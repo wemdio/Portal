@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, Zap, Users, Database, Sparkles } from 'lucide-react';
+import { RefreshCw, Zap, Users, Database, Sparkles, Lock, CheckCircle2, Clock, ExternalLink, Loader2, CreditCard, Unlink } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 type LimitKey = 'max_contacts' | 'max_rows' | 'max_chains_per_month' | 'max_domains' | 'max_emails';
@@ -19,6 +19,11 @@ type TariffResponse = {
   paid_until: string | null;
   setup_until: string | null;
   period_start: string;
+  billing_mode: 'invoice' | 'autopayment' | null;
+  payment_locked: boolean;
+  auto_renew: boolean;
+  payment_method_saved: boolean;
+  last_renewal_error: string | null;
   usage: Record<LimitKey, LimitUsage>;
 };
 
@@ -56,6 +61,25 @@ export default function ClientTariffPage() {
   const [data, setData] = useState<TariffResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [paying, setPaying] = useState(false);
+  const [paymentUrl, setPaymentUrl] = useState<string | null>(null);
+  const [payError, setPayError] = useState<string | null>(null);
+  const [unlinkOpen, setUnlinkOpen] = useState(false);
+  const [unlinking, setUnlinking] = useState(false);
+  const [unlinkError, setUnlinkError] = useState<string | null>(null);
+
+  const handlePay = useCallback(async () => {
+    setPaying(true);
+    setPayError(null);
+    try {
+      const res = await clientApiFetch<{ payment_url: string }>('/payment');
+      setPaymentUrl(res.payment_url);
+    } catch (e) {
+      setPayError(e instanceof Error ? e.message : 'Ошибка');
+    } finally {
+      setPaying(false);
+    }
+  }, []);
 
   const load = useCallback(async (showLoading = true) => {
     if (showLoading) setLoading(true);
@@ -69,6 +93,23 @@ export default function ClientTariffPage() {
       setLoading(false);
     }
   }, []);
+
+  const handleUnlinkAutopay = useCallback(async () => {
+    setUnlinking(true);
+    setUnlinkError(null);
+    try {
+      await clientApiFetch<{ ok: boolean }>('/billing', {
+        method: 'POST',
+        body: JSON.stringify({ unlink_saved_payment: true }),
+      });
+      setUnlinkOpen(false);
+      await load(false);
+    } catch (e) {
+      setUnlinkError(e instanceof Error ? e.message : 'Ошибка');
+    } finally {
+      setUnlinking(false);
+    }
+  }, [load]);
 
   useEffect(() => {
     let cancelled = false;
@@ -183,6 +224,144 @@ export default function ClientTariffPage() {
             </p>
           </section>
 
+          {/* Payment lock status card */}
+          {data.payment_locked && (
+            <section className="neu-card p-5 sm:p-6" style={{ borderLeft: '4px solid #DC2626' }}>
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div className="flex items-start gap-3">
+                  <span className="inline-flex items-center justify-center w-9 h-9 rounded-xl flex-shrink-0"
+                    style={{ background: 'rgba(220,38,38,0.10)', color: '#DC2626' }}>
+                    <Lock className="h-5 w-5" />
+                  </span>
+                  <div>
+                    {data.billing_mode === 'invoice' ? (
+                      <>
+                        <h3 className="text-base font-bold" style={{ color: 'var(--cp-text)' }}>Ожидается оплата счёта</h3>
+                        <p className="mt-1 text-sm" style={{ color: 'var(--cp-text-m)' }}>
+                          Менеджер выставил вам счёт. Как только оплата поступит — доступ к функционалу откроется автоматически.
+                        </p>
+                      </>
+                    ) : data.paid_at ? (
+                      <>
+                        <h3 className="text-base font-bold" style={{ color: 'var(--cp-text)' }}>Оплата получена</h3>
+                        <p className="mt-1 text-sm" style={{ color: 'var(--cp-text-m)' }}>
+                          Команда настраивает ваш аккаунт. Доступ откроется{' '}
+                          <strong>{formatDate(data.setup_until)}</strong> или после уведомления от менеджера.
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <h3 className="text-base font-bold" style={{ color: 'var(--cp-text)' }}>Необходима оплата</h3>
+                        <p className="mt-1 text-sm" style={{ color: 'var(--cp-text-m)' }}>
+                          Оплатите подписку для получения доступа к функционалу портала.
+                        </p>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {data.billing_mode === 'autopayment' && !data.paid_at && (
+                  <div className="flex flex-col items-end gap-1">
+                    {paymentUrl ? (
+                      <a href={paymentUrl} target="_blank" rel="noopener noreferrer"
+                        className="neu-pill inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold"
+                        style={{ background: '#DC2626', color: '#fff' }}>
+                        <ExternalLink className="h-4 w-4" />
+                        Перейти к оплате
+                      </a>
+                    ) : (
+                      <button onClick={handlePay} disabled={paying}
+                        className="neu-pill inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold disabled:opacity-60"
+                        style={{ background: '#DC2626', color: '#fff' }}>
+                        {paying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
+                        {paying ? 'Создаём счёт...' : 'Оплатить подписку'}
+                      </button>
+                    )}
+                    {payError && <p className="text-xs" style={{ color: '#DC2626' }}>{payError}</p>}
+                  </div>
+                )}
+                {data.billing_mode === 'autopayment' && data.paid_at && (
+                  <div className="flex items-center gap-1.5 text-sm font-semibold" style={{ color: '#10B981' }}>
+                    <CheckCircle2 className="h-4 w-4" />
+                    Оплачено {formatDate(data.paid_at)}
+                  </div>
+                )}
+                {data.billing_mode === 'invoice' && (
+                  <div className="flex items-center gap-1.5 text-sm" style={{ color: 'var(--cp-text-m)' }}>
+                    <Clock className="h-4 w-4" />
+                    Ожидание оплаты...
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          {/* Автоплатежи: срок продления и отключение автосписания */}
+          {data.billing_mode === 'autopayment' && (
+            <section className="neu-card p-5 sm:p-6">
+              <div className="flex items-start gap-3">
+                <span
+                  className="inline-flex items-center justify-center w-9 h-9 rounded-xl flex-shrink-0"
+                  style={{ background: 'rgba(59,130,246,0.12)', color: '#2563EB' }}
+                >
+                  <CreditCard className="h-5 w-5" />
+                </span>
+                <div className="flex-1 min-w-0 space-y-3">
+                  <div>
+                    <h3 className="text-base font-bold" style={{ color: 'var(--cp-text)' }}>
+                      Автопродление подписки
+                    </h3>
+                    <p className="mt-1 text-sm leading-relaxed" style={{ color: 'var(--cp-text-m)' }}>
+                      Текущий оплаченный период до{' '}
+                      <strong style={{ color: 'var(--cp-text)' }}>{formatDate(data.paid_until)}</strong>.
+                      При включённом автопродлении списание за следующий месяц выполняется автоматически заранее —
+                      обычно в течение нескольких дней до этой даты (как только подключается сохранённый способ
+                      оплаты после первой оплаты).
+                    </p>
+                  </div>
+                  <dl className="grid gap-2 text-xs sm:text-sm">
+                    <div className="flex flex-wrap gap-x-2 gap-y-1">
+                      <dt className="font-semibold" style={{ color: 'var(--cp-text-l)' }}>Сохранённая карта для списаний</dt>
+                      <dd style={{ color: 'var(--cp-text)' }}>
+                        {data.payment_method_saved ? 'да (используется для автопродления)' : 'ещё не привязана — появится после успешной оплаты'}
+                      </dd>
+                    </div>
+                    <div className="flex flex-wrap gap-x-2 gap-y-1">
+                      <dt className="font-semibold" style={{ color: 'var(--cp-text-l)' }}>Автопродление в портале</dt>
+                      <dd style={{ color: 'var(--cp-text)' }}>
+                        {data.auto_renew && data.payment_method_saved
+                          ? 'включено'
+                          : data.auto_renew && !data.payment_method_saved
+                            ? 'включено (ожидается привязка после оплаты)'
+                            : 'выключено'}
+                      </dd>
+                    </div>
+                  </dl>
+                  {data.last_renewal_error ? (
+                    <p className="text-xs font-medium rounded-xl px-3 py-2" style={{ background: 'rgba(239,68,68,0.1)', color: '#B91C1C' }}>
+                      Последняя ошибка автосписания: {data.last_renewal_error}
+                    </p>
+                  ) : null}
+                  {(data.payment_method_saved || data.auto_renew) && (
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => { setUnlinkOpen(true); setUnlinkError(null); }}
+                        className="neu-pill inline-flex items-center justify-center gap-2 px-4 py-2 text-sm font-semibold w-full sm:w-auto"
+                        style={{ border: '1px solid rgba(113,113,122,0.35)', color: 'var(--cp-text)' }}
+                      >
+                        <Unlink className="h-4 w-4" />
+                        Отключить автопродление и отвязать карту
+                      </button>
+                      <p className="text-xs flex-1" style={{ color: 'var(--cp-text-l)' }}>
+                        Автосписания из портала прекратятся. Текущий период не отменяется. При следующей оплате карту можно привязать снова.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
+
           <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             {LIMITS.map((item) => {
               const usage = data.usage[item.key];
@@ -233,6 +412,39 @@ export default function ClientTariffPage() {
           </section>
         </>
       ) : null}
+
+      {unlinkOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden" style={{ color: '#18181b' }}>
+            <div className="px-6 pt-6 pb-2">
+              <h2 className="text-sm font-semibold text-zinc-800">Отключить автопродление?</h2>
+              <p className="text-xs text-zinc-500 mt-2 leading-relaxed">
+                Мы перестанем автоматически продлевать подписку и уберём сохранённый способ оплаты из настроек этого
+                кабинета. Оплаченный доступ до <span className="font-medium text-zinc-700">{data ? formatDate(data.paid_until) : '—'}</span> сохраняется.
+              </p>
+              {unlinkError ? <p className="mt-2 text-xs text-red-600">{unlinkError}</p> : null}
+            </div>
+            <div className="flex gap-2 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => { setUnlinkOpen(false); setUnlinkError(null); }}
+                disabled={unlinking}
+                className="flex-1 rounded-lg border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition disabled:opacity-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleUnlinkAutopay()}
+                disabled={unlinking}
+                className="flex-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 px-4 py-2 text-sm font-medium text-white transition disabled:opacity-60"
+              >
+                {unlinking ? 'Сохраняем…' : 'Отключить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

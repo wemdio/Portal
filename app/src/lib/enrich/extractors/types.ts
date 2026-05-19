@@ -107,7 +107,7 @@ export const EXTRACTOR_LABELS: Record<ExtractorKey, string> = {
   case_industries: 'Отрасли в кейсах',
   enterprise_logos: 'Enterprise-логотипы',
   pricing_model: 'Модель продаж',
-  pricing_min: 'Цена min',
+  pricing_min: 'Мин. цена услуг',
   free_trial: 'Free trial',
   vacancies_count: 'Открытых вакансий',
   hiring_roles: 'Кого нанимают',

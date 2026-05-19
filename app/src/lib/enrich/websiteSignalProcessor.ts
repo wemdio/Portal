@@ -9,6 +9,7 @@ import {
   SubpageKind,
 } from '@/lib/enrich/extractors/types';
 import { extractCustomers } from '@/lib/enrich/extractors/customersExtractor';
+import { nameListLooksReal } from '@/lib/enrich/extractors/nameQuality';
 import { extractCasesCount } from '@/lib/enrich/extractors/casesCountExtractor';
 import { extractCaseIndustries } from '@/lib/enrich/extractors/caseIndustriesExtractor';
 import { detectEnterpriseLogos, detectEnterpriseInHtml } from '@/lib/enrich/extractors/enterpriseLogosDetector';
@@ -225,6 +226,9 @@ export async function processSignalsForUrl(
   if (extractors.includes('customers')) {
     out.customers = extractCustomers(casesHtml ?? '');
     if (out.customers.length === 0) out.customers = extractCustomers(main.html);
+    // Trust gate: a thin or junk-heavy heuristic result is dropped so the
+    // LLM fallback below produces clean company names instead.
+    if (!nameListLooksReal(out.customers)) out.customers = [];
   }
   if (extractors.includes('cases_count')) {
     out.cases_count = extractCasesCount(casesHtml ?? '');
@@ -295,6 +299,8 @@ export async function processSignalsForUrl(
   if (extractors.includes('integrations')) {
     out.integrations = extractIntegrations(subpageHtml.integrations ?? '');
     if (out.integrations.length === 0) out.integrations = extractIntegrations(main.html);
+    // Trust gate: drop a thin or junk-heavy result so the LLM fallback runs.
+    if (!nameListLooksReal(out.integrations)) out.integrations = [];
   }
   if (extractors.includes('founded_year')) {
     out.founded_year = subpageHtml.about ? extractFoundedYear(subpageHtml.about) : undefined;
@@ -309,25 +315,31 @@ export async function processSignalsForUrl(
   }
 
   // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.
-  type LlmField = 'pricing_model' | 'customers' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'hiring_roles';
+  type LlmField = 'pricing_model' | 'pricing_min' | 'customers' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'cases_count' | 'integrations' | 'hiring_roles';
   const llmNeeded = new Set<LlmField>();
   if (extractors.includes('pricing_model') && (out.pricing_model === 'unknown' || !out.pricing_model)) llmNeeded.add('pricing_model');
+  if (extractors.includes('pricing_min') && !out.pricing_min) llmNeeded.add('pricing_min');
   if (extractors.includes('customers') && (!out.customers || out.customers.length === 0)) llmNeeded.add('customers');
   if (extractors.includes('founded_year') && !out.founded_year) llmNeeded.add('founded_year');
   if (extractors.includes('team_size') && !out.team_size) llmNeeded.add('team_size');
   if (extractors.includes('free_trial') && out.free_trial !== true) llmNeeded.add('free_trial');
   if (extractors.includes('case_industries') && (!out.case_industries || out.case_industries.length === 0)) llmNeeded.add('case_industries');
+  if (extractors.includes('cases_count') && !out.cases_count) llmNeeded.add('cases_count');
+  if (extractors.includes('integrations') && (!out.integrations || out.integrations.length === 0)) llmNeeded.add('integrations');
   if (extractors.includes('hiring_roles') && out.hiring_roles && !out.hiring_roles.marketing && !out.hiring_roles.engineering && !out.hiring_roles.sales && !out.hiring_roles.design && !out.hiring_roles.product) llmNeeded.add('hiring_roles');
 
   if (llmNeeded.size > 0 && !signal?.aborted) {
     try {
       const llmResult = await llmExtractFields(main.html, subpageHtml, llmNeeded);
       if (llmResult.pricing_model && llmNeeded.has('pricing_model')) out.pricing_model = llmResult.pricing_model;
+      if (llmResult.pricing_min && llmNeeded.has('pricing_min')) out.pricing_min = llmResult.pricing_min;
       if (llmResult.customers && llmResult.customers.length > 0 && llmNeeded.has('customers')) out.customers = llmResult.customers;
       if (llmResult.founded_year && llmNeeded.has('founded_year')) out.founded_year = llmResult.founded_year;
       if (llmResult.team_size && llmNeeded.has('team_size')) out.team_size = llmResult.team_size;
       if (llmResult.free_trial === true && llmNeeded.has('free_trial')) out.free_trial = true;
       if (llmResult.case_industries && llmResult.case_industries.length > 0 && llmNeeded.has('case_industries')) out.case_industries = llmResult.case_industries;
+      if (typeof llmResult.cases_count === 'number' && llmResult.cases_count > 0 && llmNeeded.has('cases_count')) out.cases_count = llmResult.cases_count;
+      if (llmResult.integrations && llmResult.integrations.length > 0 && llmNeeded.has('integrations')) out.integrations = llmResult.integrations;
       if (llmResult.hiring_roles && llmNeeded.has('hiring_roles')) out.hiring_roles = llmResult.hiring_roles;
     } catch {
       // LLM fallback is best-effort — never break the pipeline.

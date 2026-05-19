@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { withToolTrace } from '@/lib/toolTrace';
+import { normalizeOutputLanguage } from '@/lib/emailSequenceV2/prompts';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -82,6 +83,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ ru
             allowed[String(key)] = value;
           }
         }
+      }
+
+      // Язык вывода: всегда приводим к поддерживаемому значению (ru/en/pl).
+      if ('output_language' in body) {
+        allowed.output_language = normalizeOutputLanguage(body.output_language);
       }
 
       if (Object.keys(allowed).length === 0) {

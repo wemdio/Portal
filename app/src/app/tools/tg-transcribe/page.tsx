@@ -770,7 +770,9 @@ export default function TgTranscribePage() {
                   )}
                   {botChats.map((c, i) => (
                     <option key={`${c.chatId}-${c.topicId ?? 'all'}-${i}`} value={`${c.chatId}:${c.topicId ?? ''}`}>
-                      {c.title || `Chat ${c.chatId}`}
+                      {c.topicName
+                        ? `${c.title || `Chat ${c.chatId}`} / ${c.topicName}`
+                        : c.title || `Chat ${c.chatId}`}
                     </option>
                   ))}
                 </select>

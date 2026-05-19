@@ -30,9 +30,9 @@ export async function POST(req: NextRequest) {
         if (!msg) {
           return NextResponse.json({ ok: true });
         }
-      
-        void upsertBotChat(msg.chat.id, msg.chat.title ?? '', msg.chat.type ?? 'group', msg.message_id);
-      
+
+        await upsertBotChat(msg.chat.id, msg.chat.title ?? '', msg.chat.type ?? 'group', msg.message_id);
+
         const videoInfo = extractVideoInfo(msg);
         if (!videoInfo) {
           return NextResponse.json({ ok: true });

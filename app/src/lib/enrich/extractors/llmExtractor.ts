@@ -1,6 +1,6 @@
 import 'server-only';
 import * as cheerio from 'cheerio';
-import { PricingModel, ExtractedData } from './types';
+import { PricingModel, Currency, PriceValue, ExtractedData } from './types';
 
 const MODEL = 'anthropic/claude-sonnet-4-5-20250514';
 const MAX_TEXT_CHARS = 3000;
@@ -22,11 +22,14 @@ function stripHtmlToText(html: string): string {
 
 export interface LlmFields {
   pricing_model?: PricingModel;
+  pricing_min?: PriceValue;
   customers?: string[];
   founded_year?: number;
   team_size?: number;
   free_trial?: boolean;
   case_industries?: string[];
+  cases_count?: number;
+  integrations?: string[];
   hiring_roles?: { marketing: boolean; engineering: boolean; sales: boolean; design: boolean; product: boolean };
 }
 
@@ -35,11 +38,14 @@ const SYSTEM_PROMPT = `Ты — структурированный экстра�
 Верни JSON (и только JSON, без markdown):
 {
   "pricing_model": "self-serve" | "sales-led" | "enterprise" | "freemium" | null,
+  "pricing_min": {"value": число, "currency": "RUB" | "USD" | "EUR"} или null,
   "customers": ["имя1", "имя2"] или [],
   "founded_year": число или null,
   "team_size": число или null,
   "free_trial": true/false или null,
   "case_industries": ["отрасль1", "отрасль2"] или [],
+  "cases_count": число или null,
+  "integrations": ["сервис1", "сервис2"] или [],
   "hiring_roles": {"marketing": bool, "engineering": bool, "sales": bool, "design": bool, "product": bool} или null
 }
 
@@ -50,7 +56,11 @@ const SYSTEM_PROMPT = `Ты — структурированный экстра�
 - "freemium" — есть бесплатный план или пробный период
 - null — невозможно определить
 
-Правила для customers: только реальные названия компаний-клиентов. Не включай описания кейсов.
+Правила для pricing_min: минимальная (стартовая) цена услуг или тарифов компании. Бери самый дешёвый тариф либо цену «от ...». Игнорируй цены сторонних товаров, пороги бесплатной доставки и суммы из отзывов/кейсов. Если цена нигде не указана — null. currency — валюта этой цены (RUB/USD/EUR).
+
+Правила для customers: только реальные названия компаний-клиентов. НЕ включай описания кейсов, услуги самой компании, пункты меню, названия кнопок.
+Правила для cases_count: количество кейсов/проектов в портфолио. Укажи число, только если оно явно написано на странице (например «более 200 проектов») или если кейсы перечислены и их реально можно посчитать. Иначе null.
+Правила для integrations: названия сторонних сервисов и систем, с которыми у продукта/компании есть интеграция (CRM, телефония, аналитика, платёжные системы, маркетплейсы, мессенджеры, ERP и т.п.). Только явно заявленные интеграции. НЕ включай услуги самой компании, пункты меню, названия кнопок, заголовки статей блога.
 Правила для founded_year: год основания компании. Только если явно указан.
 Правила для team_size: размер команды. Только если явно указан.
 Правила для free_trial: есть ли бесплатный пробный период или бесплатный тариф.
@@ -123,6 +133,16 @@ export async function llmExtractFields(
       }
     }
 
+    if (needed.has('pricing_min') && typeof parsed.pricing_min === 'object' && parsed.pricing_min !== null) {
+      const pm = parsed.pricing_min as Record<string, unknown>;
+      const value = typeof pm.value === 'number' ? pm.value : NaN;
+      const currency = typeof pm.currency === 'string' ? pm.currency.toUpperCase() : '';
+      const validCur: Currency[] = ['RUB', 'USD', 'EUR'];
+      if (!isNaN(value) && value > 0 && value <= 100_000_000 && validCur.includes(currency as Currency)) {
+        result.pricing_min = { value: Math.round(value), currency: currency as Currency };
+      }
+    }
+
     if (needed.has('customers') && Array.isArray(parsed.customers) && parsed.customers.length > 0) {
       result.customers = parsed.customers
         .filter((c): c is string => typeof c === 'string' && c.length >= 2)
@@ -147,6 +167,17 @@ export async function llmExtractFields(
       result.case_industries = parsed.case_industries
         .filter((c): c is string => typeof c === 'string' && c.length >= 2)
         .slice(0, 5);
+    }
+
+    if (needed.has('cases_count') && typeof parsed.cases_count === 'number') {
+      const n = Math.round(parsed.cases_count);
+      if (n > 0 && n <= 100000) result.cases_count = n;
+    }
+
+    if (needed.has('integrations') && Array.isArray(parsed.integrations) && parsed.integrations.length > 0) {
+      result.integrations = parsed.integrations
+        .filter((c): c is string => typeof c === 'string' && c.length >= 2)
+        .slice(0, 20);
     }
 
     if (needed.has('hiring_roles') && typeof parsed.hiring_roles === 'object' && parsed.hiring_roles !== null) {

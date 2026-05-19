@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { isHashLike, isDesignArtifact, isNavOrCtaText, isServiceText } from './nameQuality';
 
 const JUNK_RE: RegExp[] = [
   /^logo$/i, /^image$/i, /^icon$/i, /^photo$/i, /^avatar$/i,
@@ -7,7 +8,11 @@ const JUNK_RE: RegExp[] = [
   /^title$/i, /^background$/i, /^slider$/i, /^slide$/i,
   /^подробнее$/i, /^партнерство$/i, /^преимущества$/i,
   /^подписаться/i, /^узнать/i, /^читать/i, /^смотреть/i,
+  /^subscribe\s*\d*$/i, // "subscribe 1"
   /^награда$/i, /^award$/i,
+  /^\d+(\s+\d+)+$/,     // "1 1 1" — multiple space-separated numbers
+  /^zagruz/i,           // "zagruzhennoe" — transliterated loading image names
+  /\slogo\s/i,          // embedded " logo " word — describes an image, not a name
 ];
 
 const URL_RE = /^https?:\/\//i;
@@ -21,11 +26,27 @@ function isJunk(s: string): boolean {
   if (JUNK_RE.some((re) => re.test(s.trim()))) return true;
   if (DESCRIPTION_RE.test(s)) return true;
   if (s.split(/\s+/).length > 5) return true;
+  if (/@/.test(s)) return true;               // filename artifacts like "sm@1x"
+  if (/%/.test(s)) return true;              // any percent: "ppc%world", "%D0%9F…"
+  // CMS image hashes, design-tool exports, nav/CTA labels and marketing
+  // service names are the dominant noise classes — reject them outright.
+  if (isHashLike(s) || isDesignArtifact(s)) return true;
+  if (isNavOrCtaText(s) || isServiceText(s)) return true;
   return false;
 }
 
 function cleanName(s: string): string {
-  return s.replace(LOGO_PREFIX_RE, '').trim();
+  let cleaned = s.replace(LOGO_PREFIX_RE, '').trim();
+  // Strip leading Tilda/CMS hex hash: "fd4dbb8dde interfax" → "interfax"
+  cleaned = cleaned.replace(/^[0-9a-f]{6,}\s+/i, '').trim();
+  // Strip trailing Tilda element suffix: "ramu e" → "ramu"
+  cleaned = cleaned.replace(/\s+[eE]$/, '').trim();
+  // Strip trailing logo descriptor + optional number: "arir logo e" → "arir", "big logo 1" → "big"
+  cleaned = cleaned.replace(/\s+logo\s*\d*$/i, '').trim();
+  // Strip trailing CMS number suffixes: "subscribe 1", "brand n 1"
+  cleaned = cleaned.replace(/\s+(?:logo\s+)?\d{1,2}$/, '').trim();
+  cleaned = cleaned.replace(/\s+[nN]\s+\d+$/, '').trim();
+  return cleaned;
 }
 
 function nameFromSrc(src: string): string | null {
@@ -39,21 +60,28 @@ function nameFromSrc(src: string): string | null {
     .trim();
   if (name.length < 2 || name.length > 40) return null;
   if (/^(?:logo|img|image|icon|pic|photo|banner|bg|placeholder|default|noimage|pr)\s*\d*$/i.test(name)) return null;
+  if (isHashLike(name)) return null;
+  if (/logo/i.test(name)) return null; // "msslogo big", "biglogo" — logo image filenames
   return name;
 }
 
-// Containers that hold integration/tool/stack logos
-const INTEGRATION_CONTAINER_SELECTOR = [
+// Explicit integration containers — safe to read both logos and text.
+const STRICT_INTEGRATION_SELECTOR = [
   '[class*="integration"]', '[class*="connector"]',
-  '[class*="app-card"]', '[class*="ecosystem"]',
-  '[class*="marketplace"]', '[class*="compatible"]',
-  '[class*="connect"]', '[class*="stack"]',
-  '[class*="framework"]', '[class*="technolog"]',
-  '[class*="tool"]', '[class*="partner"]',
-  '#integrations', '#tools', '#stack', '#technologies', '#partners',
+  '#integrations', '#connectors',
 ].join(', ');
 
-const SECTION_HEADING_RE = /интеграци|подключени|совместимост|экосистем|integrations?|connectors?|apps?\s+(?:we|&)|works?\s+with|compatible|инструмент[аыов]|технологи[яи]|(?:наш|наши|we\s+use)\s+(?:стек|stack|tools)|стек\s+технологий|tech\s+stack|сервис[аыов]|(?:мы\s+)?работаем\s+с|(?:мы\s+)?используем/i;
+// Looser logo/stack containers. Text inside is unreliable (toolbars, menus,
+// generic layout classes), so we read images (logos) only.
+const LOGO_WALL_SELECTOR = [
+  '[class*="app-card"]', '[class*="ecosystem"]',
+  '[class*="marketplace"]', '[class*="compatible"]',
+  '[class*="stack"]', '[class*="framework"]',
+  '[class*="technolog"]', '[class*="partner"]',
+  '#tools', '#stack', '#technologies', '#partners',
+].join(', ');
+
+const SECTION_HEADING_RE = /интеграци|подключени|совместимост|экосистем|integrations?|connectors?|apps?\s+(?:we|&)|works?\s+with|compatible|инструмент[аыов]|технологи[яи]|(?:наш|наши|we\s+use)\s+(?:стек|stack|tools)|стек\s+технологий|tech\s+stack|(?:мы\s+)?работаем\s+с/i;
 
 const SLIDER_SELECTOR = [
   '[class*="swiper"]', '[class*="slick"]',
@@ -104,6 +132,7 @@ function findSectionFromHeading($: $Type, heading: CheerioSelection): CheerioSel
 export function extractIntegrations(html: string): string[] {
   if (!html) return [];
   const $ = cheerio.load(html);
+  $('script, style, noscript, template').remove();
   const seen = new Set<string>();
   const result: string[] = [];
 
@@ -117,26 +146,34 @@ export function extractIntegrations(html: string): string[] {
     result.push(cleaned);
   }
 
-  // Strategy 1: containers by class/id
-  $(INTEGRATION_CONTAINER_SELECTOR).each((_, container) => {
+  // Strategy 1a: explicit integration containers — logos + text labels.
+  $(STRICT_INTEGRATION_SELECTOR).each((_, container) => {
     if (result.length >= MAX_INTEGRATIONS) return false;
     extractFromImages($, $(container), add);
     extractFromText($, $(container), add);
   });
 
-  // Strategy 2: slider/carousel in integration-like context
+  // Strategy 1b: looser logo/stack containers — logos only.
+  if (result.length < MAX_INTEGRATIONS) {
+    $(LOGO_WALL_SELECTOR).each((_, container) => {
+      if (result.length >= MAX_INTEGRATIONS) return false;
+      extractFromImages($, $(container), add);
+    });
+  }
+
+  // Strategy 2: slider/carousel in integration-like context — logos only.
   if (result.length < MAX_INTEGRATIONS) {
     $(SLIDER_SELECTOR).each((_, slider) => {
       if (result.length >= MAX_INTEGRATIONS) return false;
       const $slider = $(slider);
       const parentText = $slider.parent().text().toLowerCase();
-      if (!SECTION_HEADING_RE.test(parentText) && !$slider.closest('[class*="integration"], [class*="partner"], [class*="stack"], [class*="tool"], #integrations, #tools').length) return;
+      if (!SECTION_HEADING_RE.test(parentText) && !$slider.closest('[class*="integration"], [class*="partner"], [class*="stack"], #integrations').length) return;
       extractFromImages($, $slider, add);
-      extractFromText($, $slider, add);
     });
   }
 
-  // Strategy 3: find sections by heading text, traverse up to real container
+  // Strategy 3: find sections by heading text — logos only (text in an
+  // arbitrary heading-matched section is too noisy to trust).
   if (result.length < MAX_INTEGRATIONS) {
     $('h1, h2, h3, h4, [class*="title"], [class*="heading"]').each((_, heading) => {
       if (result.length >= MAX_INTEGRATIONS) return false;
@@ -145,7 +182,6 @@ export function extractIntegrations(html: string): string[] {
 
       const section = findSectionFromHeading($, $(heading));
       extractFromImages($, section, add);
-      extractFromText($, section, add);
     });
   }
 

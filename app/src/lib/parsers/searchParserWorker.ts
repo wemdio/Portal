@@ -558,6 +558,49 @@ const BLOCKED_DOMAINS = new Set(
     'wix.com',
     'tilda.cc',
     'wordpress.com',
+    // educational platforms
+    'skyeng.ru',
+    'otus.ru',
+    'courselandia.ru',
+    // rating / catalog / media sites
+    'ratingruneta.ru',
+    'alladvertising.ru',
+    'all20.ru',
+    'seo.ru',
+    'sostav.ru',
+    'ratings.sostav.ru',
+    // job / ad platform pages (not company homepages)
+    'facancy.ru',
+    'telega.in',
+    // conference / event calendars
+    'kon-ferenc.ru',
+    'konferencii.ru',
+    'matemarketing.ru',
+    'blog.maed.ru',
+    // data seller
+    'parser-base.com',
+    // social networks (Russian)
+    'tenchat.ru',
+    // video platforms
+    'rutube.ru',
+    // online education platforms
+    'skillbox.ru',
+    'geekbrains.ru',
+    'netology.ru',
+    'coursera.org',
+    'udemy.com',
+    // advertising / marketing industry media (not agencies)
+    'adpass.ru',
+    'marketing-tech.ru',
+    // industry associations / unions
+    'gipp.ru',
+    'akarussia.ru',
+    // media / blog aggregators
+    'ikraikra.ru',
+    'vzlet.media',
+    // SaaS tools that are not marketing service vendors
+    'thunderbit.com',
+    'getcompass.ru',
   ].map((d) => d.toLowerCase()),
 );
 

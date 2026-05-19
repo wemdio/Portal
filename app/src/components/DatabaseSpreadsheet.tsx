@@ -7026,10 +7026,17 @@ export function DatabaseSpreadsheet() {
   const SIGNAL_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 
   const openSignalModal = async () => {
+    const autoSourceCol = (() => {
+      if (signalEnrichment.isProcessing || !activeTab) return signalEnrichment.sourceCol;
+      const headerRow = activeTab.data[0] ?? [];
+      const URL_COL_RE = /^(site|сайт|url|домен|domain|ссылка|link|website)$/i;
+      const idx = headerRow.findIndex((h) => URL_COL_RE.test(String(h ?? '').trim()));
+      return idx >= 0 ? idx : signalEnrichment.sourceCol;
+    })();
     setSignalEnrichment((prev) => ({
       ...prev,
       isOpen: true,
-      sourceCol: prev.sourceCol,
+      sourceCol: autoSourceCol,
       error: null,
       detectedJob: null,
     }));
