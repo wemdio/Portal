@@ -17,6 +17,7 @@ type LeadComment = {
 
 type ForwardedLead = {
   id: string;
+  source?: 'forwarded_lead' | 'reply';
   qualification_id: string | null;
   campaign_id: string;
   campaign_name: string | null;
@@ -34,6 +35,11 @@ type ForwardedLead = {
   ai_reason: string | null;
   created_at: string;
   client_lead_comments: { count: number }[];
+  email_id?: string | null;
+  lead_id?: string | null;
+  thread_id?: string | null;
+  is_unread?: boolean;
+  ai_interest_value?: number | null;
 };
 
 type LeadsResponse = {
@@ -61,8 +67,15 @@ function LeadDetail({
   const [loadingComments, setLoadingComments] = useState(true);
   const [newComment, setNewComment] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const canComment = lead.source !== 'reply';
 
   const loadComments = useCallback(async () => {
+    if (!canComment) {
+      setComments([]);
+      setLoadingComments(false);
+      return;
+    }
+
     setLoadingComments(true);
     try {
       const res = await clientApiFetch<{ items: LeadComment[] }>(
@@ -74,13 +87,14 @@ function LeadDetail({
     } finally {
       setLoadingComments(false);
     }
-  }, [lead.id]);
+  }, [canComment, lead.id]);
 
   useEffect(() => {
     loadComments();
   }, [loadComments]);
 
   const handleSubmit = async () => {
+    if (!canComment) return;
     const text = newComment.trim();
     if (!text) return;
     setSubmitting(true);
@@ -106,7 +120,7 @@ function LeadDetail({
         className="neu-pill px-3 py-1.5 text-xs font-semibold mb-6"
         style={{ color: 'var(--cp-text-m)' }}
       >
-        ← Назад к лидам
+        ← Назад к ответам
       </button>
 
       <div className="neu-card p-5 sm:p-8 mb-6">
@@ -158,56 +172,58 @@ function LeadDetail({
         </div>
       </div>
 
-      <div className="neu-card p-5 sm:p-8">
-        <h3 className="text-base font-extrabold mb-5" style={{ color: 'var(--cp-text)' }}>
-          Комментарии
-        </h3>
+      {canComment && (
+        <div className="neu-card p-5 sm:p-8">
+          <h3 className="text-base font-extrabold mb-5" style={{ color: 'var(--cp-text)' }}>
+            Комментарии
+          </h3>
 
-        {loadingComments ? (
-          <p className="text-xs py-4 text-center" style={{ color: 'var(--cp-text-l)' }}>Загрузка...</p>
-        ) : comments.length === 0 ? (
-          <p className="text-xs py-4 text-center" style={{ color: 'var(--cp-text-l)' }}>
-            Комментариев пока нет. Оставьте обратную связь по лиду.
-          </p>
-        ) : (
-          <div className="space-y-3 mb-5">
-            {comments.map((c) => (
-              <div key={c.id} className="neu-sm rounded-xl p-3">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-semibold" style={{ color: 'var(--cp-text)' }}>
-                    {c.user_name || 'Пользователь'}
-                  </span>
-                  <span className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
-                    {formatDate(c.created_at)}
-                  </span>
+          {loadingComments ? (
+            <p className="text-xs py-4 text-center" style={{ color: 'var(--cp-text-l)' }}>Загрузка...</p>
+          ) : comments.length === 0 ? (
+            <p className="text-xs py-4 text-center" style={{ color: 'var(--cp-text-l)' }}>
+              Комментариев пока нет. Оставьте обратную связь по лиду.
+            </p>
+          ) : (
+            <div className="space-y-3 mb-5">
+              {comments.map((c) => (
+                <div key={c.id} className="neu-sm rounded-xl p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-semibold" style={{ color: 'var(--cp-text)' }}>
+                      {c.user_name || 'Пользователь'}
+                    </span>
+                    <span className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+                      {formatDate(c.created_at)}
+                    </span>
+                  </div>
+                  <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
+                    {c.comment}
+                  </p>
                 </div>
-                <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
-                  {c.comment}
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
 
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={newComment}
-            onChange={(e) => setNewComment(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSubmit()}
-            placeholder="Напишите комментарий..."
-            className="neu-inset flex-1 rounded-xl px-4 py-2.5 text-sm focus:outline-none"
-            style={{ color: 'var(--cp-text)', background: 'var(--cp-inset, rgba(180,173,164,0.08))' }}
-          />
-          <button
-            onClick={handleSubmit}
-            disabled={!newComment.trim() || submitting}
-            className="neu-btn rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40 transition-opacity"
-          >
-            {submitting ? '...' : 'Отправить'}
-          </button>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={newComment}
+              onChange={(e) => setNewComment(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSubmit()}
+              placeholder="Напишите комментарий..."
+              className="neu-inset flex-1 rounded-xl px-4 py-2.5 text-sm focus:outline-none"
+              style={{ color: 'var(--cp-text)', background: 'var(--cp-inset, rgba(180,173,164,0.08))' }}
+            />
+            <button
+              onClick={handleSubmit}
+              disabled={!newComment.trim() || submitting}
+              className="neu-btn rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40 transition-opacity"
+            >
+              {submitting ? '...' : 'Отправить'}
+            </button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -233,6 +249,7 @@ function LeadCard({
   onClick: () => void;
 }) {
   const commentCount = lead.client_lead_comments?.[0]?.count ?? 0;
+  const sourceLabel = lead.source === 'reply' ? 'Ответ' : 'Лид';
 
   return (
     <button onClick={onClick} className="neu-sm block w-full text-left p-4 sm:p-5 transition-shadow hover:shadow-md">
@@ -252,10 +269,20 @@ function LeadCard({
         </span>
       </div>
 
-      <p className="text-xs truncate mb-2" style={{ color: 'var(--cp-text-m)' }}>
-        {lead.lead_email}
-        {lead.campaign_name && <span style={{ color: 'var(--cp-text-l)' }}> · {lead.campaign_name}</span>}
-      </p>
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <span className="neu-pill px-2 py-0.5 text-[10px] font-semibold" style={{ color: 'var(--cp-accent)' }}>
+          {sourceLabel}
+        </span>
+        {lead.is_unread && (
+          <span className="neu-pill px-2 py-0.5 text-[10px] font-semibold" style={{ color: 'var(--cp-danger, #dc2626)' }}>
+            Непрочитано
+          </span>
+        )}
+        <p className="text-xs truncate min-w-0" style={{ color: 'var(--cp-text-m)' }}>
+          {lead.lead_email}
+          {lead.campaign_name && <span style={{ color: 'var(--cp-text-l)' }}> · {lead.campaign_name}</span>}
+        </p>
+      </div>
 
       {(lead.reply_subject || lead.reply_body) && (
         <p className="text-xs truncate" style={{ color: 'var(--cp-text-l)' }}>
@@ -325,10 +352,10 @@ export default function ClientLeadsPage() {
           >
             <Users className="h-4.5 w-4.5" />
           </span>
-          Лиды
+          Ответы и лиды
         </h1>
         <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
-          Квалифицированные лиды по вашим кампаниям
+          Ответы получателей и квалифицированные лиды по вашим кампаниям
         </p>
       </div>
 
@@ -349,11 +376,11 @@ export default function ClientLeadsPage() {
             style={{ color: '#10B981' }}
           />
           <p className="text-base sm:text-lg font-bold mb-2 relative" style={{ color: 'var(--cp-text)' }}>
-            Лидов пока нет
+            Ответов пока нет
           </p>
           <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-text-m)' }}>
-            Лиды появляются здесь после того, как получатели ваших кампаний отвечают
-            и менеджер квалифицирует ответ как лид. Запустите кампанию, чтобы получить первые ответы.
+            Ответы появятся здесь после того, как получатели ваших кампаний напишут вам.
+            Запустите кампанию, чтобы получить первые ответы.
           </p>
           <Link
             href={'/client/launch' as Route}
@@ -366,7 +393,7 @@ export default function ClientLeadsPage() {
       ) : (
         <>
           <p className="text-xs font-semibold mb-3" style={{ color: 'var(--cp-text-l)' }}>
-            Всего: {total}
+            Всего ответов и лидов: {total}
           </p>
           <div className="space-y-3">
             {leads.map((lead) => (

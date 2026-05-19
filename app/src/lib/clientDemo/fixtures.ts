@@ -632,8 +632,8 @@ export const DEMO_SUPPORT_RESPONSE = {
 
 // ─── Отчёт по кампаниям ──────────────────────────────────────────────────────
 
-export const DEMO_REPORT_RESPONSE = (() => {
-  const totals = DEMO_CAMPAIGNS.reduce(
+function buildDemoReportResponse(campaigns: DemoCampaign[]) {
+  const totals = campaigns.reduce(
     (acc, c) => {
       acc.contacts += c.new_leads_contacted_count;
       acc.sent += c.emails_sent_count;
@@ -645,11 +645,11 @@ export const DEMO_REPORT_RESPONSE = (() => {
     },
     { contacts: 0, sent: 0, opened: 0, replies: 0, leads: 0, bounced: 0 },
   );
-  const openPct = ((totals.opened / totals.sent) * 100).toFixed(1);
-  const replyPct = ((totals.replies / totals.contacts) * 100).toFixed(1);
+  const openPct = totals.sent > 0 ? ((totals.opened / totals.sent) * 100).toFixed(1) : '0.0';
+  const replyPct = totals.contacts > 0 ? ((totals.replies / totals.contacts) * 100).toFixed(1) : '0.0';
   const rows: (string | number)[][] = [
     ['Дата', 'Кампания', 'Контактов', 'Отправлено писем', 'Открытий', '% открытий', 'Ответов', '% ответов', 'Браков'],
-    ...DEMO_CAMPAIGNS.map((c) => [
+    ...campaigns.map((c) => [
       '17.05.2026',
       c.name,
       c.new_leads_contacted_count,
@@ -666,7 +666,7 @@ export const DEMO_REPORT_RESPONSE = (() => {
     csvText: rows.map((r) => r.join(';')).join('\n'),
     rows,
     summary: {
-      totalCampaigns: DEMO_CAMPAIGNS.length,
+      totalCampaigns: campaigns.length,
       totalContacts: totals.contacts,
       totalEmailsSent: totals.sent,
       totalOpened: totals.opened,
@@ -677,7 +677,21 @@ export const DEMO_REPORT_RESPONSE = (() => {
     },
     campaignData: {},
   };
-})();
+}
+
+export function getDemoReportResponse(campaignIds?: string[]) {
+  const selected = Array.isArray(campaignIds)
+    ? campaignIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    : [];
+  const requested = new Set(selected);
+  const campaigns = requested.size > 0
+    ? DEMO_CAMPAIGNS.filter((c) => requested.has(c.id))
+    : DEMO_CAMPAIGNS;
+
+  return buildDemoReportResponse(campaigns);
+}
+
+export const DEMO_REPORT_RESPONSE = getDemoReportResponse();
 
 // ─── B2B-поиск компаний ──────────────────────────────────────────────────────
 
