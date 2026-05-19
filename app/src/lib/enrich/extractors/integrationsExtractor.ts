@@ -8,7 +8,11 @@ const JUNK_RE: RegExp[] = [
   /^title$/i, /^background$/i, /^slider$/i, /^slide$/i,
   /^подробнее$/i, /^партнерство$/i, /^преимущества$/i,
   /^подписаться/i, /^узнать/i, /^читать/i, /^смотреть/i,
+  /^subscribe\s*\d*$/i, // "subscribe 1"
   /^награда$/i, /^award$/i,
+  /^\d+(\s+\d+)+$/,     // "1 1 1" — multiple space-separated numbers
+  /^zagruz/i,           // "zagruzhennoe" — transliterated loading image names
+  /\slogo\s/i,          // embedded " logo " word — describes an image, not a name
 ];
 
 const URL_RE = /^https?:\/\//i;
@@ -22,6 +26,8 @@ function isJunk(s: string): boolean {
   if (JUNK_RE.some((re) => re.test(s.trim()))) return true;
   if (DESCRIPTION_RE.test(s)) return true;
   if (s.split(/\s+/).length > 5) return true;
+  if (/@/.test(s)) return true;               // filename artifacts like "sm@1x"
+  if (/%/.test(s)) return true;              // any percent: "ppc%world", "%D0%9F…"
   // CMS image hashes, design-tool exports, nav/CTA labels and marketing
   // service names are the dominant noise classes — reject them outright.
   if (isHashLike(s) || isDesignArtifact(s)) return true;
@@ -30,7 +36,17 @@ function isJunk(s: string): boolean {
 }
 
 function cleanName(s: string): string {
-  return s.replace(LOGO_PREFIX_RE, '').trim();
+  let cleaned = s.replace(LOGO_PREFIX_RE, '').trim();
+  // Strip leading Tilda/CMS hex hash: "fd4dbb8dde interfax" → "interfax"
+  cleaned = cleaned.replace(/^[0-9a-f]{6,}\s+/i, '').trim();
+  // Strip trailing Tilda element suffix: "ramu e" → "ramu"
+  cleaned = cleaned.replace(/\s+[eE]$/, '').trim();
+  // Strip trailing logo descriptor + optional number: "arir logo e" → "arir", "big logo 1" → "big"
+  cleaned = cleaned.replace(/\s+logo\s*\d*$/i, '').trim();
+  // Strip trailing CMS number suffixes: "subscribe 1", "brand n 1"
+  cleaned = cleaned.replace(/\s+(?:logo\s+)?\d{1,2}$/, '').trim();
+  cleaned = cleaned.replace(/\s+[nN]\s+\d+$/, '').trim();
+  return cleaned;
 }
 
 function nameFromSrc(src: string): string | null {
@@ -45,6 +61,7 @@ function nameFromSrc(src: string): string | null {
   if (name.length < 2 || name.length > 40) return null;
   if (/^(?:logo|img|image|icon|pic|photo|banner|bg|placeholder|default|noimage|pr)\s*\d*$/i.test(name)) return null;
   if (isHashLike(name)) return null;
+  if (/logo/i.test(name)) return null; // "msslogo big", "biglogo" — logo image filenames
   return name;
 }
 
