@@ -9,10 +9,13 @@ import { supabase } from '@/lib/supabaseClient';
 import { FEDERAL_DISTRICTS, ALL_REGION_CODES } from '@/lib/companiesSearch/regions';
 import { OkvedTreeModal } from '@/components/OkvedTreeModal';
 import { reduceToTopCodes } from '@/lib/companiesSearch/okved2';
+import type { Locale } from '@/lib/i18n';
 
 type Mode = 'activity' | 'inn';
-type L = 'ru' | 'en';
+type L = Locale;
 
+// Falls back to Russian for any non-EN locale; the runtime translator
+// then converts to DE/FR/ES/IT via the LLM cache.
 const t = (ru: string, en: string, locale: L) => (locale === 'en' ? en : ru);
 
 const LEGAL_FORMS = [

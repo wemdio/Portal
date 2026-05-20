@@ -2,15 +2,19 @@
 
 import { useCallback, useMemo, useState } from 'react';
 import { OKVED2_TREE, type OkvedNode } from '@/lib/companiesSearch/okved2';
+import type { Locale } from '@/lib/i18n';
 
 type Props = {
   selected: Set<string>;
   onChange: (s: Set<string>) => void;
   onClose: () => void;
-  locale?: 'ru' | 'en';
+  locale?: Locale;
 };
 
-function t(ru: string, en: string, locale: 'ru' | 'en') {
+// Falls back to Russian for any non-EN locale. Under the new on-the-fly
+// translator, the runtime GlobalTextTranslator picks up the Russian text and
+// produces DE/FR/ES/IT via the LLM-backed cache.
+function t(ru: string, en: string, locale: Locale) {
   return locale === 'en' ? en : ru;
 }
 

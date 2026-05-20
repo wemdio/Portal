@@ -22,6 +22,7 @@ import { logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { isLead as checkIsLead } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
+import type { Locale } from '@/lib/i18n';
 
 const DEFAULT_BOARD_ID = '00000000-0000-0000-0000-000000000001';
 const COLUMN_DRAG_PREFIX = 'column-';
@@ -124,7 +125,7 @@ function openNativePicker(input: HTMLInputElement): void {
   }
 }
 
-function formatDateTimeLocalDisplay(value: string, locale: 'ru' | 'en'): string {
+function formatDateTimeLocalDisplay(value: string, locale: Locale): string {
   if (!value) return '';
   const [datePart, timePart] = value.split('T');
   if (!datePart) return value;
@@ -147,7 +148,7 @@ function NativePickerField({
   placeholderEn,
 }: {
   type: 'datetime-local' | 'time';
-  locale: 'ru' | 'en';
+  locale: Locale;
   value: string;
   onChange: (nextValue: string) => void;
   className: string;
@@ -204,7 +205,7 @@ function ProjectCombobox({
   projects: Project[];
   value: string;
   onChange: (id: string) => void;
-  locale: 'ru' | 'en';
+  locale: Locale;
 }) {
   const isEn = locale === 'en';
   const [query, setQuery] = useState('');

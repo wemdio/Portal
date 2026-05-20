@@ -9,14 +9,14 @@ import { ROLE_LABELS, isClient } from '@/lib/roles';
 import type { UserRole } from '@/types';
 import { useUser } from '@/lib/UserProvider';
 import { LanguageToggle } from '@/components/LanguageToggle';
-import { commonDictionary, dict } from '@/lib/i18n';
+import { commonDictionary, dict, type Locale } from '@/lib/i18n';
 
 type ProfileRow = {
   id: string;
   email: string | null;
   full_name: string | null;
   avatar_url: string | null;
-  locale: 'ru' | 'en' | null;
+  locale: Locale | null;
   role: string | null;
 };
 
@@ -29,7 +29,9 @@ function getErrorMessage(err: unknown): string {
   return 'Неизвестная ошибка';
 }
 
-function tr(locale: 'ru' | 'en', ru: string, en: string): string {
+// Falls back to Russian for any non-EN locale; the runtime GlobalTextTranslator
+// then converts the Russian text into DE/FR/ES/IT via the LLM cache.
+function tr(locale: Locale, ru: string, en: string): string {
   return locale === 'en' ? en : ru;
 }
 

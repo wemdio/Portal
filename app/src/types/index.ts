@@ -13,13 +13,15 @@ export * from './sales-chat-analyzer';
 export * from './reglament';
 export * from './lpr';
 
+import type { Locale } from '@/lib/i18n';
+
 export type UserRole = 'technician' | 'manager' | 'director' | 'admin' | 'sales' | 'marketer' | 'lead' | 'client';
 
 export interface UserProfile {
   id: string;
   email?: string;
   role: UserRole | null;
-  locale?: 'ru' | 'en';
+  locale?: Locale;
   full_name?: string;
   avatar_url?: string;
   created_at?: string;
