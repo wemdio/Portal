@@ -3,6 +3,7 @@ import 'server-only';
 import type { Campaign } from '@/lib/instantly/types';
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
+import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { getCampaignAnalytics } from '@/lib/instantly/client';
 import {
   iterateInstantlyCampaignPages,
@@ -163,11 +164,13 @@ export async function syncInstantlyCampaignCatalog(apiKey: string): Promise<{
 export async function upsertInstantlyCatalogFromCampaign(
   campaign: Pick<Campaign, 'id' | 'name' | 'status'> &
     Partial<Pick<Campaign, 'timestamp_created' | 'timestamp_updated'>>,
+  accountId?: string | null,
 ): Promise<void> {
   if (!supabaseAdmin) return;
 
   const row = {
     id: campaign.id,
+    instantly_account_id: resolveInstantlyAccountId(accountId),
     name: String(campaign.name ?? '').slice(0, NAME_MAX_LEN),
     status: typeof campaign.status === 'number' ? campaign.status : null,
     timestamp_created: campaign.timestamp_created ?? null,
