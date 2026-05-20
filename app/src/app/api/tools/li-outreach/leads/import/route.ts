@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { extractPublicIdentifier } from '@/lib/liOutreach/leadHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -35,6 +36,14 @@ function parseCsvLine(line: string): string[] {
   return result;
 }
 
+function findHeaderIndex(headers: string[], aliases: string[]): number {
+  for (const alias of aliases) {
+    const idx = headers.indexOf(alias);
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+
 export async function POST(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.li-outreach.leads.import' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
@@ -56,8 +65,18 @@ export async function POST(req: NextRequest) {
     const lastNameIdx = headerFields.indexOf('last_name');
     const positionIdx = headerFields.indexOf('position');
     const companyIdx = headerFields.indexOf('company');
-    const profileUrlIdx = headerFields.indexOf('profile_url');
-    const publicIdIdx = headerFields.indexOf('public_identifier');
+    const profileUrlIdx = findHeaderIndex(headerFields, [
+      'profile_url',
+      'linkedin_url',
+      'linkedin_profile_url',
+      'linkedin_profile',
+      'linkedin',
+      'linkedin_link',
+      'url',
+      'profile',
+    ]);
+    const publicIdIdx = findHeaderIndex(headerFields, ['public_identifier', 'public_id', 'linkedin_public_identifier']);
+    const linkedinIdIdx = findHeaderIndex(headerFields, ['linkedin_id', 'provider_id']);
 
     const leadsToInsert: Record<string, unknown>[] = [];
     const skipped: string[] = [];
@@ -81,16 +100,24 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
+      const publicIdentifier = val(publicIdIdx) || extractPublicIdentifier(profileUrl);
+      const linkedinId = val(linkedinIdIdx) || null;
+      if (!linkedinId && !publicIdentifier && !profileUrl) {
+        skipped.push(`Row ${i + 1}: no LinkedIn profile URL / public_identifier / provider_id`);
+        continue;
+      }
+
       leadsToInsert.push({
         user_id: auth.user.id,
         lead_list_id: listId || null,
+        linkedin_id: linkedinId,
         name,
         first_name: firstName || null,
         last_name: lastName || null,
         position: val(positionIdx) || null,
         company: val(companyIdx) || null,
         profile_url: profileUrl || null,
-        public_identifier: val(publicIdIdx) || null,
+        public_identifier: publicIdentifier || null,
         status: 'new',
       });
     }
