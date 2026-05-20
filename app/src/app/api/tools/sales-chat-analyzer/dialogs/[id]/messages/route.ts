@@ -25,5 +25,27 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     .range(offset, offset + limit - 1);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ messages: data ?? [] });
+
+  const messages = data ?? [];
+  const messageIds = messages.map((m) => m.id).filter(Boolean);
+  const { data: attachments, error: attachError } = messageIds.length
+    ? await supabaseAdmin!
+        .from('sales_chat_message_attachments')
+        .select('id,message_id,tg_message_id,media_type,file_name,mime_type,file_size_bytes,status,error_message')
+        .in('message_id', messageIds)
+    : { data: [], error: null };
+  if (attachError) return NextResponse.json({ error: attachError.message }, { status: 500 });
+
+  const byMessage = new Map<string, unknown[]>();
+  for (const attachment of attachments ?? []) {
+    const messageId = (attachment as { message_id?: string }).message_id;
+    if (!messageId) continue;
+    const list = byMessage.get(messageId) ?? [];
+    list.push(attachment);
+    byMessage.set(messageId, list);
+  }
+
+  return NextResponse.json({
+    messages: messages.map((m) => ({ ...m, attachments: byMessage.get(m.id) ?? [] })),
+  });
 }

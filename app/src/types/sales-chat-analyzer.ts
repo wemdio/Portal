@@ -77,3 +77,22 @@ export interface SalesChatMessageRow {
   sent_at: string;
   created_at: string;
 }
+
+export interface SalesChatMessageAttachmentRow {
+  id: string;
+  message_id: string | null;
+  account_id: string | null;
+  dialog_id: string;
+  tg_message_id: number;
+  tg_peer_id: number;
+  media_type: string;
+  file_name: string | null;
+  mime_type: string | null;
+  file_size_bytes: number | null;
+  s3_bucket: string | null;
+  s3_key: string | null;
+  status: 'uploaded' | 'skipped' | 'error';
+  error_message: string | null;
+  created_at: string;
+  uploaded_at: string | null;
+}
