@@ -143,3 +143,17 @@ create policy li2_jobs_own_all on public.li2_jobs
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy li2_logs_own_all on public.li2_logs
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+grant all on public.li2_settings to service_role;
+grant all on public.li2_campaigns to service_role;
+grant all on public.li2_leads to service_role;
+grant all on public.li2_messages to service_role;
+grant all on public.li2_jobs to service_role;
+grant all on public.li2_logs to service_role;
+
+grant select, insert, update on public.li2_settings to authenticated;
+grant select, insert, update on public.li2_campaigns to authenticated;
+grant select, insert, update on public.li2_leads to authenticated;
+grant select, insert, update on public.li2_messages to authenticated;
+grant select, insert, update on public.li2_jobs to authenticated;
+grant select, insert, update on public.li2_logs to authenticated;
