@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { Menu } from 'lucide-react';
@@ -8,8 +8,16 @@ import { Nunito } from 'next/font/google';
 import { supabase } from '@/lib/supabaseClient';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 import { getPortalPageSectionTitle } from '@/lib/pageTitle';
-import { commonDictionary, dict, normalizeLocale, type Locale } from '@/lib/i18n';
-import { GlobalTextTranslator } from '@/components/GlobalTextTranslator';
+import {
+  LOCALES,
+  LOCALE_DESCRIPTORS,
+  commonDictionary,
+  dict,
+  normalizeLocale,
+  type Locale,
+} from '@/lib/i18n';
+import { ChevronDown } from 'lucide-react';
+import { GlobalTextTranslator, LanguageLoadingOverlay } from '@/components/GlobalTextTranslator';
 import { resolveActiveNavId } from '@/lib/clientNav';
 import { ClientSidebar } from '@/components/client/ClientSidebar';
 import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
@@ -26,6 +34,26 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const router = useRouter();
   const [locale, setLocale] = useState<Locale>('ru');
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [langOpen, setLangOpen] = useState(false);
+  const langRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!langOpen) return;
+    const onPointer = (e: MouseEvent) => {
+      if (!langRef.current) return;
+      if (langRef.current.contains(e.target as Node)) return;
+      setLangOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLangOpen(false);
+    };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [langOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,9 +95,15 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
 
   const activeId = useMemo(() => resolveActiveNavId(pathname), [pathname]);
 
+  const currentLocaleDesc = LOCALE_DESCRIPTORS[locale];
+
   return (
     <PortalLoadingProvider>
     <GlobalTextTranslator locale={locale} />
+    <LanguageLoadingOverlay
+      title={dict(commonDictionary.translatingPage, locale)}
+      hint={dict(commonDictionary.translatingHint, locale)}
+    />
     <div className={`client-portal ${nunito.className} flex flex-col min-h-screen`}>
       <DemoBanner />
       <PaymentLockedBanner />
@@ -94,23 +128,70 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
 
           <div className="flex-1" />
 
-          <div className="neu-pill inline-flex items-center gap-1 px-1.5 py-1 shrink-0">
+          {/* Multi-locale dropdown. Uses the same neu-pill styling as the
+              old RU/EN toggle for visual continuity. The dropdown panel is
+              flagged `data-i18n-skip` so the GlobalTextTranslator never
+              touches the native-language labels (e.g. "Deutsch" must stay
+              "Deutsch", not get retranslated). */}
+          <div ref={langRef} className="relative shrink-0">
             <button
               type="button"
-              onClick={() => void persistLocale('ru')}
-              className="rounded-full px-2 py-1 text-[11px] font-semibold transition-colors"
-              style={locale === 'ru' ? { background: 'var(--cp-accent)', color: '#fff' } : { color: 'var(--cp-text-l)' }}
+              onClick={() => setLangOpen((v) => !v)}
+              className="neu-pill inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold transition-colors"
+              style={{ color: 'var(--cp-text-l)' }}
+              aria-haspopup="listbox"
+              aria-expanded={langOpen}
+              aria-label={dict(commonDictionary.language, locale)}
             >
-              RU
+              <span aria-hidden>{currentLocaleDesc.flag}</span>
+              <span>{currentLocaleDesc.code}</span>
+              <ChevronDown className="h-3 w-3 opacity-60" />
             </button>
-            <button
-              type="button"
-              onClick={() => void persistLocale('en')}
-              className="rounded-full px-2 py-1 text-[11px] font-semibold transition-colors"
-              style={locale === 'en' ? { background: 'var(--cp-accent)', color: '#fff' } : { color: 'var(--cp-text-l)' }}
-            >
-              EN
-            </button>
+            {langOpen && (
+              <div
+                data-i18n-skip
+                role="listbox"
+                aria-label={dict(commonDictionary.language, locale)}
+                className="absolute right-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-2xl"
+                style={{
+                  background: 'var(--cp-bg)',
+                  boxShadow:
+                    '6px 6px 14px var(--cp-shadow-d), -6px -6px 14px var(--cp-shadow-l)',
+                }}
+              >
+                {LOCALES.map((code) => {
+                  const desc = LOCALE_DESCRIPTORS[code];
+                  const isActive = code === locale;
+                  return (
+                    <button
+                      key={code}
+                      type="button"
+                      role="option"
+                      aria-selected={isActive}
+                      onClick={() => {
+                        setLangOpen(false);
+                        if (code !== locale) void persistLocale(code);
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors"
+                      style={
+                        isActive
+                          ? { background: 'var(--cp-accent)', color: '#fff' }
+                          : { color: 'var(--cp-text-l)' }
+                      }
+                    >
+                      <span aria-hidden className="text-base leading-none">{desc.flag}</span>
+                      <span className="font-semibold">{desc.code}</span>
+                      <span
+                        className="ml-auto text-[11px]"
+                        style={{ opacity: isActive ? 0.85 : 0.6 }}
+                      >
+                        {desc.nativeName}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <button
