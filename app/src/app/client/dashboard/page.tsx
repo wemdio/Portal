@@ -357,16 +357,19 @@ export default function ClientDashboardPage() {
               </Link>
             </div>
           )}
-
-          {repliesError && (
-            <p
-              className="text-[11px] mt-2"
-              style={{ color: 'var(--cp-text-l)' }}
-            >
-              Список ответов мог обновиться неполностью. Перезагрузите страницу, чтобы синхронизировать.
-            </p>
-          )}
         </section>
+      )}
+
+      {/* repliesError renders independently of totalUnread so the user always
+          sees a hint when the replies fetch failed, even if the failure left
+          `replies` as [] and the attention section is therefore hidden. */}
+      {repliesError && (
+        <p
+          className="text-[11px]"
+          style={{ color: 'var(--cp-text-l)' }}
+        >
+          Список ответов мог обновиться неполностью. Перезагрузите страницу, чтобы синхронизировать.
+        </p>
       )}
 
       {/* Campaigns section — hidden for new clients until onboarding completes */}
