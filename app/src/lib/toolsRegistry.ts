@@ -229,9 +229,11 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description: 'OpenOutreach runtime: продукт и ICP на входе, автономный поиск, квалификация и LinkedIn-диалоги на выходе.',
     description_en: 'OpenOutreach runtime: product and ICP in, autonomous LinkedIn discovery, qualification, and conversations out.',
     href: '/tools/li-outreach-v2',
-    badge: '2.0',
-    badgeVariant: 'emerald',
+    badge: 'В разработке',
+    badge_en: 'In development',
+    badgeVariant: 'amber',
     accentColor: 'emerald',
+    disabled: true,
   },
   rdp: {
     id: 'rdp',
