@@ -3,6 +3,7 @@ import 'server-only';
 import { Api, TelegramClient } from 'telegram';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { mapMessage, bigToNum, type MappedMessage } from './messageMapper';
+import { putMainS3Object } from '@/lib/mainS3Server';
 
 /** Простой логгер, совместимый с WorkerLogger воркера. */
 type LogFn = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
@@ -11,6 +12,11 @@ type LogFn = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) =>
 const MAX_MESSAGES_PER_DIALOG = 5000;
 /** Размер батча для вставки сообщений. */
 const INSERT_BATCH = 200;
+const DEFAULT_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = Math.max(
+  1,
+  Number(process.env.SALES_CHAT_MAX_ATTACHMENT_BYTES ?? DEFAULT_MAX_ATTACHMENT_BYTES),
+);
 
 export interface SalesChatAccountLite {
   id: string;
@@ -138,6 +144,179 @@ function toRow(
   };
 }
 
+function sanitizeStorageFilename(value: string | null, fallback: string): string {
+  const raw = (value?.trim() || fallback)
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, ' ')
+    .slice(0, 160);
+  return raw || fallback;
+}
+
+function buildAttachmentKey(accountId: string, peer: PeerInfo, mapped: MappedMessage): string {
+  const filename = sanitizeStorageFilename(
+    mapped.attachment?.file_name ?? null,
+    `telegram-document-${mapped.tg_message_id}.bin`,
+  );
+  return [
+    'tools',
+    'sales-chat-analyzer',
+    'attachments',
+    accountId,
+    String(peer.tg_peer_id),
+    `${mapped.tg_message_id}-${filename}`,
+  ].join('/');
+}
+
+async function findMessageId(
+  admin: SupabaseClient,
+  dialogId: string,
+  tgMessageId: number,
+): Promise<string | null> {
+  const { data, error } = await admin
+    .from('sales_chat_messages')
+    .select('id')
+    .eq('dialog_id', dialogId)
+    .eq('tg_message_id', tgMessageId)
+    .maybeSingle();
+  if (error) throw new Error(`findMessageId: ${error.message}`);
+  return (data?.id as string | undefined) ?? null;
+}
+
+async function attachmentAlreadyUploaded(
+  admin: SupabaseClient,
+  dialogId: string,
+  tgMessageId: number,
+): Promise<boolean> {
+  const { data, error } = await admin
+    .from('sales_chat_message_attachments')
+    .select('status,s3_key')
+    .eq('dialog_id', dialogId)
+    .eq('tg_message_id', tgMessageId)
+    .maybeSingle();
+  if (error) throw new Error(`attachmentAlreadyUploaded: ${error.message}`);
+  return Boolean(data?.status === 'uploaded' && data?.s3_key);
+}
+
+async function dialogNeedsAttachmentBackfill(admin: SupabaseClient, dialogId: string): Promise<boolean> {
+  const { data: documentMessages, error } = await admin
+    .from('sales_chat_messages')
+    .select('tg_message_id')
+    .eq('dialog_id', dialogId)
+    .eq('media_type', 'document')
+    .order('sent_at', { ascending: false })
+    .limit(1000);
+  if (error) throw new Error(`dialogNeedsAttachmentBackfill: ${error.message}`);
+  const ids = (documentMessages ?? [])
+    .map((row) => Number((row as { tg_message_id?: unknown }).tg_message_id))
+    .filter((id) => Number.isFinite(id));
+  if (ids.length === 0) return false;
+
+  const { data: uploaded, error: uploadedError } = await admin
+    .from('sales_chat_message_attachments')
+    .select('tg_message_id')
+    .eq('dialog_id', dialogId)
+    .eq('status', 'uploaded')
+    .in('tg_message_id', ids);
+  if (uploadedError) throw new Error(`dialogNeedsAttachmentBackfill uploaded: ${uploadedError.message}`);
+
+  const uploadedIds = new Set((uploaded ?? []).map((row) => Number((row as { tg_message_id?: unknown }).tg_message_id)));
+  return ids.some((id) => !uploadedIds.has(id));
+}
+
+async function upsertAttachment(
+  admin: SupabaseClient,
+  row: Record<string, unknown>,
+): Promise<void> {
+  const { error } = await admin
+    .from('sales_chat_message_attachments')
+    .upsert(row, { onConflict: 'dialog_id,tg_message_id' });
+  if (error) throw new Error(`upsertAttachment: ${error.message}`);
+}
+
+async function captureAttachment(opts: {
+  admin: SupabaseClient;
+  client: TelegramClient;
+  msg: Api.Message;
+  mapped: MappedMessage;
+  accountId: string;
+  dialogId: string;
+  peer: PeerInfo;
+  log: LogFn;
+}): Promise<void> {
+  const { admin, client, msg, mapped, accountId, dialogId, peer, log } = opts;
+  const attachment = mapped.attachment;
+  if (!attachment) return;
+
+  try {
+    if (await attachmentAlreadyUploaded(admin, dialogId, mapped.tg_message_id)) return;
+
+    const messageId = await findMessageId(admin, dialogId, mapped.tg_message_id);
+    const baseRow = {
+      message_id: messageId,
+      account_id: accountId,
+      dialog_id: dialogId,
+      tg_message_id: mapped.tg_message_id,
+      tg_peer_id: peer.tg_peer_id,
+      media_type: attachment.media_type,
+      file_name: attachment.file_name,
+      mime_type: attachment.mime_type,
+      file_size_bytes: attachment.file_size_bytes,
+    };
+
+    if (attachment.file_size_bytes && attachment.file_size_bytes > MAX_ATTACHMENT_BYTES) {
+      await upsertAttachment(admin, {
+        ...baseRow,
+        status: 'skipped',
+        error_message: `File is larger than SALES_CHAT_MAX_ATTACHMENT_BYTES (${attachment.file_size_bytes} bytes)`,
+      });
+      return;
+    }
+
+    const downloaded = await client.downloadMedia(msg, {});
+    if (!Buffer.isBuffer(downloaded) || downloaded.length === 0) {
+      await upsertAttachment(admin, {
+        ...baseRow,
+        status: 'error',
+        error_message: 'Telegram returned an empty media buffer',
+      });
+      return;
+    }
+
+    const key = buildAttachmentKey(accountId, peer, mapped);
+    const uploaded = await putMainS3Object({
+      key,
+      body: downloaded,
+      contentType: attachment.mime_type ?? 'application/octet-stream',
+      cacheControl: 'private, max-age=300',
+    });
+
+    await upsertAttachment(admin, {
+      ...baseRow,
+      file_size_bytes: attachment.file_size_bytes ?? uploaded.size,
+      s3_bucket: uploaded.bucket,
+      s3_key: uploaded.key,
+      status: 'uploaded',
+      error_message: null,
+      uploaded_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    const msgText = err instanceof Error ? err.message : String(err);
+    log('warn', `[${accountId}] attachment ${mapped.tg_message_id} failed`, err);
+    await upsertAttachment(admin, {
+      account_id: accountId,
+      dialog_id: dialogId,
+      tg_message_id: mapped.tg_message_id,
+      tg_peer_id: peer.tg_peer_id,
+      media_type: attachment.media_type,
+      file_name: attachment.file_name,
+      mime_type: attachment.mime_type,
+      file_size_bytes: attachment.file_size_bytes,
+      status: 'error',
+      error_message: msgText.slice(0, 500),
+    }).catch(() => {});
+  }
+}
+
 /** Идемпотентная вставка сообщений (дубли игнорируются по unique-индексу). */
 async function insertMessages(admin: SupabaseClient, rows: ReturnType<typeof toRow>[]): Promise<void> {
   if (!rows.length) return;
@@ -182,7 +361,8 @@ export async function syncAccount(opts: {
         const dialogId = await upsertDialog(admin, account.id, peer);
         // Инкремент: если в диалоге нет ничего нового — пропускаем сообщения.
         const unchanged = sinceUnix > 0 && lastDate !== null && lastDate <= sinceUnix;
-        if (!unchanged) {
+        const attachmentBackfillOnly = unchanged && await dialogNeedsAttachmentBackfill(admin, dialogId);
+        if (!unchanged || attachmentBackfillOnly) {
           let batch: ReturnType<typeof toRow>[] = [];
           let inserted = false;
           for await (const msg of client.iterMessages(
@@ -191,10 +371,27 @@ export async function syncAccount(opts: {
           )) {
             // iterMessages идёт от новых к старым — на старых обрываем инкремент.
             const msgDate = rawMessageDate(msg);
-            if (sinceUnix > 0 && msgDate !== null && msgDate <= sinceUnix) break;
+            if (!attachmentBackfillOnly && sinceUnix > 0 && msgDate !== null && msgDate <= sinceUnix) break;
             const mapped = mapMessage(msg);
             if (!mapped) continue;
+            if (attachmentBackfillOnly && !mapped.attachment) continue;
             batch.push(toRow(mapped, account.id, dialogId, peer, selfName));
+            if (mapped.attachment && msg instanceof Api.Message) {
+              await insertMessages(admin, batch);
+              batch = [];
+              inserted = true;
+              await captureAttachment({
+                admin,
+                client,
+                msg,
+                mapped,
+                accountId: account.id,
+                dialogId,
+                peer,
+                log,
+              });
+              continue;
+            }
             if (batch.length >= INSERT_BATCH) {
               await insertMessages(admin, batch);
               batch = [];
