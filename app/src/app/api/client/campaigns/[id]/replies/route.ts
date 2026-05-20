@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
-import { isResourceAllowed } from '@/lib/clientAccess';
+import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import type { ClientRepliesPage } from '@/lib/clientCampaignReplies/types';
@@ -48,6 +48,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       limit,
       starting_after: startingAfter,
       search,
+    }, {
+      accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
     });
 
     const items = (data.items ?? []).map(mapInstantlyEmailToReply);

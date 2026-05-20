@@ -4,7 +4,7 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { filterAllowedIds } from '@/lib/clientAccess';
+import { filterAllowedIds, getResourceInstantlyAccountId, type ClientAccessRow } from '@/lib/clientAccess';
 import { listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
@@ -114,6 +114,7 @@ async function readCampaignNames(campaignIds: string[]): Promise<Map<string, str
 async function readReplyItems(
   campaignIds: string[],
   campaignNames: Map<string, string>,
+  accessRows: ClientAccessRow[],
   search?: string,
 ): Promise<{ items: LeadListItem[]; failures: number }> {
   const settled = await Promise.allSettled(
@@ -123,6 +124,8 @@ async function readReplyItems(
         ue_type: 2,
         limit: REPLIES_PER_CAMPAIGN,
         search,
+      }, {
+        accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
       });
 
       return (data.items ?? []).map((email) => {
@@ -189,7 +192,7 @@ async function applyLeadMarks(userId: string, items: LeadListItem[]) {
 
   const { data } = await supabaseInstantly
     .from('client_forwarded_leads')
-    .select('id, campaign_id, lead_email, reply_timestamp')
+    .select('id, campaign_id, lead_email')
     .eq('client_user_id', userId)
     .in('campaign_id', campaignIds);
 
@@ -198,17 +201,19 @@ async function applyLeadMarks(userId: string, items: LeadListItem[]) {
     id: string;
     campaign_id: string;
     lead_email: string;
-    reply_timestamp: string | null;
   }>) {
-    if (!row.reply_timestamp) continue;
-    marked.set(`${row.campaign_id}:${row.lead_email.toLowerCase()}:${row.reply_timestamp}`, row.id);
+    marked.set(`${row.campaign_id}:${row.lead_email.toLowerCase()}`, row.id);
   }
 
   for (const item of items) {
-    const key = `${item.campaign_id}:${item.lead_email.toLowerCase()}:${item.reply_timestamp ?? ''}`;
+    const key = `${item.campaign_id}:${item.lead_email.toLowerCase()}`;
     const leadId = marked.get(key) ?? null;
     item.is_lead = Boolean(leadId);
     item.lead_entry_id = leadId;
+    if (leadId) {
+      item.is_unread = false;
+      item.status = 'lead';
+    }
   }
 }
 
@@ -258,6 +263,7 @@ export async function GET(req: NextRequest) {
   const { items: replyItems, failures } = await readReplyItems(
     allowedCampaignIds,
     campaignNames,
+    accessRows,
     search,
   );
 

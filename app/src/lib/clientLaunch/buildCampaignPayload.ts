@@ -6,6 +6,7 @@ import type {
 } from '@/lib/instantly/types';
 import type {
   ClientCampaignPreset,
+  ClientLaunchBehaviorOverride,
   ClientLaunchScheduleOverride,
   ClientLaunchSequence,
 } from './types';
@@ -19,6 +20,11 @@ export interface BuildCampaignPayloadInput {
    * schedule_from/to/days/timezone in the resulting campaign payload.
    */
   scheduleOverride?: ClientLaunchScheduleOverride;
+  /**
+   * Optional per-launch behavior override. Defaults are pre-filled from the
+   * preset in the client UI, but the client can adjust these for one campaign.
+   */
+  behaviorOverride?: ClientLaunchBehaviorOverride;
 }
 
 /**
@@ -28,7 +34,7 @@ export interface BuildCampaignPayloadInput {
 export function buildCampaignPayloadFromPreset(
   input: BuildCampaignPayloadInput,
 ): CampaignCreatePayload {
-  const { preset, sequence, scheduleOverride } = input;
+  const { preset, sequence, scheduleOverride, behaviorOverride } = input;
 
   const fromValue = scheduleOverride?.from ?? preset.schedule_from;
   const toValue = scheduleOverride?.to ?? preset.schedule_to;
@@ -91,9 +97,9 @@ export function buildCampaignPayloadFromPreset(
     daily_limit: preset.daily_limit,
     daily_max_leads: preset.daily_max_leads,
     email_gap: preset.email_gap_minutes,
-    open_tracking: preset.open_tracking,
+    open_tracking: behaviorOverride?.open_tracking ?? preset.open_tracking,
     link_tracking: preset.link_tracking,
-    stop_on_reply: preset.stop_on_reply,
+    stop_on_reply: behaviorOverride?.stop_on_reply ?? preset.stop_on_reply,
     // Клиентские письма всегда уходят plain-text: никакого HTML, переносы
     // строк сохраняются ровно как их набрал клиент. Поэтому text_only
     // форсим в true независимо от пресета — в клиентском портале HTML

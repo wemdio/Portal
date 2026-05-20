@@ -9,16 +9,18 @@ export const GET = withAuth(async (req) => {
   const limit = url.searchParams.get('limit');
   const starting_after = url.searchParams.get('starting_after') ?? undefined;
   const search = url.searchParams.get('search') ?? undefined;
+  const accountId = url.searchParams.get('account_id') ?? undefined;
+  const requestOptions = { accountId };
 
   if (limit === 'all') {
-    const accounts = await instantly.listAllAccounts();
-    return NextResponse.json({ items: accounts });
+    const accounts = await instantly.listAllAccounts(requestOptions);
+    return NextResponse.json({ items: accounts, account_id: accountId ?? 'main' });
   }
 
   const data = await instantly.listAccounts({
     limit: limit ? parseInt(limit, 10) : 100,
     starting_after,
     search,
-  });
-  return NextResponse.json(data);
+  }, requestOptions);
+  return NextResponse.json({ ...data, account_id: accountId ?? 'main' });
 });

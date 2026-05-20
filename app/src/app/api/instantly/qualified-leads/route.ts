@@ -27,12 +27,17 @@ async function resolveCampaignIdsForUser(userId: string): Promise<string[] | nul
   if (!projects?.length) return null;
 
   const projectIds = projects.map((p: { id: string }) => p.id);
-  const { data: links } = await supabaseInstantly
+  const { data: legacyLinks } = await supabaseInstantly
     .from('project_instantly_campaigns')
     .select('campaign_id')
     .in('project_id', projectIds);
+  const { data: periodLinks } = await supabaseInstantly
+    .from('project_period_instantly_campaigns')
+    .select('campaign_id')
+    .in('project_id', projectIds);
 
-  if (!links?.length) return null;
+  const links = [...(legacyLinks ?? []), ...(periodLinks ?? [])];
+  if (!links.length) return null;
 
   return [...new Set(links.map((l) => l.campaign_id as string))];
 }

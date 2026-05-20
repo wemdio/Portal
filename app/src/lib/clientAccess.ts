@@ -3,6 +3,7 @@ export type ClientResourceType = 'campaign' | 'lead_list';
 export interface ClientAccessRow {
   resource_type: ClientResourceType;
   resource_id: string;
+  instantly_account_id?: string | null;
 }
 
 /**
@@ -30,6 +31,17 @@ export function isResourceAllowed(
   return accessRows.some(
     (r) => r.resource_type === type && r.resource_id === resourceId,
   );
+}
+
+export function getResourceInstantlyAccountId(
+  resourceId: string,
+  accessRows: ClientAccessRow[],
+  type: ClientResourceType,
+): string {
+  const row = accessRows.find(
+    (r) => r.resource_type === type && r.resource_id === resourceId,
+  );
+  return row?.instantly_account_id || 'main';
 }
 
 /**

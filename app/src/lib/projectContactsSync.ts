@@ -59,6 +59,16 @@ interface LinkRow {
   campaign_id: string;
 }
 
+interface PeriodLinkRow extends LinkRow {
+  period_id: string;
+  baseline_contacts: number | null;
+}
+
+interface ActivePeriodRow {
+  id: string;
+  project_id: string;
+}
+
 interface CampaignAnalyticsRow {
   id: string;
   new_leads_contacted_count: number | null;
@@ -77,6 +87,37 @@ async function fetchAllLinks(db: SupabaseClient): Promise<LinkRow[]> {
     if (error) throw new Error(`project_instantly_campaigns read: ${error.message}`);
     if (!data?.length) break;
     out.push(...(data as LinkRow[]));
+    if (data.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return out;
+}
+
+async function fetchActivePeriods(db: SupabaseClient): Promise<Map<string, ActivePeriodRow>> {
+  const { data, error } = await db
+    .from('project_periods')
+    .select('id, project_id')
+    .eq('status', 'active');
+  if (error) throw new Error(`project_periods read: ${error.message}`);
+
+  const map = new Map<string, ActivePeriodRow>();
+  for (const row of (data ?? []) as ActivePeriodRow[]) {
+    map.set(row.project_id, row);
+  }
+  return map;
+}
+
+async function fetchAllPeriodLinks(db: SupabaseClient): Promise<PeriodLinkRow[]> {
+  const out: PeriodLinkRow[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await db
+      .from('project_period_instantly_campaigns')
+      .select('project_id, period_id, campaign_id, baseline_contacts')
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(`project_period_instantly_campaigns read: ${error.message}`);
+    if (!data?.length) break;
+    out.push(...(data as PeriodLinkRow[]));
     if (data.length < PAGE_SIZE) break;
     from += PAGE_SIZE;
   }
@@ -117,13 +158,23 @@ export async function syncProjectContactsFromInstantly(
   const log = deps.log ?? (() => {});
 
   // 1. All project↔campaign links.
-  const links = await fetchAllLinks(instantlyDb);
+  const [activePeriods, legacyLinks, periodLinks] = await Promise.all([
+    fetchActivePeriods(mainDb),
+    fetchAllLinks(instantlyDb),
+    fetchAllPeriodLinks(instantlyDb),
+  ]);
+  const activePeriodIds = new Set([...activePeriods.values()].map((p) => p.id));
+  const activePeriodLinks = periodLinks.filter((link) => {
+    const active = activePeriods.get(link.project_id);
+    return active?.id === link.period_id && activePeriodIds.has(link.period_id);
+  });
+  const links = legacyLinks.filter((link) => !activePeriods.has(link.project_id));
   // NB: even when there are no Instantly links at all, we DO NOT early-return
   // anymore — Колди/Тригга и прочие "ручные" проекты должны получить
   // ежедневный snapshot из projects.contacts_done / kpi_fact (Bug 2).
 
   // 2. Аналитика по уникальным campaign_id.
-  const allCampaignIds = [...new Set(links.map((l) => l.campaign_id))];
+  const allCampaignIds = [...new Set([...links, ...activePeriodLinks].map((l) => l.campaign_id))];
   const contactsByCampaign =
     allCampaignIds.length > 0
       ? await fetchCampaignContacts(instantlyDb, allCampaignIds)
@@ -132,6 +183,15 @@ export async function syncProjectContactsFromInstantly(
 
   // 3. SUM по project_id.
   const sumByProject = new Map<string, number>();
+  const periodIdByProject = new Map<string, string>();
+  for (const link of activePeriodLinks) {
+    const contacts = contactsByCampaign.get(link.campaign_id);
+    if (contacts === undefined) continue;
+    const baseline = Number(link.baseline_contacts ?? 0);
+    const periodContacts = Math.max(0, contacts - (Number.isFinite(baseline) ? baseline : 0));
+    sumByProject.set(link.project_id, (sumByProject.get(link.project_id) ?? 0) + periodContacts);
+    periodIdByProject.set(link.project_id, link.period_id);
+  }
   for (const link of links) {
     const contacts = contactsByCampaign.get(link.campaign_id);
     if (contacts === undefined) continue; // catalog не дотянулся — пропускаем эту кампанию
@@ -163,6 +223,20 @@ export async function syncProjectContactsFromInstantly(
       missing.push(projectId);
       continue;
     }
+    const periodId = periodIdByProject.get(projectId);
+    if (periodId) {
+      const { error: periodUpdateErr } = await mainDb
+        .from('project_periods')
+        .update({
+          contacts_done: String(sum),
+          contacts_done_synced_at: syncedAtIso,
+        })
+        .eq('id', periodId);
+      if (periodUpdateErr) {
+        log('error', `project_periods update failed for ${periodId}: ${periodUpdateErr.message}`);
+        throw new Error(`project_periods update (${periodId}): ${periodUpdateErr.message}`);
+      }
+    }
     updated += 1;
   }
 
@@ -193,6 +267,7 @@ export async function syncProjectContactsFromInstantly(
   } else {
     const historyRows: Array<{
       project_id: string;
+      period_id?: string;
       contacts_done: number;
       kpi_fact: number | null;
       recorded_at: string;
@@ -202,8 +277,10 @@ export async function syncProjectContactsFromInstantly(
       const contacts = parseInt(p.contacts_done ?? '', 10);
       if (!Number.isFinite(contacts)) continue;
       const kpi = parseInt(p.kpi_fact ?? '', 10);
+      const activePeriod = activePeriods.get(p.id);
       historyRows.push({
         project_id: p.id,
+        ...(activePeriod ? { period_id: activePeriod.id } : {}),
         contacts_done: contacts,
         kpi_fact: Number.isFinite(kpi) ? kpi : null,
         recorded_at: today,
@@ -211,13 +288,29 @@ export async function syncProjectContactsFromInstantly(
     }
 
     if (historyRows.length > 0) {
-      const { error: histErr } = await mainDb
-        .from('project_contacts_history')
-        .upsert(historyRows, { onConflict: 'project_id,recorded_at', ignoreDuplicates: false });
-      if (histErr) {
-        log('error', `contacts history upsert failed: ${histErr.message}`);
-      } else {
-        historyWritten = historyRows.length;
+      const periodRows = historyRows.filter((row) => row.period_id);
+      const legacyRows = historyRows.filter((row) => !row.period_id);
+
+      if (periodRows.length > 0) {
+        const { error: histErr } = await mainDb
+          .from('project_contacts_history')
+          .upsert(periodRows, { onConflict: 'period_id,recorded_at', ignoreDuplicates: false });
+        if (histErr) {
+          log('error', `period contacts history upsert failed: ${histErr.message}`);
+        } else {
+          historyWritten += periodRows.length;
+        }
+      }
+
+      if (legacyRows.length > 0) {
+        const { error: histErr } = await mainDb
+          .from('project_contacts_history')
+          .upsert(legacyRows, { onConflict: 'project_id,recorded_at', ignoreDuplicates: false });
+        if (histErr) {
+          log('error', `contacts history upsert failed: ${histErr.message}`);
+        } else {
+          historyWritten += legacyRows.length;
+        }
       }
     }
   }

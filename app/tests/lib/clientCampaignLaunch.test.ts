@@ -11,6 +11,7 @@ import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
 const validPreset: ClientCampaignPreset = {
   id: 'preset-1',
   client_user_id: 'user-1',
+  instantly_account_id: 'main',
   email_account_ids: ['sender@acme.com', 'sender2@acme.com'],
   daily_limit: 100,
   daily_max_leads: 50,
@@ -54,6 +55,17 @@ describe('buildCampaignPayloadFromPreset', () => {
     expect(payload.open_tracking).toBe(false);
     expect(payload.link_tracking).toBe(false);
     expect(payload.stop_on_reply).toBe(false);
+  });
+
+  it('allows per-launch overrides for open tracking and stop-on-reply', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: { ...validPreset, open_tracking: true, stop_on_reply: true },
+      sequence: validSequence,
+      behaviorOverride: { open_tracking: false, stop_on_reply: false },
+    });
+    expect(payload.open_tracking).toBe(false);
+    expect(payload.stop_on_reply).toBe(false);
+    expect(payload.link_tracking).toBe(true);
   });
 
   it('always forces text_only=true (client emails are plain text, no HTML)', () => {

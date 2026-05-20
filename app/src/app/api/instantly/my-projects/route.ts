@@ -50,12 +50,17 @@ export const GET = withAuth(async (_req, user) => {
 
   // Fetch campaign links for these projects
   const projectIds = projects.map((p) => p.id as string);
-  const { data: links } = await supabaseInstantly
+  const { data: legacyLinks } = await supabaseInstantly
     .from('project_instantly_campaigns')
+    .select('project_id, campaign_id')
+    .in('project_id', projectIds);
+  const { data: periodLinks } = await supabaseInstantly
+    .from('project_period_instantly_campaigns')
     .select('project_id, campaign_id')
     .in('project_id', projectIds);
 
   const projectCampaigns: Record<string, string[]> = {};
+  const links = [...(legacyLinks ?? []), ...(periodLinks ?? [])];
   for (const l of links ?? []) {
     const pid = l.project_id as string;
     if (!projectCampaigns[pid]) projectCampaigns[pid] = [];

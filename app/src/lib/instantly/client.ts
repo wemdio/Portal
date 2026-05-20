@@ -23,24 +23,14 @@ import type {
   WarmupAnalyticsEntry,
   BackgroundJob,
 } from './types';
+import { getInstantlyAccountApiKey, type InstantlyRequestOptions } from './accounts';
+import { InstantlyApiError } from './errors';
+export { InstantlyApiError } from './errors';
 
 const BASE_URL = 'https://api.instantly.ai/api/v2';
 
-export class InstantlyApiError extends Error {
-  constructor(
-    message: string,
-    public status: number,
-    public body?: unknown,
-  ) {
-    super(message);
-    this.name = 'InstantlyApiError';
-  }
-}
-
-function getApiKey(): string {
-  const key = (process.env.INSTANTLY_API_KEY || process.env.INSTANTLY_PORTAL_API_KEY || '').trim();
-  if (!key) throw new InstantlyApiError('INSTANTLY_API_KEY is not configured', 503);
-  return key;
+function getApiKey(options?: InstantlyRequestOptions): string {
+  return getInstantlyAccountApiKey(options?.accountId);
 }
 
 const RATE_LIMIT_RETRIES = 3;
@@ -49,8 +39,9 @@ const RATE_LIMIT_BASE_DELAY_MS = 4000;
 async function request<T>(
   path: string,
   options: { method?: string; body?: unknown; params?: Record<string, string | number | boolean | undefined> } = {},
+  requestOptions?: InstantlyRequestOptions,
 ): Promise<T> {
-  const apiKey = getApiKey();
+  const apiKey = getApiKey(requestOptions);
   const url = new URL(`${BASE_URL}${path}`);
 
   if (options.params) {
@@ -104,14 +95,17 @@ async function fetchAllPages<T>(
   path: string,
   params?: Record<string, string | number | boolean | undefined>,
   maxItems?: number,
+  requestOptions?: InstantlyRequestOptions,
 ): Promise<T[]> {
   const all: T[] = [];
   let startingAfter: string | undefined;
 
   do {
-    const page = await request<PaginatedResponse<T>>(path, {
-      params: { limit: 100, ...params, starting_after: startingAfter },
-    });
+    const page = await request<PaginatedResponse<T>>(
+      path,
+      { params: { limit: 100, ...params, starting_after: startingAfter } },
+      requestOptions,
+    );
     if (page.items?.length) all.push(...page.items);
     startingAfter = page.next_starting_after || undefined;
   } while (startingAfter && (!maxItems || all.length < maxItems));
@@ -121,107 +115,107 @@ async function fetchAllPages<T>(
 
 // ─── Campaigns ────────────────────────────────────────────────────────────────
 
-export async function listCampaigns(params?: PaginationParams & { status?: number; tag_ids?: string }) {
-  return request<PaginatedResponse<Campaign>>('/campaigns', { params: params as Record<string, string | number> });
+export async function listCampaigns(params?: PaginationParams & { status?: number; tag_ids?: string }, requestOptions?: InstantlyRequestOptions) {
+  return request<PaginatedResponse<Campaign>>('/campaigns', { params: params as Record<string, string | number> }, requestOptions);
 }
 
-export async function listAllCampaigns(maxItems?: number): Promise<Campaign[]> {
-  return fetchAllPages<Campaign>('/campaigns', undefined, maxItems);
+export async function listAllCampaigns(maxItems?: number, requestOptions?: InstantlyRequestOptions): Promise<Campaign[]> {
+  return fetchAllPages<Campaign>('/campaigns', undefined, maxItems, requestOptions);
 }
 
-export async function getCampaign(id: string) {
-  return request<Campaign>(`/campaigns/${id}`);
+export async function getCampaign(id: string, requestOptions?: InstantlyRequestOptions) {
+  return request<Campaign>(`/campaigns/${id}`, {}, requestOptions);
 }
 
-export async function createCampaign(payload: CampaignCreatePayload) {
-  return request<Campaign>('/campaigns', { method: 'POST', body: payload });
+export async function createCampaign(payload: CampaignCreatePayload, requestOptions?: InstantlyRequestOptions) {
+  return request<Campaign>('/campaigns', { method: 'POST', body: payload }, requestOptions);
 }
 
-export async function updateCampaign(id: string, payload: CampaignUpdatePayload) {
-  return request<Campaign>(`/campaigns/${id}`, { method: 'PATCH', body: payload });
+export async function updateCampaign(id: string, payload: CampaignUpdatePayload, requestOptions?: InstantlyRequestOptions) {
+  return request<Campaign>(`/campaigns/${id}`, { method: 'PATCH', body: payload }, requestOptions);
 }
 
-export async function activateCampaign(id: string) {
-  return request<Campaign>(`/campaigns/${id}/activate`, { method: 'POST' });
+export async function activateCampaign(id: string, requestOptions?: InstantlyRequestOptions) {
+  return request<Campaign>(`/campaigns/${id}/activate`, { method: 'POST' }, requestOptions);
 }
 
-export async function pauseCampaign(id: string) {
-  return request<Campaign>(`/campaigns/${id}/pause`, { method: 'POST' });
+export async function pauseCampaign(id: string, requestOptions?: InstantlyRequestOptions) {
+  return request<Campaign>(`/campaigns/${id}/pause`, { method: 'POST' }, requestOptions);
 }
 
-export async function deleteCampaign(id: string): Promise<Campaign | undefined> {
-  return request<Campaign | undefined>(`/campaigns/${id}`, { method: 'DELETE' });
+export async function deleteCampaign(id: string, requestOptions?: InstantlyRequestOptions): Promise<Campaign | undefined> {
+  return request<Campaign | undefined>(`/campaigns/${id}`, { method: 'DELETE' }, requestOptions);
 }
 
-export async function duplicateCampaign(id: string) {
-  return request<Campaign>(`/campaigns/${id}/duplicate`, { method: 'POST' });
+export async function duplicateCampaign(id: string, requestOptions?: InstantlyRequestOptions) {
+  return request<Campaign>(`/campaigns/${id}/duplicate`, { method: 'POST' }, requestOptions);
 }
 
-export async function shareCampaign(id: string) {
-  return request<{ share_link: string }>(`/campaigns/${id}/share`, { method: 'POST' });
+export async function shareCampaign(id: string, requestOptions?: InstantlyRequestOptions) {
+  return request<{ share_link: string }>(`/campaigns/${id}/share`, { method: 'POST' }, requestOptions);
 }
 
 // ─── Campaign Analytics ──────────────────────────────────────────────────────
 
-export async function getCampaignAnalytics(params?: { id?: string; campaign_id?: string }) {
+export async function getCampaignAnalytics(params?: { id?: string; campaign_id?: string }, requestOptions?: InstantlyRequestOptions) {
   const effectiveId = params?.id ?? params?.campaign_id;
   const query: Record<string, string> = {};
   if (effectiveId) query.id = effectiveId;
-  return request<CampaignAnalytics[]>('/campaigns/analytics', { params: query });
+  return request<CampaignAnalytics[]>('/campaigns/analytics', { params: query }, requestOptions);
 }
 
-export async function getCampaignAnalyticsOverview(params?: { campaign_id?: string }) {
+export async function getCampaignAnalyticsOverview(params?: { campaign_id?: string }, requestOptions?: InstantlyRequestOptions) {
   const query: Record<string, string> = {};
   if (params?.campaign_id) query.id = params.campaign_id;
-  return request<CampaignAnalyticsOverview>('/campaigns/analytics/overview', { params: query });
+  return request<CampaignAnalyticsOverview>('/campaigns/analytics/overview', { params: query }, requestOptions);
 }
 
-export async function getCampaignAnalyticsDaily(params?: { campaign_id?: string; start_date?: string; end_date?: string }) {
+export async function getCampaignAnalyticsDaily(params?: { campaign_id?: string; start_date?: string; end_date?: string }, requestOptions?: InstantlyRequestOptions) {
   const query: Record<string, string> = {};
   if (params?.campaign_id) query.id = params.campaign_id;
   if (params?.start_date) query.start_date = params.start_date;
   if (params?.end_date) query.end_date = params.end_date;
-  return request<unknown>('/campaigns/analytics/daily', { params: query });
+  return request<unknown>('/campaigns/analytics/daily', { params: query }, requestOptions);
 }
 
-export async function getCampaignAnalyticsSteps(params: { campaign_id: string }) {
+export async function getCampaignAnalyticsSteps(params: { campaign_id: string }, requestOptions?: InstantlyRequestOptions) {
   return request<CampaignStepAnalytics[]>('/campaigns/analytics/steps', {
     params: { campaign_id: params.campaign_id } as Record<string, string>,
-  });
+  }, requestOptions);
 }
 
 // ─── Accounts ─────────────────────────────────────────────────────────────────
 
-export async function listAccounts(params?: PaginationParams & { search?: string; status?: number; tag_ids?: string }) {
-  return request<PaginatedResponse<Account>>('/accounts', { params: params as Record<string, string | number> });
+export async function listAccounts(params?: PaginationParams & { search?: string; status?: number; tag_ids?: string }, requestOptions?: InstantlyRequestOptions) {
+  return request<PaginatedResponse<Account>>('/accounts', { params: params as Record<string, string | number> }, requestOptions);
 }
 
-export async function listAllAccounts(): Promise<Account[]> {
-  return fetchAllPages<Account>('/accounts');
+export async function listAllAccounts(requestOptions?: InstantlyRequestOptions): Promise<Account[]> {
+  return fetchAllPages<Account>('/accounts', undefined, undefined, requestOptions);
 }
 
-export async function getAccount(email: string) {
-  return request<Account>(`/accounts/${encodeURIComponent(email)}`);
+export async function getAccount(email: string, requestOptions?: InstantlyRequestOptions) {
+  return request<Account>(`/accounts/${encodeURIComponent(email)}`, {}, requestOptions);
 }
 
-export async function enableWarmup(emails: string[]) {
-  return request<unknown>('/accounts/warmup/enable', { method: 'POST', body: { emails } });
+export async function enableWarmup(emails: string[], requestOptions?: InstantlyRequestOptions) {
+  return request<unknown>('/accounts/warmup/enable', { method: 'POST', body: { emails } }, requestOptions);
 }
 
-export async function disableWarmup(emails: string[]) {
-  return request<unknown>('/accounts/warmup/disable', { method: 'POST', body: { emails } });
+export async function disableWarmup(emails: string[], requestOptions?: InstantlyRequestOptions) {
+  return request<unknown>('/accounts/warmup/disable', { method: 'POST', body: { emails } }, requestOptions);
 }
 
-export async function getWarmupAnalytics(body: { emails?: string[]; start_date?: string; end_date?: string }) {
-  return request<WarmupAnalyticsEntry[]>('/accounts/warmup-analytics', { method: 'POST', body });
+export async function getWarmupAnalytics(body: { emails?: string[]; start_date?: string; end_date?: string }, requestOptions?: InstantlyRequestOptions) {
+  return request<WarmupAnalyticsEntry[]>('/accounts/warmup-analytics', { method: 'POST', body }, requestOptions);
 }
 
-export async function getAccountAnalyticsDaily(params?: { start_date?: string; end_date?: string }) {
-  return request<unknown>('/accounts/analytics/daily', { params: params as Record<string, string> });
+export async function getAccountAnalyticsDaily(params?: { start_date?: string; end_date?: string }, requestOptions?: InstantlyRequestOptions) {
+  return request<unknown>('/accounts/analytics/daily', { params: params as Record<string, string> }, requestOptions);
 }
 
-export async function testAccountVitals(body: { emails: string[] }) {
-  return request<unknown>('/accounts/test/vitals', { method: 'POST', body });
+export async function testAccountVitals(body: { emails: string[] }, requestOptions?: InstantlyRequestOptions) {
+  return request<unknown>('/accounts/test/vitals', { method: 'POST', body }, requestOptions);
 }
 
 // ─── Leads ────────────────────────────────────────────────────────────────────
@@ -236,10 +230,11 @@ const LEADS_PER_REQUEST = 1000;
 export async function createLeads(
   leads: LeadCreatePayload[],
   options?: { campaign_id?: string; list_id?: string; skip_if_in_workspace?: boolean; skip_if_in_campaign?: boolean },
+  requestOptions?: InstantlyRequestOptions,
 ) {
   // До 1000 — один запрос (поведение прежнее, отдаём сырой ответ Instantly).
   if (leads.length <= LEADS_PER_REQUEST) {
-    return request<unknown>('/leads/add', { method: 'POST', body: { leads, ...options } });
+    return request<unknown>('/leads/add', { method: 'POST', body: { leads, ...options } }, requestOptions);
   }
 
   // Больше 1000 — бьём на чанки и шлём последовательно, суммируя счётчик
@@ -247,10 +242,11 @@ export async function createLeads(
   let uploaded = 0;
   for (let i = 0; i < leads.length; i += LEADS_PER_REQUEST) {
     const chunk = leads.slice(i, i + LEADS_PER_REQUEST);
-    const res = await request<Record<string, unknown>>('/leads/add', {
-      method: 'POST',
-      body: { leads: chunk, ...options },
-    });
+    const res = await request<Record<string, unknown>>(
+      '/leads/add',
+      { method: 'POST', body: { leads: chunk, ...options } },
+      requestOptions,
+    );
     const n = Number(res.uploaded ?? res.created ?? res.total_uploaded ?? chunk.length);
     uploaded += Number.isFinite(n) ? n : chunk.length;
   }
@@ -264,7 +260,7 @@ export async function listLeads(body: {
   interest_status?: number;
   limit?: number;
   starting_after?: string;
-}) {
+}, requestOptions?: InstantlyRequestOptions) {
   // Instantly API v2 expects `list_id` and `campaign` — not `lead_list_id` /
   // `campaign_id`. Sending the wrong keys makes Instantly silently ignore the
   // filter and return leads from the entire workspace. We keep the caller-
@@ -275,51 +271,52 @@ export async function listLeads(body: {
   const apiBody: Record<string, unknown> = { ...rest };
   if (lead_list_id !== undefined) apiBody.list_id = lead_list_id;
   if (campaign_id !== undefined) apiBody.campaign = campaign_id;
-  return request<PaginatedResponse<Lead>>('/leads/list', { method: 'POST', body: apiBody });
+  return request<PaginatedResponse<Lead>>('/leads/list', { method: 'POST', body: apiBody }, requestOptions);
 }
 
-export async function listAllLeads(campaignId: string): Promise<Lead[]> {
+export async function listAllLeads(campaignId: string, requestOptions?: InstantlyRequestOptions): Promise<Lead[]> {
   const all: Lead[] = [];
   let after: string | undefined;
   do {
-    const page = await listLeads({ campaign_id: campaignId, limit: 100, starting_after: after });
+    const page = await listLeads({ campaign_id: campaignId, limit: 100, starting_after: after }, requestOptions);
     if (page.items?.length) all.push(...page.items);
     after = page.next_starting_after || undefined;
   } while (after);
   return all;
 }
 
-export async function getLead(id: string) {
-  return request<Lead>(`/leads/${id}`);
+export async function getLead(id: string, requestOptions?: InstantlyRequestOptions) {
+  return request<Lead>(`/leads/${id}`, {}, requestOptions);
 }
 
-export async function updateLead(id: string, payload: Partial<LeadCreatePayload>) {
-  return request<Lead>(`/leads/${id}`, { method: 'PATCH', body: payload });
+export async function updateLead(id: string, payload: Partial<LeadCreatePayload>, requestOptions?: InstantlyRequestOptions) {
+  return request<Lead>(`/leads/${id}`, { method: 'PATCH', body: payload }, requestOptions);
 }
 
-export async function updateLeadInterestStatus(body: { lead_email: string; campaign_id?: string; interest_status: number }) {
-  return request<unknown>('/leads/update-interest-status', { method: 'POST', body });
+export async function updateLeadInterestStatus(body: { lead_email: string; campaign_id?: string; interest_status: number }, requestOptions?: InstantlyRequestOptions) {
+  return request<unknown>('/leads/update-interest-status', { method: 'POST', body }, requestOptions);
 }
 
-export async function moveLeads(body: { lead_ids: string[]; to_campaign_id?: string; to_lead_list_id?: string }) {
-  return request<unknown>('/leads/move', { method: 'POST', body });
+export async function moveLeads(body: { lead_ids: string[]; to_campaign_id?: string; to_lead_list_id?: string }, requestOptions?: InstantlyRequestOptions) {
+  return request<unknown>('/leads/move', { method: 'POST', body }, requestOptions);
 }
 
-export async function getLeadsByEmail(params: { email: string; campaign_id?: string }) {
+export async function getLeadsByEmail(params: { email: string; campaign_id?: string }, requestOptions?: InstantlyRequestOptions) {
   const body: Record<string, unknown> = { search: params.email, limit: 10 };
   if (params.campaign_id) body.campaign = params.campaign_id;
-  const res = await request<PaginatedResponse<Lead>>('/leads/list', { method: 'POST', body });
+  const res = await request<PaginatedResponse<Lead>>('/leads/list', { method: 'POST', body }, requestOptions);
   return res.items ?? [];
 }
 
-export async function deleteLeadsByCampaign(campaignId: string): Promise<{ count: number }> {
+export async function deleteLeadsByCampaign(campaignId: string, requestOptions?: InstantlyRequestOptions): Promise<{ count: number }> {
   let totalDeleted = 0;
   const MAX_ROUNDS = 200;
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    const result = await request<{ count: number }>('/leads', {
-      method: 'DELETE',
-      body: { campaign_id: campaignId, limit: 10000 },
-    });
+    const result = await request<{ count: number }>(
+      '/leads',
+      { method: 'DELETE', body: { campaign_id: campaignId, limit: 10000 } },
+      requestOptions,
+    );
     totalDeleted += result.count;
     if (result.count === 0) break;
   }
@@ -452,12 +449,15 @@ export async function resumeSubsequence(id: string) {
 
 // ─── Emails ───────────────────────────────────────────────────────────────────
 
-export async function listEmails(params?: PaginationParams & { campaign_id?: string; lead_id?: string; search?: string; ue_type?: number }) {
-  return request<PaginatedResponse<Email>>('/emails', { params: params as Record<string, string | number> });
+export async function listEmails(
+  params?: PaginationParams & { campaign_id?: string; lead_id?: string; search?: string; ue_type?: number },
+  requestOptions?: InstantlyRequestOptions,
+) {
+  return request<PaginatedResponse<Email>>('/emails', { params: params as Record<string, string | number> }, requestOptions);
 }
 
-export async function getEmail(id: string) {
-  return request<Email>(`/emails/${id}`);
+export async function getEmail(id: string, requestOptions?: InstantlyRequestOptions) {
+  return request<Email>(`/emails/${id}`, {}, requestOptions);
 }
 
 export async function replyToEmail(body: {
@@ -467,8 +467,8 @@ export async function replyToEmail(body: {
   body: { html?: string; text?: string } | string;
   cc_address_email_list?: string;
   bcc_address_email_list?: string;
-}) {
-  return request<Email>('/emails/reply', { method: 'POST', body });
+}, requestOptions?: InstantlyRequestOptions) {
+  return request<Email>('/emails/reply', { method: 'POST', body }, requestOptions);
 }
 
 export async function forwardEmail(body: {
@@ -478,16 +478,16 @@ export async function forwardEmail(body: {
   subject: string;
   body: { html?: string; text?: string } | string;
   include_original_body: boolean;
-}) {
-  return request<Email>('/emails/forward', { method: 'POST', body });
+}, requestOptions?: InstantlyRequestOptions) {
+  return request<Email>('/emails/forward', { method: 'POST', body }, requestOptions);
 }
 
-export async function getUnreadCount() {
-  return request<{ count: number }>('/emails/unread/count');
+export async function getUnreadCount(requestOptions?: InstantlyRequestOptions) {
+  return request<{ count: number }>('/emails/unread/count', {}, requestOptions);
 }
 
-export async function markThreadAsRead(threadId: string) {
-  return request<unknown>(`/emails/threads/${threadId}/mark-as-read`, { method: 'POST' });
+export async function markThreadAsRead(threadId: string, requestOptions?: InstantlyRequestOptions) {
+  return request<unknown>(`/emails/threads/${threadId}/mark-as-read`, { method: 'POST' }, requestOptions);
 }
 
 // ─── Webhooks ─────────────────────────────────────────────────────────────────
