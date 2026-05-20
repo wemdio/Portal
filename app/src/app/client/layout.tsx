@@ -121,11 +121,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
 
           <span
             className="text-sm sm:text-base font-extrabold tracking-tight select-none shrink-0"
-            style={{
-              background: 'linear-gradient(160deg, #5E86C4, var(--cp-accent-h))',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-            }}
+            style={{ color: 'var(--cp-text)' }}
           >
             Portal
           </span>
@@ -156,7 +152,12 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
                 data-i18n-skip
                 role="listbox"
                 aria-label={dict(commonDictionary.language, locale)}
-                className="absolute right-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-lg"
+                className="absolute right-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-2xl"
+                style={{
+                  background: 'var(--cp-bg)',
+                  boxShadow:
+                    '6px 6px 14px var(--cp-shadow-d), -6px -6px 14px var(--cp-shadow-l)',
+                }}
               >
                 {LOCALES.map((code) => {
                   const desc = LOCALE_DESCRIPTORS[code];
@@ -174,7 +175,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
                       className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors"
                       style={
                         isActive
-                          ? { background: '#6366F1', color: '#fff' }
+                          ? { background: 'var(--cp-accent)', color: '#fff' }
                           : { color: 'var(--cp-text-l)' }
                       }
                     >
