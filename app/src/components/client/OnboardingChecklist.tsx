@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import type { Route } from 'next';
-import { Check, ChevronDown, Circle, Clock, Loader2, Sparkles } from 'lucide-react';
+import { AlertCircle, Check, ChevronDown, Circle, Clock, Loader2, RefreshCw, Sparkles } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 interface ChecklistItem {
@@ -41,18 +41,28 @@ export function OnboardingChecklist() {
   const pathname = usePathname();
   const [data, setData] = useState<OnboardingResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const res = await clientApiFetch<OnboardingResponse>('/onboarding/status');
       setData(res);
       // Auto-collapse on first render once user is fully onboarded; user can
       // expand again with the chevron.
       setCollapsed(res.complete);
-    } catch {
-      // swallow — non-critical surface, broken data shouldn't block dashboard
+    } catch (err) {
+      // Non-critical surface — show a quiet inline error with retry so the
+      // failure is visible (debugging) but does not block the dashboard.
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Не удалось загрузить чеклист.';
+      // Surface to DevTools for backend debugging without spamming the user.
+      console.warn('OnboardingChecklist load failed:', message);
+      setError('Не удалось загрузить чеклист настройки.');
     } finally {
       setLoading(false);
     }
@@ -78,6 +88,34 @@ export function OnboardingChecklist() {
       </div>
     );
   }
+
+  if (error && !data) {
+    return (
+      <div
+        className="neu-inset rounded-2xl px-4 py-3 sm:px-5 sm:py-3.5 flex items-center gap-3"
+        role="alert"
+      >
+        <AlertCircle
+          className="h-4 w-4 shrink-0"
+          style={{ color: 'var(--cp-danger)' }}
+          aria-hidden
+        />
+        <p className="text-sm flex-1" style={{ color: 'var(--cp-text-m)' }}>
+          {error}
+        </p>
+        <button
+          type="button"
+          onClick={() => void load()}
+          className="neu-pill inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold"
+          style={{ color: 'var(--cp-text)' }}
+        >
+          <RefreshCw className="h-3 w-3" aria-hidden />
+          Повторить
+        </button>
+      </div>
+    );
+  }
+
   if (!data) return null;
 
   // ─── Collapsed (всё готово) ──────────────────────────────────────
@@ -90,7 +128,7 @@ export function OnboardingChecklist() {
       >
         <span
           className="inline-flex items-center justify-center h-8 w-8 rounded-full"
-          style={{ background: 'linear-gradient(135deg, #10B981, #059669)', color: '#fff' }}
+          style={{ background: '#10B981', color: '#fff' }}
         >
           <Check className="h-4 w-4" />
         </span>
@@ -175,11 +213,13 @@ function ChecklistRow({
         className="inline-flex items-center justify-center h-7 w-7 rounded-full shrink-0 mt-0.5"
         style={{
           background: item.done
-            ? 'linear-gradient(135deg, #10B981, #059669)'
+            ? '#10B981'
             : isNext
-              ? 'linear-gradient(135deg, #6366F1, #8B5CF6)'
+              ? 'var(--cp-accent)'
               : 'transparent',
-          boxShadow: !item.done && !isNext ? 'inset 1.5px 1.5px 3px var(--cp-shadow-d), inset -1.5px -1.5px 3px var(--cp-shadow-l)' : undefined,
+          boxShadow: !item.done && !isNext
+            ? 'inset 1.5px 1.5px 3px var(--cp-shadow-d), inset -1.5px -1.5px 3px var(--cp-shadow-l)'
+            : undefined,
         }}
       >
         {indicator}
@@ -196,7 +236,7 @@ function ChecklistRow({
           {isNext && (
             <span
               className="text-[10px] font-bold px-1.5 py-0.5 rounded"
-              style={{ background: 'rgba(99,102,241,0.15)', color: '#6366F1' }}
+              style={{ background: 'rgba(74,111,165,0.15)', color: 'var(--cp-accent)' }}
             >
               следующий
             </span>
@@ -205,8 +245,7 @@ function ChecklistRow({
         <p
           className={`text-sm mt-0.5 ${item.done ? 'font-medium' : 'font-bold'}`}
           style={{
-            color: item.done ? 'var(--cp-text-m)' : 'var(--cp-text)',
-            textDecoration: item.done ? 'line-through' : undefined,
+            color: item.done ? 'var(--cp-text-l)' : 'var(--cp-text)',
           }}
         >
           {item.label}

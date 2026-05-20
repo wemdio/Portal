@@ -87,11 +87,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
 
           <span
             className="text-sm sm:text-base font-extrabold tracking-tight select-none shrink-0"
-            style={{
-              background: 'linear-gradient(160deg, #5E86C4, var(--cp-accent-h))',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-            }}
+            style={{ color: 'var(--cp-text)' }}
           >
             Portal
           </span>
@@ -103,7 +99,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
               type="button"
               onClick={() => void persistLocale('ru')}
               className="rounded-full px-2 py-1 text-[11px] font-semibold transition-colors"
-              style={locale === 'ru' ? { background: '#6366F1', color: '#fff' } : { color: 'var(--cp-text-l)' }}
+              style={locale === 'ru' ? { background: 'var(--cp-accent)', color: '#fff' } : { color: 'var(--cp-text-l)' }}
             >
               RU
             </button>
@@ -111,7 +107,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
               type="button"
               onClick={() => void persistLocale('en')}
               className="rounded-full px-2 py-1 text-[11px] font-semibold transition-colors"
-              style={locale === 'en' ? { background: '#6366F1', color: '#fff' } : { color: 'var(--cp-text-l)' }}
+              style={locale === 'en' ? { background: 'var(--cp-accent)', color: '#fff' } : { color: 'var(--cp-text-l)' }}
             >
               EN
             </button>

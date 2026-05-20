@@ -1184,9 +1184,38 @@ body:has(.client-portal) {
   --cp-text-m: #6A6058;
   --cp-text-l: #9A9088;
   --cp-danger: #B85450;
+  /* Hairline divider between rows inside a .neu-card. Match the warm shadow
+     family at ~18% alpha — strong enough to read on linen, soft enough not to
+     compete with the card edge. */
+  --cp-row-divider: rgba(180, 173, 164, 0.18);
   background: var(--cp-bg);
   color: var(--cp-text);
   min-height: 100vh;
+}
+
+/* Respect prefers-reduced-motion: disable our own decorative transitions
+   inside the client portal. Functional fades (loading spinners) remain so the
+   user still sees feedback. */
+@media (prefers-reduced-motion: reduce) {
+  .client-portal .neu-flat,
+  .client-portal .neu-btn,
+  .client-portal .neu-pill,
+  .client-portal .neu-row,
+  .client-portal .neu-input {
+    transition: none;
+  }
+}
+
+/* Visible focus halo for interactive surfaces inside the client portal. The
+   ring uses slate-tide at 35% alpha, the same accent the rest of the chrome
+   speaks. Class-based so we don't ship halos on every <a>/<button> by default. */
+.client-portal .neu-row:focus-visible,
+.client-portal .neu-pill:focus-visible,
+.client-portal .neu-btn:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--cp-bg),
+    0 0 0 4px rgba(74, 111, 165, 0.35);
 }
 
 .client-portal .neu-card {
