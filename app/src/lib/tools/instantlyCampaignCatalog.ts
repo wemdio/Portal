@@ -4,7 +4,6 @@ import type { Campaign } from '@/lib/instantly/types';
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 import { getCampaignAnalytics } from '@/lib/instantly/client';
-import { listInstantlyAccounts } from '@/lib/instantly/accounts';
 import {
   iterateInstantlyCampaignPages,
   type InstantlyCampaignItem,
@@ -34,7 +33,6 @@ export function isCatalogStale(lastSyncedAtIso: string | null, nowMs = Date.now(
 
 type CatalogRow = {
   id: string;
-  instantly_account_id?: string | null;
   name: string;
   status: number | null;
   timestamp_created: string | null;
@@ -103,7 +101,7 @@ export async function readInstantlyCampaignCatalog(): Promise<{
 /**
  * Полная синхронизация с Instantly: постранично upsert, затем удаление строк не из этого прохода.
  */
-export async function syncInstantlyCampaignCatalog(apiKey: string, instantlyAccountId = 'main'): Promise<{
+export async function syncInstantlyCampaignCatalog(apiKey: string): Promise<{
   pages: number;
   rows: number;
 }> {
@@ -112,7 +110,6 @@ export async function syncInstantlyCampaignCatalog(apiKey: string, instantlyAcco
   }
 
   const syncMarker = new Date().toISOString();
-  const accountId = instantlyAccountId;
   let pages = 0;
   let rows = 0;
 
@@ -120,7 +117,6 @@ export async function syncInstantlyCampaignCatalog(apiKey: string, instantlyAcco
     pages += 1;
     const batch = page.map((c) => ({
       id: c.id,
-      instantly_account_id: accountId,
       name: String(c.name ?? '').slice(0, NAME_MAX_LEN),
       status: typeof c.status === 'number' ? c.status : null,
       timestamp_created: c.timestamp_created ?? null,
@@ -141,7 +137,6 @@ export async function syncInstantlyCampaignCatalog(apiKey: string, instantlyAcco
   const { error: delError } = await supabaseAdmin
     .from('instantly_campaign_catalog')
     .delete()
-    .eq('instantly_account_id', accountId)
     .lt('synced_at', syncMarker);
 
   if (delError) {
@@ -168,13 +163,11 @@ export async function syncInstantlyCampaignCatalog(apiKey: string, instantlyAcco
 export async function upsertInstantlyCatalogFromCampaign(
   campaign: Pick<Campaign, 'id' | 'name' | 'status'> &
     Partial<Pick<Campaign, 'timestamp_created' | 'timestamp_updated'>>,
-  instantlyAccountId = 'main',
 ): Promise<void> {
   if (!supabaseAdmin) return;
 
   const row = {
     id: campaign.id,
-    instantly_account_id: instantlyAccountId,
     name: String(campaign.name ?? '').slice(0, NAME_MAX_LEN),
     status: typeof campaign.status === 'number' ? campaign.status : null,
     timestamp_created: campaign.timestamp_created ?? null,
@@ -204,8 +197,8 @@ export async function syncInstantlyCampaignAnalytics(): Promise<{ rows: number }
 
   let rows = 0;
 
-  for (const account of listInstantlyAccounts()) {
-    const analyticsData = await getCampaignAnalytics({}, { accountId: account.id });
+  for (const _account of [null]) {
+    const analyticsData = await getCampaignAnalytics({});
     if (!Array.isArray(analyticsData) || analyticsData.length === 0) continue;
 
     const syncedAt = new Date().toISOString();
@@ -215,7 +208,6 @@ export async function syncInstantlyCampaignAnalytics(): Promise<{ rows: number }
       .filter((a) => typeof a.campaign_id === 'string' && a.campaign_id)
       .map((a) => ({
         id: a.campaign_id as string,
-        instantly_account_id: account.id,
         // name нужен для upsert (NOT NULL в таблице) — используем пустую строку как fallback
         // при конфликте по id поле name НЕ перезаписывается (onConflict merge excludes it)
         name: typeof a.campaign_name === 'string' ? a.campaign_name : '',
