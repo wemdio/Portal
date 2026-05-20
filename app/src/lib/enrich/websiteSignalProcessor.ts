@@ -19,7 +19,7 @@ import { extractHiring } from '@/lib/enrich/extractors/hiringExtractor';
 import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtractor';
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
-import { extractBlogLastPost } from '@/lib/enrich/extractors/blogActivityExtractor';
+import { discoverBlogOrSocialUrls, extractBlogLastPost } from '@/lib/enrich/extractors/blogActivityExtractor';
 import { llmExtractFields } from '@/lib/enrich/extractors/llmExtractor';
 
 const DEFAULT_TIMEOUT_MS = 12_000;
@@ -312,6 +312,22 @@ export async function processSignalsForUrl(
   }
   if (extractors.includes('blog_last_post')) {
     out.blog_last_post = subpageHtml.blog ? extractBlogLastPost(subpageHtml.blog) : undefined;
+    if (!out.blog_last_post) {
+      out.blog_last_post = extractBlogLastPost(main.html);
+    }
+    if (!out.blog_last_post && !signal?.aborted) {
+      const contentUrls = discoverBlogOrSocialUrls(main.html, normalized);
+      for (const contentUrl of contentUrls) {
+        if (signal?.aborted) break;
+        const html = await fetchSubpageHtml(contentUrl, subpageTimeout, signal);
+        if (!html) continue;
+        const post = extractBlogLastPost(html);
+        if (post) {
+          out.blog_last_post = post;
+          break;
+        }
+      }
+    }
   }
 
   // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.

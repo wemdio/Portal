@@ -316,7 +316,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
       '/cases': '<section class="clients"><img alt="Тинькофф" /></section><article class="case-card">x</article>',
       '/integrations': '<section class="integrations"><img alt="Slack" /><img alt="Telegram" /></section>',
       '/about': '<p>Основана в 2018 году</p><div class="team"><div class="member-card">A</div></div>',
-      '/blog': '<article><time datetime="2026-04-10">Post</time></article>',
+      '/blog': '<article><time datetime="2026-04-10">Post</time><h2>Latest product news</h2><p>We shipped a new integration.</p></article>',
       'example.com': `
         <a href="/pricing">P</a>
         <a href="/careers">C</a>
@@ -349,7 +349,24 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
       expect(result.integrations).toEqual(expect.arrayContaining(['Slack', 'Telegram']));
       expect(result.founded_year).toBe(2018);
       expect(result.team_size).toBe(1);
-      expect(result.blog_last_post).toBe('2026-04-10');
+      expect(result.blog_last_post).toBe('Latest product news — We shipped a new integration.');
+    }
+  });
+
+  it('blog_last_post falls back to a discovered social link when no blog page is present', async () => {
+    mockUrlResponses({
+      '/blog': '',
+      'vk.com/company_page': '<article><time datetime="2026-04-11">date</time><h2>VK launch post</h2><p>New release is live.</p></article>',
+      'example.com': '<a href="/blog">Blog</a><a href="https://vk.com/company_page">VK</a>',
+    });
+
+    const result = await processSignalsForUrl('example.com', {
+      extractors: ['blog_last_post'],
+    });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.blog_last_post).toBe('VK launch post — New release is live.');
     }
   });
 

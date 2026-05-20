@@ -154,7 +154,7 @@ export const BUILTIN_PRESETS: Readonly<Record<SignalPresetId, SignalPreset>> = {
   audit: {
     id: 'audit',
     name: 'Аудит',
-    description: 'Максимум сигналов: клиенты, кейсы, отрасли, цены, интеграции, найм, возраст компании.',
+    description: 'Максимум сигналов: клиенты, кейсы, отрасли, цены, интеграции, найм, возраст компании, последний пост.',
     extractors: [
       'stack',
       'profile',
@@ -169,6 +169,7 @@ export const BUILTIN_PRESETS: Readonly<Record<SignalPresetId, SignalPreset>> = {
       'hiring_roles',
       'integrations',
       'founded_year',
+      'blog_last_post',
     ],
   },
 };
