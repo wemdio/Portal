@@ -56,6 +56,7 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'tg-transcribe': Video,
   'cis-lead-finder': Building2,
   'li-outreach': Users,
+  'li-outreach-v2': Bot,
   rdp: FileText,
   instantly: Send,
   'tg-outreach': MessageSquareMore,
