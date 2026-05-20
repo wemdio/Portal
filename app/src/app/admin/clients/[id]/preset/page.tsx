@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { Check, Mail, Search } from 'lucide-react';
+import { Building2, Check, Mail, Search } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { useUser } from '@/lib/UserProvider';
 import { isAdmin } from '@/lib/roles';
@@ -17,6 +17,7 @@ import {
 } from '@/lib/instantly/types';
 
 interface PresetState {
+  instantly_account_id: string;
   email_account_ids: string[];
   daily_limit: number;
   daily_max_leads: number;
@@ -32,6 +33,7 @@ interface PresetState {
 }
 
 const DEFAULT_PRESET: PresetState = {
+  instantly_account_id: 'main',
   email_account_ids: [],
   daily_limit: 50,
   daily_max_leads: 50,
@@ -45,6 +47,12 @@ const DEFAULT_PRESET: PresetState = {
   schedule_days: [1, 2, 3, 4, 5],
   schedule_timezone: 'Europe/Moscow',
 };
+
+interface InstantlyAccountOption {
+  id: string;
+  label: string;
+  isDefault: boolean;
+}
 
 const WEEKDAYS = [
   { value: 1, label: 'Пн' },
@@ -87,6 +95,7 @@ export default function ClientPresetPage() {
   const [client, setClient] = useState<UserProfile | null>(null);
   const [preset, setPreset] = useState<PresetState>(DEFAULT_PRESET);
   const [hasExistingPreset, setHasExistingPreset] = useState(false);
+  const [instantlyAccounts, setInstantlyAccounts] = useState<InstantlyAccountOption[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -120,21 +129,40 @@ export default function ClientPresetPage() {
     return (await res.json()) as T;
   }, []);
 
+  const loadAccounts = useCallback(async (instantlyAccountId: string) => {
+    setAccountsLoading(true);
+    setAccounts([]);
+    try {
+      const qs = new URLSearchParams({ limit: 'all', account_id: instantlyAccountId });
+      const accountsRes = await apiFetch<{ items: Account[] }>(`/api/instantly/accounts?${qs.toString()}`);
+      setAccounts(accountsRes.items ?? []);
+    } finally {
+      setAccountsLoading(false);
+    }
+  }, [apiFetch]);
+
   const loadAll = useCallback(async () => {
     if (!clientUserId) return;
     setError('');
     try {
-      const [{ data: profileData }, presetRes, accountsRes] = await Promise.all([
+      const [{ data: profileData }, presetRes] = await Promise.all([
         supabase.from('profiles').select('*').eq('id', clientUserId).single(),
-        apiFetch<{ preset: (PresetState & { id: string }) | null }>(`/api/admin/clients/${clientUserId}/preset`),
-        apiFetch<{ items: Account[] }>('/api/instantly/accounts?limit=all'),
+        apiFetch<{
+          preset: (PresetState & { id: string }) | null;
+          instantly_accounts?: InstantlyAccountOption[];
+        }>(`/api/admin/clients/${clientUserId}/preset`),
       ]);
 
       setClient((profileData as UserProfile | null) ?? null);
+      setInstantlyAccounts(presetRes.instantly_accounts?.length
+        ? presetRes.instantly_accounts
+        : [{ id: 'main', label: 'Основной Instantly', isDefault: true }]);
 
+      let nextPreset = DEFAULT_PRESET;
       if (presetRes.preset) {
         const p = presetRes.preset;
-        setPreset({
+        nextPreset = {
+          instantly_account_id: p.instantly_account_id || DEFAULT_PRESET.instantly_account_id,
           email_account_ids: Array.isArray(p.email_account_ids) ? p.email_account_ids : [],
           daily_limit: typeof p.daily_limit === 'number' ? p.daily_limit : DEFAULT_PRESET.daily_limit,
           daily_max_leads: typeof p.daily_max_leads === 'number' ? p.daily_max_leads : DEFAULT_PRESET.daily_max_leads,
@@ -147,19 +175,22 @@ export default function ClientPresetPage() {
           schedule_to: p.schedule_to || DEFAULT_PRESET.schedule_to,
           schedule_days: Array.isArray(p.schedule_days) ? p.schedule_days : DEFAULT_PRESET.schedule_days,
           schedule_timezone: p.schedule_timezone || DEFAULT_PRESET.schedule_timezone,
-        });
+        };
+        setPreset(nextPreset);
         setHasExistingPreset(true);
+      } else {
+        setPreset(DEFAULT_PRESET);
+        setHasExistingPreset(false);
       }
 
-      setAccounts(accountsRes.items ?? []);
+      await loadAccounts(nextPreset.instantly_account_id);
     } catch (err) {
       void logError('admin.client-preset.load.failed', err, { clientUserId });
       setError(getErrorMessage(err) || 'Ошибка загрузки');
     } finally {
       setLoading(false);
-      setAccountsLoading(false);
     }
-  }, [clientUserId, apiFetch]);
+  }, [clientUserId, apiFetch, loadAccounts]);
 
   useEffect(() => {
     if (admin && clientUserId) {
@@ -196,6 +227,21 @@ export default function ClientPresetPage() {
         ? prev.email_account_ids.filter((e) => e !== email)
         : [...prev.email_account_ids, email],
     }));
+  }
+
+  async function handleInstantlyAccountChange(instantlyAccountId: string) {
+    setPreset((prev) => ({
+      ...prev,
+      instantly_account_id: instantlyAccountId,
+      email_account_ids: [],
+    }));
+    setAccountSearch('');
+    try {
+      await loadAccounts(instantlyAccountId);
+    } catch (err) {
+      void logError('admin.client-preset.accounts.load.failed', err, { clientUserId, instantlyAccountId });
+      setError(getErrorMessage(err) || 'Ошибка загрузки аккаунтов Instantly');
+    }
   }
 
   function toggleDay(day: number) {
@@ -295,6 +341,32 @@ export default function ClientPresetPage() {
       )}
 
       <div className="space-y-6">
+        <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <header className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex items-center gap-2">
+            <Building2 className="h-4 w-4 text-gray-500" />
+            <h2 className="text-sm font-semibold text-gray-900">
+              Instantly-аккаунт клиента
+            </h2>
+          </header>
+          <div className="p-6 space-y-2">
+            <label className="block text-xs font-medium text-gray-700 mb-1">Workspace для запусков клиента</label>
+            <select
+              value={preset.instantly_account_id}
+              onChange={(e) => void handleInstantlyAccountChange(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+            >
+              {instantlyAccounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.label}{account.isDefault ? ' (основной)' : ''}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-500">
+              При смене workspace список email-аккаунтов ниже очищается, чтобы не смешивать отправителей из разных Instantly.
+            </p>
+          </div>
+        </section>
+
         <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <header className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex items-center justify-between gap-4">
             <div className="flex items-center gap-2">

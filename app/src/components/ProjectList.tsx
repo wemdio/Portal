@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import type { Locale } from '@/lib/i18n';
 import { Project, ProjectNote, ProjectStatus, Task, TaskStatus, UserProfile } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
@@ -45,12 +46,24 @@ import {
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
+type ProjectPeriod = {
+  id: string;
+  project_id: string;
+  name: string | null;
+  status: 'active' | 'closed';
+  period_start: string;
+  period_end: string | null;
+  contacts_done: string | null;
+  contacts_obligation: string | null;
+  deadline: string | null;
+};
+
 /* ── KPI pace tooltip (hover on KPI Факт cell) ── */
 
 function KpiPaceTooltip({
-  projectId, kpiPlan, kpiFact, deadline, children,
+  projectId, periodId, kpiPlan, kpiFact, deadline, children,
 }: {
-  projectId: string; kpiPlan: number; kpiFact: number; deadline: string | null;
+  projectId: string; periodId?: string | null; kpiPlan: number; kpiFact: number; deadline: string | null;
   children: React.ReactNode;
 }) {
   const [pace, setPace] = useState<PaceData | null>(null);
@@ -64,6 +77,7 @@ function KpiPaceTooltip({
     try {
       const result = await loadKpiPaceData(supabase, {
         projectId,
+        periodId,
         kpiPlan,
         kpiFact,
         deadline,
@@ -144,9 +158,9 @@ function KpiPaceTooltip({
 /* ── Contacts pace tooltip (hover on contacts cell) ── */
 
 function ContactsPaceTooltip({
-  projectId, obligation, done, deadline, children,
+  projectId, periodId, obligation, done, deadline, children,
 }: {
-  projectId: string; obligation: number; done: number; deadline: string | null;
+  projectId: string; periodId?: string | null; obligation: number; done: number; deadline: string | null;
   children: React.ReactNode;
 }) {
   const [pace, setPace] = useState<PaceData | null>(null);
@@ -160,6 +174,7 @@ function ContactsPaceTooltip({
     try {
       const result = await loadContactsPaceData(supabase, {
         projectId,
+        periodId,
         obligation,
         done,
         deadline,
@@ -265,7 +280,7 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string; 
   'отменен': { label: 'Отменен', color: 'text-red-700', bg: 'bg-red-50/50', border: 'border-red-200/50' },
 };
 
-function translateStatusLabel(label: string, locale: 'ru' | 'en'): string {
+function translateStatusLabel(label: string, locale: Locale): string {
   const normalized = label.toLowerCase().replace(/ё/g, 'е');
   if (normalized.includes('в работе')) return locale === 'en' ? 'In progress' : 'В работе';
   if (normalized.includes('тест')) return locale === 'en' ? 'Testing' : 'Тестирование';
@@ -489,7 +504,7 @@ function formatTaskDeadlineInput(deadline: string | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function getTaskStatusLabel(status: TaskStatus, locale: 'ru' | 'en'): string {
+function getTaskStatusLabel(status: TaskStatus, locale: Locale): string {
   if (status === 'in_progress') return locale === 'en' ? 'In progress' : 'В работе';
   if (status === 'done') return locale === 'en' ? 'Completed' : 'Завершено';
   return locale === 'en' ? 'Pending' : 'Ожидает';
@@ -662,6 +677,9 @@ export function ProjectList() {
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [panelLinkedCampaigns, setPanelLinkedCampaigns] = useState<{ campaign_id: string; campaign_name: string; match_source: string }[]>([]);
   const [panelAllCampaigns, setPanelAllCampaigns] = useState<{ id: string; name: string }[]>([]);
+  const [panelPeriods, setPanelPeriods] = useState<ProjectPeriod[]>([]);
+  const [activePeriodsByProjectId, setActivePeriodsByProjectId] = useState<Map<string, ProjectPeriod>>(new Map());
+  const [creatingPeriod, setCreatingPeriod] = useState(false);
   const [panelCampaignSearch, setPanelCampaignSearch] = useState('');
   const [showPanelCampaignPicker, setShowPanelCampaignPicker] = useState(false);
   const [editingContactsId, setEditingContactsId] = useState<string | null>(null);
@@ -715,7 +733,7 @@ export function ProjectList() {
   const paceInputsKey = projects
     .map(
       (p) =>
-        `${p.id}|${p.contacts_obligation ?? ''}|${p.contacts_done ?? ''}|${p.kpi_plan ?? ''}|${p.kpi_fact ?? ''}|${p.deadline ?? ''}`,
+        `${p.id}|${activePeriodsByProjectId.get(p.id)?.id ?? ''}|${p.contacts_obligation ?? ''}|${p.contacts_done ?? ''}|${p.kpi_plan ?? ''}|${p.kpi_fact ?? ''}|${p.deadline ?? ''}`,
     )
     .join(';');
   useEffect(() => {
@@ -726,6 +744,7 @@ export function ProjectList() {
     let cancelled = false;
     const inputs: ProjectPaceInput[] = projects.map((p) => ({
       projectId: p.id,
+      periodId: activePeriodsByProjectId.get(p.id)?.id ?? null,
       contactsObligation: parseInt(p.contacts_obligation ?? '0', 10) || 0,
       contactsDone: parseInt(p.contacts_done ?? '0', 10) || 0,
       kpiPlan: parseInt(p.kpi_plan ?? '0', 10) || 0,
@@ -788,15 +807,43 @@ export function ProjectList() {
 
   useEffect(() => {
     if (selectedProjectId) {
+      void fetchPanelPeriods(selectedProjectId);
       void fetchPanelCampaigns(selectedProjectId);
       void fetchPanelAllCampaigns();
     } else {
+      setPanelPeriods([]);
       setPanelLinkedCampaigns([]);
       setShowPanelCampaignPicker(false);
       setPanelCampaignSearch('');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId]);
+
+  const projectIdsKey = projects.map((p) => p.id).join(';');
+  useEffect(() => {
+    if (projects.length === 0) {
+      setActivePeriodsByProjectId(new Map());
+      return;
+    }
+    let cancelled = false;
+    void supabase
+      .from('project_periods')
+      .select('id, project_id, name, status, period_start, period_end, contacts_done, contacts_obligation, deadline')
+      .eq('status', 'active')
+      .in('project_id', projects.map((p) => p.id))
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error || !data) {
+          setActivePeriodsByProjectId(new Map());
+          return;
+        }
+        setActivePeriodsByProjectId(new Map((data as ProjectPeriod[]).map((p) => [p.project_id, p])));
+      });
+    return () => {
+      cancelled = true;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectIdsKey]);
 
   async function fetchProjects() {
     try {
@@ -892,6 +939,23 @@ export function ProjectList() {
     });
   }
 
+  async function fetchPanelPeriods(projectId: string) {
+    try {
+      const res = await authFetch(`/api/projects/${projectId}/periods`);
+      if (!res.ok) return;
+      const json = await res.json() as { items?: ProjectPeriod[] };
+      const items = json.items ?? [];
+      setPanelPeriods(items);
+      const active = items.find((p) => p.status === 'active') ?? null;
+      setActivePeriodsByProjectId((prev) => {
+        const next = new Map(prev);
+        if (active) next.set(projectId, active);
+        else next.delete(projectId);
+        return next;
+      });
+    } catch { /* non-critical */ }
+  }
+
   async function fetchPanelCampaigns(projectId: string) {
     try {
       const res = await authFetch(`/api/projects/${projectId}/campaigns`);
@@ -899,6 +963,28 @@ export function ProjectList() {
       const json = await res.json() as { items: { campaign_id: string; campaign_name: string; match_source: string }[] };
       setPanelLinkedCampaigns(json.items ?? []);
     } catch { /* non-critical */ }
+  }
+
+  async function createNextPeriod(project: Project) {
+    if (creatingPeriod) return;
+    setCreatingPeriod(true);
+    try {
+      const res = await authFetch(`/api/projects/${project.id}/periods`, {
+        method: 'POST',
+        body: JSON.stringify({
+          contacts_obligation: project.contacts_obligation ?? null,
+          kpi_plan: project.kpi_plan ?? null,
+          deadline: project.deadline ?? null,
+        }),
+      });
+      if (!res.ok) return;
+      await fetchProjects();
+      await fetchPanelPeriods(project.id);
+      await fetchPanelCampaigns(project.id);
+    } catch { /* non-critical */ }
+    finally {
+      setCreatingPeriod(false);
+    }
   }
 
   async function fetchPanelAllCampaigns() {
@@ -1878,6 +1964,7 @@ export function ProjectList() {
                           return (
                           <KpiPaceTooltip
                             projectId={project.id}
+                            periodId={activePeriodsByProjectId.get(project.id)?.id ?? null}
                             kpiPlan={kpiPlanNum}
                             kpiFact={kpiFactNum}
                             deadline={project.deadline ?? null}
@@ -2000,6 +2087,7 @@ export function ProjectList() {
                           return (
                             <ContactsPaceTooltip
                               projectId={project.id}
+                              periodId={activePeriodsByProjectId.get(project.id)?.id ?? null}
                               obligation={obligation}
                               done={done}
                               deadline={project.deadline ?? null}
@@ -2474,6 +2562,56 @@ export function ProjectList() {
                     </div>
                   )}
                 </div>
+              </section>
+
+              {/* Project periods */}
+              <section>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-medium text-zinc-900">Периоды</h3>
+                  {canEdit && (
+                    <button
+                      type="button"
+                      onClick={() => void createNextPeriod(selectedProject)}
+                      disabled={creatingPeriod}
+                      className="rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-wait disabled:opacity-50"
+                    >
+                      {creatingPeriod ? 'Создаем...' : 'Новый период'}
+                    </button>
+                  )}
+                </div>
+                {panelPeriods.length === 0 ? (
+                  <p className="text-xs text-zinc-400">
+                    Периоды еще не включены. Статистика считается по старой схеме проекта.
+                  </p>
+                ) : (
+                  <div className="space-y-1">
+                    {panelPeriods.map((period) => (
+                      <div
+                        key={period.id}
+                        className="flex items-center justify-between gap-2 rounded-lg border border-zinc-100 px-2.5 py-1.5 text-xs"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate font-medium text-zinc-700">
+                              {period.name ?? 'Период'}
+                            </span>
+                            <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-medium ${period.status === 'active' ? 'bg-emerald-50 text-emerald-600' : 'bg-zinc-100 text-zinc-500'}`}>
+                              {period.status === 'active' ? 'активный' : 'закрыт'}
+                            </span>
+                          </div>
+                          <div className="mt-0.5 text-[11px] text-zinc-400">
+                            {period.period_start}
+                            {period.period_end ? ` - ${period.period_end}` : ''}
+                          </div>
+                        </div>
+                        <div className="shrink-0 text-right text-[11px] text-zinc-500">
+                          <div>{period.contacts_done ?? '0'} / {period.contacts_obligation ?? '—'}</div>
+                          {period.deadline && <div className="text-zinc-400">до {period.deadline}</div>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </section>
 
               {/* Instantly Campaigns */}

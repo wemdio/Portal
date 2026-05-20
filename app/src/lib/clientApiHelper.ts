@@ -86,7 +86,7 @@ export async function requireClientAuth(
 
   const { data: rows } = await supabaseInstantly
     .from('client_instantly_access')
-    .select('resource_type, resource_id')
+    .select('resource_type, resource_id, instantly_account_id')
     .eq('client_user_id', user.id);
 
   return {

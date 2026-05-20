@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
-import { isResourceAllowed } from '@/lib/clientAccess';
+import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { getEmail, listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToThreadMessage } from '@/lib/clientCampaignReplies/mapEmail';
 import type { ClientReplyThread } from '@/lib/clientCampaignReplies/types';
@@ -31,9 +31,12 @@ export async function GET(
   if (!isResourceAllowed(campaignId, accessRows, 'campaign')) {
     return jsonError('Кампания не найдена или доступ запрещён', 404);
   }
+  const instantlyRequestOptions = {
+    accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
+  };
 
   try {
-    const original = await getEmail(emailId);
+    const original = await getEmail(emailId, instantlyRequestOptions);
     if (!original || original.campaign_id !== campaignId) {
       return jsonError('Письмо не относится к кампании', 404);
     }
@@ -43,7 +46,7 @@ export async function GET(
 
     let candidates = [original];
     if (threadId && leadId) {
-      const list = await listEmails({ campaign_id: campaignId, lead_id: leadId, limit: THREAD_FETCH_LIMIT });
+      const list = await listEmails({ campaign_id: campaignId, lead_id: leadId, limit: THREAD_FETCH_LIMIT }, instantlyRequestOptions);
       candidates = (list.items ?? []).filter((e) => e.thread_id === threadId);
       // Ensure original is in the list (in case API didn't return it).
       if (!candidates.some((e) => e.id === original.id)) {

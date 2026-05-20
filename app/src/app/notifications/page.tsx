@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useUser } from '@/lib/UserProvider';
-import { commonDictionary, dict } from '@/lib/i18n';
+import { commonDictionary, dict, toIntlLocale, type Locale } from '@/lib/i18n';
 import { supabase } from '@/lib/supabaseClient';
 
 interface Notification {
@@ -26,7 +26,11 @@ const TYPE_CONFIG: Record<string, { icon: string; color: string; bg: string }> =
   info: { icon: 'ℹ️', color: 'text-blue-600', bg: 'bg-blue-50 border-blue-200' },
 };
 
-function formatRelativeTime(dateStr: string, locale: 'ru' | 'en'): string {
+// Default branch returns Russian so the runtime DOM translator can pick it up
+// for non-EN locales (de/fr/es/it). English is the explicit alternative.
+// `toIntlLocale` maps every supported Locale to a proper BCP-47 tag for the
+// fallback Date formatting below.
+function formatRelativeTime(dateStr: string, locale: Locale): string {
   const now = Date.now();
   const date = new Date(dateStr).getTime();
   const diffMs = now - date;
@@ -34,25 +38,25 @@ function formatRelativeTime(dateStr: string, locale: 'ru' | 'en'): string {
   const diffHours = Math.floor(diffMs / 3_600_000);
   const diffDays = Math.floor(diffMs / 86_400_000);
 
-  if (diffMin < 1) return locale === 'ru' ? 'только что' : 'just now';
-  if (diffMin < 60) return locale === 'ru' ? `${diffMin} мин назад` : `${diffMin}m ago`;
-  if (diffHours < 24) return locale === 'ru' ? `${diffHours} ч назад` : `${diffHours}h ago`;
-  if (diffDays < 7) return locale === 'ru' ? `${diffDays} дн назад` : `${diffDays}d ago`;
-  return new Date(dateStr).toLocaleDateString(locale === 'ru' ? 'ru-RU' : 'en-US', {
+  if (diffMin < 1) return locale === 'en' ? 'just now' : 'только что';
+  if (diffMin < 60) return locale === 'en' ? `${diffMin}m ago` : `${diffMin} мин назад`;
+  if (diffHours < 24) return locale === 'en' ? `${diffHours}h ago` : `${diffHours} ч назад`;
+  if (diffDays < 7) return locale === 'en' ? `${diffDays}d ago` : `${diffDays} дн назад`;
+  return new Date(dateStr).toLocaleDateString(toIntlLocale(locale), {
     day: 'numeric',
     month: 'short',
   });
 }
 
-function typeLabel(type: string, locale: 'ru' | 'en'): string {
+function typeLabel(type: string, locale: Locale): string {
   switch (type) {
-    case 'deadline': return locale === 'ru' ? 'Дедлайн приближается' : 'Deadline approaching';
-    case 'deadline_lead': return locale === 'ru' ? 'Дедлайн наступил' : 'Deadline reached';
-    case 'deadline_ceo': return locale === 'ru' ? 'Дедлайн просрочен' : 'Deadline overdue';
-    case 'lead_new': return locale === 'ru' ? 'Новый лид' : 'New lead';
-    case 'lead_escalation': return locale === 'ru' ? 'Лид не обработан' : 'Lead unhandled';
-    case 'lead_ceo': return locale === 'ru' ? 'Лид просрочен' : 'Lead overdue';
-    default: return locale === 'ru' ? 'Информация' : 'Info';
+    case 'deadline': return locale === 'en' ? 'Deadline approaching' : 'Дедлайн приближается';
+    case 'deadline_lead': return locale === 'en' ? 'Deadline reached' : 'Дедлайн наступил';
+    case 'deadline_ceo': return locale === 'en' ? 'Deadline overdue' : 'Дедлайн просрочен';
+    case 'lead_new': return locale === 'en' ? 'New lead' : 'Новый лид';
+    case 'lead_escalation': return locale === 'en' ? 'Lead unhandled' : 'Лид не обработан';
+    case 'lead_ceo': return locale === 'en' ? 'Lead overdue' : 'Лид просрочен';
+    default: return locale === 'en' ? 'Info' : 'Информация';
   }
 }
 

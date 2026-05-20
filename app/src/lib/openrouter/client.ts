@@ -38,10 +38,56 @@ function sleep(ms: number) {
 }
 
 /**
+ * OpenRouter finish_reason — кодирует ПОЧЕМУ генерация закончилась.
+ *
+ * Самое важное для нас: `length` означает что ответ упёрся в max_tokens и был
+ * обрезан. Без явной проверки этого значения мы вынуждены угадывать
+ * truncation эвристикой (см. autofill/index.ts старая логика "starts with {
+ * but does not end").
+ *
+ * Точные значения зависят от модели/провайдера. Документировано как минимум:
+ * stop | length | tool_calls | content_filter | function_call | error
+ */
+export type OpenRouterFinishReason =
+  | 'stop'
+  | 'length'
+  | 'tool_calls'
+  | 'content_filter'
+  | 'function_call'
+  | 'error'
+  | string
+  | null
+  | undefined;
+
+export interface OpenRouterChatRawResult {
+  /** Текст ответа (уже trim()-нут). Может быть пустой строкой. */
+  content: string;
+  /** finish_reason первого choice. undefined если провайдер его не вернул. */
+  finishReason: OpenRouterFinishReason;
+}
+
+/**
  * Calls the OpenRouter chat-completions endpoint and returns the raw `content`
  * string of the first choice. Caller is responsible for parsing.
+ *
+ * Если нужен finish_reason — используй callOpenRouterChatRaw.
  */
 export async function callOpenRouterChat(options: OpenRouterChatOptions): Promise<string> {
+  const { content } = await callOpenRouterChatRaw(options);
+  return content;
+}
+
+/**
+ * Same as callOpenRouterChat but ALSO returns finish_reason.
+ *
+ * Используется в местах где важно различать "модель естественно закончила"
+ * (stop) и "ответ обрезан на лимите токенов" (length) — например, в autofill,
+ * чтобы отличать "AI не нашёл фактов на сайте" от "ответ обрезан, надо
+ * повторить с другим maxTokens".
+ */
+export async function callOpenRouterChatRaw(
+  options: OpenRouterChatOptions,
+): Promise<OpenRouterChatRawResult> {
   const {
     apiKey,
     model,
@@ -98,7 +144,12 @@ export async function callOpenRouterChat(options: OpenRouterChatOptions): Promis
 
     if (response.ok) {
       const rawText = await response.text();
-      let data: { choices?: Array<{ message?: { content?: string } }> };
+      let data: {
+        choices?: Array<{
+          message?: { content?: string };
+          finish_reason?: OpenRouterFinishReason;
+        }>;
+      };
       try {
         data = JSON.parse(rawText);
       } catch {
@@ -106,8 +157,10 @@ export async function callOpenRouterChat(options: OpenRouterChatOptions): Promis
         if (!jsonMatch) throw new Error(`AI вернул невалидный ответ: ${rawText.slice(0, 200)}`);
         data = JSON.parse(jsonMatch[0]);
       }
-      const content = data.choices?.[0]?.message?.content?.trim() ?? '';
-      return content;
+      const choice = data.choices?.[0];
+      const content = choice?.message?.content?.trim() ?? '';
+      const finishReason = choice?.finish_reason;
+      return { content, finishReason };
     }
 
     let errorMessage = `API error: ${response.status}`;

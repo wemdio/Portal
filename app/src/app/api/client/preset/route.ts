@@ -17,7 +17,7 @@ export async function GET(req: NextRequest) {
 
   const { data: preset, error } = await supabaseInstantly
     .from('client_campaign_presets')
-    .select('id, email_account_ids, daily_limit, daily_max_leads, email_gap_minutes, open_tracking, link_tracking, stop_on_reply, text_only, schedule_from, schedule_to, schedule_days, schedule_timezone, updated_at')
+    .select('id, instantly_account_id, email_account_ids, daily_limit, daily_max_leads, email_gap_minutes, open_tracking, link_tracking, stop_on_reply, text_only, schedule_from, schedule_to, schedule_days, schedule_timezone, updated_at')
     .eq('client_user_id', userId)
     .maybeSingle();
 

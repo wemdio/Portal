@@ -9,12 +9,14 @@ import { validateClientLaunchInput } from '@/lib/clientLaunch/validateLaunchInpu
 import { mapCsvRowsToLeads } from '@/lib/clientLaunch/mapRowsToLeads';
 import type {
   ClientCampaignPreset,
+  ClientLaunchBehaviorOverride,
   ClientLaunchColumnMapping,
   ClientLaunchScheduleOverride,
   ClientLaunchSequence,
   ClientLaunchSequenceVariant,
 } from '@/lib/clientLaunch/types';
 import { activateCampaign, createCampaign, createLeads } from '@/lib/instantly/client';
+import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
 import {
   countClientContacts,
@@ -35,6 +37,7 @@ interface LaunchBody {
   headers?: unknown;
   rows?: unknown;
   schedule?: unknown;
+  behavior?: unknown;
 }
 
 function parseScheduleOverride(raw: unknown): ClientLaunchScheduleOverride | undefined {
@@ -59,6 +62,18 @@ function parseScheduleOverride(raw: unknown): ClientLaunchScheduleOverride | und
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((s) => typeof s === 'string');
+}
+
+function parseBehaviorOverride(raw: unknown): ClientLaunchBehaviorOverride | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const obj = raw as Record<string, unknown>;
+  const openTracking = typeof obj.open_tracking === 'boolean' ? obj.open_tracking : undefined;
+  const stopOnReply = typeof obj.stop_on_reply === 'boolean' ? obj.stop_on_reply : undefined;
+  if (openTracking === undefined || stopOnReply === undefined) return undefined;
+  return {
+    open_tracking: openTracking,
+    stop_on_reply: stopOnReply,
+  };
 }
 
 export async function GET(req: NextRequest) {
@@ -145,8 +160,11 @@ export async function POST(req: NextRequest) {
   }
 
   const preset = presetRow as ClientCampaignPreset | null;
+  const instantlyAccountId = resolveInstantlyAccountId(preset?.instantly_account_id);
+  const instantlyRequestOptions = { accountId: instantlyAccountId };
 
   const scheduleOverride = parseScheduleOverride(body.schedule);
+  const behaviorOverride = parseBehaviorOverride(body.behavior);
 
   const validation = validateClientLaunchInput({
     preset,
@@ -192,6 +210,7 @@ export async function POST(req: NextRequest) {
     .insert({
       client_user_id: userId,
       preset_id: preset!.id,
+      instantly_account_id: instantlyAccountId,
       campaign_name: sequence.name.trim(),
       sequence_steps: sequence.steps,
       column_mapping: mapping,
@@ -213,8 +232,13 @@ export async function POST(req: NextRequest) {
   let instantlyCampaignId: string | null = null;
 
   try {
-    const payload = buildCampaignPayloadFromPreset({ preset: preset!, sequence, scheduleOverride });
-    const created = await createCampaign(payload);
+    const payload = buildCampaignPayloadFromPreset({
+      preset: preset!,
+      sequence,
+      scheduleOverride,
+      behaviorOverride,
+    });
+    const created = await createCampaign(payload, instantlyRequestOptions);
     instantlyCampaignId = (created as { id?: string }).id ?? null;
     if (!instantlyCampaignId) throw new Error('Instantly returned campaign without id');
 
@@ -228,10 +252,14 @@ export async function POST(req: NextRequest) {
     // он не попадает в эту кампанию — клиент загрузил базу, а кампания
     // пустая. skip_if_in_campaign оставляем: дедуп внутри самой кампании
     // безвреден (свежая кампания всё равно пустая на старте).
-    const leadResult = await createLeads(leads, {
-      campaign_id: instantlyCampaignId,
-      skip_if_in_campaign: true,
-    });
+    const leadResult = await createLeads(
+      leads,
+      {
+        campaign_id: instantlyCampaignId,
+        skip_if_in_campaign: true,
+      },
+      instantlyRequestOptions,
+    );
 
     const accepted = Number((leadResult as { uploaded?: number; created?: number; total_uploaded?: number }).uploaded ??
       (leadResult as { created?: number }).created ??
@@ -239,7 +267,7 @@ export async function POST(req: NextRequest) {
       leads.length);
     const skipped = leads.length - accepted;
 
-    const activatedCampaign = await activateCampaign(instantlyCampaignId);
+    const activatedCampaign = await activateCampaign(instantlyCampaignId, instantlyRequestOptions);
 
     // Сразу пишем кампанию в каталог: /api/client/campaigns читает
     // instantly_campaign_catalog, а не Instantly API напрямую. Без этого
@@ -247,13 +275,14 @@ export async function POST(req: NextRequest) {
     // (и на дашборде) до ближайшего часового синка каталога. Админские
     // флоу создания/активации/паузы делают то же. upsert не бросает —
     // сбой записи в каталог не должен ломать уже успешный запуск.
-    await upsertInstantlyCatalogFromCampaign(activatedCampaign);
+    await upsertInstantlyCatalogFromCampaign(activatedCampaign, instantlyAccountId);
 
     await supabaseInstantly.from('client_instantly_access').upsert(
       {
         client_user_id: userId,
         resource_type: 'campaign',
         resource_id: instantlyCampaignId,
+        instantly_account_id: instantlyAccountId,
         created_by: userId,
       },
       { onConflict: 'client_user_id,resource_type,resource_id' },

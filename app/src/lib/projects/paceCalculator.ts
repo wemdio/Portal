@@ -163,6 +163,7 @@ export async function loadContactsPaceData(
   client: PaceQueryClient,
   params: {
     projectId: string;
+    periodId?: string | null;
     obligation: number;
     done: number;
     deadline: string | null;
@@ -173,9 +174,13 @@ export async function loadContactsPaceData(
   const { projectId, obligation, done, deadline } = params;
   const limit = params.limit ?? PACE_HISTORY_LIMIT;
   const builder = client.from('project_contacts_history') as PaceQueryBuilder<ContactsHistoryRow>;
-  const { data, error } = await builder
+  let query = builder
     .select('contacts_done, recorded_at')
-    .eq('project_id', projectId)
+    .eq('project_id', projectId);
+  if (params.periodId) {
+    query = query.eq('period_id', params.periodId);
+  }
+  const { data, error } = await query
     .order('recorded_at', { ascending: false })
     .limit(limit);
   if (error || !data) return null;
@@ -197,6 +202,7 @@ export async function loadKpiPaceData(
   client: PaceQueryClient,
   params: {
     projectId: string;
+    periodId?: string | null;
     kpiPlan: number;
     kpiFact: number;
     deadline: string | null;
@@ -207,10 +213,14 @@ export async function loadKpiPaceData(
   const { projectId, kpiPlan, kpiFact, deadline } = params;
   const limit = params.limit ?? PACE_HISTORY_LIMIT;
   const builder = client.from('project_contacts_history') as PaceQueryBuilder<KpiHistoryRow>;
-  const { data, error } = await builder
+  let query = builder
     .select('kpi_fact, recorded_at')
     .eq('project_id', projectId)
-    .not('kpi_fact', 'is', null)
+    .not('kpi_fact', 'is', null);
+  if (params.periodId) {
+    query = query.eq('period_id', params.periodId);
+  }
+  const { data, error } = await query
     .order('recorded_at', { ascending: false })
     .limit(limit);
   if (error || !data) return null;
@@ -227,6 +237,8 @@ export const PACE_HISTORY_WINDOW_DAYS = 90;
 
 export interface ProjectPaceInput {
   projectId: string;
+  /** Active project period. When present, pace history is isolated to this period. */
+  periodId?: string | null;
   /** Плановый объём контактов (`projects.contacts_obligation`, после parseInt). 0 ⇒ ось контактов отключена. */
   contactsObligation: number;
   /** Текущий факт контактов (`projects.contacts_done`, после parseInt). */
@@ -270,42 +282,67 @@ export async function loadAllProjectsPace(
   const result = new Map<string, ProjectPace>();
   if (inputs.length === 0) return result;
 
-  const ids = inputs.map((i) => i.projectId);
   const cutoffDate = new Date(now.getTime() - PACE_HISTORY_WINDOW_DAYS * 86_400_000)
     .toISOString()
     .slice(0, 10);
 
   type Row = {
     project_id: string;
+    period_id?: string | null;
     contacts_done: number;
     kpi_fact: number | null;
     recorded_at: string;
   };
 
-  const builder = client.from('project_contacts_history') as PaceQueryBuilder<Row>;
-  const { data, error } = await builder
-    .select('project_id, contacts_done, kpi_fact, recorded_at')
-    .in('project_id', ids)
-    .gte('recorded_at', cutoffDate)
-    .order('recorded_at', { ascending: false })
-    // верхняя граница; в реальности per-project уже отсечено окном дат
-    .limit(ids.length * PACE_HISTORY_WINDOW_DAYS);
-  if (error || !data) return result;
+  const rows: Row[] = [];
+  const periodIds = [
+    ...new Set(inputs.map((i) => i.periodId).filter((id): id is string => !!id)),
+  ];
+  const legacyProjectIds = [
+    ...new Set(inputs.filter((i) => !i.periodId).map((i) => i.projectId)),
+  ];
+
+  if (periodIds.length > 0) {
+    const builder = client.from('project_contacts_history') as PaceQueryBuilder<Row>;
+    const { data, error } = await builder
+      .select('project_id, period_id, contacts_done, kpi_fact, recorded_at')
+      .in('period_id', periodIds)
+      .gte('recorded_at', cutoffDate)
+      .order('recorded_at', { ascending: false })
+      .limit(periodIds.length * PACE_HISTORY_WINDOW_DAYS);
+    if (error || !data) return result;
+    rows.push(...data);
+  }
+
+  if (legacyProjectIds.length > 0) {
+    const builder = client.from('project_contacts_history') as PaceQueryBuilder<Row>;
+    const { data, error } = await builder
+      .select('project_id, contacts_done, kpi_fact, recorded_at')
+      .in('project_id', legacyProjectIds)
+      .gte('recorded_at', cutoffDate)
+      .order('recorded_at', { ascending: false })
+      // верхняя граница; в реальности per-project уже отсечено окном дат
+      .limit(legacyProjectIds.length * PACE_HISTORY_WINDOW_DAYS);
+    if (error || !data) return result;
+    rows.push(...data);
+  }
 
   const rowsByProject = new Map<string, Row[]>();
-  for (const row of data) {
-    const list = rowsByProject.get(row.project_id);
+  for (const row of rows) {
+    const key = row.period_id ? `period:${row.period_id}` : `project:${row.project_id}`;
+    const list = rowsByProject.get(key);
     if (list) list.push(row);
-    else rowsByProject.set(row.project_id, [row]);
+    else rowsByProject.set(key, [row]);
   }
 
   for (const input of inputs) {
-    const rows = rowsByProject.get(input.projectId) ?? [];
-    const contactsPoints: PaceHistoryPoint[] = rows.map((r) => ({
+    const key = input.periodId ? `period:${input.periodId}` : `project:${input.projectId}`;
+    const projectRows = rowsByProject.get(key) ?? [];
+    const contactsPoints: PaceHistoryPoint[] = projectRows.map((r) => ({
       value: r.contacts_done,
       recorded_at: r.recorded_at,
     }));
-    const kpiPoints: PaceHistoryPoint[] = rows
+    const kpiPoints: PaceHistoryPoint[] = projectRows
       .filter((r): r is Row & { kpi_fact: number } => r.kpi_fact !== null)
       .map((r) => ({ value: r.kpi_fact, recorded_at: r.recorded_at }));
 

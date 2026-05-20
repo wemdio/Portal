@@ -25,10 +25,17 @@ interface PresetSummary {
   email_account_ids: string[];
   daily_limit: number;
   daily_max_leads: number;
+  open_tracking: boolean;
+  stop_on_reply: boolean;
   schedule_from: string;
   schedule_to: string;
   schedule_days: number[];
   schedule_timezone: string;
+}
+
+interface LaunchBehaviorSettings {
+  open_tracking: boolean;
+  stop_on_reply: boolean;
 }
 
 interface LaunchHistoryItem {
@@ -151,6 +158,10 @@ export default function ClientLaunchPage() {
     timezone: 'Europe/Kirov',
   });
   const [scheduleHydrated, setScheduleHydrated] = useState(false);
+  const [behavior, setBehavior] = useState<LaunchBehaviorSettings>({
+    open_tracking: true,
+    stop_on_reply: true,
+  });
 
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState('');
@@ -176,6 +187,10 @@ export default function ClientLaunchPage() {
             ? data.preset.schedule_days
             : [1, 2, 3, 4, 5],
           timezone: normalizeInstantlyTimezone(data.preset.schedule_timezone || 'Europe/Kirov'),
+        });
+        setBehavior({
+          open_tracking: data.preset.open_tracking !== false,
+          stop_on_reply: data.preset.stop_on_reply !== false,
         });
         setScheduleHydrated(true);
       }
@@ -425,6 +440,7 @@ export default function ClientLaunchPage() {
           headers: fileHeaders,
           rows: fileRows,
           schedule,
+          behavior,
         }),
       });
       setResult(data.launch);
@@ -744,9 +760,19 @@ export default function ClientLaunchPage() {
           </Section>
         )}
 
-        {/* Step 5: Launch */}
+        {/* Step 5: Behavior */}
         {fileHeaders.length > 0 && (
-          <Section number={5} title="Запуск" subtitle="Кампания будет создана в Instantly и сразу же активирована.">
+          <Section number={5} title="Настройки отправки" subtitle="Эти параметры применятся только к этой кампании.">
+            <BehaviorEditor
+              behavior={behavior}
+              onChange={setBehavior}
+            />
+          </Section>
+        )}
+
+        {/* Step 6: Launch */}
+        {fileHeaders.length > 0 && (
+          <Section number={6} title="Запуск" subtitle="Кампания будет создана в Instantly и сразу же активирована.">
             {launchError && (
               <div className="mb-4 neu-inset rounded-2xl px-4 py-3 text-sm flex items-start gap-2" style={{ color: 'var(--cp-danger)' }}>
                 <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
@@ -1083,6 +1109,74 @@ function VariableChip({ entry }: { entry: VariableEntry }) {
           · {entry.sample.slice(0, 24)}
         </span>
       )}
+    </button>
+  );
+}
+
+function BehaviorEditor({
+  behavior,
+  onChange,
+}: {
+  behavior: LaunchBehaviorSettings;
+  onChange: (next: LaunchBehaviorSettings) => void;
+}) {
+  const toggle = (key: keyof LaunchBehaviorSettings) => {
+    onChange({ ...behavior, [key]: !behavior[key] });
+  };
+
+  return (
+    <div className="space-y-3">
+      <BehaviorToggle
+        checked={behavior.open_tracking}
+        label="Отслеживать открытия писем"
+        description="Instantly будет считать открытия писем в статистике кампании."
+        onToggle={() => toggle('open_tracking')}
+      />
+      <BehaviorToggle
+        checked={behavior.stop_on_reply}
+        label="Останавливать цепочку при ответе"
+        description="Если получатель ответит, следующие письма цепочки для него не отправятся."
+        onToggle={() => toggle('stop_on_reply')}
+      />
+    </div>
+  );
+}
+
+function BehaviorToggle({
+  checked,
+  label,
+  description,
+  onToggle,
+}: {
+  checked: boolean;
+  label: string;
+  description: string;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className="neu-sm w-full p-4 text-left flex items-center justify-between gap-4"
+      aria-pressed={checked}
+    >
+      <span className="min-w-0">
+        <span className="block text-sm font-semibold" style={{ color: 'var(--cp-text)' }}>
+          {label}
+        </span>
+        <span className="block text-xs mt-1" style={{ color: 'var(--cp-text-m)' }}>
+          {description}
+        </span>
+      </span>
+      <span
+        className="relative h-6 w-11 shrink-0 rounded-full transition-colors"
+        style={{ background: checked ? 'var(--cp-accent)' : 'rgba(148,163,184,0.35)' }}
+      >
+        <span
+          className="absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform"
+          style={{ left: checked ? '1.375rem' : '0.125rem' }}
+        />
+      </span>
     </button>
   );
 }
