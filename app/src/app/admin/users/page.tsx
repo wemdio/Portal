@@ -10,7 +10,7 @@ import { useUser } from '@/lib/UserProvider';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
-import { Check, ChevronDown, ChevronUp, MoreVertical, Plus } from 'lucide-react';
+import { Check, CheckCircle2, ChevronDown, ChevronUp, Loader2, MoreVertical, Plus, Power, Unlock } from 'lucide-react';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, ALL_NAV_TAB_IDS, NAV_TABS_CONFIG } from '@/lib/toolsRegistry';
 import { CampaignStatusLabels } from '@/lib/instantly/types';
 
@@ -999,45 +999,46 @@ export default function UsersPage() {
                       )}
 
                       <div className="mt-4 pt-3 border-t border-gray-100">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-xs font-medium text-gray-700">Подписка</span>
-                          {subscriptionSetup ? (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700 ring-1 ring-amber-200/60">
-                              Настройка ЛК до {setupUntil ? new Date(setupUntil).toLocaleDateString('ru-RU') : '—'}
-                            </span>
-                          ) : subscriptionActive ? (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-[11px] font-semibold text-green-700 ring-1 ring-green-200/60">
-                              Активна до {paidUntil ? new Date(paidUntil).toLocaleDateString('ru-RU') : '—'}
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-600 ring-1 ring-red-200/60">
-                              Не оплачена
-                            </span>
-                          )}
-                        </div>
-                        {/* Billing mode badge */}
-                        {(subscriptionActive || subscriptionSetup) && billingMode && (
-                          <div className="flex items-center gap-2 text-xs text-gray-500">
-                            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${
-                              billingMode === 'invoice'
-                                ? 'bg-blue-50 text-blue-700 ring-blue-200/60'
-                                : 'bg-purple-50 text-purple-700 ring-purple-200/60'
-                            }`}>
-                              {billingMode === 'invoice' ? '🧾 Счёт' : '💳 Автоплатёж'}
-                            </span>
-                            {paymentLocked && (
-                              <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-600 ring-1 ring-red-200/60">
-                                🔒 Ожидает оплаты
+                        <div className="flex items-start justify-between gap-3">
+                          <span className="pt-1 text-xs font-medium text-gray-700">Подписка</span>
+                          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+                            {(subscriptionActive || subscriptionSetup) && billingMode && (
+                              <>
+                                <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${
+                                  billingMode === 'invoice'
+                                    ? 'bg-blue-50 text-blue-700 ring-blue-200/60'
+                                    : 'bg-purple-50 text-purple-700 ring-purple-200/60'
+                                }`}>
+                                  {billingMode === 'invoice' ? '🧾 Счёт' : '💳 Автоплатёж'}
+                                </span>
+                                {paymentLocked && (
+                                  <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-600 ring-1 ring-red-200/60">
+                                    🔒 Ожидает оплаты
+                                  </span>
+                                )}
+                              </>
+                            )}
+                            {subscriptionSetup ? (
+                              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700 ring-1 ring-amber-200/60">
+                                Настройка ЛК до {setupUntil ? new Date(setupUntil).toLocaleDateString('ru-RU') : '—'}
+                              </span>
+                            ) : subscriptionActive ? (
+                              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-[11px] font-semibold text-green-700 ring-1 ring-green-200/60">
+                                Активна до {paidUntil ? new Date(paidUntil).toLocaleDateString('ru-RU') : '—'}
+                              </span>
+                            ) : (
+                              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-600 ring-1 ring-red-200/60">
+                                Не оплачена
                               </span>
                             )}
                           </div>
-                        )}
+                        </div>
 
-                        <div className="flex gap-2 flex-wrap">
+                        <div className="mt-3 grid grid-cols-1 gap-2.5 min-[520px]:grid-cols-2">
                           {!subscriptionActive && !subscriptionSetup && (
                             <>
                               {/* Billing mode selector */}
-                              <div className="w-full flex gap-1.5 mb-1">
+                              <div className="flex gap-1.5 min-[520px]:col-span-2">
                                 {(['manual', 'invoice', 'autopayment'] as const).map((m) => (
                                   <button
                                     key={m}
@@ -1082,9 +1083,19 @@ export default function UsersPage() {
                                     setActivating(false);
                                   }
                                 }}
-                                className="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-50 transition-colors"
+                                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 shadow-sm transition-colors hover:border-emerald-300 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50 min-[520px]:col-span-2"
                               >
-                                {activating ? 'Активация...' : 'Активировать'}
+                                {activating ? (
+                                  <>
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    <span>Активация...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                                    <span>Активировать</span>
+                                  </>
+                                )}
                               </button>
                             </>
                           )}
@@ -1111,9 +1122,19 @@ export default function UsersPage() {
                                   setActivating(false);
                                 }
                               }}
-                              className="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-blue-300 text-blue-700 hover:bg-blue-50 disabled:opacity-50 transition-colors"
+                              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-center text-xs font-semibold leading-snug text-blue-700 shadow-sm transition-colors hover:border-blue-300 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50 min-[520px]:col-span-2"
                             >
-                              {activating ? 'Завершение...' : 'Завершить настройку досрочно'}
+                              {activating ? (
+                                <>
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  <span>Завершение...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                                  <span>Завершить настройку досрочно</span>
+                                </>
+                              )}
                             </button>
                           )}
                           {(subscriptionActive || subscriptionSetup) && paymentLocked && (
@@ -1136,9 +1157,10 @@ export default function UsersPage() {
                                   setActivating(false);
                                 }
                               }}
-                              className="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-50 transition-colors"
+                              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 shadow-sm transition-colors hover:border-amber-300 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
                             >
-                              🔓 Снять блокировку
+                              <Unlock className="h-3.5 w-3.5 shrink-0" />
+                              <span>Снять блокировку</span>
                             </button>
                           )}
                           {(subscriptionActive || subscriptionSetup) && (
@@ -1164,9 +1186,10 @@ export default function UsersPage() {
                                   setActivating(false);
                                 }
                               }}
-                              className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50 transition-colors"
+                              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-semibold text-red-600 shadow-sm transition-colors hover:border-red-300 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
                             >
-                              Деактивировать
+                              <Power className="h-3.5 w-3.5 shrink-0" />
+                              <span>Деактивировать</span>
                             </button>
                           )}
                         </div>
