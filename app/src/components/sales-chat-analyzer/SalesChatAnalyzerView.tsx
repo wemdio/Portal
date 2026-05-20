@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Download } from 'lucide-react';
-import { authFetchJson } from '@/lib/authFetch';
+import { authFetch, authFetchJson } from '@/lib/authFetch';
 import type {
   SalesChatAccountRow,
   SalesChatAccountStatus,
@@ -35,6 +35,19 @@ interface MessageRow {
   text: string | null;
   media_type: string | null;
   sent_at: string;
+  attachments?: AttachmentRow[];
+}
+
+interface AttachmentRow {
+  id: string;
+  message_id: string | null;
+  tg_message_id: number;
+  media_type: string;
+  file_name: string | null;
+  mime_type: string | null;
+  file_size_bytes: number | null;
+  status: 'uploaded' | 'skipped' | 'error';
+  error_message: string | null;
 }
 
 function formatDate(value: string | null | undefined): string {
@@ -51,29 +64,32 @@ function formatDate(value: string | null | undefined): string {
   });
 }
 
-function safeTxtFilename(title: string | null, tgPeerId: number): string {
-  const base =
-    (title?.trim() ? title.replace(/[/\\?%*:|"<>[\]\n\r\t]/g, '_').slice(0, 80) : '') ||
-    `dialog_${tgPeerId}`;
-  return `${base}.txt`;
+function formatBytes(value: number | null | undefined): string {
+  if (!value || value < 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
-function buildMessagesTxt(dialog: DialogRow, messages: MessageRow[]): string {
-  const title = dialog.peer_title ?? `Диалог ${dialog.tg_peer_id}`;
-  const lines = messages.map((m) => {
-    const who = m.sender_name ?? (m.direction === 'out' ? 'Менеджер' : 'Собеседник');
-    const when = formatDate(m.sent_at);
-    const parts: string[] = [];
-    if (m.text?.trim()) parts.push(m.text.trim());
-    if (m.media_type) parts.push(`[${m.media_type}]`);
-    const body = parts.length > 0 ? parts.join('\n') : '(пустое сообщение)';
-    return `[${when}] ${who}\n${body}`;
-  });
-  return `${title}\n${'─'.repeat(48)}\n\n${lines.join('\n\n')}\n`;
+function filenameFromDisposition(value: string | null, fallback: string): string {
+  const encoded = value?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return fallback;
+    }
+  }
+  const plain = value?.match(/filename="?([^";]+)"?/i)?.[1];
+  return plain || fallback;
 }
 
-function downloadTextFile(filename: string, content: string): void {
-  const blob = new Blob([`\uFEFF${content}`], { type: 'text/plain;charset=utf-8' });
+function downloadBlob(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -131,6 +147,27 @@ function syncStatusText(runs: SalesChatSyncRunRow[]): string {
   return 'Синхронизаций ещё не было';
 }
 
+function LoadingState({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-2 py-3 text-sm text-gray-500">
+      <svg className="h-4 w-4 text-blue-600" viewBox="0 0 24 24" aria-hidden>
+        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeOpacity="0.18" strokeWidth="3" />
+        <path d="M21 12a9 9 0 0 0-9-9" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="3">
+          <animateTransform
+            attributeName="transform"
+            dur="0.8s"
+            from="0 12 12"
+            repeatCount="indefinite"
+            to="360 12 12"
+            type="rotate"
+          />
+        </path>
+      </svg>
+      <span>{label}</span>
+    </div>
+  );
+}
+
 export function SalesChatAnalyzerView() {
   const [accounts, setAccounts] = useState<AccountListRow[]>([]);
   const [dialogs, setDialogs] = useState<DialogRow[]>([]);
@@ -141,6 +178,8 @@ export function SalesChatAnalyzerView() {
   const [dialogQuery, setDialogQuery] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [dialogsLoading, setDialogsLoading] = useState(false);
+  const [messagesLoading, setMessagesLoading] = useState(false);
 
   // Мастер подключения.
   const [connectOpen, setConnectOpen] = useState(false);
@@ -158,18 +197,28 @@ export function SalesChatAnalyzerView() {
     setAccounts(data.accounts ?? []);
   }, []);
 
-  const loadDialogs = useCallback(async (accountId: string, q: string) => {
-    const url = `${API}/accounts/${accountId}/dialogs${q ? `?q=${encodeURIComponent(q)}` : ''}`;
-    const data = await authFetchJson<{ dialogs: DialogRow[] }>(url, { method: 'GET' });
-    setDialogs(data.dialogs ?? []);
+  const loadDialogs = useCallback(async (accountId: string, q: string, silent = false) => {
+    if (!silent) setDialogsLoading(true);
+    try {
+      const url = `${API}/accounts/${accountId}/dialogs${q ? `?q=${encodeURIComponent(q)}` : ''}`;
+      const data = await authFetchJson<{ dialogs: DialogRow[] }>(url, { method: 'GET' });
+      setDialogs(data.dialogs ?? []);
+    } finally {
+      if (!silent) setDialogsLoading(false);
+    }
   }, []);
 
-  const loadMessages = useCallback(async (dialogId: string) => {
-    const data = await authFetchJson<{ messages: MessageRow[] }>(
-      `${API}/dialogs/${dialogId}/messages`,
-      { method: 'GET' },
-    );
-    setMessages(data.messages ?? []);
+  const loadMessages = useCallback(async (dialogId: string, silent = false) => {
+    if (!silent) setMessagesLoading(true);
+    try {
+      const data = await authFetchJson<{ messages: MessageRow[] }>(
+        `${API}/dialogs/${dialogId}/messages`,
+        { method: 'GET' },
+      );
+      setMessages(data.messages ?? []);
+    } finally {
+      if (!silent) setMessagesLoading(false);
+    }
   }, []);
 
   const loadSync = useCallback(async () => {
@@ -210,8 +259,8 @@ export function SalesChatAnalyzerView() {
     const timer = window.setInterval(() => {
       loadAccounts().catch(() => {});
       loadSync().catch(() => {});
-      if (selectedAccount) loadDialogs(selectedAccount, dialogQuery).catch(() => {});
-      if (selectedDialog) loadMessages(selectedDialog.id).catch(() => {});
+      if (selectedAccount) loadDialogs(selectedAccount, dialogQuery, true).catch(() => {});
+      if (selectedDialog) loadMessages(selectedDialog.id, true).catch(() => {});
     }, POLL_MS);
     return () => window.clearInterval(timer);
   }, [loadAccounts, loadSync, loadDialogs, loadMessages, selectedAccount, selectedDialog, dialogQuery]);
@@ -220,6 +269,7 @@ export function SalesChatAnalyzerView() {
     async (accountId: string) => {
       setSelectedAccount(accountId);
       setSelectedDialog(null);
+      setDialogs([]);
       setMessages([]);
       setDialogQuery('');
       try {
@@ -234,6 +284,7 @@ export function SalesChatAnalyzerView() {
   const selectDialog = useCallback(
     async (dialog: DialogRow) => {
       setSelectedDialog(dialog);
+      setMessages([]);
       try {
         await loadMessages(dialog.id);
       } catch (e) {
@@ -370,11 +421,52 @@ export function SalesChatAnalyzerView() {
     [loadAccounts, selectedAccount],
   );
 
-  const downloadChatTxt = useCallback(() => {
+  const downloadChatDocx = useCallback(async () => {
     if (!selectedDialog || messages.length === 0) return;
-    const name = safeTxtFilename(selectedDialog.peer_title, selectedDialog.tg_peer_id);
-    downloadTextFile(name, buildMessagesTxt(selectedDialog, messages));
-  }, [selectedDialog, messages]);
+    setBusy('export-docx');
+    setError(null);
+    try {
+      const res = await authFetch(`${API}/dialogs/${selectedDialog.id}/export?format=docx`, { method: 'GET' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(body?.error ?? `Error ${res.status}`);
+      }
+      const blob = await res.blob();
+      const filename = filenameFromDisposition(
+        res.headers.get('content-disposition'),
+        `${selectedDialog.peer_title ?? `dialog_${selectedDialog.tg_peer_id}`}.docx`,
+      );
+      downloadBlob(filename, blob);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'РћС€РёР±РєР°');
+    } finally {
+      setBusy(null);
+    }
+  }, [selectedDialog, messages.length]);
+
+  const downloadAttachment = useCallback(async (attachment: AttachmentRow) => {
+    setBusy(attachment.id);
+    setError(null);
+    try {
+      const res = await authFetch(`${API}/attachments/${attachment.id}/download`, { method: 'GET' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(body?.error ?? `Error ${res.status}`);
+      }
+      const blob = await res.blob();
+      const filename = filenameFromDisposition(
+        res.headers.get('content-disposition'),
+        attachment.file_name ?? `telegram-document-${attachment.tg_message_id}`,
+      );
+      downloadBlob(filename, blob);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка скачивания файла');
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
+  const selectedAccountRow = accounts.find((acc) => acc.id === selectedAccount) ?? null;
 
   return (
     <div className="space-y-6">
@@ -388,14 +480,17 @@ export function SalesChatAnalyzerView() {
 
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3">
         <div className="text-sm text-gray-600">{syncStatusText(syncRuns)}</div>
-        <button
-          type="button"
-          onClick={triggerSync}
-          disabled={busy != null}
-          className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
-        >
-          {busy === 'sync' ? 'Запуск…' : 'Выгрузить сейчас'}
-        </button>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <span className="text-xs text-gray-500">Запускает выгрузку по всем активным аккаунтам</span>
+          <button
+            type="button"
+            onClick={triggerSync}
+            disabled={busy != null}
+            className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {busy === 'sync' ? 'Запуск…' : 'Выгрузить сейчас'}
+          </button>
+        </div>
       </div>
 
       {error ? (
@@ -598,7 +693,9 @@ export function SalesChatAnalyzerView() {
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm mb-3"
               />
               <div className="space-y-1 max-h-[520px] overflow-y-auto pr-1">
-                {dialogs.length === 0 ? (
+                {dialogsLoading ? (
+                  <LoadingState label="Загружаем диалоги..." />
+                ) : dialogs.length === 0 ? (
                   <div className="text-sm text-gray-500">Диалогов пока нет.</div>
                 ) : (
                   dialogs.map((d) => (
@@ -635,29 +732,35 @@ export function SalesChatAnalyzerView() {
             </h2>
             <button
               type="button"
-              onClick={downloadChatTxt}
-              disabled={!selectedDialog || messages.length === 0}
-              title="Скачать всю переписку в текстовый файл"
+              onClick={downloadChatDocx}
+              disabled={!selectedDialog || messages.length === 0 || busy === 'export-docx'}
+              title="Скачать всю переписку в DOCX с ссылками на файлы из S3"
               className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-45"
             >
               <Download className="h-3.5 w-3.5" aria-hidden />
-              Скачать .txt
+              {busy === 'export-docx' ? 'Готовим...' : 'Скачать .docx'}
             </button>
           </div>
           {!selectedDialog ? (
             <div className="text-sm text-gray-500">Выберите диалог.</div>
+          ) : messagesLoading ? (
+            <LoadingState label="Загружаем переписку..." />
           ) : messages.length === 0 ? (
             <div className="text-sm text-gray-500">В этом диалоге пока нет сообщений.</div>
           ) : (
             <div className="space-y-2 max-h-[540px] overflow-y-auto pr-1">
-              {messages.map((m) => (
+              {messages.map((m) => {
+                const isOwn =
+                  m.direction === 'out' ||
+                  (selectedAccountRow?.tg_user_id != null && m.sender_tg_id === selectedAccountRow.tg_user_id);
+                return (
                 <div
                   key={m.id}
-                  className={`flex ${m.direction === 'out' ? 'justify-end' : 'justify-start'}`}
+                  className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}
                 >
                   <div
                     className={`max-w-[80%] rounded-2xl border px-3 py-2 text-sm ${
-                      m.direction === 'out'
+                      isOwn
                         ? 'border-blue-200 bg-blue-50 text-gray-900'
                         : 'border-gray-200 bg-gray-50 text-gray-900'
                     }`}
@@ -672,9 +775,36 @@ export function SalesChatAnalyzerView() {
                     {m.media_type ? (
                       <div className="mt-0.5 text-xs italic text-gray-500">[{m.media_type}]</div>
                     ) : null}
+                    {m.attachments?.length ? (
+                      <div className="mt-1 space-y-0.5 text-xs text-gray-600">
+                        {m.attachments.map((a) => (
+                          a.status === 'uploaded' ? (
+                            <button
+                              key={a.id}
+                              type="button"
+                              onClick={() => void downloadAttachment(a)}
+                              disabled={busy === a.id}
+                              className="inline-flex max-w-full items-center gap-1 text-left font-medium text-blue-700 hover:text-blue-800 hover:underline disabled:opacity-50"
+                              title="Скачать файл"
+                            >
+                              <Download className="h-3 w-3 shrink-0" aria-hidden />
+                              <span className="truncate">{a.file_name ?? `telegram-document-${a.tg_message_id}`}</span>
+                              {a.file_size_bytes ? <span className="shrink-0 text-gray-500">· {formatBytes(a.file_size_bytes)}</span> : null}
+                            </button>
+                          ) : (
+                            <div key={a.id}>
+                              {a.file_name ?? `telegram-document-${a.tg_message_id}`}
+                              {a.file_size_bytes ? ` · ${formatBytes(a.file_size_bytes)}` : ''}
+                              {a.error_message ? ` · ${a.error_message}` : ''}
+                            </div>
+                          )
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
