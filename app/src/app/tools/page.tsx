@@ -31,6 +31,7 @@ import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/tool
 import { RdpToolCard } from './RdpToolCard';
 import { usePortalBlockingLoad } from '@/components/PortalLoadingProvider';
 import { useUser } from '@/lib/UserProvider';
+import type { Locale } from '@/lib/i18n';
 
 /** Логотип Telegram (lucide не содержит брендовых иконок). */
 function TelegramIcon({ className }: { className?: string }) {
@@ -72,7 +73,7 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'sales-chat-analyzer': TelegramIcon,
 };
 
-function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: 'ru' | 'en' }) {
+function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: Locale }) {
   const config = TOOLS_CONFIG[toolId];
   const Icon = TOOL_ICONS[toolId];
   const hasBadge = Boolean(config.badge);

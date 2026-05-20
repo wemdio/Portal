@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import type { Locale } from '@/lib/i18n';
 import { Project, ProjectNote, ProjectStatus, Task, TaskStatus, UserProfile } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
@@ -265,7 +266,7 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string; 
   'отменен': { label: 'Отменен', color: 'text-red-700', bg: 'bg-red-50/50', border: 'border-red-200/50' },
 };
 
-function translateStatusLabel(label: string, locale: 'ru' | 'en'): string {
+function translateStatusLabel(label: string, locale: Locale): string {
   const normalized = label.toLowerCase().replace(/ё/g, 'е');
   if (normalized.includes('в работе')) return locale === 'en' ? 'In progress' : 'В работе';
   if (normalized.includes('тест')) return locale === 'en' ? 'Testing' : 'Тестирование';
@@ -489,7 +490,7 @@ function formatTaskDeadlineInput(deadline: string | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function getTaskStatusLabel(status: TaskStatus, locale: 'ru' | 'en'): string {
+function getTaskStatusLabel(status: TaskStatus, locale: Locale): string {
   if (status === 'in_progress') return locale === 'en' ? 'In progress' : 'В работе';
   if (status === 'done') return locale === 'en' ? 'Completed' : 'Завершено';
   return locale === 'en' ? 'Pending' : 'Ожидает';

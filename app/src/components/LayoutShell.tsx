@@ -10,14 +10,22 @@ import { TmaHeader } from './TmaHeader';
 import { UserProvider, useUser } from '@/lib/UserProvider';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 import { PortalDocumentTitle } from '@/components/PortalDocumentTitle';
-import { GlobalTextTranslator } from '@/components/GlobalTextTranslator';
+import { GlobalTextTranslator, LanguageLoadingOverlay } from '@/components/GlobalTextTranslator';
 import { dict, commonDictionary, normalizeLocale, type Locale } from '@/lib/i18n';
 
 const MD_BREAKPOINT = 768;
 
 function LocaleTextTranslator() {
   const { locale } = useUser();
-  return <GlobalTextTranslator locale={locale} />;
+  return (
+    <>
+      <GlobalTextTranslator locale={locale} />
+      <LanguageLoadingOverlay
+        title={dict(commonDictionary.translatingPage, locale)}
+        hint={dict(commonDictionary.translatingHint, locale)}
+      />
+    </>
+  );
 }
 
 export function LayoutShell({
