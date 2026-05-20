@@ -5,6 +5,7 @@ const YOOKASSA_API = 'https://api.yookassa.ru/v3';
 const shopId = process.env.YOOKASSA_SHOP_ID;
 const secretKey = process.env.YOOKASSA_SECRET_KEY;
 const DEFAULT_INVOICE_VALIDITY_DAYS = 30;
+const INVOICE_EXPIRES_AT_SAFETY_BUFFER_MS = 15 * 60 * 1000;
 
 function basicAuth(): string {
   if (!shopId || !secretKey) {
@@ -72,17 +73,35 @@ export interface CreateInvoiceParams {
   savePaymentMethod?: boolean;
 }
 
+type YookassaErrorResponse = {
+  type?: string;
+  id?: string;
+  description?: string;
+  parameter?: string;
+  code?: string;
+};
+
 export function getDefaultYookassaInvoiceExpiresAt(now = new Date()): string {
   const expiresAt = new Date(now.getTime());
   expiresAt.setUTCDate(expiresAt.getUTCDate() + DEFAULT_INVOICE_VALIDITY_DAYS);
+  expiresAt.setTime(expiresAt.getTime() - INVOICE_EXPIRES_AT_SAFETY_BUFFER_MS);
   expiresAt.setUTCSeconds(0, 0);
   return expiresAt.toISOString();
 }
 
-export async function createYookassaInvoice(params: CreateInvoiceParams): Promise<YookassaInvoice> {
-  const expiresAt = params.expiresAt ?? getDefaultYookassaInvoiceExpiresAt();
+function isExpiresAtTooBigError(err: YookassaErrorResponse): boolean {
+  return err.parameter === 'expires_at' && err.description === 'invalid_request.expires_at.too_big';
+}
 
-  const body = {
+function getResponseDate(res: Response): Date | null {
+  const dateHeader = res.headers.get('date');
+  if (!dateHeader) return null;
+  const date = new Date(dateHeader);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function buildInvoiceBody(params: CreateInvoiceParams, expiresAt: string) {
+  return {
     payment_data: {
       amount: {
         value: params.amount.toFixed(2),
@@ -116,23 +135,54 @@ export async function createYookassaInvoice(params: CreateInvoiceParams): Promis
       company_name: params.companyName,
     },
   };
+}
 
+async function postYookassaInvoice(
+  body: ReturnType<typeof buildInvoiceBody>,
+  idempotencyKey: string,
+): Promise<{ invoice?: YookassaInvoice; error?: YookassaErrorResponse; response: Response }> {
   const res = await fetch(`${YOOKASSA_API}/invoices`, {
     method: 'POST',
     headers: {
       Authorization: basicAuth(),
       'Content-Type': 'application/json',
-      'Idempotence-Key': params.idempotencyKey,
+      'Idempotence-Key': idempotencyKey,
     },
     body: JSON.stringify(body),
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(`YooKassa error ${res.status}: ${JSON.stringify(err)}`);
+    return {
+      error: await res.json().catch(() => ({})),
+      response: res,
+    };
   }
 
-  return (await res.json()) as YookassaInvoice;
+  return {
+    invoice: (await res.json()) as YookassaInvoice,
+    response: res,
+  };
+}
+
+export async function createYookassaInvoice(params: CreateInvoiceParams): Promise<YookassaInvoice> {
+  const expiresAt = params.expiresAt ?? getDefaultYookassaInvoiceExpiresAt();
+  const result = await postYookassaInvoice(buildInvoiceBody(params, expiresAt), params.idempotencyKey);
+
+  if (result.invoice) return result.invoice;
+
+  if (!params.expiresAt && result.error && isExpiresAtTooBigError(result.error)) {
+    const yookassaNow = getResponseDate(result.response) ?? new Date();
+    const retryExpiresAt = getDefaultYookassaInvoiceExpiresAt(yookassaNow);
+    const retry = await postYookassaInvoice(
+      buildInvoiceBody(params, retryExpiresAt),
+      `${params.idempotencyKey}-expires-retry`,
+    );
+
+    if (retry.invoice) return retry.invoice;
+    throw new Error(`YooKassa error ${retry.response.status}: ${JSON.stringify(retry.error ?? {})}`);
+  }
+
+  throw new Error(`YooKassa error ${result.response.status}: ${JSON.stringify(result.error ?? {})}`);
 }
 
 export async function getYookassaInvoice(ykInvoiceId: string): Promise<YookassaInvoice> {
