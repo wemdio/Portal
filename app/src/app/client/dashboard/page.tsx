@@ -1,260 +1,520 @@
 'use client';
 
+/**
+ * Client dashboard — single-page command center.
+ *
+ * One layout, three states branched by data:
+ *   - Returning + has unread replies: replies-needing-attention is the lede.
+ *   - Returning + caught up: short "all calm" greeting + campaigns rows.
+ *   - First-visit / mid-onboarding: greeting + onboarding checklist; campaigns
+ *     section hides until onboarding completes.
+ *
+ * No hero panel, no gradient text, no rainbow side-stripes, no per-action
+ * chromatic accents. Single slate accent + semantic status dots only.
+ * Conforms to DESIGN.md §Components, §Do's-and-Don'ts, and the Single Slate /
+ * No-White-Background / Material rules.
+ */
+
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
 import type { Route } from 'next';
 import {
-  Send, Mail, ArrowRight, Loader2,
-  LayoutDashboard, FileText, Database, Sparkles, Rocket,
+  ArrowRight,
+  Loader2,
+  Mail,
+  MessageSquare,
+  RefreshCw,
+  Send,
 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { OnboardingChecklist } from '@/components/client/OnboardingChecklist';
+
+// ───────────────────────── types ─────────────────────────
 
 interface CampaignRow {
   id: string;
   name: string;
   status: number | null;
   emails_sent_count: number | null;
+  open_count: number | null;
   reply_count: number | null;
+  new_leads_contacted_count: number | null;
+  analytics_synced_at: string | null;
 }
 
 interface CampaignsResponse {
   total: number;
   campaigns: CampaignRow[];
+  lastSyncedAt: string | null;
 }
 
-interface QuickAction {
-  href: string;
+interface ReplyItem {
+  id: string;
+  campaign_id: string;
+  campaign_name: string | null;
+  lead_email: string;
+  lead_name: string | null;
+  company_name: string | null;
+  reply_subject: string | null;
+  reply_timestamp: string | null;
+  is_unread?: boolean;
+  is_lead?: boolean;
+  thread_id?: string | null;
+  email_id?: string | null;
+  ai_interest_value?: number | null;
+}
+
+interface RepliesResponse {
+  items: ReplyItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+interface OnboardingItem {
+  id: 'brief' | 'preset' | 'first_base' | 'first_clean' | 'first_sequence' | 'first_launch';
   label: string;
-  description: string;
-  primary?: boolean;
-  icon: React.ElementType;
-  color: string;
-  bg: string;
+  done: boolean;
+  href: string | null;
+  blocked_reason?: string;
 }
 
-const QUICK_ACTIONS: readonly QuickAction[] = [
-  {
-    href: '/client/brief',
-    label: 'Заполнить бриф',
-    description: 'AI-инструменты используют его для лучших результатов',
-    icon: FileText,
-    color: '#F59E0B',
-    bg: 'rgba(245,158,11,0.12)',
-  },
-  {
-    href: '/client/build',
-    label: 'Подготовить базу',
-    description: 'Собрать контакты из источников и очистить под рассылку',
-    icon: Database,
-    color: '#3B82F6',
-    bg: 'rgba(59,130,246,0.12)',
-  },
-  {
-    href: '/client/parsers?tab=email-sequence',
-    label: 'Цепочки писем',
-    description: 'AI-генерация холодных писем под сегмент',
-    icon: Sparkles,
-    color: '#F97316',
-    bg: 'rgba(249,115,22,0.12)',
-  },
-  {
-    href: '/client/launch',
-    label: 'Создать кампанию',
-    description: 'Загрузить базу, написать цепочку и запустить',
-    primary: true,
-    icon: Rocket,
-    color: '#10B981',
-    bg: 'rgba(16,185,129,0.12)',
-  },
-];
+interface OnboardingResponse {
+  items: OnboardingItem[];
+  complete: boolean;
+  next_id: OnboardingItem['id'] | null;
+}
 
-function formatStatus(status: number | null): string {
+// ───────────────────────── helpers ─────────────────────────
+
+/** Russian plural — "1 ответ" / "2 ответа" / "5 ответов". */
+function plural(n: number, one: string, few: string, many: string): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+/** Compact relative time in Russian — "5 мин назад", "2 ч назад", "3 дня назад". */
+function relativeTime(iso: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const diffMs = Date.now() - d.getTime();
+  if (diffMs < 0) return 'только что';
+  const min = Math.floor(diffMs / 60000);
+  if (min < 1) return 'только что';
+  if (min < 60) return `${min} мин назад`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h} ч назад`;
+  const days = Math.floor(h / 24);
+  if (days < 7) return `${days} ${plural(days, 'день', 'дня', 'дней')} назад`;
+  return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+}
+
+/** Status int → human label + 6px semantic dot color. */
+function statusInfo(status: number | null): { label: string; dot: string } {
   switch (status) {
-    case 1: return 'Активна';
-    case 2: return 'Пауза';
-    case 3: return 'Завершена';
-    default: return '—';
+    case 1:
+      return { label: 'Активна', dot: '#10B981' /* spruce-positive */ };
+    case 2:
+      return { label: 'Пауза', dot: '#F59E0B' /* amber-prompt */ };
+    case 3:
+      return { label: 'Завершена', dot: 'var(--cp-text-l)' };
+    default:
+      return { label: 'Подготовка', dot: 'var(--cp-text-l)' };
   }
 }
 
+function trimSubject(s: string | null, max = 60): string {
+  if (!s) return '';
+  const trimmed = s.trim();
+  if (trimmed.length <= max) return trimmed;
+  return trimmed.slice(0, max - 1).trimEnd() + '…';
+}
+
+// ───────────────────────── page ─────────────────────────
+
 export default function ClientDashboardPage() {
   const [campaigns, setCampaigns] = useState<CampaignRow[] | null>(null);
-  const [error, setError] = useState('');
+  const [replies, setReplies] = useState<ReplyItem[] | null>(null);
+  const [onboarding, setOnboarding] = useState<OnboardingResponse | null>(null);
+
+  const [campaignsError, setCampaignsError] = useState('');
+  const [repliesError, setRepliesError] = useState('');
+
+  const [reloadKey, setReloadKey] = useState(0);
+  const retry = useCallback(() => setReloadKey((k) => k + 1), []);
 
   useEffect(() => {
     let cancelled = false;
+
+    setCampaignsError('');
+    setRepliesError('');
+    setCampaigns(null);
+    setReplies(null);
+
     void (async () => {
       try {
         const data = await clientApiFetch<CampaignsResponse>('/campaigns');
         if (!cancelled) setCampaigns(data.campaigns ?? []);
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Ошибка загрузки');
-        }
+        if (cancelled) return;
+        setCampaigns([]);
+        setCampaignsError(
+          err instanceof Error
+            ? 'Не удалось загрузить кампании. Проверьте подключение и повторите.'
+            : 'Не удалось загрузить кампании.',
+        );
       }
     })();
+
+    void (async () => {
+      try {
+        const data = await clientApiFetch<RepliesResponse>('/replies?limit=50');
+        if (!cancelled) setReplies(data.items ?? []);
+      } catch (err) {
+        if (cancelled) return;
+        setReplies([]);
+        setRepliesError(
+          err instanceof Error
+            ? 'Не удалось загрузить ответы лидов.'
+            : 'Не удалось загрузить ответы.',
+        );
+      }
+    })();
+
+    void (async () => {
+      try {
+        const data = await clientApiFetch<OnboardingResponse>('/onboarding/status');
+        if (!cancelled) setOnboarding(data);
+      } catch {
+        // onboarding is graceful-fallback; absence simply hides the checklist
+        if (!cancelled) setOnboarding(null);
+      }
+    })();
+
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadKey]);
+
+  // ── derived state ──────────────────────────────────────
+
+  const unreadReplies = useMemo(
+    () => (replies ?? []).filter((r) => r.is_unread && !r.is_lead),
+    [replies],
+  );
+
+  const totalUnread = unreadReplies.length;
+  const ledeReplies = unreadReplies.slice(0, 3);
 
   const recentCampaigns = (campaigns ?? []).slice(0, 5);
+  const hasAnyCampaigns = (campaigns ?? []).length > 0;
+  const hasActiveCampaign = (campaigns ?? []).some((c) => c.status === 1);
+
+  const onboardingComplete = onboarding?.complete === true;
+  const showCampaignsSection = hasAnyCampaigns || onboardingComplete;
+
+  const stillLoading = campaigns === null || replies === null;
+
+  // ── greeting copy (branches on data) ──────────────────
+
+  const greeting = useMemo<string | null>(() => {
+    if (stillLoading) return null;
+
+    if (totalUnread > 0) {
+      const word = plural(totalUnread, 'ответ', 'ответа', 'ответов');
+      const verb = plural(totalUnread, 'ждёт', 'ждут', 'ждут');
+      return `С возвращением. ${totalUnread} ${word} ${verb} вас.`;
+    }
+
+    if (hasActiveCampaign) {
+      return 'С возвращением. Сегодня всё спокойно.';
+    }
+
+    if (onboarding && !onboarding.complete && onboarding.items?.length) {
+      const next =
+        onboarding.items.find((i) => i.id === onboarding.next_id && !i.done) ??
+        onboarding.items.find((i) => !i.done);
+      if (next) {
+        return `Здравствуйте. Давайте сделаем первый шаг — ${next.label.toLowerCase()}.`;
+      }
+    }
+
+    return 'С возвращением.';
+  }, [stillLoading, totalUnread, hasActiveCampaign, onboarding]);
+
+  // ───────────────────────── render ─────────────────────────
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 sm:space-y-8">
-      {/* ── Hero ─────────────────────────────────────────────────────── */}
-      <header
-        className="neu-card relative overflow-hidden p-6 sm:p-8"
-        style={{ background: 'linear-gradient(135deg, rgba(74,111,165,0.08), rgba(124,58,237,0.06))' }}
-      >
-        <LayoutDashboard
-          className="absolute -right-4 -top-4 h-32 w-32 opacity-[0.06]"
-          style={{ color: 'var(--cp-accent)' }}
-        />
-        <h1 className="text-2xl sm:text-3xl font-extrabold relative" style={{ color: 'var(--cp-text)' }}>
-          Дашборд
-        </h1>
-        <p className="mt-2 text-sm sm:text-base relative" style={{ color: 'var(--cp-text-m)' }}>
-          Здесь начинается ваш email-аутрич. Пройдите чеклист справа — за шесть шагов
-          вы запустите первую кампанию.
+      {/* Greeting — single line, no hero container, no gradient */}
+      <header>
+        <p
+          className="text-base sm:text-lg font-bold"
+          style={{ color: greeting === null ? 'var(--cp-text-l)' : 'var(--cp-text)' }}
+        >
+          {greeting ?? 'Загружаем…'}
         </p>
       </header>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_minmax(320px,420px)] gap-5 sm:gap-6">
-        {/* ── Quick actions ────────────────────────────────────────── */}
-        <section>
+      {/* Lede: replies awaiting attention. Renders only when there's something. */}
+      {totalUnread > 0 && (
+        <section aria-labelledby="dash-attention-label">
           <h2
+            id="dash-attention-label"
             className="text-[10px] font-bold uppercase tracking-[0.12em] mb-3"
             style={{ color: 'var(--cp-text-l)' }}
           >
-            Быстрые действия
+            Сегодня требуют внимания
           </h2>
-          <div className="space-y-2.5">
-            {QUICK_ACTIONS.map((action) => {
-              const Icon = action.icon;
+
+          <div className="neu-card overflow-hidden">
+            {ledeReplies.map((r, idx) => {
+              const name = (r.lead_name?.trim() || r.lead_email).trim();
+              const company = r.company_name?.trim();
+              const subject = trimSubject(r.reply_subject, 64);
+              const ago = relativeTime(r.reply_timestamp);
               return (
                 <Link
-                  key={action.href}
-                  href={action.href as Route}
-                  className={`neu-row flex items-center gap-3 sm:gap-4 px-4 py-3.5 rounded-2xl ${
-                    action.primary ? 'neu-card' : 'neu-sm'
-                  }`}
-                  style={{ borderLeft: `3px solid ${action.color}` }}
+                  key={r.id}
+                  href={'/client/replies' as Route}
+                  className="neu-row flex items-center gap-3 px-4 sm:px-5 py-3 sm:py-3.5 focus:outline-none focus-visible:ring-2"
+                  style={
+                    idx > 0
+                      ? {
+                          borderTop: '1px solid var(--cp-row-divider, rgba(180,173,164,0.18))',
+                        }
+                      : undefined
+                  }
                 >
                   <span
-                    className="inline-flex items-center justify-center w-9 h-9 rounded-xl shrink-0"
-                    style={{ background: action.bg, color: action.color }}
+                    className="inline-flex items-center justify-center w-8 h-8 rounded-xl shrink-0"
+                    style={{ background: 'rgba(74,111,165,0.10)', color: 'var(--cp-accent)' }}
+                    aria-hidden
                   >
-                    <Icon className="h-4.5 w-4.5" />
+                    <MessageSquare className="h-4 w-4" />
                   </span>
                   <div className="flex-1 min-w-0">
                     <p
-                      className="text-sm font-bold"
+                      className="text-sm font-bold truncate"
                       style={{ color: 'var(--cp-text)' }}
                     >
-                      {action.label}
+                      {name}
+                      {company && (
+                        <>
+                          <span style={{ color: 'var(--cp-text-l)' }}> · </span>
+                          <span style={{ color: 'var(--cp-text-m)', fontWeight: 600 }}>
+                            {company}
+                          </span>
+                        </>
+                      )}
                     </p>
-                    <p
-                      className="text-xs mt-0.5"
-                      style={{ color: 'var(--cp-text-m)' }}
+                    {subject && (
+                      <p
+                        className="text-xs mt-0.5 truncate"
+                        style={{ color: 'var(--cp-text-m)' }}
+                      >
+                        {subject}
+                      </p>
+                    )}
+                  </div>
+                  {ago && (
+                    <span
+                      className="text-[11px] whitespace-nowrap shrink-0 hidden sm:inline"
+                      style={{ color: 'var(--cp-text-l)' }}
                     >
-                      {action.description}
-                    </p>
-                  </div>
-                  <ArrowRight className="h-4 w-4 shrink-0" style={{ color: 'var(--cp-text-l)' }} />
+                      {ago}
+                    </span>
+                  )}
+                  <span
+                    className="text-xs font-semibold whitespace-nowrap shrink-0"
+                    style={{ color: 'var(--cp-accent)' }}
+                  >
+                    Ответить
+                  </span>
+                  <ArrowRight
+                    className="h-4 w-4 shrink-0"
+                    style={{ color: 'var(--cp-text-l)' }}
+                    aria-hidden
+                  />
                 </Link>
               );
             })}
           </div>
-        </section>
 
-        {/* ── Onboarding checklist ─────────────────────────────────── */}
-        <aside>
-          <OnboardingChecklist />
-        </aside>
-      </div>
-
-      {/* ── Last campaigns ───────────────────────────────────────────── */}
-      <section>
-        <div className="flex items-center justify-between mb-3">
-          <h2
-            className="text-[10px] font-bold uppercase tracking-[0.12em]"
-            style={{ color: 'var(--cp-text-l)' }}
-          >
-            Последние кампании
-          </h2>
-          {campaigns !== null && campaigns.length > 0 && (
-            <Link
-              href={'/client' as Route}
-              className="text-xs font-semibold inline-flex items-center gap-1"
-              style={{ color: 'var(--cp-accent)' }}
-            >
-              Все кампании <ArrowRight className="h-3 w-3" />
-            </Link>
+          {totalUnread > 3 && (
+            <div className="mt-2 text-right">
+              <Link
+                href={'/client/replies' as Route}
+                className="text-xs font-semibold inline-flex items-center gap-1"
+                style={{ color: 'var(--cp-accent)' }}
+              >
+                Все {totalUnread} {plural(totalUnread, 'ответ', 'ответа', 'ответов')}
+                <ArrowRight className="h-3 w-3" aria-hidden />
+              </Link>
+            </div>
           )}
-        </div>
 
-        {error && (
-          <div className="neu-inset rounded-2xl px-4 py-3 text-sm" style={{ color: 'var(--cp-danger)' }}>
-            {error}
-          </div>
-        )}
-
-        {campaigns === null && !error && (
-          <div className="neu-card flex items-center gap-3 px-5 py-6">
-            <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--cp-text-l)' }} />
-            <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
-              Загрузка кампаний…
-            </p>
-          </div>
-        )}
-
-        {campaigns !== null && campaigns.length === 0 && !error && (
-          <div className="neu-card px-5 py-8 sm:py-10 text-center">
-            <Mail className="mx-auto h-8 w-8 mb-3" style={{ color: 'var(--cp-text-l)' }} />
-            <p className="text-sm font-bold mb-1" style={{ color: 'var(--cp-text)' }}>
-              Кампаний пока нет
-            </p>
-            <p className="text-xs mb-4" style={{ color: 'var(--cp-text-m)' }}>
-              Когда вы запустите первую кампанию, она появится здесь
-            </p>
-            <Link
-              href={'/client/launch' as Route}
-              className="neu-btn inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold"
+          {repliesError && (
+            <p
+              className="text-[11px] mt-2"
+              style={{ color: 'var(--cp-text-l)' }}
             >
-              <Send className="h-4 w-4" /> Создать кампанию
-            </Link>
-          </div>
-        )}
+              Список ответов мог обновиться неполностью. Перезагрузите страницу, чтобы синхронизировать.
+            </p>
+          )}
+        </section>
+      )}
 
-        {recentCampaigns.length > 0 && (
-          <div className="neu-card overflow-hidden">
-            {recentCampaigns.map((c, idx) => {
-              const sent = Number(c.emails_sent_count ?? 0);
-              const replied = Number(c.reply_count ?? 0);
-              return (
-                <Link
-                  key={c.id}
-                  href={`/client/campaigns/${c.id}` as Route}
-                  className="neu-row flex items-center gap-3 px-4 sm:px-5 py-3 sm:py-3.5"
-                  style={idx > 0 ? { borderTop: '1px solid rgba(180,173,164,0.15)' } : undefined}
-                >
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-bold truncate" style={{ color: 'var(--cp-text)' }}>
-                      {c.name}
-                    </p>
-                    <p className="text-[11px] mt-0.5" style={{ color: 'var(--cp-text-m)' }}>
-                      {formatStatus(c.status)} · {sent.toLocaleString('ru-RU')} sent · {replied} reply
-                    </p>
-                  </div>
-                  <ArrowRight className="h-4 w-4 shrink-0" style={{ color: 'var(--cp-text-l)' }} />
-                </Link>
-              );
-            })}
+      {/* Campaigns section — hidden for new clients until onboarding completes */}
+      {showCampaignsSection && (
+        <section aria-labelledby="dash-campaigns-label">
+          <div className="flex items-center justify-between mb-3">
+            <h2
+              id="dash-campaigns-label"
+              className="text-[10px] font-bold uppercase tracking-[0.12em]"
+              style={{ color: 'var(--cp-text-l)' }}
+            >
+              Кампании
+            </h2>
+            {hasAnyCampaigns && (
+              <Link
+                href={'/client/campaigns' as Route}
+                className="text-xs font-semibold inline-flex items-center gap-1"
+                style={{ color: 'var(--cp-accent)' }}
+              >
+                Все кампании <ArrowRight className="h-3 w-3" aria-hidden />
+              </Link>
+            )}
           </div>
-        )}
-      </section>
+
+          {campaignsError && (
+            <div
+              className="neu-inset rounded-2xl px-4 py-3 text-sm flex items-center gap-3"
+              role="alert"
+            >
+              <span className="flex-1" style={{ color: 'var(--cp-danger)' }}>
+                {campaignsError}
+              </span>
+              <button
+                type="button"
+                onClick={retry}
+                className="neu-pill inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold"
+                style={{ color: 'var(--cp-text)' }}
+              >
+                <RefreshCw className="h-3 w-3" aria-hidden />
+                Повторить
+              </button>
+            </div>
+          )}
+
+          {campaigns === null && !campaignsError && (
+            <div className="neu-card flex items-center gap-3 px-5 py-6">
+              <Loader2
+                className="h-4 w-4 animate-spin"
+                style={{ color: 'var(--cp-text-l)' }}
+                aria-hidden
+              />
+              <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
+                Загружаем кампании…
+              </p>
+            </div>
+          )}
+
+          {campaigns !== null && campaigns.length === 0 && !campaignsError && (
+            <div className="neu-card px-5 py-8 sm:py-10 text-center">
+              <Mail
+                className="mx-auto h-8 w-8 mb-3"
+                style={{ color: 'var(--cp-text-l)' }}
+                aria-hidden
+              />
+              <p className="text-sm font-bold mb-1" style={{ color: 'var(--cp-text)' }}>
+                Кампаний пока нет
+              </p>
+              <p className="text-xs mb-4" style={{ color: 'var(--cp-text-m)' }}>
+                Когда вы запустите первую кампанию, она появится здесь.
+              </p>
+              <Link
+                href={'/client/launch' as Route}
+                className="neu-btn inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold"
+              >
+                <Send className="h-4 w-4" aria-hidden /> Создать кампанию
+              </Link>
+            </div>
+          )}
+
+          {recentCampaigns.length > 0 && (
+            <div className="neu-card overflow-hidden">
+              {recentCampaigns.map((c, idx) => {
+                const sent = Number(c.emails_sent_count ?? 0);
+                const replied = Number(c.reply_count ?? 0);
+                const contacted = Number(c.new_leads_contacted_count ?? 0);
+                const replyRate = contacted > 0 ? (replied / contacted) * 100 : 0;
+                const info = statusInfo(c.status);
+                const rateColor =
+                  replyRate < 0.5 ? 'var(--cp-danger)' : 'var(--cp-text)';
+                const last = relativeTime(c.analytics_synced_at);
+                return (
+                  <Link
+                    key={c.id}
+                    href={`/client/campaigns/${c.id}` as Route}
+                    className="neu-row flex items-center gap-3 px-4 sm:px-5 py-3 sm:py-3.5 focus:outline-none focus-visible:ring-2"
+                    style={
+                      idx > 0
+                        ? {
+                            borderTop:
+                              '1px solid var(--cp-row-divider, rgba(180,173,164,0.18))',
+                          }
+                        : undefined
+                    }
+                  >
+                    <span
+                      aria-label={info.label}
+                      title={info.label}
+                      className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
+                      style={{ background: info.dot }}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p
+                        className="text-sm font-bold truncate"
+                        style={{ color: 'var(--cp-text)' }}
+                      >
+                        {c.name}
+                      </p>
+                      <p
+                        className="text-[11px] mt-0.5 truncate"
+                        style={{ color: 'var(--cp-text-m)' }}
+                      >
+                        {info.label} · {sent.toLocaleString('ru-RU')} отправлено
+                        {replied > 0 && (
+                          <>
+                            {' · '}
+                            <span style={{ color: rateColor, fontWeight: 600 }}>
+                              {replyRate.toFixed(1)}% ответов
+                            </span>
+                          </>
+                        )}
+                        {last && <> · {last}</>}
+                      </p>
+                    </div>
+                    <ArrowRight
+                      className="h-4 w-4 shrink-0"
+                      style={{ color: 'var(--cp-text-l)' }}
+                      aria-hidden
+                    />
+                  </Link>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Onboarding checklist — only when incomplete; renders its own neu-card */}
+      {onboarding && !onboarding.complete && <OnboardingChecklist />}
     </div>
   );
 }
