@@ -58,6 +58,78 @@ describe('syncProjectContactsFromInstantly', () => {
     expect(p2?.contacts_done_synced_at).toBe(NOW.toISOString());
   });
 
+  it('uses active project period links and subtracts the saved campaign baseline', async () => {
+    const mainDb = createMockSupabase({
+      tables: {
+        projects: [
+          { id: 'p1', name: 'Acme', contacts_done: '0', contacts_done_synced_at: null },
+        ],
+        project_periods: [
+          {
+            id: 'period-1',
+            project_id: 'p1',
+            status: 'closed',
+            period_start: '2026-04-01',
+            period_end: '2026-04-30',
+          },
+          {
+            id: 'period-2',
+            project_id: 'p1',
+            status: 'active',
+            period_start: '2026-05-01',
+            period_end: null,
+          },
+        ],
+        project_contacts_history: [],
+      },
+    });
+    const instantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          // Legacy project-level link from the previous implementation must not
+          // make the active period count the whole campaign lifetime.
+          { project_id: 'p1', campaign_id: 'c1' },
+        ],
+        project_period_instantly_campaigns: [
+          {
+            project_id: 'p1',
+            period_id: 'period-2',
+            campaign_id: 'c1',
+            baseline_contacts: 1000,
+          },
+        ],
+        instantly_campaign_catalog: [
+          { id: 'c1', new_leads_contacted_count: 1250 },
+        ],
+      },
+    });
+
+    const result = await syncProjectContactsFromInstantly({
+      mainDb: mainDb as never,
+      instantlyDb: instantlyDb as never,
+      now: NOW,
+    });
+
+    expect(result.projectsWithLinks).toBe(1);
+    expect(result.projectsUpdated).toBe(1);
+
+    const p1 = mainDb.getRows('projects').find((p) => p.id === 'p1');
+    expect(p1?.contacts_done).toBe('250');
+
+    const period = mainDb.getRows('project_periods').find((p) => p.id === 'period-2');
+    expect(period?.contacts_done).toBe('250');
+
+    const history = mainDb.getRows('project_contacts_history');
+    expect(history).toContainEqual(
+      expect.objectContaining({
+        project_id: 'p1',
+        period_id: 'period-2',
+        contacts_done: 250,
+        recorded_at: '2026-04-26',
+      }),
+    );
+  });
+
   it('does not touch projects without any project_instantly_campaigns row', async () => {
     // Колди/Тригга кейс — у проекта нет привязок, специалист сам ведёт contacts_done.
     const mainDb = createMockSupabase({

@@ -40,11 +40,17 @@ function envNumber(name: string, fallback: number): number {
  */
 async function getPortalLinkedCampaignIds(): Promise<string[]> {
   if (!supabaseAdmin) return [];
-  const { data: links } = await supabaseAdmin
+  const { data: legacyLinks } = await supabaseAdmin
     .from('project_instantly_campaigns')
     .select('project_id, campaign_id');
+  const { data: periodLinks } = await supabaseAdmin
+    .from('project_period_instantly_campaigns')
+    .select('project_id, campaign_id');
 
-  const rows = (links ?? []) as { project_id?: string | null; campaign_id?: string | null }[];
+  const rows = [
+    ...((legacyLinks ?? []) as { project_id?: string | null; campaign_id?: string | null }[]),
+    ...((periodLinks ?? []) as { project_id?: string | null; campaign_id?: string | null }[]),
+  ];
   if (rows.length === 0) return [];
 
   // If main DB is unavailable, we cannot verify that the project still exists
@@ -385,11 +391,16 @@ async function notifySpecialistsAboutLead(
     let clientName: string | null = null;
 
     // Primary: find specialist via project link
-    const { data: links } = await instantlyDb
+    const { data: legacyLinks } = await instantlyDb
       .from('project_instantly_campaigns')
       .select('project_id')
       .eq('campaign_id', campaignId);
+    const { data: periodLinks } = await instantlyDb
+      .from('project_period_instantly_campaigns')
+      .select('project_id')
+      .eq('campaign_id', campaignId);
 
+    const links = [...(periodLinks ?? []), ...(legacyLinks ?? [])];
     if (links?.length) {
       const projectIds = links.map((l: { project_id: string }) => l.project_id);
       const { data: projects } = await supabaseMain
