@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
-import { isResourceAllowed } from '@/lib/clientAccess';
+import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { getEmail, markThreadAsRead } from '@/lib/instantly/client';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
@@ -60,9 +60,12 @@ export async function POST(
   if (!isResourceAllowed(campaignId, accessRows, 'campaign')) {
     return jsonError('Кампания не найдена или доступ запрещён', 404);
   }
+  const instantlyRequestOptions = {
+    accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
+  };
 
   try {
-    const original = await getEmail(emailId);
+    const original = await getEmail(emailId, instantlyRequestOptions);
     if (!original || original.campaign_id !== campaignId) {
       return jsonError('Письмо не относится к кампании', 404);
     }
@@ -74,7 +77,7 @@ export async function POST(
     const markRead = async () => {
       if (!original.thread_id) return;
       try {
-        await markThreadAsRead(original.thread_id);
+        await markThreadAsRead(original.thread_id, instantlyRequestOptions);
       } catch (err) {
         await logError('client.replies.mark_lead.mark_read_failed', err, {
           campaignId,

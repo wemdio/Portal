@@ -1,6 +1,7 @@
 export interface ClientCampaignPreset {
   id: string;
   client_user_id: string;
+  instantly_account_id: string;
   email_account_ids: string[];
   daily_limit: number;
   daily_max_leads: number;
@@ -90,6 +91,7 @@ export interface ClientCampaignLaunch {
   client_user_id: string;
   preset_id: string | null;
   instantly_campaign_id: string | null;
+  instantly_account_id: string;
   campaign_name: string;
   sequence_steps: ClientLaunchSequenceStep[];
   column_mapping: ClientLaunchColumnMapping;

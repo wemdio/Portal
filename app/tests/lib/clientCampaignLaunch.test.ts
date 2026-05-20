@@ -11,6 +11,7 @@ import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
 const validPreset: ClientCampaignPreset = {
   id: 'preset-1',
   client_user_id: 'user-1',
+  instantly_account_id: 'main',
   email_account_ids: ['sender@acme.com', 'sender2@acme.com'],
   daily_limit: 100,
   daily_max_leads: 50,

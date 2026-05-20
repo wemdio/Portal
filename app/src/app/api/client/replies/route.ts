@@ -4,7 +4,7 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { filterAllowedIds } from '@/lib/clientAccess';
+import { filterAllowedIds, getResourceInstantlyAccountId, type ClientAccessRow } from '@/lib/clientAccess';
 import { listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
@@ -114,6 +114,7 @@ async function readCampaignNames(campaignIds: string[]): Promise<Map<string, str
 async function readReplyItems(
   campaignIds: string[],
   campaignNames: Map<string, string>,
+  accessRows: ClientAccessRow[],
   search?: string,
 ): Promise<{ items: LeadListItem[]; failures: number }> {
   const settled = await Promise.allSettled(
@@ -123,6 +124,8 @@ async function readReplyItems(
         ue_type: 2,
         limit: REPLIES_PER_CAMPAIGN,
         search,
+      }, {
+        accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
       });
 
       return (data.items ?? []).map((email) => {
@@ -260,6 +263,7 @@ export async function GET(req: NextRequest) {
   const { items: replyItems, failures } = await readReplyItems(
     allowedCampaignIds,
     campaignNames,
+    accessRows,
     search,
   );
 

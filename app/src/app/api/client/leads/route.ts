@@ -6,6 +6,7 @@ import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
+import { getResourceInstantlyAccountId, type ClientAccessRow } from '@/lib/clientAccess';
 
 export const dynamic = 'force-dynamic';
 
@@ -130,7 +131,7 @@ function timestampDistance(a: string | null, b: string | null): number {
   return Math.abs(ta - tb);
 }
 
-async function enrichFromInstantlyReplies(items: LeadListItem[]) {
+async function enrichFromInstantlyReplies(items: LeadListItem[], accessRows: ClientAccessRow[]) {
   const pending = items.filter((item) => item.campaign_id && item.lead_email && !item.email_id);
   if (pending.length === 0) return;
 
@@ -146,6 +147,8 @@ async function enrichFromInstantlyReplies(items: LeadListItem[]) {
       campaign_id: campaignId,
       ue_type: 2,
       limit: REPLIES_PER_CAMPAIGN,
+    }, {
+      accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
     });
 
     const replies = (data.items ?? []).map((email) => {
@@ -181,7 +184,7 @@ export async function GET(req: NextRequest) {
   if (result.auth.isDemo) return serveClientDemo(req);
   if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
 
-  const { userId } = result.auth;
+  const { userId, accessRows } = result.auth;
 
   const url = new URL(req.url);
   const limit = Math.min(parsePositiveInt(url.searchParams.get('limit'), DEFAULT_LIMIT), MAX_LIMIT);
@@ -198,7 +201,7 @@ export async function GET(req: NextRequest) {
   const items = forwarded.items;
 
   await enrichFromSyncedLeads(userId, items);
-  await enrichFromInstantlyReplies(items);
+  await enrichFromInstantlyReplies(items, accessRows);
 
   return NextResponse.json({
     items,

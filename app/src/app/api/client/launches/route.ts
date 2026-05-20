@@ -16,6 +16,7 @@ import type {
   ClientLaunchSequenceVariant,
 } from '@/lib/clientLaunch/types';
 import { activateCampaign, createCampaign, createLeads } from '@/lib/instantly/client';
+import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
 import {
   countClientContacts,
@@ -159,6 +160,8 @@ export async function POST(req: NextRequest) {
   }
 
   const preset = presetRow as ClientCampaignPreset | null;
+  const instantlyAccountId = resolveInstantlyAccountId(preset?.instantly_account_id);
+  const instantlyRequestOptions = { accountId: instantlyAccountId };
 
   const scheduleOverride = parseScheduleOverride(body.schedule);
   const behaviorOverride = parseBehaviorOverride(body.behavior);
@@ -207,6 +210,7 @@ export async function POST(req: NextRequest) {
     .insert({
       client_user_id: userId,
       preset_id: preset!.id,
+      instantly_account_id: instantlyAccountId,
       campaign_name: sequence.name.trim(),
       sequence_steps: sequence.steps,
       column_mapping: mapping,
@@ -234,7 +238,7 @@ export async function POST(req: NextRequest) {
       scheduleOverride,
       behaviorOverride,
     });
-    const created = await createCampaign(payload);
+    const created = await createCampaign(payload, instantlyRequestOptions);
     instantlyCampaignId = (created as { id?: string }).id ?? null;
     if (!instantlyCampaignId) throw new Error('Instantly returned campaign without id');
 
@@ -248,10 +252,14 @@ export async function POST(req: NextRequest) {
     // он не попадает в эту кампанию — клиент загрузил базу, а кампания
     // пустая. skip_if_in_campaign оставляем: дедуп внутри самой кампании
     // безвреден (свежая кампания всё равно пустая на старте).
-    const leadResult = await createLeads(leads, {
-      campaign_id: instantlyCampaignId,
-      skip_if_in_campaign: true,
-    });
+    const leadResult = await createLeads(
+      leads,
+      {
+        campaign_id: instantlyCampaignId,
+        skip_if_in_campaign: true,
+      },
+      instantlyRequestOptions,
+    );
 
     const accepted = Number((leadResult as { uploaded?: number; created?: number; total_uploaded?: number }).uploaded ??
       (leadResult as { created?: number }).created ??
@@ -259,7 +267,7 @@ export async function POST(req: NextRequest) {
       leads.length);
     const skipped = leads.length - accepted;
 
-    const activatedCampaign = await activateCampaign(instantlyCampaignId);
+    const activatedCampaign = await activateCampaign(instantlyCampaignId, instantlyRequestOptions);
 
     // Сразу пишем кампанию в каталог: /api/client/campaigns читает
     // instantly_campaign_catalog, а не Instantly API напрямую. Без этого
@@ -267,13 +275,14 @@ export async function POST(req: NextRequest) {
     // (и на дашборде) до ближайшего часового синка каталога. Админские
     // флоу создания/активации/паузы делают то же. upsert не бросает —
     // сбой записи в каталог не должен ломать уже успешный запуск.
-    await upsertInstantlyCatalogFromCampaign(activatedCampaign);
+    await upsertInstantlyCatalogFromCampaign(activatedCampaign, instantlyAccountId);
 
     await supabaseInstantly.from('client_instantly_access').upsert(
       {
         client_user_id: userId,
         resource_type: 'campaign',
         resource_id: instantlyCampaignId,
+        instantly_account_id: instantlyAccountId,
         created_by: userId,
       },
       { onConflict: 'client_user_id,resource_type,resource_id' },

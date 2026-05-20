@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { InstantlyApiError } from './client';
+import { InstantlyApiError } from './errors';
 
 export const dynamic = 'force-dynamic';
 

@@ -723,7 +723,7 @@ describe('Client Portal — empty new-user state', () => {
       campaign_id: ALLOWED_CAMPAIGN,
       ue_type: 2,
       limit: 100,
-    }));
+    }), { accountId: 'main' });
     const body = (await (res as Response).json()) as {
       items: Array<Record<string, unknown>>;
     };
@@ -791,7 +791,7 @@ describe('Client Portal — empty new-user state', () => {
       campaign_id: ALLOWED_CAMPAIGN,
       ue_type: 2,
       limit: 100,
-    }));
+    }), { accountId: 'main' });
     const body = (await (res as Response).json()) as {
       items: Array<Record<string, unknown>>;
       total: number;
@@ -1095,7 +1095,7 @@ describe('Client Portal — RBAC isolation across clients', () => {
       { params: Promise.resolve({ id: ALLOWED_CAMPAIGN }) },
     );
     expect((res as Response).status).toBe(200);
-    expect(mockGetCampaign).toHaveBeenCalledWith(ALLOWED_CAMPAIGN);
+    expect(mockGetCampaign).toHaveBeenCalledWith(ALLOWED_CAMPAIGN, { accountId: 'main' });
   });
 
   it('GET /campaigns/[id]/replies of unallowed campaign → 404', async () => {
@@ -1183,7 +1183,7 @@ describe('Client Portal — RBAC isolation across clients', () => {
       eaccount: 'sender@me.com',
       subject: 'Re: Intro',
       body: { text: 'Hi' },
-    }));
+    }), { accountId: 'main' });
   });
 
   it('reply does not double-prefix an existing Re: subject', async () => {
@@ -1208,7 +1208,7 @@ describe('Client Portal — RBAC isolation across clients', () => {
     expect(mockReplyToEmail).toHaveBeenCalledWith(expect.objectContaining({
       subject: 'Re: Intro',
       body: { text: 'Hi again' },
-    }));
+    }), { accountId: 'main' });
   });
 
   it('forward sends Instantly-required body and include_original_body', async () => {
@@ -1237,7 +1237,7 @@ describe('Client Portal — RBAC isolation across clients', () => {
       subject: 'Fwd: Intro',
       body: { text: '' },
       include_original_body: true,
-    }));
+    }), { accountId: 'main' });
   });
 
   it('mark-lead stores the reply as a client forwarded lead', async () => {
@@ -1279,7 +1279,7 @@ describe('Client Portal — RBAC isolation across clients', () => {
     );
 
     expect((res as Response).status).toBe(201);
-    expect(mockMarkThreadAsRead).toHaveBeenCalledWith('t1');
+    expect(mockMarkThreadAsRead).toHaveBeenCalledWith('t1', { accountId: 'main' });
     expect(dbState.insertCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({
         table: 'client_forwarded_leads',
