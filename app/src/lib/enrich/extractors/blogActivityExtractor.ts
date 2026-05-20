@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import type { AnyNode } from 'domhandler';
 
 const RU_MONTH_PREFIXES: Array<[string, string]> = [
   ['январ', '01'],
@@ -142,7 +143,7 @@ function isDateAcceptable(iso: string): boolean {
   return iso <= cutoffIso;
 }
 
-function extractDateFromElement($: cheerio.CheerioAPI, el: cheerio.Element): string | null {
+function extractDateFromElement($: cheerio.CheerioAPI, el: AnyNode): string | null {
   const node = $(el);
   const timeDate = node.find('time[datetime]').first().attr('datetime') ?? '';
   const timeIso = parseIsoDate(timeDate);
@@ -155,7 +156,7 @@ function extractDateFromElement($: cheerio.CheerioAPI, el: cheerio.Element): str
   return findDateInText(node.text());
 }
 
-function extractPostTextFromElement($: cheerio.CheerioAPI, el: cheerio.Element): string {
+function extractPostTextFromElement($: cheerio.CheerioAPI, el: AnyNode): string {
   const node = $(el).clone();
   node.find('script, style, noscript, svg, nav, footer, form, button, time, [class*="date"], [class*="meta"]').remove();
 
