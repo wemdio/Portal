@@ -199,6 +199,28 @@ export async function runCampaignTick(
   const inProgressCount = campaignLeads.filter((cl) => (cl as { status: string }).status === 'in_progress').length;
   log('info', `Найдено ${campaignLeads.length} лидов: ${pendingCount} pending, ${inProgressCount} in_progress, ${waitingCount} waiting | отправлено сегодня: ${campaign.invites_sent_today}/${campaign.daily_invite_limit}`);
 
+  // Early-exit when every lead in this batch sits on an `invite` step AND the
+  // daily limit is already exhausted. Without this guard we'd spin through 20
+  // no-op leads with a 60–400s sleep between each (see comment below) — ~80
+  // minutes wasted while every other LinkedIn account waits its turn in the
+  // outer worker loop. Leads on `wait` / `message` steps still need to be
+  // touched (timers expire, follow-ups go out without consuming invites), so
+  // we only skip when the *entire* batch is invite-bound.
+  const limitReached = campaign.invites_sent_today >= campaign.daily_invite_limit;
+  const allOnInviteStep = (campaignLeads as Array<LiCampaignLead & { lead: LiLead }>).every((cl) => {
+    if (!cl.lead) return true;
+    const stepIdx = cl.current_step;
+    if (stepIdx >= steps.length) return false;
+    return steps[stepIdx]?.type === 'invite';
+  });
+  if (limitReached && allOnInviteStep) {
+    log(
+      'info',
+      `Дневной лимит инвайтов достигнут (${campaign.invites_sent_today}/${campaign.daily_invite_limit}) и все ${campaignLeads.length} лидов на шаге invite — тик закрыт без задержек до следующего дня`,
+    );
+    return { processed: 0, errors: 0 };
+  }
+
   let processed = 0;
   let errors = 0;
 
@@ -226,9 +248,16 @@ export async function runCampaignTick(
 
     const step = steps[stepIdx]!;
 
+    // `didNetworkWork` distinguishes "we actually hit LinkedIn (or AI)" from
+    // "we just updated DB rows / hit the daily-limit guard / skipped". Only
+    // the former needs the human-like inter-lead pause; otherwise the pause
+    // is wasted clock time that blocks every other account in the parallel
+    // worker. Defaults to true on exceptions — safer to over-pause than to
+    // hammer LI after an error.
+    let didNetworkWork = true;
     try {
       log('info', `Обработка шага ${stepIdx + 1}/${steps.length} (${step.type})`, cl.lead.name, stepIdx);
-      await processStep(step, stepIdx, cl, cl.lead, campaign, client, aiConfig, db, log, account?.id ?? null);
+      didNetworkWork = await processStep(step, stepIdx, cl, cl.lead, campaign, client, aiConfig, db, log, account?.id ?? null);
       processed++;
     } catch (e) {
       // Cooldown bubble: account already updated inside processStep — log and
@@ -253,7 +282,9 @@ export async function runCampaignTick(
         .eq('id', cl.id);
     }
 
-    // Random delay between leads
+    if (!didNetworkWork) continue;
+
+    // Random delay between leads — only after a real LinkedIn/AI call.
     const delaySec = Math.floor(Math.random() * (campaign.max_delay - campaign.min_delay + 1)) + campaign.min_delay;
     log('info', `Пауза ${delaySec}с перед следующим лидом`);
     await randomDelay(campaign.min_delay, campaign.max_delay);
@@ -265,6 +296,13 @@ export async function runCampaignTick(
 
 // ---- Step processors ----------------------------------------------------
 
+/**
+ * Returns true if this step actually hit LinkedIn/AI (sendInvite / startChat /
+ * sendMessage / getProviderId / personalize). Returns false for pure DB-only
+ * paths — limit reached, already-invited skip, no provider_id, wait timer set
+ * or still pending. Caller uses this to decide whether to sleep the human-like
+ * inter-lead pause.
+ */
 async function processStep(
   step: LiCampaignStep,
   stepIdx: number,
@@ -276,20 +314,19 @@ async function processStep(
   db: NonNullable<typeof supabaseAdmin>,
   log: LogFn,
   accountDbId: string | null,
-): Promise<void> {
+): Promise<boolean> {
   switch (step.type) {
     case 'invite':
-      await processInviteStep(step, stepIdx, cl, lead, campaign, client, aiConfig, db, log, accountDbId);
-      break;
+      return processInviteStep(step, stepIdx, cl, lead, campaign, client, aiConfig, db, log, accountDbId);
 
     case 'wait':
+      // Wait steps are pure DB bookkeeping — never any LinkedIn traffic.
       await processWaitStep(step, stepIdx, cl, db, log, lead.name);
-      break;
+      return false;
 
     case 'message':
     case 'follow_up':
-      await processMessageStep(step, stepIdx, cl, lead, campaign, client, aiConfig, db, log);
-      break;
+      return processMessageStep(step, stepIdx, cl, lead, campaign, client, aiConfig, db, log);
   }
 }
 
@@ -304,7 +341,7 @@ async function processInviteStep(
   db: NonNullable<typeof supabaseAdmin>,
   log: LogFn,
   accountDbId: string | null,
-): Promise<void> {
+): Promise<boolean> {
   const now = new Date().toISOString();
 
   // If the lead is already invited/connected/messaged/replied, skip the API
@@ -328,12 +365,12 @@ async function processInviteStep(
         updated_at: now,
       })
       .eq('id', cl.id);
-    return;
+    return false;
   }
 
   if (campaign.invites_sent_today >= campaign.daily_invite_limit) {
     log('warning', `Дневной лимит инвайтов достигнут (${campaign.invites_sent_today}/${campaign.daily_invite_limit}) — пропуск`, lead.name, stepIdx);
-    return;
+    return false;
   }
 
   let providerId = lead.linkedin_id;
@@ -401,7 +438,9 @@ async function processInviteStep(
             updated_at: now,
           })
           .eq('id', cl.id);
-        return;
+        // sendInvite() did hit LinkedIn (it returned the already_invited error),
+        // so honour the human-like inter-lead pause.
+        return true;
       }
 
       // invitation_limit / account_restricted — these ARE account-wide signals.
@@ -453,6 +492,7 @@ async function processInviteStep(
     .eq('id', cl.id);
 
   log('info', `Инвайт отправлен (${newCount}/${campaign.daily_invite_limit} сегодня)`, lead.name, stepIdx);
+  return true;
 }
 
 async function processWaitStep(
@@ -505,7 +545,7 @@ async function processMessageStep(
   aiConfig: { apiKey: string; model?: string },
   db: NonNullable<typeof supabaseAdmin>,
   log: LogFn,
-): Promise<void> {
+): Promise<boolean> {
   const now = new Date().toISOString();
 
   if (!lead.chat_id) {
@@ -530,7 +570,7 @@ async function processMessageStep(
         lead.name,
         stepIdx,
       );
-      return;
+      return false;
     }
     if (lead.status === 'new') {
       await db
@@ -547,7 +587,7 @@ async function processMessageStep(
         lead.name,
         stepIdx,
       );
-      return;
+      return false;
     }
 
     if (lead.linkedin_id) {
@@ -563,11 +603,12 @@ async function processMessageStep(
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         log('warning', `Не удалось начать чат (ещё нет коннекта?): ${msg}`, lead.name, stepIdx);
-        return;
+        // startChat() did hit LinkedIn — keep the human-like pause.
+        return true;
       }
     } else {
       log('warning', 'Нет chat_id и linkedin_id — невозможно отправить сообщение, пропуск', lead.name, stepIdx);
-      return;
+      return false;
     }
   }
 
@@ -581,7 +622,10 @@ async function processMessageStep(
 
   if (!message.trim()) {
     log('warning', 'Пустое сообщение после генерации — пропуск', lead.name, stepIdx);
-    return;
+    // If AI-personalization was attempted above it already hit the LLM — but
+    // we still treat this as no-network for pacing purposes: an empty message
+    // is operator-error, not LI traffic. The next tick will retry.
+    return false;
   }
 
   log('info', `Отправка сообщения: "${message.slice(0, 80)}${message.length > 80 ? '…' : ''}"`, lead.name, stepIdx);
@@ -598,4 +642,5 @@ async function processMessageStep(
     .eq('id', cl.id);
 
   log('info', `Сообщение отправлено${isLast ? ' (последний шаг — лид завершён)' : ''}`, lead.name, stepIdx);
+  return true;
 }
