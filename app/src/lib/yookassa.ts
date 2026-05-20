@@ -4,6 +4,7 @@ const YOOKASSA_API = 'https://api.yookassa.ru/v3';
 
 const shopId = process.env.YOOKASSA_SHOP_ID;
 const secretKey = process.env.YOOKASSA_SECRET_KEY;
+const DEFAULT_INVOICE_VALIDITY_DAYS = 30;
 
 function basicAuth(): string {
   if (!shopId || !secretKey) {
@@ -71,10 +72,15 @@ export interface CreateInvoiceParams {
   savePaymentMethod?: boolean;
 }
 
+export function getDefaultYookassaInvoiceExpiresAt(now = new Date()): string {
+  const expiresAt = new Date(now.getTime());
+  expiresAt.setUTCDate(expiresAt.getUTCDate() + DEFAULT_INVOICE_VALIDITY_DAYS);
+  expiresAt.setUTCSeconds(0, 0);
+  return expiresAt.toISOString();
+}
+
 export async function createYookassaInvoice(params: CreateInvoiceParams): Promise<YookassaInvoice> {
-  const expiresAt =
-    params.expiresAt ??
-    new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAt = params.expiresAt ?? getDefaultYookassaInvoiceExpiresAt();
 
   const body = {
     payment_data: {
