@@ -209,6 +209,47 @@ export function getDemoReplies(campaignId: string) {
   };
 }
 
+export function getDemoRepliesResponse(limit: number, offset: number) {
+  const items = DEMO_REPLIES
+    .slice()
+    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+    .map((reply) => ({
+      id: `reply:${reply.campaign_id}:${reply.id}`,
+      source: 'reply',
+      qualification_id: null,
+      campaign_id: reply.campaign_id,
+      campaign_name: null,
+      lead_email: reply.from_email,
+      lead_name: reply.from_name,
+      company_name: null,
+      phone: null,
+      website: null,
+      linkedin_url: null,
+      reply_subject: reply.subject,
+      reply_body: reply.body,
+      last_outbound_preview: null,
+      reply_timestamp: reply.timestamp,
+      status: reply.is_lead ? 'lead' : 'reply',
+      ai_reason: null,
+      created_at: reply.timestamp,
+      client_lead_comments: [],
+      email_id: reply.id,
+      lead_id: null,
+      thread_id: null,
+      is_unread: false,
+      ai_interest_value: null,
+      is_lead: reply.is_lead,
+      lead_entry_id: reply.is_lead ? `demo-lead-${reply.id.split('-').pop()}` : null,
+    }));
+
+  return {
+    items: items.slice(offset, offset + limit),
+    total: items.length,
+    limit,
+    offset,
+  };
+}
+
 // ─── Лиды (переданные клиенту) ───────────────────────────────────────────────
 
 interface DemoLead {
@@ -632,8 +673,8 @@ export const DEMO_SUPPORT_RESPONSE = {
 
 // ─── Отчёт по кампаниям ──────────────────────────────────────────────────────
 
-export const DEMO_REPORT_RESPONSE = (() => {
-  const totals = DEMO_CAMPAIGNS.reduce(
+function buildDemoReportResponse(campaigns: DemoCampaign[]) {
+  const totals = campaigns.reduce(
     (acc, c) => {
       acc.contacts += c.new_leads_contacted_count;
       acc.sent += c.emails_sent_count;
@@ -645,11 +686,11 @@ export const DEMO_REPORT_RESPONSE = (() => {
     },
     { contacts: 0, sent: 0, opened: 0, replies: 0, leads: 0, bounced: 0 },
   );
-  const openPct = ((totals.opened / totals.sent) * 100).toFixed(1);
-  const replyPct = ((totals.replies / totals.contacts) * 100).toFixed(1);
+  const openPct = totals.sent > 0 ? ((totals.opened / totals.sent) * 100).toFixed(1) : '0.0';
+  const replyPct = totals.contacts > 0 ? ((totals.replies / totals.contacts) * 100).toFixed(1) : '0.0';
   const rows: (string | number)[][] = [
     ['Дата', 'Кампания', 'Контактов', 'Отправлено писем', 'Открытий', '% открытий', 'Ответов', '% ответов', 'Браков'],
-    ...DEMO_CAMPAIGNS.map((c) => [
+    ...campaigns.map((c) => [
       '17.05.2026',
       c.name,
       c.new_leads_contacted_count,
@@ -666,7 +707,7 @@ export const DEMO_REPORT_RESPONSE = (() => {
     csvText: rows.map((r) => r.join(';')).join('\n'),
     rows,
     summary: {
-      totalCampaigns: DEMO_CAMPAIGNS.length,
+      totalCampaigns: campaigns.length,
       totalContacts: totals.contacts,
       totalEmailsSent: totals.sent,
       totalOpened: totals.opened,
@@ -677,7 +718,21 @@ export const DEMO_REPORT_RESPONSE = (() => {
     },
     campaignData: {},
   };
-})();
+}
+
+export function getDemoReportResponse(campaignIds?: string[]) {
+  const selected = Array.isArray(campaignIds)
+    ? campaignIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    : [];
+  const requested = new Set(selected);
+  const campaigns = requested.size > 0
+    ? DEMO_CAMPAIGNS.filter((c) => requested.has(c.id))
+    : DEMO_CAMPAIGNS;
+
+  return buildDemoReportResponse(campaigns);
+}
+
+export const DEMO_REPORT_RESPONSE = getDemoReportResponse();
 
 // ─── B2B-поиск компаний ──────────────────────────────────────────────────────
 

@@ -11,6 +11,12 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 30;
 
+function buildForwardSubject(subject?: string | null): string {
+  const trimmed = subject?.trim();
+  if (!trimmed) return 'Fwd:';
+  return /^fwd?:/i.test(trimmed) ? trimmed : `Fwd: ${trimmed}`;
+}
+
 /**
  * POST /api/client/campaigns/[id]/replies/[emailId]/forward
  * Body: { to_email: string }
@@ -58,9 +64,12 @@ export async function POST(
     }
 
     await forwardEmail({
-      email_uuid: emailId,
-      from_email: eaccount,
-      to_email: validation.to_email!,
+      reply_to_uuid: emailId,
+      eaccount,
+      to_address_email_list: validation.to_email!,
+      subject: buildForwardSubject(original.subject),
+      body: { text: 'Пересылаю письмо ниже.' },
+      include_original_body: true,
     });
 
     void logAudit('client.campaign.replies.forward.sent', 'Client forwarded reply via Instantly', {

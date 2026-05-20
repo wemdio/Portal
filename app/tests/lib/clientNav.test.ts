@@ -76,6 +76,7 @@ describe('client nav IA', () => {
       '/client',
       '/client/dashboard',
       '/client/projects',
+      '/client/replies',
       '/client/leads',
       '/client/bases',
       '/client/reports',
@@ -132,6 +133,7 @@ describe('client nav IA', () => {
     expect(monitoring.items.map((i) => i.id)).toEqual([
       'campaigns',
       'replies',
+      'leads',
       'reports',
       'tariff',
     ]);
@@ -155,10 +157,13 @@ describe('client nav IA', () => {
     expect(launch?.primaryCta).toBe(true);
   });
 
-  it('label rename: «Лиды» → «Ответы и лиды»', () => {
+  it('splits replies and leads into separate monitoring tabs', () => {
     const replies = allItems.find((i) => i.id === 'replies');
-    expect(replies?.label).toBe('Ответы и лиды');
-    expect(replies?.href).toBe('/client/leads');
+    const leads = allItems.find((i) => i.id === 'leads');
+    expect(replies?.label).toBe('Ответы');
+    expect(replies?.href).toBe('/client/replies');
+    expect(leads?.label).toBe('Лиды');
+    expect(leads?.href).toBe('/client/leads');
   });
 
   it('label rename: «Базы» → «Базы в кампаниях»', () => {

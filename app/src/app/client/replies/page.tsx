@@ -41,6 +41,8 @@ type ForwardedLead = {
   thread_id?: string | null;
   is_unread?: boolean;
   ai_interest_value?: number | null;
+  is_lead?: boolean;
+  lead_entry_id?: string | null;
 };
 
 type LeadsResponse = {
@@ -60,14 +62,19 @@ function formatDate(iso: string | null): string {
 function LeadDetail({
   lead,
   onBack,
+  onMarkedLead,
 }: {
   lead: ForwardedLead;
   onBack: () => void;
+  onMarkedLead?: () => void;
 }) {
   const [comments, setComments] = useState<LeadComment[]>([]);
   const [loadingComments, setLoadingComments] = useState(true);
   const [newComment, setNewComment] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [isLead, setIsLead] = useState(Boolean(lead.is_lead));
+  const [markingLead, setMarkingLead] = useState(false);
+  const [markLeadError, setMarkLeadError] = useState('');
   const canComment = lead.source !== 'reply';
   const canReplyByEmail = Boolean(lead.campaign_id && lead.email_id);
 
@@ -112,6 +119,23 @@ function LeadDetail({
       // ignore
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleMarkLead = async () => {
+    if (!lead.campaign_id || !lead.email_id || isLead) return;
+    setMarkingLead(true);
+    setMarkLeadError('');
+    try {
+      await clientApiFetch(`/campaigns/${lead.campaign_id}/replies/${lead.email_id}/mark-lead`, {
+        method: 'POST',
+      });
+      setIsLead(true);
+      onMarkedLead?.();
+    } catch (err) {
+      setMarkLeadError(err instanceof Error ? err.message : 'Не удалось пометить как лид');
+    } finally {
+      setMarkingLead(false);
     }
   };
 
@@ -172,6 +196,34 @@ function LeadDetail({
             {lead.reply_body ?? '(пусто)'}
           </div>
         </div>
+
+        {canReplyByEmail && (
+          <div className="neu-sm mt-5 p-4">
+            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+              <div>
+                <p className="text-sm font-bold mb-1" style={{ color: 'var(--cp-text)' }}>
+                  Лид из этого диалога
+                </p>
+                <p className="text-xs leading-relaxed" style={{ color: 'var(--cp-text-m)' }}>
+                  Помечайте как лид те ответы, где есть реальный интерес, запрос цены, созвона или материалов. Такие диалоги попадут в отдельную вкладку «Лиды», где их удобно вести дальше и оставлять комментарии.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleMarkLead()}
+                disabled={isLead || markingLead}
+                className="neu-btn shrink-0 px-4 py-2 text-xs font-semibold disabled:opacity-60"
+              >
+                {isLead ? 'Уже в лидах' : markingLead ? 'Сохраняем...' : 'Пометить как лид'}
+              </button>
+            </div>
+            {markLeadError && (
+              <p className="text-xs mt-2" style={{ color: 'var(--cp-danger)' }}>
+                {markLeadError}
+              </p>
+            )}
+          </div>
+        )}
 
         {canReplyByEmail && (
           <ReplyThreadActions
@@ -258,7 +310,7 @@ function LeadCard({
   onClick: () => void;
 }) {
   const commentCount = lead.client_lead_comments?.[0]?.count ?? 0;
-  const sourceLabel = lead.source === 'reply' ? 'Ответ' : 'Лид';
+  const sourceLabel = lead.is_lead ? 'Лид' : 'Ответ';
 
   return (
     <button onClick={onClick} className="neu-sm block w-full text-left p-4 sm:p-5 transition-shadow hover:shadow-md">
@@ -325,7 +377,7 @@ export default function ClientLeadsPage() {
     setError('');
     try {
       const data = await clientApiFetch<LeadsResponse>(
-        `/leads?limit=${LIMIT}&offset=${offset}`,
+        `/replies?limit=${LIMIT}&offset=${offset}`,
       );
       setLeads(data.items);
       setTotal(data.total);
@@ -346,6 +398,12 @@ export default function ClientLeadsPage() {
         <LeadDetail
           lead={selectedLead}
           onBack={() => setSelectedLead(null)}
+          onMarkedLead={() => {
+            setLeads((prev) => prev.map((lead) => (
+              lead.id === selectedLead.id ? { ...lead, is_lead: true } : lead
+            )));
+            setSelectedLead((lead) => (lead ? { ...lead, is_lead: true } : lead));
+          }}
         />
       </div>
     );
@@ -361,10 +419,10 @@ export default function ClientLeadsPage() {
           >
             <Users className="h-4.5 w-4.5" />
           </span>
-          Лиды
+          Ответы
         </h1>
         <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
-          Диалоги, которые вы пометили как лиды из вкладки «Ответы»
+          Все ответы получателей по вашим кампаниям
         </p>
       </div>
 
@@ -385,24 +443,24 @@ export default function ClientLeadsPage() {
             style={{ color: '#10B981' }}
           />
           <p className="text-base sm:text-lg font-bold mb-2 relative" style={{ color: 'var(--cp-text)' }}>
-            Лидов пока нет
+            Ответов пока нет
           </p>
           <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-text-m)' }}>
-            Откройте вкладку «Ответы» и помечайте перспективные диалоги как лиды.
-            Здесь будет отдельный рабочий список для дальнейшей обработки и комментариев.
+            Ответы появятся здесь после того, как получатели ваших кампаний напишут вам.
+            Когда ответ выглядит перспективным, откройте диалог и пометьте его как лид.
           </p>
           <Link
-            href={'/client/replies' as Route}
+            href={'/client/launch' as Route}
             className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold"
           >
             <Send className="h-4 w-4" />
-            Перейти к ответам
+            Создать кампанию
           </Link>
         </div>
       ) : (
         <>
           <p className="text-xs font-semibold mb-3" style={{ color: 'var(--cp-text-l)' }}>
-            Всего лидов: {total}
+            Всего ответов: {total}
           </p>
           <div className="space-y-3">
             {leads.map((lead) => (

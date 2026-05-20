@@ -72,7 +72,7 @@ export function BriefAutofillPanel({
           type="text"
           value={website}
           onChange={(e) => setWebsite(e.target.value)}
-          placeholder="например, redev.ru или https://acme.com"
+          placeholder="например, roga-kopyta.example или https://example.com"
           className="flex-1 rounded-lg border border-indigo-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
           disabled={loading}
         />

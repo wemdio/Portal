@@ -22,24 +22,34 @@ import {
   DEMO_PRESET_RESPONSE,
   DEMO_TARIFF_RESPONSE,
   DEMO_LAUNCHES_RESPONSE,
-  DEMO_REPORT_RESPONSE,
   DEMO_SUPPORT_RESPONSE,
   DEMO_COMPANIES_SEARCH_RESPONSE,
   DEMO_ACTIVITY_TYPES_RESPONSE,
   DEMO_LEAD_COMMENTS,
   getDemoLeadsResponse,
+  getDemoRepliesResponse,
   getDemoReplies,
   getDemoCampaignDetail,
   getDemoProjectDetail,
+  getDemoReportResponse,
 } from './fixtures';
 
 function json(body: unknown): NextResponse {
   return NextResponse.json(body);
 }
 
-export function serveClientDemo(req: NextRequest): NextResponse {
+async function readJsonBody<T>(req: NextRequest): Promise<T | null> {
+  try {
+    return (await req.clone().json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+export async function serveClientDemo(req: NextRequest): Promise<NextResponse> {
+  const pathname = req.nextUrl?.pathname ?? new URL(req.url).pathname;
   const path =
-    req.nextUrl.pathname.replace(/^\/api\/client/, '').replace(/\/+$/, '') || '/';
+    pathname.replace(/^\/api\/client/, '').replace(/\/+$/, '') || '/';
   const seg = path.split('/').filter(Boolean);
 
   switch (path) {
@@ -59,8 +69,13 @@ export function serveClientDemo(req: NextRequest): NextResponse {
       return json(DEMO_TARIFF_RESPONSE);
     case '/launches':
       return json(DEMO_LAUNCHES_RESPONSE);
-    case '/reports':
-      return json(DEMO_REPORT_RESPONSE);
+    case '/reports': {
+      const body = await readJsonBody<{ campaignIds?: unknown }>(req);
+      const campaignIds = Array.isArray(body?.campaignIds)
+        ? body.campaignIds.filter((id): id is string => typeof id === 'string')
+        : [];
+      return json(getDemoReportResponse(campaignIds));
+    }
     case '/support/thread':
       return json(DEMO_SUPPORT_RESPONSE);
     case '/companies-search':
@@ -73,6 +88,13 @@ export function serveClientDemo(req: NextRequest): NextResponse {
       const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
       const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
       return json(getDemoLeadsResponse(limit, offset));
+    }
+    case '/replies': {
+      const rawLimit = Number(req.nextUrl.searchParams.get('limit') ?? '50');
+      const rawOffset = Number(req.nextUrl.searchParams.get('offset') ?? '0');
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
+      const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
+      return json(getDemoRepliesResponse(limit, offset));
     }
     default:
       break;
