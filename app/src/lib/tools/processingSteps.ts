@@ -148,26 +148,84 @@ export async function stepEmailDedup(
    STEP: Find emails (scrape from websites)
    ═══════════════════════════════════════════ */
 
+/**
+ * Канон-имя колонки куда find_emails пишет scrape-результат когда target='separate'.
+ *
+ * Зачем отдельная колонка: если в исходной базе уже есть email от sales-process'а
+ * (введены вручную, проверены продажниками), скрапленные с сайтов email — это
+ * ДРУГОЕ качество. Юзер хочет хранить их в разных колонках, чтобы:
+ *   - validate'ить отдельно (например, доверять «своим» без re-validate);
+ *   - в финальном экспорте видеть оба источника;
+ *   - при выборе «обе колонки» merge на финале объединит их через запятую
+ *     (с дедупом case-insensitive — см. mergeFoundEmailColumn в baseConstructorWorker).
+ *
+ * Важно: имя НЕ совпадает ни с одним alias'ом 'email'/'e-mail'/'почта'/'mail' —
+ * findColumnIndex делает exact-match, так что эта колонка не будет случайно
+ * подобрана как «email-column» в других шагах (validate знает про неё отдельно).
+ */
+export const FOUND_EMAIL_COL = 'Найденный Email';
+
+export interface StepFindEmailsOptions {
+  /**
+   * Куда писать scrape-результат:
+   *   - 'same' (legacy): дополняем существующую email-колонку (или создаём если её нет).
+   *     `find_emails` исторически работал именно так, юзер использовал шаг чтобы
+   *     добрать email для строк с сайтом но без email — это сохраняется.
+   *   - 'separate': создаём отдельную колонку FOUND_EMAIL_COL и пишем ТУДА.
+   *     Исходная email-колонка не трогается. Полезно когда юзер хочет сохранить
+   *     первичные данные и иметь scrape-результат «рядом», а потом отдельно решать
+   *     что валидировать / как мерджить.
+   *
+   * Если target='separate' но email-колонки в исходных данных нет — fallback'имся
+   * на 'same' (создаём «Email» как раньше). Опция теряет смысл когда нет «исходных».
+   */
+  target?: 'same' | 'separate';
+}
+
 export async function stepFindEmails(
   data: string[][],
   onProgress: ProgressFn,
   isCancelled?: CancelCheckFn,
+  options?: StepFindEmailsOptions,
 ): Promise<string[][]> {
   let header = [...data[0]];
   let body = data.slice(1).map((r) => [...r]);
   const siteIdx = findColumnIndex(header, 'сайт', 'site', 'website', 'url', 'домен', 'domain');
   if (siteIdx < 0) { await onProgress(100); return data; }
 
-  let emailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
-  if (emailIdx < 0) {
-    emailIdx = header.length;
+  const existingEmailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
+  const wantsSeparate = options?.target === 'separate';
+
+  // Target column resolution:
+  //   - target='separate' + есть существующая email-колонка → пишем в FOUND_EMAIL_COL (новая);
+  //   - target='separate' + НЕТ email-колонки → нечего «отделять», fallback к 'same' (создаём «Email»);
+  //   - target='same' (или не указан) + есть email-колонка → дополняем её (legacy);
+  //   - target='same' + НЕТ email-колонки → создаём «Email».
+  let targetIdx: number;
+  if (wantsSeparate && existingEmailIdx >= 0) {
+    const foundExistingFoundIdx = header.findIndex((h) => h.trim() === FOUND_EMAIL_COL);
+    if (foundExistingFoundIdx >= 0) {
+      // Re-run / resume: колонка уже создана прошлым проходом. Используем её.
+      targetIdx = foundExistingFoundIdx;
+    } else {
+      targetIdx = header.length;
+      header = [...header, FOUND_EMAIL_COL];
+      body = body.map((row) => [...row, '']);
+    }
+  } else if (existingEmailIdx >= 0) {
+    targetIdx = existingEmailIdx;
+  } else {
+    targetIdx = header.length;
     header = [...header, 'Email'];
     body = body.map((row) => [...row, '']);
   }
 
+  // Для строк где target-колонка уже заполнена — скипаем (идемпотентно
+  // при resume, и сохраняет ручной ввод когда target='same').
+  // Для 'separate' это значит «не перезатираем найденный ранее scrape-результат».
   const toProcess = body
     .map((row, i) => ({ row, i, url: (row[siteIdx] || '').trim() }))
-    .filter((r) => r.url && !extractEmail(r.row[emailIdx] || ''));
+    .filter((r) => r.url && !extractEmail(r.row[targetIdx] || ''));
 
   if (toProcess.length === 0) { await onProgress(100); return [header, ...body]; }
 
@@ -177,7 +235,7 @@ export async function stepFindEmails(
     try {
       const { emails } = await scrapeEmails(item.url, { timeout: 15_000, maxPages: 5 });
       if (emails.length > 0) {
-        body[item.i][emailIdx] = emails.join(', ');
+        body[item.i][targetIdx] = emails.join(', ');
       }
     } catch { /* skip */ }
     done++;
@@ -759,40 +817,114 @@ export async function stepPersonalize(
 
 const VALIDATION_CONCURRENCY = 10;
 
+export type ValidateEmailsTarget = 'original' | 'found' | 'both';
+
+export interface StepValidateEmailsOptions {
+  /**
+   * Какие колонки валидировать (имеет смысл когда find_emails работал в target='separate'
+   * и создал FOUND_EMAIL_COL рядом с исходной):
+   *   - 'original' (default): только исходная email-колонка (alias-based: email/e-mail/...).
+   *     Когда юзер доверяет своим email'ам и хочет проверить только их.
+   *   - 'found': только колонка FOUND_EMAIL_COL (scrape-результат). Когда юзер
+   *     доверяет своим email'ам и хочет проверить только то что нашёл worker
+     *     (бывает мусор типа noreply@/info@).
+ *   - 'both': обе колонки независимо. В каждой колонке невалидные → удаляются
+ *     (заменяются пустой строкой); строка остаётся пока хотя бы в одной
+ *     колонке остался валидный email после фильтра.
+ *
+ * Если запрошенной колонки нет в данных — фильтрация по ней просто скипается
+ * (no-op). Это совместимо со сценарием когда find_emails не запускался
+ * и FOUND_EMAIL_COL отсутствует — validate в режиме 'both'/'found' тогда
+ * деградирует до 'original'/no-op без ошибок.
+ */
+  validateTarget?: ValidateEmailsTarget;
+}
+
 export async function stepValidateEmails(
   data: string[][],
   onProgress: ProgressFn,
   isCancelled?: CancelCheckFn,
+  options?: StepValidateEmailsOptions,
 ): Promise<string[][]> {
   const header = data[0];
   const body = data.slice(1);
-  const emailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
-  if (emailIdx < 0) { await onProgress(100); return data; }
+  const originalEmailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
+  const foundEmailIdx = header.findIndex((h) => h.trim() === FOUND_EMAIL_COL);
 
-  const newHeader = [...header, 'Email Статус', 'Email Провайдер'];
-  const newBody = body.map((row) => [...row, '', '']);
+  const target: ValidateEmailsTarget = options?.validateTarget ?? 'original';
 
-  const toValidate = newBody
-    .map((row, i) => ({ row, i, email: extractEmail(row[emailIdx] || '') }))
-    .filter((item) => item.email);
+  // Резолвим какие индексы реально валидируем. Если запрошен 'both' но одна
+  // из колонок отсутствует — берём только что есть; если обе отсутствуют —
+  // ранний return (нечего валидировать).
+  const indicesToValidate: number[] = [];
+  if ((target === 'original' || target === 'both') && originalEmailIdx >= 0) {
+    indicesToValidate.push(originalEmailIdx);
+  }
+  if ((target === 'found' || target === 'both') && foundEmailIdx >= 0) {
+    indicesToValidate.push(foundEmailIdx);
+  }
+  if (indicesToValidate.length === 0) { await onProgress(100); return data; }
+
+  // Status/provider колонки добавляем по одной паре на каждую валидируемую
+  // колонку. Имена префиксуем явно чтобы юзер в финальном экспорте понимал
+  // что относится к чему: «Email Статус» для original, «Найденный Email Статус»
+  // для found.
+  const newHeader = [...header];
+  const newBody = body.map((row) => [...row]);
+  const meta: { srcIdx: number; statusIdx: number; providerIdx: number; label: string }[] = [];
+  for (const idx of indicesToValidate) {
+    const srcLabel = header[idx];
+    const statusName = `${srcLabel} Статус`;
+    const providerName = `${srcLabel} Провайдер`;
+    const statusIdx = newHeader.length;
+    newHeader.push(statusName);
+    const providerIdx = newHeader.length;
+    newHeader.push(providerName);
+    for (const row of newBody) { row.push(''); row.push(''); }
+    meta.push({ srcIdx: idx, statusIdx, providerIdx, label: srcLabel });
+  }
+
+  // Собираем плоский список (rowIdx, sourceIdx, email) для общего пула с
+  // concurrency=10. Это лучше чем валидировать колонки последовательно —
+  // на «both» получим 2x скорость и общий domainCache для catch-all/free
+  // лукапов.
+  type ValidationItem = {
+    rowIdx: number;
+    srcIdx: number;
+    email: string;
+    statusIdx: number;
+    providerIdx: number;
+  };
+  const toValidate: ValidationItem[] = [];
+  for (let r = 0; r < newBody.length; r += 1) {
+    for (const m of meta) {
+      const email = extractEmail(newBody[r][m.srcIdx] || '');
+      if (email) {
+        toValidate.push({
+          rowIdx: r,
+          srcIdx: m.srcIdx,
+          email,
+          statusIdx: m.statusIdx,
+          providerIdx: m.providerIdx,
+        });
+      }
+    }
+  }
 
   if (toValidate.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 
-  const statusIdx = newHeader.length - 2;
-  const providerIdx = newHeader.length - 1;
   const domainCache = new Map<string, DomainInfo>();
   let done = 0;
 
   await processInPool(toValidate, VALIDATION_CONCURRENCY, async (item) => {
     if (isCancelled && await isCancelled()) return;
-    const email = item.email!;
     try {
-      const result = await validateEmail(email, domainCache);
-      newBody[item.i][statusIdx] = result.result;
-      const domain = email.split('@')[1] || '';
-      newBody[item.i][providerIdx] = result.is_free ? 'free' : result.is_catch_all ? 'catch-all' : domain;
+      const result = await validateEmail(item.email, domainCache);
+      newBody[item.rowIdx][item.statusIdx] = result.result;
+      const domain = item.email.split('@')[1] || '';
+      newBody[item.rowIdx][item.providerIdx] = result.is_free ? 'free' : result.is_catch_all ? 'catch-all' : domain;
     } catch {
-      newBody[item.i][statusIdx] = 'error';
+      newBody[item.rowIdx][item.statusIdx] = 'error';
     }
     done++;
     if (done % 5 === 0 || done === toValidate.length) {
@@ -800,9 +932,33 @@ export async function stepValidateEmails(
     }
   });
 
+  // Фильтрация: строка остаётся ЕСЛИ хотя бы в одной из валидируемых колонок
+  // email прошёл (ok/catch_all). Это семантика «строка имеет хотя бы один
+  // рабочий email» — для outreach это и нужно.
+  //
+  // Дополнительно: для каждой строки в провалившихся колонках обнуляем email
+  // (status != ok/catch_all → пишем '' в src-колонку), чтобы в финальном файле
+  // не торчал заведомо плохой email. Это касается ТОЛЬКО валидируемых колонок —
+  // другие колонки остаются как есть.
+  const VALID_STATUSES = new Set(['ok', 'catch_all']);
   const filtered = newBody.filter((row) => {
-    const status = row[statusIdx];
-    return status === 'ok' || status === 'catch_all' || status === '';
+    let anyValid = false;
+    for (const m of meta) {
+      const status = row[m.statusIdx];
+      if (status === '') continue; // пустой email в этой колонке — не учитываем
+      if (VALID_STATUSES.has(status)) {
+        anyValid = true;
+      } else {
+        // Невалидный — чистим src-ячейку чтобы потомки (export, merge) не видели.
+        row[m.srcIdx] = '';
+      }
+    }
+    // Если ни одна колонка не имела email вовсе — оставляем строку (как раньше,
+    // status='' трактовался как «не валидировался»). Это сохраняет совместимость
+    // со сценариями где email колонка есть, но пустая для конкретной строки.
+    const hadAnyEmail = meta.some((m) => row[m.statusIdx] !== '');
+    if (!hadAnyEmail) return true;
+    return anyValid;
   });
 
   await onProgress(100);
