@@ -533,25 +533,34 @@ services:
     networks:
       - portal-network
 
-  polza-reports:
-    image: ${DOCKER_USERNAME}/portal-polza-reports:prod
-    container_name: portal-polza-reports
-    # Stateless Coldy scraper + Trigga CSV → xlsx. Reached only from the portal
-    # service inside portal-network; no port exposed publicly.
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          memory: 2048M
-          cpus: '1.5'
-    restart: unless-stopped
-    networks:
-      - portal-network
+  # ─── polza-reports — TEMPORARILY DISABLED ───
+  # Image ${DOCKER_USERNAME}/portal-polza-reports:prod is missing from Docker
+  # Hub registry, which blocks every prod deploy on `docker compose pull`. Service
+  # was added in d271201a feat(polza-reports) but the CI/CD push pipeline for it
+  # was never wired up. Re-enable after the image is built and pushed:
+  #   cd services/polza-reports && docker build -t dimakuladmed/portal-polza-reports:prod . && docker push dimakuladmed/portal-polza-reports:prod
+  # While disabled, portal-side Coldy/Trigga report endpoints return network errors
+  # (handled as soft-fails — the rest of the portal stays up).
+  #
+  # polza-reports:
+  #   image: ${DOCKER_USERNAME}/portal-polza-reports:prod
+  #   container_name: portal-polza-reports
+  #   # Stateless Coldy scraper + Trigga CSV → xlsx. Reached only from the portal
+  #   # service inside portal-network; no port exposed publicly.
+  #   healthcheck:
+  #     test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 30s
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 2048M
+  #         cpus: '1.5'
+  #   restart: unless-stopped
+  #   networks:
+  #     - portal-network
 
   health-check:
     image: ${DOCKER_USERNAME}/portal-health-check:prod
