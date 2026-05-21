@@ -345,6 +345,7 @@ function SettingsTab({ campaign, onSave }: {
 function LogsTab({ campaignId }: { campaignId: string }) {
   const [logs, setLogs] = useState<OutreachLog[]>([]);
   const [loading, setLoading] = useState(true);
+  const [exportingRange, setExportingRange] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isAutoScroll = useRef(true);
@@ -357,6 +358,41 @@ function LogsTab({ campaignId }: { campaignId: string }) {
     }
     setLoading(false);
   }, [campaignId]);
+
+  const exportLogs = useCallback(
+    async (range: '6h' | '24h' | '7d') => {
+      setExportingRange(range);
+      try {
+        const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/logs/export?range=${range}`);
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          alert((data as { error?: string }).error ?? `Не удалось выгрузить логи (HTTP ${res.status})`);
+          return;
+        }
+        // Pick up the server-suggested filename from Content-Disposition; fall
+        // back to a sensible default if the browser/proxy stripped it.
+        const cd = res.headers.get('content-disposition') ?? '';
+        const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+        const ascii = /filename="?([^";]+)"?/i.exec(cd);
+        const filename = utf8
+          ? decodeURIComponent(utf8[1])
+          : (ascii?.[1] ?? `tg-outreach-logs-${range}.txt`);
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } finally {
+        setExportingRange(null);
+      }
+    },
+    [campaignId],
+  );
 
   useEffect(() => { queueMicrotask(() => { void fetchLogs(); }); }, [fetchLogs]);
 
@@ -387,21 +423,42 @@ function LogsTab({ campaignId }: { campaignId: string }) {
   };
 
   return (
-    <div 
-      ref={containerRef} 
-      onScroll={handleScroll}
-      className="rounded-lg border border-gray-800 bg-gray-950 p-3 font-mono text-[11px] leading-relaxed h-[500px] overflow-auto"
-    >
-      {loading && <p className="text-gray-500">Загрузка логов...</p>}
-      {!loading && logs.length === 0 && <p className="text-gray-600">Нет логов. Запустите кампанию.</p>}
-      {logs.map(log => (
-        <div key={log.id} className="flex gap-2">
-          <span className="text-gray-600 shrink-0">{new Date(log.created_at).toLocaleTimeString('ru-RU')}</span>
-          <span className={`shrink-0 font-bold uppercase w-14 ${levelColor(log.level)}`}>{log.level}</span>
-          <span className="text-gray-300 break-all">{log.message}</span>
-        </div>
-      ))}
-      <div ref={bottomRef} />
+    <div className="space-y-3">
+      <div className="flex items-center justify-end gap-2">
+        <span className="text-xs text-gray-500 mr-1">Выгрузить .txt:</span>
+        {(['6h', '24h', '7d'] as const).map((r) => {
+          const labels: Record<typeof r, string> = { '6h': '6 часов', '24h': '24 часа', '7d': '7 дней' };
+          const busy = exportingRange === r;
+          return (
+            <button
+              key={r}
+              type="button"
+              onClick={() => void exportLogs(r)}
+              disabled={exportingRange !== null}
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+            >
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+              {labels[r]}
+            </button>
+          );
+        })}
+      </div>
+      <div
+        ref={containerRef}
+        onScroll={handleScroll}
+        className="rounded-lg border border-gray-800 bg-gray-950 p-3 font-mono text-[11px] leading-relaxed h-[500px] overflow-auto"
+      >
+        {loading && <p className="text-gray-500">Загрузка логов...</p>}
+        {!loading && logs.length === 0 && <p className="text-gray-600">Нет логов. Запустите кампанию.</p>}
+        {logs.map(log => (
+          <div key={log.id} className="flex gap-2">
+            <span className="text-gray-600 shrink-0">{new Date(log.created_at).toLocaleTimeString('ru-RU')}</span>
+            <span className={`shrink-0 font-bold uppercase w-14 ${levelColor(log.level)}`}>{log.level}</span>
+            <span className="text-gray-300 break-all">{log.message}</span>
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
     </div>
   );
 }
