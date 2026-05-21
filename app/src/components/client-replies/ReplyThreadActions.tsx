@@ -39,15 +39,15 @@ function ThreadMessageCard({ msg }: { msg: ThreadMessage }) {
     <div className="neu-sm px-3 py-2.5">
       <div className="flex items-center gap-2 mb-1.5">
         {isInbound ? (
-          <ArrowDownLeft className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--cp-accent)' }} />
+          <ArrowDownLeft className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--cp-amber)' }} />
         ) : (
-          <ArrowUpRight className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--cp-text-l)' }} />
+          <ArrowUpRight className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--cp-paper-faint)' }} />
         )}
         <span
-          className="text-[10px] uppercase tracking-wider font-bold shrink-0"
-          style={{ color: isInbound ? 'var(--cp-accent)' : 'var(--cp-text-l)' }}
+          className="ds-eyebrow shrink-0"
+          style={{ color: isInbound ? 'var(--cp-amber)' : 'var(--cp-paper-faint)' }}
         >
-          {isInbound ? 'Лид' : 'Мы'}
+          {isInbound ? 'ЛИД' : 'МЫ'}
         </span>
         <span className="text-[10px] truncate flex-1 min-w-0" style={{ color: 'var(--cp-text-m)' }}>
           {msg.from_name ? `${msg.from_name} • ` : ''}{msg.from_email ?? ''}
@@ -57,7 +57,7 @@ function ThreadMessageCard({ msg }: { msg: ThreadMessage }) {
         </span>
       </div>
       {msg.subject && (
-        <p className="text-[11px] font-semibold mb-1 truncate" style={{ color: 'var(--cp-text-d)' }}>
+        <p className="text-[11px] font-semibold mb-1 truncate" style={{ color: 'var(--cp-paper)' }}>
           {msg.subject}
         </p>
       )}
@@ -106,7 +106,7 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
   return (
     <div className="neu-sm p-3 space-y-2.5">
       <div className="flex items-center justify-between">
-        <p className="text-[11px] font-bold" style={{ color: 'var(--cp-text-d)' }}>Ответить лиду</p>
+        <p className="text-[11px] font-bold" style={{ color: 'var(--cp-paper)' }}>Ответить лиду</p>
         <button type="button" onClick={onCancel} className="neu-pill p-1" style={{ color: 'var(--cp-text-l)' }}>
           <X className="h-3 w-3" />
         </button>
@@ -117,7 +117,7 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
         onChange={(e) => setCc(e.target.value)}
         placeholder="CC (через запятую): boss@company.ru, team@..."
         className="neu-input w-full px-3 py-2 text-[11px] sm:text-xs bg-transparent outline-none"
-        style={{ color: 'var(--cp-text-d)' }}
+        style={{ color: 'var(--cp-paper)' }}
       />
       {showBcc ? (
         <input
@@ -126,7 +126,7 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
           onChange={(e) => setBcc(e.target.value)}
           placeholder="BCC (скрытая копия)"
           className="neu-input w-full px-3 py-2 text-[11px] sm:text-xs bg-transparent outline-none"
-          style={{ color: 'var(--cp-text-d)' }}
+          style={{ color: 'var(--cp-paper)' }}
         />
       ) : (
         <button type="button" onClick={() => setShowBcc(true)} className="text-[10px] font-semibold" style={{ color: 'var(--cp-text-l)' }}>
@@ -139,7 +139,7 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
         rows={6}
         placeholder="Текст ответа..."
         className="neu-input w-full px-3 py-2 text-[11px] sm:text-xs bg-transparent outline-none resize-y"
-        style={{ color: 'var(--cp-text-d)' }}
+        style={{ color: 'var(--cp-paper)' }}
       />
       {error && <p className="text-[11px]" style={{ color: 'var(--cp-danger)' }}>{error}</p>}
       <div className="flex items-center justify-end gap-2">
@@ -197,7 +197,7 @@ function ForwardForm({ campaignId, emailId, onCancel, onSent }: ForwardFormProps
   return (
     <div className="neu-sm p-3 space-y-2.5">
       <div className="flex items-center justify-between">
-        <p className="text-[11px] font-bold" style={{ color: 'var(--cp-text-d)' }}>Переслать письмо</p>
+        <p className="text-[11px] font-bold" style={{ color: 'var(--cp-paper)' }}>Переслать письмо</p>
         <button type="button" onClick={onCancel} className="neu-pill p-1" style={{ color: 'var(--cp-text-l)' }}>
           <X className="h-3 w-3" />
         </button>
@@ -208,7 +208,7 @@ function ForwardForm({ campaignId, emailId, onCancel, onSent }: ForwardFormProps
         onChange={(e) => setToEmail(e.target.value)}
         placeholder="Кому: colleague@company.ru"
         className="neu-input w-full px-3 py-2 text-[11px] sm:text-xs bg-transparent outline-none"
-        style={{ color: 'var(--cp-text-d)' }}
+        style={{ color: 'var(--cp-paper)' }}
       />
       <p className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
         Пересылаем оригинальный текст письма от лида целиком.

@@ -71,7 +71,6 @@ describe('POST /api/projects/[id]/periods', () => {
         deadline: '2026-06-20',
         budget: '150000',
         margin: '40%',
-        payment_method: 'card',
         payment_date: '2026-05-21',
       }),
       { params: Promise.resolve({ id: 'project-1' }) },
@@ -94,10 +93,10 @@ describe('POST /api/projects/[id]/periods', () => {
         deadline: '2026-05-04',
         budget: '100000',
         margin: '30%',
-        payment_method: 'bank',
         payment_date: '2026-03-27',
       }),
     );
+    expect(periods[0]).not.toHaveProperty('payment_method');
     expect(periods[1]).toEqual(
       expect.objectContaining({
         name: 'Period 2',
@@ -111,10 +110,10 @@ describe('POST /api/projects/[id]/periods', () => {
         deadline: '2026-06-20',
         budget: '150000',
         margin: '40%',
-        payment_method: 'card',
         payment_date: '2026-05-21',
       }),
     );
+    expect(periods[1]).not.toHaveProperty('payment_method');
 
     const project = mockMainDb!.getRows('projects')[0];
     expect(project).toEqual(
@@ -127,7 +126,7 @@ describe('POST /api/projects/[id]/periods', () => {
         deadline: '2026-06-20',
         budget: '150000',
         margin: '40%',
-        payment_method: 'card',
+        payment_method: 'bank',
         payment_date: '2026-05-21',
       }),
     );
