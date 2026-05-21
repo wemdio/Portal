@@ -142,12 +142,15 @@ export async function buildClients(
       // We only do the DB round-trip when there's something to clear, since
       // the common case is "counter was already 0".
       if (db && (acc.auth_key_dup_count ?? 0) > 0) {
-        await db
+        const { error: resetErr } = await db
           .from('tg_outreach_accounts')
           .update({ auth_key_dup_count: 0 })
-          .eq('id', acc.id)
-          .then(() => {});
-        acc.auth_key_dup_count = 0;
+          .eq('id', acc.id);
+        if (resetErr) {
+          log('warning', `${acc.session_name}: не удалось сбросить auth_key_dup_count в БД — ${resetErr.message}`);
+        } else {
+          acc.auth_key_dup_count = 0;
+        }
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -160,28 +163,34 @@ export async function buildClients(
       if (db && errMsg.includes('AUTH_KEY_DUPLICATED')) {
         const next = (acc.auth_key_dup_count ?? 0) + 1;
         if (next >= AUTH_KEY_DUP_DISABLE_THRESHOLD) {
-          await db
+          const { error: updErr } = await db
             .from('tg_outreach_accounts')
             .update({ is_active: false, auth_key_dup_count: next })
-            .eq('id', acc.id)
-            .then(() => {});
-          log(
-            'warning',
-            `${acc.session_name}: ${next} подряд AUTH_KEY_DUPLICATED → аккаунт выключен. ` +
-              `Перелогиньте сессию (Telegram → Settings → Active Sessions → terminate others), ` +
-              `затем заново загрузите session_data в UI.`,
-          );
+            .eq('id', acc.id);
+          if (updErr) {
+            log('error', `${acc.session_name}: не удалось выключить аккаунт в БД — ${updErr.message}`);
+          } else {
+            log(
+              'warning',
+              `${acc.session_name}: ${next} подряд AUTH_KEY_DUPLICATED → аккаунт выключен. ` +
+                `Перелогиньте сессию (Telegram → Settings → Active Sessions → terminate others), ` +
+                `затем заново загрузите session_data в UI.`,
+            );
+          }
         } else {
-          await db
+          const { error: updErr } = await db
             .from('tg_outreach_accounts')
             .update({ auth_key_dup_count: next })
-            .eq('id', acc.id)
-            .then(() => {});
-          log(
-            'warning',
-            `${acc.session_name}: AUTH_KEY_DUPLICATED (${next}/${AUTH_KEY_DUP_DISABLE_THRESHOLD}) — ` +
-              `после ${AUTH_KEY_DUP_DISABLE_THRESHOLD} подряд выключим автоматически.`,
-          );
+            .eq('id', acc.id);
+          if (updErr) {
+            log('warning', `${acc.session_name}: не удалось записать auth_key_dup_count в БД — ${updErr.message}`);
+          } else {
+            log(
+              'warning',
+              `${acc.session_name}: AUTH_KEY_DUPLICATED (${next}/${AUTH_KEY_DUP_DISABLE_THRESHOLD}) — ` +
+                `после ${AUTH_KEY_DUP_DISABLE_THRESHOLD} подряд выключим автоматически.`,
+            );
+          }
         }
       }
     }

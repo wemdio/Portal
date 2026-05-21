@@ -481,9 +481,11 @@ export async function handleChat(
   }
 
   if (tg.ignore_bot_usernames && tgIsBot) {
+    log('info', `${displayName}: бот — пропуск (ignore_bot_usernames)`);
     return { replied: false, triggerType: null };
   }
   if (tg.ignore_no_username && !tgUsername) {
+    log('info', `${displayName}: без @username — пропуск (ignore_no_username)`);
     return { replied: false, triggerType: null };
   }
 
@@ -541,17 +543,29 @@ export async function handleChat(
   if (tg.reply_only_if_previously_wrote) {
     const hasOurMessage = chatMessages.some(m => m.role === 'assistant');
     if (!hasOurMessage) {
+      log('info', `${displayName}: ранее не писали этому пользователю — пропуск (reply_only_if_previously_wrote)`);
       return { replied: false, triggerType: null };
     }
   }
 
   let replyText: string | null = null;
+  let usedFallback = false;
+  const openaiStart = Date.now();
   try {
     replyText = await openaiGenerate(oai, chatMessages);
+    const openaiMs = Date.now() - openaiStart;
+    if (replyText) {
+      log('info', `${displayName}: OpenAI ответил за ${openaiMs}мс (${replyText.length} симв.)`);
+    } else {
+      log('warning', `${displayName}: OpenAI вернул пусто за ${openaiMs}мс`);
+    }
   } catch (err) {
-    log('error', `${displayName}: OpenAI ошибка — ${err instanceof Error ? err.message : String(err)}`);
+    const openaiMs = Date.now() - openaiStart;
+    log('error', `${displayName}: OpenAI ошибка за ${openaiMs}мс — ${err instanceof Error ? err.message : String(err)}`);
     if (oai.use_fallback_on_fail && oai.fallback_text) {
       replyText = oai.fallback_text;
+      usedFallback = true;
+      log('info', `${displayName}: использую fallback_text (${replyText.length} симв.)`);
     }
   }
 
@@ -559,7 +573,7 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
   if (isLowValueReply(replyText)) {
-    log('warning', `${displayName}: сгенерирован пустой/бессмысленный ответ "${replyText}" — пропускаю отправку`);
+    log('warning', `${displayName}: ${usedFallback ? 'fallback' : 'OpenAI'} вернул бессмысленный ответ "${replyText}" — пропускаю отправку`);
     return { replied: false, triggerType: null };
   }
 
@@ -578,7 +592,7 @@ export async function handleChat(
   const triggerType = detectTrigger(replyText, oai);
 
   if (triggerType) {
-    log('info', `${displayName}: триггер "${triggerType}"`);
+    log('info', `${displayName}: триггер "${triggerType}" сработал`);
 
     const targetChat = triggerType === 'positive'
       ? oai.target_chats_positive
@@ -590,6 +604,8 @@ export async function handleChat(
         .map(m => m.id)
         .concat(sent.id);
       await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log);
+    } else {
+      log('info', `${displayName}: триггер "${triggerType}", но target_chat не задан — пересылки нет`);
     }
 
     await markProcessed(db, campaign.id, tgUserId, tgUsername);
@@ -617,11 +633,17 @@ async function handleFollowUp(
   const delayMinutes = tg.follow_up?.delay_minutes ?? 0;
   const blocked = new Set((tg.blocked_usernames ?? []).map((u) => u.trim().toLowerCase().replace(/^@/, '')));
   const totalDelayMs = (delayHours * 3600 + delayMinutes * 60) * 1000;
-  if (!tg.follow_up?.enabled || totalDelayMs <= 0 || !followUpPrompt) return;
+  if (!tg.follow_up?.enabled) {
+    return;
+  }
+  if (totalDelayMs <= 0 || !followUpPrompt) {
+    log('info', `${account.session_name}: follow-up пропущен (отключён или нулевая задержка/пустой промпт)`);
+    return;
+  }
 
   const cutoff = new Date(Date.now() - totalDelayMs).toISOString();
 
-  const { data: dialogs } = await db
+  const { data: dialogs, error: fErr } = await db
     .from('tg_outreach_dialogs')
     .select('*')
     .eq('campaign_id', campaign.id)
@@ -631,22 +653,44 @@ async function handleFollowUp(
     .lt('last_message_at', cutoff)
     .limit(10);
 
-  if (!dialogs?.length) return;
+  if (fErr) {
+    log('warning', `${account.session_name}: follow-up — ошибка запроса диалогов из БД: ${fErr.message}`);
+    return;
+  }
+  if (!dialogs?.length) {
+    log('info', `${account.session_name}: follow-up — нет диалогов старше ${delayHours}ч ${delayMinutes}мин`);
+    return;
+  }
+
+  // Aggregate skip reasons across the batch so we emit one summary at the
+  // end instead of dozens of per-skip log lines.
+  const stats = {
+    scanned: dialogs.length,
+    sent: 0,
+    skip_bot: 0,
+    skip_blocked: 0,
+    skip_empty: 0,
+    skip_last_not_assistant: 0,
+    skip_already_sent: 0,
+    skip_openai_empty: 0,
+    skip_low_value: 0,
+    errors: 0,
+  };
 
   for (const dialog of dialogs) {
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
-    if (isBot && tg.ignore_bot_usernames) continue;
-    if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) continue;
+    if (isBot && tg.ignore_bot_usernames) { stats.skip_bot++; continue; }
+    if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { stats.skip_blocked++; continue; }
 
     const messages = dialog.messages as DialogMessage[];
-    if (messages.length === 0) continue;
+    if (messages.length === 0) { stats.skip_empty++; continue; }
     const lastMsg = messages[messages.length - 1];
-    if (lastMsg.role !== 'assistant') continue;
+    if (lastMsg.role !== 'assistant') { stats.skip_last_not_assistant++; continue; }
 
     const alreadySentFollowUp = messages.some(m => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith('[Система: пользователь не ответил'));
-    if (alreadySentFollowUp) continue;
+    if (alreadySentFollowUp) { stats.skip_already_sent++; continue; }
 
     try {
       const followUpMessages: DialogMessage[] = [
@@ -655,8 +699,9 @@ async function handleFollowUp(
       ];
 
       const reply = await openaiGenerate(oai, followUpMessages);
-      if (!reply) continue;
+      if (!reply) { stats.skip_openai_empty++; continue; }
       if (isLowValueReply(reply)) {
+        stats.skip_low_value++;
         log('warning', `Follow-up пропущен для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}: бессмысленный ответ "${reply}"`);
         continue;
       }
@@ -668,11 +713,28 @@ async function handleFollowUp(
 
       messages.push({ role: 'assistant', content: reply, timestamp: new Date().toISOString() });
       await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, messages, undefined, { tgIsBot: isBot });
-      log('info', `Follow-up: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}`);
+      stats.sent++;
+      log('info', `Follow-up: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} (${reply.length} симв.)`);
     } catch (err) {
-      log('warning', `Follow-up ошибка ${tgUserId}: ${err instanceof Error ? err.message : String(err)}`);
+      stats.errors++;
+      log('warning', `Follow-up ошибка ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+
+  // Always emit a summary, even when 0 sent — gives an "I ran" signal in the
+  // log instead of a silent block of time.
+  log(
+    'info',
+    `${account.session_name}: follow-up — сканировано ${stats.scanned}, отправлено ${stats.sent}` +
+      (stats.skip_already_sent ? `, уже_было=${stats.skip_already_sent}` : '') +
+      (stats.skip_last_not_assistant ? `, не_наш_последний=${stats.skip_last_not_assistant}` : '') +
+      (stats.skip_empty ? `, пустые=${stats.skip_empty}` : '') +
+      (stats.skip_bot ? `, боты=${stats.skip_bot}` : '') +
+      (stats.skip_blocked ? `, blacklist=${stats.skip_blocked}` : '') +
+      (stats.skip_openai_empty ? `, ai_пусто=${stats.skip_openai_empty}` : '') +
+      (stats.skip_low_value ? `, low_value=${stats.skip_low_value}` : '') +
+      (stats.errors ? `, ошибки=${stats.errors}` : ''),
+  );
 }
 
 async function handleMissedRepliesLastDays(
@@ -689,7 +751,7 @@ async function handleMissedRepliesLastDays(
   const lookbackMs = 3 * 24 * 60 * 60 * 1000;
   const cutoffIso = new Date(Date.now() - lookbackMs).toISOString();
 
-  const { data: dialogs } = await db
+  const { data: dialogs, error: cErr } = await db
     .from('tg_outreach_dialogs')
     .select('id, tg_user_id, tg_username, tg_is_bot, status, can_send, messages, last_message_at')
     .eq('campaign_id', campaign.id)
@@ -700,10 +762,25 @@ async function handleMissedRepliesLastDays(
     .order('last_message_at', { ascending: true })
     .limit(200);
 
-  if (!dialogs?.length) return;
+  if (cErr) {
+    log('warning', `${account.session_name}: catch-up — ошибка запроса диалогов: ${cErr.message}`);
+    return;
+  }
+  if (!dialogs?.length) {
+    log('info', `${account.session_name}: catch-up за 3 дня — подходящих диалогов нет`);
+    return;
+  }
 
   let processed = 0;
   let replied = 0;
+  let skipBot = 0;
+  let skipBlocked = 0;
+  let skipEmpty = 0;
+  let skipLastNotUser = 0;
+  let skipOpenaiEmpty = 0;
+  let skipLowValue = 0;
+  let errorsCount = 0;
+
   for (const dialog of dialogs) {
     if (shouldStop?.()) break;
     processed++;
@@ -711,18 +788,19 @@ async function handleMissedRepliesLastDays(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
-    if (isBot && tg.ignore_bot_usernames) continue;
-    if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) continue;
+    if (isBot && tg.ignore_bot_usernames) { skipBot++; continue; }
+    if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { skipBlocked++; continue; }
 
     const messages = Array.isArray(dialog.messages) ? (dialog.messages as DialogMessage[]) : [];
-    if (messages.length === 0) continue;
+    if (messages.length === 0) { skipEmpty++; continue; }
     const lastMessage = messages[messages.length - 1];
-    if (lastMessage.role !== 'user') continue;
+    if (lastMessage.role !== 'user') { skipLastNotUser++; continue; }
 
     try {
       const reply = await openaiGenerate(oai, messages);
-      if (!reply) continue;
+      if (!reply) { skipOpenaiEmpty++; continue; }
       if (isLowValueReply(reply)) {
+        skipLowValue++;
         log('warning', `Catch-up пропущен для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}: бессмысленный ответ "${reply}"`);
         continue;
       }
@@ -742,15 +820,25 @@ async function handleMissedRepliesLastDays(
       messages.push({ role: 'assistant', content: reply, timestamp: new Date().toISOString() });
       await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, messages, undefined, { tgIsBot: isBot });
       replied++;
-      log('info', `Catch-up reply: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}`);
+      log('info', `Catch-up reply: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} (${reply.length} симв.)`);
     } catch (err) {
+      errorsCount++;
       log('warning', `Catch-up ошибка ${tgUsername ?? tgUserId}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  if (processed > 0) {
-    log('info', `Catch-up за 3 дня: обработано ${processed}, отправлено ${replied}`);
-  }
+  // Always emit a summary so the operator can confirm catch-up actually ran.
+  log(
+    'info',
+    `${account.session_name}: catch-up за 3 дня — обработано ${processed}, отправлено ${replied}` +
+      (skipBot ? `, боты=${skipBot}` : '') +
+      (skipBlocked ? `, blacklist=${skipBlocked}` : '') +
+      (skipEmpty ? `, пустые=${skipEmpty}` : '') +
+      (skipLastNotUser ? `, не_user_последний=${skipLastNotUser}` : '') +
+      (skipOpenaiEmpty ? `, ai_пусто=${skipOpenaiEmpty}` : '') +
+      (skipLowValue ? `, low_value=${skipLowValue}` : '') +
+      (errorsCount ? `, ошибки=${errorsCount}` : ''),
+  );
 }
 
 async function backfillEmptyDialogs(
@@ -762,19 +850,31 @@ async function backfillEmptyDialogs(
 ) {
   const tg = campaign.telegram_settings as TelegramSettings;
 
-  const { data: dialogs } = await db
+  const { data: dialogs, error: bErr } = await db
     .from('tg_outreach_dialogs')
     .select('id, tg_user_id, tg_username, tg_is_bot, messages')
     .eq('campaign_id', campaign.id)
     .eq('account_id', account.id)
     .limit(50);
 
+  if (bErr) {
+    log('warning', `${account.session_name}: backfill — ошибка запроса диалогов: ${bErr.message}`);
+    return;
+  }
+
   const empty = (dialogs ?? []).filter(
     d => !d.messages || (Array.isArray(d.messages) && (d.messages as unknown[]).length === 0),
   );
-  if (empty.length === 0) return;
+  if (empty.length === 0) {
+    // Quiet at info level — backfill runs every cycle and the "nothing to do"
+    // case would otherwise spam the log. Just skip silently.
+    return;
+  }
 
-  log('info', `Backfill: ${empty.length} диалогов с пустыми сообщениями`);
+  log('info', `${account.session_name}: backfill — ${empty.length} диалогов с пустыми сообщениями, начинаю заполнение`);
+  let filled = 0;
+  let stillEmpty = 0;
+  let errors = 0;
 
   for (const dialog of empty) {
     const tgUserId = dialog.tg_user_id as number;
@@ -795,11 +895,21 @@ async function backfillEmptyDialogs(
       if (chatMessages.length > 0) {
         await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot: Boolean(dialog.tg_is_bot) });
         log('info', `Backfill: ${backfillLabel} — ${chatMessages.length} сообщ.`);
+        filled++;
+      } else {
+        stillEmpty++;
       }
     } catch (err) {
+      errors++;
       log('warning', `Backfill ошибка ${tgUsername ?? tgUserId}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+
+  log(
+    'info',
+    `${account.session_name}: backfill завершён — заполнено ${filled}, всё ещё пустых ${stillEmpty}` +
+      (errors ? `, ошибки=${errors}` : ''),
+  );
 }
 
 export type TraceContext = { requestId: string };
@@ -831,7 +941,7 @@ export async function runCampaignLoop(
     .single();
 
   if (cErr || !campaign) {
-    log('error', 'Кампания не найдена');
+    log('error', `Кампания ${campaignId} не найдена в БД${cErr ? ` — ${cErr.message}` : ''}`);
     return;
   }
 
@@ -841,7 +951,8 @@ export async function runCampaignLoop(
   if (!process.env.OPENROUTER_TG_OUTREACH_API_KEY) {
     log('error', 'OPENROUTER_TG_OUTREACH_API_KEY не задан в .env');
     // Hard config error — leave in error so we don't loop on it forever
-    await db.from('tg_outreach_campaigns').update({ status: 'error' }).eq('id', campaignId);
+    const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'error' }).eq('id', campaignId);
+    if (stErr) log('error', `Не удалось записать status=error в БД — ${stErr.message}`);
     return;
   }
 
@@ -855,7 +966,8 @@ export async function runCampaignLoop(
     log('error', 'Нет активных аккаунтов — кампания в paused, авто-возобновится когда появятся аккаунты');
     // Use paused (not error) so resumeRunningCampaigns retries us automatically
     // once accounts become active again, instead of leaving the campaign stuck.
-    await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
+    const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
+    if (stErr) log('error', `Не удалось записать status=paused в БД — ${stErr.message}`);
     return;
   }
 
@@ -869,23 +981,33 @@ export async function runCampaignLoop(
 
   const downloadSessionFile = (storagePath: string) => downloadSessionToTemp(db, storagePath);
   let clients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db);
+  log('info', `Первый билд клиентов: подключилось ${clients.length}/${accounts.length} аккаунтов`);
 
   if (clients.length === 0) {
     log('warning', 'Ни один аккаунт не подключился — жду 60 сек и пробую заново');
     await interruptibleSleep(60_000, shouldStop);
     if (shouldStop()) return;
     const retryClients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db);
+    log('info', `Повтор билда: подключилось ${retryClients.length}/${accounts.length}`);
     if (retryClients.length === 0) {
       log('error', 'Повторная попытка подключения не удалась — кампания в paused');
-      await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
+      const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
+      if (stErr) log('error', `Не удалось записать status=paused в БД — ${stErr.message}`);
       return;
     }
     clients = retryClients;
   }
 
-  await db.from('tg_outreach_campaigns').update({ status: 'running', updated_at: new Date().toISOString() }).eq('id', campaignId);
+  {
+    const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'running', updated_at: new Date().toISOString() }).eq('id', campaignId);
+    if (stErr) log('error', `Не удалось записать status=running в БД — ${stErr.message}`);
+  }
 
   const offsetErrorCounts = new Map<string, number>();
+  // Stays true while we're inside a sleep_periods window so we can emit a
+  // matching "сон закончился" line when it ends (otherwise users see only
+  // the start of the silence and can't tell when work resumed).
+  let inSleepPeriod = false;
 
   try {
     while (!shouldStop()) {
@@ -893,20 +1015,28 @@ export async function runCampaignLoop(
       try { fs.writeFileSync('/tmp/tg-outreach-heartbeat', Date.now().toString()); } catch { /* */ }
 
       if (isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) {
-        log('info', 'Спящий период — пауза 60 сек');
+        if (!inSleepPeriod) {
+          log('info', 'Спящий период начался — пауза по 60 сек до выхода из окна');
+          inSleepPeriod = true;
+        }
         await interruptibleSleep(60_000, shouldStop);
         continue;
+      } else if (inSleepPeriod) {
+        log('info', 'Спящий период закончился — продолжаем рассылку');
+        inSleepPeriod = false;
       }
 
       let blockedUserIds: Set<number>;
       try {
         blockedUserIds = await loadBlockedUserIds(db, campaign.user_id);
+        log('info', `Чёрный список загружен: ${blockedUserIds.size} ID`);
       } catch (err) {
         log('warning', `Не удалось загрузить глобальный чёрный список: ${err instanceof Error ? err.message : String(err)}`);
         blockedUserIds = new Set();
       }
 
       let tlSchemaErrorCount = 0;
+      log('info', `Начинаю цикл по ${clients.length} аккаунтам`);
 
       for (const { client, account } of clients) {
         if (shouldStop()) break;
@@ -923,8 +1053,22 @@ export async function runCampaignLoop(
           continue;
         }
 
+        // Per-account cycle stats — emitted as a single summary line at the
+        // end so per-dialog reasons stay aggregated and don't drown the UI.
+        const cycleStats = {
+          dialogs_total: 0,
+          unread: 0,
+          not_user: 0,
+          processed: 0,
+          replied: 0,
+          flood: 0,
+          errors: 0,
+        };
+        const accountStartMs = Date.now();
+
         try {
           let dialogs: Awaited<ReturnType<typeof client.getDialogs>>;
+          let retriedSmallerLimit = false;
           try {
             // Race against a hard per-account timeout. We do not abort the
             // gramJS call (Promise.race leaves it dangling), but the worker
@@ -949,21 +1093,41 @@ export async function runCampaignLoop(
             const errMsg = err instanceof Error ? err.message : String(err);
             if (errMsg.includes('offset') && errMsg.includes('out of range')) {
               // GramJS off-by-a-few bug in internal pagination; retry with smaller limit.
-              dialogs = await client.getDialogs({ limit: Math.min(20, DIALOGS_FETCH_LIMIT) });
+              const smallerLimit = Math.min(20, DIALOGS_FETCH_LIMIT);
+              log('warning', `${account.session_name}: getDialogs offset out of range — повтор с limit=${smallerLimit}`);
+              dialogs = await client.getDialogs({ limit: smallerLimit });
+              retriedSmallerLimit = true;
             } else {
               throw err;
             }
           }
+          cycleStats.dialogs_total = dialogs.length;
+          cycleStats.unread = dialogs.filter(d => d.unreadCount > 0).length;
+          log(
+            'info',
+            `${account.session_name}: получено ${dialogs.length} диалогов, ${cycleStats.unread} непрочитанных${retriedSmallerLimit ? ' (после повтора с меньшим limit)' : ''}`,
+          );
 
           for (const dialog of dialogs) {
             if (shouldStop()) break;
             if (dialog.unreadCount === 0) continue;
-            if (!dialog.entity || !(dialog.entity instanceof Api.User)) continue;
+            if (!dialog.entity || !(dialog.entity instanceof Api.User)) {
+              cycleStats.not_user++;
+              continue;
+            }
 
             try {
-              await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop, { blockedUserIds });
+              const r = await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop, { blockedUserIds });
+              cycleStats.processed++;
+              if (r.replied) cycleStats.replied++;
             } catch (err: unknown) {
               const errMsg = err instanceof Error ? err.message : String(err);
+              // Reconstruct a stable display label for the error log so the
+              // operator can search by ID/@username without scrolling.
+              const dialogId = dialog.entity instanceof Api.User ? Number(dialog.entity.id) : null;
+              const dialogLabel = dialog.entity instanceof Api.User && dialog.entity.username
+                ? `@${dialog.entity.username}`
+                : dialogId != null ? `ID:${dialogId}` : 'unknown';
 
               if (
                 errMsg.includes('PeerFloodError') ||
@@ -972,13 +1136,18 @@ export async function runCampaignLoop(
                 errMsg.includes('FROZEN_METHOD_INVALID')
               ) {
                 const cooldownUntil = new Date(Date.now() + tg.account_cooldown_hours * 3600 * 1000).toISOString();
-                await db.from('tg_outreach_accounts').update({ cooldown_until: cooldownUntil }).eq('id', account.id);
+                const { error: cdErr } = await db.from('tg_outreach_accounts').update({ cooldown_until: cooldownUntil }).eq('id', account.id);
+                if (cdErr) {
+                  log('error', `${account.session_name}: не удалось записать cooldown_until в БД — ${cdErr.message}`);
+                }
                 (account as OutreachAccount).cooldown_until = cooldownUntil;
-                log('warning', `${account.session_name}: FloodError → cooldown ${tg.account_cooldown_hours}ч`);
+                log('warning', `${account.session_name}: FloodError на ${dialogLabel} → cooldown ${tg.account_cooldown_hours}ч (до ${cooldownUntil})`);
+                cycleStats.flood++;
                 break;
               }
 
-              log('error', `Ошибка обработки диалога: ${errMsg}`);
+              cycleStats.errors++;
+              log('error', `${account.session_name} → ${dialogLabel}: ошибка обработки диалога — ${errMsg}`);
             }
           }
 
@@ -988,27 +1157,46 @@ export async function runCampaignLoop(
           try {
             await backfillEmptyDialogs(client, account, campaign as unknown as OutreachCampaign, db, log);
           } catch (err) {
-            log('warning', `Backfill ошибка: ${err instanceof Error ? err.message : String(err)}`);
+            log('warning', `${account.session_name}: Backfill ошибка — ${err instanceof Error ? err.message : String(err)}`);
           }
 
           const updatedSession = await getUpdatedSessionString(client);
           if (updatedSession && updatedSession !== account.session_data) {
-            await db.from('tg_outreach_accounts').update({ session_data: updatedSession }).eq('id', account.id);
+            const { error: sErr } = await db.from('tg_outreach_accounts').update({ session_data: updatedSession }).eq('id', account.id);
+            if (sErr) {
+              log('warning', `${account.session_name}: не удалось сохранить обновлённый session_data в БД — ${sErr.message}`);
+            }
           }
+
+          // Single-line per-account summary at the end of the cycle.
+          const elapsedMs = Date.now() - accountStartMs;
+          log(
+            'info',
+            `${account.session_name}: цикл завершён за ${(elapsedMs / 1000).toFixed(1)}с — ` +
+              `обработано ${cycleStats.processed} из ${cycleStats.unread}, отправлено ${cycleStats.replied}, ` +
+              `пропущено: not_user=${cycleStats.not_user}, ошибки=${cycleStats.errors}` +
+              (cycleStats.flood ? `, flood=${cycleStats.flood}` : ''),
+          );
 
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           if (errMsg.includes('Constructor ID')) {
             tlSchemaErrorCount++;
-            if (tlSchemaErrorCount === 1) {
-              log('warning', `GramJS TL schema устарела — Telegram вернул неизвестный объект. Нужно обновить пакет 'telegram'. Ошибка: ${errMsg.slice(0, 150)}`);
-            }
+            // Log every occurrence (not only the first) so the operator sees
+            // how widespread the TL-schema mismatch is. The aggregate backoff
+            // below still kicks in only when every account is affected.
+            log('warning', `${account.session_name}: GramJS TL schema mismatch #${tlSchemaErrorCount} — нужно обновить пакет 'telegram'. Ошибка: ${errMsg.slice(0, 150)}`);
           } else if (errMsg.includes('AUTH_KEY_UNREGISTERED') || errMsg.includes('USER_DEACTIVATED')) {
-            await db
+            const reason = errMsg.includes('AUTH_KEY_UNREGISTERED') ? 'AUTH_KEY_UNREGISTERED' : 'USER_DEACTIVATED';
+            const { error: deactErr } = await db
               .from('tg_outreach_accounts')
               .update({ is_active: false, cooldown_until: null })
               .eq('id', account.id);
-            log('warning', `${account.session_name}: аккаунт деактивирован (${errMsg.includes('AUTH_KEY_UNREGISTERED') ? 'AUTH_KEY_UNREGISTERED' : 'USER_DEACTIVATED'})`);
+            if (deactErr) {
+              log('error', `${account.session_name}: ${reason}, но НЕ удалось записать is_active=false в БД — ${deactErr.message}`);
+            } else {
+              log('warning', `${account.session_name}: аккаунт деактивирован (${reason})`);
+            }
           } else if (
             // Only treat "offset out of range" as session damage when it
             // originated in our SQLite session reader, NOT in gramJS MTProto
@@ -1024,14 +1212,21 @@ export async function runCampaignLoop(
             const count = (offsetErrorCounts.get(account.id) ?? 0) + 1;
             offsetErrorCounts.set(account.id, count);
             if (count >= 2) {
-              await db
+              const { error: dErr } = await db
                 .from('tg_outreach_accounts')
                 .update({ is_active: false, cooldown_until: null })
                 .eq('id', account.id);
-              log('warning', `${account.session_name}: повреждённая сессия (offset out of range × ${count}) → аккаунт деактивирован. Пересоздайте .session.`);
+              if (dErr) {
+                log('error', `${account.session_name}: повреждённая сессия (× ${count}), но НЕ удалось записать is_active=false — ${dErr.message}`);
+              } else {
+                log('warning', `${account.session_name}: повреждённая сессия (offset out of range × ${count}) → аккаунт деактивирован. Пересоздайте .session.`);
+              }
             } else {
               const cooldownUntil = new Date(Date.now() + 3600_000).toISOString();
-              await db.from('tg_outreach_accounts').update({ cooldown_until: cooldownUntil }).eq('id', account.id);
+              const { error: cdErr } = await db.from('tg_outreach_accounts').update({ cooldown_until: cooldownUntil }).eq('id', account.id);
+              if (cdErr) {
+                log('error', `${account.session_name}: не удалось записать cooldown_until в БД — ${cdErr.message}`);
+              }
               (account as OutreachAccount).cooldown_until = cooldownUntil;
               log('warning', `${account.session_name}: повреждённая сессия (offset out of range × ${count}) → cooldown 1ч. Деактивация после 2-й попытки.`);
             }
@@ -1069,12 +1264,14 @@ export async function runCampaignLoop(
       log('info', `Цикл завершён. Пауза ${cycleDelay / 1000} сек`);
       await interruptibleSleep(cycleDelay, shouldStop);
 
-      const { data: fresh } = await db
+      const { data: fresh, error: freshErr } = await db
         .from('tg_outreach_campaigns')
         .select('status')
         .eq('id', campaignId)
         .single();
-      if (fresh?.status === 'stopped' || fresh?.status === 'paused') {
+      if (freshErr) {
+        log('warning', `Не удалось перечитать статус кампании из БД — ${freshErr.message}. Продолжаю текущий цикл.`);
+      } else if (fresh?.status === 'stopped' || fresh?.status === 'paused') {
         log('info', `Кампания ${fresh.status} — выход`);
         break;
       }
@@ -1085,10 +1282,13 @@ export async function runCampaignLoop(
     // auto-resume on the next worker start will skip it.
     // Explicit stop is handled by worker handler which sets status=stopped before signaling stop.
     if (!shouldStop()) {
-      await db.from('tg_outreach_campaigns')
+      const { error: stErr } = await db.from('tg_outreach_campaigns')
         .update({ status: 'stopped', updated_at: new Date().toISOString() })
         .eq('id', campaignId)
         .neq('status', 'paused');
+      if (stErr) {
+        log('error', `Не удалось пометить кампанию как stopped при выходе — ${stErr.message}`);
+      }
     } else {
       log('info', 'Остановка воркера — статус кампании сохранён для автоподъёма');
     }
