@@ -18,7 +18,7 @@ import {
 } from '@/lib/i18n';
 import { ChevronDown } from 'lucide-react';
 import { GlobalTextTranslator, LanguageLoadingOverlay } from '@/components/GlobalTextTranslator';
-import { resolveActiveNavId } from '@/lib/clientNav';
+import { resolveActiveNavId, type ClientNavMode } from '@/lib/clientNav';
 import { ClientSidebar } from '@/components/client/ClientSidebar';
 import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
 import { DemoBanner } from '@/components/client/DemoBanner';
@@ -40,6 +40,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const pathname = usePathname();
   const router = useRouter();
   const [locale, setLocale] = useState<Locale>('ru');
+  const [navMode, setNavMode] = useState<ClientNavMode>('manual');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement | null>(null);
@@ -68,12 +69,30 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
       if (!token || cancelled) return;
-      const res = await fetch('/api/user/locale', { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok || cancelled) return;
-      const body = (await res.json()) as { locale?: Locale };
-      const nextLocale = normalizeLocale(body.locale);
-      setLocale(nextLocale);
-      document.documentElement.lang = nextLocale;
+
+      // Параллельно тянем locale и portal-mode — оба нужны для первого
+      // рендера. Mode возвращает 'auto'|'manual' по комбинации
+      // profiles.auto_pipeline_enabled + configs.enabled.
+      const [localeRes, modeRes] = await Promise.all([
+        fetch('/api/user/locale', { headers: { Authorization: `Bearer ${token}` } }),
+        fetch('/api/client/portal-mode', { headers: { Authorization: `Bearer ${token}` } }),
+      ]);
+
+      if (cancelled) return;
+
+      if (localeRes.ok) {
+        const body = (await localeRes.json()) as { locale?: Locale };
+        const nextLocale = normalizeLocale(body.locale);
+        setLocale(nextLocale);
+        document.documentElement.lang = nextLocale;
+      }
+
+      if (modeRes.ok) {
+        const body = (await modeRes.json()) as { mode?: ClientNavMode };
+        if (body.mode === 'auto' || body.mode === 'manual') {
+          setNavMode(body.mode);
+        }
+      }
     })();
     return () => {
       cancelled = true;
@@ -217,10 +236,11 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         onClose={() => setDrawerOpen(false)}
         activeId={activeId}
         locale={locale}
+        mode={navMode}
       />
 
       <div className="flex-1 flex">
-        <ClientSidebar activeId={activeId} locale={locale} />
+        <ClientSidebar activeId={activeId} locale={locale} mode={navMode} />
         <main className="flex-1 min-w-0 px-3 py-4 sm:px-4 sm:py-6 md:px-8 md:py-8">
           {children}
         </main>
