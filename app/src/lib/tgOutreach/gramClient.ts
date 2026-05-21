@@ -17,6 +17,38 @@ import type { OutreachAccount, OutreachProxy } from './types';
  */
 const AUTH_KEY_DUP_DISABLE_THRESHOLD = 3;
 
+/**
+ * Translate raw gramJS / MTProto error messages into something a non-developer
+ * can read while keeping the original technical token in parentheses so
+ * engineers can still grep for it.
+ *
+ * Used by buildClients when logging connection failures to tg_outreach_logs.
+ */
+function humanizeConnectError(rawMsg: string): string {
+  if (rawMsg.includes('AUTH_KEY_DUPLICATED')) {
+    return `сессия параллельно открыта с другого устройства (AUTH_KEY_DUPLICATED)`;
+  }
+  if (rawMsg.includes('AUTH_KEY_UNREGISTERED')) {
+    return `Telegram больше не признаёт эту сессию (AUTH_KEY_UNREGISTERED — обычно после смены пароля или ручного выхода)`;
+  }
+  if (rawMsg.includes('USER_DEACTIVATED_BAN') || rawMsg.includes('USER_DEACTIVATED')) {
+    return `Telegram забанил этот номер (${rawMsg.includes('USER_DEACTIVATED_BAN') ? 'USER_DEACTIVATED_BAN' : 'USER_DEACTIVATED'})`;
+  }
+  if (rawMsg.includes('FLOOD_WAIT')) {
+    return `Telegram временно блокирует подключение из-за частых запросов (FLOOD_WAIT)`;
+  }
+  if (rawMsg.includes('connect timeout')) {
+    return `прокси или Telegram не отвечают за 15 секунд (${rawMsg.trim()} — обычно мёртвая прокси)`;
+  }
+  if (rawMsg.includes('PHONE_NUMBER_BANNED')) {
+    return `Telegram забанил этот номер при попытке логина (PHONE_NUMBER_BANNED)`;
+  }
+  if (rawMsg.includes('SESSION_REVOKED')) {
+    return `сессия отозвана пользователем вручную (SESSION_REVOKED)`;
+  }
+  return rawMsg.trim();
+}
+
 export const HEARTBEAT_PATH = '/tmp/tg-outreach-heartbeat';
 export function writeHeartbeat() {
   try { fs.writeFileSync(HEARTBEAT_PATH, Date.now().toString()); } catch { /* ignore */ }
@@ -147,14 +179,14 @@ export async function buildClients(
           .update({ auth_key_dup_count: 0 })
           .eq('id', acc.id);
         if (resetErr) {
-          log('warning', `${acc.session_name}: не удалось сбросить auth_key_dup_count в БД — ${resetErr.message}`);
+          log('warning', `Аккаунт ${acc.session_name}: не смог сбросить счётчик ошибок подключения в базе данных — ${resetErr.message}`);
         } else {
           acc.auth_key_dup_count = 0;
         }
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      log('error', `Аккаунт ${acc.session_name}: ошибка подключения — ${errMsg}`);
+      log('error', `Аккаунт ${acc.session_name}: не удалось подключиться к Telegram — ${humanizeConnectError(errMsg)}`);
 
       // AUTH_KEY_DUPLICATED means Telegram sees a parallel login on this
       // session. It will never recover from retries — the user has to
@@ -168,13 +200,13 @@ export async function buildClients(
             .update({ is_active: false, auth_key_dup_count: next })
             .eq('id', acc.id);
           if (updErr) {
-            log('error', `${acc.session_name}: не удалось выключить аккаунт в БД — ${updErr.message}`);
+            log('error', `Аккаунт ${acc.session_name}: не смог выключить аккаунт в базе данных — ${updErr.message}`);
           } else {
             log(
               'warning',
-              `${acc.session_name}: ${next} подряд AUTH_KEY_DUPLICATED → аккаунт выключен. ` +
-                `Перелогиньте сессию (Telegram → Settings → Active Sessions → terminate others), ` +
-                `затем заново загрузите session_data в UI.`,
+              `Аккаунт ${acc.session_name}: 3 неудачные попытки подряд (AUTH_KEY_DUPLICATED) — выключаю автоматически. ` +
+                `Чтобы вернуть в работу: на телефоне с этим номером откройте Telegram → Настройки → Конфиденциальность → ` +
+                `Активные сеансы → завершите чужие сессии. Затем перевыпустите session_data в UI.`,
             );
           }
         } else {
@@ -183,12 +215,13 @@ export async function buildClients(
             .update({ auth_key_dup_count: next })
             .eq('id', acc.id);
           if (updErr) {
-            log('warning', `${acc.session_name}: не удалось записать auth_key_dup_count в БД — ${updErr.message}`);
+            log('warning', `Аккаунт ${acc.session_name}: не смог записать счётчик ошибок подключения в базу данных — ${updErr.message}`);
           } else {
             log(
               'warning',
-              `${acc.session_name}: AUTH_KEY_DUPLICATED (${next}/${AUTH_KEY_DUP_DISABLE_THRESHOLD}) — ` +
-                `после ${AUTH_KEY_DUP_DISABLE_THRESHOLD} подряд выключим автоматически.`,
+              `Аккаунт ${acc.session_name}: сессия параллельно открыта с другого устройства ` +
+                `(AUTH_KEY_DUPLICATED, попытка ${next}/${AUTH_KEY_DUP_DISABLE_THRESHOLD} подряд). ` +
+                `После 3 подряд аккаунт будет выключен автоматически.`,
             );
           }
         }
