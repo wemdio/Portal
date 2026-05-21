@@ -8,17 +8,11 @@ import type { ColdyCredentials, PolzaColdyEvent } from './types';
  * Only the portal container talks to this service — it lives in the internal
  * docker network and is not authenticated, so we never expose its URL to the
  * browser. All calls happen from Next.js API routes (server-only).
+ *
+ * The service name is fixed by docker-compose (`polza-reports`) and listens
+ * on port 8000 — so this URL is a constant inside the portal network.
  */
-
-function getServiceUrl(): string {
-  const url = (process.env.POLZA_REPORTS_URL ?? '').trim();
-  if (!url) {
-    throw new Error(
-      'POLZA_REPORTS_URL is not configured. Set it to the internal address of the polza-reports service (e.g. http://polza-reports:8000).',
-    );
-  }
-  return url.replace(/\/+$/, '');
-}
+const SERVICE_URL = 'http://polza-reports:8000';
 
 export interface ColdyReportOptions {
   detailed: boolean;
@@ -44,7 +38,7 @@ export async function streamColdyReport(
   onEvent: ColdyEventHandler,
   signal?: AbortSignal,
 ): Promise<{ xlsx: Buffer; campaignsCount: number }> {
-  const res = await fetch(`${getServiceUrl()}/reports/coldy`, {
+  const res = await fetch(`${SERVICE_URL}/reports/coldy`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -140,7 +134,7 @@ export async function generateTriggaReport(
   form.append('include_created', String(options.include_created));
   form.append('include_base_left', String(options.include_base_left));
 
-  const res = await fetch(`${getServiceUrl()}/reports/trigga`, {
+  const res = await fetch(`${SERVICE_URL}/reports/trigga`, {
     method: 'POST',
     body: form,
     signal,
