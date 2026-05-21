@@ -581,6 +581,7 @@ export function getDemoProjectDetail(id: string) {
 export const DEMO_PRESET_RESPONSE = {
   preset: {
     id: 'demo-preset',
+    instantly_account_id: 'main',
     email_account_ids: ['demo-sender-1', 'demo-sender-2'],
     daily_limit: 120,
     daily_max_leads: 60,

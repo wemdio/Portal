@@ -4,10 +4,12 @@ import { requireAdminAuth, jsonError } from '@/lib/adminApiHelper';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { getClientTariffRow, resolveEffectiveLimits } from '@/lib/tariffs';
+import { listInstantlyAccounts, resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 
 export const dynamic = 'force-dynamic';
 
 interface PresetBody {
+  instantly_account_id?: unknown;
   email_account_ids?: unknown;
   daily_limit?: unknown;
   daily_max_leads?: unknown;
@@ -26,6 +28,15 @@ const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 function sanitizeBody(body: PresetBody): { ok: true; data: Record<string, unknown> } | { ok: false; error: string } {
   const data: Record<string, unknown> = {};
+
+  if (body.instantly_account_id !== undefined) {
+    const accountId = resolveInstantlyAccountId(String(body.instantly_account_id));
+    const allowed = new Set(listInstantlyAccounts().map((a) => a.id));
+    if (!allowed.has(accountId)) {
+      return { ok: false, error: 'instantly_account_id is not configured' };
+    }
+    data.instantly_account_id = accountId;
+  }
 
   if (body.email_account_ids !== undefined) {
     if (!Array.isArray(body.email_account_ids) || body.email_account_ids.some((s) => typeof s !== 'string')) {
@@ -93,7 +104,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     return jsonError('Failed to load preset', 500);
   }
 
-  return NextResponse.json({ preset: preset ?? null });
+  return NextResponse.json({
+    preset: preset ?? null,
+    instantly_accounts: listInstantlyAccounts(),
+  });
 }
 
 export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {

@@ -189,6 +189,30 @@ describe('loadContactsPaceData', () => {
     );
   });
 
+  it('filters contacts pace by period_id when a project period is active', async () => {
+    const { client, calls } = makeRecordingClient<{ contacts_done: number; recorded_at: string }>([
+      { contacts_done: 250, recorded_at: '2026-05-10' },
+      { contacts_done: 100, recorded_at: '2026-05-01' },
+    ]);
+
+    const pace = await loadContactsPaceData(client, {
+      projectId: 'proj-1',
+      periodId: 'period-2',
+      obligation: 500,
+      done: 250,
+      deadline: null,
+      now: NOW,
+    });
+
+    expect(pace?.avgPerDay).toBeCloseTo(150 / 9, 4);
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        { method: 'eq', args: ['project_id', 'proj-1'] },
+        { method: 'eq', args: ['period_id', 'period-2'] },
+      ]),
+    );
+  });
+
   it('feeds rows into computePace and returns the resulting pace', async () => {
     const { client } = makeRecordingClient<{ contacts_done: number; recorded_at: string }>([
       { contacts_done: 60, recorded_at: '2026-04-21' },
@@ -349,6 +373,40 @@ describe('loadAllProjectsPace', () => {
     expect(p2?.contacts?.dataPoints).toBe(2);
     // p2 has kpiPlan=0 → KPI ось отключена
     expect(p2?.kpi).toBeNull();
+  });
+
+  it('groups bulk pace by active period_id and ignores older project-period history', async () => {
+    const rows = [
+      { project_id: 'p1', period_id: 'period-1', contacts_done: 1000, kpi_fact: 20, recorded_at: '2026-04-30' },
+      { project_id: 'p1', period_id: 'period-2', contacts_done: 250, kpi_fact: 5, recorded_at: '2026-05-10' },
+      { project_id: 'p1', period_id: 'period-2', contacts_done: 100, kpi_fact: 2, recorded_at: '2026-05-01' },
+    ];
+    const { client, calls } = makeRecordingClient(rows);
+
+    const result = await loadAllProjectsPace(
+      client,
+      [
+        {
+          projectId: 'p1',
+          periodId: 'period-2',
+          contactsObligation: 500,
+          contactsDone: 250,
+          kpiPlan: 20,
+          kpiFact: 5,
+          deadline: null,
+        },
+      ],
+      NOW,
+    );
+
+    expect(calls).toEqual(expect.arrayContaining([
+      { method: 'in', args: ['period_id', ['period-2']] },
+    ]));
+    const p1 = result.get('p1');
+    expect(p1?.contacts?.dataPoints).toBe(2);
+    expect(p1?.contacts?.avgPerDay).toBeCloseTo(150 / 9, 4);
+    expect(p1?.kpi?.dataPoints).toBe(2);
+    expect(p1?.kpi?.avgPerDay).toBeCloseTo(3 / 9, 4);
   });
 
   it('returns empty pace pair for projects without history rows', async () => {

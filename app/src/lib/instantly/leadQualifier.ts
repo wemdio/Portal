@@ -246,13 +246,23 @@ export async function fetchBriefByCampaign(campaignId: string): Promise<string |
 
   // Primary: get brief from project linked to this campaign
   if (supabaseMain) {
-    const { data: link } = await supabaseInstantly
+    const { data: periodLink } = await supabaseInstantly
+      .from('project_period_instantly_campaigns')
+      .select('project_id')
+      .eq('campaign_id', campaignId)
+      .limit(1)
+      .maybeSingle();
+
+    const { data: legacyLink } = periodLink?.project_id
+      ? { data: null }
+      : await supabaseInstantly
       .from('project_instantly_campaigns')
       .select('project_id')
       .eq('campaign_id', campaignId)
       .limit(1)
       .maybeSingle();
 
+    const link = periodLink?.project_id ? periodLink : legacyLink;
     if (link?.project_id) {
       const { data: project } = await supabaseMain
         .from('projects')

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
-import { isResourceAllowed } from '@/lib/clientAccess';
+import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { pauseCampaign } from '@/lib/instantly/client';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { logAudit, logError } from '@/lib/loggerServer';
@@ -19,7 +19,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
 
   try {
-    await pauseCampaign(campaignId);
+    await pauseCampaign(campaignId, {
+      accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
+    });
 
     if (supabaseInstantly) {
       await supabaseInstantly

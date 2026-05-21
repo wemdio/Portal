@@ -9,6 +9,7 @@ const CONCURRENCY = 3;
 interface AccessRow {
   client_user_id: string;
   resource_id: string;
+  instantly_account_id?: string | null;
 }
 
 /**
@@ -26,14 +27,20 @@ export async function syncClientLeads(): Promise<{ campaigns: number; leads: num
 
   const { data: accessRows, error: accessErr } = await db
     .from('client_instantly_access')
-    .select('client_user_id, resource_id')
+    .select('client_user_id, resource_id, instantly_account_id')
     .eq('resource_type', 'campaign');
 
   if (accessErr) throw new Error(`Failed to read client_instantly_access: ${accessErr.message}`);
   if (!accessRows?.length) return { campaigns: 0, leads: 0 };
 
-  const campaignUsers = new Map<string, string[]>();
+  const campaignUsersByAccount = new Map<string, Map<string, string[]>>();
   for (const row of accessRows as AccessRow[]) {
+    const accountId = row.instantly_account_id || 'main';
+    let campaignUsers = campaignUsersByAccount.get(accountId);
+    if (!campaignUsers) {
+      campaignUsers = new Map<string, string[]>();
+      campaignUsersByAccount.set(accountId, campaignUsers);
+    }
     let users = campaignUsers.get(row.resource_id);
     if (!users) {
       users = [];
@@ -42,20 +49,22 @@ export async function syncClientLeads(): Promise<{ campaigns: number; leads: num
     users.push(row.client_user_id);
   }
 
-  const campaignNames = await listAllCampaigns();
-  const nameMap = new Map(campaignNames.map((c) => [c.id, c.name]));
-
   let totalLeads = 0;
   let campaignsDone = 0;
 
-  const syncOneCampaign = async (campaignId: string, userIds: string[]) => {
+  const syncOneCampaign = async (
+    accountId: string,
+    campaignId: string,
+    userIds: string[],
+    nameMap: Map<string, string>,
+  ) => {
     const campaignName = nameMap.get(campaignId) ?? campaignId;
 
-    const rawLeads = await listAllLeads(campaignId);
+    const rawLeads = await listAllLeads(campaignId, { accountId });
     if (rawLeads.length === 0) {
       console.log(`[leads-sync] "${campaignName}" — 0 leads from Instantly`);
       campaignsDone++;
-      await updateSyncTimestamp(db, campaignId, userIds);
+      await updateSyncTimestamp(db, accountId, campaignId, userIds);
       return;
     }
 
@@ -91,16 +100,20 @@ export async function syncClientLeads(): Promise<{ campaigns: number; leads: num
 
     totalLeads += rawLeads.length;
     campaignsDone++;
-    await updateSyncTimestamp(db, campaignId, userIds);
+    await updateSyncTimestamp(db, accountId, campaignId, userIds);
   };
 
-  const entries = [...campaignUsers.entries()];
   const executing = new Set<Promise<void>>();
-  for (const [campaignId, userIds] of entries) {
-    const task = syncOneCampaign(campaignId, userIds).finally(() => executing.delete(task));
-    executing.add(task);
-    if (executing.size >= CONCURRENCY) {
-      await Promise.race(executing);
+  for (const [accountId, campaignUsers] of campaignUsersByAccount.entries()) {
+    const campaignNames = await listAllCampaigns(undefined, { accountId });
+    const nameMap = new Map(campaignNames.map((c) => [c.id, c.name]));
+
+    for (const [campaignId, userIds] of campaignUsers.entries()) {
+      const task = syncOneCampaign(accountId, campaignId, userIds, nameMap).finally(() => executing.delete(task));
+      executing.add(task);
+      if (executing.size >= CONCURRENCY) {
+        await Promise.race(executing);
+      }
     }
   }
   await Promise.all(executing);
@@ -111,6 +124,7 @@ export async function syncClientLeads(): Promise<{ campaigns: number; leads: num
 
 async function updateSyncTimestamp(
   db: NonNullable<typeof supabaseInstantly>,
+  accountId: string,
   campaignId: string,
   userIds: string[],
 ): Promise<void> {
@@ -119,6 +133,7 @@ async function updateSyncTimestamp(
     .from('client_instantly_access')
     .update({ leads_synced_at: now })
     .eq('resource_type', 'campaign')
+    .eq('instantly_account_id', accountId)
     .eq('resource_id', campaignId)
     .in('client_user_id', userIds);
   if (error) {

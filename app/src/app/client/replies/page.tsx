@@ -400,9 +400,13 @@ export default function ClientLeadsPage() {
           onBack={() => setSelectedLead(null)}
           onMarkedLead={() => {
             setLeads((prev) => prev.map((lead) => (
-              lead.id === selectedLead.id ? { ...lead, is_lead: true } : lead
+              lead.id === selectedLead.id
+                ? { ...lead, is_lead: true, is_unread: false, status: 'lead' }
+                : lead
             )));
-            setSelectedLead((lead) => (lead ? { ...lead, is_lead: true } : lead));
+            setSelectedLead((lead) => (lead
+              ? { ...lead, is_lead: true, is_unread: false, status: 'lead' }
+              : lead));
           }}
         />
       </div>

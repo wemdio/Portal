@@ -33,9 +33,14 @@ jest.mock('@/lib/clientApiHelper', () => {
   };
 });
 
+// Старый мок остался для совместимости с enricher'ами (они используют
+// callOpenRouterChat). Главный autofill flow с 2026-05-20 ходит через
+// callOpenRouterChatRaw — чтобы читать finish_reason — поэтому второй мок.
 const callOpenRouterChatMock: jest.Mock = jest.fn();
+const callOpenRouterChatRawMock: jest.Mock = jest.fn();
 jest.mock('@/lib/openrouter/client', () => ({
   callOpenRouterChat: (arg: unknown) => callOpenRouterChatMock(arg),
+  callOpenRouterChatRaw: (arg: unknown) => callOpenRouterChatRawMock(arg),
 }));
 
 const logAuditMock: jest.Mock = jest.fn(async () => {});
@@ -68,6 +73,7 @@ beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
   process.env.OPENROUTER_BRIEF_API_KEY = 'test-key';
   callOpenRouterChatMock.mockReset();
+  callOpenRouterChatRawMock.mockReset();
   logAuditMock.mockClear();
   logErrorMock.mockClear();
   // Default fetchImpl returns a tiny but valid HTML page.
@@ -87,8 +93,8 @@ beforeEach(() => {
 
 describe('POST /api/client/brief/autofill — happy path', () => {
   it('returns the AI-derived patch (200) and never overwrites with empty strings', async () => {
-    callOpenRouterChatMock.mockResolvedValueOnce(
-      JSON.stringify({
+    callOpenRouterChatRawMock.mockResolvedValueOnce({
+      content: JSON.stringify({
         company_website: 'acme.com',
         company_description: 'We make widgets.',
         product_description: '',
@@ -99,7 +105,8 @@ describe('POST /api/client/brief/autofill — happy path', () => {
         questions: ['Какой средний чек?'],
         sources: { company_website: 'из <title>' },
       }),
-    );
+      finishReason: 'stop',
+    });
 
     const { POST } = await import('@/app/api/client/brief/autofill/route');
     const res = await POST(makeReq({ website: 'acme.com' }));
@@ -121,12 +128,19 @@ describe('POST /api/client/brief/autofill — happy path', () => {
   });
 
   it('passes website text to the AI (includes <title> and meta description)', async () => {
-    callOpenRouterChatMock.mockResolvedValueOnce(JSON.stringify({ company_website: 'acme.com' }));
+    callOpenRouterChatRawMock.mockResolvedValueOnce({
+      content: JSON.stringify({ company_website: 'acme.com' }),
+      finishReason: 'stop',
+    });
     const { POST } = await import('@/app/api/client/brief/autofill/route');
     await POST(makeReq({ website: 'acme.com' }));
 
-    expect(callOpenRouterChatMock).toHaveBeenCalledTimes(1);
-    const callArg = callOpenRouterChatMock.mock.calls[0][0] as {
+    // Main autofill идёт через Raw-вариант. Enricher'ы используют обычный
+    // callOpenRouterChat, но в этом тесте HTML не содержит ссылок на
+    // /cases/reviews/etc — discovery вернёт 0 кандидатов, enricher'ы скипнут.
+    expect(callOpenRouterChatRawMock).toHaveBeenCalledTimes(1);
+    expect(callOpenRouterChatMock).not.toHaveBeenCalled();
+    const callArg = callOpenRouterChatRawMock.mock.calls[0][0] as {
       messages: Array<{ role: string; content: string }>;
     };
     const userMessage = callArg.messages.find((m) => m.role === 'user');
@@ -137,7 +151,10 @@ describe('POST /api/client/brief/autofill — happy path', () => {
   });
 
   it('audits success', async () => {
-    callOpenRouterChatMock.mockResolvedValueOnce(JSON.stringify({ company_website: 'acme.com' }));
+    callOpenRouterChatRawMock.mockResolvedValueOnce({
+      content: JSON.stringify({ company_website: 'acme.com' }),
+      finishReason: 'stop',
+    });
     const { POST } = await import('@/app/api/client/brief/autofill/route');
     await POST(makeReq({ website: 'acme.com' }));
     expect(logAuditMock).toHaveBeenCalled();
@@ -166,7 +183,10 @@ describe('POST /api/client/brief/autofill — validation', () => {
   });
 
   it('accepts plain domains like redev.ru', async () => {
-    callOpenRouterChatMock.mockResolvedValueOnce(JSON.stringify({ company_website: 'redev.ru' }));
+    callOpenRouterChatRawMock.mockResolvedValueOnce({
+      content: JSON.stringify({ company_website: 'redev.ru' }),
+      finishReason: 'stop',
+    });
     const { POST } = await import('@/app/api/client/brief/autofill/route');
     const res = await POST(makeReq({ website: 'redev.ru' }));
     expect((res as Response).status).toBe(200);
@@ -198,7 +218,7 @@ describe('POST /api/client/brief/autofill — server config / failures', () => {
   });
 
   it('returns 502 when the AI call throws', async () => {
-    callOpenRouterChatMock.mockRejectedValueOnce(new Error('upstream boom'));
+    callOpenRouterChatRawMock.mockRejectedValueOnce(new Error('upstream boom'));
     const { POST } = await import('@/app/api/client/brief/autofill/route');
     const res = await POST(makeReq({ website: 'acme.com' }));
     expect((res as Response).status).toBe(502);

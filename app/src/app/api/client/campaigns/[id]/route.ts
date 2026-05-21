@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
-import { isResourceAllowed } from '@/lib/clientAccess';
+import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import {
   getCampaign,
   getCampaignAnalytics,
@@ -28,18 +28,21 @@ export async function GET(
   if (!isResourceAllowed(campaignId, accessRows, 'campaign')) {
     return jsonError('Кампания не найдена или доступ запрещён', 404);
   }
+  const instantlyRequestOptions = {
+    accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
+  };
 
   try {
     const [campaign, analyticsData, stepsData] = await Promise.all([
-      cached(`instantly:campaign:${campaignId}`, () => getCampaign(campaignId), DETAIL_TTL),
+      cached(`instantly:${instantlyRequestOptions.accountId}:campaign:${campaignId}`, () => getCampaign(campaignId, instantlyRequestOptions), DETAIL_TTL),
       cached(
-        `instantly:analytics:${campaignId}`,
-        () => getCampaignAnalytics({ campaign_id: campaignId }).catch(() => []),
+        `instantly:${instantlyRequestOptions.accountId}:analytics:${campaignId}`,
+        () => getCampaignAnalytics({ campaign_id: campaignId }, instantlyRequestOptions).catch(() => []),
         DETAIL_TTL,
       ),
       cached(
-        `instantly:steps:${campaignId}`,
-        () => getCampaignAnalyticsSteps({ campaign_id: campaignId }).catch(() => []),
+        `instantly:${instantlyRequestOptions.accountId}:steps:${campaignId}`,
+        () => getCampaignAnalyticsSteps({ campaign_id: campaignId }, instantlyRequestOptions).catch(() => []),
         DETAIL_TTL,
       ),
     ]);
