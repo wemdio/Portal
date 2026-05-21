@@ -488,6 +488,81 @@ const CLEANUP_SYSTEM_PROMPT = `Ты очищаешь названия компа
 Без пояснений, без кавычек. Количество строк = количеству входных компаний. Порядок и нумерация те же.
 Если не знаешь как очистить — верни оригинальное название с его номером. НИКОГДА не пропускай строки.`;
 
+/**
+ * Стрипает префиксы вида «N.», «N)» с начала строки, и так до упора.
+ *
+ * Зачем жадно: AI'а мы просим вернуть строки вида "{N}. Очищенное Название",
+ * но модель регулярно глючит:
+ *   - повторяет один номер для всех строк подряд (10. A, 10. B, 10. C);
+ *   - оборачивает оригинальное «10. ПК ЗВМП» во внешний нумер и возвращает
+ *     «1. 10. ПК ЗВМП» — внешний номер мы должны убрать, но внутренний
+ *     тоже мусор для финальной базы;
+ *   - в positional-fallback'е (когда <80% строк нумерованы) раньше префикс
+ *     вообще не стрипался и пролезал в БД (жалоба специалиста: «в рандомных
+ *     компаниях цифры в начале»).
+ *
+ * Trade-off: имя типа «1.5 кг» с точкой превратится в «5 кг», «12. серия»
+ * → «серия». В B2B-базе названий компаний такое почти не встречается,
+ * принимаем как осознанный риск ради устранения регресса с цифрами.
+ *
+ * Лимит на 5 итераций — защита от теоретической бесконечности; на практике
+ * двух хватает («35. 10. ПК ЗВМП» → «10. ПК ЗВМП» → «ПК ЗВМП»).
+ */
+const NUMBER_PREFIX_RE = /^(\d+)[.)]\s*/;
+function stripNumberPrefix(s: string): string {
+  let out = s;
+  for (let i = 0; i < 5; i += 1) {
+    const next = out.replace(NUMBER_PREFIX_RE, '');
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+/**
+ * Парсит ответ модели в Map<rowNumber, cleanedName>.
+ *
+ * Два режима:
+ *   1. Strict numbered — если >=80% строк имеют префикс «N.», используем
+ *      его как ключ. Робастно к перестановкам, пропускам, лишним строкам
+ *      типа «Очищенные названия:».
+ *   2. Positional fallback — если префиксов мало (модель забыла нумеровать,
+ *      или повторила один номер для всех строк), выстраиваем строки по
+ *      позиции i → row i+1. Здесь критично ВСЁ ЖЕ стрипать префиксы — иначе
+ *      мусор типа «10. ПК ЗВМП» пролезет в БД как есть (это и был баг).
+ *
+ * Возвращает null если ответ пустой.
+ */
+export function parseCleanupResponse(
+  content: string,
+  expectedCount: number,
+): Map<number, string> | null {
+  const numbered = new Map<number, string>();
+  const cleanLines: string[] = [];
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const numMatch = trimmed.match(NUMBER_PREFIX_RE);
+    const cleaned = stripNumberPrefix(trimmed);
+    if (!cleaned) continue; // строка состояла только из префикса — мусор
+    if (numMatch) numbered.set(parseInt(numMatch[1], 10), cleaned);
+    cleanLines.push(cleaned);
+  }
+  if (cleanLines.length === 0) return null;
+  if (numbered.size >= expectedCount * 0.8) return numbered;
+  // Positional fallback. Логируем, чтобы по jobId можно было искать
+  // «cleanup упал в fallback» — индикатор что модель отвечает плохо
+  // и стоит дробить батчи или менять prompt.
+  console.warn(
+    `[base-constructor] cleanup positional fallback: only ${numbered.size}/${expectedCount} lines numbered`,
+  );
+  const positional = new Map<number, string>();
+  for (let j = 0; j < cleanLines.length && j < expectedCount; j += 1) {
+    if (cleanLines[j]) positional.set(j + 1, cleanLines[j]);
+  }
+  return positional;
+}
+
 export async function stepNameCleanup(
   data: string[][],
   onProgress: ProgressFn,
@@ -496,7 +571,7 @@ export async function stepNameCleanup(
   const header = data[0];
   const body = data.slice(1);
   const nameIdx = findColumnIndex(header, 'компания', 'company', 'name', 'название');
-  const siteIdx = findColumnIndex(header, 'сайт', 'site', 'website', 'url', 'домен', 'domain');
+  const siteIdx = findColumnIndex(header, 'сайт', 'site', 'website', 'url', 'domain');
   if (nameIdx < 0) { await onProgress(100); return data; }
 
   for (let batch = 0; batch < body.length; batch += CLEANUP_BATCH) {
@@ -517,26 +592,7 @@ export async function stepNameCleanup(
         { role: 'system', content: CLEANUP_SYSTEM_PROMPT },
         { role: 'user', content: input },
       ], { temperature: 0.1, title: 'Portal - Base Constructor Cleanup' });
-
-      const numbered = new Map<number, string>();
-      const allLines: string[] = [];
-      for (const line of content.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        const match = trimmed.match(/^(\d+)\.\s*(.+)/);
-        if (match) numbered.set(parseInt(match[1], 10), match[2].trim());
-        allLines.push(trimmed);
-      }
-
-      if (numbered.size >= chunk.length * 0.8) {
-        cleanedMap = numbered;
-      } else if (allLines.length > 0) {
-        const positional = new Map<number, string>();
-        for (let j = 0; j < allLines.length && j < chunk.length; j++) {
-          if (allLines[j]) positional.set(j + 1, allLines[j]);
-        }
-        cleanedMap = positional;
-      }
+      cleanedMap = parseCleanupResponse(content, chunk.length);
     } catch { /* skip batch on failure */ }
 
     if (cleanedMap) {
