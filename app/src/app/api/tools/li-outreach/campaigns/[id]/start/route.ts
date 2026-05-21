@@ -45,10 +45,20 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       }
     }
 
-    await supabaseAdmin
+    const { error: updErr } = await supabaseAdmin
       .from('li_campaigns')
       .update({ status: 'running', updated_at: new Date().toISOString() })
       .eq('id', id);
+    if (updErr) return jsonError(`Не удалось перевести кампанию в статус «запущена» — ${updErr.message}`, 500);
+
+    // Record the lifecycle transition in the per-campaign log so the operator
+    // sees in the Logs tab who started the campaign and when, alongside the
+    // runtime events that follow.
+    await supabaseAdmin.from('li_campaign_logs').insert({
+      campaign_id: id,
+      level: 'info',
+      message: `Кампания запущена пользователем (UI «Старт»). Дальше воркер сам будет тикать каждые ~5 минут.`,
+    });
 
     return NextResponse.json({ ok: true });
   });

@@ -58,7 +58,15 @@ async function maybeParkAccountFromError(
 ): Promise<void> {
   const cooldown = detectAccountCooldownError(err);
   if (!cooldown) return;
-  await applyCooldownToAccount(db, accountDbId, cooldown.kind);
+  const { error: cdErr } = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
+  if (cdErr) {
+    // The DB write is best-effort, but a silent failure here means we'll keep
+    // poking LinkedIn after they told us to stop — visible in worker logs so
+    // ops can see it.
+    console.warn(
+      `[li-outreach][scraper] applyCooldownToAccount failed for account ${accountDbId} (${cooldown.kind}): ${cdErr}`,
+    );
+  }
 }
 
 function parseHeadline(headline: string | null): { position: string; company: string } {
