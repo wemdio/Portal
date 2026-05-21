@@ -15,5 +15,4 @@ create index if not exists li_campaign_logs_account_created_idx
   where account_id is not null;
 
 comment on column public.li_campaign_logs.account_id is
-  'LinkedIn account that produced this log line (li_accounts.id). NULL for ' ||
-  'lines emitted before the per-tick account is loaded, or for legacy rows.';
+  'LinkedIn account that produced this log line (li_accounts.id). NULL for lines emitted before the per-tick account is loaded, or for legacy rows.';
