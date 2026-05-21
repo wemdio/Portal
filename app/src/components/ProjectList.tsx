@@ -55,8 +55,74 @@ type ProjectPeriod = {
   period_end: string | null;
   contacts_done: string | null;
   contacts_obligation: string | null;
+  kpi_plan: string | null;
   deadline: string | null;
+  budget: string | null;
+  margin: string | null;
+  payment_method: string | null;
+  payment_date: string | null;
 };
+
+type PeriodFormState = {
+  period_start: string;
+  budget: string;
+  margin: string;
+  payment_method: string;
+  payment_date: string;
+  contacts_obligation: string;
+  kpi_plan: string;
+  deadline: string;
+};
+
+function toDateInputValue(value: string | null | undefined): string {
+  return value ? value.slice(0, 10) : '';
+}
+
+function todayInputDate(): string {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 10);
+}
+
+function formValueOrNull(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function PeriodDialogField({
+  label,
+  value,
+  onChange,
+  type = 'text',
+  placeholder,
+  className = '',
+  help,
+  disabled,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  type?: 'text' | 'date';
+  placeholder?: string;
+  className?: string;
+  help?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <label className={`block ${className}`}>
+      <span className="mb-1.5 block text-xs font-semibold text-zinc-700">{label}</span>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        disabled={disabled}
+        className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-blue-400 focus:ring-4 focus:ring-blue-100 disabled:cursor-wait disabled:bg-zinc-50 disabled:text-zinc-500"
+      />
+      {help && <span className="mt-1 block text-[11px] leading-4 text-zinc-400">{help}</span>}
+    </label>
+  );
+}
 
 /* ── KPI pace tooltip (hover on KPI Факт cell) ── */
 
@@ -680,6 +746,8 @@ export function ProjectList() {
   const [panelPeriods, setPanelPeriods] = useState<ProjectPeriod[]>([]);
   const [activePeriodsByProjectId, setActivePeriodsByProjectId] = useState<Map<string, ProjectPeriod>>(new Map());
   const [creatingPeriod, setCreatingPeriod] = useState(false);
+  const [periodFormProject, setPeriodFormProject] = useState<Project | null>(null);
+  const [periodForm, setPeriodForm] = useState<PeriodFormState | null>(null);
   const [panelCampaignSearch, setPanelCampaignSearch] = useState('');
   const [showPanelCampaignPicker, setShowPanelCampaignPicker] = useState(false);
   const [editingContactsId, setEditingContactsId] = useState<string | null>(null);
@@ -828,7 +896,7 @@ export function ProjectList() {
     let cancelled = false;
     void supabase
       .from('project_periods')
-      .select('id, project_id, name, status, period_start, period_end, contacts_done, contacts_obligation, deadline')
+      .select('id, project_id, name, status, period_start, period_end, contacts_done, contacts_obligation, kpi_plan, deadline, budget, margin, payment_method, payment_date')
       .eq('status', 'active')
       .in('project_id', projects.map((p) => p.id))
       .then(({ data, error }) => {
@@ -965,22 +1033,53 @@ export function ProjectList() {
     } catch { /* non-critical */ }
   }
 
-  async function createNextPeriod(project: Project) {
+  function openNewPeriodDialog(project: Project) {
+    setPeriodFormProject(project);
+    setPeriodForm({
+      period_start: todayInputDate(),
+      budget: project.budget ?? '',
+      margin: project.margin ?? '',
+      payment_method: project.payment_method ?? '',
+      payment_date: toDateInputValue(project.payment_date),
+      contacts_obligation: project.contacts_obligation ?? '',
+      kpi_plan: project.kpi_plan ?? '',
+      deadline: toDateInputValue(project.deadline),
+    });
+  }
+
+  function updatePeriodForm(field: keyof PeriodFormState, value: string) {
+    setPeriodForm((prev) => (prev ? { ...prev, [field]: value } : prev));
+  }
+
+  function closeNewPeriodDialog() {
+    if (creatingPeriod) return;
+    setPeriodForm(null);
+    setPeriodFormProject(null);
+  }
+
+  async function createNextPeriod(project: Project, form: PeriodFormState) {
     if (creatingPeriod) return;
     setCreatingPeriod(true);
     try {
       const res = await authFetch(`/api/projects/${project.id}/periods`, {
         method: 'POST',
         body: JSON.stringify({
-          contacts_obligation: project.contacts_obligation ?? null,
-          kpi_plan: project.kpi_plan ?? null,
-          deadline: project.deadline ?? null,
+          period_start: formValueOrNull(form.period_start),
+          budget: formValueOrNull(form.budget),
+          margin: formValueOrNull(form.margin),
+          payment_method: formValueOrNull(form.payment_method),
+          payment_date: formValueOrNull(form.payment_date),
+          contacts_obligation: formValueOrNull(form.contacts_obligation),
+          kpi_plan: formValueOrNull(form.kpi_plan),
+          deadline: formValueOrNull(form.deadline),
         }),
       });
       if (!res.ok) return;
       await fetchProjects();
       await fetchPanelPeriods(project.id);
       await fetchPanelCampaigns(project.id);
+      setPeriodForm(null);
+      setPeriodFormProject(null);
     } catch { /* non-critical */ }
     finally {
       setCreatingPeriod(false);
@@ -2571,7 +2670,7 @@ export function ProjectList() {
                   {canEdit && (
                     <button
                       type="button"
-                      onClick={() => void createNextPeriod(selectedProject)}
+                      onClick={() => openNewPeriodDialog(selectedProject)}
                       disabled={creatingPeriod}
                       className="rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-wait disabled:opacity-50"
                     >
@@ -2603,9 +2702,17 @@ export function ProjectList() {
                             {period.period_start}
                             {period.period_end ? ` - ${period.period_end}` : ''}
                           </div>
+                          {(period.budget || period.margin) && (
+                            <div className="mt-0.5 truncate text-[11px] text-zinc-500">
+                              {period.budget ? `Сумма: ${period.budget}` : ''}
+                              {period.budget && period.margin ? ' · ' : ''}
+                              {period.margin ? `Маржа: ${period.margin}` : ''}
+                            </div>
+                          )}
                         </div>
                         <div className="shrink-0 text-right text-[11px] text-zinc-500">
                           <div>{period.contacts_done ?? '0'} / {period.contacts_obligation ?? '—'}</div>
+                          {period.kpi_plan && <div className="text-zinc-400">KPI {period.kpi_plan}</div>}
                           {period.deadline && <div className="text-zinc-400">до {period.deadline}</div>}
                         </div>
                       </div>
@@ -2994,6 +3101,131 @@ export function ProjectList() {
                </div>
              )}
           </div>
+        </div>
+      )}
+
+      {periodFormProject && periodForm && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-zinc-950/45"
+            onClick={closeNewPeriodDialog}
+          />
+          <form
+            className="relative max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-zinc-200 bg-white shadow-2xl"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void createNextPeriod(periodFormProject, periodForm);
+            }}
+          >
+            <div className="sticky top-0 z-10 border-b border-zinc-100 bg-white px-5 py-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <h3 className="text-base font-semibold text-zinc-950">Новый период</h3>
+                  <p className="mt-1 truncate text-sm text-zinc-500">
+                    {periodFormProject.client || periodFormProject.name || 'Проект'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeNewPeriodDialog}
+                  disabled={creatingPeriod}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 disabled:opacity-50"
+                  aria-label="Закрыть"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="mt-4 flex gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" strokeWidth={1.75} aria-hidden="true" />
+                <div>
+                  <p className="text-sm font-semibold">
+                    Проверьте условия нового периода перед созданием.
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-amber-800">
+                    Поля уже заполнены текущими данными проекта. Если клиент оплатил другую сумму,
+                    изменились контакты, KPI, маржа или дедлайн, обновите детали здесь.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 px-5 py-5 sm:grid-cols-2">
+              <PeriodDialogField
+                label="Дата начала периода"
+                type="date"
+                value={periodForm.period_start}
+                onChange={(value) => updatePeriodForm('period_start', value)}
+                disabled={creatingPeriod}
+              />
+              <PeriodDialogField
+                label="Дата оплаты"
+                type="date"
+                value={periodForm.payment_date}
+                onChange={(value) => updatePeriodForm('payment_date', value)}
+                disabled={creatingPeriod}
+              />
+              <PeriodDialogField
+                label="Выручка / сумма договора"
+                value={periodForm.budget}
+                onChange={(value) => updatePeriodForm('budget', value)}
+                placeholder="Например: 150000"
+                disabled={creatingPeriod}
+              />
+              <PeriodDialogField
+                label="Маржа"
+                value={periodForm.margin}
+                onChange={(value) => updatePeriodForm('margin', value)}
+                placeholder="Автоматически или вручную"
+                disabled={creatingPeriod}
+              />
+              <PeriodDialogField
+                label="Способ оплаты"
+                value={periodForm.payment_method}
+                onChange={(value) => updatePeriodForm('payment_method', value)}
+                placeholder="Например: счет, карта, рассрочка"
+                disabled={creatingPeriod}
+              />
+              <PeriodDialogField
+                label="Обязательство по контактам"
+                value={periodForm.contacts_obligation}
+                onChange={(value) => updatePeriodForm('contacts_obligation', value)}
+                placeholder="Например: 8000-16000"
+                disabled={creatingPeriod}
+              />
+              <PeriodDialogField
+                label="KPI"
+                value={periodForm.kpi_plan}
+                onChange={(value) => updatePeriodForm('kpi_plan', value)}
+                placeholder="Ключевые показатели"
+                disabled={creatingPeriod}
+              />
+              <PeriodDialogField
+                label="Дедлайн"
+                type="date"
+                value={periodForm.deadline}
+                onChange={(value) => updatePeriodForm('deadline', value)}
+                disabled={creatingPeriod}
+              />
+            </div>
+
+            <div className="flex flex-col-reverse gap-2 border-t border-zinc-100 px-5 py-4 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={closeNewPeriodDialog}
+                disabled={creatingPeriod}
+                className="rounded-lg border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="submit"
+                disabled={creatingPeriod}
+                className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-wait disabled:opacity-60"
+              >
+                {creatingPeriod ? 'Создаем...' : 'Создать период'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
 

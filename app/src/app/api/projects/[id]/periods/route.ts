@@ -6,13 +6,16 @@ export const dynamic = 'force-dynamic';
 
 type ProjectRow = {
   id: string;
+  budget: string | null;
+  margin: string | null;
+  payment_method: string | null;
+  payment_date: string | null;
   contacts_obligation: string | null;
   contacts_done: string | null;
   kpi_plan: string | null;
   kpi_fact: string | null;
   deadline: string | null;
   launch_date: string | null;
-  payment_date: string | null;
   created_at: string | null;
 };
 
@@ -29,6 +32,10 @@ type PeriodRow = {
   kpi_plan: string | null;
   kpi_fact: string | null;
   deadline: string | null;
+  budget: string | null;
+  margin: string | null;
+  payment_method: string | null;
+  payment_date: string | null;
   created_at: string;
 };
 
@@ -45,6 +52,15 @@ function dateOnly(value: string | null | undefined): string | null {
   const d = new Date(value);
   if (isNaN(d.getTime())) return null;
   return d.toISOString().slice(0, 10);
+}
+
+function textOrNull(value: string | null | undefined): string | null {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  return trimmed ? trimmed : null;
+}
+
+function hasBodyField<T extends object>(body: T, key: keyof T): boolean {
+  return Object.prototype.hasOwnProperty.call(body, key);
 }
 
 function dayBefore(date: string): string {
@@ -98,6 +114,10 @@ export async function POST(
 
   const body = await req.json().catch(() => ({})) as {
     period_start?: string;
+    budget?: string | null;
+    margin?: string | null;
+    payment_method?: string | null;
+    payment_date?: string | null;
     contacts_obligation?: string | null;
     kpi_plan?: string | null;
     deadline?: string | null;
@@ -107,7 +127,7 @@ export async function POST(
 
   const { data: project, error: projectErr } = await supabaseAdmin
     .from('projects')
-    .select('id, contacts_obligation, contacts_done, kpi_plan, kpi_fact, deadline, launch_date, payment_date, created_at')
+    .select('id, budget, margin, payment_method, payment_date, contacts_obligation, contacts_done, kpi_plan, kpi_fact, deadline, launch_date, created_at')
     .eq('id', projectId)
     .maybeSingle();
   if (projectErr) return jsonError(projectErr.message, 500);
@@ -145,6 +165,10 @@ export async function POST(
         kpi_plan: currentProject.kpi_plan,
         kpi_fact: currentProject.kpi_fact,
         deadline: currentProject.deadline,
+        budget: currentProject.budget,
+        margin: currentProject.margin,
+        payment_method: currentProject.payment_method,
+        payment_date: currentProject.payment_date,
       })
       .select('id')
       .maybeSingle();
@@ -182,11 +206,29 @@ export async function POST(
     status: 'active',
     period_start: periodStart,
     period_end: null,
-    contacts_obligation: body.contacts_obligation ?? currentProject.contacts_obligation,
+    contacts_obligation: hasBodyField(body, 'contacts_obligation')
+      ? textOrNull(body.contacts_obligation)
+      : currentProject.contacts_obligation,
     contacts_done: '0',
-    kpi_plan: body.kpi_plan ?? currentProject.kpi_plan,
+    kpi_plan: hasBodyField(body, 'kpi_plan')
+      ? textOrNull(body.kpi_plan)
+      : currentProject.kpi_plan,
     kpi_fact: '0',
-    deadline: body.deadline ?? currentProject.deadline,
+    deadline: hasBodyField(body, 'deadline')
+      ? dateOnly(body.deadline)
+      : currentProject.deadline,
+    budget: hasBodyField(body, 'budget')
+      ? textOrNull(body.budget)
+      : currentProject.budget,
+    margin: hasBodyField(body, 'margin')
+      ? textOrNull(body.margin)
+      : currentProject.margin,
+    payment_method: hasBodyField(body, 'payment_method')
+      ? textOrNull(body.payment_method)
+      : currentProject.payment_method,
+    payment_date: hasBodyField(body, 'payment_date')
+      ? dateOnly(body.payment_date)
+      : currentProject.payment_date,
   };
 
   const { data: newPeriod, error: newErr } = await supabaseAdmin
@@ -222,6 +264,10 @@ export async function POST(
       kpi_plan: newPeriodPayload.kpi_plan,
       kpi_fact: '0',
       deadline: newPeriodPayload.deadline,
+      budget: newPeriodPayload.budget,
+      margin: newPeriodPayload.margin,
+      payment_method: newPeriodPayload.payment_method,
+      payment_date: newPeriodPayload.payment_date,
       updated_at: new Date().toISOString(),
     })
     .eq('id', projectId);
