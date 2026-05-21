@@ -3,16 +3,25 @@
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
+  CLIENT_NAV_AUTO_PIPELINE_SETUP,
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_GROUPS,
   CLIENT_NAV_SUPPORT,
+  filterClientNavGroupsForMode,
   type ClientNavItem,
+  type ClientNavMode,
 } from '@/lib/clientNav';
 import type { Locale } from '@/lib/i18n';
 
 export interface ClientNavListProps {
   activeId: string | null;
   locale: Locale;
+  /**
+   * Portal mode. 'auto' hides everything except Dashboard/Replies/Leads/Reports/Support.
+   * Defaults to 'manual' when the parent doesn't know yet (initial render before
+   * /api/user/me responds).
+   */
+  mode?: ClientNavMode;
   onItemClick?: () => void;
 }
 
@@ -51,7 +60,8 @@ function NavItemRow({
   );
 }
 
-export function ClientNavList({ activeId, locale, onItemClick }: ClientNavListProps) {
+export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }: ClientNavListProps) {
+  const groups = filterClientNavGroupsForMode(CLIENT_NAV_GROUPS, mode);
   return (
     <nav aria-label={locale === 'en' ? 'Main navigation' : 'Главное меню'} className="flex flex-col gap-1.5">
       <NavItemRow
@@ -61,7 +71,19 @@ export function ClientNavList({ activeId, locale, onItemClick }: ClientNavListPr
         onItemClick={onItemClick}
       />
 
-      {CLIENT_NAV_GROUPS.map((group, idx) => {
+      {/* Auto-mode-only: настройка цепочек под скоры endpoint'а. В manual
+          этого пункта не существует — manual-клиент пишет цепочки прямо
+          в /client/launch при запуске кампании. */}
+      {mode === 'auto' && (
+        <NavItemRow
+          item={CLIENT_NAV_AUTO_PIPELINE_SETUP}
+          active={activeId === CLIENT_NAV_AUTO_PIPELINE_SETUP.id}
+          locale={locale}
+          onItemClick={onItemClick}
+        />
+      )}
+
+      {groups.map((group, idx) => {
         const groupLabel = locale === 'en' ? group.labelEn : group.label;
         const groupNumber = String(idx + 1).padStart(2, '0');
         return (

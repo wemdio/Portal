@@ -10,13 +10,15 @@
 
 import { ClientNavList } from './ClientNavList';
 import type { Locale } from '@/lib/i18n';
+import type { ClientNavMode } from '@/lib/clientNav';
 
 export interface ClientSidebarProps {
   activeId: string | null;
   locale: Locale;
+  mode?: ClientNavMode;
 }
 
-export function ClientSidebar({ activeId, locale }: ClientSidebarProps) {
+export function ClientSidebar({ activeId, locale, mode }: ClientSidebarProps) {
   return (
     <aside
       className="hidden md:block sticky top-24 self-start max-h-[calc(100vh-6rem)] overflow-y-auto px-4 py-5 shrink-0 w-[250px] lg:w-[270px]"
@@ -24,7 +26,7 @@ export function ClientSidebar({ activeId, locale }: ClientSidebarProps) {
       aria-label={locale === 'en' ? 'Sidebar' : 'Боковое меню'}
     >
       <div style={{ direction: 'ltr' }}>
-        <ClientNavList activeId={activeId} locale={locale} />
+        <ClientNavList activeId={activeId} locale={locale} mode={mode} />
       </div>
     </aside>
   );

@@ -11,6 +11,7 @@ import {
   stepNameCleanup,
   stepPersonalize,
   stepValidateEmails,
+  FOUND_EMAIL_COL,
   type StepKey,
   type ProgressFn,
   type CancelCheckFn,
@@ -23,6 +24,21 @@ interface StepConfig {
   brief?: string;
   prompt?: string;
   column_mapping?: string;
+  /**
+   * Куда find_emails пишет результат (когда в файле уже есть email-колонка):
+   *   - 'separate' (default из UI): новая колонка 'Найденный Email' рядом с исходной;
+   *   - 'same' (legacy/explicit choice): дополнение существующей колонки.
+   * Если колонки email в исходных данных нет — опция игнорируется, шаг создаёт «Email».
+   */
+  find_emails_target?: 'same' | 'separate';
+  /**
+   * Какие email-колонки валидирует validate_emails:
+   *   - 'original' (default из UI когда есть только исходная): валидируем исходную;
+   *   - 'found': валидируем только «Найденный Email» (создан find_emails в режиме separate);
+   *   - 'both': обе колонки. Строка остаётся если хотя бы в одной email прошёл.
+   * Имеет смысл только когда find_emails работал в target='separate' и колонок две.
+   */
+  validate_target?: 'original' | 'found' | 'both';
   /** When true, ta_scoring annotates rows with score+reason but does NOT filter <7. */
   keepAllScored?: boolean;
   onCheckpoint?: (data: string[][]) => Promise<void>;
@@ -242,9 +258,18 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
   dedup_full: (data, prog) => stepFullDedup(data, prog),
   dedup_email: (data, prog) => stepEmailDedup(data, prog),
   clean_names: (data, prog, cancel) => stepNameCleanup(data, prog, cancel),
-  find_emails: (data, prog, cancel) => stepFindEmails(data, prog, cancel),
+  find_emails: (data, prog, cancel, cfg) =>
+    stepFindEmails(data, prog, cancel, {
+      // Default 'separate' выбран в UI: при наличии email-колонки в файле новые
+      // скрапленные email НЕ перетирают исходные данные юзера, кладутся отдельно.
+      // Legacy-юзер с прежним поведением может явно поставить 'same' в UI.
+      target: cfg.find_emails_target ?? 'separate',
+    }),
   split_emails: (data, prog) => stepSplitEmails(data, prog),
-  validate_emails: (data, prog) => stepValidateEmails(data, prog),
+  validate_emails: (data, prog, cancel, cfg) =>
+    stepValidateEmails(data, prog, cancel, {
+      validateTarget: cfg.validate_target ?? 'original',
+    }),
   check_sites: (data, prog, cancel) => stepSiteCheck(data, prog, cancel),
   enrich_descriptions: (data, prog, cancel, cfg) => stepEnrich(data, prog, cancel, cfg.onCheckpoint),
   ta_scoring: (data, prog, cancel, cfg) =>
@@ -254,6 +279,92 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
     }),
   personalization: (data, prog, cancel, cfg) => stepPersonalize(data, cfg.prompt || '', prog, cancel),
 };
+
+/**
+ * Финальный merge: если в data есть и исходная email-колонка, и FOUND_EMAIL_COL —
+ * объединяем их в одну (исходную), удаляем FOUND_EMAIL_COL из header'а и тела.
+ *
+ * Зачем: юзер хочет получить итоговый файл с одной email-колонкой, даже если
+ * на промежуточных шагах мы хранили исходник и scrape-результат раздельно
+ * (см. stepFindEmails target='separate'). Merge даёт юзеру свободу выбрать
+ * на этапе настройки (1 колонка / 2 раздельные), но **финальный экспорт всегда
+ * 1 колонка** — это требование специалиста.
+ *
+ * Дедуп case-insensitive:
+ *   - оригинал: 'Sales@x.ru'
+ *   - найденный: 'sales@x.ru, info@x.ru'
+ *   - merged: 'Sales@x.ru, info@x.ru' (порядок: исходные, потом найденные;
+ *     сохраняем регистр первого вхождения)
+ *
+ * Безопасно вызывать всегда — если FOUND_EMAIL_COL отсутствует, функция возвращает
+ * data как есть (no-op). Если есть FOUND_EMAIL_COL но нет исходной — переименовываем
+ * FOUND_EMAIL_COL в 'Email' (странный case, но не теряем данные).
+ *
+ * @internal — exported только для тестов; не использовать снаружи модуля.
+ */
+export function mergeFoundEmailColumn(data: string[][]): string[][] {
+  if (data.length === 0) return data;
+  const header = data[0];
+  const foundIdx = header.findIndex((h) => h.trim() === FOUND_EMAIL_COL);
+  if (foundIdx < 0) return data; // нечего мерджить
+
+  // Ищем исходную email-колонку (тот же набор alias'ов что и findColumnIndex
+  // в шагах). Re-implementируем здесь чтобы не тащить лишний import.
+  const aliases = ['email', 'e-mail', 'почта', 'mail'];
+  const lower = header.map((h) => h.trim().toLowerCase());
+  let originalIdx = -1;
+  for (const a of aliases) {
+    const idx = lower.indexOf(a);
+    if (idx >= 0 && idx !== foundIdx) { originalIdx = idx; break; }
+  }
+
+  if (originalIdx < 0) {
+    // Нет исходной — просто переименовываем FOUND_EMAIL_COL → 'Email'. Случай
+    // редкий (find_emails в режиме separate без исходной колонки не должен
+    // создавать FOUND_EMAIL_COL — она бы fallback'нулась в 'Email'). Но
+    // защитимся на resume/багов будущего.
+    const newHeader = [...header];
+    newHeader[foundIdx] = 'Email';
+    return [newHeader, ...data.slice(1)];
+  }
+
+  // Email-регекс берём такой же как stepSplitEmails — общий паттерн.
+  const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+
+  const mergedBody = data.slice(1).map((row) => {
+    const origCell = row[originalIdx] || '';
+    const foundCell = row[foundIdx] || '';
+    if (!foundCell) {
+      // В found-колонке пусто — нечего сливать, оставляем оригинал.
+      const out = [...row];
+      out.splice(foundIdx, 1);
+      return out;
+    }
+    // Парсим email'ы из обеих ячеек, дедуплицируем case-insensitive с сохранением
+    // регистра первого вхождения. Порядок: исходные, потом найденные (юзер так
+    // ожидает — «свои» вперёд).
+    const seen = new Map<string, string>(); // lowercase → original-case
+    const collect = (cell: string) => {
+      const matches = cell.match(EMAIL_RE);
+      if (!matches) return;
+      for (const m of matches) {
+        const lc = m.toLowerCase();
+        if (!seen.has(lc)) seen.set(lc, m);
+      }
+    };
+    collect(origCell);
+    collect(foundCell);
+    const merged = [...seen.values()].join(', ');
+    const out = [...row];
+    out[originalIdx] = merged;
+    out.splice(foundIdx, 1);
+    return out;
+  });
+
+  const newHeader = [...header];
+  newHeader.splice(foundIdx, 1);
+  return [newHeader, ...mergedBody];
+}
 
 export async function runBaseConstructorJob(jobId: string): Promise<void> {
   try {
@@ -412,6 +523,10 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
       ? body.reduce((s, r) => s + (parseInt(r[scoreIdx], 10) || 0), 0) / (body.length || 1)
       : 0;
 
+    // Финальный merge двух email-колонок (если find_emails работал в режиме
+    // 'separate' — у нас сейчас и исходная Email, и Найденный Email). Юзер хочет
+    // итоговый файл с одной колонкой — мерджим case-insensitive с дедупом.
+    data = mergeFoundEmailColumn(data);
     const finalSanitized = sanitizeRowsForJsonb(data);
     const finalApproxBytes = JSON.stringify(finalSanitized).length;
     const { error: finalErr, ms: finalMs, attempts: finalAttempts } = await updateJobWithRetry(

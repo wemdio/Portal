@@ -1,0 +1,98 @@
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+
+export const dynamic = 'force-dynamic';
+
+/**
+ * GET /api/client/auto-pipeline/summary
+ *
+ * Краткая сводка по авто-пайплайну для дашборда клиента. Возвращает:
+ *   - enabled: true/false (из client_auto_pipeline_configs)
+ *   - last_run: данные последнего прогона (status, started_at, метрики)
+ *   - totals_30d: совокупные метрики за 30 дней
+ *   - stored_count: сколько лидов в storage-only состоянии (висят без отправки)
+ *
+ * Возвращает enabled=false (и null-ы) для клиентов, у которых нет конфига
+ * или он отключён. Дашборд по этому полю решает, рендерить ли блок.
+ */
+export async function GET(req: NextRequest) {
+  try {
+    const token = getBearerToken(req.headers.get('authorization'));
+    if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const supabase = createAuthedSupabaseClient(token);
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
+
+    // Конфиг.
+    const { data: config } = await supabaseAdmin
+      .from('client_auto_pipeline_configs')
+      .select('enabled, last_run_at, last_run_status, daily_limit')
+      .eq('client_user_id', user.id)
+      .maybeSingle();
+
+    if (!config || !(config as { enabled?: boolean }).enabled) {
+      return NextResponse.json({
+        enabled: false,
+        last_run: null,
+        totals_30d: null,
+        stored_count: 0,
+      });
+    }
+
+    // Последний прогон.
+    const { data: lastRun } = await supabaseAdmin
+      .from('client_auto_pipeline_runs')
+      .select('status, started_at, finished_at, parsed_count, new_count, routed_count, stored_count, skipped_count, failed_count, error_message')
+      .eq('client_user_id', user.id)
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    // Метрики за 30 дней.
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: monthRuns } = await supabaseAdmin
+      .from('client_auto_pipeline_runs')
+      .select('routed_count, stored_count, skipped_count, failed_count')
+      .eq('client_user_id', user.id)
+      .gte('started_at', thirtyDaysAgo);
+
+    const totals30d = (monthRuns ?? []).reduce(
+      (acc, r) => {
+        const row = r as Record<string, number | null>;
+        acc.routed += row.routed_count ?? 0;
+        acc.stored += row.stored_count ?? 0;
+        acc.skipped += row.skipped_count ?? 0;
+        acc.failed += row.failed_count ?? 0;
+        return acc;
+      },
+      { routed: 0, stored: 0, skipped: 0, failed: 0 },
+    );
+
+    // Stored employers — общее количество в текущей очереди.
+    const { count: storedCount } = await supabaseAdmin
+      .from('client_auto_pipeline_seen_employers')
+      .select('id', { count: 'exact', head: true })
+      .eq('client_user_id', user.id)
+      .eq('status', 'stored');
+
+    return NextResponse.json({
+      enabled: true,
+      daily_limit: (config as { daily_limit?: number | null }).daily_limit ?? null,
+      last_run: lastRun ?? null,
+      totals_30d: totals30d,
+      stored_count: storedCount ?? 0,
+    });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Internal error' },
+      { status: 500 },
+    );
+  }
+}
