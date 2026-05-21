@@ -5,7 +5,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isTechnician } from '@/lib/roles';
 import type { UserRole } from '@/types';
-import { createYookassaInvoice, extractInvoiceUrl, isYookassaConfigured } from '@/lib/yookassa';
+import { createYookassaInvoice, extractInvoiceUrl, isYookassaConfigured, buildDefaultReceipt, type YookassaVatCode } from '@/lib/yookassa';
 
 export const dynamic = 'force-dynamic';
 
@@ -194,31 +194,61 @@ export async function POST(req: NextRequest) {
   if (!isYookassaConfigured()) {
     yookassaError = 'YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY не настроены';
   } else {
-    try {
-      const ykInvoice = await createYookassaInvoice({
-        amount,
-        currency: invoice.currency,
-        description: invoice.description ?? `Счёт для ${invoice.company_name}`,
-        invoiceId: invoice.id,
-        companyName: invoice.company_name,
-        idempotencyKey: invoice.id,
-      });
+    // 54-FZ receipt requires a customer email (or phone). Prefer the linked
+    // client's profile email; fall back to YOOKASSA_FALLBACK_RECEIPT_EMAIL
+    // for invoices not tied to a specific client.
+    let customerEmail: string | null = null;
+    if (invoice.client_user_id) {
+      const { data: clientProfile } = await supabaseAdmin
+        .from('profiles')
+        .select('email')
+        .eq('id', invoice.client_user_id)
+        .maybeSingle();
+      customerEmail = clientProfile?.email ?? null;
+    }
+    if (!customerEmail) {
+      customerEmail = process.env.YOOKASSA_FALLBACK_RECEIPT_EMAIL ?? null;
+    }
 
-      const ykUrl = extractInvoiceUrl(ykInvoice);
+    if (!customerEmail) {
+      yookassaError = 'Не удалось определить email для чека (54-ФЗ). Привяжите клиента к счёту или задайте YOOKASSA_FALLBACK_RECEIPT_EMAIL.';
+      await logError('invoices.yookassa.no_receipt_email', null, { invoice_id: invoice.id, client_user_id: invoice.client_user_id });
+    } else {
+      try {
+        const description = invoice.description ?? `Счёт для ${invoice.company_name}`;
+        const vatCode = (body.vat_code as YookassaVatCode | undefined) ?? 1;
+        const ykInvoice = await createYookassaInvoice({
+          amount,
+          currency: invoice.currency,
+          description,
+          invoiceId: invoice.id,
+          companyName: invoice.company_name,
+          idempotencyKey: invoice.id,
+          receipt: buildDefaultReceipt({
+            customerEmail,
+            description,
+            amount,
+            currency: invoice.currency,
+            vatCode,
+          }),
+        });
 
-      await supabaseAdmin
-        .from('invoices')
-        .update({
-          yookassa_payment_id: ykInvoice.id,
-          yookassa_payment_url: ykUrl,
-        })
-        .eq('id', invoice.id);
+        const ykUrl = extractInvoiceUrl(ykInvoice);
 
-      invoice.yookassa_payment_id = ykInvoice.id;
-      invoice.yookassa_payment_url = ykUrl;
-    } catch (ykErr) {
-      yookassaError = ykErr instanceof Error ? ykErr.message : String(ykErr);
-      await logError('invoices.yookassa.create.failed', ykErr, { invoice_id: invoice.id });
+        await supabaseAdmin
+          .from('invoices')
+          .update({
+            yookassa_payment_id: ykInvoice.id,
+            yookassa_payment_url: ykUrl,
+          })
+          .eq('id', invoice.id);
+
+        invoice.yookassa_payment_id = ykInvoice.id;
+        invoice.yookassa_payment_url = ykUrl;
+      } catch (ykErr) {
+        yookassaError = ykErr instanceof Error ? ykErr.message : String(ykErr);
+        await logError('invoices.yookassa.create.failed', ykErr, { invoice_id: invoice.id });
+      }
     }
   }
 

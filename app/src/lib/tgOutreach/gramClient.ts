@@ -2,9 +2,52 @@ import fs from 'fs';
 import { TelegramClient } from 'telegram';
 import { ConnectionTCPObfuscated } from 'telegram/network';
 import { StringSession } from 'telegram/sessions';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { readSqliteSession } from '@/lib/telegram/sessionUtils';
 import { HttpConnectSocket } from './httpProxySocket';
 import type { OutreachAccount, OutreachProxy } from './types';
+
+/**
+ * Threshold for auto-disabling an account that keeps getting
+ * 406: AUTH_KEY_DUPLICATED from Telegram (session is shared with another
+ * login and can never recover until the user re-authenticates).
+ *
+ * The counter is persisted in tg_outreach_accounts.auth_key_dup_count and
+ * resets to 0 on any successful connect.
+ */
+const AUTH_KEY_DUP_DISABLE_THRESHOLD = 3;
+
+/**
+ * Translate raw gramJS / MTProto error messages into something a non-developer
+ * can read while keeping the original technical token in parentheses so
+ * engineers can still grep for it.
+ *
+ * Used by buildClients when logging connection failures to tg_outreach_logs.
+ */
+function humanizeConnectError(rawMsg: string): string {
+  if (rawMsg.includes('AUTH_KEY_DUPLICATED')) {
+    return `сессия параллельно открыта с другого устройства (AUTH_KEY_DUPLICATED)`;
+  }
+  if (rawMsg.includes('AUTH_KEY_UNREGISTERED')) {
+    return `Telegram больше не признаёт эту сессию (AUTH_KEY_UNREGISTERED — обычно после смены пароля или ручного выхода)`;
+  }
+  if (rawMsg.includes('USER_DEACTIVATED_BAN') || rawMsg.includes('USER_DEACTIVATED')) {
+    return `Telegram забанил этот номер (${rawMsg.includes('USER_DEACTIVATED_BAN') ? 'USER_DEACTIVATED_BAN' : 'USER_DEACTIVATED'})`;
+  }
+  if (rawMsg.includes('FLOOD_WAIT')) {
+    return `Telegram временно блокирует подключение из-за частых запросов (FLOOD_WAIT)`;
+  }
+  if (rawMsg.includes('connect timeout')) {
+    return `прокси или Telegram не отвечают за 15 секунд (${rawMsg.trim()} — обычно мёртвая прокси)`;
+  }
+  if (rawMsg.includes('PHONE_NUMBER_BANNED')) {
+    return `Telegram забанил этот номер при попытке логина (PHONE_NUMBER_BANNED)`;
+  }
+  if (rawMsg.includes('SESSION_REVOKED')) {
+    return `сессия отозвана пользователем вручную (SESSION_REVOKED)`;
+  }
+  return rawMsg.trim();
+}
 
 export const HEARTBEAT_PATH = '/tmp/tg-outreach-heartbeat';
 export function writeHeartbeat() {
@@ -107,6 +150,7 @@ export async function buildClients(
   proxies: OutreachProxy[],
   log: (level: 'info' | 'warning' | 'error', msg: string) => void,
   downloadSessionFile?: SessionFactory,
+  db?: SupabaseClient,
 ): Promise<ActiveClient[]> {
   const proxyMap = new Map(proxies.map(p => [p.id, p]));
   const clients: ActiveClient[] = [];
@@ -125,8 +169,63 @@ export async function buildClients(
       const client = await createGramClient(acc, proxy, downloadSessionFile);
       clients.push({ client, account: acc });
       log('info', `Аккаунт ${acc.session_name}: подключён`);
+
+      // Reset the duplicated-session counter on any successful connect.
+      // We only do the DB round-trip when there's something to clear, since
+      // the common case is "counter was already 0".
+      if (db && (acc.auth_key_dup_count ?? 0) > 0) {
+        const { error: resetErr } = await db
+          .from('tg_outreach_accounts')
+          .update({ auth_key_dup_count: 0 })
+          .eq('id', acc.id);
+        if (resetErr) {
+          log('warning', `Аккаунт ${acc.session_name}: не смог сбросить счётчик ошибок подключения в базе данных — ${resetErr.message}`);
+        } else {
+          acc.auth_key_dup_count = 0;
+        }
+      }
     } catch (err) {
-      log('error', `Аккаунт ${acc.session_name}: ошибка подключения — ${err instanceof Error ? err.message : String(err)}`);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log('error', `Аккаунт ${acc.session_name}: не удалось подключиться к Telegram — ${humanizeConnectError(errMsg)}`);
+
+      // AUTH_KEY_DUPLICATED means Telegram sees a parallel login on this
+      // session. It will never recover from retries — the user has to
+      // re-authenticate. We track consecutive failures so a single dead
+      // session doesn't keep poisoning every worker restart.
+      if (db && errMsg.includes('AUTH_KEY_DUPLICATED')) {
+        const next = (acc.auth_key_dup_count ?? 0) + 1;
+        if (next >= AUTH_KEY_DUP_DISABLE_THRESHOLD) {
+          const { error: updErr } = await db
+            .from('tg_outreach_accounts')
+            .update({ is_active: false, auth_key_dup_count: next })
+            .eq('id', acc.id);
+          if (updErr) {
+            log('error', `Аккаунт ${acc.session_name}: не смог выключить аккаунт в базе данных — ${updErr.message}`);
+          } else {
+            log(
+              'warning',
+              `Аккаунт ${acc.session_name}: 3 неудачные попытки подряд (AUTH_KEY_DUPLICATED) — выключаю автоматически. ` +
+                `Чтобы вернуть в работу: на телефоне с этим номером откройте Telegram → Настройки → Конфиденциальность → ` +
+                `Активные сеансы → завершите чужие сессии. Затем перевыпустите session_data в UI.`,
+            );
+          }
+        } else {
+          const { error: updErr } = await db
+            .from('tg_outreach_accounts')
+            .update({ auth_key_dup_count: next })
+            .eq('id', acc.id);
+          if (updErr) {
+            log('warning', `Аккаунт ${acc.session_name}: не смог записать счётчик ошибок подключения в базу данных — ${updErr.message}`);
+          } else {
+            log(
+              'warning',
+              `Аккаунт ${acc.session_name}: сессия параллельно открыта с другого устройства ` +
+                `(AUTH_KEY_DUPLICATED, попытка ${next}/${AUTH_KEY_DUP_DISABLE_THRESHOLD} подряд). ` +
+                `После 3 подряд аккаунт будет выключен автоматически.`,
+            );
+          }
+        }
+      }
     }
   }
 

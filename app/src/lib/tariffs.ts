@@ -58,6 +58,79 @@ export type ClientTariffRow = {
 /** setup — paid but within setup phase; active — ready to use; expired — past paid_until; inactive — not paid */
 export type ClientStatus = 'setup' | 'active' | 'expired' | 'inactive';
 
+/**
+ * Apply a "this client just paid an invoice" event to their tariff row.
+ *
+ * Called from two places that observe a successful YooKassa payment:
+ *   - /api/invoices/webhook — push notification from YooKassa (prod path)
+ *   - /api/invoices/[id] PATCH with sync_yookassa — manual sync from the UI
+ *     (fallback when the webhook can't reach us, e.g. local dev on localhost)
+ *
+ * Returns the partial update that was applied (empty object = nothing to do).
+ */
+export async function applyInvoicePaidToTariff(
+  clientUserId: string,
+  options?: {
+    /** When the payment object carries a saved method id, persist it for autopay. */
+    paymentMethod?: { id?: string | null; saved?: boolean | null } | null;
+  },
+): Promise<Record<string, unknown>> {
+  if (!supabaseAdmin) return {};
+
+  const { data: tariff } = await supabaseAdmin
+    .from('client_tariffs')
+    .select('id, billing_mode, payment_locked, paid_at, setup_until, paid_until')
+    .eq('user_id', clientUserId)
+    .maybeSingle();
+
+  if (!tariff) return {};
+
+  const now = new Date().toISOString();
+  const tariffUpdate: Record<string, unknown> = {};
+
+  if (!tariff.paid_at) {
+    // First payment: paid_until = setup_until + 1 month (or now + 1 month).
+    tariffUpdate.paid_at = now;
+    const base = tariff.setup_until ? new Date(tariff.setup_until) : new Date();
+    const paidUntil = new Date(base);
+    paidUntil.setMonth(paidUntil.getMonth() + 1);
+    tariffUpdate.paid_until = paidUntil.toISOString();
+  } else {
+    // Renewal: extend paid_until by 1 month from the current paid_until.
+    const base = tariff.paid_until ? new Date(tariff.paid_until) : new Date();
+    const paidUntil = new Date(base);
+    paidUntil.setMonth(paidUntil.getMonth() + 1);
+    tariffUpdate.paid_until = paidUntil.toISOString();
+    tariffUpdate.paid_at = now;
+  }
+
+  // Persist saved payment method for future autopay charges (webhook path only).
+  const pm = options?.paymentMethod;
+  if (pm?.id && pm.saved) {
+    tariffUpdate.yookassa_payment_method_id = pm.id;
+    tariffUpdate.auto_renew = true;
+    tariffUpdate.last_renewal_error = null;
+  }
+
+  // Invoice mode: unlock the portal as soon as payment lands.
+  // Autopayment mode keeps payment_locked until setup_until elapses;
+  // isPaymentLocked() lifts it on the next read.
+  if (tariff.billing_mode === 'invoice' && tariff.payment_locked) {
+    tariffUpdate.payment_locked = false;
+  }
+
+  if (Object.keys(tariffUpdate).length === 0) return {};
+  tariffUpdate.updated_at = now;
+
+  const { error } = await supabaseAdmin
+    .from('client_tariffs')
+    .update(tariffUpdate)
+    .eq('user_id', clientUserId);
+
+  if (error) throw error;
+  return tariffUpdate;
+}
+
 export function getClientStatus(row: ClientTariffRow | null): ClientStatus {
   if (!row || !row.is_active) return 'inactive';
   const now = new Date();
