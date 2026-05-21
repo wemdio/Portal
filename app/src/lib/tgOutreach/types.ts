@@ -140,6 +140,9 @@ export interface OutreachAccount {
   session_file_path?: string | null;
   is_active: boolean;
   cooldown_until: string | null;
+  /** Consecutive AUTH_KEY_DUPLICATED errors during connect. See migration
+   *  20260521_0002. Reset on successful connect; auto-disable at 3. */
+  auth_key_dup_count?: number;
   created_at: string;
 }
 

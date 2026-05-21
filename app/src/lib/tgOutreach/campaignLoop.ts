@@ -69,6 +69,20 @@ function randomRange([min, max]: [number, number]): number {
 const DIALOGS_FETCH_LIMIT = Number(process.env.TG_OUTREACH_DIALOGS_LIMIT ?? '100');
 
 /**
+ * Hard per-account ceiling on the first gramJS call of each iteration
+ * (getDialogs). If MTProto recvLoop hangs on a stale session or a dropped
+ * connection, this prevents one stuck account from holding the whole loop
+ * hostage and triggering the worker watchdog at 15 minutes. The watchdog
+ * still acts as the ultimate backstop for the rest of the iteration.
+ */
+const PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS =
+  Number(process.env.TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS) || 60_000;
+
+/** Marker string included in the Error message so the catch branch can
+ *  distinguish our explicit timeout from generic TIMEOUT errors. */
+const PER_ACCOUNT_TIMEOUT_MARKER = 'per-account first-call TIMEOUT';
+
+/**
  * Таймстамп последнего сообщения, у которого есть дата. null — если ни у
  * одного нет. Нужен чтобы last_message_at отражал РЕАЛЬНУЮ активность
  * диалога, а не момент последнего upsert'а.
@@ -854,13 +868,13 @@ export async function runCampaignLoop(
   log('info', `Запуск кампании "${campaign.name}": ${accounts.length} аккаунтов, ${proxies?.length ?? 0} прокси`);
 
   const downloadSessionFile = (storagePath: string) => downloadSessionToTemp(db, storagePath);
-  let clients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile);
+  let clients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db);
 
   if (clients.length === 0) {
     log('warning', 'Ни один аккаунт не подключился — жду 60 сек и пробую заново');
     await interruptibleSleep(60_000, shouldStop);
     if (shouldStop()) return;
-    const retryClients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile);
+    const retryClients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db);
     if (retryClients.length === 0) {
       log('error', 'Повторная попытка подключения не удалась — кампания в paused');
       await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
@@ -912,7 +926,25 @@ export async function runCampaignLoop(
         try {
           let dialogs: Awaited<ReturnType<typeof client.getDialogs>>;
           try {
-            dialogs = await client.getDialogs({ limit: DIALOGS_FETCH_LIMIT });
+            // Race against a hard per-account timeout. We do not abort the
+            // gramJS call (Promise.race leaves it dangling), but the worker
+            // moves on, which is what matters for keeping the watchdog happy.
+            // A dangling getDialogs eventually resolves or errors into a
+            // detached promise — gramJS swallows the result.
+            dialogs = await Promise.race([
+              client.getDialogs({ limit: DIALOGS_FETCH_LIMIT }),
+              new Promise<never>((_, reject) =>
+                setTimeout(
+                  () =>
+                    reject(
+                      new Error(
+                        `${PER_ACCOUNT_TIMEOUT_MARKER} (${PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS / 1000}s) on getDialogs`,
+                      ),
+                    ),
+                  PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS,
+                ),
+              ),
+            ]);
           } catch (err) {
             const errMsg = err instanceof Error ? err.message : String(err);
             if (errMsg.includes('offset') && errMsg.includes('out of range')) {
@@ -1003,6 +1035,16 @@ export async function runCampaignLoop(
               (account as OutreachAccount).cooldown_until = cooldownUntil;
               log('warning', `${account.session_name}: повреждённая сессия (offset out of range × ${count}) → cooldown 1ч. Деактивация после 2-й попытки.`);
             }
+          } else if (errMsg.includes(PER_ACCOUNT_TIMEOUT_MARKER)) {
+            // Our own 60s ceiling on the first call. Most often this means
+            // the session is alive enough to connect but gramJS recvLoop is
+            // stuck on a stale/bad MTProto state. The watchdog at 15 min is
+            // there to backstop the rest of the iteration, but bailing this
+            // account here keeps all the other accounts moving.
+            log(
+              'warning',
+              `${account.session_name}: зависание на getDialogs > ${PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS / 1000}с, пропускаем аккаунт в этом цикле`,
+            );
           } else if (errMsg.includes('out of range') || errMsg.includes('TIMEOUT') || errMsg.includes('Constructor ID')) {
             // Transient MTProto/network issue — log but do not punish account
             log('warning', `${account.session_name}: транзиентная ошибка MTProto, пропускаем итерацию: ${errMsg.slice(0, 150)}`);
@@ -1126,7 +1168,7 @@ export async function refetchEmptyDialogs(
     .eq('is_active', true);
 
   const downloadSessionFile = (storagePath: string) => downloadSessionToTemp(db, storagePath);
-  const clients = await buildClients(accounts as OutreachAccount[], proxies ?? [], log, downloadSessionFile);
+  const clients = await buildClients(accounts as OutreachAccount[], proxies ?? [], log, downloadSessionFile, db);
 
   if (clients.length === 0) {
     log('error', 'Refetch: ни один аккаунт не подключился');
