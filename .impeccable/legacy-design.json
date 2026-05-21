@@ -1,0 +1,287 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-05-21T00:00:00Z",
+  "title": "Design System: Portal Client",
+  "extensions": {
+    "colorMeta": {
+      "linen-cream": {
+        "role": "neutral",
+        "displayName": "Linen Cream",
+        "canonical": "oklch(96.4% 0.001 67)",
+        "tonalRamp": ["#2c2725", "#44403d", "#5d5856", "#767270", "#908b88", "#abaaa6", "#c7c4bf", "#e2dfd9", "#f7f4ef"]
+      },
+      "walnut-ink": {
+        "role": "neutral",
+        "displayName": "Walnut Ink",
+        "canonical": "oklch(25% 0.012 67)",
+        "tonalRamp": ["#1f1c19", "#3a3530", "#534c46", "#6e655d", "#898074", "#a59a8d", "#c1b6a9", "#ddd2c5", "#f3eae0"]
+      },
+      "walnut-mid": {
+        "role": "neutral",
+        "displayName": "Walnut Mid",
+        "canonical": "oklch(45% 0.012 67)",
+        "tonalRamp": ["#1f1c19", "#3a3530", "#534c46", "#6a6058", "#898074", "#a59a8d", "#c1b6a9", "#ddd2c5", "#f3eae0"]
+      },
+      "walnut-soft": {
+        "role": "neutral",
+        "displayName": "Walnut Soft",
+        "canonical": "oklch(63% 0.012 67)",
+        "tonalRamp": ["#3a3530", "#534c46", "#6a6058", "#7e756c", "#9a9088", "#b3aaa1", "#cac0b6", "#e0d6cb", "#f4ebe0"]
+      },
+      "slate-tide": {
+        "role": "primary",
+        "displayName": "Slate Tide",
+        "canonical": "oklch(50% 0.078 254)",
+        "tonalRamp": ["#15243a", "#243a55", "#34516f", "#4a6fa5", "#5e86c4", "#7da7c8", "#9bbcd6", "#bed3e5", "#e0ecf4"]
+      },
+      "slate-tide-deep": {
+        "role": "primary",
+        "displayName": "Slate Tide Deep",
+        "canonical": "oklch(43% 0.08 254)",
+        "tonalRamp": ["#0f1c2e", "#1f3149", "#2c4869", "#3d5a87", "#5174a0", "#6e8eb6", "#8eaace", "#b3c8e0", "#d8e4ef"]
+      },
+      "terracotta-signal": {
+        "role": "secondary",
+        "displayName": "Terracotta Signal",
+        "canonical": "oklch(55% 0.135 25)",
+        "tonalRamp": ["#3f1816", "#5e2722", "#813831", "#9d463d", "#b85450", "#ce6e6a", "#df8f8a", "#ecb1ac", "#f6d4cf"]
+      },
+      "spruce-positive": {
+        "role": "secondary",
+        "displayName": "Spruce Positive",
+        "canonical": "oklch(70% 0.16 162)",
+        "tonalRamp": ["#053527", "#0a5640", "#10785a", "#10b981", "#34d399", "#6ee7b7", "#a7f3d0", "#d1fae5", "#ecfdf5"]
+      },
+      "amber-prompt": {
+        "role": "secondary",
+        "displayName": "Amber Prompt",
+        "canonical": "oklch(76% 0.16 75)",
+        "tonalRamp": ["#3a1d05", "#5e3009", "#8a4a0e", "#b06b12", "#f59e0b", "#fbbd47", "#fcd380", "#fde8ad", "#fef3c7"]
+      },
+      "paper-elevated": {
+        "role": "neutral",
+        "displayName": "Paper Elevated",
+        "canonical": "oklch(100% 0 0)",
+        "tonalRamp": ["#cccccc", "#d4d4d4", "#dddddd", "#e5e5e5", "#eeeeee", "#f4f4f4", "#f9f9f9", "#fcfcfc", "#ffffff"]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Single hero headline on /client/dashboard. Maximum one per page."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Page-level H1 on every client route except dashboard. Frequently paired with an inline icon."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Section heading inside a card (Quick actions, Last campaigns, checklist title)."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Descriptions, table cells, paragraph copy. Cap at 65–75ch in long-form sections."
+      },
+      "label": {
+        "displayName": "Wide Label",
+        "purpose": "Eyebrows, sidebar group titles, metric labels, table headers. The wide-tracking-uppercase recipe is the system's chrome signature."
+      }
+    },
+    "shadows": [
+      {
+        "name": "outset-lifted",
+        "value": "6px 6px 14px rgba(150, 140, 130, 0.60), -6px -6px 14px rgba(255, 255, 255, 0.94)",
+        "purpose": "Primary .neu-card. Hero sections, dashboard panels, large feature blocks."
+      },
+      {
+        "name": "outset-resting",
+        "value": "4px 4px 10px rgba(150, 140, 130, 0.60), -4px -4px 10px rgba(255, 255, 255, 0.94)",
+        "purpose": "Compact .neu-sm. Metric tiles, quick-action rows, smaller list cards."
+      },
+      {
+        "name": "outset-button",
+        "value": "3px 3px 8px rgba(150, 140, 130, 0.60), -2px -2px 6px rgba(255, 255, 255, 0.94)",
+        "purpose": "Primary .neu-btn at rest. Asymmetric — highlight tighter than shadow."
+      },
+      {
+        "name": "outset-button-settled",
+        "value": "1px 1px 4px rgba(150, 140, 130, 0.60), -1px -1px 4px rgba(255, 255, 255, 0.94)",
+        "purpose": ".neu-btn:hover. The button 'settles' rather than lifts."
+      },
+      {
+        "name": "inset-carved",
+        "value": "inset 2px 2px 5px rgba(150, 140, 130, 0.60), inset -2px -2px 5px rgba(255, 255, 255, 0.94)",
+        "purpose": ".neu-inset, .neu-well, .neu-input, active .neu-pill. Signals recessed surface."
+      },
+      {
+        "name": "press-down",
+        "value": "inset 2px 2px 5px rgba(0, 0, 0, 0.15)",
+        "purpose": ".neu-btn:active. Button pressed in like a physical key."
+      },
+      {
+        "name": "hover-lift",
+        "value": "3px 3px 8px rgba(150, 140, 130, 0.60), -3px -3px 8px rgba(255, 255, 255, 0.94)",
+        "purpose": ".neu-flat:hover. Used sparingly; most surfaces commit to a resting state."
+      },
+      {
+        "name": "white-card-bridge",
+        "value": "0 1px 3px rgba(0, 0, 0, 0.06), 0 4px 18px rgba(0, 0, 0, 0.05)",
+        "purpose": "Admin components reused inside .client-portal (parser tables, brief sections). The intentional exception to the neumorphic rule."
+      },
+      {
+        "name": "accent-glow",
+        "value": "0 2px 8px rgba(74, 111, 165, 0.35)",
+        "purpose": "Legacy: slate-tide glow under gradient buttons in parser context. Not canonical — slated for removal."
+      },
+      {
+        "name": "focus-ring",
+        "value": "0 0 0 2px rgba(74, 111, 165, 0.25)",
+        "purpose": "Focus halo around inputs and interactive elements. Always slate-tide at 25% alpha."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-button",
+        "value": "all 0.2s ease",
+        "purpose": "Default transition on .neu-btn for background and shadow swaps."
+      },
+      {
+        "name": "ease-row",
+        "value": "background 0.15s ease",
+        "purpose": "List row hover tint transition."
+      },
+      {
+        "name": "ease-surface",
+        "value": "box-shadow 0.25s ease",
+        "purpose": ".neu-flat hover lift; pill active-state transitions."
+      },
+      {
+        "name": "press-quick",
+        "value": "all 0.1s ease",
+        "purpose": "Quick acknowledgment on button :active; not currently a separate token but should be."
+      },
+      {
+        "name": "indeterminate-slide",
+        "value": "cp-slide 1.4s ease-in-out infinite",
+        "purpose": "Sliding gradient inside the indeterminate progress bar on long fetches."
+      }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" },
+      { "name": "lg", "value": "1024px" },
+      { "name": "xl", "value": "1280px" },
+      { "name": "2xl", "value": "1536px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single canonical CTA. Slate-tide fill, white text, neumorphic outset shadow that tightens on hover ('settles') and inverts on press.",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">Создать кампанию</button>",
+      "css": ".ds-btn-primary { background: #4A6FA5; color: #ffffff; border: none; border-radius: 14px; padding: 10px 18px; font-family: Nunito, ui-sans-serif, system-ui, sans-serif; font-size: 14px; font-weight: 700; letter-spacing: normal; cursor: pointer; box-shadow: 3px 3px 8px rgba(150, 140, 130, 0.60), -2px -2px 6px rgba(255, 255, 255, 0.94); transition: all 0.2s ease; } .ds-btn-primary:hover { background: #3D5A87; box-shadow: 1px 1px 4px rgba(150, 140, 130, 0.60), -1px -1px 4px rgba(255, 255, 255, 0.94); } .ds-btn-primary:focus-visible { outline: none; box-shadow: 3px 3px 8px rgba(150, 140, 130, 0.60), -2px -2px 6px rgba(255, 255, 255, 0.94), 0 0 0 3px rgba(74, 111, 165, 0.35); } .ds-btn-primary:active { box-shadow: inset 2px 2px 5px rgba(0, 0, 0, 0.15); }"
+    },
+    {
+      "name": "Nav Pill",
+      "kind": "nav",
+      "refersTo": "nav-pill",
+      "description": "Sidebar / mobile-drawer / language-toggle item. Cream surface, no shadow at rest; carved inset + slate-tide text when active; subtle outset on hover.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Меню\">\n  <a class=\"ds-nav-pill\" href=\"#\">Дашборд</a>\n  <a class=\"ds-nav-pill ds-nav-pill-active\" href=\"#\" aria-current=\"page\">Кампании</a>\n  <a class=\"ds-nav-pill\" href=\"#\">Лиды</a>\n</nav>",
+      "css": ".ds-nav { display: flex; flex-direction: column; gap: 6px; background: #F5F5F4; padding: 12px; border-radius: 16px; font-family: Nunito, ui-sans-serif, system-ui, sans-serif; } .ds-nav-pill { display: flex; align-items: center; padding: 8px 14px; border-radius: 12px; background: #F5F5F4; color: #6A6058; font-size: 14px; font-weight: 700; text-decoration: none; transition: box-shadow 0.25s ease, color 0.15s ease; } .ds-nav-pill:hover { box-shadow: 2px 2px 6px rgba(150, 140, 130, 0.60), -2px -2px 6px rgba(255, 255, 255, 0.94); } .ds-nav-pill:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(74, 111, 165, 0.35); } .ds-nav-pill-active { color: #4A6FA5; box-shadow: inset 2px 2px 5px rgba(150, 140, 130, 0.60), inset -2px -2px 5px rgba(255, 255, 255, 0.94); }"
+    },
+    {
+      "name": "Card Elevated",
+      "kind": "card",
+      "refersTo": "card-elevated",
+      "description": "Primary container. Linen-cream surface, 20px radius, large neumorphic outset. Hosts hero sections, feature blocks, the onboarding checklist.",
+      "html": "<article class=\"ds-card-elevated\">\n  <p class=\"ds-card-eyebrow\">Последние кампании</p>\n  <h3 class=\"ds-card-title\">Q2 outbound — финтех Москва</h3>\n  <p class=\"ds-card-body\">128 отправлено · 42 открытий · 7 ответов за последние 7 дней. Кампания идёт в плановом темпе.</p>\n</article>",
+      "css": ".ds-card-elevated { background: #F5F5F4; color: #3A3530; border-radius: 20px; padding: 24px; box-shadow: 6px 6px 14px rgba(150, 140, 130, 0.60), -6px -6px 14px rgba(255, 255, 255, 0.94); font-family: Nunito, ui-sans-serif, system-ui, sans-serif; } .ds-card-eyebrow { margin: 0 0 6px 0; color: #9A9088; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; } .ds-card-title { margin: 0 0 8px 0; color: #3A3530; font-size: 18px; font-weight: 800; line-height: 1.25; } .ds-card-body { margin: 0; color: #6A6058; font-size: 14px; line-height: 1.55; }"
+    },
+    {
+      "name": "Card Small",
+      "kind": "card",
+      "refersTo": "card-elevated-sm",
+      "description": "Compact card. 16px radius, lighter outset shadow. Metric tile, quick-action row, list-card.",
+      "html": "<article class=\"ds-card-sm\">\n  <div class=\"ds-card-sm-head\">\n    <p class=\"ds-card-sm-label\">Отправлено</p>\n    <svg class=\"ds-card-sm-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M22 2 11 13\"/><path d=\"m22 2-7 20-4-9-9-4Z\"/></svg>\n  </div>\n  <p class=\"ds-card-sm-value\">12 847</p>\n</article>",
+      "css": ".ds-card-sm { background: #F5F5F4; color: #3A3530; border-radius: 16px; padding: 16px 20px; box-shadow: 4px 4px 10px rgba(150, 140, 130, 0.60), -4px -4px 10px rgba(255, 255, 255, 0.94); font-family: Nunito, ui-sans-serif, system-ui, sans-serif; } .ds-card-sm-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; } .ds-card-sm-label { margin: 0; color: #9A9088; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; } .ds-card-sm-icon { width: 16px; height: 16px; color: #4A6FA5; } .ds-card-sm-value { margin: 4px 0 0 0; color: #3A3530; font-size: 22px; font-weight: 800; line-height: 1.1; }"
+    },
+    {
+      "name": "Card Well",
+      "kind": "card",
+      "refersTo": "card-well",
+      "description": "Inset 'well' container. Used for inline error blocks, contextual information panels, secondary content that should read as carved into the surface.",
+      "html": "<div class=\"ds-card-well\" role=\"status\">\n  <svg class=\"ds-well-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"M12 8v4M12 16h.01\"/></svg>\n  <p>Кампания на паузе с 18 мая — ждём подтверждения новой базы.</p>\n</div>",
+      "css": ".ds-card-well { display: flex; align-items: flex-start; gap: 10px; background: #F5F5F4; color: #6A6058; border-radius: 12px; padding: 12px 16px; box-shadow: inset 2px 2px 5px rgba(150, 140, 130, 0.60), inset -2px -2px 5px rgba(255, 255, 255, 0.94); font-family: Nunito, ui-sans-serif, system-ui, sans-serif; font-size: 13px; line-height: 1.5; } .ds-well-icon { width: 16px; height: 16px; flex-shrink: 0; margin-top: 2px; color: #9A9088; } .ds-card-well p { margin: 0; }"
+    },
+    {
+      "name": "Input Recessed",
+      "kind": "input",
+      "refersTo": "input-recessed",
+      "description": "Text field. Linen-cream surface, no visible border; recessed inset shadow at rest, slate-tide focus halo on focus. Placeholder in walnut-soft.",
+      "html": "<label class=\"ds-input-wrap\">\n  <span class=\"ds-input-label\">Название кампании</span>\n  <input class=\"ds-input\" type=\"text\" placeholder=\"Q3 outbound — SaaS США\" />\n</label>",
+      "css": ".ds-input-wrap { display: flex; flex-direction: column; gap: 6px; font-family: Nunito, ui-sans-serif, system-ui, sans-serif; } .ds-input-label { color: #9A9088; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; } .ds-input { background: #F5F5F4; color: #3A3530; border: none; border-radius: 14px; padding: 10px 14px; font-family: inherit; font-size: 14px; font-weight: 400; outline: none; box-shadow: inset 2px 2px 5px rgba(150, 140, 130, 0.60), inset -2px -2px 5px rgba(255, 255, 255, 0.94); transition: box-shadow 0.2s ease; } .ds-input::placeholder { color: #9A9088; } .ds-input:focus { box-shadow: inset 2px 2px 5px rgba(150, 140, 130, 0.60), inset -2px -2px 5px rgba(255, 255, 255, 0.94), 0 0 0 2px rgba(74, 111, 165, 0.25); }"
+    },
+    {
+      "name": "List Row",
+      "kind": "custom",
+      "refersTo": "list-row",
+      "description": "Body row inside an elevated card (campaigns, leads, replies). No background at rest; a warm-grey tint appears on hover; hairline border separates rows.",
+      "html": "<div class=\"ds-card-elevated ds-list-wrap\">\n  <a class=\"ds-list-row\" href=\"#\">\n    <div class=\"ds-list-row-content\">\n      <p class=\"ds-list-row-title\">Q2 outbound — финтех Москва</p>\n      <p class=\"ds-list-row-meta\">Активна · 1 247 sent · 38 reply</p>\n    </div>\n    <svg class=\"ds-list-row-arrow\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M5 12h14M12 5l7 7-7 7\"/></svg>\n  </a>\n  <a class=\"ds-list-row\" href=\"#\">\n    <div class=\"ds-list-row-content\">\n      <p class=\"ds-list-row-title\">Healthcare США — пилот</p>\n      <p class=\"ds-list-row-meta\">Пауза · 482 sent · 12 reply</p>\n    </div>\n    <svg class=\"ds-list-row-arrow\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M5 12h14M12 5l7 7-7 7\"/></svg>\n  </a>\n</div>",
+      "css": ".ds-list-wrap { padding: 0; overflow: hidden; } .ds-list-row { display: flex; align-items: center; gap: 12px; padding: 14px 20px; color: #3A3530; text-decoration: none; transition: background 0.15s ease; font-family: Nunito, ui-sans-serif, system-ui, sans-serif; } .ds-list-row + .ds-list-row { border-top: 1px solid rgba(180, 173, 164, 0.15); } .ds-list-row:hover { background: rgba(180, 173, 164, 0.10); } .ds-list-row:focus-visible { outline: none; background: rgba(74, 111, 165, 0.08); } .ds-list-row-content { flex: 1; min-width: 0; } .ds-list-row-title { margin: 0; color: #3A3530; font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-list-row-meta { margin: 2px 0 0 0; color: #6A6058; font-size: 11px; } .ds-list-row-arrow { width: 16px; height: 16px; flex-shrink: 0; color: #9A9088; }"
+    },
+    {
+      "name": "Empty State",
+      "kind": "custom",
+      "refersTo": "card-elevated",
+      "description": "Canonical empty state inside a primary card: centered icon (walnut-soft), bold title (walnut-ink), soft description (walnut-mid), single primary CTA.",
+      "html": "<div class=\"ds-empty\">\n  <svg class=\"ds-empty-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><rect x=\"2\" y=\"4\" width=\"20\" height=\"16\" rx=\"3\"/><path d=\"m22 7-10 6L2 7\"/></svg>\n  <p class=\"ds-empty-title\">Кампаний пока нет</p>\n  <p class=\"ds-empty-body\">Когда вы запустите первую кампанию, она появится здесь.</p>\n  <button class=\"ds-btn-primary\" type=\"button\">Создать кампанию</button>\n</div>",
+      "css": ".ds-empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; padding: 40px 24px; background: #F5F5F4; border-radius: 20px; box-shadow: 6px 6px 14px rgba(150, 140, 130, 0.60), -6px -6px 14px rgba(255, 255, 255, 0.94); font-family: Nunito, ui-sans-serif, system-ui, sans-serif; } .ds-empty-icon { width: 32px; height: 32px; color: #9A9088; margin-bottom: 6px; } .ds-empty-title { margin: 0; color: #3A3530; font-size: 14px; font-weight: 800; } .ds-empty-body { margin: 0 0 12px 0; color: #6A6058; font-size: 13px; line-height: 1.5; max-width: 340px; } .ds-empty .ds-btn-primary { background: #4A6FA5; color: #ffffff; border: none; border-radius: 14px; padding: 10px 18px; font-family: inherit; font-size: 14px; font-weight: 700; cursor: pointer; box-shadow: 3px 3px 8px rgba(150, 140, 130, 0.60), -2px -2px 6px rgba(255, 255, 255, 0.94); transition: all 0.2s ease; } .ds-empty .ds-btn-primary:hover { background: #3D5A87; box-shadow: 1px 1px 4px rgba(150, 140, 130, 0.60), -1px -1px 4px rgba(255, 255, 255, 0.94); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Calm Workshop",
+    "overview": "The Portal Client surface should feel like a quiet workshop at the back of an outreach agency. Tools are within reach, surfaces are warm to the touch, the light is even, and nothing is shouting for attention. The visitor (the agency's paying B2B customer) walked in to check on work-in-progress, not to be impressed by the room. Every surface earns its presence by helping that visitor answer a single question: 'what is happening for my business right now, and what do I need to do next?'\n\nThe system is built on three commitments. First, a warm-stone palette (linen-cream as the universal canvas, walnut-ink for text) replaces the cold grey-on-white default of generic SaaS. Second, neumorphic tactility: every primary surface is shaped by a paired warm dark shadow and a soft light highlight, so cards, buttons, and pills read as physical objects sitting on a linen tabletop. Third, a single slate-blue accent (slate-tide) carries every clickable affordance the client cares about; the rest of the chrome stays in stone-and-walnut.\n\nThis system explicitly rejects: Bitrix/Amo-style multicoloured icon parades, generic SaaS-cream landing-page-as-dashboard aesthetics, AI-slop enterprise-blue-with-gradient-hero, and OpenAI-style black-and-neon.",
+    "keyCharacteristics": [
+      "Warm, low-saturation palette (linen + walnut + slate)",
+      "Neumorphic shadows as material, not as decoration",
+      "Nunito throughout — friendly humanist sans, latin + cyrillic",
+      "Slate-blue accent reserved for genuine actions only",
+      "Generous radii (12-20px), never sharp",
+      "Density flexes via .ui-density-compact for heavy desktop pages"
+    ],
+    "rules": [
+      { "name": "The Single Slate Rule", "body": "Slate Tide is the only chromatic accent in chrome (nav, buttons, focus, active states). Rainbow icons and gradient buttons are legacy and get unified during redesign work.", "section": "colors" },
+      { "name": "The No-White-Background Rule", "body": "The page is linen-cream. The card is linen-cream. The input is linen-cream. Depth is conveyed by shadow, not by colour swap. The only #FFFFFF allowed is the admin-component bridge.", "section": "colors" },
+      { "name": "The Warm-Neutral Rule", "body": "No #000, no #fff for type. Text is always walnut. The 0.012 chroma on the neutral ramp ties everything back to the warm hue.", "section": "colors" },
+      { "name": "The One-Face Rule", "body": "No second typeface. Differentiation comes through weight (400 → 700 → 800) or letter-spacing, never through a switch to Inter / Geist / Mono.", "section": "typography" },
+      { "name": "The Wide-Label Rule", "body": "Every small uppercase label is text-[10px] font-bold uppercase tracking-[0.12em] walnut-soft. Same recipe everywhere — do not invent a 9px alternative.", "section": "typography" },
+      { "name": "The Material Rule", "body": "Shadows are material, not decoration. A shadow appears because a surface exists at that position; never for emphasis, drama, or polish.", "section": "elevation" },
+      { "name": "The Light-from-Upper-Left Rule", "body": "Always. Dark to lower-right, highlight to upper-left. Reversing this is forbidden — it instantly reads as broken even when the viewer can't articulate why.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do use linen-cream #F5F5F4 as the page surface and every primary container surface. Depth is shadow's job, not colour's.",
+      "Do restrict colour-as-meaning to slate-tide (action / active), terracotta-signal (danger), and spruce-positive (genuine completion). Everything else is walnut.",
+      "Do put all shadows on the upper-left light source (dark to lower-right, highlight to upper-left).",
+      "Do apply the Wide-Label treatment (text-[10px] font-bold uppercase tracking-[0.12em] walnut-soft) to every chrome label without exception.",
+      "Do use Nunito at three weights (400 / 700 / 800) and nothing else.",
+      "Do keep buttons honest: a primary action is one slate-tide pill on the screen, not three.",
+      "Do pair every spinner / progress with a sentence describing what's happening — 'Загружаем кампании…', 'Загружено 47 из 120 кампаний'.",
+      "Do keep tables dense but warm: walnut-mid body text, walnut-ink for numeric emphasis, no zebra striping."
+    ],
+    "donts": [
+      "Don't use background-clip: text with a gradient. Gradient text is decorative, never meaningful — use a solid slate-tide or walnut-ink and let weight carry it.",
+      "Don't decorate cards with border-left: 3px solid <color> or border-top: 3px solid <color> as a tag or category stripe. The neumorphic shadow already separates the card.",
+      "Don't assign a different colour to every metric or quick-action icon. Five rainbow icons in a row is a Bitrix/Amo CRM reflex.",
+      "Don't introduce linear-gradient(...) fills on buttons as decoration. The asymmetric Outset Button shadow + slate-tide-deep hover is the entire button visual language.",
+      "Don't use #000 for text or #fff for surfaces. Walnut-ink + linen-cream.",
+      "Don't invert the light direction (highlight to lower-right, shadow to upper-left). The system breaks instantly.",
+      "Don't mix neumorphic and flat-with-drop-shadow components inside the same surface. The admin-bridge is the only allowed exception.",
+      "Don't chase glassmorphism, hero-metric templates ('2,847 ↗ +12% ▲'), gradient hero banners, or sidebar-icon-explosions.",
+      "Don't copy the OpenAI / Anthropic dark-yellow palette into the client product. That lives on the marketing landing and stays there.",
+      "Don't wrap inline copy in vague apologies ('Пожалуйста, обратите внимание', 'К сожалению, произошла ошибка'). Use the voice of a calm colleague.",
+      "Don't invent a 9px label, a 13px body, or a sharp 8px-radius card. Stay inside the published scales."
+    ]
+  }
+}

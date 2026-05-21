@@ -11,6 +11,22 @@ import type {
   ClientBriefSocialProof,
   ClientBriefSocialProofKey,
 } from '../types';
+import { detectStub, type StubFilterCategory } from './stubFilters';
+
+/**
+ * Маппинг social_proof ключей в категории stub-фильтра. ratings/recommendations/
+ * press/awards/media/cases — категории с разными requirements (числа для
+ * ratings, кавычки для recommendations, и т.д.). photos/presentations пока
+ * без жёстких требований — фильтруем только generic stubs ("на сайте есть").
+ */
+const SOCIAL_PROOF_STUB_CATEGORY: Partial<Record<ClientBriefSocialProofKey, StubFilterCategory>> = {
+  ratings: 'ratings',
+  recommendations: 'recommendations',
+  cases: 'cases',
+  press: 'press',
+  awards: 'awards',
+  media: 'media',
+};
 
 /**
  * Поля, которые AI может пытаться заполнить с публичного сайта.
@@ -137,7 +153,22 @@ function mapSocialProof(raw: unknown): Partial<ClientBriefFields['social_proof']
     const item = entry as Partial<ClientBriefSocialProof>;
     const has = item.has === true;
     if (!has) continue;
-    const comment = normalizeText(item.comment);
+    const rawComment = normalizeText(item.comment);
+
+    // Фильтруем stub-комментарии вида "Раздел 'Кейсы' на сайте", "Положительные
+    // отзывы есть на разных платформах" — они бесполезны для downstream
+    // AI-инструментов и затирают пользовательские данные.
+    //
+    // ВАЖНО: фильтруем только comment, но has=true оставляем. Если main AI
+    // распознал что доказательство ЕСТЬ на сайте — отметку чекбокса
+    // сохраняем; в comment просто остаётся пусто, чтобы потом enricher или
+    // клиент дозаполнили реальным текстом.
+    const category = SOCIAL_PROOF_STUB_CATEGORY[key];
+    let comment = rawComment;
+    if (category && rawComment) {
+      const stub = detectStub(rawComment, category);
+      if (stub.isStub) comment = '';
+    }
     out[key] = { has: true, comment };
   }
   return Object.keys(out).length > 0 ? out : undefined;

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
-import { isResourceAllowed } from '@/lib/clientAccess';
+import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { getEmail, listEmails, replyToEmail } from '@/lib/instantly/client';
 import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
 import { validateReplyInput } from '@/lib/clientCampaignReplies/validate';
@@ -36,6 +36,9 @@ export async function POST(
   if (!isResourceAllowed(campaignId, accessRows, 'campaign')) {
     return jsonError('Кампания не найдена или доступ запрещён', 404);
   }
+  const instantlyRequestOptions = {
+    accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
+  };
 
   let body: unknown;
   try {
@@ -49,28 +52,31 @@ export async function POST(
   if (!validation.ok) return jsonError(validation.error ?? 'Bad request', 400);
 
   try {
-    const original = await getEmail(emailId);
+    const original = await getEmail(emailId, instantlyRequestOptions);
     if (!original || original.campaign_id !== campaignId) {
       return jsonError('Письмо не относится к кампании', 404);
     }
 
     let eaccount = findEaccountForReply({ originalEmail: original, threadEmails: [] });
     if (!eaccount && original.thread_id && original.lead) {
-      const thread = await listEmails({ campaign_id: campaignId, lead_id: original.lead, limit: 100 });
+      const thread = await listEmails({ campaign_id: campaignId, lead_id: original.lead, limit: 100 }, instantlyRequestOptions);
       eaccount = findEaccountForReply({ originalEmail: original, threadEmails: thread.items ?? [] });
     }
     if (!eaccount) {
       return jsonError('Не удалось определить аккаунт отправки. Попробуйте позже.', 400);
     }
 
-    await replyToEmail({
-      reply_to_uuid: emailId,
-      eaccount,
-      subject: buildReplySubject(original.subject),
-      body: { text: validation.body_text! },
-      ...(validation.cc ? { cc_address_email_list: validation.cc } : {}),
-      ...(validation.bcc ? { bcc_address_email_list: validation.bcc } : {}),
-    });
+    await replyToEmail(
+      {
+        reply_to_uuid: emailId,
+        eaccount,
+        subject: buildReplySubject(original.subject),
+        body: { text: validation.body_text! },
+        ...(validation.cc ? { cc_address_email_list: validation.cc } : {}),
+        ...(validation.bcc ? { bcc_address_email_list: validation.bcc } : {}),
+      },
+      instantlyRequestOptions,
+    );
 
     void logAudit('client.campaign.replies.reply.sent', 'Client replied via Instantly', {
       campaignId,

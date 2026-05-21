@@ -56,6 +56,21 @@ export async function POST(req: NextRequest) {
       website: result.resolvedUrl,
       filledFields: Object.keys(result.patch),
       questionsCount: result.questions.length,
+      // Трейс по enricher'ам нужен чтобы видеть в логах, помогает ли multi-page
+      // enrichment vs главная страница (когда выявим — поднимем/уберём enricher).
+      enrichers: result.enrichers
+        ? {
+            discoveredUrls: result.enrichers.discovered.map((d) => ({
+              kind: d.kind,
+              url: d.url,
+              score: d.score,
+            })),
+            cases: result.enrichers.cases,
+            reviews: result.enrichers.reviews,
+            press: result.enrichers.press,
+            faq: result.enrichers.faq,
+          }
+        : undefined,
     });
 
     return NextResponse.json({

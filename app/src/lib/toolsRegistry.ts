@@ -33,6 +33,7 @@ export const ALL_TOOL_IDS = [
   'email-sequence',
   'email-sequence-v2',
   'auto-report',
+  'polza-reports',
   'audio-transcribe',
   'tg-transcribe',
   'rdp',
@@ -183,6 +184,17 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description_en:
       'Instantly campaign reports: campaign loading, project selection, stats, and email-level details.',
     href: '/tools/auto-report',
+    accentColor: 'blue',
+  },
+  'polza-reports': {
+    id: 'polza-reports',
+    title: 'Отчёты по рассылкам (Coldy / Trigga)',
+    title_en: 'Outreach reports (Coldy / Trigga)',
+    description:
+      'Excel-отчёты по email-кампаниям: Coldy через автоматический заход в кабинет и Trigga через загрузку CSV.',
+    description_en:
+      'Excel reports for email campaigns: Coldy via automated cabinet login and Trigga via CSV upload.',
+    href: '/tools/polza-reports',
     accentColor: 'blue',
   },
   'audio-transcribe': {
@@ -378,7 +390,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Утилиты',
     label_en: 'Utilities',
-    toolIds: ['auto-report', 'audio-transcribe', 'tg-transcribe', 'rdp'],
+    toolIds: ['auto-report', 'polza-reports', 'audio-transcribe', 'tg-transcribe', 'rdp'],
   },
   {
     label: 'AI и знания',

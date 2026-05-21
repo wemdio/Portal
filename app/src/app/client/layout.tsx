@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { Menu } from 'lucide-react';
-import { Nunito } from 'next/font/google';
+import { Inter, JetBrains_Mono } from 'next/font/google';
 import { supabase } from '@/lib/supabaseClient';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 import { getPortalPageSectionTitle } from '@/lib/pageTitle';
@@ -24,9 +24,16 @@ import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
 import { DemoBanner } from '@/components/client/DemoBanner';
 import { PaymentLockedBanner } from '@/components/client/PaymentLockedBanner';
 
-const nunito = Nunito({
+const inter = Inter({
   subsets: ['latin', 'cyrillic'],
   display: 'swap',
+  variable: '--font-inter',
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ['latin', 'cyrillic'],
+  display: 'swap',
+  variable: '--font-mono',
 });
 
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
@@ -101,7 +108,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     <PortalLoadingProvider>
     <GlobalTextTranslator locale={locale} />
     <LanguageLoadingOverlay />
-    <div className={`client-portal ${nunito.className} flex flex-col min-h-screen`}>
+    <div className={`client-portal ${inter.variable} ${jetbrainsMono.variable} flex flex-col min-h-screen`}>
       <DemoBanner />
       <PaymentLockedBanner />
       <header className="sticky top-0 z-40 px-3 pt-3 pb-1 sm:px-4 sm:pt-4 sm:pb-2">
@@ -118,11 +125,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
 
           <span
             className="text-sm sm:text-base font-extrabold tracking-tight select-none shrink-0"
-            style={{
-              background: 'linear-gradient(160deg, #5E86C4, var(--cp-accent-h))',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-            }}
+            style={{ color: 'var(--cp-text)' }}
           >
             Portal
           </span>
@@ -153,7 +156,11 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
                 data-i18n-skip
                 role="listbox"
                 aria-label={dict(commonDictionary.language, locale)}
-                className="absolute right-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-lg"
+                className="absolute right-0 top-full z-50 mt-1 w-48 overflow-hidden rounded-md"
+                style={{
+                  background: 'var(--cp-surface-elev)',
+                  border: '1px solid var(--cp-divider-strong)',
+                }}
               >
                 {LOCALES.map((code) => {
                   const desc = LOCALE_DESCRIPTORS[code];
@@ -171,8 +178,8 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
                       className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors"
                       style={
                         isActive
-                          ? { background: '#6366F1', color: '#fff' }
-                          : { color: 'var(--cp-text-l)' }
+                          ? { background: 'var(--cp-paper)', color: 'var(--cp-ink)' }
+                          : { color: 'var(--cp-paper-mute)' }
                       }
                     >
                       <span aria-hidden className="text-base leading-none">{desc.flag}</span>

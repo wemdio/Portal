@@ -3,6 +3,7 @@ import 'server-only';
 import type { Campaign } from '@/lib/instantly/types';
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
+import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { getCampaignAnalytics } from '@/lib/instantly/client';
 import {
   iterateInstantlyCampaignPages,
@@ -163,11 +164,13 @@ export async function syncInstantlyCampaignCatalog(apiKey: string): Promise<{
 export async function upsertInstantlyCatalogFromCampaign(
   campaign: Pick<Campaign, 'id' | 'name' | 'status'> &
     Partial<Pick<Campaign, 'timestamp_created' | 'timestamp_updated'>>,
+  accountId?: string | null,
 ): Promise<void> {
   if (!supabaseAdmin) return;
 
   const row = {
     id: campaign.id,
+    instantly_account_id: resolveInstantlyAccountId(accountId),
     name: String(campaign.name ?? '').slice(0, NAME_MAX_LEN),
     status: typeof campaign.status === 'number' ? campaign.status : null,
     timestamp_created: campaign.timestamp_created ?? null,
@@ -195,46 +198,49 @@ export async function syncInstantlyCampaignAnalytics(): Promise<{ rows: number }
     throw new Error('SUPABASE_SERVICE_ROLE_KEY не настроен — синхронизация аналитики недоступна');
   }
 
-  const analyticsData = await getCampaignAnalytics({});
-  if (!Array.isArray(analyticsData) || analyticsData.length === 0) {
-    return { rows: 0 };
+  let rows = 0;
+
+  for (const _account of [null]) {
+    const analyticsData = await getCampaignAnalytics({});
+    if (!Array.isArray(analyticsData) || analyticsData.length === 0) continue;
+
+    const syncedAt = new Date().toISOString();
+
+    // Готовим batch: только кампании у которых есть campaign_id
+    const batch = analyticsData
+      .filter((a) => typeof a.campaign_id === 'string' && a.campaign_id)
+      .map((a) => ({
+        id: a.campaign_id as string,
+        // name нужен для upsert (NOT NULL в таблице) — используем пустую строку как fallback
+        // при конфликте по id поле name НЕ перезаписывается (onConflict merge excludes it)
+        name: typeof a.campaign_name === 'string' ? a.campaign_name : '',
+        emails_sent_count: typeof a.emails_sent_count === 'number' ? a.emails_sent_count : null,
+        open_count: typeof a.open_count === 'number' ? a.open_count : null,
+        reply_count: typeof a.reply_count === 'number' ? a.reply_count : null,
+        new_leads_contacted_count:
+          typeof a.new_leads_contacted_count === 'number' ? a.new_leads_contacted_count : null,
+        bounced_count: typeof a.bounced_count === 'number' ? a.bounced_count : null,
+        unsubscribed_count: typeof a.unsubscribed_count === 'number' ? a.unsubscribed_count : null,
+        leads_count: typeof a.leads_count === 'number' ? a.leads_count : null,
+        analytics_synced_at: syncedAt,
+        synced_at: syncedAt,
+      }));
+
+    if (batch.length === 0) continue;
+
+    // Один bulk-upsert — щадящий для БД
+    const { error } = await supabaseAdmin
+      .from('instantly_campaign_catalog')
+      .upsert(batch, {
+        onConflict: 'id',
+        ignoreDuplicates: false,
+      });
+
+    if (error) throw new Error(error.message);
+    rows += batch.length;
   }
 
-  const syncedAt = new Date().toISOString();
-
-  // Готовим batch: только кампании у которых есть campaign_id
-  const batch = analyticsData
-    .filter((a) => typeof a.campaign_id === 'string' && a.campaign_id)
-    .map((a) => ({
-      id: a.campaign_id as string,
-      // name нужен для upsert (NOT NULL в таблице) — используем пустую строку как fallback
-      // при конфликте по id поле name НЕ перезаписывается (onConflict merge excludes it)
-      name: typeof a.campaign_name === 'string' ? a.campaign_name : '',
-      emails_sent_count: typeof a.emails_sent_count === 'number' ? a.emails_sent_count : null,
-      open_count: typeof a.open_count === 'number' ? a.open_count : null,
-      reply_count: typeof a.reply_count === 'number' ? a.reply_count : null,
-      new_leads_contacted_count:
-        typeof a.new_leads_contacted_count === 'number' ? a.new_leads_contacted_count : null,
-      bounced_count: typeof a.bounced_count === 'number' ? a.bounced_count : null,
-      unsubscribed_count: typeof a.unsubscribed_count === 'number' ? a.unsubscribed_count : null,
-      leads_count: typeof a.leads_count === 'number' ? a.leads_count : null,
-      analytics_synced_at: syncedAt,
-      synced_at: syncedAt,
-    }));
-
-  if (batch.length === 0) return { rows: 0 };
-
-  // Один bulk-upsert — щадящий для БД
-  const { error } = await supabaseAdmin
-    .from('instantly_campaign_catalog')
-    .upsert(batch, {
-      onConflict: 'id',
-      ignoreDuplicates: false,
-    });
-
-  if (error) throw new Error(error.message);
-
-  return { rows: batch.length };
+  return { rows };
 }
 
 /**
@@ -433,6 +439,45 @@ function tokenizeClient(s: string): Set<string> {
   );
 }
 
+interface ActiveProjectPeriod {
+  id: string;
+  project_id: string;
+  period_start: string | null;
+}
+
+interface MatchableCampaign {
+  id: string;
+  name: string;
+  timestamp_created?: string | null;
+  new_leads_contacted_count?: number | null;
+}
+
+function campaignStartsInsidePeriod(campaign: MatchableCampaign, period: ActiveProjectPeriod): boolean {
+  if (!period.period_start) return true;
+  const campaignMs = Date.parse(campaign.timestamp_created ?? '');
+  const periodMs = Date.parse(period.period_start);
+  if (!Number.isFinite(campaignMs) || !Number.isFinite(periodMs)) return false;
+  return campaignMs >= periodMs;
+}
+
+async function loadActiveProjectPeriods(
+  projectIds: readonly string[],
+): Promise<Map<string, ActiveProjectPeriod>> {
+  const map = new Map<string, ActiveProjectPeriod>();
+  if (!supabaseMain || projectIds.length === 0) return map;
+
+  const { data } = await supabaseMain
+    .from('project_periods')
+    .select('id, project_id, period_start')
+    .in('project_id', projectIds)
+    .eq('status', 'active');
+
+  for (const row of (data ?? []) as ActiveProjectPeriod[]) {
+    map.set(row.project_id, row);
+  }
+  return map;
+}
+
 /**
  * AI-powered matching, переписанный с нуля после массового мисматча
  * 14 мая 2026 (104 ложных привязки, типа ProfitAds ← UNIRATE/Wasserjet/...).
@@ -454,6 +499,7 @@ async function aiMatchUnmatchedCampaigns(
   projects: { id: string; client: string }[],
   allCampaignIds: Set<string>,
   denylistSet: Set<string>,
+  activePeriodByProjectId: Map<string, ActiveProjectPeriod>,
 ): Promise<{ matched: number; aiCalls: number }> {
   if (!supabaseAdmin || !supabaseMain) return { matched: 0, aiCalls: 0 };
 
@@ -479,15 +525,23 @@ async function aiMatchUnmatchedCampaigns(
   const { data: alreadyLinked } = await supabaseAdmin
     .from('project_instantly_campaigns')
     .select('campaign_id');
+
+  const { data: alreadyPeriodLinked } = await supabaseAdmin
+    .from('project_period_instantly_campaigns')
+    .select('campaign_id');
+
   const linkedIds = new Set(
     (alreadyLinked ?? []).map((r: { campaign_id: string }) => r.campaign_id),
   );
+  for (const row of (alreadyPeriodLinked ?? []) as { campaign_id: string }[]) {
+    linkedIds.add(row.campaign_id);
+  }
 
   const { data: catalogRows } = await supabaseAdmin
     .from('instantly_campaign_catalog')
-    .select('id, name')
+    .select('id, name, timestamp_created, new_leads_contacted_count')
     .not('name', 'is', null);
-  const unmatched = (catalogRows as { id: string; name: string }[] | null ?? [])
+  const unmatched = (catalogRows as MatchableCampaign[] | null ?? [])
     .filter(
       (c) =>
         c.name &&
@@ -502,6 +556,8 @@ async function aiMatchUnmatchedCampaigns(
   const campaignNormalized = unmatched.map((c) => ({
     id: c.id,
     name: c.name,
+    timestamp_created: c.timestamp_created,
+    new_leads_contacted_count: c.new_leads_contacted_count,
     norm: normalizeForMatch(c.name),
     normTranslit: normalizeForMatch(transliterate(c.name)),
     tokens: new Set(
@@ -516,15 +572,18 @@ async function aiMatchUnmatchedCampaigns(
   let aiCalls = 0;
   const matchesToInsert: {
     project_id: string;
+    period_id?: string;
     campaign_id: string;
     match_source: string;
     match_confidence: number;
     match_reason: string;
+    baseline_contacts?: number;
   }[] = [];
 
   for (const project of projects) {
     const client = project.client?.trim();
     if (!client || client.length < 2) continue;
+    const activePeriod = activePeriodByProjectId.get(project.id);
 
     const clientLower = client.toLowerCase();
     const clientNorm = normalizeForMatch(client);
@@ -535,6 +594,7 @@ async function aiMatchUnmatchedCampaigns(
     //    клиентов — много токенов и много шума.
     const candidates = campaignNormalized
       .filter((c) => {
+        if (activePeriod && !campaignStartsInsidePeriod(c, activePeriod)) return false;
         if (c.name.toLowerCase().includes(clientLower)) return true;
         if (clientNorm.length >= 3 && c.norm.includes(clientNorm)) return true;
         if (clientNorm.length >= 3 && c.normTranslit.includes(clientNorm)) return true;
@@ -654,15 +714,19 @@ Return {"matches": []} if no confident matches.`;
         );
       }
 
-      const candidateIds = new Set(candidates.map((c) => c.id));
+      const candidateById = new Map(candidates.map((c) => [c.id, c] as const));
       for (const m of parsed) {
         if (typeof m.confidence !== 'number') continue;
         if (m.confidence < CONFIDENCE_THRESHOLD) continue;
-        if (!candidateIds.has(m.campaign_id)) continue;
+        const matchedCampaign = candidateById.get(m.campaign_id);
+        if (!matchedCampaign) continue;
         const key = `${project.id}::${m.campaign_id}`;
         if (denylistSet.has(key)) continue;
         matchesToInsert.push({
           project_id: project.id,
+          ...(activePeriod
+            ? { period_id: activePeriod.id, baseline_contacts: 0 }
+            : {}),
           campaign_id: m.campaign_id,
           match_source: 'auto-ai',
           match_confidence: m.confidence,
@@ -705,6 +769,65 @@ Return {"matches": []} if no confident matches.`;
     console.log(
       `[ai-match] dedup by campaign_id: ${matchesToInsert.length} → ${dedupedMatches.length}`,
     );
+  }
+
+  if (dedupedMatches.some((m) => m.period_id)) {
+    const legacyMatches = dedupedMatches.flatMap((m) =>
+      m.period_id
+        ? []
+        : [{
+            project_id: m.project_id,
+            campaign_id: m.campaign_id,
+            match_source: m.match_source,
+            match_confidence: m.match_confidence,
+            match_reason: m.match_reason,
+          }],
+    );
+    const periodMatches = dedupedMatches.flatMap((m) =>
+      m.period_id
+        ? [{
+            project_id: m.project_id,
+            period_id: m.period_id,
+            campaign_id: m.campaign_id,
+            match_source: m.match_source,
+            match_confidence: m.match_confidence,
+            match_reason: m.match_reason,
+            baseline_contacts: m.baseline_contacts ?? 0,
+          }]
+        : [],
+    );
+
+    let insertedCount = 0;
+    if (legacyMatches.length > 0) {
+      const { error } = await supabaseAdmin
+        .from('project_instantly_campaigns')
+        .upsert(legacyMatches, {
+          onConflict: 'project_id,campaign_id',
+          ignoreDuplicates: true,
+        });
+      if (error) {
+        console.error('[ai-match] legacy upsert error:', error.message);
+      } else {
+        insertedCount += legacyMatches.length;
+      }
+    }
+
+    if (periodMatches.length > 0) {
+      const { error } = await supabaseAdmin
+        .from('project_period_instantly_campaigns')
+        .upsert(periodMatches, {
+          onConflict: 'period_id,campaign_id',
+          ignoreDuplicates: true,
+        });
+      if (error) {
+        console.error('[ai-match] period upsert error:', error.message);
+      } else {
+        insertedCount += periodMatches.length;
+      }
+    }
+
+    totalMatched = insertedCount;
+    return { matched: totalMatched, aiCalls };
   }
 
   if (dedupedMatches.length > 0) {
@@ -756,9 +879,12 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
 
   const { data: campaigns } = await supabaseAdmin
     .from('instantly_campaign_catalog')
-    .select('id, name');
+    .select('id, name, timestamp_created, new_leads_contacted_count');
 
   if (!campaigns?.length) return { matched: 0 };
+
+  const projectRows = projects as { id: string; client: string }[];
+  const activePeriodByProjectId = await loadActiveProjectPeriods(projectRows.map((p) => p.id));
 
   const { data: existingManual } = await supabaseAdmin
     .from('project_instantly_campaigns')
@@ -768,6 +894,15 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
   const manualSet = new Set(
     (existingManual ?? []).map((r: { project_id: string; campaign_id: string }) =>
       `${r.project_id}::${r.campaign_id}`),
+  );
+
+  const { data: existingPeriodLinks } = await supabaseAdmin
+    .from('project_period_instantly_campaigns')
+    .select('project_id, period_id, campaign_id');
+
+  const periodLinkSet = new Set(
+    (existingPeriodLinks ?? []).map((r: { period_id: string; campaign_id: string }) =>
+      `${r.period_id}::${r.campaign_id}`),
   );
 
   // Чёрный список ручных удалений — кампании, которые специалист отвязал
@@ -783,36 +918,69 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
       `${r.project_id}::${r.campaign_id}`),
   );
 
-  const matches: { project_id: string; campaign_id: string; match_source: string }[] = [];
+  const legacyMatches: { project_id: string; campaign_id: string; match_source: string }[] = [];
+  const periodMatches: {
+    project_id: string;
+    period_id: string;
+    campaign_id: string;
+    match_source: string;
+    baseline_contacts: number;
+  }[] = [];
 
-  for (const project of projects as { id: string; client: string }[]) {
+  for (const project of projectRows) {
     const clientLower = project.client.trim().toLowerCase();
     if (clientLower.length < 2) continue;
+    const activePeriod = activePeriodByProjectId.get(project.id);
 
-    for (const campaign of campaigns as { id: string; name: string }[]) {
+    for (const campaign of campaigns as MatchableCampaign[]) {
       const campaignLower = (campaign.name ?? '').toLowerCase();
       if (!campaignLower.includes(clientLower)) continue;
       const key = `${project.id}::${campaign.id}`;
       if (manualSet.has(key)) continue;
       if (denylistSet.has(key)) continue;
-      matches.push({
-        project_id: project.id,
-        campaign_id: campaign.id,
-        match_source: 'auto-text',
-      });
+      if (activePeriod) {
+        if (!campaignStartsInsidePeriod(campaign, activePeriod)) continue;
+        const periodKey = `${activePeriod.id}::${campaign.id}`;
+        if (periodLinkSet.has(periodKey)) continue;
+        periodMatches.push({
+          project_id: project.id,
+          period_id: activePeriod.id,
+          campaign_id: campaign.id,
+          match_source: 'auto-text',
+          baseline_contacts: 0,
+        });
+      } else {
+        legacyMatches.push({
+          project_id: project.id,
+          campaign_id: campaign.id,
+          match_source: 'auto-text',
+        });
+      }
     }
   }
 
   let textMatched = 0;
-  if (matches.length > 0) {
+  if (legacyMatches.length > 0) {
     const { error } = await supabaseAdmin
       .from('project_instantly_campaigns')
-      .upsert(matches, { onConflict: 'project_id,campaign_id', ignoreDuplicates: true });
+      .upsert(legacyMatches, { onConflict: 'project_id,campaign_id', ignoreDuplicates: true });
 
     if (error) {
       console.error('[instantly-catalog] auto-match campaigns to projects failed', error.message);
     } else {
-      textMatched = matches.length;
+      textMatched += legacyMatches.length;
+    }
+  }
+
+  if (periodMatches.length > 0) {
+    const { error } = await supabaseAdmin
+      .from('project_period_instantly_campaigns')
+      .upsert(periodMatches, { onConflict: 'period_id,campaign_id', ignoreDuplicates: true });
+
+    if (error) {
+      console.error('[instantly-catalog] auto-match campaigns to project periods failed', error.message);
+    } else {
+      textMatched += periodMatches.length;
     }
   }
 
@@ -823,9 +991,10 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
   let aiCalls = 0;
   try {
     const aiResult = await aiMatchUnmatchedCampaigns(
-      projects as { id: string; client: string }[],
+      projectRows,
       allCampaignIds,
       denylistSet,
+      activePeriodByProjectId,
     );
     aiMatched = aiResult.matched;
     aiCalls = aiResult.aiCalls;
