@@ -118,20 +118,39 @@ export function computeCooldownUntil(kind: AccountCooldownKind, now: Date = new 
  * written. Both the campaign runner and the scraper call this so that *any*
  * write op that hits a LinkedIn limit parks the account for everyone.
  *
- * `db` is typed loosely as a Supabase-shaped object so callers can pass either
- * `supabaseAdmin` (server worker) or a per-request Supabase client.
+ * Returns the cooldown timestamp plus the DB error message (if any) so
+ * callers can decide how loudly to complain about a failed write.
  */
+// Loose shape to accept either supabaseAdmin (full SupabaseClient) or a
+// per-request authed client. We only use the `update().eq()` builder, which
+// is thenable (PromiseLike), so we keep the type minimal and unwrap with
+// Promise.resolve() to upgrade to a real Promise.
+type CooldownDb = {
+  from: (table: string) => {
+    update: (data: Record<string, unknown>) => {
+      eq: (col: string, val: unknown) => PromiseLike<{ error: { message?: string } | null }>;
+    };
+  };
+};
+
 export async function applyCooldownToAccount(
-  db: { from: (table: string) => { update: (data: Record<string, unknown>) => { eq: (col: string, val: unknown) => unknown } } },
+  db: CooldownDb,
   accountId: string,
   kind: AccountCooldownKind,
-): Promise<string> {
+): Promise<{ cooldownUntil: string; error: string | null }> {
   const cooldownUntil = computeCooldownUntil(kind);
-  await db
-    .from('li_accounts')
-    .update({ cooldown_until: cooldownUntil, cooldown_reason: kind })
-    .eq('id', accountId);
-  return cooldownUntil;
+  // Promise.resolve() upgrades the supabase PostgrestBuilder (PromiseLike) to
+  // a full Promise so the caller (and our `await`) play well together.
+  const { error } = await Promise.resolve(
+    db
+      .from('li_accounts')
+      .update({ cooldown_until: cooldownUntil, cooldown_reason: kind })
+      .eq('id', accountId),
+  );
+  return {
+    cooldownUntil,
+    error: error?.message ?? null,
+  };
 }
 
 /**

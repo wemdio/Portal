@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { parseYookassaWebhookBody } from '@/lib/yookassa';
+import { applyInvoicePaidToTariff } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 
@@ -97,66 +98,21 @@ export async function POST(req: NextRequest) {
 
   // If this invoice is linked to a client — update their tariff
   if (payment.status === 'succeeded' && invoice.client_user_id) {
-    const { data: tariff } = await supabaseAdmin
-      .from('client_tariffs')
-      .select('id, billing_mode, payment_locked, paid_at, setup_until, paid_until')
-      .eq('user_id', invoice.client_user_id)
-      .maybeSingle();
-
-    if (tariff) {
-      const now = new Date().toISOString();
-      const tariffUpdate: Record<string, unknown> = {};
-
-      if (!tariff.paid_at) {
-        tariffUpdate.paid_at = now;
-        // Set paid_until = setup_until + 1 month (or now + 1 month if no setup)
-        const base = tariff.setup_until ? new Date(tariff.setup_until) : new Date();
-        const paidUntil = new Date(base);
-        paidUntil.setMonth(paidUntil.getMonth() + 1);
-        tariffUpdate.paid_until = paidUntil.toISOString();
-      } else {
-        // Renewal: extend paid_until by 1 month from current paid_until
-        const base = tariff.paid_until ? new Date(tariff.paid_until) : new Date();
-        const paidUntil = new Date(base);
-        paidUntil.setMonth(paidUntil.getMonth() + 1);
-        tariffUpdate.paid_until = paidUntil.toISOString();
-        tariffUpdate.paid_at = now;
-      }
-
-      // Save payment method for future recurring charges
-      const pm = (payment as { payment_method?: { id?: string; saved?: boolean } }).payment_method;
-      if (pm?.id && pm.saved) {
-        tariffUpdate.yookassa_payment_method_id = pm.id;
-        tariffUpdate.auto_renew = true;
-        tariffUpdate.last_renewal_error = null;
-      }
-
-      // invoice mode → unlock immediately when paid
-      if (tariff.billing_mode === 'invoice' && tariff.payment_locked) {
-        tariffUpdate.payment_locked = false;
-      }
-
-      // autopayment mode → record payment but keep lock until setup_until expires
-      // (lock auto-lifts via isPaymentLocked() at read time)
-
+    const pm = (payment as { payment_method?: { id?: string; saved?: boolean } }).payment_method;
+    try {
+      const tariffUpdate = await applyInvoicePaidToTariff(invoice.client_user_id, {
+        paymentMethod: pm ?? null,
+      });
       if (Object.keys(tariffUpdate).length > 0) {
-        tariffUpdate.updated_at = now;
-        const { error: tariffErr } = await supabaseAdmin
-          .from('client_tariffs')
-          .update(tariffUpdate)
-          .eq('user_id', invoice.client_user_id);
-
-        if (tariffErr) {
-          await logError('invoices.webhook.tariff_update.failed', tariffErr, { client_user_id: invoice.client_user_id });
-        } else {
-          await logAudit(
-            'invoices.webhook.tariff_unlocked',
-            `Tariff updated for client ${invoice.client_user_id} after payment`,
-            { client_user_id: invoice.client_user_id, billing_mode: tariff.billing_mode, tariffUpdate },
-            {},
-          );
-        }
+        await logAudit(
+          'invoices.webhook.tariff_unlocked',
+          `Tariff updated for client ${invoice.client_user_id} after payment`,
+          { client_user_id: invoice.client_user_id, tariffUpdate },
+          {},
+        );
       }
+    } catch (tariffErr) {
+      await logError('invoices.webhook.tariff_update.failed', tariffErr, { client_user_id: invoice.client_user_id });
     }
   }
 

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
-import { chargeRecurringPayment, isYookassaConfigured } from '@/lib/yookassa';
+import { chargeRecurringPayment, isYookassaConfigured, buildDefaultReceipt } from '@/lib/yookassa';
 
 export const dynamic = 'force-dynamic';
 
@@ -59,14 +59,44 @@ export async function GET(req: NextRequest) {
     const amount = TARIFF_PRICES[row.tariff_type] ?? 15000;
     const billingMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
     const idempotencyKey = `autorenew-${row.id}-${billingMonth}`;
+    const description = `Автопродление подписки — ${billingMonth}`;
+
+    // 54-FZ receipt: look up the client's email from their profile.
+    const { data: clientProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('email')
+      .eq('id', row.user_id)
+      .maybeSingle();
+    const customerEmail = clientProfile?.email ?? process.env.YOOKASSA_FALLBACK_RECEIPT_EMAIL ?? null;
+
+    if (!customerEmail) {
+      const msg = 'Нет email для чека 54-ФЗ (нет в profiles и не задан YOOKASSA_FALLBACK_RECEIPT_EMAIL)';
+      await logError('cron.auto-renew.no_receipt_email', null, { user_id: row.user_id });
+      await supabaseAdmin
+        .from('client_tariffs')
+        .update({
+          last_renewal_error: msg,
+          last_renewal_attempt_at: now.toISOString(),
+          updated_at: now.toISOString(),
+        })
+        .eq('id', row.id);
+      results.push({ user_id: row.user_id, success: false, error: msg });
+      continue;
+    }
 
     try {
       const payment = await chargeRecurringPayment({
         amount,
         currency: 'RUB',
-        description: `Автопродление подписки — ${billingMonth}`,
+        description,
         paymentMethodId: row.yookassa_payment_method_id!,
         idempotencyKey,
+        receipt: buildDefaultReceipt({
+          customerEmail,
+          description,
+          amount,
+          currency: 'RUB',
+        }),
       });
 
       if (payment.status === 'succeeded') {

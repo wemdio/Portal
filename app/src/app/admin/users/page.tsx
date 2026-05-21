@@ -285,17 +285,30 @@ export default function UsersPage() {
     setCampaignSearch('');
     try {
       const isClient = user.role === 'client';
+      // Per-call catch so one failing endpoint does not blow away state derived
+      // from the others. Without this, a 500 on /client-access would reset the
+      // already-loaded tariff/subscription back to "Не оплачена" defaults via
+      // the outer catch, even though the tariff fetch itself succeeded.
       const [toolsRes, accessRes, tariffRes] = await Promise.all([
         apiFetch<{ visibility: Record<string, boolean> }>(
           `/api/admin/users/${user.id}/tools`
-        ),
+        ).catch((err) => {
+          void logError('admin.users.modal.tools.fetch.failed', err, { targetUserId: user.id });
+          return { visibility: {} as Record<string, boolean> };
+        }),
         isClient
           ? apiFetch<{ rows: Array<{ resource_type: string; resource_id: string }> }>(
               `/api/admin/users/${user.id}/client-access`
-            )
+            ).catch((err) => {
+              void logError('admin.users.modal.client-access.fetch.failed', err, { targetUserId: user.id });
+              return { rows: [] as Array<{ resource_type: string; resource_id: string }> };
+            })
           : Promise.resolve({ rows: [] as Array<{ resource_type: string; resource_id: string }> }),
         isClient
-          ? apiFetch<{ tariff: AdminUserTariffPayload | null }>(`/api/admin/users/${user.id}/tariff`)
+          ? apiFetch<{ tariff: AdminUserTariffPayload | null }>(`/api/admin/users/${user.id}/tariff`).catch((err) => {
+              void logError('admin.users.modal.tariff.fetch.failed', err, { targetUserId: user.id });
+              return { tariff: null as AdminUserTariffPayload | null };
+            })
           : Promise.resolve({ tariff: null as AdminUserTariffPayload | null }),
       ]);
       setToolVisibility(toolsRes.visibility ?? {});
@@ -311,10 +324,15 @@ export default function UsersPage() {
           max_emails: tariffRes.tariff.max_emails ?? TARIFF_DEFAULTS.pro.max_emails,
         });
         const now = new Date();
-        const isExpired = !tariffRes.tariff.paid_until || new Date(tariffRes.tariff.paid_until) <= now;
-        const inSetup = tariffRes.tariff.is_active === true && !isExpired
+        const isActive = tariffRes.tariff.is_active === true;
+        // Mirrors getClientStatus() in lib/tariffs.ts: only "expired" when paid_until is set AND in the past.
+        // A null paid_until during invoice/autopayment setup is NOT expired.
+        const isExpired = isActive
+          && !!tariffRes.tariff.paid_until
+          && new Date(tariffRes.tariff.paid_until) <= now;
+        const inSetup = isActive && !isExpired
           && !!tariffRes.tariff.setup_until && new Date(tariffRes.tariff.setup_until) > now;
-        const isAct = tariffRes.tariff.is_active === true && !isExpired && !inSetup;
+        const isAct = isActive && !isExpired && !inSetup;
         setSubscriptionActive(isAct);
         setSubscriptionSetup(inSetup);
         setPaidUntil(tariffRes.tariff.paid_until ?? null);
