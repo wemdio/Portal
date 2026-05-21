@@ -92,22 +92,6 @@ export const commonDictionary = {
     es: 'Aquí aparecerán las notificaciones sobre tareas, campañas y eventos.',
     it: 'Qui appariranno le notifiche su attività, campagne ed eventi.',
   },
-  translatingPage: {
-    ru: 'Перевод страницы…',
-    en: 'Translating page…',
-    de: 'Seite wird übersetzt…',
-    fr: 'Traduction de la page…',
-    es: 'Traduciendo la página…',
-    it: 'Traduzione della pagina…',
-  },
-  translatingHint: {
-    ru: 'Подождите несколько секунд, мы переводим интерфейс.',
-    en: 'Hold on a moment — we’re translating the interface.',
-    de: 'Einen Moment bitte – die Oberfläche wird übersetzt.',
-    fr: 'Patientez quelques secondes, nous traduisons l’interface.',
-    es: 'Un momento, estamos traduciendo la interfaz.',
-    it: 'Un momento, stiamo traducendo l’interfaccia.',
-  },
 } as const;
 
 type DictEntry = (typeof commonDictionary)[keyof typeof commonDictionary];

@@ -100,10 +100,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   return (
     <PortalLoadingProvider>
     <GlobalTextTranslator locale={locale} />
-    <LanguageLoadingOverlay
-      title={dict(commonDictionary.translatingPage, locale)}
-      hint={dict(commonDictionary.translatingHint, locale)}
-    />
+    <LanguageLoadingOverlay />
     <div className={`client-portal ${nunito.className} flex flex-col min-h-screen`}>
       <DemoBanner />
       <PaymentLockedBanner />
