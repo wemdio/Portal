@@ -1424,6 +1424,16 @@ body:has(.client-portal) {
   text-decoration: none;
 }
 
+/* Clickable surface that lifts on hover via surface-elev tint, no shadow.
+   Use on whole-card click targets (e.g. list items rendered as <button>). */
+.client-portal .ds-card-pressable {
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.client-portal .ds-card-pressable:hover {
+  background: var(--cp-surface-elev);
+}
+
 .client-portal .ds-row + .ds-row {
   border-top: 1px solid var(--cp-divider);
 }
