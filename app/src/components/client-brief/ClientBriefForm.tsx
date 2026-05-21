@@ -64,11 +64,38 @@ interface BriefApiResponse {
   compiled_brief_text?: string;
 }
 
-const SECTION_BASE = 'rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden';
-const HEADER_BASE = 'px-6 py-3 border-b border-gray-200 bg-gray-50 text-sm font-semibold text-gray-900';
+const SECTION_BASE = 'rounded-lg overflow-hidden';
+const SECTION_STYLE: React.CSSProperties = {
+  background: 'var(--cp-surface-rest)',
+  border: '1px solid var(--cp-divider)',
+};
+
+function SectionHeader({ number, title }: { number: number; title: string }) {
+  const num = String(number).padStart(2, '0');
+  return (
+    <header
+      className="px-6 py-3 flex items-baseline gap-3"
+      style={{
+        borderBottom: '1px solid var(--cp-divider)',
+        background: 'var(--cp-surface-elev)',
+      }}
+    >
+      <span className="ds-eyebrow shrink-0">
+        {num}<span aria-hidden> → </span>
+      </span>
+      <h2 className="text-sm font-semibold m-0" style={{ color: 'var(--cp-paper)' }}>
+        {title}
+      </h2>
+    </header>
+  );
+}
 
 function HelperText({ children }: { children: React.ReactNode }) {
-  return <p className="text-[11px] text-gray-500 mt-1">{children}</p>;
+  return (
+    <p className="text-[11px] mt-1" style={{ color: 'var(--cp-paper-faint)' }}>
+      {children}
+    </p>
+  );
 }
 
 function TextField({
@@ -88,13 +115,13 @@ function TextField({
 }) {
   return (
     <div>
-      <label className="block text-xs font-medium text-gray-700 mb-1">{label}</label>
+      <label className="ds-eyebrow block mb-1.5">{label}</label>
       <input
         type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+        className="ds-input w-full"
       />
       {hint && <HelperText>{hint}</HelperText>}
     </div>
@@ -118,13 +145,13 @@ function TextAreaField({
 }) {
   return (
     <div>
-      <label className="block text-xs font-medium text-gray-700 mb-1">{label}</label>
+      <label className="ds-eyebrow block mb-1.5">{label}</label>
       <textarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         rows={rows}
-        className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white resize-y"
+        className="ds-input w-full resize-y"
       />
       {hint && <HelperText>{hint}</HelperText>}
     </div>
@@ -140,7 +167,7 @@ function PriceTierSelector({
 }) {
   return (
     <div>
-      <label className="block text-xs font-medium text-gray-700 mb-2">Ценовая категория</label>
+      <label className="ds-eyebrow block mb-2">Ценовая категория</label>
       <div className="flex flex-wrap gap-2">
         {ALLOWED_PRICE_TIERS.map((tier) => {
           const active = value === tier;
@@ -199,7 +226,7 @@ function SocialProofGrid({
                 onChange={(e) => setItem(key, { comment: e.target.value })}
                 placeholder="Подробности (опционально): ссылки, описание, цифры…"
                 rows={2}
-                className="mt-2 w-full px-3 py-2 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white resize-y"
+                className="ds-input mt-2 w-full resize-y text-xs"
               />
             )}
           </div>
@@ -236,34 +263,70 @@ function HypothesesSection({
         minute: '2-digit',
       })
     : null;
+  // Shared style for the four status messages (generating / error /
+  // not-saved-yet / generated-at). Editorial dark: surface-elev background,
+  // hairline border, paper text. State signaled by 6px status dot, not by
+  // tinted backgrounds. Same recipe as BriefAutofillPanel.
+  const statusBoxStyle = {
+    background: 'var(--cp-surface-elev)',
+    border: '1px solid var(--cp-divider)',
+    color: 'var(--cp-paper)',
+  };
+
   return (
-    <section className={SECTION_BASE}>
-      <header className={`${HEADER_BASE} flex items-center gap-2`}>
-        Гипотезы по сбору базы (AI)
+    <section className={SECTION_BASE} style={SECTION_STYLE}>
+      <header
+        className="px-6 py-3 flex items-baseline gap-3"
+        style={{
+          borderBottom: '1px solid var(--cp-divider)',
+          background: 'var(--cp-surface-elev)',
+        }}
+      >
+        <span className="ds-eyebrow shrink-0">AI ассистент</span>
+        <h2 className="text-sm font-semibold m-0" style={{ color: 'var(--cp-paper)' }}>
+          Гипотезы по сбору базы
+        </h2>
       </header>
       <div className="p-6 space-y-4">
-        <p className="text-xs text-gray-600">
+        <p className="text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
           На основе сохранённого брифа AI предлагает 5–10 конкретных гипотез по сбору
           базы потенциальных клиентов: какой источник использовать, какие фильтры/запросы
           задать и какой объём ожидать.
         </p>
 
         {generating && (
-          <div className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Генерируем гипотезы — это занимает 30–60 секунд…
+          <div
+            className="flex items-center gap-2.5 rounded-md px-4 py-3 text-sm"
+            style={statusBoxStyle}
+          >
+            <Loader2
+              className="h-4 w-4 animate-spin shrink-0"
+              style={{ color: 'var(--cp-paper-faint)' }}
+              aria-hidden
+            />
+            <span style={{ color: 'var(--cp-paper-mute)' }}>
+              Генерируем гипотезы — это занимает 30–60 секунд…
+            </span>
           </div>
         )}
 
         {error && !generating && (
-          <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+          <div
+            className="flex items-start gap-2.5 rounded-md px-4 py-3 text-sm"
+            style={statusBoxStyle}
+            role="alert"
+          >
+            <span
+              aria-hidden
+              className="ds-status-dot shrink-0"
+              style={{ background: 'var(--cp-red)', marginTop: '7px' }}
+            />
             <span>{error}</span>
           </div>
         )}
 
         {!briefSaved && !hasResult && !generating && (
-          <p className="text-xs text-gray-500">
+          <p className="text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
             Сначала сохраните бриф — после первого сохранения генерация запустится автоматически.
           </p>
         )}
@@ -271,7 +334,7 @@ function HypothesesSection({
         {hasResult && (
           <div className="space-y-2">
             {formattedAt && (
-              <p className="text-[11px] text-gray-500">
+              <p className="text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
                 Сгенерировано: {formattedAt}
               </p>
             )}
@@ -285,9 +348,9 @@ function HypothesesSection({
               type="button"
               onClick={onGenerate}
               disabled={generating}
-              className="inline-flex h-9 items-center gap-2 rounded-lg border border-indigo-300 bg-white px-4 text-xs font-medium text-indigo-700 transition-colors hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
+              className="ds-btn-secondary inline-flex h-9 items-center gap-2 px-4 text-xs disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {generating && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              {generating && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />}
               {hasResult ? 'Сгенерировать заново' : 'Сгенерировать ещё раз'}
             </button>
           </div>
@@ -529,8 +592,8 @@ export function ClientBriefForm({
         />
       )}
 
-      <section className={SECTION_BASE}>
-        <header className={HEADER_BASE}>1. О компании</header>
+      <section className={SECTION_BASE} style={SECTION_STYLE}>
+        <SectionHeader number={1} title="О компании" />
         <div className="p-6 space-y-4">
           <TextField
             label="Сайт"
@@ -567,8 +630,8 @@ export function ClientBriefForm({
         </div>
       </section>
 
-      <section className={SECTION_BASE}>
-        <header className={HEADER_BASE}>2. Продукт / услуга</header>
+      <section className={SECTION_BASE} style={SECTION_STYLE}>
+        <SectionHeader number={2} title="Продукт / услуга" />
         <div className="p-6 space-y-4">
           <TextAreaField
             label="Подробное описание товара/услуги"
@@ -616,8 +679,8 @@ export function ClientBriefForm({
         </div>
       </section>
 
-      <section className={SECTION_BASE}>
-        <header className={HEADER_BASE}>3. Целевая аудитория</header>
+      <section className={SECTION_BASE} style={SECTION_STYLE}>
+        <SectionHeader number={3} title="Целевая аудитория" />
         <div className="p-6 space-y-4">
           <TextAreaField
             label="Описание ЦА"
@@ -641,8 +704,8 @@ export function ClientBriefForm({
         </div>
       </section>
 
-      <section className={SECTION_BASE}>
-        <header className={HEADER_BASE}>4. Коммуникация</header>
+      <section className={SECTION_BASE} style={SECTION_STYLE}>
+        <SectionHeader number={4} title="Коммуникация" />
         <div className="p-6 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <TextField
@@ -692,8 +755,8 @@ export function ClientBriefForm({
         </div>
       </section>
 
-      <section className={SECTION_BASE}>
-        <header className={HEADER_BASE}>5. Доказательства</header>
+      <section className={SECTION_BASE} style={SECTION_STYLE}>
+        <SectionHeader number={5} title="Доказательства" />
         <div className="p-6 space-y-4">
           <TextAreaField
             label="Ваши действующие клиенты (3-5 примеров)"
@@ -712,8 +775,8 @@ export function ClientBriefForm({
         </div>
       </section>
 
-      <section className={SECTION_BASE}>
-        <header className={HEADER_BASE}>6. Social proof</header>
+      <section className={SECTION_BASE} style={SECTION_STYLE}>
+        <SectionHeader number={6} title="Social proof" />
         <div className="p-6">
           <p className="text-[11px] text-gray-500 mb-3">
             Отметьте, что у вас есть. Под каждым пунктом можно добавить детали.
@@ -725,8 +788,8 @@ export function ClientBriefForm({
         </div>
       </section>
 
-      <section className={SECTION_BASE}>
-        <header className={HEADER_BASE}>7. Дополнительный контекст</header>
+      <section className={SECTION_BASE} style={SECTION_STYLE}>
+        <SectionHeader number={7} title="Дополнительный контекст" />
         <div className="p-6">
           <TextAreaField
             label="Любая дополнительная информация для AI"
@@ -762,9 +825,9 @@ export function ClientBriefForm({
           type="button"
           onClick={() => void handleSave()}
           disabled={saving}
-          className="neu-btn inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-6 text-sm font-semibold text-white shadow-sm transition-all disabled:cursor-not-allowed disabled:opacity-50"
+          className="ds-btn-primary inline-flex h-10 items-center justify-center gap-2 px-6"
         >
-          {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+          {saving && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
           {saving ? 'Сохранение...' : 'Сохранить бриф'}
         </button>
       </div>
