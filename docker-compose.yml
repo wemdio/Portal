@@ -36,6 +36,8 @@ services:
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
       - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
+      - POLZA_REPORTS_URL=http://polza-reports:8000
+      - POLZA_CRED_KEY=${POLZA_CRED_KEY}
       - TG_AGENT_BOT_TOKEN=${TG_AGENT_BOT_TOKEN}
       - OPENROUTER_AGENT_API_KEY=${OPENROUTER_AGENT_API_KEY}
       - INSTANTLY_API_KEY=${INSTANTLY_API_KEY}
@@ -106,6 +108,17 @@ services:
     container_name: portal-yandexmaps
     ports:
       - "8010:8000"
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  polza-reports:
+    build:
+      context: ./services/polza-reports
+      dockerfile: Dockerfile
+    container_name: portal-polza-reports
+    # No public port — only the portal container talks to this service
+    # over the internal docker network.
     restart: unless-stopped
     networks:
       - portal-network

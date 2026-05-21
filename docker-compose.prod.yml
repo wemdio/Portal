@@ -39,6 +39,8 @@ services:
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
       - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
+      - POLZA_REPORTS_URL=http://polza-reports:8000
+      - POLZA_CRED_KEY=${POLZA_CRED_KEY}
       - VAPI_API_KEY=${VAPI_API_KEY}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - AI_CALLER_PROVIDER=${AI_CALLER_PROVIDER:-vapi}
@@ -529,6 +531,26 @@ services:
     restart: unless-stopped
     ports:
       - "8010:8000"
+    networks:
+      - portal-network
+
+  polza-reports:
+    image: ${DOCKER_USERNAME}/portal-polza-reports:prod
+    container_name: portal-polza-reports
+    # Stateless Coldy scraper + Trigga CSV → xlsx. Reached only from the portal
+    # service inside portal-network; no port exposed publicly.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+          cpus: '1.5'
+    restart: unless-stopped
     networks:
       - portal-network
 
