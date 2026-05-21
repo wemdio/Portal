@@ -471,7 +471,7 @@ export async function stepTAScore(
 
 const CLEANUP_SYSTEM_PROMPT = `Ты очищаешь названия компаний для использования в персонализированных email-письмах.
 
-Правила:
+Правила очистки:
 1. Оставь только само название (2-3 слова максимум)
 2. Удали: Inc, Ltd, Corp, LLC, ООО, ИП, АО, ЗАО, GmbH и т.п.
 3. Удали текст после: -, |, /, ,, :
@@ -481,12 +481,11 @@ const CLEANUP_SYSTEM_PROMPT = `Ты очищаешь названия компа
 7. Если всё КАПСОМ (6+ букв) — преобразуй в Title Case
 8. Результат должен красиво звучать в предложении: "Я заметил что КОМПАНИЯ..."
 
-ФОРМАТ: Очищенные названия с нумерацией строго в формате:
-1. Название
-2. Название
-...и так далее.
-Без пояснений, без кавычек. Количество строк = количеству входных компаний. Порядок и нумерация те же.
-Если не знаешь как очистить — верни оригинальное название с его номером. НИКОГДА не пропускай строки.`;
+ФОРМАТ ВВОДА: JSON-объект {"companies": [{"idx": 0, "name": "...", "domain": "..."?}, ...]}
+ФОРМАТ ОТВЕТА: только JSON-объект {"cleaned": [{"idx": 0, "name": "очищенное"}, ...]}.
+Каждому idx из ввода должен соответствовать ровно один элемент в cleaned с тем же idx.
+Если не знаешь как очистить — верни оригинальное name. НИКОГДА не пропускай элементы.
+Никаких пояснений, никаких markdown-обёрток вокруг JSON.`;
 
 /**
  * Стрипает префиксы вида «N.», «N)» с начала строки, и так до упора.
@@ -507,6 +506,9 @@ const CLEANUP_SYSTEM_PROMPT = `Ты очищаешь названия компа
  *
  * Лимит на 5 итераций — защита от теоретической бесконечности; на практике
  * двух хватает («35. 10. ПК ЗВМП» → «10. ПК ЗВМП» → «ПК ЗВМП»).
+ *
+ * Применяется и в JSON-режиме (на случай если AI вшил префикс в name),
+ * и в legacy text-fallback'е.
  */
 const NUMBER_PREFIX_RE = /^(\d+)[.)]\s*/;
 function stripNumberPrefix(s: string): string {
@@ -520,7 +522,67 @@ function stripNumberPrefix(s: string): string {
 }
 
 /**
- * Парсит ответ модели в Map<rowNumber, cleanedName>.
+ * Основной парсер (JSON-mode).
+ *
+ * Зачем: text-парсер исторически разбирался регэкспами по нумерованному
+ * списку, и когда AI терялся в нумерации (повторял один номер для всей
+ * пачки), парсер скатывался в positional fallback и пропускал «N. » префикс
+ * в БД. С JSON-mode (response_format: json_object) модель обязана вернуть
+ * валидный JSON со структурой {cleaned: [{idx, name}, ...]} — никаких
+ * парсингов строк, никакого fallback'а нужно.
+ *
+ * Robust: salvage из markdown-блока ```json ...``` если модель проигнорировала
+ * response_format и завернула; пропуск элементов без idx/name; финальный
+ * stripNumberPrefix на name как safety-net (вдруг AI вшил «1. » внутрь name'а).
+ *
+ * Возвращает null если JSON вовсе не достали — caller тогда упадёт
+ * на text-парсер как fallback.
+ */
+export function parseCleanupResponseJson(
+  content: string,
+): Map<number, string> | null {
+  let parsed: unknown = null;
+  // 1) Прямой JSON.parse.
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    // 2) Salvage: модель завернула в markdown ```json ...```.
+    const codeBlock = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (codeBlock) {
+      try { parsed = JSON.parse(codeBlock[1].trim()); } catch { /* fallthrough */ }
+    }
+    // 3) Salvage: вырезаем по самым внешним { ... }.
+    if (parsed === null) {
+      const objMatch = content.match(/\{[\s\S]*\}/);
+      if (objMatch) {
+        try { parsed = JSON.parse(objMatch[0]); } catch { /* fallthrough */ }
+      }
+    }
+  }
+
+  if (!parsed || typeof parsed !== 'object') return null;
+  const cleaned = (parsed as { cleaned?: unknown }).cleaned;
+  if (!Array.isArray(cleaned)) return null;
+
+  // idx в JSON — 0-based (натурально для разработчика), а в map ключи 1-based
+  // (так лукапит существующий stepNameCleanup: cleanedMap.get(i + 1)).
+  // Транслируем idx → idx+1 при записи.
+  const result = new Map<number, string>();
+  for (const item of cleaned) {
+    if (!item || typeof item !== 'object') continue;
+    const { idx, name } = item as { idx?: unknown; name?: unknown };
+    if (typeof idx !== 'number' || !Number.isInteger(idx) || idx < 0) continue;
+    if (typeof name !== 'string') continue;
+    const trimmed = name.trim();
+    if (!trimmed) continue;
+    const stripped = stripNumberPrefix(trimmed);
+    if (stripped) result.set(idx + 1, stripped);
+  }
+  return result.size > 0 ? result : null;
+}
+
+/**
+ * Legacy text-парсер (fallback).
  *
  * Два режима:
  *   1. Strict numbered — если >=80% строк имеют префикс «N.», используем
@@ -530,6 +592,10 @@ function stripNumberPrefix(s: string): string {
  *      или повторила один номер для всех строк), выстраиваем строки по
  *      позиции i → row i+1. Здесь критично ВСЁ ЖЕ стрипать префиксы — иначе
  *      мусор типа «10. ПК ЗВМП» пролезет в БД как есть (это и был баг).
+ *
+ * После перехода на JSON-mode (parseCleanupResponseJson выше) этот парсер
+ * остался как страховка на случай если модель проигнорировала
+ * response_format: json_object и вернула старый текстовый формат.
  *
  * Возвращает null если ответ пустой.
  */
@@ -577,22 +643,33 @@ export async function stepNameCleanup(
   for (let batch = 0; batch < body.length; batch += CLEANUP_BATCH) {
     if (isCancelled && await isCancelled()) throw new Error('Отменено');
     const chunk = body.slice(batch, batch + CLEANUP_BATCH);
-    const input = chunk
-      .map((row, i) => {
-        const num = i + 1;
-        const name = row[nameIdx] || '';
-        const domain = siteIdx >= 0 ? row[siteIdx] || '' : '';
-        return domain ? `${num}. ${name} Домен: ${domain}` : `${num}. ${name}`;
-      })
-      .join('\n');
+
+    // Input — JSON, idx 0-based (отдаём natively, парсер JSON'а транслирует
+    // в 1-based ключи map'а при возврате).
+    const companies = chunk.map((row, i) => {
+      const obj: Record<string, unknown> = { idx: i, name: row[nameIdx] || '' };
+      if (siteIdx >= 0 && row[siteIdx]) obj.domain = row[siteIdx];
+      return obj;
+    });
+    const userMsg = JSON.stringify({ companies });
 
     let cleanedMap: Map<number, string> | null = null;
     try {
       const content = await callOpenRouter(OPENROUTER_CLEANUP_API_KEY, CLEANUP_MODEL, [
         { role: 'system', content: CLEANUP_SYSTEM_PROMPT },
-        { role: 'user', content: input },
-      ], { temperature: 0.1, title: 'Portal - Base Constructor Cleanup' });
-      cleanedMap = parseCleanupResponse(content, chunk.length);
+        { role: 'user', content: userMsg },
+      ], { temperature: 0.1, json: true, title: 'Portal - Base Constructor Cleanup' });
+
+      // Сначала пробуем JSON-парсер (основной путь). Если модель таки
+      // вернула текст в нумерованном формате (response_format иногда
+      // игнорится упрощёнными моделями) — fallback на legacy text-парсер.
+      cleanedMap = parseCleanupResponseJson(content);
+      if (!cleanedMap) {
+        console.warn(
+          `[base-constructor] cleanup JSON parse returned null, falling back to text parser`,
+        );
+        cleanedMap = parseCleanupResponse(content, chunk.length);
+      }
     } catch { /* skip batch on failure */ }
 
     if (cleanedMap) {

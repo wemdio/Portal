@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
-import { Send, Users, MessageSquare } from 'lucide-react';
+import { Send, MessageSquare } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ReplyThreadActions } from '@/components/client-replies/ReplyThreadActions';
 
@@ -179,20 +179,20 @@ function LeadDetail({
 
         {lead.last_outbound_preview && (
           <div className="mb-4">
-            <p className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--cp-text-l)' }}>
-              Наше последнее письмо
+            <p className="ds-eyebrow mb-2">
+              02<span aria-hidden> → </span>наше последнее письмо
             </p>
-            <div className="neu-inset rounded-xl p-4 sm:p-5 text-sm whitespace-pre-wrap max-h-48 overflow-y-auto" style={{ color: 'var(--cp-text-m)' }}>
+            <div className="neu-inset rounded-xl p-4 sm:p-5 text-sm whitespace-pre-wrap max-h-48 overflow-y-auto" style={{ color: 'var(--cp-paper-mute)' }}>
               {lead.last_outbound_preview}
             </div>
           </div>
         )}
 
         <div className="mb-2">
-          <p className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--cp-text-l)' }}>
-            Ответ лида{lead.reply_subject ? `: ${lead.reply_subject}` : ''}
+          <p className="ds-eyebrow mb-2">
+            {lead.last_outbound_preview ? '03' : '02'}<span aria-hidden> → </span>ответ лида{lead.reply_subject ? `: ${lead.reply_subject.toLowerCase()}` : ''}
           </p>
-          <div className="neu-inset rounded-xl p-4 sm:p-5 text-sm whitespace-pre-wrap max-h-64 overflow-y-auto" style={{ color: 'var(--cp-text)' }}>
+          <div className="neu-inset rounded-xl p-4 sm:p-5 text-sm whitespace-pre-wrap max-h-64 overflow-y-auto" style={{ color: 'var(--cp-paper)' }}>
             {lead.reply_body ?? '(пусто)'}
           </div>
         </div>
@@ -235,7 +235,10 @@ function LeadDetail({
 
       {canComment && (
         <div className="neu-card p-5 sm:p-8">
-          <h3 className="text-base font-extrabold mb-5" style={{ color: 'var(--cp-text)' }}>
+          <p className="ds-eyebrow mb-2">
+            04<span aria-hidden> → </span>комментарии
+          </p>
+          <h3 className="text-base font-bold mb-5" style={{ color: 'var(--cp-paper)' }}>
             Комментарии
           </h3>
 
@@ -292,10 +295,8 @@ function LeadDetail({
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="neu-sm rounded-lg p-3">
-      <p className="text-[10px] font-semibold uppercase tracking-wider mb-0.5" style={{ color: 'var(--cp-text-l)' }}>
-        {label}
-      </p>
-      <p className="text-sm font-medium break-all" style={{ color: 'var(--cp-text)' }}>
+      <p className="ds-eyebrow mb-1">{label.toLowerCase()}</p>
+      <p className="text-sm font-medium break-all" style={{ color: 'var(--cp-paper)' }}>
         {value}
       </p>
     </div>
@@ -310,52 +311,64 @@ function LeadCard({
   onClick: () => void;
 }) {
   const commentCount = lead.client_lead_comments?.[0]?.count ?? 0;
-  const sourceLabel = lead.is_lead ? 'Лид' : 'Ответ';
+
+  // One status per row, hierarchy: lead > unread > read.
+  const statusColor = lead.is_lead
+    ? 'var(--cp-green)'
+    : lead.is_unread
+      ? 'var(--cp-amber)'
+      : 'var(--cp-paper-faint)';
+  const statusTextColor = lead.is_lead
+    ? 'var(--cp-green)'
+    : lead.is_unread
+      ? 'var(--cp-amber)'
+      : 'var(--cp-paper-mute)';
+  const statusLabel = lead.is_lead ? 'Лид' : lead.is_unread ? 'Непрочитано' : 'Ответ';
 
   return (
-    <button onClick={onClick} className="neu-sm block w-full text-left p-4 sm:p-5 transition-shadow hover:shadow-md">
+    <button
+      onClick={onClick}
+      className="neu-sm ds-card-pressable block w-full text-left p-4 sm:p-5"
+    >
       <div className="flex items-start justify-between gap-3 mb-2">
         <div className="min-w-0">
-          <p className="text-sm font-bold truncate" style={{ color: 'var(--cp-text)' }}>
+          <p className="text-sm font-bold truncate" style={{ color: 'var(--cp-paper)' }}>
             {lead.lead_name || lead.lead_email}
           </p>
           {lead.company_name && (
-            <p className="text-xs truncate mt-0.5" style={{ color: 'var(--cp-text-m)' }}>
+            <p className="text-xs truncate mt-0.5" style={{ color: 'var(--cp-paper-mute)' }}>
               {lead.company_name}
             </p>
           )}
         </div>
-        <span className="text-[10px] shrink-0 whitespace-nowrap" style={{ color: 'var(--cp-text-l)' }}>
+        <span className="text-[10px] shrink-0 whitespace-nowrap" style={{ color: 'var(--cp-paper-faint)' }}>
           {formatDate(lead.reply_timestamp ?? lead.created_at)}
         </span>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 mb-2">
-        <span className="neu-pill px-2 py-0.5 text-[10px] font-semibold" style={{ color: 'var(--cp-accent)' }}>
-          {sourceLabel}
+      <div className="flex flex-wrap items-center gap-3 mb-2">
+        <span className="ds-status-tag" style={{ color: statusTextColor }}>
+          <span aria-hidden className="ds-status-dot" style={{ background: statusColor }} />
+          {statusLabel}
         </span>
-        {lead.is_unread && (
-          <span className="neu-pill px-2 py-0.5 text-[10px] font-semibold" style={{ color: 'var(--cp-danger, #dc2626)' }}>
-            Непрочитано
-          </span>
-        )}
-        <p className="text-xs truncate min-w-0" style={{ color: 'var(--cp-text-m)' }}>
+        <p className="text-xs truncate min-w-0" style={{ color: 'var(--cp-paper-mute)' }}>
           {lead.lead_email}
-          {lead.campaign_name && <span style={{ color: 'var(--cp-text-l)' }}> · {lead.campaign_name}</span>}
+          {lead.campaign_name && <span style={{ color: 'var(--cp-paper-faint)' }}> · {lead.campaign_name}</span>}
         </p>
       </div>
 
       {(lead.reply_subject || lead.reply_body) && (
-        <p className="text-xs truncate" style={{ color: 'var(--cp-text-l)' }}>
+        <p className="text-xs truncate" style={{ color: 'var(--cp-paper-faint)' }}>
           {lead.reply_subject && <span className="font-semibold">{lead.reply_subject}: </span>}
           {lead.reply_body?.slice(0, 120) ?? ''}
         </p>
       )}
 
       {commentCount > 0 && (
-        <div className="mt-2 flex items-center gap-1">
-          <span className="text-[10px] font-semibold" style={{ color: 'var(--cp-accent)' }}>
-            💬 {commentCount} {commentCount === 1 ? 'комментарий' : commentCount < 5 ? 'комментария' : 'комментариев'}
+        <div className="mt-2 flex items-center gap-1.5">
+          <MessageSquare className="h-3 w-3" style={{ color: 'var(--cp-paper-faint)' }} aria-hidden />
+          <span className="text-[10px] font-semibold" style={{ color: 'var(--cp-paper-mute)' }}>
+            {commentCount} {commentCount === 1 ? 'комментарий' : commentCount < 5 ? 'комментария' : 'комментариев'}
           </span>
         </div>
       )}
@@ -415,20 +428,17 @@ export default function ClientLeadsPage() {
 
   return (
     <div className="mx-auto max-w-5xl">
-      <div className="mb-6 sm:mb-8">
-        <h1 className="text-xl sm:text-2xl font-extrabold flex items-center gap-2.5">
-          <span
-            className="inline-flex items-center justify-center w-8 h-8 rounded-xl"
-            style={{ background: 'rgba(16,185,129,0.12)', color: '#10B981' }}
-          >
-            <Users className="h-4.5 w-4.5" />
-          </span>
+      <header className="mb-6 sm:mb-8">
+        <p className="ds-eyebrow mb-2">
+          01<span aria-hidden> → </span>Inbox
+        </p>
+        <h1 className="text-xl sm:text-2xl font-bold" style={{ color: 'var(--cp-paper)' }}>
           Ответы
         </h1>
-        <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
+        <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
           Все ответы получателей по вашим кампаниям
         </p>
-      </div>
+      </header>
 
       {error && (
         <div className="neu-inset mb-6 rounded-2xl px-5 py-3.5 text-sm font-medium" style={{ color: 'var(--cp-danger, #dc2626)' }}>
@@ -441,15 +451,16 @@ export default function ClientLeadsPage() {
           <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>Загрузка...</p>
         </div>
       ) : leads.length === 0 ? (
-        <div className="neu-card py-12 sm:py-16 text-center px-6 relative overflow-hidden">
+        <div className="neu-card py-12 sm:py-16 text-center px-6">
           <MessageSquare
-            className="absolute -right-4 -top-4 h-28 w-28 opacity-[0.05]"
-            style={{ color: '#10B981' }}
+            className="mx-auto h-8 w-8 mb-3"
+            style={{ color: 'var(--cp-paper-faint)' }}
+            aria-hidden
           />
-          <p className="text-base sm:text-lg font-bold mb-2 relative" style={{ color: 'var(--cp-text)' }}>
+          <p className="text-base sm:text-lg font-bold mb-2" style={{ color: 'var(--cp-paper)' }}>
             Ответов пока нет
           </p>
-          <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-text-m)' }}>
+          <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-paper-mute)' }}>
             Ответы появятся здесь после того, как получатели ваших кампаний напишут вам.
             Когда ответ выглядит перспективным, откройте диалог и пометьте его как лид.
           </p>
@@ -457,7 +468,7 @@ export default function ClientLeadsPage() {
             href={'/client/launch' as Route}
             className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold"
           >
-            <Send className="h-4 w-4" />
+            <Send className="h-4 w-4" aria-hidden />
             Создать кампанию
           </Link>
         </div>
