@@ -11,29 +11,12 @@
  */
 
 import type { ClientBriefFields } from '../../../types';
+import { detectStub } from '../../stubFilters';
 
 export interface CasesEnricherPatch {
   cases_comment?: string;
   impressive_results?: string;
   existing_clients?: string;
-}
-
-/** Подстроки, по которым опознаём "отписки" — это не текстовое содержимое. */
-const STUB_PATTERNS: RegExp[] = [
-  /^есть\s+(раздел|кейс|портфолио)/i,
-  /^имеются\s+кейс/i,
-  /кейсы\s+есть\s+(на\s+сайте|в\s+портфолио|в\s+разделе)/i,
-  /^\d+\+?\s*(кейс|проект)/i, // "85+ проектов" без описаний
-  /см\.\s*(сайт|раздел)/i,
-  /подробнее\s+(на\s+сайте|в\s+разделе)/i,
-  /смотрите?\s+(на\s+сайте|в\s+портфолио)/i,
-];
-
-/** Кейс должен либо содержать тире (формат «клиент — задача — результат»), либо быть длинным (>80 симв). */
-function looksLikeRealContent(text: string): boolean {
-  if (text.length >= 80) return true;
-  // dash может быть em/en/обычный
-  return /[—–-]/.test(text);
 }
 
 function normalizeText(value: unknown): string {
@@ -44,17 +27,6 @@ function normalizeText(value: unknown): string {
     .map((line) => line.replace(/[ \t]+$/g, ''))
     .join('\n')
     .replace(/^\s+|\s+$/g, '');
-}
-
-function isStubAnswer(text: string): boolean {
-  // Если общий текст короткий и матчится один из паттернов отписки — drop.
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  if (lines.length === 0) return true;
-  // Любая строка — реально-выглядящий кейс? Тогда не отписка.
-  if (lines.some(looksLikeRealContent)) return false;
-  // Все строки коротки и без тире — почти наверняка отписка. Ужесточим:
-  // если хотя бы одна строка матчит STUB_PATTERNS — точно отписка.
-  return lines.some((line) => STUB_PATTERNS.some((re) => re.test(line)));
 }
 
 function tryParseJson(raw: unknown): Record<string, unknown> | null {
@@ -111,12 +83,14 @@ export function parseCasesResponse(raw: unknown): CasesEnricherPatch {
   const out: CasesEnricherPatch = {};
 
   const casesComment = normalizeText(parsed.cases_comment);
-  if (casesComment && !isStubAnswer(casesComment)) {
+  if (casesComment && !detectStub(casesComment, 'cases').isStub) {
     out.cases_comment = casesComment;
   }
 
   const impressive = normalizeText(parsed.impressive_results);
-  if (impressive && !isStubAnswer(impressive)) {
+  // impressive_results тоже фильтруем по cases-правилам — длинный текст
+  // с тире/цифрами; короткий "Раздел X" — отписка.
+  if (impressive && !detectStub(impressive, 'cases').isStub) {
     out.impressive_results = impressive;
   }
 

@@ -1169,143 +1169,173 @@ input[type=number]::-webkit-outer-spin-button {
   background-color: #e0e7ff; /* indigo-100 */
 }
 
-/* ===== CLIENT PORTAL — Neumorphic Design System ===== */
+/* ===== CLIENT PORTAL — Decisive Editorial Dark =====
+   See DESIGN.md for the canonical token vocabulary. Legacy .neu-* class names
+   from the prior Calm Workshop iteration are kept (remapped below) so the 13
+   client pages we haven't re-crafted yet continue to render coherently while
+   the cascade runs. New code should use .ds-* utilities and the new tokens. */
 body:has(.client-portal) {
-  background: #F5F5F4 !important;
+  background: #0a0a0a !important;
 }
 
 .client-portal {
-  --cp-bg: #F5F5F4;
-  --cp-shadow-d: rgba(150, 140, 130, 0.60);
-  --cp-shadow-l: rgba(255, 255, 255, 0.94);
-  --cp-accent: #4A6FA5;
-  --cp-accent-h: #3D5A87;
-  --cp-text: #3A3530;
-  --cp-text-m: #6A6058;
-  --cp-text-l: #9A9088;
-  --cp-danger: #B85450;
-  /* Hairline divider between rows inside a .neu-card. Match the warm shadow
-     family at ~18% alpha — strong enough to read on linen, soft enough not to
-     compete with the card edge. */
-  --cp-row-divider: rgba(180, 173, 164, 0.18);
-  background: var(--cp-bg);
-  color: var(--cp-text);
+  /* Legacy --cp-* tokens remapped to editorial dark values. Old code that
+     references var(--cp-bg) / var(--cp-text) / var(--cp-accent) gets the new
+     dark vocabulary automatically; .neu-* rules below override box-shadows to
+     match the flat surface system. */
+  --cp-bg: #0a0a0a;
+  --cp-text: #fafafa;
+  --cp-text-m: #a1a1a3;
+  --cp-text-l: #6c6c70;
+  --cp-accent: #fafafa;
+  --cp-accent-h: #a1a1a3;
+  --cp-danger: #e5484d;
+  --cp-row-divider: #1f2023;
+  --cp-shadow-d: transparent;
+  --cp-shadow-l: transparent;
+
+  /* New tokens (preferred for fresh code, .ds-* classes use these). */
+  --cp-ink: #0a0a0a;
+  --cp-surface-rest: #111213;
+  --cp-surface-elev: #18191c;
+  --cp-surface-active: #1f2023;
+  --cp-divider: #1f2023;
+  --cp-divider-strong: #2a2b2f;
+  --cp-paper: #fafafa;
+  --cp-paper-mute: #a1a1a3;
+  --cp-paper-faint: #6c6c70;
+  --cp-amber: #f5a623;
+  --cp-red: #e5484d;
+  --cp-green: #46a758;
+  --cp-grey: #6c6c70;
+
+  background: var(--cp-ink);
+  color: var(--cp-paper);
   min-height: 100vh;
+  font-family: var(--font-inter), Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
-/* Respect prefers-reduced-motion: disable our own decorative transitions
-   inside the client portal. Functional fades (loading spinners) remain so the
-   user still sees feedback. */
-@media (prefers-reduced-motion: reduce) {
-  .client-portal .neu-flat,
-  .client-portal .neu-btn,
-  .client-portal .neu-pill,
-  .client-portal .neu-row,
-  .client-portal .neu-input {
-    transition: none;
-  }
+.client-portal .ds-mono,
+.client-portal [data-mono] {
+  font-family: var(--font-mono), 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-/* Visible focus halo for interactive surfaces inside the client portal. The
-   ring uses slate-tide at 35% alpha, the same accent the rest of the chrome
-   speaks. Class-based so we don't ship halos on every <a>/<button> by default. */
+/* Focus halo — the only system-wide box-shadow allowed. Double-track paper
+   ring at 40% alpha; outer offset is ink so the ring reads on every surface. */
 .client-portal .neu-row:focus-visible,
 .client-portal .neu-pill:focus-visible,
-.client-portal .neu-btn:focus-visible {
+.client-portal .neu-btn:focus-visible,
+.client-portal .ds-row:focus-visible,
+.client-portal .ds-btn-primary:focus-visible,
+.client-portal .ds-btn-secondary:focus-visible,
+.client-portal .ds-btn-ghost:focus-visible,
+.client-portal .ds-nav-item:focus-visible {
   outline: none;
   box-shadow:
-    0 0 0 2px var(--cp-bg),
-    0 0 0 4px rgba(74, 111, 165, 0.35);
+    0 0 0 2px var(--cp-ink),
+    0 0 0 4px rgba(250, 250, 250, 0.4);
 }
 
+/* ─── Legacy .neu-* overrides — flatten neumorphic shadows, swap surfaces to
+   the editorial-dark ramp. Lets the 13 unmigrated client pages keep working
+   while the cascade rewrites them onto .ds-* utilities. ─── */
+
 .client-portal .neu-card {
-  background: var(--cp-bg);
-  box-shadow: 6px 6px 14px var(--cp-shadow-d), -6px -6px 14px var(--cp-shadow-l);
-  border-radius: 20px;
+  background: var(--cp-surface-rest);
+  box-shadow: none;
+  border: 1px solid var(--cp-divider);
+  border-radius: 8px;
 }
 
 .client-portal .neu-sm {
-  background: var(--cp-bg);
-  box-shadow: 4px 4px 10px var(--cp-shadow-d), -4px -4px 10px var(--cp-shadow-l);
-  border-radius: 16px;
+  background: var(--cp-surface-rest);
+  box-shadow: none;
+  border: 1px solid var(--cp-divider);
+  border-radius: 6px;
 }
 
-.client-portal .neu-inset {
-  box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l);
+.client-portal .neu-inset,
+.client-portal .neu-well {
+  background: var(--cp-surface-rest);
+  box-shadow: none;
+  border: 1px solid var(--cp-divider);
+  border-radius: 6px;
 }
 
 .client-portal .neu-flat {
-  transition: box-shadow 0.25s ease;
+  transition: background 0.15s ease;
 }
 
 .client-portal .neu-flat:hover {
-  box-shadow: 3px 3px 8px var(--cp-shadow-d), -3px -3px 8px var(--cp-shadow-l);
+  background: var(--cp-surface-elev);
+  box-shadow: none;
 }
 
 .client-portal .neu-btn {
-  background: var(--cp-accent);
-  color: #fff;
+  background: var(--cp-paper);
+  color: var(--cp-ink);
   border: none;
-  border-radius: 14px;
-  box-shadow: 3px 3px 8px var(--cp-shadow-d), -2px -2px 6px var(--cp-shadow-l);
-  transition: all 0.2s ease;
+  border-radius: 6px;
+  box-shadow: none;
+  font-weight: 500;
+  transition: background 0.15s ease;
 }
 
 .client-portal .neu-btn:hover:not(:disabled) {
-  background: var(--cp-accent-h);
-  box-shadow: 1px 1px 4px var(--cp-shadow-d), -1px -1px 4px var(--cp-shadow-l);
+  background: var(--cp-paper-mute);
+  box-shadow: none;
 }
 
 .client-portal .neu-btn:active:not(:disabled) {
-  box-shadow: inset 2px 2px 5px rgba(0, 0, 0, 0.15);
+  background: var(--cp-paper-mute);
+  box-shadow: none;
 }
 
 .client-portal .neu-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
 .client-portal .neu-input {
-  background: var(--cp-bg);
-  border: none;
-  box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l);
-  border-radius: 14px;
-  color: var(--cp-text);
+  background: var(--cp-surface-rest);
+  border: 1px solid var(--cp-divider-strong);
+  box-shadow: none;
+  border-radius: 6px;
+  color: var(--cp-paper);
   outline: none;
-  transition: box-shadow 0.2s ease;
+  transition: border-color 0.15s ease;
 }
 
 .client-portal .neu-input::placeholder {
-  color: var(--cp-text-l);
+  color: var(--cp-paper-faint);
 }
 
 .client-portal .neu-input:focus {
-  box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l),
-    0 0 0 2px rgba(74, 111, 165, 0.25);
+  border-color: var(--cp-paper);
+  box-shadow: none;
 }
 
 .client-portal .neu-pill {
-  background: var(--cp-bg);
-  border-radius: 12px;
-  transition: all 0.25s ease;
+  background: transparent;
+  border-radius: 4px;
+  color: var(--cp-paper-mute);
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .client-portal .neu-pill.active {
-  box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l);
-  color: var(--cp-accent);
+  background: var(--cp-surface-elev);
+  color: var(--cp-paper);
+  box-shadow: none;
 }
+
 .client-portal .neu-pill:focus-visible {
   outline: none;
 }
 
 .client-portal .neu-pill:not(.active):hover {
-  box-shadow: 2px 2px 6px var(--cp-shadow-d), -2px -2px 6px var(--cp-shadow-l);
-}
-
-.client-portal .neu-well {
-  background: var(--cp-bg);
-  box-shadow: inset 2px 2px 4px var(--cp-shadow-d), inset -2px -2px 4px var(--cp-shadow-l);
-  border-radius: 12px;
+  background: var(--cp-surface-rest);
+  color: var(--cp-paper);
+  box-shadow: none;
 }
 
 .client-portal .neu-row {
@@ -1313,37 +1343,39 @@ body:has(.client-portal) {
 }
 
 .client-portal .neu-row:hover {
-  background: rgba(180, 173, 164, 0.1);
+  background: var(--cp-surface-elev);
 }
 
 .client-portal .neu-divider {
   border: none;
   height: 1px;
-  background: linear-gradient(90deg, transparent 0%, var(--cp-shadow-d) 50%, transparent 100%);
+  background: var(--cp-divider);
 }
 
 .client-portal input[type="checkbox"] {
   appearance: none;
-  width: 18px;
-  height: 18px;
-  border-radius: 6px;
-  background: var(--cp-bg);
-  box-shadow: inset 1px 1px 3px var(--cp-shadow-d), inset -1px -1px 3px var(--cp-shadow-l);
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  background: var(--cp-surface-rest);
+  border: 1px solid var(--cp-divider-strong);
+  box-shadow: none;
   cursor: pointer;
   position: relative;
   flex-shrink: 0;
-  transition: all 0.2s ease;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .client-portal input[type="checkbox"]:checked {
-  background: var(--cp-accent);
-  box-shadow: 1px 1px 3px var(--cp-shadow-d), -1px -1px 3px var(--cp-shadow-l);
+  background: var(--cp-paper);
+  border-color: var(--cp-paper);
+  box-shadow: none;
 }
 
 .client-portal input[type="checkbox"]:checked::after {
   content: '✓';
   position: absolute;
-  color: white;
+  color: var(--cp-ink);
   font-size: 11px;
   font-weight: 700;
   top: 50%;
@@ -1352,19 +1384,19 @@ body:has(.client-portal) {
 }
 
 .client-portal ::-webkit-scrollbar-thumb {
-  background: rgba(180, 173, 164, 0.5);
+  background: var(--cp-divider-strong);
   border-radius: 4px;
 }
 
 .client-portal ::-webkit-scrollbar-thumb:hover {
-  background: rgba(160, 153, 144, 0.7);
+  background: var(--cp-paper-faint);
 }
 
 .client-portal .neu-spinner {
-  width: 24px;
-  height: 24px;
-  border: 3px solid var(--cp-shadow-d);
-  border-top-color: var(--cp-accent);
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--cp-divider-strong);
+  border-top-color: var(--cp-paper);
   border-radius: 50%;
 }
 
@@ -1376,50 +1408,208 @@ body:has(.client-portal) {
   display: none;
 }
 
-@media (max-width: 639px) {
-  .client-portal .neu-card,
-  .client-portal .neu-sm {
-    border-radius: 14px;
-  }
-  .client-portal .neu-pill {
-    border-radius: 10px;
+/* ─── .ds-* utility classes (preferred for new editorial-dark code) ─── */
+
+.client-portal .ds-card {
+  background: var(--cp-surface-rest);
+  border: 1px solid var(--cp-divider);
+  border-radius: 8px;
+}
+
+.client-portal .ds-row {
+  display: flex;
+  align-items: center;
+  transition: background 0.15s ease;
+  color: var(--cp-paper);
+  text-decoration: none;
+}
+
+.client-portal .ds-row + .ds-row {
+  border-top: 1px solid var(--cp-divider);
+}
+
+.client-portal .ds-row:hover {
+  background: var(--cp-surface-elev);
+}
+
+.client-portal .ds-btn-primary {
+  background: var(--cp-paper);
+  color: var(--cp-ink);
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-weight: 500;
+  font-size: 13px;
+  transition: background 0.15s ease;
+  cursor: pointer;
+}
+.client-portal .ds-btn-primary:hover:not(:disabled) {
+  background: var(--cp-paper-mute);
+}
+.client-portal .ds-btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.client-portal .ds-btn-secondary {
+  background: var(--cp-ink);
+  color: var(--cp-paper);
+  border: 1px solid var(--cp-divider-strong);
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-weight: 500;
+  font-size: 13px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  cursor: pointer;
+}
+.client-portal .ds-btn-secondary:hover:not(:disabled) {
+  background: var(--cp-surface-rest);
+  border-color: var(--cp-paper-faint);
+}
+
+.client-portal .ds-btn-ghost {
+  background: transparent;
+  color: var(--cp-paper-mute);
+  border: none;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-weight: 500;
+  font-size: 13px;
+  transition: background 0.15s ease, color 0.15s ease;
+  cursor: pointer;
+}
+.client-portal .ds-btn-ghost:hover:not(:disabled) {
+  background: var(--cp-surface-rest);
+  color: var(--cp-paper);
+}
+
+.client-portal .ds-input {
+  background: var(--cp-surface-rest);
+  border: 1px solid var(--cp-divider-strong);
+  border-radius: 6px;
+  color: var(--cp-paper);
+  padding: 8px 12px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+.client-portal .ds-input::placeholder {
+  color: var(--cp-paper-faint);
+}
+.client-portal .ds-input:focus {
+  border-color: var(--cp-paper);
+}
+
+.client-portal .ds-nav-item {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--cp-paper-mute);
+  background: transparent;
+  transition: background 0.15s ease, color 0.15s ease;
+  text-decoration: none;
+}
+.client-portal .ds-nav-item:hover {
+  background: var(--cp-surface-rest);
+  color: var(--cp-paper);
+}
+.client-portal .ds-nav-item.active,
+.client-portal .ds-nav-item[aria-current="page"] {
+  background: var(--cp-surface-elev);
+  color: var(--cp-paper);
+}
+
+/* Editorial eyebrow — mono, paper-faint, lowercase, for section headers and
+   group labels. Pair with editorial numbering like "02 → Section name". */
+.client-portal .ds-eyebrow {
+  font-family: var(--font-mono), 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--cp-paper-faint);
+  letter-spacing: 0.02em;
+}
+
+.client-portal .ds-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.client-portal .ds-status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono), 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* prefers-reduced-motion. Kill transitions broadly inside the portal so the
+   user can choose stillness without us hunting every component. */
+@media (prefers-reduced-motion: reduce) {
+  .client-portal *,
+  .client-portal *::before,
+  .client-portal *::after {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
   }
 }
 
-/* ─── Reused admin components (parsers, base-constructor, etc.) embedded in
-   the client portal: translate Tailwind admin colors into the neumorphic
-   palette via CSS scoping so we don't have to duplicate JSX with conditional
-   classNames. Activated only inside `.client-portal`. ─── */
+@media (max-width: 639px) {
+  .client-portal .neu-card,
+  .client-portal .neu-sm,
+  .client-portal .ds-card {
+    border-radius: 6px;
+  }
+  .client-portal .neu-pill {
+    border-radius: 4px;
+  }
+}
+
+/* ─── Admin bridge: components reused inside .client-portal (parsers,
+   base-constructor, etc.) use raw Tailwind utility classes. Remap them so
+   they read as editorial dark surfaces — paper text on surface-rest cards,
+   gradient buttons flattened to paper-on-ink, status colours preserved. ─── */
 
 .client-portal .bg-white,
+.client-portal .bg-white.rounded-xl,
+.client-portal .bg-white.rounded-2xl,
+.client-portal .bg-white.rounded-lg,
 .client-portal .bg-gray-50,
 .client-portal .bg-gray-50\/50,
 .client-portal .bg-gray-50\/60 {
-  background-color: var(--cp-bg);
+  background-color: var(--cp-surface-rest) !important;
 }
 
 .client-portal .bg-gray-100 {
-  background-color: rgba(180, 173, 164, 0.18);
+  background-color: var(--cp-surface-elev);
 }
 .client-portal .bg-gray-200 {
-  background-color: rgba(180, 173, 164, 0.28);
+  background-color: var(--cp-surface-active);
 }
 
 .client-portal .text-gray-900,
 .client-portal .text-gray-800 {
-  color: var(--cp-text);
+  color: var(--cp-paper);
 }
 .client-portal .text-gray-700,
 .client-portal .text-gray-600 {
-  color: var(--cp-text-m);
+  color: var(--cp-paper-mute);
 }
 .client-portal .text-gray-500,
 .client-portal .text-gray-400 {
-  color: var(--cp-text-l);
+  color: var(--cp-paper-faint);
 }
 .client-portal .text-gray-300,
 .client-portal .text-gray-200 {
-  color: rgba(180, 173, 164, 0.55);
+  color: var(--cp-paper-faint);
 }
 
 .client-portal .border-gray-100,
@@ -1427,88 +1617,81 @@ body:has(.client-portal) {
 .client-portal .border-gray-300,
 .client-portal .border-slate-200,
 .client-portal .border {
-  border-color: rgba(180, 173, 164, 0.32);
+  border-color: var(--cp-divider);
 }
 
+/* Tailwind blue utilities → paper-white (single-slate chrome).
+   No chromatic accent in chrome — only status semantics carry colour. */
 .client-portal .text-blue-600,
 .client-portal .text-blue-500 {
-  color: var(--cp-accent);
+  color: var(--cp-paper);
 }
 .client-portal .text-blue-700,
 .client-portal .text-blue-800 {
-  color: var(--cp-accent-h);
+  color: var(--cp-paper-mute);
 }
 .client-portal .bg-blue-50,
 .client-portal .bg-blue-50\/50,
 .client-portal .bg-blue-50\/60 {
-  background-color: rgba(74, 111, 165, 0.08);
+  background-color: rgba(250, 250, 250, 0.05);
 }
 .client-portal .bg-blue-100 {
-  background-color: rgba(74, 111, 165, 0.16);
+  background-color: rgba(250, 250, 250, 0.08);
 }
 .client-portal .bg-blue-500,
 .client-portal .bg-blue-600 {
-  background-color: var(--cp-accent);
+  background-color: var(--cp-paper);
+  color: var(--cp-ink);
 }
 .client-portal .bg-blue-700,
 .client-portal .hover\:bg-blue-700:hover,
 .client-portal .hover\:bg-blue-500:hover {
-  background-color: var(--cp-accent-h);
+  background-color: var(--cp-paper-mute);
+  color: var(--cp-ink);
 }
 .client-portal .border-blue-200,
 .client-portal .border-blue-300,
 .client-portal .border-blue-400,
 .client-portal .border-blue-500 {
-  border-color: rgba(74, 111, 165, 0.35);
+  border-color: var(--cp-divider-strong);
 }
 .client-portal .ring-blue-500,
 .client-portal .focus\:ring-blue-500:focus,
 .client-portal .focus-visible\:ring-blue-500:focus-visible {
-  --tw-ring-color: rgba(74, 111, 165, 0.35);
+  --tw-ring-color: rgba(250, 250, 250, 0.4);
 }
 
 .client-portal .text-red-600,
 .client-portal .text-red-700,
 .client-portal .text-red-500 {
-  color: var(--cp-danger);
+  color: var(--cp-red);
 }
 .client-portal .bg-red-50,
 .client-portal .bg-red-50\/50 {
-  background-color: rgba(184, 84, 80, 0.08);
+  background-color: rgba(229, 72, 77, 0.08);
 }
 .client-portal .border-red-200,
 .client-portal .border-red-300 {
-  border-color: rgba(184, 84, 80, 0.3);
+  border-color: rgba(229, 72, 77, 0.3);
 }
 
-/* Admin "card-like" containers → elevated white card (readable over #F5F5F4 page bg) */
-.client-portal .bg-white.rounded-xl,
-.client-portal .bg-white.rounded-2xl,
-.client-portal .bg-white.rounded-lg {
-  background-color: #FFFFFF !important;
-  border: 1px solid rgba(180, 173, 164, 0.22) !important;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 4px 18px rgba(0, 0, 0, 0.05) !important;
-}
-/* The `shadow-sm` admin utility on white cards → soft lift */
 .client-portal .shadow-sm {
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 4px 14px rgba(0, 0, 0, 0.04);
+  box-shadow: none;
 }
 
-/* Price tier buttons and similar toggle buttons in admin components */
 .client-portal button.price-tier-btn {
-  box-shadow: 2px 2px 5px var(--cp-shadow-d), -2px -2px 5px var(--cp-shadow-l);
-  border-color: transparent !important;
+  background: var(--cp-surface-rest);
+  border: 1px solid var(--cp-divider) !important;
+  color: var(--cp-paper-mute);
+  box-shadow: none;
 }
 .client-portal button.price-tier-btn.active {
-  box-shadow: inset 2px 2px 5px rgba(0, 0, 0, 0.18);
-  border-color: transparent !important;
-  /* Выбранная кнопка — заливка accent + белый текст (как neu-btn).
-     Раньше было color: var(--cp-accent) на accent-фоне → текст не виден. */
-  color: #fff !important;
-  background-color: var(--cp-accent) !important;
+  background: var(--cp-paper) !important;
+  color: var(--cp-ink) !important;
+  border-color: var(--cp-paper) !important;
+  box-shadow: none;
 }
 
-/* Inputs / selects / textareas in admin components: make them clean and readable */
 .client-portal input[type="text"],
 .client-portal input[type="email"],
 .client-portal input[type="password"],
@@ -1519,94 +1702,90 @@ body:has(.client-portal) {
 .client-portal input[type="url"],
 .client-portal select,
 .client-portal textarea {
-  background-color: #FFFFFF !important;
-  color: var(--cp-text);
-  box-shadow: inset 1px 1px 3px rgba(0, 0, 0, 0.04) !important;
-  border: 1px solid rgba(180, 173, 164, 0.3) !important;
-  border-radius: 10px !important;
+  background-color: var(--cp-surface-rest) !important;
+  color: var(--cp-paper);
+  box-shadow: none !important;
+  border: 1px solid var(--cp-divider-strong) !important;
+  border-radius: 6px !important;
 }
 .client-portal input[type="text"]::placeholder,
 .client-portal input[type="email"]::placeholder,
 .client-portal input[type="search"]::placeholder,
 .client-portal textarea::placeholder {
-  color: var(--cp-text-l);
+  color: var(--cp-paper-faint);
 }
 .client-portal input[type="text"]:focus,
 .client-portal input[type="email"]:focus,
 .client-portal textarea:focus {
-  border-color: var(--cp-accent) !important;
-  box-shadow: 0 0 0 2px rgba(74, 111, 165, 0.15) !important;
+  border-color: var(--cp-paper) !important;
+  box-shadow: none !important;
   outline: none;
 }
 
-/* Hover surfaces (e.g. hover:bg-gray-50/100 in admin lists) */
 .client-portal .hover\:bg-gray-50:hover,
 .client-portal .hover\:bg-gray-100:hover {
-  background-color: rgba(180, 173, 164, 0.12);
+  background-color: var(--cp-surface-elev);
 }
 .client-portal .hover\:text-gray-700:hover,
 .client-portal .hover\:text-gray-900:hover {
-  color: var(--cp-text);
+  color: var(--cp-paper);
 }
 
-/* Divide-y in admin lists */
 .client-portal .divide-gray-100 > :not([hidden]) ~ :not([hidden]),
 .client-portal .divide-gray-200 > :not([hidden]) ~ :not([hidden]) {
-  border-color: rgba(180, 173, 164, 0.26);
+  border-color: var(--cp-divider);
 }
 
-/* Make any badge with bg-emerald/yellow/etc keep its tint but soften saturation */
 .client-portal .bg-emerald-50 {
-  background-color: rgba(16, 185, 129, 0.1);
+  background-color: rgba(70, 167, 88, 0.08);
 }
 .client-portal .text-emerald-600,
 .client-portal .text-emerald-700 {
-  color: #2f8f6e;
+  color: var(--cp-green);
 }
 
-/* ── Parser components: vibrant accents inside client portal ─── */
-
-/* Primary action buttons → clean monochromatic blue */
+/* Parser / admin primary buttons — neutralise gradient fills, use paper-on-ink. */
 .client-portal button.bg-blue-600,
 .client-portal button.bg-blue-500 {
-  background: linear-gradient(160deg, #5E86C4, var(--cp-accent-h)) !important;
-  box-shadow: 0 2px 8px rgba(74, 111, 165, 0.35);
-  transition: all 0.2s ease;
+  background: var(--cp-paper) !important;
+  color: var(--cp-ink);
+  box-shadow: none;
+  transition: background 0.15s ease;
 }
 .client-portal button.bg-blue-600:hover:not(:disabled),
 .client-portal button.bg-blue-500:hover:not(:disabled) {
-  filter: brightness(1.08);
-  box-shadow: 0 4px 14px rgba(74, 111, 165, 0.45);
-  transform: translateY(-1px);
+  background: var(--cp-paper-mute) !important;
+  transform: none;
+  filter: none;
+  box-shadow: none;
 }
 .client-portal button.bg-emerald-600,
 .client-portal button.bg-emerald-500 {
-  background: linear-gradient(135deg, #10B981, #059669) !important;
-  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+  background: var(--cp-green) !important;
+  color: var(--cp-ink);
+  box-shadow: none;
 }
 .client-portal button.bg-emerald-600:hover:not(:disabled),
 .client-portal button.bg-emerald-500:hover:not(:disabled) {
-  filter: brightness(1.08);
-  transform: translateY(-1px);
+  transform: none;
+  filter: brightness(1.1);
+  box-shadow: none;
 }
 
-/* Progress bars → gradient fills */
 .client-portal .bg-emerald-500[style*="width"],
 .client-portal .bg-emerald-400[style*="width"] {
-  background: linear-gradient(90deg, #10B981, #34D399) !important;
+  background: var(--cp-green) !important;
 }
 .client-portal .bg-blue-500[style*="width"] {
-  background: linear-gradient(90deg, var(--cp-accent), #818CF8) !important;
+  background: var(--cp-paper) !important;
 }
 
-/* Table header rows — subtle warm tint */
 .client-portal thead.bg-gray-50 {
-  background-color: rgba(180, 173, 164, 0.12) !important;
+  background-color: var(--cp-surface-elev) !important;
 }
 
-/* Mode switcher tabs in parser forms — accent when active */
 .client-portal .parser-mode-active {
-  background: var(--cp-accent) !important;
-  color: #fff !important;
-  box-shadow: 0 1px 4px rgba(74, 111, 165, 0.3);
+  background: var(--cp-paper) !important;
+  color: var(--cp-ink) !important;
+  box-shadow: none;
 }

@@ -6,32 +6,11 @@
  */
 
 import type { ClientBriefFields } from '../../../types';
+import { detectStub } from '../../stubFilters';
 
 export interface FaqEnricherPatch {
   common_questions?: string;
   client_problems?: string;
-}
-
-const QUESTIONS_STUB_PATTERNS: RegExp[] = [
-  /^на\s+сайте\s+есть\s+faq/i,
-  /^есть\s+faq/i,
-  /^отвечаем\s+на/i,
-  /faq\s+есть\s+на\s+сайте/i,
-];
-
-const PROBLEMS_STUB_PATTERNS: RegExp[] = [
-  /^разные\s+проблемы/i,
-  /^сложности\s+с\s+лидогенерац/i,
-  /^общие\s+проблемы/i,
-];
-
-/** common_questions должны выглядеть как Q/A или с двоеточием/тире. */
-function looksLikeQuestionsAnswers(text: string): boolean {
-  // "В:" / "Q:" формат
-  if (/\bВ:\s*\S/u.test(text) || /\bQ:\s*\S/u.test(text)) return true;
-  // Или просто несколько строк с "?"
-  const questionLines = text.split('\n').filter((line) => /\?/.test(line));
-  return questionLines.length >= 2;
 }
 
 function normalizeText(value: unknown): string {
@@ -42,12 +21,6 @@ function normalizeText(value: unknown): string {
     .map((line) => line.replace(/[ \t]+$/g, ''))
     .join('\n')
     .replace(/^\s+|\s+$/g, '');
-}
-
-function isStubAnswer(text: string, patterns: RegExp[]): boolean {
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  if (lines.length === 0) return true;
-  return lines.some((line) => patterns.some((re) => re.test(line)));
 }
 
 function tryParseJson(raw: unknown): Record<string, unknown> | null {
@@ -100,23 +73,12 @@ export function parseFaqResponse(raw: unknown): FaqEnricherPatch {
   const out: FaqEnricherPatch = {};
 
   const questions = normalizeText(parsed.common_questions);
-  if (
-    questions &&
-    looksLikeQuestionsAnswers(questions) &&
-    !isStubAnswer(questions, QUESTIONS_STUB_PATTERNS)
-  ) {
+  if (questions && !detectStub(questions, 'common_questions').isStub) {
     out.common_questions = questions;
   }
 
   const problems = normalizeText(parsed.client_problems);
-  // Проблемы — достаточно чтобы было хотя бы 2 строки и >40 символов
-  // (короткая отписка не пройдёт).
-  const problemLines = problems.split('\n').filter((l) => l.trim().length > 0);
-  if (
-    problems &&
-    !isStubAnswer(problems, PROBLEMS_STUB_PATTERNS) &&
-    (problemLines.length >= 2 || problems.length >= 40)
-  ) {
+  if (problems && !detectStub(problems, 'client_problems').isStub) {
     out.client_problems = problems;
   }
 
