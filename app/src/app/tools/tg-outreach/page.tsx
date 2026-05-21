@@ -24,6 +24,7 @@ import {
   Upload,
   Ban,
   RefreshCw,
+  AlertCircle,
 } from 'lucide-react';
 import type {
   OutreachCampaign,
@@ -787,6 +788,9 @@ function ProcessedTab({ campaignId }: { campaignId: string }) {
 function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   const [proxies, setProxies] = useState<OutreachProxy[]>([]);
+  const [errorCounts, setErrorCounts] = useState<
+    Record<string, { error: number; warning: number; account_id: string }>
+  >({});
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -798,12 +802,16 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
   const [proxyId, setProxyId] = useState('');
   const [saving, setSaving] = useState(false);
   const [editingProxyFor, setEditingProxyFor] = useState<string | null>(null);
+  const [selectedAccount, setSelectedAccount] = useState<OutreachAccount | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [accRes, proxRes] = await Promise.all([
+    const [accRes, proxRes, errRes] = await Promise.all([
       authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`),
       authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
+      // Bulk error counts in last 24h — cheap (one query, grouped server-side).
+      // Used to render the ⚠ N chips next to each account name.
+      authFetch(`${API_BASE}/campaigns/${campaignId}/accounts/error-counts?range=24h`),
     ]);
     if (accRes.ok) {
       const d = await accRes.json() as { items: OutreachAccount[] };
@@ -812,6 +820,12 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
     if (proxRes.ok) {
       const d = await proxRes.json() as { items: OutreachProxy[] };
       setProxies(d.items);
+    }
+    if (errRes.ok) {
+      const d = await errRes.json() as {
+        counts: Record<string, { error: number; warning: number; account_id: string }>;
+      };
+      setErrorCounts(d.counts ?? {});
     }
     setLoading(false);
   }, [campaignId]);
@@ -967,14 +981,34 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
           {accounts.map(a => {
             const proxy = proxies.find(p => p.id === a.proxy_id);
             const onCooldown = a.cooldown_until && new Date(a.cooldown_until) > new Date();
+            const counts = errorCounts[a.session_name];
+            const errorCount = counts?.error ?? 0;
             return (
               <div key={a.id} className="grid grid-cols-[1fr_120px_150px_80px_40px] gap-4 items-center px-4 py-2.5">
-                <div className="min-w-0">
-                  <p className="text-xs font-medium text-gray-800 truncate">{a.session_name}</p>
+                <div className="min-w-0 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedAccount(a)}
+                    title="Открыть логи и информацию"
+                    className="min-w-0 text-left text-xs font-medium text-gray-800 truncate hover:text-indigo-600 hover:underline transition cursor-pointer"
+                  >
+                    {a.session_name}
+                  </button>
+                  {errorCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedAccount(a)}
+                      title={`${errorCount} ошибок за 24ч — открыть логи`}
+                      className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 hover:bg-rose-100 transition cursor-pointer shrink-0"
+                    >
+                      <AlertCircle className="h-3 w-3" />
+                      {errorCount}
+                    </button>
+                  )}
                   {onCooldown && (
-                    <p className="text-[10px] text-amber-600">
+                    <span className="text-[10px] text-amber-600 shrink-0">
                       Кулдаун до {new Date(a.cooldown_until!).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}
-                    </p>
+                    </span>
                   )}
                 </div>
                 <span className="text-xs text-gray-500 truncate">{a.phone || '—'}</span>
@@ -1012,6 +1046,237 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
           })}
         </div>
       )}
+
+      {selectedAccount && (
+        <AccountLogsModal
+          account={selectedAccount}
+          proxy={proxies.find(p => p.id === selectedAccount.proxy_id) ?? null}
+          onClose={() => setSelectedAccount(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/* =================== ACCOUNT LOGS MODAL =================== */
+function AccountLogsModal({
+  account,
+  proxy,
+  onClose,
+}: {
+  account: OutreachAccount;
+  proxy: OutreachProxy | null;
+  onClose: () => void;
+}) {
+  const [range, setRange] = useState<'6h' | '24h' | '7d'>('24h');
+  const [logs, setLogs] = useState<OutreachLog[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [exportingRange, setExportingRange] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  const fetchLogs = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/${account.id}/logs?range=${range}`);
+      if (res.ok) {
+        const d = await res.json() as {
+          items: OutreachLog[];
+          truncated: boolean;
+        };
+        setLogs(d.items ?? []);
+        setTruncated(Boolean(d.truncated));
+      } else {
+        setLogs([]);
+        setTruncated(false);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [account.id, range]);
+
+  useEffect(() => { void fetchLogs(); }, [fetchLogs]);
+
+  // Close on Escape so the modal feels native.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  // Auto-scroll to bottom (newest) after each refresh.
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ block: 'end' });
+  }, [logs]);
+
+  const exportLogs = useCallback(
+    async (r: '6h' | '24h' | '7d') => {
+      setExportingRange(r);
+      try {
+        const res = await authFetch(`${API_BASE}/accounts/${account.id}/logs?range=${r}&format=txt`);
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          alert((data as { error?: string }).error ?? `Не удалось выгрузить логи (HTTP ${res.status})`);
+          return;
+        }
+        const cd = res.headers.get('content-disposition') ?? '';
+        const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+        const ascii = /filename="?([^";]+)"?/i.exec(cd);
+        const filename = utf8
+          ? decodeURIComponent(utf8[1])
+          : (ascii?.[1] ?? `tg-outreach-account-${account.session_name}-${r}.txt`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } finally {
+        setExportingRange(null);
+      }
+    },
+    [account.id, account.session_name],
+  );
+
+  const levelColor = (l: string) => {
+    switch (l) {
+      case 'error': return 'text-rose-400';
+      case 'warning': return 'text-amber-400';
+      default: return 'text-gray-400';
+    }
+  };
+
+  const errorCount = logs.filter(l => l.level === 'error').length;
+  const warningCount = logs.filter(l => l.level === 'warning').length;
+  const onCooldown = account.cooldown_until && new Date(account.cooldown_until) > new Date();
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
+      <div
+        className="relative w-full max-w-4xl max-h-[90vh] flex flex-col rounded-2xl bg-white shadow-2xl overflow-hidden"
+        onClick={e => e.stopPropagation()}
+      >
+        <header className="flex items-start justify-between border-b border-gray-100 px-5 py-4">
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold text-gray-900 truncate">
+              {account.session_name}
+            </h2>
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
+              {account.phone && account.phone !== account.session_name && (
+                <span>Телефон: <span className="text-gray-700">{account.phone}</span></span>
+              )}
+              <span>Прокси: <span className="text-gray-700">{proxy ? (proxy.name || proxy.url) : '—'}</span></span>
+              <span>
+                Активен:{' '}
+                <span className={account.is_active ? 'text-emerald-700' : 'text-gray-500'}>
+                  {account.is_active ? 'Да' : 'Нет'}
+                </span>
+              </span>
+              {onCooldown && (
+                <span className="text-amber-600">
+                  Кулдаун до {new Date(account.cooldown_until!).toLocaleString('ru-RU', {
+                    hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit',
+                  })}
+                </span>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-3 p-1.5 rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition cursor-pointer"
+            aria-label="Закрыть"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+
+        <div className="px-5 py-3 border-b border-gray-100 flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-gray-500 mr-1">Период:</span>
+            {(['6h', '24h', '7d'] as const).map(r => {
+              const labels: Record<typeof r, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д' };
+              const active = range === r;
+              return (
+                <button
+                  key={r}
+                  type="button"
+                  onClick={() => setRange(r)}
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition cursor-pointer ${
+                    active
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-white text-gray-600 border border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'
+                  }`}
+                >
+                  {labels[r]}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="text-xs text-gray-500">
+            {loading ? '…' : (
+              <>
+                Всего строк: <span className="font-semibold text-gray-700">{logs.length}</span>
+                {errorCount > 0 && (
+                  <> · <span className="text-rose-600 font-semibold">{errorCount} ошибок</span></>
+                )}
+                {warningCount > 0 && (
+                  <> · <span className="text-amber-600 font-semibold">{warningCount} предупреждений</span></>
+                )}
+                {truncated && (
+                  <> · <span className="text-gray-400">(показано не всё — обрезано лимитом)</span></>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="text-xs text-gray-500 mr-1">.txt:</span>
+            {(['6h', '24h', '7d'] as const).map(r => {
+              const labels: Record<typeof r, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д' };
+              const busy = exportingRange === r;
+              return (
+                <button
+                  key={r}
+                  type="button"
+                  onClick={() => void exportLogs(r)}
+                  disabled={exportingRange !== null}
+                  className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                  {labels[r]}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-auto bg-gray-950 p-3 font-mono text-[11px] leading-relaxed">
+          {loading && <p className="text-gray-500">Загрузка логов…</p>}
+          {!loading && logs.length === 0 && (
+            <p className="text-gray-600">
+              По этому аккаунту ничего не найдено в выбранном периоде.
+            </p>
+          )}
+          {logs.map((log, idx) => (
+            <div key={`${log.id}-${idx}`} className="flex gap-2">
+              <span className="text-gray-600 shrink-0">
+                {new Date(log.created_at).toLocaleTimeString('ru-RU')}
+              </span>
+              <span className={`shrink-0 font-bold uppercase w-14 ${levelColor(log.level)}`}>
+                {log.level}
+              </span>
+              <span className="text-gray-300 break-all">{log.message}</span>
+            </div>
+          ))}
+          <div ref={bottomRef} />
+        </div>
+      </div>
     </div>
   );
 }
