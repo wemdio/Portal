@@ -55,13 +55,33 @@ function isTargetLocale(value: Locale): value is TargetLocale {
   return (TRANSLATABLE_TARGET_LOCALES as readonly string[]).includes(value);
 }
 
-function shouldSkipElement(el: Element | null): boolean {
+/**
+ * Whether the TEXT CONTENT of `el`'s children should be ignored. Skips
+ * containers whose visible text is either code, machine output, or user-typed
+ * input — translating those would corrupt them. <textarea> is here because its
+ * text node IS the user's draft.
+ */
+export function shouldSkipTextIn(el: Element | null): boolean {
   if (!el) return true;
   const tag = el.tagName;
   if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'CODE' || tag === 'PRE' || tag === 'TEXTAREA') return true;
   if ((el as HTMLElement).isContentEditable) return true;
-  // The loading overlay's own copy must stay in the target locale dictionary
-  // (`commonDictionary.translatingPage`) — never machine-translated. Skip.
+  // The loading overlay opts out via [data-i18n-skip] so the MutationObserver
+  // doesn't try to translate (now non-existent) overlay copy.
+  if (el.closest?.('[data-i18n-skip]')) return true;
+  return false;
+}
+
+/**
+ * Whether the translatable ATTRIBUTES on `el` should be ignored. Narrower than
+ * the text-node rule: <textarea>/<code>/<pre> can legitimately carry
+ * `placeholder`/`title`/`aria-label` strings authored by us, and those should
+ * absolutely be translated even though their child text is off-limits.
+ */
+export function shouldSkipAttrsOn(el: Element | null): boolean {
+  if (!el) return true;
+  const tag = el.tagName;
+  if (tag === 'SCRIPT' || tag === 'STYLE') return true;
   if (el.closest?.('[data-i18n-skip]')) return true;
   return false;
 }
@@ -226,7 +246,7 @@ export function GlobalTextTranslator({ locale }: { locale: Locale }) {
     const collectQueue: Array<{ kind: 'text'; node: Text } | { kind: 'attr'; el: Element; attr: string }> = [];
 
     const collectText = (node: Text) => {
-      if (shouldSkipElement(node.parentElement)) return;
+      if (shouldSkipTextIn(node.parentElement)) return;
       const raw = node.nodeValue;
       if (!needsTranslation(raw)) return;
       // Save original once.
@@ -242,7 +262,7 @@ export function GlobalTextTranslator({ locale }: { locale: Locale }) {
     };
 
     const collectAttrs = (el: Element) => {
-      if (shouldSkipElement(el)) return;
+      if (shouldSkipAttrsOn(el)) return;
       let existing = getOrigAttrs(el);
       for (const attr of ATTRS_TO_TRANSLATE) {
         const v = el.getAttribute(attr);
@@ -407,17 +427,12 @@ export function GlobalTextTranslator({ locale }: { locale: Locale }) {
  * `data-portal-translating` attribute on <html> — set by GlobalTextTranslator
  * around its API calls.
  *
- * Built as a separate component so the overlay is a static, key-based
- * piece of UI (uses commonDictionary) that the runtime translator
- * doesn't try to retranslate while it's busy.
+ * Intentionally text-free: any visible copy would have to live in the source
+ * language (Russian) and would leak the fact that the UI is being translated
+ * on the fly. A bare spinner on a page-coloured backdrop reads as a generic
+ * "page is loading" state in every locale.
  */
-export function LanguageLoadingOverlay({
-  title,
-  hint,
-}: {
-  title: string;
-  hint: string;
-}) {
+export function LanguageLoadingOverlay() {
   const [active, setActive] = useState(false);
 
   useEffect(() => {
@@ -438,11 +453,11 @@ export function LanguageLoadingOverlay({
       display: active ? 'flex' : 'none',
       alignItems: 'center',
       justifyContent: 'center',
-      flexDirection: 'column',
-      backgroundColor: 'rgba(15, 23, 42, 0.55)',
-      backdropFilter: 'blur(4px)',
-      WebkitBackdropFilter: 'blur(4px)',
-      color: '#fff',
+      // Page-coloured, opaque-enough to hide the still-Russian content
+      // underneath without looking like a modal dialog.
+      backgroundColor: 'rgba(255, 255, 255, 0.92)',
+      backdropFilter: 'blur(2px)',
+      WebkitBackdropFilter: 'blur(2px)',
       pointerEvents: active ? 'auto' : 'none',
     }),
     [active],
@@ -460,14 +475,12 @@ export function LanguageLoadingOverlay({
         style={{
           width: 36,
           height: 36,
-          border: '3px solid rgba(255,255,255,0.25)',
-          borderTopColor: '#fff',
+          border: '3px solid rgba(37, 99, 235, 0.18)',
+          borderTopColor: '#2563eb',
           borderRadius: '50%',
           animation: 'portal-i18n-spin 0.8s linear infinite',
         }}
       />
-      <div style={{ marginTop: 16, fontSize: 16, fontWeight: 600 }}>{title}</div>
-      <div style={{ marginTop: 6, fontSize: 13, opacity: 0.8 }}>{hint}</div>
       <style>{`@keyframes portal-i18n-spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );

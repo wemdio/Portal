@@ -20,10 +20,7 @@ function LocaleTextTranslator() {
   return (
     <>
       <GlobalTextTranslator locale={locale} />
-      <LanguageLoadingOverlay
-        title={dict(commonDictionary.translatingPage, locale)}
-        hint={dict(commonDictionary.translatingHint, locale)}
-      />
+      <LanguageLoadingOverlay />
     </>
   );
 }
