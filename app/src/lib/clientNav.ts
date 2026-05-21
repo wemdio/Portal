@@ -193,6 +193,72 @@ export const CLIENT_NAV_GROUPS: readonly ClientNavGroup[] = [
 ];
 
 /**
+ * Client portal can run in two modes:
+ *   - 'manual' (default): клиент сам собирает базы, пишет цепочки, запускает.
+ *     Видит весь набор групп Старт / Мониторинг / Архив.
+ *   - 'auto':  HH-парсинг → endpoint клиента → Instantly идут автоматически
+ *     по cron'у (см. /api/cron/auto-hh-pipeline). Клиенту в портале остаются
+ *     только «смотрелки» — ответы, лиды, отчёты, дашборд со сводкой.
+ *
+ * Решение «какой режим у клиента» принимается по profiles.auto_pipeline_enabled
+ * и проверке client_auto_pipeline_configs.enabled. Loader сидит в
+ * /client/layout.tsx и пробрасывает mode вниз через пропс.
+ */
+export type ClientNavMode = 'manual' | 'auto';
+
+/**
+ * Id'шники nav-айтемов, которые остаются видимыми в auto-режиме. Всё, чего
+ * нет в этом списке, скрывается из сайдбара авто-клиента. Группы целиком
+ * становятся скрытыми, если в них не осталось видимых элементов (см.
+ * filterClientNavForMode).
+ *
+ * Solely-в-портале (вне групп) — Dashboard и Support — всегда видны, их
+ * отфильтровывать незачем.
+ */
+const AUTO_MODE_VISIBLE_ITEM_IDS: ReadonlySet<string> = new Set([
+  'replies',
+  'leads',
+  'reports',
+]);
+
+/**
+ * Auto-mode-only nav item. Не входит ни в один из CLIENT_NAV_GROUPS — это
+ * top-level элемент (как Dashboard и Support), но видим только клиенту в
+ * auto-режиме. ClientNavList рендерит его сразу после Dashboard'а, когда
+ * mode === 'auto'.
+ *
+ * Сделано отдельной константой (а не флагом внутри monitoringGroup), чтобы
+ * не ломать существующий contract-тест monitoring-группы и сохранить
+ * чистоту manual-режима — в нём этот пункт просто не существует.
+ */
+export const CLIENT_NAV_AUTO_PIPELINE_SETUP: ClientNavItem = {
+  id: 'auto-pipeline-setup',
+  label: 'Настройка цепочек',
+  labelEn: 'Sequence setup',
+  href: '/client/auto-pipeline/setup',
+  description: 'Цепочки под каждый score, который возвращает endpoint',
+  descriptionEn: 'Sequence per score returned by the endpoint',
+};
+
+/**
+ * Возвращает группы, отфильтрованные под текущий mode. В 'manual' — без
+ * изменений; в 'auto' — оставляем только items из AUTO_MODE_VISIBLE_ITEM_IDS
+ * и группы, в которых что-то осталось.
+ */
+export function filterClientNavGroupsForMode(
+  groups: readonly ClientNavGroup[],
+  mode: ClientNavMode,
+): readonly ClientNavGroup[] {
+  if (mode === 'manual') return groups;
+  return groups
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((it) => AUTO_MODE_VISIBLE_ITEM_IDS.has(it.id)),
+    }))
+    .filter((g) => g.items.length > 0);
+}
+
+/**
  * Phase 4 consolidation: the «Базы» hub at /client/build shows three legacy
  * tools as cards (companies-search, parsers, base-constructor). When a user
  * is on any of those legacy URLs the sidebar should still highlight «Базы»
@@ -218,6 +284,12 @@ export function resolveActiveNavId(pathname: string): string | null {
   }
   if (pathname === '/client/parsers' || pathname.startsWith('/client/parsers/')) {
     return 'parsers';
+  }
+  if (
+    pathname === '/client/auto-pipeline/setup' ||
+    pathname.startsWith('/client/auto-pipeline/setup/')
+  ) {
+    return 'auto-pipeline-setup';
   }
   // Кампании — both the list (/client) and the detail page (/client/campaigns/:id).
   if (pathname === '/client' || pathname.startsWith('/client/campaigns')) {

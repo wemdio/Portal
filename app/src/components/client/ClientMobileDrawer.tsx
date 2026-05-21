@@ -15,15 +15,17 @@ import { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import { ClientNavList } from './ClientNavList';
 import type { Locale } from '@/lib/i18n';
+import type { ClientNavMode } from '@/lib/clientNav';
 
 export interface ClientMobileDrawerProps {
   open: boolean;
   onClose: () => void;
   activeId: string | null;
   locale: Locale;
+  mode?: ClientNavMode;
 }
 
-export function ClientMobileDrawer({ open, onClose, activeId, locale }: ClientMobileDrawerProps) {
+export function ClientMobileDrawer({ open, onClose, activeId, locale, mode }: ClientMobileDrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -86,7 +88,7 @@ export function ClientMobileDrawer({ open, onClose, activeId, locale }: ClientMo
           </button>
         </div>
 
-        <ClientNavList activeId={activeId} locale={locale} onItemClick={onClose} />
+        <ClientNavList activeId={activeId} locale={locale} mode={mode} onItemClick={onClose} />
       </div>
     </>
   );

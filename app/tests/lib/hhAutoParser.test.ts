@@ -1,0 +1,50 @@
+/**
+ * Unit test for deriveDomain — единственная чистая функция в hhAutoParser,
+ * остальное это сетевой ввод-вывод (HH API), который под integration-тест,
+ * не unit. Domain-нормализацию тестируем плотно, потому что она потом идёт
+ * в endpoint клиента: ошибка нормализации = промах в скоринг.
+ */
+
+import { deriveDomain } from '@/lib/jobs/hhAutoParser';
+
+describe('deriveDomain', () => {
+  it('returns null for null input', () => {
+    expect(deriveDomain(null)).toBeNull();
+  });
+
+  it('strips https:// scheme', () => {
+    expect(deriveDomain('https://example.com')).toBe('example.com');
+  });
+
+  it('strips http:// scheme', () => {
+    expect(deriveDomain('http://example.com')).toBe('example.com');
+  });
+
+  it('adds implicit https when scheme is missing', () => {
+    expect(deriveDomain('example.com')).toBe('example.com');
+  });
+
+  it('strips leading www.', () => {
+    expect(deriveDomain('https://www.example.com')).toBe('example.com');
+  });
+
+  it('lowercases the domain', () => {
+    expect(deriveDomain('https://EXAMPLE.COM/contacts')).toBe('example.com');
+  });
+
+  it('strips path, query, hash', () => {
+    expect(deriveDomain('https://example.com/about?utm=1#section')).toBe('example.com');
+  });
+
+  it('preserves subdomain other than www', () => {
+    expect(deriveDomain('https://shop.example.com')).toBe('shop.example.com');
+  });
+
+  it('returns null for malformed input that throws on URL parse', () => {
+    expect(deriveDomain('not a url at all')).toBeNull();
+  });
+
+  it('returns null for empty string', () => {
+    expect(deriveDomain('')).toBeNull();
+  });
+});
