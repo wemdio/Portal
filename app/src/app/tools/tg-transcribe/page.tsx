@@ -2,6 +2,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { authFetch } from '@/lib/authFetch';
+import ActiveJobsPanel from './ActiveJobsPanel';
 import {
   Video,
   Loader2,
@@ -1381,6 +1382,9 @@ export default function TgTranscribePage() {
           </div>
         )}
       </div>
+
+      {/* Side panel: background webhook transcription jobs */}
+      <ActiveJobsPanel onJobCompleted={() => void fetchAllItems(sortOrder)} />
 
       {/* Stop confirmation dialog */}
       <StopConfirmDialog
