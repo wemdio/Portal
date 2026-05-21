@@ -5,7 +5,8 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isTechnician } from '@/lib/roles';
 import type { UserRole } from '@/types';
-import { getYookassaInvoice, createYookassaInvoice, cancelYookassaInvoice, extractInvoiceUrl, isYookassaConfigured } from '@/lib/yookassa';
+import { getYookassaInvoice, createYookassaInvoice, cancelYookassaInvoice, extractInvoiceUrl, isYookassaConfigured, buildDefaultReceipt } from '@/lib/yookassa';
+import { applyInvoicePaidToTariff } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 
@@ -135,14 +136,40 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
         return NextResponse.json({ invoice: recovered });
       }
 
-      // No YK invoice yet — create it
+      // No YK invoice yet — create it.
+      // 54-FZ receipt requires a customer email — prefer the linked client's
+      // profile email, otherwise fall back to YOOKASSA_FALLBACK_RECEIPT_EMAIL.
+      let customerEmail: string | null = null;
+      if (existing.client_user_id) {
+        const { data: clientProfile } = await supabaseAdmin
+          .from('profiles')
+          .select('email')
+          .eq('id', existing.client_user_id)
+          .maybeSingle();
+        customerEmail = clientProfile?.email ?? null;
+      }
+      if (!customerEmail) {
+        customerEmail = process.env.YOOKASSA_FALLBACK_RECEIPT_EMAIL ?? null;
+      }
+      if (!customerEmail) {
+        return jsonError('Не удалось определить email для чека (54-ФЗ). Привяжите клиента к счёту или задайте YOOKASSA_FALLBACK_RECEIPT_EMAIL.', 400);
+      }
+
+      const description = existing.description ?? `Счёт для ${existing.company_name}`;
+      const amountNum = Number(existing.amount);
       const ykInvoice = await createYookassaInvoice({
-        amount: Number(existing.amount),
+        amount: amountNum,
         currency: existing.currency,
-        description: existing.description ?? `Счёт для ${existing.company_name}`,
+        description,
         invoiceId: existing.id,
         companyName: existing.company_name,
         idempotencyKey: existing.id,
+        receipt: buildDefaultReceipt({
+          customerEmail,
+          description,
+          amount: amountNum,
+          currency: existing.currency,
+        }),
       });
 
       const { error: ykUpdateErr } = await supabaseAdmin
@@ -190,6 +217,50 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       if (syncErr) {
         await logError('invoices.patch.sync.failed', syncErr, { id });
         return jsonError('Failed to sync status', 500);
+      }
+
+      // When sync confirms the YooKassa invoice is paid and there's a linked
+      // client, also unlock their tariff — same effect as the webhook, but
+      // works in local dev where YooKassa cannot reach our webhook URL.
+      //
+      // Apply when EITHER:
+      //   1. The invoice just transitioned non-paid → paid (normal case), OR
+      //   2. It was already "paid" locally but the tariff is still locked /
+      //      paid_at is null (stuck case — e.g. webhook never reached us and
+      //      a previous sync only updated the invoice row).
+      // The second branch checks tariff state explicitly to avoid double-
+      // applying a renewal on a re-sync of an already-processed invoice.
+      if (ykInvoice.status === 'succeeded' && existing.client_user_id) {
+        try {
+          const wasUnpaid = existing.status !== 'paid';
+          let needsApply = wasUnpaid;
+          if (!needsApply) {
+            const { data: tariffCheck } = await supabaseAdmin
+              .from('client_tariffs')
+              .select('payment_locked, paid_at, billing_mode')
+              .eq('user_id', existing.client_user_id)
+              .maybeSingle();
+            const stuckOnInvoice =
+              tariffCheck?.billing_mode === 'invoice' && tariffCheck.payment_locked === true;
+            const neverPaid = tariffCheck && !tariffCheck.paid_at;
+            needsApply = Boolean(stuckOnInvoice || neverPaid);
+          }
+
+          if (needsApply) {
+            const tariffUpdate = await applyInvoicePaidToTariff(existing.client_user_id);
+            if (Object.keys(tariffUpdate).length > 0) {
+              await logAudit(
+                'invoices.sync.tariff_unlocked',
+                `Tariff updated for client ${existing.client_user_id} after sync`,
+                { client_user_id: existing.client_user_id, invoice_id: id, tariffUpdate, viaStuckRecovery: !wasUnpaid },
+                { userId: user.id },
+              );
+            }
+          }
+        } catch (tariffErr) {
+          await logError('invoices.sync.tariff_update.failed', tariffErr, { client_user_id: existing.client_user_id, invoice_id: id });
+          // Don't block the sync response — invoice status itself was updated.
+        }
       }
 
       await logAudit('invoices.synced', `Invoice ${id} synced: ${newStatus}`, { id, newStatus }, { userId: user.id });

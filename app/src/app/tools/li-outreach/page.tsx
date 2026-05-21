@@ -125,6 +125,13 @@ async function api<T = unknown>(path: string, opts?: RequestInit & { json?: unkn
 export default function LiOutreachPage() {
   const [tab, setTab] = useState<Tab>('dashboard');
   const [accounts, setAccounts] = useState<LiAccount[]>([]);
+  // Per-account error/warning counts from li_campaign_logs over the last 24h
+  // (rendered as a chip on each AccountCard). Map keyed by account_id.
+  const [accountErrorCounts, setAccountErrorCounts] = useState<
+    Record<string, { error: number; warning: number }>
+  >({});
+  // Account whose log feed is open in the modal, or null.
+  const [accountLogsModal, setAccountLogsModal] = useState<LiAccount | null>(null);
   const [leadLists, setLeadLists] = useState<LiLeadList[]>([]);
   const [leads, setLeads] = useState<LiLead[]>([]);
   const [leadsTotal, setLeadsTotal] = useState(0);
@@ -172,6 +179,16 @@ export default function LiOutreachPage() {
 
   const loadAccounts = useCallback(async () => {
     try { const d = await api<{ accounts: LiAccount[] }>('/accounts'); setAccounts(d.accounts); } catch (e) { console.error('[li-outreach] loadAccounts failed', e); }
+  }, []);
+  const loadAccountErrorCounts = useCallback(async () => {
+    try {
+      const d = await api<{
+        counts: Record<string, { error: number; warning: number }>;
+      }>('/accounts/error-counts?range=24h');
+      setAccountErrorCounts(d.counts ?? {});
+    } catch (e) {
+      console.error('[li-outreach] loadAccountErrorCounts failed', e);
+    }
   }, []);
   const loadLeadLists = useCallback(async () => {
     try { const d = await api<{ lead_lists: LiLeadList[] }>('/lead-lists'); setLeadLists(d.lead_lists); } catch (e) { console.error('[li-outreach] loadLeadLists failed', e); }
@@ -224,6 +241,7 @@ export default function LiOutreachPage() {
         const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
           if (s && !cancelled) {
             void loadAccounts();
+            void loadAccountErrorCounts();
             void loadCampaigns();
             void loadLeadLists();
             void loadSettings();
@@ -233,6 +251,7 @@ export default function LiOutreachPage() {
         return () => { cancelled = true; subscription.unsubscribe(); };
       }
       void loadAccounts();
+      void loadAccountErrorCounts();
       void loadCampaigns();
       void loadLeadLists();
       void loadSettings();
@@ -1202,7 +1221,13 @@ export default function LiOutreachPage() {
           {accounts.length === 0 ? (
             <div className="text-sm text-gray-500">Нет аккаунтов. Настройте Unipile и нажмите «Синхронизировать».</div>
           ) : accounts.map((a) => (
-            <AccountCard key={a.id} account={a} onUpdated={loadAccounts} />
+            <AccountCard
+              key={a.id}
+              account={a}
+              errorCounts24h={accountErrorCounts[a.id]}
+              onUpdated={() => { void loadAccounts(); void loadAccountErrorCounts(); }}
+              onShowLogs={() => setAccountLogsModal(a)}
+            />
           ))}
         </div>
       )}
@@ -1233,13 +1258,31 @@ export default function LiOutreachPage() {
           </button>
         </div>
       )}
+
+      {/* Per-account log modal */}
+      {accountLogsModal && (
+        <AccountLogsModal
+          account={accountLogsModal}
+          onClose={() => setAccountLogsModal(null)}
+        />
+      )}
     </div>
   );
 }
 
 // ---- Account card -----------------------------------------------------------
 
-function AccountCard({ account: a, onUpdated }: { account: LiAccount; onUpdated: () => void }) {
+function AccountCard({
+  account: a,
+  errorCounts24h,
+  onUpdated,
+  onShowLogs,
+}: {
+  account: LiAccount;
+  errorCounts24h?: { error: number; warning: number };
+  onUpdated: () => void;
+  onShowLogs: () => void;
+}) {
   const cooling = isAccountInCooldown(a);
   const [proxyDraft, setProxyDraft] = useState(a.proxy_url ?? '');
   const [saving, setSaving] = useState(false);
@@ -1282,7 +1325,24 @@ function AccountCard({ account: a, onUpdated }: { account: LiAccount; onUpdated:
       <div className="flex items-center justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="font-medium">{a.name || a.unipile_account_id}</span>
+            <button
+              type="button"
+              onClick={onShowLogs}
+              title="Открыть логи этого аккаунта"
+              className="font-medium text-left hover:text-indigo-600 hover:underline transition cursor-pointer"
+            >
+              {a.name || a.unipile_account_id}
+            </button>
+            {errorCounts24h && errorCounts24h.error > 0 && (
+              <button
+                type="button"
+                onClick={onShowLogs}
+                title={`${errorCounts24h.error} ошибок${errorCounts24h.warning ? ` и ${errorCounts24h.warning} предупреждений` : ''} за 24ч — открыть логи`}
+                className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 hover:bg-rose-100 transition cursor-pointer shrink-0"
+              >
+                ⚠ {errorCounts24h.error}
+              </button>
+            )}
             {a.headline && <span className="text-xs text-gray-500 truncate">{a.headline}</span>}
           </div>
           {cooling && (
@@ -1355,6 +1415,7 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
   const [filterCampaignId, setFilterCampaignId] = useState('');
   const [filterLevel, setFilterLevel] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [exportingRange, setExportingRange] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isAutoScroll = useRef(true);
@@ -1416,6 +1477,38 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
   const errorCount = logs.filter((l) => l.level === 'error').length;
   const warnCount = logs.filter((l) => l.level === 'warning').length;
 
+  // Download buttons honour the currently-applied filters (campaign + level)
+  // so the .txt file matches what the operator is actually looking at.
+  const exportLogs = useCallback(
+    async (range: '6h' | '24h' | '7d') => {
+      setExportingRange(range);
+      try {
+        const params = new URLSearchParams({ range });
+        if (filterCampaignId) params.set('campaign_id', filterCampaignId);
+        if (filterLevel) params.set('level', filterLevel);
+        const res = await authFetch(`/api/tools/li-outreach/logs/export?${params.toString()}`);
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          alert((data as { error?: string }).error ?? `Не удалось выгрузить логи (HTTP ${res.status})`);
+          return;
+        }
+        const cd = res.headers.get('content-disposition') ?? '';
+        const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+        const ascii = /filename="?([^";]+)"?/i.exec(cd);
+        const filename = utf8 ? decodeURIComponent(utf8[1]) : (ascii?.[1] ?? `li-outreach-logs-${range}.txt`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } finally {
+        setExportingRange(null);
+      }
+    },
+    [filterCampaignId, filterLevel],
+  );
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1444,8 +1537,25 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
             {warnCount > 0 && <span className="ml-1.5 text-amber-600">{warnCount} предупреждений</span>}
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-gray-500">Выгрузить .txt:</span>
+          {(['6h', '24h', '7d'] as const).map((r) => {
+            const labels: Record<typeof r, string> = { '6h': '6 часов', '24h': '24 часа', '7d': '7 дней' };
+            const busy = exportingRange === r;
+            return (
+              <button
+                key={r}
+                type="button"
+                onClick={() => void exportLogs(r)}
+                disabled={exportingRange !== null}
+                title={`Скачать логи за последние ${labels[r]}${filterCampaignId ? ' (текущая кампания)' : ' (все кампании)'}${filterLevel ? `, уровень ${filterLevel}` : ''}`}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {busy ? '...' : labels[r]}
+              </button>
+            );
+          })}
+          <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer ml-2">
             <input
               type="checkbox"
               checked={autoRefresh}
@@ -1486,6 +1596,237 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
           </div>
         ))}
         <div ref={bottomRef} />
+      </div>
+    </div>
+  );
+}
+
+// ---- Per-account log modal --------------------------------------------------
+
+type AccountLogItem = {
+  created_at: string;
+  level: string;
+  message: string;
+  lead_name: string | null;
+  step_index: number | null;
+  campaign_id: string;
+  campaign?: { name: string } | null;
+};
+
+function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: () => void }) {
+  const [range, setRange] = useState<'6h' | '24h' | '7d'>('24h');
+  const [logs, setLogs] = useState<AccountLogItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
+  const [exportingRange, setExportingRange] = useState<string | null>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  const fetchLogs = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const d = await api<{ items: AccountLogItem[]; truncated: boolean }>(
+        `/accounts/${account.id}/logs?range=${range}`,
+      );
+      setLogs(d.items ?? []);
+      setTruncated(Boolean(d.truncated));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Не удалось загрузить логи');
+      setLogs([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [account.id, range]);
+
+  useEffect(() => { void fetchLogs(); }, [fetchLogs]);
+
+  // Close on Escape so the modal feels native.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ block: 'end' });
+  }, [logs]);
+
+  const exportTxt = useCallback(
+    async (r: '6h' | '24h' | '7d') => {
+      setExportingRange(r);
+      try {
+        const res = await authFetch(`/api/tools/li-outreach/accounts/${account.id}/logs?range=${r}&format=txt`);
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          alert((d as { error?: string }).error ?? `Не удалось выгрузить логи (HTTP ${res.status})`);
+          return;
+        }
+        const cd = res.headers.get('content-disposition') ?? '';
+        const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+        const ascii = /filename="?([^";]+)"?/i.exec(cd);
+        const filename = utf8
+          ? decodeURIComponent(utf8[1])
+          : (ascii?.[1] ?? `li-outreach-account-${r}.txt`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } finally {
+        setExportingRange(null);
+      }
+    },
+    [account.id],
+  );
+
+  const levelColor = (l: string) => {
+    switch (l) {
+      case 'error': return 'text-rose-400';
+      case 'warning': return 'text-amber-400';
+      default: return 'text-emerald-400';
+    }
+  };
+  const levelBadge = (l: string) => {
+    switch (l) {
+      case 'error': return 'ERR ';
+      case 'warning': return 'WARN';
+      default: return 'INFO';
+    }
+  };
+
+  const errorCount = logs.filter((l) => l.level === 'error').length;
+  const warningCount = logs.filter((l) => l.level === 'warning').length;
+  const cooling = isAccountInCooldown(account);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
+      <div
+        className="relative w-full max-w-4xl max-h-[90vh] flex flex-col rounded-2xl bg-white shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="flex items-start justify-between border-b border-gray-100 px-5 py-4">
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold text-gray-900 truncate">
+              {account.name || account.unipile_account_id}
+            </h2>
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
+              <span>Unipile ID: <span className="font-mono text-gray-700">{account.unipile_account_id}</span></span>
+              {account.headline && <span className="truncate max-w-[260px]">{account.headline}</span>}
+              <span>
+                Статус:{' '}
+                <span className={cooling ? 'text-amber-700' : account.is_active ? 'text-emerald-700' : 'text-gray-500'}>
+                  {cooling ? 'В отлёжке' : account.is_active ? 'Активен' : 'Неактивен'}
+                </span>
+              </span>
+              {cooling && account.cooldown_until && (
+                <span className="text-amber-600">
+                  до {new Date(account.cooldown_until).toLocaleString('ru-RU', {
+                    hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit',
+                  })}
+                </span>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-3 px-2 py-1 rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition"
+            aria-label="Закрыть"
+          >
+            ✕
+          </button>
+        </header>
+
+        <div className="px-5 py-3 border-b border-gray-100 flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-gray-500 mr-1">Период:</span>
+            {(['6h', '24h', '7d'] as const).map((r) => {
+              const labels: Record<typeof r, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д' };
+              const active = range === r;
+              return (
+                <button
+                  key={r}
+                  type="button"
+                  onClick={() => setRange(r)}
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                    active
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-white text-gray-600 border border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'
+                  }`}
+                >
+                  {labels[r]}
+                </button>
+              );
+            })}
+          </div>
+          <div className="text-xs text-gray-500">
+            {loading ? '…' : (
+              <>
+                Всего строк: <span className="font-semibold text-gray-700">{logs.length}</span>
+                {errorCount > 0 && (
+                  <> · <span className="text-rose-600 font-semibold">{errorCount} ошибок</span></>
+                )}
+                {warningCount > 0 && (
+                  <> · <span className="text-amber-600 font-semibold">{warningCount} предупреждений</span></>
+                )}
+                {truncated && (
+                  <> · <span className="text-gray-400">(показано не всё — обрезано лимитом)</span></>
+                )}
+              </>
+            )}
+          </div>
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="text-xs text-gray-500 mr-1">.txt:</span>
+            {(['6h', '24h', '7d'] as const).map((r) => {
+              const labels: Record<typeof r, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д' };
+              const busy = exportingRange === r;
+              return (
+                <button
+                  key={r}
+                  type="button"
+                  onClick={() => void exportTxt(r)}
+                  disabled={exportingRange !== null}
+                  className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {busy ? '...' : labels[r]}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {error && (
+          <div className="mx-5 mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+            {error}
+          </div>
+        )}
+
+        <div className="flex-1 overflow-auto bg-gray-950 p-3 font-mono text-[11px] leading-relaxed">
+          {loading && <p className="text-gray-500">Загрузка логов…</p>}
+          {!loading && !error && logs.length === 0 && (
+            <p className="text-gray-600">По этому аккаунту ничего не найдено в выбранном периоде.</p>
+          )}
+          {logs.map((log, idx) => (
+            <div key={`${log.created_at}-${idx}`} className="flex gap-2 py-[1px] hover:bg-gray-900/50">
+              <span className="text-gray-600 shrink-0">
+                {new Date(log.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+              </span>
+              <span className={`shrink-0 font-bold w-10 ${levelColor(log.level)}`}>{levelBadge(log.level)}</span>
+              {log.campaign?.name && (
+                <span className="shrink-0 text-blue-400 max-w-[160px] truncate">[{log.campaign.name}]</span>
+              )}
+              {log.lead_name && <span className="shrink-0 text-violet-400">{log.lead_name}</span>}
+              {log.step_index != null && <span className="shrink-0 text-gray-600">step:{log.step_index}</span>}
+              <span className="text-gray-300 break-all">{log.message}</span>
+            </div>
+          ))}
+          <div ref={bottomRef} />
+        </div>
       </div>
     </div>
   );

@@ -31,6 +31,57 @@ export interface YookassaCartItem {
   vat_code?: 1 | 2 | 3 | 4;
 }
 
+/* ─── 54-ФЗ receipt types ─── */
+/**
+ * VAT codes per YooKassa 54-FZ reference:
+ * 1=Без НДС, 2=НДС 0%, 3=НДС 10%, 4=НДС 20%,
+ * 5=10/110, 6=20/120, 7=НДС 5%, 8=НДС 7%, 9=5/105, 10=7/107,
+ * 11=НДС 22% (с 2026-01-01), 12=22/122 (с 2026-01-01).
+ */
+export type YookassaVatCode = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12;
+/** "Признак способа расчёта" — only full_prepayment and full_payment are supported for invoices */
+export type YookassaPaymentMode = 'full_prepayment' | 'full_payment';
+/** "Признак предмета расчёта" — most common is "service" for SaaS */
+export type YookassaPaymentSubject =
+  | 'commodity' | 'excise' | 'job' | 'service' | 'payment' | 'casino'
+  | 'gambling_bet' | 'gambling_prize' | 'lottery' | 'lottery_prize'
+  | 'intellectual_activity' | 'agent_commission' | 'property_right'
+  | 'non_operating_gain' | 'sales_tax' | 'resort_fee' | 'marked'
+  | 'non_marked' | 'marked_excise' | 'non_marked_excise' | 'fine'
+  | 'tax' | 'lien' | 'cost' | 'agent_withdrawals'
+  | 'pension_insurance_without_payouts' | 'pension_insurance_with_payouts'
+  | 'health_insurance_without_payouts' | 'health_insurance_with_payouts'
+  | 'health_insurance' | 'another';
+
+export interface YookassaReceiptCustomer {
+  /** At least one of email or phone is required by 54-FZ */
+  email?: string;
+  phone?: string;
+  full_name?: string;
+  inn?: string;
+}
+
+export interface YookassaReceiptItem {
+  description: string;
+  /** YooKassa accepts a number; sent as a string formatted to 3 decimals */
+  quantity: string;
+  amount: YookassaAmount;
+  vat_code: YookassaVatCode;
+  payment_mode: YookassaPaymentMode;
+  payment_subject: YookassaPaymentSubject;
+}
+
+export interface YookassaReceipt {
+  customer: YookassaReceiptCustomer;
+  items: YookassaReceiptItem[];
+  /**
+   * Required only when the merchant has multiple tax systems registered.
+   * Leave undefined to let YooKassa use the shop's default.
+   * 1=ОСН, 2=УСН доходы, 3=УСН доход-расход, 4=ЕНВД, 5=ЕСХН, 6=Патент.
+   */
+  tax_system_code?: 1 | 2 | 3 | 4 | 5 | 6;
+}
+
 export interface YookassaInvoice {
   id: string;
   status: 'pending' | 'succeeded' | 'canceled';
@@ -71,6 +122,15 @@ export interface CreateInvoiceParams {
    * (contact your YooKassa manager to enable this feature).
    */
   savePaymentMethod?: boolean;
+  /**
+   * 54-FZ receipt block — REQUIRED when the YooKassa shop has fiscalization
+   * (онлайн-касса) enabled. Without it, the customer-facing payment step on
+   * yookassa.ru fails with "internal command error" even though invoice
+   * creation returns 201. The first-attempt working defaults
+   * (vat_code=1 / payment_subject="service" / payment_mode="full_payment")
+   * match what our other services (e.g. telegram-bot) use successfully.
+   */
+  receipt?: YookassaReceipt;
 }
 
 type YookassaErrorResponse = {
@@ -111,6 +171,10 @@ function buildInvoiceBody(params: CreateInvoiceParams, expiresAt: string) {
       description: params.description,
       // save_payment_method enables recurring charges after the first payment
       ...(params.savePaymentMethod ? { save_payment_method: true } : {}),
+      // receipt: required by 54-FZ when fiscalization is enabled on the shop.
+      // Without it, paying the invoice on yookassa.ru fails with
+      // "internal command error" even though invoice creation returns 201.
+      ...(params.receipt ? { receipt: params.receipt } : {}),
       metadata: {
         invoice_id: params.invoiceId,
         company_name: params.companyName,
@@ -228,6 +292,51 @@ export interface ChargeRecurringParams {
   paymentMethodId: string;
   /** Idempotency key — use a deterministic value like `${tariffId}-${billingMonth}` */
   idempotencyKey: string;
+  /** 54-FZ receipt — required when fiscalization is enabled on the shop. */
+  receipt?: YookassaReceipt;
+}
+
+/**
+ * Build a 54-FZ receipt for a single-line SaaS-style invoice using the same
+ * defaults as our other working service (telegram-bot): "Без НДС", "service",
+ * "full_payment", tax_system_code from the shop's own settings.
+ *
+ * Pass a real customer email (or phone) — YooKassa rejects the payment step
+ * with "internal command error" when neither is present and fiscalization is on.
+ */
+export function buildDefaultReceipt(params: {
+  customerEmail?: string | null;
+  customerPhone?: string | null;
+  description: string;
+  amount: number;
+  currency?: string;
+  vatCode?: YookassaVatCode;
+  paymentSubject?: YookassaPaymentSubject;
+  paymentMode?: YookassaPaymentMode;
+}): YookassaReceipt {
+  const email = params.customerEmail?.trim() || undefined;
+  const phone = params.customerPhone?.trim() || undefined;
+  if (!email && !phone) {
+    throw new Error('YooKassa receipt requires customer email or phone (54-FZ)');
+  }
+  return {
+    customer: { ...(email ? { email } : {}), ...(phone ? { phone } : {}) },
+    items: [
+      {
+        description: params.description,
+        quantity: '1.000',
+        amount: {
+          value: params.amount.toFixed(2),
+          currency: params.currency ?? 'RUB',
+        },
+        vat_code: params.vatCode ?? 1,
+        payment_mode: params.paymentMode ?? 'full_payment',
+        payment_subject: params.paymentSubject ?? 'service',
+      },
+    ],
+    // tax_system_code intentionally omitted: shop has one system configured
+    // in the YooKassa cabinet and YooKassa fills it in automatically.
+  };
 }
 
 /**
@@ -245,6 +354,9 @@ export async function chargeRecurringPayment(params: ChargeRecurringParams): Pro
     capture: true,
     payment_method_id: params.paymentMethodId,
     description: params.description,
+    // receipt required by 54-FZ on fiscalized shops; without it the recurring
+    // charge fails the same way invoice payments do.
+    ...(params.receipt ? { receipt: params.receipt } : {}),
   };
 
   const res = await fetch(`${YOOKASSA_API}/payments`, {

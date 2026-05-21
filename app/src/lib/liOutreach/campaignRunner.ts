@@ -64,6 +64,14 @@ export async function runCampaignTick(
   if (!supabaseAdmin) return { processed: 0, errors: 0 };
   const db = supabaseAdmin;
 
+  // The log() helper closes over this variable so every line written after
+  // we've loaded the account row automatically gets attributed back to that
+  // account. Lines emitted before account load (early returns about Unipile
+  // settings, missing account_id, etc.) keep account_id=null.
+  // Migration 20260521_0003 added the column; UI uses it for per-account
+  // log views and error-count chips.
+  let currentAccountId: string | null = null;
+
   // Log helper — writes to DB so the UI logs tab can display entries.
   // IMPORTANT: supabase-js PostgrestBuilder is lazy — it only fires the HTTP
   // request when `.then()` / `await` is called. Using `void builder` does NOT
@@ -75,6 +83,7 @@ export async function runCampaignTick(
     db.from('li_campaign_logs')
       .insert({
         campaign_id: campaignId,
+        account_id: currentAccountId,
         level,
         message,
         lead_name: leadName ?? null,
@@ -123,20 +132,14 @@ export async function runCampaignTick(
     }>();
 
   if (account && isAccountInCooldown(account)) {
+    // Attribute the upcoming log line to the account it's about.
+    currentAccountId = account.id;
     const until = new Date(account.cooldown_until!).toLocaleString('ru-RU');
-    // Lazily use the campaign log helper here too — but we need it defined
-    // first, so insert the message directly.
-    db.from('li_campaign_logs')
-      .insert({
-        campaign_id: campaignId,
-        level: 'warning',
-        message: `Тик пропущен — аккаунт в отлёжке до ${until} (причина: ${account.cooldown_reason ?? 'unknown'})`,
-        lead_name: null,
-        step_index: null,
-      })
-      .then(({ error }) => {
-        if (error) console.warn(`[li-outreach] cooldown skip log failed: ${error.message}`);
-      }, () => undefined);
+    log(
+      'warning',
+      `Тик пропущен — LinkedIn-аккаунт в отлёжке до ${until} (причина от LinkedIn: ${account.cooldown_reason ?? 'неизвестна'}). ` +
+        `Это защита от бана: аккаунт сам выйдет из отлёжки в указанное время.`,
+    );
     return { processed: 0, errors: 0 };
   }
 
@@ -165,7 +168,11 @@ export async function runCampaignTick(
     return { processed: 0, errors: 0 };
   }
 
-  log('info', `Тик запущен — кампания «${campaign.name}», аккаунт ${account.unipile_account_id ?? 'N/A'}`);
+  // From here on every log() line will be attributed to this account in
+  // li_campaign_logs.account_id, so the UI can filter per-account.
+  currentAccountId = account.id;
+
+  log('info', `Тик запущен — кампания «${campaign.name}», LinkedIn-аккаунт ${account.unipile_account_id ?? 'не указан'}. Ищу лидов, готовых к обработке.`);
 
   // Daily-counter reset is now atomic inside `li_campaign_increment_invite`
   // (see migration 20260420_0002). For the in-memory state used by the
@@ -175,7 +182,7 @@ export async function runCampaignTick(
   const today = todayStr();
   if (campaign.last_invite_date !== today) {
     campaign.invites_sent_today = 0;
-    log('info', `Новый день — счётчик инвайтов сброшен (лимит: ${campaign.daily_invite_limit}/день)`);
+    log('info', `Наступил новый день — счётчик отправленных инвайтов обнулён (дневной лимит: ${campaign.daily_invite_limit} инвайтов)`);
   }
 
   // Get campaign leads ready to process
@@ -190,14 +197,19 @@ export async function runCampaignTick(
     .limit(20);
 
   if (!campaignLeads?.length) {
-    log('info', 'Нет лидов для обработки в этом тике');
+    log('info', 'В этом тике нет лидов, готовых к обработке (все либо завершены, либо ждут своего времени по next_action_at)');
     return { processed: 0, errors: 0 };
   }
 
   const pendingCount = campaignLeads.filter((cl) => (cl as { status: string }).status === 'pending').length;
   const waitingCount = campaignLeads.filter((cl) => (cl as { status: string }).status === 'waiting').length;
   const inProgressCount = campaignLeads.filter((cl) => (cl as { status: string }).status === 'in_progress').length;
-  log('info', `Найдено ${campaignLeads.length} лидов: ${pendingCount} pending, ${inProgressCount} in_progress, ${waitingCount} waiting | отправлено сегодня: ${campaign.invites_sent_today}/${campaign.daily_invite_limit}`);
+  log(
+    'info',
+    `Готов обработать ${campaignLeads.length} лидов в этом тике: ` +
+      `${pendingCount} новых (pending), ${inProgressCount} в работе (in_progress), ${waitingCount} ждут следующего шага (waiting). ` +
+      `Инвайтов отправлено сегодня: ${campaign.invites_sent_today} из лимита ${campaign.daily_invite_limit}.`,
+  );
 
   // Early-exit when every lead in this batch sits on an `invite` step AND the
   // daily limit is already exhausted. Without this guard we'd spin through 20
@@ -216,7 +228,8 @@ export async function runCampaignTick(
   if (limitReached && allOnInviteStep) {
     log(
       'info',
-      `Дневной лимит инвайтов достигнут (${campaign.invites_sent_today}/${campaign.daily_invite_limit}) и все ${campaignLeads.length} лидов на шаге invite — тик закрыт без задержек до следующего дня`,
+      `Дневной лимит инвайтов исчерпан (${campaign.invites_sent_today} из ${campaign.daily_invite_limit}), и все ${campaignLeads.length} лидов в этом тике ждут именно отправки инвайта. ` +
+        `Тик закрываю без задержек — продолжим завтра, когда счётчик сбросится.`,
     );
     return { processed: 0, errors: 0 };
   }
@@ -378,19 +391,30 @@ async function processInviteStep(
   // Imports/scrapers often store profile_url but leave public_identifier null.
   const publicId = lead.public_identifier ?? extractPublicIdentifier(lead.profile_url);
   if (!lead.public_identifier && publicId) {
-    await db.from('li_leads').update({ public_identifier: publicId }).eq('id', lead.id);
-    log('info', `public_identifier восстановлен из profile_url: ${publicId}`, lead.name, stepIdx);
+    const { error: piErr } = await db.from('li_leads').update({ public_identifier: publicId }).eq('id', lead.id);
+    if (piErr) {
+      // Non-fatal: we still have publicId in memory for this tick, but on the
+      // next tick the resolver will run again — wasted work. Surface so ops
+      // can spot DB connectivity / RLS issues.
+      log('warning', `Не смог сохранить public_identifier «${publicId}» в БД — на следующем тике придётся резолвить заново: ${piErr.message}`, lead.name, stepIdx);
+    } else {
+      log('info', `public_identifier восстановлен из profile_url: ${publicId}`, lead.name, stepIdx);
+    }
   }
 
   if (!providerId && publicId) {
-    log('info', `Резолв provider_id по public_identifier: ${publicId}`, lead.name, stepIdx);
+    log('info', `Запрашиваю у Unipile внутренний LinkedIn ID для public_identifier «${publicId}»`, lead.name, stepIdx);
     try {
       providerId = await client.getProviderId(publicId);
-      await db.from('li_leads').update({ linkedin_id: providerId }).eq('id', lead.id);
-      log('info', `provider_id получен: ${providerId}`, lead.name, stepIdx);
+      const { error: liErr } = await db.from('li_leads').update({ linkedin_id: providerId }).eq('id', lead.id);
+      if (liErr) {
+        log('warning', `LinkedIn ID получен (${providerId}), но не смог сохранить в БД — на следующем тике снова дёрнем Unipile: ${liErr.message}`, lead.name, stepIdx);
+      } else {
+        log('info', `LinkedIn ID получен и сохранён: ${providerId}`, lead.name, stepIdx);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      log('error', `Не удалось получить provider_id: ${msg}`, lead.name, stepIdx);
+      log('error', `Не смог получить LinkedIn ID через Unipile — ${msg}. Лид этим тиком обработать не получится.`, lead.name, stepIdx);
       throw new Error('Cannot resolve provider_id');
     }
   }
@@ -403,8 +427,21 @@ async function processInviteStep(
   if (message) {
     message = parseMessageTemplate(message, leadToInfo(lead));
     if (campaign.use_ai && aiConfig.apiKey) {
-      log('info', 'AI-персонализация инвайта...', lead.name, stepIdx);
-      message = await personalizeInviteMessage(message, leadToInfo(lead), aiConfig, campaign.ai_prompt_invite);
+      log('info', 'Прошу GPT персонализировать инвайт...', lead.name, stepIdx);
+      const aiStart = Date.now();
+      try {
+        const before = message;
+        message = await personalizeInviteMessage(message, leadToInfo(lead), aiConfig, campaign.ai_prompt_invite);
+        const aiSec = ((Date.now() - aiStart) / 1000).toFixed(1);
+        if (message === before) {
+          log('warning', `GPT вернул шаблон без изменений за ${aiSec}с — отправляю как есть (возможно, упёрлись в лимит OpenRouter)`, lead.name, stepIdx);
+        } else {
+          log('info', `GPT персонализировал инвайт за ${aiSec}с (${message.length} символов)`, lead.name, stepIdx);
+        }
+      } catch (err) {
+        const aiSec = ((Date.now() - aiStart) / 1000).toFixed(1);
+        log('error', `Ошибка GPT при персонализации инвайта за ${aiSec}с — отправляю шаблон без изменений: ${err instanceof Error ? err.message : String(err)}`, lead.name, stepIdx);
+      }
     }
   }
 
@@ -447,14 +484,28 @@ async function processInviteStep(
       // Park the account so every campaign + scraper using it stops hammering
       // the API for COOLDOWN_MINUTES[kind] minutes; abort the rest of the tick.
       if (accountDbId) {
-        const until = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
-        const untilHuman = new Date(until).toLocaleString('ru-RU');
-        log(
-          'warning',
-          `LinkedIn вернул сигнал «${cooldown.kind}» — аккаунт уходит в отлёжку до ${untilHuman}`,
-          lead.name,
-          stepIdx,
-        );
+        const { cooldownUntil, error: cooldownErr } = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
+        const untilHuman = new Date(cooldownUntil).toLocaleString('ru-RU');
+        if (cooldownErr) {
+          // The write failed — we'll re-throw the cooldown signal so the tick
+          // still exits, but the account isn't actually parked in the DB. Loud
+          // ERROR so the operator notices and can park it manually.
+          log(
+            'error',
+            `LinkedIn вернул сигнал «${cooldown.kind}», но не смог записать отлёжку аккаунта в базу данных — ${cooldownErr}. ` +
+              `Аккаунт может продолжать получать запросы и копить нарушения. Поставьте отлёжку вручную через UI или БД.`,
+            lead.name,
+            stepIdx,
+          );
+        } else {
+          log(
+            'warning',
+            `LinkedIn ограничил аккаунт (${cooldown.kind} — ${describeCooldownReason(cooldown.kind)}). ` +
+              `Аккаунт уходит в отлёжку до ${untilHuman}, остальные кампании на этом аккаунте тоже ждут.`,
+            lead.name,
+            stepIdx,
+          );
+        }
         // Lead stays pending on purpose so it gets picked up again once cooldown expires.
         throw new AccountCooldownTriggered(cooldown.kind);
       }
@@ -616,8 +667,21 @@ async function processMessageStep(
   message = parseMessageTemplate(message, leadToInfo(lead));
   if (campaign.use_ai && campaign.use_ai_followup && aiConfig.apiKey) {
     const historyEntries = (lead.conversation_history ?? []) as Array<{ role: string; content: string }>;
-    log('info', `AI-персонализация follow-up (история: ${historyEntries.length} сообщ.)`, lead.name, stepIdx);
-    message = await personalizeFollowUp(message, leadToInfo(lead), historyEntries, aiConfig, campaign.ai_prompt_chat);
+    log('info', `Прошу GPT персонализировать follow-up (учитываю историю из ${historyEntries.length} сообщ.)`, lead.name, stepIdx);
+    const aiStart = Date.now();
+    try {
+      const before = message;
+      message = await personalizeFollowUp(message, leadToInfo(lead), historyEntries, aiConfig, campaign.ai_prompt_chat);
+      const aiSec = ((Date.now() - aiStart) / 1000).toFixed(1);
+      if (message === before) {
+        log('warning', `GPT вернул шаблон follow-up без изменений за ${aiSec}с — отправляю как есть`, lead.name, stepIdx);
+      } else {
+        log('info', `GPT персонализировал follow-up за ${aiSec}с (${message.length} символов)`, lead.name, stepIdx);
+      }
+    } catch (err) {
+      const aiSec = ((Date.now() - aiStart) / 1000).toFixed(1);
+      log('error', `Ошибка GPT при персонализации follow-up за ${aiSec}с — отправляю шаблон: ${err instanceof Error ? err.message : String(err)}`, lead.name, stepIdx);
+    }
   }
 
   if (!message.trim()) {
