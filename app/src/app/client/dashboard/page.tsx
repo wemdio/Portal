@@ -243,7 +243,9 @@ export default function ClientDashboardPage() {
         onboarding.items.find((i) => i.id === onboarding.next_id && !i.done) ??
         onboarding.items.find((i) => !i.done);
       if (next) {
-        return `Здравствуйте. Давайте сделаем первый шаг — ${next.label.toLowerCase()}.`;
+        const doneCount = onboarding.items.filter((i) => i.done).length;
+        const verb = doneCount === 0 ? 'сделаем первый шаг' : 'сделаем следующий шаг';
+        return `Здравствуйте. Давайте ${verb} — ${next.label.toLowerCase()}.`;
       }
     }
 
