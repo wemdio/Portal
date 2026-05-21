@@ -217,6 +217,10 @@ export default function ClientDashboardPage() {
   const onboardingComplete = onboarding?.complete === true;
   const showCampaignsSection = hasAnyCampaigns || onboardingComplete;
 
+  // Editorial section numbering — pageLocal index, advanced by visible sections.
+  const ledeVisible = totalUnread > 0;
+  const campaignsNumber = ledeVisible ? '02' : '01';
+
   const stillLoading = campaigns === null || replies === null;
 
   // ── greeting copy (branches on data) ──────────────────
@@ -263,12 +267,8 @@ export default function ClientDashboardPage() {
       {/* Lede: replies awaiting attention. Renders only when there's something. */}
       {totalUnread > 0 && (
         <section aria-labelledby="dash-attention-label">
-          <h2
-            id="dash-attention-label"
-            className="text-[10px] font-bold uppercase tracking-[0.12em] mb-3"
-            style={{ color: 'var(--cp-text-l)' }}
-          >
-            Сегодня требуют внимания
+          <h2 id="dash-attention-label" className="ds-eyebrow mb-3">
+            01<span aria-hidden> → </span>Сегодня требуют внимания
           </h2>
 
           <div className="neu-card overflow-hidden">
@@ -291,12 +291,15 @@ export default function ClientDashboardPage() {
                   }
                 >
                   <span
-                    className="inline-flex items-center justify-center w-8 h-8 rounded-xl shrink-0"
-                    style={{ background: 'rgba(74,111,165,0.10)', color: 'var(--cp-accent)' }}
                     aria-hidden
-                  >
-                    <MessageSquare className="h-4 w-4" />
-                  </span>
+                    className="ds-status-dot shrink-0"
+                    style={{ background: 'var(--cp-amber)' }}
+                  />
+                  <MessageSquare
+                    className="h-4 w-4 shrink-0"
+                    style={{ color: 'var(--cp-paper-faint)' }}
+                    aria-hidden
+                  />
                   <div className="flex-1 min-w-0">
                     <p
                       className="text-sm font-bold truncate"
@@ -376,12 +379,8 @@ export default function ClientDashboardPage() {
       {showCampaignsSection && (
         <section aria-labelledby="dash-campaigns-label">
           <div className="flex items-center justify-between mb-3">
-            <h2
-              id="dash-campaigns-label"
-              className="text-[10px] font-bold uppercase tracking-[0.12em]"
-              style={{ color: 'var(--cp-text-l)' }}
-            >
-              Кампании
+            <h2 id="dash-campaigns-label" className="ds-eyebrow">
+              {campaignsNumber}<span aria-hidden> → </span>Кампании
             </h2>
             {hasAnyCampaigns && (
               <Link

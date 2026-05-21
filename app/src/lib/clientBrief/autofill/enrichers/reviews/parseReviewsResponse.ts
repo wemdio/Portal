@@ -8,35 +8,11 @@
  */
 
 import type { ClientBriefFields } from '../../../types';
+import { detectStub } from '../../stubFilters';
 
 export interface ReviewsEnricherPatch {
   ratings_comment?: string;
   recommendations_comment?: string;
-}
-
-const RATINGS_STUB_PATTERNS: RegExp[] = [
-  /^положительные\s+отзыв/i,
-  /^много\s+(положительных|хороших)\s+отзыв/i,
-  /^высокие\s+оценки/i,
-  /^хорошие\s+отзыв/i,
-  /отзывы\s+есть\s+(на\s+сайте|в\s+разделе)/i,
-];
-
-const RECS_STUB_PATTERNS: RegExp[] = [
-  /^много\s+положительных/i,
-  /^клиенты\s+довольны/i,
-  /^благодарность/i, // одиночное слово без цитаты
-  /отзыв\s+оставил/i,
-];
-
-/** Рейтинг должен содержать хотя бы одно число с дробью/процентом/из. */
-function ratingsHaveNumbers(text: string): boolean {
-  return /\d[.,]\d|\d+\/\d+|\d+%/.test(text);
-}
-
-/** Рекомендация должна содержать двоеточие (отделяющее автора от цитаты) или кавычки. */
-function recommendationsHaveQuotes(text: string): boolean {
-  return /[«»"„""]/.test(text) || /:\s*[«"]/.test(text) || /:\s*[А-ЯA-Z]/.test(text);
 }
 
 function normalizeText(value: unknown): string {
@@ -47,12 +23,6 @@ function normalizeText(value: unknown): string {
     .map((line) => line.replace(/[ \t]+$/g, ''))
     .join('\n')
     .replace(/^\s+|\s+$/g, '');
-}
-
-function isStubAnswer(text: string, stubPatterns: RegExp[]): boolean {
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  if (lines.length === 0) return true;
-  return lines.some((line) => stubPatterns.some((re) => re.test(line)));
 }
 
 function tryParseJson(raw: unknown): Record<string, unknown> | null {
@@ -105,16 +75,12 @@ export function parseReviewsResponse(raw: unknown): ReviewsEnricherPatch {
   const out: ReviewsEnricherPatch = {};
 
   const ratings = normalizeText(parsed.ratings_comment);
-  if (ratings && ratingsHaveNumbers(ratings) && !isStubAnswer(ratings, RATINGS_STUB_PATTERNS)) {
+  if (ratings && !detectStub(ratings, 'ratings').isStub) {
     out.ratings_comment = ratings;
   }
 
   const recs = normalizeText(parsed.recommendations_comment);
-  if (
-    recs &&
-    recommendationsHaveQuotes(recs) &&
-    !isStubAnswer(recs, RECS_STUB_PATTERNS)
-  ) {
+  if (recs && !detectStub(recs, 'recommendations').isStub) {
     out.recommendations_comment = recs;
   }
 

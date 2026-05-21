@@ -128,7 +128,7 @@ export function OnboardingChecklist() {
       >
         <span
           className="inline-flex items-center justify-center h-8 w-8 rounded-full"
-          style={{ background: '#10B981', color: '#fff' }}
+          style={{ background: 'var(--cp-green)', color: 'var(--cp-ink)' }}
         >
           <Check className="h-4 w-4" />
         </span>
@@ -149,8 +149,8 @@ export function OnboardingChecklist() {
     <div className="neu-card p-5 sm:p-6">
       <div className="flex items-center justify-between mb-4">
         <div className="min-w-0">
-          <h2 className="text-base font-bold flex items-center gap-2" style={{ color: 'var(--cp-text)' }}>
-            <Sparkles className="h-4 w-4" style={{ color: '#F59E0B' }} />
+          <h2 className="text-base font-bold flex items-center gap-2" style={{ color: 'var(--cp-paper)' }}>
+            <Sparkles className="h-4 w-4" style={{ color: 'var(--cp-amber)' }} />
             С чего начать
           </h2>
           <p className="text-xs mt-0.5" style={{ color: 'var(--cp-text-m)' }}>
@@ -189,11 +189,11 @@ function ChecklistRow({
   isNext: boolean;
 }) {
   const indicator = item.done ? (
-    <Check className="h-4 w-4" style={{ color: '#fff' }} />
+    <Check className="h-4 w-4" style={{ color: 'var(--cp-ink)' }} />
   ) : isNext ? (
-    <Clock className="h-4 w-4" style={{ color: '#fff' }} />
+    <Clock className="h-4 w-4" style={{ color: 'var(--cp-ink)' }} />
   ) : (
-    <Circle className="h-4 w-4" style={{ color: 'var(--cp-text-l)' }} />
+    <Circle className="h-4 w-4" style={{ color: 'var(--cp-paper-faint)' }} />
   );
 
   const Wrapper: React.ElementType = item.href ? Link : 'div';
@@ -213,13 +213,11 @@ function ChecklistRow({
         className="inline-flex items-center justify-center h-7 w-7 rounded-full shrink-0 mt-0.5"
         style={{
           background: item.done
-            ? '#10B981'
+            ? 'var(--cp-green)'
             : isNext
-              ? 'var(--cp-accent)'
+              ? 'var(--cp-amber)'
               : 'transparent',
-          boxShadow: !item.done && !isNext
-            ? 'inset 1.5px 1.5px 3px var(--cp-shadow-d), inset -1.5px -1.5px 3px var(--cp-shadow-l)'
-            : undefined,
+          border: !item.done && !isNext ? '1px solid var(--cp-divider-strong)' : 'none',
         }}
       >
         {indicator}
@@ -227,16 +225,13 @@ function ChecklistRow({
 
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
-          <span
-            className="text-[10px] font-bold uppercase tracking-wider"
-            style={{ color: 'var(--cp-text-l)' }}
-          >
-            Шаг {stepNumber}
+          <span className="ds-eyebrow">
+            {String(stepNumber).padStart(2, '0')}<span aria-hidden> → </span>шаг
           </span>
           {isNext && (
             <span
-              className="text-[10px] font-bold px-1.5 py-0.5 rounded"
-              style={{ background: 'rgba(74,111,165,0.15)', color: 'var(--cp-accent)' }}
+              className="ds-status-tag px-1.5 py-0.5 rounded"
+              style={{ background: 'rgba(245, 166, 35, 0.15)', color: 'var(--cp-amber)' }}
             >
               следующий
             </span>

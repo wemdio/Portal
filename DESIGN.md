@@ -1,53 +1,56 @@
 ---
 name: Portal Client
-description: "Calm Workshop — a self-serve client portal for OutreachOS outbound services. Warm-stone surfaces, slate-blue accent, neumorphic tactility, Nunito throughout."
+description: "Decisive editorial dark for the OutreachOS client portal — pure-near-black surfaces, paper-white invisible accent, hairline structure, Inter + JetBrains Mono."
 colors:
-  linen-cream: "#F5F5F4"
-  walnut-ink: "#3A3530"
-  walnut-mid: "#6A6058"
-  walnut-soft: "#9A9088"
-  slate-tide: "#4A6FA5"
-  slate-tide-deep: "#3D5A87"
-  terracotta-signal: "#B85450"
-  spruce-positive: "#10B981"
-  amber-prompt: "#F59E0B"
-  paper-elevated: "#FFFFFF"
+  ink: "#0a0a0a"
+  surface-rest: "#111213"
+  surface-elev: "#18191c"
+  surface-active: "#1f2023"
+  divider: "#1f2023"
+  divider-strong: "#2a2b2f"
+  paper: "#fafafa"
+  paper-mute: "#a1a1a3"
+  paper-faint: "#6c6c70"
+  amber-active: "#f5a623"
+  red-attention: "#e5484d"
+  green-go: "#46a758"
+  grey-quiet: "#6c6c70"
 typography:
   display:
-    fontFamily: "Nunito, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "clamp(1.5rem, 3vw, 1.875rem)"
-    fontWeight: 800
-    lineHeight: 1.15
-    letterSpacing: "-0.01em"
-  headline:
-    fontFamily: "Nunito, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "clamp(1.25rem, 2vw, 1.5rem)"
-    fontWeight: 800
-    lineHeight: 1.2
-    letterSpacing: "-0.005em"
-  title:
-    fontFamily: "Nunito, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "1rem"
+    fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: "clamp(1.75rem, 3vw, 2.25rem)"
     fontWeight: 700
-    lineHeight: 1.3
-    letterSpacing: "normal"
+    lineHeight: 1.1
+    letterSpacing: "-0.02em"
+  headline:
+    fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "clamp(1.25rem, 2vw, 1.5rem)"
+    fontWeight: 600
+    lineHeight: 1.2
+    letterSpacing: "-0.015em"
+  title:
+    fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "0.9375rem"
+    fontWeight: 600
+    lineHeight: 1.35
+    letterSpacing: "-0.005em"
   body:
-    fontFamily: "Nunito, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "0.875rem"
+    fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "0.8125rem"
     fontWeight: 400
     lineHeight: 1.55
-    letterSpacing: "normal"
+    letterSpacing: "0"
   label:
-    fontFamily: "Nunito, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "0.625rem"
-    fontWeight: 700
+    fontFamily: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+    fontSize: "0.6875rem"
+    fontWeight: 500
     lineHeight: 1.3
-    letterSpacing: "0.12em"
+    letterSpacing: "0.02em"
 rounded:
-  sm: "12px"
-  md: "14px"
-  lg: "16px"
-  xl: "20px"
+  sm: "4px"
+  md: "6px"
+  lg: "8px"
+  xl: "12px"
 spacing:
   xs: "4px"
   sm: "8px"
@@ -55,223 +58,250 @@ spacing:
   lg: "16px"
   xl: "24px"
   2xl: "32px"
+  3xl: "48px"
 components:
   button-primary:
-    backgroundColor: "{colors.slate-tide}"
-    textColor: "{colors.paper-elevated}"
+    backgroundColor: "{colors.paper}"
+    textColor: "{colors.ink}"
     rounded: "{rounded.md}"
-    padding: "10px 18px"
+    padding: "8px 14px"
   button-primary-hover:
-    backgroundColor: "{colors.slate-tide-deep}"
-    textColor: "{colors.paper-elevated}"
-  button-ghost:
-    backgroundColor: "{colors.linen-cream}"
-    textColor: "{colors.walnut-mid}"
-    rounded: "{rounded.sm}"
-    padding: "8px 14px"
-  button-ghost-active:
-    backgroundColor: "{colors.linen-cream}"
-    textColor: "{colors.slate-tide}"
-  card-elevated:
-    backgroundColor: "{colors.linen-cream}"
-    textColor: "{colors.walnut-ink}"
-    rounded: "{rounded.xl}"
-    padding: "20px"
-  card-elevated-sm:
-    backgroundColor: "{colors.linen-cream}"
-    textColor: "{colors.walnut-ink}"
-    rounded: "{rounded.lg}"
-    padding: "16px"
-  card-well:
-    backgroundColor: "{colors.linen-cream}"
-    textColor: "{colors.walnut-mid}"
-    rounded: "{rounded.sm}"
-    padding: "12px 16px"
-  input-recessed:
-    backgroundColor: "{colors.linen-cream}"
-    textColor: "{colors.walnut-ink}"
+    backgroundColor: "{colors.paper-mute}"
+    textColor: "{colors.ink}"
+  button-secondary:
+    backgroundColor: "{colors.ink}"
+    textColor: "{colors.paper}"
     rounded: "{rounded.md}"
-    padding: "10px 14px"
-  nav-pill:
-    backgroundColor: "{colors.linen-cream}"
-    textColor: "{colors.walnut-mid}"
-    rounded: "{rounded.sm}"
     padding: "8px 14px"
-  nav-pill-active:
-    backgroundColor: "{colors.linen-cream}"
-    textColor: "{colors.slate-tide}"
+  button-ghost:
+    backgroundColor: "{colors.ink}"
+    textColor: "{colors.paper-mute}"
+    rounded: "{rounded.md}"
+    padding: "8px 12px"
+  button-ghost-hover:
+    backgroundColor: "{colors.surface-rest}"
+    textColor: "{colors.paper}"
+  input-field:
+    backgroundColor: "{colors.surface-rest}"
+    textColor: "{colors.paper}"
+    rounded: "{rounded.md}"
+    padding: "8px 12px"
+  card-container:
+    backgroundColor: "{colors.surface-rest}"
+    textColor: "{colors.paper}"
+    rounded: "{rounded.lg}"
+    padding: "20px"
+  nav-item:
+    backgroundColor: "{colors.ink}"
+    textColor: "{colors.paper-mute}"
     rounded: "{rounded.sm}"
-    padding: "8px 14px"
+    padding: "6px 10px"
+  nav-item-active:
+    backgroundColor: "{colors.surface-elev}"
+    textColor: "{colors.paper}"
+    rounded: "{rounded.sm}"
+    padding: "6px 10px"
+  status-tag-active:
+    backgroundColor: "{colors.ink}"
+    textColor: "{colors.amber-active}"
+    rounded: "{rounded.sm}"
+    padding: "2px 6px"
 ---
 
 # Design System: Portal Client
 
 ## 1. Overview
 
-**Creative North Star: "Calm Workshop"**
+**Creative North Star: "Decisive Editorial Dark"**
 
-The Portal Client surface should feel like a quiet workshop at the back of an outreach agency. Tools are within reach, surfaces are warm to the touch, the light is even, and nothing is shouting for attention. The visitor (the agency's paying B2B customer) walked in to check on work-in-progress, not to be impressed by the room. Every surface earns its presence by helping that visitor answer a single question: *"what is happening for my business right now, and what do I need to do next?"*
+The Portal Client surface is a serious tool for serious people. The visitor — a B2B founder, sales lead, or marketer who pays the agency real money — opens the portal between two client calls. They want one answer in one glance: *what is happening for my business right now, and what do I do next?* The room is dark, the type is precise, the colour stays in the data and not in the chrome. Nothing decorates; everything informs.
 
-The system is built on three commitments. First, a **warm-stone palette** (`linen-cream` `#F5F5F4` as the universal canvas, `walnut-ink` `#3A3530` for text) replaces the cold grey-on-white default of generic SaaS. Second, **neumorphic tactility**: every primary surface is shaped by a paired warm dark shadow and a soft light highlight, so cards, buttons, and pills read as physical objects sitting on a linen tabletop rather than as flat rectangles painted on a screen. Third, a **single slate-blue accent** (`slate-tide` `#4A6FA5`) carries every clickable affordance the client cares about; the rest of the chrome stays in stone-and-walnut.
+The system is built on four commitments. First, **a near-black base** (`ink` `#0a0a0a`) with a three-step surface ramp — every container earns its depth through a 1-2% lightness step, not a shadow. Second, an **invisible accent**: the chrome speaks in paper-white (`#fafafa`) on ink; the primary action is the brightest object on the screen because it is *white*, not because it is *coloured*. Third, **status colours are data, not decoration** — amber for in-progress, red for at-risk, green for on-track, grey for todo. They appear as 6px dots and short text-tags, never as filled card backgrounds. Fourth, **typography carries hierarchy** — Inter for everything human, JetBrains Mono for everything technical, with editorial numbering (`02 → Сегодня требуют внимания`) marking sections in the same way a scientific paper labels its figures.
 
-This system explicitly rejects: Bitrix/Amo-style multicoloured icon parades, generic SaaS-cream landing-page-as-dashboard aesthetics, AI-slop enterprise-blue-with-gradient-hero, and OpenAI-style black-and-neon — all called out in PRODUCT.md as anti-references for the client surface.
+This system explicitly rejects: neon/CRT/hacker-terminal aesthetics that the OpenAI/Anthropic admin-tool reflex defaults to (`#0A0A0A` + neon-lime + ASCII mockups); the warm-stone neumorphic baseline we worked through previously (linen-cream + walnut + double-shadow — a valid system, but a different one); generic SaaS-cream marketing-template land (cream backgrounds, violet accents, hero-metric blocks); and Bitrix/Amo rainbow CRM noise.
 
 **Key Characteristics:**
 
-- Warm, low-saturation palette (linen + walnut + slate)
-- Neumorphic shadows as **material**, not as decoration
-- Nunito throughout — friendly humanist sans, latin + cyrillic
-- Slate-blue accent reserved for genuine actions only
-- Generous radii (12-20px) — never sharp, never pill-overstated
-- Density flexes via `.ui-density-compact` for heavy desktop pages
+- Pure-near-black base, paper-white text — no warm tint, no chromatic chrome
+- Hairlines instead of shadows; depth lives in the 1-2% lightness step between surfaces
+- Inter + JetBrains Mono, both with full Cyrillic — no third typeface
+- Status colours used only as semantics; never as decoration
+- Editorial numbering for sections in mono — a signature touch borrowed from publishing
+- Sharp radii (4-12px) — never pillowed, never overly rounded
+- Dark-only — no light theme in this iteration
 
 ## 2. Colors
 
-A warm, low-saturation palette built around `linen-cream` `#F5F5F4` as the only background. There is no white surface anywhere by default. Hex values are authoritative for tooling; OKLCH is given as the canonical perceptual reference.
+A neutral dark ramp with paper-white as the only voice in chrome. Hex values are authoritative; OKLCH is the canonical perceptual reference.
 
 ### Primary
 
-- **Slate Tide** (`#4A6FA5`, oklch(50% 0.078 254)): the single accent. Used for: primary button fills, active sidebar pill text, hover state of links inside lists, focus rings (at 25% alpha). It is reserved — if a screen has 5 slate-tide marks, 3 of them are wrong.
-- **Slate Tide Deep** (`#3D5A87`, oklch(43% 0.08 254)): hover state of the primary button. Never used as a fill on its own.
+Paper-white is the **only chrome voice**. It carries every interactive affordance the client cares about — primary button fill, active nav state, link colour, focus ring. There is no "brand colour" in the chrome.
+
+- **Paper** (`#fafafa`, oklch(98% 0 0)): primary text on `ink`. Primary button background (white-on-black, like Linear marketing CTAs). Focus ring colour. Contrast against `ink` ≈ 19.5:1.
 
 ### Neutral
 
-- **Linen Cream** (`#F5F5F4`, oklch(96.4% 0.001 67)): the universal surface. Page background, card background, button-ghost background, input background. Warm rather than greenish or bluish; the slight warmth is the whole point.
-- **Walnut Ink** (`#3A3530`, oklch(25% 0.012 67)): primary text on `linen-cream`. Not `#000`. Contrast ratio ≈ 12.7:1 against the background.
-- **Walnut Mid** (`#6A6058`, oklch(45% 0.012 67)): secondary text (descriptions, captions, table body cells). Contrast ≈ 5.8:1.
-- **Walnut Soft** (`#9A9088`, oklch(63% 0.012 67)): tertiary text (placeholders, labels, eyebrows, meta). Contrast ≈ 3.2:1 — passes WCAG AA for large text only; avoid on body copy.
-- **Paper Elevated** (`#FFFFFF`, oklch(100% 0 0)): the only place pure white is permitted is for cards that re-host admin components inside the client portal (parser tables, base constructor) — these have to be readable as data surfaces and the neumorphic stone gets too low-contrast under them. Never use for primary client UI.
+- **Ink** (`#0a0a0a`, oklch(8% 0 0)): the universal surface — page background, sidebar background, default container background. Not pure `#000000`; the 8% lightness softens it just enough that screen glare on long sessions doesn't bite.
+- **Surface Rest** (`#111213`, oklch(12% 0 0)): a card, panel, or elevated container at rest. One step lighter than `ink`. Used for grouping content visibly without putting a border on it.
+- **Surface Elev** (`#18191c`, oklch(15% 0.002 250)): the hover/active state of a surface. Also: dropdown panels, modal sheets, command palette.
+- **Surface Active** (`#1f2023`, oklch(18% 0.002 250)): pressed / selected state. Same value as `divider` deliberately — pressed surfaces read as carved by becoming the divider colour.
+- **Divider** (`#1f2023`, oklch(18% 0.002 250)): hairline separator between rows, sections, cells. Renders as a barely-visible 1px line on ink — enough to give a table structure without weight.
+- **Divider Strong** (`#2a2b2f`, oklch(22% 0.003 250)): rare emphasis hairline — at the top of a section, around a focused input.
+- **Paper Mute** (`#a1a1a3`, oklch(67% 0 0)): secondary text — descriptions, table cells, captions. Contrast against `ink` ≈ 8.2:1.
+- **Paper Faint** (`#6c6c70`, oklch(48% 0.002 250)): tertiary text — eyebrows, placeholders, editorial numbering, time stamps. Contrast against `ink` ≈ 4.6:1 (passes WCAG AA for body, brushes the edge for labels).
 
-### Danger
+### Status (data colours, not chrome)
 
-- **Terracotta Signal** (`#B85450`, oklch(55% 0.135 25)): error messages, danger toasts, destructive button text. Warm and muted, not the standard `#dc2626` SaaS-red. Sits comfortably on `linen-cream` without screaming.
+Used exclusively as 6px dots, short text-tags (`АКТИВНА` in mono), and the leading icon of a per-row indicator. **Never as a background fill of a card or stripe.** These four colours together are the only chromatic accents permitted anywhere in the client product.
 
-### Ad-hoc Accents (currently in code; quarantine zone)
-
-These appear in the current dashboard's `MetricCard`, `QuickAction`, and `OnboardingChecklist` components. They are **not part of the system** — they're shipped reality that the system intends to shrink. Listed here for honesty, not for replication.
-
-- **Spruce Positive** (`#10B981`): completion checkmarks, "kick off campaign" CTA on dashboard.
-- **Amber Prompt** (`#F59E0B`): "fill the brief" CTA icon, sparkles in onboarding header.
-- Plus: `#3B82F6` (Base icon), `#F97316` (Sequences icon), `#8B5CF6` / `#7C3AED` (gradient ends), `#F43F5E` (reply-rate metric icon), `#6366F1` (RU/EN toggle).
+- **Amber Active** (`#f5a623`, oklch(72% 0.135 70)): in-progress, in-flight, pending review. Long-running things that are not stuck.
+- **Red Attention** (`#e5484d`, oklch(60% 0.185 25)): at-risk, stuck, error, destructive action. Use for things that need the user *today*, not informationally.
+- **Green Go** (`#46a758`, oklch(65% 0.15 142)): on-track, sent, success, completed. Earned positive, not decorative.
+- **Grey Quiet** (`#6c6c70`, oklch(48% 0.002 250)): todo, paused, archived, neutral. Equal to `paper-faint` deliberately — a status without colour is *grey*, not absent.
 
 ### Named Rules
 
-**The Single Slate Rule.** Slate Tide is the only chromatic accent in chrome (nav, buttons, focus, active states). Anything coloured outside that role — orange icons, gradient buttons, rainbow metric cards — is legacy and gets unified during redesign work.
+**The Invisible Accent Rule.** The chrome has no chromatic colour. Buttons, links, active states, focus rings are paper-white. Colour appears only inside the **status vocabulary**: amber, red, green, grey, as semantic indicators of data. If you reach for "the brand colour" — there isn't one in this system. The brand voice is in copy and density, not in hue.
 
-**The No-White-Background Rule.** The page is `linen-cream`. The card is `linen-cream`. The input is `linen-cream`. The button ghost is `linen-cream`. Depth is conveyed by shadow, not by colour swap. The only allowed `#FFFFFF` is the admin-component bridge (Paper Elevated above) and that's a known exception, not a pattern to reach for.
+**The Status-as-Data Rule.** A colour exists on screen because data has a status. If you can remove the colour without changing what the user understands about the data underneath, the colour is decoration — delete it. There are no "filled cards" with semantic background tint, no "category" colour stripes, no rainbow icons.
 
-**The Warm-Neutral Rule.** No `#000`, no `#fff` for type. Text is always walnut. The 0.012 chroma on the neutral ramp ties everything back to the warm hue and makes the palette read as a single material.
+**The No-Warm-Tint Rule.** The neutral ramp is pure cool grey (chroma ≤0.003). No warm-stone, no linen-cream, no walnut. Warmth lives in the copy and in the spacing, not in the colour.
 
 ## 3. Typography
 
-**Display / Body Font:** Nunito (Google Fonts, subsets: latin, cyrillic). Loaded via `next/font/google` in `app/src/app/client/layout.tsx` with `display: 'swap'`.
+**Display / Body Font:** Inter (Google Fonts, subsets: latin, cyrillic, cyrillic-ext). Variable font, weights 400/500/600/700/800.
 
-**Character:** Nunito is a humanist sans with rounded terminals — it carries the "friendly and alive" tone PRODUCT.md asks for without slipping into Comic-Sans cuteness. Used uniformly across hierarchy; weight (400 / 700 / 800) and size do the differentiation. There is no mono, no display serif, no second face.
+**Technical / Mono Font:** JetBrains Mono (Google Fonts, subsets: latin, cyrillic). Variable font, weights 400/500.
+
+Both loaded via `next/font/google` in `app/src/app/client/layout.tsx` with `display: 'swap'`. No third typeface. The variable-font setup means subsetting and font-feature-settings (`ss01`, `cv11` if relevant) can be tuned without re-loading.
+
+**Character:** Inter is the workhorse — neutral, geometric, high x-height, dense kerning at body sizes. It does not have a personality; that is exactly the point. JetBrains Mono carries the editorial signature: section numbers, status tags, file paths, IDs, timestamps. Wherever there is "a thing the machine names rather than a human reads", the mono carries it.
 
 ### Hierarchy
 
-- **Display** (`800`, `clamp(1.5rem, 3vw, 1.875rem)`, `1.15`): hero on `/client/dashboard`. One per page, never more.
-- **Headline** (`800`, `clamp(1.25rem, 2vw, 1.5rem)`, `1.2`): page H1 on every other client route (`/client`, `/client/leads`, `/client/replies`). Often paired with an inline icon.
-- **Title** (`700`, `1rem`, `1.3`): section heading inside a card (`<h2>` for "Quick actions", "Last campaigns", checklist title).
-- **Body** (`400`, `0.875rem`, `1.55`): descriptions, table cells, paragraph copy. Cap line length at 65-75ch in long-form sections (briefs, support, reports).
-- **Label** (`700`, `0.625rem` (10px), `1.3`, `letter-spacing: 0.12em`, uppercase): eyebrows above sections, table headers, metric card labels, navigation group titles. The wide-tracking-uppercase is the project's signature for chrome text.
+- **Display** (`700`, `clamp(1.75rem, 3vw, 2.25rem)`, `1.1`, `letter-spacing: -0.02em`): page-level hero on a landing-style screen inside the product (analytics overview, a dedicated detail page). Used sparingly — most screens don't need a display.
+- **Headline** (`600`, `clamp(1.25rem, 2vw, 1.5rem)`, `1.2`, `letter-spacing: -0.015em`): page H1 on every standard route (`/client/dashboard`, `/client/replies`). Often paired with a metadata line in `paper-mute` below.
+- **Title** (`600`, `0.9375rem` (15px), `1.35`): section heading inside a card or a row block — "Сегодня требуют внимания" body text.
+- **Body** (`400`, `0.8125rem` (13px), `1.55`): primary reading text — descriptions, table cells, paragraphs. Cap line length at 65-75ch in long-form sections. Smaller than the previous Calm Workshop body (14px) because tool-grade dark systems compress density.
+- **Label** (`500`, `0.6875rem` (11px), `1.3`, `letter-spacing: 0.02em`, **JetBrains Mono**): editorial-numbering eyebrows, status tags, table column headers, technical IDs. Mono, not uppercase by default — uppercase is reserved for the `status-tag` variant.
 
 ### Named Rules
 
-**The One-Face Rule.** No second typeface. If something needs differentiation, it gets it through weight (400 → 700 → 800) or letter-spacing (the label treatment), never through a switch to Inter / Geist / Mono.
+**The Editorial-Numbering Rule.** Sections inside the product are introduced with a numbered eyebrow in JetBrains Mono, paper-faint, with a right-pointing arrow as separator: `02 → Сегодня требуют внимания`. The arrow `→` (U+2192) is not a hyphen, not an em-dash; it is the editorial-figure separator borrowed from scientific publication conventions. Section numbers are local to the page (a dashboard has its own 01/02/03), not global.
 
-**The Wide-Label Rule.** Whenever you write a small uppercase label, it is `text-[10px] font-bold uppercase tracking-[0.12em]`, walnut-soft colour. This pattern is used in: sidebar group headers, metric labels, eyebrows. It is the same recipe everywhere — do not invent a 9px alternative or drop the tracking.
+**The Mono-for-Tech Rule.** Anything the machine names rather than the human reads goes in JetBrains Mono: campaign IDs (`CMP-2703`), file paths, status tags (`АКТИВНА`, `ПАУЗА`), timestamps in compact form (`14:32`), numeric counters where alignment matters. Russian text in mono is allowed and looks correct because JetBrains Mono has full cyrillic. Status tags that *are* mono get uppercase (`АКТИВНА` not `Активна`); body mono stays mixed-case.
+
+**The One-Family Rule.** Inter + JetBrains Mono — no third typeface. No serif, no display-serif italics, no script. If a layout needs a third voice, the answer is **weight, size, or mono**, not a new family.
+
+**The Sharp-Type Rule.** Type uses negative letter-spacing at display and headline scale (`-0.02em` / `-0.015em`); body letter-spacing is `0`. Mono labels use slight positive tracking (`0.02em`) to compensate for the slab terminals. Never use positive tracking on display sans (it weakens the silhouette).
 
 ## 4. Elevation
 
-The system is **explicitly neumorphic**: depth is conveyed by paired shadows, not by tonal layering or single-direction drops. A surface sits on the linen tabletop because a warm dark shadow falls down-and-right of it and a soft white highlight catches up-and-left. The same surface, inverted (inset), reads as carved into the tabletop instead of resting on it. This is the dominant material of the system.
+The system is **explicitly flat**. There are no `box-shadow` declarations anywhere except for `focus-visible` halos. Depth is conveyed by the 1-2% lightness step between `ink` (`#0a0a0a`) → `surface-rest` (`#111213`) → `surface-elev` (`#18191c`) → `surface-active` (`#1f2023`), and by hairline `1px solid` dividers in `divider` colour (`#1f2023`).
 
-Light direction is fixed: **upper-left source**. Dark shadows fall to the lower-right (positive offsets); highlights rise to the upper-left (negative offsets). Inverting that direction breaks the illusion immediately.
+A card sits on the page because its background is one step lighter than the page, not because it casts a shadow. A row is separated from its neighbour by a hairline, not by a gap. A hovered row tints darker (`surface-elev`), not lighter.
 
-### Shadow Vocabulary
+### Hairline Vocabulary
 
-All shadows use the warm shadow pair: `--cp-shadow-d: rgba(150, 140, 130, 0.60)` (warm grey-brown, the "dark") and `--cp-shadow-l: rgba(255, 255, 255, 0.94)` (almost pure highlight). Hex of the dark approximates `oklch(63% 0.012 67) / 0.6`.
-
-- **Outset Lifted** (`box-shadow: 6px 6px 14px var(--cp-shadow-d), -6px -6px 14px var(--cp-shadow-l)`): the primary `.neu-card`. Used for hero, dashboard sections, large content containers.
-- **Outset Resting** (`box-shadow: 4px 4px 10px var(--cp-shadow-d), -4px -4px 10px var(--cp-shadow-l)`): the compact `.neu-sm`. Metric cards, quick-action items, smaller list cards.
-- **Outset Button** (`box-shadow: 3px 3px 8px var(--cp-shadow-d), -2px -2px 6px var(--cp-shadow-l)`): the `.neu-btn` at rest. Asymmetric — the highlight is slightly tighter than the shadow to keep the button feeling decisive rather than floating.
-- **Inset Carved** (`box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l)`): the `.neu-inset` / `.neu-well` / `.neu-input` / active `.neu-pill`. Reads as recessed into the surface; used for fields, wells, and selected states.
-- **Press-Down** (`box-shadow: inset 2px 2px 5px rgba(0, 0, 0, 0.15)`): the `.neu-btn:active`. The button gets pushed in — same gesture as a physical key.
-- **Hover Lift** (`.neu-flat:hover` → `3px 3px 8px / -3px -3px 8px`): a flat surface receives a small outset on hover. Used sparingly; most surfaces are committed to a resting state.
-- **Accent Glow** (`box-shadow: 0 2px 8px rgba(74, 111, 165, 0.35)`): the gradient primary buttons in parser/admin contexts have a soft slate-tide glow underneath. This is leakage from admin styling and is not part of the canonical button vocabulary — listed for completeness.
-- **White Card Lift** (`box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 4px 18px rgba(0,0,0,0.05)`): the admin-bridge white cards (parser tables, brief sections) use a conventional drop shadow because they explicitly break out of the neumorphic system.
+- **Section Divider** (`1px solid #1f2023`, full-width inside a container, vertical or horizontal): separates major sections inside a card or a page region.
+- **Row Divider** (`1px solid #1f2023`, between sibling rows in a list): separates adjacent rows in a `list-row` group. The first row has no top divider; subsequent rows have `border-top`.
+- **Focused Field Border** (`1px solid #2a2b2f` at rest → `1px solid #fafafa` on `:focus-visible`): inputs and selects get a hairline border at rest and a paper-white border when focused. No focus glow.
+- **Focus Ring** (`0 0 0 2px #fafafa` at 30% alpha, offset by `0 0 0 4px #0a0a0a` for double-track on layered surfaces): the *only* `box-shadow` in the system, applied on `:focus-visible` for interactive elements.
 
 ### Named Rules
 
-**The Material Rule.** Shadows are material, not decoration. A shadow appears because a surface exists at that position; it never appears for emphasis, drama, or "polish". If you can remove the shadow without changing the user's mental model of the surface, the shadow shouldn't be there.
+**The Hairline-Not-Shadow Rule.** Depth is the difference between two adjacent surface colours, not a `box-shadow`. If you reach for `box-shadow` outside of `:focus-visible`, ask first whether a 1-step surface lightness change does the same job. It almost always does.
 
-**The Light-from-Upper-Left Rule.** Always. Dark to lower-right, highlight to upper-left. Reversing this is forbidden — it instantly reads as broken even when the user can't articulate why.
+**The No-Glow Rule.** No `box-shadow` for hover. No `box-shadow` for active. No `box-shadow` for elevation. The only allowed shadow is the focus-ring, and it is `0 0 0 2px` plus an offset — a hard ring, not a soft glow.
 
 ## 5. Components
 
 ### Buttons
 
-- **Shape:** medium radius (14px, `rounded.md`) for the primary; small radius (12px, `rounded.sm`) for the ghost / pill variants.
-- **Primary** (`.neu-btn`): `slate-tide` background, white text, Outset Button shadow at rest, Press-Down on `:active`. Padding `10px 18px`, font-weight `600-700`, transition `all 0.2s ease`. Hover deepens to `slate-tide-deep` and tightens the shadow (`1px 1px 4px / -1px -1px 4px`) — the button "settles" rather than lifts.
-- **Ghost** (`.neu-pill` at rest): `linen-cream` background, walnut-mid text, no shadow. Used for: language toggle, log-out button in header, sidebar links, secondary actions.
-- **Ghost Active** (`.neu-pill.active`): same surface, slate-tide text, Inset Carved shadow. Reads as "pressed in and held" — the active nav state.
-- **Hover (ghost)**: receives the Outset Resting shadow.
+- **Shape:** `rounded.md` (6px) — sharp but not razor-cornered. The primary action is the brightest object on the screen because it is *paper*, not because it is coloured.
+- **Primary** (`ds-btn-primary`): `paper` background (`#fafafa`), `ink` text (`#0a0a0a`), padding `8px 14px`, font Inter 500 13px. On `:hover`: background steps to `paper-mute` (`#a1a1a3`). On `:focus-visible`: paper background + focus ring. On `:active`: background `paper-mute`, no displacement (no translateY trickery). Used for the single primary CTA per screen.
+- **Secondary** (`ds-btn-secondary`): `ink` background, `paper` text, `1px solid #2a2b2f` hairline border, same padding and font as primary. On `:hover`: background `surface-rest`. The "I want to take an action but not the single most important one" button.
+- **Ghost** (`ds-btn-ghost`): no background, no border, `paper-mute` text, same padding. On `:hover`: background `surface-rest`, text `paper`. The "I'm here just for completeness" button — close, dismiss, cancel.
 
-### Cards
+### Status Tag
 
-- **Card Elevated** (`.neu-card`): `linen-cream` background, `rounded.xl` (20px), Outset Lifted shadow, padding `p-5 / p-6` (20-24px) on desktop, `p-5 sm:p-6` responsive. Used for hero sections, large feature blocks, the onboarding checklist container.
-- **Card Elevated Small** (`.neu-sm`): same colour, `rounded.lg` (16px), Outset Resting shadow, padding `p-3 sm:p-5`. Used for metric tiles, quick-action rows that aren't the primary CTA.
-- **Card Well** (`.neu-well`): `linen-cream` with Inset Carved shadow, `rounded.sm` (12px). Used for inline contextual containers (the "error" inset on the campaigns page, secondary information wells).
-- **Hover behavior** (`.neu-flat:hover`): rest cards do not lift on hover by default. The `.neu-flat` modifier opts a surface in. List rows use `.neu-row` instead — background tint, no shadow change.
-- **Internal Padding:** card content uses `space-y-4` to `space-y-8` for vertical rhythm; horizontal padding follows the `p-{4|5|6|8}` Tailwind scale. Compact density mode (`.ui-density-compact`) collapses these to `p-{1.5|2}` on desktop ≥768px.
+Used to indicate the state of a row item: campaign status, lead status, request status. Always: mono, uppercase, paired with a 6px dot of the same semantic colour.
 
-### Inputs / Fields
-
-- **Style** (`.neu-input`): `linen-cream` background, no visible border, Inset Carved shadow at rest, `rounded.md` (14px), walnut-ink text. The recessed shadow signals "you can type here" without a border line.
-- **Focus:** retains the inset, adds a slate-tide ring `0 0 0 2px rgba(74,111,165,0.25)`. No border colour change.
-- **Placeholder:** walnut-soft.
-- **Admin overrides:** inside admin components reused in the client portal, inputs switch to white background + 1px hairline border (`rgba(180,173,164,0.3)`) + soft inset of `0 1px 3px rgba(0,0,0,0.04)`. This bridge style is intentional but is the only inputs context outside the neumorphic rule.
-
-### Navigation
-
-- **Sidebar** (`ClientSidebar`): sticky 250-270px column, group headings in the **Wide-Label** treatment, items as `.neu-pill` with `truncate` text. Active item gets `.neu-pill.active` (inset + slate-tide text). The sidebar lives inside an `aside` with `direction: rtl` wrapper to push its scrollbar to the inner edge — content overrides back to `direction: ltr`.
-- **Mobile drawer** (`ClientMobileDrawer`): replaces the sidebar below `md`; uses the same `.neu-pill` items.
-- **Header:** sticky, sits inside a `.neu-card` to lift it from the scroll. Currently carries: drawer-toggle (mobile), the "Portal" wordmark, RU/EN toggle, sign-out pill.
+- **Shape:** `rounded.sm` (4px) wrapper, but visually it's "dot + text" not a pill.
+- **Composition:** `<span><span class="dot" style="background:{color}"/> ТЕКСТ</span>`
+- **Active variant:** dot `#f5a623` + text `#f5a623`, font JetBrains Mono 500 11px uppercase.
+- **Attention variant:** dot `#e5484d` + text `#e5484d`.
+- **Go variant:** dot `#46a758` + text `#46a758`.
+- **Quiet variant:** dot `#6c6c70` + text `#a1a1a3` (the *only* place the dot and text colour differ — quiet status is muted text with muted dot, not "bright muted" mixed).
 
 ### List Rows
 
-- **Style** (`.neu-row`): no shadow, no background at rest, walnut-ink text. Hover adds `background: rgba(180, 173, 164, 0.1)` (a tint of the warm shadow colour). Used in dashboard recent-campaigns list, campaign table body, leads/replies rows.
-- **Separators:** thin warm-grey `1px solid rgba(180,173,164,0.15)` borderTop between rows inside a `.neu-card`. There is **no** dividing line between the outermost card edge and the first row.
+The dominant pattern in this system. Used for: campaigns list, replies list, leads list, request list, log list. Replaces cards-with-content in 90% of cases.
 
-### Loading / Empty States
+- **Style** (`ds-list-row`): no background at rest, padding `12px 16px` (compact) or `14px 20px` (comfortable), text body 13px. Rows are siblings inside a `card-container`; first row has no top border, subsequent rows have `border-top: 1px solid #1f2023`.
+- **Hover:** background `surface-elev` (`#18191c`), text remains `paper`. Cursor `pointer`.
+- **Active / Pressed:** background `surface-active` (`#1f2023`).
+- **Focus:** focus ring (paper 30% double-track).
+- **Composition:** leading status dot (optional) → main column with title + meta sublabel → trailing actions (timestamp in mono, arrow icon). Touch target ≥44px on mobile.
 
-- **Spinner:** `.neu-spinner` — 24×24 ring with `--cp-shadow-d` track and `--cp-accent` arc. Always paired with text ("Загружаем кампании…").
-- **Progress bar (indeterminate):** linear gradient `slate-tide → #7C3AED` sliding inside a 6px-tall warm-grey track. Used for long fetches with unknown ETAs.
-- **Empty state:** `.neu-card` centred, icon at top in `walnut-soft`, bold title in `walnut-ink`, soft description in `walnut-mid`, single `.neu-btn` CTA. The "Кампаний пока нет" pattern is the canonical empty state.
+### Editorial Eyebrow
+
+Section header above a list-row group, a card, or a content block.
+
+- **Style:** font JetBrains Mono 500 11px, colour `paper-faint` (`#6c6c70`), letter-spacing `0.02em`, margin-bottom 12px.
+- **Format:** `NN → Section Name` — two-digit local index, arrow separator, title in normal case (not uppercase).
+- **Example:** `02 → Сегодня требуют внимания`, `03 → Кампании`. Numbers are page-local, not global.
+
+### Card Container
+
+Used to group list-rows or section content. **Not** used as a decoration around individual items.
+
+- **Style** (`ds-card`): `surface-rest` background (`#111213`), `rounded.lg` (8px), no border, no shadow, padding 0 (rows manage their own padding) or `20px` (when wrapping non-row content). The 1-step lightness lift from `ink` is the entire separation device.
+
+### Inputs
+
+- **Style** (`ds-input`): `surface-rest` background, `1px solid #2a2b2f` hairline border, `paper` text, `paper-faint` placeholder, padding `8px 12px`, `rounded.md` (6px), font Inter 400 13px.
+- **Focus:** border becomes `#fafafa` (paper). Background unchanged. No glow.
+- **Disabled:** background `ink`, text `paper-faint`, border `divider`.
+- **Error:** border `#e5484d`, helper text below in same colour 12px.
+
+### Navigation
+
+- **Sidebar items** (`ds-nav-item`): inline-flex, padding `6px 10px`, `rounded.sm` (4px), font Inter 500 13px, colour `paper-mute` at rest. Hover: background `surface-rest`, colour `paper`. Active: background `surface-elev`, colour `paper`. No bullet, no icon-square, no chromatic accent.
+- **Group labels** (`ds-nav-group`): editorial eyebrow style — JetBrains Mono 11px, `paper-faint`, margin around `12px 4px`. Use page-local numbering when groups feel like distinct concerns (`01 → Старт`, `02 → Мониторинг`, `03 → Архив`). If groups don't naturally number, drop the number and just leave the title.
+
+### Focus Indicator (system-wide)
+
+Every interactive element exposes `:focus-visible` with a double-track paper ring: `box-shadow: 0 0 0 2px rgba(250, 250, 250, 0.3), 0 0 0 4px #0a0a0a`. The inner 2px is paper at 30% alpha; the outer 4px is `ink` so the ring reads on top of any surface colour (rest, elev, active). Never a coloured focus glow.
 
 ## 6. Do's and Don'ts
 
 ### Do
 
-- **Do** use `linen-cream` `#F5F5F4` as the page surface and every primary container surface. Depth is shadow's job, not colour's.
-- **Do** restrict colour-as-meaning to `slate-tide` (action / active), `terracotta-signal` (danger), and `spruce-positive` (genuine completion). Everything else is walnut.
-- **Do** put all shadows on the upper-left light source (dark to lower-right, highlight to upper-left).
-- **Do** apply the **Wide-Label** treatment (`text-[10px] font-bold uppercase tracking-[0.12em] walnut-soft`) to every chrome label without exception.
-- **Do** use Nunito at three weights (400 / 700 / 800) and nothing else.
-- **Do** keep buttons honest: a primary action is one slate-tide pill on the screen, not three. If you find yourself wanting two primaries, you have a hierarchy problem, not a button problem.
-- **Do** pair every spinner / progress with a sentence describing what's happening ("Загружаем кампании…", "Загружено 47 из 120 кампаний") — see PRODUCT.md "Клиент видит результат, а не процесс".
-- **Do** keep tables dense but warm: walnut-mid body text, walnut-ink for numeric emphasis, no zebra striping (the hover tint is enough).
+- **Do** use `ink` `#0a0a0a` as the page background everywhere. Cards lift one step to `surface-rest`; hover lifts another step to `surface-elev`. Three steps total.
+- **Do** speak in `paper` (`#fafafa`) for chrome — primary buttons, active nav, links, focus ring. Status colours stay in dots and short tags only.
+- **Do** apply the **Editorial Eyebrow Rule** to every section above a card or row group: `NN → Title` in JetBrains Mono `paper-faint`. This is the system's signature.
+- **Do** use Inter at four weights (400 / 500 / 600 / 700) and JetBrains Mono at two (500 / 600). No third family.
+- **Do** keep status compact: 6px dot + uppercase mono tag (`АКТИВНА`). Status never fills a card background.
+- **Do** prefer list-rows over cards-with-content. A dashboard is a stack of titled row-groups, not a grid of decorative cards.
+- **Do** localise every label — `1234 отправлено` not `1234 sent`. JetBrains Mono has full cyrillic and renders Russian uppercase correctly.
+- **Do** make focus visible everywhere. Double-track paper ring on `:focus-visible` is the standard. Never `outline: none` without a replacement.
+- **Do** use the arrow `→` (U+2192) as the editorial separator. Hyphens for compound words (`OutreachOS-кампания`); commas, colons, periods for sentence punctuation.
 
 ### Don't
 
-- **Don't** use `background-clip: text` with a gradient for the "Portal" wordmark or any other text. Gradient text is decorative, never meaningful — pull the wordmark back to a solid `slate-tide` or `walnut-ink` and let weight carry it. (Currently violated in `app/src/app/client/layout.tsx` line 90-95.)
-- **Don't** decorate cards with `border-left: 3px solid <color>` or `border-top: 3px solid <color>` as a "tag" or "category" stripe. The neumorphic shadow already separates the card; the stripe is a side-stripe anti-pattern. (Currently violated in `QuickAction` and `MetricCard` — to be refactored during redesign.)
-- **Don't** assign a different colour to every metric / quick-action icon. Five rainbow icons in a row is a Bitrix/Amo CRM reflex called out in PRODUCT.md anti-references. Use the **Single Slate Rule**: one accent, used sparingly.
-- **Don't** introduce `linear-gradient(...)` fills on buttons as decoration. The asymmetric Outset Button shadow + the `slate-tide-deep` hover is the entire button visual language. (Currently violated in parser-context buttons inside `.client-portal`.)
-- **Don't** use `#000` for text or `#fff` for surfaces. Walnut-ink + linen-cream. The 0.012 chroma on neutrals is what makes the palette feel like a single warm material.
-- **Don't** invert the light direction (highlight to lower-right, shadow to upper-left). The system breaks instantly even if the viewer can't name what's wrong.
-- **Don't** mix neumorphic and flat-with-conventional-drop-shadow components inside the same surface. The admin-bridge white cards are a known exception; outside that exception, commit to one elevation language per screen.
-- **Don't** chase glassmorphism, hero-metric templates ("2,847 ↗ +12% ▲"), gradient hero banners, or sidebar-icon-explosions. These are the AI-slop enterprise-dashboard anti-reference from PRODUCT.md — they have no place in the Calm Workshop.
-- **Don't** copy the OpenAI / Anthropic dark-yellow palette into the client product. That palette lives on the marketing landing (`landing/index.html`) and stays there. The client product is warm-stone + slate, not black + neon.
-- **Don't** wrap inline copy in vague apologies ("Пожалуйста, обратите внимание", "К сожалению, произошла ошибка"). PRODUCT.md asks for the voice of a calm colleague — see the **Тёплый профессионализм** principle there.
-- **Don't** invent a 9px label, a 13px body, or a sharp 8px-radius card. Stay inside the published scales (`rounded.{sm,md,lg,xl}`, `spacing.{xs..2xl}`, the typography levels above). If you genuinely need a new step, add it to the system first.
+- **Don't** introduce `box-shadow` outside `:focus-visible`. Depth comes from the surface ramp, not glow.
+- **Don't** use neon yellow `#E8FF59`, lime green, or any other "AI-tool" reflex accent in the product chrome. That palette lives on the landing only. PRODUCT.md Anti-reference 4.
+- **Don't** use `#000000` for any surface or `#ffffff` for any text. The 2% offset (`#0a0a0a` / `#fafafa`) is what makes long sessions tolerable.
+- **Don't** apply chromatic colour to chrome — no purple primary buttons, no blue links, no rainbow nav indicators. The chrome speaks paper-white only.
+- **Don't** apply `border-left: Npx solid <color>` or any side-stripe accent as a tag. Status is a dot + mono tag, not a colour stripe.
+- **Don't** use `background-clip: text` with a gradient anywhere. No gradient text, ever, even on wordmarks.
+- **Don't** use `gradient` fills on buttons. White-on-black is the entire primary CTA visual language.
+- **Don't** carry forward any `.neu-*` class or `--cp-*` token from the previous Calm Workshop iteration. The pivot is decisive — neumorphic warm-stone is archived in `.impeccable/legacy-design.md`, not extended.
+- **Don't** introduce a third typeface, a script, or a serif italic. Inter + JetBrains Mono. The temptation to add Instrument Serif for "warmth" is a marketing-page move; the product doesn't need it.
+- **Don't** decorate cards with rainbow per-row icons (`#3B82F6` blue + `#F59E0B` amber + `#10B981` green). That is the Bitrix/Amo reflex from PRODUCT.md Anti-reference 1.
+- **Don't** chase glassmorphism, blur surfaces, or "frosted" effects. The system is flat by doctrine.
+- **Don't** invent rounded corners larger than `rounded.xl` (12px). Sharp readability beats pillowed softness — the previous Calm Workshop's 20px card radius doesn't belong in this language.
+- **Don't** mix this system with leftover `.client-portal` `.neu-*` styles. When migrating a screen, fully rewrite its chrome to the new tokens; don't leave half-neumorphic, half-editorial surfaces.
+- **Don't** use the editorial-numbering pattern as decoration (sprinkling `FIG 0.X` on screens that don't need section markers). The numbering only earns its place when the page has 2+ distinct section concerns the user navigates between.
