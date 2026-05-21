@@ -28,8 +28,6 @@ import {
 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { OnboardingChecklist } from '@/components/client/OnboardingChecklist';
-import { AutoPipelineSummary } from '@/components/client/AutoPipelineSummary';
-import type { ClientNavMode } from '@/lib/clientNav';
 
 // ───────────────────────── types ─────────────────────────
 
@@ -142,9 +140,6 @@ export default function ClientDashboardPage() {
   const [campaigns, setCampaigns] = useState<CampaignRow[] | null>(null);
   const [replies, setReplies] = useState<ReplyItem[] | null>(null);
   const [onboarding, setOnboarding] = useState<OnboardingResponse | null>(null);
-  // 'auto' клиенты — портал собирает кампании за них; онбординг скрываем,
-  // CTA «Создать кампанию» меняется на блок AutoPipelineSummary.
-  const [portalMode, setPortalMode] = useState<ClientNavMode>('manual');
 
   const [campaignsError, setCampaignsError] = useState('');
   const [repliesError, setRepliesError] = useState('');
@@ -197,17 +192,6 @@ export default function ClientDashboardPage() {
       } catch {
         // onboarding is graceful-fallback; absence simply hides the checklist
         if (!cancelled) setOnboarding(null);
-      }
-    })();
-
-    void (async () => {
-      try {
-        const data = await clientApiFetch<{ mode?: ClientNavMode }>('/portal-mode');
-        if (!cancelled && (data.mode === 'auto' || data.mode === 'manual')) {
-          setPortalMode(data.mode);
-        }
-      } catch {
-        // mode fetch failure → falls back to 'manual'; nothing breaks.
       }
     })();
 
@@ -393,12 +377,6 @@ export default function ClientDashboardPage() {
         </p>
       )}
 
-      {/* Auto-pipeline summary — заменяет онбординг для клиентов в авто-режиме.
-          Гарантированно невидим для manual-клиентов (компонент сам ничего
-          не рендерит при enabled=false, но условие на режим даёт нам
-          предсказуемость без зависимости от внутренней логики компонента). */}
-      {portalMode === 'auto' && <AutoPipelineSummary />}
-
       {/* Campaigns section — hidden for new clients until onboarding completes */}
       {showCampaignsSection && (
         <section aria-labelledby="dash-campaigns-label">
@@ -460,24 +438,15 @@ export default function ClientDashboardPage() {
               <p className="text-sm font-bold mb-1" style={{ color: 'var(--cp-text)' }}>
                 Кампаний пока нет
               </p>
-              {portalMode === 'auto' ? (
-                <p className="text-xs" style={{ color: 'var(--cp-text-m)' }}>
-                  Кампании собираются автоматически каждое утро в 07:00 МСК
-                  — следите за разделом «Ответы».
-                </p>
-              ) : (
-                <>
-                  <p className="text-xs mb-4" style={{ color: 'var(--cp-text-m)' }}>
-                    Когда вы запустите первую кампанию, она появится здесь.
-                  </p>
-                  <Link
-                    href={'/client/launch' as Route}
-                    className="neu-btn inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold"
-                  >
-                    <Send className="h-4 w-4" aria-hidden /> Создать кампанию
-                  </Link>
-                </>
-              )}
+              <p className="text-xs mb-4" style={{ color: 'var(--cp-text-m)' }}>
+                Когда вы запустите первую кампанию, она появится здесь.
+              </p>
+              <Link
+                href={'/client/launch' as Route}
+                className="neu-btn inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold"
+              >
+                <Send className="h-4 w-4" aria-hidden /> Создать кампанию
+              </Link>
             </div>
           )}
 
@@ -548,10 +517,8 @@ export default function ClientDashboardPage() {
         </section>
       )}
 
-      {/* Onboarding checklist — only when incomplete AND клиент не в auto-режиме.
-          В auto-режиме онбординг бессмыслен (брифом/базой/цепочкой управляем
-          мы, не клиент), вместо него сверху страницы стоит AutoPipelineSummary. */}
-      {portalMode === 'manual' && onboarding && !onboarding.complete && <OnboardingChecklist />}
+      {/* Onboarding checklist — only when incomplete. */}
+      {onboarding && !onboarding.complete && <OnboardingChecklist />}
     </div>
   );
 }
