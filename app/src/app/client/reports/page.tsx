@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback, useEffect } from 'react';
-import { FileBarChart2, Send, Eye, MessageSquare, Layers } from 'lucide-react';
+import { FileBarChart2 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 interface CampaignRow {
@@ -100,22 +100,29 @@ export default function ClientReportsPage() {
 
   return (
     <div className="mx-auto max-w-5xl">
-      <div className="mb-6 sm:mb-8">
-        <h1 className="text-xl sm:text-2xl font-extrabold flex items-center gap-2.5">
-          <span
-            className="inline-flex items-center justify-center w-8 h-8 rounded-xl"
-            style={{ background: 'rgba(139,92,246,0.12)', color: '#8B5CF6' }}
-          >
-            <FileBarChart2 className="h-4.5 w-4.5" />
-          </span>
+      <header className="mb-6 sm:mb-8">
+        <h1
+          className="text-xl sm:text-2xl font-bold m-0"
+          style={{ color: 'var(--cp-paper)' }}
+        >
           Отчёты
         </h1>
-        <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>Выберите кампании и сформируйте отчёт</p>
-      </div>
+        <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
+          Выберите кампании и сформируйте отчёт
+        </p>
+      </header>
 
       {error && (
-        <div className="neu-inset mb-6 rounded-2xl px-5 py-3.5 text-sm font-medium" style={{ color: 'var(--cp-danger)' }}>
-          {error}
+        <div
+          className="neu-inset mb-6 rounded-lg px-5 py-3.5 text-sm font-medium flex items-start gap-2.5"
+          role="alert"
+        >
+          <span
+            aria-hidden
+            className="ds-status-dot shrink-0"
+            style={{ background: 'var(--cp-red)', marginTop: '7px' }}
+          />
+          <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
         </div>
       )}
 
@@ -126,7 +133,10 @@ export default function ClientReportsPage() {
       ) : (
         <>
           {campaigns.length === 0 ? (
-            <div className="neu-inset mb-4 rounded-2xl px-5 py-3.5 text-sm" style={{ color: 'var(--cp-text-l)' }}>
+            <div
+              className="neu-inset mb-4 rounded-lg px-5 py-3.5 text-sm"
+              style={{ color: 'var(--cp-paper-mute)' }}
+            >
               Нет доступных кампаний
             </div>
           ) : (
@@ -134,12 +144,15 @@ export default function ClientReportsPage() {
               <button
                 onClick={selectAll}
                 className="text-xs font-semibold transition-colors"
-                style={{ color: 'var(--cp-accent)' }}
+                style={{ color: 'var(--cp-paper)' }}
               >
                 {selectedIds.size === campaigns.length ? 'Снять все' : 'Выбрать все'}
               </button>
-              <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>
-                {selectedIds.size > 0 ? `Выбрано: ${selectedIds.size}` : 'Все кампании'}
+              <span
+                className="ds-mono text-[11px]"
+                style={{ color: 'var(--cp-paper-faint)' }}
+              >
+                {selectedIds.size > 0 ? `выбрано: ${selectedIds.size}` : 'все кампании'}
               </span>
             </div>
           )}
@@ -154,16 +167,25 @@ export default function ClientReportsPage() {
                   <label
                     key={c.id}
                     className="neu-row flex items-center gap-2 sm:gap-3 px-3 sm:px-5 py-2.5 sm:py-3 cursor-pointer"
-                    style={idx > 0 ? { borderTop: '1px solid rgba(180,173,164,0.15)' } : undefined}
+                    style={
+                      idx > 0
+                        ? { borderTop: '1px solid var(--cp-divider)' }
+                        : undefined
+                    }
                   >
                     <input
                       type="checkbox"
                       checked={checked}
                       onChange={() => toggleCampaign(c.id)}
                     />
-                    <span className="flex-1 min-w-0 text-xs sm:text-sm font-medium truncate">{c.name}</span>
-                    <span className="text-[10px] sm:text-[11px] shrink-0 hidden sm:inline" style={{ color: 'var(--cp-text-l)' }}>
-                      {sent} sent / {replied} replies
+                    <span className="flex-1 min-w-0 text-xs sm:text-sm font-medium truncate">
+                      {c.name}
+                    </span>
+                    <span
+                      className="ds-mono text-[10px] sm:text-[11px] shrink-0 hidden sm:inline"
+                      style={{ color: 'var(--cp-paper-faint)' }}
+                    >
+                      {sent} отправлено · {replied} ответов
                     </span>
                   </label>
                 );
@@ -175,59 +197,103 @@ export default function ClientReportsPage() {
             <button
               onClick={handleGenerate}
               disabled={generating || campaigns.length === 0}
-              className="neu-btn inline-flex items-center gap-2 px-5 sm:px-6 py-2.5 sm:py-3 text-xs sm:text-sm font-semibold w-full sm:w-auto justify-center"
+              className="ds-btn-primary inline-flex items-center gap-2 px-5 sm:px-6 py-2.5 sm:py-3 text-xs sm:text-sm w-full sm:w-auto justify-center disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {generating ? 'Генерация...' : 'Сформировать отчёт'}
+              <FileBarChart2 className="h-4 w-4" aria-hidden />
+              {generating ? 'Генерация…' : 'Сформировать отчёт'}
             </button>
           </div>
 
           {report && (
             <div className="neu-card overflow-hidden">
               <div className="px-3 sm:px-5 py-3 sm:py-4 flex items-center justify-between">
-                <h3 className="text-xs sm:text-sm font-bold">Результат</h3>
+                <p className="ds-eyebrow">Результат</p>
                 <button
                   onClick={handleDownloadCsv}
-                  className="neu-pill inline-flex items-center gap-1.5 px-3 py-1.5 text-[10px] sm:text-xs font-semibold"
-                  style={{ color: 'var(--cp-accent)' }}
+                  className="ds-btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-[10px] sm:text-xs"
                 >
                   CSV
                 </button>
               </div>
 
-              <hr className="neu-divider mx-3 sm:mx-5" />
+              <hr
+                className="m-0"
+                style={{
+                  border: 'none',
+                  borderTop: '1px solid var(--cp-divider)',
+                }}
+              />
 
               <div className="p-3 sm:p-5 grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-4">
-                {([
-                  { label: 'Кампаний', value: report.summary.totalCampaigns, sub: undefined as string | undefined, icon: Layers, color: '#4A6FA5' },
-                  { label: 'Отправлено', value: report.summary.totalEmailsSent, sub: undefined as string | undefined, icon: Send, color: '#3B82F6' },
-                  { label: 'Открытия', value: report.summary.totalOpened, sub: report.summary.conversion.openPctAllEmails, icon: Eye, color: '#8B5CF6' },
-                  { label: 'Ответы', value: report.summary.totalReplies, sub: report.summary.conversion.replyPctByLeads, icon: MessageSquare, color: '#10B981' },
-                ]).map((m) => {
-                  const Icon = m.icon;
-                  return (
-                  <div key={m.label} className="neu-sm p-2.5 sm:p-3.5" style={{ borderTop: `3px solid ${m.color}` }}>
-                    <div className="flex items-center justify-between">
-                      <p className="text-[9px] sm:text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>{m.label}</p>
-                      <Icon className="h-3.5 w-3.5" style={{ color: m.color }} />
-                    </div>
-                    <p className="text-base sm:text-lg font-bold mt-1">
+                {(
+                  [
+                    {
+                      label: 'Кампаний',
+                      value: report.summary.totalCampaigns,
+                      sub: undefined as string | undefined,
+                    },
+                    {
+                      label: 'Отправлено',
+                      value: report.summary.totalEmailsSent,
+                      sub: undefined as string | undefined,
+                    },
+                    {
+                      label: 'Открытия',
+                      value: report.summary.totalOpened,
+                      sub: report.summary.conversion.openPctAllEmails,
+                    },
+                    {
+                      label: 'Ответы',
+                      value: report.summary.totalReplies,
+                      sub: report.summary.conversion.replyPctByLeads,
+                    },
+                  ]
+                ).map((m) => (
+                  <div
+                    key={m.label}
+                    className="rounded-md p-2.5 sm:p-3.5"
+                    style={{
+                      background: 'var(--cp-surface-rest)',
+                      border: '1px solid var(--cp-divider)',
+                    }}
+                  >
+                    <p className="ds-eyebrow">{m.label}</p>
+                    <p
+                      className="ds-mono text-base sm:text-lg font-semibold mt-1"
+                      style={{ color: 'var(--cp-paper)' }}
+                    >
                       {m.value}
-                      {m.sub && <span className="text-[10px] sm:text-xs font-normal ml-1 sm:ml-1.5" style={{ color: 'var(--cp-text-l)' }}>{m.sub}</span>}
+                      {m.sub && (
+                        <span
+                          className="text-[10px] sm:text-xs font-normal ml-1 sm:ml-1.5"
+                          style={{ color: 'var(--cp-paper-faint)' }}
+                        >
+                          {m.sub}
+                        </span>
+                      )}
                     </p>
                   </div>
-                  );
-                })}
+                ))}
               </div>
 
               {report.rows && report.rows.length > 0 && (
                 <>
-                  <hr className="neu-divider mx-3 sm:mx-5" />
+                  <hr
+                    className="m-0"
+                    style={{
+                      border: 'none',
+                      borderTop: '1px solid var(--cp-divider)',
+                    }}
+                  />
                   <div className="overflow-x-auto">
                     <table className="w-full text-[10px] sm:text-xs">
                       <thead>
-                        <tr>
+                        <tr style={{ background: 'var(--cp-surface-elev)' }}>
                           {report.rows[0]?.map((cell, i) => (
-                            <th key={i} className="px-3 sm:px-5 py-2.5 sm:py-3 text-left text-[9px] sm:text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap" style={{ color: 'var(--cp-text-l)' }}>
+                            <th
+                              key={i}
+                              className="ds-eyebrow px-3 sm:px-5 py-2.5 sm:py-3 text-left whitespace-nowrap"
+                            >
                               {String(cell)}
                             </th>
                           ))}
@@ -235,9 +301,19 @@ export default function ClientReportsPage() {
                       </thead>
                       <tbody>
                         {report.rows.slice(1).map((row, ri) => (
-                          <tr key={ri} className="neu-row" style={{ borderTop: '1px solid rgba(180,173,164,0.15)' }}>
+                          <tr
+                            key={ri}
+                            className="neu-row"
+                            style={{ borderTop: '1px solid var(--cp-divider)' }}
+                          >
                             {row.map((cell, ci) => (
-                              <td key={ci} className="px-3 sm:px-5 py-2 sm:py-2.5 whitespace-nowrap" style={{ color: 'var(--cp-text-m)' }}>{String(cell)}</td>
+                              <td
+                                key={ci}
+                                className="ds-mono px-3 sm:px-5 py-2 sm:py-2.5 whitespace-nowrap"
+                                style={{ color: 'var(--cp-paper-mute)' }}
+                              >
+                                {String(cell)}
+                              </td>
                             ))}
                           </tr>
                         ))}
