@@ -29,31 +29,31 @@ export default function ClientParsersPage() {
 
   return (
     <div className="mx-auto max-w-5xl">
-      <div className="mb-6 sm:mb-8">
-        <h1 className="text-xl sm:text-2xl font-extrabold">Инструменты парсинга</h1>
-        <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
+      <header className="mb-6 sm:mb-8">
+        <h1
+          className="text-xl sm:text-2xl font-bold m-0"
+          style={{ color: 'var(--cp-paper)' }}
+        >
+          Инструменты парсинга
+        </h1>
+        <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
           Парсеры и генерация контента
         </p>
-      </div>
+      </header>
 
-      <div className="mb-6">
-        <div className="inline-flex rounded-xl p-1 neu-inset flex-wrap gap-1">
-          {TABS.map(({ tab, label }) => (
-            <button
-              key={tab}
-              type="button"
-              onClick={() => setActiveTab(tab)}
-              className={`px-4 py-2 text-sm font-semibold rounded-lg transition ${
-                activeTab === tab
-                  ? 'neu-card shadow-sm'
-                  : 'text-[var(--cp-text-m)] hover:text-[var(--cp-text)]'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
+      <nav className="flex gap-1 mb-6 flex-wrap" aria-label="Инструменты">
+        {TABS.map(({ tab, label }) => (
+          <button
+            key={tab}
+            type="button"
+            onClick={() => setActiveTab(tab)}
+            className={`ds-nav-item px-4 py-2 text-xs ${activeTab === tab ? 'active' : ''}`}
+            aria-current={activeTab === tab ? 'page' : undefined}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
 
       {activeTab === 'hh' && <HHParserView clientMode />}
       {activeTab === 'search' && <SearchParserView clientMode />}

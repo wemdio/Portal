@@ -14,7 +14,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Send, Loader2, AlertCircle } from 'lucide-react';
+import { Send, Loader2, MessageSquare } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import {
@@ -146,8 +146,13 @@ export default function ClientSupportPage() {
   return (
     <div className="mx-auto max-w-3xl">
       <header className="mb-4 sm:mb-6">
-        <h1 className="text-xl sm:text-2xl font-extrabold mb-1.5">Поддержка</h1>
-        <p className="text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
+        <h1
+          className="text-xl sm:text-2xl font-bold mb-1.5 m-0"
+          style={{ color: 'var(--cp-paper)' }}
+        >
+          Поддержка
+        </h1>
+        <p className="text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
           Напишите менеджеру — мы видим сообщение в портале и отвечаем в рабочее время.
         </p>
       </header>
@@ -158,21 +163,26 @@ export default function ClientSupportPage() {
             <div className="flex items-center justify-center py-12">
               <Loader2
                 className="h-5 w-5 animate-spin"
-                style={{ color: 'var(--cp-text-l)' }}
+                style={{ color: 'var(--cp-paper-faint)' }}
                 aria-label="Загрузка"
               />
             </div>
           ) : messages.length === 0 ? (
             <div className="text-center py-12 px-4">
+              <MessageSquare
+                className="mx-auto h-8 w-8 mb-3"
+                style={{ color: 'var(--cp-paper-faint)' }}
+                aria-hidden
+              />
               <p
                 className="text-sm sm:text-base font-semibold mb-2"
-                style={{ color: 'var(--cp-text)' }}
+                style={{ color: 'var(--cp-paper)' }}
               >
                 Пока сообщений нет
               </p>
               <p
                 className="text-xs sm:text-sm max-w-md mx-auto"
-                style={{ color: 'var(--cp-text-m)' }}
+                style={{ color: 'var(--cp-paper-mute)' }}
               >
                 Опишите вопрос, проблему или пожелание. Менеджер получит уведомление
                 и ответит вам прямо здесь — переписка сохраняется.
@@ -188,15 +198,16 @@ export default function ClientSupportPage() {
 
         <div
           className="border-t p-3 sm:p-4"
-          style={{ borderColor: 'var(--cp-divider, rgba(0,0,0,0.06))' }}
+          style={{ borderColor: 'var(--cp-divider)' }}
         >
           {error && (
-            <div
-              className="flex items-center gap-2 mb-2 text-xs"
-              style={{ color: 'var(--cp-text-error, #b91c1c)' }}
-            >
-              <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-              <span>{error}</span>
+            <div className="flex items-start gap-2 mb-2 text-xs">
+              <span
+                aria-hidden
+                className="ds-status-dot shrink-0"
+                style={{ background: 'var(--cp-red)', marginTop: '5px' }}
+              />
+              <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
             </div>
           )}
           <div className="flex items-end gap-2 sm:gap-3">
@@ -213,21 +224,20 @@ export default function ClientSupportPage() {
               placeholder="Напишите сообщение… (Ctrl/⌘ + Enter — отправить)"
               maxLength={SUPPORT_MESSAGE_MAX_LEN}
               rows={2}
-              className="neu-inset flex-1 resize-none rounded-xl px-3 py-2 text-sm focus:outline-none"
-              style={{ color: 'var(--cp-text)' }}
+              className="ds-input flex-1 resize-none"
               aria-label="Сообщение менеджеру"
             />
             <button
               type="button"
               disabled={!canSend}
               onClick={() => void handleSend()}
-              className="neu-btn inline-flex items-center justify-center gap-1.5 px-4 py-2.5 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+              className="ds-btn-primary inline-flex items-center justify-center gap-1.5 px-4 py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
               aria-label="Отправить"
             >
               {sending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
               ) : (
-                <Send className="h-4 w-4" />
+                <Send className="h-4 w-4" aria-hidden />
               )}
               <span className="hidden sm:inline">Отправить</span>
             </button>
@@ -243,21 +253,27 @@ function MessageBubble({ message }: { message: SupportMessageRow }) {
   return (
     <div className={`flex ${fromClient ? 'justify-end' : 'justify-start'}`}>
       <div
-        className={`max-w-[85%] sm:max-w-[75%] rounded-2xl px-3.5 py-2 ${
-          fromClient ? 'neu-btn' : 'neu-pill'
-        }`}
+        className="max-w-[85%] sm:max-w-[75%] rounded-lg px-3.5 py-2"
         style={
           fromClient
-            ? undefined
-            : { color: 'var(--cp-text)', background: 'var(--cp-surface, transparent)' }
+            ? { background: 'var(--cp-paper)', color: 'var(--cp-ink)' }
+            : {
+                background: 'var(--cp-surface-rest)',
+                border: '1px solid var(--cp-divider)',
+                color: 'var(--cp-paper)',
+              }
         }
       >
         <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
           {message.body}
         </div>
         <div
-          className="text-[10px] font-semibold mt-1 opacity-70"
-          style={fromClient ? undefined : { color: 'var(--cp-text-l)' }}
+          className="ds-mono text-[10px] mt-1.5"
+          style={
+            fromClient
+              ? { color: 'rgba(10, 10, 10, 0.55)' }
+              : { color: 'var(--cp-paper-faint)' }
+          }
         >
           {fromClient ? 'Вы' : 'Менеджер'} · {formatTime(message.created_at)}
         </div>
