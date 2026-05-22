@@ -3,9 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
-import {
-  BarChart3, Send, Mail, Eye, MessageSquare, Percent,
-} from 'lucide-react';
+import { Mail } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { OnboardingBanner } from '@/components/client/OnboardingBanner';
 
@@ -27,22 +25,22 @@ interface CampaignsResponse {
   lastSyncedAt: string | null;
 }
 
-function MetricCard({ label, value, icon: Icon, color }: { label: string; value: number | string; icon: React.ElementType; color: string }) {
-  return (
-    <div className="neu-sm p-3 sm:p-5" style={{ borderTop: `3px solid ${color}` }}>
-      <div className="flex items-center justify-between mb-1">
-        <p className="text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>
-          {label}
-        </p>
-        <Icon className="h-4 w-4" style={{ color }} />
-      </div>
-      <p className="mt-1 sm:mt-2 text-xl sm:text-2xl font-bold">{value}</p>
-    </div>
-  );
-}
-
 type SortCol = 'name' | 'sent' | 'opened' | 'openRate' | 'replied' | 'replyRate';
 type SortDir = 'asc' | 'desc';
+
+// Status int → 6px dot colour. Semantic: green = active, amber = paused,
+// paper-faint = done / preparation. Matches dashboard's statusInfo.
+function statusDot(status: number | null): string {
+  switch (status) {
+    case 1:
+      return '#46a758'; // cp-green
+    case 2:
+      return '#f5a623'; // cp-amber
+    case 3:
+    default:
+      return 'var(--cp-paper-faint)';
+  }
+}
 
 function SortIcon({ col, active, dir }: { col: string; active: boolean; dir: SortDir }) {
   void col;
@@ -58,40 +56,42 @@ function SortIcon({ col, active, dir }: { col: string; active: boolean; dir: Sor
   );
 }
 
-// Indeterminate progress bar + "загружено x из y" counter
+// Hairline progress bar + "загружено x из y" counter. No gradients — just a
+// paper-white fill on a divider track, matching the editorial-flat language.
 function LoadingProgress({ loaded, total }: { loaded: number; total: number | null }) {
   const isDone = total !== null && loaded >= total;
   const pct = total && total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
 
   return (
     <div className="flex flex-col items-center gap-4 py-16">
-      <p className="text-sm font-medium" style={{ color: 'var(--cp-text-m)' }}>
+      <p
+        className="ds-mono text-xs"
+        style={{ color: 'var(--cp-paper-mute)' }}
+      >
         {isDone
-          ? `Загружено ${loaded} из ${total} кампаний`
+          ? `Загружено ${loaded} из ${total}`
           : total !== null
-            ? `Загружаем ваши кампании... загружено ${loaded} из ${total}`
-            : 'Загружаем ваши кампании...'}
+            ? `Загружаем кампании · ${loaded} из ${total}`
+            : 'Загружаем кампании…'}
       </p>
 
       <div
-        className="w-64 sm:w-80 rounded-full overflow-hidden"
-        style={{ height: '6px', background: 'rgba(180,173,164,0.2)' }}
+        className="w-64 sm:w-80 overflow-hidden rounded-full"
+        style={{ height: '2px', background: 'var(--cp-divider)' }}
       >
         {total === null ? (
-          // Indeterminate — CSS sliding animation while we don't know total
           <div
-            className="h-full rounded-full"
+            className="h-full"
             style={{
               width: '40%',
-              background: 'linear-gradient(90deg, var(--cp-accent), #7C3AED)',
+              background: 'var(--cp-paper)',
               animation: 'cp-slide 1.4s ease-in-out infinite',
             }}
           />
         ) : (
-          // Determinate — fill to pct
           <div
-            className="h-full rounded-full transition-all duration-500"
-            style={{ width: `${pct}%`, background: 'linear-gradient(90deg, var(--cp-accent), #818CF8)' }}
+            className="h-full transition-all duration-500"
+            style={{ width: `${pct}%`, background: 'var(--cp-paper)' }}
           />
         )}
       </div>
@@ -111,7 +111,12 @@ function formatSyncedAt(iso: string | null): string {
   if (!iso) return '';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
-  return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 export default function ClientCampaignsPage() {
@@ -164,7 +169,9 @@ export default function ClientCampaignsPage() {
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const totals = campaigns.reduce<{ sent: number; opened: number; replied: number; contacted: number }>(
     (acc, c) => ({
@@ -201,157 +208,264 @@ export default function ClientCampaignsPage() {
     });
 
   const syncedLabel = formatSyncedAt(lastSyncedAt);
+  const hasCampaigns = campaigns.length > 0;
 
   return (
     <div className="mx-auto max-w-5xl">
       <OnboardingBanner />
-      <div className="mb-6 sm:mb-8 flex items-end justify-between gap-4">
+
+      <header className="mb-6 sm:mb-8 flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-extrabold flex items-center gap-2.5">
-            <span
-              className="inline-flex items-center justify-center w-8 h-8 rounded-xl"
-              style={{ background: 'rgba(59,130,246,0.12)', color: '#3B82F6' }}
-            >
-              <BarChart3 className="h-4.5 w-4.5" />
-            </span>
+          <p className="ds-eyebrow mb-2">
+            01<span aria-hidden> → </span>Мониторинг
+          </p>
+          <h1
+            className="text-xl sm:text-2xl font-bold m-0"
+            style={{ color: 'var(--cp-paper)' }}
+          >
             Кампании
           </h1>
-          <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
+          <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
             Статистика по вашим email-кампаниям
           </p>
         </div>
         {!loading && syncedLabel && (
-          <p className="text-[11px] shrink-0" style={{ color: 'var(--cp-text-l)' }}>
-            Обновлено {syncedLabel}
+          <p
+            className="ds-mono text-[11px] shrink-0"
+            style={{ color: 'var(--cp-paper-faint)' }}
+          >
+            обновлено {syncedLabel}
           </p>
         )}
-      </div>
+      </header>
 
       {error && (
-        <div className="neu-inset mb-6 rounded-2xl px-5 py-3.5 text-sm font-medium" style={{ color: 'var(--cp-danger)' }}>
-          {error}
+        <div
+          className="neu-inset mb-6 rounded-lg px-5 py-3.5 text-sm font-medium flex items-start gap-2.5"
+          role="alert"
+        >
+          <span
+            aria-hidden
+            className="ds-status-dot shrink-0"
+            style={{ background: 'var(--cp-red)', marginTop: '7px' }}
+          />
+          <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
         </div>
       )}
 
       {loading ? (
         <LoadingProgress loaded={loadedCount} total={total} />
+      ) : !hasCampaigns ? (
+        <div
+          className="neu-card py-12 sm:py-16 text-center px-6"
+        >
+          <Mail
+            className="mx-auto h-8 w-8 mb-3"
+            style={{ color: 'var(--cp-paper-faint)' }}
+            aria-hidden
+          />
+          <p className="text-base sm:text-lg font-bold mb-2" style={{ color: 'var(--cp-paper)' }}>
+            Кампаний пока нет
+          </p>
+          <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-paper-mute)' }}>
+            Запустите первую кампанию: загрузите базу, напишите цепочку и мы покажем
+            здесь её метрики (отправки, открытия, ответы) в реальном времени.
+          </p>
+          <Link
+            href={'/client/launch' as Route}
+            className="ds-btn-primary inline-flex items-center gap-2 px-5"
+          >
+            Создать кампанию
+          </Link>
+        </div>
       ) : (
         <>
-          <div className="mb-6 sm:mb-8 grid grid-cols-2 gap-3 sm:gap-5 sm:grid-cols-3 lg:grid-cols-5">
-            <MetricCard label="Отправлено" value={totals.sent.toLocaleString('ru-RU')} icon={Send} color="#4A6FA5" />
-            <MetricCard label="Открытия" value={totals.opened.toLocaleString('ru-RU')} icon={Eye} color="#8B5CF6" />
-            <MetricCard label="Ответы" value={totals.replied} icon={MessageSquare} color="#10B981" />
-            <MetricCard label="Open rate" value={`${openRate}%`} icon={Percent} color="#F59E0B" />
-            <MetricCard label="Reply rate" value={`${replyRate}%`} icon={Percent} color="#F43F5E" />
+          {/* Mono summary — single editorial line over the table. Replaces the
+              5 rainbow MetricCards (side-stripes + colored icons + hero-metric
+              template, all DESIGN.md Don'ts). */}
+          <p
+            className="ds-mono text-xs mb-5 sm:mb-6"
+            style={{ color: 'var(--cp-paper-mute)' }}
+          >
+            {totals.sent.toLocaleString('ru-RU')} отправлено
+            <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+            {openRate}% открытий
+            <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+            {replyRate}% ответов
+            <span style={{ color: 'var(--cp-paper-faint)' }}>
+              {' · '}
+              {totals.replied} {totals.replied === 1 ? 'ответ' : totals.replied < 5 ? 'ответа' : 'ответов'} всего
+            </span>
+          </p>
+
+          {/* Mobile: card list with status dot + mono metrics summary */}
+          <div className="space-y-2 sm:hidden">
+            {sortedRows.map(({ c, sent, openRateVal, replyRateVal }) => {
+              const or_ = openRateVal.toFixed(1);
+              const rr = replyRateVal.toFixed(1);
+              return (
+                <Link
+                  key={c.id}
+                  href={`/client/campaigns/${c.id}` as Route}
+                  className="ds-card-pressable block p-4 rounded-lg"
+                  style={{
+                    background: 'var(--cp-surface-rest)',
+                    border: '1px solid var(--cp-divider)',
+                  }}
+                >
+                  <div className="flex items-center gap-2.5 mb-1.5">
+                    <span
+                      aria-hidden
+                      className="ds-status-dot"
+                      style={{ background: statusDot(c.status) }}
+                    />
+                    <p
+                      className="text-sm font-semibold truncate flex-1"
+                      style={{ color: 'var(--cp-paper)' }}
+                    >
+                      {c.name}
+                    </p>
+                  </div>
+                  <p
+                    className="ds-mono text-[11px] pl-4"
+                    style={{ color: 'var(--cp-paper-mute)' }}
+                  >
+                    {sent.toLocaleString('ru-RU')} отправлено
+                    <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+                    {or_}% откр
+                    <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+                    {rr}% отв
+                  </p>
+                </Link>
+              );
+            })}
           </div>
 
-          {campaigns.length === 0 ? (
-            <div className="neu-card py-12 sm:py-16 text-center px-6">
-              <p className="text-base sm:text-lg font-bold mb-2" style={{ color: 'var(--cp-text)' }}>
-                Кампаний пока нет
-              </p>
-              <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-text-m)' }}>
-                Запустите первую кампанию: загрузите базу, напишите цепочку — мы покажем
-                здесь её метрики (отправки, открытия, ответы) в реальном времени.
-              </p>
-              <Link
-                href={'/client/launch' as Route}
-                className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold"
-              >
-                Создать кампанию
-              </Link>
-            </div>
-          ) : (
-            <>
-              {/* Mobile: card list */}
-              <div className="space-y-3 sm:hidden">
-                {sortedRows.map(({ c, sent, opened, replied, openRateVal, replyRateVal }) => {
-                  const or_ = openRateVal.toFixed(1);
-                  const rr = replyRateVal.toFixed(1);
-                  return (
-                    <Link key={c.id} href={`/client/campaigns/${c.id}` as Route} className="neu-sm block p-4">
-                      <p className="text-sm font-semibold mb-3 truncate">{c.name}</p>
-                      <div className="grid grid-cols-3 gap-2 text-center">
-                        <div>
-                          <p className="text-[10px] uppercase font-semibold" style={{ color: 'var(--cp-text-l)' }}>Отпр.</p>
-                          <p className="text-sm font-bold">{sent}</p>
-                        </div>
-                        <div>
-                          <p className="text-[10px] uppercase font-semibold" style={{ color: 'var(--cp-text-l)' }}>Open</p>
-                          <p className="text-sm font-bold">{or_}%</p>
-                        </div>
-                        <div>
-                          <p className="text-[10px] uppercase font-semibold" style={{ color: 'var(--cp-text-l)' }}>Reply</p>
-                          <p className="text-sm font-bold">{rr}%</p>
-                        </div>
-                      </div>
-                      <div className="mt-2 flex justify-between text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
-                        <span>{opened} откр. / {replied} отв.</span>
-                      </div>
-                    </Link>
-                  );
-                })}
-              </div>
-
-              {/* Desktop: table */}
-              <div className="neu-card overflow-hidden hidden sm:block">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr>
-                        {(
-                          [
-                            { col: 'name' as SortCol, label: 'Кампания', align: 'left' },
-                            { col: 'sent' as SortCol, label: 'Отправлено', align: 'right' },
-                            { col: 'opened' as SortCol, label: 'Открытия', align: 'right' },
-                            { col: 'openRate' as SortCol, label: 'Open %', align: 'right' },
-                            { col: 'replied' as SortCol, label: 'Ответы', align: 'right' },
-                            { col: 'replyRate' as SortCol, label: 'Reply %', align: 'right' },
-                          ] as const
-                        ).map(({ col, label, align }) => (
-                          <th
-                            key={col}
-                            onClick={() => handleSort(col)}
-                            className={`px-5 py-4 text-${align} text-[11px] font-semibold uppercase tracking-wider cursor-pointer select-none whitespace-nowrap`}
-                            style={{ color: sortCol === col ? 'var(--cp-text)' : 'var(--cp-text-l)' }}
-                          >
-                            {label}
-                            <SortIcon col={col} active={sortCol === col} dir={sortDir} />
-                          </th>
-                        ))}
+          {/* Desktop: sortable table. Headers in editorial mono; numeric body
+              cells in JetBrains Mono for tabular alignment. */}
+          <div
+            className="hidden sm:block rounded-lg overflow-hidden"
+            style={{
+              background: 'var(--cp-surface-rest)',
+              border: '1px solid var(--cp-divider)',
+            }}
+          >
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr style={{ background: 'var(--cp-surface-elev)' }}>
+                    {(
+                      [
+                        { col: 'name' as SortCol, label: 'Кампания', align: 'left' },
+                        { col: 'sent' as SortCol, label: 'Отправлено', align: 'right' },
+                        { col: 'opened' as SortCol, label: 'Открытия', align: 'right' },
+                        { col: 'openRate' as SortCol, label: 'Open %', align: 'right' },
+                        { col: 'replied' as SortCol, label: 'Ответы', align: 'right' },
+                        { col: 'replyRate' as SortCol, label: 'Reply %', align: 'right' },
+                      ] as const
+                    ).map(({ col, label, align }) => (
+                      <th
+                        key={col}
+                        onClick={() => handleSort(col)}
+                        className={`ds-eyebrow px-5 py-3 text-${align} cursor-pointer select-none whitespace-nowrap`}
+                        style={{
+                          color:
+                            sortCol === col
+                              ? 'var(--cp-paper)'
+                              : 'var(--cp-paper-faint)',
+                          fontWeight: sortCol === col ? 600 : 500,
+                        }}
+                      >
+                        {label}
+                        <SortIcon col={col} active={sortCol === col} dir={sortDir} />
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedRows.map(({ c, sent, opened, replied, openRateVal, replyRateVal }, idx) => {
+                    const or_ = openRateVal.toFixed(1);
+                    const rr = replyRateVal.toFixed(1);
+                    const rowBorder =
+                      idx > 0 ? '1px solid var(--cp-divider)' : 'none';
+                    return (
+                      <tr
+                        key={c.id}
+                        className="neu-row"
+                      >
+                        <td
+                          className="px-5 py-3"
+                          style={{ borderTop: rowBorder }}
+                        >
+                          <div className="flex items-center gap-2.5">
+                            <span
+                              aria-hidden
+                              className="ds-status-dot shrink-0"
+                              style={{ background: statusDot(c.status) }}
+                            />
+                            <Link
+                              href={`/client/campaigns/${c.id}` as Route}
+                              className="font-semibold transition-colors hover:underline"
+                              style={{ color: 'var(--cp-paper)' }}
+                            >
+                              {c.name}
+                            </Link>
+                          </div>
+                        </td>
+                        <td
+                          className="ds-mono px-5 py-3 text-right"
+                          style={{
+                            borderTop: rowBorder,
+                            color: 'var(--cp-paper-mute)',
+                          }}
+                        >
+                          {sent.toLocaleString('ru-RU')}
+                        </td>
+                        <td
+                          className="ds-mono px-5 py-3 text-right"
+                          style={{
+                            borderTop: rowBorder,
+                            color: 'var(--cp-paper-mute)',
+                          }}
+                        >
+                          {opened.toLocaleString('ru-RU')}
+                        </td>
+                        <td
+                          className="ds-mono px-5 py-3 text-right"
+                          style={{
+                            borderTop: rowBorder,
+                            color: 'var(--cp-paper)',
+                            fontWeight: 600,
+                          }}
+                        >
+                          {or_}%
+                        </td>
+                        <td
+                          className="ds-mono px-5 py-3 text-right"
+                          style={{
+                            borderTop: rowBorder,
+                            color: 'var(--cp-paper-mute)',
+                          }}
+                        >
+                          {replied}
+                        </td>
+                        <td
+                          className="ds-mono px-5 py-3 text-right"
+                          style={{
+                            borderTop: rowBorder,
+                            color: 'var(--cp-paper)',
+                            fontWeight: 600,
+                          }}
+                        >
+                          {rr}%
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {sortedRows.map(({ c, sent, opened, replied, openRateVal, replyRateVal }) => {
-                        const or_ = openRateVal.toFixed(1);
-                        const rr = replyRateVal.toFixed(1);
-                        return (
-                          <tr key={c.id} className="neu-row">
-                            <td className="px-5 py-3.5" style={{ borderTop: '1px solid rgba(180,173,164,0.15)' }}>
-                              <Link
-                                href={`/client/campaigns/${c.id}` as Route}
-                                className="font-semibold transition-colors hover:underline"
-                                style={{ color: 'var(--cp-text)' }}
-                                onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--cp-accent)')}
-                                onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--cp-text)')}
-                              >
-                                {c.name}
-                              </Link>
-                            </td>
-                            <td className="px-5 py-3.5 text-right" style={{ borderTop: '1px solid rgba(180,173,164,0.15)', color: 'var(--cp-text-m)' }}>{sent.toLocaleString('ru-RU')}</td>
-                            <td className="px-5 py-3.5 text-right" style={{ borderTop: '1px solid rgba(180,173,164,0.15)', color: 'var(--cp-text-m)' }}>{opened.toLocaleString('ru-RU')}</td>
-                            <td className="px-5 py-3.5 text-right font-semibold" style={{ borderTop: '1px solid rgba(180,173,164,0.15)' }}>{or_}%</td>
-                            <td className="px-5 py-3.5 text-right" style={{ borderTop: '1px solid rgba(180,173,164,0.15)', color: 'var(--cp-text-m)' }}>{replied}</td>
-                            <td className="px-5 py-3.5 text-right font-semibold" style={{ borderTop: '1px solid rgba(180,173,164,0.15)' }}>{rr}%</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </>
-          )}
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </>
       )}
     </div>
