@@ -33,9 +33,9 @@ type SortDir = 'asc' | 'desc';
 function statusDot(status: number | null): string {
   switch (status) {
     case 1:
-      return '#46a758'; // cp-green
+      return 'var(--cp-green)';
     case 2:
-      return '#f5a623'; // cp-amber
+      return 'var(--cp-amber)';
     case 3:
     default:
       return 'var(--cp-paper-faint)';

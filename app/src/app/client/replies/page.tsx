@@ -441,7 +441,7 @@ export default function ClientLeadsPage() {
       </header>
 
       {error && (
-        <div className="neu-inset mb-6 rounded-2xl px-5 py-3.5 text-sm font-medium" style={{ color: 'var(--cp-danger, #dc2626)' }}>
+        <div className="neu-inset mb-6 rounded-2xl px-5 py-3.5 text-sm font-medium" style={{ color: 'var(--cp-red)' }}>
           {error}
         </div>
       )}

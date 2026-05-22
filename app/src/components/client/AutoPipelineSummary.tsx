@@ -1,22 +1,25 @@
 'use client';
 
 /**
- * Компактный блок «Авто-пайплайн» в верху клиентского дашборда.
+ * Блок «Авто-пайплайн» в верху клиентского дашборда.
  *
- * Показывает только клиентам в auto-режиме (т.е. portal-mode === 'auto').
+ * Показывается только клиентам в auto-режиме (portal-mode === 'auto').
  * Замещает CTA «Создать кампанию» и онбординг — кампании собираются за них,
  * клиенту смотреть на «как настроить» нечего.
  *
- * Что показываем:
- *   — Time-of-last-run и его статус (зелёный/красный кружок).
- *   — Метрики последнего прогона: добавлено в работу / в очереди / отброшено.
- *   — Сводка за 30 дней (мелкий шрифт): сколько лидов прошло.
+ * Editorial-dark вёрстка:
+ *   — eyebrow «01 → Авто-пайплайн» + статус-точка с временем последнего прогона
+ *   — четыре строки-ледгера: первая (Добавлено в работу) — primary, mono-2xl,
+ *     полный paper; остальные — компактные mono-sm, paper-mute, разделены
+ *     hairline-дивайдером сверху
+ *   — пустое состояние: один абзац paper-mute («первый прогон ещё не запускался»)
+ *   — ошибка последнего прогона: mono красная строка снизу с error_message
  *
  * Источник данных: GET /api/client/auto-pipeline/summary.
  */
 
 import { useEffect, useState } from 'react';
-import { Clock, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 interface LastRun {
@@ -89,10 +92,10 @@ export function AutoPipelineSummary() {
       >
         <Loader2
           className="h-4 w-4 animate-spin"
-          style={{ color: 'var(--cp-text-l)' }}
+          style={{ color: 'var(--cp-paper-faint)' }}
           aria-hidden
         />
-        <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
+        <p className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
           Авто-пайплайн…
         </p>
       </section>
@@ -101,38 +104,59 @@ export function AutoPipelineSummary() {
 
   const { last_run, totals_30d, stored_count } = data;
   const lastRunStatus = last_run?.status ?? null;
-  const statusIcon =
-    lastRunStatus === 'failed' ? (
-      <AlertCircle className="h-4 w-4" style={{ color: 'var(--cp-danger)' }} aria-hidden />
-    ) : lastRunStatus === 'completed' ? (
-      <CheckCircle2 className="h-4 w-4" style={{ color: 'var(--cp-success, #4ade80)' }} aria-hidden />
-    ) : (
-      <Clock className="h-4 w-4" style={{ color: 'var(--cp-text-l)' }} aria-hidden />
-    );
+
+  // Status-as-Data dot: одна точка несёт всю семантику прогона.
+  const statusDotColor =
+    lastRunStatus === 'failed'
+      ? 'var(--cp-red)'
+      : lastRunStatus === 'completed'
+        ? 'var(--cp-green)'
+        : lastRunStatus === 'running'
+          ? 'var(--cp-amber)'
+          : 'var(--cp-paper-faint)';
+
+  const timeLabel = last_run
+    ? relativeTime(last_run.finished_at ?? last_run.started_at)
+    : 'ни одного прогона';
 
   return (
     <section className="neu-card px-5 py-4" aria-labelledby="auto-pipeline-label">
-      <header className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          {statusIcon}
-          <h2 id="auto-pipeline-label" className="text-sm font-bold" style={{ color: 'var(--cp-text)' }}>
-            Авто-пайплайн
-          </h2>
-        </div>
-        <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>
-          {last_run ? relativeTime(last_run.finished_at ?? last_run.started_at) : 'ни одного прогона'}
+      <header className="flex items-baseline justify-between gap-3 mb-4">
+        <h2 id="auto-pipeline-label" className="ds-eyebrow" style={{ color: 'var(--cp-paper-mute)' }}>
+          01<span aria-hidden> → </span>Авто-пайплайн
+        </h2>
+        <span
+          className="inline-flex items-center gap-1.5 text-xs ds-mono shrink-0"
+          style={{ color: 'var(--cp-paper-mute)' }}
+        >
+          <span
+            className="inline-block h-1.5 w-1.5 rounded-full"
+            style={{ background: statusDotColor }}
+            aria-hidden
+          />
+          {timeLabel}
         </span>
       </header>
 
       {last_run ? (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <Metric label="Добавлено в работу" value={last_run.routed_count} accent />
-          <Metric label="В очереди (stored)" value={stored_count} />
-          <Metric label="Отброшено" value={last_run.skipped_count + last_run.failed_count} />
-          <Metric label="Всего за 30 дней" value={totals_30d?.routed ?? 0} />
+        <div className="space-y-0">
+          <LedgerRow
+            label="Добавлено в работу"
+            value={last_run.routed_count}
+            primary
+          />
+          <LedgerRow label="В очереди" value={stored_count} />
+          <LedgerRow
+            label="Отброшено"
+            value={last_run.skipped_count + last_run.failed_count}
+          />
+          <LedgerRow
+            label="Всего за 30 дней"
+            value={totals_30d?.routed ?? 0}
+          />
         </div>
       ) : (
-        <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
+        <p className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
           Кампании собираются автоматически каждое утро в 07:00 МСК.
           Первый прогон ещё не запускался.
         </p>
@@ -140,27 +164,46 @@ export function AutoPipelineSummary() {
 
       {last_run?.status === 'failed' && last_run.error_message && (
         <p
-          className="mt-3 text-xs"
-          style={{ color: 'var(--cp-danger)' }}
+          className="mt-4 text-xs ds-mono"
+          style={{ color: 'var(--cp-red)' }}
         >
-          Последний прогон с ошибкой: {last_run.error_message}
+          Ошибка: {last_run.error_message}
         </p>
       )}
     </section>
   );
 }
 
-function Metric({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
+/**
+ * Ledger row. Primary — большая mono-цифра + жирный paper-лейбл, без
+ * верхнего дивайдера (сидит флешем под заголовком). Остальные — компактные
+ * paper-mute строки с hairline сверху.
+ */
+function LedgerRow({
+  label,
+  value,
+  primary,
+}: {
+  label: string;
+  value: number;
+  primary?: boolean;
+}) {
   return (
-    <div>
+    <div
+      className={`flex items-baseline justify-between gap-3 ${primary ? 'py-2' : 'py-2.5'}`}
+      style={primary ? undefined : { borderTop: '1px solid var(--cp-divider)' }}
+    >
       <p
-        className="text-xl font-bold tabular-nums"
-        style={{ color: accent ? 'var(--cp-accent)' : 'var(--cp-text)' }}
+        className={`text-sm ${primary ? 'font-semibold' : ''}`}
+        style={{ color: primary ? 'var(--cp-paper)' : 'var(--cp-paper-mute)' }}
+      >
+        {label}
+      </p>
+      <p
+        className={`ds-mono tabular-nums ${primary ? 'text-2xl font-bold' : 'text-sm'}`}
+        style={{ color: 'var(--cp-paper)' }}
       >
         {value.toLocaleString('ru-RU')}
-      </p>
-      <p className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-        {label}
       </p>
     </div>
   );

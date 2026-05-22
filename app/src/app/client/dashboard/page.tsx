@@ -5,7 +5,8 @@
  *
  * One layout, three states branched by data:
  *   - Returning + has unread replies: replies-needing-attention is the lede.
- *   - Returning + caught up: short "all calm" greeting + campaigns rows.
+ *   - Returning + caught up: short "all calm" greeting + mono portfolio
+ *     strip ("В работе N · отправлено M · ответов K") + campaigns rows.
  *   - First-visit / mid-onboarding: greeting + onboarding checklist; campaigns
  *     section hides until onboarding completes.
  *
@@ -119,9 +120,9 @@ function relativeTime(iso: string | null): string {
 function statusInfo(status: number | null): { label: string; dot: string } {
   switch (status) {
     case 1:
-      return { label: 'Активна', dot: '#10B981' /* spruce-positive */ };
+      return { label: 'Активна', dot: 'var(--cp-green)' };
     case 2:
-      return { label: 'Пауза', dot: '#F59E0B' /* amber-prompt */ };
+      return { label: 'Пауза', dot: 'var(--cp-amber)' };
     case 3:
       return { label: 'Завершена', dot: 'var(--cp-text-l)' };
     default:
@@ -230,6 +231,23 @@ export default function ClientDashboardPage() {
   const hasAnyCampaigns = (campaigns ?? []).length > 0;
   const hasActiveCampaign = (campaigns ?? []).some((c) => c.status === 1);
 
+  // Portfolio strip — лайфтайм-цифры по всем кампаниям. Дневной разбивки в
+  // /campaigns нет (analytics_synced_at — это «когда подтянули», не «за день»),
+  // поэтому показываем честные total'ы: активных кампаний, отправлено всего,
+  // получено ответов. Без выдумок типа «сегодня отправлено».
+  const activeCount = useMemo(
+    () => (campaigns ?? []).filter((c) => c.status === 1).length,
+    [campaigns],
+  );
+  const totalSent = useMemo(
+    () => (campaigns ?? []).reduce((sum, c) => sum + Number(c.emails_sent_count ?? 0), 0),
+    [campaigns],
+  );
+  const totalReplies = useMemo(
+    () => (campaigns ?? []).reduce((sum, c) => sum + Number(c.reply_count ?? 0), 0),
+    [campaigns],
+  );
+
   const onboardingComplete = onboarding?.complete === true;
   const showCampaignsSection = hasAnyCampaigns || onboardingComplete;
 
@@ -238,6 +256,13 @@ export default function ClientDashboardPage() {
   const campaignsNumber = ledeVisible ? '02' : '01';
 
   const stillLoading = campaigns === null || replies === null;
+
+  // Calm/caught-up branch only: under the greeting we surface one mono line of
+  // portfolio activity so the user doesn't have to scan rows to confirm
+  // "things are happening". Hidden when there's a lede (unread replies) or
+  // when nothing has actually been sent (totals would all be zero).
+  const showPortfolioSignal =
+    !stillLoading && totalUnread === 0 && hasActiveCampaign && totalSent > 0;
 
   // ── greeting copy (branches on data) ──────────────────
 
@@ -280,6 +305,22 @@ export default function ClientDashboardPage() {
         >
           {greeting ?? 'Загружаем…'}
         </p>
+        {showPortfolioSignal && (
+          <p className="text-xs mt-1.5" style={{ color: 'var(--cp-paper-mute)' }}>
+            В работе{' '}
+            <span className="ds-mono tabular-nums" style={{ color: 'var(--cp-paper)' }}>
+              {activeCount}
+            </span>
+            {' · отправлено '}
+            <span className="ds-mono tabular-nums" style={{ color: 'var(--cp-paper)' }}>
+              {totalSent.toLocaleString('ru-RU')}
+            </span>
+            {' · ответов '}
+            <span className="ds-mono tabular-nums" style={{ color: 'var(--cp-paper)' }}>
+              {totalReplies.toLocaleString('ru-RU')}
+            </span>
+          </p>
+        )}
       </header>
 
       {/* Lede: replies awaiting attention. Renders only when there's something. */}
