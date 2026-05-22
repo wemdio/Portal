@@ -105,7 +105,7 @@ export function AutoPipelineSummary() {
     lastRunStatus === 'failed' ? (
       <AlertCircle className="h-4 w-4" style={{ color: 'var(--cp-danger)' }} aria-hidden />
     ) : lastRunStatus === 'completed' ? (
-      <CheckCircle2 className="h-4 w-4" style={{ color: 'var(--cp-success, #4ade80)' }} aria-hidden />
+      <CheckCircle2 className="h-4 w-4" style={{ color: 'var(--cp-green)' }} aria-hidden />
     ) : (
       <Clock className="h-4 w-4" style={{ color: 'var(--cp-text-l)' }} aria-hidden />
     );

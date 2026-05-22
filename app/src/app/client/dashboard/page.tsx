@@ -119,9 +119,9 @@ function relativeTime(iso: string | null): string {
 function statusInfo(status: number | null): { label: string; dot: string } {
   switch (status) {
     case 1:
-      return { label: 'Активна', dot: '#10B981' /* spruce-positive */ };
+      return { label: 'Активна', dot: 'var(--cp-green)' };
     case 2:
-      return { label: 'Пауза', dot: '#F59E0B' /* amber-prompt */ };
+      return { label: 'Пауза', dot: 'var(--cp-amber)' };
     case 3:
       return { label: 'Завершена', dot: 'var(--cp-text-l)' };
     default:
