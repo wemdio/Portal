@@ -273,7 +273,11 @@ export default function AutoPipelineSetupPage() {
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <Loader2 className="h-5 w-5 animate-spin" style={{ color: 'var(--cp-text-l)' }} />
+        <Loader2
+          className="h-5 w-5 animate-spin"
+          style={{ color: 'var(--cp-paper-faint)' }}
+          aria-hidden
+        />
       </div>
     );
   }
@@ -293,11 +297,15 @@ export default function AutoPipelineSetupPage() {
       <div className="max-w-3xl mx-auto">
         <Header />
         <div className="neu-card px-5 py-8 text-center">
-          <AlertCircle className="mx-auto h-8 w-8 mb-3" style={{ color: 'var(--cp-text-l)' }} />
-          <p className="text-sm font-bold mb-1" style={{ color: 'var(--cp-text)' }}>
+          <AlertCircle
+            className="mx-auto h-8 w-8 mb-3"
+            style={{ color: 'var(--cp-paper-faint)' }}
+            aria-hidden
+          />
+          <p className="text-sm font-bold mb-1" style={{ color: 'var(--cp-paper)' }}>
             Авто-пайплайн ещё не подключён
           </p>
-          <p className="text-xs" style={{ color: 'var(--cp-text-m)' }}>
+          <p className="text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
             Обратитесь к менеджеру — настроим endpoint скоринга и включим режим.
           </p>
         </div>
@@ -309,10 +317,12 @@ export default function AutoPipelineSetupPage() {
     <div className="max-w-3xl mx-auto pb-24">
       <Header />
 
-      <p className="text-sm mb-6" style={{ color: 'var(--cp-text-m)' }}>
+      <p className="text-sm mb-6" style={{ color: 'var(--cp-paper-mute)' }}>
         Настройте диапазоны score, которые возвращает ваш endpoint. Для каждого
-        диапазона напишите свою цепочку писем. <strong>Пустая цепочка</strong> —
-        лиды с таким скором сохраняются в журнале, но <strong>не отправляются</strong>
+        диапазона напишите свою цепочку писем.{' '}
+        <strong style={{ color: 'var(--cp-paper)' }}>Пустая цепочка</strong> — лиды с
+        таким скором сохраняются в журнале, но{' '}
+        <strong style={{ color: 'var(--cp-paper)' }}>не отправляются</strong>{' '}
         (полезно для «холодных» сегментов).
       </p>
 
@@ -340,25 +350,37 @@ export default function AutoPipelineSetupPage() {
       <button
         type="button"
         onClick={addBucket}
-        className="neu-pill inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold mb-4"
-        style={{ color: 'var(--cp-text-m)' }}
+        className="ds-btn-ghost inline-flex items-center gap-1.5 px-3 py-1.5 text-xs mb-4"
       >
-        <Plus className="h-3.5 w-3.5" /> Добавить диапазон
+        <Plus className="h-3.5 w-3.5" aria-hidden /> Добавить диапазон
       </button>
 
       <div className="sticky bottom-4 neu-card flex items-center gap-3 px-5 py-4">
         {(saveError || validationError) && (
-          <span className="text-xs flex-1" style={{ color: 'var(--cp-danger)' }}>
-            {saveError ?? validationError}
+          <span className="flex-1 inline-flex items-start gap-2.5 text-xs">
+            <span
+              aria-hidden
+              className="ds-status-dot shrink-0"
+              style={{ background: 'var(--cp-red)', marginTop: '5px' }}
+            />
+            <span style={{ color: 'var(--cp-paper)' }}>
+              {saveError ?? validationError}
+            </span>
           </span>
         )}
         {!saveError && !validationError && savedAt && Date.now() - savedAt < 5000 && (
-          <span className="text-xs flex-1 inline-flex items-center gap-1.5" style={{ color: 'var(--cp-success, #4ade80)' }}>
-            <Check className="h-3.5 w-3.5" /> Сохранено
+          <span
+            className="text-xs flex-1 inline-flex items-center gap-1.5"
+            style={{ color: 'var(--cp-green)' }}
+          >
+            <Check className="h-3.5 w-3.5" aria-hidden /> Сохранено
           </span>
         )}
         {!saveError && !validationError && (!savedAt || Date.now() - savedAt >= 5000) && (
-          <span className="text-xs flex-1" style={{ color: 'var(--cp-text-l)' }}>
+          <span
+            className="text-xs flex-1"
+            style={{ color: 'var(--cp-paper-faint)' }}
+          >
             {syncWarnings.length > 0
               ? `Сохранено, но ${syncWarnings.length} ${syncWarnings.length === 1 ? 'кампания' : 'кампаний'} не синхронизирована${syncWarnings.length === 1 ? '' : 'ы'} с Instantly`
               : 'Изменения применятся ко всем будущим прогонам'}
@@ -368,11 +390,11 @@ export default function AutoPipelineSetupPage() {
           type="button"
           onClick={() => void handleSave()}
           disabled={saving || !!validationError}
-          className="neu-btn px-5 py-2 text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
+          className="ds-btn-primary px-5 py-2 text-sm inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {saving ? (
             <>
-              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Сохранение
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> Сохранение
             </>
           ) : (
             'Сохранить'
@@ -381,14 +403,30 @@ export default function AutoPipelineSetupPage() {
       </div>
 
       {syncWarnings.length > 0 && (
-        <div className="mt-4 neu-inset rounded-2xl px-4 py-3 text-xs" style={{ color: 'var(--cp-danger)' }}>
-          <p className="font-bold mb-1">Не удалось синхронизировать с Instantly:</p>
-          <ul className="list-disc list-inside space-y-0.5">
+        <div
+          className="mt-4 neu-inset rounded-md px-4 py-3 text-xs"
+          role="alert"
+        >
+          <p
+            className="font-bold mb-1 inline-flex items-center gap-2"
+            style={{ color: 'var(--cp-paper)' }}
+          >
+            <span
+              aria-hidden
+              className="ds-status-dot"
+              style={{ background: 'var(--cp-amber)' }}
+            />
+            Не удалось синхронизировать с Instantly
+          </p>
+          <ul
+            className="list-disc list-inside space-y-0.5 mt-1.5"
+            style={{ color: 'var(--cp-paper-mute)' }}
+          >
             {syncWarnings.map((w, i) => (
               <li key={i}>{w}</li>
             ))}
           </ul>
-          <p className="mt-2" style={{ color: 'var(--cp-text-m)' }}>
+          <p className="mt-2" style={{ color: 'var(--cp-paper-faint)' }}>
             Тексты сохранены в портале — попробуйте сохранить ещё раз через минуту, либо обратитесь к менеджеру.
           </p>
         </div>
@@ -402,7 +440,13 @@ export default function AutoPipelineSetupPage() {
 function Header() {
   return (
     <header className="mb-6">
-      <h1 className="text-2xl font-extrabold tracking-tight" style={{ color: 'var(--cp-text)' }}>
+      <p className="ds-eyebrow mb-2">
+        01<span aria-hidden> → </span>Авто-пайплайн
+      </p>
+      <h1
+        className="text-xl sm:text-2xl font-bold m-0"
+        style={{ color: 'var(--cp-paper)' }}
+      >
         Настройка цепочек
       </h1>
     </header>
@@ -411,16 +455,27 @@ function Header() {
 
 function ErrorBlock({ text, onRetry }: { text: string; onRetry: () => void }) {
   return (
-    <div className="neu-card px-5 py-6 flex items-center gap-3" role="alert">
-      <AlertCircle className="h-5 w-5" style={{ color: 'var(--cp-danger)' }} />
-      <span className="flex-1 text-sm" style={{ color: 'var(--cp-text)' }}>
+    <div
+      className="neu-card px-5 py-6 flex items-start gap-3"
+      role="alert"
+    >
+      <span
+        aria-hidden
+        className="ds-status-dot shrink-0"
+        style={{ background: 'var(--cp-red)', marginTop: '8px' }}
+      />
+      <AlertCircle
+        className="h-5 w-5 shrink-0 mt-0.5"
+        style={{ color: 'var(--cp-paper-faint)' }}
+        aria-hidden
+      />
+      <span className="flex-1 text-sm" style={{ color: 'var(--cp-paper)' }}>
         {text}
       </span>
       <button
         type="button"
         onClick={onRetry}
-        className="neu-pill px-3 py-1 text-xs font-semibold"
-        style={{ color: 'var(--cp-text)' }}
+        className="ds-btn-secondary px-3 py-1 text-xs"
       >
         Повторить
       </button>
@@ -448,24 +503,19 @@ function BucketCard({
     return 'Кампания создастся при сохранении';
   }, [hasContent, bucket.instantly_campaign_id]);
 
-  const statusColor = bucket.instantly_campaign_id
-    ? 'var(--cp-success, #4ade80)'
+  const statusDotColor = bucket.instantly_campaign_id
+    ? 'var(--cp-green)'
     : hasContent
-      ? 'var(--cp-accent)'
-      : 'var(--cp-text-l)';
+      ? 'var(--cp-amber)'
+      : 'var(--cp-paper-faint)';
 
   return (
     <section className="neu-card px-5 py-4" aria-labelledby={`bucket-${position}`}>
       <header className="flex items-start justify-between mb-3 gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 mb-1">
-            <span
-              className="text-[11px] font-bold uppercase tracking-wider"
-              style={{ color: 'var(--cp-text-l)' }}
-            >
-              Score {bucket.score_min.toLocaleString('ru-RU')} – {formatScoreMax(bucket.score_max)}
-            </span>
-          </div>
+          <p className="ds-eyebrow mb-1">
+            score {bucket.score_min.toLocaleString('ru-RU')} — {formatScoreMax(bucket.score_max)}
+          </p>
           <input
             id={`bucket-${position}`}
             type="text"
@@ -474,33 +524,37 @@ function BucketCard({
               onChange((prev) => ({ ...prev, label: e.target.value }))
             }
             placeholder="Название диапазона"
-            className="w-full bg-transparent text-base font-bold focus:outline-none"
-            style={{ color: 'var(--cp-text)' }}
+            className="w-full bg-transparent text-base font-bold focus:outline-none border-none"
+            style={{ color: 'var(--cp-paper)' }}
           />
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <span className="text-[11px] font-semibold" style={{ color: statusColor }}>
+        <div className="flex items-center gap-3 shrink-0">
+          <span className="ds-status-tag" style={{ color: 'var(--cp-paper-mute)' }}>
+            <span
+              aria-hidden
+              className="ds-status-dot"
+              style={{ background: statusDotColor }}
+            />
             {statusLabel}
           </span>
           {canDelete && (
             <button
               type="button"
               onClick={onDelete}
-              className="p-1.5"
-              style={{ color: 'var(--cp-text-l)' }}
+              className="ds-btn-ghost p-1.5"
               aria-label="Удалить диапазон"
               title="Удалить диапазон"
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              <Trash2 className="h-3.5 w-3.5" aria-hidden />
             </button>
           )}
         </div>
       </header>
 
-      <div className="grid grid-cols-2 gap-3 mb-3">
+      <div className="grid grid-cols-2 gap-3 mb-4">
         <div>
-          <label className="text-[11px] block mb-1" style={{ color: 'var(--cp-text-l)' }}>
-            От (включительно)
+          <label className="ds-eyebrow block mb-1">
+            от (включительно)
           </label>
           <input
             type="number"
@@ -512,13 +566,12 @@ function BucketCard({
                 score_min: Number.isFinite(n) ? n : 0,
               }));
             }}
-            className="w-full neu-inset rounded-lg px-3 py-1.5 text-sm bg-transparent focus:outline-none tabular-nums"
-            style={{ color: 'var(--cp-text)' }}
+            className="ds-input ds-mono w-full text-sm"
           />
         </div>
         <div>
-          <label className="text-[11px] block mb-1" style={{ color: 'var(--cp-text-l)' }}>
-            До (включительно, пусто = ∞)
+          <label className="ds-eyebrow block mb-1">
+            до (включительно, пусто = ∞)
           </label>
           <input
             type="number"
@@ -535,8 +588,7 @@ function BucketCard({
                 }
               }
             }}
-            className="w-full neu-inset rounded-lg px-3 py-1.5 text-sm bg-transparent focus:outline-none tabular-nums"
-            style={{ color: 'var(--cp-text)' }}
+            className="ds-input ds-mono w-full text-sm"
           />
         </div>
       </div>
@@ -562,8 +614,8 @@ function SequenceEditor({
     <div className="flex flex-col gap-3">
       {sequence.steps.length === 0 && (
         <div
-          className="neu-inset rounded-2xl px-4 py-3 text-xs"
-          style={{ color: 'var(--cp-text-l)' }}
+          className="neu-inset rounded-md px-4 py-3 text-xs"
+          style={{ color: 'var(--cp-paper-mute)' }}
         >
           Цепочка пуста — лиды этого диапазона будут попадать в журнал
           (status=stored), но в Instantly не отправятся. Чтобы начать слать —
@@ -605,10 +657,9 @@ function SequenceEditor({
               ],
             }))
           }
-          className="neu-pill inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold self-start"
-          style={{ color: 'var(--cp-text-m)' }}
+          className="ds-btn-ghost inline-flex items-center gap-1.5 px-3 py-1.5 text-xs self-start"
         >
-          <Plus className="h-3.5 w-3.5" />
+          <Plus className="h-3.5 w-3.5" aria-hidden />
           {sequence.steps.length === 0 ? 'Добавить первое письмо' : 'Добавить follow-up'}
         </button>
       )}
@@ -633,16 +684,19 @@ function StepEditor({
 }) {
   return (
     <div
-      className="neu-inset rounded-2xl px-4 py-3"
+      className="rounded-md px-4 py-3"
+      style={{
+        background: 'var(--cp-surface-rest)',
+        border: '1px solid var(--cp-divider)',
+      }}
       aria-label={isFirst ? 'Первое письмо' : `Follow-up ${stepIndex}`}
     >
       <div className="flex items-center justify-between mb-2 gap-2">
-        <span
-          className="text-[11px] font-bold uppercase tracking-wider"
-          style={{ color: 'var(--cp-text-l)' }}
-        >
-          {isFirst ? 'Письмо 1 (первое касание)' : `Follow-up ${stepIndex}`}
-        </span>
+        <p className="ds-eyebrow m-0">
+          {isFirst
+            ? '01 → письмо 1 (первое касание)'
+            : `${String(stepIndex + 1).padStart(2, '0')} → follow-up ${stepIndex}`}
+        </p>
         <div className="flex items-center gap-2">
           {!isFirst && (
             <div className="flex items-center gap-1.5">
@@ -658,10 +712,12 @@ function StepEditor({
                     wait_days: Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0,
                   }));
                 }}
-                className="w-12 text-center text-xs neu-pill px-2 py-1"
-                style={{ color: 'var(--cp-text)' }}
+                className="ds-input ds-mono w-14 text-center text-xs"
               />
-              <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+              <span
+                className="text-[11px]"
+                style={{ color: 'var(--cp-paper-faint)' }}
+              >
                 дн после предыдущего
               </span>
             </div>
@@ -670,11 +726,10 @@ function StepEditor({
             <button
               type="button"
               onClick={onDelete}
-              className="p-1"
-              style={{ color: 'var(--cp-text-l)' }}
+              className="ds-btn-ghost p-1"
               aria-label="Удалить шаг"
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              <Trash2 className="h-3.5 w-3.5" aria-hidden />
             </button>
           )}
         </div>
@@ -687,8 +742,8 @@ function StepEditor({
           onChange((prev) => ({ ...prev, subject: e.target.value }))
         }
         placeholder="Тема письма"
-        className="w-full text-sm font-semibold bg-transparent focus:outline-none mb-2"
-        style={{ color: 'var(--cp-text)' }}
+        className="w-full text-sm font-semibold bg-transparent focus:outline-none mb-2 border-none"
+        style={{ color: 'var(--cp-paper)' }}
       />
       <textarea
         value={step.body}
@@ -697,8 +752,8 @@ function StepEditor({
         }
         placeholder="Текст письма…"
         rows={6}
-        className="w-full text-sm bg-transparent focus:outline-none resize-y"
-        style={{ color: 'var(--cp-text)' }}
+        className="w-full text-sm bg-transparent focus:outline-none resize-y border-none"
+        style={{ color: 'var(--cp-paper)' }}
       />
 
       {isFirst && (
@@ -721,42 +776,56 @@ function FirstStepVariants({
   const canAdd = variants.length < 2;
 
   return (
-    <div className="mt-3 pt-3" style={{ borderTop: '1px dashed var(--cp-divider)' }}>
+    <div
+      className="mt-3 pt-3"
+      style={{ borderTop: '1px solid var(--cp-divider)' }}
+    >
       <div className="flex items-center justify-between mb-2">
-        <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>
-          Альтернативные варианты первого письма (A/B/C)
-        </span>
+        <p className="ds-eyebrow">
+          альтернативные варианты первого письма (A/B/C)
+        </p>
         {canAdd && (
           <button
             type="button"
             onClick={() => onChange([...variants, { subject: '', body: '' }])}
-            className="neu-pill text-[11px] px-2 py-1 inline-flex items-center gap-1"
-            style={{ color: 'var(--cp-text-m)' }}
+            className="ds-btn-ghost text-[11px] px-2 py-1 inline-flex items-center gap-1"
           >
-            <Plus className="h-3 w-3" /> Добавить вариант
+            <Plus className="h-3 w-3" aria-hidden /> Добавить вариант
           </button>
         )}
       </div>
       {variants.length === 0 ? (
-        <p className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+        <p
+          className="text-[11px]"
+          style={{ color: 'var(--cp-paper-faint)' }}
+        >
           Можно добавить 1-2 альтернативных варианта — Instantly случайно выберет один на каждого лида.
         </p>
       ) : (
         <div className="flex flex-col gap-2">
           {variants.map((variant, vi) => (
-            <div key={vi} className="rounded-xl px-3 py-2" style={{ background: 'rgba(0,0,0,0.03)' }}>
+            <div
+              key={vi}
+              className="rounded-md px-3 py-2"
+              style={{
+                background: 'var(--cp-ink)',
+                border: '1px solid var(--cp-divider)',
+              }}
+            >
               <div className="flex items-center justify-between mb-1">
-                <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>
-                  Вариант {String.fromCharCode(66 + vi)}
+                <span
+                  className="ds-eyebrow"
+                  style={{ color: 'var(--cp-paper-mute)' }}
+                >
+                  вариант {String.fromCharCode(66 + vi)}
                 </span>
                 <button
                   type="button"
                   onClick={() => onChange(variants.filter((_, i) => i !== vi))}
-                  className="p-1"
-                  style={{ color: 'var(--cp-text-l)' }}
+                  className="ds-btn-ghost p-1"
                   aria-label="Удалить вариант"
                 >
-                  <Trash2 className="h-3 w-3" />
+                  <Trash2 className="h-3 w-3" aria-hidden />
                 </button>
               </div>
               <input
@@ -768,8 +837,8 @@ function FirstStepVariants({
                   onChange(next);
                 }}
                 placeholder="Тема (вариант)"
-                className="w-full text-xs font-semibold bg-transparent focus:outline-none mb-1"
-                style={{ color: 'var(--cp-text)' }}
+                className="w-full text-xs font-semibold bg-transparent focus:outline-none mb-1 border-none"
+                style={{ color: 'var(--cp-paper)' }}
               />
               <textarea
                 value={variant.body}
@@ -780,8 +849,8 @@ function FirstStepVariants({
                 }}
                 placeholder="Текст письма (вариант)"
                 rows={4}
-                className="w-full text-xs bg-transparent focus:outline-none resize-y"
-                style={{ color: 'var(--cp-text)' }}
+                className="w-full text-xs bg-transparent focus:outline-none resize-y border-none"
+                style={{ color: 'var(--cp-paper)' }}
               />
             </div>
           ))}
