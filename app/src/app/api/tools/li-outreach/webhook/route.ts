@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { UnipileClient } from '@/lib/liOutreach/unipileClient';
-import { generateAutoReply, leadToInfo } from '@/lib/liOutreach/aiService';
+import { generateAutoReply, leadToInfo, parseMessageTemplate } from '@/lib/liOutreach/aiService';
 import type { LiLead, LiSettings, LiCampaign } from '@/lib/liOutreach/types';
 
 export const dynamic = 'force-dynamic';
@@ -161,10 +161,12 @@ async function handleConnectionAccepted(payload: Record<string, unknown>): Promi
   // Send welcome message if configured
   const { data: campaignLeads } = await db
     .from('li_campaign_leads')
-    .select('campaign_id')
+    .select('id, campaign_id')
     .eq('lead_id', lead.id)
     .limit(1);
-  const campaignId = (campaignLeads?.[0] as { campaign_id?: string })?.campaign_id;
+  const campaignLeadRow = campaignLeads?.[0] as { id?: string; campaign_id?: string } | undefined;
+  const campaignId = campaignLeadRow?.campaign_id;
+  const campaignLeadId = campaignLeadRow?.id;
   if (!campaignId || !chatId) return;
 
   const { data: campaign } = await db.from('li_campaigns').select('*').eq('id', campaignId).maybeSingle<LiCampaign>();
@@ -177,9 +179,27 @@ async function handleConnectionAccepted(payload: Record<string, unknown>): Promi
     .maybeSingle<LiSettings>();
   if (!settings?.unipile_dsn) return;
 
+  // Render template variables ({{first_name}}, {{company}}, …) before sending.
+  // Without this, leads got literal "Hi {{first_name}}!" in their LinkedIn chat.
+  const welcomeText = parseMessageTemplate(campaign.welcome_message, leadToInfo(lead));
+  if (!welcomeText.trim()) {
+    console.warn('[li-outreach] welcome_message resolved to empty string after template substitution — skipping');
+    return;
+  }
+
   const client = new UnipileClient(settings.unipile_dsn, settings.unipile_api_key, accountId || undefined);
   try {
-    await client.sendMessage(chatId, campaign.welcome_message);
+    await client.sendMessage(chatId, welcomeText);
+    // Record successful delivery so the campaign runner's next message step
+    // knows the welcome has already been sent and can be skipped — otherwise
+    // the lead gets the welcome plus a near-identical scheduled follow-up
+    // back-to-back when the wait step expires.
+    if (campaignLeadId) {
+      await db
+        .from('li_campaign_leads')
+        .update({ welcome_sent_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq('id', campaignLeadId);
+    }
   } catch (e) {
     console.error('[li-outreach] webhook welcome message failed:', e instanceof Error ? e.message : e);
   }

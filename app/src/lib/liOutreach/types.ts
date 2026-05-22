@@ -7,6 +7,11 @@
 export type LiLeadStatus =
   | 'new'
   | 'invited'
+  // LinkedIn refused the invite step because the recipient was already
+  // invited (by us in a prior campaign or by another tool). We did NOT
+  // send an invite this run — separate from `invited` to keep the funnel
+  // honest vs the LinkedIn account dashboard.
+  | 'already_invited'
   | 'connected'
   | 'messaged'
   | 'replied'
@@ -150,6 +155,12 @@ export interface LiCampaignLead {
   next_action_at: string | null;
   user_replied: boolean;
   invite_accepted: boolean;
+  /**
+   * Set by the connection_accepted webhook when it successfully delivers
+   * campaign.welcome_message to this lead. The runner uses this to skip the
+   * first message/follow_up step so the lead isn't messaged twice.
+   */
+  welcome_sent_at: string | null;
   error_message: string | null;
   created_at: string;
   updated_at: string;
