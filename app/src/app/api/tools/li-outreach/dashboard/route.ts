@@ -6,10 +6,15 @@ import { withToolTrace } from '@/lib/toolTrace';
 export const dynamic = 'force-dynamic';
 
 type LeadRow = { id: string; company: string | null; status: string };
-type Funnel = { new: number; invited: number; connected: number; messaged: number; replied: number; completed: number; error: number; total: number };
+// `already_invited` is the side-track from the invite step: LinkedIn refused
+// our invite because the recipient was already invited (by us in another
+// campaign, or by another tool). Such leads are NOT counted in `invited`,
+// matching what the LinkedIn account dashboard reports as "Приглашений
+// отправлено" (only invites actually sent in this run).
+type Funnel = { new: number; invited: number; already_invited: number; connected: number; messaged: number; replied: number; completed: number; error: number; total: number };
 
 function emptyFunnel(): Funnel {
-  return { new: 0, invited: 0, connected: 0, messaged: 0, replied: 0, completed: 0, error: 0, total: 0 };
+  return { new: 0, invited: 0, already_invited: 0, connected: 0, messaged: 0, replied: 0, completed: 0, error: 0, total: 0 };
 }
 
 function addToFunnel(f: Funnel, status: string): void {
@@ -88,7 +93,7 @@ export async function GET(req: NextRequest) {
       .sort((a, b) => b.total - a.total);
 
     // --- Global funnel ---
-    const funnel = { new: 0, invited: 0, connected: 0, messaged: 0, replied: 0, completed: 0, error: 0, total: leads.length };
+    const funnel: Funnel = { new: 0, invited: 0, already_invited: 0, connected: 0, messaged: 0, replied: 0, completed: 0, error: 0, total: leads.length };
     for (const lead of leads) {
       const s = lead.status as keyof typeof funnel;
       if (s in funnel && s !== 'total') (funnel[s] as number)++;

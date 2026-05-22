@@ -268,8 +268,12 @@ describe('runCampaignTick — daily-invite counter', () => {
 
   it('does NOT increment the counter when LinkedIn says already_invited', async () => {
     // LinkedIn reports the invite was sent earlier (different session / manual
-    // outreach). The lead is moved to `invited` so it leaves the funnel, but
-    // today's quota is preserved for actually-new invites.
+    // outreach). The lead is moved to a dedicated `already_invited` status so
+    // the Portal funnel doesn't double-count it as an invite we sent now —
+    // the LinkedIn account dashboard wouldn't count it either. Today's quota
+    // is preserved for actually-new invites, and the campaign-lead row is
+    // marked `skipped` WITHOUT advancing current_step (we never invited them
+    // in this campaign, so wait/message follow-up makes no sense).
     seed({ invitesSentToday: 5, dailyLimit: 30, leads: 1 });
 
     sendInviteImpl = async () => {
@@ -281,11 +285,11 @@ describe('runCampaignTick — daily-invite counter', () => {
     expect(counterInDb()).toBe(5);
     expect(mockDb.rpcCallsFor('li_campaign_increment_invite')).toHaveLength(0);
 
-    // Regression: the lead row & campaign-lead row should still be advanced
-    // exactly like the cooldown test asserts.
     const leadStatus = dbState.rows.li_leads?.[0]?.status;
-    expect(leadStatus).toBe('invited');
+    expect(leadStatus).toBe('already_invited');
     const cl = dbState.rows.li_campaign_leads?.[0];
+    // current_step is advanced so the lead can still pick up the wait →
+    // message follow-up if the existing LinkedIn invite is accepted.
     expect(cl?.current_step).toBe(1);
   });
 
