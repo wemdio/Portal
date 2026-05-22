@@ -679,12 +679,15 @@ async function processMessageStep(
     // startChat() blindly and LinkedIn returned `errors/no_connection_with_recipient`
     // for ~1499 leads in a single prod week (Apr 2026). Branch on lead.status:
     //
-    //   - 'invited'              → invite sent but accept not yet observed via webhook;
-    //                              defer one day so a late accept can still be picked up.
+    //   - 'invited' / 'already_invited' → invite is live on LinkedIn (sent
+    //                              by us this run, or pre-existing from
+    //                              another campaign / tool) but accept not
+    //                              yet observed via webhook; defer one day
+    //                              so a late accept can still be picked up.
     //   - 'new'                  → we never even sent an invite — something went sideways
     //                              earlier, skip permanently.
     //   - 'connected' / others   → fall through to startChat — chat just wasn't opened yet.
-    if (lead.status === 'invited') {
+    if (lead.status === 'invited' || lead.status === 'already_invited') {
       const deferAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
       await db
         .from('li_campaign_leads')
@@ -692,7 +695,7 @@ async function processMessageStep(
         .eq('id', cl.id);
       log(
         'info',
-        `Шаг message пропущен: коннект ещё не подтверждён (lead.status=invited). Повторим ${new Date(deferAt).toLocaleString('ru-RU')}.`,
+        `Шаг message пропущен: коннект ещё не подтверждён (lead.status=${lead.status}). Повторим ${new Date(deferAt).toLocaleString('ru-RU')}.`,
         lead.name,
         stepIdx,
       );

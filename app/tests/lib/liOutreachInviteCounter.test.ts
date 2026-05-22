@@ -288,8 +288,9 @@ describe('runCampaignTick — daily-invite counter', () => {
     const leadStatus = dbState.rows.li_leads?.[0]?.status;
     expect(leadStatus).toBe('already_invited');
     const cl = dbState.rows.li_campaign_leads?.[0];
-    expect(cl?.status).toBe('skipped');
-    expect(cl?.current_step).toBe(0);
+    // current_step is advanced so the lead can still pick up the wait →
+    // message follow-up if the existing LinkedIn invite is accepted.
+    expect(cl?.current_step).toBe(1);
   });
 
   it('on a new day the RPC resets the counter to 1 (no JS-side pre-update)', async () => {

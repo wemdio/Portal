@@ -315,7 +315,7 @@ describe('runCampaignTick — account cooldown', () => {
     }
   });
 
-  it('on already_invited error: marks lead already_invited (NOT invited), sets campaign-lead status=skipped without advancing step, does NOT park account, tick continues to next lead', async () => {
+  it('on already_invited error: marks lead already_invited (NOT invited), advances campaign-lead step, does NOT park account, tick continues to next lead', async () => {
     seedBase();
 
     // First lead returns already_invited, second lead succeeds.
@@ -328,9 +328,11 @@ describe('runCampaignTick — account cooldown', () => {
     //    be 'already_invited' (not 'invited'), so the Portal funnel doesn't
     //    overcount sent invites vs what the LinkedIn account dashboard
     //    actually shows in "Приглашений отправлено".
-    //  - The campaign_lead row must be marked 'skipped' WITHOUT advancing
-    //    current_step — they're not going through the rest of the funnel
-    //    (wait → message) for a campaign where we never invited them.
+    //  - The campaign_lead row still advances to the next step (wait →
+    //    message): the existing LinkedIn invite is live for ~3 weeks, so if
+    //    the recipient accepts, the follow-up message should still fire.
+    //    The message step has its own guard that defers for accept while
+    //    lead.status is 'already_invited' (same as 'invited').
     let calls = 0;
     sendInviteImpl = async (providerId) => {
       calls++;
@@ -356,11 +358,10 @@ describe('runCampaignTick — account cooldown', () => {
     expect(leadUpdates.some((u) => u.data.status === 'already_invited')).toBe(true);
     expect(leadUpdates.some((u) => u.data.status === 'invited')).toBe(false);
 
-    // Campaign-lead-1 must be marked 'skipped' and current_step must NOT have
-    // been advanced (we never invited them, so no wait/message follow-up).
+    // Campaign-lead-1 must have its current_step advanced so it picks up the
+    // follow-up message after the wait step.
     const clUpdates = findCampaignLeadUpdates().filter((u) => u.filters.id === 'cl-1');
-    expect(clUpdates.some((u) => u.data.status === 'skipped')).toBe(true);
-    expect(clUpdates.some((u) => u.data.current_step === 1)).toBe(false);
+    expect(clUpdates.some((u) => u.data.current_step === 1)).toBe(true);
   });
 
   it('skips leads already in status=invited without calling sendInvite at all', async () => {
