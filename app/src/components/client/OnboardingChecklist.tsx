@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import type { Route } from 'next';
-import { AlertCircle, Check, ChevronDown, Circle, Clock, Loader2, RefreshCw, Sparkles } from 'lucide-react';
+import { AlertCircle, Check, ChevronDown, Clock, Loader2, RefreshCw } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 interface ChecklistItem {
@@ -127,10 +127,14 @@ export function OnboardingChecklist() {
         className="neu-card p-4 sm:p-5 flex items-center gap-3 w-full text-left"
       >
         <span
-          className="inline-flex items-center justify-center h-8 w-8 rounded-full"
-          style={{ background: 'var(--cp-green)', color: 'var(--cp-ink)' }}
+          className="inline-flex items-center justify-center h-6 w-6 rounded-full shrink-0"
+          style={{
+            background: 'transparent',
+            border: '1px solid var(--cp-paper-faint)',
+            color: 'var(--cp-paper-faint)',
+          }}
         >
-          <Check className="h-4 w-4" />
+          <Check className="h-3.5 w-3.5" />
         </span>
         <div className="flex-1 min-w-0">
           <p className="text-sm font-bold" style={{ color: 'var(--cp-text)' }}>
@@ -149,8 +153,7 @@ export function OnboardingChecklist() {
     <div className="neu-card p-5 sm:p-6">
       <div className="flex items-center justify-between mb-4">
         <div className="min-w-0">
-          <h2 className="text-base font-bold flex items-center gap-2" style={{ color: 'var(--cp-paper)' }}>
-            <Sparkles className="h-4 w-4" style={{ color: 'var(--cp-amber)' }} />
+          <h2 className="text-base font-bold" style={{ color: 'var(--cp-paper)' }}>
             С чего начать
           </h2>
           <p className="text-xs mt-0.5" style={{ color: 'var(--cp-text-m)' }}>
@@ -188,13 +191,21 @@ function ChecklistRow({
   stepNumber: number;
   isNext: boolean;
 }) {
+  // Quiet editorial state vocabulary:
+  //   - done : thin outline circle, Check in paper-faint (completed, no fanfare)
+  //   - next : thin outline circle in amber, Clock in amber (one accent on page)
+  //   - idle : thin outline circle in divider-strong, no inner icon
   const indicator = item.done ? (
-    <Check className="h-4 w-4" style={{ color: 'var(--cp-ink)' }} />
+    <Check className="h-3.5 w-3.5" />
   ) : isNext ? (
-    <Clock className="h-4 w-4" style={{ color: 'var(--cp-ink)' }} />
-  ) : (
-    <Circle className="h-4 w-4" style={{ color: 'var(--cp-paper-faint)' }} />
-  );
+    <Clock className="h-3.5 w-3.5" />
+  ) : null;
+
+  const ringColor = isNext
+    ? 'var(--cp-amber)'
+    : item.done
+      ? 'var(--cp-paper-faint)'
+      : 'var(--cp-divider-strong)';
 
   const Wrapper: React.ElementType = item.href ? Link : 'div';
   const wrapperProps = item.href
@@ -210,14 +221,11 @@ function ChecklistRow({
       title={item.blocked_reason ?? undefined}
     >
       <span
-        className="inline-flex items-center justify-center h-7 w-7 rounded-full shrink-0 mt-0.5"
+        className="inline-flex items-center justify-center h-6 w-6 rounded-full shrink-0 mt-0.5"
         style={{
-          background: item.done
-            ? 'var(--cp-green)'
-            : isNext
-              ? 'var(--cp-amber)'
-              : 'transparent',
-          border: !item.done && !isNext ? '1px solid var(--cp-divider-strong)' : 'none',
+          background: 'transparent',
+          border: `1px solid ${ringColor}`,
+          color: isNext ? 'var(--cp-amber)' : 'var(--cp-paper-faint)',
         }}
       >
         {indicator}
@@ -225,17 +233,12 @@ function ChecklistRow({
 
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="ds-eyebrow">
+          <span
+            className="ds-eyebrow"
+            style={isNext ? { color: 'var(--cp-amber)' } : undefined}
+          >
             {String(stepNumber).padStart(2, '0')}<span aria-hidden> → </span>шаг
           </span>
-          {isNext && (
-            <span
-              className="ds-status-tag px-1.5 py-0.5 rounded"
-              style={{ background: 'rgba(245, 166, 35, 0.15)', color: 'var(--cp-amber)' }}
-            >
-              следующий
-            </span>
-          )}
         </div>
         <p
           className={`text-sm mt-0.5 ${item.done ? 'font-medium' : 'font-bold'}`}

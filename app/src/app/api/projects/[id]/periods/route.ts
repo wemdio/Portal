@@ -8,7 +8,6 @@ type ProjectRow = {
   id: string;
   budget: string | null;
   margin: string | null;
-  payment_method: string | null;
   payment_date: string | null;
   contacts_obligation: string | null;
   contacts_done: string | null;
@@ -34,7 +33,6 @@ type PeriodRow = {
   deadline: string | null;
   budget: string | null;
   margin: string | null;
-  payment_method: string | null;
   payment_date: string | null;
   created_at: string;
 };
@@ -116,7 +114,6 @@ export async function POST(
     period_start?: string;
     budget?: string | null;
     margin?: string | null;
-    payment_method?: string | null;
     payment_date?: string | null;
     contacts_obligation?: string | null;
     kpi_plan?: string | null;
@@ -127,7 +124,7 @@ export async function POST(
 
   const { data: project, error: projectErr } = await supabaseAdmin
     .from('projects')
-    .select('id, budget, margin, payment_method, payment_date, contacts_obligation, contacts_done, kpi_plan, kpi_fact, deadline, launch_date, created_at')
+    .select('id, budget, margin, payment_date, contacts_obligation, contacts_done, kpi_plan, kpi_fact, deadline, launch_date, created_at')
     .eq('id', projectId)
     .maybeSingle();
   if (projectErr) return jsonError(projectErr.message, 500);
@@ -167,7 +164,6 @@ export async function POST(
         deadline: currentProject.deadline,
         budget: currentProject.budget,
         margin: currentProject.margin,
-        payment_method: currentProject.payment_method,
         payment_date: currentProject.payment_date,
       })
       .select('id')
@@ -223,9 +219,6 @@ export async function POST(
     margin: hasBodyField(body, 'margin')
       ? textOrNull(body.margin)
       : currentProject.margin,
-    payment_method: hasBodyField(body, 'payment_method')
-      ? textOrNull(body.payment_method)
-      : currentProject.payment_method,
     payment_date: hasBodyField(body, 'payment_date')
       ? dateOnly(body.payment_date)
       : currentProject.payment_date,
@@ -266,7 +259,6 @@ export async function POST(
       deadline: newPeriodPayload.deadline,
       budget: newPeriodPayload.budget,
       margin: newPeriodPayload.margin,
-      payment_method: newPeriodPayload.payment_method,
       payment_date: newPeriodPayload.payment_date,
       updated_at: new Date().toISOString(),
     })

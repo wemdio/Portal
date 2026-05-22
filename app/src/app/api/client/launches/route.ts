@@ -3,29 +3,17 @@ import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import { logAudit, logError } from '@/lib/loggerServer';
-import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
-import { validateClientLaunchInput } from '@/lib/clientLaunch/validateLaunchInput';
+import { logError } from '@/lib/loggerServer';
 import { mapCsvRowsToLeads } from '@/lib/clientLaunch/mapRowsToLeads';
+import { runClientLaunch, ClientLaunchError } from '@/lib/clientLaunch/runLaunch';
 import type {
-  ClientCampaignPreset,
   ClientLaunchBehaviorOverride,
   ClientLaunchColumnMapping,
   ClientLaunchScheduleOverride,
   ClientLaunchSequence,
   ClientLaunchSequenceVariant,
 } from '@/lib/clientLaunch/types';
-import { activateCampaign, createCampaign, createLeads } from '@/lib/instantly/client';
-import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
-import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
-import {
-  countClientContacts,
-  getBillingPeriodStart,
-  getClientTariffRow,
-  getClientStatus,
-  getClientTariffUsage,
-  resolveEffectiveLimits,
-} from '@/lib/tariffs';
+import { getClientTariffUsage } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -102,10 +90,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
-  if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
 
   const { userId } = result.auth;
-  const logMeta = { userId };
 
   let body: LaunchBody;
   try {
@@ -148,181 +134,37 @@ export async function POST(req: NextRequest) {
     }),
   };
 
-  const { data: presetRow, error: presetErr } = await supabaseInstantly
-    .from('client_campaign_presets')
-    .select('*')
-    .eq('client_user_id', userId)
-    .maybeSingle();
-
-  if (presetErr) {
-    await logError('client.launches.post.preset_load_failed', presetErr, {}, logMeta);
-    return jsonError('Не удалось загрузить пресет', 500);
-  }
-
-  const preset = presetRow as ClientCampaignPreset | null;
-  const instantlyAccountId = resolveInstantlyAccountId(preset?.instantly_account_id);
-  const instantlyRequestOptions = { accountId: instantlyAccountId };
-
   const scheduleOverride = parseScheduleOverride(body.schedule);
   const behaviorOverride = parseBehaviorOverride(body.behavior);
-
-  const validation = validateClientLaunchInput({
-    preset,
-    sequence,
-    mapping,
-    rowCount: rows.length,
-    scheduleOverride,
-  });
-
-  if (!validation.ok) {
-    return jsonError(validation.error, 400);
-  }
 
   const leads = mapCsvRowsToLeads({ headers, rows, mapping });
   if (leads.length === 0) {
     return jsonError('В файле нет валидных email-адресов', 400);
   }
 
-  const tariffRow = await getClientTariffRow(userId);
-  const clientStatus = getClientStatus(tariffRow);
-  if (clientStatus === 'setup') {
-    return jsonError('Ваш личный кабинет настраивается. Пожалуйста, подождите — мы скоро всё подготовим.', 403);
-  }
-  if (clientStatus !== 'active') {
-    return jsonError('Подписка не активна. Оплатите тариф для продолжения работы.', 403);
-  }
-  const limits = resolveEffectiveLimits(tariffRow);
-  const periodStart = getBillingPeriodStart(tariffRow);
-  const usedContacts = await countClientContacts(userId, periodStart);
-  if (usedContacts + leads.length > limits.max_contacts) {
-    const remaining = Math.max(0, limits.max_contacts - usedContacts);
-    return jsonError(
-      `Лимит контактов: ${limits.max_contacts.toLocaleString('ru-RU')} / мес. ` +
-      `Использовано: ${usedContacts.toLocaleString('ru-RU')}. ` +
-      `Попытка добавить: ${leads.length.toLocaleString('ru-RU')}. ` +
-      `Осталось: ${remaining.toLocaleString('ru-RU')}.`,
-      400,
-    );
-  }
-
-  const { data: launchRow, error: insertErr } = await supabaseInstantly
-    .from('client_campaign_launches')
-    .insert({
-      client_user_id: userId,
-      preset_id: preset!.id,
-      instantly_account_id: instantlyAccountId,
-      campaign_name: sequence.name.trim(),
-      sequence_steps: sequence.steps,
-      column_mapping: mapping,
-      uploaded_rows: rows.length,
-      accepted_rows: 0,
-      skipped_rows: 0,
-      status: 'uploading',
-    })
-    .select()
-    .single();
-
-  if (insertErr || !launchRow) {
-    await logError('client.launches.post.insert_failed', insertErr, {}, logMeta);
-    return jsonError('Не удалось создать запись запуска', 500);
-  }
-
-  const launchId = (launchRow as { id: string }).id;
-
-  let instantlyCampaignId: string | null = null;
-
   try {
-    const payload = buildCampaignPayloadFromPreset({
-      preset: preset!,
+    const launch = await runClientLaunch({
+      userId,
       sequence,
+      leads,
       scheduleOverride,
       behaviorOverride,
+      uploadedRows: rows.length,
+      columnMapping: mapping,
     });
-    const created = await createCampaign(payload, instantlyRequestOptions);
-    instantlyCampaignId = (created as { id?: string }).id ?? null;
-    if (!instantlyCampaignId) throw new Error('Instantly returned campaign without id');
-
-    await supabaseInstantly
-      .from('client_campaign_launches')
-      .update({ instantly_campaign_id: instantlyCampaignId })
-      .eq('id', launchId);
-
-    // skip_if_in_workspace НЕ выставляем: иначе Instantly пропускает любого
-    // лида, который уже есть где-либо в воркспейсе (из прошлых кампаний), и
-    // он не попадает в эту кампанию — клиент загрузил базу, а кампания
-    // пустая. skip_if_in_campaign оставляем: дедуп внутри самой кампании
-    // безвреден (свежая кампания всё равно пустая на старте).
-    const leadResult = await createLeads(
-      leads,
-      {
-        campaign_id: instantlyCampaignId,
-        skip_if_in_campaign: true,
-      },
-      instantlyRequestOptions,
-    );
-
-    const accepted = Number((leadResult as { uploaded?: number; created?: number; total_uploaded?: number }).uploaded ??
-      (leadResult as { created?: number }).created ??
-      (leadResult as { total_uploaded?: number }).total_uploaded ??
-      leads.length);
-    const skipped = leads.length - accepted;
-
-    const activatedCampaign = await activateCampaign(instantlyCampaignId, instantlyRequestOptions);
-
-    // Сразу пишем кампанию в каталог: /api/client/campaigns читает
-    // instantly_campaign_catalog, а не Instantly API напрямую. Без этого
-    // свежезапущенная кампания не появляется в списке кампаний клиента
-    // (и на дашборде) до ближайшего часового синка каталога. Админские
-    // флоу создания/активации/паузы делают то же. upsert не бросает —
-    // сбой записи в каталог не должен ломать уже успешный запуск.
-    await upsertInstantlyCatalogFromCampaign(activatedCampaign, instantlyAccountId);
-
-    await supabaseInstantly.from('client_instantly_access').upsert(
-      {
-        client_user_id: userId,
-        resource_type: 'campaign',
-        resource_id: instantlyCampaignId,
-        instantly_account_id: instantlyAccountId,
-        created_by: userId,
-      },
-      { onConflict: 'client_user_id,resource_type,resource_id' },
-    );
-
-    await supabaseInstantly
-      .from('client_campaign_launches')
-      .update({
-        status: 'active',
-        accepted_rows: accepted,
-        skipped_rows: skipped < 0 ? 0 : skipped,
-      })
-      .eq('id', launchId);
-
-    await logAudit(
-      'client.launches.post.success',
-      'Client launched campaign',
-      { instantlyCampaignId, accepted, skipped, totalLeads: leads.length, steps: sequence.steps.length },
-      logMeta,
-    );
 
     return NextResponse.json({
-      launch: {
-        id: launchId,
-        instantly_campaign_id: instantlyCampaignId,
-        campaign_name: sequence.name.trim(),
-        status: 'active',
-        uploaded_rows: rows.length,
-        accepted_rows: accepted,
-        skipped_rows: skipped < 0 ? 0 : skipped,
-      },
+      launch,
       tariff_usage: await getClientTariffUsage(userId),
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Не удалось запустить кампанию';
-    await logError('client.launches.post.launch_failed', err, { instantlyCampaignId }, logMeta);
-    await supabaseInstantly
-      .from('client_campaign_launches')
-      .update({ status: 'failed', error_message: message.slice(0, 500) })
-      .eq('id', launchId);
-    return jsonError(message, 500);
+    if (err instanceof ClientLaunchError) {
+      return jsonError(err.message, err.status);
+    }
+    await logError('client.launches.post.unexpected', err, {}, { userId });
+    return jsonError(
+      err instanceof Error ? err.message : 'Не удалось запустить кампанию',
+      500,
+    );
   }
 }

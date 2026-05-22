@@ -59,7 +59,6 @@ type ProjectPeriod = {
   deadline: string | null;
   budget: string | null;
   margin: string | null;
-  payment_method: string | null;
   payment_date: string | null;
 };
 
@@ -67,7 +66,6 @@ type PeriodFormState = {
   period_start: string;
   budget: string;
   margin: string;
-  payment_method: string;
   payment_date: string;
   contacts_obligation: string;
   kpi_plan: string;
@@ -896,7 +894,7 @@ export function ProjectList() {
     let cancelled = false;
     void supabase
       .from('project_periods')
-      .select('id, project_id, name, status, period_start, period_end, contacts_done, contacts_obligation, kpi_plan, deadline, budget, margin, payment_method, payment_date')
+      .select('id, project_id, name, status, period_start, period_end, contacts_done, contacts_obligation, kpi_plan, deadline, budget, margin, payment_date')
       .eq('status', 'active')
       .in('project_id', projects.map((p) => p.id))
       .then(({ data, error }) => {
@@ -1039,7 +1037,6 @@ export function ProjectList() {
       period_start: todayInputDate(),
       budget: project.budget ?? '',
       margin: project.margin ?? '',
-      payment_method: project.payment_method ?? '',
       payment_date: toDateInputValue(project.payment_date),
       contacts_obligation: project.contacts_obligation ?? '',
       kpi_plan: project.kpi_plan ?? '',
@@ -1067,7 +1064,6 @@ export function ProjectList() {
           period_start: formValueOrNull(form.period_start),
           budget: formValueOrNull(form.budget),
           margin: formValueOrNull(form.margin),
-          payment_method: formValueOrNull(form.payment_method),
           payment_date: formValueOrNull(form.payment_date),
           contacts_obligation: formValueOrNull(form.contacts_obligation),
           kpi_plan: formValueOrNull(form.kpi_plan),
@@ -3176,13 +3172,6 @@ export function ProjectList() {
                 value={periodForm.margin}
                 onChange={(value) => updatePeriodForm('margin', value)}
                 placeholder="Автоматически или вручную"
-                disabled={creatingPeriod}
-              />
-              <PeriodDialogField
-                label="Способ оплаты"
-                value={periodForm.payment_method}
-                onChange={(value) => updatePeriodForm('payment_method', value)}
-                placeholder="Например: счет, карта, рассрочка"
                 disabled={creatingPeriod}
               />
               <PeriodDialogField

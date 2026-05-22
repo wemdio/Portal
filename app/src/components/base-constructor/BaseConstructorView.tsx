@@ -327,6 +327,13 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const [savedBriefText, setSavedBriefText] = useState('');
   const [prompt, setPrompt] = useState('');
   const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
+  // Email-pipeline target options. Дефолты выставлены так, чтобы при наличии
+  // в файле существующей email-колонки поведение было «безопасным»:
+  //   - find_emails не перетирает исходные email, пишет в отдельную колонку;
+  //   - validate валидирует исходные (т.к. они «свои», легко проверить).
+  // Юзер может переключить через UI в секции «Настройки».
+  const [findEmailsTarget, setFindEmailsTarget] = useState<'same' | 'separate'>('separate');
+  const [validateTarget, setValidateTarget] = useState<'original' | 'found' | 'both'>('original');
   const [showPreview, setShowPreview] = useState(true);
   const briefFileRef = useRef<HTMLInputElement | null>(null);
 
@@ -603,6 +610,14 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
       if (selectedSteps.includes('ta_scoring') && keepAllScored) stepConfig.keepAllScored = true;
       if (selectedSteps.includes('personalization') && prompt.trim()) stepConfig.prompt = prompt.trim();
       if (Object.keys(columnMapping).length > 0) stepConfig.column_mapping = JSON.stringify(columnMapping);
+      // Передаём настройки email-пайплайна ТОЛЬКО когда они релевантны
+      // (соответствующий шаг выбран). Иначе worker применит свои дефолты.
+      if (selectedSteps.includes('find_emails')) {
+        stepConfig.find_emails_target = findEmailsTarget;
+      }
+      if (selectedSteps.includes('validate_emails')) {
+        stepConfig.validate_target = validateTarget;
+      }
 
       const res = await authFetch('/api/tools/base-constructor', {
         method: 'POST',
@@ -697,6 +712,36 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const needsPrompt = selectedSteps.includes('personalization');
   const neededRoles = fileData ? getNeededRoles(selectedSteps) : [];
   const unmappedRoles = neededRoles.filter((r) => !columnMapping[r.key]);
+  // Есть ли в файле колонка с email — определяется по column_mapping
+  // (туда autoDetectMapping положил при загрузке, либо юзер ткнул вручную).
+  const hasExistingEmailCol = !!columnMapping.email;
+  // Показывать ли radio «куда писать найденные» — только когда есть смысл
+  // (выбран find_emails И в файле уже есть email-колонка → выбор между
+  // «дополнить ту же» и «отдельная»; иначе нечего «отделять»).
+  const showFindEmailsTargetOption =
+    selectedSteps.includes('find_emails') && hasExistingEmailCol;
+  // Показывать ли radio «что валидировать» — только когда в результате
+  // будет 2 колонки (find_emails выбран в режиме separate ИЛИ юзер уже
+  // зафиксировал отдельную через previous run — для текущего сабмита считаем
+  // что 2 колонки только если find_emails+separate).
+  const showValidateTargetOption =
+    selectedSteps.includes('validate_emails') &&
+    showFindEmailsTargetOption &&
+    findEmailsTarget === 'separate';
+  // Auto-correct: если опции скрыты, держим в state дефолт. Без этого юзер
+  // мог переключить showFindEmailsTargetOption на false (выключив find_emails)
+  // и валидация бы продолжала использовать прошлое значение target='found'.
+  useEffect(() => {
+    if (!showFindEmailsTargetOption && findEmailsTarget !== 'separate') {
+      setFindEmailsTarget('separate');
+    }
+  }, [showFindEmailsTargetOption, findEmailsTarget]);
+  useEffect(() => {
+    if (!showValidateTargetOption && validateTarget !== 'original') {
+      setValidateTarget('original');
+    }
+  }, [showValidateTargetOption, validateTarget]);
+
   const canSubmit = fileData && selectedSteps.length > 0 && !submitting
     && unmappedRoles.length === 0
     && (!needsBrief || brief.trim())
@@ -1100,13 +1145,123 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
               </div>
             )}
 
-            {/* Config inputs for steps that need them */}
-            {fileData && (needsBrief || needsPrompt) && (
+            {/* Settings: brief, prompt, email pipeline target options */}
+            {fileData && (needsBrief || needsPrompt || showFindEmailsTargetOption || showValidateTargetOption) && (
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
                 <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
                   <h2 className="text-base font-bold text-gray-900">{neededRoles.length > 0 ? '4' : '3'}. Настройки</h2>
                 </div>
                 <div className="px-6 py-5 space-y-4">
+                  {(showFindEmailsTargetOption || showValidateTargetOption) && (
+                    <div className="space-y-3 pb-1">
+                      <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                        <MailSearch className="w-4 h-4 text-gray-500" />
+                        Email пайплайн
+                      </h3>
+
+                      {showFindEmailsTargetOption && (
+                        <fieldset className="border border-gray-200 rounded-xl p-4 space-y-2">
+                          <legend className="text-xs font-semibold text-gray-700 px-1">
+                            Куда писать найденные email
+                          </legend>
+                          <p className="text-[11px] text-gray-500 mb-2">
+                            В вашем файле уже есть колонка email. Выберите, как поступить с теми, что найдутся со скрейпа сайтов.
+                          </p>
+                          <label className="flex items-start gap-2 cursor-pointer select-none">
+                            <input
+                              type="radio"
+                              name="find-emails-target"
+                              value="separate"
+                              checked={findEmailsTarget === 'separate'}
+                              onChange={() => setFindEmailsTarget('separate')}
+                              className="mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400"
+                            />
+                            <span className="text-xs text-gray-700 leading-snug">
+                              В отдельную колонку «Найденный Email»
+                              <span className="block text-[11px] text-gray-500 mt-0.5">
+                                Исходные email не трогаются. В итоговом файле колонки сольются в одну с дедупом.
+                              </span>
+                            </span>
+                          </label>
+                          <label className="flex items-start gap-2 cursor-pointer select-none">
+                            <input
+                              type="radio"
+                              name="find-emails-target"
+                              value="same"
+                              checked={findEmailsTarget === 'same'}
+                              onChange={() => setFindEmailsTarget('same')}
+                              className="mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400"
+                            />
+                            <span className="text-xs text-gray-700 leading-snug">
+                              Дополнять ту же колонку
+                              <span className="block text-[11px] text-gray-500 mt-0.5">
+                                Найденные email вписываются только в пустые ячейки. Существующие не перезаписываются.
+                              </span>
+                            </span>
+                          </label>
+                        </fieldset>
+                      )}
+
+                      {showValidateTargetOption && (
+                        <fieldset className="border border-gray-200 rounded-xl p-4 space-y-2">
+                          <legend className="text-xs font-semibold text-gray-700 px-1">
+                            Что валидировать
+                          </legend>
+                          <p className="text-[11px] text-gray-500 mb-2">
+                            После шага «Найти email» у вас будет 2 email-колонки. Выберите какие проверить SMTP-валидацией.
+                          </p>
+                          <label className="flex items-start gap-2 cursor-pointer select-none">
+                            <input
+                              type="radio"
+                              name="validate-target"
+                              value="original"
+                              checked={validateTarget === 'original'}
+                              onChange={() => setValidateTarget('original')}
+                              className="mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400"
+                            />
+                            <span className="text-xs text-gray-700 leading-snug">
+                              Только исходные
+                              <span className="block text-[11px] text-gray-500 mt-0.5">
+                                Email из загруженного файла. Найденные scrape-результаты не валидируем.
+                              </span>
+                            </span>
+                          </label>
+                          <label className="flex items-start gap-2 cursor-pointer select-none">
+                            <input
+                              type="radio"
+                              name="validate-target"
+                              value="found"
+                              checked={validateTarget === 'found'}
+                              onChange={() => setValidateTarget('found')}
+                              className="mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400"
+                            />
+                            <span className="text-xs text-gray-700 leading-snug">
+                              Только найденные
+                              <span className="block text-[11px] text-gray-500 mt-0.5">
+                                Email со скрейпа сайтов. Исходные считаем доверенными.
+                              </span>
+                            </span>
+                          </label>
+                          <label className="flex items-start gap-2 cursor-pointer select-none">
+                            <input
+                              type="radio"
+                              name="validate-target"
+                              value="both"
+                              checked={validateTarget === 'both'}
+                              onChange={() => setValidateTarget('both')}
+                              className="mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400"
+                            />
+                            <span className="text-xs text-gray-700 leading-snug">
+                              Обе
+                              <span className="block text-[11px] text-gray-500 mt-0.5">
+                                Каждая колонка валидируется независимо. Невалидные email очищаются, строка вылетает только если все колонки пустые/невалидные.
+                              </span>
+                            </span>
+                          </label>
+                        </fieldset>
+                      )}
+                    </div>
+                  )}
                   {needsBrief && (
                     <div>
                       <label className="block text-sm font-semibold text-gray-700 mb-2">
