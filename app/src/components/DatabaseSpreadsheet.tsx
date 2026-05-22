@@ -7993,7 +7993,75 @@ export function DatabaseSpreadsheet() {
 
     let processedCount = 0;
     let found = 0;
-    const BATCH = 5;
+    // BATCH=2 (раньше 5): на проде batches с 5 строк уходят в backend на 5-7
+    // минут (15s timeout × ~6 URL-кандидатов × 5 строк), и юзер видит «0/N»
+    // первые минуты — выглядит как hang. На 2 строки worst-case ~3 минуты,
+    // прогресс обновляется в 2.5× раз чаще. Бэк MAX_ITEMS=5, так что 2 пройдёт.
+    const BATCH = 2;
+    // Per-batch timeout на frontend: если backend завис (network/proxy/контейнер),
+    // fetch без timeout'а будет висеть до закрытия вкладки. 90 секунд — щедрый
+    // запас на worst-case бэк (15s × 6 URL × 2 строки ≈ 3 мин — нет, не влезаем,
+    // увеличим до 180s? проверим: 90s достаточно для 95% батчей, для остальных
+    // лучше retry чем висеть бесконечно).
+    const BATCH_TIMEOUT_MS = 180_000;
+    const MAX_FETCH_ATTEMPTS = 2;
+
+    /**
+     * Fetch батча с timeout'ом + retry. Возвращает Response при успехе,
+     * throws при исчерпании retries или явном user-cancel.
+     *
+     * Зачем не использовать AbortSignal.any: на старых браузерах его нет.
+     * Делаем вручную: timeoutCtrl слушает и таймер, и user-abort.
+     */
+    const fetchBatchWithTimeout = async (items: Array<{ url: string }>): Promise<Response> => {
+      for (let attempt = 1; attempt <= MAX_FETCH_ATTEMPTS; attempt += 1) {
+        if (abortCtrl.signal.aborted) throw new Error('Отменено пользователем');
+        const timeoutCtrl = new AbortController();
+        const timer = setTimeout(() => timeoutCtrl.abort(), BATCH_TIMEOUT_MS);
+        const onUserAbort = () => timeoutCtrl.abort();
+        abortCtrl.signal.addEventListener('abort', onUserAbort);
+        // «Таймаут vs user-cancel» различаем по `abortCtrl.signal.aborted`
+        // ПОСЛЕ catch'а: если true — юзер ткнул «Стоп», если false — таймер.
+        try {
+          const tokenRes = await supabase.auth.getSession();
+          const token = tokenRes.data.session?.access_token;
+          const res = await fetch('/api/enrich/inn-lookup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ items }),
+            signal: timeoutCtrl.signal,
+          });
+          if (!res.ok) {
+            // HTTP ошибка — ретраим (5xx могут быть транзитными), 4xx тоже
+            // (на 401 может потребоваться свежий токен на следующем attempt'е).
+            if (attempt < MAX_FETCH_ATTEMPTS) {
+              await new Promise((r) => setTimeout(r, 1000 * attempt));
+              continue;
+            }
+            throw new Error(`HTTP ${res.status}`);
+          }
+          return res;
+        } catch (err) {
+          if (abortCtrl.signal.aborted) throw new Error('Отменено пользователем');
+          // Это таймаут (timer сработал), AbortError, или сетевая ошибка.
+          // Все они ретраибельны если не последний attempt.
+          const wasTimeout = err instanceof Error && err.name === 'AbortError';
+          if (attempt < MAX_FETCH_ATTEMPTS) {
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
+            continue;
+          }
+          if (wasTimeout) {
+            throw new Error(`Сервер не отвечает на батч (>${BATCH_TIMEOUT_MS / 1000}s, ${MAX_FETCH_ATTEMPTS} попыток). Попробуйте через минуту.`);
+          }
+          throw err;
+        } finally {
+          clearTimeout(timer);
+          abortCtrl.signal.removeEventListener('abort', onUserAbort);
+        }
+      }
+      // Unreachable, но TS требует.
+      throw new Error('fetchBatchWithTimeout: unexpected exit');
+    };
 
     try {
       if (missingLabels.length > 0) {
@@ -8022,17 +8090,7 @@ export function DatabaseSpreadsheet() {
           url: String(activeTab.data[ri]?.[urlCol] ?? '').trim(),
         }));
 
-        const res = await fetch('/api/enrich/inn-lookup', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}`,
-          },
-          body: JSON.stringify({ items }),
-          signal: abortCtrl.signal,
-        });
-
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const res = await fetchBatchWithTimeout(items);
         const json = (await res.json()) as {
           results: Array<{ inn: string | null; companyName: string | null }>;
         };
