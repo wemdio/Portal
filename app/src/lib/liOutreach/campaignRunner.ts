@@ -381,6 +381,30 @@ async function processInviteStep(
     return false;
   }
 
+  // Defensive: lead already known to be 'already_invited' from a prior tick
+  // (this campaign or another). Don't waste an API call to re-confirm what
+  // LinkedIn will tell us again — advance the step so this lead can still
+  // pick up the follow-up message if/when LinkedIn flips them to connected.
+  // Same effect as the in-tick already_invited cooldown branch below.
+  if (lead.status === 'already_invited') {
+    log(
+      'info',
+      `Лид уже помечен «already_invited» в нашей базе — пропуск инвайта без API-вызова. Лид продолжает идти по воронке: если человек примет уже-висящий инвайт, фоллов-ап сработает.`,
+      lead.name,
+      stepIdx,
+    );
+    await db
+      .from('li_campaign_leads')
+      .update({
+        current_step: stepIdx + 1,
+        status:
+          stepIdx + 1 < (campaign.steps?.length ?? 0) ? 'in_progress' : 'completed',
+        updated_at: now,
+      })
+      .eq('id', cl.id);
+    return false;
+  }
+
   if (campaign.invites_sent_today >= campaign.daily_invite_limit) {
     log('warning', `Дневной лимит инвайтов достигнут (${campaign.invites_sent_today}/${campaign.daily_invite_limit}) — пропуск`, lead.name, stepIdx);
     return false;
@@ -452,20 +476,36 @@ async function processInviteStep(
     const cooldown = detectAccountCooldownError(e);
     if (cooldown) {
       // `already_invited` is a per-lead signal, NOT an account-wide back-off.
-      // It just means LinkedIn still has a pending invitation from us to this
-      // specific person. Mark the lead as invited, advance the campaign step,
-      // and let the tick continue to the next lead. We saw in prod (Apr 2026)
-      // that parking the whole account for 15 min on every such hit dropped
-      // throughput from 25/day to ~1/15min on lists with historically-invited
-      // contacts. See bug log + accountCooldown.ts.
+      // LinkedIn already has a pending invitation to this person — sent
+      // earlier by us in another campaign, or by another tool. The invite is
+      // still live on LinkedIn's side (typically ~3 weeks before expiry),
+      // so the recipient could accept any day and we should still get the
+      // chance to follow up.
+      //
+      // Therefore:
+      //   - li_leads.status → dedicated 'already_invited' state (not
+      //     'invited'), so the funnel doesn't double-count it as an invite
+      //     we sent now — the LinkedIn account dashboard wouldn't include
+      //     it in "Приглашений отправлено" either.
+      //   - The campaign-lead row STILL advances to the next step (wait →
+      //     message). The follow-up message step has its own guard
+      //     (sendMessageStep) that defers a day at a time while the lead
+      //     hasn't accepted — so if the existing invite is accepted later,
+      //     the message will go out then. That guard also recognises
+      //     'already_invited' (parallel to 'invited') after this change.
+      //   - Daily invite quota is NOT consumed (no API send happened).
+      //   - Account is NOT parked (prod 2026-04: parking 15min on every
+      //     already_invited dropped throughput from 25/day to ~1/15min on
+      //     historically-invited lists — see accountCooldown.ts).
       if (cooldown.kind === 'already_invited') {
         log(
           'warning',
-          `LinkedIn вернул «already_invited» — лид помечен invited и пропущен (аккаунт НЕ паркуется, тик продолжается)`,
+          `LinkedIn ответил «already_invited» — у нас уже есть активный инвайт на этого лида (отправлен ранее, в другой кампании или вручную). ` +
+            `Дневной лимит не тратится. Лид помечен «already_invited» и продолжает идти по воронке: если человек примет инвайт в ближайшие ~3 недели, сработает фоллов-ап.`,
           lead.name,
           stepIdx,
         );
-        await db.from('li_leads').update({ status: 'invited', updated_at: now }).eq('id', lead.id);
+        await db.from('li_leads').update({ status: 'already_invited', updated_at: now }).eq('id', lead.id);
         await db
           .from('li_campaign_leads')
           .update({
@@ -599,17 +639,55 @@ async function processMessageStep(
 ): Promise<boolean> {
   const now = new Date().toISOString();
 
+  // Welcome-vs-follow-up dedup. When `campaign.welcome_message` is configured,
+  // the connection_accepted webhook sends it instantly on accept. If we then
+  // also fire the FIRST message/follow_up step from the runner, the lead gets
+  // two near-identical messages back-to-back (one when accept lands, one when
+  // the 2-day wait expires). Skip this step exactly once when:
+  //   - welcome was actually delivered (welcome_sent_at is set), AND
+  //   - this is the first message step in the campaign (no earlier
+  //     message/follow_up step in steps[0..stepIdx-1]).
+  // Subsequent message/follow_up steps still fire normally — they're meant as
+  // real follow-ups, not the welcome.
+  if (cl.welcome_sent_at) {
+    const priorMessageIdx = (campaign.steps ?? []).findIndex(
+      (s, i) => i < stepIdx && (s.type === 'message' || s.type === 'follow_up'),
+    );
+    if (priorMessageIdx === -1) {
+      const totalSteps = campaign.steps?.length ?? 0;
+      const isLast = stepIdx + 1 >= totalSteps;
+      await db
+        .from('li_campaign_leads')
+        .update({
+          current_step: stepIdx + 1,
+          status: isLast ? 'completed' : 'in_progress',
+          updated_at: now,
+        })
+        .eq('id', cl.id);
+      log(
+        'info',
+        `Шаг message пропущен: welcome уже отправлен через webhook на accept (welcome_sent_at=${cl.welcome_sent_at}). Переход к следующему шагу.`,
+        lead.name,
+        stepIdx,
+      );
+      return false;
+    }
+  }
+
   if (!lead.chat_id) {
     // Connection guard. Without it, after a 2-day `wait` step we used to call
     // startChat() blindly and LinkedIn returned `errors/no_connection_with_recipient`
     // for ~1499 leads in a single prod week (Apr 2026). Branch on lead.status:
     //
-    //   - 'invited'              → invite sent but accept not yet observed via webhook;
-    //                              defer one day so a late accept can still be picked up.
+    //   - 'invited' / 'already_invited' → invite is live on LinkedIn (sent
+    //                              by us this run, or pre-existing from
+    //                              another campaign / tool) but accept not
+    //                              yet observed via webhook; defer one day
+    //                              so a late accept can still be picked up.
     //   - 'new'                  → we never even sent an invite — something went sideways
     //                              earlier, skip permanently.
     //   - 'connected' / others   → fall through to startChat — chat just wasn't opened yet.
-    if (lead.status === 'invited') {
+    if (lead.status === 'invited' || lead.status === 'already_invited') {
       const deferAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
       await db
         .from('li_campaign_leads')
@@ -617,7 +695,7 @@ async function processMessageStep(
         .eq('id', cl.id);
       log(
         'info',
-        `Шаг message пропущен: коннект ещё не подтверждён (lead.status=invited). Повторим ${new Date(deferAt).toLocaleString('ru-RU')}.`,
+        `Шаг message пропущен: коннект ещё не подтверждён (lead.status=${lead.status}). Повторим ${new Date(deferAt).toLocaleString('ru-RU')}.`,
         lead.name,
         stepIdx,
       );
