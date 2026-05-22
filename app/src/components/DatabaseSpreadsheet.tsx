@@ -6258,8 +6258,16 @@ export function DatabaseSpreadsheet() {
         setLastAction({ message: 'Валидация почт отменена', time: Date.now() });
         setEmailValidation((prev) => ({ ...prev, isValidating: false, isOpen: false, jobId: null }));
       } else {
+        // Раньше тут было `isOpen: true` — модал САМ открывался поверх того что
+        // юзер сейчас делает (жалоба специалиста: «при обогащении ИНН вышла
+        // ошибка валидации почт — при чём тут валидация?»). Polling крутится
+        // в фоне через 5 минут после запуска юзера, и юзер уже мог уйти
+        // в другой инструмент. Не открываем модал автоматически — сохраняем
+        // текущее isOpen (если был в модале — там и остался с алертом; ушёл —
+        // увидит только toast).
         const errorMsg = err instanceof Error ? err.message : 'Произошла ошибка';
-        setEmailValidation((prev) => ({ ...prev, error: errorMsg, isValidating: false, isOpen: true, jobId: null }));
+        setEmailValidation((prev) => ({ ...prev, error: errorMsg, isValidating: false, jobId: null }));
+        setLastAction({ message: `Валидация почт: ошибка — ${errorMsg}`, time: Date.now() });
       }
     }
   };
@@ -6481,12 +6489,15 @@ export function DatabaseSpreadsheet() {
         setLastAction({ message: 'Валидация почт отменена', time: Date.now() });
         setEmailValidation((prev) => ({ ...prev, isValidating: false, isOpen: false, jobId: null }));
       } else {
+        // Не открываем модал автоматически — см. комментарий в parallel-catch'е
+        // выше. Юзер мог запустить валидацию и уйти в другой инструмент;
+        // 5-минутный stall-таймаут в фоне не должен ему вытаскивать модал
+        // поверх ИНН-lookup'а / brief-scoring'а / чего-то ещё.
         const errorMsg = err instanceof Error ? err.message : 'Произошла ошибка';
         setEmailValidation((prev) => ({
           ...prev,
           error: errorMsg,
           isValidating: false,
-          isOpen: true,
           jobId: null,
         }));
         setLastAction({ message: `Валидация почт: ошибка — ${errorMsg}`, time: Date.now() });
@@ -8058,8 +8069,20 @@ export function DatabaseSpreadsheet() {
       });
       setInnLookup((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
     } catch (err) {
-      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
+      // Раньше при не-AbortError'е catch тихо закрывал модал, не показывая юзеру
+      // причину — он видел только что «10 ИНН нашлось и пропало». Особенно
+      // подло после redeploy'я: «Failed to find Server Action» из соседних
+      // действий мог прервать цикл, а юзер думал что ИНН-lookup сам по себе
+      // отвалился. Теперь всегда выводим toast с причиной + сколько успели.
+      const isAbort = err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем');
+      if (isAbort) {
         setLastAction({ message: `ИНН отменено (обработано: ${processedCount})`, time: Date.now() });
+      } else {
+        const reason = err instanceof Error ? err.message : 'неизвестная ошибка';
+        setLastAction({
+          message: `ИНН: прервано после ${processedCount} строк — ${reason}. Попробуйте обновить страницу (Ctrl+Shift+R) и запустить заново.`,
+          time: Date.now(),
+        });
       }
       setInnLookup((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
     } finally {
