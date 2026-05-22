@@ -1,9 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import {
-  Building2, Filter, UserCheck, Download as DownloadIcon,
-} from 'lucide-react';
+import { Building2, FileSpreadsheet, FileText, Search, X } from 'lucide-react';
 import { Switch } from '@/components/Switch';
 import { supabase } from '@/lib/supabaseClient';
 import { FEDERAL_DISTRICTS, ALL_REGION_CODES } from '@/lib/companiesSearch/regions';
@@ -115,7 +113,6 @@ export default function CompaniesSearchPage() {
     };
   };
 
-
   const handleCalculate = async () => {
     setCalcLoading(true);
     setCalcError(null);
@@ -200,20 +197,20 @@ export default function CompaniesSearchPage() {
     }
   };
 
-
   return (
     <div className="max-w-6xl mx-auto space-y-6 pb-20">
       <header>
-        <h1 className="text-2xl sm:text-3xl font-extrabold text-gray-900 flex items-center gap-3">
-          <span
-            className="inline-flex items-center justify-center w-9 h-9 rounded-xl"
-            style={{ background: 'rgba(59,130,246,0.12)', color: '#3B82F6' }}
-          >
-            <Building2 className="h-5 w-5" />
-          </span>
+        <p className="ds-eyebrow mb-2">
+          <Building2 className="inline-block h-3 w-3 mr-1" aria-hidden />
+          {t('Сбор баз', 'Database collection', locale)}
+        </p>
+        <h1
+          className="text-xl sm:text-2xl font-bold m-0"
+          style={{ color: 'var(--cp-paper)' }}
+        >
           {t('B2B-поиск компаний', 'B2B company search', locale)}
         </h1>
-        <p className="mt-2 text-sm sm:text-base text-gray-500">
+        <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
           {t(
             'Поиск российских юрлиц по ОКВЭД, регионам, выручке и контактам. Экспорт в CSV/XLSX.',
             'Russian legal entities by activity, region, revenue, and contacts. CSV/XLSX export.',
@@ -222,61 +219,76 @@ export default function CompaniesSearchPage() {
         </p>
       </header>
 
-      {/* Step 1 */}
-      <div className="bg-white rounded-xl shadow-sm p-6" style={{ borderTop: '3px solid #3B82F6' }}>
-        <div className="flex items-center gap-6 mb-6 text-sm">
+      {/* ── 01 → Регионы и виды деятельности ─────────────────────────── */}
+      <section className="neu-card p-5 sm:p-6">
+        <div className="flex items-center gap-4 mb-5">
           <button
             type="button"
             onClick={() => setMode('activity')}
-            className={`flex items-center gap-2 ${mode === 'activity' ? 'font-bold text-gray-900' : 'text-blue-600'}`}
+            className={`ds-nav-item px-3 py-1.5 text-xs ${mode === 'activity' ? 'active' : ''}`}
+            aria-current={mode === 'activity' ? 'page' : undefined}
           >
-            {mode === 'activity' && <span className="text-green-600">✓</span>}
             {t('По видам деятельности', 'By activity type', locale)}
           </button>
           <button
             type="button"
             onClick={() => setMode('inn')}
-            className={`flex items-center gap-2 ${mode === 'inn' ? 'font-bold text-gray-900' : 'text-blue-600'}`}
+            className={`ds-nav-item px-3 py-1.5 text-xs ${mode === 'inn' ? 'active' : ''}`}
+            aria-current={mode === 'inn' ? 'page' : undefined}
           >
-            {mode === 'inn' && <span className="text-green-600">✓</span>}
             {t('По списку ИНН', 'By TIN list', locale)}
           </button>
         </div>
 
-        <h2 className="text-xl font-bold mb-4 flex items-center gap-2.5">
-          <span
-            className="inline-flex items-center justify-center w-7 h-7 rounded-full text-xs font-bold"
-            style={{ background: 'linear-gradient(135deg, #3B82F6, #6366F1)', color: '#fff' }}
-          >
-            1
-          </span>
-          {t('Выберите регионы и виды деятельности', 'Select regions and activity types', locale)}
-        </h2>
+        <p className="ds-eyebrow mb-3">
+          01<span aria-hidden> → </span>
+          {t('Регионы и виды деятельности', 'Regions and activity types', locale)}
+        </p>
 
         {mode === 'activity' ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <button
               type="button"
               onClick={() => setRegionsModalOpen(true)}
-              className="group flex items-center gap-3 w-full border border-gray-200 rounded-xl px-5 py-4 bg-white hover:border-blue-400 hover:shadow-sm transition-all text-left"
+              className="ds-card-pressable flex items-center gap-3 w-full rounded-md px-5 py-4 text-left"
+              style={{
+                background: 'var(--cp-surface-rest)',
+                border: '1px solid var(--cp-divider)',
+              }}
             >
-              <div className="w-10 h-10 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center flex-shrink-0 group-hover:bg-blue-100 transition-colors">
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
-                </svg>
-              </div>
+              <svg
+                className="w-5 h-5 shrink-0"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={1.5}
+                style={{ color: 'var(--cp-paper-faint)' }}
+                aria-hidden
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
+              </svg>
               <div className="flex-1 min-w-0">
-                <div className="text-sm font-semibold text-gray-900">{t('Регионы', 'Regions', locale)}</div>
-                <div className="text-xs text-gray-500 mt-0.5">
+                <div className="text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
+                  {t('Регионы', 'Regions', locale)}
+                </div>
+                <div className="ds-mono text-[11px] mt-0.5" style={{ color: 'var(--cp-paper-faint)' }}>
                   {selectedRegionsCount === ALL_REGION_CODES.length
-                    ? t('Выбраны все регионы РФ', 'All regions selected', locale)
+                    ? t('все регионы РФ', 'all regions selected', locale)
                     : selectedRegionsCount === 0
-                      ? t('Не выбран ни один регион', 'No regions selected', locale)
-                      : t(`Выбрано: ${selectedRegionsCount}`, `Selected: ${selectedRegionsCount}`, locale)}
+                      ? t('не выбран ни один регион', 'no regions selected', locale)
+                      : t(`выбрано: ${selectedRegionsCount}`, `selected: ${selectedRegionsCount}`, locale)}
                 </div>
               </div>
-              <svg className="w-5 h-5 text-gray-400 group-hover:text-blue-500 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <svg
+                className="w-4 h-4 shrink-0"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+                style={{ color: 'var(--cp-paper-faint)' }}
+                aria-hidden
+              >
                 <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
               </svg>
             </button>
@@ -284,90 +296,109 @@ export default function CompaniesSearchPage() {
             <button
               type="button"
               onClick={() => setOkvedModalOpen(true)}
-              className="group flex items-center gap-3 w-full border border-gray-200 rounded-xl px-5 py-4 bg-white hover:border-blue-400 hover:shadow-sm transition-all text-left"
+              className="ds-card-pressable flex items-center gap-3 w-full rounded-md px-5 py-4 text-left"
+              style={{
+                background: 'var(--cp-surface-rest)',
+                border: '1px solid var(--cp-divider)',
+              }}
             >
-              <div className="w-10 h-10 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center flex-shrink-0 group-hover:bg-amber-100 transition-colors">
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" />
-                </svg>
-              </div>
+              <svg
+                className="w-5 h-5 shrink-0"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={1.5}
+                style={{ color: 'var(--cp-paper-faint)' }}
+                aria-hidden
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" />
+              </svg>
               <div className="flex-1 min-w-0">
-                <div className="text-sm font-semibold text-gray-900">{t('Виды деятельности (ОКВЭД)', 'Activity types (OKVED)', locale)}</div>
-                <div className="text-xs text-gray-500 mt-0.5">
+                <div className="text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
+                  {t('Виды деятельности (ОКВЭД)', 'Activity types (OKVED)', locale)}
+                </div>
+                <div className="ds-mono text-[11px] mt-0.5" style={{ color: 'var(--cp-paper-faint)' }}>
                   {selectedOkveds.size === 0
-                    ? t('Все виды деятельности', 'All activity types', locale)
+                    ? t('все виды деятельности', 'all activity types', locale)
                     : t(
-                        `Выбрано: ${selectedOkveds.size}${selectedOkvedTopCount !== selectedOkveds.size ? ` (${selectedOkvedTopCount} групп)` : ''}`,
-                        `Selected: ${selectedOkveds.size}${selectedOkvedTopCount !== selectedOkveds.size ? ` (${selectedOkvedTopCount} groups)` : ''}`,
+                        `выбрано: ${selectedOkveds.size}${selectedOkvedTopCount !== selectedOkveds.size ? ` (${selectedOkvedTopCount} групп)` : ''}`,
+                        `selected: ${selectedOkveds.size}${selectedOkvedTopCount !== selectedOkveds.size ? ` (${selectedOkvedTopCount} groups)` : ''}`,
                         locale,
                       )}
                 </div>
               </div>
-              <svg className="w-5 h-5 text-gray-400 group-hover:text-blue-500 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <svg
+                className="w-4 h-4 shrink-0"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+                style={{ color: 'var(--cp-paper-faint)' }}
+                aria-hidden
+              >
                 <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
               </svg>
             </button>
           </div>
         ) : (
           <div>
-            <label className="text-sm text-gray-600 mb-2 block">
+            <label className="ds-eyebrow block mb-2">
               {t(
-                'Список ИНН (через запятую, пробел или с новой строки):',
-                'TIN list (comma, space, or newline separated):',
+                'список ИНН (через запятую, пробел или с новой строки)',
+                'TIN list (comma, space, or newline separated)',
                 locale,
               )}
             </label>
             <textarea
               value={innList}
               onChange={(e) => setInnList(e.target.value)}
-              className="w-full border border-gray-300 rounded p-3 font-mono text-sm"
+              className="ds-input w-full ds-mono"
               rows={6}
               placeholder="7710641442&#10;5017074592"
             />
           </div>
         )}
-      </div>
+      </section>
 
-      {/* Step 2 */}
-      <div className="bg-white rounded-xl shadow-sm p-6" style={{ borderTop: '3px solid #8B5CF6' }}>
-        <h2 className="text-xl font-bold mb-6 flex items-center gap-2.5">
-          <span
-            className="inline-flex items-center justify-center w-7 h-7 rounded-full text-xs font-bold"
-            style={{ background: 'linear-gradient(135deg, #8B5CF6, #7C3AED)', color: '#fff' }}
-          >
-            2
-          </span>
+      {/* ── 02 → Дополнительные фильтры ──────────────────────────────── */}
+      <section className="neu-card p-5 sm:p-6">
+        <p className="ds-eyebrow mb-4">
+          02<span aria-hidden> → </span>
           {t('Дополнительные фильтры', 'Additional filters', locale)}
-        </h2>
+        </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
           <div className="space-y-6">
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">
-                {t('Контакты', 'Contacts', locale)}
-              </div>
+              <p className="ds-eyebrow mb-2">{t('контакты', 'contacts', locale)}</p>
               <div className="flex flex-wrap gap-6">
                 <Switch
                   checked={hasPhone}
                   onCheckedChange={setHasPhone}
-                  label={<span className="text-sm">{t('Указан телефон', 'Has phone', locale)}</span>}
+                  label={
+                    <span className="text-sm" style={{ color: 'var(--cp-paper)' }}>
+                      {t('Указан телефон', 'Has phone', locale)}
+                    </span>
+                  }
                 />
                 <Switch
                   checked={hasEmail}
                   onCheckedChange={setHasEmail}
-                  label={<span className="text-sm">{t('Указан email', 'Has email', locale)}</span>}
+                  label={
+                    <span className="text-sm" style={{ color: 'var(--cp-paper)' }}>
+                      {t('Указан email', 'Has email', locale)}
+                    </span>
+                  }
                 />
               </div>
             </div>
 
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">
-                {t('Организационно-правовая форма', 'Legal form', locale)}
-              </div>
+              <p className="ds-eyebrow mb-2">{t('организационно-правовая форма', 'legal form', locale)}</p>
               <select
                 value={legalForm}
                 onChange={(e) => setLegalForm(e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm bg-white"
+                className="ds-input w-full text-sm"
               >
                 <option value="">{t('Все организации', 'All organizations', locale)}</option>
                 {LEGAL_FORMS.map((f) => (
@@ -379,53 +410,71 @@ export default function CompaniesSearchPage() {
             </div>
 
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">
-                {t('Численность сотрудников', 'Number of employees', locale)}
-              </div>
+              <p className="ds-eyebrow mb-2">{t('численность сотрудников', 'number of employees', locale)}</p>
               <div className="grid grid-cols-2 gap-3">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-500">{t('От', 'From', locale)}</span>
+                  <span
+                    className="ds-mono text-[11px]"
+                    style={{ color: 'var(--cp-paper-faint)' }}
+                  >
+                    {t('от', 'from', locale)}
+                  </span>
                   <input
                     type="number"
                     min={0}
                     value={employeesFrom}
                     onChange={(e) => setEmployeesFrom(e.target.value)}
-                    className="flex-1 border-b border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                    className="ds-input flex-1 text-sm"
                     placeholder="0"
                   />
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-500">{t('до', 'to', locale)}</span>
+                  <span
+                    className="ds-mono text-[11px]"
+                    style={{ color: 'var(--cp-paper-faint)' }}
+                  >
+                    {t('до', 'to', locale)}
+                  </span>
                   <input
                     type="number"
                     min={0}
                     value={employeesTo}
                     onChange={(e) => setEmployeesTo(e.target.value)}
-                    className="flex-1 border-b border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                    className="ds-input flex-1 text-sm"
                   />
                 </div>
               </div>
             </div>
 
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">
-                {t('Дополнительные данные', 'Additional data', locale)}
-              </div>
+              <p className="ds-eyebrow mb-2">{t('дополнительные данные', 'additional data', locale)}</p>
               <div className="flex flex-col gap-2">
                 <Switch
                   checked={hasWebsite}
                   onCheckedChange={setHasWebsite}
-                  label={<span className="text-sm">{t('Есть сайт', 'Has website', locale)}</span>}
+                  label={
+                    <span className="text-sm" style={{ color: 'var(--cp-paper)' }}>
+                      {t('Есть сайт', 'Has website', locale)}
+                    </span>
+                  }
                 />
                 <Switch
                   checked={hasEdo}
                   onCheckedChange={setHasEdo}
-                  label={<span className="text-sm">{t('Есть идентификатор ЭДО', 'Has EDI ID', locale)}</span>}
+                  label={
+                    <span className="text-sm" style={{ color: 'var(--cp-paper)' }}>
+                      {t('Есть идентификатор ЭДО', 'Has EDI ID', locale)}
+                    </span>
+                  }
                 />
                 <Switch
                   checked={hasEgais}
                   onCheckedChange={setHasEgais}
-                  label={<span className="text-sm">{t('Есть ЕГАИС', 'Has EGAIS', locale)}</span>}
+                  label={
+                    <span className="text-sm" style={{ color: 'var(--cp-paper)' }}>
+                      {t('Есть ЕГАИС', 'Has EGAIS', locale)}
+                    </span>
+                  }
                 />
               </div>
             </div>
@@ -433,72 +482,85 @@ export default function CompaniesSearchPage() {
 
           <div className="space-y-6">
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">
-                {t('Выручка, руб.', 'Revenue, RUB', locale)}
-              </div>
+              <p className="ds-eyebrow mb-2">{t('выручка, руб.', 'revenue, RUB', locale)}</p>
               <div className="flex items-center gap-2">
-                <span className="text-sm text-gray-500">{t('От', 'From', locale)}</span>
+                <span
+                  className="ds-mono text-[11px]"
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                >
+                  {t('от', 'from', locale)}
+                </span>
                 <input
                   type="number"
                   min={0}
                   value={revenueFrom}
                   onChange={(e) => setRevenueFrom(e.target.value)}
-                  className="flex-1 border-b border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                  className="ds-input flex-1 text-sm"
                 />
-                <span className="text-sm text-gray-500">{t('до', 'to', locale)}</span>
+                <span
+                  className="ds-mono text-[11px]"
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                >
+                  {t('до', 'to', locale)}
+                </span>
                 <input
                   type="number"
                   min={0}
                   value={revenueTo}
                   onChange={(e) => setRevenueTo(e.target.value)}
-                  className="flex-1 border-b border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                  className="ds-input flex-1 text-sm"
                 />
               </div>
             </div>
 
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">
-                {t('Стоимость организации, руб.', 'Company cost, RUB', locale)}
-              </div>
+              <p className="ds-eyebrow mb-2">
+                {t('стоимость организации, руб.', 'company cost, RUB', locale)}
+              </p>
               <div className="flex items-center gap-2">
-                <span className="text-sm text-gray-500">{t('От', 'From', locale)}</span>
+                <span
+                  className="ds-mono text-[11px]"
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                >
+                  {t('от', 'from', locale)}
+                </span>
                 <input
                   type="number"
                   min={0}
                   value={costFrom}
                   onChange={(e) => setCostFrom(e.target.value)}
-                  className="flex-1 border-b border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                  className="ds-input flex-1 text-sm"
                 />
-                <span className="text-sm text-gray-500">{t('до', 'to', locale)}</span>
+                <span
+                  className="ds-mono text-[11px]"
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                >
+                  {t('до', 'to', locale)}
+                </span>
                 <input
                   type="number"
                   min={0}
                   value={costTo}
                   onChange={(e) => setCostTo(e.target.value)}
-                  className="flex-1 border-b border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                  className="ds-input flex-1 text-sm"
                 />
               </div>
             </div>
           </div>
         </div>
-      </div>
+      </section>
 
-      {/* Step 3 */}
-      <div className="bg-white rounded-xl shadow-sm p-6" style={{ borderTop: '3px solid #F59E0B' }}>
-        <h2 className="text-xl font-bold mb-4 flex items-center gap-2.5">
-          <span
-            className="inline-flex items-center justify-center w-7 h-7 rounded-full text-xs font-bold"
-            style={{ background: 'linear-gradient(135deg, #F59E0B, #D97706)', color: '#fff' }}
-          >
-            3
-          </span>
+      {/* ── 03 → Данные по ИП ────────────────────────────────────────── */}
+      <section className="neu-card p-5 sm:p-6">
+        <p className="ds-eyebrow mb-3">
+          03<span aria-hidden> → </span>
           {t('Данные по ИП', 'Individual entrepreneurs', locale)}
-        </h2>
+        </p>
         <Switch
           checked={includeIp}
           onCheckedChange={setIncludeIp}
           label={
-            <span className="text-sm font-medium">
+            <span className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>
               {t(
                 'Добавить данные по индивидуальным предпринимателям',
                 'Include individual entrepreneurs',
@@ -507,42 +569,56 @@ export default function CompaniesSearchPage() {
             </span>
           }
         />
-        <p className="text-xs text-gray-500 mt-4 leading-relaxed">
+        <p className="text-xs mt-3 leading-relaxed" style={{ color: 'var(--cp-paper-mute)' }}>
           {t(
             'Для ИП доступны только базовые поля (название, ИНН, адрес, контакты).',
             'For individual entrepreneurs, only basic fields are available (name, TIN, address, contacts).',
             locale,
           )}
         </p>
-      </div>
+      </section>
 
-      {/* Action */}
+      {/* ── Action: calculate + download ─────────────────────────────── */}
       <div className="flex flex-col items-center gap-4">
         <button
           type="button"
           onClick={handleCalculate}
           disabled={calcLoading}
-          className="disabled:opacity-60 text-white font-semibold px-12 py-4 rounded-xl text-base shadow-sm transition-all hover:shadow-md active:scale-[0.98]"
-          style={{ background: 'linear-gradient(135deg, #3B82F6, #6366F1)' }}
+          className="ds-btn-primary px-12 py-4 text-base disabled:opacity-60"
         >
           {calcLoading
-            ? t('Считаем...', 'Calculating...', locale)
+            ? t('Считаем…', 'Calculating…', locale)
             : t('Собрать базу', 'Build database', locale)}
         </button>
 
-        {calcError && <div className="text-sm text-red-600">{calcError}</div>}
+        {calcError && (
+          <div className="flex items-start gap-2.5 text-sm">
+            <span
+              aria-hidden
+              className="ds-status-dot shrink-0"
+              style={{ background: 'var(--cp-red)', marginTop: '7px' }}
+            />
+            <span style={{ color: 'var(--cp-paper)' }}>{calcError}</span>
+          </div>
+        )}
 
         {calcResult && (
           <div className="text-center">
-            <div className="text-sm text-gray-700 mb-1">
+            <div className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
               {t('Найдено компаний: ', 'Companies found: ', locale)}
-              <span className="font-bold text-lg text-gray-900">
+              <span
+                className="ds-mono font-bold text-lg"
+                style={{ color: 'var(--cp-paper)' }}
+              >
                 {calcResult.count.toLocaleString(locale === 'en' ? 'en-US' : 'ru-RU')}
               </span>
               {calcResult.count > 0 && (
-                <span className="text-xs text-gray-500 ml-2">
+                <span
+                  className="ds-mono text-xs ml-2"
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                >
                   ({t(
-                    `после скачивания ваш остаток по тарифу: ${Math.max(0, calcResult.remaining - calcResult.count).toLocaleString('ru-RU')}`,
+                    `остаток по тарифу после скачивания: ${Math.max(0, calcResult.remaining - calcResult.count).toLocaleString('ru-RU')}`,
                     `remaining after download: ${Math.max(0, calcResult.remaining - calcResult.count).toLocaleString('en-US')}`,
                     locale,
                   )})
@@ -553,27 +629,35 @@ export default function CompaniesSearchPage() {
         )}
 
         {calcResult && calcResult.count > 0 && (
-          <div className="bg-white rounded-xl shadow-sm p-6 w-full max-w-lg">
-            <h3 className="text-sm font-semibold text-gray-700 mb-4 text-center">
-              {t('Скачать базу', 'Download database', locale)}
-            </h3>
+          <div className="neu-card p-6 w-full max-w-lg">
+            <p className="ds-eyebrow text-center mb-4">
+              {t('скачать базу', 'download database', locale)}
+            </p>
             <div className="grid grid-cols-2 gap-3">
               <button
                 type="button"
                 onClick={() => handleExport('xlsx')}
                 disabled={exportLoading !== null}
-                className="flex flex-col items-center gap-2 border-2 border-green-500 bg-green-50 hover:bg-green-100 disabled:opacity-60 rounded-lg px-4 py-4 transition-colors"
+                className="ds-card-pressable flex flex-col items-center gap-2 rounded-md px-4 py-4 disabled:opacity-60"
+                style={{
+                  background: 'var(--cp-surface-rest)',
+                  border: '1px solid var(--cp-divider)',
+                }}
               >
-                <svg className="w-8 h-8 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25h6m-3-3v3" />
-                </svg>
-                <span className="text-sm font-semibold text-green-700">
+                <FileSpreadsheet
+                  className="h-7 w-7"
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                  aria-hidden
+                />
+                <span
+                  className="ds-mono text-xs font-semibold"
+                  style={{ color: 'var(--cp-paper)' }}
+                >
                   {exportLoading === 'xlsx'
-                    ? t('Формируем...', 'Generating...', locale)
-                    : 'Excel (.xlsx)'}
+                    ? t('Формируем…', 'Generating…', locale)
+                    : 'XLSX'}
                 </span>
-                <span className="text-xs text-gray-500">
+                <span className="text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
                   {t('Для работы в Excel', 'For Excel', locale)}
                 </span>
               </button>
@@ -582,23 +666,39 @@ export default function CompaniesSearchPage() {
                 type="button"
                 onClick={() => handleExport('csv')}
                 disabled={exportLoading !== null}
-                className="flex flex-col items-center gap-2 border-2 border-blue-400 bg-blue-50 hover:bg-blue-100 disabled:opacity-60 rounded-lg px-4 py-4 transition-colors"
+                className="ds-card-pressable flex flex-col items-center gap-2 rounded-md px-4 py-4 disabled:opacity-60"
+                style={{
+                  background: 'var(--cp-surface-rest)',
+                  border: '1px solid var(--cp-divider)',
+                }}
               >
-                <svg className="w-8 h-8 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m.75 12 3 3m0 0 3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-                </svg>
-                <span className="text-sm font-semibold text-blue-700">
+                <FileText
+                  className="h-7 w-7"
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                  aria-hidden
+                />
+                <span
+                  className="ds-mono text-xs font-semibold"
+                  style={{ color: 'var(--cp-paper)' }}
+                >
                   {exportLoading === 'csv'
-                    ? t('Формируем...', 'Generating...', locale)
-                    : 'CSV (.csv)'}
+                    ? t('Формируем…', 'Generating…', locale)
+                    : 'CSV'}
                 </span>
-                <span className="text-xs text-gray-500">
+                <span className="text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
                   {t('Универсальный формат', 'Universal format', locale)}
                 </span>
               </button>
             </div>
             {exportError && (
-              <div className="text-sm text-red-600 text-center mt-3">{exportError}</div>
+              <div className="flex items-start gap-2.5 text-sm mt-3 justify-center">
+                <span
+                  aria-hidden
+                  className="ds-status-dot shrink-0"
+                  style={{ background: 'var(--cp-red)', marginTop: '7px' }}
+                />
+                <span style={{ color: 'var(--cp-paper)' }}>{exportError}</span>
+              </div>
             )}
           </div>
         )}
@@ -678,48 +778,67 @@ function RegionsModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col animate-in fade-in zoom-in-95 duration-200">
-        <div className="flex items-center justify-between px-8 pt-6 pb-3">
-          <h3 className="text-base font-semibold text-gray-900">
+      <div
+        className="absolute inset-0"
+        style={{ background: 'rgba(0, 0, 0, 0.6)' }}
+        onClick={onClose}
+      />
+      <div
+        className="relative rounded-lg max-w-2xl w-full max-h-[80vh] flex flex-col"
+        style={{
+          background: 'var(--cp-surface-elev)',
+          border: '1px solid var(--cp-divider-strong)',
+        }}
+      >
+        <div
+          className="flex items-center justify-between px-6 pt-5 pb-3"
+          style={{ borderBottom: '1px solid var(--cp-divider)' }}
+        >
+          <h3
+            className="text-base font-semibold m-0"
+            style={{ color: 'var(--cp-paper)' }}
+          >
             {t('Регионы и города', 'Regions and cities', locale)}
           </h3>
           <button
             onClick={onClose}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+            className="ds-btn-ghost inline-flex h-8 w-8 items-center justify-center px-0"
+            aria-label={t('Закрыть', 'Close', locale)}
           >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
-            </svg>
+            <X className="w-4 h-4" aria-hidden />
           </button>
         </div>
-        <div className="px-8 pb-4">
+        <div className="px-6 py-4" style={{ borderBottom: '1px solid var(--cp-divider)' }}>
           <div className="relative">
-            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
-            </svg>
+            <Search
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4"
+              style={{ color: 'var(--cp-paper-faint)' }}
+              aria-hidden
+            />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder={t('Быстрый поиск', 'Quick search', locale)}
-              className="w-full border border-gray-200 rounded-lg pl-9 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-shadow"
+              className="ds-input w-full pl-9 text-sm"
             />
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto px-8 pb-4">
+        <div className="flex-1 overflow-y-auto px-6 py-3">
           {filtered.map((district) => {
             const codes = district.regions.map((r) => r.code);
             const selectedCount = codes.filter((c) => selected.has(c)).length;
             const allSelected = selectedCount === codes.length && codes.length > 0;
             const isOpen = expanded.has(district.name);
             return (
-              <div key={district.name} className="mb-1">
-                <div className="flex items-center gap-2 py-1 hover:bg-gray-50 rounded-lg px-1 -mx-1">
+              <div key={district.name} className="mb-0.5">
+                <div className="flex items-center gap-2 py-1.5 px-1 -mx-1 rounded hover:bg-[var(--cp-surface-rest)] transition-colors">
                   <button
                     type="button"
                     onClick={() => toggleExpand(district.name)}
-                    className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-gray-700 flex-shrink-0"
+                    className="ds-mono w-6 h-6 flex items-center justify-center shrink-0"
+                    style={{ color: 'var(--cp-paper-faint)' }}
+                    aria-label={isOpen ? t('Свернуть', 'Collapse', locale) : t('Развернуть', 'Expand', locale)}
                   >
                     {isOpen ? '−' : '+'}
                   </button>
@@ -730,22 +849,34 @@ function RegionsModal({
                       if (el) el.indeterminate = !allSelected && selectedCount > 0;
                     }}
                     onChange={() => toggleDistrict(district.name)}
-                    className="w-4 h-4 accent-blue-600 flex-shrink-0"
+                    className="w-4 h-4 shrink-0"
                   />
-                  <span className="text-sm font-medium">{district.name}</span>
+                  <span className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>
+                    {district.name}
+                  </span>
                 </div>
                 {isOpen && (
                   <div className="ml-12 mt-0.5 space-y-0.5">
                     {district.regions.map((r) => (
-                      <label key={r.code} className="flex items-center gap-2 cursor-pointer py-0.5 hover:bg-gray-50 rounded px-1 -mx-1">
+                      <label
+                        key={r.code}
+                        className="flex items-center gap-2 cursor-pointer py-1 px-1 -mx-1 rounded hover:bg-[var(--cp-surface-rest)] transition-colors"
+                      >
                         <input
                           type="checkbox"
                           checked={selected.has(r.code)}
                           onChange={() => toggle(r.code)}
-                          className="w-4 h-4 accent-blue-600 flex-shrink-0"
+                          className="w-4 h-4 shrink-0"
                         />
-                        <span className="text-sm text-gray-500 font-semibold mr-1">{r.code}</span>
-                        <span className="text-sm">{r.name}</span>
+                        <span
+                          className="ds-mono text-[11px] font-semibold mr-1"
+                          style={{ color: 'var(--cp-paper-faint)' }}
+                        >
+                          {r.code}
+                        </span>
+                        <span className="text-sm" style={{ color: 'var(--cp-paper)' }}>
+                          {r.name}
+                        </span>
                       </label>
                     ))}
                   </div>
@@ -754,29 +885,35 @@ function RegionsModal({
             );
           })}
         </div>
-        <div className="flex items-center justify-between px-8 py-5 border-t border-gray-100">
-          <span className="text-sm text-gray-500">
-            {t(`Выбрано: ${selected.size}`, `Selected: ${selected.size}`, locale)}
+        <div
+          className="flex items-center justify-between px-6 py-4"
+          style={{ borderTop: '1px solid var(--cp-divider)' }}
+        >
+          <span
+            className="ds-mono text-xs"
+            style={{ color: 'var(--cp-paper-faint)' }}
+          >
+            {t(`выбрано: ${selected.size}`, `selected: ${selected.size}`, locale)}
           </span>
-          <div className="flex gap-3">
+          <div className="flex gap-2">
             <button
               type="button"
               onClick={() => onChange(new Set())}
-              className="rounded-xl border border-gray-200 bg-white px-6 py-3 text-base font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+              className="ds-btn-secondary px-4 py-2 text-sm"
             >
               {t('Очистить', 'Clear', locale)}
             </button>
             <button
               type="button"
               onClick={() => onChange(new Set(ALL_REGION_CODES))}
-              className="rounded-xl border border-gray-200 bg-white px-6 py-3 text-base font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+              className="ds-btn-secondary px-4 py-2 text-sm"
             >
               {t('Все', 'All', locale)}
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="rounded-xl bg-gray-900 px-8 py-3 text-base font-medium text-white hover:bg-gray-800 transition-colors"
+              className="ds-btn-primary px-6 py-2 text-sm"
             >
               {t('Готово', 'Done', locale)}
             </button>
@@ -786,4 +923,3 @@ function RegionsModal({
     </div>
   );
 }
-

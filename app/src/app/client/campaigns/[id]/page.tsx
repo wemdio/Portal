@@ -12,9 +12,21 @@ import type { ClientReply, ClientRepliesPage, ClientReplyThread, ThreadMessage }
 function MetricCard({ label, value, sub }: { label: string; value: number | string; sub?: string }) {
   return (
     <div className="neu-sm p-3 sm:p-4">
-      <p className="text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>{label}</p>
-      <p className="mt-1 sm:mt-1.5 text-lg sm:text-xl font-bold">{value}</p>
-      {sub && <p className="mt-0.5 text-[10px] sm:text-xs" style={{ color: 'var(--cp-text-m)' }}>{sub}</p>}
+      <p className="ds-eyebrow">{label}</p>
+      <p
+        className="ds-mono mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold"
+        style={{ color: 'var(--cp-paper)' }}
+      >
+        {value}
+      </p>
+      {sub && (
+        <p
+          className="ds-mono mt-0.5 text-[10px] sm:text-xs"
+          style={{ color: 'var(--cp-paper-faint)' }}
+        >
+          {sub}
+        </p>
+      )}
     </div>
   );
 }
@@ -99,12 +111,15 @@ function ExpandedThread({ campaignId, emailId, onAfterAction }: ExpandedThreadPr
       <hr className="neu-divider" />
 
       {threadLoading && (
-        <div className="flex items-center gap-2 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Загружаем тред…
+        <div className="flex items-center gap-2 text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
+          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> Загружаем тред…
         </div>
       )}
       {threadError && (
-        <p className="text-[11px]" style={{ color: 'var(--cp-danger)' }}>{threadError}</p>
+        <div className="flex items-start gap-2 text-[11px]">
+          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)', marginTop: '5px' }} />
+          <span style={{ color: 'var(--cp-paper)' }}>{threadError}</span>
+        </div>
       )}
 
       {thread && thread.length > 0 && (
@@ -120,18 +135,16 @@ function ExpandedThread({ campaignId, emailId, onAfterAction }: ExpandedThreadPr
           <button
             type="button"
             onClick={() => setActionMode((m) => (m === 'reply' ? null : 'reply'))}
-            className={`neu-pill inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold ${actionMode === 'reply' ? 'active' : ''}`}
-            style={actionMode !== 'reply' ? { color: 'var(--cp-text-m)' } : undefined}
+            className={`ds-btn-ghost inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] ${actionMode === 'reply' ? 'active' : ''}`}
           >
-            <Reply className="h-3 w-3" /> Ответить
+            <Reply className="h-3 w-3" aria-hidden /> Ответить
           </button>
           <button
             type="button"
             onClick={() => setActionMode((m) => (m === 'forward' ? null : 'forward'))}
-            className={`neu-pill inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold ${actionMode === 'forward' ? 'active' : ''}`}
-            style={actionMode !== 'forward' ? { color: 'var(--cp-text-m)' } : undefined}
+            className={`ds-btn-ghost inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] ${actionMode === 'forward' ? 'active' : ''}`}
           >
-            <Forward className="h-3 w-3" /> Переслать
+            <Forward className="h-3 w-3" aria-hidden /> Переслать
           </button>
         </div>
       )}
@@ -165,35 +178,36 @@ function ExpandedThread({ campaignId, emailId, onAfterAction }: ExpandedThreadPr
 
 function ThreadMessageCard({ msg }: { msg: ThreadMessage }) {
   const isInbound = msg.direction === 'inbound';
+  const directionColor = isInbound ? 'var(--cp-amber)' : 'var(--cp-paper-faint)';
   return (
     <div className="neu-sm px-3 py-2.5">
       <div className="flex items-center gap-2 mb-1.5">
         {isInbound ? (
-          <ArrowDownLeft className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--cp-accent)' }} />
+          <ArrowDownLeft className="h-3.5 w-3.5 shrink-0" style={{ color: directionColor }} aria-hidden />
         ) : (
-          <ArrowUpRight className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--cp-text-l)' }} />
+          <ArrowUpRight className="h-3.5 w-3.5 shrink-0" style={{ color: directionColor }} aria-hidden />
         )}
-        <span className="text-[10px] uppercase tracking-wider font-bold shrink-0" style={{ color: isInbound ? 'var(--cp-accent)' : 'var(--cp-text-l)' }}>
-          {isInbound ? 'Лид' : 'Мы'}
+        <span className="ds-eyebrow shrink-0" style={{ color: directionColor }}>
+          {isInbound ? 'ЛИД' : 'МЫ'}
         </span>
-        <span className="text-[10px] truncate flex-1 min-w-0" style={{ color: 'var(--cp-text-m)' }}>
-          {msg.from_name ? `${msg.from_name} • ` : ''}{msg.from_email ?? ''}
+        <span className="text-[10px] truncate flex-1 min-w-0" style={{ color: 'var(--cp-paper-mute)' }}>
+          {msg.from_name ? `${msg.from_name} · ` : ''}{msg.from_email ?? ''}
         </span>
-        <span className="text-[10px] shrink-0" style={{ color: 'var(--cp-text-l)' }}>
+        <span className="ds-mono text-[10px] shrink-0" style={{ color: 'var(--cp-paper-faint)' }}>
           {formatReplyDate(msg.timestamp)}
         </span>
       </div>
       {msg.subject && (
-        <p className="text-[11px] font-semibold mb-1 truncate" style={{ color: 'var(--cp-text-d)' }}>
+        <p className="text-[11px] font-semibold mb-1 truncate" style={{ color: 'var(--cp-paper)' }}>
           {msg.subject}
         </p>
       )}
       {msg.body_text ? (
-        <pre className="text-[11px] whitespace-pre-wrap font-sans leading-relaxed max-h-60 overflow-y-auto" style={{ color: 'var(--cp-text-m)' }}>
+        <pre className="text-[11px] whitespace-pre-wrap font-sans leading-relaxed max-h-60 overflow-y-auto" style={{ color: 'var(--cp-paper-mute)' }}>
           {msg.body_text}
         </pre>
       ) : (
-        <p className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>(пусто)</p>
+        <p className="text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>(пусто)</p>
       )}
     </div>
   );
@@ -233,9 +247,14 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
   return (
     <div className="neu-sm p-3 space-y-2.5">
       <div className="flex items-center justify-between">
-        <p className="text-[11px] font-bold" style={{ color: 'var(--cp-text-d)' }}>Ответить лиду</p>
-        <button type="button" onClick={onCancel} className="neu-pill p-1" style={{ color: 'var(--cp-text-l)' }}>
-          <X className="h-3 w-3" />
+        <p className="ds-eyebrow">Ответить лиду</p>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="ds-btn-ghost p-1"
+          aria-label="Закрыть"
+        >
+          <X className="h-3 w-3" aria-hidden />
         </button>
       </div>
       <input
@@ -243,8 +262,7 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
         value={cc}
         onChange={(e) => setCc(e.target.value)}
         placeholder="CC (через запятую): boss@company.ru, team@..."
-        className="neu-input w-full px-3 py-2 text-[11px] sm:text-xs bg-transparent outline-none"
-        style={{ color: 'var(--cp-text-d)' }}
+        className="ds-input w-full text-[11px] sm:text-xs"
       />
       {showBcc ? (
         <input
@@ -252,11 +270,15 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
           value={bcc}
           onChange={(e) => setBcc(e.target.value)}
           placeholder="BCC (скрытая копия)"
-          className="neu-input w-full px-3 py-2 text-[11px] sm:text-xs bg-transparent outline-none"
-          style={{ color: 'var(--cp-text-d)' }}
+          className="ds-input w-full text-[11px] sm:text-xs"
         />
       ) : (
-        <button type="button" onClick={() => setShowBcc(true)} className="text-[10px] font-semibold" style={{ color: 'var(--cp-text-l)' }}>
+        <button
+          type="button"
+          onClick={() => setShowBcc(true)}
+          className="text-[10px] font-semibold underline-offset-2 hover:underline"
+          style={{ color: 'var(--cp-paper-faint)' }}
+        >
           + добавить скрытую копию
         </button>
       )}
@@ -265,17 +287,20 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
         onChange={(e) => setBodyText(e.target.value)}
         rows={6}
         placeholder="Текст ответа…"
-        className="neu-input w-full px-3 py-2 text-[11px] sm:text-xs bg-transparent outline-none resize-y"
-        style={{ color: 'var(--cp-text-d)' }}
+        className="ds-input w-full text-[11px] sm:text-xs resize-y"
       />
-      {error && <p className="text-[11px]" style={{ color: 'var(--cp-danger)' }}>{error}</p>}
+      {error && (
+        <div className="flex items-start gap-2 text-[11px]">
+          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)', marginTop: '5px' }} />
+          <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
+        </div>
+      )}
       <div className="flex items-center justify-end gap-2">
         <button
           type="button"
           onClick={onCancel}
           disabled={sending}
-          className="neu-pill px-3 py-1.5 text-[11px] font-semibold disabled:opacity-50"
-          style={{ color: 'var(--cp-text-m)' }}
+          className="ds-btn-ghost px-3 py-1.5 text-[11px] disabled:opacity-50"
         >
           Отмена
         </button>
@@ -283,9 +308,9 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
           type="button"
           onClick={() => void handleSend()}
           disabled={sending || bodyText.trim().length === 0}
-          className="neu-btn inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold disabled:opacity-50"
+          className="ds-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] disabled:opacity-50"
         >
-          {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
+          {sending ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : <Send className="h-3 w-3" aria-hidden />}
           Отправить
         </button>
       </div>
@@ -324,9 +349,14 @@ function ForwardForm({ campaignId, emailId, onCancel, onSent }: ForwardFormProps
   return (
     <div className="neu-sm p-3 space-y-2.5">
       <div className="flex items-center justify-between">
-        <p className="text-[11px] font-bold" style={{ color: 'var(--cp-text-d)' }}>Переслать письмо</p>
-        <button type="button" onClick={onCancel} className="neu-pill p-1" style={{ color: 'var(--cp-text-l)' }}>
-          <X className="h-3 w-3" />
+        <p className="ds-eyebrow">Переслать письмо</p>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="ds-btn-ghost p-1"
+          aria-label="Закрыть"
+        >
+          <X className="h-3 w-3" aria-hidden />
         </button>
       </div>
       <input
@@ -334,20 +364,23 @@ function ForwardForm({ campaignId, emailId, onCancel, onSent }: ForwardFormProps
         value={toEmail}
         onChange={(e) => setToEmail(e.target.value)}
         placeholder="Кому: colleague@company.ru"
-        className="neu-input w-full px-3 py-2 text-[11px] sm:text-xs bg-transparent outline-none"
-        style={{ color: 'var(--cp-text-d)' }}
+        className="ds-input w-full text-[11px] sm:text-xs"
       />
-      <p className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+      <p className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
         Пересылаем оригинальный текст письма от лида целиком.
       </p>
-      {error && <p className="text-[11px]" style={{ color: 'var(--cp-danger)' }}>{error}</p>}
+      {error && (
+        <div className="flex items-start gap-2 text-[11px]">
+          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)', marginTop: '5px' }} />
+          <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
+        </div>
+      )}
       <div className="flex items-center justify-end gap-2">
         <button
           type="button"
           onClick={onCancel}
           disabled={sending}
-          className="neu-pill px-3 py-1.5 text-[11px] font-semibold disabled:opacity-50"
-          style={{ color: 'var(--cp-text-m)' }}
+          className="ds-btn-ghost px-3 py-1.5 text-[11px] disabled:opacity-50"
         >
           Отмена
         </button>
@@ -355,9 +388,9 @@ function ForwardForm({ campaignId, emailId, onCancel, onSent }: ForwardFormProps
           type="button"
           onClick={() => void handleSend()}
           disabled={sending || toEmail.trim().length === 0}
-          className="neu-btn inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold disabled:opacity-50"
+          className="ds-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] disabled:opacity-50"
         >
-          {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Forward className="h-3 w-3" />}
+          {sending ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : <Forward className="h-3 w-3" aria-hidden />}
           Переслать
         </button>
       </div>
@@ -382,7 +415,7 @@ function RepliesPanel({
   return (
     <div className="space-y-3">
       <div className="neu-sm flex items-center gap-2 px-3 py-2">
-        <Search className="h-4 w-4 shrink-0" style={{ color: 'var(--cp-text-l)' }} />
+        <Search className="h-4 w-4 shrink-0" style={{ color: 'var(--cp-paper-faint)' }} aria-hidden />
         <input
           type="text"
           value={searchInput}
@@ -392,29 +425,29 @@ function RepliesPanel({
           }}
           placeholder="Поиск по тексту, теме, email…"
           className="flex-1 bg-transparent outline-none text-xs sm:text-sm"
-          style={{ color: 'var(--cp-text-d)' }}
+          style={{ color: 'var(--cp-paper)' }}
         />
         <button
           type="button"
           onClick={onSearch}
           disabled={loading}
-          className="neu-pill px-3 py-1 text-[11px] font-semibold disabled:opacity-50"
-          style={{ color: 'var(--cp-text-m)' }}
+          className="ds-btn-secondary px-3 py-1 text-[11px] disabled:opacity-50"
         >
           Найти
         </button>
       </div>
 
       {error && (
-        <div className="neu-inset rounded-2xl px-4 py-3 text-xs" style={{ color: 'var(--cp-danger)' }}>
-          {error}
+        <div className="neu-inset rounded-lg px-4 py-3 text-xs flex items-start gap-2.5">
+          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)', marginTop: '5px' }} />
+          <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
         </div>
       )}
 
       {loaded && !loading && replies.length === 0 && !error && (
         <div className="neu-card py-14 text-center">
-          <Inbox className="mx-auto mb-3 h-8 w-8" style={{ color: 'var(--cp-text-l)' }} />
-          <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
+          <Inbox className="mx-auto mb-3 h-8 w-8" style={{ color: 'var(--cp-paper-faint)' }} aria-hidden />
+          <p className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
             {searchInput ? 'По вашему запросу ответов не найдено' : 'Ответов пока нет'}
           </p>
         </div>
@@ -443,27 +476,28 @@ function RepliesPanel({
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className="text-xs sm:text-sm font-semibold truncate flex-1 min-w-0">{headerName}</p>
                       {r.is_unread && (
-                        <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-md font-bold" style={{ background: 'var(--cp-accent)', color: '#fff' }}>
-                          new
+                        <span className="ds-status-tag" style={{ color: 'var(--cp-amber)' }}>
+                          <span aria-hidden className="ds-status-dot" style={{ background: 'var(--cp-amber)' }} />
+                          NEW
                         </span>
                       )}
                       {r.ai_interest_value !== null && (
-                        <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-md neu-well" style={{ color: 'var(--cp-text-m)' }}>
-                          <Sparkles className="h-2.5 w-2.5" />
+                        <span className="ds-mono inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-md" style={{ color: 'var(--cp-paper-mute)', background: 'var(--cp-surface-elev)' }}>
+                          <Sparkles className="h-2.5 w-2.5" aria-hidden />
                           {r.ai_interest_value}
                         </span>
                       )}
-                      <span className="text-[10px] sm:text-[11px] shrink-0" style={{ color: 'var(--cp-text-l)' }}>
+                      <span className="ds-mono text-[10px] shrink-0" style={{ color: 'var(--cp-paper-faint)' }}>
                         {formatReplyDate(r.timestamp)}
                       </span>
                     </div>
                     {r.subject && (
-                      <p className="mt-1 text-[11px] sm:text-xs truncate" style={{ color: 'var(--cp-text-m)' }}>
+                      <p className="mt-1 text-[11px] sm:text-xs truncate" style={{ color: 'var(--cp-paper-mute)' }}>
                         {r.subject}
                       </p>
                     )}
                     {!expanded && r.content_preview && (
-                      <p className="mt-1 text-[11px] sm:text-xs line-clamp-2" style={{ color: 'var(--cp-text-l)' }}>
+                      <p className="mt-1 text-[11px] sm:text-xs line-clamp-2" style={{ color: 'var(--cp-paper-faint)' }}>
                         {r.content_preview}
                       </p>
                     )}
@@ -487,8 +521,7 @@ function RepliesPanel({
           <button
             type="button"
             onClick={onLoadMore}
-            className="neu-pill px-5 py-2 text-xs font-semibold"
-            style={{ color: 'var(--cp-text-m)' }}
+            className="ds-btn-ghost px-5 py-2 text-xs"
           >
             Загрузить ещё
           </button>
@@ -613,10 +646,17 @@ export default function ClientCampaignDetailPage() {
   if (error && !campaign) {
     return (
       <div className="mx-auto max-w-4xl">
-        <Link href={'/client' as Route} className="inline-flex items-center gap-1 text-xs font-medium mb-4 transition-colors" style={{ color: 'var(--cp-text-m)' }}>
+        <Link
+          href={'/client' as Route}
+          className="inline-flex items-center gap-1 text-xs font-medium mb-4 underline-offset-2 hover:underline"
+          style={{ color: 'var(--cp-paper-mute)' }}
+        >
           ← Кампании
         </Link>
-        <div className="neu-inset rounded-2xl px-5 py-4 text-sm font-medium" style={{ color: 'var(--cp-danger)' }}>{error}</div>
+        <div className="neu-inset rounded-lg px-5 py-4 text-sm font-medium flex items-start gap-2.5">
+          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)', marginTop: '7px' }} />
+          <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
+        </div>
       </div>
     );
   }
@@ -637,66 +677,84 @@ export default function ClientCampaignDetailPage() {
     <div className="mx-auto max-w-4xl">
       <Link
         href={'/client' as Route}
-        className="inline-flex items-center gap-1 text-xs font-medium mb-5 transition-colors"
-        style={{ color: 'var(--cp-text-m)' }}
-        onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--cp-accent)')}
-        onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--cp-text-m)')}
+        className="inline-flex items-center gap-1 text-xs font-medium mb-5 underline-offset-2 hover:underline"
+        style={{ color: 'var(--cp-paper-mute)' }}
       >
         ← Кампании
       </Link>
 
-      <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
-        <h1 className="text-lg sm:text-xl font-extrabold break-words flex-1 min-w-0">{campaign.name}</h1>
-        <div className="flex items-center gap-2 shrink-0">
-          <span className="neu-well px-3 py-1.5 text-[10px] sm:text-xs font-semibold" style={{ color: 'var(--cp-text-m)' }}>
-            {CampaignStatusLabels[campaign.status] ?? `Статус ${campaign.status}`}
-          </span>
-          {campaign.status === CampaignStatus.Active && (
-            <button
-              type="button"
-              onClick={() => handleToggle('pause')}
-              disabled={actionPending !== null}
-              className="neu-pill inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
-              style={{ color: 'var(--cp-text-m)' }}
-            >
-              {actionPending === 'pause' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pause className="h-3.5 w-3.5" />}
-              Пауза
-            </button>
-          )}
-          {campaign.status === CampaignStatus.Paused && (
-            <button
-              type="button"
-              onClick={() => handleToggle('activate')}
-              disabled={actionPending !== null}
-              className="neu-btn inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
-            >
-              {actionPending === 'activate' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-              Запустить
-            </button>
-          )}
+      <header className="mb-1">
+        <p className="ds-eyebrow mb-2">
+          <span className="ds-mono">{campaign.id.slice(0, 8)}</span>
+          <span aria-hidden> · </span>
+          {CampaignStatusLabels[campaign.status] ?? `Статус ${campaign.status}`}
+        </p>
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <h1
+            className="text-lg sm:text-xl font-bold break-words flex-1 min-w-0 m-0"
+            style={{ color: 'var(--cp-paper)' }}
+          >
+            {campaign.name}
+          </h1>
+          <div className="flex items-center gap-2 shrink-0">
+            {campaign.status === CampaignStatus.Active && (
+              <button
+                type="button"
+                onClick={() => handleToggle('pause')}
+                disabled={actionPending !== null}
+                className="ds-btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"
+              >
+                {actionPending === 'pause' ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                ) : (
+                  <Pause className="h-3.5 w-3.5" aria-hidden />
+                )}
+                Пауза
+              </button>
+            )}
+            {campaign.status === CampaignStatus.Paused && (
+              <button
+                type="button"
+                onClick={() => handleToggle('activate')}
+                disabled={actionPending !== null}
+                className="ds-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"
+              >
+                {actionPending === 'activate' ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                ) : (
+                  <Play className="h-3.5 w-3.5" aria-hidden />
+                )}
+                Запустить
+              </button>
+            )}
+          </div>
         </div>
-      </div>
-      <p className="text-[10px] sm:text-xs mb-1 truncate" style={{ color: 'var(--cp-text-l)' }}>ID: {campaign.id}</p>
+      </header>
       {actionError && (
-        <p className="text-xs mb-3" style={{ color: 'var(--cp-danger)' }}>{actionError}</p>
+        <div className="text-xs mb-3 flex items-start gap-2">
+          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)', marginTop: '5px' }} />
+          <span style={{ color: 'var(--cp-paper)' }}>{actionError}</span>
+        </div>
       )}
       <div className="mb-4 sm:mb-6" />
 
-      <div className="flex gap-2 mb-4 sm:mb-6">
+      <nav className="flex gap-1 mb-4 sm:mb-6" aria-label="Разделы кампании">
         {(['overview', 'steps', 'replies'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`neu-pill px-5 py-2 text-xs font-semibold ${tab === t ? 'active' : ''}`}
-            style={tab !== t ? { color: 'var(--cp-text-m)' } : undefined}
+            className={`ds-nav-item px-4 py-2 text-xs ${tab === t ? 'active' : ''}`}
+            aria-current={tab === t ? 'page' : undefined}
           >
             {t === 'overview' ? 'Обзор' : t === 'steps' ? 'Цепочка' : 'Ответы'}
             {t === 'replies' && replyCount > 0 && (
-              <span className="ml-1.5 text-[10px] opacity-70">({replyCount})</span>
+              <span className="ds-mono ml-1.5 text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                ({replyCount})
+              </span>
             )}
           </button>
         ))}
-      </div>
+      </nav>
 
       {tab === 'overview' && (
         <>
@@ -711,28 +769,28 @@ export default function ClientCampaignDetailPage() {
 
           {steps.length > 0 && (
             <div className="neu-card overflow-hidden">
-              <h3 className="px-3 sm:px-5 py-3 sm:py-4 text-xs sm:text-sm font-bold" style={{ color: 'var(--cp-text-m)' }}>
-                Статистика по шагам
-              </h3>
+              <header className="px-3 sm:px-5 py-3 sm:py-4" style={{ background: 'var(--cp-surface-elev)', borderBottom: '1px solid var(--cp-divider)' }}>
+                <p className="ds-eyebrow">статистика по шагам</p>
+              </header>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs sm:text-sm">
                   <thead>
-                    <tr style={{ borderTop: '1px solid rgba(180,173,164,0.15)' }}>
-                      <th className="px-3 sm:px-5 py-2.5 sm:py-3 text-left text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>Шаг</th>
-                      <th className="px-3 sm:px-5 py-2.5 sm:py-3 text-right text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>Отпр.</th>
-                      <th className="px-3 sm:px-5 py-2.5 sm:py-3 text-right text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>Откр.</th>
-                      <th className="px-3 sm:px-5 py-2.5 sm:py-3 text-right text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>Отв.</th>
+                    <tr style={{ background: 'var(--cp-surface-elev)' }}>
+                      <th className="ds-eyebrow px-3 sm:px-5 py-2.5 sm:py-3 text-left">Шаг</th>
+                      <th className="ds-eyebrow px-3 sm:px-5 py-2.5 sm:py-3 text-right">Отпр.</th>
+                      <th className="ds-eyebrow px-3 sm:px-5 py-2.5 sm:py-3 text-right">Откр.</th>
+                      <th className="ds-eyebrow px-3 sm:px-5 py-2.5 sm:py-3 text-right">Отв.</th>
                     </tr>
                   </thead>
                   <tbody>
                     {steps.map((s, i) => (
-                      <tr key={i} className="neu-row" style={{ borderTop: '1px solid rgba(180,173,164,0.15)' }}>
-                        <td className="px-3 sm:px-5 py-2.5 sm:py-3" style={{ color: 'var(--cp-text-m)' }}>
-                          Step {s.step}{s.variant ? ` (${String.fromCharCode(65 + Number(s.variant))})` : ''}
+                      <tr key={i} className="neu-row" style={{ borderTop: '1px solid var(--cp-divider)' }}>
+                        <td className="ds-mono px-3 sm:px-5 py-2.5 sm:py-3" style={{ color: 'var(--cp-paper)' }}>
+                          {String(s.step).padStart(2, '0')}{s.variant ? ` · ${String.fromCharCode(65 + Number(s.variant))}` : ''}
                         </td>
-                        <td className="px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-text-m)' }}>{s.sent ?? 0}</td>
-                        <td className="px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-text-m)' }}>{s.unique_opened ?? s.opened ?? 0}</td>
-                        <td className="px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-text-m)' }}>{s.unique_replies ?? s.replies ?? 0}</td>
+                        <td className="ds-mono px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-paper-mute)' }}>{s.sent ?? 0}</td>
+                        <td className="ds-mono px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-paper-mute)' }}>{s.unique_opened ?? s.opened ?? 0}</td>
+                        <td className="ds-mono px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-paper-mute)' }}>{s.unique_replies ?? s.replies ?? 0}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -761,30 +819,38 @@ export default function ClientCampaignDetailPage() {
       )}
 
       {tab === 'steps' && (
-        <div className="space-y-4">
+        <div className="space-y-3">
           {sequences.length === 0 ? (
             <div className="neu-card py-14 text-center">
-              <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>Цепочка не настроена</p>
+              <p className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>Цепочка не настроена</p>
             </div>
           ) : (
             sequences.map((step, idx) => {
               const subject = step.subject ?? step.variants?.[0]?.subject ?? '';
               const body = stripHtml(step.body ?? step.variants?.[0]?.body);
               const waitDays = step.wait_days ?? (step.delay_unit === 'days' ? step.delay ?? null : null);
+              const num = String(idx + 1).padStart(2, '0');
               return (
                 <div key={idx} className="neu-sm overflow-hidden">
-                  <div className="px-3 sm:px-5 py-3 sm:py-4 flex items-center gap-2.5 sm:gap-3">
-                    <div className="neu-well flex h-7 w-7 sm:h-8 sm:w-8 items-center justify-center text-[10px] sm:text-xs font-bold shrink-0" style={{ color: 'var(--cp-accent)' }}>
-                      {idx + 1}
-                    </div>
+                  <div className="px-3 sm:px-5 py-3 sm:py-4 flex items-center gap-3">
+                    <span className="ds-mono text-xs font-semibold shrink-0" style={{ color: 'var(--cp-paper-faint)' }}>
+                      {num}
+                      <span aria-hidden> → </span>
+                    </span>
                     <div className="flex-1 min-w-0">
-                      {subject && <p className="text-xs sm:text-sm font-semibold truncate">{subject}</p>}
+                      {subject && (
+                        <p className="text-xs sm:text-sm font-semibold truncate" style={{ color: 'var(--cp-paper)' }}>
+                          {subject}
+                        </p>
+                      )}
                       {step.variants && step.variants.length > 1 && (
-                        <p className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>{step.variants.length} варианта</p>
+                        <p className="ds-mono text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                          {step.variants.length} варианта
+                        </p>
                       )}
                     </div>
                     {waitDays != null && waitDays > 0 && (
-                      <span className="text-[10px] sm:text-[11px] font-medium shrink-0" style={{ color: 'var(--cp-text-l)' }}>
+                      <span className="ds-mono text-[10px] sm:text-[11px] shrink-0" style={{ color: 'var(--cp-paper-faint)' }}>
                         {waitDays}д
                       </span>
                     )}
@@ -793,7 +859,7 @@ export default function ClientCampaignDetailPage() {
                     <>
                       <hr className="neu-divider mx-3 sm:mx-5" />
                       <div className="px-3 sm:px-5 py-3 sm:py-4">
-                        <pre className="text-[11px] sm:text-xs whitespace-pre-wrap font-sans leading-relaxed max-h-48 overflow-y-auto" style={{ color: 'var(--cp-text-m)' }}>
+                        <pre className="text-[11px] sm:text-xs whitespace-pre-wrap font-sans leading-relaxed max-h-48 overflow-y-auto" style={{ color: 'var(--cp-paper-mute)' }}>
                           {body}
                         </pre>
                       </div>
