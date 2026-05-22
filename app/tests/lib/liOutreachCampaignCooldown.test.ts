@@ -315,14 +315,24 @@ describe('runCampaignTick — account cooldown', () => {
     }
   });
 
-  it('on already_invited error: marks lead invited, advances step, does NOT park account, tick continues to next lead', async () => {
+  it('on already_invited error: marks lead already_invited (NOT invited), advances campaign-lead step, does NOT park account, tick continues to next lead', async () => {
     seedBase();
 
     // First lead returns already_invited, second lead succeeds.
-    // The whole point of the new behaviour: a single already_invited must NOT
-    // throw an AccountCooldownTriggered that aborts the tick — otherwise on
-    // a lead list with many historically-invited contacts we burn an entire
-    // 15-min account window per such lead.
+    // Key invariants of the current behaviour:
+    //  - already_invited is a per-lead signal: do NOT throw an account-wide
+    //    cooldown that would abort the tick. Otherwise a lead list seeded
+    //    with historically-invited contacts burns an entire 15-min account
+    //    window per such lead.
+    //  - We did NOT send an invite this run. The lead's li_leads.status must
+    //    be 'already_invited' (not 'invited'), so the Portal funnel doesn't
+    //    overcount sent invites vs what the LinkedIn account dashboard
+    //    actually shows in "Приглашений отправлено".
+    //  - The campaign_lead row still advances to the next step (wait →
+    //    message): the existing LinkedIn invite is live for ~3 weeks, so if
+    //    the recipient accepts, the follow-up message should still fire.
+    //    The message step has its own guard that defers for accept while
+    //    lead.status is 'already_invited' (same as 'invited').
     let calls = 0;
     sendInviteImpl = async (providerId) => {
       calls++;
@@ -343,11 +353,13 @@ describe('runCampaignTick — account cooldown', () => {
     // The account must NOT have been parked for already_invited.
     expect(findAccountCooldownUpdate()).toBeNull();
 
-    // Lead-1 should be marked invited and its campaign-lead step advanced
-    // so we never retry it on the next tick.
+    // Lead-1 must be marked 'already_invited' (not 'invited').
     const leadUpdates = findLeadUpdates().filter((u) => u.filters.id === 'lead-1');
-    expect(leadUpdates.some((u) => u.data.status === 'invited')).toBe(true);
+    expect(leadUpdates.some((u) => u.data.status === 'already_invited')).toBe(true);
+    expect(leadUpdates.some((u) => u.data.status === 'invited')).toBe(false);
 
+    // Campaign-lead-1 must have its current_step advanced so it picks up the
+    // follow-up message after the wait step.
     const clUpdates = findCampaignLeadUpdates().filter((u) => u.filters.id === 'cl-1');
     expect(clUpdates.some((u) => u.data.current_step === 1)).toBe(true);
   });

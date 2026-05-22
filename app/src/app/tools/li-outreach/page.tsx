@@ -54,7 +54,7 @@ type DashboardCampaignStat = {
   funnel: DashboardFunnel;
 };
 type DashboardTimeline = { date: string; actions: number; errors: number };
-type DashboardFunnel = { new: number; invited: number; connected: number; messaged: number; replied: number; completed: number; error: number; total: number };
+type DashboardFunnel = { new: number; invited: number; already_invited: number; connected: number; messaged: number; replied: number; completed: number; error: number; total: number };
 type DashboardData = {
   funnel: DashboardFunnel;
   by_company: DashboardCompanyRow[];
@@ -141,6 +141,9 @@ export default function LiOutreachPage() {
   const [_settings, setSettings] = useState<LiSettings | null>(null);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [campaignLogs, setCampaignLogs] = useState<LiCampaignLog[]>([]);
+  // Range key currently being exported (button shows '...' until done).
+  // Null when no export is in flight.
+  const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'6h' | '24h' | '7d' | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsForm, setSettingsForm] = useState<LiSettings>({ unipile_dsn: '', unipile_api_key: '', openai_api_key: '', openai_model: 'gpt-4o-mini', webhook_secret: '', proxy_url: '' });
@@ -273,6 +276,43 @@ export default function LiOutreachPage() {
     if (selectedCampaignId) void loadCampaignLogs(selectedCampaignId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCampaignId]);
+
+  // Download the selected campaign's logs as a .txt for the given range.
+  // Reuses the existing global export endpoint with campaign_id filter — same
+  // contract as the per-campaign export in tg-outreach.
+  const exportCampaignLogs = useCallback(
+    async (range: '6h' | '24h' | '7d') => {
+      if (!selectedCampaignId) return;
+      setExportingCampaignLogsRange(range);
+      try {
+        const params = new URLSearchParams({ range, campaign_id: selectedCampaignId });
+        const res = await authFetch(`/api/tools/li-outreach/logs/export?${params.toString()}`);
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          alert((data as { error?: string }).error ?? `Не удалось выгрузить логи (HTTP ${res.status})`);
+          return;
+        }
+        const cd = res.headers.get('content-disposition') ?? '';
+        const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+        const ascii = /filename="?([^";]+)"?/i.exec(cd);
+        const filename = utf8
+          ? decodeURIComponent(utf8[1])
+          : (ascii?.[1] ?? `li-outreach-logs-${range}.txt`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } finally {
+        setExportingCampaignLogsRange(null);
+      }
+    },
+    [selectedCampaignId],
+  );
 
   // ---- Actions --------------------------------------------------------------
 
@@ -991,7 +1031,28 @@ export default function LiOutreachPage() {
                 <div className="text-sm text-gray-400 text-center py-8">Выберите кампанию</div>
               ) : (
                 <div className="space-y-3">
-                  <h3 className="font-semibold text-gray-900">{selectedCampaign.name} — Логи</h3>
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <h3 className="font-semibold text-gray-900">{selectedCampaign.name} — Логи</h3>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs text-gray-500">Выгрузить .txt:</span>
+                      {(['6h', '24h', '7d'] as const).map((r) => {
+                        const labels: Record<typeof r, string> = { '6h': '6 часов', '24h': '24 часа', '7d': '7 дней' };
+                        const busy = exportingCampaignLogsRange === r;
+                        return (
+                          <button
+                            key={r}
+                            type="button"
+                            onClick={() => void exportCampaignLogs(r)}
+                            disabled={exportingCampaignLogsRange !== null}
+                            title={`Скачать логи кампании за последние ${labels[r]}`}
+                            className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {busy ? '...' : labels[r]}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                   <div className="max-h-[400px] overflow-y-auto space-y-1">
                     {campaignLogs.length === 0 ? (
                       <div className="text-xs text-gray-400">Нет логов</div>
@@ -1865,12 +1926,16 @@ function StatCard({ label, value, total, accent = 'gray' }: { label: string; val
 // ---- Funnel Chart (visual horizontal bars) ---------------------------------
 
 const FUNNEL_STAGES: { key: keyof DashboardFunnel; label: string; color: string }[] = [
-  { key: 'new',       label: 'Новые',       color: '#9ca3af' },
-  { key: 'invited',   label: 'Приглашены',   color: '#f59e0b' },
-  { key: 'connected', label: 'Подключены',   color: '#3b82f6' },
-  { key: 'messaged',  label: 'Написано',     color: '#8b5cf6' },
-  { key: 'replied',   label: 'Ответили',     color: '#10b981' },
-  { key: 'completed', label: 'Завершено',    color: '#06b6d4' },
+  { key: 'new',             label: 'Новые',                color: '#9ca3af' },
+  { key: 'invited',         label: 'Приглашены',           color: '#f59e0b' },
+  // Side-track: LinkedIn refused the invite as duplicate.
+  // Sits right after 'invited' so the operator can compare
+  // "actually sent" vs "already in LinkedIn's queue" at a glance.
+  { key: 'already_invited', label: 'Уже приглашены ранее', color: '#a8a29e' },
+  { key: 'connected',       label: 'Подключены',           color: '#3b82f6' },
+  { key: 'messaged',        label: 'Написано',             color: '#8b5cf6' },
+  { key: 'replied',         label: 'Ответили',             color: '#10b981' },
+  { key: 'completed',       label: 'Завершено',            color: '#06b6d4' },
 ];
 
 function FunnelChart({ funnel }: { funnel: DashboardFunnel }) {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError, checkIsAdmin } from '@/lib/liOutreach/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -78,11 +78,14 @@ export async function GET(req: NextRequest) {
       const accountIdFilter = url.searchParams.get('account_id');
       const level = url.searchParams.get('level');
 
+      // Admins can export logs across all users' campaigns; regular users are
+      // scoped to their own. Mirrors /campaigns/[id]/logs admin behaviour.
+      const admin = await checkIsAdmin(auth.user.id);
+
       // Pull owned campaigns for RLS-equivalent guard + display names.
-      const { data: ownedCampaigns, error: ocErr } = await supabaseAdmin
-        .from('li_campaigns')
-        .select('id, name')
-        .eq('user_id', auth.user.id);
+      let ocQ = supabaseAdmin.from('li_campaigns').select('id, name');
+      if (!admin) ocQ = ocQ.eq('user_id', auth.user.id);
+      const { data: ownedCampaigns, error: ocErr } = await ocQ;
       if (ocErr) return jsonError(ocErr.message, 500);
       const ownedIds = (ownedCampaigns ?? []).map((c) => c.id);
       if (campaignIdFilter && !ownedIds.includes(campaignIdFilter)) {
@@ -99,11 +102,11 @@ export async function GET(req: NextRequest) {
       );
 
       // Pull owned accounts (in batch) so we can label rows by account.name.
-      // Accounts are per-user, not per-campaign, so a single fetch is enough.
-      const { data: accounts, error: accErr } = await supabaseAdmin
-        .from('li_accounts')
-        .select('id, name, unipile_account_id')
-        .eq('user_id', auth.user.id);
+      // Accounts are per-user — for admins we need the full set so labels work
+      // when exporting logs from another user's campaign.
+      let accQ = supabaseAdmin.from('li_accounts').select('id, name, unipile_account_id');
+      if (!admin) accQ = accQ.eq('user_id', auth.user.id);
+      const { data: accounts, error: accErr } = await accQ;
       if (accErr) return jsonError(accErr.message, 500);
       const accountLabelById = new Map<string, string>(
         (accounts ?? []).map((a) => [

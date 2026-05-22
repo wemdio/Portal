@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError, checkIsAdmin } from '@/lib/liOutreach/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -17,10 +17,13 @@ export async function GET(req: NextRequest) {
     const campaignId = url.searchParams.get('campaign_id');
     const level = url.searchParams.get('level');
 
-    const ownedCampaignsRes = await supabaseAdmin
-      .from('li_campaigns')
-      .select('id, name')
-      .eq('user_id', auth.user.id);
+    // Admins see logs across all users' campaigns (mirrors the per-campaign
+    // /campaigns/[id]/logs endpoint). Regular users are scoped to their own.
+    const admin = await checkIsAdmin(auth.user.id);
+
+    let campaignsQ = supabaseAdmin.from('li_campaigns').select('id, name');
+    if (!admin) campaignsQ = campaignsQ.eq('user_id', auth.user.id);
+    const ownedCampaignsRes = await campaignsQ;
     if (ownedCampaignsRes.error) return jsonError(ownedCampaignsRes.error.message, 500);
     const ownedCampaigns = (ownedCampaignsRes.data ?? []) as Array<{ id: string; name: string }>;
     const ownedCampaignIds = ownedCampaigns.map((c) => c.id);
