@@ -63,24 +63,28 @@ export function OnboardingBanner() {
       className="neu-card flex items-center gap-3 px-4 py-3 sm:px-5 sm:py-3.5 mb-5 sm:mb-6"
       role="status"
     >
-      <span
-        className="inline-flex items-center justify-center h-8 w-8 rounded-xl shrink-0"
-        style={{ background: 'rgba(99,102,241,0.12)', color: '#6366F1' }}
-      >
-        <Sparkles className="h-4 w-4" />
-      </span>
+      <Sparkles
+        className="h-4 w-4 shrink-0"
+        style={{ color: 'var(--cp-amber)' }}
+        aria-hidden
+      />
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-bold leading-tight" style={{ color: 'var(--cp-text)' }}>
+        <p
+          className="text-sm font-bold leading-tight m-0"
+          style={{ color: 'var(--cp-paper)' }}
+        >
           Только начинаете?
         </p>
-        <p className="text-xs mt-0.5" style={{ color: 'var(--cp-text-m)' }}>
+        <p
+          className="text-xs mt-0.5"
+          style={{ color: 'var(--cp-paper-mute)' }}
+        >
           На дашборде есть пошаговый онбординг — за 6 шагов запустите первую кампанию.
         </p>
       </div>
       <Link
         href={'/client/dashboard' as Route}
-        className="neu-pill px-3 py-1.5 text-xs font-semibold whitespace-nowrap shrink-0"
-        style={{ color: '#6366F1' }}
+        className="ds-btn-primary px-3 py-1.5 text-xs whitespace-nowrap shrink-0"
       >
         Открыть дашборд →
       </Link>
@@ -93,10 +97,9 @@ export function OnboardingBanner() {
           setShow(false);
         }}
         aria-label="Скрыть"
-        className="neu-pill p-1.5 shrink-0"
-        style={{ color: 'var(--cp-text-l)' }}
+        className="ds-btn-ghost p-1.5 shrink-0"
       >
-        <X className="h-3.5 w-3.5" />
+        <X className="h-3.5 w-3.5" aria-hidden />
       </button>
     </div>
   );
