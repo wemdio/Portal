@@ -1,11 +1,20 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Suspense } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
-import { Send, MessageSquare, RefreshCw } from 'lucide-react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { Send, MessageSquare, RefreshCw, Search, X } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ReplyThreadActions } from '@/components/client-replies/ReplyThreadActions';
+
+type StatusFilter = 'all' | 'unread' | 'leads';
+
+const STATUS_LABEL: Record<StatusFilter, string> = {
+  all: 'Все',
+  unread: 'Непрочитано',
+  leads: 'Лиды',
+};
 
 type LeadComment = {
   id: string;
@@ -419,21 +428,85 @@ function LeadCard({
   );
 }
 
-export default function ClientLeadsPage() {
+function RepliesPageContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // URL-driven filter + query. Anything malformed quietly collapses to 'all'
+  // so a stale or mangled link never leaks the unfiltered set under the
+  // wrong label.
+  const rawStatus = searchParams.get('status');
+  const status: StatusFilter =
+    rawStatus === 'unread' || rawStatus === 'leads' ? rawStatus : 'all';
+  const query = searchParams.get('q') ?? '';
+
   const [leads, setLeads] = useState<ForwardedLead[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selectedLead, setSelectedLead] = useState<ForwardedLead | null>(null);
   const [offset, setOffset] = useState(0);
+  // Controlled input for the search box; pushed to URL after a 300 ms
+  // debounce so every keystroke doesn't spam history or the API.
+  const [searchInput, setSearchInput] = useState(query);
   const LIMIT = 30;
+
+  // Debounce input → URL update.
+  useEffect(() => {
+    if (searchInput === query) return;
+    const t = setTimeout(() => {
+      const params = new URLSearchParams(searchParams);
+      const trimmed = searchInput.trim();
+      if (trimmed) params.set('q', trimmed);
+      else params.delete('q');
+      const qs = params.toString();
+      router.replace(`/client/replies${qs ? `?${qs}` : ''}`);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchInput, query, searchParams, router]);
+
+  // Reset pagination whenever the active filter or query changes — otherwise
+  // a user paginated to page 4 of "all" would land on page 4 of "unread"
+  // which is almost always empty.
+  useEffect(() => {
+    setOffset(0);
+  }, [status, query]);
+
+  const setStatusFilter = useCallback(
+    (next: StatusFilter) => {
+      const params = new URLSearchParams(searchParams);
+      if (next === 'all') params.delete('status');
+      else params.set('status', next);
+      const qs = params.toString();
+      router.replace(`/client/replies${qs ? `?${qs}` : ''}`);
+    },
+    [router, searchParams],
+  );
+
+  const clearSearch = useCallback(() => {
+    setSearchInput('');
+    const params = new URLSearchParams(searchParams);
+    params.delete('q');
+    const qs = params.toString();
+    router.replace(`/client/replies${qs ? `?${qs}` : ''}`);
+  }, [router, searchParams]);
+
+  const clearAll = useCallback(() => {
+    setSearchInput('');
+    router.replace('/client/replies');
+  }, [router]);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
+      const params = new URLSearchParams();
+      params.set('limit', String(LIMIT));
+      params.set('offset', String(offset));
+      if (status !== 'all') params.set('status', status);
+      if (query) params.set('search', query);
       const data = await clientApiFetch<LeadsResponse>(
-        `/replies?limit=${LIMIT}&offset=${offset}`,
+        `/replies?${params.toString()}`,
       );
       setLeads(data.items);
       setTotal(data.total);
@@ -442,7 +515,7 @@ export default function ClientLeadsPage() {
     } finally {
       setLoading(false);
     }
-  }, [offset]);
+  }, [offset, status, query]);
 
   useEffect(() => {
     load();
@@ -469,6 +542,8 @@ export default function ClientLeadsPage() {
     );
   }
 
+  const hasFilter = status !== 'all' || query.length > 0;
+
   return (
     <div className="mx-auto max-w-5xl">
       <header className="mb-6 sm:mb-8">
@@ -483,8 +558,77 @@ export default function ClientLeadsPage() {
         </p>
       </header>
 
+      {/* Filter strip — status toggle + search. Both wired to URL params so
+          a filtered view is shareable and browser back walks the filters. */}
+      <div className="mb-5 flex flex-col sm:flex-row sm:items-center gap-3">
+        <div
+          className="flex gap-1.5 shrink-0"
+          role="tablist"
+          aria-label="Фильтр ответов"
+        >
+          {(['all', 'unread', 'leads'] as const).map((s) => {
+            const active = status === s;
+            return (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setStatusFilter(s)}
+                role="tab"
+                aria-selected={active}
+                className="px-3 py-1.5 text-xs font-semibold rounded-md transition-colors"
+                style={
+                  active
+                    ? {
+                        color: 'var(--cp-paper)',
+                        background: 'var(--cp-surface-elev)',
+                        border: '1px solid var(--cp-divider-strong)',
+                      }
+                    : {
+                        color: 'var(--cp-paper-mute)',
+                        background: 'transparent',
+                        border: '1px solid var(--cp-divider)',
+                      }
+                }
+              >
+                {STATUS_LABEL[s]}
+              </button>
+            );
+          })}
+        </div>
+        <div className="sm:flex-1 relative">
+          <Search
+            className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 pointer-events-none"
+            style={{ color: 'var(--cp-paper-faint)' }}
+            aria-hidden
+          />
+          <input
+            type="search"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Поиск по email или имени"
+            className="neu-inset w-full rounded-md pl-9 pr-9 py-1.5 text-xs focus:outline-none"
+            style={{ color: 'var(--cp-paper)' }}
+            aria-label="Поиск по ответам"
+          />
+          {searchInput && (
+            <button
+              type="button"
+              onClick={clearSearch}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md"
+              style={{ color: 'var(--cp-paper-faint)' }}
+              aria-label="Очистить поиск"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
+
       {error && (
-        <div className="neu-inset mb-6 rounded-xl px-5 py-3.5 text-sm font-medium" style={{ color: 'var(--cp-red)' }}>
+        <div
+          className="neu-inset mb-6 rounded-xl px-5 py-3.5 text-sm font-medium"
+          style={{ color: 'var(--cp-red)' }}
+        >
           {error}
         </div>
       )}
@@ -494,31 +638,63 @@ export default function ClientLeadsPage() {
           <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>Загрузка...</p>
         </div>
       ) : leads.length === 0 ? (
-        <div className="neu-card py-12 sm:py-16 text-center px-6">
-          <MessageSquare
-            className="mx-auto h-8 w-8 mb-3"
-            style={{ color: 'var(--cp-paper-faint)' }}
-            aria-hidden
-          />
-          <p className="text-base sm:text-lg font-bold mb-2" style={{ color: 'var(--cp-paper)' }}>
-            Ответов пока нет
-          </p>
-          <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-paper-mute)' }}>
-            Ответы появятся здесь после того, как получатели ваших кампаний напишут вам.
-            Когда ответ выглядит перспективным, откройте диалог и пометьте его как лид.
-          </p>
-          <Link
-            href={'/client/launch' as Route}
-            className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold"
-          >
-            <Send className="h-4 w-4" aria-hidden />
-            Создать кампанию
-          </Link>
-        </div>
+        hasFilter ? (
+          // Filtered empty — explain filter context, offer a clear-all CTA.
+          <div className="neu-card py-10 text-center px-6">
+            <MessageSquare
+              className="mx-auto h-6 w-6 mb-3"
+              style={{ color: 'var(--cp-paper-faint)' }}
+              aria-hidden
+            />
+            <p className="text-sm font-bold mb-1" style={{ color: 'var(--cp-paper)' }}>
+              {status === 'unread'
+                ? 'Нет непрочитанных ответов'
+                : status === 'leads'
+                  ? 'В этой выборке нет помеченных лидов'
+                  : `Ничего не найдено по запросу «${query}»`}
+            </p>
+            <p className="text-xs mb-4" style={{ color: 'var(--cp-paper-mute)' }}>
+              Попробуйте изменить фильтр или сбросить поиск.
+            </p>
+            <button
+              type="button"
+              onClick={clearAll}
+              className="neu-pill inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold"
+              style={{ color: 'var(--cp-paper)' }}
+            >
+              <X className="h-3 w-3" aria-hidden />
+              Сбросить фильтр
+            </button>
+          </div>
+        ) : (
+          // Cold empty — no inbox activity at all yet.
+          <div className="neu-card py-12 sm:py-16 text-center px-6">
+            <MessageSquare
+              className="mx-auto h-8 w-8 mb-3"
+              style={{ color: 'var(--cp-paper-faint)' }}
+              aria-hidden
+            />
+            <p className="text-base sm:text-lg font-bold mb-2" style={{ color: 'var(--cp-paper)' }}>
+              Ответов пока нет
+            </p>
+            <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-paper-mute)' }}>
+              Ответы появятся здесь после того, как получатели ваших кампаний напишут вам.
+              Когда ответ выглядит перспективным, откройте диалог и пометьте его как лид.
+            </p>
+            <Link
+              href={'/client/launch' as Route}
+              className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold"
+            >
+              <Send className="h-4 w-4" aria-hidden />
+              Создать кампанию
+            </Link>
+          </div>
+        )
       ) : (
         <>
           <p className="text-xs font-semibold mb-3" style={{ color: 'var(--cp-text-l)' }}>
-            Всего ответов: <span className="ds-mono tabular-nums">{total}</span>
+            {hasFilter ? 'В выборке: ' : 'Всего ответов: '}
+            <span className="ds-mono tabular-nums">{total}</span>
           </p>
           <div className="space-y-3">
             {leads.map((lead) => (
@@ -556,5 +732,26 @@ export default function ClientLeadsPage() {
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * Suspense wrapper required because useSearchParams() opts the route into
+ * client rendering and Next.js 16 wants an explicit boundary at the route
+ * level — otherwise build warns and the page CSR-flickers on cold nav.
+ */
+export default function ClientLeadsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-5xl">
+          <div className="flex items-center justify-center py-16">
+            <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>Загрузка...</p>
+          </div>
+        </div>
+      }
+    >
+      <RepliesPageContent />
+    </Suspense>
   );
 }

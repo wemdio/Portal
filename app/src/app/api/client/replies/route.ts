@@ -257,6 +257,12 @@ export async function GET(req: NextRequest) {
   const offset = Math.max(0, parsePositiveInt(url.searchParams.get('offset'), 0));
   const search = url.searchParams.get('search')?.trim() || undefined;
 
+  // Status filter is whitelisted so a malformed query never leaks the
+  // unfiltered set under the wrong label. 'all' = passthrough.
+  const rawStatus = url.searchParams.get('status');
+  const statusFilter: 'all' | 'unread' | 'leads' =
+    rawStatus === 'unread' || rawStatus === 'leads' ? rawStatus : 'all';
+
   const allowedCampaignIds = filterAllowedIds([], accessRows, 'campaign');
 
   const campaignNames = await readCampaignNames(allowedCampaignIds);
@@ -275,11 +281,25 @@ export async function GET(req: NextRequest) {
   }
 
   const merged = mergeAndSortItems(replyItems);
-  const total = merged.length;
-  const items = merged.slice(offset, offset + limit);
 
+  // applyLeadMarks must run BEFORE filter+slice so is_lead is populated
+  // across the full set — otherwise filter=leads would only find leads
+  // already in the visible page window. Cost is one DB query regardless
+  // of item count.
+  await applyLeadMarks(userId, merged);
+
+  const filtered = statusFilter === 'unread'
+    ? merged.filter((i) => i.is_unread === true)
+    : statusFilter === 'leads'
+      ? merged.filter((i) => i.is_lead === true)
+      : merged;
+
+  const total = filtered.length;
+  const items = filtered.slice(offset, offset + limit);
+
+  // Synced-lead enrichment stays after slice — only the visible page pays
+  // the cost of name/website joins.
   await enrichFromSyncedLeads(userId, items);
-  await applyLeadMarks(userId, items);
 
   return NextResponse.json({
     items,
