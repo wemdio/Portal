@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
-import { Send, MessageSquare } from 'lucide-react';
+import { Send, MessageSquare, RefreshCw } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ReplyThreadActions } from '@/components/client-replies/ReplyThreadActions';
 
@@ -59,6 +59,15 @@ function formatDate(iso: string | null): string {
   return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
 }
 
+/** Russian noun pluralization with 11-14 exception (1 / 2-4 / 5+). */
+function plural(n: number, one: string, few: string, many: string): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
 function LeadDetail({
   lead,
   onBack,
@@ -70,8 +79,10 @@ function LeadDetail({
 }) {
   const [comments, setComments] = useState<LeadComment[]>([]);
   const [loadingComments, setLoadingComments] = useState(true);
+  const [commentsError, setCommentsError] = useState('');
   const [newComment, setNewComment] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
   const [isLead, setIsLead] = useState(Boolean(lead.is_lead));
   const [markingLead, setMarkingLead] = useState(false);
   const [markLeadError, setMarkLeadError] = useState('');
@@ -86,13 +97,18 @@ function LeadDetail({
     }
 
     setLoadingComments(true);
+    setCommentsError('');
     try {
       const res = await clientApiFetch<{ items: LeadComment[] }>(
         `/leads/${lead.id}/comments`,
       );
       setComments(res.items);
-    } catch {
-      // ignore
+    } catch (err) {
+      // Surface the failure inline with a retry — silent catches let the
+      // empty-state lie ("Комментариев пока нет") when API actually 500'd.
+      setCommentsError(
+        err instanceof Error ? err.message : 'Не удалось загрузить комментарии',
+      );
     } finally {
       setLoadingComments(false);
     }
@@ -107,16 +123,21 @@ function LeadDetail({
     const text = newComment.trim();
     if (!text) return;
     setSubmitting(true);
+    setSubmitError('');
     try {
       await clientApiFetch(`/leads/${lead.id}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ comment: text }),
       });
+      // Clear ONLY on success — silent failure used to clear input as if it
+      // worked, costing the user their typed comment with no warning.
       setNewComment('');
       loadComments();
-    } catch {
-      // ignore
+    } catch (err) {
+      setSubmitError(
+        err instanceof Error ? err.message : 'Не удалось отправить комментарий',
+      );
     } finally {
       setSubmitting(false);
     }
@@ -152,7 +173,7 @@ function LeadDetail({
       <div className="neu-card p-5 sm:p-8 mb-6">
         <div className="flex items-start justify-between gap-4 mb-6">
           <div>
-            <h2 className="text-xl sm:text-2xl font-extrabold" style={{ color: 'var(--cp-text)' }}>
+            <h2 className="text-xl sm:text-2xl font-bold" style={{ color: 'var(--cp-text)' }}>
               {lead.lead_name || lead.lead_email}
             </h2>
             {lead.company_name && (
@@ -190,7 +211,7 @@ function LeadDetail({
 
         <div className="mb-2">
           <p className="ds-eyebrow mb-2">
-            {lead.last_outbound_preview ? '03' : '02'}<span aria-hidden> → </span>ответ лида{lead.reply_subject ? `: ${lead.reply_subject.toLowerCase()}` : ''}
+            {lead.last_outbound_preview ? '03' : '02'}<span aria-hidden> → </span>ответ лида{lead.reply_subject ? `: ${lead.reply_subject}` : ''}
           </p>
           <div className="neu-inset rounded-xl p-4 sm:p-5 text-sm whitespace-pre-wrap max-h-64 overflow-y-auto" style={{ color: 'var(--cp-paper)' }}>
             {lead.reply_body ?? '(пусто)'}
@@ -201,7 +222,7 @@ function LeadDetail({
           <div className="neu-sm mt-5 p-4">
             <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
               <div>
-                <p className="text-sm font-bold mb-1" style={{ color: 'var(--cp-text)' }}>
+                <p className="text-sm font-semibold mb-1" style={{ color: 'var(--cp-text)' }}>
                   Лид из этого диалога
                 </p>
                 <p className="text-xs leading-relaxed" style={{ color: 'var(--cp-text-m)' }}>
@@ -218,7 +239,7 @@ function LeadDetail({
               </button>
             </div>
             {markLeadError && (
-              <p className="text-xs mt-2" style={{ color: 'var(--cp-danger)' }}>
+              <p className="text-xs mt-2" style={{ color: 'var(--cp-red)' }}>
                 {markLeadError}
               </p>
             )}
@@ -235,15 +256,31 @@ function LeadDetail({
 
       {canComment && (
         <div className="neu-card p-5 sm:p-8">
-          <p className="ds-eyebrow mb-2">
+          <p className="ds-eyebrow mb-5">
             04<span aria-hidden> → </span>комментарии
           </p>
-          <h3 className="text-base font-bold mb-5" style={{ color: 'var(--cp-paper)' }}>
-            Комментарии
-          </h3>
 
           {loadingComments ? (
             <p className="text-xs py-4 text-center" style={{ color: 'var(--cp-text-l)' }}>Загрузка...</p>
+          ) : commentsError ? (
+            <div
+              className="flex items-center gap-3 mb-5 px-4 py-3 rounded-xl"
+              style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' }}
+              role="alert"
+            >
+              <p className="text-xs flex-1" style={{ color: 'var(--cp-red)' }}>
+                {commentsError}
+              </p>
+              <button
+                type="button"
+                onClick={() => void loadComments()}
+                className="neu-pill inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-semibold shrink-0"
+                style={{ color: 'var(--cp-paper)' }}
+              >
+                <RefreshCw className="h-3 w-3" aria-hidden />
+                Повторить
+              </button>
+            </div>
           ) : comments.length === 0 ? (
             <p className="text-xs py-4 text-center" style={{ color: 'var(--cp-text-l)' }}>
               Комментариев пока нет. Оставьте обратную связь по лиду.
@@ -256,7 +293,7 @@ function LeadDetail({
                     <span className="text-xs font-semibold" style={{ color: 'var(--cp-text)' }}>
                       {c.user_name || 'Пользователь'}
                     </span>
-                    <span className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+                    <span className="text-[10px] ds-mono" style={{ color: 'var(--cp-text-l)' }}>
                       {formatDate(c.created_at)}
                     </span>
                   </div>
@@ -276,7 +313,7 @@ function LeadDetail({
               onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSubmit()}
               placeholder="Напишите комментарий..."
               className="neu-inset flex-1 rounded-xl px-4 py-2.5 text-sm focus:outline-none"
-              style={{ color: 'var(--cp-text)', background: 'var(--cp-inset, rgba(180,173,164,0.08))' }}
+              style={{ color: 'var(--cp-text)' }}
             />
             <button
               onClick={handleSubmit}
@@ -286,6 +323,11 @@ function LeadDetail({
               {submitting ? '...' : 'Отправить'}
             </button>
           </div>
+          {submitError && (
+            <p className="text-xs mt-2" style={{ color: 'var(--cp-red)' }}>
+              {submitError}
+            </p>
+          )}
         </div>
       )}
     </div>
@@ -296,7 +338,7 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="neu-sm rounded-lg p-3">
       <p className="ds-eyebrow mb-1">{label.toLowerCase()}</p>
-      <p className="text-sm font-medium break-all" style={{ color: 'var(--cp-paper)' }}>
+      <p className="text-sm break-all" style={{ color: 'var(--cp-paper)' }}>
         {value}
       </p>
     </div>
@@ -341,7 +383,7 @@ function LeadCard({
             </p>
           )}
         </div>
-        <span className="text-[10px] shrink-0 whitespace-nowrap" style={{ color: 'var(--cp-paper-faint)' }}>
+        <span className="text-[10px] ds-mono shrink-0 whitespace-nowrap" style={{ color: 'var(--cp-paper-faint)' }}>
           {formatDate(lead.reply_timestamp ?? lead.created_at)}
         </span>
       </div>
@@ -368,7 +410,8 @@ function LeadCard({
         <div className="mt-2 flex items-center gap-1.5">
           <MessageSquare className="h-3 w-3" style={{ color: 'var(--cp-paper-faint)' }} aria-hidden />
           <span className="text-[10px] font-semibold" style={{ color: 'var(--cp-paper-mute)' }}>
-            {commentCount} {commentCount === 1 ? 'комментарий' : commentCount < 5 ? 'комментария' : 'комментариев'}
+            <span className="ds-mono tabular-nums">{commentCount}</span>{' '}
+            {plural(commentCount, 'комментарий', 'комментария', 'комментариев')}
           </span>
         </div>
       )}
@@ -430,9 +473,9 @@ export default function ClientLeadsPage() {
     <div className="mx-auto max-w-5xl">
       <header className="mb-6 sm:mb-8">
         <p className="ds-eyebrow mb-2">
-          01<span aria-hidden> → </span>Inbox
+          01<span aria-hidden> → </span>Входящие
         </p>
-        <h1 className="text-xl sm:text-2xl font-bold" style={{ color: 'var(--cp-paper)' }}>
+        <h1 className="text-xl sm:text-2xl font-extrabold" style={{ color: 'var(--cp-paper)' }}>
           Ответы
         </h1>
         <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
@@ -441,7 +484,7 @@ export default function ClientLeadsPage() {
       </header>
 
       {error && (
-        <div className="neu-inset mb-6 rounded-2xl px-5 py-3.5 text-sm font-medium" style={{ color: 'var(--cp-red)' }}>
+        <div className="neu-inset mb-6 rounded-xl px-5 py-3.5 text-sm font-medium" style={{ color: 'var(--cp-red)' }}>
           {error}
         </div>
       )}
@@ -475,7 +518,7 @@ export default function ClientLeadsPage() {
       ) : (
         <>
           <p className="text-xs font-semibold mb-3" style={{ color: 'var(--cp-text-l)' }}>
-            Всего ответов: {total}
+            Всего ответов: <span className="ds-mono tabular-nums">{total}</span>
           </p>
           <div className="space-y-3">
             {leads.map((lead) => (
@@ -497,7 +540,7 @@ export default function ClientLeadsPage() {
               >
                 ← Назад
               </button>
-              <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>
+              <span className="text-xs ds-mono" style={{ color: 'var(--cp-text-l)' }}>
                 {offset + 1}–{Math.min(offset + LIMIT, total)} из {total}
               </span>
               <button
