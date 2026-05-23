@@ -30,39 +30,17 @@
  *        — limit: общий cap, остановка пагинации.
  */
 
-import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from 'undici';
-
 const HH_API_BASE = 'https://api.hh.ru';
 const USER_AGENT = 'PortalBot/1.0 (sergey@wemd.io)';
 const REQUEST_GAP_MS = 250;
 const MAX_PAGES = 20;
 const PAGE_SIZE = 100;
 
-/**
- * HH блокирует запросы из-вне России → используем proxy если настроен.
- * Берём первый из PROXY_URLS (JSON-массив) или fallback на HH_PROXY_URL.
- * Round-robin как в hhParser.ts здесь не нужен — у нас в день ~700 запросов
- * с одного клиента, один прокси справится без банов.
- */
-function resolveDispatcher(): Dispatcher | undefined {
-  let url: string | null = null;
-  if (process.env.PROXY_URLS) {
-    try {
-      const parsed = JSON.parse(process.env.PROXY_URLS);
-      if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'string') {
-        url = parsed[0].trim();
-      }
-    } catch {
-      // ignore
-    }
-  }
-  if (!url && process.env.HH_PROXY_URL) {
-    url = process.env.HH_PROXY_URL.trim();
-  }
-  return url ? new ProxyAgent(url) : undefined;
-}
-
-const HH_DISPATCHER = resolveDispatcher();
+// До 2026-04 HH банил по IP — приходилось ходить через proxy (undici.ProxyAgent).
+// С обязательным OAuth идентификация per-token, не per-IP, и партнёрский токен
+// HH_ACCESS_TOKEN даёт лимит ~10 RPS напрямую с любого IP. Поэтому undici/proxy
+// инфраструктура удалена — простой глобальный fetch (Node 18+) + Bearer header.
+// Проверка реальными запросами с моей машины (вне РФ) → 200 OK, 0 ошибок.
 
 export interface HhAutoParserConfig {
   /** Only include vacancies published at or after this moment. */
@@ -134,11 +112,8 @@ function buildHeaders(): Record<string, string> {
 
 async function fetchJson<T>(url: string): Promise<T | null> {
   try {
-    // Используем undici.fetch напрямую — у глобального fetch'а в Node нет
-    // dispatcher-опции, и proxy игнорируется.
-    const res = await undiciFetch(url, {
+    const res = await fetch(url, {
       headers: buildHeaders(),
-      dispatcher: HH_DISPATCHER,
     });
     if (!res.ok) {
       // Полезный сигнал для отладки — HH 403 (geo-блок) или 429 (rate-limit)
