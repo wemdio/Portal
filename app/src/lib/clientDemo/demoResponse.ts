@@ -94,7 +94,12 @@ export async function serveClientDemo(req: NextRequest): Promise<NextResponse> {
       const rawOffset = Number(req.nextUrl.searchParams.get('offset') ?? '0');
       const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
       const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
-      return json(getDemoRepliesResponse(limit, offset));
+      // Mirror real /replies API: whitelist status, pass search through.
+      const rawStatus = req.nextUrl.searchParams.get('status');
+      const status: 'all' | 'unread' | 'leads' =
+        rawStatus === 'unread' || rawStatus === 'leads' ? rawStatus : 'all';
+      const search = req.nextUrl.searchParams.get('search')?.trim() || undefined;
+      return json(getDemoRepliesResponse(limit, offset, status, search));
     }
     default:
       break;
