@@ -30,11 +30,39 @@
  *        — limit: общий cap, остановка пагинации.
  */
 
+import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from 'undici';
+
 const HH_API_BASE = 'https://api.hh.ru';
 const USER_AGENT = 'PortalBot/1.0 (sergey@wemd.io)';
 const REQUEST_GAP_MS = 250;
 const MAX_PAGES = 20;
 const PAGE_SIZE = 100;
+
+/**
+ * HH блокирует запросы из-вне России → используем proxy если настроен.
+ * Берём первый из PROXY_URLS (JSON-массив) или fallback на HH_PROXY_URL.
+ * Round-robin как в hhParser.ts здесь не нужен — у нас в день ~700 запросов
+ * с одного клиента, один прокси справится без банов.
+ */
+function resolveDispatcher(): Dispatcher | undefined {
+  let url: string | null = null;
+  if (process.env.PROXY_URLS) {
+    try {
+      const parsed = JSON.parse(process.env.PROXY_URLS);
+      if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'string') {
+        url = parsed[0].trim();
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (!url && process.env.HH_PROXY_URL) {
+    url = process.env.HH_PROXY_URL.trim();
+  }
+  return url ? new ProxyAgent(url) : undefined;
+}
+
+const HH_DISPATCHER = resolveDispatcher();
 
 export interface HhAutoParserConfig {
   /** Only include vacancies published at or after this moment. */
@@ -89,12 +117,40 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * HH API с 2026-04-15 требует OAuth Bearer для /vacancies и /employers.
+ * Без токена возвращает 403 «forbidden» даже с правильным User-Agent и из
+ * российского IP. Токен лежит в HH_ACCESS_TOKEN, обновляется отдельным
+ * процессом (token-refresh worker, см. hhParser.ts).
+ */
+function buildHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'User-Agent': USER_AGENT };
+  const token = process.env.HH_ACCESS_TOKEN?.trim();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
 async function fetchJson<T>(url: string): Promise<T | null> {
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT } });
-    if (!res.ok) return null;
+    // Используем undici.fetch напрямую — у глобального fetch'а в Node нет
+    // dispatcher-опции, и proxy игнорируется.
+    const res = await undiciFetch(url, {
+      headers: buildHeaders(),
+      dispatcher: HH_DISPATCHER,
+    });
+    if (!res.ok) {
+      // Полезный сигнал для отладки — HH 403 (geo-блок) или 429 (rate-limit)
+      // должны быть видны в логе, а не теряться молча.
+      if (res.status === 403 || res.status === 429) {
+        console.warn(`[hhAutoParser] HH returned ${res.status} for ${url} — proxy issue?`);
+      }
+      return null;
+    }
     return (await res.json()) as T;
-  } catch {
+  } catch (err) {
+    console.warn(`[hhAutoParser] fetch error for ${url}:`, err instanceof Error ? err.message : err);
     return null;
   }
 }
