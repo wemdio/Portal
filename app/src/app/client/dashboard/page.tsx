@@ -10,6 +10,12 @@
  *   - First-visit / mid-onboarding: greeting + onboarding checklist; campaigns
  *     section hides until onboarding completes.
  *
+ * Auto-mode clients (portalMode === 'auto', e.g. mailganer custom portal) get
+ * their own greeting branch — the onboarding flow (бриф/база/цепочка) is
+ * invisible to them by design, so we never reference those steps, even when
+ * /onboarding/status reports incomplete. AutoPipelineSummary carries the
+ * activity signal; the portfolio strip stays hidden to avoid two metric strips.
+ *
  * No hero panel, no gradient text, no rainbow side-stripes, no per-action
  * chromatic accents. Single slate accent + semantic status dots only.
  * Conforms to DESIGN.md §Components, §Do's-and-Don'ts, and the Single Slate /
@@ -259,10 +265,15 @@ export default function ClientDashboardPage() {
 
   // Calm/caught-up branch only: under the greeting we surface one mono line of
   // portfolio activity so the user doesn't have to scan rows to confirm
-  // "things are happening". Hidden when there's a lede (unread replies) or
-  // when nothing has actually been sent (totals would all be zero).
+  // "things are happening". Hidden when there's a lede (unread replies),
+  // nothing has been sent yet, or the user is in auto-mode (AutoPipelineSummary
+  // already carries the activity signal — two metric strips would compete).
   const showPortfolioSignal =
-    !stillLoading && totalUnread === 0 && hasActiveCampaign && totalSent > 0;
+    !stillLoading &&
+    totalUnread === 0 &&
+    hasActiveCampaign &&
+    totalSent > 0 &&
+    portalMode !== 'auto';
 
   // ── greeting copy (branches on data) ──────────────────
 
@@ -273,6 +284,16 @@ export default function ClientDashboardPage() {
       const word = plural(totalUnread, 'ответ', 'ответа', 'ответов');
       const verb = plural(totalUnread, 'ждёт', 'ждут', 'ждут');
       return `С возвращением. ${totalUnread} ${word} ${verb} вас.`;
+    }
+
+    // Auto-mode: портал собирает кампании сам, онбординг (бриф/база/цепочка)
+    // им недоступен по дизайну — кастомные кабинеты типа mailganer не дают
+    // эти шаги вообще. Поэтому никакого "давайте заполним бриф" здесь быть
+    // не должно, даже если /onboarding/status вернул incomplete.
+    if (portalMode === 'auto') {
+      return hasActiveCampaign
+        ? 'С возвращением. Сегодня всё спокойно.'
+        : 'С возвращением.';
     }
 
     if (hasActiveCampaign) {
@@ -291,7 +312,7 @@ export default function ClientDashboardPage() {
     }
 
     return 'С возвращением.';
-  }, [stillLoading, totalUnread, hasActiveCampaign, onboarding]);
+  }, [stillLoading, totalUnread, hasActiveCampaign, onboarding, portalMode]);
 
   // ───────────────────────── render ─────────────────────────
 
