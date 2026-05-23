@@ -434,6 +434,16 @@ export async function runAutoPipelineForClient(
       await finishRunRow(runId, { status: 'failed', error_message: 'No endpoint configured' });
       return { ...emptyResult(runId), status: 'failed', error: 'No endpoint configured' };
     }
+    // Фиксируем was_dry_run в run row сразу после загрузки конфига, не дожидаясь
+    // finishRunRow — иначе при обрыве (timeout, crash) zombie row висит со
+    // status='running' и was_dry_run=false, что обманывает дашборд («какой
+    // режим был у прерванного прогона?»).
+    if (supabaseAdmin) {
+      await supabaseAdmin
+        .from('client_auto_pipeline_runs')
+        .update({ was_dry_run: config.dry_run })
+        .eq('id', runId);
+    }
     // В dry-run режиме bucket'ы вообще не обязательны — мы делаем замер
     // воронки (HH → score → email → validate), но не роутим лидов в кампании.
     // Поэтому пропускаем оба check'а ниже.
