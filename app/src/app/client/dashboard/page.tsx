@@ -5,8 +5,10 @@
  *
  * One layout, three states branched by data:
  *   - Returning + has unread replies: replies-needing-attention is the lede.
- *   - Returning + caught up: short "all calm" greeting + mono portfolio
- *     strip ("В работе N · отправлено M · ответов K") + campaigns rows.
+ *   - Returning + caught up: short "С возвращением." greeting + mono portfolio
+ *     strip ("В работе N · отправлено M · ответов K") + campaigns rows. The
+ *     sub-line "всё спокойно" was dropped as ambiguous — portfolio strip is
+ *     the unambiguous state signal.
  *   - First-visit / mid-onboarding: greeting + onboarding checklist; campaigns
  *     section hides until onboarding completes.
  *
@@ -286,18 +288,14 @@ export default function ClientDashboardPage() {
       return `С возвращением. ${totalUnread} ${word} ${verb} вас.`;
     }
 
-    // Auto-mode: портал собирает кампании сам, онбординг (бриф/база/цепочка)
-    // им недоступен по дизайну — кастомные кабинеты типа mailganer не дают
-    // эти шаги вообще. Поэтому никакого "давайте заполним бриф" здесь быть
-    // не должно, даже если /onboarding/status вернул incomplete.
-    if (portalMode === 'auto') {
-      return hasActiveCampaign
-        ? 'С возвращением. Сегодня всё спокойно.'
-        : 'С возвращением.';
-    }
-
-    if (hasActiveCampaign) {
-      return 'С возвращением. Сегодня всё спокойно.';
+    // Caught-up (нет unread'ов): greeting короткий, ниже всю фактуру несёт
+    // portfolio strip или AutoPipelineSummary. Прежнее "всё спокойно" убрали
+    // как двусмысленное (читалось и как "всё ок", и как "тишина / кампании
+    // стоят"). Auto-mode сюда тоже попадает — онбординг-копия для них
+    // выключена по дизайну (кастомные кабинеты типа mailganer не дают
+    // заполнять бриф/базу/цепочку).
+    if (portalMode === 'auto' || hasActiveCampaign) {
+      return 'С возвращением.';
     }
 
     if (onboarding && !onboarding.complete && onboarding.items?.length) {
