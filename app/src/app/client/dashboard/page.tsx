@@ -5,10 +5,18 @@
  *
  * One layout, three states branched by data:
  *   - Returning + has unread replies: replies-needing-attention is the lede.
- *   - Returning + caught up: short "all calm" greeting + mono portfolio
- *     strip ("В работе N · отправлено M · ответов K") + campaigns rows.
+ *   - Returning + caught up: short "С возвращением." greeting + mono portfolio
+ *     strip ("В работе N · отправлено M · ответов K") + campaigns rows. The
+ *     sub-line "всё спокойно" was dropped as ambiguous — portfolio strip is
+ *     the unambiguous state signal.
  *   - First-visit / mid-onboarding: greeting + onboarding checklist; campaigns
  *     section hides until onboarding completes.
+ *
+ * Auto-mode clients (portalMode === 'auto', e.g. mailganer custom portal) get
+ * their own greeting branch — the onboarding flow (бриф/база/цепочка) is
+ * invisible to them by design, so we never reference those steps, even when
+ * /onboarding/status reports incomplete. AutoPipelineSummary carries the
+ * activity signal; the portfolio strip stays hidden to avoid two metric strips.
  *
  * No hero panel, no gradient text, no rainbow side-stripes, no per-action
  * chromatic accents. Single slate accent + semantic status dots only.
@@ -259,10 +267,15 @@ export default function ClientDashboardPage() {
 
   // Calm/caught-up branch only: under the greeting we surface one mono line of
   // portfolio activity so the user doesn't have to scan rows to confirm
-  // "things are happening". Hidden when there's a lede (unread replies) or
-  // when nothing has actually been sent (totals would all be zero).
+  // "things are happening". Hidden when there's a lede (unread replies),
+  // nothing has been sent yet, or the user is in auto-mode (AutoPipelineSummary
+  // already carries the activity signal — two metric strips would compete).
   const showPortfolioSignal =
-    !stillLoading && totalUnread === 0 && hasActiveCampaign && totalSent > 0;
+    !stillLoading &&
+    totalUnread === 0 &&
+    hasActiveCampaign &&
+    totalSent > 0 &&
+    portalMode !== 'auto';
 
   // ── greeting copy (branches on data) ──────────────────
 
@@ -275,8 +288,14 @@ export default function ClientDashboardPage() {
       return `С возвращением. ${totalUnread} ${word} ${verb} вас.`;
     }
 
-    if (hasActiveCampaign) {
-      return 'С возвращением. Сегодня всё спокойно.';
+    // Caught-up (нет unread'ов): greeting короткий, ниже всю фактуру несёт
+    // portfolio strip или AutoPipelineSummary. Прежнее "всё спокойно" убрали
+    // как двусмысленное (читалось и как "всё ок", и как "тишина / кампании
+    // стоят"). Auto-mode сюда тоже попадает — онбординг-копия для них
+    // выключена по дизайну (кастомные кабинеты типа mailganer не дают
+    // заполнять бриф/базу/цепочку).
+    if (portalMode === 'auto' || hasActiveCampaign) {
+      return 'С возвращением.';
     }
 
     if (onboarding && !onboarding.complete && onboarding.items?.length) {
@@ -291,7 +310,7 @@ export default function ClientDashboardPage() {
     }
 
     return 'С возвращением.';
-  }, [stillLoading, totalUnread, hasActiveCampaign, onboarding]);
+  }, [stillLoading, totalUnread, hasActiveCampaign, onboarding, portalMode]);
 
   // ───────────────────────── render ─────────────────────────
 

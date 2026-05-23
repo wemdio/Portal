@@ -33,6 +33,7 @@ function mockEnrichment(overrides: Partial<EnrichmentResult>): EnrichmentResult 
     employer: mockEmployer(),
     domain: 'test.example',
     email: 'info@test.example',
+    emailValidation: null,
     score: 100,
     spf: 'v=spf1 -all',
     endpointRaw: null,
