@@ -164,9 +164,22 @@ interface DemoReply {
   body: string;
   timestamp: string;
   is_lead: boolean;
+  /** Whether this reply still demands attention (amber dot in the list). */
+  is_unread?: boolean;
 }
 
+/**
+ * Demo inbox — mixed на 9 ответов:
+ *   3 lead (зелёные)  — горячие, готовы говорить
+ *   2 unread (амбер)  — новые, ещё не открытые
+ *   4 read non-lead   — холодные вежливости / отказы / out-of-office
+ *
+ * Состав подобран так, чтобы фильтры на /client/replies выглядели
+ * содержательно для демо-аккаунта (без реальных кампаний у клиентов
+ * это единственный способ проверить UX inbox-фильтров).
+ */
 const DEMO_REPLIES: DemoReply[] = [
+  // ── 3 lead (status=leads → 3) ─────────────────────────────────────────────
   {
     id: 'demo-reply-1',
     campaign_id: 'demo-cmp-retail',
@@ -200,6 +213,78 @@ const DEMO_REPLIES: DemoReply[] = [
     timestamp: '2026-05-13T16:40:00.000Z',
     is_lead: true,
   },
+
+  // ── 2 unread non-lead (status=unread → 2) ─────────────────────────────────
+  {
+    id: 'demo-reply-4',
+    campaign_id: 'demo-cmp-3pl',
+    from_name: 'Дмитрий Орлов',
+    from_email: 'd.orlov@logistics-hub.example',
+    subject: 'Re: WMS для распределительного центра',
+    preview: 'Спасибо за письмо, изучаем рынок. Можете прислать сравнение с Mantis WMS?',
+    body: 'Спасибо за письмо! Сейчас активно изучаем рынок WMS для нашего распределительного центра в Подмосковье (около 8 тыс кв.м). Можете прислать сравнение вашей платформы с Mantis WMS — она у нас в шорт-листе?\n\nДмитрий Орлов, IT-директор',
+    timestamp: '2026-05-21T14:30:00.000Z',
+    is_lead: false,
+    is_unread: true,
+  },
+  {
+    id: 'demo-reply-5',
+    campaign_id: 'demo-cmp-retail',
+    from_name: 'Анна Соловьёва',
+    from_email: 'a.solovieva@cross-dock.example',
+    subject: 'Re: Кросс-докинг под маркетплейсы',
+    preview: 'Готовы обсудить, но сначала демо. Когда есть слот?',
+    body: 'Здравствуйте! Готовы обсудить кросс-докинг для нашего ОМП. Когда у вас есть слот на демо? Желательно на следующей неделе во второй половине дня — утро у нас занято операционкой.\n\nС уважением, Анна Соловьёва',
+    timestamp: '2026-05-20T10:15:00.000Z',
+    is_lead: false,
+    is_unread: true,
+  },
+
+  // ── 4 read non-lead (нейтральные / отказы / OOO) ──────────────────────────
+  {
+    id: 'demo-reply-6',
+    campaign_id: 'demo-cmp-retail',
+    from_name: 'Сергей Кузьмин',
+    from_email: 's.kuzmin@warehouse-king.example',
+    subject: 'Re: WMS для склада 12 тыс кв.м',
+    preview: 'Спасибо, сейчас не актуально — внедряем 1С:WMS до конца года.',
+    body: 'Спасибо за предложение! Сейчас не актуально — у нас уже идёт внедрение 1С:WMS, заканчиваем до конца года. Возможно, через 12 месяцев вернёмся к разговору, если будут вопросы по второму складу.\n\nСергей Кузьмин',
+    timestamp: '2026-05-18T16:20:00.000Z',
+    is_lead: false,
+  },
+  {
+    id: 'demo-reply-7',
+    campaign_id: 'demo-cmp-retail',
+    from_name: 'Елена Морозова',
+    from_email: 'e.morozova@retail-ops.example',
+    subject: 'Re: Сократили пересорт на складе на 30%',
+    preview: 'Передам коллегам, у нас этим направлением занимается другой отдел.',
+    body: 'Здравствуйте! Передам ваше письмо коллегам — у нас этим направлением занимается другой отдел (склад и логистика отдельно от закупок). Если будут вопросы — свяжемся.',
+    timestamp: '2026-05-17T11:00:00.000Z',
+    is_lead: false,
+  },
+  {
+    id: 'demo-reply-8',
+    campaign_id: 'demo-cmp-3pl',
+    from_name: 'Анна Тарасова',
+    from_email: 'a.tarasova@auto-parts.example',
+    subject: 'Re: WMS под фулфилмент за 3 недели',
+    preview: 'Сейчас в отпуске до 28 мая, отвечу по возвращении.',
+    body: 'Автоматический ответ\n\nСпасибо за письмо! Сейчас в отпуске до 28 мая, отвечу по возвращении. По срочным вопросам — anna.kim@auto-parts.example',
+    timestamp: '2026-05-16T08:45:00.000Z',
+    is_lead: false,
+  },
+  {
+    id: 'demo-reply-9',
+    campaign_id: 'demo-cmp-3pl',
+    from_name: 'Виктор Шевченко',
+    from_email: 'v.shevchenko@logistics-llc.example',
+    subject: 'Re: WMS под фулфилмент за 3 недели',
+    preview: 'Просьба удалить наш email из рассылки.',
+    body: 'Здравствуйте. Просьба удалить наш email из рассылки. Спасибо.',
+    timestamp: '2026-05-15T15:30:00.000Z',
+    is_lead: false,
+  },
 ];
 
 export function getDemoReplies(campaignId: string) {
@@ -209,42 +294,67 @@ export function getDemoReplies(campaignId: string) {
   };
 }
 
-export function getDemoRepliesResponse(limit: number, offset: number) {
-  const items = DEMO_REPLIES
+export function getDemoRepliesResponse(
+  limit: number,
+  offset: number,
+  status: 'all' | 'unread' | 'leads' = 'all',
+  search?: string,
+) {
+  // Sort by recency (matches real backend behaviour).
+  let items = DEMO_REPLIES
     .slice()
-    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
-    .map((reply) => ({
-      id: `reply:${reply.campaign_id}:${reply.id}`,
-      source: 'reply',
-      qualification_id: null,
-      campaign_id: reply.campaign_id,
-      campaign_name: null,
-      lead_email: reply.from_email,
-      lead_name: reply.from_name,
-      company_name: null,
-      phone: null,
-      website: null,
-      linkedin_url: null,
-      reply_subject: reply.subject,
-      reply_body: reply.body,
-      last_outbound_preview: null,
-      reply_timestamp: reply.timestamp,
-      status: reply.is_lead ? 'lead' : 'reply',
-      ai_reason: null,
-      created_at: reply.timestamp,
-      client_lead_comments: [],
-      email_id: reply.id,
-      lead_id: null,
-      thread_id: null,
-      is_unread: false,
-      ai_interest_value: null,
-      is_lead: reply.is_lead,
-      lead_entry_id: reply.is_lead ? `demo-lead-${reply.id.split('-').pop()}` : null,
-    }));
+    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+
+  if (status === 'unread') {
+    items = items.filter((r) => r.is_unread === true);
+  } else if (status === 'leads') {
+    items = items.filter((r) => r.is_lead === true);
+  }
+
+  // Local case-insensitive search across subject / from / preview — mirrors
+  // what the real Instantly search returns from listEmails().
+  if (search) {
+    const q = search.toLowerCase();
+    items = items.filter((r) =>
+      r.subject.toLowerCase().includes(q)
+      || r.from_name.toLowerCase().includes(q)
+      || r.from_email.toLowerCase().includes(q)
+      || r.preview.toLowerCase().includes(q),
+    );
+  }
+
+  const mapped = items.map((reply) => ({
+    id: `reply:${reply.campaign_id}:${reply.id}`,
+    source: 'reply',
+    qualification_id: null,
+    campaign_id: reply.campaign_id,
+    campaign_name: null,
+    lead_email: reply.from_email,
+    lead_name: reply.from_name,
+    company_name: null,
+    phone: null,
+    website: null,
+    linkedin_url: null,
+    reply_subject: reply.subject,
+    reply_body: reply.body,
+    last_outbound_preview: null,
+    reply_timestamp: reply.timestamp,
+    status: reply.is_lead ? 'lead' : (reply.is_unread ? 'unread' : 'reply'),
+    ai_reason: null,
+    created_at: reply.timestamp,
+    client_lead_comments: [],
+    email_id: reply.id,
+    lead_id: null,
+    thread_id: null,
+    is_unread: reply.is_unread === true,
+    ai_interest_value: null,
+    is_lead: reply.is_lead,
+    lead_entry_id: reply.is_lead ? `demo-lead-${reply.id.split('-').pop()}` : null,
+  }));
 
   return {
-    items: items.slice(offset, offset + limit),
-    total: items.length,
+    items: mapped.slice(offset, offset + limit),
+    total: mapped.length,
     limit,
     offset,
   };
