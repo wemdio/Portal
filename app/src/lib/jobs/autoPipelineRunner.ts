@@ -91,6 +91,12 @@ export interface AutoPipelineConfig {
   daily_limit: number | null;
   hh_date_window_hours: number;
   hh_extra_exclude_patterns: string[];
+  /**
+   * HH top-level industry id'ы для itrate отдельными запросами. Пустой массив —
+   * один общий запрос без industry-фильтра (старое поведение). 30 индустрий
+   * → +10-15× уникальных компаний в дневной выборке.
+   */
+  industries: string[];
   last_run_at: string | null;
   /**
    * Распределение нагрузки. 'burst' — старый поведение (один прогон ~35 мин).
@@ -517,6 +523,11 @@ export async function runAutoPipelineForClient(
     const employers = await findNewHhEmployers({
       since,
       excludePatterns,
+      // Если в конфиге заданы industries — делаем по запросу на каждую (даёт
+      // ×10-15 объём выборки). Пустой массив = один общий запрос (legacy
+      // поведение). Парсер сам обрабатывает оба случая через единый
+      // queries-loop.
+      industries: config.industries.length > 0 ? config.industries : undefined,
       limit: config.daily_limit ?? 1000,
       log: (m) => void logAudit('auto-pipeline.hh', m, logCtx),
     });

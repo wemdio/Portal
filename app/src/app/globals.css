@@ -1201,6 +1201,8 @@ body:has(.client-portal) {
   --cp-surface-active: #1f2023;
   --cp-divider: #1f2023;
   --cp-divider-strong: #2a2b2f;
+  /* Modal/drawer backdrop — ink at 60% opacity, editorial scrim. */
+  --cp-scrim: rgba(10, 10, 10, 0.6);
   --cp-paper: #fafafa;
   --cp-paper-mute: #a1a1a3;
   --cp-paper-faint: #6c6c70;
