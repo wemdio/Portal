@@ -10,18 +10,23 @@
  *
  * Sections, all editorially numbered so a screen-reader / cmd-F user can
  * jump between them:
- *   01 → биллинг           page header
- *   02 → текущий тариф     plan name + status dot + billing dates
+ *   01 → биллинг           page header + «Обсудить расширение» link
+ *   02 → текущий тариф     plan name + status dot + inline billing dates
  *   02b → доступ           shown only when payment_locked
  *   02c → автопродление    shown only when billing_mode === 'autopayment'
- *   03 → лимиты            ledger of per-limit usage rows
+ *   03 → лимиты            ledger of per-limit usage rows; muted when locked
+ *
+ * Pacing for Maksim-class users: stressedLimit hint above the ledger also
+ * projects an exhaustion date when current burn rate would run out before
+ * the period ends. Silent otherwise.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import type { Route } from 'next';
 import {
   CheckCircle2,
   Clock,
-  CreditCard,
   ExternalLink,
   Loader2,
   RefreshCw,
@@ -88,6 +93,8 @@ const STATUS_LABELS: Record<TariffResponse['status'], string> = {
   inactive: 'Не активен',
 };
 
+const MS_IN_DAY = 86_400_000;
+
 // Status → 6px semantic dot. Active = green; expired = red; setup/inactive
 // = amber (in-progress). Matches the system's Status-as-Data rule.
 function statusDot(status: TariffResponse['status']): string {
@@ -120,6 +127,22 @@ function formatDate(value: string | null | undefined) {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return '—';
   return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function formatShortDate(value: string | null | undefined) {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+}
+
+/** Russian "1 / 2-4 / 5+" plural with 11-14 exception. */
+function plural(n: number, one: string, few: string, many: string): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
 }
 
 export default function ClientTariffPage() {
@@ -176,23 +199,24 @@ export default function ClientTariffPage() {
     }
   }, [load]);
 
+  // Initial fetch — defers to the same `load()` the «Обновить» button uses
+  // (was reimplementing the fetch body inline; invited drift between init
+  // and refresh per re-critique findings).
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await clientApiFetch<TariffResponse>('/tariff');
-        if (cancelled) return;
-        setData(res);
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Не удалось загрузить тариф');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void load();
+  }, [load]);
+
+  // Days remaining until period end (paid_until). Used to annotate the
+  // "оплачен до" date inline — answers "сколько у меня ещё есть" without
+  // mental subtraction.
+  const daysLeftInPeriod = useMemo<number | null>(() => {
+    if (!data?.paid_until) return null;
+    const paid = Date.parse(data.paid_until);
+    if (!Number.isFinite(paid)) return null;
+    const ms = paid - Date.now();
+    if (ms < 0) return 0;
+    return Math.ceil(ms / MS_IN_DAY);
+  }, [data]);
 
   // Most-stressed limit: surfaces a single one-line answer to "am I about
   // to hit something?" so Olga doesn't have to scan three rows to feel safe
@@ -211,6 +235,29 @@ export default function ClientTariffPage() {
     }
     return best;
   }, [data]);
+
+  // Burn-rate projection for the stressed limit: if at the current daily
+  // pace this limit will exhaust BEFORE the paid period ends, surface the
+  // projected calendar date next to "ближайший: ...". Stays quiet when the
+  // period ends first (no concern) or when we have <7 days of data (too
+  // noisy to project from). Closes the Flexibility gap for Maksim.
+  const projectedExhaustion = useMemo<Date | null>(() => {
+    if (!data || !stressedLimit) return null;
+    const u = data.usage[stressedLimit.key];
+    if (!u || u.used <= 0 || u.remaining <= 0) return null;
+    const periodStart = Date.parse(data.period_start);
+    const paidUntil = data.paid_until ? Date.parse(data.paid_until) : null;
+    if (!Number.isFinite(periodStart) || !paidUntil || !Number.isFinite(paidUntil)) return null;
+    const now = Date.now();
+    const daysElapsed = (now - periodStart) / MS_IN_DAY;
+    if (daysElapsed < 7) return null; // too early to project meaningfully
+    const dailyBurn = u.used / daysElapsed;
+    if (dailyBurn <= 0) return null;
+    const daysToExhaust = u.remaining / dailyBurn;
+    const projectedMs = now + daysToExhaust * MS_IN_DAY;
+    if (projectedMs >= paidUntil) return null; // period ends first; no concern
+    return new Date(projectedMs);
+  }, [data, stressedLimit]);
 
   // ── Loading skeleton ───────────────────────────────────────────────
   if (loading && !data) {
@@ -246,7 +293,7 @@ export default function ClientTariffPage() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 sm:space-y-8">
-      <header className="flex items-start justify-between gap-4">
+      <header className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <p className="ds-eyebrow mb-2">
             01<span aria-hidden> → </span>биллинг
@@ -261,25 +308,30 @@ export default function ClientTariffPage() {
             Текущий тариф и остатки по лимитам на расчётный период.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void load()}
-          disabled={loading}
-          className="ds-btn-ghost inline-flex items-center gap-2 px-3 py-2 text-xs disabled:opacity-50"
-        >
-          <RefreshCw
-            className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`}
-            aria-hidden
-          />
-          Обновить
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <Link
+            href={'/client/support' as Route}
+            className="ds-btn-ghost inline-flex items-center gap-2 px-3 py-2 text-xs"
+          >
+            Обсудить расширение
+          </Link>
+          <button
+            type="button"
+            onClick={() => void load()}
+            disabled={loading}
+            className="ds-btn-ghost inline-flex items-center gap-2 px-3 py-2 text-xs disabled:opacity-50"
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`}
+              aria-hidden
+            />
+            Обновить
+          </button>
+        </div>
       </header>
 
       {error && !data && (
-        <div
-          className="neu-card flex items-center gap-3 px-5 py-4"
-          role="alert"
-        >
+        <div className="neu-card flex items-center gap-3 px-5 py-4" role="alert">
           <span
             aria-hidden
             className="inline-block h-1.5 w-1.5 rounded-full shrink-0"
@@ -299,10 +351,11 @@ export default function ClientTariffPage() {
         </div>
       )}
 
-      {/* Soft error (data exists but a recent reload failed) — quiet line, no chrome */}
+      {/* Soft error (stale data still rendered) — quiet line, no chrome. */}
       {error && data && (
         <p className="text-xs ds-mono" style={{ color: 'var(--cp-red)' }}>
-          {error} <button
+          {error}{' '}
+          <button
             type="button"
             onClick={() => void load()}
             className="underline ml-1"
@@ -341,43 +394,43 @@ export default function ClientTariffPage() {
                   </span>
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3 text-xs sm:text-sm">
-                <div
-                  className="rounded-md px-4 py-3"
-                  style={{
-                    background: 'var(--cp-surface-rest)',
-                    border: '1px solid var(--cp-divider)',
-                  }}
-                >
-                  <p className="ds-eyebrow">период с</p>
-                  <p
-                    className="ds-mono font-semibold mt-1"
+              {/* Distilled: was two rounded-md "tile" boxes — micro-card pattern
+                  that fought the ledger aesthetic below. Now: inline editorial
+                  run, eyebrow + mono value, with the "осталось N дней" suffix
+                  inline so the user doesn't have to compute the period length. */}
+              <div className="flex flex-col gap-1.5 text-xs sm:text-sm sm:items-end">
+                <div className="flex items-baseline gap-2">
+                  <span className="ds-eyebrow">период с</span>
+                  <span
+                    className="ds-mono font-semibold"
                     style={{ color: 'var(--cp-paper)' }}
                   >
                     {formatDate(data.period_start)}
-                  </p>
+                  </span>
                 </div>
-                <div
-                  className="rounded-md px-4 py-3"
-                  style={{
-                    background: 'var(--cp-surface-rest)',
-                    border: '1px solid var(--cp-divider)',
-                  }}
-                >
-                  <p className="ds-eyebrow">оплачен до</p>
-                  <p
-                    className="ds-mono font-semibold mt-1"
+                <div className="flex items-baseline gap-2 flex-wrap">
+                  <span className="ds-eyebrow">оплачен до</span>
+                  <span
+                    className="ds-mono font-semibold"
                     style={{ color: 'var(--cp-paper)' }}
                   >
                     {formatDate(data.paid_until)}
-                  </p>
+                  </span>
+                  {daysLeftInPeriod !== null && (
+                    <span
+                      className="ds-mono text-xs"
+                      style={{ color: 'var(--cp-paper-mute)' }}
+                    >
+                      ({daysLeftInPeriod} {plural(daysLeftInPeriod, 'день', 'дня', 'дней')})
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
-            {/* Removed faux total "N из M единиц" — see /impeccable critique 2026-05-24:
-                you cannot sum контакты + запросы + AI-цепочки as one "единиц"
-                count without misleading the reader. The most-stressed limit
-                hint above the ledger does the real job. */}
+            {/* The faux "N из M единиц" total has been deleted — see critique
+                2026-05-24: cannot sum контакты + запросы + AI-цепочки as one
+                dimensionless count. The "ближайший" hint above the ledger
+                does the real job (and the projection extends it for Maksim). */}
           </section>
 
           {/* ── 02b → Доступ (когда payment locked) ───────────────────── */}
@@ -386,8 +439,8 @@ export default function ClientTariffPage() {
               <p className="ds-eyebrow mb-3">02b<span aria-hidden> → </span>доступ</p>
               <div className="flex items-start justify-between gap-4 flex-wrap">
                 <div className="flex items-start gap-3">
-                  {/* Distill: dropped redundant Lock icon — the red dot already
-                      carries the "locked" semantic; the heading carries the rest. */}
+                  {/* Distill: dropped redundant Lock icon — red dot carries the
+                      "locked" semantic; heading carries the rest. */}
                   <span
                     aria-hidden
                     className="inline-block h-1.5 w-1.5 rounded-full shrink-0"
@@ -396,31 +449,19 @@ export default function ClientTariffPage() {
                   <div>
                     {data.billing_mode === 'invoice' ? (
                       <>
-                        <h3
-                          className="text-base font-bold m-0"
-                          style={{ color: 'var(--cp-paper)' }}
-                        >
+                        <h3 className="text-base font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
                           Ожидается оплата счёта
                         </h3>
-                        <p
-                          className="mt-1 text-sm"
-                          style={{ color: 'var(--cp-paper-mute)' }}
-                        >
+                        <p className="mt-1 text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
                           Менеджер выставил вам счёт. Как только оплата поступит — доступ к функционалу откроется автоматически.
                         </p>
                       </>
                     ) : data.paid_at ? (
                       <>
-                        <h3
-                          className="text-base font-bold m-0"
-                          style={{ color: 'var(--cp-paper)' }}
-                        >
+                        <h3 className="text-base font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
                           Оплата получена
                         </h3>
-                        <p
-                          className="mt-1 text-sm"
-                          style={{ color: 'var(--cp-paper-mute)' }}
-                        >
+                        <p className="mt-1 text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
                           Команда настраивает ваш аккаунт. Доступ откроется{' '}
                           <strong style={{ color: 'var(--cp-paper)' }}>
                             {formatDate(data.setup_until)}
@@ -430,16 +471,10 @@ export default function ClientTariffPage() {
                       </>
                     ) : (
                       <>
-                        <h3
-                          className="text-base font-bold m-0"
-                          style={{ color: 'var(--cp-paper)' }}
-                        >
+                        <h3 className="text-base font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
                           Необходима оплата
                         </h3>
-                        <p
-                          className="mt-1 text-sm"
-                          style={{ color: 'var(--cp-paper-mute)' }}
-                        >
+                        <p className="mt-1 text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
                           Оплатите подписку для получения доступа к функционалу портала.
                         </p>
                       </>
@@ -473,10 +508,7 @@ export default function ClientTariffPage() {
                       </button>
                     )}
                     {payError && (
-                      <p
-                        className="ds-mono text-xs"
-                        style={{ color: 'var(--cp-red)' }}
-                      >
+                      <p className="ds-mono text-xs" style={{ color: 'var(--cp-red)' }}>
                         {payError}
                       </p>
                     )}
@@ -504,107 +536,94 @@ export default function ClientTariffPage() {
             </section>
           )}
 
-          {/* ── 02c → Автопродление (только когда billing_mode = autopayment) ── */}
+          {/* ── 02c → Автопродление (distilled per re-critique) ───────── */}
           {data.billing_mode === 'autopayment' && (
             <section className="neu-card p-5 sm:p-6">
               <p className="ds-eyebrow mb-3">02c<span aria-hidden> → </span>автопродление</p>
-              <div className="flex items-start gap-3">
-                <CreditCard
-                  className="h-5 w-5 shrink-0 mt-0.5"
-                  style={{ color: 'var(--cp-paper-faint)' }}
-                  aria-hidden
-                />
-                <div className="flex-1 min-w-0 space-y-3">
-                  <div>
-                    <h3
-                      className="text-base font-bold m-0"
-                      style={{ color: 'var(--cp-paper)' }}
+              <div className="space-y-3">
+                <div>
+                  <h3
+                    className="text-base font-bold m-0"
+                    style={{ color: 'var(--cp-paper)' }}
+                  >
+                    Автопродление
+                  </h3>
+                  <p
+                    className="mt-1 text-sm"
+                    style={{ color: 'var(--cp-paper-mute)' }}
+                  >
+                    Период оплачен до{' '}
+                    <span className="ds-mono" style={{ color: 'var(--cp-paper)' }}>
+                      {formatDate(data.paid_until)}
+                    </span>
+                    . При включённом автопродлении списание выполняется за 1–3 дня до этой даты.
+                  </p>
+                </div>
+
+                {/* dl → eyebrow + value rows. Tightens the densest section on
+                    the page (re-critique P1-NEW). */}
+                <div className="flex flex-col gap-1 text-xs">
+                  <div className="flex items-baseline gap-3">
+                    <span
+                      className="ds-eyebrow shrink-0"
+                      style={{ minWidth: '14ch' }}
                     >
-                      Автопродление подписки
-                    </h3>
+                      карта
+                    </span>
+                    <span style={{ color: 'var(--cp-paper)' }}>
+                      {data.payment_method_saved
+                        ? 'привязана'
+                        : 'не привязана (появится после оплаты)'}
+                    </span>
+                  </div>
+                  <div className="flex items-baseline gap-3">
+                    <span
+                      className="ds-eyebrow shrink-0"
+                      style={{ minWidth: '14ch' }}
+                    >
+                      автопродление
+                    </span>
+                    <span style={{ color: 'var(--cp-paper)' }}>
+                      {data.auto_renew && data.payment_method_saved
+                        ? 'включено'
+                        : data.auto_renew && !data.payment_method_saved
+                          ? 'включено (ожидается карта)'
+                          : 'выключено'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Error tile → quiet mono red line. */}
+                {data.last_renewal_error && (
+                  <p
+                    className="ds-mono text-xs"
+                    style={{ color: 'var(--cp-red)' }}
+                  >
+                    Ошибка автосписания: {data.last_renewal_error}
+                  </p>
+                )}
+
+                {(data.payment_method_saved || data.auto_renew) && (
+                  <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUnlinkOpen(true);
+                        setUnlinkError(null);
+                      }}
+                      className="ds-btn-secondary inline-flex items-center justify-center gap-2 px-4 py-2 text-sm w-full sm:w-auto"
+                    >
+                      <Unlink className="h-4 w-4" aria-hidden />
+                      Отключить автопродление
+                    </button>
                     <p
-                      className="mt-1 text-sm leading-relaxed"
-                      style={{ color: 'var(--cp-paper-mute)' }}
+                      className="text-xs flex-1"
+                      style={{ color: 'var(--cp-paper-faint)' }}
                     >
-                      Текущий оплаченный период до{' '}
-                      <strong style={{ color: 'var(--cp-paper)' }}>
-                        {formatDate(data.paid_until)}
-                      </strong>
-                      . При включённом автопродлении списание за следующий месяц выполняется
-                      автоматически заранее — обычно в течение нескольких дней до этой даты
-                      (как только подключается сохранённый способ оплаты после первой оплаты).
+                      Списания прекратятся. Текущий период сохраняется.
                     </p>
                   </div>
-                  <dl className="grid gap-2 text-xs sm:text-sm">
-                    <div className="flex flex-wrap gap-x-2 gap-y-1">
-                      <dt
-                        className="font-semibold"
-                        style={{ color: 'var(--cp-paper-faint)' }}
-                      >
-                        Сохранённая карта для списаний
-                      </dt>
-                      <dd style={{ color: 'var(--cp-paper)' }}>
-                        {data.payment_method_saved
-                          ? 'да (используется для автопродления)'
-                          : 'ещё не привязана — появится после успешной оплаты'}
-                      </dd>
-                    </div>
-                    <div className="flex flex-wrap gap-x-2 gap-y-1">
-                      <dt
-                        className="font-semibold"
-                        style={{ color: 'var(--cp-paper-faint)' }}
-                      >
-                        Автопродление в портале
-                      </dt>
-                      <dd style={{ color: 'var(--cp-paper)' }}>
-                        {data.auto_renew && data.payment_method_saved
-                          ? 'включено'
-                          : data.auto_renew && !data.payment_method_saved
-                            ? 'включено (ожидается привязка после оплаты)'
-                            : 'выключено'}
-                      </dd>
-                    </div>
-                  </dl>
-                  {data.last_renewal_error && (
-                    <div
-                      className="text-xs font-medium rounded-md px-3 py-2 flex items-start gap-2.5"
-                      style={{
-                        background: 'var(--cp-surface-rest)',
-                        border: '1px solid var(--cp-divider)',
-                      }}
-                    >
-                      <span
-                        aria-hidden
-                        className="inline-block h-1.5 w-1.5 rounded-full shrink-0"
-                        style={{ background: 'var(--cp-red)', marginTop: '5px' }}
-                      />
-                      <span style={{ color: 'var(--cp-paper)' }}>
-                        Последняя ошибка автосписания: {data.last_renewal_error}
-                      </span>
-                    </div>
-                  )}
-                  {(data.payment_method_saved || data.auto_renew) && (
-                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setUnlinkOpen(true);
-                          setUnlinkError(null);
-                        }}
-                        className="ds-btn-secondary inline-flex items-center justify-center gap-2 px-4 py-2 text-sm w-full sm:w-auto"
-                      >
-                        <Unlink className="h-4 w-4" aria-hidden />
-                        Отключить автопродление и отвязать карту
-                      </button>
-                      <p
-                        className="text-xs flex-1"
-                        style={{ color: 'var(--cp-paper-faint)' }}
-                      >
-                        Автосписания из портала прекратятся. Текущий период не отменяется. При следующей оплате карту можно привязать снова.
-                      </p>
-                    </div>
-                  )}
-                </div>
+                )}
               </div>
             </section>
           )}
@@ -615,21 +634,36 @@ export default function ClientTariffPage() {
               <p id="tariff-limits-label" className="ds-eyebrow">
                 03<span aria-hidden> → </span>лимиты
               </p>
-              {stressedLimit && (
+              {stressedLimit && !data.payment_locked && (
                 <p
                   className="text-xs ds-mono"
                   style={{ color: 'var(--cp-paper-mute)' }}
                 >
-                  ближайший: <span style={{ color: 'var(--cp-paper)' }}>{stressedLimit.label}</span>{' '}
+                  ближайший:{' '}
+                  <span style={{ color: 'var(--cp-paper)' }}>{stressedLimit.label}</span>{' '}
                   <span style={{ color: stressedLimit.color }}>{stressedLimit.pct}%</span>
+                  {projectedExhaustion && (
+                    <>
+                      {' · '}
+                      <span style={{ color: stressedLimit.color }}>
+                        хватит до {formatShortDate(projectedExhaustion.toISOString())}
+                      </span>
+                    </>
+                  )}
                 </p>
               )}
             </div>
 
-            {/* Editorial ledger: one row per limit, hairline divider between.
-                Replaces the 3-card grid (absolute-ban) + nested 3-tile hero-metric
-                template (absolute-ban) the page had pre-2026-05-24. */}
-            <div className="neu-card px-5 sm:px-6" aria-live="polite">
+            {/* Editorial ledger (1 row per limit, hairline between). When
+                payment_locked, dim to 60% and show a caption — the numbers
+                are still true but the user can't act on them, so we
+                de-emphasize without removing the contract info. */}
+            <div
+              className="neu-card px-5 sm:px-6"
+              style={data.payment_locked ? { opacity: 0.6 } : undefined}
+              aria-live="polite"
+              aria-disabled={data.payment_locked || undefined}
+            >
               {LIMITS.map((item, idx) => {
                 const usage = data.usage[item.key];
                 if (!usage) return null;
@@ -643,17 +677,24 @@ export default function ClientTariffPage() {
                 );
               })}
             </div>
+            {data.payment_locked && (
+              <p
+                className="text-xs mt-2"
+                style={{ color: 'var(--cp-paper-mute)' }}
+              >
+                Лимиты доступны после оплаты.
+              </p>
+            )}
           </section>
         </>
       )}
 
-      {/* Destructive-action confirmation. Modal is acceptable here because the
-          consequence (unlink saved card) is genuinely high-stakes; copy
-          explicitly preserves paid_until access so the user isn't anxious. */}
+      {/* Destructive-action confirmation. Modal acceptable here — high-stakes
+          action (unlink saved card), copy explicitly preserves paid_until. */}
       {unlinkOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          style={{ background: 'rgba(0, 0, 0, 0.6)' }}
+          style={{ background: 'var(--cp-scrim)' }}
         >
           <div
             className="rounded-lg w-full max-w-md overflow-hidden"
@@ -722,15 +763,13 @@ export default function ClientTariffPage() {
  * One limit row in the editorial ledger.
  *
  * Layout:
- *   ┌─────────────────────────────────────────────────────────┐
- *   │ <label>                          <used> / <limit>       │
- *   │ <hint>                                                  │
- *   │ ▓▓▓░░░░░░░░░░░░░░  <pct>%               <remaining>      │
- *   └─────────────────────────────────────────────────────────┘
+ *   <label>                          <used> / <limit>
+ *   <hint>
+ *   ▓▓▓░░░░░░░░░░░░░░  <pct>%               <remaining>
  *
- * First row sits flush, subsequent rows get a hairline top border for the
- * editorial table feel — no card chrome per row, no nested stat tiles, no
- * redundant "осталось N {unit}" sentence.
+ * First row sits flush, subsequent rows get a hairline top border — no
+ * card chrome per row, no nested stat tiles, no redundant "осталось N
+ * {unit}" sentence.
  */
 function LimitRow({
   item,
