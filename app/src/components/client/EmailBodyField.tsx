@@ -1,7 +1,7 @@
 'use client';
 
 import { useRef, useState } from 'react';
-import { Link2 } from 'lucide-react';
+import { Link2, X } from 'lucide-react';
 
 interface EmailBodyFieldProps {
   value: string;
@@ -24,12 +24,17 @@ function looksLikeLink(raw: string): boolean {
 }
 
 /**
- * Поле текста письма + кнопка «Вставить ссылку».
+ * Поле текста письма + inline-форма «Вставить ссылку».
  *
  * UTM-метки клиент проставляет на ссылку сам (своим конструктором / Campaign
- * URL Builder и т.п.) и вставляет УЖЕ ГОТОВУЮ ссылку. Кнопка открывает окно
- * с одним полем: вставил ссылку → «Вставить» помещает её в текст письма —
- * заменяет выделенный фрагмент или встаёт в позицию курсора.
+ * URL Builder и т.п.) и вставляет УЖЕ ГОТОВУЮ ссылку. Кнопка раскрывает
+ * inline-форму прямо под textarea — без модалки, без scrim'а: текст письма
+ * всегда виден, фокус не теряется, Esc закрывает, Enter вставляет.
+ *
+ * Раньше это была full-screen модалка со stale tokens (`--cp-accent`,
+ * `--cp-text`, `--cp-text-m`) и warm-stone classes (neu-input/pill/btn) —
+ * absolute-ban «modal as first thought» + off-doctrine в conversion path
+ * (см. /impeccable critique 2026-05-24).
  *
  * HTML не используется — ссылка остаётся обычным текстом (письма plain-text).
  */
@@ -41,11 +46,12 @@ export function EmailBodyField({
   className,
 }: EmailBodyFieldProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const linkInputRef = useRef<HTMLInputElement>(null);
   const [sel, setSel] = useState({ start: 0, end: 0 });
   const [open, setOpen] = useState(false);
   const [link, setLink] = useState('');
 
-  const openModal = () => {
+  const openInline = () => {
     const ta = textareaRef.current;
     const start = ta?.selectionStart ?? 0;
     const end = ta?.selectionEnd ?? 0;
@@ -53,6 +59,14 @@ export function EmailBodyField({
     // Если клиент выделил фрагмент в тексте — подставим его как ссылку.
     setLink(value.slice(start, end).trim());
     setOpen(true);
+    // Focus инпута после монтирования (rAF чтобы поймать ref).
+    requestAnimationFrame(() => linkInputRef.current?.focus());
+  };
+
+  const closeInline = () => {
+    setOpen(false);
+    setLink('');
+    requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
   const canInsert = looksLikeLink(link);
@@ -62,6 +76,7 @@ export function EmailBodyField({
     const clean = link.trim();
     onChange(value.slice(0, sel.start) + clean + value.slice(sel.end));
     setOpen(false);
+    setLink('');
     const caret = sel.start + clean.length;
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
@@ -85,61 +100,67 @@ export function EmailBodyField({
         rows={rows}
         className={className}
       />
-      <button
-        type="button"
-        onClick={openModal}
-        className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] font-semibold"
-        style={{ color: 'var(--cp-accent)' }}
-      >
-        <Link2 className="h-3 w-3" />
-        Вставить ссылку
-      </button>
-
-      {open && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
-          onClick={() => setOpen(false)}
+      {!open ? (
+        <button
+          type="button"
+          onClick={openInline}
+          className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] font-semibold"
+          style={{ color: 'var(--cp-paper)' }}
         >
-          <div
-            className="neu-card w-full max-w-md p-5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-sm font-bold mb-1" style={{ color: 'var(--cp-text)' }}>
+          <Link2 className="h-3 w-3" aria-hidden />
+          Вставить ссылку
+        </button>
+      ) : (
+        <div
+          className="mt-2 rounded-md p-3 space-y-2"
+          style={{
+            background: 'var(--cp-surface-rest)',
+            border: '1px solid var(--cp-divider)',
+          }}
+          role="group"
+          aria-label="Вставить ссылку"
+        >
+          <div className="flex items-center justify-between">
+            <p
+              className="text-xs font-semibold m-0"
+              style={{ color: 'var(--cp-paper)' }}
+            >
               Вставить ссылку
-            </h3>
-            <p className="text-[11px] mb-3" style={{ color: 'var(--cp-text-m)' }}>
-              Вставьте готовую ссылку (с UTM-метками, если нужно). Она встанет в текст
-              письма — заменит выделенный фрагмент или вставится в позицию курсора.
             </p>
+            <button
+              type="button"
+              onClick={closeInline}
+              className="ds-btn-ghost p-1"
+              aria-label="Отмена"
+            >
+              <X className="h-3 w-3" aria-hidden />
+            </button>
+          </div>
+          <p className="text-[11px] m-0" style={{ color: 'var(--cp-paper-mute)' }}>
+            Вставьте готовую ссылку (с UTM-метками, если нужно). Она встанет в текст письма — заменит выделенный фрагмент или вставится в позицию курсора.
+          </p>
+          <div className="flex gap-2">
             <input
+              ref={linkInputRef}
               type="text"
               value={link}
               onChange={(e) => setLink(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && canInsert) insert();
+                else if (e.key === 'Escape') closeInline();
               }}
               placeholder="https://polzaagency.ru/?utm_source=email&utm_campaign=..."
-              autoFocus
-              className="neu-input w-full px-3 py-2 text-sm mb-4"
+              className="ds-input flex-1 px-3 py-2 text-sm"
+              style={{ color: 'var(--cp-paper)' }}
             />
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="neu-pill px-3 py-1.5 text-xs font-semibold"
-                style={{ color: 'var(--cp-text-m)' }}
-              >
-                Отмена
-              </button>
-              <button
-                type="button"
-                onClick={insert}
-                disabled={!canInsert}
-                className="neu-btn px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
-              >
-                Вставить в письмо
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={insert}
+              disabled={!canInsert}
+              className="ds-btn-primary px-3 py-2 text-xs font-semibold disabled:opacity-50 shrink-0"
+            >
+              Вставить
+            </button>
           </div>
         </div>
       )}

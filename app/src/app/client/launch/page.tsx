@@ -60,6 +60,27 @@ interface LaunchResult {
   skipped_rows: number;
 }
 
+/**
+ * Persisted draft of the in-progress wizard (everything except the uploaded
+ * file, which can't be programmatically restored). Saved to localStorage
+ * with 500ms debounce on every state change; cleared on successful launch
+ * or explicit «начать с нуля» action. Lets Olga survive a misclicked nav
+ * or a tab refresh without losing 40 minutes of typing — the most
+ * catastrophic failure mode flagged in /impeccable critique 2026-05-24.
+ */
+const DRAFT_KEY = 'client.launch.draft.v1';
+
+interface DraftPayload {
+  campaignName: string;
+  sequenceSteps: ClientLaunchSequenceStep[];
+  activeVariantIdx: number[];
+  mapping: ClientLaunchColumnMapping;
+  customVars: { key: string; header: string }[];
+  schedule: ClientLaunchScheduleOverride;
+  behavior: LaunchBehaviorSettings;
+  savedAt: string;
+}
+
 const STANDARD_FIELDS: { key: keyof Omit<ClientLaunchColumnMapping, 'custom_variables_mapping'>; label: string; required?: boolean; variable: string }[] = [
   { key: 'email', label: 'Email', required: true, variable: 'email' },
   { key: 'first_name', label: 'Имя', variable: 'first_name' },
@@ -194,6 +215,100 @@ export default function ClientLaunchPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // ─── Draft persistence (localStorage) ──────────────────────────────────
+  // See DRAFT_KEY comment above for rationale.
+  const [draftSavedAt, setDraftSavedAt] = useState<Date | null>(null);
+  const [draftRestored, setDraftRestored] = useState(false);
+
+  // Restore once on mount. Bad JSON / sandbox / no storage → silent skip.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(DRAFT_KEY);
+      if (!raw) return;
+      const draft = JSON.parse(raw) as Partial<DraftPayload> | null;
+      if (!draft || typeof draft !== 'object') return;
+      if (typeof draft.campaignName === 'string') setCampaignName(draft.campaignName);
+      if (Array.isArray(draft.sequenceSteps) && draft.sequenceSteps.length > 0) {
+        setSequenceSteps(draft.sequenceSteps);
+      }
+      if (Array.isArray(draft.activeVariantIdx)) setActiveVariantIdx(draft.activeVariantIdx);
+      if (draft.mapping && typeof draft.mapping === 'object') setMapping(draft.mapping);
+      if (Array.isArray(draft.customVars)) setCustomVars(draft.customVars);
+      if (draft.schedule && typeof draft.schedule === 'object') setSchedule(draft.schedule);
+      if (draft.behavior && typeof draft.behavior === 'object') setBehavior(draft.behavior);
+      if (typeof draft.savedAt === 'string') {
+        const d = new Date(draft.savedAt);
+        if (!Number.isNaN(d.getTime())) setDraftSavedAt(d);
+      }
+      setDraftRestored(true);
+    } catch {
+      // bad JSON / sandbox / no storage — silent skip
+    }
+  }, []);
+
+  // Debounced save on any tracked state change. Skip when state is the empty
+  // default (no point in writing «empty draft» entries every mount).
+  useEffect(() => {
+    const isEmpty =
+      !campaignName.trim() &&
+      sequenceSteps.length === 1 &&
+      !sequenceSteps[0].subject &&
+      !sequenceSteps[0].body &&
+      customVars.length === 0;
+    if (isEmpty) return;
+    const t = setTimeout(() => {
+      try {
+        const payload: DraftPayload = {
+          campaignName,
+          sequenceSteps,
+          activeVariantIdx,
+          mapping,
+          customVars,
+          schedule,
+          behavior,
+          savedAt: new Date().toISOString(),
+        };
+        window.localStorage.setItem(DRAFT_KEY, JSON.stringify(payload));
+        setDraftSavedAt(new Date());
+        // After first save, the draft is no longer "восстановленный" — it's a
+        // fresh save. Flip the flag so microcopy switches from «восстановлен
+        // черновик от HH:MM» to plain «черновик сохранён HH:MM» (re-critique
+        // 2026-05-24 N3). File-gone hint stays — it's data-driven, not based
+        // on this flag.
+        setDraftRestored(false);
+      } catch {
+        // sandbox / quota / no storage — silent
+      }
+    }, 500);
+    return () => clearTimeout(t);
+  }, [campaignName, sequenceSteps, activeVariantIdx, mapping, customVars, schedule, behavior]);
+
+  // Clear draft on successful launch.
+  useEffect(() => {
+    if (!result) return;
+    try {
+      window.localStorage.removeItem(DRAFT_KEY);
+    } catch { /* ignore */ }
+    setDraftSavedAt(null);
+    setDraftRestored(false);
+  }, [result]);
+
+  // beforeunload guard while a draft is dirty — avoid silent loss to nav.
+  useEffect(() => {
+    const hasDirtyDraft =
+      !!campaignName.trim() ||
+      sequenceSteps.some((s) => s.subject || s.body) ||
+      customVars.length > 0;
+    if (!hasDirtyDraft || result) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [campaignName, sequenceSteps, customVars, result]);
+
   // ─── Load preset + history ───────────────────────────────────────────────
   const loadPreset = useCallback(async () => {
     setPresetLoading(true);
@@ -201,27 +316,34 @@ export default function ClientLaunchPage() {
     try {
       const data = await clientApiFetch<{ preset: PresetSummary | null }>('/preset');
       setPreset(data.preset);
-      if (data.preset) {
-        setSchedule({
-          from: data.preset.schedule_from || '09:00',
-          to: data.preset.schedule_to || '18:00',
-          days: Array.isArray(data.preset.schedule_days) && data.preset.schedule_days.length > 0
-            ? data.preset.schedule_days
-            : [1, 2, 3, 4, 5],
-          timezone: normalizeInstantlyTimezone(data.preset.schedule_timezone || 'Europe/Kirov'),
-        });
-        setBehavior({
-          open_tracking: data.preset.open_tracking !== false,
-          stop_on_reply: data.preset.stop_on_reply !== false,
-        });
-        setScheduleHydrated(true);
-      }
     } catch (err) {
       setPresetError(err instanceof Error ? err.message : 'Не удалось загрузить пресет');
     } finally {
       setPresetLoading(false);
     }
   }, []);
+
+  // Hydrate schedule + behavior from preset on first load — but ONLY when
+  // there's no restored draft to honor. Otherwise we'd silently clobber
+  // Olga's custom schedule/behavior with preset defaults: race surfaced by
+  // /impeccable re-critique 2026-05-24 (N1). Draft always wins on restore.
+  useEffect(() => {
+    if (!preset) return;
+    if (draftRestored) return; // draft already populated schedule/behavior — keep them
+    setSchedule({
+      from: preset.schedule_from || '09:00',
+      to: preset.schedule_to || '18:00',
+      days: Array.isArray(preset.schedule_days) && preset.schedule_days.length > 0
+        ? preset.schedule_days
+        : [1, 2, 3, 4, 5],
+      timezone: normalizeInstantlyTimezone(preset.schedule_timezone || 'Europe/Kirov'),
+    });
+    setBehavior({
+      open_tracking: preset.open_tracking !== false,
+      stop_on_reply: preset.stop_on_reply !== false,
+    });
+    setScheduleHydrated(true);
+  }, [preset, draftRestored]);
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -481,6 +603,13 @@ export default function ClientLaunchPage() {
     setActiveVariantIdx([0]);
     setLaunchError('');
     setResult(null);
+    // Also wipe any persisted draft — an explicit "start fresh" wins over
+    // any saved draft from a prior session.
+    setDraftSavedAt(null);
+    setDraftRestored(false);
+    try {
+      window.localStorage.removeItem(DRAFT_KEY);
+    } catch { /* ignore */ }
   }
 
   // ─── Render: preset gate ───────────────────────────────────────────────
@@ -619,6 +748,40 @@ export default function ClientLaunchPage() {
           <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
             Загрузите базу, напишите цепочку и запустите
           </p>
+          {draftSavedAt && (
+            <p className="mt-1 text-xs ds-mono" style={{ color: 'var(--cp-paper-faint)' }}>
+              {draftRestored ? 'восстановлен черновик от ' : 'черновик сохранён '}
+              {draftSavedAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+              {draftRestored && (
+                <>
+                  {' · '}
+                  <button
+                    type="button"
+                    onClick={startNewLaunch}
+                    className="underline"
+                    style={{ color: 'var(--cp-paper)' }}
+                  >
+                    начать с нуля
+                  </button>
+                </>
+              )}
+            </p>
+          )}
+          {/* File-gone hint: when draft state references a file (mapping or
+              sequence content) but no file is loaded, we're almost certainly
+              post-restore — Step 2+ of the wizard gate on fileHeaders.length,
+              so a fresh user can't reach mapping/sequence without uploading
+              first. Data-driven, not based on draftRestored flag (which gets
+              cleared after first save per N3 fix). Amber = action needed. */}
+          {fileRows.length === 0 && (
+            mapping.email !== ''
+            || customVars.length > 0
+            || sequenceSteps.some((s) => s.subject || s.body)
+          ) && (
+            <p className="mt-1 text-xs" style={{ color: 'var(--cp-amber)' }}>
+              Файл базы нужно загрузить заново — браузеры не сохраняют файлы между сессиями. Цепочка, колонки и расписание восстановлены.
+            </p>
+          )}
         </div>
         <PresetBadge preset={preset} />
       </header>
