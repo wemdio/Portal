@@ -271,6 +271,12 @@ export default function ClientLaunchPage() {
         };
         window.localStorage.setItem(DRAFT_KEY, JSON.stringify(payload));
         setDraftSavedAt(new Date());
+        // After first save, the draft is no longer "восстановленный" — it's a
+        // fresh save. Flip the flag so microcopy switches from «восстановлен
+        // черновик от HH:MM» to plain «черновик сохранён HH:MM» (re-critique
+        // 2026-05-24 N3). File-gone hint stays — it's data-driven, not based
+        // on this flag.
+        setDraftRestored(false);
       } catch {
         // sandbox / quota / no storage — silent
       }
@@ -310,27 +316,34 @@ export default function ClientLaunchPage() {
     try {
       const data = await clientApiFetch<{ preset: PresetSummary | null }>('/preset');
       setPreset(data.preset);
-      if (data.preset) {
-        setSchedule({
-          from: data.preset.schedule_from || '09:00',
-          to: data.preset.schedule_to || '18:00',
-          days: Array.isArray(data.preset.schedule_days) && data.preset.schedule_days.length > 0
-            ? data.preset.schedule_days
-            : [1, 2, 3, 4, 5],
-          timezone: normalizeInstantlyTimezone(data.preset.schedule_timezone || 'Europe/Kirov'),
-        });
-        setBehavior({
-          open_tracking: data.preset.open_tracking !== false,
-          stop_on_reply: data.preset.stop_on_reply !== false,
-        });
-        setScheduleHydrated(true);
-      }
     } catch (err) {
       setPresetError(err instanceof Error ? err.message : 'Не удалось загрузить пресет');
     } finally {
       setPresetLoading(false);
     }
   }, []);
+
+  // Hydrate schedule + behavior from preset on first load — but ONLY when
+  // there's no restored draft to honor. Otherwise we'd silently clobber
+  // Olga's custom schedule/behavior with preset defaults: race surfaced by
+  // /impeccable re-critique 2026-05-24 (N1). Draft always wins on restore.
+  useEffect(() => {
+    if (!preset) return;
+    if (draftRestored) return; // draft already populated schedule/behavior — keep them
+    setSchedule({
+      from: preset.schedule_from || '09:00',
+      to: preset.schedule_to || '18:00',
+      days: Array.isArray(preset.schedule_days) && preset.schedule_days.length > 0
+        ? preset.schedule_days
+        : [1, 2, 3, 4, 5],
+      timezone: normalizeInstantlyTimezone(preset.schedule_timezone || 'Europe/Kirov'),
+    });
+    setBehavior({
+      open_tracking: preset.open_tracking !== false,
+      stop_on_reply: preset.stop_on_reply !== false,
+    });
+    setScheduleHydrated(true);
+  }, [preset, draftRestored]);
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -752,6 +765,21 @@ export default function ClientLaunchPage() {
                   </button>
                 </>
               )}
+            </p>
+          )}
+          {/* File-gone hint: when draft state references a file (mapping or
+              sequence content) but no file is loaded, we're almost certainly
+              post-restore — Step 2+ of the wizard gate on fileHeaders.length,
+              so a fresh user can't reach mapping/sequence without uploading
+              first. Data-driven, not based on draftRestored flag (which gets
+              cleared after first save per N3 fix). Amber = action needed. */}
+          {fileRows.length === 0 && (
+            mapping.email !== ''
+            || customVars.length > 0
+            || sequenceSteps.some((s) => s.subject || s.body)
+          ) && (
+            <p className="mt-1 text-xs" style={{ color: 'var(--cp-amber)' }}>
+              Файл базы нужно загрузить заново — браузеры не сохраняют файлы между сессиями. Цепочка, колонки и расписание восстановлены.
             </p>
           )}
         </div>
