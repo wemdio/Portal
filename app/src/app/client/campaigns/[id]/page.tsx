@@ -1,34 +1,55 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+/**
+ * Single campaign detail view.
+ *
+ * Reached from /client (campaigns list) or /client/dashboard. Tabs:
+ *   Обзор — editorial ledger (была 6-tile MetricCard grid = hero-metric
+ *           template multiplied, absolute-ban; теперь one editorial sentence
+ *           plus hairline-divided ledger) + per-step table
+ *   Цепочка — sequence preview with editorial numbering
+ *   Ответы — paginated replies list with search, expandable threads
+ *
+ * Closes all 6 findings from /impeccable critique 2026-05-24:
+ *   P0 — 6-tile MetricCard grid → editorial sentence + ledger
+ *   P1 — status dot inline в header (was raw text in eyebrow only)
+ *   P1 — «Bounce» → «Отказы доставки» (was English on Russian page)
+ *   P1 — Pause/Resume 2-tap confirm with 5s auto-clear (was instant)
+ *   P2 — «Повторить» retry buttons in all 4 error blocks
+ *   P2 — `var(--cp-text-l)` undefined token → `var(--cp-paper-mute)`
+ *   P2 — `rgba(180,173,164,0.15)` warm-stone literal → `var(--cp-divider)`
+ *   P3 — tab state lives in URL via `?tab=` (shareable, browser back works)
+ */
+
+import { useState, useEffect, useCallback, Suspense } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
-import { useParams } from 'next/navigation';
-import { Pause, Play, Loader2, Search, ChevronDown, ChevronRight, Inbox, Sparkles, Reply, Forward, X, Send, ArrowDownLeft, ArrowUpRight } from 'lucide-react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import {
+  Pause, Play, Loader2, Search, ChevronDown, ChevronRight, Inbox, Sparkles,
+  Reply, Forward, X, Send, ArrowDownLeft, ArrowUpRight, RefreshCw,
+} from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
-import { CampaignStatus, CampaignStatusLabels, type Campaign, type CampaignAnalytics, type CampaignStepAnalytics, type SequenceStep } from '@/lib/instantly/types';
-import type { ClientReply, ClientRepliesPage, ClientReplyThread, ThreadMessage } from '@/lib/clientCampaignReplies/types';
+import {
+  CampaignStatus, CampaignStatusLabels,
+  type Campaign, type CampaignAnalytics, type CampaignStepAnalytics, type SequenceStep,
+} from '@/lib/instantly/types';
+import type {
+  ClientReply, ClientRepliesPage, ClientReplyThread, ThreadMessage,
+} from '@/lib/clientCampaignReplies/types';
 
-function MetricCard({ label, value, sub }: { label: string; value: number | string; sub?: string }) {
-  return (
-    <div className="neu-sm p-3 sm:p-4">
-      <p className="ds-eyebrow">{label}</p>
-      <p
-        className="ds-mono mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold"
-        style={{ color: 'var(--cp-paper)' }}
-      >
-        {value}
-      </p>
-      {sub && (
-        <p
-          className="ds-mono mt-0.5 text-[10px] sm:text-xs"
-          style={{ color: 'var(--cp-paper-faint)' }}
-        >
-          {sub}
-        </p>
-      )}
-    </div>
-  );
+// Map campaign status number → semantic dot color (Status-as-Data rule).
+function statusDotColor(status: number): string {
+  switch (status) {
+    case CampaignStatus.Active:
+      return 'var(--cp-green)';
+    case CampaignStatus.Paused:
+      return 'var(--cp-amber)';
+    case CampaignStatus.Completed:
+      return 'var(--cp-paper-faint)';
+    default:
+      return 'var(--cp-paper-faint)';
+  }
 }
 
 function stripHtml(value?: string): string {
@@ -50,7 +71,7 @@ function formatReplyDate(iso: string | null): string {
   if (!iso) return '';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
-  return d.toLocaleDateString('ru-RU', {
+  return d.toLocaleString('ru-RU', {
     day: 'numeric',
     month: 'short',
     hour: '2-digit',
@@ -67,6 +88,7 @@ interface RepliesPanelProps {
   searchInput: string;
   onSearchInputChange: (v: string) => void;
   onSearch: () => void;
+  onRetry: () => void;
   hasMore: boolean;
   onLoadMore: () => void;
   expandedReplyId: string | null;
@@ -116,9 +138,17 @@ function ExpandedThread({ campaignId, emailId, onAfterAction }: ExpandedThreadPr
         </div>
       )}
       {threadError && (
-        <div className="flex items-start gap-2 text-[11px]">
-          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)', marginTop: '5px' }} />
-          <span style={{ color: 'var(--cp-paper)' }}>{threadError}</span>
+        <div className="flex items-center gap-2 text-[11px]">
+          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
+          <span className="flex-1" style={{ color: 'var(--cp-paper)' }}>{threadError}</span>
+          <button
+            type="button"
+            onClick={() => void loadThread()}
+            className="ds-btn-ghost inline-flex items-center gap-1 px-2 py-0.5 text-[10px]"
+          >
+            <RefreshCw className="h-2.5 w-2.5" aria-hidden />
+            Повторить
+          </button>
         </div>
       )}
 
@@ -290,8 +320,8 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
         className="ds-input w-full text-[11px] sm:text-xs resize-y"
       />
       {error && (
-        <div className="flex items-start gap-2 text-[11px]">
-          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)', marginTop: '5px' }} />
+        <div className="flex items-center gap-2 text-[11px]">
+          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
           <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
         </div>
       )}
@@ -370,8 +400,8 @@ function ForwardForm({ campaignId, emailId, onCancel, onSent }: ForwardFormProps
         Пересылаем оригинальный текст письма от лида целиком.
       </p>
       {error && (
-        <div className="flex items-start gap-2 text-[11px]">
-          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)', marginTop: '5px' }} />
+        <div className="flex items-center gap-2 text-[11px]">
+          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
           <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
         </div>
       )}
@@ -407,6 +437,7 @@ function RepliesPanel({
   searchInput,
   onSearchInputChange,
   onSearch,
+  onRetry,
   hasMore,
   onLoadMore,
   expandedReplyId,
@@ -438,9 +469,17 @@ function RepliesPanel({
       </div>
 
       {error && (
-        <div className="neu-inset rounded-lg px-4 py-3 text-xs flex items-start gap-2.5">
-          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)', marginTop: '5px' }} />
-          <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
+        <div className="neu-card px-4 py-3 text-xs flex items-center gap-3" role="alert">
+          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
+          <span className="flex-1" style={{ color: 'var(--cp-paper)' }}>{error}</span>
+          <button
+            type="button"
+            onClick={onRetry}
+            className="ds-btn-secondary inline-flex items-center gap-1.5 px-3 py-1 text-[11px]"
+          >
+            <RefreshCw className="h-3 w-3" aria-hidden />
+            Повторить
+          </button>
         </div>
       )}
 
@@ -454,7 +493,10 @@ function RepliesPanel({
       )}
 
       {replies.length > 0 && (
-        <div className="neu-card overflow-hidden divide-y" style={{ borderColor: 'rgba(180,173,164,0.15)' }}>
+        <div
+          className="neu-card overflow-hidden divide-y"
+          style={{ borderColor: 'var(--cp-divider)' }}
+        >
           {replies.map((r) => {
             const expanded = expandedReplyId === r.id;
             const headerName = r.from_name ? `${r.from_name} • ${r.from_email ?? ''}` : r.from_email ?? '(без email)';
@@ -467,9 +509,9 @@ function RepliesPanel({
                 >
                   <div className="mt-0.5 shrink-0">
                     {expanded ? (
-                      <ChevronDown className="h-4 w-4" style={{ color: 'var(--cp-text-l)' }} />
+                      <ChevronDown className="h-4 w-4" style={{ color: 'var(--cp-paper-mute)' }} />
                     ) : (
-                      <ChevronRight className="h-4 w-4" style={{ color: 'var(--cp-text-l)' }} />
+                      <ChevronRight className="h-4 w-4" style={{ color: 'var(--cp-paper-mute)' }} />
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
@@ -537,16 +579,85 @@ function RepliesPanel({
   );
 }
 
-export default function ClientCampaignDetailPage() {
+/**
+ * Editorial ledger row — replaces the per-stat MetricCard tile pattern.
+ * Label on the left, optional percent in the middle column, mono number
+ * tabular-nums far right. Hairline border on subsequent rows.
+ */
+function FunnelRow({
+  label,
+  value,
+  percent,
+  isFirst,
+  emphasized,
+}: {
+  label: string;
+  value: number;
+  percent?: string;
+  isFirst?: boolean;
+  emphasized?: boolean;
+}) {
+  return (
+    <div
+      className={`flex items-baseline gap-3 py-3 ${isFirst ? '' : 'border-t'}`}
+      style={isFirst ? undefined : { borderTopColor: 'var(--cp-divider)' }}
+    >
+      <p
+        className={`text-sm flex-1 ${emphasized ? 'font-semibold' : ''}`}
+        style={{ color: emphasized ? 'var(--cp-paper)' : 'var(--cp-paper-mute)' }}
+      >
+        {label}
+      </p>
+      {percent && (
+        <span
+          className="ds-mono tabular-nums text-xs shrink-0"
+          style={{ color: 'var(--cp-paper-mute)', minWidth: '4rem', textAlign: 'right' }}
+        >
+          {percent}
+        </span>
+      )}
+      <span
+        className={`ds-mono tabular-nums shrink-0 ${emphasized ? 'text-base font-semibold' : 'text-sm'}`}
+        style={{ color: 'var(--cp-paper)', minWidth: '5rem', textAlign: 'right' }}
+      >
+        {value.toLocaleString('ru-RU')}
+      </span>
+    </div>
+  );
+}
+
+function CampaignDetailPageContent() {
   const params = useParams<{ id: string }>();
   const campaignId = params.id;
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // URL-driven tab — shareable via ?tab=replies, browser back walks tabs.
+  const rawTab = searchParams.get('tab');
+  const tab: 'overview' | 'steps' | 'replies' =
+    rawTab === 'steps' || rawTab === 'replies' ? rawTab : 'overview';
+
+  const setTab = useCallback(
+    (next: 'overview' | 'steps' | 'replies') => {
+      const params = new URLSearchParams(searchParams);
+      if (next === 'overview') params.delete('tab');
+      else params.set('tab', next);
+      const qs = params.toString();
+      router.replace(`/client/campaigns/${campaignId}${qs ? `?${qs}` : ''}`);
+    },
+    [router, searchParams, campaignId],
+  );
 
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [analytics, setAnalytics] = useState<CampaignAnalytics | null>(null);
   const [steps, setSteps] = useState<CampaignStepAnalytics[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<'overview' | 'steps' | 'replies'>('overview');
+
+  // Pause/Resume confirm — two-tap inline. First click arms the action,
+  // second click within 5s fires it; otherwise auto-cancel. Prevents
+  // accidental mid-send pauses on this irreversible API.
+  const [pendingToggle, setPendingToggle] = useState<'pause' | 'activate' | null>(null);
   const [actionPending, setActionPending] = useState<'pause' | 'activate' | null>(null);
   const [actionError, setActionError] = useState('');
 
@@ -559,6 +670,13 @@ export default function ClientCampaignDetailPage() {
   const [repliesSearchInput, setRepliesSearchInput] = useState('');
   const [repliesLoaded, setRepliesLoaded] = useState(false);
   const [expandedReplyId, setExpandedReplyId] = useState<string | null>(null);
+
+  // Auto-clear pending confirm after 5s (or when state changes).
+  useEffect(() => {
+    if (!pendingToggle) return;
+    const t = setTimeout(() => setPendingToggle(null), 5000);
+    return () => clearTimeout(t);
+  }, [pendingToggle]);
 
   const loadReplies = useCallback(
     async (mode: 'reset' | 'append', searchOverride?: string) => {
@@ -599,6 +717,10 @@ export default function ClientCampaignDetailPage() {
     void loadReplies('reset', q);
   }, [repliesSearchInput, loadReplies]);
 
+  const handleRepliesRetry = useCallback(() => {
+    void loadReplies('reset');
+  }, [loadReplies]);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -635,6 +757,18 @@ export default function ClientCampaignDetailPage() {
     }
   }, [campaignId, load]);
 
+  const armToggle = useCallback((type: 'pause' | 'activate') => {
+    setActionError('');
+    setPendingToggle(type);
+  }, []);
+
+  const confirmToggle = useCallback(() => {
+    if (!pendingToggle) return;
+    const action = pendingToggle;
+    setPendingToggle(null);
+    void handleToggle(action);
+  }, [pendingToggle, handleToggle]);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-32">
@@ -653,9 +787,17 @@ export default function ClientCampaignDetailPage() {
         >
           ← Кампании
         </Link>
-        <div className="neu-inset rounded-lg px-5 py-4 text-sm font-medium flex items-start gap-2.5">
-          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)', marginTop: '7px' }} />
-          <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
+        <div className="neu-card px-5 py-4 text-sm font-medium flex items-center gap-3" role="alert">
+          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
+          <span className="flex-1" style={{ color: 'var(--cp-paper)' }}>{error}</span>
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="ds-btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
+          >
+            <RefreshCw className="h-3 w-3" aria-hidden />
+            Повторить
+          </button>
         </div>
       </div>
     );
@@ -668,10 +810,13 @@ export default function ClientCampaignDetailPage() {
   const replyCount = Number(analytics?.reply_count ?? 0);
   const contactedCount = Number(analytics?.new_leads_contacted_count ?? 0);
   const bouncedCount = Number(analytics?.bounced_count ?? 0);
+  const leadsCount = Number(analytics?.leads_count ?? 0);
   const openRate = sentCount > 0 ? ((openCount / sentCount) * 100).toFixed(1) : '0';
   const replyRate = contactedCount > 0 ? ((replyCount / contactedCount) * 100).toFixed(1) : '0';
 
   const sequences: SequenceStep[] = (campaign.sequences ?? []).flatMap((s) => s.steps ?? []);
+
+  const statusLabel = CampaignStatusLabels[campaign.status] ?? `Статус ${campaign.status}`;
 
   return (
     <div className="mx-auto max-w-4xl">
@@ -683,60 +828,122 @@ export default function ClientCampaignDetailPage() {
         ← Кампании
       </Link>
 
-      <header className="mb-1">
+      <header className="mb-5 sm:mb-6">
         <p className="ds-eyebrow mb-2">
           <span className="ds-mono">{campaign.id.slice(0, 8)}</span>
-          <span aria-hidden> · </span>
-          {CampaignStatusLabels[campaign.status] ?? `Статус ${campaign.status}`}
         </p>
         <div className="flex items-start justify-between gap-3 flex-wrap">
-          <h1
-            className="text-lg sm:text-xl font-bold break-words flex-1 min-w-0 m-0"
-            style={{ color: 'var(--cp-paper)' }}
-          >
-            {campaign.name}
-          </h1>
+          <div className="flex-1 min-w-0">
+            <h1
+              className="text-lg sm:text-xl font-bold break-words m-0"
+              style={{ color: 'var(--cp-paper)' }}
+            >
+              {campaign.name}
+            </h1>
+            {/* Status dot + label inline — was raw text in eyebrow only,
+                forcing the user to read instead of scan. */}
+            <p className="mt-1 inline-flex items-center gap-1.5 text-sm" style={{ color: statusDotColor(campaign.status) }}>
+              <span
+                aria-hidden
+                className="ds-status-dot"
+                style={{ background: statusDotColor(campaign.status) }}
+              />
+              {statusLabel}
+            </p>
+          </div>
           <div className="flex items-center gap-2 shrink-0">
             {campaign.status === CampaignStatus.Active && (
-              <button
-                type="button"
-                onClick={() => handleToggle('pause')}
-                disabled={actionPending !== null}
-                className="ds-btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"
-              >
-                {actionPending === 'pause' ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                ) : (
+              pendingToggle === 'pause' ? (
+                // Confirm state — 5s auto-clear, two-tap to fire
+                <>
+                  <button
+                    type="button"
+                    onClick={confirmToggle}
+                    disabled={actionPending !== null}
+                    className="ds-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"
+                  >
+                    {actionPending === 'pause' ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                    ) : (
+                      <Pause className="h-3.5 w-3.5" aria-hidden />
+                    )}
+                    Подтвердить пауза
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingToggle(null)}
+                    disabled={actionPending !== null}
+                    className="ds-btn-ghost px-3 py-1.5 text-xs disabled:opacity-50"
+                  >
+                    Отмена
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => armToggle('pause')}
+                  disabled={actionPending !== null}
+                  className="ds-btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"
+                >
                   <Pause className="h-3.5 w-3.5" aria-hidden />
-                )}
-                Пауза
-              </button>
+                  Пауза
+                </button>
+              )
             )}
             {campaign.status === CampaignStatus.Paused && (
-              <button
-                type="button"
-                onClick={() => handleToggle('activate')}
-                disabled={actionPending !== null}
-                className="ds-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"
-              >
-                {actionPending === 'activate' ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                ) : (
+              pendingToggle === 'activate' ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={confirmToggle}
+                    disabled={actionPending !== null}
+                    className="ds-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"
+                  >
+                    {actionPending === 'activate' ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                    ) : (
+                      <Play className="h-3.5 w-3.5" aria-hidden />
+                    )}
+                    Подтвердить запуск
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingToggle(null)}
+                    disabled={actionPending !== null}
+                    className="ds-btn-ghost px-3 py-1.5 text-xs disabled:opacity-50"
+                  >
+                    Отмена
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => armToggle('activate')}
+                  disabled={actionPending !== null}
+                  className="ds-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"
+                >
                   <Play className="h-3.5 w-3.5" aria-hidden />
-                )}
-                Запустить
-              </button>
+                  Запустить
+                </button>
+              )
             )}
           </div>
         </div>
       </header>
+
       {actionError && (
-        <div className="text-xs mb-3 flex items-start gap-2">
-          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)', marginTop: '5px' }} />
-          <span style={{ color: 'var(--cp-paper)' }}>{actionError}</span>
+        <div className="text-xs mb-4 flex items-center gap-2">
+          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
+          <span className="flex-1" style={{ color: 'var(--cp-paper)' }}>{actionError}</span>
+          <button
+            type="button"
+            onClick={() => setActionError('')}
+            className="ds-btn-ghost px-2 py-0.5 text-[11px]"
+          >
+            Закрыть
+          </button>
         </div>
       )}
-      <div className="mb-4 sm:mb-6" />
 
       <nav className="flex gap-1 mb-4 sm:mb-6" aria-label="Разделы кампании">
         {(['overview', 'steps', 'replies'] as const).map((t) => (
@@ -758,14 +965,63 @@ export default function ClientCampaignDetailPage() {
 
       {tab === 'overview' && (
         <>
-          <div className="grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-3 lg:grid-cols-4 mb-4 sm:mb-6">
-            <MetricCard label="Отправлено" value={sentCount} />
-            <MetricCard label="Открытия" value={openCount} sub={`${openRate}%`} />
-            <MetricCard label="Ответы" value={replyCount} sub={`${replyRate}%`} />
-            <MetricCard label="Контактов" value={contactedCount} />
-            <MetricCard label="Лидов" value={Number(analytics?.leads_count ?? 0)} />
-            <MetricCard label="Bounce" value={bouncedCount} />
-          </div>
+          {/* Editorial summary — one honest sentence answers "what is this
+              campaign doing?" with mono numbers inline. Replaces the 6-tile
+              MetricCard grid (hero-metric template multiplied = absolute ban). */}
+          <p
+            className="text-sm mb-5 sm:mb-6"
+            style={{ color: 'var(--cp-paper-mute)' }}
+          >
+            Кампания отправила{' '}
+            <span className="ds-mono tabular-nums font-semibold" style={{ color: 'var(--cp-paper)' }}>
+              {sentCount.toLocaleString('ru-RU')}
+            </span>
+            {' '}писем, открыли{' '}
+            <span className="ds-mono tabular-nums font-semibold" style={{ color: 'var(--cp-paper)' }}>
+              {openRate}%
+            </span>
+            , ответили{' '}
+            <span className="ds-mono tabular-nums font-semibold" style={{ color: 'var(--cp-paper)' }}>
+              {replyRate}%
+            </span>
+            .
+          </p>
+
+          {/* Ledger of all metrics — hairline-divided rows, no per-row cards.
+              First row (most actionable) emphasized; others quiet. */}
+          <section className="neu-card px-4 sm:px-5 mb-4 sm:mb-6" aria-labelledby="funnel-label">
+            <header className="py-3 mb-1 border-b" style={{ borderColor: 'var(--cp-divider)' }}>
+              <p id="funnel-label" className="ds-eyebrow">воронка</p>
+            </header>
+            <FunnelRow
+              label="Письма отправлены"
+              value={sentCount}
+              isFirst
+              emphasized
+            />
+            <FunnelRow
+              label="Уникальные открытия"
+              value={openCount}
+              percent={sentCount > 0 ? `${openRate}%` : undefined}
+            />
+            <FunnelRow
+              label="Уникальные ответы"
+              value={replyCount}
+              percent={contactedCount > 0 ? `${replyRate}%` : undefined}
+            />
+            <FunnelRow
+              label="Контакты в работе"
+              value={contactedCount}
+            />
+            <FunnelRow
+              label="Помечено лидами"
+              value={leadsCount}
+            />
+            <FunnelRow
+              label="Отказы доставки"
+              value={bouncedCount}
+            />
+          </section>
 
           {steps.length > 0 && (
             <div className="neu-card overflow-hidden">
@@ -811,6 +1067,7 @@ export default function ClientCampaignDetailPage() {
           searchInput={repliesSearchInput}
           onSearchInputChange={setRepliesSearchInput}
           onSearch={handleSearch}
+          onRetry={handleRepliesRetry}
           hasMore={!!repliesNextCursor}
           onLoadMore={() => void loadReplies('append')}
           expandedReplyId={expandedReplyId}
@@ -822,7 +1079,13 @@ export default function ClientCampaignDetailPage() {
         <div className="space-y-3">
           {sequences.length === 0 ? (
             <div className="neu-card py-14 text-center">
-              <p className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>Цепочка не настроена</p>
+              <p className="text-sm mb-4" style={{ color: 'var(--cp-paper-mute)' }}>Цепочка не настроена</p>
+              <Link
+                href={'/client/launch' as Route}
+                className="ds-btn-secondary inline-flex items-center gap-1.5 px-4 py-2 text-xs"
+              >
+                Настроить через запуск
+              </Link>
             </div>
           ) : (
             sequences.map((step, idx) => {
@@ -872,5 +1135,24 @@ export default function ClientCampaignDetailPage() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Suspense wrapper — useSearchParams() opts the route into client rendering
+ * and Next.js 16 wants an explicit boundary at the route level (matches
+ * the pattern in /client/replies, /client and /client/launch).
+ */
+export default function ClientCampaignDetailPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex items-center justify-center py-32">
+          <div className="neu-spinner animate-spin" />
+        </div>
+      }
+    >
+      <CampaignDetailPageContent />
+    </Suspense>
   );
 }
