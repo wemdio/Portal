@@ -227,6 +227,12 @@ export interface EnrichmentResult {
 async function enrichEmployers(
   employers: HhEmployer[],
   endpointBase: { url: string; apiKey: string; authScheme: string; timeoutMs: number },
+  /**
+   * Bucket'ы клиента — нужны чтобы решить, делать ли scrape+SMTP для каждого
+   * employer'а после получения score. Пустой массив = свежий клиент в dry-run,
+   * fallback на score>0.
+   */
+  scoreBuckets: ScoreBucket[],
   concurrency = 5,
   /**
    * Пауза в миллисекундах ПОСЛЕ обогащения каждого employer'а (внутри worker).
@@ -249,31 +255,34 @@ async function enrichEmployers(
       const emp = employers[i];
       const domain = deriveDomain(emp.siteUrl);
       try {
-        const [scrape, endpoint] = await Promise.all([
-          emp.siteUrl
-            ? scrapeEmails(emp.siteUrl, { timeout: 12_000, maxPages: 5 }).catch(() => ({
-                emails: [],
-              }))
-            : Promise.resolve({ emails: [] as string[] }),
-          domain
-            ? fetchScoreForDomain({
-                url: endpointBase.url,
-                apiKey: endpointBase.apiKey,
-                authScheme: endpointBase.authScheme,
-                timeoutMs: endpointBase.timeoutMs,
-                domain,
-              })
-            : Promise.resolve({ score: null, spf: null, raw: null, ok: false, error: 'no domain' as const }),
-        ]);
+        // Шаг 1: получаем score (быстрый, ~1s). Без него не понять стоит ли
+        // тратить время на scrape сайта (медленный, до 12s) и SMTP-валидацию
+        // (тоже не бесплатная — SMTP-handshake несколько секунд).
+        const endpoint = domain
+          ? await fetchScoreForDomain({
+              url: endpointBase.url,
+              apiKey: endpointBase.apiKey,
+              authScheme: endpointBase.authScheme,
+              timeoutMs: endpointBase.timeoutMs,
+              domain,
+            })
+          : { score: null, spf: null, raw: null, ok: false as const, error: 'no domain' as const };
 
-        const email = scrape.emails[0] ?? null;
-        // Валидация только если scrape нашёл хоть один адрес. Без email
-        // валидировать нечего — но это всё равно legitimate воронка-шаг,
-        // потому что для finita-метрики «email_valid» нужно знать что
-        // не только нашли но и проверили.
-        const emailValidation = email
-          ? await validateEmailForAutoPipeline(email, domainCache)
-          : null;
+        // Шаг 2: scrape + SMTP — только если employer попал бы в активный
+        // bucket (с непустой sequence). Иначе всё равно пойдёт в `stored`
+        // или `skipped`, и email нам не нужен.
+        let email: string | null = null;
+        let emailValidation: AutoPipelineEmailValidation | null = null;
+        if (shouldDoEmailWork(endpoint.score, scoreBuckets) && emp.siteUrl) {
+          const scrape = await scrapeEmails(emp.siteUrl, {
+            timeout: 12_000,
+            maxPages: 5,
+          }).catch(() => ({ emails: [] as string[] }));
+          email = scrape.emails[0] ?? null;
+          if (email) {
+            emailValidation = await validateEmailForAutoPipeline(email, domainCache);
+          }
+        }
 
         results[i] = {
           employer: emp,
@@ -333,6 +342,43 @@ export type RoutingDecision =
  * Соответствие диапазона: score_min ≤ score ≤ score_max (или ≥ score_min,
  * если score_max=null — означает «и выше»).
  */
+/**
+ * Стоит ли тратить scrape+SMTP-валидацию на employer'а с этим score?
+ *
+ * Раньше enrichment делал scrape+endpoint параллельно для ВСЕХ 815 employers —
+ * включая 684 со score=0, которые всё равно пойдут в `stored` без отправки.
+ * Это растягивало прогон до 38 минут (scrape медленный, 12s timeout на сайт)
+ * и съедало 80% бюджета SMTP-проверок впустую.
+ *
+ * Теперь сначала вызываем Mailganer (~1s), и scrape+SMTP делаем ТОЛЬКО если
+ * employer попал бы в bucket с непустой sequence. Score=0 / out-of-buckets /
+ * storage-only — пропускаем дальше, не теряя время на email.
+ *
+ * Edge case — buckets ещё не настроены (свежий клиент в dry-run): fallback
+ * на «score > 0 значит интересно», чтобы первые замеры воронки имели смысл
+ * без необходимости заранее настраивать sequence'ы.
+ */
+export function shouldDoEmailWork(
+  score: number | null,
+  buckets: ScoreBucket[],
+): boolean {
+  if (score === null) return false;
+  if (buckets.length === 0) {
+    // Fallback для свежего клиента без настроенных bucket'ов — считаем
+    // что score > 0 = «потенциально активный» (это и есть наш дефолтный
+    // critерий, который Mailganer как раз использует для определения 0).
+    return score > 0;
+  }
+  for (const bucket of buckets) {
+    const inRange =
+      score >= bucket.score_min &&
+      (bucket.score_max === null || score <= bucket.score_max);
+    if (!inRange) continue;
+    return Array.isArray(bucket.sequence?.steps) && bucket.sequence.steps.length > 0;
+  }
+  return false;
+}
+
 export function decideRoute(
   enrichment: EnrichmentResult,
   config: Pick<AutoPipelineConfig, 'score_buckets'>,
@@ -541,6 +587,7 @@ export async function runAutoPipelineForClient(
         authScheme: config.endpoint_auth_scheme ?? 'Bearer',
         timeoutMs: config.endpoint_timeout_ms,
       },
+      config.score_buckets,
       ENRICH_CONCURRENCY,
       pacing.perItemPauseMs,
     );
