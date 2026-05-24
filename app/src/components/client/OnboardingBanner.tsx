@@ -63,9 +63,12 @@ export function OnboardingBanner() {
       className="neu-card flex items-center gap-3 px-4 py-3 sm:px-5 sm:py-3.5 mb-5 sm:mb-6"
       role="status"
     >
+      {/* Decorative icon — colored paper-mute to honor Status-as-Data
+          (color is reserved for semantic dots, not chrome). Flagged in
+          /impeccable critique 2026-05-24 on /client. */}
       <Sparkles
         className="h-4 w-4 shrink-0"
-        style={{ color: 'var(--cp-amber)' }}
+        style={{ color: 'var(--cp-paper-mute)' }}
         aria-hidden
       />
       <div className="flex-1 min-w-0">
