@@ -294,6 +294,70 @@ export function getDemoReplies(campaignId: string) {
   };
 }
 
+/**
+ * Synthetic outreach copy per кампания — used as the outbound side of every
+ * demo thread. Real backend has Instantly-generated bodies; here we just
+ * need enough realism so ReplyThreadActions has something to render.
+ */
+function getDemoOutboundBody(campaignId: string): string {
+  switch (campaignId) {
+    case 'demo-cmp-retail':
+      return 'Команда OutreachOS помогает розничным сетям сократить пересорт на складе. Кейс: 30% за 3 месяца у клиента с 12 складами в Подмосковье — без миграции учётной системы и с возвратом инвестиций за полугодие.';
+    case 'demo-cmp-3pl':
+      return 'OutreachOS внедряет WMS-системы под фулфилмент-операторов за 3 недели — без даунтайма складских операций, с интеграцией под Wildberries / Ozon / Я.Маркет и нативной поддержкой кросс-докинга.';
+    default:
+      return 'Мы помогаем компаниям вашего масштаба автоматизировать складские операции. Есть кейсы у клиентов с похожим профилем — поделимся, если интересно.';
+  }
+}
+
+/**
+ * Demo thread fixture: synthesizes a 2-message conversation для каждого
+ * DEMO_REPLIES item — наш исходный outreach (направленный за 3 дня до
+ * ответа) + сам ответ лида. Без этого ReplyThreadActions висит на
+ * "Загружаем тред..." потому что общий /campaigns/X/replies handler
+ * возвращает плоский список replies вместо thread shape.
+ */
+export function getDemoThread(campaignId: string, emailId: string) {
+  const reply = DEMO_REPLIES.find(
+    (r) => r.id === emailId && r.campaign_id === campaignId,
+  );
+  if (!reply) {
+    // Unknown id — graceful empty thread; UI shows "Ответить / Переслать"
+    // buttons but no message bubbles.
+    return { thread_id: null, messages: [] };
+  }
+
+  const replyMs = Date.parse(reply.timestamp);
+  const outboundTimestamp = Number.isFinite(replyMs)
+    ? new Date(replyMs - 3 * 24 * 3600 * 1000).toISOString()
+    : reply.timestamp;
+  const outboundSubject = reply.subject.replace(/^Re:\s*/i, '');
+
+  return {
+    thread_id: `thread-${reply.id}`,
+    messages: [
+      {
+        id: `${reply.id}-outbound`,
+        direction: 'outbound' as const,
+        timestamp: outboundTimestamp,
+        subject: outboundSubject,
+        from_email: 'team@demo-agency.example',
+        from_name: 'OutreachOS · Команда',
+        body_text: `Здравствуйте!\n\n${getDemoOutboundBody(campaignId)}\n\nЕсли тема актуальна — отвечайте на это письмо, обсудим детали.\n\nС уважением,\nКоманда OutreachOS`,
+      },
+      {
+        id: reply.id,
+        direction: 'inbound' as const,
+        timestamp: reply.timestamp,
+        subject: reply.subject,
+        from_email: reply.from_email,
+        from_name: reply.from_name,
+        body_text: reply.body,
+      },
+    ],
+  };
+}
+
 export function getDemoRepliesResponse(
   limit: number,
   offset: number,

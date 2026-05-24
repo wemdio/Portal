@@ -29,6 +29,7 @@ import {
   getDemoLeadsResponse,
   getDemoRepliesResponse,
   getDemoReplies,
+  getDemoThread,
   getDemoCampaignDetail,
   getDemoProjectDetail,
   getDemoReportResponse,
@@ -106,8 +107,18 @@ export async function serveClientDemo(req: NextRequest): Promise<NextResponse> {
   }
 
   // ── Динамические сегменты ──────────────────────────────────────────────
-  // /campaigns/<id>            → деталь кампании
-  // /campaigns/<id>/replies    → ответы получателей
+  // /campaigns/<id>/replies/<emailId>/thread → тред (outbound + inbound)
+  // /campaigns/<id>/replies                  → ответы получателей по кампании
+  // /campaigns/<id>                          → деталь кампании
+  if (
+    seg[0] === 'campaigns'
+    && seg[1]
+    && seg[2] === 'replies'
+    && seg[3]
+    && seg[4] === 'thread'
+  ) {
+    return json(getDemoThread(seg[1], seg[3]));
+  }
   if (seg[0] === 'campaigns' && seg[1]) {
     if (seg[2] === 'replies') return json(getDemoReplies(seg[1]));
     return json(getDemoCampaignDetail(seg[1]));
