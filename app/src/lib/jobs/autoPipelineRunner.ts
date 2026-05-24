@@ -51,6 +51,7 @@ import { findNewHhEmployers, deriveDomain, type HhEmployer } from './hhAutoParse
 import { fetchScoreForDomain } from './clientEndpointClient';
 import { validateEmailForAutoPipeline, type AutoPipelineEmailValidation } from './autoPipelineEmailValidation';
 import { calcPacing } from './autoPipelinePacing';
+import { fetchTopUpFromBaseOfBases } from './baseOfBasesSource';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import type { ClientLaunchSequence } from '@/lib/clientLaunch/types';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
@@ -97,6 +98,20 @@ export interface AutoPipelineConfig {
    * → +10-15× уникальных компаний в дневной выборке.
    */
   industries: string[];
+  /**
+   * Добирать недостающие компании из «базы баз» (companies_directory) когда HH
+   * дал меньше чем daily_target_employers. Это путь к стабильным 670 ready/день
+   * (~20k/мес).
+   */
+  base_of_bases_enabled: boolean;
+  /** Минимальный годовой оборот компании для top-up из BoB. В рублях. */
+  base_of_bases_revenue_from: number;
+  /**
+   * Целевое количество компаний на enrichment. HH парсит сколько может, BoB
+   * добирает до этого числа. При конверсии 6.3% (parsed → ready) 10 000 target
+   * даёт ~630 ready/день ≈ 19k/мес.
+   */
+  daily_target_employers: number;
   last_run_at: string | null;
   /**
    * Распределение нагрузки. 'burst' — старый поведение (один прогон ~35 мин).
@@ -176,6 +191,27 @@ async function loadSeenEmployerIds(clientUserId: string): Promise<Set<string>> {
     .eq('client_user_id', clientUserId);
   if (error || !data) return new Set();
   return new Set(data.map((r) => (r as { hh_employer_id: string }).hh_employer_id));
+}
+
+/**
+ * Domain-set всех уже виденных компаний — для dedup top-up из BoB. HH-парсер
+ * dedup'ится по hh_employer_id (числовой), BoB-домены другие. Поэтому BoB
+ * нуждается в separate domain-based dedup.
+ */
+async function loadSeenDomains(clientUserId: string): Promise<Set<string>> {
+  if (!supabaseAdmin) return new Set();
+  const { data, error } = await supabaseAdmin
+    .from('client_auto_pipeline_seen_employers')
+    .select('domain')
+    .eq('client_user_id', clientUserId)
+    .not('domain', 'is', null);
+  if (error || !data) return new Set();
+  const set = new Set<string>();
+  for (const r of data) {
+    const d = (r as { domain: string | null }).domain;
+    if (d) set.add(d.toLowerCase());
+  }
+  return set;
 }
 
 async function startRunRow(clientUserId: string): Promise<string | null> {
@@ -425,9 +461,16 @@ interface SeenEmployerUpsert {
   routed_bucket_id: string | null;
   routed_campaign_id: string | null;
   status: 'routed' | 'stored' | 'skipped' | 'failed' | 'dry_run';
+  /** Какой источник дал нам этого employer'а — для аналитики «эффект BoB». */
+  source: 'hh' | 'base_of_bases';
   skip_reason: string | null;
   error_message: string | null;
   processed_at: string;
+}
+
+/** Источник employer'а по id-префиксу. BoB-id мы выпускаем как «bob:<inn>». */
+function detectSource(employerId: string): 'hh' | 'base_of_bases' {
+  return employerId.startsWith('bob:') ? 'base_of_bases' : 'hh';
 }
 
 async function upsertSeenEmployers(rows: SeenEmployerUpsert[]): Promise<void> {
@@ -532,15 +575,55 @@ export async function runAutoPipelineForClient(
       log: (m) => void logAudit('auto-pipeline.hh', m, logCtx),
     });
 
-    // 3. Дедуп.
+    // 3. Дедуп HH-результатов по hh_employer_id.
     const seen = await loadSeenEmployerIds(clientUserId);
-    const fresh = employers.filter((e) => !seen.has(e.id));
+    const freshFromHh = employers.filter((e) => !seen.has(e.id));
 
     await logAudit(
       'auto-pipeline.parsed',
       'Parsed HH employers',
-      { ...logCtx, parsed: employers.length, new: fresh.length, seen: seen.size },
+      { ...logCtx, parsed: employers.length, new: freshFromHh.length, seen: seen.size },
     );
+
+    // 3.5. Top-up из «базы баз», если HH дал меньше daily_target_employers.
+    //      BoB-domain ≠ HH employer.id, поэтому dedup-set для BoB — отдельный,
+    //      по domain. Кроме исторических seen-domains добавляем домены
+    //      сегодняшних HH-результатов, чтобы один и тот же сайт не попал
+    //      и из HH, и из BoB в одном прогоне.
+    let fresh: HhEmployer[] = freshFromHh;
+    if (
+      config.base_of_bases_enabled &&
+      freshFromHh.length < config.daily_target_employers
+    ) {
+      const seenDomains = await loadSeenDomains(clientUserId);
+      for (const e of freshFromHh) {
+        const d = deriveDomain(e.siteUrl);
+        if (d) seenDomains.add(d);
+      }
+      const neededFromBob = config.daily_target_employers - freshFromHh.length;
+      const bobResult = await fetchTopUpFromBaseOfBases({
+        neededCount: neededFromBob,
+        revenueFrom: config.base_of_bases_revenue_from,
+        seenDomains,
+        excludePatterns,
+        log: (m) => void logAudit('auto-pipeline.bob', m, logCtx),
+      });
+      fresh = [...freshFromHh, ...bobResult.employers];
+      await logAudit(
+        'auto-pipeline.top-up.bob',
+        'Topped up from base of bases',
+        {
+          ...logCtx,
+          hhCount: freshFromHh.length,
+          bobAdded: bobResult.employers.length,
+          bobScanned: bobResult.scanned,
+          bobDedupSkipped: bobResult.dedupSkipped,
+          bobExcludeSkipped: bobResult.excludeSkipped,
+          bobNoSiteSkipped: bobResult.noSiteSkipped,
+          totalFresh: fresh.length,
+        },
+      );
+    }
 
     if (fresh.length === 0) {
       await finishRunRow(runId, {
@@ -641,6 +724,7 @@ export async function runAutoPipelineForClient(
         email_found: enr.email,
         email_validation_status: enr.emailValidation?.status ?? null,
         email_validation_details: enr.emailValidation?.details ?? null,
+        source: detectSource(enr.employer.id),
         processed_at: now,
       };
 
