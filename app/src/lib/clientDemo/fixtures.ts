@@ -297,7 +297,7 @@ export function getDemoReplies(campaignId: string) {
 /**
  * Synthetic outreach copy per кампания — used as the outbound side of every
  * demo thread. Real backend has Instantly-generated bodies; here we just
- * need enough realism so ReplyThreadActions has something to render.
+ * need enough realism so ExpandedThread has something to render.
  */
 function getDemoOutboundBody(campaignId: string): string {
   switch (campaignId) {
@@ -313,7 +313,7 @@ function getDemoOutboundBody(campaignId: string): string {
 /**
  * Demo thread fixture: synthesizes a 2-message conversation для каждого
  * DEMO_REPLIES item — наш исходный outreach (направленный за 3 дня до
- * ответа) + сам ответ лида. Без этого ReplyThreadActions висит на
+ * ответа) + сам ответ лида. Без этого ExpandedThread висит на
  * "Загружаем тред..." потому что общий /campaigns/X/replies handler
  * возвращает плоский список replies вместо thread shape.
  */
