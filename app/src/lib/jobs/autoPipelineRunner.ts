@@ -49,6 +49,7 @@ import { logAudit, logError } from '@/lib/loggerServer';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { findNewHhEmployers, deriveDomain, type HhEmployer } from './hhAutoParser';
 import { fetchScoreForDomain } from './clientEndpointClient';
+import { getOrFetchScore, emptyCacheStats } from './mailganerScoreCache';
 import { validateEmailForAutoPipeline, type AutoPipelineEmailValidation } from './autoPipelineEmailValidation';
 import { calcPacing } from './autoPipelinePacing';
 import { fetchTopUpFromBaseOfBases } from './baseOfBasesSource';
@@ -282,6 +283,11 @@ async function enrichEmployers(
    * сколько именно, чтобы прогон вписался в окно [start..end] UTC.
    */
   perItemPauseMs = 0,
+  /**
+   * Per-domain кэш статистика (передаётся снаружи чтобы вернуть hit-rate
+   * в финальный лог прогона).
+   */
+  mailganerStats?: import('./mailganerScoreCache').MailganerCacheStats,
 ): Promise<EnrichmentResult[]> {
   const results: EnrichmentResult[] = new Array(employers.length);
   let cursor = 0;
@@ -297,17 +303,22 @@ async function enrichEmployers(
       const emp = employers[i];
       const domain = deriveDomain(emp.siteUrl);
       try {
-        // Шаг 1: получаем score (быстрый, ~1s). Без него не понять стоит ли
-        // тратить время на scrape сайта (медленный, до 12s) и SMTP-валидацию
-        // (тоже не бесплатная — SMTP-handshake несколько секунд).
+        // Шаг 1: получаем score. Сначала смотрим в БД-кэш — если домен
+        // скорили в любом прошлом прогоне, возьмём оттуда мгновенно (один
+        // SELECT, ~5ms). Если нет — getOrFetchScore сам дёрнет Mailganer и
+        // сохранит результат для следующих прогонов.
         const endpoint = domain
-          ? await fetchScoreForDomain({
-              url: endpointBase.url,
-              apiKey: endpointBase.apiKey,
-              authScheme: endpointBase.authScheme,
-              timeoutMs: endpointBase.timeoutMs,
+          ? await getOrFetchScore(
               domain,
-            })
+              {
+                url: endpointBase.url,
+                apiKey: endpointBase.apiKey,
+                authScheme: endpointBase.authScheme,
+                timeoutMs: endpointBase.timeoutMs,
+              },
+              'cron',
+              mailganerStats,
+            )
           : { score: null, spf: null, raw: null, ok: false as const, error: 'no domain' as const };
 
         // Шаг 2: scrape + SMTP — только если employer попал бы в активный
@@ -673,6 +684,11 @@ export async function runAutoPipelineForClient(
     }
 
     // 5. Enrich.
+    // Mailganer per-domain кэш статистика для этого прогона — поможет видеть
+    // насколько кэш экономит API-вызовы (через 2-3 недели работы должно быть
+    // >50% hit-rate, что эквивалентно ускорению cron'а в ~2 раза).
+    const mailganerStats = emptyCacheStats();
+
     const enrichments = await enrichEmployers(
       fresh,
       {
@@ -684,6 +700,13 @@ export async function runAutoPipelineForClient(
       config.score_buckets,
       ENRICH_CONCURRENCY,
       pacing.perItemPauseMs,
+      mailganerStats,
+    );
+
+    await logAudit(
+      'auto-pipeline.mailganer-cache',
+      `Mailganer cache: ${mailganerStats.hits} hits, ${mailganerStats.misses} misses, ${mailganerStats.errors} errors`,
+      { ...logCtx, ...mailganerStats },
     );
 
     // 5. Routing.
