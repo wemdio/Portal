@@ -10,6 +10,7 @@
 import {
   buildExcludePatterns,
   decideRoute,
+  shouldDoEmailWork,
   type EnrichmentResult,
   type ScoreBucket,
 } from '@/lib/jobs/autoPipelineRunner';
@@ -33,6 +34,7 @@ function mockEnrichment(overrides: Partial<EnrichmentResult>): EnrichmentResult 
     employer: mockEmployer(),
     domain: 'test.example',
     email: 'info@test.example',
+    emailValidation: null,
     score: 100,
     spf: 'v=spf1 -all',
     endpointRaw: null,
@@ -67,6 +69,55 @@ function mockBucket(
     sequence,
   };
 }
+
+describe('shouldDoEmailWork — sequential enrichment gate', () => {
+  const activeBuckets = [
+    mockBucket(0, 1000, 'low', emptySequence()),
+    mockBucket(1001, 15000, 'mid'),
+    mockBucket(15001, null, 'high'),
+  ];
+
+  it('returns false for null score', () => {
+    expect(shouldDoEmailWork(null, activeBuckets)).toBe(false);
+  });
+
+  it('returns false for score=0 (storage_only bucket)', () => {
+    expect(shouldDoEmailWork(0, activeBuckets)).toBe(false);
+  });
+
+  it('returns false for score 1-1000 (empty sequence bucket)', () => {
+    expect(shouldDoEmailWork(500, activeBuckets)).toBe(false);
+  });
+
+  it('returns true for score 1001-15000 (active bucket)', () => {
+    expect(shouldDoEmailWork(5000, activeBuckets)).toBe(true);
+  });
+
+  it('returns true for score 15001+ (open-ended active bucket)', () => {
+    expect(shouldDoEmailWork(5_000_000, activeBuckets)).toBe(true);
+  });
+
+  it('returns false for score in no bucket at all', () => {
+    const gapped = [mockBucket(0, 1000, 'low', emptySequence()), mockBucket(15001, null, 'high')];
+    // 5000 between the two ranges — out of buckets entirely.
+    expect(shouldDoEmailWork(5000, gapped)).toBe(false);
+  });
+
+  describe('fallback: empty buckets array (fresh dry-run client)', () => {
+    it('treats score > 0 as active when no buckets configured', () => {
+      expect(shouldDoEmailWork(100, [])).toBe(true);
+      expect(shouldDoEmailWork(50_000, [])).toBe(true);
+    });
+
+    it('treats score = 0 as inactive even with empty buckets', () => {
+      expect(shouldDoEmailWork(0, [])).toBe(false);
+    });
+
+    it('treats null score as inactive even with empty buckets', () => {
+      expect(shouldDoEmailWork(null, [])).toBe(false);
+    });
+  });
+});
 
 describe('decideRoute — happy path', () => {
   it('routes to matching range bucket', () => {

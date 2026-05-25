@@ -4,9 +4,12 @@
  * Persistent setup checklist shown on /client/dashboard.
  *
  * Six steps in fixed order: brief → preset → first base → first clean →
- * first sequence → first launch. Done items render with a soft inset
- * checkmark; the next not-done item gets a highlighted ring and a
- * "следующий шаг" tag so the user always knows what to tackle next.
+ * first sequence → first launch. Each row carries an editorial eyebrow
+ * ("01 → "); the next not-done row additionally gets surface-elev
+ * background + 1px amber border, an amber "следующий" eyebrow tail, an
+ * amber Clock ring, and an explicit amber "Сделать сейчас →" call-out
+ * — so a brand-new user (Olga) sees at a single glance where to click
+ * without scanning. Done rows demote to paper-faint with a smaller check.
  *
  * When all six are done the widget collapses to a slim "Setup complete ✓"
  * badge with a chevron to expand for review.
@@ -191,10 +194,11 @@ function ChecklistRow({
   stepNumber: number;
   isNext: boolean;
 }) {
-  // Quiet editorial state vocabulary:
-  //   - done : thin outline circle, Check in paper-faint (completed, no fanfare)
-  //   - next : thin outline circle in amber, Clock in amber (one accent on page)
-  //   - idle : thin outline circle in divider-strong, no inner icon
+  // Editorial state vocabulary — one accent (amber) on the next-step row only:
+  //   - next : surface-elev background, 1px amber border, amber Clock ring,
+  //            amber eyebrow tail "следующий", amber "Сделать сейчас →" tail
+  //   - done : flat neu-row, paper-faint Check ring, paper-faint eyebrow tail "готово"
+  //   - idle : flat neu-row, divider-strong empty ring, paper-mute eyebrow alone
   const indicator = item.done ? (
     <Check className="h-3.5 w-3.5" />
   ) : isNext ? (
@@ -207,6 +211,13 @@ function ChecklistRow({
       ? 'var(--cp-paper-faint)'
       : 'var(--cp-divider-strong)';
 
+  const eyebrowSuffix = isNext ? 'следующий' : item.done ? 'готово' : null;
+  const eyebrowColor = isNext
+    ? 'var(--cp-amber)'
+    : item.done
+      ? 'var(--cp-paper-faint)'
+      : 'var(--cp-paper-mute)';
+
   const Wrapper: React.ElementType = item.href ? Link : 'div';
   const wrapperProps = item.href
     ? ({ href: item.href as Route } as { href: Route })
@@ -215,9 +226,17 @@ function ChecklistRow({
   return (
     <Wrapper
       {...wrapperProps}
-      className={`neu-row flex items-start gap-3 px-3.5 py-3 rounded-xl ${
+      className={`flex items-start gap-3 px-3.5 py-3 rounded-xl ${
         item.href ? 'cursor-pointer' : ''
-      } ${isNext ? 'neu-inset' : ''}`}
+      } ${isNext ? '' : 'neu-row'}`}
+      style={
+        isNext
+          ? {
+              background: 'var(--cp-surface-elev)',
+              border: '1px solid var(--cp-amber)',
+            }
+          : undefined
+      }
       title={item.blocked_reason ?? undefined}
     >
       <span
@@ -233,11 +252,14 @@ function ChecklistRow({
 
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
-          <span
-            className="ds-eyebrow"
-            style={isNext ? { color: 'var(--cp-amber)' } : undefined}
-          >
-            {String(stepNumber).padStart(2, '0')}<span aria-hidden> → </span>шаг
+          <span className="ds-eyebrow" style={{ color: eyebrowColor }}>
+            {String(stepNumber).padStart(2, '0')}
+            {eyebrowSuffix && (
+              <>
+                <span aria-hidden> → </span>
+                {eyebrowSuffix}
+              </>
+            )}
           </span>
         </div>
         <p
@@ -248,6 +270,14 @@ function ChecklistRow({
         >
           {item.label}
         </p>
+        {isNext && item.href && (
+          <p
+            className="text-xs font-semibold mt-2 ds-mono"
+            style={{ color: 'var(--cp-amber)' }}
+          >
+            Сделать сейчас →
+          </p>
+        )}
         {!item.done && item.blocked_reason && (
           <p className="text-[11px] mt-1" style={{ color: 'var(--cp-text-m)' }}>
             {item.blocked_reason}

@@ -36,6 +36,12 @@ const REQUEST_GAP_MS = 250;
 const MAX_PAGES = 20;
 const PAGE_SIZE = 100;
 
+// До 2026-04 HH банил по IP — приходилось ходить через proxy (undici.ProxyAgent).
+// С обязательным OAuth идентификация per-token, не per-IP, и партнёрский токен
+// HH_ACCESS_TOKEN даёт лимит ~10 RPS напрямую с любого IP. Поэтому undici/proxy
+// инфраструктура удалена — простой глобальный fetch (Node 18+) + Bearer header.
+// Проверка реальными запросами с моей машины (вне РФ) → 200 OK, 0 ошибок.
+
 export interface HhAutoParserConfig {
   /** Only include vacancies published at or after this moment. */
   since: Date;
@@ -89,12 +95,37 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * HH API с 2026-04-15 требует OAuth Bearer для /vacancies и /employers.
+ * Без токена возвращает 403 «forbidden» даже с правильным User-Agent и из
+ * российского IP. Токен лежит в HH_ACCESS_TOKEN, обновляется отдельным
+ * процессом (token-refresh worker, см. hhParser.ts).
+ */
+function buildHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'User-Agent': USER_AGENT };
+  const token = process.env.HH_ACCESS_TOKEN?.trim();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
 async function fetchJson<T>(url: string): Promise<T | null> {
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT } });
-    if (!res.ok) return null;
+    const res = await fetch(url, {
+      headers: buildHeaders(),
+    });
+    if (!res.ok) {
+      // Полезный сигнал для отладки — HH 403 (geo-блок) или 429 (rate-limit)
+      // должны быть видны в логе, а не теряться молча.
+      if (res.status === 403 || res.status === 429) {
+        console.warn(`[hhAutoParser] HH returned ${res.status} for ${url} — proxy issue?`);
+      }
+      return null;
+    }
     return (await res.json()) as T;
-  } catch {
+  } catch (err) {
+    console.warn(`[hhAutoParser] fetch error for ${url}:`, err instanceof Error ? err.message : err);
     return null;
   }
 }

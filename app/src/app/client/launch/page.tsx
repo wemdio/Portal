@@ -60,6 +60,27 @@ interface LaunchResult {
   skipped_rows: number;
 }
 
+/**
+ * Persisted draft of the in-progress wizard (everything except the uploaded
+ * file, which can't be programmatically restored). Saved to localStorage
+ * with 500ms debounce on every state change; cleared on successful launch
+ * or explicit «начать с нуля» action. Lets Olga survive a misclicked nav
+ * or a tab refresh without losing 40 minutes of typing — the most
+ * catastrophic failure mode flagged in /impeccable critique 2026-05-24.
+ */
+const DRAFT_KEY = 'client.launch.draft.v1';
+
+interface DraftPayload {
+  campaignName: string;
+  sequenceSteps: ClientLaunchSequenceStep[];
+  activeVariantIdx: number[];
+  mapping: ClientLaunchColumnMapping;
+  customVars: { key: string; header: string }[];
+  schedule: ClientLaunchScheduleOverride;
+  behavior: LaunchBehaviorSettings;
+  savedAt: string;
+}
+
 const STANDARD_FIELDS: { key: keyof Omit<ClientLaunchColumnMapping, 'custom_variables_mapping'>; label: string; required?: boolean; variable: string }[] = [
   { key: 'email', label: 'Email', required: true, variable: 'email' },
   { key: 'first_name', label: 'Имя', variable: 'first_name' },
@@ -112,16 +133,38 @@ const STATUS_LABELS: Record<LaunchHistoryItem['status'], string> = {
   failed: 'Ошибка',
 };
 
-const STATUS_COLORS: Record<LaunchHistoryItem['status'], string> = {
-  uploading: 'var(--cp-text-l)',
-  active: 'var(--cp-accent)',
-  paused: '#C49B4A',
-  completed: 'var(--cp-text-m)',
-  failed: 'var(--cp-danger)',
+// Semantic dot per launch status. Same vocabulary as campaigns list and
+// projects: amber = transient/needs-attention, paper-faint = neutral/done,
+// green = active flow, red = failure.
+const STATUS_DOT: Record<LaunchHistoryItem['status'], string> = {
+  uploading: 'var(--cp-amber)',
+  active: 'var(--cp-green)',
+  paused: 'var(--cp-amber)',
+  completed: 'var(--cp-paper-faint)',
+  failed: 'var(--cp-red)',
 };
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+// Shared header: small editorial eyebrow + plain h1. Replaces the four
+// duplicated 'tinted-iconbox + extrabold h1' instances at the top of the
+// file.
+function LaunchHeader({ title, eyebrow = 'Запуск' }: { title: string; eyebrow?: string }) {
+  return (
+    <header className="mb-6 sm:mb-8">
+      <p className="ds-eyebrow mb-2">
+        01<span aria-hidden> → </span>{eyebrow}
+      </p>
+      <h1
+        className="text-xl sm:text-2xl font-bold m-0"
+        style={{ color: 'var(--cp-paper)' }}
+      >
+        {title}
+      </h1>
+    </header>
+  );
 }
 
 export default function ClientLaunchPage() {
@@ -172,6 +215,100 @@ export default function ClientLaunchPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // ─── Draft persistence (localStorage) ──────────────────────────────────
+  // See DRAFT_KEY comment above for rationale.
+  const [draftSavedAt, setDraftSavedAt] = useState<Date | null>(null);
+  const [draftRestored, setDraftRestored] = useState(false);
+
+  // Restore once on mount. Bad JSON / sandbox / no storage → silent skip.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(DRAFT_KEY);
+      if (!raw) return;
+      const draft = JSON.parse(raw) as Partial<DraftPayload> | null;
+      if (!draft || typeof draft !== 'object') return;
+      if (typeof draft.campaignName === 'string') setCampaignName(draft.campaignName);
+      if (Array.isArray(draft.sequenceSteps) && draft.sequenceSteps.length > 0) {
+        setSequenceSteps(draft.sequenceSteps);
+      }
+      if (Array.isArray(draft.activeVariantIdx)) setActiveVariantIdx(draft.activeVariantIdx);
+      if (draft.mapping && typeof draft.mapping === 'object') setMapping(draft.mapping);
+      if (Array.isArray(draft.customVars)) setCustomVars(draft.customVars);
+      if (draft.schedule && typeof draft.schedule === 'object') setSchedule(draft.schedule);
+      if (draft.behavior && typeof draft.behavior === 'object') setBehavior(draft.behavior);
+      if (typeof draft.savedAt === 'string') {
+        const d = new Date(draft.savedAt);
+        if (!Number.isNaN(d.getTime())) setDraftSavedAt(d);
+      }
+      setDraftRestored(true);
+    } catch {
+      // bad JSON / sandbox / no storage — silent skip
+    }
+  }, []);
+
+  // Debounced save on any tracked state change. Skip when state is the empty
+  // default (no point in writing «empty draft» entries every mount).
+  useEffect(() => {
+    const isEmpty =
+      !campaignName.trim() &&
+      sequenceSteps.length === 1 &&
+      !sequenceSteps[0].subject &&
+      !sequenceSteps[0].body &&
+      customVars.length === 0;
+    if (isEmpty) return;
+    const t = setTimeout(() => {
+      try {
+        const payload: DraftPayload = {
+          campaignName,
+          sequenceSteps,
+          activeVariantIdx,
+          mapping,
+          customVars,
+          schedule,
+          behavior,
+          savedAt: new Date().toISOString(),
+        };
+        window.localStorage.setItem(DRAFT_KEY, JSON.stringify(payload));
+        setDraftSavedAt(new Date());
+        // After first save, the draft is no longer "восстановленный" — it's a
+        // fresh save. Flip the flag so microcopy switches from «восстановлен
+        // черновик от HH:MM» to plain «черновик сохранён HH:MM» (re-critique
+        // 2026-05-24 N3). File-gone hint stays — it's data-driven, not based
+        // on this flag.
+        setDraftRestored(false);
+      } catch {
+        // sandbox / quota / no storage — silent
+      }
+    }, 500);
+    return () => clearTimeout(t);
+  }, [campaignName, sequenceSteps, activeVariantIdx, mapping, customVars, schedule, behavior]);
+
+  // Clear draft on successful launch.
+  useEffect(() => {
+    if (!result) return;
+    try {
+      window.localStorage.removeItem(DRAFT_KEY);
+    } catch { /* ignore */ }
+    setDraftSavedAt(null);
+    setDraftRestored(false);
+  }, [result]);
+
+  // beforeunload guard while a draft is dirty — avoid silent loss to nav.
+  useEffect(() => {
+    const hasDirtyDraft =
+      !!campaignName.trim() ||
+      sequenceSteps.some((s) => s.subject || s.body) ||
+      customVars.length > 0;
+    if (!hasDirtyDraft || result) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [campaignName, sequenceSteps, customVars, result]);
+
   // ─── Load preset + history ───────────────────────────────────────────────
   const loadPreset = useCallback(async () => {
     setPresetLoading(true);
@@ -179,27 +316,34 @@ export default function ClientLaunchPage() {
     try {
       const data = await clientApiFetch<{ preset: PresetSummary | null }>('/preset');
       setPreset(data.preset);
-      if (data.preset) {
-        setSchedule({
-          from: data.preset.schedule_from || '09:00',
-          to: data.preset.schedule_to || '18:00',
-          days: Array.isArray(data.preset.schedule_days) && data.preset.schedule_days.length > 0
-            ? data.preset.schedule_days
-            : [1, 2, 3, 4, 5],
-          timezone: normalizeInstantlyTimezone(data.preset.schedule_timezone || 'Europe/Kirov'),
-        });
-        setBehavior({
-          open_tracking: data.preset.open_tracking !== false,
-          stop_on_reply: data.preset.stop_on_reply !== false,
-        });
-        setScheduleHydrated(true);
-      }
     } catch (err) {
       setPresetError(err instanceof Error ? err.message : 'Не удалось загрузить пресет');
     } finally {
       setPresetLoading(false);
     }
   }, []);
+
+  // Hydrate schedule + behavior from preset on first load — but ONLY when
+  // there's no restored draft to honor. Otherwise we'd silently clobber
+  // Olga's custom schedule/behavior with preset defaults: race surfaced by
+  // /impeccable re-critique 2026-05-24 (N1). Draft always wins on restore.
+  useEffect(() => {
+    if (!preset) return;
+    if (draftRestored) return; // draft already populated schedule/behavior — keep them
+    setSchedule({
+      from: preset.schedule_from || '09:00',
+      to: preset.schedule_to || '18:00',
+      days: Array.isArray(preset.schedule_days) && preset.schedule_days.length > 0
+        ? preset.schedule_days
+        : [1, 2, 3, 4, 5],
+      timezone: normalizeInstantlyTimezone(preset.schedule_timezone || 'Europe/Kirov'),
+    });
+    setBehavior({
+      open_tracking: preset.open_tracking !== false,
+      stop_on_reply: preset.stop_on_reply !== false,
+    });
+    setScheduleHydrated(true);
+  }, [preset, draftRestored]);
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -459,6 +603,13 @@ export default function ClientLaunchPage() {
     setActiveVariantIdx([0]);
     setLaunchError('');
     setResult(null);
+    // Also wipe any persisted draft — an explicit "start fresh" wins over
+    // any saved draft from a prior session.
+    setDraftSavedAt(null);
+    setDraftRestored(false);
+    try {
+      window.localStorage.removeItem(DRAFT_KEY);
+    } catch { /* ignore */ }
   }
 
   // ─── Render: preset gate ───────────────────────────────────────────────
@@ -475,9 +626,17 @@ export default function ClientLaunchPage() {
   if (presetError) {
     return (
       <div className="mx-auto max-w-5xl">
-        <h1 className="text-xl sm:text-2xl font-extrabold mb-6 sm:mb-8 flex items-center gap-2.5"><span className="inline-flex items-center justify-center w-8 h-8 rounded-xl" style={{ background: 'rgba(16,185,129,0.12)', color: '#10B981' }}><Send className="h-4.5 w-4.5" /></span>Запуск кампаний</h1>
-        <div className="neu-inset rounded-2xl px-5 py-4 text-sm font-medium" style={{ color: 'var(--cp-danger)' }}>
-          {presetError}
+        <LaunchHeader title="Запуск кампаний" />
+        <div
+          className="neu-inset rounded-lg px-5 py-4 text-sm font-medium flex items-start gap-2.5"
+          role="alert"
+        >
+          <span
+            aria-hidden
+            className="ds-status-dot shrink-0"
+            style={{ background: 'var(--cp-red)', marginTop: '7px' }}
+          />
+          <span style={{ color: 'var(--cp-paper)' }}>{presetError}</span>
         </div>
       </div>
     );
@@ -486,21 +645,31 @@ export default function ClientLaunchPage() {
   if (!preset || preset.email_account_ids.length === 0) {
     return (
       <div className="mx-auto max-w-5xl">
-        <h1 className="text-xl sm:text-2xl font-extrabold mb-6 sm:mb-8 flex items-center gap-2.5"><span className="inline-flex items-center justify-center w-8 h-8 rounded-xl" style={{ background: 'rgba(16,185,129,0.12)', color: '#10B981' }}><Send className="h-4.5 w-4.5" /></span>Создать кампанию</h1>
+        <LaunchHeader title="Создать кампанию" />
         <div className="neu-card py-12 sm:py-16 text-center px-6">
-          <Settings className="mx-auto h-10 w-10 mb-4" style={{ color: 'var(--cp-text-l)' }} />
-          <p className="text-sm sm:text-base font-semibold mb-2" style={{ color: 'var(--cp-text)' }}>
+          <Settings
+            className="mx-auto h-8 w-8 mb-3"
+            style={{ color: 'var(--cp-paper-faint)' }}
+            aria-hidden
+          />
+          <p
+            className="text-sm sm:text-base font-semibold mb-2"
+            style={{ color: 'var(--cp-paper)' }}
+          >
             Пресет ещё не настроен
           </p>
-          <p className="text-xs sm:text-sm max-w-md mx-auto" style={{ color: 'var(--cp-text-m)' }}>
+          <p
+            className="text-xs sm:text-sm max-w-md mx-auto"
+            style={{ color: 'var(--cp-paper-mute)' }}
+          >
             Прежде чем вы запустите первую кампанию, ваш менеджер должен привязать
             к аккаунту email-почты для рассылки и общее расписание. Это разовая настройка.
           </p>
           <Link
             href={'/client/support' as Route}
-            className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 mt-6 text-sm font-semibold"
+            className="ds-btn-primary inline-flex items-center gap-2 px-5 mt-5"
           >
-            <Mail className="h-4 w-4" />
+            <Mail className="h-4 w-4" aria-hidden />
             Связаться с менеджером
           </Link>
         </div>
@@ -512,12 +681,24 @@ export default function ClientLaunchPage() {
   if (result) {
     return (
       <div className="mx-auto max-w-3xl">
-        <h1 className="text-xl sm:text-2xl font-extrabold mb-6 sm:mb-8 flex items-center gap-2.5"><span className="inline-flex items-center justify-center w-8 h-8 rounded-xl" style={{ background: 'rgba(16,185,129,0.12)', color: '#10B981' }}><CheckCircle2 className="h-4.5 w-4.5" /></span>Кампания запущена</h1>
+        <LaunchHeader title="Кампания запущена" eyebrow="Готово" />
         <div className="neu-card p-8 sm:p-10 text-center">
-          <CheckCircle2 className="mx-auto h-14 w-14 mb-5" style={{ color: 'var(--cp-accent)' }} />
-          <h2 className="text-lg sm:text-xl font-bold mb-2">{result.campaign_name}</h2>
-          <p className="text-sm mb-6" style={{ color: 'var(--cp-text-m)' }}>
-            Загружено {result.accepted_rows.toLocaleString('ru-RU')} лидов
+          <CheckCircle2
+            className="mx-auto h-10 w-10 mb-4"
+            style={{ color: 'var(--cp-green)' }}
+            aria-hidden
+          />
+          <h2
+            className="text-lg sm:text-xl font-bold mb-2 m-0"
+            style={{ color: 'var(--cp-paper)' }}
+          >
+            {result.campaign_name}
+          </h2>
+          <p
+            className="ds-mono text-sm mb-6"
+            style={{ color: 'var(--cp-paper-mute)' }}
+          >
+            {result.accepted_rows.toLocaleString('ru-RU')} лидов загружено
             {result.skipped_rows > 0 && ` · пропущено ${result.skipped_rows.toLocaleString('ru-RU')}`}
             <span className="block mt-1">
               <ClientTariffUsageInline
@@ -532,16 +713,15 @@ export default function ClientLaunchPage() {
             {result.instantly_campaign_id && (
               <Link
                 href={`/client/campaigns/${result.instantly_campaign_id}`}
-                className="neu-btn px-6 py-3 text-sm font-semibold inline-flex items-center justify-center gap-2"
+                className="ds-btn-primary px-6 py-3 text-sm inline-flex items-center justify-center gap-2"
               >
-                Перейти к кампании <ExternalLink className="h-4 w-4" />
+                Перейти к кампании <ExternalLink className="h-4 w-4" aria-hidden />
               </Link>
             )}
             <button
               type="button"
               onClick={startNewLaunch}
-              className="neu-pill px-6 py-3 text-sm font-semibold"
-              style={{ color: 'var(--cp-text-m)' }}
+              className="ds-btn-secondary px-6 py-3 text-sm"
             >
               Запустить ещё одну
             </button>
@@ -554,15 +734,57 @@ export default function ClientLaunchPage() {
   // ─── Render: wizard ────────────────────────────────────────────────────
   return (
     <div className="mx-auto max-w-5xl">
-      <div className="mb-6 sm:mb-8 flex items-start justify-between gap-4 flex-wrap">
+      <header className="mb-6 sm:mb-8 flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-xl sm:text-2xl font-extrabold flex items-center gap-2.5"><span className="inline-flex items-center justify-center w-8 h-8 rounded-xl" style={{ background: 'rgba(16,185,129,0.12)', color: '#10B981' }}><Send className="h-4.5 w-4.5" /></span>Запуск кампаний</h1>
-          <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
+          <p className="ds-eyebrow mb-2">
+            01<span aria-hidden> → </span>Запуск
+          </p>
+          <h1
+            className="text-xl sm:text-2xl font-bold m-0"
+            style={{ color: 'var(--cp-paper)' }}
+          >
+            Запуск кампаний
+          </h1>
+          <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
             Загрузите базу, напишите цепочку и запустите
           </p>
+          {draftSavedAt && (
+            <p className="mt-1 text-xs ds-mono" style={{ color: 'var(--cp-paper-faint)' }}>
+              {draftRestored ? 'восстановлен черновик от ' : 'черновик сохранён '}
+              {draftSavedAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+              {draftRestored && (
+                <>
+                  {' · '}
+                  <button
+                    type="button"
+                    onClick={startNewLaunch}
+                    className="underline"
+                    style={{ color: 'var(--cp-paper)' }}
+                  >
+                    начать с нуля
+                  </button>
+                </>
+              )}
+            </p>
+          )}
+          {/* File-gone hint: when draft state references a file (mapping or
+              sequence content) but no file is loaded, we're almost certainly
+              post-restore — Step 2+ of the wizard gate on fileHeaders.length,
+              so a fresh user can't reach mapping/sequence without uploading
+              first. Data-driven, not based on draftRestored flag (which gets
+              cleared after first save per N3 fix). Amber = action needed. */}
+          {fileRows.length === 0 && (
+            mapping.email !== ''
+            || customVars.length > 0
+            || sequenceSteps.some((s) => s.subject || s.body)
+          ) && (
+            <p className="mt-1 text-xs" style={{ color: 'var(--cp-amber)' }}>
+              Файл базы нужно загрузить заново — браузеры не сохраняют файлы между сессиями. Цепочка, колонки и расписание восстановлены.
+            </p>
+          )}
         </div>
         <PresetBadge preset={preset} />
-      </div>
+      </header>
 
       <div className="space-y-5 sm:space-y-6">
         {/* Step 1: Upload */}
@@ -572,18 +794,37 @@ export default function ClientLaunchPage() {
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
-              className={`neu-inset rounded-2xl flex flex-col items-center justify-center cursor-pointer p-8 sm:p-10 transition-all ${isDragOver ? 'ring-2 ring-offset-2' : ''}`}
-              style={isDragOver ? { boxShadow: 'inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l), 0 0 0 2px var(--cp-accent)' } : undefined}
+              className="rounded-md flex flex-col items-center justify-center cursor-pointer p-8 sm:p-10 transition-all"
+              style={{
+                background: 'var(--cp-surface-rest)',
+                border: isDragOver
+                  ? '1px solid var(--cp-paper)'
+                  : '1px solid var(--cp-divider)',
+              }}
             >
               {parsing ? (
-                <Loader2 className="h-8 w-8 animate-spin" style={{ color: 'var(--cp-accent)' }} />
+                <Loader2
+                  className="h-8 w-8 animate-spin"
+                  style={{ color: 'var(--cp-paper)' }}
+                  aria-hidden
+                />
               ) : (
                 <>
-                  <Upload className="h-10 w-10 mb-3" style={{ color: 'var(--cp-text-l)' }} />
-                  <p className="text-sm font-semibold mb-1" style={{ color: 'var(--cp-text)' }}>
+                  <Upload
+                    className="h-8 w-8 mb-3"
+                    style={{ color: 'var(--cp-paper-faint)' }}
+                    aria-hidden
+                  />
+                  <p
+                    className="text-sm font-semibold mb-1"
+                    style={{ color: 'var(--cp-paper)' }}
+                  >
                     Перетащите файл или нажмите
                   </p>
-                  <p className="text-xs" style={{ color: 'var(--cp-text-m)' }}>
+                  <p
+                    className="ds-mono text-xs"
+                    style={{ color: 'var(--cp-paper-faint)' }}
+                  >
                     .csv .xlsx .xls .tsv
                   </p>
                 </>
@@ -602,25 +843,52 @@ export default function ClientLaunchPage() {
             </label>
           ) : (
             <>
-              <div className="neu-inset rounded-2xl px-4 sm:px-5 py-3.5 flex items-center gap-3">
-                <FileText className="h-5 w-5 shrink-0" style={{ color: 'var(--cp-accent)' }} />
+              <div
+                className="rounded-md px-4 sm:px-5 py-3.5 flex items-center gap-3"
+                style={{
+                  background: 'var(--cp-surface-rest)',
+                  border: '1px solid var(--cp-divider)',
+                }}
+              >
+                <FileText
+                  className="h-5 w-5 shrink-0"
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                  aria-hidden
+                />
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold truncate">{fileName}</p>
-                  <p className="text-xs" style={{ color: 'var(--cp-text-m)' }}>
+                  <p
+                    className="text-sm font-semibold truncate m-0"
+                    style={{ color: 'var(--cp-paper)' }}
+                  >
+                    {fileName}
+                  </p>
+                  <p
+                    className="ds-mono text-xs"
+                    style={{ color: 'var(--cp-paper-mute)' }}
+                  >
                     {fileRows.length.toLocaleString('ru-RU')} строк · {fileHeaders.length} колонок · валидных email: {validLeadsCount.toLocaleString('ru-RU')}
                   </p>
                 </div>
-                <button type="button" onClick={clearFile} className="p-2 rounded-lg" aria-label="Удалить файл" style={{ color: 'var(--cp-text-m)' }}>
-                  <X className="h-4 w-4" />
+                <button
+                  type="button"
+                  onClick={clearFile}
+                  className="ds-btn-ghost p-2"
+                  aria-label="Удалить файл"
+                >
+                  <X className="h-4 w-4" aria-hidden />
                 </button>
               </div>
               <BasePreview headers={fileHeaders} rows={fileRows.slice(0, PREVIEW_ROW_COUNT)} />
             </>
           )}
           {parseError && (
-            <div className="mt-3 text-xs flex items-start gap-2" style={{ color: 'var(--cp-danger)' }}>
-              <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-              {parseError}
+            <div className="mt-3 text-xs flex items-start gap-2.5">
+              <span
+                aria-hidden
+                className="ds-status-dot shrink-0"
+                style={{ background: 'var(--cp-red)', marginTop: '5px' }}
+              />
+              <span style={{ color: 'var(--cp-paper)' }}>{parseError}</span>
             </div>
           )}
         </Section>
@@ -642,43 +910,68 @@ export default function ClientLaunchPage() {
               ))}
             </div>
 
-            <div className="mt-5 pt-5 border-t" style={{ borderColor: 'rgba(180,173,164,0.2)' }}>
+            <div
+              className="mt-5 pt-5"
+              style={{ borderTop: '1px solid var(--cp-divider)' }}
+            >
               <div className="flex items-center justify-between mb-3">
-                <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-m)' }}>
-                  Кастомные переменные
-                </p>
-                <button type="button" onClick={addCustomVar} className="neu-pill inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold" style={{ color: 'var(--cp-accent)' }}>
-                  <Plus className="h-3 w-3" /> Добавить
+                <p className="ds-eyebrow">кастомные переменные</p>
+                <button
+                  type="button"
+                  onClick={addCustomVar}
+                  className="ds-btn-ghost inline-flex items-center gap-1 px-3 py-1.5 text-xs"
+                >
+                  <Plus className="h-3 w-3" aria-hidden /> Добавить
                 </button>
               </div>
               {customVars.length === 0 ? (
-                <p className="text-xs" style={{ color: 'var(--cp-text-l)' }}>
-                  Пример: переменная <code className="font-mono">company_size</code> → колонка «Размер компании», в шаблоне используйте <code className="font-mono">{'{{company_size}}'}</code>
+                <p className="text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
+                  Пример: переменная <code className="ds-mono">company_size</code> → колонка «Размер компании», в шаблоне используйте <code className="ds-mono">{'{{company_size}}'}</code>
                 </p>
               ) : (
                 <div className="space-y-2">
                   {customVars.map((cv, idx) => (
                     <div key={idx} className="flex gap-2 items-center">
-                      <span className="text-xs font-mono shrink-0" style={{ color: 'var(--cp-text-m)' }}>{'{{'}</span>
+                      <span
+                        className="ds-mono text-xs shrink-0"
+                        style={{ color: 'var(--cp-paper-faint)' }}
+                      >
+                        {'{{'}
+                      </span>
                       <input
                         type="text"
                         value={cv.key}
                         onChange={(e) => updateCustomVar(idx, { key: e.target.value })}
                         placeholder="ключ"
-                        className="neu-input flex-1 px-3 py-1.5 text-xs font-mono"
+                        className="ds-input ds-mono flex-1 text-xs"
                       />
-                      <span className="text-xs font-mono shrink-0" style={{ color: 'var(--cp-text-m)' }}>{'}}'}</span>
-                      <span className="text-xs shrink-0" style={{ color: 'var(--cp-text-l)' }}>=</span>
+                      <span
+                        className="ds-mono text-xs shrink-0"
+                        style={{ color: 'var(--cp-paper-faint)' }}
+                      >
+                        {'}}'}
+                      </span>
+                      <span
+                        className="ds-mono text-xs shrink-0"
+                        style={{ color: 'var(--cp-paper-faint)' }}
+                      >
+                        =
+                      </span>
                       <select
                         value={cv.header}
                         onChange={(e) => updateCustomVar(idx, { header: e.target.value })}
-                        className="neu-input flex-1 px-3 py-1.5 text-xs"
+                        className="ds-input flex-1 text-xs"
                       >
-                        <option value="">Колонка...</option>
+                        <option value="">Колонка…</option>
                         {fileHeaders.map((h) => <option key={h} value={h}>{h}</option>)}
                       </select>
-                      <button type="button" onClick={() => removeCustomVar(idx)} className="p-1.5 rounded-lg shrink-0" style={{ color: 'var(--cp-text-m)' }} aria-label="Удалить переменную">
-                        <Trash2 className="h-3.5 w-3.5" />
+                      <button
+                        type="button"
+                        onClick={() => removeCustomVar(idx)}
+                        className="ds-btn-ghost p-1.5 shrink-0"
+                        aria-label="Удалить переменную"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" aria-hidden />
                       </button>
                     </div>
                   ))}
@@ -693,14 +986,30 @@ export default function ClientLaunchPage() {
           <Section number={3} title="Цепочка писем" subtitle="Используйте переменные ниже, чтобы персонализировать сообщения.">
             {briefFilled === false && (
               <div
-                className="neu-inset rounded-2xl px-4 py-3 sm:px-5 sm:py-3.5 mb-4 flex items-start gap-3 text-xs sm:text-sm"
-                style={{ color: 'var(--cp-text-m)' }}
+                className="rounded-md px-4 py-3 sm:px-5 sm:py-3.5 mb-4 flex items-start gap-2.5 text-xs sm:text-sm"
+                style={{
+                  background: 'var(--cp-surface-rest)',
+                  border: '1px solid var(--cp-divider)',
+                }}
               >
-                <Info className="h-4 w-4 shrink-0 mt-0.5" style={{ color: 'var(--cp-accent)' }} />
+                <span
+                  aria-hidden
+                  className="ds-status-dot shrink-0"
+                  style={{ background: 'var(--cp-amber)', marginTop: '7px' }}
+                />
                 <div className="flex-1 min-w-0">
-                  <strong style={{ color: 'var(--cp-text)' }}>Совет.</strong>{' '}
-                  Заполните <Link href={'/client/brief' as Route} className="font-semibold" style={{ color: 'var(--cp-accent)' }}>бриф</Link> —
-                  AI-инструменты (Цепочки писем, Оценка ЦА, персонализация) сработают точнее под вашу аудиторию.
+                  <strong style={{ color: 'var(--cp-paper)' }}>Совет.</strong>{' '}
+                  <span style={{ color: 'var(--cp-paper-mute)' }}>
+                    Заполните{' '}
+                    <Link
+                      href={'/client/brief' as Route}
+                      className="font-semibold underline"
+                      style={{ color: 'var(--cp-paper)' }}
+                    >
+                      бриф
+                    </Link>
+                    {' '}— AI-инструменты (Цепочки писем, Оценка ЦА, персонализация) сработают точнее под вашу аудиторию.
+                  </span>
                 </div>
               </div>
             )}
@@ -713,15 +1022,13 @@ export default function ClientLaunchPage() {
             />
 
             <div className="mb-4">
-              <label className="text-xs font-semibold uppercase tracking-wider block mb-2" style={{ color: 'var(--cp-text-m)' }}>
-                Название кампании
-              </label>
+              <label className="ds-eyebrow block mb-2">название кампании</label>
               <input
                 type="text"
                 value={campaignName}
                 onChange={(e) => setCampaignName(e.target.value)}
                 placeholder="Например: Q2 Outreach IT-компании"
-                className="neu-input w-full px-4 py-2.5 text-sm"
+                className="ds-input w-full text-sm"
               />
             </div>
 
@@ -742,8 +1049,12 @@ export default function ClientLaunchPage() {
                   onRemoveVariant={(vIdx) => removeVariant(idx, vIdx)}
                 />
               ))}
-              <button type="button" onClick={addStep} className="neu-pill w-full py-3 text-sm font-semibold inline-flex items-center justify-center gap-2" style={{ color: 'var(--cp-accent)' }}>
-                <Plus className="h-4 w-4" /> Добавить шаг
+              <button
+                type="button"
+                onClick={addStep}
+                className="ds-btn-secondary w-full py-3 text-sm inline-flex items-center justify-center gap-2"
+              >
+                <Plus className="h-4 w-4" aria-hidden /> Добавить шаг
               </button>
             </div>
           </Section>
@@ -774,26 +1085,39 @@ export default function ClientLaunchPage() {
         {fileHeaders.length > 0 && (
           <Section number={6} title="Запуск" subtitle="Кампания будет создана в Instantly и сразу же активирована.">
             {launchError && (
-              <div className="mb-4 neu-inset rounded-2xl px-4 py-3 text-sm flex items-start gap-2" style={{ color: 'var(--cp-danger)' }}>
-                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-                {launchError}
+              <div
+                className="mb-4 neu-inset rounded-md px-4 py-3 text-sm flex items-start gap-2.5"
+                role="alert"
+              >
+                <span
+                  aria-hidden
+                  className="ds-status-dot shrink-0"
+                  style={{ background: 'var(--cp-red)', marginTop: '7px' }}
+                />
+                <span style={{ color: 'var(--cp-paper)' }}>{launchError}</span>
               </div>
             )}
             <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
-              <div className="text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
-                Будет загружено <span className="font-bold" style={{ color: 'var(--cp-text)' }}>{validLeadsCount.toLocaleString('ru-RU')}</span> лидов
-                · {sequenceSteps.length} {sequenceSteps.length === 1 ? 'шаг' : 'шага'} в цепочке
+              <div className="text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
+                Будет загружено{' '}
+                <span
+                  className="ds-mono font-bold"
+                  style={{ color: 'var(--cp-paper)' }}
+                >
+                  {validLeadsCount.toLocaleString('ru-RU')}
+                </span>{' '}
+                лидов · {sequenceSteps.length} {sequenceSteps.length === 1 ? 'шаг' : 'шага'} в цепочке
               </div>
               <button
                 type="button"
                 onClick={handleLaunch}
                 disabled={launching || validLeadsCount === 0}
-                className="neu-btn px-6 py-3 text-sm font-semibold inline-flex items-center justify-center gap-2"
+                className="ds-btn-primary px-6 py-3 text-sm inline-flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {launching ? (
-                  <><Loader2 className="h-4 w-4 animate-spin" /> Запускаем...</>
+                  <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Запускаем…</>
                 ) : (
-                  <><Send className="h-4 w-4" /> Запустить кампанию</>
+                  <><Send className="h-4 w-4" aria-hidden /> Запустить кампанию</>
                 )}
               </button>
             </div>
@@ -803,38 +1127,55 @@ export default function ClientLaunchPage() {
 
       {/* History */}
       <div className="mt-10">
-        <h2 className="text-sm font-bold uppercase tracking-wider mb-4" style={{ color: 'var(--cp-text-m)' }}>
-          История запусков
-        </h2>
+        <p className="ds-eyebrow mb-4">история запусков</p>
         {historyLoading ? (
           <div className="neu-card py-8 flex items-center justify-center">
             <div className="neu-spinner animate-spin" />
           </div>
         ) : history.length === 0 ? (
-          <div className="neu-card py-10 text-center text-sm" style={{ color: 'var(--cp-text-m)' }}>
+          <div
+            className="neu-card py-10 text-center text-sm"
+            style={{ color: 'var(--cp-paper-mute)' }}
+          >
             Запусков пока не было
           </div>
         ) : (
           <div className="space-y-2">
             {history.map((h) => (
               <div key={h.id} className="neu-sm px-4 py-3 flex items-center gap-3">
+                <span
+                  aria-hidden
+                  className="ds-status-dot shrink-0"
+                  style={{ background: STATUS_DOT[h.status] }}
+                />
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold truncate">{h.campaign_name}</p>
-                  <p className="text-xs mt-0.5" style={{ color: 'var(--cp-text-l)' }}>
+                  <p
+                    className="text-sm font-semibold truncate m-0"
+                    style={{ color: 'var(--cp-paper)' }}
+                  >
+                    {h.campaign_name}
+                  </p>
+                  <p
+                    className="ds-mono text-xs mt-0.5"
+                    style={{ color: 'var(--cp-paper-faint)' }}
+                  >
                     {formatDate(h.created_at)} · {h.accepted_rows.toLocaleString('ru-RU')} из {h.uploaded_rows.toLocaleString('ru-RU')}
                     {h.error_message && ` · ${h.error_message}`}
                   </p>
                 </div>
-                <span className="shrink-0 text-xs font-semibold px-2 py-1 rounded-full neu-well" style={{ color: STATUS_COLORS[h.status] }}>
+                <span
+                  className="ds-status-tag shrink-0"
+                  style={{ color: 'var(--cp-paper-mute)' }}
+                >
                   {STATUS_LABELS[h.status]}
                 </span>
                 {h.instantly_campaign_id && (
                   <Link
                     href={`/client/campaigns/${h.instantly_campaign_id}`}
-                    className="shrink-0 p-2 rounded-lg" aria-label="Открыть кампанию"
-                    style={{ color: 'var(--cp-accent)' }}
+                    className="ds-btn-ghost shrink-0 p-2"
+                    aria-label="Открыть кампанию"
                   >
-                    <ExternalLink className="h-4 w-4" />
+                    <ExternalLink className="h-4 w-4" aria-hidden />
                   </Link>
                 )}
               </div>
@@ -850,10 +1191,19 @@ function PresetBadge({ preset }: { preset: PresetSummary }) {
   return (
     <Link
       href={'/client/launch' as Route}
-      className="neu-well px-3 py-2 text-xs flex items-center gap-2 max-w-xs"
-      style={{ color: 'var(--cp-text-m)' }}
+      className="ds-mono text-xs flex items-center gap-2 max-w-xs px-3 py-2 rounded-md"
+      style={{
+        background: 'var(--cp-surface-rest)',
+        border: '1px solid var(--cp-divider)',
+        color: 'var(--cp-paper-mute)',
+        textDecoration: 'none',
+      }}
     >
-      <Mail className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--cp-accent)' }} />
+      <Mail
+        className="h-3.5 w-3.5 shrink-0"
+        style={{ color: 'var(--cp-paper-faint)' }}
+        aria-hidden
+      />
       <span className="truncate">
         {preset.email_account_ids.length} {preset.email_account_ids.length === 1 ? 'аккаунт' : 'аккаунтов'} · {preset.daily_limit}/день
       </span>
@@ -872,15 +1222,31 @@ function Section({
   subtitle?: string;
   children: React.ReactNode;
 }) {
+  const num = String(number).padStart(2, '0');
   return (
     <section className="neu-card overflow-hidden">
-      <header className="px-5 sm:px-6 py-4 flex items-start gap-3" style={{ borderBottom: '1px solid rgba(180,173,164,0.15)' }}>
-        <div className="flex h-7 w-7 items-center justify-center text-xs font-bold shrink-0 rounded-full text-white" style={{ background: 'linear-gradient(135deg, #10B981, #059669)' }}>
-          {number}
-        </div>
+      <header
+        className="px-5 sm:px-6 py-4 flex items-baseline gap-3"
+        style={{
+          borderBottom: '1px solid var(--cp-divider)',
+          background: 'var(--cp-surface-elev)',
+        }}
+      >
+        <span className="ds-eyebrow shrink-0">
+          {num}<span aria-hidden> → </span>
+        </span>
         <div className="min-w-0 flex-1">
-          <h2 className="text-sm sm:text-base font-bold">{title}</h2>
-          {subtitle && <p className="text-xs mt-0.5" style={{ color: 'var(--cp-text-m)' }}>{subtitle}</p>}
+          <h2
+            className="text-sm sm:text-base font-semibold m-0"
+            style={{ color: 'var(--cp-paper)' }}
+          >
+            {title}
+          </h2>
+          {subtitle && (
+            <p className="text-xs mt-0.5" style={{ color: 'var(--cp-paper-mute)' }}>
+              {subtitle}
+            </p>
+          )}
         </div>
       </header>
       <div className="px-5 sm:px-6 py-5">{children}</div>
@@ -906,15 +1272,20 @@ function MappingRow({
   return (
     <div>
       <div className="flex items-center justify-between mb-1.5 gap-2">
-        <label className="text-xs font-semibold" style={{ color: 'var(--cp-text-m)' }}>
-          {label} {required && <span style={{ color: 'var(--cp-danger)' }}>*</span>}
+        <label className="ds-eyebrow">
+          {label.toLowerCase()}{' '}
+          {required && (
+            <span style={{ color: 'var(--cp-red)' }} aria-label="обязательное">
+              *
+            </span>
+          )}
         </label>
         {value && <CopyVariableBadge variable={variable} />}
       </div>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="neu-input w-full px-3 py-2 text-sm"
+        className="ds-input w-full text-sm"
       >
         <option value="">— не использовать —</option>
         {headers.map((h) => <option key={h} value={h}>{h}</option>)}
@@ -932,11 +1303,15 @@ function CopyVariableBadge({ variable }: { variable: string }) {
       onClick={async () => {
         try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* noop */ }
       }}
-      className="neu-pill inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono shrink-0"
-      style={{ color: copied ? 'var(--cp-accent)' : 'var(--cp-text-m)' }}
+      className="ds-mono inline-flex items-center gap-1 px-2 py-0.5 text-[10px] shrink-0 rounded"
+      style={{
+        background: 'var(--cp-surface-rest)',
+        border: '1px solid var(--cp-divider)',
+        color: copied ? 'var(--cp-green)' : 'var(--cp-paper-mute)',
+      }}
       title="Скопировать переменную"
     >
-      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+      {copied ? <Check className="h-3 w-3" aria-hidden /> : <Copy className="h-3 w-3" aria-hidden />}
       {text}
     </button>
   );
@@ -945,10 +1320,14 @@ function CopyVariableBadge({ variable }: { variable: string }) {
 function BasePreview({ headers, rows }: { headers: string[]; rows: string[][] }) {
   if (headers.length === 0 || rows.length === 0) return null;
   return (
-    <div className="mt-3 neu-inset rounded-2xl px-3 py-3">
-      <p className="text-[10px] font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--cp-text-l)' }}>
-        Превью первых {rows.length} строк
-      </p>
+    <div
+      className="mt-3 rounded-md px-3 py-3"
+      style={{
+        background: 'var(--cp-surface-rest)',
+        border: '1px solid var(--cp-divider)',
+      }}
+    >
+      <p className="ds-eyebrow mb-2">превью первых {rows.length} строк</p>
       <div className="overflow-x-auto -mx-1 px-1">
         <table className="w-full text-xs" style={{ borderCollapse: 'separate', borderSpacing: 0 }}>
           <thead>
@@ -956,10 +1335,10 @@ function BasePreview({ headers, rows }: { headers: string[]; rows: string[][] })
               {headers.map((h, i) => (
                 <th
                   key={`${h}-${i}`}
-                  className="text-left font-semibold px-2 py-1.5 whitespace-nowrap"
-                  style={{ color: 'var(--cp-text-m)', borderBottom: '1px solid rgba(180,173,164,0.25)' }}
+                  className="ds-eyebrow text-left px-2 py-1.5 whitespace-nowrap"
+                  style={{ borderBottom: '1px solid var(--cp-divider)' }}
                 >
-                  {h || <span style={{ color: 'var(--cp-text-l)' }}>(пусто)</span>}
+                  {h || <span style={{ color: 'var(--cp-paper-faint)' }}>(пусто)</span>}
                 </th>
               ))}
             </tr>
@@ -970,11 +1349,18 @@ function BasePreview({ headers, rows }: { headers: string[]; rows: string[][] })
                 {headers.map((_, colIdx) => (
                   <td
                     key={colIdx}
-                    className="px-2 py-1.5 whitespace-nowrap font-mono"
-                    style={{ color: 'var(--cp-text)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}
+                    className="ds-mono px-2 py-1.5 whitespace-nowrap"
+                    style={{
+                      color: 'var(--cp-paper)',
+                      maxWidth: 200,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
                     title={row[colIdx] ?? ''}
                   >
-                    {(row[colIdx] ?? '').slice(0, 80) || <span className="font-sans" style={{ color: 'var(--cp-text-l)' }}>—</span>}
+                    {(row[colIdx] ?? '').slice(0, 80) || (
+                      <span style={{ color: 'var(--cp-paper-faint)' }}>—</span>
+                    )}
                   </td>
                 ))}
               </tr>
@@ -1063,18 +1449,39 @@ function VariableReference({
   );
   if (entries.length === 0) {
     return (
-      <div className="neu-inset rounded-2xl px-4 py-3 mb-4 text-xs flex items-start gap-2" style={{ color: 'var(--cp-text-m)' }}>
-        <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+      <div
+        className="rounded-md px-4 py-3 mb-4 text-xs flex items-start gap-2"
+        style={{
+          background: 'var(--cp-surface-rest)',
+          border: '1px solid var(--cp-divider)',
+          color: 'var(--cp-paper-mute)',
+        }}
+      >
+        <Info
+          className="h-3.5 w-3.5 shrink-0 mt-0.5"
+          style={{ color: 'var(--cp-paper-faint)' }}
+          aria-hidden
+        />
         Сопоставьте колонки на шаге 2 — здесь появятся доступные переменные.
       </div>
     );
   }
   return (
-    <div className="neu-inset rounded-2xl px-4 py-3 mb-4">
+    <div
+      className="rounded-md px-4 py-3 mb-4"
+      style={{
+        background: 'var(--cp-surface-rest)',
+        border: '1px solid var(--cp-divider)',
+      }}
+    >
       <div className="flex items-center gap-2 mb-2.5">
-        <Info className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--cp-accent)' }} />
-        <p className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-m)' }}>
-          Доступные переменные · клик — копировать
+        <Info
+          className="h-3.5 w-3.5 shrink-0"
+          style={{ color: 'var(--cp-paper-faint)' }}
+          aria-hidden
+        />
+        <p className="ds-eyebrow">
+          доступные переменные · клик — копировать
         </p>
       </div>
       <div className="flex flex-wrap gap-1.5">
@@ -1082,7 +1489,10 @@ function VariableReference({
           <VariableChip key={entry.variable} entry={entry} />
         ))}
       </div>
-      <p className="text-[10px] mt-2.5" style={{ color: 'var(--cp-text-l)' }}>
+      <p
+        className="text-[10px] mt-2.5"
+        style={{ color: 'var(--cp-paper-faint)' }}
+      >
         Если переменной нет у конкретного лида, Instantly подставит пустую строку.
       </p>
     </div>
@@ -1098,14 +1508,24 @@ function VariableChip({ entry }: { entry: VariableEntry }) {
       onClick={async () => {
         try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* noop */ }
       }}
-      className="neu-pill inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono"
-      style={{ color: copied ? 'var(--cp-accent)' : 'var(--cp-text-m)' }}
+      className="ds-mono inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] rounded transition-colors"
+      style={{
+        background: 'var(--cp-ink)',
+        border: '1px solid var(--cp-divider)',
+        color: copied ? 'var(--cp-green)' : 'var(--cp-paper-mute)',
+      }}
       title={entry.sample ? `Колонка «${entry.source}» · пример: ${entry.sample}` : `Колонка «${entry.source}»`}
     >
-      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+      {copied ? <Check className="h-3 w-3" aria-hidden /> : <Copy className="h-3 w-3" aria-hidden />}
       {text}
       {entry.sample && (
-        <span className="font-sans text-[10px] truncate max-w-[120px]" style={{ color: 'var(--cp-text-l)' }}>
+        <span
+          className="text-[10px] truncate max-w-[120px]"
+          style={{
+            color: 'var(--cp-paper-faint)',
+            fontFamily: 'var(--font-inter), Inter, ui-sans-serif',
+          }}
+        >
           · {entry.sample.slice(0, 24)}
         </span>
       )}
@@ -1157,24 +1577,39 @@ function BehaviorToggle({
     <button
       type="button"
       onClick={onToggle}
-      className="neu-sm w-full p-4 text-left flex items-center justify-between gap-4"
+      className="ds-card-pressable w-full p-4 text-left flex items-center justify-between gap-4 rounded-md"
+      style={{
+        background: 'var(--cp-surface-rest)',
+        border: '1px solid var(--cp-divider)',
+      }}
       aria-pressed={checked}
     >
       <span className="min-w-0">
-        <span className="block text-sm font-semibold" style={{ color: 'var(--cp-text)' }}>
+        <span
+          className="block text-sm font-semibold"
+          style={{ color: 'var(--cp-paper)' }}
+        >
           {label}
         </span>
-        <span className="block text-xs mt-1" style={{ color: 'var(--cp-text-m)' }}>
+        <span
+          className="block text-xs mt-1"
+          style={{ color: 'var(--cp-paper-mute)' }}
+        >
           {description}
         </span>
       </span>
       <span
         className="relative h-6 w-11 shrink-0 rounded-full transition-colors"
-        style={{ background: checked ? 'var(--cp-accent)' : 'rgba(148,163,184,0.35)' }}
+        style={{
+          background: checked ? 'var(--cp-paper)' : 'var(--cp-divider-strong)',
+        }}
       >
         <span
-          className="absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform"
-          style={{ left: checked ? '1.375rem' : '0.125rem' }}
+          className="absolute top-0.5 h-5 w-5 rounded-full transition-transform"
+          style={{
+            left: checked ? '1.375rem' : '0.125rem',
+            background: checked ? 'var(--cp-ink)' : 'var(--cp-paper-faint)',
+          }}
         />
       </span>
     </button>
@@ -1204,35 +1639,29 @@ function ScheduleEditor({
     <div>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
         <div>
-          <label className="text-xs font-semibold uppercase tracking-wider block mb-1.5" style={{ color: 'var(--cp-text-m)' }}>
-            Время начала
-          </label>
+          <label className="ds-eyebrow block mb-1.5">время начала</label>
           <input
             type="time"
             value={schedule.from}
             onChange={(e) => onChange({ ...schedule, from: e.target.value })}
-            className="neu-input w-full px-3 py-2 text-sm"
+            className="ds-input ds-mono w-full text-sm"
           />
         </div>
         <div>
-          <label className="text-xs font-semibold uppercase tracking-wider block mb-1.5" style={{ color: 'var(--cp-text-m)' }}>
-            Время окончания
-          </label>
+          <label className="ds-eyebrow block mb-1.5">время окончания</label>
           <input
             type="time"
             value={schedule.to}
             onChange={(e) => onChange({ ...schedule, to: e.target.value })}
-            className="neu-input w-full px-3 py-2 text-sm"
+            className="ds-input ds-mono w-full text-sm"
           />
         </div>
         <div>
-          <label className="text-xs font-semibold uppercase tracking-wider block mb-1.5" style={{ color: 'var(--cp-text-m)' }}>
-            Часовой пояс
-          </label>
+          <label className="ds-eyebrow block mb-1.5">часовой пояс</label>
           <select
             value={tzNormalized}
             onChange={(e) => onChange({ ...schedule, timezone: e.target.value })}
-            className="neu-input w-full px-3 py-2 text-sm"
+            className="ds-input w-full text-sm"
           >
             {INSTANTLY_TIMEZONE_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
@@ -1241,9 +1670,7 @@ function ScheduleEditor({
         </div>
       </div>
       <div>
-        <label className="text-xs font-semibold uppercase tracking-wider block mb-2" style={{ color: 'var(--cp-text-m)' }}>
-          Дни недели
-        </label>
+        <label className="ds-eyebrow block mb-2">дни недели</label>
         <div className="flex flex-wrap gap-1.5">
           {WEEKDAYS.map((d) => {
             const checked = schedule.days.includes(d.value);
@@ -1252,8 +1679,8 @@ function ScheduleEditor({
                 key={d.value}
                 type="button"
                 onClick={() => toggleDay(d.value)}
-                className={`neu-pill px-3 py-1.5 text-xs font-semibold ${checked ? 'active' : ''}`}
-                style={!checked ? { color: 'var(--cp-text-m)' } : undefined}
+                className={`ds-nav-item px-3 py-1.5 text-xs ${checked ? 'active' : ''}`}
+                aria-pressed={checked}
               >
                 {d.label}
               </button>
@@ -1262,10 +1689,13 @@ function ScheduleEditor({
         </div>
       </div>
       {hydrated && (
-        <p className="mt-3 text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+        <p
+          className="ds-mono mt-3 text-[11px]"
+          style={{ color: 'var(--cp-paper-faint)' }}
+        >
           {schedule.days.length === 0
-            ? 'Выберите хотя бы один день — иначе кампания не будет отправляться.'
-            : `Письма будут уходить ${schedule.from}–${schedule.to} (${tzLabel}) в выбранные дни.`}
+            ? 'выберите хотя бы один день — иначе кампания не будет отправляться'
+            : `${schedule.from}–${schedule.to} (${tzLabel}) в выбранные дни`}
         </p>
       )}
     </div>
@@ -1306,32 +1736,59 @@ function SequenceStepEditor({
   const canAddVariant = variantsCount < CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP;
 
   return (
-    <div className="neu-sm p-4">
+    <div
+      className="rounded-md p-4"
+      style={{
+        background: 'var(--cp-surface-rest)',
+        border: '1px solid var(--cp-divider)',
+      }}
+    >
       <div className="flex items-center gap-3 mb-3">
-        <div className="neu-well flex h-7 w-7 items-center justify-center text-xs font-bold shrink-0" style={{ color: 'var(--cp-accent)' }}>
-          {stepIdx + 1}
-        </div>
-        <span className="text-sm font-semibold" style={{ color: 'var(--cp-text)' }}>
+        <span
+          className="ds-mono text-xs font-semibold shrink-0"
+          style={{ color: 'var(--cp-paper-faint)' }}
+        >
+          {String(stepIdx + 1).padStart(2, '0')}
+        </span>
+        <span
+          className="text-sm font-semibold"
+          style={{ color: 'var(--cp-paper)' }}
+        >
           {isFirstStep ? 'Первое письмо' : `Письмо ${stepIdx + 1}`}
         </span>
         <div className="flex-1" />
         {!isFirstStep && (
           <div className="flex items-center gap-2 shrink-0">
-            <span className="text-xs" style={{ color: 'var(--cp-text-m)' }}>через</span>
+            <span
+              className="text-xs"
+              style={{ color: 'var(--cp-paper-mute)' }}
+            >
+              через
+            </span>
             <input
               type="number"
               min={0}
               max={60}
               value={step.wait_days}
               onChange={(e) => onUpdateStep({ wait_days: Math.max(0, Math.min(60, Number(e.target.value) || 0)) })}
-              className="neu-input w-14 px-2 py-1.5 text-sm text-center"
+              className="ds-input ds-mono w-14 text-sm text-center"
             />
-            <span className="text-xs" style={{ color: 'var(--cp-text-m)' }}>дн.</span>
+            <span
+              className="text-xs"
+              style={{ color: 'var(--cp-paper-mute)' }}
+            >
+              дн.
+            </span>
           </div>
         )}
         {canRemove && (
-          <button type="button" onClick={onRemoveStep} className="p-1.5 rounded-lg shrink-0" style={{ color: 'var(--cp-text-m)' }} aria-label="Удалить шаг">
-            <Trash2 className="h-4 w-4" />
+          <button
+            type="button"
+            onClick={onRemoveStep}
+            className="ds-btn-ghost p-1.5 shrink-0"
+            aria-label="Удалить шаг"
+          >
+            <Trash2 className="h-4 w-4" aria-hidden />
           </button>
         )}
       </div>
@@ -1342,7 +1799,10 @@ function SequenceStepEditor({
           const letter = String.fromCharCode(65 + vIdx);
           const isActive = vIdx === activeVariant;
           return (
-            <div key={vIdx} className={`neu-pill inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold ${isActive ? 'active' : ''}`} style={!isActive ? { color: 'var(--cp-text-m)' } : undefined}>
+            <div
+              key={vIdx}
+              className={`ds-nav-item inline-flex items-center gap-1 px-3 py-1 text-xs ${isActive ? 'active' : ''}`}
+            >
               <button type="button" onClick={() => onSetActiveVariant(vIdx)}>
                 Вариант {letter}
               </button>
@@ -1350,11 +1810,11 @@ function SequenceStepEditor({
                 <button
                   type="button"
                   onClick={() => onRemoveVariant(vIdx - 1)}
-                  className="ml-0.5 -mr-1 p-0.5 rounded-full hover:bg-black/5"
-                  style={{ color: 'var(--cp-text-l)' }}
+                  className="ml-0.5 -mr-1 p-0.5"
+                  style={{ color: 'var(--cp-paper-faint)' }}
                   aria-label={`Удалить вариант ${letter}`}
                 >
-                  <X className="h-3 w-3" />
+                  <X className="h-3 w-3" aria-hidden />
                 </button>
               )}
             </div>
@@ -1364,14 +1824,16 @@ function SequenceStepEditor({
           <button
             type="button"
             onClick={onAddVariant}
-            className="neu-pill inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold"
-            style={{ color: 'var(--cp-accent)' }}
+            className="ds-btn-ghost inline-flex items-center gap-1 px-3 py-1 text-xs"
           >
-            <Plus className="h-3 w-3" /> Вариант
+            <Plus className="h-3 w-3" aria-hidden /> Вариант
           </button>
         )}
         {variantsCount > 1 && (
-          <span className="ml-2 text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+          <span
+            className="ml-2 text-[10px]"
+            style={{ color: 'var(--cp-paper-faint)' }}
+          >
             Instantly случайно выберет один вариант для каждого лида
           </span>
         )}
@@ -1382,27 +1844,41 @@ function SequenceStepEditor({
         value={activeContent.subject ?? ''}
         onChange={(e) => onUpdateActive({ subject: e.target.value })}
         placeholder={subjectRequired ? 'Тема письма' : 'Та же тема — продолжение ветки'}
-        className="neu-input w-full px-3 py-2 text-sm"
+        className="ds-input w-full text-sm"
       />
       {customSubjectOnFollowUp && (
-        <div className="mt-1.5 text-[11px] flex items-start gap-1.5" style={{ color: '#C49B4A' }}>
-          <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
-          Новая тема создаст отдельную ветку — получатель не увидит историю переписки. Оставьте пустым, чтобы продолжить ту же ветку.
+        <div className="mt-1.5 text-[11px] flex items-start gap-1.5">
+          <AlertTriangle
+            className="h-3 w-3 shrink-0 mt-0.5"
+            style={{ color: 'var(--cp-amber)' }}
+            aria-hidden
+          />
+          <span style={{ color: 'var(--cp-paper-mute)' }}>
+            Новая тема создаст отдельную ветку — получатель не увидит историю переписки. Оставьте пустым, чтобы продолжить ту же ветку.
+          </span>
         </div>
       )}
       {!isFirstStep && (activeContent.subject ?? '').trim() === '' && (
-        <div className="mt-1.5 text-[11px] flex items-start gap-1.5" style={{ color: 'var(--cp-text-l)' }}>
-          <Info className="h-3 w-3 shrink-0 mt-0.5" />
-          Будет отправлено в той же ветке, что и предыдущее письмо.
+        <div className="mt-1.5 text-[11px] flex items-start gap-1.5">
+          <Info
+            className="h-3 w-3 shrink-0 mt-0.5"
+            style={{ color: 'var(--cp-paper-faint)' }}
+            aria-hidden
+          />
+          <span style={{ color: 'var(--cp-paper-faint)' }}>
+            Будет отправлено в той же ветке, что и предыдущее письмо.
+          </span>
         </div>
       )}
-      <EmailBodyField
-        value={activeContent.body}
-        onChange={(v) => onUpdateActive({ body: v })}
-        placeholder="Текст письма — обычный текст, HTML не используется"
-        rows={6}
-        className="neu-input w-full px-3 py-2 text-sm font-sans resize-y"
-      />
+      <div className="mt-2">
+        <EmailBodyField
+          value={activeContent.body}
+          onChange={(v) => onUpdateActive({ body: v })}
+          placeholder="Текст письма — обычный текст, HTML не используется"
+          rows={6}
+          className="ds-input w-full text-sm resize-y"
+        />
+      </div>
     </div>
   );
 }

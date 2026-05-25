@@ -4,7 +4,13 @@ import { runCryptoPaymentJob } from '@/lib/parsers/cryptoPaymentsWorker';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
-const MAX_CONCURRENCY = 5;
+// MAX_CONCURRENCY — сколько job'ов одна реплика worker'а берёт параллельно.
+// Был 5 hardcoded. Поднимаю до 8: на 50к-базах юзеры жаловались что job'ы
+// от разных людей встают в очередь. Память: ~150-300MB на активный job
+// (in-flight Map + cheerio HTML buffers), 8 × ~250MB = ~2GB max — попадает
+// в обновлённый docker-compose limit. Env override доступен на случай
+// если на конкретной реплике мало памяти.
+const MAX_CONCURRENCY = Number(process.env.ENRICH_MAX_CONCURRENCY ?? '8');
 const STALE_JOB_MINUTES = Number(process.env.ENRICH_STALE_JOB_MINUTES ?? '10');
 const WATCHDOG_INTERVAL_MS = 60_000;
 const WORKER_ID = `enrich-${process.pid}-${Date.now()}`;

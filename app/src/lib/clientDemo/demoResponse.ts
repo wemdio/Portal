@@ -29,6 +29,7 @@ import {
   getDemoLeadsResponse,
   getDemoRepliesResponse,
   getDemoReplies,
+  getDemoThread,
   getDemoCampaignDetail,
   getDemoProjectDetail,
   getDemoReportResponse,
@@ -94,15 +95,30 @@ export async function serveClientDemo(req: NextRequest): Promise<NextResponse> {
       const rawOffset = Number(req.nextUrl.searchParams.get('offset') ?? '0');
       const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
       const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
-      return json(getDemoRepliesResponse(limit, offset));
+      // Mirror real /replies API: whitelist status, pass search through.
+      const rawStatus = req.nextUrl.searchParams.get('status');
+      const status: 'all' | 'unread' | 'leads' =
+        rawStatus === 'unread' || rawStatus === 'leads' ? rawStatus : 'all';
+      const search = req.nextUrl.searchParams.get('search')?.trim() || undefined;
+      return json(getDemoRepliesResponse(limit, offset, status, search));
     }
     default:
       break;
   }
 
   // ── Динамические сегменты ──────────────────────────────────────────────
-  // /campaigns/<id>            → деталь кампании
-  // /campaigns/<id>/replies    → ответы получателей
+  // /campaigns/<id>/replies/<emailId>/thread → тред (outbound + inbound)
+  // /campaigns/<id>/replies                  → ответы получателей по кампании
+  // /campaigns/<id>                          → деталь кампании
+  if (
+    seg[0] === 'campaigns'
+    && seg[1]
+    && seg[2] === 'replies'
+    && seg[3]
+    && seg[4] === 'thread'
+  ) {
+    return json(getDemoThread(seg[1], seg[3]));
+  }
   if (seg[0] === 'campaigns' && seg[1]) {
     if (seg[2] === 'replies') return json(getDemoReplies(seg[1]));
     return json(getDemoCampaignDetail(seg[1]));

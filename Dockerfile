@@ -8,9 +8,17 @@ COPY app/patches ./patches
 
 # Install dependencies and force musl lightningcss binary for Alpine.
 # package-lock currently contains only gnu flavor, which breaks Next/Turbopack on musl.
-RUN npm install --include=optional \
+#
+# --ignore-scripts: sqlite3 (через gramjs-sqlitesession) тянет node-gyp rebuild,
+# который требует Python + make + g++. С npm install (не npm ci) deps стали
+# tucking новые версии sqlite3 → build падает в чистом node:22-alpine, потому
+# что там нет Python. В main-app sqlite используется только telegram/sessionUtils.ts,
+# воркеры тянут свой собственный образ (Dockerfile.worker) который ставит Python
+# и rebuild'ит — поэтому в main-app достаточно --ignore-scripts (sqlite3 не
+# работает в main API/SSR контексте, но native sqlite-биндинги там и не нужны).
+RUN npm install --include=optional --ignore-scripts \
   && LIGHTNINGCSS_VERSION=$(node -p "require('./node_modules/lightningcss/package.json').version") \
-  && npm install --no-save "lightningcss-linux-x64-musl@${LIGHTNINGCSS_VERSION}"
+  && npm install --no-save --ignore-scripts "lightningcss-linux-x64-musl@${LIGHTNINGCSS_VERSION}"
 
 # Stage 2: Builder
 FROM node:22-alpine AS builder

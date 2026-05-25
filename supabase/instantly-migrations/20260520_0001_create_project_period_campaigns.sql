@@ -26,7 +26,16 @@ create index if not exists idx_project_period_campaigns_campaign
 
 alter table public.project_period_instantly_campaigns enable row level security;
 
-grant all on public.project_period_instantly_campaigns to service_role;
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'service_role') then
+    grant all on public.project_period_instantly_campaigns to service_role;
+  end if;
+
+  if exists (select 1 from pg_roles where rolname = 'instantly') then
+    grant all on public.project_period_instantly_campaigns to instantly;
+  end if;
+end $$;
 
 drop policy if exists "Service role full access on project_period_instantly_campaigns" on public.project_period_instantly_campaigns;
 create policy "Service role full access on project_period_instantly_campaigns"

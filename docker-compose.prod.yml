@@ -152,11 +152,22 @@ services:
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=enrich
+      # Тюнинг производительности email/text/signals enrichment'а:
+      # - WEBSITE_ENRICHMENT_CONCURRENCY: сколько сайтов в одном job'е скрапится
+      #   параллельно (10 → 15). Domain-throttle (=1 на домен) ограничивает
+      #   нагрузку на target-сайты, так что +50% concurrency не вызовет ban'ов.
+      # - ENRICH_MAX_CONCURRENCY: сколько job'ов одна реплика обслуживает
+      #   одновременно (5 → 8). Раньше юзеры на 50к-базах вставали в очередь
+      #   когда параллельно запускались несколько Поисков почт.
+      # Memory limit поднял до 2G чтобы покрыть +50% concurrency
+      # (8 job × ~250MB peak in-flight ≈ 2G с запасом на cheerio HTML buffers).
+      - WEBSITE_ENRICHMENT_CONCURRENCY=${WEBSITE_ENRICHMENT_CONCURRENCY:-15}
+      - ENRICH_MAX_CONCURRENCY=${ENRICH_MAX_CONCURRENCY:-8}
     stop_grace_period: 30m
     deploy:
       resources:
         limits:
-          memory: 1536M
+          memory: 2048M
           cpus: '1'
     restart: unless-stopped
     networks:

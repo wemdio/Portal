@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
+import { FolderKanban } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 type ProjectListItem = {
@@ -26,13 +27,17 @@ type ProjectsResponse = {
   total: number;
 };
 
-const STATUS_TONES: Record<string, { bg: string; fg: string }> = {
-  'В работе': { bg: 'rgba(59,130,246,0.15)', fg: '#1d4ed8' },
-  'Тестирование': { bg: 'rgba(245,158,11,0.15)', fg: '#b45309' },
-  'На паузе': { bg: 'rgba(148,163,184,0.18)', fg: '#475569' },
-  'Подготовка': { bg: 'rgba(168,85,247,0.15)', fg: '#7e22ce' },
-  'Завершен': { bg: 'rgba(34,197,94,0.15)', fg: '#15803d' },
-  'Отменен': { bg: 'rgba(239,68,68,0.15)', fg: '#b91c1c' },
+// Status → 6px semantic dot colour. Tones collapse onto the system's status
+// vocabulary (amber = in-progress, green = done, red = cancelled, paper-faint
+// = neutral/paused/preparation). The filled tinted-pill pattern is gone —
+// status is data, signalled by a dot + mono uppercase tag.
+const STATUS_DOT: Record<string, string> = {
+  'В работе': 'var(--cp-amber)',
+  'Тестирование': 'var(--cp-amber)',
+  'На паузе': 'var(--cp-paper-faint)',
+  'Подготовка': 'var(--cp-paper-faint)',
+  'Завершен': 'var(--cp-green)',
+  'Отменен': 'var(--cp-red)',
 };
 
 function formatDate(value: string | null): string {
@@ -59,28 +64,25 @@ function ContactsProgress({ done, total }: { done: string | null; total: string 
   return (
     <div>
       <div className="flex items-baseline justify-between mb-1.5">
+        <span className="ds-eyebrow">Контакты</span>
         <span
-          className="text-[10px] font-semibold uppercase tracking-wider"
-          style={{ color: 'var(--cp-text-l)' }}
+          className="ds-mono text-xs font-semibold"
+          style={{ color: 'var(--cp-paper)' }}
         >
-          Контакты
-        </span>
-        <span className="text-xs font-bold" style={{ color: 'var(--cp-text)' }}>
           {done?.trim() || '0'}
-          {total?.trim() ? <span style={{ color: 'var(--cp-text-l)' }}> / {total}</span> : null}
+          {total?.trim() ? (
+            <span style={{ color: 'var(--cp-paper-faint)' }}> / {total}</span>
+          ) : null}
         </span>
       </div>
       {isNumeric && (
         <div
-          className="neu-inset h-1.5 rounded-full overflow-hidden"
-          style={{ background: 'var(--cp-inset, rgba(180,173,164,0.12))' }}
+          className="h-1.5 rounded-full overflow-hidden"
+          style={{ background: 'var(--cp-divider)' }}
         >
           <div
             className="h-full rounded-full transition-all"
-            style={{
-              width: `${pct}%`,
-              background: 'var(--cp-accent)',
-            }}
+            style={{ width: `${pct}%`, background: 'var(--cp-paper)' }}
           />
         </div>
       )}
@@ -89,15 +91,17 @@ function ContactsProgress({ done, total }: { done: string | null; total: string 
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const tone = STATUS_TONES[status] ?? {
-    bg: 'rgba(148,163,184,0.18)',
-    fg: '#475569',
-  };
+  const dot = STATUS_DOT[status] ?? 'var(--cp-paper-faint)';
   return (
     <span
-      className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold whitespace-nowrap"
-      style={{ background: tone.bg, color: tone.fg }}
+      className="ds-status-tag"
+      style={{ color: 'var(--cp-paper-mute)' }}
     >
+      <span
+        aria-hidden
+        className="ds-status-dot shrink-0"
+        style={{ background: dot }}
+      />
       {status}
     </span>
   );
@@ -107,17 +111,22 @@ function ProjectCard({ project }: { project: ProjectListItem }) {
   return (
     <Link
       href={`/client/projects/${project.id}` as Route}
-      className="neu-sm block p-4 sm:p-5 transition-shadow hover:shadow-md"
+      className="neu-sm ds-card-pressable block p-4 sm:p-5"
     >
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="min-w-0">
-          <p className="text-base font-extrabold truncate" style={{ color: 'var(--cp-text)' }}>
+          <p
+            className="text-base font-bold truncate m-0"
+            style={{ color: 'var(--cp-paper)' }}
+          >
             {project.name || 'Без названия'}
           </p>
           {(project.specialist || project.manager) && (
-            <p className="text-xs truncate mt-0.5" style={{ color: 'var(--cp-text-m)' }}>
+            <p className="text-xs truncate mt-0.5" style={{ color: 'var(--cp-paper-mute)' }}>
               {project.specialist && <>Специалист: {project.specialist}</>}
-              {project.specialist && project.manager && <span style={{ color: 'var(--cp-text-l)' }}> · </span>}
+              {project.specialist && project.manager && (
+                <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+              )}
               {project.manager && <>Менеджер: {project.manager}</>}
             </p>
           )}
@@ -126,27 +135,48 @@ function ProjectCard({ project }: { project: ProjectListItem }) {
       </div>
 
       <div className="grid grid-cols-3 gap-2 mb-3">
-        <div className="neu-inset rounded-lg px-2.5 py-2 text-center">
-          <p className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>
-            Активных
-          </p>
-          <p className="text-base font-extrabold" style={{ color: 'var(--cp-text)' }}>
+        <div
+          className="rounded-md px-2.5 py-2 text-center"
+          style={{
+            background: 'var(--cp-surface-rest)',
+            border: '1px solid var(--cp-divider)',
+          }}
+        >
+          <p className="ds-eyebrow">Активных</p>
+          <p
+            className="ds-mono text-base font-semibold mt-0.5"
+            style={{ color: 'var(--cp-paper)' }}
+          >
             {project.tasks_active}
           </p>
         </div>
-        <div className="neu-inset rounded-lg px-2.5 py-2 text-center">
-          <p className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>
-            Завершено
-          </p>
-          <p className="text-base font-extrabold" style={{ color: 'var(--cp-text)' }}>
+        <div
+          className="rounded-md px-2.5 py-2 text-center"
+          style={{
+            background: 'var(--cp-surface-rest)',
+            border: '1px solid var(--cp-divider)',
+          }}
+        >
+          <p className="ds-eyebrow">Завершено</p>
+          <p
+            className="ds-mono text-base font-semibold mt-0.5"
+            style={{ color: 'var(--cp-paper)' }}
+          >
             {project.tasks_done}
           </p>
         </div>
-        <div className="neu-inset rounded-lg px-2.5 py-2 text-center">
-          <p className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>
-            Лиды
-          </p>
-          <p className="text-base font-extrabold" style={{ color: 'var(--cp-accent)' }}>
+        <div
+          className="rounded-md px-2.5 py-2 text-center"
+          style={{
+            background: 'var(--cp-surface-rest)',
+            border: '1px solid var(--cp-divider)',
+          }}
+        >
+          <p className="ds-eyebrow">Лиды</p>
+          <p
+            className="ds-mono text-base font-semibold mt-0.5"
+            style={{ color: 'var(--cp-paper)' }}
+          >
             {project.leads_count}
           </p>
         </div>
@@ -158,15 +188,23 @@ function ProjectCard({ project }: { project: ProjectListItem }) {
       />
 
       {(project.launch_date || project.deadline) && (
-        <div className="flex items-center justify-between mt-3 pt-3 text-xs" style={{ borderTop: '1px solid var(--cp-divider, rgba(148,163,184,0.18))', color: 'var(--cp-text-m)' }}>
+        <div
+          className="ds-mono flex items-center justify-between mt-3 pt-3 text-[11px]"
+          style={{
+            borderTop: '1px solid var(--cp-divider)',
+            color: 'var(--cp-paper-mute)',
+          }}
+        >
           {project.launch_date && (
             <span>
-              <span style={{ color: 'var(--cp-text-l)' }}>Запуск:</span> {formatDate(project.launch_date)}
+              <span style={{ color: 'var(--cp-paper-faint)' }}>запуск </span>
+              {formatDate(project.launch_date)}
             </span>
           )}
           {project.deadline && (
             <span>
-              <span style={{ color: 'var(--cp-text-l)' }}>Дедлайн:</span> {formatDate(project.deadline)}
+              <span style={{ color: 'var(--cp-paper-faint)' }}>дедлайн </span>
+              {formatDate(project.deadline)}
             </span>
           )}
         </div>
@@ -201,48 +239,69 @@ export default function ClientProjectsPage() {
 
   return (
     <div className="mx-auto max-w-5xl">
-      <div className="mb-6 sm:mb-8">
-        <h1 className="text-xl sm:text-2xl font-extrabold">Проекты</h1>
-        <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
+      <header className="mb-6 sm:mb-8">
+        <h1
+          className="text-xl sm:text-2xl font-bold m-0"
+          style={{ color: 'var(--cp-paper)' }}
+        >
+          Проекты
+        </h1>
+        <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
           Статусы, задачи и прогресс по контактам по всем вашим проектам
         </p>
-      </div>
+      </header>
 
       {error && (
         <div
-          className="neu-inset mb-6 rounded-2xl px-5 py-3.5 text-sm font-medium"
-          style={{ color: 'var(--cp-danger, #dc2626)' }}
+          className="neu-inset mb-6 rounded-lg px-5 py-3.5 text-sm font-medium flex items-start gap-2.5"
+          role="alert"
         >
-          {error}
+          <span
+            aria-hidden
+            className="ds-status-dot shrink-0"
+            style={{ background: 'var(--cp-red)', marginTop: '7px' }}
+          />
+          <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
         </div>
       )}
 
       {loading ? (
         <div className="flex items-center justify-center py-16">
-          <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
-            Загрузка...
+          <p
+            className="ds-mono text-xs"
+            style={{ color: 'var(--cp-paper-mute)' }}
+          >
+            Загружаем проекты…
           </p>
         </div>
       ) : items.length === 0 ? (
         <div className="neu-card py-12 sm:py-16 text-center px-6">
-          <p className="text-base sm:text-lg font-bold mb-2" style={{ color: 'var(--cp-text)' }}>
+          <FolderKanban
+            className="mx-auto h-8 w-8 mb-3"
+            style={{ color: 'var(--cp-paper-faint)' }}
+            aria-hidden
+          />
+          <p className="text-base sm:text-lg font-bold mb-2" style={{ color: 'var(--cp-paper)' }}>
             Проектов пока нет
           </p>
-          <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-text-m)' }}>
+          <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-paper-mute)' }}>
             Проекты создаёт менеджер агентства. Если вы ожидаете проект, но его нет —
             напишите менеджеру, чтобы он привязал его к вашему профилю.
           </p>
           <Link
             href={'/client/support' as Route}
-            className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold"
+            className="ds-btn-primary inline-flex items-center gap-2 px-5"
           >
             Связаться с менеджером
           </Link>
         </div>
       ) : (
         <>
-          <p className="text-xs font-semibold mb-3" style={{ color: 'var(--cp-text-l)' }}>
-            Всего проектов: {total}
+          <p
+            className="ds-mono text-xs mb-3"
+            style={{ color: 'var(--cp-paper-faint)' }}
+          >
+            всего проектов: {total}
           </p>
           <div className="space-y-3">
             {items.map((project) => (
