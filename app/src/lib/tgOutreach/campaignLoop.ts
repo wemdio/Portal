@@ -1165,7 +1165,6 @@ export async function runCampaignLoop(
         const accountStartMs = Date.now();
 
         try {
-          let dialogs: Awaited<ReturnType<typeof client.getDialogs>>;
           // Race against a hard per-account timeout. We do not abort the
           // gramJS call (Promise.race leaves it dangling), but the worker
           // moves on, which is what matters for keeping the watchdog happy.
@@ -1179,7 +1178,7 @@ export async function runCampaignLoop(
           // The bug itself is now handled in the outer catch with a
           // dedicated branch — the old inner retry never succeeded
           // (1:1 retry-to-fail ratio in 7d of prod logs), so we drop it.
-          dialogs = await Promise.race([
+          const dialogs = await Promise.race([
             client.getDialogs({ limit: DIALOGS_FETCH_LIMIT, archived: false }),
             new Promise<never>((_, reject) =>
               setTimeout(
