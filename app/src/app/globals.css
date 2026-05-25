@@ -1801,3 +1801,137 @@ body:has(.client-portal) {
   color: var(--cp-ink) !important;
   box-shadow: none;
 }
+
+/* ── Parser / shared-admin-tools chrome bridge (extension) ───────────────
+   Shared components (HHParserView/Form, JobsList, VacancyResults,
+   SearchParserForm, YandexMapsParserView, EmailSequenceV2*) live in
+   /client/parsers and similar client routes but were authored for the
+   admin surface — they use Tailwind's decorative palette directly:
+   indigo briefcase icon boxes, emerald table boxes, amber clock boxes,
+   inline 3px colored top stripes (#6366F1, #3B82F6, #F43F5E), blue/
+   indigo "Запустить" buttons, amber "Как работает" ghost pills, etc.
+
+   Inside .client-portal we neutralize all of that to editorial dark;
+   admin views (no .client-portal ancestor — CSS naturally scoped) keep
+   their colors exactly as they were. Zero risk of breaking admin tools.
+
+   See user observation 2026-05-24 («инструменты сильно отличаются по
+   дизайну»).
+   ─────────────────────────────────────────────────────────────────────── */
+
+/* (a) Inline 3px colored top stripes (HHParserForm #6366F1,
+   SearchParserForm #3B82F6, YandexMapsParserView #F43F5E). Catches any
+   inline border-top in client scope and flattens to hairline divider. */
+.client-portal [style*="border-top"] {
+  border-top-color: var(--cp-divider) !important;
+  border-top-width: 1px !important;
+}
+
+/* (b) Decorative icon boxes: 7×7 squares wrapping a Lucide icon. The
+   Tailwind pattern is bg-{color}-100 + text-{color}-600 — pure chrome,
+   no semantic. Neutralize to surface-elev + paper. */
+.client-portal .bg-indigo-100,
+.client-portal .bg-violet-100,
+.client-portal .bg-violet-50,
+.client-portal .bg-purple-100,
+.client-portal .bg-amber-100,
+.client-portal .bg-orange-100,
+.client-portal .bg-emerald-100,
+.client-portal .bg-sky-100,
+.client-portal .bg-rose-100,
+.client-portal .bg-fuchsia-100 {
+  background: var(--cp-surface-elev) !important;
+}
+.client-portal .text-indigo-600,
+.client-portal .text-indigo-700,
+.client-portal .text-violet-600,
+.client-portal .text-violet-700,
+.client-portal .text-purple-600,
+.client-portal .text-purple-700,
+.client-portal .text-orange-600,
+.client-portal .text-orange-700,
+.client-portal .text-rose-600,
+.client-portal .text-rose-700,
+.client-portal .text-sky-600,
+.client-portal .text-fuchsia-600 {
+  color: var(--cp-paper) !important;
+}
+
+/* (c) Primary CTAs: bg-{blue,indigo,violet,purple}-600/700 with text-white.
+   Swap to editorial paper-on-ink. */
+.client-portal .bg-indigo-600,
+.client-portal .bg-indigo-700,
+.client-portal .bg-violet-600,
+.client-portal .bg-violet-700,
+.client-portal .bg-purple-600,
+.client-portal .bg-purple-700,
+.client-portal .bg-emerald-600 {
+  background: var(--cp-paper) !important;
+  color: var(--cp-ink) !important;
+}
+.client-portal .bg-indigo-600.text-white,
+.client-portal .bg-violet-600.text-white,
+.client-portal .bg-purple-600.text-white,
+.client-portal .bg-emerald-600.text-white {
+  color: var(--cp-ink) !important;
+}
+.client-portal .hover\:bg-indigo-700:hover,
+.client-portal .hover\:bg-violet-700:hover,
+.client-portal .hover\:bg-purple-700:hover,
+.client-portal .hover\:bg-emerald-700:hover {
+  background: var(--cp-paper-mute) !important;
+  color: var(--cp-ink) !important;
+}
+
+/* (d) Helper/ghost buttons: bg-amber-50 + text-amber-800 + border-amber-200
+   (e.g. «Как работает парсер»). Convert to neutral ghost. */
+.client-portal .bg-amber-50,
+.client-portal .bg-orange-50 {
+  background: var(--cp-surface-rest) !important;
+}
+.client-portal .text-amber-800,
+.client-portal .text-amber-700,
+.client-portal .text-orange-800,
+.client-portal .text-orange-700 {
+  color: var(--cp-paper-mute) !important;
+}
+.client-portal .border-amber-200,
+.client-portal .border-amber-300,
+.client-portal .border-orange-200,
+.client-portal .border-orange-300 {
+  border-color: var(--cp-divider) !important;
+}
+.client-portal .hover\:bg-amber-100:hover,
+.client-portal .hover\:bg-orange-100:hover {
+  background: var(--cp-surface-elev) !important;
+}
+.client-portal .hover\:border-amber-300:hover,
+.client-portal .hover\:border-orange-300:hover {
+  border-color: var(--cp-divider-strong) !important;
+}
+
+/* (e) Status fills used in progress bars / live indicators. Map to the
+   semantic editorial tokens so amber-500 reads as cp-amber not Tailwind's
+   slightly hotter shade, and same for emerald. */
+.client-portal .bg-amber-500,
+.client-portal .bg-amber-400 {
+  background: var(--cp-amber) !important;
+}
+.client-portal .bg-emerald-500,
+.client-portal .bg-emerald-400 {
+  background: var(--cp-green) !important;
+}
+
+/* (f) Focus rings — neutralize colored rings to paper at 40%. Without
+   this, parser form inputs flash blue/amber when focused. */
+.client-portal .focus-visible\:ring-amber-400:focus-visible,
+.client-portal .focus-visible\:ring-blue-400:focus-visible,
+.client-portal .focus-visible\:ring-indigo-400:focus-visible,
+.client-portal .focus-visible\:ring-violet-400:focus-visible {
+  --tw-ring-color: rgba(250, 250, 250, 0.4) !important;
+}
+.client-portal .focus\:ring-blue-400:focus,
+.client-portal .focus\:border-blue-400:focus {
+  --tw-ring-color: rgba(250, 250, 250, 0.4) !important;
+  border-color: var(--cp-paper) !important;
+}

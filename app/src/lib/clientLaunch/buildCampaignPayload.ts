@@ -1,6 +1,7 @@
 import type {
   CampaignCreatePayload,
   CampaignScheduleDays,
+  CampaignUpdatePayload,
   SequenceStep,
   SequenceVariant,
 } from '@/lib/instantly/types';
@@ -11,6 +12,31 @@ import type {
   ClientLaunchSequence,
 } from './types';
 import { normalizeInstantlyTimezone } from './timezones';
+
+/**
+ * Preset field keys that map to Instantly campaign fields when admin edits
+ * the preset. Used to decide which keys trigger a sync to running campaigns.
+ *
+ * Excluded on purpose:
+ *  - `text_only` — forced to true at campaign create; preset value is ignored.
+ *  - `instantly_account_id` — picks the Instantly workspace at create time;
+ *    can't migrate a live campaign between workspaces.
+ */
+export const PRESET_KEYS_THAT_SYNC_TO_CAMPAIGN = [
+  'email_account_ids',
+  'daily_limit',
+  'daily_max_leads',
+  'email_gap_minutes',
+  'open_tracking',
+  'link_tracking',
+  'stop_on_reply',
+  'schedule_from',
+  'schedule_to',
+  'schedule_days',
+  'schedule_timezone',
+] as const;
+
+export type PresetKeyThatSyncsToCampaign = (typeof PRESET_KEYS_THAT_SYNC_TO_CAMPAIGN)[number];
 
 export interface BuildCampaignPayloadInput {
   preset: ClientCampaignPreset;
@@ -106,4 +132,91 @@ export function buildCampaignPayloadFromPreset(
     // запрещён, письмо уходит как написано.
     text_only: true,
   };
+}
+
+export interface BuildCampaignPresetUpdatePayloadInput {
+  /** The preset row AFTER the admin's edits were applied. */
+  preset: ClientCampaignPreset;
+  /**
+   * Set of preset field keys the admin actually changed in this PUT. Only
+   * fields in this set get included in the resulting payload — so we never
+   * overwrite Instantly state the admin didn't touch (e.g. per-launch
+   * schedule overrides set by the client at launch time).
+   */
+  changedPresetKeys: ReadonlySet<string>;
+}
+
+/**
+ * Builds a partial CampaignUpdatePayload containing ONLY the preset-managed
+ * fields the admin actually changed. Used to sync preset edits to already-
+ * running Instantly campaigns via PATCH /campaigns/:id.
+ *
+ * Never touched here:
+ *  - `sequences` — per-campaign content edited via the client UI, must not
+ *    be reset by a preset edit.
+ *  - `name` — per-launch, not stored on the preset.
+ *  - `text_only` — forced to true at create; preset value is ignored.
+ *  - workspace / `instantly_account_id` — campaigns can't migrate workspaces.
+ *
+ * Schedule note: if ANY of from/to/days/timezone changed, we rebuild the
+ * whole `campaign_schedule` from the current preset. Partial schedule
+ * update would leave the campaign with inconsistent timing. Side effect:
+ * pushing the schedule will overwrite any per-launch schedule override
+ * the client set — this is the intended behavior when admin edits schedule
+ * in the preset (admin's edit wins, by design).
+ */
+export function buildCampaignPresetUpdatePayload(
+  input: BuildCampaignPresetUpdatePayloadInput,
+): CampaignUpdatePayload {
+  const { preset, changedPresetKeys } = input;
+  const payload: CampaignUpdatePayload = {};
+
+  if (changedPresetKeys.has('email_account_ids')) {
+    payload.email_list = [...preset.email_account_ids];
+  }
+  if (changedPresetKeys.has('daily_limit')) {
+    payload.daily_limit = preset.daily_limit;
+  }
+  if (changedPresetKeys.has('daily_max_leads')) {
+    payload.daily_max_leads = preset.daily_max_leads;
+  }
+  if (changedPresetKeys.has('email_gap_minutes')) {
+    payload.email_gap = preset.email_gap_minutes;
+  }
+  if (changedPresetKeys.has('open_tracking')) {
+    payload.open_tracking = preset.open_tracking;
+  }
+  if (changedPresetKeys.has('link_tracking')) {
+    payload.link_tracking = preset.link_tracking;
+  }
+  if (changedPresetKeys.has('stop_on_reply')) {
+    payload.stop_on_reply = preset.stop_on_reply;
+  }
+
+  const scheduleTouched =
+    changedPresetKeys.has('schedule_from') ||
+    changedPresetKeys.has('schedule_to') ||
+    changedPresetKeys.has('schedule_days') ||
+    changedPresetKeys.has('schedule_timezone');
+
+  if (scheduleTouched) {
+    const days: CampaignScheduleDays = {};
+    for (const d of preset.schedule_days) {
+      if (d >= 0 && d <= 6) {
+        (days as Record<number, boolean>)[d] = true;
+      }
+    }
+    payload.campaign_schedule = {
+      schedules: [
+        {
+          name: 'Schedule',
+          timing: { from: preset.schedule_from, to: preset.schedule_to },
+          days,
+          timezone: normalizeInstantlyTimezone(preset.schedule_timezone),
+        },
+      ],
+    };
+  }
+
+  return payload;
 }

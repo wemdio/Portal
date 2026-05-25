@@ -1,4 +1,7 @@
-import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
+import {
+  buildCampaignPayloadFromPreset,
+  buildCampaignPresetUpdatePayload,
+} from '@/lib/clientLaunch/buildCampaignPayload';
 import { validateClientLaunchInput } from '@/lib/clientLaunch/validateLaunchInput';
 import { mapCsvRowsToLeads } from '@/lib/clientLaunch/mapRowsToLeads';
 import type {
@@ -590,5 +593,173 @@ describe('mapCsvRowsToLeads', () => {
       mapping: { email: 'Email', first_name: 'fn' },
     });
     expect(leads[0].custom_variables).toBeUndefined();
+  });
+});
+
+describe('buildCampaignPresetUpdatePayload', () => {
+  it('returns an empty payload when no preset keys changed', () => {
+    const payload = buildCampaignPresetUpdatePayload({
+      preset: validPreset,
+      changedPresetKeys: new Set(),
+    });
+    expect(payload).toEqual({});
+  });
+
+  it('includes only the fields the admin actually changed', () => {
+    const payload = buildCampaignPresetUpdatePayload({
+      preset: { ...validPreset, daily_limit: 1000 },
+      changedPresetKeys: new Set(['daily_limit']),
+    });
+    expect(payload).toEqual({ daily_limit: 1000 });
+    expect(payload.email_list).toBeUndefined();
+    expect(payload.daily_max_leads).toBeUndefined();
+    expect(payload.campaign_schedule).toBeUndefined();
+  });
+
+  it('maps preset.email_account_ids → email_list as a fresh array', () => {
+    const accounts = ['a@x.com', 'b@x.com', 'c@x.com'];
+    const payload = buildCampaignPresetUpdatePayload({
+      preset: { ...validPreset, email_account_ids: accounts },
+      changedPresetKeys: new Set(['email_account_ids']),
+    });
+    expect(payload.email_list).toEqual(accounts);
+    // Defensive copy — mutating the input should not leak into the payload.
+    expect(payload.email_list).not.toBe(accounts);
+  });
+
+  it('maps preset.email_gap_minutes → email_gap (preset key differs from API key)', () => {
+    const payload = buildCampaignPresetUpdatePayload({
+      preset: { ...validPreset, email_gap_minutes: 42 },
+      changedPresetKeys: new Set(['email_gap_minutes']),
+    });
+    expect(payload.email_gap).toBe(42);
+  });
+
+  it('propagates daily_max_leads when changed', () => {
+    const payload = buildCampaignPresetUpdatePayload({
+      preset: { ...validPreset, daily_max_leads: 200 },
+      changedPresetKeys: new Set(['daily_max_leads']),
+    });
+    expect(payload.daily_max_leads).toBe(200);
+  });
+
+  it('propagates boolean flags (open_tracking, link_tracking, stop_on_reply)', () => {
+    const payload = buildCampaignPresetUpdatePayload({
+      preset: {
+        ...validPreset,
+        open_tracking: false,
+        link_tracking: false,
+        stop_on_reply: false,
+      },
+      changedPresetKeys: new Set(['open_tracking', 'link_tracking', 'stop_on_reply']),
+    });
+    expect(payload.open_tracking).toBe(false);
+    expect(payload.link_tracking).toBe(false);
+    expect(payload.stop_on_reply).toBe(false);
+  });
+
+  it('rebuilds the full campaign_schedule when ANY schedule field changes', () => {
+    // Even if only schedule_from is in changedPresetKeys, the resulting payload
+    // must contain the complete schedule structure — partial schedule updates
+    // would leave Instantly with inconsistent timing.
+    const payload = buildCampaignPresetUpdatePayload({
+      preset: {
+        ...validPreset,
+        schedule_from: '10:00',
+        schedule_to: '20:00',
+        schedule_days: [1, 3, 5],
+        schedule_timezone: 'Europe/Moscow',
+      },
+      changedPresetKeys: new Set(['schedule_from']),
+    });
+    expect(payload.campaign_schedule).toBeDefined();
+    const schedule = payload.campaign_schedule!.schedules[0];
+    expect(schedule.timing.from).toBe('10:00');
+    expect(schedule.timing.to).toBe('20:00');
+    expect(schedule.days).toEqual({ 1: true, 3: true, 5: true });
+    expect(schedule.timezone).toBeTruthy();
+  });
+
+  it('does not rebuild schedule when no schedule field changed', () => {
+    const payload = buildCampaignPresetUpdatePayload({
+      preset: validPreset,
+      changedPresetKeys: new Set(['daily_limit']),
+    });
+    expect(payload.campaign_schedule).toBeUndefined();
+  });
+
+  it('never includes name, sequences, text_only, or instantly_account_id', () => {
+    // These fields are explicitly excluded — name/sequences are per-campaign,
+    // text_only is forced at create, and instantly_account_id is the workspace
+    // selector (a campaign can't migrate workspaces).
+    const payload = buildCampaignPresetUpdatePayload({
+      preset: { ...validPreset, text_only: true },
+      // Pretend EVERY preset key changed:
+      changedPresetKeys: new Set([
+        'email_account_ids',
+        'daily_limit',
+        'daily_max_leads',
+        'email_gap_minutes',
+        'open_tracking',
+        'link_tracking',
+        'stop_on_reply',
+        'text_only',
+        'instantly_account_id',
+        'schedule_from',
+        'schedule_to',
+        'schedule_days',
+        'schedule_timezone',
+      ]),
+    });
+    const typed = payload as Record<string, unknown>;
+    expect(typed.name).toBeUndefined();
+    expect(typed.sequences).toBeUndefined();
+    expect(typed.text_only).toBeUndefined();
+    expect(typed.instantly_account_id).toBeUndefined();
+  });
+
+  it('combines multiple changed fields into a single payload', () => {
+    const payload = buildCampaignPresetUpdatePayload({
+      preset: {
+        ...validPreset,
+        daily_limit: 500,
+        daily_max_leads: 75,
+        email_account_ids: ['only@x.com'],
+        open_tracking: false,
+      },
+      changedPresetKeys: new Set([
+        'daily_limit',
+        'daily_max_leads',
+        'email_account_ids',
+        'open_tracking',
+      ]),
+    });
+    expect(payload).toEqual({
+      daily_limit: 500,
+      daily_max_leads: 75,
+      email_list: ['only@x.com'],
+      open_tracking: false,
+    });
+  });
+
+  it('ignores unknown keys in changedPresetKeys without throwing', () => {
+    // Defensive: if some future preset field is added to the PUT body but
+    // not to the sync mapping, the helper should silently ignore it
+    // instead of failing or producing junk.
+    const payload = buildCampaignPresetUpdatePayload({
+      preset: validPreset,
+      changedPresetKeys: new Set(['totally_unknown_field', 'another_one']),
+    });
+    expect(payload).toEqual({});
+  });
+
+  it('filters out-of-range schedule_days entries when rebuilding the schedule', () => {
+    // Mirrors the same defensive filter buildCampaignPayloadFromPreset uses
+    // for create payloads (values outside 0..6 are silently dropped).
+    const payload = buildCampaignPresetUpdatePayload({
+      preset: { ...validPreset, schedule_days: [-1, 0, 2, 6, 7, 99] },
+      changedPresetKeys: new Set(['schedule_days']),
+    });
+    expect(payload.campaign_schedule!.schedules[0].days).toEqual({ 0: true, 2: true, 6: true });
   });
 });

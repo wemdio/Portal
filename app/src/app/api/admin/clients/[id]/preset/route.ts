@@ -5,6 +5,12 @@ import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { getClientTariffRow, resolveEffectiveLimits } from '@/lib/tariffs';
 import { listInstantlyAccounts, resolveInstantlyAccountId } from '@/lib/instantly/accounts';
+import { updateCampaign } from '@/lib/instantly/client';
+import {
+  PRESET_KEYS_THAT_SYNC_TO_CAMPAIGN,
+  buildCampaignPresetUpdatePayload,
+} from '@/lib/clientLaunch/buildCampaignPayload';
+import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -165,5 +171,116 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     logMeta,
   );
 
-  return NextResponse.json({ preset });
+  // Sync preset changes to already-running Instantly campaigns. Without this,
+  // the preset row in Supabase updates but live campaigns keep the values
+  // they were created with — admin edits the preset and nothing happens.
+  // Best-effort: per-campaign failures are logged but don't fail the PUT.
+  const sync = await syncPresetToRunningCampaigns({
+    preset: preset as ClientCampaignPreset,
+    changedPresetKeys: new Set(Object.keys(sanitized.data)),
+    logMeta,
+  });
+
+  return NextResponse.json({ preset, sync });
+}
+
+interface SyncPresetInput {
+  preset: ClientCampaignPreset;
+  changedPresetKeys: Set<string>;
+  logMeta: { userId: string; targetUserId: string };
+}
+
+interface SyncPresetResult {
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  /** True when the admin didn't touch any preset field that propagates to campaigns. */
+  skipped: boolean;
+}
+
+async function syncPresetToRunningCampaigns(input: SyncPresetInput): Promise<SyncPresetResult> {
+  const { preset, changedPresetKeys, logMeta } = input;
+
+  // If admin only touched fields that don't propagate (e.g. text_only,
+  // instantly_account_id), there's nothing to sync.
+  const hasSyncableChange = PRESET_KEYS_THAT_SYNC_TO_CAMPAIGN.some((k) => changedPresetKeys.has(k));
+  if (!hasSyncableChange) {
+    return { attempted: 0, succeeded: 0, failed: 0, skipped: true };
+  }
+
+  if (!supabaseInstantly) {
+    return { attempted: 0, succeeded: 0, failed: 0, skipped: true };
+  }
+
+  // Find every live campaign this client has. Skip 'failed' and 'completed' —
+  // syncing those would either fail (deleted campaign) or be pointless.
+  const { data: launches, error } = await supabaseInstantly
+    .from('client_campaign_launches')
+    .select('id, instantly_campaign_id, instantly_account_id, status')
+    .eq('client_user_id', preset.client_user_id)
+    .in('status', ['uploading', 'active', 'paused'])
+    .not('instantly_campaign_id', 'is', null);
+
+  if (error) {
+    await logError('admin.client-preset.sync.list_failed', error, {}, logMeta);
+    return { attempted: 0, succeeded: 0, failed: 0, skipped: false };
+  }
+
+  const rows = (launches ?? []) as Array<{
+    id: string;
+    instantly_campaign_id: string;
+    instantly_account_id: string;
+    status: string;
+  }>;
+
+  if (rows.length === 0) {
+    return { attempted: 0, succeeded: 0, failed: 0, skipped: false };
+  }
+
+  const payload = buildCampaignPresetUpdatePayload({ preset, changedPresetKeys });
+
+  // Defensive: if for some reason the payload came out empty (e.g. only
+  // schedule keys touched but they all matched the existing values…
+  // shouldn't happen, but just in case), bail without making API calls.
+  if (Object.keys(payload).length === 0) {
+    return { attempted: 0, succeeded: 0, failed: 0, skipped: true };
+  }
+
+  let succeeded = 0;
+  let failed = 0;
+
+  for (const row of rows) {
+    try {
+      await updateCampaign(row.instantly_campaign_id, payload, {
+        accountId: resolveInstantlyAccountId(row.instantly_account_id),
+      });
+      succeeded += 1;
+    } catch (err) {
+      failed += 1;
+      await logError(
+        'admin.client-preset.sync.campaign_failed',
+        err,
+        {
+          launchId: row.id,
+          instantlyCampaignId: row.instantly_campaign_id,
+          instantlyAccountId: row.instantly_account_id,
+        },
+        logMeta,
+      );
+    }
+  }
+
+  await logAudit(
+    'admin.client-preset.sync.done',
+    'Synced preset changes to running campaigns',
+    {
+      attempted: rows.length,
+      succeeded,
+      failed,
+      fields: Object.keys(payload),
+    },
+    logMeta,
+  );
+
+  return { attempted: rows.length, succeeded, failed, skipped: false };
 }
