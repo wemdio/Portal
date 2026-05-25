@@ -116,8 +116,8 @@ services:
       context: ./services/polza-reports
       dockerfile: Dockerfile
     container_name: portal-polza-reports
-    # No public port — only the portal container talks to this service
-    # over the internal docker network.
+    ports:
+      - "8020:8000"
     restart: unless-stopped
     networks:
       - portal-network
