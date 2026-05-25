@@ -42,7 +42,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     const allowed = [
       'name', 'account_id', 'lead_list_id', 'steps', 'use_ai', 'ai_prompt_invite', 'ai_prompt_chat',
       'stop_on_reply', 'min_delay', 'max_delay', 'daily_invite_limit', 'welcome_message',
-      'message_existing_connections', 'use_ai_welcome', 'use_ai_followup',
+      'message_existing_connections', 'use_ai_welcome', 'use_ai_followup', 'ai_model',
     ];
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     for (const key of allowed) { if (key in body) patch[key] = body[key]; }

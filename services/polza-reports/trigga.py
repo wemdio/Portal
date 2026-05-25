@@ -37,7 +37,7 @@ def _avg(values: list[float]) -> float:
 
 
 def _letter_parts(name: str) -> tuple[int, str | None]:
-    match = re.search(r"письмо\s*#?\s*(\d+)(?:\s*\(([^)]+)\))?", name, re.IGNORECASE)
+    match = re.search(r"письмо\s*[#№]?\s*(\d+)(?:\s*\(([^)]+)\))?", name, re.IGNORECASE)
     if not match:
         return 9999, None
     number = int(match.group(1))
@@ -96,7 +96,16 @@ def _build_letters(rows: list[dict[str, str]]) -> list[LetterStat]:
 
 def parse_trigga_csv(data: bytes) -> list[Campaign]:
     text = data.decode("utf-8-sig")
-    reader = csv.DictReader(StringIO(text))
+
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t")
+    except csv.Error:
+        dialect = "excel"
+
+    reader = csv.DictReader(StringIO(text), dialect=dialect)
+
+    if reader.fieldnames:
+        reader.fieldnames = [name.strip() for name in reader.fieldnames]
 
     grouped: dict[str, list[dict[str, str]]] = {}
     for row in reader:
