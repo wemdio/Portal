@@ -1,6 +1,7 @@
 import {
   buildCampaignPayloadFromPreset,
   buildCampaignPresetUpdatePayload,
+  toInstantlyHtmlBody,
 } from '@/lib/clientLaunch/buildCampaignPayload';
 import { validateClientLaunchInput } from '@/lib/clientLaunch/validateLaunchInput';
 import { mapCsvRowsToLeads } from '@/lib/clientLaunch/mapRowsToLeads';
@@ -523,6 +524,47 @@ describe('mapCsvRowsToLeads', () => {
     expect(leads[0].phone).toBe('+79991234567');
   });
 
+  it('mirrors standard fields into custom_variables with snake_case keys (legacy template compat)', () => {
+    // Instantly templates substitute STANDARD fields only via camelCase
+    // (`{{firstName}}`, `{{companyName}}`). Snake_case placeholders like
+    // `{{first_name}}` only work as CUSTOM variables. To keep legacy
+    // campaign bodies (where the portal previously suggested snake_case
+    // chips) working, mapRowsToLeads writes each standard field value
+    // into custom_variables under its snake_case key too. Belt-and-
+    // suspenders: standard field substitution still works via camelCase
+    // for new templates.
+    const leads = mapCsvRowsToLeads({
+      headers: ['e', 'fn', 'ln', 'cn'],
+      rows: [['a@b.com', 'John', 'Doe', 'Acme']],
+      mapping: {
+        email: 'e',
+        first_name: 'fn',
+        last_name: 'ln',
+        company_name: 'cn',
+      },
+    });
+    expect(leads[0].custom_variables).toEqual({
+      first_name: 'John',
+      last_name: 'Doe',
+      company_name: 'Acme',
+    });
+    // Standard fields are STILL set at top level so camelCase
+    // (`{{firstName}}`) keeps working — mirror is additive, not a
+    // replacement.
+    expect(leads[0].first_name).toBe('John');
+    expect(leads[0].company_name).toBe('Acme');
+  });
+
+  it('mirror does not include email (email has no separate placeholder semantic)', () => {
+    const leads = mapCsvRowsToLeads({
+      headers: ['Email'],
+      rows: [['a@b.com']],
+      mapping: { email: 'Email' },
+    });
+    // Only email mapped → nothing to mirror, no custom_variables at all.
+    expect(leads[0].custom_variables).toBeUndefined();
+  });
+
   it('puts unmapped columns into custom_variables', () => {
     const leads = mapCsvRowsToLeads({
       headers,
@@ -586,13 +628,18 @@ describe('mapCsvRowsToLeads', () => {
     expect(leads).toEqual([]);
   });
 
-  it('does not include custom_variables key if there are no extra columns', () => {
+  it('always emits custom_variables when ANY standard field beyond email is mapped (legacy compat mirror)', () => {
+    // Before the legacy-compat mirror, mapping only `first_name` produced
+    // no custom_variables on the lead. After the fix, even a single
+    // mapped standard field adds its snake_case mirror to
+    // custom_variables so legacy `{{first_name}}` in template bodies
+    // still substitutes.
     const leads = mapCsvRowsToLeads({
       headers: ['Email', 'fn'],
       rows: [['a@b.com', 'John']],
       mapping: { email: 'Email', first_name: 'fn' },
     });
-    expect(leads[0].custom_variables).toBeUndefined();
+    expect(leads[0].custom_variables).toEqual({ first_name: 'John' });
   });
 });
 
@@ -761,5 +808,133 @@ describe('buildCampaignPresetUpdatePayload', () => {
       changedPresetKeys: new Set(['schedule_days']),
     });
     expect(payload.campaign_schedule!.schedules[0].days).toEqual({ 0: true, 2: true, 6: true });
+  });
+});
+
+describe('toInstantlyHtmlBody', () => {
+  it('leaves single-line text without special chars unchanged', () => {
+    expect(toInstantlyHtmlBody('Hello world')).toBe('Hello world');
+  });
+
+  it('converts a single \\n to <br> + newline so Instantly editor renders the break', () => {
+    expect(toInstantlyHtmlBody('Line 1\nLine 2')).toBe('Line 1<br>\nLine 2');
+  });
+
+  it('preserves paragraph spacing (\\n\\n becomes two <br>s)', () => {
+    expect(toInstantlyHtmlBody('Para 1\n\nPara 2')).toBe('Para 1<br>\n<br>\nPara 2');
+  });
+
+  it('normalizes CRLF to LF before substitution (no double-<br>)', () => {
+    expect(toInstantlyHtmlBody('Line 1\r\nLine 2')).toBe('Line 1<br>\nLine 2');
+  });
+
+  it('HTML-escapes &, <, > so client text "5 < 10 & rising" does not break markup', () => {
+    expect(toInstantlyHtmlBody('5 < 10 & rising > 3')).toBe('5 &lt; 10 &amp; rising &gt; 3');
+  });
+
+  it('leaves Instantly variable braces {{firstName}} untouched (they are not HTML special)', () => {
+    expect(toInstantlyHtmlBody('Hi {{firstName}}')).toBe('Hi {{firstName}}');
+  });
+
+  it('escapes & BEFORE other entities (so `&lt;` stays one entity, not double-escaped)', () => {
+    // If we escaped < first then &, the output of `<` would be `&lt;`,
+    // which would then turn into `&amp;lt;`. Order matters.
+    expect(toInstantlyHtmlBody('<b>')).toBe('&lt;b&gt;');
+  });
+
+  it('handles realistic multi-paragraph client body with a bulleted list', () => {
+    // Mirrors the screenshot from the bug report: client wrote paragraphs
+    // and a bullet list with `•`, all separated by newlines.
+    const raw = [
+      'Добрый день! Это Иван из «Чизмол».',
+      '',
+      'Почему с нами работают:',
+      '• качественное масло по ГОСТ',
+      '• цена на 10–15% ниже рынка',
+      '',
+      'С уважением, Иван',
+    ].join('\n');
+    const html = toInstantlyHtmlBody(raw);
+    // Each \n becomes <br>\n — and bullets / paragraphs survive intact.
+    expect(html).toContain('Добрый день! Это Иван из «Чизмол».<br>');
+    expect(html).toContain('Почему с нами работают:<br>');
+    expect(html).toContain('• качественное масло по ГОСТ<br>');
+    expect(html).toContain('С уважением, Иван');
+    // Empty line between paragraphs preserved as <br><br>:
+    expect(html).toMatch(/Чизмол».<br>\n<br>\nПочему/);
+  });
+
+  it('handles empty body without throwing', () => {
+    expect(toInstantlyHtmlBody('')).toBe('');
+  });
+
+  it('SECURITY: HTML/JS injection attempts reach recipient as literal text, not markup', () => {
+    // Client-portal emails must NEVER carry HTML formatting or executable
+    // payloads to recipients. Whatever HTML-looking content the client types
+    // into the textarea must be escaped at the boundary, so:
+    //   - Instantly's editor displays it as visible text (not rendered tags)
+    //   - text_only: true at send strips any remaining HTML to plain text
+    //   - recipient's email client sees the raw characters in a text/plain
+    //     email and does not parse them as HTML
+    //
+    // The assertions below pin the escape behavior. If anyone ever drops the
+    // escape step from toInstantlyHtmlBody, this test will catch it.
+
+    // Script tag — the canonical XSS payload.
+    expect(toInstantlyHtmlBody('<script>alert(1)</script>')).toBe(
+      '&lt;script&gt;alert(1)&lt;/script&gt;',
+    );
+
+    // img+onerror — common XSS without explicit <script>.
+    expect(toInstantlyHtmlBody('<img src=x onerror="alert(1)">')).toBe(
+      '&lt;img src=x onerror="alert(1)"&gt;',
+    );
+
+    // Plain formatting tags — client cannot smuggle bold/italic/links into
+    // what should be a text-only email.
+    expect(toInstantlyHtmlBody('<b>bold</b> and <a href="https://evil">click</a>')).toBe(
+      '&lt;b&gt;bold&lt;/b&gt; and &lt;a href="https://evil"&gt;click&lt;/a&gt;',
+    );
+
+    // Pre-encoded entities stay encoded (no double-decode that could let
+    // someone smuggle real HTML via `&lt;script&gt;`).
+    expect(toInstantlyHtmlBody('&lt;script&gt;')).toBe('&amp;lt;script&amp;gt;');
+  });
+});
+
+describe('buildCampaignPayloadFromPreset — body HTML conversion', () => {
+  it('applies HTML conversion to step body and all variants', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: {
+        name: 'Multiline',
+        steps: [
+          {
+            subject: 'Hello',
+            body: 'Line 1\nLine 2',
+            wait_days: 0,
+            variants: [
+              { subject: 'B', body: 'B line 1\nB line 2' },
+            ],
+          },
+        ],
+      },
+    });
+    const step = payload.sequences?.[0].steps[0];
+    expect(step?.variants?.[0].body).toBe('Line 1<br>\nLine 2');
+    expect(step?.variants?.[1].body).toBe('B line 1<br>\nB line 2');
+  });
+
+  it('does not HTML-escape the subject (subjects are single-line plain text in Instantly)', () => {
+    // Subject preservation matters for variables like {{firstName}} and
+    // also for chars like «»: we don't touch subject, period.
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [{ subject: 'Hi {{firstName}} & co', body: 'b', wait_days: 0 }],
+      },
+    });
+    expect(payload.sequences?.[0].steps[0].variants?.[0].subject).toBe('Hi {{firstName}} & co');
   });
 });

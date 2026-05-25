@@ -902,7 +902,42 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   )}
                 </div>
                 <div className="px-6 py-5 space-y-5">
-                  {CATEGORIES.map((cat) => (
+                  {/*
+                    In clientMode 9 of 11 steps are always-on and locked
+                    (ALWAYS_ON_STEPS_FOR_CLIENT). Per /impeccable critique
+                    2026-05-25 (P1 identical-card-grid), rendering them as
+                    9 disabled cards forces Olga to scan a wall of locked
+                    chrome to find the 2 toggleable steps. Collapse them
+                    into a single editorial summary row + render only the
+                    AI category (with the 2 interactive cards) below.
+                  */}
+                  {clientMode && (
+                    <div
+                      className="rounded-md px-4 py-3"
+                      style={{
+                        background: 'var(--cp-surface-rest)',
+                        border: '1px solid var(--cp-divider)',
+                      }}
+                    >
+                      <p
+                        className="ds-eyebrow mb-1"
+                        style={{ color: 'var(--cp-paper-mute)' }}
+                      >
+                        автоматически
+                      </p>
+                      <p className="text-xs" style={{ color: 'var(--cp-paper)' }}>
+                        Очистка пустых, дедуп строк/email, разделение почт, очистка названий,
+                        проверка сайтов, поиск email, валидация и обогащение описаниями —
+                        выполняются по умолчанию для каждой базы.
+                      </p>
+                    </div>
+                  )}
+                  {CATEGORIES.map((cat) => {
+                    const visibleSteps = clientMode
+                      ? STEPS.filter((s) => s.category === cat.key && !ALWAYS_ON_SET.has(s.key))
+                      : STEPS.filter((s) => s.category === cat.key);
+                    if (visibleSteps.length === 0) return null;
+                    return (
                     <div key={cat.key}>
                       <div className="flex items-center gap-2 mb-3">
                         <span className={`px-2.5 py-0.5 text-xs font-semibold rounded-md border ${cat.color}`}>
@@ -910,7 +945,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         </span>
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                        {STEPS.filter((s) => s.category === cat.key).map((step) => {
+                        {visibleSteps.map((step) => {
                           const isSelected = selectedSteps.includes(step.key);
                           const lockedReason = isSelected ? isRequiredByOther(step.key) : null;
                           const isAlwaysOn = clientMode && ALWAYS_ON_SET.has(step.key);
@@ -1007,7 +1042,8 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                                 )}
                                 {isSelected && lockedReason && !isAlwaysOn && (
                                   <p className="text-[11px] text-gray-500 mt-1 flex items-center gap-1">
-                                    🔒 {lockedReason}
+                                    <Lock className="w-3 h-3 flex-shrink-0" />
+                                    {lockedReason}
                                   </p>
                                 )}
                                 {showAsActive && !columnWarnings.has(step.key) && stepHints.has(step.key) && !clientHint && (
@@ -1027,7 +1063,8 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         })}
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
 
                   {/* Selected order */}
                   {selectedSteps.length > 0 && (
@@ -1057,7 +1094,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                               {hasWarning && <AlertTriangle className="w-3 h-3 text-amber-500" />}
                               {hasHint && <Zap className="w-3 h-3 text-blue-500" />}
                               {locked || (clientMode && ALWAYS_ON_SET.has(key)) ? (
-                                <span className="ml-0.5 text-gray-300 cursor-not-allowed" title={locked ?? 'Выполняется автоматически'}>🔒</span>
+                                <span
+                                  className="ml-0.5 text-gray-300 cursor-not-allowed inline-flex items-center"
+                                  title={locked ?? 'Выполняется автоматически'}
+                                >
+                                  <Lock className="w-3 h-3" />
+                                </span>
                               ) : (
                               <button
                                 onClick={(e) => { e.stopPropagation(); toggleStep(key); }}
@@ -1445,6 +1487,47 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     </>
                   )}
                 </button>
+                {/* Pre-flight summary — facts the user can verify, plus a vague
+                    time band (without false precision). Earlier version used
+                    serial worker timings (0.5s/row × AI steps) that
+                    overshot 9× for 10K-row jobs because real workers parallel-
+                    fire AI requests. Per re-critique 2026-05-25T21-57-33Z
+                    (N2 vibes-based math + N3 dead plural ternary). */}
+                {!submitting && (() => {
+                  const rows = Math.max(0, (fileData?.length ?? 0) - 1);
+                  const aiSteps = selectedSteps.filter((k) => STEP_MAP.get(k)?.cost === 'ai').length;
+                  const apiSteps = selectedSteps.filter((k) => STEP_MAP.get(k)?.cost === 'api').length;
+                  // Vague time band — honest about not having real telemetry.
+                  // Tiers: <5K rows or no AI/API = «несколько минут»; up to
+                  // 20K rows or 1 AI step = «5–15 минут»; otherwise «10+ мин».
+                  const sizeFactor = rows + aiSteps * 2000 + apiSteps * 500;
+                  const timeLabel =
+                    sizeFactor < 5000 ? 'несколько минут'
+                    : sizeFactor < 20000 ? '5–15 минут'
+                    : '10–30 минут';
+                  return (
+                    <p
+                      className="ds-mono text-xs text-center"
+                      style={{ color: 'var(--cp-paper-mute)' }}
+                    >
+                      ≈ {timeLabel}
+                      <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+                      <span style={{ color: 'var(--cp-paper)' }}>
+                        {rows.toLocaleString('ru-RU')}
+                      </span>{' '}
+                      строк в обработке
+                      {aiSteps > 0 && (
+                        <>
+                          <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+                          <span style={{ color: 'var(--cp-paper)' }}>
+                            {(aiSteps * rows).toLocaleString('ru-RU')}
+                          </span>{' '}
+                          AI-обработок
+                        </>
+                      )}
+                    </p>
+                  );
+                })()}
               </div>
             )}
           </>
@@ -1563,49 +1646,79 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
         {/* ═══════════ RESULTS ═══════════ */}
         {isComplete && activeJob && (
           <div className="space-y-4">
-            {/* Stats */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Строк</p>
-                <p className="mt-2 text-2xl font-bold text-gray-900">
-                  {activeJob.result_stats?.total_rows ?? 0}
-                </p>
-                <p className="text-xs text-gray-400 mt-0.5">
-                  из {activeJob.initial_row_count}
-                  {clientMode ? (
+            {/* Stats — clientMode: editorial portfolio sentence (one headline +
+                secondary metrics inline). Admin (/tools/our-bases): legacy 4-card
+                grid preserved verbatim. */}
+            {clientMode ? (
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-2">
+                <div className="flex items-baseline flex-wrap gap-x-2">
+                  <span className="ds-mono tabular-nums text-3xl font-semibold text-gray-900">
+                    {activeJob.result_stats?.total_rows ?? 0}
+                  </span>
+                  <span className="text-sm text-gray-500">
+                    строк из {activeJob.initial_row_count} обработано
+                    {' '}
+                    (<ClientTariffUsageInline
+                      metric="max_rows"
+                      spent={activeJob.initial_row_count}
+                      remainingOnly
+                      refreshKey={`${activeJob.id}:${activeJob.completed_at ?? activeJob.status}`}
+                    />)
+                  </span>
+                </div>
+                <p className="text-sm text-gray-500">
+                  <span className="ds-mono tabular-nums font-semibold text-emerald-600">
+                    {activeJob.result_stats?.emails_found ?? 0}
+                  </span>
+                  {' email найдено'}
+                  {(activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
                     <>
-                      {' '}
-                      (<ClientTariffUsageInline
-                        metric="max_rows"
-                        spent={activeJob.initial_row_count}
-                        remainingOnly
-                        refreshKey={`${activeJob.id}:${activeJob.completed_at ?? activeJob.status}`}
-                      />)
+                      {' · средний ЦА '}
+                      <span className="ds-mono tabular-nums font-semibold text-gray-900">
+                        {activeJob.result_stats?.avg_ta_score ?? 0}
+                      </span>
                     </>
-                  ) : null}
+                  )}
+                  {' · '}
+                  <span className="ds-mono tabular-nums font-semibold text-gray-900">
+                    {activeJob.result_stats?.columns ?? 0}
+                  </span>
+                  {' колонок'}
                 </p>
               </div>
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Email найдено</p>
-                <p className="mt-2 text-2xl font-bold text-emerald-600">
-                  {activeJob.result_stats?.emails_found ?? 0}
-                </p>
-              </div>
-              {(activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Средний ЦА</p>
-                  <p className="mt-2 text-2xl font-bold text-blue-600">
-                    {activeJob.result_stats?.avg_ta_score ?? 0}
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Строк</p>
+                  <p className="mt-2 text-2xl font-bold text-gray-900">
+                    {activeJob.result_stats?.total_rows ?? 0}
+                  </p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    из {activeJob.initial_row_count}
                   </p>
                 </div>
-              )}
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Колонок</p>
-                <p className="mt-2 text-2xl font-bold text-gray-700">
-                  {activeJob.result_stats?.columns ?? 0}
-                </p>
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Email найдено</p>
+                  <p className="mt-2 text-2xl font-bold text-emerald-600">
+                    {activeJob.result_stats?.emails_found ?? 0}
+                  </p>
+                </div>
+                {(activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
+                  <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+                    <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Средний ЦА</p>
+                    <p className="mt-2 text-2xl font-bold text-blue-600">
+                      {activeJob.result_stats?.avg_ta_score ?? 0}
+                    </p>
+                  </div>
+                )}
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Колонок</p>
+                  <p className="mt-2 text-2xl font-bold text-gray-700">
+                    {activeJob.result_stats?.columns ?? 0}
+                  </p>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* TA scoring telemetry — отдельным блоком, чтобы пользователь видел
                 что AI оценил, какие средние, и сколько отфильтровалось */}

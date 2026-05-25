@@ -159,7 +159,11 @@ describe('pollAndQualifyReplies', () => {
     expect(listEmails).toHaveBeenCalledTimes(1);
     expect(listEmails).toHaveBeenCalledWith(
       expect.objectContaining({
-        ue_type: 2,
+        // Правильный фильтр Instantly v2 — `email_type` (string enum),
+        // а не `ue_type` (response-поле). Раньше тут было `ue_type: 2`,
+        // но Instantly его молча игнорировал — ловило весь трафик
+        // и фильтровало вручную в `linkedReplies`.
+        email_type: 'received',
         limit: expect.any(Number),
       }),
     );

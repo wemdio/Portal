@@ -44,7 +44,11 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   try {
     const data = await listEmails({
       campaign_id: campaignId,
-      ue_type: 2, // 2 = reply from lead
+      // Instantly v2 фильтрует по `email_type`, а не `ue_type` (ue_type —
+      // это поле в ответе). Без этого Instantly игнорил наш фильтр и
+      // возвращал все письма по кампании — и входящие, и наши же
+      // исходящие первые шаги.
+      email_type: 'received',
       limit,
       starting_after: startingAfter,
       search,
