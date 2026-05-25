@@ -218,9 +218,6 @@ export default function ClientLaunchPage() {
   const [launchError, setLaunchError] = useState('');
   const [result, setResult] = useState<LaunchResult | null>(null);
 
-  // Brief status drives an inline tip in Step 3. Null until first fetch.
-  const [briefFilled, setBriefFilled] = useState<boolean | null>(null);
-
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ─── Draft persistence (localStorage) ──────────────────────────────────
@@ -369,24 +366,6 @@ export default function ClientLaunchPage() {
     void loadPreset();
     void loadHistory();
   }, [loadPreset, loadHistory]);
-
-  // Fire-and-forget: fetch onboarding status to know whether the brief is
-  // filled. Drives the inline tip shown in the Sequence step. Failures are
-  // silent — the tip just won't show.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await clientApiFetch<{ items: { id: string; done: boolean }[] }>(
-          '/onboarding/status',
-        );
-        if (cancelled) return;
-        const brief = res.items.find((i) => i.id === 'brief');
-        setBriefFilled(brief?.done ?? null);
-      } catch { /* ignore — non-critical */ }
-    })();
-    return () => { cancelled = true; };
-  }, []);
 
   // ─── File upload ────────────────────────────────────────────────────────
   async function handleFile(file: File) {
@@ -992,36 +971,6 @@ export default function ClientLaunchPage() {
         {/* Step 3: Sequence */}
         {fileHeaders.length > 0 && (
           <Section number={3} title="Цепочка писем" subtitle="Используйте переменные ниже, чтобы персонализировать сообщения.">
-            {briefFilled === false && (
-              <div
-                className="rounded-md px-4 py-3 sm:px-5 sm:py-3.5 mb-4 flex items-start gap-2.5 text-xs sm:text-sm"
-                style={{
-                  background: 'var(--cp-surface-rest)',
-                  border: '1px solid var(--cp-divider)',
-                }}
-              >
-                <span
-                  aria-hidden
-                  className="ds-status-dot shrink-0"
-                  style={{ background: 'var(--cp-amber)', marginTop: '7px' }}
-                />
-                <div className="flex-1 min-w-0">
-                  <strong style={{ color: 'var(--cp-paper)' }}>Совет.</strong>{' '}
-                  <span style={{ color: 'var(--cp-paper-mute)' }}>
-                    Заполните{' '}
-                    <Link
-                      href={'/client/brief' as Route}
-                      className="font-semibold underline"
-                      style={{ color: 'var(--cp-paper)' }}
-                    >
-                      бриф
-                    </Link>
-                    {' '}— AI-инструменты (Цепочки писем, Оценка ЦА, персонализация) сработают точнее под вашу аудиторию.
-                  </span>
-                </div>
-              </div>
-            )}
-
             <VariableReference
               mapping={mapping}
               customVars={customVars}
