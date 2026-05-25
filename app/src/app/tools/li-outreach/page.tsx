@@ -143,7 +143,7 @@ export default function LiOutreachPage() {
   const [campaignLogs, setCampaignLogs] = useState<LiCampaignLog[]>([]);
   // Range key currently being exported (button shows '...' until done).
   // Null when no export is in flight.
-  const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'6h' | '24h' | '7d' | null>(null);
+  const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'24h' | '7d' | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsForm, setSettingsForm] = useState<LiSettings>({ unipile_dsn: '', unipile_api_key: '', openai_api_key: '', openai_model: 'gpt-4o-mini', webhook_secret: '', proxy_url: '' });
@@ -281,7 +281,7 @@ export default function LiOutreachPage() {
   // Reuses the existing global export endpoint with campaign_id filter — same
   // contract as the per-campaign export in tg-outreach.
   const exportCampaignLogs = useCallback(
-    async (range: '6h' | '24h' | '7d') => {
+    async (range: '24h' | '7d') => {
       if (!selectedCampaignId) return;
       setExportingCampaignLogsRange(range);
       try {
@@ -1035,8 +1035,8 @@ export default function LiOutreachPage() {
                     <h3 className="font-semibold text-gray-900">{selectedCampaign.name} — Логи</h3>
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-gray-500">Выгрузить .txt:</span>
-                      {(['6h', '24h', '7d'] as const).map((r) => {
-                        const labels: Record<typeof r, string> = { '6h': '6 часов', '24h': '24 часа', '7d': '7 дней' };
+                      {(['24h', '7d'] as const).map((r) => {
+                        const labels: Record<typeof r, string> = { '24h': '24 часа', '7d': '7 дней' };
                         const busy = exportingCampaignLogsRange === r;
                         return (
                           <button
@@ -1541,7 +1541,7 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
   // Download buttons honour the currently-applied filters (campaign + level)
   // so the .txt file matches what the operator is actually looking at.
   const exportLogs = useCallback(
-    async (range: '6h' | '24h' | '7d') => {
+    async (range: '24h' | '7d') => {
       setExportingRange(range);
       try {
         const params = new URLSearchParams({ range });
@@ -1600,8 +1600,8 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs text-gray-500">Выгрузить .txt:</span>
-          {(['6h', '24h', '7d'] as const).map((r) => {
-            const labels: Record<typeof r, string> = { '6h': '6 часов', '24h': '24 часа', '7d': '7 дней' };
+          {(['24h', '7d'] as const).map((r) => {
+            const labels: Record<typeof r, string> = { '24h': '24 часа', '7d': '7 дней' };
             const busy = exportingRange === r;
             return (
               <button
@@ -1675,7 +1675,7 @@ type AccountLogItem = {
 };
 
 function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: () => void }) {
-  const [range, setRange] = useState<'6h' | '24h' | '7d'>('24h');
+  const [range, setRange] = useState<'24h' | '7d'>('24h');
   const [logs, setLogs] = useState<AccountLogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1714,7 +1714,7 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
   }, [logs]);
 
   const exportTxt = useCallback(
-    async (r: '6h' | '24h' | '7d') => {
+    async (r: '24h' | '7d') => {
       setExportingRange(r);
       try {
         const res = await authFetch(`/api/tools/li-outreach/accounts/${account.id}/logs?range=${r}&format=txt`);
@@ -1806,8 +1806,8 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
         <div className="px-5 py-3 border-b border-gray-100 flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-gray-500 mr-1">Период:</span>
-            {(['6h', '24h', '7d'] as const).map((r) => {
-              const labels: Record<typeof r, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д' };
+            {(['24h', '7d'] as const).map((r) => {
+              const labels: Record<typeof r, string> = { '24h': '24ч', '7d': '7д' };
               const active = range === r;
               return (
                 <button
@@ -1843,8 +1843,8 @@ function AccountLogsModal({ account, onClose }: { account: LiAccount; onClose: (
           </div>
           <div className="ml-auto flex items-center gap-1.5">
             <span className="text-xs text-gray-500 mr-1">.txt:</span>
-            {(['6h', '24h', '7d'] as const).map((r) => {
-              const labels: Record<typeof r, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д' };
+            {(['24h', '7d'] as const).map((r) => {
+              const labels: Record<typeof r, string> = { '24h': '24ч', '7d': '7д' };
               const busy = exportingRange === r;
               return (
                 <button
