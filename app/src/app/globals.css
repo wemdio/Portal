@@ -1935,3 +1935,96 @@ body:has(.client-portal) {
   --tw-ring-color: rgba(250, 250, 250, 0.4) !important;
   border-color: var(--cp-paper) !important;
 }
+
+/* (g) Extended text-color coverage for icon glyphs and badge text across
+   more palettes/shades. The previous bridge only caught -600/-700 of a
+   few palettes; admin components routinely use -400/-500/-800 too and
+   palettes like emerald/green/pink that weren't in the text-* rules
+   above. Surfaced again in /impeccable critique 2026-05-25 (parsers
+   tab shows orange clock + green table + pink badges that the first
+   bridge missed). Neutralize all to paper. */
+.client-portal .text-indigo-400,
+.client-portal .text-indigo-500,
+.client-portal .text-indigo-800,
+.client-portal .text-violet-400,
+.client-portal .text-violet-500,
+.client-portal .text-violet-800,
+.client-portal .text-purple-400,
+.client-portal .text-purple-500,
+.client-portal .text-purple-800,
+.client-portal .text-amber-400,
+.client-portal .text-amber-500,
+.client-portal .text-amber-600,
+.client-portal .text-orange-400,
+.client-portal .text-orange-500,
+.client-portal .text-orange-800,
+.client-portal .text-emerald-400,
+.client-portal .text-emerald-500,
+.client-portal .text-emerald-600,
+.client-portal .text-emerald-700,
+.client-portal .text-emerald-800,
+.client-portal .text-green-400,
+.client-portal .text-green-500,
+.client-portal .text-green-600,
+.client-portal .text-green-700,
+.client-portal .text-green-800,
+.client-portal .text-pink-400,
+.client-portal .text-pink-500,
+.client-portal .text-pink-600,
+.client-portal .text-pink-700,
+.client-portal .text-pink-800,
+.client-portal .text-rose-400,
+.client-portal .text-rose-500,
+.client-portal .text-rose-800,
+.client-portal .text-fuchsia-400,
+.client-portal .text-fuchsia-500,
+.client-portal .text-fuchsia-700,
+.client-portal .text-fuchsia-800,
+.client-portal .text-sky-400,
+.client-portal .text-sky-500,
+.client-portal .text-sky-700,
+.client-portal .text-sky-800 {
+  color: var(--cp-paper) !important;
+}
+
+/* (h) Light-shade backgrounds for badges + banners (Цепочки писем
+   «Потрачено: N цепочек» banner, «Черновик» pill badges, etc).
+   Tailwind pattern is bg-{color}-50/100 for ultra-light tints. Map
+   to editorial surface-rest so the chrome reads as one neutral surface
+   instead of a rainbow of admin-era pills. */
+.client-portal .bg-pink-50,
+.client-portal .bg-pink-100,
+.client-portal .bg-fuchsia-50,
+.client-portal .bg-rose-50,
+.client-portal .bg-emerald-50,
+.client-portal .bg-green-50,
+.client-portal .bg-green-100,
+.client-portal .bg-sky-50 {
+  background: var(--cp-surface-rest) !important;
+}
+
+/* (i) Colored borders on badges/cards — flatten to hairline divider so
+   nothing visually competes with the editorial-dark hairline system. */
+.client-portal .border-pink-100,
+.client-portal .border-pink-200,
+.client-portal .border-pink-300,
+.client-portal .border-fuchsia-100,
+.client-portal .border-fuchsia-200,
+.client-portal .border-rose-100,
+.client-portal .border-rose-200,
+.client-portal .border-emerald-100,
+.client-portal .border-emerald-200,
+.client-portal .border-green-100,
+.client-portal .border-green-200,
+.client-portal .border-sky-100,
+.client-portal .border-sky-200,
+.client-portal .border-violet-100,
+.client-portal .border-violet-200,
+.client-portal .border-purple-100,
+.client-portal .border-purple-200,
+.client-portal .border-indigo-100,
+.client-portal .border-indigo-200,
+.client-portal .border-blue-100,
+.client-portal .border-blue-200 {
+  border-color: var(--cp-divider) !important;
+}
