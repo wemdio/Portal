@@ -54,6 +54,28 @@ interface InstantlyAccountOption {
   isDefault: boolean;
 }
 
+interface PresetSaveSync {
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  skipped: boolean;
+}
+
+/**
+ * Renders the green success banner text after a preset save. We surface the
+ * sync result so the admin sees that their edit actually propagated to live
+ * campaigns (the whole reason this endpoint syncs in the first place).
+ */
+function buildSavedMessage(sync: PresetSaveSync | undefined): string {
+  if (!sync || sync.skipped || sync.attempted === 0) {
+    return 'Пресет сохранён';
+  }
+  if (sync.failed === 0) {
+    return `Пресет сохранён. Обновлено кампаний в Instantly: ${sync.succeeded}`;
+  }
+  return `Пресет сохранён. Обновлено кампаний: ${sync.succeeded} из ${sync.attempted}`;
+}
+
 const WEEKDAYS = [
   { value: 1, label: 'Пн' },
   { value: 2, label: 'Вт' },
@@ -102,6 +124,7 @@ export default function ClientPresetPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [savedMessage, setSavedMessage] = useState('');
+  const [syncWarning, setSyncWarning] = useState('');
   const [accountSearch, setAccountSearch] = useState('');
 
   const apiFetch = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
@@ -265,16 +288,32 @@ export default function ClientPresetPage() {
 
     setSaving(true);
     setError('');
+    setSyncWarning('');
     try {
-      await apiFetch<{ preset: unknown }>(`/api/admin/clients/${clientUserId}/preset`, {
+      const res = await apiFetch<{
+        preset: unknown;
+        sync?: {
+          attempted: number;
+          succeeded: number;
+          failed: number;
+          skipped: boolean;
+        };
+      }>(`/api/admin/clients/${clientUserId}/preset`, {
         method: 'PUT',
         body: JSON.stringify(preset),
       });
       void logAudit('admin.client-preset.save.success', 'Client preset saved', {
         targetUserId: clientUserId,
         accounts: preset.email_account_ids.length,
+        sync: res.sync,
       });
-      setSavedMessage('Пресет сохранён');
+      setSavedMessage(buildSavedMessage(res.sync));
+      if (res.sync && res.sync.failed > 0) {
+        setSyncWarning(
+          `Часть кампаний не удалось синхронизировать: ${res.sync.failed} из ${res.sync.attempted}. ` +
+            'Подробности — в логах. Можно нажать «Сохранить» ещё раз, чтобы повторить синхронизацию.',
+        );
+      }
       setHasExistingPreset(true);
     } catch (err) {
       void logError('admin.client-preset.save.failed', err, { clientUserId });
@@ -337,6 +376,13 @@ export default function ClientPresetPage() {
             <Check className="size-3 stroke-[3]" />
           </span>
           {savedMessage}
+        </div>
+      )}
+      {syncWarning && (
+        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 text-amber-800 text-sm">
+          <span aria-hidden>⚠️</span>
+          <span className="flex-1">{syncWarning}</span>
+          <button onClick={() => setSyncWarning('')} className="ml-2 text-amber-600 hover:text-amber-800" aria-label="Закрыть">✕</button>
         </div>
       )}
 
