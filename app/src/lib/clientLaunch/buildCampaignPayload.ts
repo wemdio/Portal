@@ -38,6 +38,37 @@ export const PRESET_KEYS_THAT_SYNC_TO_CAMPAIGN = [
 
 export type PresetKeyThatSyncsToCampaign = (typeof PRESET_KEYS_THAT_SYNC_TO_CAMPAIGN)[number];
 
+/**
+ * Converts client-authored plain-text email body into the minimal HTML that
+ * Instantly's API expects.
+ *
+ * Why this is required even with `text_only: true`:
+ *
+ * Instantly's POST /api/v2/campaigns spec says the `body` field is "HTML body
+ * of the email" — meaning Instantly's editor parses it as HTML on input. If we
+ * send raw text with `\n`, the HTML parser collapses every newline to a single
+ * space (standard HTML whitespace handling), and the campaign editor displays
+ * one solid block. At send time `text_only: true` strips HTML to plain text,
+ * but by then the newlines are already gone — what client sees in the editor
+ * is exactly what the recipient gets.
+ *
+ * Fix: HTML-escape the special chars (so things like "5 < 10" don't break the
+ * markup), then convert each `\n` to `<br>`. Instantly's editor renders this
+ * correctly with line breaks; `text_only: true` converts `<br>` back to `\n`
+ * at send time; recipient sees the same paragraphing the client typed.
+ *
+ * Note: Instantly's `{{firstName}}`-style variables use `{` / `}` which are
+ * NOT HTML special chars, so escaping leaves them untouched.
+ */
+export function toInstantlyHtmlBody(plainText: string): string {
+  return plainText
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n/g, '<br>\n');
+}
+
 export interface BuildCampaignPayloadInput {
   preset: ClientCampaignPreset;
   sequence: ClientLaunchSequence;
@@ -102,11 +133,15 @@ export function buildCampaignPayloadFromPreset(
           // обязательное поле), а не в subject/body самого шага. subject/body
           // шага — это Вариант A; s.variants — дополнительные B/C. Instantly
           // случайно выбирает один вариант на каждого лида.
+          //
+          // body конвертим plain-text → минимальный HTML (см. doc-comment
+          // у toInstantlyHtmlBody). Без этого Instantly схлопывает все
+          // переносы строк, и письмо уходит сплошным абзацем.
           const variants: SequenceVariant[] = [
-            { subject: s.subject, body: s.body },
+            { subject: s.subject, body: toInstantlyHtmlBody(s.body) },
             ...(s.variants ?? []).map<SequenceVariant>((v) => ({
               subject: v.subject ?? '',
-              body: v.body,
+              body: toInstantlyHtmlBody(v.body),
             })),
           ];
 
@@ -126,10 +161,12 @@ export function buildCampaignPayloadFromPreset(
     open_tracking: behaviorOverride?.open_tracking ?? preset.open_tracking,
     link_tracking: preset.link_tracking,
     stop_on_reply: behaviorOverride?.stop_on_reply ?? preset.stop_on_reply,
-    // Клиентские письма всегда уходят plain-text: никакого HTML, переносы
-    // строк сохраняются ровно как их набрал клиент. Поэтому text_only
-    // форсим в true независимо от пресета — в клиентском портале HTML
-    // запрещён, письмо уходит как написано.
+    // Клиентские письма всегда уходят plain-text (без видимой клиенту
+    // разметки) — поэтому text_only форсим в true независимо от пресета.
+    // ВАЖНО: Instantly API на входе ждёт body именно как HTML (даже при
+    // text_only=true) — иначе схлопывает все \n. См. toInstantlyHtmlBody
+    // выше: мы конвертируем plain-text → минимальный HTML с <br>,
+    // а text_only=true распаковывает обратно в текст при отправке.
     text_only: true,
   };
 }
