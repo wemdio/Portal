@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
+import { isAuthExpiredError } from '@/lib/authFetch';
 import type { ClientReplyThread, ThreadMessage } from '@/lib/clientCampaignReplies/types';
 
 type ActionMode = 'reply' | 'forward' | null;
@@ -86,10 +87,12 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
   const [showBcc, setShowBcc] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [authExpired, setAuthExpired] = useState(false);
 
   const handleSend = async () => {
     setSending(true);
     setError('');
+    setAuthExpired(false);
     try {
       await clientApiFetch(`/campaigns/${campaignId}/replies/${emailId}/reply`, {
         method: 'POST',
@@ -97,6 +100,7 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
       });
       onSent();
     } catch (err) {
+      if (isAuthExpiredError(err)) setAuthExpired(true);
       setError(err instanceof Error ? err.message : 'Не удалось отправить');
     } finally {
       setSending(false);
@@ -141,7 +145,22 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
         className="neu-input w-full px-3 py-2 text-[11px] sm:text-xs bg-transparent outline-none resize-y"
         style={{ color: 'var(--cp-paper)' }}
       />
-      {error && <p className="text-[11px]" style={{ color: 'var(--cp-danger)' }}>{error}</p>}
+      {error && (
+        <div className="text-[11px] space-y-1" style={{ color: 'var(--cp-danger)' }}>
+          <p>{error}</p>
+          {authExpired && (
+            <a
+              href="/login"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-[11px] font-semibold underline"
+              style={{ color: 'var(--cp-paper)' }}
+            >
+              Открыть страницу входа в новой вкладке →
+            </a>
+          )}
+        </div>
+      )}
       <div className="flex items-center justify-end gap-2">
         <button
           type="button"
@@ -177,10 +196,12 @@ function ForwardForm({ campaignId, emailId, onCancel, onSent }: ForwardFormProps
   const [toEmail, setToEmail] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [authExpired, setAuthExpired] = useState(false);
 
   const handleSend = async () => {
     setSending(true);
     setError('');
+    setAuthExpired(false);
     try {
       await clientApiFetch(`/campaigns/${campaignId}/replies/${emailId}/forward`, {
         method: 'POST',
@@ -188,6 +209,7 @@ function ForwardForm({ campaignId, emailId, onCancel, onSent }: ForwardFormProps
       });
       onSent();
     } catch (err) {
+      if (isAuthExpiredError(err)) setAuthExpired(true);
       setError(err instanceof Error ? err.message : 'Не удалось переслать');
     } finally {
       setSending(false);
@@ -213,7 +235,22 @@ function ForwardForm({ campaignId, emailId, onCancel, onSent }: ForwardFormProps
       <p className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
         Пересылаем оригинальный текст письма от лида целиком.
       </p>
-      {error && <p className="text-[11px]" style={{ color: 'var(--cp-danger)' }}>{error}</p>}
+      {error && (
+        <div className="text-[11px] space-y-1" style={{ color: 'var(--cp-danger)' }}>
+          <p>{error}</p>
+          {authExpired && (
+            <a
+              href="/login"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-[11px] font-semibold underline"
+              style={{ color: 'var(--cp-paper)' }}
+            >
+              Открыть страницу входа в новой вкладке →
+            </a>
+          )}
+        </div>
+      )}
       <div className="flex items-center justify-end gap-2">
         <button
           type="button"
