@@ -141,6 +141,7 @@ export interface LiCampaign {
   message_existing_connections: boolean;
   use_ai_welcome: boolean;
   use_ai_followup: boolean;
+  ai_model: string | null;
   status: LiCampaignStatus;
   created_at: string;
   updated_at: string;

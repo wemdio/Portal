@@ -149,9 +149,10 @@ export async function runCampaignTick(
     account?.unipile_account_id,
   );
 
-  const aiConfig = settings.openai_api_key
-    ? { apiKey: settings.openai_api_key, model: settings.openai_model }
-    : { apiKey: process.env.OPENROUTER_LI_OUTREACH_API_KEY ?? '', model: 'gpt-4o-mini' };
+  const aiConfig = {
+    apiKey: settings.openai_api_key || process.env.OPENROUTER_LI_OUTREACH_API_KEY || '',
+    model: campaign.ai_model || settings.openai_model || 'openai/gpt-4o-mini',
+  };
 
   const steps = (campaign.steps ?? []) as LiCampaignStep[];
   if (steps.length === 0) {
@@ -339,7 +340,7 @@ async function processStep(
 
     case 'message':
     case 'follow_up':
-      return processMessageStep(step, stepIdx, cl, lead, campaign, client, aiConfig, db, log);
+      return processMessageStep(step, stepIdx, cl, lead, campaign, client, aiConfig, db, log, accountDbId);
   }
 }
 
@@ -439,6 +440,19 @@ async function processInviteStep(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log('error', `Не смог получить LinkedIn ID через Unipile — ${msg}. Лид этим тиком обработать не получится.`, lead.name, stepIdx);
+
+      const cooldown = detectAccountCooldownError(e);
+      if (cooldown && accountDbId) {
+        const { cooldownUntil, error: cooldownErr } = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
+        const untilHuman = new Date(cooldownUntil).toLocaleString('ru-RU');
+        if (cooldownErr) {
+          log('error', `Сигнал «${cooldown.kind}» при резолве ID, но не смог записать отлёжку — ${cooldownErr}.`, lead.name, stepIdx);
+        } else {
+          log('warning', `Аккаунт уходит в отлёжку до ${untilHuman} (${describeCooldownReason(cooldown.kind)}).`, lead.name, stepIdx);
+        }
+        throw new AccountCooldownTriggered(cooldown.kind);
+      }
+
       throw new Error('Cannot resolve provider_id');
     }
   }
@@ -636,6 +650,7 @@ async function processMessageStep(
   aiConfig: { apiKey: string; model?: string },
   db: NonNullable<typeof supabaseAdmin>,
   log: LogFn,
+  accountDbId: string | null,
 ): Promise<boolean> {
   const now = new Date().toISOString();
 
@@ -765,6 +780,10 @@ async function processMessageStep(
   //   - no chat yet   → startChat opens it AND delivers `message` as the first
   //                     line in one call; we MUST NOT fall through to
   //                     sendMessage afterwards or LI receives the same text twice.
+  // Both branches share the same cooldown contract: an account-level error
+  // (invitation_limit / account_restricted) parks the account in the DB and
+  // aborts the rest of the tick via AccountCooldownTriggered so we don't keep
+  // banging on a parked account.
   if (!lead.chat_id) {
     log('info', `Нет chat_id — открываю чат через Unipile с готовым сообщением: "${message.slice(0, 80)}${message.length > 80 ? '…' : ''}"`, lead.name, stepIdx);
     try {
@@ -783,12 +802,34 @@ async function processMessageStep(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log('warning', `Не удалось начать чат (ещё нет коннекта?): ${msg}`, lead.name, stepIdx);
-      // startChat() did hit LinkedIn — keep the human-like pause.
+      const cooldown = detectAccountCooldownError(e);
+      if (cooldown && accountDbId) {
+        const { cooldownUntil, error: cooldownErr } = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
+        const untilHuman = new Date(cooldownUntil).toLocaleString('ru-RU');
+        if (!cooldownErr) {
+          log('warning', `Аккаунт уходит в отлёжку до ${untilHuman} (${describeCooldownReason(cooldown.kind)}).`, lead.name, stepIdx);
+        }
+        throw new AccountCooldownTriggered(cooldown.kind);
+      }
+      // Non-cooldown failure — startChat() did hit LinkedIn, keep the human-like pause.
       return true;
     }
   } else {
     log('info', `Отправка сообщения: "${message.slice(0, 80)}${message.length > 80 ? '…' : ''}"`, lead.name, stepIdx);
-    await client.sendMessage(lead.chat_id, message);
+    try {
+      await client.sendMessage(lead.chat_id, message);
+    } catch (e) {
+      const cooldown = detectAccountCooldownError(e);
+      if (cooldown && accountDbId) {
+        const { cooldownUntil, error: cooldownErr } = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
+        const untilHuman = new Date(cooldownUntil).toLocaleString('ru-RU');
+        if (!cooldownErr) {
+          log('warning', `Аккаунт уходит в отлёжку до ${untilHuman} (${describeCooldownReason(cooldown.kind)}).`, lead.name, stepIdx);
+        }
+        throw new AccountCooldownTriggered(cooldown.kind);
+      }
+      throw e;
+    }
   }
 
   const history = [...(lead.conversation_history ?? []), { role: 'assistant', content: message, ts: now }];

@@ -12,7 +12,11 @@ import type { ColdyCredentials, PolzaColdyEvent } from './types';
  * The service name is fixed by docker-compose (`polza-reports`) and listens
  * on port 8000 — so this URL is a constant inside the portal network.
  */
-const SERVICE_URL = 'http://polza-reports:8000';
+const SERVICE_URL =
+  process.env.POLZA_REPORTS_URL ||
+  (process.env.NODE_ENV === 'production'
+    ? 'http://polza-reports:8000'
+    : 'http://127.0.0.1:8020');
 
 export interface ColdyReportOptions {
   detailed: boolean;

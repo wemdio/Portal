@@ -32,14 +32,31 @@ type PendingAuth = {
 const pendingAuths = new Map<string, PendingAuth>();
 const TTL_MS = 5 * 60 * 1000;
 
+// Логирование специально многословное (с PID воркера и размером Map) — нужно
+// для диагностики «Сессия авторизации не найдена»: при WEB_CONCURRENCY=8 каждый
+// форк имеет свою копию pendingAuths, и запросы send_code / sign_in могут
+// прийти в разные процессы. Все логи префиксованы [scA][auth] для grep'а.
+const LOG_PREFIX = '[scA][auth]';
+function log(event: string, fields: Record<string, unknown> = {}) {
+  // eslint-disable-next-line no-console
+  console.error(
+    `${LOG_PREFIX} pid=${process.pid} pending=${pendingAuths.size} event=${event} ${JSON.stringify(
+      fields,
+    )}`,
+  );
+}
+
 function cleanup() {
   const now = Date.now();
+  let removed = 0;
   for (const [id, entry] of pendingAuths) {
     if (now - entry.createdAt > TTL_MS) {
       entry.client.disconnect().catch(() => {});
       pendingAuths.delete(id);
+      removed += 1;
     }
   }
+  if (removed > 0) log('cleanup_expired', { removed });
 }
 
 /** Сохраняет авторизованный аккаунт: шифрует сессию, тянет мета через getMe. */
@@ -128,7 +145,8 @@ export async function POST(req: NextRequest) {
           settings: new Api.CodeSettings({}),
         }),
       );
-      const phoneCodeHash = (result as Api.auth.SentCode).phoneCodeHash;
+      const sent = result as Api.auth.SentCode;
+      const phoneCodeHash = sent.phoneCodeHash;
 
       const authId = randomUUID();
       pendingAuths.set(authId, {
@@ -139,10 +157,24 @@ export async function POST(req: NextRequest) {
         phoneCodeHash,
         createdAt: Date.now(),
       });
+      // sent.type — это SentCodeTypeApp / SentCodeTypeSms / SentCodeTypeCall и т.п.
+      // Канал доставки нигде в UI не показывается, и если Telegram сделал dedup
+      // (вернул старый phoneCodeHash без доставки нового кода) — увидим это
+      // только здесь по типу + хэшу.
+      log('send_code_ok', {
+        auth_id: authId,
+        user_id: guard.userId,
+        phone,
+        sent_type: sent.type?.className ?? null,
+        next_type: sent.nextType?.className ?? null,
+        timeout: sent.timeout ?? null,
+        phone_code_hash_prefix: phoneCodeHash.slice(0, 6),
+      });
       return NextResponse.json({ step: 'code_needed', auth_id: authId });
     } catch (e) {
       await client.disconnect().catch(() => {});
       const msg = e instanceof Error ? e.message : String(e);
+      log('send_code_fail', { phone, error: msg });
       return jsonError(`Не удалось отправить код: ${msg}`, 400);
     }
   }
@@ -154,8 +186,21 @@ export async function POST(req: NextRequest) {
     if (!authId || !code) return jsonError('auth_id и code обязательны', 400);
 
     const entry = pendingAuths.get(authId);
-    if (!entry) return jsonError('Сессия авторизации не найдена или истекла', 404);
-    if (entry.userId !== guard.userId) return jsonError('Unauthorized', 401);
+    if (!entry) {
+      // КЛЮЧЕВОЙ диагностический лог: если send_code и sign_in попали в разные
+      // воркеры кластера, auth_id здесь будет «чужой» и Map пустая (либо
+      // содержит auth_id'ы других пользователей). pid + pending=N это покажет.
+      log('sign_in_session_missing', { auth_id: authId, user_id: guard.userId });
+      return jsonError('Сессия авторизации не найдена или истекла', 404);
+    }
+    if (entry.userId !== guard.userId) {
+      log('sign_in_user_mismatch', {
+        auth_id: authId,
+        owner: entry.userId,
+        requester: guard.userId,
+      });
+      return jsonError('Unauthorized', 401);
+    }
 
     try {
       await entry.client.invoke(
@@ -168,14 +213,17 @@ export async function POST(req: NextRequest) {
       const account = await saveAccount(entry);
       await entry.client.disconnect().catch(() => {});
       pendingAuths.delete(authId);
+      log('sign_in_ok', { auth_id: authId, user_id: guard.userId, phone: entry.phone });
       return NextResponse.json({ step: 'done', account });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes('SESSION_PASSWORD_NEEDED')) {
+        log('sign_in_2fa_required', { auth_id: authId, user_id: guard.userId });
         return NextResponse.json({ step: 'password_needed', auth_id: authId });
       }
       await entry.client.disconnect().catch(() => {});
       pendingAuths.delete(authId);
+      log('sign_in_fail', { auth_id: authId, user_id: guard.userId, error: msg });
       return jsonError(`Ошибка входа: ${msg}`, 400);
     }
   }
@@ -187,8 +235,18 @@ export async function POST(req: NextRequest) {
     if (!authId || !password) return jsonError('auth_id и password обязательны', 400);
 
     const entry = pendingAuths.get(authId);
-    if (!entry) return jsonError('Сессия авторизации не найдена или истекла', 404);
-    if (entry.userId !== guard.userId) return jsonError('Unauthorized', 401);
+    if (!entry) {
+      log('check_password_session_missing', { auth_id: authId, user_id: guard.userId });
+      return jsonError('Сессия авторизации не найдена или истекла', 404);
+    }
+    if (entry.userId !== guard.userId) {
+      log('check_password_user_mismatch', {
+        auth_id: authId,
+        owner: entry.userId,
+        requester: guard.userId,
+      });
+      return jsonError('Unauthorized', 401);
+    }
 
     try {
       const passwordSrp = await entry.client.invoke(new Api.account.GetPassword());
@@ -198,17 +256,21 @@ export async function POST(req: NextRequest) {
       const account = await saveAccount(entry);
       await entry.client.disconnect().catch(() => {});
       pendingAuths.delete(authId);
+      log('check_password_ok', { auth_id: authId, user_id: guard.userId });
       return NextResponse.json({ step: 'done', account });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes('PASSWORD_HASH_INVALID')) {
+        log('check_password_invalid', { auth_id: authId, user_id: guard.userId });
         return jsonError('Неверный пароль 2FA', 400);
       }
       await entry.client.disconnect().catch(() => {});
       pendingAuths.delete(authId);
+      log('check_password_fail', { auth_id: authId, user_id: guard.userId, error: msg });
       return jsonError(`Ошибка 2FA: ${msg}`, 400);
     }
   }
 
+  log('unknown_step', { step });
   return jsonError('Неизвестный step. Ожидается: send_code, sign_in, check_password', 400);
 }

@@ -24,7 +24,8 @@ export async function authFetch(
   const token = await getAccessToken();
   const headers = new Headers(init?.headers);
   headers.set('Authorization', `Bearer ${token}`);
-  if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  const isFormData = typeof FormData !== 'undefined' && init?.body instanceof FormData;
+  if (!isFormData && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
 
   let res = await fetch(url, { ...init, headers });
 

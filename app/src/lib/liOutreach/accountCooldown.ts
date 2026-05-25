@@ -18,7 +18,8 @@ import { UnipileError } from './unipileClient';
 export type AccountCooldownKind =
   | 'invitation_limit'
   | 'already_invited'
-  | 'account_restricted';
+  | 'account_restricted'
+  | 'disconnected';
 
 export interface AccountCooldownDetection {
   kind: AccountCooldownKind;
@@ -40,6 +41,7 @@ export const COOLDOWN_MINUTES: Record<AccountCooldownKind, number> = {
   invitation_limit: Number(process.env.LI_INVITE_COOLDOWN_MIN ?? '60'),
   already_invited: Number(process.env.LI_ALREADY_INVITED_COOLDOWN_MIN ?? '15'),
   account_restricted: Number(process.env.LI_RESTRICTED_COOLDOWN_MIN ?? '120'),
+  disconnected: Number(process.env.LI_DISCONNECTED_COOLDOWN_MIN ?? '60'),
 };
 
 /**
@@ -99,8 +101,13 @@ export function detectAccountCooldownError(err: unknown): AccountCooldownDetecti
     return { kind: 'invitation_limit' };
   }
 
-  // 4xx that doesn't match a known LinkedIn-side signal: validation error,
-  // 401 auth, 404 profile-not-found, etc. — leave the account alone.
+  if (
+    body.includes('disconnected_account') ||
+    body.includes('disconnected') && body.includes('account')
+  ) {
+    return { kind: 'disconnected' };
+  }
+
   return null;
 }
 
@@ -176,5 +183,7 @@ export function describeCooldownReason(kind: AccountCooldownKind): string {
       return 'LinkedIn вернул "уже инвайтили" — даём аккаунту передохнуть';
     case 'account_restricted':
       return 'LinkedIn временно ограничил аккаунт';
+    case 'disconnected':
+      return 'LinkedIn-аккаунт отключён от Unipile — требуется переподключение';
   }
 }

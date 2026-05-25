@@ -303,6 +303,8 @@ async def _get_analytics(page: Page, campaign: Campaign) -> Optional[CampaignAna
         if len(lcells) < 3:
             continue
         letter_name = (await lcells[0].inner_text()).strip()
+        if "@" in letter_name:
+            continue
         l_sent = _parse_int(await lcells[1].inner_text())
         l_open_text = (await lcells[2].inner_text()).strip()
         l_rep_text = (await lcells[3].inner_text()).strip() if len(lcells) > 3 else "0"
