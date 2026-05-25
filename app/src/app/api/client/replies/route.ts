@@ -121,7 +121,9 @@ async function readReplyItems(
     campaignIds.map(async (campaignId) => {
       const data = await listEmails({
         campaign_id: campaignId,
-        ue_type: 2,
+        // См. комментарий в /campaigns/[id]/replies/route.ts: правильный
+        // параметр — `email_type`, не `ue_type`.
+        email_type: 'received',
         limit: REPLIES_PER_CAMPAIGN,
         search,
       }, {

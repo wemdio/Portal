@@ -122,7 +122,10 @@ async function fetchRecentLinkedReplies(
 
   for (let page = 0; page < maxPages; page++) {
     const res = await instantly.listEmails({
-      ue_type: 2,
+      // Правильный фильтр Instantly v2 — `email_type` (string enum),
+      // а не `ue_type` (это response-поле, query-параметр Instantly
+      // игнорил молча и возвращал все письма подряд).
+      email_type: 'received',
       limit: REPLY_EMAILS_PAGE_SIZE,
       starting_after: startingAfter,
     });
