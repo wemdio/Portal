@@ -351,6 +351,59 @@ async function canSendToDialog(
   return data?.can_send !== false;
 }
 
+/**
+ * If `errMsg` describes a permanently unreachable peer, flip can_send=false
+ * for that dialog so future cycles short-circuit before burning a GPT call
+ * and another SendMessage attempt. Returns the matched code (or null when
+ * the error doesn't match any known terminal condition).
+ *
+ * Codes covered:
+ *  - PEER_ID_INVALID       — peer reference is stale (account deleted, etc.)
+ *  - INPUT_USER_DEACTIVATED — Telegram banned the user
+ *  - USER_BANNED_IN_CHANNEL — applies only to channels but bubbles up here too
+ *  - USER_IS_BLOCKED       — they blocked us
+ *
+ * Operators can still see the dialog in the UI and re-enable manually if a
+ * peer becomes reachable again (rare, but worth keeping the data).
+ */
+async function disableDialogIfUnreachable(
+  errMsg: string,
+  ctx: {
+    db: SupabaseClient;
+    campaignId: string;
+    accountId: string;
+    tgUserId: number | null;
+    dialogLabel: string;
+    log: LogFn;
+  },
+): Promise<string | null> {
+  const reasonCode =
+    errMsg.includes('PEER_ID_INVALID') ? 'PEER_ID_INVALID' :
+    errMsg.includes('INPUT_USER_DEACTIVATED') ? 'INPUT_USER_DEACTIVATED' :
+    errMsg.includes('USER_BANNED_IN_CHANNEL') ? 'USER_BANNED_IN_CHANNEL' :
+    errMsg.includes('USER_IS_BLOCKED') ? 'USER_IS_BLOCKED' :
+    null;
+  if (!reasonCode) return null;
+
+  if (ctx.tgUserId == null) {
+    ctx.log('warning', `Диалог ${ctx.dialogLabel}: ${reasonCode} — пользователь недоступен, но автоматически отключить не могу (нет числового tg_user_id).`);
+    return reasonCode;
+  }
+
+  const { error: csErr } = await ctx.db
+    .from('tg_outreach_dialogs')
+    .update({ can_send: false })
+    .eq('campaign_id', ctx.campaignId)
+    .eq('account_id', ctx.accountId)
+    .eq('tg_user_id', ctx.tgUserId);
+  if (csErr) {
+    ctx.log('error', `Диалог ${ctx.dialogLabel}: получили ${reasonCode}, но не смог отключить отправку в базе данных — ${csErr.message}. Будем дальше тратить GPT-запросы на этом диалоге.`);
+  } else {
+    ctx.log('warning', `Диалог ${ctx.dialogLabel}: Telegram вернул ${reasonCode} — пользователь недоступен (удалил аккаунт, заблокировал бота или невалидный peer). Дальнейшие отправки в этот диалог отключены автоматически (can_send=false).`);
+  }
+  return reasonCode;
+}
+
 async function ensureDialogMeta(
   db: SupabaseClient,
   campaignId: string,
@@ -718,7 +771,20 @@ async function handleFollowUp(
       log('info', `Напоминание отправлено ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} (${reply.length} символов)`);
     } catch (err) {
       stats.errors++;
-      log('warning', `Напоминание для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} не отправлено — ошибка: ${err instanceof Error ? err.message : String(err)}`);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      // Same unreachable-peer treatment as in handleChat — saves a GPT call
+      // next round if this user is permanently gone.
+      const unreachable = await disableDialogIfUnreachable(errMsg, {
+        db,
+        campaignId: campaign.id,
+        accountId: account.id,
+        tgUserId,
+        dialogLabel: tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`,
+        log,
+      });
+      if (!unreachable) {
+        log('warning', `Напоминание для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} не отправлено — ошибка: ${errMsg}`);
+      }
     }
   }
 
@@ -833,7 +899,18 @@ async function handleMissedRepliesLastDays(
       log('info', `Catch-up: отправлен запоздалый ответ ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} (${reply.length} символов)`);
     } catch (err) {
       errorsCount++;
-      log('warning', `Catch-up: ответ для ${tgUsername ?? tgUserId} не отправлен — ошибка: ${err instanceof Error ? err.message : String(err)}`);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const unreachable = await disableDialogIfUnreachable(errMsg, {
+        db,
+        campaignId: campaign.id,
+        accountId: account.id,
+        tgUserId,
+        dialogLabel: tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`,
+        log,
+      });
+      if (!unreachable) {
+        log('warning', `Catch-up: ответ для ${tgUsername ?? tgUserId} не отправлен — ошибка: ${errMsg}`);
+      }
     }
   }
 
@@ -1018,6 +1095,13 @@ export async function runCampaignLoop(
   }
 
   const offsetErrorCounts = new Map<string, number>();
+  // Separate counter for the gramJS internal pagination bug — `getDialogs`
+  // throws RangeError ("offset out of range") on accounts with thousands of
+  // dialogs. Production data shows the inner retry with smaller limit never
+  // succeeds (1:1 ratio of retry attempts to outer-catch failures over 7d),
+  // so we no longer retry. Instead we track consecutive failures per account
+  // and put chronic offenders on a 6h cooldown so the operator can act.
+  const pagingFailureCounts = new Map<string, number>();
   // Stays true while we're inside a sleep_periods window so we can emit a
   // matching "сон закончился" line when it ends (otherwise users see only
   // the start of the silence and can't tell when work resumed).
@@ -1082,44 +1166,40 @@ export async function runCampaignLoop(
 
         try {
           let dialogs: Awaited<ReturnType<typeof client.getDialogs>>;
-          let retriedSmallerLimit = false;
-          try {
-            // Race against a hard per-account timeout. We do not abort the
-            // gramJS call (Promise.race leaves it dangling), but the worker
-            // moves on, which is what matters for keeping the watchdog happy.
-            // A dangling getDialogs eventually resolves or errors into a
-            // detached promise — gramJS swallows the result.
-            dialogs = await Promise.race([
-              client.getDialogs({ limit: DIALOGS_FETCH_LIMIT }),
-              new Promise<never>((_, reject) =>
-                setTimeout(
-                  () =>
-                    reject(
-                      new Error(
-                        `${PER_ACCOUNT_TIMEOUT_MARKER} (${PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS / 1000}s) on getDialogs`,
-                      ),
+          // Race against a hard per-account timeout. We do not abort the
+          // gramJS call (Promise.race leaves it dangling), but the worker
+          // moves on, which is what matters for keeping the watchdog happy.
+          // A dangling getDialogs eventually resolves or errors into a
+          // detached promise — gramJS swallows the result.
+          //
+          // `archived: false` skips dialogs the user has moved to Archive —
+          // we never message archived contacts anyway, and shrinking the
+          // result set reduces the chance gramJS's internal pagination
+          // overshoots the dialog count (the "offset out of range" bug).
+          // The bug itself is now handled in the outer catch with a
+          // dedicated branch — the old inner retry never succeeded
+          // (1:1 retry-to-fail ratio in 7d of prod logs), so we drop it.
+          dialogs = await Promise.race([
+            client.getDialogs({ limit: DIALOGS_FETCH_LIMIT, archived: false }),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      `${PER_ACCOUNT_TIMEOUT_MARKER} (${PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS / 1000}s) on getDialogs`,
                     ),
-                  PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS,
-                ),
+                  ),
+                PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS,
               ),
-            ]);
-          } catch (err) {
-            const errMsg = err instanceof Error ? err.message : String(err);
-            if (errMsg.includes('offset') && errMsg.includes('out of range')) {
-              // GramJS off-by-a-few bug in internal pagination; retry with smaller limit.
-              const smallerLimit = Math.min(20, DIALOGS_FETCH_LIMIT);
-              log('warning', `Аккаунт ${account.session_name}: сбой постраничной загрузки диалогов (offset out of range) — повторяю запрос с меньшим объёмом (${smallerLimit})`);
-              dialogs = await client.getDialogs({ limit: smallerLimit });
-              retriedSmallerLimit = true;
-            } else {
-              throw err;
-            }
-          }
+            ),
+          ]);
+          // Successful fetch — reset the chronic paging failure counter.
+          if (pagingFailureCounts.has(account.id)) pagingFailureCounts.delete(account.id);
           cycleStats.dialogs_total = dialogs.length;
           cycleStats.unread = dialogs.filter(d => d.unreadCount > 0).length;
           log(
             'info',
-            `Аккаунт ${account.session_name}: загрузил ${dialogs.length} диалогов, из них ${cycleStats.unread} с непрочитанными${retriedSmallerLimit ? ' (потребовался повтор с меньшим лимитом)' : ''}`,
+            `Аккаунт ${account.session_name}: загрузил ${dialogs.length} диалогов, из них ${cycleStats.unread} с непрочитанными`,
           );
 
           for (const dialog of dialogs) {
@@ -1159,6 +1239,24 @@ export async function runCampaignLoop(
                 log('warning', `Аккаунт ${account.session_name}: Telegram ограничил отправку (FloodError/Frozen на диалоге ${dialogLabel}). Аккаунт на паузе до ${cooldownDisplay} (${tg.account_cooldown_hours}ч).`);
                 cycleStats.flood++;
                 break;
+              }
+
+              // Permanently unreachable peer: user deleted account, blocked
+              // us, or the peer reference is stale. Each cycle we'd otherwise
+              // burn another GPT call and another SendMessage. The helper
+              // flips can_send=false so canSendToDialog() short-circuits
+              // future rounds.
+              const unreachable = await disableDialogIfUnreachable(errMsg, {
+                db,
+                campaignId: campaign.id,
+                accountId: account.id,
+                tgUserId: dialogId,
+                dialogLabel,
+                log,
+              });
+              if (unreachable) {
+                cycleStats.errors++;
+                continue;
               }
 
               cycleStats.errors++;
@@ -1260,7 +1358,46 @@ export async function runCampaignLoop(
               'warning',
               `Аккаунт ${account.session_name}: подключение зависло дольше ${PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS / 1000} секунд при загрузке диалогов. Пропускаю этот аккаунт в текущем круге, попробую снова на следующем.`,
             );
-          } else if (errMsg.includes('out of range') || errMsg.includes('TIMEOUT') || errMsg.includes('Constructor ID')) {
+          } else if (
+            // gramJS internal pagination bug: throws RangeError when offset
+            // overshoots dialog count by a few. Distinct from the session-
+            // corruption case handled above (no `.session`/`readSqliteSession`
+            // in the stack) and from generic MTProto/network glitches.
+            errMsg.includes('offset') && errMsg.includes('out of range')
+          ) {
+            // Single, clearly-attributed warning per failed attempt. We used
+            // to log a retry message followed by a generic "разовый сбой",
+            // duplicating every failure — production showed 100% retry-fail
+            // rate, so we collapse to one line and skip the cycle.
+            const count = (pagingFailureCounts.get(account.id) ?? 0) + 1;
+            pagingFailureCounts.set(account.id, count);
+            // After many consecutive failures the account is effectively
+            // disabled — sit it out for 6h so operators can diagnose
+            // (typical fix: reduce account's dialog count, archive old
+            // chats, or re-issue the session).
+            const PAGING_FAILURE_COOLDOWN_THRESHOLD = 5;
+            if (count >= PAGING_FAILURE_COOLDOWN_THRESHOLD) {
+              const cooldownMs = 6 * 3600 * 1000;
+              const cooldownUntil = new Date(Date.now() + cooldownMs).toISOString();
+              const cooldownDisplay = new Date(cooldownUntil).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
+              const { error: cdErr } = await db.from('tg_outreach_accounts').update({ cooldown_until: cooldownUntil }).eq('id', account.id);
+              if (cdErr) {
+                log('error', `Аккаунт ${account.session_name}: не смог сохранить 6-часовую паузу в базе данных — ${cdErr.message}`);
+              } else {
+                (account as OutreachAccount).cooldown_until = cooldownUntil;
+              }
+              log(
+                'warning',
+                `Аккаунт ${account.session_name}: ${count} подряд сбоев пагинации диалогов (известный баг gramJS на больших аккаунтах). Пауза 6ч до ${cooldownDisplay}. Рекомендация: вручную очистить архив / удалить старые чаты или перевыпустить сессию.`,
+              );
+              pagingFailureCounts.delete(account.id);
+            } else {
+              log(
+                'warning',
+                `Аккаунт ${account.session_name}: сбой пагинации диалогов (offset out of range, попытка ${count}/${PAGING_FAILURE_COOLDOWN_THRESHOLD}) — пропускаю круг. Это известный баг gramJS на аккаунтах с тысячами диалогов.`,
+              );
+            }
+          } else if (errMsg.includes('TIMEOUT') || errMsg.includes('Constructor ID')) {
             // Transient MTProto/network issue — log but do not punish account
             log('warning', `Аккаунт ${account.session_name}: разовый сбой сети или Telegram — пропускаю этот круг. Детали: ${errMsg.slice(0, 150)}`);
           } else {
