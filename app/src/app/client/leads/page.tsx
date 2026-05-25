@@ -5,7 +5,7 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import { Send, MessageSquare } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
-import { ReplyThreadActions } from '@/components/client-replies/ReplyThreadActions';
+import { ExpandedThread } from '@/components/client-replies/ExpandedThread';
 
 type LeadComment = {
   id: string;
@@ -183,7 +183,7 @@ function LeadDetail({
         </div>
 
         {canReplyByEmail && (
-          <ReplyThreadActions
+          <ExpandedThread
             campaignId={lead.campaign_id}
             emailId={lead.email_id!}
           />

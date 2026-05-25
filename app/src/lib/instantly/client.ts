@@ -450,7 +450,20 @@ export async function resumeSubsequence(id: string) {
 // ─── Emails ───────────────────────────────────────────────────────────────────
 
 export async function listEmails(
-  params?: PaginationParams & { campaign_id?: string; lead_id?: string; search?: string; ue_type?: number },
+  params?: PaginationParams & {
+    campaign_id?: string;
+    lead_id?: string;
+    search?: string;
+    /**
+     * Per Instantly v2 docs (GET /api/v2/emails), the filter on direction is
+     * `email_type` (string enum), NOT `ue_type` (which is a RESPONSE field
+     * classifying the email, not a query filter). Passing an unknown param
+     * like `ue_type` is silently ignored — Instantly returns ALL emails for
+     * the campaign, including outbound ones. Use `email_type: 'received'`
+     * when you want only inbound replies.
+     */
+    email_type?: 'received' | 'sent' | 'manual';
+  },
   requestOptions?: InstantlyRequestOptions,
 ) {
   return request<PaginatedResponse<Email>>('/emails', { params: params as Record<string, string | number> }, requestOptions);

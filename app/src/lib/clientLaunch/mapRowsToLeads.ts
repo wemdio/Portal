@@ -63,6 +63,14 @@ export function mapCsvRowsToLeads(input: MapCsvRowsInput): LeadCreatePayload[] {
     const lead: LeadCreatePayload = { email: rawEmail };
 
     const leadRecord = lead as unknown as Record<string, unknown>;
+    // Параллельно собираем «зеркало» стандартных полей в custom_variables
+    // под snake_case ключами. Зачем: Instantly умеет подставлять
+    // стандартные поля в шаблон ТОЛЬКО через camelCase (`{{firstName}}`,
+    // `{{companyName}}`). Если в body клиента остался старый чип
+    // `{{company_name}}` (так показывал портал до фикса), без зеркала
+    // плейсхолдер уйдёт литералом в письмо. С зеркалом — подставится
+    // через custom_variable с тем же snake_case ключом.
+    const snakeCaseMirror: Record<string, string> = {};
     for (const field of STANDARD_FIELDS) {
       if (field === 'email') continue;
       const idx = standardIdx[field];
@@ -70,10 +78,11 @@ export function mapCsvRowsToLeads(input: MapCsvRowsInput): LeadCreatePayload[] {
       const val = (row[idx] ?? '').toString().trim();
       if (val) {
         leadRecord[field] = val;
+        snakeCaseMirror[field] = val;
       }
     }
 
-    const customVars: Record<string, string> = {};
+    const customVars: Record<string, string> = { ...snakeCaseMirror };
 
     for (const [varKey, headerName] of Object.entries(customMapping)) {
       const idx = indexByHeader.get(headerName);
