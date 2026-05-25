@@ -1,11 +1,36 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { Building2, FileSpreadsheet, FileText, Search, X } from 'lucide-react';
-import { Switch } from '@/components/Switch';
+/**
+ * Client-portal B2B companies parser.
+ *
+ * Closes findings from /impeccable critique 2026-05-25 (baseline 15/40 Bad):
+ *   P0 — OkvedTreeModal was cross-aesthetic admin component (bg-white,
+ *        blue checkboxes); now uses OkvedTreeModalClient (editorial dark
+ *        clone, admin original untouched so /tools/our-bases still works).
+ *   P0 — Switch primitive used 7 times rendered blue iOS pills; replaced
+ *        with native checkboxes styled `accent-color: var(--cp-paper)`.
+ *   P1 — Filter state now persists to localStorage (with «черновик
+ *        сохранён HH:MM» microcopy + «начать с нуля») so Olga doesn't
+ *        lose 12 selections on tab close. Mirrors launch wizard pattern.
+ *   P1 — «Сбросить фильтры» button.
+ *   P1 — Chip strip under each selector button shows first 6 selected
+ *        items (regions / OKVEDs) with inline remove × — no need to
+ *        reopen modal to see what's in there.
+ *   P2 — Action zone distilled: «Скачать XLSX» / «Скачать CSV» are now
+ *        ghost buttons inline next to the count, not a 2-card mini-grid.
+ *   P2 — Employees range layout flattened to single flex row (matches
+ *        revenue/cost — consistency across all three numeric ranges).
+ *   Help — `title=""` tooltips on ОКВЭД / ЭДО / ЕГАИС / «стоимость
+ *        организации» — closes the «Olga doesn't know what those are»
+ *        gap surfaced in persona red flags.
+ *   Carryover — RegionsModal scrim swapped to var(--cp-scrim) token.
+ */
+
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Building2, Download, FileSpreadsheet, FileText, RotateCcw, Search, X } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { FEDERAL_DISTRICTS, ALL_REGION_CODES } from '@/lib/companiesSearch/regions';
-import { OkvedTreeModal } from '@/components/OkvedTreeModal';
+import { OkvedTreeModalClient } from '@/components/client/OkvedTreeModalClient';
 import { reduceToTopCodes } from '@/lib/companiesSearch/okved2';
 import type { Locale } from '@/lib/i18n';
 
@@ -23,6 +48,29 @@ const LEGAL_FORMS = [
   { code: 'НКО', label: 'НКО' },
 ];
 
+const DRAFT_KEY = 'client.companies-search.filters.v1';
+
+interface DraftPayload {
+  mode: Mode;
+  selectedRegions: string[];
+  selectedOkveds: string[];
+  innList: string;
+  hasPhone: boolean;
+  hasEmail: boolean;
+  legalForm: string;
+  employeesFrom: string;
+  employeesTo: string;
+  revenueFrom: string;
+  revenueTo: string;
+  costFrom: string;
+  costTo: string;
+  hasWebsite: boolean;
+  hasEdo: boolean;
+  hasEgais: boolean;
+  includeIp: boolean;
+  savedAt: string;
+}
+
 function useLocale(): L {
   const [locale, setLocale] = useState<L>('ru');
   useEffect(() => {
@@ -36,6 +84,102 @@ function useLocale(): L {
     return () => observer.disconnect();
   }, []);
   return locale;
+}
+
+/**
+ * Editorial-dark checkbox + label. Replaces the shared Switch primitive
+ * (blue iOS pill) for filter inclusion flags. Native input + `accent-color:
+ * var(--cp-paper)` means checked state is paper-white on the dark surface,
+ * keeping the «Invisible Accent» rule intact and the «Status-as-Data» rule
+ * unviolated.
+ */
+function Checkbox({
+  checked,
+  onChange,
+  label,
+  title,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label: React.ReactNode;
+  title?: string;
+}) {
+  return (
+    <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="w-4 h-4 shrink-0"
+        style={{ accentColor: 'var(--cp-paper)' }}
+      />
+      <span
+        className="text-sm"
+        style={{ color: 'var(--cp-paper)' }}
+        title={title}
+      >
+        {label}
+      </span>
+    </label>
+  );
+}
+
+/**
+ * Compact chip strip — renders the first `maxVisible` selected items with
+ * inline remove × buttons; overflows show as «+N». Closes the «выбрано: 17
+ * gives count not content» recognition gap surfaced in re-critique.
+ */
+function ChipStrip({
+  items,
+  onRemove,
+  maxVisible = 6,
+  locale,
+}: {
+  items: { code: string; label: string }[];
+  onRemove: (code: string) => void;
+  maxVisible?: number;
+  locale: L;
+}) {
+  if (items.length === 0) return null;
+  const visible = items.slice(0, maxVisible);
+  const overflow = items.length - maxVisible;
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {visible.map(({ code, label }) => (
+        <span
+          key={code}
+          className="inline-flex items-center gap-1 ds-mono text-[11px] px-2 py-0.5 rounded"
+          style={{
+            background: 'var(--cp-surface-rest)',
+            border: '1px solid var(--cp-divider)',
+            color: 'var(--cp-paper-mute)',
+          }}
+        >
+          <span style={{ color: 'var(--cp-paper)' }}>{label}</span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              onRemove(code);
+            }}
+            className="ml-0.5 opacity-60 hover:opacity-100"
+            aria-label={t(`Убрать ${label}`, `Remove ${label}`, locale)}
+          >
+            <X className="h-3 w-3" aria-hidden />
+          </button>
+        </span>
+      ))}
+      {overflow > 0 && (
+        <span
+          className="ds-mono text-[11px] px-2 py-0.5"
+          style={{ color: 'var(--cp-paper-faint)' }}
+        >
+          +{overflow}
+        </span>
+      )}
+    </div>
+  );
 }
 
 export default function CompaniesSearchPage() {
@@ -72,11 +216,195 @@ export default function CompaniesSearchPage() {
   const [exportLoading, setExportLoading] = useState<'csv' | 'xlsx' | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
+  // Draft persistence — see DRAFT_KEY comment.
+  const [draftSavedAt, setDraftSavedAt] = useState<Date | null>(null);
+  const [draftRestored, setDraftRestored] = useState(false);
+
   const selectedRegionsCount = selectedRegions.size;
   const selectedOkvedTopCount = useMemo(
     () => reduceToTopCodes(selectedOkveds).length,
     [selectedOkveds],
   );
+
+  // Map region codes → region name for chip display.
+  const regionNameByCode = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const district of FEDERAL_DISTRICTS) {
+      for (const r of district.regions) {
+        map.set(r.code, r.name);
+      }
+    }
+    return map;
+  }, []);
+
+  // Restore once on mount.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(DRAFT_KEY);
+      if (!raw) return;
+      const draft = JSON.parse(raw) as Partial<DraftPayload> | null;
+      if (!draft || typeof draft !== 'object') return;
+      if (draft.mode === 'activity' || draft.mode === 'inn') setMode(draft.mode);
+      if (Array.isArray(draft.selectedRegions)) {
+        setSelectedRegions(new Set(draft.selectedRegions));
+      }
+      if (Array.isArray(draft.selectedOkveds)) {
+        setSelectedOkveds(new Set(draft.selectedOkveds));
+      }
+      if (typeof draft.innList === 'string') setInnList(draft.innList);
+      if (typeof draft.hasPhone === 'boolean') setHasPhone(draft.hasPhone);
+      if (typeof draft.hasEmail === 'boolean') setHasEmail(draft.hasEmail);
+      if (typeof draft.legalForm === 'string') setLegalForm(draft.legalForm);
+      if (typeof draft.employeesFrom === 'string') setEmployeesFrom(draft.employeesFrom);
+      if (typeof draft.employeesTo === 'string') setEmployeesTo(draft.employeesTo);
+      if (typeof draft.revenueFrom === 'string') setRevenueFrom(draft.revenueFrom);
+      if (typeof draft.revenueTo === 'string') setRevenueTo(draft.revenueTo);
+      if (typeof draft.costFrom === 'string') setCostFrom(draft.costFrom);
+      if (typeof draft.costTo === 'string') setCostTo(draft.costTo);
+      if (typeof draft.hasWebsite === 'boolean') setHasWebsite(draft.hasWebsite);
+      if (typeof draft.hasEdo === 'boolean') setHasEdo(draft.hasEdo);
+      if (typeof draft.hasEgais === 'boolean') setHasEgais(draft.hasEgais);
+      if (typeof draft.includeIp === 'boolean') setIncludeIp(draft.includeIp);
+      if (typeof draft.savedAt === 'string') {
+        const d = new Date(draft.savedAt);
+        if (!Number.isNaN(d.getTime())) setDraftSavedAt(d);
+      }
+      setDraftRestored(true);
+    } catch {
+      // bad JSON / sandbox / no storage — silent skip
+    }
+  }, []);
+
+  // Debounced save on any tracked filter change. The «default» check
+  // prevents writing the empty-default state on first paint.
+  useEffect(() => {
+    const isDefault =
+      mode === 'activity' &&
+      selectedRegions.size === ALL_REGION_CODES.length &&
+      selectedOkveds.size === 0 &&
+      !innList.trim() &&
+      !hasPhone &&
+      !hasEmail &&
+      !legalForm &&
+      !employeesFrom &&
+      !employeesTo &&
+      !revenueFrom &&
+      !revenueTo &&
+      !costFrom &&
+      !costTo &&
+      !hasWebsite &&
+      !hasEdo &&
+      !hasEgais &&
+      !includeIp;
+    if (isDefault) return;
+    const t = setTimeout(() => {
+      try {
+        const payload: DraftPayload = {
+          mode,
+          selectedRegions: Array.from(selectedRegions),
+          selectedOkveds: Array.from(selectedOkveds),
+          innList,
+          hasPhone,
+          hasEmail,
+          legalForm,
+          employeesFrom,
+          employeesTo,
+          revenueFrom,
+          revenueTo,
+          costFrom,
+          costTo,
+          hasWebsite,
+          hasEdo,
+          hasEgais,
+          includeIp,
+          savedAt: new Date().toISOString(),
+        };
+        window.localStorage.setItem(DRAFT_KEY, JSON.stringify(payload));
+        setDraftSavedAt(new Date());
+        // After first save, draft is no longer «восстановленный» — fresh.
+        setDraftRestored(false);
+      } catch {
+        // sandbox / quota / no storage — silent
+      }
+    }, 500);
+    return () => clearTimeout(t);
+  }, [
+    mode,
+    selectedRegions,
+    selectedOkveds,
+    innList,
+    hasPhone,
+    hasEmail,
+    legalForm,
+    employeesFrom,
+    employeesTo,
+    revenueFrom,
+    revenueTo,
+    costFrom,
+    costTo,
+    hasWebsite,
+    hasEdo,
+    hasEgais,
+    includeIp,
+  ]);
+
+  const clearAllFilters = useCallback(() => {
+    setMode('activity');
+    setSelectedRegions(new Set(ALL_REGION_CODES));
+    setSelectedOkveds(new Set());
+    setInnList('');
+    setHasPhone(false);
+    setHasEmail(false);
+    setLegalForm('');
+    setEmployeesFrom('');
+    setEmployeesTo('');
+    setRevenueFrom('');
+    setRevenueTo('');
+    setCostFrom('');
+    setCostTo('');
+    setHasWebsite(false);
+    setHasEdo(false);
+    setHasEgais(false);
+    setIncludeIp(false);
+    setCalcResult(null);
+    setCalcError(null);
+    setDraftSavedAt(null);
+    setDraftRestored(false);
+    try {
+      window.localStorage.removeItem(DRAFT_KEY);
+    } catch { /* ignore */ }
+  }, []);
+
+  const removeRegion = useCallback((code: string) => {
+    setSelectedRegions((prev) => {
+      const next = new Set(prev);
+      next.delete(code);
+      return next;
+    });
+  }, []);
+
+  const removeOkved = useCallback((code: string) => {
+    setSelectedOkveds((prev) => {
+      const next = new Set(prev);
+      next.delete(code);
+      return next;
+    });
+  }, []);
+
+  // Chip strip items.
+  const regionChips = useMemo(() => {
+    if (selectedRegionsCount === ALL_REGION_CODES.length) return [];
+    return Array.from(selectedRegions).map((code) => ({
+      code,
+      label: regionNameByCode.get(code) ?? code,
+    }));
+  }, [selectedRegions, selectedRegionsCount, regionNameByCode]);
+
+  const okvedChips = useMemo(() => {
+    if (selectedOkveds.size === 0) return [];
+    return Array.from(selectedOkveds).map((code) => ({ code, label: code }));
+  }, [selectedOkveds]);
 
   const buildFilters = () => {
     const parsedInnList =
@@ -199,24 +527,45 @@ export default function CompaniesSearchPage() {
 
   return (
     <div className="max-w-6xl mx-auto space-y-6 pb-20">
-      <header>
-        <p className="ds-eyebrow mb-2">
-          <Building2 className="inline-block h-3 w-3 mr-1" aria-hidden />
-          {t('Сбор баз', 'Database collection', locale)}
-        </p>
-        <h1
-          className="text-xl sm:text-2xl font-bold m-0"
-          style={{ color: 'var(--cp-paper)' }}
-        >
-          {t('B2B-поиск компаний', 'B2B company search', locale)}
-        </h1>
-        <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
-          {t(
-            'Поиск российских юрлиц по ОКВЭД, регионам, выручке и контактам. Экспорт в CSV/XLSX.',
-            'Russian legal entities by activity, region, revenue, and contacts. CSV/XLSX export.',
-            locale,
+      <header className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <p className="ds-eyebrow mb-2">
+            <Building2 className="inline-block h-3 w-3 mr-1" aria-hidden />
+            {t('Сбор баз', 'Database collection', locale)}
+          </p>
+          <h1
+            className="text-xl sm:text-2xl font-bold m-0"
+            style={{ color: 'var(--cp-paper)' }}
+          >
+            {t('B2B-поиск компаний', 'B2B company search', locale)}
+          </h1>
+          <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
+            {t(
+              'Поиск российских юрлиц по ОКВЭД, регионам, выручке и контактам. Экспорт в CSV/XLSX.',
+              'Russian legal entities by activity, region, revenue, and contacts. CSV/XLSX export.',
+              locale,
+            )}
+          </p>
+          {draftSavedAt && (
+            <p className="mt-2 text-xs ds-mono" style={{ color: 'var(--cp-paper-faint)' }}>
+              {draftRestored
+                ? t('восстановлены последние фильтры от ', 'last filters restored from ', locale)
+                : t('черновик сохранён ', 'draft saved ', locale)}
+              {draftSavedAt.toLocaleTimeString(locale === 'en' ? 'en-US' : 'ru-RU', {
+                hour: '2-digit',
+                minute: '2-digit',
+              })}
+            </p>
           )}
-        </p>
+        </div>
+        <button
+          type="button"
+          onClick={clearAllFilters}
+          className="ds-btn-ghost inline-flex items-center gap-1.5 px-3 py-2 text-xs shrink-0"
+        >
+          <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+          {t('Сбросить фильтры', 'Reset filters', locale)}
+        </button>
       </header>
 
       {/* ── 01 → Регионы и виды деятельности ─────────────────────────── */}
@@ -247,98 +596,111 @@ export default function CompaniesSearchPage() {
 
         {mode === 'activity' ? (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <button
-              type="button"
-              onClick={() => setRegionsModalOpen(true)}
-              className="ds-card-pressable flex items-center gap-3 w-full rounded-md px-5 py-4 text-left"
-              style={{
-                background: 'var(--cp-surface-rest)',
-                border: '1px solid var(--cp-divider)',
-              }}
-            >
-              <svg
-                className="w-5 h-5 shrink-0"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={1.5}
-                style={{ color: 'var(--cp-paper-faint)' }}
-                aria-hidden
+            {/* Regions selector */}
+            <div>
+              <button
+                type="button"
+                onClick={() => setRegionsModalOpen(true)}
+                className="ds-card-pressable flex items-center gap-3 w-full rounded-md px-5 py-4 text-left"
+                style={{
+                  background: 'var(--cp-surface-rest)',
+                  border: '1px solid var(--cp-divider)',
+                }}
               >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
-                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
-              </svg>
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
-                  {t('Регионы', 'Regions', locale)}
+                <svg
+                  className="w-5 h-5 shrink-0"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={1.5}
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                  aria-hidden
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
+                </svg>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
+                    {t('Регионы', 'Regions', locale)}
+                  </div>
+                  <div className="ds-mono text-[11px] mt-0.5" style={{ color: 'var(--cp-paper-faint)' }}>
+                    {selectedRegionsCount === ALL_REGION_CODES.length
+                      ? t('все регионы РФ', 'all regions selected', locale)
+                      : selectedRegionsCount === 0
+                        ? t('не выбран ни один регион', 'no regions selected', locale)
+                        : t(`выбрано: ${selectedRegionsCount}`, `selected: ${selectedRegionsCount}`, locale)}
+                  </div>
                 </div>
-                <div className="ds-mono text-[11px] mt-0.5" style={{ color: 'var(--cp-paper-faint)' }}>
-                  {selectedRegionsCount === ALL_REGION_CODES.length
-                    ? t('все регионы РФ', 'all regions selected', locale)
-                    : selectedRegionsCount === 0
-                      ? t('не выбран ни один регион', 'no regions selected', locale)
-                      : t(`выбрано: ${selectedRegionsCount}`, `selected: ${selectedRegionsCount}`, locale)}
-                </div>
-              </div>
-              <svg
-                className="w-4 h-4 shrink-0"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-                style={{ color: 'var(--cp-paper-faint)' }}
-                aria-hidden
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-              </svg>
-            </button>
+                <svg
+                  className="w-4 h-4 shrink-0"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                  aria-hidden
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+                </svg>
+              </button>
+              <ChipStrip items={regionChips} onRemove={removeRegion} locale={locale} />
+            </div>
 
-            <button
-              type="button"
-              onClick={() => setOkvedModalOpen(true)}
-              className="ds-card-pressable flex items-center gap-3 w-full rounded-md px-5 py-4 text-left"
-              style={{
-                background: 'var(--cp-surface-rest)',
-                border: '1px solid var(--cp-divider)',
-              }}
-            >
-              <svg
-                className="w-5 h-5 shrink-0"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={1.5}
-                style={{ color: 'var(--cp-paper-faint)' }}
-                aria-hidden
+            {/* OKVED selector */}
+            <div>
+              <button
+                type="button"
+                onClick={() => setOkvedModalOpen(true)}
+                className="ds-card-pressable flex items-center gap-3 w-full rounded-md px-5 py-4 text-left"
+                style={{
+                  background: 'var(--cp-surface-rest)',
+                  border: '1px solid var(--cp-divider)',
+                }}
+                title={t(
+                  'ОКВЭД — Общероссийский классификатор видов экономической деятельности. Коды показывают, чем компания занимается.',
+                  'OKVED — All-Russian Classifier of Types of Economic Activity. Codes indicate what a company does.',
+                  locale,
+                )}
               >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" />
-              </svg>
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
-                  {t('Виды деятельности (ОКВЭД)', 'Activity types (OKVED)', locale)}
+                <svg
+                  className="w-5 h-5 shrink-0"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={1.5}
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                  aria-hidden
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" />
+                </svg>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
+                    {t('Виды деятельности (ОКВЭД)', 'Activity types (OKVED)', locale)}
+                  </div>
+                  <div className="ds-mono text-[11px] mt-0.5" style={{ color: 'var(--cp-paper-faint)' }}>
+                    {selectedOkveds.size === 0
+                      ? t('все виды деятельности', 'all activity types', locale)
+                      : t(
+                          `выбрано: ${selectedOkveds.size}${selectedOkvedTopCount !== selectedOkveds.size ? ` (${selectedOkvedTopCount} групп)` : ''}`,
+                          `selected: ${selectedOkveds.size}${selectedOkvedTopCount !== selectedOkveds.size ? ` (${selectedOkvedTopCount} groups)` : ''}`,
+                          locale,
+                        )}
+                  </div>
                 </div>
-                <div className="ds-mono text-[11px] mt-0.5" style={{ color: 'var(--cp-paper-faint)' }}>
-                  {selectedOkveds.size === 0
-                    ? t('все виды деятельности', 'all activity types', locale)
-                    : t(
-                        `выбрано: ${selectedOkveds.size}${selectedOkvedTopCount !== selectedOkveds.size ? ` (${selectedOkvedTopCount} групп)` : ''}`,
-                        `selected: ${selectedOkveds.size}${selectedOkvedTopCount !== selectedOkveds.size ? ` (${selectedOkvedTopCount} groups)` : ''}`,
-                        locale,
-                      )}
-                </div>
-              </div>
-              <svg
-                className="w-4 h-4 shrink-0"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-                style={{ color: 'var(--cp-paper-faint)' }}
-                aria-hidden
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-              </svg>
-            </button>
+                <svg
+                  className="w-4 h-4 shrink-0"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                  aria-hidden
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+                </svg>
+              </button>
+              <ChipStrip items={okvedChips} onRemove={removeOkved} locale={locale} />
+            </div>
           </div>
         ) : (
           <div>
@@ -372,23 +734,15 @@ export default function CompaniesSearchPage() {
             <div>
               <p className="ds-eyebrow mb-2">{t('контакты', 'contacts', locale)}</p>
               <div className="flex flex-wrap gap-6">
-                <Switch
+                <Checkbox
                   checked={hasPhone}
-                  onCheckedChange={setHasPhone}
-                  label={
-                    <span className="text-sm" style={{ color: 'var(--cp-paper)' }}>
-                      {t('Указан телефон', 'Has phone', locale)}
-                    </span>
-                  }
+                  onChange={setHasPhone}
+                  label={t('Указан телефон', 'Has phone', locale)}
                 />
-                <Switch
+                <Checkbox
                   checked={hasEmail}
-                  onCheckedChange={setHasEmail}
-                  label={
-                    <span className="text-sm" style={{ color: 'var(--cp-paper)' }}>
-                      {t('Указан email', 'Has email', locale)}
-                    </span>
-                  }
+                  onChange={setHasEmail}
+                  label={t('Указан email', 'Has email', locale)}
                 />
               </div>
             </div>
@@ -411,70 +765,65 @@ export default function CompaniesSearchPage() {
 
             <div>
               <p className="ds-eyebrow mb-2">{t('численность сотрудников', 'number of employees', locale)}</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="flex items-center gap-2">
-                  <span
-                    className="ds-mono text-[11px]"
-                    style={{ color: 'var(--cp-paper-faint)' }}
-                  >
-                    {t('от', 'from', locale)}
-                  </span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={employeesFrom}
-                    onChange={(e) => setEmployeesFrom(e.target.value)}
-                    className="ds-input flex-1 text-sm"
-                    placeholder="0"
-                  />
-                </div>
-                <div className="flex items-center gap-2">
-                  <span
-                    className="ds-mono text-[11px]"
-                    style={{ color: 'var(--cp-paper-faint)' }}
-                  >
-                    {t('до', 'to', locale)}
-                  </span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={employeesTo}
-                    onChange={(e) => setEmployeesTo(e.target.value)}
-                    className="ds-input flex-1 text-sm"
-                  />
-                </div>
+              {/* Single flex row — matches revenue/cost range layout below. */}
+              <div className="flex items-center gap-2">
+                <span
+                  className="ds-mono text-[11px] shrink-0"
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                >
+                  {t('от', 'from', locale)}
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={employeesFrom}
+                  onChange={(e) => setEmployeesFrom(e.target.value)}
+                  className="ds-input flex-1 text-sm"
+                  placeholder="0"
+                />
+                <span
+                  className="ds-mono text-[11px] shrink-0"
+                  style={{ color: 'var(--cp-paper-faint)' }}
+                >
+                  {t('до', 'to', locale)}
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={employeesTo}
+                  onChange={(e) => setEmployeesTo(e.target.value)}
+                  className="ds-input flex-1 text-sm"
+                />
               </div>
             </div>
 
             <div>
               <p className="ds-eyebrow mb-2">{t('дополнительные данные', 'additional data', locale)}</p>
               <div className="flex flex-col gap-2">
-                <Switch
+                <Checkbox
                   checked={hasWebsite}
-                  onCheckedChange={setHasWebsite}
-                  label={
-                    <span className="text-sm" style={{ color: 'var(--cp-paper)' }}>
-                      {t('Есть сайт', 'Has website', locale)}
-                    </span>
-                  }
+                  onChange={setHasWebsite}
+                  label={t('Есть сайт', 'Has website', locale)}
                 />
-                <Switch
+                <Checkbox
                   checked={hasEdo}
-                  onCheckedChange={setHasEdo}
-                  label={
-                    <span className="text-sm" style={{ color: 'var(--cp-paper)' }}>
-                      {t('Есть идентификатор ЭДО', 'Has EDI ID', locale)}
-                    </span>
-                  }
+                  onChange={setHasEdo}
+                  label={t('Есть идентификатор ЭДО', 'Has EDI ID', locale)}
+                  title={t(
+                    'ЭДО — система электронного документооборота. Идентификатор показывает, что компания готова обмениваться юридически значимыми документами электронно.',
+                    'EDI — Electronic Document Interchange. The ID indicates the company can exchange legally binding documents electronically.',
+                    locale,
+                  )}
                 />
-                <Switch
+                <Checkbox
                   checked={hasEgais}
-                  onCheckedChange={setHasEgais}
-                  label={
-                    <span className="text-sm" style={{ color: 'var(--cp-paper)' }}>
-                      {t('Есть ЕГАИС', 'Has EGAIS', locale)}
-                    </span>
-                  }
+                  onChange={setHasEgais}
+                  label={t('Есть ЕГАИС', 'Has EGAIS', locale)}
+                  title={t(
+                    'ЕГАИС — государственная система контроля оборота алкогольной продукции. Признак указывает, что компания работает с алкоголем.',
+                    'EGAIS — state alcohol product turnover control system. Indicates the company deals with alcohol.',
+                    locale,
+                  )}
                 />
               </div>
             </div>
@@ -485,7 +834,7 @@ export default function CompaniesSearchPage() {
               <p className="ds-eyebrow mb-2">{t('выручка, руб.', 'revenue, RUB', locale)}</p>
               <div className="flex items-center gap-2">
                 <span
-                  className="ds-mono text-[11px]"
+                  className="ds-mono text-[11px] shrink-0"
                   style={{ color: 'var(--cp-paper-faint)' }}
                 >
                   {t('от', 'from', locale)}
@@ -498,7 +847,7 @@ export default function CompaniesSearchPage() {
                   className="ds-input flex-1 text-sm"
                 />
                 <span
-                  className="ds-mono text-[11px]"
+                  className="ds-mono text-[11px] shrink-0"
                   style={{ color: 'var(--cp-paper-faint)' }}
                 >
                   {t('до', 'to', locale)}
@@ -514,12 +863,19 @@ export default function CompaniesSearchPage() {
             </div>
 
             <div>
-              <p className="ds-eyebrow mb-2">
+              <p
+                className="ds-eyebrow mb-2"
+                title={t(
+                  'Оценка стоимости компании по данным ЕГРЮЛ — основана на уставном капитале, выручке и финансовых показателях. Не рыночная оценка, не приглашённая оценка.',
+                  'Company value estimate based on EGRUL data (registered capital, revenue, financial indicators). Not a market or appraisal valuation.',
+                  locale,
+                )}
+              >
                 {t('стоимость организации, руб.', 'company cost, RUB', locale)}
               </p>
               <div className="flex items-center gap-2">
                 <span
-                  className="ds-mono text-[11px]"
+                  className="ds-mono text-[11px] shrink-0"
                   style={{ color: 'var(--cp-paper-faint)' }}
                 >
                   {t('от', 'from', locale)}
@@ -532,7 +888,7 @@ export default function CompaniesSearchPage() {
                   className="ds-input flex-1 text-sm"
                 />
                 <span
-                  className="ds-mono text-[11px]"
+                  className="ds-mono text-[11px] shrink-0"
                   style={{ color: 'var(--cp-paper-faint)' }}
                 >
                   {t('до', 'to', locale)}
@@ -556,18 +912,19 @@ export default function CompaniesSearchPage() {
           03<span aria-hidden> → </span>
           {t('Данные по ИП', 'Individual entrepreneurs', locale)}
         </p>
-        <Switch
+        <Checkbox
           checked={includeIp}
-          onCheckedChange={setIncludeIp}
-          label={
-            <span className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>
-              {t(
-                'Добавить данные по индивидуальным предпринимателям',
-                'Include individual entrepreneurs',
-                locale,
-              )}
-            </span>
-          }
+          onChange={setIncludeIp}
+          label={t(
+            'Добавить данные по индивидуальным предпринимателям',
+            'Include individual entrepreneurs',
+            locale,
+          )}
+          title={t(
+            'ИП — индивидуальные предприниматели. Это физлица, ведущие бизнес без создания юридического лица.',
+            'IE — individual entrepreneurs. Individuals doing business without forming a legal entity.',
+            locale,
+          )}
         />
         <p className="text-xs mt-3 leading-relaxed" style={{ color: 'var(--cp-paper-mute)' }}>
           {t(
@@ -578,7 +935,7 @@ export default function CompaniesSearchPage() {
         </p>
       </section>
 
-      {/* ── Action: calculate + download ─────────────────────────────── */}
+      {/* ── Action: calculate + download (distilled inline) ──────────── */}
       <div className="flex flex-col items-center gap-4">
         <button
           type="button"
@@ -592,19 +949,19 @@ export default function CompaniesSearchPage() {
         </button>
 
         {calcError && (
-          <div className="flex items-start gap-2.5 text-sm">
+          <div className="flex items-center gap-2.5 text-sm">
             <span
               aria-hidden
-              className="ds-status-dot shrink-0"
-              style={{ background: 'var(--cp-red)', marginTop: '7px' }}
+              className="inline-block h-1.5 w-1.5 rounded-full shrink-0"
+              style={{ background: 'var(--cp-red)' }}
             />
             <span style={{ color: 'var(--cp-paper)' }}>{calcError}</span>
           </div>
         )}
 
         {calcResult && (
-          <div className="text-center">
-            <div className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
+          <div className="flex flex-col items-center gap-2">
+            <p className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
               {t('Найдено компаний: ', 'Companies found: ', locale)}
               <span
                 className="ds-mono font-bold text-lg"
@@ -624,81 +981,54 @@ export default function CompaniesSearchPage() {
                   )})
                 </span>
               )}
-            </div>
-          </div>
-        )}
-
-        {calcResult && calcResult.count > 0 && (
-          <div className="neu-card p-6 w-full max-w-lg">
-            <p className="ds-eyebrow text-center mb-4">
-              {t('скачать базу', 'download database', locale)}
             </p>
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={() => handleExport('xlsx')}
-                disabled={exportLoading !== null}
-                className="ds-card-pressable flex flex-col items-center gap-2 rounded-md px-4 py-4 disabled:opacity-60"
-                style={{
-                  background: 'var(--cp-surface-rest)',
-                  border: '1px solid var(--cp-divider)',
-                }}
-              >
-                <FileSpreadsheet
-                  className="h-7 w-7"
-                  style={{ color: 'var(--cp-paper-faint)' }}
-                  aria-hidden
-                />
-                <span
-                  className="ds-mono text-xs font-semibold"
-                  style={{ color: 'var(--cp-paper)' }}
-                >
-                  {exportLoading === 'xlsx'
-                    ? t('Формируем…', 'Generating…', locale)
-                    : 'XLSX'}
-                </span>
-                <span className="text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
-                  {t('Для работы в Excel', 'For Excel', locale)}
-                </span>
-              </button>
 
-              <button
-                type="button"
-                onClick={() => handleExport('csv')}
-                disabled={exportLoading !== null}
-                className="ds-card-pressable flex flex-col items-center gap-2 rounded-md px-4 py-4 disabled:opacity-60"
-                style={{
-                  background: 'var(--cp-surface-rest)',
-                  border: '1px solid var(--cp-divider)',
-                }}
-              >
-                <FileText
-                  className="h-7 w-7"
-                  style={{ color: 'var(--cp-paper-faint)' }}
-                  aria-hidden
-                />
-                <span
-                  className="ds-mono text-xs font-semibold"
-                  style={{ color: 'var(--cp-paper)' }}
-                >
-                  {exportLoading === 'csv'
-                    ? t('Формируем…', 'Generating…', locale)
-                    : 'CSV'}
-                </span>
-                <span className="text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
-                  {t('Универсальный формат', 'Universal format', locale)}
-                </span>
-              </button>
-            </div>
-            {exportError && (
-              <div className="flex items-start gap-2.5 text-sm mt-3 justify-center">
-                <span
-                  aria-hidden
-                  className="ds-status-dot shrink-0"
-                  style={{ background: 'var(--cp-red)', marginTop: '7px' }}
-                />
-                <span style={{ color: 'var(--cp-paper)' }}>{exportError}</span>
-              </div>
+            {calcResult.count > 0 && (
+              <>
+                {/* Distilled action zone — two ghost buttons inline, no 2-card mini-grid. */}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleExport('xlsx')}
+                    disabled={exportLoading !== null}
+                    className="ds-btn-secondary inline-flex items-center gap-1.5 px-4 py-2 text-xs disabled:opacity-60"
+                  >
+                    {exportLoading === 'xlsx' ? (
+                      <span className="ds-mono">{t('Формируем…', 'Generating…', locale)}</span>
+                    ) : (
+                      <>
+                        <FileSpreadsheet className="h-3.5 w-3.5" aria-hidden />
+                        <span>{t('Скачать XLSX', 'Download XLSX', locale)}</span>
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleExport('csv')}
+                    disabled={exportLoading !== null}
+                    className="ds-btn-secondary inline-flex items-center gap-1.5 px-4 py-2 text-xs disabled:opacity-60"
+                  >
+                    {exportLoading === 'csv' ? (
+                      <span className="ds-mono">{t('Формируем…', 'Generating…', locale)}</span>
+                    ) : (
+                      <>
+                        <FileText className="h-3.5 w-3.5" aria-hidden />
+                        <span>{t('Скачать CSV', 'Download CSV', locale)}</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+                {exportError && (
+                  <div className="flex items-center gap-2.5 text-sm">
+                    <span
+                      aria-hidden
+                      className="inline-block h-1.5 w-1.5 rounded-full shrink-0"
+                      style={{ background: 'var(--cp-red)' }}
+                    />
+                    <span style={{ color: 'var(--cp-paper)' }}>{exportError}</span>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
@@ -713,7 +1043,7 @@ export default function CompaniesSearchPage() {
         />
       )}
       {okvedModalOpen && (
-        <OkvedTreeModal
+        <OkvedTreeModalClient
           selected={selectedOkveds}
           onChange={setSelectedOkveds}
           onClose={() => setOkvedModalOpen(false)}
@@ -780,7 +1110,7 @@ function RegionsModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div
         className="absolute inset-0"
-        style={{ background: 'rgba(0, 0, 0, 0.6)' }}
+        style={{ background: 'var(--cp-scrim)' }}
         onClick={onClose}
       />
       <div
@@ -850,6 +1180,7 @@ function RegionsModal({
                     }}
                     onChange={() => toggleDistrict(district.name)}
                     className="w-4 h-4 shrink-0"
+                    style={{ accentColor: 'var(--cp-paper)' }}
                   />
                   <span className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>
                     {district.name}
@@ -867,6 +1198,7 @@ function RegionsModal({
                           checked={selected.has(r.code)}
                           onChange={() => toggle(r.code)}
                           className="w-4 h-4 shrink-0"
+                          style={{ accentColor: 'var(--cp-paper)' }}
                         />
                         <span
                           className="ds-mono text-[11px] font-semibold mr-1"
@@ -899,14 +1231,14 @@ function RegionsModal({
             <button
               type="button"
               onClick={() => onChange(new Set())}
-              className="ds-btn-secondary px-4 py-2 text-sm"
+              className="ds-btn-ghost px-4 py-2 text-sm"
             >
               {t('Очистить', 'Clear', locale)}
             </button>
             <button
               type="button"
               onClick={() => onChange(new Set(ALL_REGION_CODES))}
-              className="ds-btn-secondary px-4 py-2 text-sm"
+              className="ds-btn-ghost px-4 py-2 text-sm"
             >
               {t('Все', 'All', locale)}
             </button>
