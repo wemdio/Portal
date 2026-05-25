@@ -1487,28 +1487,30 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     </>
                   )}
                 </button>
-                {/* Pre-flight summary — gives Maksim a glance of cost/time/quota
-                    before kicking off a multi-minute, quota-eating job. Rough
-                    estimates (no real benchmarks yet); honest about being
-                    approximate. Per /impeccable critique 2026-05-25 (P1 no
-                    cost/time preview on submit). */}
+                {/* Pre-flight summary — facts the user can verify, plus a vague
+                    time band (without false precision). Earlier version used
+                    serial worker timings (0.5s/row × AI steps) that
+                    overshot 9× for 10K-row jobs because real workers parallel-
+                    fire AI requests. Per re-critique 2026-05-25T21-57-33Z
+                    (N2 vibes-based math + N3 dead plural ternary). */}
                 {!submitting && (() => {
                   const rows = Math.max(0, (fileData?.length ?? 0) - 1);
                   const aiSteps = selectedSteps.filter((k) => STEP_MAP.get(k)?.cost === 'ai').length;
                   const apiSteps = selectedSteps.filter((k) => STEP_MAP.get(k)?.cost === 'api').length;
-                  // Rough: 0.05s/row per cheap+free step, 0.15s/row per api step,
-                  // 0.5s/row per ai step. Floor at 1 min for any non-trivial job.
-                  const baseSecs = selectedSteps.length * 5; // setup
-                  const aiSecs = aiSteps * rows * 0.5;
-                  const apiSecs = apiSteps * rows * 0.15;
-                  const otherSecs = (selectedSteps.length - aiSteps - apiSteps) * rows * 0.05;
-                  const totalMin = Math.max(1, Math.round((baseSecs + aiSecs + apiSecs + otherSecs) / 60));
+                  // Vague time band — honest about not having real telemetry.
+                  // Tiers: <5K rows or no AI/API = «несколько минут»; up to
+                  // 20K rows or 1 AI step = «5–15 минут»; otherwise «10+ мин».
+                  const sizeFactor = rows + aiSteps * 2000 + apiSteps * 500;
+                  const timeLabel =
+                    sizeFactor < 5000 ? 'несколько минут'
+                    : sizeFactor < 20000 ? '5–15 минут'
+                    : '10–30 минут';
                   return (
                     <p
                       className="ds-mono text-xs text-center"
                       style={{ color: 'var(--cp-paper-mute)' }}
                     >
-                      ~{totalMin} {totalMin === 1 ? 'мин' : totalMin < 5 ? 'мин' : 'мин'}
+                      ≈ {timeLabel}
                       <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
                       <span style={{ color: 'var(--cp-paper)' }}>
                         {rows.toLocaleString('ru-RU')}
@@ -1520,7 +1522,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                           <span style={{ color: 'var(--cp-paper)' }}>
                             {(aiSteps * rows).toLocaleString('ru-RU')}
                           </span>{' '}
-                          AI-вызовов
+                          AI-обработок
                         </>
                       )}
                     </p>

@@ -2171,3 +2171,93 @@ body:has(.client-portal) {
 .client-portal .bg-red-600 {
   background: var(--cp-red) !important;
 }
+
+/* ── Bridge layer #4: colored text ramps + plain bg-*-50 + bg-gray-900
+   Surfaced by re-critique of /client/base-constructor 2026-05-25T21-57-33Z
+   (26/40 OK mid). Bridge #3 covered most chrome but left these gaps:
+   - text-emerald/violet/amber/red 400-900 (success microcopy, warnings,
+     errors, radio focus rings) — visible as low-contrast color whispers
+     on dark surfaces
+   - plain bg-emerald-50/bg-amber-50/bg-red-50 (no `/` opacity suffix) —
+     pale pastels on dark background
+   - bg-gray-900 dark chips/discs — invisible black-on-black corner badges
+*/
+
+/* (r) Plain bg-*-50/100 without opacity-modifier (no `/`) — bridge (o)
+   only catches the `/N` variants. These are direct utility classes. */
+.client-portal .bg-emerald-50,
+.client-portal .bg-emerald-100 {
+  background: var(--cp-surface-rest) !important;
+}
+.client-portal .bg-amber-50,
+.client-portal .bg-amber-100 {
+  background: var(--cp-surface-rest) !important;
+}
+.client-portal .bg-red-50,
+.client-portal .bg-red-100 {
+  background: var(--cp-surface-rest) !important;
+}
+.client-portal .bg-violet-50,
+.client-portal .bg-violet-100 {
+  background: var(--cp-surface-rest) !important;
+}
+.client-portal .bg-rose-50,
+.client-portal .bg-rose-100 {
+  background: var(--cp-surface-rest) !important;
+}
+
+/* (s) Colored text ramps — admin uses these for success/warning/error
+   microcopy. In editorial dark scope, map them to the corresponding
+   semantic role: red → cp-red (semantic error), amber → cp-amber for
+   warnings, emerald/violet → paper (no separate success color in
+   editorial palette; success is implicit, paper-white carries it). */
+.client-portal .text-emerald-400,
+.client-portal .text-emerald-500,
+.client-portal .text-emerald-600,
+.client-portal .text-emerald-700,
+.client-portal .text-emerald-800,
+.client-portal .text-emerald-900 {
+  color: var(--cp-paper) !important;
+}
+.client-portal .text-violet-400,
+.client-portal .text-violet-500,
+.client-portal .text-violet-700,
+.client-portal .text-violet-800,
+.client-portal .text-violet-900 {
+  color: var(--cp-paper) !important;
+}
+.client-portal .text-amber-400,
+.client-portal .text-amber-500,
+.client-portal .text-amber-600,
+.client-portal .text-amber-700,
+.client-portal .text-amber-800,
+.client-portal .text-amber-900 {
+  color: var(--cp-amber) !important;
+}
+.client-portal .text-red-400,
+.client-portal .text-red-500,
+.client-portal .text-red-600,
+.client-portal .text-red-700,
+.client-portal .text-red-800,
+.client-portal .text-red-900 {
+  color: var(--cp-red) !important;
+}
+
+/* (t) bg-gray-900 — used for admin dark chips/discs (order numbers,
+   check indicators). In light admin scope this is high-contrast against
+   bg-white; in dark .client-portal it's invisible. Map to surface-elev
+   so the chip becomes a visible elevated surface against cp-surface-rest. */
+.client-portal .bg-gray-900 {
+  background: var(--cp-surface-elev) !important;
+}
+
+/* (u) Focus rings on radio/checkbox — admin uses ring-blue-* /
+   ring-violet-* on focus. Replace with paper at low opacity for
+   editorial-dark focus halo (matches .ds-input :focus-visible pattern). */
+.client-portal .focus\:ring-blue-500\/20:focus,
+.client-portal .focus\:ring-blue-600:focus,
+.client-portal .focus\:ring-violet-400:focus,
+.client-portal .focus\:ring-violet-500:focus,
+.client-portal .focus\:ring-emerald-500:focus {
+  --tw-ring-color: rgb(250 250 250 / 0.4) !important;
+}
