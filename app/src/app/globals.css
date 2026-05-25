@@ -2028,3 +2028,146 @@ body:has(.client-portal) {
 .client-portal .border-blue-200 {
   border-color: var(--cp-divider) !important;
 }
+
+/* ── Bridge layer #3: gray/blue palette + opacity-modifier variants ──
+   Surfaced by /impeccable critique 2026-05-25 of /client/base-constructor
+   (23/40 OK, lower edge). BaseConstructorView uses bg-white/gray-50/
+   blue-50 admin chrome heavily for its 5 stacked card panels, plus
+   opacity-modifier variants (bg-emerald-50/50, bg-blue-50/60) that the
+   prior bridge extensions missed because Tailwind escapes the `/` to
+   `\/` in the compiled class name and `.bg-emerald-50` doesn't match
+   `.bg-emerald-50\/50`. Same pattern leaks in /client/parsers and any
+   future admin-shared component rendered in the .client-portal scope. */
+
+/* (j) Gray palette (admin chrome: bg-white panels, gray text ramps) */
+.client-portal .bg-white {
+  background: var(--cp-surface-rest) !important;
+}
+.client-portal .bg-gray-50,
+.client-portal [class*="bg-gray-50/"] {
+  background: var(--cp-surface-rest) !important;
+}
+.client-portal .bg-gray-100,
+.client-portal [class*="bg-gray-100/"] {
+  background: var(--cp-surface-elev) !important;
+}
+.client-portal .border-gray-100 {
+  border-color: var(--cp-divider) !important;
+}
+.client-portal .border-gray-200 {
+  border-color: var(--cp-divider) !important;
+}
+.client-portal .border-gray-300 {
+  border-color: var(--cp-divider-strong) !important;
+}
+.client-portal .text-gray-900,
+.client-portal .text-gray-800,
+.client-portal .text-gray-700 {
+  color: var(--cp-paper) !important;
+}
+.client-portal .text-gray-600,
+.client-portal .text-gray-500 {
+  color: var(--cp-paper-mute) !important;
+}
+.client-portal .text-gray-400,
+.client-portal .text-gray-300 {
+  color: var(--cp-paper-faint) !important;
+}
+
+/* (k) Gray hover states */
+.client-portal .hover\:bg-gray-50:hover,
+.client-portal .hover\:bg-gray-100:hover,
+.client-portal .hover\:bg-gray-200:hover {
+  background: var(--cp-surface-elev) !important;
+}
+.client-portal .hover\:text-gray-600:hover,
+.client-portal .hover\:text-gray-700:hover,
+.client-portal .hover\:text-gray-800:hover,
+.client-portal .hover\:text-gray-900:hover {
+  color: var(--cp-paper) !important;
+}
+.client-portal .hover\:border-gray-300:hover {
+  border-color: var(--cp-divider-strong) !important;
+}
+
+/* (l) Flat editorial — drop depth shadows. Admin uses shadow-sm/md/lg
+   for elevation; editorial dark uses 1px hairline borders instead. */
+.client-portal .shadow-sm,
+.client-portal .shadow,
+.client-portal .shadow-md,
+.client-portal .shadow-lg,
+.client-portal .shadow-xl,
+.client-portal .shadow-2xl {
+  box-shadow: none !important;
+}
+
+/* (m) Divide colors — used in admin table dividers
+   (BaseConstructorView preview table). */
+.client-portal .divide-gray-50 > * + *,
+.client-portal .divide-gray-100 > * + *,
+.client-portal .divide-gray-200 > * + * {
+  border-color: var(--cp-divider) !important;
+}
+
+/* (n) Blue palette (form focus rings, dropzone hover states, loading
+   spinners в admin tools). Map to paper / surface-rest. */
+.client-portal .bg-blue-50,
+.client-portal [class*="bg-blue-50/"] {
+  background: var(--cp-surface-rest) !important;
+}
+.client-portal .border-blue-300,
+.client-portal .border-blue-400 {
+  border-color: var(--cp-divider-strong) !important;
+}
+.client-portal .text-blue-400,
+.client-portal .text-blue-500,
+.client-portal .text-blue-600,
+.client-portal .text-blue-700,
+.client-portal .text-blue-800 {
+  color: var(--cp-paper) !important;
+}
+
+/* (o) Opacity-modifier variants for the colored palettes — Tailwind
+   `bg-emerald-50/50`, `bg-amber-50/80`, `bg-violet-50/40` etc. The
+   attribute selector matches the literal class-attribute substring
+   (DOM has the `/` unescaped even though Tailwind escapes for CSS). */
+.client-portal [class*="bg-emerald-50/"],
+.client-portal [class*="bg-emerald-100/"] {
+  background: var(--cp-surface-rest) !important;
+}
+.client-portal [class*="bg-amber-50/"],
+.client-portal [class*="bg-amber-100/"] {
+  background: var(--cp-surface-rest) !important;
+}
+.client-portal [class*="bg-violet-50/"],
+.client-portal [class*="bg-violet-100/"] {
+  background: var(--cp-surface-rest) !important;
+}
+.client-portal [class*="bg-rose-50/"],
+.client-portal [class*="bg-rose-100/"],
+.client-portal [class*="bg-red-50/"],
+.client-portal [class*="bg-red-100/"] {
+  background: var(--cp-surface-rest) !important;
+}
+
+/* (p) Violet text in radio fieldsets + admin-style links. */
+.client-portal .text-violet-600 {
+  color: var(--cp-paper) !important;
+}
+
+/* (q) Re-assert semantic dots — these explicit color tokens MUST win
+   over the broader bg-*-50 / bg-*-100 / [class*="bg-*"] rules above.
+   Declared LAST so cascade order makes them effective when a sibling
+   selector with the same specificity targets the same class. */
+.client-portal .bg-emerald-500,
+.client-portal .bg-emerald-400 {
+  background: var(--cp-green) !important;
+}
+.client-portal .bg-amber-500,
+.client-portal .bg-amber-400 {
+  background: var(--cp-amber) !important;
+}
+.client-portal .bg-red-500,
+.client-portal .bg-red-600 {
+  background: var(--cp-red) !important;
+}
