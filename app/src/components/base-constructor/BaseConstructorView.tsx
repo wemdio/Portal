@@ -902,7 +902,42 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   )}
                 </div>
                 <div className="px-6 py-5 space-y-5">
-                  {CATEGORIES.map((cat) => (
+                  {/*
+                    In clientMode 9 of 11 steps are always-on and locked
+                    (ALWAYS_ON_STEPS_FOR_CLIENT). Per /impeccable critique
+                    2026-05-25 (P1 identical-card-grid), rendering them as
+                    9 disabled cards forces Olga to scan a wall of locked
+                    chrome to find the 2 toggleable steps. Collapse them
+                    into a single editorial summary row + render only the
+                    AI category (with the 2 interactive cards) below.
+                  */}
+                  {clientMode && (
+                    <div
+                      className="rounded-md px-4 py-3"
+                      style={{
+                        background: 'var(--cp-surface-rest)',
+                        border: '1px solid var(--cp-divider)',
+                      }}
+                    >
+                      <p
+                        className="ds-eyebrow mb-1"
+                        style={{ color: 'var(--cp-paper-mute)' }}
+                      >
+                        автоматически
+                      </p>
+                      <p className="text-xs" style={{ color: 'var(--cp-paper)' }}>
+                        Очистка пустых, дедуп строк/email, разделение почт, очистка названий,
+                        проверка сайтов, поиск email, валидация и обогащение описаниями —
+                        выполняются по умолчанию для каждой базы.
+                      </p>
+                    </div>
+                  )}
+                  {CATEGORIES.map((cat) => {
+                    const visibleSteps = clientMode
+                      ? STEPS.filter((s) => s.category === cat.key && !ALWAYS_ON_SET.has(s.key))
+                      : STEPS.filter((s) => s.category === cat.key);
+                    if (visibleSteps.length === 0) return null;
+                    return (
                     <div key={cat.key}>
                       <div className="flex items-center gap-2 mb-3">
                         <span className={`px-2.5 py-0.5 text-xs font-semibold rounded-md border ${cat.color}`}>
@@ -910,7 +945,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         </span>
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                        {STEPS.filter((s) => s.category === cat.key).map((step) => {
+                        {visibleSteps.map((step) => {
                           const isSelected = selectedSteps.includes(step.key);
                           const lockedReason = isSelected ? isRequiredByOther(step.key) : null;
                           const isAlwaysOn = clientMode && ALWAYS_ON_SET.has(step.key);
@@ -1007,7 +1042,8 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                                 )}
                                 {isSelected && lockedReason && !isAlwaysOn && (
                                   <p className="text-[11px] text-gray-500 mt-1 flex items-center gap-1">
-                                    🔒 {lockedReason}
+                                    <Lock className="w-3 h-3 flex-shrink-0" />
+                                    {lockedReason}
                                   </p>
                                 )}
                                 {showAsActive && !columnWarnings.has(step.key) && stepHints.has(step.key) && !clientHint && (
@@ -1027,7 +1063,8 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         })}
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
 
                   {/* Selected order */}
                   {selectedSteps.length > 0 && (
@@ -1057,7 +1094,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                               {hasWarning && <AlertTriangle className="w-3 h-3 text-amber-500" />}
                               {hasHint && <Zap className="w-3 h-3 text-blue-500" />}
                               {locked || (clientMode && ALWAYS_ON_SET.has(key)) ? (
-                                <span className="ml-0.5 text-gray-300 cursor-not-allowed" title={locked ?? 'Выполняется автоматически'}>🔒</span>
+                                <span
+                                  className="ml-0.5 text-gray-300 cursor-not-allowed inline-flex items-center"
+                                  title={locked ?? 'Выполняется автоматически'}
+                                >
+                                  <Lock className="w-3 h-3" />
+                                </span>
                               ) : (
                               <button
                                 onClick={(e) => { e.stopPropagation(); toggleStep(key); }}
@@ -1445,6 +1487,45 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     </>
                   )}
                 </button>
+                {/* Pre-flight summary — gives Maksim a glance of cost/time/quota
+                    before kicking off a multi-minute, quota-eating job. Rough
+                    estimates (no real benchmarks yet); honest about being
+                    approximate. Per /impeccable critique 2026-05-25 (P1 no
+                    cost/time preview on submit). */}
+                {!submitting && (() => {
+                  const rows = Math.max(0, (fileData?.length ?? 0) - 1);
+                  const aiSteps = selectedSteps.filter((k) => STEP_MAP.get(k)?.cost === 'ai').length;
+                  const apiSteps = selectedSteps.filter((k) => STEP_MAP.get(k)?.cost === 'api').length;
+                  // Rough: 0.05s/row per cheap+free step, 0.15s/row per api step,
+                  // 0.5s/row per ai step. Floor at 1 min for any non-trivial job.
+                  const baseSecs = selectedSteps.length * 5; // setup
+                  const aiSecs = aiSteps * rows * 0.5;
+                  const apiSecs = apiSteps * rows * 0.15;
+                  const otherSecs = (selectedSteps.length - aiSteps - apiSteps) * rows * 0.05;
+                  const totalMin = Math.max(1, Math.round((baseSecs + aiSecs + apiSecs + otherSecs) / 60));
+                  return (
+                    <p
+                      className="ds-mono text-xs text-center"
+                      style={{ color: 'var(--cp-paper-mute)' }}
+                    >
+                      ~{totalMin} {totalMin === 1 ? 'мин' : totalMin < 5 ? 'мин' : 'мин'}
+                      <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+                      <span style={{ color: 'var(--cp-paper)' }}>
+                        {rows.toLocaleString('ru-RU')}
+                      </span>{' '}
+                      строк в обработке
+                      {aiSteps > 0 && (
+                        <>
+                          <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+                          <span style={{ color: 'var(--cp-paper)' }}>
+                            {(aiSteps * rows).toLocaleString('ru-RU')}
+                          </span>{' '}
+                          AI-вызовов
+                        </>
+                      )}
+                    </p>
+                  );
+                })()}
               </div>
             )}
           </>
