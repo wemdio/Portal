@@ -482,23 +482,26 @@ export default function ClientPresetPage() {
           <header className="px-6 py-4 border-b border-gray-200 bg-gray-50">
             <h2 className="text-sm font-semibold text-gray-900">Лимиты и интервалы</h2>
           </header>
-          <div className="p-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <NumberField
-              label="Лимит писем в день (на аккаунт)"
-              value={preset.daily_limit}
-              onChange={(v) => setPreset({ ...preset, daily_limit: v })}
-              min={0}
-              max={1000}
-            />
+          <div className="p-6 grid grid-cols-1 sm:grid-cols-3 gap-4 items-start">
             <NumberField
               label="Новых лидов в день"
+              hint="Сколько новых лидов входит в сиквенс за сутки. В начале кампании именно это поле обычно режет реальную отправку."
               value={preset.daily_max_leads}
               onChange={(v) => setPreset({ ...preset, daily_max_leads: v })}
               min={0}
               max={1000}
             />
             <NumberField
+              label="Лимит писем в день"
+              hint="Максимум исходящих со всей кампании за сутки — первые письма + follow-up'ы суммарно. Не путать с per-mailbox лимитом в Instantly."
+              value={preset.daily_limit}
+              onChange={(v) => setPreset({ ...preset, daily_limit: v })}
+              min={0}
+              max={1000}
+            />
+            <NumberField
               label="Интервал между письмами (мин)"
+              hint="Минимальная пауза между отправками с одного ящика."
               value={preset.email_gap_minutes}
               onChange={(v) => setPreset({ ...preset, email_gap_minutes: v })}
               min={0}
@@ -621,12 +624,14 @@ export default function ClientPresetPage() {
 
 function NumberField({
   label,
+  hint,
   value,
   onChange,
   min,
   max,
 }: {
   label: string;
+  hint?: string;
   value: number;
   onChange: (v: number) => void;
   min?: number;
@@ -646,6 +651,7 @@ function NumberField({
         max={max}
         className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
+      {hint && <p className="text-xs text-gray-500 mt-1 leading-snug">{hint}</p>}
     </div>
   );
 }
