@@ -85,7 +85,7 @@ type LiCampaign = {
 };
 type LiTask = { id: string; type: string; status: string; progress: number; total: number; error_message: string | null; created_at: string };
 type LiCampaignLog = { id: number; level: string; message: string; lead_name: string | null; step_index: number | null; created_at: string };
-type LiSettings = { unipile_dsn: string; unipile_api_key: string; openai_api_key: string; openai_model: string; webhook_secret: string; proxy_url: string };
+type LiSettings = { unipile_dsn: string; unipile_api_key: string; webhook_secret: string; proxy_url: string };
 type CampaignStep = { type?: unknown; message?: unknown; days?: unknown; hours?: unknown };
 
 const DEFAULT_CAMPAIGN_FORM = {
@@ -147,7 +147,7 @@ export default function LiOutreachPage() {
   const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'24h' | '7d' | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
-  const [settingsForm, setSettingsForm] = useState<LiSettings>({ unipile_dsn: '', unipile_api_key: '', openai_api_key: '', openai_model: 'openai/gpt-4o-mini', webhook_secret: '', proxy_url: '' });
+  const [settingsForm, setSettingsForm] = useState<LiSettings>({ unipile_dsn: '', unipile_api_key: '', webhook_secret: '', proxy_url: '' });
 
   // Scraper form
   const [scraperUrl, setScraperUrl] = useState('');

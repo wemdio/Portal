@@ -110,13 +110,17 @@ async function handleMessageReceived(payload: Record<string, unknown>): Promise<
     last_activity: new Date().toISOString(),
   }).eq('id', lead.id);
 
-  // Auto-reply if AI is configured
+  // Auto-reply if AI is configured. AI credentials now come from the central
+  // env Requesty router (BYOK in li_settings is deprecated — see migration
+  // 20260525_0003_li_outreach_drop_byok_keys.sql); we only still need the
+  // li_settings row for the Unipile DSN/api_key, since those *are* per-user.
   const { data: settings } = await db
     .from('li_settings')
     .select('*')
     .eq('user_id', lead.user_id)
     .maybeSingle<LiSettings>();
-  if (!settings?.openai_api_key || !settings?.unipile_dsn) return;
+  const aiApiKey = process.env.OPENROUTER_LI_OUTREACH_API_KEY ?? '';
+  if (!aiApiKey || !settings?.unipile_dsn) return;
 
   // Find active campaign for this lead
   const { data: campaignLeads } = await db
@@ -132,7 +136,7 @@ async function handleMessageReceived(payload: Record<string, unknown>): Promise<
       const reply = await generateAutoReply(
         text,
         history as Array<{ role: string; content: string }>,
-        { apiKey: settings.openai_api_key, model: settings.openai_model },
+        { apiKey: aiApiKey, model: campaign.ai_model || 'openai/gpt-4o-mini' },
         campaign.ai_prompt_chat,
         leadToInfo(lead),
       );

@@ -149,9 +149,15 @@ export async function runCampaignTick(
     account?.unipile_account_id,
   );
 
+  // AI personalization now goes through the centralized Requesty router only —
+  // BYOK (per-user OpenAI keys from li_settings) is deprecated. Reading the
+  // legacy `settings.openai_api_key` here used to silently break personalization
+  // when a leftover OpenAI `sk-proj-...` key was in DB (Requesty rejects with
+  // 401), and the user-facing settings UI no longer exposes that field anyway.
+  // See migration 20260525_0003_li_outreach_drop_byok_keys.sql.
   const aiConfig = {
-    apiKey: settings.openai_api_key || process.env.OPENROUTER_LI_OUTREACH_API_KEY || '',
-    model: campaign.ai_model || settings.openai_model || 'openai/gpt-4o-mini',
+    apiKey: process.env.OPENROUTER_LI_OUTREACH_API_KEY ?? '',
+    model: campaign.ai_model || 'openai/gpt-4o-mini',
   };
 
   const steps = (campaign.steps ?? []) as LiCampaignStep[];
