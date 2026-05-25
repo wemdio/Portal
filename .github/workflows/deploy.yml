@@ -114,10 +114,17 @@ jobs:
             cd /home/Portal/prod/
             echo "${{ secrets.DOCKER_PASSWORD }}" | sudo docker login --username ${{ secrets.DOCKER_USERNAME }} --password-stdin
             sudo docker compose version
-            sudo docker compose -p portal -f docker-compose.prod.yml pull portal worker-baseconstructor instantly-sync-bot portal-backup
+            sudo docker compose -p portal -f docker-compose.prod.yml pull portal worker-baseconstructor worker-li-outreach instantly-sync-bot portal-backup
             sudo docker ps -a --filter "label=com.docker.compose.service=portal" -q | xargs -r sudo docker rm -f
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps instantly-sync-bot portal-backup
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps worker-baseconstructor
+            # worker-li-outreach needs to be in the redeploy loop the same way
+            # worker-baseconstructor is: its image is built and pushed above,
+            # but without this line the running container stays on the old
+            # image (see fix history in 2026-05 where the welcome-handler /
+            # startChat fixes shipped in code but the worker kept running the
+            # bug until someone restarted it manually).
+            sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps worker-li-outreach
             sudo docker image prune --force
             sudo docker volume prune --force

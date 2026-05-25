@@ -149,9 +149,15 @@ export async function runCampaignTick(
     account?.unipile_account_id,
   );
 
+  // AI personalization now goes through the centralized Requesty router only —
+  // BYOK (per-user OpenAI keys from li_settings) is deprecated. Reading the
+  // legacy `settings.openai_api_key` here used to silently break personalization
+  // when a leftover OpenAI `sk-proj-...` key was in DB (Requesty rejects with
+  // 401), and the user-facing settings UI no longer exposes that field anyway.
+  // See migration 20260525_0003_li_outreach_drop_byok_keys.sql.
   const aiConfig = {
-    apiKey: settings.openai_api_key || process.env.OPENROUTER_LI_OUTREACH_API_KEY || '',
-    model: campaign.ai_model || settings.openai_model || 'openai/gpt-4o-mini',
+    apiKey: process.env.OPENROUTER_LI_OUTREACH_API_KEY ?? '',
+    model: campaign.ai_model || 'openai/gpt-4o-mini',
   };
 
   const steps = (campaign.steps ?? []) as LiCampaignStep[];
@@ -689,19 +695,19 @@ async function processMessageStep(
     }
   }
 
+  // Connection guard. Without it, after a 2-day `wait` step we used to call
+  // startChat() blindly and LinkedIn returned `errors/no_connection_with_recipient`
+  // for ~1499 leads in a single prod week (Apr 2026). Branch on lead.status:
+  //
+  //   - 'invited' / 'already_invited' → invite is live on LinkedIn (sent
+  //                              by us this run, or pre-existing from
+  //                              another campaign / tool) but accept not
+  //                              yet observed via webhook; defer one day
+  //                              so a late accept can still be picked up.
+  //   - 'new'                  → we never even sent an invite — something went sideways
+  //                              earlier, skip permanently.
+  //   - 'connected' / others   → fall through to startChat — chat just wasn't opened yet.
   if (!lead.chat_id) {
-    // Connection guard. Without it, after a 2-day `wait` step we used to call
-    // startChat() blindly and LinkedIn returned `errors/no_connection_with_recipient`
-    // for ~1499 leads in a single prod week (Apr 2026). Branch on lead.status:
-    //
-    //   - 'invited' / 'already_invited' → invite is live on LinkedIn (sent
-    //                              by us this run, or pre-existing from
-    //                              another campaign / tool) but accept not
-    //                              yet observed via webhook; defer one day
-    //                              so a late accept can still be picked up.
-    //   - 'new'                  → we never even sent an invite — something went sideways
-    //                              earlier, skip permanently.
-    //   - 'connected' / others   → fall through to startChat — chat just wasn't opened yet.
     if (lead.status === 'invited' || lead.status === 'already_invited') {
       const deferAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
       await db
@@ -733,39 +739,19 @@ async function processMessageStep(
       );
       return false;
     }
-
-    if (lead.linkedin_id) {
-      log('info', 'Нет chat_id — попытка начать чат через Unipile', lead.name, stepIdx);
-      try {
-        const chatResult = await client.startChat(lead.linkedin_id, step.message ?? undefined);
-        const chatId = String(chatResult.id ?? chatResult.chat_id ?? '');
-        if (chatId) {
-          await db.from('li_leads').update({ chat_id: chatId, status: 'connected', updated_at: now }).eq('id', lead.id);
-          lead.chat_id = chatId;
-          log('info', `Чат создан (chat_id: ${chatId})`, lead.name, stepIdx);
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        log('warning', `Не удалось начать чат (ещё нет коннекта?): ${msg}`, lead.name, stepIdx);
-
-        const cooldown = detectAccountCooldownError(e);
-        if (cooldown && accountDbId) {
-          const { cooldownUntil, error: cooldownErr } = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
-          const untilHuman = new Date(cooldownUntil).toLocaleString('ru-RU');
-          if (!cooldownErr) {
-            log('warning', `Аккаунт уходит в отлёжку до ${untilHuman} (${describeCooldownReason(cooldown.kind)}).`, lead.name, stepIdx);
-          }
-          throw new AccountCooldownTriggered(cooldown.kind);
-        }
-
-        return true;
-      }
-    } else {
+    if (!lead.linkedin_id) {
       log('warning', 'Нет chat_id и linkedin_id — невозможно отправить сообщение, пропуск', lead.name, stepIdx);
       return false;
     }
   }
 
+  // Build the final outgoing text BEFORE deciding between startChat / sendMessage.
+  // Previously startChat (the "no chat_id yet" branch) received the raw
+  // `step.message`, so the first line of any chat opened via runner went out
+  // literally as "Hi {{first_name}}!"; the parseMessageTemplate + GPT call ran
+  // afterwards and produced a *second*, properly rendered message via
+  // sendMessage. End result for the lead: two near-identical follow-ups in a
+  // row, the first one un-personalized. See prod 2026-05 reports.
   let message = step.message ?? '';
   message = parseMessageTemplate(message, leadToInfo(lead));
   if (campaign.use_ai && campaign.use_ai_followup && aiConfig.apiKey) {
@@ -795,20 +781,61 @@ async function processMessageStep(
     return false;
   }
 
-  log('info', `Отправка сообщения: "${message.slice(0, 80)}${message.length > 80 ? '…' : ''}"`, lead.name, stepIdx);
-  try {
-    await client.sendMessage(lead.chat_id!, message);
-  } catch (e) {
-    const cooldown = detectAccountCooldownError(e);
-    if (cooldown && accountDbId) {
-      const { cooldownUntil, error: cooldownErr } = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
-      const untilHuman = new Date(cooldownUntil).toLocaleString('ru-RU');
-      if (!cooldownErr) {
-        log('warning', `Аккаунт уходит в отлёжку до ${untilHuman} (${describeCooldownReason(cooldown.kind)}).`, lead.name, stepIdx);
+  // Two delivery paths, same prepared `message`:
+  //   - existing chat → sendMessage
+  //   - no chat yet   → startChat opens it AND delivers `message` as the first
+  //                     line in one call; we MUST NOT fall through to
+  //                     sendMessage afterwards or LI receives the same text twice.
+  // Both branches share the same cooldown contract: an account-level error
+  // (invitation_limit / account_restricted) parks the account in the DB and
+  // aborts the rest of the tick via AccountCooldownTriggered so we don't keep
+  // banging on a parked account.
+  if (!lead.chat_id) {
+    log('info', `Нет chat_id — открываю чат через Unipile с готовым сообщением: "${message.slice(0, 80)}${message.length > 80 ? '…' : ''}"`, lead.name, stepIdx);
+    try {
+      const chatResult = await client.startChat(lead.linkedin_id!, message);
+      const newChatId = String(chatResult.id ?? chatResult.chat_id ?? '');
+      if (!newChatId) {
+        log('warning', 'startChat не вернул chat_id — сообщение, скорее всего, не доставлено', lead.name, stepIdx);
+        return true;
       }
-      throw new AccountCooldownTriggered(cooldown.kind);
+      lead.chat_id = newChatId;
+      await db
+        .from('li_leads')
+        .update({ chat_id: newChatId, status: 'connected', updated_at: now })
+        .eq('id', lead.id);
+      log('info', `Чат создан (chat_id: ${newChatId}), сообщение отправлено как initial text`, lead.name, stepIdx);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('warning', `Не удалось начать чат (ещё нет коннекта?): ${msg}`, lead.name, stepIdx);
+      const cooldown = detectAccountCooldownError(e);
+      if (cooldown && accountDbId) {
+        const { cooldownUntil, error: cooldownErr } = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
+        const untilHuman = new Date(cooldownUntil).toLocaleString('ru-RU');
+        if (!cooldownErr) {
+          log('warning', `Аккаунт уходит в отлёжку до ${untilHuman} (${describeCooldownReason(cooldown.kind)}).`, lead.name, stepIdx);
+        }
+        throw new AccountCooldownTriggered(cooldown.kind);
+      }
+      // Non-cooldown failure — startChat() did hit LinkedIn, keep the human-like pause.
+      return true;
     }
-    throw e;
+  } else {
+    log('info', `Отправка сообщения: "${message.slice(0, 80)}${message.length > 80 ? '…' : ''}"`, lead.name, stepIdx);
+    try {
+      await client.sendMessage(lead.chat_id, message);
+    } catch (e) {
+      const cooldown = detectAccountCooldownError(e);
+      if (cooldown && accountDbId) {
+        const { cooldownUntil, error: cooldownErr } = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
+        const untilHuman = new Date(cooldownUntil).toLocaleString('ru-RU');
+        if (!cooldownErr) {
+          log('warning', `Аккаунт уходит в отлёжку до ${untilHuman} (${describeCooldownReason(cooldown.kind)}).`, lead.name, stepIdx);
+        }
+        throw new AccountCooldownTriggered(cooldown.kind);
+      }
+      throw e;
+    }
   }
 
   const history = [...(lead.conversation_history ?? []), { role: 'assistant', content: message, ts: now }];

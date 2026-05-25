@@ -67,7 +67,19 @@ function makeBuilder(table: string) {
       }
       return { data: null, error: null };
     },
-    single: async () => ({ data: null, error: { message: 'not found' } }),
+    single: async () => {
+      // The webhook POST handler chains `.insert(...).select('id').single()`
+      // on li_webhook_logs to capture the row id for later marking
+      // processed=true. Record the insert here too — `.then()` won't be
+      // invoked when `.single()` terminates the chain.
+      if (mode === 'insert') {
+        if (table === 'li_webhook_logs') {
+          supaCalls.webhookLogInserts.push(payload as Record<string, unknown>);
+        }
+        return { data: { id: 1 }, error: null };
+      }
+      return { data: null, error: { message: 'not found' } };
+    },
     then: (resolve: (v: unknown) => void) => {
       if (mode === 'insert') {
         if (table === 'li_webhook_logs') {

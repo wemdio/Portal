@@ -94,13 +94,30 @@ interface AiConfig {
   model?: string;
 }
 
+/**
+ * Requesty's router (`router.requesty.ai`) accepts model names only in the
+ * `provider/model` shape — bare names like `gpt-4o-mini` return 400 with
+ * `Invalid model, expected: "provider/model"`. We default the provider to
+ * `openai` because that's the historical default for LI outreach campaigns;
+ * operators who want a non-OpenAI model can still pick one explicitly by
+ * typing the full `vendor/name`, e.g. `anthropic/claude-3-5-sonnet`.
+ *
+ * Exported so the unit test can pin the contract without going through the
+ * full HTTP request path.
+ */
+export function normalizeModel(model: string | null | undefined): string {
+  const trimmed = (model ?? '').trim();
+  if (!trimmed) return 'openai/gpt-4o-mini';
+  return trimmed.includes('/') ? trimmed : `openai/${trimmed}`;
+}
+
 async function makeOpenAiRequest(
   messages: Array<{ role: string; content: string }>,
   config: AiConfig,
   maxTokens = 150,
 ): Promise<string | null> {
   if (!config.apiKey) return null;
-  const model = config.model || 'openai/gpt-4o-mini';
+  const model = normalizeModel(config.model);
 
   const isNewModel = /gpt-5|o1|o3/i.test(model);
   const payload: Record<string, unknown> = { model, messages };

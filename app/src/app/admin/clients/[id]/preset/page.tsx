@@ -54,6 +54,28 @@ interface InstantlyAccountOption {
   isDefault: boolean;
 }
 
+interface PresetSaveSync {
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  skipped: boolean;
+}
+
+/**
+ * Renders the green success banner text after a preset save. We surface the
+ * sync result so the admin sees that their edit actually propagated to live
+ * campaigns (the whole reason this endpoint syncs in the first place).
+ */
+function buildSavedMessage(sync: PresetSaveSync | undefined): string {
+  if (!sync || sync.skipped || sync.attempted === 0) {
+    return 'Пресет сохранён';
+  }
+  if (sync.failed === 0) {
+    return `Пресет сохранён. Обновлено кампаний в Instantly: ${sync.succeeded}`;
+  }
+  return `Пресет сохранён. Обновлено кампаний: ${sync.succeeded} из ${sync.attempted}`;
+}
+
 const WEEKDAYS = [
   { value: 1, label: 'Пн' },
   { value: 2, label: 'Вт' },
@@ -102,6 +124,7 @@ export default function ClientPresetPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [savedMessage, setSavedMessage] = useState('');
+  const [syncWarning, setSyncWarning] = useState('');
   const [accountSearch, setAccountSearch] = useState('');
 
   const apiFetch = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
@@ -265,16 +288,32 @@ export default function ClientPresetPage() {
 
     setSaving(true);
     setError('');
+    setSyncWarning('');
     try {
-      await apiFetch<{ preset: unknown }>(`/api/admin/clients/${clientUserId}/preset`, {
+      const res = await apiFetch<{
+        preset: unknown;
+        sync?: {
+          attempted: number;
+          succeeded: number;
+          failed: number;
+          skipped: boolean;
+        };
+      }>(`/api/admin/clients/${clientUserId}/preset`, {
         method: 'PUT',
         body: JSON.stringify(preset),
       });
       void logAudit('admin.client-preset.save.success', 'Client preset saved', {
         targetUserId: clientUserId,
         accounts: preset.email_account_ids.length,
+        sync: res.sync,
       });
-      setSavedMessage('Пресет сохранён');
+      setSavedMessage(buildSavedMessage(res.sync));
+      if (res.sync && res.sync.failed > 0) {
+        setSyncWarning(
+          `Часть кампаний не удалось синхронизировать: ${res.sync.failed} из ${res.sync.attempted}. ` +
+            'Подробности — в логах. Можно нажать «Сохранить» ещё раз, чтобы повторить синхронизацию.',
+        );
+      }
       setHasExistingPreset(true);
     } catch (err) {
       void logError('admin.client-preset.save.failed', err, { clientUserId });
@@ -337,6 +376,13 @@ export default function ClientPresetPage() {
             <Check className="size-3 stroke-[3]" />
           </span>
           {savedMessage}
+        </div>
+      )}
+      {syncWarning && (
+        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 text-amber-800 text-sm">
+          <span aria-hidden>⚠️</span>
+          <span className="flex-1">{syncWarning}</span>
+          <button onClick={() => setSyncWarning('')} className="ml-2 text-amber-600 hover:text-amber-800" aria-label="Закрыть">✕</button>
         </div>
       )}
 
@@ -436,23 +482,26 @@ export default function ClientPresetPage() {
           <header className="px-6 py-4 border-b border-gray-200 bg-gray-50">
             <h2 className="text-sm font-semibold text-gray-900">Лимиты и интервалы</h2>
           </header>
-          <div className="p-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <NumberField
-              label="Лимит писем в день (на аккаунт)"
-              value={preset.daily_limit}
-              onChange={(v) => setPreset({ ...preset, daily_limit: v })}
-              min={0}
-              max={1000}
-            />
+          <div className="p-6 grid grid-cols-1 sm:grid-cols-3 gap-4 items-start">
             <NumberField
               label="Новых лидов в день"
+              hint="Сколько новых лидов входит в сиквенс за сутки. В начале кампании именно это поле обычно режет реальную отправку."
               value={preset.daily_max_leads}
               onChange={(v) => setPreset({ ...preset, daily_max_leads: v })}
               min={0}
               max={1000}
             />
             <NumberField
+              label="Лимит писем в день"
+              hint="Максимум исходящих со всей кампании за сутки — первые письма + follow-up'ы суммарно. Не путать с per-mailbox лимитом в Instantly."
+              value={preset.daily_limit}
+              onChange={(v) => setPreset({ ...preset, daily_limit: v })}
+              min={0}
+              max={1000}
+            />
+            <NumberField
               label="Интервал между письмами (мин)"
+              hint="Минимальная пауза между отправками с одного ящика."
               value={preset.email_gap_minutes}
               onChange={(v) => setPreset({ ...preset, email_gap_minutes: v })}
               min={0}
@@ -575,12 +624,14 @@ export default function ClientPresetPage() {
 
 function NumberField({
   label,
+  hint,
   value,
   onChange,
   min,
   max,
 }: {
   label: string;
+  hint?: string;
   value: number;
   onChange: (v: number) => void;
   min?: number;
@@ -600,6 +651,7 @@ function NumberField({
         max={max}
         className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
+      {hint && <p className="text-xs text-gray-500 mt-1 leading-snug">{hint}</p>}
     </div>
   );
 }

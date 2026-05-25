@@ -25,7 +25,13 @@ export async function PUT(req: NextRequest) {
     if ('error' in auth) return auth.error;
 
     const body = (await req.json()) as Record<string, unknown>;
-    const allowed = ['unipile_dsn', 'unipile_api_key', 'openai_api_key', 'openai_model', 'webhook_secret', 'proxy_url'];
+    // `openai_api_key` and `openai_model` deliberately excluded: per-user BYOK
+    // is deprecated. AI personalization runs through the centralized env
+    // Requesty router (process.env.OPENROUTER_LI_OUTREACH_API_KEY) and any
+    // per-campaign override goes through li_campaigns.ai_model, not settings.
+    // Leftover values from before this change were cleaned in migration
+    // 20260525_0003_li_outreach_drop_byok_keys.sql.
+    const allowed = ['unipile_dsn', 'unipile_api_key', 'webhook_secret', 'proxy_url'];
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     for (const key of allowed) {
       if (key in body) patch[key] = body[key];
