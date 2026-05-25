@@ -721,7 +721,9 @@ describe('Client Portal — empty new-user state', () => {
     expect((res as Response).status).toBe(200);
     expect(mockListEmails).toHaveBeenCalledWith(expect.objectContaining({
       campaign_id: ALLOWED_CAMPAIGN,
-      ue_type: 2,
+      // Instantly v2 фильтрует по `email_type` (string enum),
+      // а не `ue_type` (это поле в ответе).
+      email_type: 'received',
       limit: 100,
     }), { accountId: 'main' });
     const body = (await (res as Response).json()) as {
@@ -789,7 +791,8 @@ describe('Client Portal — empty new-user state', () => {
     expect((res as Response).status).toBe(200);
     expect(mockListEmails).toHaveBeenCalledWith(expect.objectContaining({
       campaign_id: ALLOWED_CAMPAIGN,
-      ue_type: 2,
+      // См. выше — фильтр Instantly v2 — `email_type`, не `ue_type`.
+      email_type: 'received',
       limit: 100,
     }), { accountId: 'main' });
     const body = (await (res as Response).json()) as {
