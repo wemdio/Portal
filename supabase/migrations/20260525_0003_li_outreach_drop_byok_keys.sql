@@ -47,12 +47,16 @@
 
 BEGIN;
 
--- 1. Wipe leftover BYOK keys.
+-- 1. Wipe leftover BYOK keys. The column has a NOT NULL constraint inherited
+--    from the initial 2026-03-19 schema, so we clear to '' rather than NULL —
+--    has the same falsy effect in JS (`settings.openai_api_key || env` falls
+--    through to env either way) and avoids a constraint-drop DDL inside what's
+--    otherwise a pure data migration. A future migration can drop the column
+--    + constraint together when we're confident nothing else reads it.
 UPDATE li_settings
-   SET openai_api_key = NULL,
+   SET openai_api_key = '',
        updated_at     = NOW()
- WHERE openai_api_key IS NOT NULL
-   AND openai_api_key <> '';
+ WHERE openai_api_key <> '';
 
 -- 2. Normalize bare model names in li_settings (legacy per-user override).
 UPDATE li_settings
