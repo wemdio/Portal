@@ -821,6 +821,39 @@ describe('toInstantlyHtmlBody', () => {
   it('handles empty body without throwing', () => {
     expect(toInstantlyHtmlBody('')).toBe('');
   });
+
+  it('SECURITY: HTML/JS injection attempts reach recipient as literal text, not markup', () => {
+    // Client-portal emails must NEVER carry HTML formatting or executable
+    // payloads to recipients. Whatever HTML-looking content the client types
+    // into the textarea must be escaped at the boundary, so:
+    //   - Instantly's editor displays it as visible text (not rendered tags)
+    //   - text_only: true at send strips any remaining HTML to plain text
+    //   - recipient's email client sees the raw characters in a text/plain
+    //     email and does not parse them as HTML
+    //
+    // The assertions below pin the escape behavior. If anyone ever drops the
+    // escape step from toInstantlyHtmlBody, this test will catch it.
+
+    // Script tag — the canonical XSS payload.
+    expect(toInstantlyHtmlBody('<script>alert(1)</script>')).toBe(
+      '&lt;script&gt;alert(1)&lt;/script&gt;',
+    );
+
+    // img+onerror — common XSS without explicit <script>.
+    expect(toInstantlyHtmlBody('<img src=x onerror="alert(1)">')).toBe(
+      '&lt;img src=x onerror="alert(1)"&gt;',
+    );
+
+    // Plain formatting tags — client cannot smuggle bold/italic/links into
+    // what should be a text-only email.
+    expect(toInstantlyHtmlBody('<b>bold</b> and <a href="https://evil">click</a>')).toBe(
+      '&lt;b&gt;bold&lt;/b&gt; and &lt;a href="https://evil"&gt;click&lt;/a&gt;',
+    );
+
+    // Pre-encoded entities stay encoded (no double-decode that could let
+    // someone smuggle real HTML via `&lt;script&gt;`).
+    expect(toInstantlyHtmlBody('&lt;script&gt;')).toBe('&amp;lt;script&amp;gt;');
+  });
 });
 
 describe('buildCampaignPayloadFromPreset — body HTML conversion', () => {
