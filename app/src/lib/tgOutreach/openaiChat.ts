@@ -39,7 +39,7 @@ export async function openaiGenerate(
   const body = {
     model,
     messages,
-    max_tokens: 1024,
+    max_tokens: 4096,
   };
 
   const headers: Record<string, string> = {

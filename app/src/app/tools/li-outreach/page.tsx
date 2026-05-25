@@ -111,6 +111,7 @@ const DEFAULT_CAMPAIGN_FORM = {
   message_existing_connections: false,
   use_ai_welcome: false,
   use_ai_followup: true,
+  ai_model: 'openai/gpt-4o-mini',
 };
 
 // ---- Helpers ----------------------------------------------------------------
@@ -146,7 +147,7 @@ export default function LiOutreachPage() {
   const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'24h' | '7d' | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
-  const [settingsForm, setSettingsForm] = useState<LiSettings>({ unipile_dsn: '', unipile_api_key: '', openai_api_key: '', openai_model: 'gpt-4o-mini', webhook_secret: '', proxy_url: '' });
+  const [settingsForm, setSettingsForm] = useState<LiSettings>({ unipile_dsn: '', unipile_api_key: '', openai_api_key: '', openai_model: 'openai/gpt-4o-mini', webhook_secret: '', proxy_url: '' });
 
   // Scraper form
   const [scraperUrl, setScraperUrl] = useState('');
@@ -367,6 +368,7 @@ export default function LiOutreachPage() {
           message_existing_connections: cf.message_existing_connections,
           use_ai_welcome: cf.use_ai_welcome,
           use_ai_followup: cf.use_ai_followup,
+          ai_model: cf.ai_model || null,
         },
       });
       setShowCreate(false);
@@ -427,6 +429,7 @@ export default function LiOutreachPage() {
       message_existing_connections: Boolean(campaign.message_existing_connections),
       use_ai_welcome: Boolean(campaign.use_ai_welcome),
       use_ai_followup: campaign.use_ai_followup !== false,
+      ai_model: typeof (campaign as Record<string, unknown>).ai_model === 'string' ? String((campaign as Record<string, unknown>).ai_model) : DEFAULT_CAMPAIGN_FORM.ai_model,
     });
     setEditingCampaignId(campaign.id);
     setShowCreate(true);
@@ -944,6 +947,18 @@ export default function LiOutreachPage() {
                   <p className="text-xs text-gray-600">
                     Промпт персонализации используется для инвайтов и follow-up, промпт автоответов - для ответов на входящие сообщения.
                   </p>
+                  <div>
+                    <label className="text-xs text-gray-600 block mb-1">Модель AI</label>
+                    <select
+                      value={cf.ai_model}
+                      onChange={(e) => setCf({ ...cf, ai_model: e.target.value })}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                    >
+                      <option value="openai/gpt-4o-mini">openai/gpt-4o-mini</option>
+                      <option value="openai/gpt-5-mini">openai/gpt-5-mini</option>
+                      <option value="openai/gpt-5">openai/gpt-5</option>
+                    </select>
+                  </div>
                   <div>
                     <label className="text-xs text-gray-600 block mb-1">Промпт персонализации</label>
                     <textarea
