@@ -229,8 +229,7 @@ function SettingsTab({ campaign, onSave }: {
             >
               <option value="openai/gpt-5-mini">openai/gpt-5-mini</option>
               <option value="openai/gpt-4o-mini">openai/gpt-4o-mini</option>
-              <option value="google/gemini-3-flash-preview">google/gemini-3-flash-preview</option>
-              <option value="vertex/gemini-3-flash-preview">vertex/gemini-3-flash-preview</option>
+              <option value="openai/gpt-5">openai/gpt-5</option>
             </select>
           </div>
         </div>

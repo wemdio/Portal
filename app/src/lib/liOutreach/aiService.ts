@@ -100,7 +100,7 @@ async function makeOpenAiRequest(
   maxTokens = 150,
 ): Promise<string | null> {
   if (!config.apiKey) return null;
-  const model = config.model || 'gpt-4o-mini';
+  const model = config.model || 'openai/gpt-4o-mini';
 
   const isNewModel = /gpt-5|o1|o3/i.test(model);
   const payload: Record<string, unknown> = { model, messages };
@@ -111,7 +111,7 @@ async function makeOpenAiRequest(
   const timer = setTimeout(() => controller.abort(), 60_000);
 
   try {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    const res = await fetch('https://router.requesty.ai/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -122,7 +122,7 @@ async function makeOpenAiRequest(
       const text = await res.text().catch(() => '');
       // Fallback to gpt-4o-mini if model not found
       if ((res.status === 404 || res.status === 400) && (text.toLowerCase().includes('model') || text.toLowerCase().includes('max_tokens'))) {
-        return makeOpenAiRequest(messages, { ...config, model: 'gpt-4o-mini' }, maxTokens);
+        return makeOpenAiRequest(messages, { ...config, model: 'openai/gpt-4o-mini' }, maxTokens);
       }
       console.error(`[li-outreach][ai] OpenAI ${res.status}: ${text.slice(0, 300)}`);
       return null;
