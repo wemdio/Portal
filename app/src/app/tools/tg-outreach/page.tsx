@@ -343,6 +343,30 @@ function SettingsTab({ campaign, onSave }: {
 }
 
 /* =================== LOGS TAB =================== */
+type ErrorRange = '6h' | '24h' | '7d';
+
+type ErrorCountsResponse = {
+  range: ErrorRange;
+  since: string;
+  until: string;
+  truncated: boolean;
+  counts: Record<string, { error: number; warning: number; account_id: string }>;
+  other: {
+    error: number;
+    warning: number;
+    recent: { id: number; level: 'error' | 'warning'; message: string; created_at: string }[];
+  };
+};
+
+function formatPeriod(sinceIso: string, untilIso: string) {
+  const opts: Intl.DateTimeFormatOptions = {
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+  };
+  const since = new Date(sinceIso).toLocaleString('ru-RU', opts);
+  const until = new Date(untilIso).toLocaleString('ru-RU', opts);
+  return `${since} — ${until}`;
+}
+
 function LogsTab({ campaignId }: { campaignId: string }) {
   const [logs, setLogs] = useState<OutreachLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -351,8 +375,25 @@ function LogsTab({ campaignId }: { campaignId: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const isAutoScroll = useRef(true);
 
+  // Side panel state: range, accounts (for opening AccountLogsModal on click)
+  // and the aggregated error counts. Polled on the same 5s cadence as logs so
+  // a fresh ошибка in the dark block doesn't lag behind in the side list.
+  const [panelRange, setPanelRange] = useState<ErrorRange>('24h');
+  const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
+  const [proxies, setProxies] = useState<OutreachProxy[]>([]);
+  const [errData, setErrData] = useState<ErrorCountsResponse | null>(null);
+  const [errLoading, setErrLoading] = useState(true);
+  const [selectedAccount, setSelectedAccount] = useState<OutreachAccount | null>(null);
+
   const fetchLogs = useCallback(async () => {
-    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/logs?limit=200`);
+    // Rolling 6-hour window — wide enough to cover overnight quiet hours
+    // ending mid-morning, narrow enough that the dark block stays readable
+    // and scroll-to-bottom feels live. Limit of 5000 is well above the
+    // realistic 6h volume (~300-500 lines at current cadence) and prevents
+    // a runaway response if the worker enters a logging hot loop.
+    const sinceIso = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    const params = new URLSearchParams({ since: sinceIso, limit: '5000' });
+    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/logs?${params}`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachLog[] };
       setLogs(d.items.reverse());
@@ -360,8 +401,29 @@ function LogsTab({ campaignId }: { campaignId: string }) {
     setLoading(false);
   }, [campaignId]);
 
+  const fetchSidePanel = useCallback(async () => {
+    const [errRes, accRes, proxRes] = await Promise.all([
+      authFetch(`${API_BASE}/campaigns/${campaignId}/accounts/error-counts?range=${panelRange}`),
+      authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`),
+      authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
+    ]);
+    if (errRes.ok) {
+      const d = await errRes.json() as ErrorCountsResponse;
+      setErrData(d);
+    }
+    if (accRes.ok) {
+      const d = await accRes.json() as { items: OutreachAccount[] };
+      setAccounts(d.items);
+    }
+    if (proxRes.ok) {
+      const d = await proxRes.json() as { items: OutreachProxy[] };
+      setProxies(d.items);
+    }
+    setErrLoading(false);
+  }, [campaignId, panelRange]);
+
   const exportLogs = useCallback(
-    async (range: '6h' | '24h' | '7d') => {
+    async (range: ErrorRange) => {
       setExportingRange(range);
       try {
         const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/logs/export?range=${range}`);
@@ -396,11 +458,15 @@ function LogsTab({ campaignId }: { campaignId: string }) {
   );
 
   useEffect(() => { queueMicrotask(() => { void fetchLogs(); }); }, [fetchLogs]);
+  useEffect(() => { queueMicrotask(() => { void fetchSidePanel(); }); }, [fetchSidePanel]);
 
   useEffect(() => {
-    const interval = setInterval(() => void fetchLogs(), 5000);
+    const interval = setInterval(() => {
+      void fetchLogs();
+      void fetchSidePanel();
+    }, 10000);
     return () => clearInterval(interval);
-  }, [fetchLogs]);
+  }, [fetchLogs, fetchSidePanel]);
 
   const handleScroll = useCallback(() => {
     if (!containerRef.current) return;
@@ -423,43 +489,226 @@ function LogsTab({ campaignId }: { campaignId: string }) {
     }
   };
 
+  // Sort accounts by error count desc; only show those with non-zero errors or
+  // warnings. Account-side keys are session_name (matches API contract).
+  const accountsWithErrors = React.useMemo(() => {
+    if (!errData) return [] as { account: OutreachAccount; error: number; warning: number }[];
+    return accounts
+      .map(a => {
+        const c = errData.counts[a.session_name];
+        return {
+          account: a,
+          error: c?.error ?? 0,
+          warning: c?.warning ?? 0,
+        };
+      })
+      .filter(x => x.error > 0 || x.warning > 0)
+      .sort((a, b) => (b.error - a.error) || (b.warning - a.warning));
+  }, [errData, accounts]);
+
+  const totalErr = errData?.other.error ?? 0;
+  const totalWarn = errData?.other.warning ?? 0;
+  const accErr = accountsWithErrors.reduce((s, x) => s + x.error, 0);
+  const accWarn = accountsWithErrors.reduce((s, x) => s + x.warning, 0);
+
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-end gap-2">
-        <span className="text-xs text-gray-500 mr-1">Выгрузить .txt:</span>
-        {(['6h', '24h', '7d'] as const).map((r) => {
-          const labels: Record<typeof r, string> = { '6h': '6 часов', '24h': '24 часа', '7d': '7 дней' };
-          const busy = exportingRange === r;
-          return (
-            <button
-              key={r}
-              type="button"
-              onClick={() => void exportLogs(r)}
-              disabled={exportingRange !== null}
-              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-            >
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-              {labels[r]}
-            </button>
-          );
-        })}
-      </div>
-      <div
-        ref={containerRef}
-        onScroll={handleScroll}
-        className="rounded-lg border border-gray-800 bg-gray-950 p-3 font-mono text-[11px] leading-relaxed h-[500px] overflow-auto"
-      >
-        {loading && <p className="text-gray-500">Загрузка логов...</p>}
-        {!loading && logs.length === 0 && <p className="text-gray-600">Нет логов. Запустите кампанию.</p>}
-        {logs.map(log => (
-          <div key={log.id} className="flex gap-2">
-            <span className="text-gray-600 shrink-0">{new Date(log.created_at).toLocaleTimeString('ru-RU')}</span>
-            <span className={`shrink-0 font-bold uppercase w-14 ${levelColor(log.level)}`}>{log.level}</span>
-            <span className="text-gray-300 break-all">{log.message}</span>
+    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4">
+      {/* Left: existing export bar + dark log block */}
+      <div className="space-y-3 min-w-0">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <span className="text-[11px] text-gray-400">
+            Показаны логи за последние 6 часов · обновление каждые 10 сек
+          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500 mr-1">Выгрузить .txt:</span>
+            {(['6h', '24h', '7d'] as const).map((r) => {
+              const labels: Record<typeof r, string> = { '6h': '6 часов', '24h': '24 часа', '7d': '7 дней' };
+              const busy = exportingRange === r;
+              return (
+                <button
+                  key={r}
+                  type="button"
+                  onClick={() => void exportLogs(r)}
+                  disabled={exportingRange !== null}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                  {labels[r]}
+                </button>
+              );
+            })}
           </div>
-        ))}
-        <div ref={bottomRef} />
+        </div>
+        <div
+          ref={containerRef}
+          onScroll={handleScroll}
+          className="rounded-lg border border-gray-800 bg-gray-950 p-3 font-mono text-[11px] leading-relaxed h-[500px] overflow-auto"
+        >
+          {loading && <p className="text-gray-500">Загрузка логов...</p>}
+          {!loading && logs.length === 0 && <p className="text-gray-600">Нет логов. Запустите кампанию.</p>}
+          {logs.map(log => (
+            <div key={log.id} className="flex gap-2">
+              <span className="text-gray-600 shrink-0">{new Date(log.created_at).toLocaleTimeString('ru-RU')}</span>
+              <span className={`shrink-0 font-bold uppercase w-14 ${levelColor(log.level)}`}>{log.level}</span>
+              <span className="text-gray-300 break-all">{log.message}</span>
+            </div>
+          ))}
+          <div ref={bottomRef} />
+        </div>
       </div>
+
+      {/* Right: errors side panel */}
+      <aside className="rounded-lg border border-gray-200 bg-white flex flex-col h-[538px] min-h-0 overflow-hidden">
+        <header className="px-3.5 py-3 border-b border-gray-100 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-xs font-semibold text-gray-800 flex items-center gap-1.5">
+              <AlertCircle className="h-3.5 w-3.5 text-rose-500" />
+              Ошибки за период
+            </h3>
+            <button
+              type="button"
+              onClick={() => { setErrLoading(true); void fetchSidePanel(); }}
+              title="Обновить"
+              className="p-1 rounded-md text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${errLoading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+          <div className="flex items-center gap-1">
+            {(['6h', '24h', '7d'] as const).map(r => {
+              const labels: Record<ErrorRange, string> = { '6h': '6ч', '24h': '24ч', '7d': '7д' };
+              const active = panelRange === r;
+              return (
+                <button
+                  key={r}
+                  type="button"
+                  onClick={() => { setPanelRange(r); setErrLoading(true); }}
+                  className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition cursor-pointer ${
+                    active
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-white text-gray-600 border border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'
+                  }`}
+                >
+                  {labels[r]}
+                </button>
+              );
+            })}
+          </div>
+          {errData && (
+            <p className="text-[10px] text-gray-500 leading-snug">
+              Период: <span className="text-gray-700 font-medium">{formatPeriod(errData.since, errData.until)}</span>
+            </p>
+          )}
+          <div className="flex items-center gap-2 text-[11px]">
+            <span className="inline-flex items-center gap-1 rounded-md bg-rose-50 px-1.5 py-0.5 text-rose-700">
+              <span className="font-semibold">{accErr + totalErr}</span> ошибок
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 px-1.5 py-0.5 text-amber-700">
+              <span className="font-semibold">{accWarn + totalWarn}</span> предупр.
+            </span>
+            {errData?.truncated && (
+              <span className="text-[10px] text-gray-400 ml-auto">обрезано</span>
+            )}
+          </div>
+        </header>
+
+        <div className="flex-1 overflow-auto">
+          {/* Accounts with errors */}
+          <div className="px-3.5 py-3 border-b border-gray-100">
+            <h4 className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 mb-2">
+              Аккаунты с ошибками
+            </h4>
+            {errLoading && !errData ? (
+              <div className="flex items-center gap-2 py-2 text-[11px] text-gray-400">
+                <Loader2 className="h-3 w-3 animate-spin" /> Загрузка...
+              </div>
+            ) : accountsWithErrors.length === 0 ? (
+              <p className="text-[11px] text-gray-400 py-2">Нет ошибок у аккаунтов</p>
+            ) : (
+              <ul className="space-y-1">
+                {accountsWithErrors.map(({ account, error, warning }) => (
+                  <li key={account.id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedAccount(account)}
+                      title="Открыть логи аккаунта"
+                      className="w-full flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-gray-50 transition cursor-pointer text-left"
+                    >
+                      <span className="text-[11px] font-medium text-gray-800 truncate flex-1 min-w-0">
+                        {account.session_name}
+                      </span>
+                      {error > 0 && (
+                        <span className="inline-flex items-center gap-0.5 rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 shrink-0">
+                          <AlertCircle className="h-2.5 w-2.5" />
+                          {error}
+                        </span>
+                      )}
+                      {warning > 0 && (
+                        <span className="inline-flex items-center gap-0.5 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 shrink-0">
+                          {warning}
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {/* Other errors (not tied to any account) */}
+          <div className="px-3.5 py-3">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                Прочие ошибки
+              </h4>
+              {errData && (totalErr + totalWarn > 0) && (
+                <span className="text-[10px] text-gray-400">
+                  {totalErr} ош. · {totalWarn} пред.
+                </span>
+              )}
+            </div>
+            {errLoading && !errData ? (
+              <div className="flex items-center gap-2 py-2 text-[11px] text-gray-400">
+                <Loader2 className="h-3 w-3 animate-spin" /> Загрузка...
+              </div>
+            ) : !errData || errData.other.recent.length === 0 ? (
+              <p className="text-[11px] text-gray-400 py-2">
+                Нет ошибок без привязки к аккаунту
+              </p>
+            ) : (
+              <ul className="space-y-1.5">
+                {errData.other.recent.map(row => (
+                  <li
+                    key={row.id}
+                    className="rounded-md border border-gray-100 bg-gray-50 px-2 py-1.5 text-[11px]"
+                  >
+                    <div className="flex items-center gap-1.5 text-[10px] text-gray-500 mb-0.5">
+                      <span className={`font-semibold uppercase ${row.level === 'error' ? 'text-rose-600' : 'text-amber-600'}`}>
+                        {row.level}
+                      </span>
+                      <span>
+                        {new Date(row.created_at).toLocaleString('ru-RU', {
+                          day: '2-digit', month: '2-digit',
+                          hour: '2-digit', minute: '2-digit',
+                        })}
+                      </span>
+                    </div>
+                    <p className="text-gray-700 break-words leading-snug">{row.message}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </aside>
+
+      {selectedAccount && (
+        <AccountLogsModal
+          account={selectedAccount}
+          proxy={proxies.find(p => p.id === selectedAccount.proxy_id) ?? null}
+          onClose={() => setSelectedAccount(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1776,8 +2025,8 @@ function CampaignsSection() {
   const selected = campaigns.find(c => c.id === selectedId) ?? null;
 
   return (
-    <div className="flex gap-6 text-left max-w-full">
-      <div className="min-w-0 flex-1 max-w-7xl space-y-6">
+    <div className="w-full text-left">
+      <div className="min-w-0 w-full space-y-6">
         {/* Header */}
         <header className="space-y-2">
           <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
@@ -1845,10 +2094,8 @@ function CampaignsSection() {
 /* =================== MAIN PAGE =================== */
 export default function TgOutreachPage() {
   return (
-    <div className="flex gap-6 text-left max-w-full">
-      <div className="min-w-0 flex-1 max-w-7xl">
-        <CampaignsSection />
-      </div>
+    <div className="w-full text-left">
+      <CampaignsSection />
     </div>
   );
 }
