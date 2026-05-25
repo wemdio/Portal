@@ -81,11 +81,19 @@ interface DraftPayload {
   savedAt: string;
 }
 
+// Стандартные плейсхолдеры в Instantly v2 используют camelCase, а НЕ
+// snake_case (Instantly hr: см. их доки, пример subject: "Hello {{firstName}}").
+// Раньше мы показывали клиенту `{{first_name}}` и `{{company_name}}` — клиент
+// копировал их в body, при отправке Instantly не находил совпадения и
+// плейсхолдер уходил литералом в письмо. Снизу в mapRowsToLeads мы также
+// дублируем значение в custom_variables со snake_case ключом — это
+// «лечит» уже запущенные кампании, где body набирался по старому чипу
+// (новые лиды смогут подставиться в `{{company_name}}` через custom_var).
 const STANDARD_FIELDS: { key: keyof Omit<ClientLaunchColumnMapping, 'custom_variables_mapping'>; label: string; required?: boolean; variable: string }[] = [
   { key: 'email', label: 'Email', required: true, variable: 'email' },
-  { key: 'first_name', label: 'Имя', variable: 'first_name' },
-  { key: 'last_name', label: 'Фамилия', variable: 'last_name' },
-  { key: 'company_name', label: 'Компания', variable: 'company_name' },
+  { key: 'first_name', label: 'Имя', variable: 'firstName' },
+  { key: 'last_name', label: 'Фамилия', variable: 'lastName' },
+  { key: 'company_name', label: 'Компания', variable: 'companyName' },
   { key: 'website', label: 'Сайт', variable: 'website' },
   { key: 'phone', label: 'Телефон', variable: 'phone' },
 ];
@@ -1395,10 +1403,12 @@ function buildAvailableVariables(
     return (firstRow[idx] ?? '').toString().trim();
   };
 
+  // camelCase — единственная форма, которую Instantly понимает для
+  // стандартных полей в шаблонах. См. STANDARD_FIELDS наверху файла.
   const standardKeys: { var: string; header: string | undefined }[] = [
-    { var: 'first_name', header: mapping.first_name },
-    { var: 'last_name', header: mapping.last_name },
-    { var: 'company_name', header: mapping.company_name },
+    { var: 'firstName', header: mapping.first_name },
+    { var: 'lastName', header: mapping.last_name },
+    { var: 'companyName', header: mapping.company_name },
     { var: 'website', header: mapping.website },
     { var: 'phone', header: mapping.phone },
   ];

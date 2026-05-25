@@ -524,6 +524,47 @@ describe('mapCsvRowsToLeads', () => {
     expect(leads[0].phone).toBe('+79991234567');
   });
 
+  it('mirrors standard fields into custom_variables with snake_case keys (legacy template compat)', () => {
+    // Instantly templates substitute STANDARD fields only via camelCase
+    // (`{{firstName}}`, `{{companyName}}`). Snake_case placeholders like
+    // `{{first_name}}` only work as CUSTOM variables. To keep legacy
+    // campaign bodies (where the portal previously suggested snake_case
+    // chips) working, mapRowsToLeads writes each standard field value
+    // into custom_variables under its snake_case key too. Belt-and-
+    // suspenders: standard field substitution still works via camelCase
+    // for new templates.
+    const leads = mapCsvRowsToLeads({
+      headers: ['e', 'fn', 'ln', 'cn'],
+      rows: [['a@b.com', 'John', 'Doe', 'Acme']],
+      mapping: {
+        email: 'e',
+        first_name: 'fn',
+        last_name: 'ln',
+        company_name: 'cn',
+      },
+    });
+    expect(leads[0].custom_variables).toEqual({
+      first_name: 'John',
+      last_name: 'Doe',
+      company_name: 'Acme',
+    });
+    // Standard fields are STILL set at top level so camelCase
+    // (`{{firstName}}`) keeps working — mirror is additive, not a
+    // replacement.
+    expect(leads[0].first_name).toBe('John');
+    expect(leads[0].company_name).toBe('Acme');
+  });
+
+  it('mirror does not include email (email has no separate placeholder semantic)', () => {
+    const leads = mapCsvRowsToLeads({
+      headers: ['Email'],
+      rows: [['a@b.com']],
+      mapping: { email: 'Email' },
+    });
+    // Only email mapped → nothing to mirror, no custom_variables at all.
+    expect(leads[0].custom_variables).toBeUndefined();
+  });
+
   it('puts unmapped columns into custom_variables', () => {
     const leads = mapCsvRowsToLeads({
       headers,
@@ -587,13 +628,18 @@ describe('mapCsvRowsToLeads', () => {
     expect(leads).toEqual([]);
   });
 
-  it('does not include custom_variables key if there are no extra columns', () => {
+  it('always emits custom_variables when ANY standard field beyond email is mapped (legacy compat mirror)', () => {
+    // Before the legacy-compat mirror, mapping only `first_name` produced
+    // no custom_variables on the lead. After the fix, even a single
+    // mapped standard field adds its snake_case mirror to
+    // custom_variables so legacy `{{first_name}}` in template bodies
+    // still substitutes.
     const leads = mapCsvRowsToLeads({
       headers: ['Email', 'fn'],
       rows: [['a@b.com', 'John']],
       mapping: { email: 'Email', first_name: 'fn' },
     });
-    expect(leads[0].custom_variables).toBeUndefined();
+    expect(leads[0].custom_variables).toEqual({ first_name: 'John' });
   });
 });
 
