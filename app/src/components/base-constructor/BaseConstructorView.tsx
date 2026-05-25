@@ -1646,49 +1646,79 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
         {/* ═══════════ RESULTS ═══════════ */}
         {isComplete && activeJob && (
           <div className="space-y-4">
-            {/* Stats */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Строк</p>
-                <p className="mt-2 text-2xl font-bold text-gray-900">
-                  {activeJob.result_stats?.total_rows ?? 0}
-                </p>
-                <p className="text-xs text-gray-400 mt-0.5">
-                  из {activeJob.initial_row_count}
-                  {clientMode ? (
+            {/* Stats — clientMode: editorial portfolio sentence (one headline +
+                secondary metrics inline). Admin (/tools/our-bases): legacy 4-card
+                grid preserved verbatim. */}
+            {clientMode ? (
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-2">
+                <div className="flex items-baseline flex-wrap gap-x-2">
+                  <span className="ds-mono tabular-nums text-3xl font-semibold text-gray-900">
+                    {activeJob.result_stats?.total_rows ?? 0}
+                  </span>
+                  <span className="text-sm text-gray-500">
+                    строк из {activeJob.initial_row_count} обработано
+                    {' '}
+                    (<ClientTariffUsageInline
+                      metric="max_rows"
+                      spent={activeJob.initial_row_count}
+                      remainingOnly
+                      refreshKey={`${activeJob.id}:${activeJob.completed_at ?? activeJob.status}`}
+                    />)
+                  </span>
+                </div>
+                <p className="text-sm text-gray-500">
+                  <span className="ds-mono tabular-nums font-semibold text-emerald-600">
+                    {activeJob.result_stats?.emails_found ?? 0}
+                  </span>
+                  {' email найдено'}
+                  {(activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
                     <>
-                      {' '}
-                      (<ClientTariffUsageInline
-                        metric="max_rows"
-                        spent={activeJob.initial_row_count}
-                        remainingOnly
-                        refreshKey={`${activeJob.id}:${activeJob.completed_at ?? activeJob.status}`}
-                      />)
+                      {' · средний ЦА '}
+                      <span className="ds-mono tabular-nums font-semibold text-gray-900">
+                        {activeJob.result_stats?.avg_ta_score ?? 0}
+                      </span>
                     </>
-                  ) : null}
+                  )}
+                  {' · '}
+                  <span className="ds-mono tabular-nums font-semibold text-gray-900">
+                    {activeJob.result_stats?.columns ?? 0}
+                  </span>
+                  {' колонок'}
                 </p>
               </div>
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Email найдено</p>
-                <p className="mt-2 text-2xl font-bold text-emerald-600">
-                  {activeJob.result_stats?.emails_found ?? 0}
-                </p>
-              </div>
-              {(activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Средний ЦА</p>
-                  <p className="mt-2 text-2xl font-bold text-blue-600">
-                    {activeJob.result_stats?.avg_ta_score ?? 0}
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Строк</p>
+                  <p className="mt-2 text-2xl font-bold text-gray-900">
+                    {activeJob.result_stats?.total_rows ?? 0}
+                  </p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    из {activeJob.initial_row_count}
                   </p>
                 </div>
-              )}
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Колонок</p>
-                <p className="mt-2 text-2xl font-bold text-gray-700">
-                  {activeJob.result_stats?.columns ?? 0}
-                </p>
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Email найдено</p>
+                  <p className="mt-2 text-2xl font-bold text-emerald-600">
+                    {activeJob.result_stats?.emails_found ?? 0}
+                  </p>
+                </div>
+                {(activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
+                  <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+                    <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Средний ЦА</p>
+                    <p className="mt-2 text-2xl font-bold text-blue-600">
+                      {activeJob.result_stats?.avg_ta_score ?? 0}
+                    </p>
+                  </div>
+                )}
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Колонок</p>
+                  <p className="mt-2 text-2xl font-bold text-gray-700">
+                    {activeJob.result_stats?.columns ?? 0}
+                  </p>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* TA scoring telemetry — отдельным блоком, чтобы пользователь видел
                 что AI оценил, какие средние, и сколько отфильтровалось */}

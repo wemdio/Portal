@@ -2261,3 +2261,53 @@ body:has(.client-portal) {
 .client-portal .focus\:ring-emerald-500:focus {
   --tw-ring-color: rgb(250 250 250 / 0.4) !important;
 }
+
+/* ── Bridge layer #4.1: surgical overrides for bridge (t) + (s) ──────
+   Re-re-critique 2026-05-25T22-39-45Z surfaced two NEW regressions
+   from bridge #4:
+
+   1. bridge (t) bg-gray-900 → cp-surface-elev breaks primary CTAs.
+      Submit/Download buttons use `bg-gray-900 text-white` as the
+      admin inverse-on-light pattern; mapping bg→surface-elev kills
+      the contrast (low-contrast chip instead of dominant action).
+      Progress bar fills (bg-gray-900 over bg-gray-100 track) become
+      invisible (both → surface-elev = same colour).
+
+      Fix: ANY button with bg-gray-900 → cp-paper background + cp-ink
+      text. Restores inverse intent (light fill, dark text) in
+      editorial-dark scope. Decorative chips/discs without `button`
+      tag keep the (t) surface-elev mapping (still visible against
+      cp-surface-rest pages).
+
+   2. bridge (s) text-emerald-* → cp-paper kills the success-affect
+      cue everywhere: «Сохранённый бриф будет использован»,
+      file-uploaded indicator, brief-edit link. Olga loses the
+      "this is good news" signal. Fix: re-assert
+      text-emerald-600/700 → cp-green for success microcopy
+      specifically. Earlier shades (400/500) and darker (800/900)
+      stay paper — those are usually rare/decorative. */
+
+/* (v) Primary CTAs using bg-gray-900 — restore inverse contrast */
+.client-portal button.bg-gray-900,
+.client-portal a.bg-gray-900 {
+  background: var(--cp-paper) !important;
+  color: var(--cp-ink) !important;
+}
+.client-portal button.bg-gray-900 *,
+.client-portal a.bg-gray-900 * {
+  color: var(--cp-ink) !important;
+}
+/* Progress-bar fills typically nest a bg-gray-900 div inside a
+   bg-gray-100 track. Make the fill paper so it shows against the
+   surface-elev track. */
+.client-portal .bg-gray-100 > .bg-gray-900 {
+  background: var(--cp-paper) !important;
+}
+
+/* (w) Success-microcopy text-emerald-600/700 → cp-green
+   Restore the green-success cue overridden by bridge (s). Declared
+   after (s) so cascade wins. */
+.client-portal .text-emerald-600,
+.client-portal .text-emerald-700 {
+  color: var(--cp-green) !important;
+}
