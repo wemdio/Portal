@@ -30,6 +30,7 @@ import {
   Reply, Forward, X, Send, ArrowDownLeft, ArrowUpRight, RefreshCw,
 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
+import { isAuthExpiredError } from '@/lib/authFetch';
 import {
   CampaignStatus, CampaignStatusLabels,
   type Campaign, type CampaignAnalytics, type CampaignStepAnalytics, type SequenceStep,
@@ -97,6 +98,29 @@ interface RepliesPanelProps {
 
 type ActionMode = 'reply' | 'forward' | null;
 
+/**
+ * Inline recovery link shown when the campaign-replies UI catches an
+ * AuthExpiredError. Opens login in a NEW tab so the form contents in the
+ * current tab survive — user logs in over there, comes back, retries.
+ *
+ * Same pattern lives in `src/components/client-replies/ReplyThreadActions.tsx`
+ * (the dup-component file). When/if those two files are consolidated, this
+ * helper moves out too. For now duplicated by design to keep the fix narrow.
+ */
+function AuthExpiredLink() {
+  return (
+    <a
+      href="/login"
+      target="_blank"
+      rel="noopener noreferrer"
+      className="inline-flex items-center gap-1 text-[10px] font-semibold underline-offset-2 hover:underline"
+      style={{ color: 'var(--cp-paper)' }}
+    >
+      Открыть страницу входа в новой вкладке →
+    </a>
+  );
+}
+
 interface ExpandedThreadProps {
   campaignId: string;
   emailId: string;
@@ -107,17 +131,20 @@ function ExpandedThread({ campaignId, emailId, onAfterAction }: ExpandedThreadPr
   const [thread, setThread] = useState<ThreadMessage[] | null>(null);
   const [threadLoading, setThreadLoading] = useState(false);
   const [threadError, setThreadError] = useState('');
+  const [threadAuthExpired, setThreadAuthExpired] = useState(false);
   const [actionMode, setActionMode] = useState<ActionMode>(null);
 
   const loadThread = useCallback(async () => {
     setThreadLoading(true);
     setThreadError('');
+    setThreadAuthExpired(false);
     try {
       const data = await clientApiFetch<ClientReplyThread>(
         `/campaigns/${campaignId}/replies/${emailId}/thread`,
       );
       setThread(data.messages);
     } catch (err) {
+      if (isAuthExpiredError(err)) setThreadAuthExpired(true);
       setThreadError(err instanceof Error ? err.message : 'Не удалось загрузить тред');
     } finally {
       setThreadLoading(false);
@@ -138,17 +165,24 @@ function ExpandedThread({ campaignId, emailId, onAfterAction }: ExpandedThreadPr
         </div>
       )}
       {threadError && (
-        <div className="flex items-center gap-2 text-[11px]">
-          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
-          <span className="flex-1" style={{ color: 'var(--cp-paper)' }}>{threadError}</span>
-          <button
-            type="button"
-            onClick={() => void loadThread()}
-            className="ds-btn-ghost inline-flex items-center gap-1 px-2 py-0.5 text-[10px]"
-          >
-            <RefreshCw className="h-2.5 w-2.5" aria-hidden />
-            Повторить
-          </button>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-[11px]">
+            <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
+            <span className="flex-1" style={{ color: 'var(--cp-paper)' }}>
+              {threadAuthExpired
+                ? 'Сессия истекла. Войдите заново — раскрытый тред подгрузится после возврата.'
+                : threadError}
+            </span>
+            <button
+              type="button"
+              onClick={() => void loadThread()}
+              className="ds-btn-ghost inline-flex items-center gap-1 px-2 py-0.5 text-[10px]"
+            >
+              <RefreshCw className="h-2.5 w-2.5" aria-hidden />
+              Повторить
+            </button>
+          </div>
+          {threadAuthExpired && <div className="pl-4"><AuthExpiredLink /></div>}
         </div>
       )}
 
@@ -257,10 +291,12 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
   const [showBcc, setShowBcc] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [authExpired, setAuthExpired] = useState(false);
 
   const handleSend = async () => {
     setSending(true);
     setError('');
+    setAuthExpired(false);
     try {
       await clientApiFetch(`/campaigns/${campaignId}/replies/${emailId}/reply`, {
         method: 'POST',
@@ -268,6 +304,7 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
       });
       onSent();
     } catch (err) {
+      if (isAuthExpiredError(err)) setAuthExpired(true);
       setError(err instanceof Error ? err.message : 'Не удалось отправить');
     } finally {
       setSending(false);
@@ -320,9 +357,16 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
         className="ds-input w-full text-[11px] sm:text-xs resize-y"
       />
       {error && (
-        <div className="flex items-center gap-2 text-[11px]">
-          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
-          <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-[11px]">
+            <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
+            <span style={{ color: 'var(--cp-paper)' }}>
+              {authExpired
+                ? 'Сессия истекла. Откройте страницу входа в новой вкладке — текст ответа и CC сохранятся здесь.'
+                : error}
+            </span>
+          </div>
+          {authExpired && <div className="pl-4"><AuthExpiredLink /></div>}
         </div>
       )}
       <div className="flex items-center justify-end gap-2">
@@ -359,10 +403,12 @@ function ForwardForm({ campaignId, emailId, onCancel, onSent }: ForwardFormProps
   const [toEmail, setToEmail] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [authExpired, setAuthExpired] = useState(false);
 
   const handleSend = async () => {
     setSending(true);
     setError('');
+    setAuthExpired(false);
     try {
       await clientApiFetch(`/campaigns/${campaignId}/replies/${emailId}/forward`, {
         method: 'POST',
@@ -370,6 +416,7 @@ function ForwardForm({ campaignId, emailId, onCancel, onSent }: ForwardFormProps
       });
       onSent();
     } catch (err) {
+      if (isAuthExpiredError(err)) setAuthExpired(true);
       setError(err instanceof Error ? err.message : 'Не удалось переслать');
     } finally {
       setSending(false);
@@ -400,9 +447,16 @@ function ForwardForm({ campaignId, emailId, onCancel, onSent }: ForwardFormProps
         Пересылаем оригинальный текст письма от лида целиком.
       </p>
       {error && (
-        <div className="flex items-center gap-2 text-[11px]">
-          <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
-          <span style={{ color: 'var(--cp-paper)' }}>{error}</span>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-[11px]">
+            <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
+            <span style={{ color: 'var(--cp-paper)' }}>
+              {authExpired
+                ? 'Сессия истекла. Откройте страницу входа в новой вкладке — адрес получателя сохранится здесь.'
+                : error}
+            </span>
+          </div>
+          {authExpired && <div className="pl-4"><AuthExpiredLink /></div>}
         </div>
       )}
       <div className="flex items-center justify-end gap-2">
