@@ -47,11 +47,15 @@ export async function openaiGenerate(
     Authorization: `Bearer ${apiKey}`,
   };
 
+  // 45s по умолчанию: gpt-5-mini тратит 25-35с на reasoning при коротком
+  // ответе, и 30с был на грани — половина запросов отваливалась за секунду
+  // до ответа. Override через env, если нужно.
+  const GPT_TIMEOUT_MS = Number(process.env.TG_OUTREACH_GPT_TIMEOUT_MS) || 45_000;
   const res = await fetch('https://router.requesty.ai/v1/chat/completions', {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(GPT_TIMEOUT_MS),
   });
 
   if (!res.ok) {
