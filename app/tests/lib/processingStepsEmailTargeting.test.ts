@@ -247,4 +247,61 @@ describe('stepValidateEmails', () => {
     expect(out).toHaveLength(2);
     expect(out[1][0]).toBe('ca@x.ru');
   });
+
+  it('default (dropRowsWithoutEmail=true) — строка с пустым email колонкой ДРОПАЕТСЯ', async () => {
+    // Реальный кейс polza@polza.ru: 74% строк на выходе были без email'а
+    // ('email Статус' пустой), потому что legacy-ветка их сохраняла.
+    // Дефолт теперь — дропать такие строки.
+    mockValidator({ 'good@x.ru': 'ok' });
+    const data = [
+      ['Компания', 'Email'],
+      ['Acme', 'good@x.ru'],
+      ['Beta', ''],         // пустой email → DROP
+      ['Gamma', '   '],     // whitespace-only → тоже DROP
+    ];
+    const out = await stepValidateEmails(data, noopProgress, undefined, {
+      validateTarget: 'original',
+    });
+    // header + 1 валидная строка
+    expect(out).toHaveLength(2);
+    expect(out[1][0]).toBe('Acme');
+  });
+
+  it('dropRowsWithoutEmail=false — legacy-поведение: пустые строки сохраняются', async () => {
+    // Опт-ин путь для случаев когда validate — промежуточный шаг enrich-
+    // пайплайна, и строки без email ещё могут получить email позже.
+    mockValidator({ 'good@x.ru': 'ok' });
+    const data = [
+      ['Компания', 'Email'],
+      ['Acme', 'good@x.ru'],
+      ['Beta', ''],         // пустой email → KEEP (legacy)
+    ];
+    const out = await stepValidateEmails(data, noopProgress, undefined, {
+      validateTarget: 'original',
+      dropRowsWithoutEmail: false,
+    });
+    expect(out).toHaveLength(3);
+    expect(out[1][0]).toBe('Acme');
+    expect(out[2][0]).toBe('Beta');
+    expect(out[2][1]).toBe(''); // email остался пустым
+  });
+
+  it('default — строка с мусором (не-email) в колонке тоже дропается', async () => {
+    // Кейс из job 8b188038-…: cell сдвинулся, в колонке email лежит
+    // «Project Administrator — https://...». extractEmail() не найдёт @-pattern,
+    // validateEmail не вызовется (статус останется ''), и dropRowsWithoutEmail
+    // дропнет строку. Side-effect: фикс sтоп parseCSV сдвига становится мягче —
+    // даже если что-то проскользнёт, на выходе мусора не будет.
+    mockValidator({ 'real@x.ru': 'ok' });
+    const data = [
+      ['Email'],
+      ['real@x.ru'],
+      ['Project Administrator — https://hh.ru/vacancy/1'], // мусор
+    ];
+    const out = await stepValidateEmails(data, noopProgress, undefined, {
+      validateTarget: 'original',
+    });
+    expect(out).toHaveLength(2);
+    expect(out[1][0]).toBe('real@x.ru');
+  });
 });

@@ -85,9 +85,13 @@ export function OnboardingBanner() {
           На дашборде есть пошаговый онбординг — за 6 шагов запустите первую кампанию.
         </p>
       </div>
+      {/* CTA bumped from `text-xs px-3 py-1.5` to `text-sm px-4 py-2` for
+          onboarding presence — flagged on the 2026-05-26 /client screenshot
+          where the primary CTA read as a quiet utility chip rather than the
+          banner's reason for existing. */}
       <Link
         href={'/client/dashboard' as Route}
-        className="ds-btn-primary px-3 py-1.5 text-xs whitespace-nowrap shrink-0"
+        className="ds-btn-primary px-4 py-2 text-sm font-semibold whitespace-nowrap shrink-0"
       >
         Открыть дашборд →
       </Link>
