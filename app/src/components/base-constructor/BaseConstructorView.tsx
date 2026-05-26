@@ -976,20 +976,21 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     AI category (with the 2 interactive cards) below.
                   */}
                   {clientMode && (
-                    <div
-                      className="rounded-md px-4 py-3"
-                      style={{
-                        background: 'var(--cp-surface-rest)',
-                        border: '1px solid var(--cp-divider)',
-                      }}
-                    >
+                    /* Bridge #5: flatten the «автоматически» inner box. The
+                       framed wrapper inside an already-bordered outer card
+                       was the hairline-on-hairline anti-pattern visible in
+                       the 2026-05-26 screenshot review. The eyebrow + tight
+                       paragraph speak for themselves; the outer section card
+                       already provides the frame. clientMode-gated → admin
+                       (/tools/our-bases) unaffected. */
+                    <div className="px-1 py-2">
                       <p
                         className="ds-eyebrow mb-1"
                         style={{ color: 'var(--cp-paper-mute)' }}
                       >
                         автоматически
                       </p>
-                      <p className="text-xs" style={{ color: 'var(--cp-paper)' }}>
+                      <p className="text-xs leading-relaxed" style={{ color: 'var(--cp-paper)' }}>
                         Очистка пустых, дедуп строк/email, разделение почт, очистка названий,
                         проверка сайтов, поиск email, валидация и обогащение описаниями —
                         выполняются по умолчанию для каждой базы.
