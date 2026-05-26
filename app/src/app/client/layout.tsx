@@ -239,7 +239,15 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         mode={navMode}
       />
 
-      <div className="flex-1 flex">
+      {/* Layout shell: wrap sidebar + main in the same 1400px viewport-centered
+          column the header uses (line 134), so:
+            (a) sidebar's left edge sits at the header's left edge — they look
+                like one column, not two layout systems competing,
+            (b) main content centers inside `viewport-center-minus-sidebar`
+                rather than `viewport-minus-sidebar`, removing the ~140px
+                perceptual rightward drift the user flagged in the 2026-05-26
+                dashboard screenshot. */}
+      <div className="flex-1 flex w-full max-w-[1400px] mx-auto">
         <ClientSidebar activeId={activeId} locale={locale} mode={navMode} />
         <main className="flex-1 min-w-0 px-3 py-4 sm:px-4 sm:py-6 md:px-8 md:py-8">
           {children}

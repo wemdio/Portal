@@ -64,6 +64,13 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
   const groups = filterClientNavGroupsForMode(CLIENT_NAV_GROUPS, mode);
   return (
     <nav aria-label={locale === 'en' ? 'Main navigation' : 'Главное меню'} className="flex flex-col gap-1.5">
+      {/* «Главная» eyebrow — gives Dashboard a section anchor so it isn't an
+          orphan above the numbered sections (Старт / Мониторинг / Архив).
+          Intentionally unnumbered: home ≠ step in the editorial-numbering
+          vocabulary; numbers belong to the linear workflow stages. */}
+      <h2 className="ds-eyebrow px-3 mb-2">
+        {locale === 'en' ? 'Home' : 'Главная'}
+      </h2>
       <NavItemRow
         item={CLIENT_NAV_DASHBOARD}
         active={activeId === CLIENT_NAV_DASHBOARD.id}
@@ -87,7 +94,10 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
         const groupLabel = locale === 'en' ? group.labelEn : group.label;
         const groupNumber = String(idx + 1).padStart(2, '0');
         return (
-          <div key={group.id} className="mt-5 first-of-type:mt-6">
+          /* Tighter vertical rhythm: mt-4 between groups (was mt-5); first group
+             keeps mt-5 (was mt-6) so Dashboard breathes against the workflow
+             sections. Trims ~12px of dead space from a long sidebar. */
+          <div key={group.id} className="mt-4 first-of-type:mt-5">
             <h2 className="ds-eyebrow px-3 mb-2">
               {groupNumber}
               <span aria-hidden> → </span>
@@ -108,7 +118,7 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
         );
       })}
 
-      <div className="mt-6 pt-4 border-t" style={{ borderColor: 'var(--cp-divider)' }}>
+      <div className="mt-5 pt-4 border-t" style={{ borderColor: 'var(--cp-divider)' }}>
         <NavItemRow
           item={CLIENT_NAV_SUPPORT}
           active={activeId === CLIENT_NAV_SUPPORT.id}
