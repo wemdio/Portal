@@ -658,6 +658,68 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
     let consecutiveDbErrors = 0;
     const MAX_CONSECUTIVE_DB_ERRORS = 20;
 
+    // ─── Progress flush (debounced) ─────────────────────────────────
+    //
+    // До этого фикса: `processed` обновлялся в БД ОДИН раз — после полного
+    // batch'а (60 items). При темпе ~30 items/мин batch занимает 2 минуты,
+    // и первые 2 минуты после старта frontend читает processed=0. Юзер
+    // видит «0% — Стоп», паникует, нажимает Стоп, перезапускает, опять
+    // первые 2 минуты 0%, опять Стоп → итеративный фрустрационный цикл
+    // (жалоба специалиста Ольги: 3 cancelled job'а подряд в БД).
+    //
+    // Watchdog в `enrich.ts` тоже завязан на `job.processed`: если оно
+    // не изменилось за 10 мин — сбрасывает job в pending. Для batch'а
+    // длиннее 10 мин (например при DOMAIN_CONCURRENCY=1 + много items
+    // одного домена) watchdog убивал живые job'ы.
+    //
+    // Фикс: дебаунс-флэш processed каждые ~2.5 секунды. Это даёт юзеру
+    // непрерывный прогресс с первых секунд + успокаивает watchdog.
+    // БД нагружается умеренно: 1 UPDATE на job каждые 2.5s = 0.4 RPS
+    // даже при 8 параллельных job'ах = 3.2 RPS, мизер для PostgREST.
+    const PROGRESS_FLUSH_INTERVAL_MS = 2500;
+    let lastProgressFlushAt = 0;
+    let pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    let flushInFlight = false;
+
+    const doFlush = async () => {
+      if (flushInFlight) return; // защита от наложений
+      flushInFlight = true;
+      lastProgressFlushAt = Date.now();
+      try {
+        await withSupabaseTimeout(
+          supabaseAdmin!
+            .from('website_enrichment_jobs')
+            .update({ processed, success_count: success, error_count: errors })
+            .eq('id', jobId),
+          'Таймаут флэша прогресса',
+        );
+      } catch {
+        // Игнорируем — следующий тик сделает свежий снимок.
+      } finally {
+        flushInFlight = false;
+      }
+    };
+
+    const flushProgress = (force = false) => {
+      const now = Date.now();
+      const elapsed = now - lastProgressFlushAt;
+      if (force || elapsed >= PROGRESS_FLUSH_INTERVAL_MS) {
+        if (pendingFlushTimer) {
+          clearTimeout(pendingFlushTimer);
+          pendingFlushTimer = null;
+        }
+        void doFlush();
+        return;
+      }
+      // Debounce: запланировать flush через (interval - elapsed) если ещё не запланировано.
+      if (!pendingFlushTimer) {
+        pendingFlushTimer = setTimeout(() => {
+          pendingFlushTimer = null;
+          void doFlush();
+        }, PROGRESS_FLUSH_INTERVAL_MS - elapsed);
+      }
+    };
+
     while (true) {
       if (consecutiveDbErrors >= MAX_CONSECUTIVE_DB_ERRORS) {
         throw new Error(`Supabase недоступен: ${consecutiveDbErrors} ошибок подряд, перезапускаем задачу`);
@@ -831,24 +893,33 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
               url: item.url_raw,
             });
           } finally {
-            if (finalized) processed += 1;
+            if (finalized) {
+              processed += 1;
+              // Дёргаем debounced флэш — фактический UPDATE уйдёт не чаще
+              // раза в 2.5s (или сразу если прошло >2.5s с предыдущего).
+              flushProgress();
+            }
             release();
           }
         },
       );
 
-      await withSupabaseTimeout(
-        supabaseAdmin
-          .from('website_enrichment_jobs')
-          .update({
-            processed,
-            success_count: success,
-            error_count: errors,
-          })
-          .eq('id', jobId),
-        'Таймаут обновления прогресса задачи',
-      ).catch(() => {});
+      // По окончании batch'а форсим финальный flush — гарантируем что
+      // последний UPDATE с финальными значениями этого batch'а ушёл.
+      flushProgress(true);
     }
+
+    // Выходим из batch loop → чистим pending flush timer и форсим последний
+    // апдейт. Без cleanup setTimeout мог бы «выстрелить» после того как Node
+    // уже думает что работа закончена.
+    if (pendingFlushTimer) {
+      clearTimeout(pendingFlushTimer);
+      pendingFlushTimer = null;
+    }
+    // Финальный force-flush ниже идёт через тот же UPDATE что и завершение
+    // (строка `.update({ status, processed: processedTotal, ... })`), так что
+    // дополнительный flushProgress(true) здесь не нужен — он бы делал лишний
+    // UPDATE дублирующий финальный.
 
     if (cancelled) {
       const now = new Date().toISOString();
