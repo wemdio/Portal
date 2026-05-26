@@ -53,6 +53,7 @@ import { getOrFetchScore, emptyCacheStats } from './mailganerScoreCache';
 import { validateEmailForAutoPipeline, type AutoPipelineEmailValidation } from './autoPipelineEmailValidation';
 import { calcPacing } from './autoPipelinePacing';
 import { fetchTopUpFromBaseOfBases } from './baseOfBasesSource';
+import { fetchTopUpFromCache } from './baseOfBasesFromCache';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import type { ClientLaunchSequence } from '@/lib/clientLaunch/types';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
@@ -612,25 +613,51 @@ export async function runAutoPipelineForClient(
         if (d) seenDomains.add(d);
       }
       const neededFromBob = config.daily_target_employers - freshFromHh.length;
-      const bobResult = await fetchTopUpFromBaseOfBases({
+
+      // 1. Сначала пробуем взять готовые активные домены из кэша
+      //    (mailganer_domain_scores). Они уже scored через background
+      //    scorer → ни одного Mailganer-вызова в cron'е. Сильно экономит
+      //    время прогона (с 2.5h до 10-15 мин когда кэш покрывает большую
+      //    часть BoB).
+      const cacheResult = await fetchTopUpFromCache({
         neededCount: neededFromBob,
-        revenueFrom: config.base_of_bases_revenue_from,
         seenDomains,
         excludePatterns,
-        log: (m) => void logAudit('auto-pipeline.bob', m, logCtx),
+        log: (m) => void logAudit('auto-pipeline.bob-cache', m, logCtx),
       });
-      fresh = [...freshFromHh, ...bobResult.employers];
+
+      // 2. Если кэш не дал достаточно (background scorer ещё не дошёл до
+      //    нужных доменов или их там просто нет) — fallback на прямой BoB.
+      //    Этот путь scoring'ит домены через Mailganer на лету и тоже
+      //    наполняет кэш через getOrFetchScore (это побочный эффект).
+      const stillNeeded = neededFromBob - cacheResult.employers.length;
+      let bobLiveResult: Awaited<ReturnType<typeof fetchTopUpFromBaseOfBases>> | null = null;
+      if (stillNeeded > 0) {
+        bobLiveResult = await fetchTopUpFromBaseOfBases({
+          neededCount: stillNeeded,
+          revenueFrom: config.base_of_bases_revenue_from,
+          seenDomains,
+          excludePatterns,
+          log: (m) => void logAudit('auto-pipeline.bob-live', m, logCtx),
+        });
+      }
+
+      fresh = [
+        ...freshFromHh,
+        ...cacheResult.employers,
+        ...(bobLiveResult?.employers ?? []),
+      ];
+
       await logAudit(
         'auto-pipeline.top-up.bob',
-        'Topped up from base of bases',
+        'Topped up from base of bases (cache + live)',
         {
           ...logCtx,
           hhCount: freshFromHh.length,
-          bobAdded: bobResult.employers.length,
-          bobScanned: bobResult.scanned,
-          bobDedupSkipped: bobResult.dedupSkipped,
-          bobExcludeSkipped: bobResult.excludeSkipped,
-          bobNoSiteSkipped: bobResult.noSiteSkipped,
+          bobFromCache: cacheResult.employers.length,
+          bobFromLive: bobLiveResult?.employers.length ?? 0,
+          cacheScanned: cacheResult.scanned,
+          bobLiveScanned: bobLiveResult?.scanned ?? 0,
           totalFresh: fresh.length,
         },
       );
