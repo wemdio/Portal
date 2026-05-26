@@ -4,6 +4,7 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import {
   CLIENT_NAV_AUTO_PIPELINE_SETUP,
+  CLIENT_NAV_MANUAL_SCORING,
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_GROUPS,
   CLIENT_NAV_SUPPORT,
@@ -85,6 +86,17 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
         <NavItemRow
           item={CLIENT_NAV_AUTO_PIPELINE_SETUP}
           active={activeId === CLIENT_NAV_AUTO_PIPELINE_SETUP.id}
+          locale={locale}
+          onItemClick={onItemClick}
+        />
+      )}
+
+      {/* Auto-mode-only: ручная batch-обработка доменов через Mailganer.
+          Клиент загружает CSV → получает 4 файла по bucket'ам score. */}
+      {mode === 'auto' && (
+        <NavItemRow
+          item={CLIENT_NAV_MANUAL_SCORING}
+          active={activeId === CLIENT_NAV_MANUAL_SCORING.id}
           locale={locale}
           onItemClick={onItemClick}
         />

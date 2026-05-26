@@ -241,6 +241,19 @@ export const CLIENT_NAV_AUTO_PIPELINE_SETUP: ClientNavItem = {
 };
 
 /**
+ * Ручная batch-обработка доменов — клиент загружает список, получает 4 CSV
+ * по bucket'ам score. Видим только в auto-режиме, как и setup выше.
+ */
+export const CLIENT_NAV_MANUAL_SCORING: ClientNavItem = {
+  id: 'manual-scoring',
+  label: 'Ручная обработка',
+  labelEn: 'Manual scoring',
+  href: '/client/manual-scoring',
+  description: 'Загрузить CSV с доменами, получить 4 файла по bucket\'ам score',
+  descriptionEn: 'Upload domain CSV, get 4 files split by score buckets',
+};
+
+/**
  * Возвращает группы, отфильтрованные под текущий mode. В 'manual' — без
  * изменений; в 'auto' — оставляем только items из AUTO_MODE_VISIBLE_ITEM_IDS
  * и группы, в которых что-то осталось.
@@ -290,6 +303,12 @@ export function resolveActiveNavId(pathname: string): string | null {
     pathname.startsWith('/client/auto-pipeline/setup/')
   ) {
     return 'auto-pipeline-setup';
+  }
+  if (
+    pathname === '/client/manual-scoring' ||
+    pathname.startsWith('/client/manual-scoring/')
+  ) {
+    return 'manual-scoring';
   }
   // Кампании — both the list (/client) and the detail page (/client/campaigns/:id).
   if (pathname === '/client' || pathname.startsWith('/client/campaigns')) {
