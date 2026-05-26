@@ -338,6 +338,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const briefFileRef = useRef<HTMLInputElement | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
+  // Секунды, прошедшие с момента нажатия «Запустить». Используется ТОЛЬКО
+  // во время `submitting=true` для дружелюбного hint'а под кнопкой («идёт
+  // загрузка большого файла, обычно до минуты»). Без этого юзер на больших
+  // базах (несколько мегабайт jsonb-payload в POST'е) видит крутящееся «Запуск...»
+  // и думает что зависло — жалоба клиента polza@polza.ru от 26 мая.
+  const [submittingElapsedSec, setSubmittingElapsedSec] = useState(0);
   const [error, setError] = useState('');
 
   const [activeJob, setActiveJob] = useState<ConstructorJob | null>(null);
@@ -438,6 +444,64 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     pollRef.current = setInterval(poll, 3000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [activeJob, loadHistory]);
+
+  /* ─── Submitting elapsed timer ──────────────────────────────────────
+   *
+   * Пока submitting=true (юзер нажал «Запустить» и ждёт ответа POST'а),
+   * тикаем секундомер раз в секунду. Используется UI-кнопкой для показа
+   * дружелюбного hint'а («загружаем большой файл, обычно до минуты»).
+   *
+   * Сбрасывается в 0 как только submitting=false.
+   */
+  useEffect(() => {
+    if (!submitting) {
+      setSubmittingElapsedSec(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const id = setInterval(() => {
+      setSubmittingElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [submitting]);
+
+  /* ─── Polling fallback while submitting ─────────────────────────────
+   *
+   * Сценарий клиента polza@polza.ru: загрузил 4297 строк CSV (6.5 МБ jsonb
+   * payload в POST'е), фронт повис на «Запуск...» больше минуты — backend
+   * принимал большой body и не успевал ответить ДО того как worker уже
+   * создал job в БД и начал его обрабатывать. Юзер видит «Запуск...»,
+   * думает что зависло, паникует.
+   *
+   * Защита: после 25 секунд ожидания начинаем фоном поллить активный
+   * job через GET /api/tools/base-constructor (loadHistory). Если в БД
+   * уже появилась running/pending запись этого юзера (POST успел дойти,
+   * просто ответ ещё едет) — переключаем UI в processing view, не дожидаясь
+   * ответа POST'а. POST потом ответит, но мы уже в правильном состоянии.
+   */
+  useEffect(() => {
+    if (!submitting || submittingElapsedSec < 25) return;
+    let cancelled = false;
+    const checkActiveJob = async () => {
+      try {
+        const res = await authFetch('/api/tools/base-constructor');
+        if (!res.ok || cancelled) return;
+        const { jobs } = (await res.json()) as { jobs?: ConstructorJob[] };
+        const running = (jobs ?? []).find((j) =>
+          ['pending', 'processing'].includes(j.status),
+        );
+        if (running && !cancelled) {
+          setActiveJob(running);
+          setSubmitting(false);
+        }
+      } catch {
+        // Игнорируем — следующий тик попробует ещё раз.
+      }
+    };
+    void checkActiveJob();
+    const id = setInterval(() => { void checkActiveJob(); }, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [submitting, submittingElapsedSec]);
 
   /* ─── Load job result data ─── */
 
@@ -912,20 +976,21 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     AI category (with the 2 interactive cards) below.
                   */}
                   {clientMode && (
-                    <div
-                      className="rounded-md px-4 py-3"
-                      style={{
-                        background: 'var(--cp-surface-rest)',
-                        border: '1px solid var(--cp-divider)',
-                      }}
-                    >
+                    /* Bridge #5: flatten the «автоматически» inner box. The
+                       framed wrapper inside an already-bordered outer card
+                       was the hairline-on-hairline anti-pattern visible in
+                       the 2026-05-26 screenshot review. The eyebrow + tight
+                       paragraph speak for themselves; the outer section card
+                       already provides the frame. clientMode-gated → admin
+                       (/tools/our-bases) unaffected. */
+                    <div className="px-1 py-2">
                       <p
                         className="ds-eyebrow mb-1"
                         style={{ color: 'var(--cp-paper-mute)' }}
                       >
                         автоматически
                       </p>
-                      <p className="text-xs" style={{ color: 'var(--cp-paper)' }}>
+                      <p className="text-xs leading-relaxed" style={{ color: 'var(--cp-paper)' }}>
                         Очистка пустых, дедуп строк/email, разделение почт, очистка названий,
                         проверка сайтов, поиск email, валидация и обогащение описаниями —
                         выполняются по умолчанию для каждой базы.
@@ -1478,7 +1543,10 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   {submitting ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      Запуск...
+                      {submittingElapsedSec < 5 && 'Запуск...'}
+                      {submittingElapsedSec >= 5 && submittingElapsedSec < 20 && 'Загружаем базу...'}
+                      {submittingElapsedSec >= 20 && submittingElapsedSec < 60 && `Сохраняем... ${submittingElapsedSec}s`}
+                      {submittingElapsedSec >= 60 && `Большой файл, ещё немного... ${submittingElapsedSec}s`}
                     </>
                   ) : (
                     <>
@@ -1487,6 +1555,26 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     </>
                   )}
                 </button>
+                {/* Фазированный hint под кнопкой — синхронизируется с таймером
+                    выше. До 5s — ничего (быстрый ответ выглядит как обычная
+                    форма). 5-30s — мягкое объяснение что нормально. 30s+ —
+                    подсказка что фоновый polling уже работает (см. useEffect
+                    в начале файла, который ловит активный job через GET).
+                    60s+ — финальный совет про F5 если совсем хочется
+                    подействовать. */}
+                {submitting && submittingElapsedSec >= 5 && (
+                  <p className="text-xs text-gray-500 leading-relaxed">
+                    {submittingElapsedSec < 30 && (
+                      <>Загружаем базу на сервер. На больших файлах (несколько мегабайт) это занимает до минуты — это нормально.</>
+                    )}
+                    {submittingElapsedSec >= 30 && submittingElapsedSec < 90 && (
+                      <>Файл большой, продолжаем сохранение. Задача наверняка уже запущена на сервере — если ответ долго не приходит, мы переключим экран автоматически.</>
+                    )}
+                    {submittingElapsedSec >= 90 && (
+                      <>Сохранение затянулось. Обновите страницу (F5) — задача почти наверняка уже запущена и появится в «Прогрессе».</>
+                    )}
+                  </p>
+                )}
                 {/* Pre-flight summary — facts the user can verify, plus a vague
                     time band (without false precision). Earlier version used
                     serial worker timings (0.5s/row × AI steps) that
