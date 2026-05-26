@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
 
   const clientIds = (data ?? []).map((c: { id: string }) => c.id);
 
-  let tariffMap: Record<string, { tariff_type: string; paid_until: string | null; paid_at: string | null; setup_until: string | null; is_active: boolean; billing_period: string | null; billing_amount: number | null }> = {};
+  const tariffMap: Record<string, { tariff_type: string; paid_until: string | null; paid_at: string | null; setup_until: string | null; is_active: boolean; billing_period: string | null; billing_amount: number | null }> = {};
   if (clientIds.length > 0) {
     const { data: tariffs } = await supabaseAdmin
       .from('client_tariffs')
