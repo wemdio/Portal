@@ -75,8 +75,12 @@ const DIALOGS_FETCH_LIMIT = Number(process.env.TG_OUTREACH_DIALOGS_LIMIT ?? '100
  * hostage and triggering the worker watchdog at 15 minutes. The watchdog
  * still acts as the ultimate backstop for the rest of the iteration.
  */
+// Default 180s: accounts with thousands of dialogs (e.g. Политген) routinely
+// hit the original 60s ceiling on getDialogs() even when the proxy is healthy.
+// Raising the bar trades a small amount of wall-clock time for full dialog
+// coverage. Override via TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS if needed.
 const PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS =
-  Number(process.env.TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS) || 60_000;
+  Number(process.env.TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS) || 180_000;
 
 /** Marker string included in the Error message so the catch branch can
  *  distinguish our explicit timeout from generic TIMEOUT errors. */

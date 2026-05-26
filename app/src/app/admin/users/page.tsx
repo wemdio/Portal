@@ -31,12 +31,33 @@ type AdminUserTariffPayload = TariffData & {
   setup_until?: string | null;
   billing_mode?: 'invoice' | 'autopayment' | null;
   payment_locked?: boolean;
+  billing_period?: 'month' | 'half_year' | 'year' | null;
+  billing_amount?: number | null;
 };
 const TARIFF_DEFAULTS: Record<'standard' | 'pro', Omit<TariffData, 'tariff_type'>> = {
   standard: { max_contacts: 10_000, max_rows: 20_000, max_chains_per_month: 10, max_domains: 4, max_emails: 16 },
   pro: { max_contacts: 20_000, max_rows: 40_000, max_chains_per_month: 20, max_domains: 8, max_emails: 32 },
 };
 const TARIFF_LABELS: Record<TariffType, string> = { standard: 'Стандарт', pro: 'Про', custom: 'Custom' };
+
+// Mirror lib/tariffs.ts (which is server-only). Keep in sync with that file.
+const TARIFF_MONTHLY_PRICE: Record<'standard' | 'pro', number> = { standard: 40_000, pro: 80_000 };
+const BILLING_PERIOD_MONTHS: Record<'month' | 'half_year' | 'year', number> = { month: 1, half_year: 6, year: 12 };
+const BILLING_PERIOD_LABELS: Record<'month' | 'half_year' | 'year', string> = {
+  month: 'Месяц',
+  half_year: 'Полгода',
+  year: 'Год',
+};
+
+function calcTariffAmount(tariff: TariffType, period: 'month' | 'half_year' | 'year'): number | null {
+  if (tariff === 'custom') return null;
+  return TARIFF_MONTHLY_PRICE[tariff] * BILLING_PERIOD_MONTHS[period];
+}
+
+function formatRub(n: number | null | undefined): string {
+  if (n == null) return '—';
+  return `${n.toLocaleString('ru-RU')} ₽`;
+}
 const LIMIT_LABELS: { key: keyof Omit<TariffData, 'tariff_type'>; label: string }[] = [
   { key: 'max_contacts', label: 'Контакты Instantly' },
   { key: 'max_rows', label: 'Строки для сбора + конструктор баз' },
@@ -127,6 +148,11 @@ export default function UsersPage() {
   const [billingMode, setBillingMode] = useState<'invoice' | 'autopayment' | null>(null);
   const [paymentLocked, setPaymentLocked] = useState(false);
   const [activateBillingMode, setActivateBillingMode] = useState<'invoice' | 'autopayment' | 'manual'>('manual');
+  const [activatePeriod, setActivatePeriod] = useState<'month' | 'half_year' | 'year'>('month');
+  const [activateCustomAmount, setActivateCustomAmount] = useState<string>('');
+  const [billingPeriod, setBillingPeriod] = useState<'month' | 'half_year' | 'year' | null>(null);
+  const [billingAmount, setBillingAmount] = useState<number | null>(null);
+  const [showExtendForm, setShowExtendForm] = useState(false);
   const [activating, setActivating] = useState(false);
 
   type SortColumn = 'name' | 'email' | 'role';
@@ -339,6 +365,9 @@ export default function UsersPage() {
         setSetupUntil(tariffRes.tariff.setup_until ?? null);
         setBillingMode((tariffRes.tariff.billing_mode as 'invoice' | 'autopayment' | null) ?? null);
         setPaymentLocked(tariffRes.tariff.payment_locked ?? false);
+        setBillingPeriod((tariffRes.tariff.billing_period as 'month' | 'half_year' | 'year' | null) ?? null);
+        setBillingAmount(tariffRes.tariff.billing_amount ?? null);
+        setShowExtendForm(false);
       } else {
         setTariffType('standard');
         setCustomLimits({ ...TARIFF_DEFAULTS.pro });
@@ -348,7 +377,12 @@ export default function UsersPage() {
         setSetupUntil(null);
         setBillingMode(null);
         setPaymentLocked(false);
+        setBillingPeriod(null);
+        setBillingAmount(null);
+        setShowExtendForm(false);
       }
+      setActivatePeriod('month');
+      setActivateCustomAmount('');
       setModalRole(user.role ?? null);
       setActionModalOrigin(origin);
       setActionModalUserId(user.id);
@@ -367,6 +401,11 @@ export default function UsersPage() {
       setBillingMode(null);
       setPaymentLocked(false);
       setSetupUntil(null);
+      setBillingPeriod(null);
+      setBillingAmount(null);
+      setShowExtendForm(false);
+      setActivatePeriod('month');
+      setActivateCustomAmount('');
       setModalRole(user.role ?? null);
       setActionModalOrigin(origin);
       setActionModalUserId(user.id);
@@ -1049,12 +1088,56 @@ export default function UsersPage() {
                                 Не оплачена
                               </span>
                             )}
+                            {(subscriptionActive || subscriptionSetup) && billingPeriod && billingAmount != null && (
+                              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-zinc-50 px-2 py-0.5 text-[11px] font-semibold text-zinc-700 ring-1 ring-zinc-200/60">
+                                {BILLING_PERIOD_LABELS[billingPeriod]} · {formatRub(billingAmount)}
+                              </span>
+                            )}
                           </div>
                         </div>
 
                         <div className="mt-3 grid grid-cols-1 gap-2.5 min-[520px]:grid-cols-2">
                           {!subscriptionActive && !subscriptionSetup && (
                             <>
+                              {/* Период оплаты */}
+                              <div className="min-[520px]:col-span-2">
+                                <p className="mb-1.5 text-[11px] font-medium text-gray-700">Период оплаты</p>
+                                <div className="flex gap-1.5">
+                                  {(['month', 'half_year', 'year'] as const).map((p) => {
+                                    const amt = calcTariffAmount(tariffType, p);
+                                    return (
+                                      <button
+                                        key={p}
+                                        type="button"
+                                        onClick={() => setActivatePeriod(p)}
+                                        className={`flex-1 px-2 py-2 text-[11px] font-medium rounded-lg border transition-colors ${
+                                          activatePeriod === p
+                                            ? 'bg-emerald-600 text-white border-emerald-600'
+                                            : 'border-gray-200 text-gray-700 hover:bg-gray-50 bg-white'
+                                        }`}
+                                      >
+                                        <div>{BILLING_PERIOD_LABELS[p]}</div>
+                                        <div className={`mt-0.5 text-[10px] tabular-nums ${activatePeriod === p ? 'text-emerald-50' : 'text-gray-500'}`}>
+                                          {tariffType === 'custom' ? 'индивид.' : formatRub(amt)}
+                                        </div>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                                {tariffType === 'custom' && (
+                                  <div className="mt-2">
+                                    <label className="block text-[11px] font-medium text-gray-700 mb-1">Сумма за период (₽)</label>
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      value={activateCustomAmount}
+                                      onChange={(e) => setActivateCustomAmount(e.target.value)}
+                                      placeholder="Например: 100000"
+                                      className="w-full px-2.5 py-1.5 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    />
+                                  </div>
+                                )}
+                              </div>
                               {/* Billing mode selector */}
                               <div className="flex gap-1.5 min-[520px]:col-span-2">
                                 {(['manual', 'invoice', 'autopayment'] as const).map((m) => (
@@ -1077,12 +1160,26 @@ export default function UsersPage() {
                                 disabled={activating}
                                 onClick={async () => {
                                   if (!actionModalUserId) return;
+                                  if (tariffType === 'custom') {
+                                    const n = Number(activateCustomAmount.replace(',', '.'));
+                                    if (!Number.isFinite(n) || n <= 0) {
+                                      setError('Укажите сумму за период для тарифа Custom');
+                                      return;
+                                    }
+                                  }
                                   setActivating(true);
                                   try {
                                     const bm = activateBillingMode === 'manual' ? null : activateBillingMode;
-                                    const res = await apiFetch<{ ok: true; paid_until?: string; setup_until?: string; billing_mode?: string; payment_locked?: boolean }>(`/api/admin/users/${actionModalUserId}/tariff`, {
+                                    const customAmt = tariffType === 'custom' ? Number(activateCustomAmount.replace(',', '.')) : undefined;
+                                    const res = await apiFetch<{ ok: true; paid_until?: string; setup_until?: string; billing_mode?: string; payment_locked?: boolean; billing_period?: string; billing_amount?: number }>(`/api/admin/users/${actionModalUserId}/tariff`, {
                                       method: 'PUT',
-                                      body: JSON.stringify({ action: 'activate', billing_mode: bm }),
+                                      body: JSON.stringify({
+                                        action: 'activate',
+                                        billing_mode: bm,
+                                        tariff_type: tariffType,
+                                        billing_period: activatePeriod,
+                                        billing_amount: customAmt,
+                                      }),
                                     });
                                     setSubscriptionSetup(true);
                                     setSubscriptionActive(false);
@@ -1090,6 +1187,8 @@ export default function UsersPage() {
                                     setSetupUntil(res.setup_until ?? null);
                                     setBillingMode((res.billing_mode as 'invoice' | 'autopayment' | null) ?? null);
                                     setPaymentLocked(res.payment_locked ?? false);
+                                    setBillingPeriod((res.billing_period as 'month' | 'half_year' | 'year' | null) ?? null);
+                                    setBillingAmount(res.billing_amount ?? null);
                                     setSaveSuccessMessage(
                                       bm === 'invoice' ? 'Активировано. Зайдите в Счета и выставьте счёт клиенту.' :
                                       bm === 'autopayment' ? 'Активировано. Клиент оплатит в своём ЛК.' :
@@ -1181,6 +1280,21 @@ export default function UsersPage() {
                               <span>Снять блокировку</span>
                             </button>
                           )}
+                          {subscriptionActive && !showExtendForm && (
+                            <button
+                              type="button"
+                              disabled={activating}
+                              onClick={() => {
+                                setActivatePeriod('month');
+                                setActivateCustomAmount('');
+                                setShowExtendForm(true);
+                              }}
+                              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 shadow-sm transition-colors hover:border-indigo-300 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <Plus className="h-3.5 w-3.5 shrink-0" />
+                              <span>Продлить подписку</span>
+                            </button>
+                          )}
                           {(subscriptionActive || subscriptionSetup) && (
                             <button
                               type="button"
@@ -1197,6 +1311,9 @@ export default function UsersPage() {
                                   setSubscriptionSetup(false);
                                   setBillingMode(null);
                                   setPaymentLocked(false);
+                                  setBillingPeriod(null);
+                                  setBillingAmount(null);
+                                  setShowExtendForm(false);
                                   setSaveSuccessMessage('Подписка деактивирована');
                                 } catch (err: unknown) {
                                   setError(getErrorMessage(err));
@@ -1211,6 +1328,133 @@ export default function UsersPage() {
                             </button>
                           )}
                         </div>
+
+                        {/* Inline-форма продления подписки */}
+                        {subscriptionActive && showExtendForm && (
+                          <div className="mt-3 rounded-lg border border-indigo-200 bg-indigo-50/40 p-3">
+                            <div className="mb-2 flex items-center justify-between">
+                              <p className="text-xs font-semibold text-indigo-900">Продление подписки</p>
+                              <button
+                                type="button"
+                                onClick={() => setShowExtendForm(false)}
+                                className="text-[11px] text-gray-500 hover:text-gray-700"
+                              >
+                                Отмена
+                              </button>
+                            </div>
+                            <p className="mb-2 text-[11px] text-indigo-700">
+                              Выберите тариф наверху и период ниже. Срок прибавится к текущему «{paidUntil ? new Date(paidUntil).toLocaleDateString('ru-RU') : '—'}».
+                            </p>
+                            <div className="flex gap-1.5">
+                              {(['month', 'half_year', 'year'] as const).map((p) => {
+                                const amt = calcTariffAmount(tariffType, p);
+                                return (
+                                  <button
+                                    key={p}
+                                    type="button"
+                                    onClick={() => setActivatePeriod(p)}
+                                    className={`flex-1 px-2 py-2 text-[11px] font-medium rounded-lg border transition-colors ${
+                                      activatePeriod === p
+                                        ? 'bg-indigo-600 text-white border-indigo-600'
+                                        : 'border-indigo-200 text-gray-700 bg-white hover:bg-indigo-50'
+                                    }`}
+                                  >
+                                    <div>{BILLING_PERIOD_LABELS[p]}</div>
+                                    <div className={`mt-0.5 text-[10px] tabular-nums ${activatePeriod === p ? 'text-indigo-50' : 'text-gray-500'}`}>
+                                      {tariffType === 'custom' ? 'индивид.' : formatRub(amt)}
+                                    </div>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            {tariffType === 'custom' && (
+                              <div className="mt-2">
+                                <label className="block text-[11px] font-medium text-gray-700 mb-1">Сумма за период (₽)</label>
+                                <input
+                                  type="text"
+                                  inputMode="decimal"
+                                  value={activateCustomAmount}
+                                  onChange={(e) => setActivateCustomAmount(e.target.value)}
+                                  placeholder="Например: 100000"
+                                  className="w-full px-2.5 py-1.5 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                            )}
+                            <div className="mt-2 flex gap-1.5">
+                              {(['manual', 'invoice', 'autopayment'] as const).map((m) => (
+                                <button
+                                  key={m}
+                                  type="button"
+                                  onClick={() => setActivateBillingMode(m)}
+                                  className={`flex-1 px-2 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                                    activateBillingMode === m
+                                      ? 'bg-gray-900 text-white border-gray-900'
+                                      : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'
+                                  }`}
+                                >
+                                  {m === 'manual' ? 'Вручную' : m === 'invoice' ? '🧾 Счёт' : '💳 Автоплатёж'}
+                                </button>
+                              ))}
+                            </div>
+                            <button
+                              type="button"
+                              disabled={activating}
+                              onClick={async () => {
+                                if (!actionModalUserId) return;
+                                if (tariffType === 'custom') {
+                                  const n = Number(activateCustomAmount.replace(',', '.'));
+                                  if (!Number.isFinite(n) || n <= 0) {
+                                    setError('Укажите сумму за период для тарифа Custom');
+                                    return;
+                                  }
+                                }
+                                setActivating(true);
+                                try {
+                                  const bm = activateBillingMode === 'manual' ? null : activateBillingMode;
+                                  const customAmt = tariffType === 'custom' ? Number(activateCustomAmount.replace(',', '.')) : undefined;
+                                  const res = await apiFetch<{ ok: true; paid_until?: string; billing_mode?: string; payment_locked?: boolean; billing_period?: string; billing_amount?: number; tariff_type?: string }>(`/api/admin/users/${actionModalUserId}/tariff`, {
+                                    method: 'PUT',
+                                    body: JSON.stringify({
+                                      action: 'extend',
+                                      billing_mode: bm,
+                                      tariff_type: tariffType,
+                                      billing_period: activatePeriod,
+                                      billing_amount: customAmt,
+                                    }),
+                                  });
+                                  setPaidUntil(res.paid_until ?? null);
+                                  setBillingMode((res.billing_mode as 'invoice' | 'autopayment' | null) ?? null);
+                                  setPaymentLocked(res.payment_locked ?? false);
+                                  setBillingPeriod((res.billing_period as 'month' | 'half_year' | 'year' | null) ?? null);
+                                  setBillingAmount(res.billing_amount ?? null);
+                                  setShowExtendForm(false);
+                                  setSaveSuccessMessage(
+                                    bm === 'invoice' ? 'Подписка продлена. Выставьте новый счёт клиенту.' :
+                                    bm === 'autopayment' ? 'Подписка продлена. Клиент оплатит в своём ЛК.' :
+                                    'Подписка продлена'
+                                  );
+                                } catch (err: unknown) {
+                                  setError(getErrorMessage(err));
+                                } finally {
+                                  setActivating(false);
+                                }
+                              }}
+                              className="mt-2 w-full inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-indigo-300 bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {activating ? (
+                                <>
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  <span>Продление...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                                  <span>Подтвердить продление</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
