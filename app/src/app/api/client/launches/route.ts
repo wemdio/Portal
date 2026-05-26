@@ -26,6 +26,14 @@ interface LaunchBody {
   rows?: unknown;
   schedule?: unknown;
   behavior?: unknown;
+  /**
+   * Optional per-launch subset of preset.email_account_ids. Pass as a
+   * string array of mailbox IDs the client wants to USE for THIS campaign
+   * (must be a subset of their preset). Omit to fall back to the full
+   * preset pool. Empty array is rejected downstream (validates as a
+   * usage error, not silent).
+   */
+  email_account_ids?: unknown;
 }
 
 function parseScheduleOverride(raw: unknown): ClientLaunchScheduleOverride | undefined {
@@ -136,6 +144,12 @@ export async function POST(req: NextRequest) {
 
   const scheduleOverride = parseScheduleOverride(body.schedule);
   const behaviorOverride = parseBehaviorOverride(body.behavior);
+  // Per-launch mailbox subset (legacy: omit → full preset pool used).
+  // Subset / non-empty validation happens in runLaunch where we have
+  // the preset loaded to compare against.
+  const emailAccountIdsOverride = isStringArray(body.email_account_ids)
+    ? body.email_account_ids
+    : undefined;
 
   const leads = mapCsvRowsToLeads({ headers, rows, mapping });
   if (leads.length === 0) {
@@ -149,6 +163,7 @@ export async function POST(req: NextRequest) {
       leads,
       scheduleOverride,
       behaviorOverride,
+      emailAccountIdsOverride,
       uploadedRows: rows.length,
       columnMapping: mapping,
     });

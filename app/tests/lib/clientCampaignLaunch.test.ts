@@ -72,6 +72,49 @@ describe('buildCampaignPayloadFromPreset', () => {
     expect(payload.link_tracking).toBe(true);
   });
 
+  it('uses the full preset email_account_ids when no override is given', () => {
+    // Default: every mailbox configured in the preset becomes the Instantly
+    // email_list for this campaign. This is what every legacy launch hit
+    // before the per-launch subset feature.
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset, // ['sender@acme.com', 'sender2@acme.com']
+      sequence: validSequence,
+    });
+    expect(payload.email_list).toEqual(['sender@acme.com', 'sender2@acme.com']);
+  });
+
+  it('uses the override array as email_list when client picks a subset', () => {
+    // Scenario: client has 3 mailboxes in preset but wants this campaign
+    // to send only from one — to run a parallel campaign on the same base
+    // from a different mailbox pool.
+    const preset = {
+      ...validPreset,
+      email_account_ids: ['a@x.com', 'b@x.com', 'c@x.com'],
+    };
+    const payload = buildCampaignPayloadFromPreset({
+      preset,
+      sequence: validSequence,
+      emailAccountIdsOverride: ['b@x.com'],
+    });
+    expect(payload.email_list).toEqual(['b@x.com']);
+  });
+
+  it('override produces a defensive copy of the array (no shared reference)', () => {
+    // Mutating the input array later must not leak into the payload — the
+    // payload is handed off to Instantly's API client and we don't want
+    // someone editing the original array mid-flight to silently change
+    // what Instantly receives.
+    const override = ['a@x.com'];
+    const payload = buildCampaignPayloadFromPreset({
+      preset: { ...validPreset, email_account_ids: ['a@x.com', 'b@x.com'] },
+      sequence: validSequence,
+      emailAccountIdsOverride: override,
+    });
+    expect(payload.email_list).not.toBe(override);
+    override.push('c@x.com');
+    expect(payload.email_list).toEqual(['a@x.com']);
+  });
+
   it('always forces text_only=true (client emails are plain text, no HTML)', () => {
     // Client emails must go out exactly as typed — plain text, line breaks
     // preserved, no HTML. text_only is forced regardless of the preset.

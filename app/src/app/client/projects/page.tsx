@@ -51,6 +51,18 @@ function formatDate(value: string | null): string {
   });
 }
 
+// "Needs attention" semantic for the meta-rail. An overdue deadline on an
+// active project is the single most-decisive signal on this page — Olga's
+// reason for opening it. Completed and cancelled projects are excluded so
+// archived rows don't permanently shout.
+function isDeadlineOverdue(deadline: string | null, status: string): boolean {
+  if (!deadline) return false;
+  if (status === 'Завершен' || status === 'Отменен') return false;
+  const d = new Date(deadline);
+  if (isNaN(d.getTime())) return false;
+  return d < new Date();
+}
+
 function ContactsProgress({ done, total }: { done: string | null; total: string | null }) {
   const doneNum = Number(done);
   const totalNum = Number(total);
@@ -115,8 +127,11 @@ function ProjectCard({ project }: { project: ProjectListItem }) {
     >
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="min-w-0">
+          {/* P2-A: font-semibold (was font-bold). Five bold titles in a row
+              flatten cross-list hierarchy — status dot can't reassert primacy
+              if every name shouts equally. */}
           <p
-            className="text-base font-bold truncate m-0"
+            className="text-base font-semibold truncate m-0"
             style={{ color: 'var(--cp-paper)' }}
           >
             {project.name || 'Без названия'}
@@ -134,81 +149,78 @@ function ProjectCard({ project }: { project: ProjectListItem }) {
         <StatusBadge status={project.status} />
       </div>
 
-      <div className="grid grid-cols-3 gap-2 mb-3">
-        <div
-          className="rounded-md px-2.5 py-2 text-center"
-          style={{
-            background: 'var(--cp-surface-rest)',
-            border: '1px solid var(--cp-divider)',
-          }}
-        >
-          <p className="ds-eyebrow">Активных</p>
-          <p
-            className="ds-mono text-base font-semibold mt-0.5"
-            style={{ color: 'var(--cp-paper)' }}
-          >
-            {project.tasks_active}
-          </p>
-        </div>
-        <div
-          className="rounded-md px-2.5 py-2 text-center"
-          style={{
-            background: 'var(--cp-surface-rest)',
-            border: '1px solid var(--cp-divider)',
-          }}
-        >
-          <p className="ds-eyebrow">Завершено</p>
-          <p
-            className="ds-mono text-base font-semibold mt-0.5"
-            style={{ color: 'var(--cp-paper)' }}
-          >
-            {project.tasks_done}
-          </p>
-        </div>
-        <div
-          className="rounded-md px-2.5 py-2 text-center"
-          style={{
-            background: 'var(--cp-surface-rest)',
-            border: '1px solid var(--cp-divider)',
-          }}
-        >
-          <p className="ds-eyebrow">Лиды</p>
-          <p
-            className="ds-mono text-base font-semibold mt-0.5"
-            style={{ color: 'var(--cp-paper)' }}
-          >
-            {project.leads_count}
-          </p>
-        </div>
-      </div>
+      {/* P1: distilled metric row. Was 3 framed tiles (hairline-on-hairline
+          inside an already-bordered card); now one editorial sentence — mono
+          numbers in paper, labels in faint. Same density saving as the
+          base-constructor 4-card → sentence distill. */}
+      <p
+        className="ds-mono text-sm mb-3"
+        style={{ color: 'var(--cp-paper-faint)' }}
+      >
+        <span className="font-semibold" style={{ color: 'var(--cp-paper)' }}>
+          {project.tasks_active}
+        </span>
+        {' активных · '}
+        <span className="font-semibold" style={{ color: 'var(--cp-paper)' }}>
+          {project.tasks_done}
+        </span>
+        {' завершено · '}
+        <span className="font-semibold" style={{ color: 'var(--cp-paper)' }}>
+          {project.leads_count}
+        </span>
+        {' лидов'}
+      </p>
 
       <ContactsProgress
         done={project.contacts_done}
         total={project.contacts_obligation}
       />
 
-      {(project.launch_date || project.deadline) && (
-        <div
-          className="ds-mono flex items-center justify-between mt-3 pt-3 text-[11px]"
-          style={{
-            borderTop: '1px solid var(--cp-divider)',
-            color: 'var(--cp-paper-mute)',
-          }}
-        >
-          {project.launch_date && (
-            <span>
-              <span style={{ color: 'var(--cp-paper-faint)' }}>запуск </span>
-              {formatDate(project.launch_date)}
-            </span>
-          )}
-          {project.deadline && (
-            <span>
-              <span style={{ color: 'var(--cp-paper-faint)' }}>дедлайн </span>
-              {formatDate(project.deadline)}
-            </span>
-          )}
-        </div>
-      )}
+      {(project.launch_date || project.deadline) && (() => {
+        const overdue = isDeadlineOverdue(project.deadline, project.status);
+        return (
+          <div
+            className="ds-mono flex items-center justify-between mt-3 pt-3 text-[11px]"
+            style={{
+              borderTop: '1px solid var(--cp-divider)',
+              color: 'var(--cp-paper-mute)',
+            }}
+          >
+            {project.launch_date && (
+              <span>
+                <span style={{ color: 'var(--cp-paper-faint)' }}>запуск </span>
+                {formatDate(project.launch_date)}
+              </span>
+            )}
+            {project.deadline && (
+              /* P2-C: surface overdue deadlines — amber dot + amber text. The
+                 page's persona-decisive signal (Olga opens this list to find
+                 "what needs attention"). Inactive statuses (Завершен/Отменен)
+                 are excluded by isDeadlineOverdue so archived rows stay
+                 quiet. */
+              <span className="inline-flex items-center gap-1.5">
+                {overdue && (
+                  <span
+                    aria-hidden
+                    className="ds-status-dot"
+                    style={{ background: 'var(--cp-amber)' }}
+                  />
+                )}
+                <span
+                  style={{
+                    color: overdue ? 'var(--cp-amber)' : 'var(--cp-paper-faint)',
+                  }}
+                >
+                  дедлайн{' '}
+                </span>
+                <span style={{ color: overdue ? 'var(--cp-amber)' : undefined }}>
+                  {formatDate(project.deadline)}
+                </span>
+              </span>
+            )}
+          </div>
+        );
+      })()}
     </Link>
   );
 }
