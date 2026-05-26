@@ -436,7 +436,31 @@ async function fetchSignalsForUrl(
   }
 }
 
-async function fetchEmailsWithCache(
+/**
+ * Hard timeout на ОДНУ ОЧЕРЕДНУЮ строку в email-режиме.
+ *
+ * Зачем: одна строка из CSV может содержать URL `extractNormalizedUrls`
+ * который вернёт 1-3 вариантов (`acme.com` + `www.acme.com` + `m.acme.com`).
+ * На каждый из них зовётся `fetchEmailsForUrl` → `scrapeEmails` → ходит
+ * до 12 страниц с per-request таймаутом 15s. Уже-существующий
+ * `FETCH_HARD_TIMEOUT_MS` (60s) — это hard cap НА ОДИН scrapeEmails вызов,
+ * не на всю строку. В worst case строка может занять 60s × 3 = 3 минуты.
+ *
+ * Наблюдение из локального replay (26 мая): процесс зависал на 408-й
+ * строке потому что все 5 concurrent слотов одновременно зацепили
+ * медленные сайты, каждый сидел до 3 минут — общий темп упал в ноль.
+ * На проде с concurrency=15 один patological сайт парализует один слот,
+ * пять штук — треть мощности воркера.
+ *
+ * 120 секунд достаточно для адекватных сайтов (даже tarpit с 15s ответом
+ * × 8 candidate-страниц = 120s), но отрезает явный мусор который никогда
+ * не отдаёт результат.
+ */
+const FETCH_EMAIL_ROW_HARD_TIMEOUT_MS = Number(
+  process.env.WEBSITE_ENRICHMENT_ROW_HARD_TIMEOUT_MS ?? '120000',
+);
+
+async function fetchEmailsWithCacheInner(
   item: QueueItem,
   inflight: Map<string, Promise<FetchResult>>,
 ): Promise<FetchResult> {
@@ -475,6 +499,23 @@ async function fetchEmailsWithCache(
   }
 
   return { text: '' };
+}
+
+async function fetchEmailsWithCache(
+  item: QueueItem,
+  inflight: Map<string, Promise<FetchResult>>,
+): Promise<FetchResult> {
+  try {
+    return await runWithTimeout(fetchEmailsWithCacheInner(item, inflight), {
+      timeoutMs: FETCH_EMAIL_ROW_HARD_TIMEOUT_MS,
+      timeoutMessage: `Превышен per-row таймаут ${FETCH_EMAIL_ROW_HARD_TIMEOUT_MS / 1000}s`,
+    });
+  } catch (err) {
+    // runWithTimeout reject'ит с Error(timeoutMessage); поведение
+    // соответствует прочим non-success возвратам — пишем в last_error.
+    // shouldRetryEnrichmentItem решит, ретраить или сразу failed.
+    return { error: err instanceof Error ? err.message : 'Per-row timeout' };
+  }
 }
 
 async function updateQueueItem(
