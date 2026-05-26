@@ -46,5 +46,23 @@ export async function GET(req: NextRequest) {
   const { data, error } = await query;
   if (error) return jsonError('Failed to load clients', 500);
 
-  return NextResponse.json({ clients: data ?? [] });
+  const clientIds = (data ?? []).map((c: { id: string }) => c.id);
+
+  let tariffMap: Record<string, { tariff_type: string; paid_until: string | null; paid_at: string | null; setup_until: string | null; is_active: boolean; billing_period: string | null; billing_amount: number | null }> = {};
+  if (clientIds.length > 0) {
+    const { data: tariffs } = await supabaseAdmin
+      .from('client_tariffs')
+      .select('user_id, tariff_type, paid_until, paid_at, setup_until, is_active, billing_period, billing_amount')
+      .in('user_id', clientIds);
+    for (const t of tariffs ?? []) {
+      tariffMap[t.user_id] = t;
+    }
+  }
+
+  const clients = (data ?? []).map((c: { id: string; full_name: string | null; email: string | null }) => ({
+    ...c,
+    tariff: tariffMap[c.id] ?? null,
+  }));
+
+  return NextResponse.json({ clients });
 }

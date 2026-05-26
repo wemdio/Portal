@@ -155,10 +155,27 @@ function Chart({ data, isMonthly }: { data: DailyStats[]; isMonthly: boolean }) 
    CREATE MODAL
 ══════════════════════════════════════════ */
 
+interface ClientTariffInfo {
+  tariff_type: string;
+  paid_until: string | null;
+  paid_at: string | null;
+  setup_until: string | null;
+  is_active: boolean;
+  billing_period: string | null;
+  billing_amount: number | null;
+}
+
+const BILLING_PERIOD_LABEL: Record<string, string> = {
+  month: 'за месяц',
+  half_year: 'за полгода',
+  year: 'за год',
+};
+
 interface ClientOption {
   id: string;
   full_name: string | null;
   email: string | null;
+  tariff: ClientTariffInfo | null;
 }
 
 interface CreateModalProps {
@@ -179,6 +196,7 @@ function CreateModal({ onClose, onCreated }: CreateModalProps) {
   const [clients, setClients] = useState<ClientOption[]>([]);
   const [clientsLoading, setClientsLoading] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
+  const [selectedTariff, setSelectedTariff] = useState<ClientTariffInfo | null>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -215,6 +233,8 @@ function CreateModal({ onClose, onCreated }: CreateModalProps) {
   const handleCompanyInput = (val: string) => {
     setCompanyName(val);
     setClientUserId(null);
+    setSelectedTariff(null);
+    setAmount('');
     setShowDropdown(true);
     if (searchTimer.current) clearTimeout(searchTimer.current);
     searchTimer.current = setTimeout(() => loadClients(val), 250);
@@ -223,7 +243,15 @@ function CreateModal({ onClose, onCreated }: CreateModalProps) {
   const handleSelectClient = (c: ClientOption) => {
     setCompanyName(c.full_name || c.email?.split('@')[0] || '');
     setClientUserId(c.id);
+    setSelectedTariff(c.tariff);
     setShowDropdown(false);
+    // Сумма берётся из активной подписки клиента (зафиксирована при активации тарифа).
+    // Если подписки нет — сумма заполняется вручную.
+    if (c.tariff?.is_active && c.tariff.billing_amount != null) {
+      setAmount(String(c.tariff.billing_amount));
+    } else {
+      setAmount('');
+    }
   };
 
   const clientLabel = (c: ClientOption) => {
@@ -292,7 +320,7 @@ function CreateModal({ onClose, onCreated }: CreateModalProps) {
             {clientUserId && (
               <button
                 type="button"
-                onClick={() => { setClientUserId(null); setCompanyName(''); }}
+                onClick={() => { setClientUserId(null); setCompanyName(''); setSelectedTariff(null); setAmount(''); }}
                 className="absolute right-2.5 top-[calc(50%+6px)] -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
               >
                 <X className="h-3.5 w-3.5" />
@@ -326,6 +354,30 @@ function CreateModal({ onClose, onCreated }: CreateModalProps) {
             )}
           </div>
 
+          {selectedTariff && selectedTariff.is_active && (() => {
+            const fmt = (d: Date) => d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+            const tariffLabel = selectedTariff.tariff_type === 'pro' ? 'Про' : selectedTariff.tariff_type === 'custom' ? 'Custom' : 'Стандарт';
+            const periodLabel = selectedTariff.billing_period ? BILLING_PERIOD_LABEL[selectedTariff.billing_period] : null;
+            const currentPaidUntil = selectedTariff.paid_until ? new Date(selectedTariff.paid_until) : null;
+            return (
+              <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2.5 text-xs text-amber-800 space-y-0.5">
+                <p className="font-medium">
+                  Активный тариф «{tariffLabel}»{periodLabel ? ` (${periodLabel})` : ''}
+                  {currentPaidUntil ? ` — до ${fmt(currentPaidUntil)}` : ''}
+                </p>
+                <p className="text-amber-600">
+                  Сумма зафиксирована при активации подписки. Чтобы изменить — деактивируйте подписку в админке.
+                </p>
+              </div>
+            );
+          })()}
+
+          {selectedTariff && !selectedTariff.is_active && (
+            <div className="rounded-lg bg-zinc-50 border border-zinc-200 px-3 py-2.5 text-xs text-zinc-600">
+              У клиента нет активной подписки. Активируйте тариф в админке — сумма проставится автоматически.
+            </div>
+          )}
+
           <div className="flex gap-3">
             <div className="flex-1">
               <label className="block text-xs font-medium text-zinc-600 mb-1">Сумма *</label>
@@ -334,8 +386,13 @@ function CreateModal({ onClose, onCreated }: CreateModalProps) {
                 inputMode="decimal"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
+                readOnly={!!(selectedTariff && selectedTariff.is_active && selectedTariff.billing_amount != null)}
                 placeholder="50 000"
-                className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-800 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-400 transition"
+                className={`w-full rounded-lg border px-3 py-2 text-sm text-zinc-800 outline-none transition ${
+                  selectedTariff && selectedTariff.is_active && selectedTariff.billing_amount != null
+                    ? 'border-zinc-200 bg-zinc-50 cursor-not-allowed'
+                    : 'border-zinc-200 focus:border-zinc-400 focus:ring-1 focus:ring-zinc-400'
+                }`}
               />
             </div>
             <div className="w-24">
