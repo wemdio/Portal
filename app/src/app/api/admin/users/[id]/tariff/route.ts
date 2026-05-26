@@ -5,7 +5,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isAdmin } from '@/lib/roles';
 import type { UserRole } from '@/types';
-import { type TariffType, SETUP_DAYS } from '@/lib/tariffs';
+import { type TariffType, type BillingPeriod, SETUP_DAYS, calcBillingAmount, BILLING_PERIOD_MONTHS } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 
@@ -57,6 +57,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 }
 
 const VALID_TYPES = new Set<string>(['standard', 'pro', 'custom']);
+const VALID_PERIODS = new Set<string>(['month', 'half_year', 'year']);
 
 type TariffBody = {
   tariff_type?: string;
@@ -65,9 +66,31 @@ type TariffBody = {
   max_chains_per_month?: number | null;
   max_domains?: number | null;
   max_emails?: number | null;
-  action?: 'activate' | 'deactivate' | 'finish_setup' | 'unlock_payment';
+  action?: 'activate' | 'deactivate' | 'finish_setup' | 'unlock_payment' | 'extend';
   billing_mode?: 'invoice' | 'autopayment' | null;
+  billing_period?: string;
+  billing_amount?: number | null;
 };
+
+/** Normalises body.billing_period/billing_amount, returning [period, amount] or null on invalid. */
+function normalisePeriodAndAmount(
+  tariffType: TariffType,
+  body: TariffBody,
+): { period: BillingPeriod | null; amount: number | null; error?: string } {
+  if (!body.billing_period) return { period: null, amount: null };
+  if (!VALID_PERIODS.has(body.billing_period)) {
+    return { period: null, amount: null, error: 'Invalid billing_period' };
+  }
+  const period = body.billing_period as BillingPeriod;
+  if (tariffType === 'custom') {
+    const manual = Number(body.billing_amount);
+    if (!Number.isFinite(manual) || manual <= 0) {
+      return { period, amount: null, error: 'billing_amount required for custom tariff' };
+    }
+    return { period, amount: manual };
+  }
+  return { period, amount: calcBillingAmount(tariffType, period) };
+}
 
 function clampInt(v: unknown): number | null {
   if (v === null || v === undefined) return null;
@@ -118,19 +141,32 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     const now = new Date();
     const setupUntil = new Date(now);
     setupUntil.setDate(setupUntil.getDate() + SETUP_DAYS);
-    const paidUntil = new Date(setupUntil);
-    paidUntil.setMonth(paidUntil.getMonth() + 1);
 
     const billingMode = body.billing_mode ?? null;
     const paymentLocked = billingMode !== null;
 
-    const subscriptionFields = {
+    const tariffType = typeof body.tariff_type === 'string' && VALID_TYPES.has(body.tariff_type)
+      ? (body.tariff_type as TariffType)
+      : 'standard';
+
+    const { period, amount, error: periodErr } = normalisePeriodAndAmount(tariffType, body);
+    if (periodErr) return jsonError(periodErr, 400);
+
+    // paid_until = setup_until + N месяцев (N = период; по умолчанию 1 если период не выбран).
+    const monthsToAdd = period ? BILLING_PERIOD_MONTHS[period] : 1;
+    const paidUntil = new Date(setupUntil);
+    paidUntil.setMonth(paidUntil.getMonth() + monthsToAdd);
+
+    const subscriptionFields: Record<string, unknown> = {
       is_active: true,
+      tariff_type: tariffType,
       paid_at: billingMode ? null : now.toISOString(),
       setup_until: setupUntil.toISOString(),
       paid_until: billingMode ? null : paidUntil.toISOString(),
       billing_mode: billingMode,
       payment_locked: paymentLocked,
+      billing_period: period,
+      billing_amount: amount,
       updated_at: now.toISOString(),
     };
 
@@ -147,7 +183,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
           .eq('user_id', targetUserId)
       : await supabaseAdmin
           .from('client_tariffs')
-          .insert({ user_id: targetUserId, tariff_type: 'standard', ...subscriptionFields });
+          .insert({ user_id: targetUserId, ...subscriptionFields });
 
     if (error) {
       await logError('admin.tariff.activate.failed', error, { targetUserId });
@@ -157,15 +193,101 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     await logAudit(
       'admin.tariff.activate',
       'Client subscription activated',
-      { targetUserId, setup_until: setupUntil.toISOString(), billing_mode: billingMode, payment_locked: paymentLocked },
+      {
+        targetUserId,
+        tariff_type: tariffType,
+        billing_period: period,
+        billing_amount: amount,
+        setup_until: setupUntil.toISOString(),
+        billing_mode: billingMode,
+        payment_locked: paymentLocked,
+      },
       { userId: user.id },
     );
 
     return NextResponse.json({
       ok: true,
       action: 'activate',
+      tariff_type: tariffType,
       setup_until: setupUntil.toISOString(),
       paid_until: billingMode ? null : paidUntil.toISOString(),
+      billing_mode: billingMode,
+      payment_locked: paymentLocked,
+      billing_period: period,
+      billing_amount: amount,
+    });
+  }
+
+  // Продление подписки: можно сменить тариф/период. paid_until сдвигается
+  // от текущего paid_until (или setup_until/now, если ещё не оплачено).
+  if (body.action === 'extend') {
+    const { data: existingForExtend } = await supabaseAdmin
+      .from('client_tariffs')
+      .select('id, is_active, paid_until, setup_until')
+      .eq('user_id', targetUserId)
+      .maybeSingle();
+
+    if (!existingForExtend) return jsonError('Subscription not found', 404);
+    if (!existingForExtend.is_active) return jsonError('Subscription is not active', 400);
+
+    const tariffType = typeof body.tariff_type === 'string' && VALID_TYPES.has(body.tariff_type)
+      ? (body.tariff_type as TariffType)
+      : 'standard';
+
+    const { period, amount, error: periodErr } = normalisePeriodAndAmount(tariffType, body);
+    if (periodErr) return jsonError(periodErr, 400);
+    if (!period) return jsonError('billing_period required for extend', 400);
+
+    const now = new Date();
+    // База: текущий paid_until (если в будущем), иначе setup_until (если в будущем), иначе now.
+    let base = now;
+    if (existingForExtend.paid_until && new Date(existingForExtend.paid_until) > now) {
+      base = new Date(existingForExtend.paid_until);
+    } else if (existingForExtend.setup_until && new Date(existingForExtend.setup_until) > now) {
+      base = new Date(existingForExtend.setup_until);
+    }
+    const newPaidUntil = new Date(base);
+    newPaidUntil.setMonth(newPaidUntil.getMonth() + BILLING_PERIOD_MONTHS[period]);
+
+    const billingMode = body.billing_mode ?? null;
+    const paymentLocked = billingMode !== null;
+
+    const extendFields: Record<string, unknown> = {
+      tariff_type: tariffType,
+      billing_period: period,
+      billing_amount: amount,
+      billing_mode: billingMode,
+      payment_locked: paymentLocked,
+      // Если оплата через счёт, очищаем paid_until — подписка продлится после оплаты.
+      // Если manual (billing_mode=null), сразу проставляем новый paid_until.
+      paid_until: billingMode ? null : newPaidUntil.toISOString(),
+      updated_at: now.toISOString(),
+    };
+
+    const { error: extErr } = await supabaseAdmin
+      .from('client_tariffs')
+      .update(extendFields)
+      .eq('user_id', targetUserId);
+
+    if (extErr) {
+      await logError('admin.tariff.extend.failed', extErr, { targetUserId });
+      return jsonError('Failed to extend subscription', 500);
+    }
+
+    await logAudit(
+      'admin.tariff.extend',
+      'Client subscription extended with new tariff/period',
+      { targetUserId, tariff_type: tariffType, billing_period: period, billing_amount: amount, billing_mode: billingMode },
+      { userId: user.id },
+    );
+
+    return NextResponse.json({
+      ok: true,
+      action: 'extend',
+      tariff_type: tariffType,
+      billing_period: period,
+      billing_amount: amount,
+      paid_until: billingMode ? null : newPaidUntil.toISOString(),
       billing_mode: billingMode,
       payment_locked: paymentLocked,
     });
