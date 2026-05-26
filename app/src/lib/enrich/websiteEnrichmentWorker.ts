@@ -658,6 +658,143 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
     let consecutiveDbErrors = 0;
     const MAX_CONSECUTIVE_DB_ERRORS = 20;
 
+    // ─── Progress flush (debounced) ─────────────────────────────────
+    //
+    // До этого фикса: `processed` обновлялся в БД ОДИН раз — после полного
+    // batch'а (60 items). При темпе ~30 items/мин batch занимает 2 минуты,
+    // и первые 2 минуты после старта frontend читает processed=0. Юзер
+    // видит «0% — Стоп», паникует, нажимает Стоп, перезапускает, опять
+    // первые 2 минуты 0%, опять Стоп → итеративный фрустрационный цикл
+    // (жалоба специалиста Ольги: 3 cancelled job'а подряд в БД).
+    //
+    // Watchdog в `enrich.ts` тоже завязан на `job.processed`: если оно
+    // не изменилось за 10 мин — сбрасывает job в pending. Для batch'а
+    // длиннее 10 мин (например при DOMAIN_CONCURRENCY=1 + много items
+    // одного домена) watchdog убивал живые job'ы.
+    //
+    // Фикс: дебаунс-флэш processed каждые ~2.5 секунды. Это даёт юзеру
+    // непрерывный прогресс с первых секунд + успокаивает watchdog.
+    // БД нагружается умеренно: 1 UPDATE на job каждые 2.5s = 0.4 RPS
+    // даже при 8 параллельных job'ах = 3.2 RPS, мизер для PostgREST.
+    const PROGRESS_FLUSH_INTERVAL_MS = 2500;
+    let lastProgressFlushAt = 0;
+    let pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    let flushInFlight = false;
+
+    const doFlush = async () => {
+      if (flushInFlight) return; // защита от наложений
+      flushInFlight = true;
+      lastProgressFlushAt = Date.now();
+      try {
+        await withSupabaseTimeout(
+          supabaseAdmin!
+            .from('website_enrichment_jobs')
+            .update({ processed, success_count: success, error_count: errors })
+            .eq('id', jobId),
+          'Таймаут флэша прогресса',
+        );
+      } catch {
+        // Игнорируем — следующий тик сделает свежий снимок.
+      } finally {
+        flushInFlight = false;
+      }
+    };
+
+    const flushProgress = (force = false) => {
+      const now = Date.now();
+      const elapsed = now - lastProgressFlushAt;
+      if (force || elapsed >= PROGRESS_FLUSH_INTERVAL_MS) {
+        if (pendingFlushTimer) {
+          clearTimeout(pendingFlushTimer);
+          pendingFlushTimer = null;
+        }
+        void doFlush();
+        return;
+      }
+      // Debounce: запланировать flush через (interval - elapsed) если ещё не запланировано.
+      if (!pendingFlushTimer) {
+        pendingFlushTimer = setTimeout(() => {
+          pendingFlushTimer = null;
+          void doFlush();
+        }, PROGRESS_FLUSH_INTERVAL_MS - elapsed);
+      }
+    };
+
+    // ─── Periodic apply to spreadsheet (email-only) ─────────────────────
+    //
+    // Жалоба Оли 26 мая: «прогресс 55%, в таблице 1 email». В БД на тот
+    // момент 64 email уже completed, но frontend polling сбоил и не
+    // подтягивал их в видимую таблицу.
+    //
+    // Раньше серверный apply вызывался ТОЛЬКО в финале job'а — то есть
+    // safety-net'а во время работы не было. Плюс сам apply был broken для
+    // юзеров с новой схемой state_compressed (читал колонку state которая
+    // у них null).
+    //
+    // Фикс: периодически (раз в 60s) звать applyEnrichmentResults во время
+    // работы — это вытащит свежие completed items в spreadsheet state.
+    // applyEnrichmentResults внутри:
+    //   - читает state_compressed (через shared loadCompressedState);
+    //   - применяет результаты в копию state'а;
+    //   - сохраняет с CAS (compare-and-swap по updated_at).
+    // CAS защищает от race: если юзер параллельно правит ячейки и frontend
+    // сейчас пишет state — наш save отбрасывается (no-op), на следующем
+    // тике повторим. Никаких lost updates у юзера быть не может.
+    //
+    // Делаем только для email — у text/signals никто не жаловался,
+    // а финальный apply для них тоже стал работать после фикса
+    // state_compressed.
+    const APPLY_INTERVAL_MS = 60_000;
+    let lastApplyAt = 0;
+    let pendingApplyTimer: ReturnType<typeof setTimeout> | null = null;
+    let applyInFlight = false;
+    const isEmailJob = job.extraction_type === 'email';
+    const canApplyToSpreadsheet =
+      isEmailJob &&
+      !!job.spreadsheet_tab_id &&
+      job.result_col_index != null;
+
+    const doApply = async () => {
+      if (applyInFlight) return;
+      applyInFlight = true;
+      lastApplyAt = Date.now();
+      try {
+        if (canApplyToSpreadsheet) {
+          await applyEnrichmentResults(
+            job.user_id,
+            jobId,
+            job.spreadsheet_tab_id!,
+            job.result_col_index!,
+            job.result_col_header ?? undefined,
+          );
+        }
+      } catch {
+        // apply не падает наружу — функция сама ловит ошибки и логирует
+      } finally {
+        applyInFlight = false;
+      }
+    };
+
+    const maybeApplyToSpreadsheet = (force = false) => {
+      if (!canApplyToSpreadsheet) return;
+      const now = Date.now();
+      const elapsed = now - lastApplyAt;
+      if (force || elapsed >= APPLY_INTERVAL_MS) {
+        if (pendingApplyTimer) {
+          clearTimeout(pendingApplyTimer);
+          pendingApplyTimer = null;
+        }
+        void doApply();
+        return;
+      }
+      if (!pendingApplyTimer) {
+        pendingApplyTimer = setTimeout(() => {
+          pendingApplyTimer = null;
+          void doApply();
+        }, APPLY_INTERVAL_MS - elapsed);
+      }
+    };
+
     while (true) {
       if (consecutiveDbErrors >= MAX_CONSECUTIVE_DB_ERRORS) {
         throw new Error(`Supabase недоступен: ${consecutiveDbErrors} ошибок подряд, перезапускаем задачу`);
@@ -831,24 +968,40 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
               url: item.url_raw,
             });
           } finally {
-            if (finalized) processed += 1;
+            if (finalized) {
+              processed += 1;
+              // Дёргаем debounced флэш — фактический UPDATE уйдёт не чаще
+              // раза в 2.5s (или сразу если прошло >2.5s с предыдущего).
+              flushProgress();
+            }
             release();
           }
         },
       );
 
-      await withSupabaseTimeout(
-        supabaseAdmin
-          .from('website_enrichment_jobs')
-          .update({
-            processed,
-            success_count: success,
-            error_count: errors,
-          })
-          .eq('id', jobId),
-        'Таймаут обновления прогресса задачи',
-      ).catch(() => {});
+      // По окончании batch'а форсим финальный flush — гарантируем что
+      // последний UPDATE с финальными значениями этого batch'а ушёл.
+      flushProgress(true);
+      // Дебаунс-apply spreadsheet (no-op если не email или нет tab_id;
+      // CAS внутри защитит от race с frontend save'ом).
+      maybeApplyToSpreadsheet();
     }
+
+    // Выходим из batch loop → чистим pending flush + apply таймеры и форсим
+    // последний апдейт. Без cleanup setTimeout мог бы «выстрелить» после того
+    // как Node уже думает что работа закончена.
+    if (pendingFlushTimer) {
+      clearTimeout(pendingFlushTimer);
+      pendingFlushTimer = null;
+    }
+    if (pendingApplyTimer) {
+      clearTimeout(pendingApplyTimer);
+      pendingApplyTimer = null;
+    }
+    // Финальный force-flush ниже идёт через тот же UPDATE что и завершение
+    // (строка `.update({ status, processed: processedTotal, ... })`), так что
+    // дополнительный flushProgress(true) здесь не нужен — он бы делал лишний
+    // UPDATE дублирующий финальный.
 
     if (cancelled) {
       const now = new Date().toISOString();
