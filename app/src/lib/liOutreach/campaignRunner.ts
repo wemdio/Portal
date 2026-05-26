@@ -660,40 +660,19 @@ async function processMessageStep(
 ): Promise<boolean> {
   const now = new Date().toISOString();
 
-  // Welcome-vs-follow-up dedup. When `campaign.welcome_message` is configured,
-  // the connection_accepted webhook sends it instantly on accept. If we then
-  // also fire the FIRST message/follow_up step from the runner, the lead gets
-  // two near-identical messages back-to-back (one when accept lands, one when
-  // the 2-day wait expires). Skip this step exactly once when:
-  //   - welcome was actually delivered (welcome_sent_at is set), AND
-  //   - this is the first message step in the campaign (no earlier
-  //     message/follow_up step in steps[0..stepIdx-1]).
-  // Subsequent message/follow_up steps still fire normally — they're meant as
-  // real follow-ups, not the welcome.
-  if (cl.welcome_sent_at) {
-    const priorMessageIdx = (campaign.steps ?? []).findIndex(
-      (s, i) => i < stepIdx && (s.type === 'message' || s.type === 'follow_up'),
-    );
-    if (priorMessageIdx === -1) {
-      const totalSteps = campaign.steps?.length ?? 0;
-      const isLast = stepIdx + 1 >= totalSteps;
-      await db
-        .from('li_campaign_leads')
-        .update({
-          current_step: stepIdx + 1,
-          status: isLast ? 'completed' : 'in_progress',
-          updated_at: now,
-        })
-        .eq('id', cl.id);
-      log(
-        'info',
-        `Шаг message пропущен: welcome уже отправлен через webhook на accept (welcome_sent_at=${cl.welcome_sent_at}). Переход к следующему шагу.`,
-        lead.name,
-        stepIdx,
-      );
-      return false;
-    }
-  }
+  // NOTE: We intentionally do NOT short-circuit when `cl.welcome_sent_at` is set.
+  // An earlier version skipped the first message-step entirely if welcome had
+  // been delivered through the connection_accepted webhook, on the assumption
+  // that welcome and the first follow-up are duplicates of the same intent.
+  // In practice operators configure welcome and the first message-step with
+  // *different* content (welcome = "thanks for connecting, here's who we are";
+  // first message = real follow-up with examples 2 days later) — see prod
+  // SaaS Никита 2026-05. The dedup silently swallowed the real follow-up and
+  // made it look like the runner had stopped working. If a campaign really
+  // does want a single message, the operator should leave either
+  // `welcome_message` empty or omit the first message step — not have the
+  // runner second-guess intent. `welcome_sent_at` is still recorded on the
+  // row for analytics / audit, just not used to suppress this step.
 
   // Connection guard. Without it, after a 2-day `wait` step we used to call
   // startChat() blindly and LinkedIn returned `errors/no_connection_with_recipient`
