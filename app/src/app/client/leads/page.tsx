@@ -147,19 +147,27 @@ function LeadDetail({
           </span>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
+        {/* P1-A distill: was a grid of 5 framed `neu-sm` tiles (border + bg)
+            living inside the outer `neu-card` — hairline-on-hairline. Now a
+            flat 2-column definition list with generous gaps. Same info
+            density, ~80px less vertical, and `dl/dt/dd` is the semantic
+            HTML for the structure. */}
+        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 mb-6">
           <InfoRow label="Email" value={lead.lead_email} />
           {lead.phone && <InfoRow label="Телефон" value={lead.phone} />}
           {lead.website && <InfoRow label="Сайт" value={lead.website} />}
           {lead.linkedin_url && <InfoRow label="LinkedIn" value={lead.linkedin_url} />}
           {lead.campaign_name && <InfoRow label="Кампания" value={lead.campaign_name} />}
-        </div>
+        </dl>
 
+        {/* P2-B: stripped «02 → » and «02/03 → » section numbers. Editorial-
+            Numbering is for multi-step flows; these are content blocks inside
+            a lead view. The conditional jump (02 vs 03 depending on whether
+            outbound preview exists) also broke cross-lead consistency. Bare
+            eyebrows tell the same story without the lie. */}
         {lead.last_outbound_preview && (
           <div className="mb-4">
-            <p className="ds-eyebrow mb-2">
-              02<span aria-hidden> → </span>наше последнее письмо
-            </p>
+            <p className="ds-eyebrow mb-2">наше последнее письмо</p>
             <div
               className="neu-inset rounded-md p-4 sm:p-5 text-sm whitespace-pre-wrap max-h-48 overflow-y-auto"
               style={{ color: 'var(--cp-paper-mute)' }}
@@ -171,7 +179,7 @@ function LeadDetail({
 
         <div className="mb-2">
           <p className="ds-eyebrow mb-2">
-            {lead.last_outbound_preview ? '03' : '02'}<span aria-hidden> → </span>ответ лида
+            ответ лида
             {lead.reply_subject ? `: ${lead.reply_subject.toLowerCase()}` : ''}
           </p>
           <div
@@ -190,11 +198,16 @@ function LeadDetail({
         )}
       </div>
 
-      {canComment && (
+      {/* P1-B: was `{canComment && (...)}` which silently hid the entire 70-
+          line comment card for reply-sourced leads. Olga opened a lead,
+          expected to leave an internal note, saw nothing. Now: when
+          comments aren't available for this lead source, render an
+          explanatory note card pointing the user to where they should
+          comment instead.
+          P2-B: dropped the «04 → комментарии» eyebrow that duplicated the
+          H3 «Комментарии» right below it. The H3 alone is enough. */}
+      {canComment ? (
         <div className="neu-card p-5 sm:p-8">
-          <p className="ds-eyebrow mb-2">
-            04<span aria-hidden> → </span>комментарии
-          </p>
           <h3
             className="text-base font-bold mb-5 m-0"
             style={{ color: 'var(--cp-paper)' }}
@@ -260,21 +273,46 @@ function LeadDetail({
             </button>
           </div>
         </div>
+      ) : (
+        <div className="neu-card p-5 sm:p-8">
+          <h3
+            className="text-base font-bold mb-2 m-0"
+            style={{ color: 'var(--cp-paper)' }}
+          >
+            Комментарии
+          </h3>
+          <p className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
+            Это лид из «Ответов» — оставляйте комментарии прямо во{' '}
+            <Link
+              href={'/client/replies' as Route}
+              className="font-semibold underline"
+              style={{ color: 'var(--cp-paper)' }}
+            >
+              вкладке «Ответы»
+            </Link>
+            , так контекст диалога останется в одном месте.
+          </p>
+        </div>
       )}
     </div>
   );
 }
 
 function InfoRow({ label, value }: { label: string; value: string }) {
+  /* P1-A distill: dropped the inner `neu-sm rounded-md p-3` frame. The parent
+     neu-card already provided the boundary; nesting another bordered cell
+     for each label/value pair was hairline-on-hairline (the same anti-pattern
+     just shipped on /projects and base-constructor). dl/dt/dd is the
+     semantic HTML for a definition list, which is what these rows are. */
   return (
-    <div className="neu-sm rounded-md p-3">
-      <p className="ds-eyebrow mb-1">{label.toLowerCase()}</p>
-      <p
+    <div>
+      <dt className="ds-eyebrow mb-1">{label.toLowerCase()}</dt>
+      <dd
         className="text-sm font-medium break-all m-0"
         style={{ color: 'var(--cp-paper)' }}
       >
         {value}
-      </p>
+      </dd>
     </div>
   );
 }
@@ -301,8 +339,12 @@ function LeadCard({
     >
       <div className="flex items-start justify-between gap-3 mb-2">
         <div className="min-w-0">
+          {/* P2-A: font-semibold (was font-bold) — 30 bold titles in a row
+              flatten cross-list hierarchy; the status dot can't reassert
+              primacy if every name shouts equally. Same fix shipped on
+              /projects and /client (campaigns). */}
           <p
-            className="text-sm font-bold truncate m-0"
+            className="text-sm font-semibold truncate m-0"
             style={{ color: 'var(--cp-paper)' }}
           >
             {lead.lead_name || lead.lead_email}
@@ -413,8 +455,13 @@ export default function ClientLeadsPage() {
   return (
     <div className="mx-auto max-w-5xl">
       <header className="mb-6 sm:mb-8">
+        {/* P2-B: page eyebrow now mirrors the sidebar section. «Лиды» is a
+            page within the Мониторинг group (CLIENT_NAV_GROUPS[1] → «02»);
+            the previous «01 → Лиды» put a number on the page name itself
+            which was ornament (Editorial-Numbering is for multi-step flows,
+            not page badges). Same alignment shipped on /client (campaigns). */}
         <p className="ds-eyebrow mb-2">
-          01<span aria-hidden> → </span>Лиды
+          02<span aria-hidden> → </span>Мониторинг
         </p>
         <h1
           className="text-xl sm:text-2xl font-bold m-0"
