@@ -720,6 +720,81 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       }
     };
 
+    // ─── Periodic apply to spreadsheet (email-only) ─────────────────────
+    //
+    // Жалоба Оли 26 мая: «прогресс 55%, в таблице 1 email». В БД на тот
+    // момент 64 email уже completed, но frontend polling сбоил и не
+    // подтягивал их в видимую таблицу.
+    //
+    // Раньше серверный apply вызывался ТОЛЬКО в финале job'а — то есть
+    // safety-net'а во время работы не было. Плюс сам apply был broken для
+    // юзеров с новой схемой state_compressed (читал колонку state которая
+    // у них null).
+    //
+    // Фикс: периодически (раз в 60s) звать applyEnrichmentResults во время
+    // работы — это вытащит свежие completed items в spreadsheet state.
+    // applyEnrichmentResults внутри:
+    //   - читает state_compressed (через shared loadCompressedState);
+    //   - применяет результаты в копию state'а;
+    //   - сохраняет с CAS (compare-and-swap по updated_at).
+    // CAS защищает от race: если юзер параллельно правит ячейки и frontend
+    // сейчас пишет state — наш save отбрасывается (no-op), на следующем
+    // тике повторим. Никаких lost updates у юзера быть не может.
+    //
+    // Делаем только для email — у text/signals никто не жаловался,
+    // а финальный apply для них тоже стал работать после фикса
+    // state_compressed.
+    const APPLY_INTERVAL_MS = 60_000;
+    let lastApplyAt = 0;
+    let pendingApplyTimer: ReturnType<typeof setTimeout> | null = null;
+    let applyInFlight = false;
+    const isEmailJob = job.extraction_type === 'email';
+    const canApplyToSpreadsheet =
+      isEmailJob &&
+      !!job.spreadsheet_tab_id &&
+      job.result_col_index != null;
+
+    const doApply = async () => {
+      if (applyInFlight) return;
+      applyInFlight = true;
+      lastApplyAt = Date.now();
+      try {
+        if (canApplyToSpreadsheet) {
+          await applyEnrichmentResults(
+            job.user_id,
+            jobId,
+            job.spreadsheet_tab_id!,
+            job.result_col_index!,
+            job.result_col_header ?? undefined,
+          );
+        }
+      } catch {
+        // apply не падает наружу — функция сама ловит ошибки и логирует
+      } finally {
+        applyInFlight = false;
+      }
+    };
+
+    const maybeApplyToSpreadsheet = (force = false) => {
+      if (!canApplyToSpreadsheet) return;
+      const now = Date.now();
+      const elapsed = now - lastApplyAt;
+      if (force || elapsed >= APPLY_INTERVAL_MS) {
+        if (pendingApplyTimer) {
+          clearTimeout(pendingApplyTimer);
+          pendingApplyTimer = null;
+        }
+        void doApply();
+        return;
+      }
+      if (!pendingApplyTimer) {
+        pendingApplyTimer = setTimeout(() => {
+          pendingApplyTimer = null;
+          void doApply();
+        }, APPLY_INTERVAL_MS - elapsed);
+      }
+    };
+
     while (true) {
       if (consecutiveDbErrors >= MAX_CONSECUTIVE_DB_ERRORS) {
         throw new Error(`Supabase недоступен: ${consecutiveDbErrors} ошибок подряд, перезапускаем задачу`);
@@ -907,14 +982,21 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       // По окончании batch'а форсим финальный flush — гарантируем что
       // последний UPDATE с финальными значениями этого batch'а ушёл.
       flushProgress(true);
+      // Дебаунс-apply spreadsheet (no-op если не email или нет tab_id;
+      // CAS внутри защитит от race с frontend save'ом).
+      maybeApplyToSpreadsheet();
     }
 
-    // Выходим из batch loop → чистим pending flush timer и форсим последний
-    // апдейт. Без cleanup setTimeout мог бы «выстрелить» после того как Node
-    // уже думает что работа закончена.
+    // Выходим из batch loop → чистим pending flush + apply таймеры и форсим
+    // последний апдейт. Без cleanup setTimeout мог бы «выстрелить» после того
+    // как Node уже думает что работа закончена.
     if (pendingFlushTimer) {
       clearTimeout(pendingFlushTimer);
       pendingFlushTimer = null;
+    }
+    if (pendingApplyTimer) {
+      clearTimeout(pendingApplyTimer);
+      pendingApplyTimer = null;
     }
     // Финальный force-flush ниже идёт через тот же UPDATE что и завершение
     // (строка `.update({ status, processed: processedTotal, ... })`), так что
