@@ -11,6 +11,10 @@ import {
 } from '@/lib/tools/baseConstructorClientGuard';
 import { parseCSV } from '@/lib/spreadsheet/parseCSV';
 import {
+  estimateProcessingMinutes,
+  formatProcessingTimeBand,
+} from '@/lib/tools/baseConstructorEta';
+import {
   Eraser, CopyMinus, MailMinus, Sparkles, MailSearch, MailCheck,
   Globe, FileText, Target, PenLine, Upload, Play, X, Check,
   Download, ArrowRight, Loader2, ChevronDown, ChevronUp, RotateCcw,
@@ -1575,24 +1579,24 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     )}
                   </p>
                 )}
-                {/* Pre-flight summary — facts the user can verify, plus a vague
-                    time band (without false precision). Earlier version used
-                    serial worker timings (0.5s/row × AI steps) that
-                    overshot 9× for 10K-row jobs because real workers parallel-
-                    fire AI requests. Per re-critique 2026-05-25T21-57-33Z
-                    (N2 vibes-based math + N3 dead plural ternary). */}
+                {/* Pre-flight summary — facts the user can verify, plus a
+                    rough time band based on per-step empirical timings
+                    (see estimateProcessingMinutes below).
+                    History: earlier formula ignored `cheap` cost (site-scrape
+                    steps like find_emails, check_sites, enrich_descriptions)
+                    and only counted `ai`/`api`. For polza@polza.ru job on
+                    4297 rows it predicted «5–15 минут» but actual was 2h —
+                    because the 3 cheap site-scraping steps dominated, and
+                    they weren't in the formula at all. Now `cheap` is the
+                    biggest coefficient. */}
                 {!submitting && (() => {
                   const rows = Math.max(0, (fileData?.length ?? 0) - 1);
                   const aiSteps = selectedSteps.filter((k) => STEP_MAP.get(k)?.cost === 'ai').length;
                   const apiSteps = selectedSteps.filter((k) => STEP_MAP.get(k)?.cost === 'api').length;
-                  // Vague time band — honest about not having real telemetry.
-                  // Tiers: <5K rows or no AI/API = «несколько минут»; up to
-                  // 20K rows or 1 AI step = «5–15 минут»; otherwise «10+ мин».
-                  const sizeFactor = rows + aiSteps * 2000 + apiSteps * 500;
-                  const timeLabel =
-                    sizeFactor < 5000 ? 'несколько минут'
-                    : sizeFactor < 20000 ? '5–15 минут'
-                    : '10–30 минут';
+                  const cheapSteps = selectedSteps.filter((k) => STEP_MAP.get(k)?.cost === 'cheap').length;
+                  const timeLabel = formatProcessingTimeBand(
+                    estimateProcessingMinutes({ rows, cheapSteps, apiSteps, aiSteps }),
+                  );
                   return (
                     <p
                       className="ds-mono text-xs text-center"
