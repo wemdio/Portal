@@ -82,6 +82,14 @@ export interface BuildCampaignPayloadInput {
    * preset in the client UI, but the client can adjust these for one campaign.
    */
   behaviorOverride?: ClientLaunchBehaviorOverride;
+  /**
+   * Optional per-launch subset of mailboxes (must be a subset of
+   * `preset.email_account_ids`; caller validates). When present, becomes
+   * Instantly's `email_list` for this campaign. Used when client runs two
+   * parallel campaigns on the same base with different mailbox pools.
+   * Undefined → full preset pool used.
+   */
+  emailAccountIdsOverride?: string[];
 }
 
 /**
@@ -91,7 +99,7 @@ export interface BuildCampaignPayloadInput {
 export function buildCampaignPayloadFromPreset(
   input: BuildCampaignPayloadInput,
 ): CampaignCreatePayload {
-  const { preset, sequence, scheduleOverride, behaviorOverride } = input;
+  const { preset, sequence, scheduleOverride, behaviorOverride, emailAccountIdsOverride } = input;
 
   const fromValue = scheduleOverride?.from ?? preset.schedule_from;
   const toValue = scheduleOverride?.to ?? preset.schedule_to;
@@ -154,7 +162,7 @@ export function buildCampaignPayloadFromPreset(
         }),
       },
     ],
-    email_list: [...preset.email_account_ids],
+    email_list: [...(emailAccountIdsOverride ?? preset.email_account_ids)],
     daily_limit: preset.daily_limit,
     daily_max_leads: preset.daily_max_leads,
     email_gap: preset.email_gap_minutes,

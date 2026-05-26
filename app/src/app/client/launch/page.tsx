@@ -78,6 +78,13 @@ interface DraftPayload {
   customVars: { key: string; header: string }[];
   schedule: ClientLaunchScheduleOverride;
   behavior: LaunchBehaviorSettings;
+  /**
+   * Subset of the preset's email_account_ids the client wants to use for
+   * this campaign. Equal to full preset pool → "no override". Strict
+   * subset → client picked specific mailboxes. Persisted in draft so
+   * users don't lose their selection if they reload mid-flow.
+   */
+  selectedEmailAccountIds?: string[];
   savedAt: string;
 }
 
@@ -213,6 +220,11 @@ export default function ClientLaunchPage() {
     open_tracking: true,
     stop_on_reply: true,
   });
+  // Per-launch mailbox selection. NULL = «not yet hydrated from preset».
+  // Once preset loads we initialize this to the FULL preset pool (default
+  // behavior: send from all configured mailboxes). Client can untick
+  // individual mailboxes to run a campaign on a hand-picked subset.
+  const [selectedEmailAccountIds, setSelectedEmailAccountIds] = useState<string[] | null>(null);
 
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState('');
@@ -242,6 +254,9 @@ export default function ClientLaunchPage() {
       if (Array.isArray(draft.customVars)) setCustomVars(draft.customVars);
       if (draft.schedule && typeof draft.schedule === 'object') setSchedule(draft.schedule);
       if (draft.behavior && typeof draft.behavior === 'object') setBehavior(draft.behavior);
+      if (Array.isArray(draft.selectedEmailAccountIds)) {
+        setSelectedEmailAccountIds(draft.selectedEmailAccountIds);
+      }
       if (typeof draft.savedAt === 'string') {
         const d = new Date(draft.savedAt);
         if (!Number.isNaN(d.getTime())) setDraftSavedAt(d);
@@ -272,6 +287,7 @@ export default function ClientLaunchPage() {
           customVars,
           schedule,
           behavior,
+          ...(selectedEmailAccountIds !== null ? { selectedEmailAccountIds } : {}),
           savedAt: new Date().toISOString(),
         };
         window.localStorage.setItem(DRAFT_KEY, JSON.stringify(payload));
@@ -287,7 +303,7 @@ export default function ClientLaunchPage() {
       }
     }, 500);
     return () => clearTimeout(t);
-  }, [campaignName, sequenceSteps, activeVariantIdx, mapping, customVars, schedule, behavior]);
+  }, [campaignName, sequenceSteps, activeVariantIdx, mapping, customVars, schedule, behavior, selectedEmailAccountIds]);
 
   // Clear draft on successful launch.
   useEffect(() => {
@@ -347,8 +363,25 @@ export default function ClientLaunchPage() {
       open_tracking: preset.open_tracking !== false,
       stop_on_reply: preset.stop_on_reply !== false,
     });
+    // Default mailbox selection: all preset mailboxes. Same draft-wins
+    // policy — if a draft already hydrated this state, leave it alone.
+    setSelectedEmailAccountIds([...preset.email_account_ids]);
     setScheduleHydrated(true);
   }, [preset, draftRestored]);
+
+  // If the preset's mailbox pool changes (e.g. admin removed a mailbox)
+  // while client has already selected a subset, prune the selection to
+  // stay a valid subset. Without this, runLaunch would reject the launch
+  // with «не из вашего пресета» and the client wouldn't understand why.
+  useEffect(() => {
+    if (!preset) return;
+    if (selectedEmailAccountIds === null) return;
+    const pool = new Set(preset.email_account_ids);
+    const pruned = selectedEmailAccountIds.filter((id) => pool.has(id));
+    if (pruned.length !== selectedEmailAccountIds.length) {
+      setSelectedEmailAccountIds(pruned);
+    }
+  }, [preset, selectedEmailAccountIds]);
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -531,6 +564,14 @@ export default function ClientLaunchPage() {
       setLaunchError('Расписание: выберите хотя бы один день недели');
       return;
     }
+    if (
+      preset &&
+      selectedEmailAccountIds !== null &&
+      selectedEmailAccountIds.length === 0
+    ) {
+      setLaunchError('Почты отправки: выберите хотя бы один ящик из пула пресета');
+      return;
+    }
     for (let i = 0; i < sequenceSteps.length; i++) {
       const s = sequenceSteps[i];
       const isFirst = i === 0;
@@ -562,6 +603,15 @@ export default function ClientLaunchPage() {
 
     setLaunching(true);
     try {
+      // Send `email_account_ids` only if the client picked a STRICT subset.
+      // If they kept the default (all mailboxes from the preset) we omit the
+      // field so the launch row stores NULL → semantic «track the full preset
+      // pool», not a frozen snapshot of today's pool.
+      const isExplicitSubset =
+        preset !== null &&
+        selectedEmailAccountIds !== null &&
+        selectedEmailAccountIds.length > 0 &&
+        selectedEmailAccountIds.length < preset.email_account_ids.length;
       const data = await clientApiFetch<{ launch: LaunchResult }>('/launches', {
         method: 'POST',
         body: JSON.stringify({
@@ -572,6 +622,7 @@ export default function ClientLaunchPage() {
           rows: fileRows,
           schedule,
           behavior,
+          ...(isExplicitSubset ? { email_account_ids: selectedEmailAccountIds } : {}),
         }),
       });
       setResult(data.launch);
@@ -1038,9 +1089,27 @@ export default function ClientLaunchPage() {
           </Section>
         )}
 
-        {/* Step 6: Launch */}
+        {/* Step 6: Mailbox subset picker — only meaningful if the preset has >=2 mailboxes.
+            For a single-mailbox preset there's nothing to choose, so the section is hidden
+            to reduce noise. Same when the preset hasn't loaded yet — Section 6 simply
+            doesn't render. */}
+        {fileHeaders.length > 0 && preset && preset.email_account_ids.length >= 2 && selectedEmailAccountIds !== null && (
+          <Section
+            number={6}
+            title="Почты отправки"
+            subtitle="С каких ящиков из вашего пресета отправлять ЭТУ кампанию. По умолчанию задействованы все. Снимите галочку, чтобы отправлять с подмножества (например, чтобы пустить параллельную кампанию по той же базе с другого пула)."
+          >
+            <EmailAccountsPicker
+              pool={preset.email_account_ids}
+              selected={selectedEmailAccountIds}
+              onChange={setSelectedEmailAccountIds}
+            />
+          </Section>
+        )}
+
+        {/* Step 7: Launch */}
         {fileHeaders.length > 0 && (
-          <Section number={6} title="Запуск" subtitle="Кампания будет создана в Instantly и сразу же активирована.">
+          <Section number={7} title="Запуск" subtitle="Кампания будет создана в Instantly и сразу же активирована.">
             {launchError && (
               <div
                 className="mb-4 neu-inset rounded-md px-4 py-3 text-sm flex items-start gap-2.5"
@@ -1489,6 +1558,101 @@ function VariableChip({ entry }: { entry: VariableEntry }) {
         </span>
       )}
     </button>
+  );
+}
+
+/**
+ * Per-launch mailbox subset picker. Renders pool as toggleable pills.
+ * Default state when section first renders: every mailbox selected
+ * (initialized upstream from preset.email_account_ids). Counter and
+ * Все/Очистить shortcuts above the pill grid for quick adjustments.
+ *
+ * Validation lives in handleLaunch (empty selection → blocking error)
+ * and runLaunch (subset check). This component just owns the toggle.
+ */
+function EmailAccountsPicker({
+  pool,
+  selected,
+  onChange,
+}: {
+  pool: string[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const selectedSet = new Set(selected);
+  const allSelected = selectedSet.size === pool.length;
+
+  const toggle = (id: string) => {
+    if (selectedSet.has(id)) {
+      onChange(selected.filter((s) => s !== id));
+    } else {
+      // Preserve pool order in the resulting array so journaling and
+      // Instantly's email_list stay deterministic across re-renders.
+      onChange(pool.filter((p) => p === id || selectedSet.has(p)));
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+          Выбрано{' '}
+          <span className="ds-mono font-bold" style={{ color: 'var(--cp-paper)' }}>
+            {selected.length}
+          </span>{' '}
+          из {pool.length}
+        </p>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => onChange([...pool])}
+            disabled={allSelected}
+            className="ds-btn-ghost px-3 py-1 text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Выбрать все
+          </button>
+          <button
+            type="button"
+            onClick={() => onChange([])}
+            disabled={selected.length === 0}
+            className="ds-btn-ghost px-3 py-1 text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Очистить
+          </button>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {pool.map((email) => {
+          const isSelected = selectedSet.has(email);
+          return (
+            <button
+              key={email}
+              type="button"
+              onClick={() => toggle(email)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] rounded transition-colors"
+              style={{
+                background: isSelected ? 'var(--cp-paper)' : 'var(--cp-ink)',
+                border: '1px solid var(--cp-divider)',
+                color: isSelected ? 'var(--cp-ink)' : 'var(--cp-paper-mute)',
+              }}
+              aria-pressed={isSelected}
+            >
+              {isSelected ? (
+                <Check className="h-3 w-3" aria-hidden />
+              ) : (
+                <span aria-hidden className="inline-block h-3 w-3" />
+              )}
+              <span className="ds-mono">{email}</span>
+            </button>
+          );
+        })}
+      </div>
+      {selected.length === 0 && (
+        <p className="text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+          Минимум один ящик — иначе Instantly не сможет отправить кампанию.
+        </p>
+      )}
+    </div>
   );
 }
 

@@ -214,9 +214,12 @@ async function syncPresetToRunningCampaigns(input: SyncPresetInput): Promise<Syn
 
   // Find every live campaign this client has. Skip 'failed' and 'completed' —
   // syncing those would either fail (deleted campaign) or be pointless.
+  // Also pull email_account_ids: when a launch has a per-launch mailbox
+  // override, we must NOT push the preset's new email_list — that would
+  // silently overwrite the client's explicit per-campaign mailbox choice.
   const { data: launches, error } = await supabaseInstantly
     .from('client_campaign_launches')
-    .select('id, instantly_campaign_id, instantly_account_id, status')
+    .select('id, instantly_campaign_id, instantly_account_id, status, email_account_ids')
     .eq('client_user_id', preset.client_user_id)
     .in('status', ['uploading', 'active', 'paused'])
     .not('instantly_campaign_id', 'is', null);
@@ -231,27 +234,46 @@ async function syncPresetToRunningCampaigns(input: SyncPresetInput): Promise<Syn
     instantly_campaign_id: string;
     instantly_account_id: string;
     status: string;
+    email_account_ids: string[] | null;
   }>;
 
   if (rows.length === 0) {
     return { attempted: 0, succeeded: 0, failed: 0, skipped: false };
   }
 
-  const payload = buildCampaignPresetUpdatePayload({ preset, changedPresetKeys });
+  const basePayload = buildCampaignPresetUpdatePayload({ preset, changedPresetKeys });
 
   // Defensive: if for some reason the payload came out empty (e.g. only
   // schedule keys touched but they all matched the existing values…
   // shouldn't happen, but just in case), bail without making API calls.
-  if (Object.keys(payload).length === 0) {
+  if (Object.keys(basePayload).length === 0) {
     return { attempted: 0, succeeded: 0, failed: 0, skipped: true };
   }
 
   let succeeded = 0;
   let failed = 0;
+  let skippedDueToOverride = 0;
 
   for (const row of rows) {
+    // Per-launch payload: copy of basePayload, but strip `email_list` if
+    // this launch has a per-launch mailbox override. The override is the
+    // client's explicit choice; admin's preset edit must not silently
+    // change which mailboxes a running campaign sends from.
+    const perLaunchPayload = { ...basePayload };
+    if (row.email_account_ids !== null && 'email_list' in perLaunchPayload) {
+      delete perLaunchPayload.email_list;
+    }
+
+    // If everything got stripped (admin only changed mailbox pool AND
+    // this launch has an override), there's nothing left to push for
+    // this campaign — skip the API call entirely.
+    if (Object.keys(perLaunchPayload).length === 0) {
+      skippedDueToOverride += 1;
+      continue;
+    }
+
     try {
-      await updateCampaign(row.instantly_campaign_id, payload, {
+      await updateCampaign(row.instantly_campaign_id, perLaunchPayload, {
         accountId: resolveInstantlyAccountId(row.instantly_account_id),
       });
       succeeded += 1;
@@ -277,7 +299,8 @@ async function syncPresetToRunningCampaigns(input: SyncPresetInput): Promise<Syn
       attempted: rows.length,
       succeeded,
       failed,
-      fields: Object.keys(payload),
+      skippedDueToOverride,
+      fields: Object.keys(basePayload),
     },
     logMeta,
   );
