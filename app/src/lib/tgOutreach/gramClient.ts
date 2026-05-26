@@ -38,7 +38,8 @@ function humanizeConnectError(rawMsg: string): string {
     return `Telegram временно блокирует подключение из-за частых запросов (FLOOD_WAIT)`;
   }
   if (rawMsg.includes('connect timeout')) {
-    return `прокси или Telegram не отвечают за 15 секунд (${rawMsg.trim()} — обычно мёртвая прокси)`;
+    // rawMsg already contains the actual duration, e.g. "connect timeout (30s)".
+    return `прокси или Telegram не отвечают (${rawMsg.trim()} — проверьте прокси или временные проблемы Telegram)`;
   }
   if (rawMsg.includes('PHONE_NUMBER_BANNED')) {
     return `Telegram забанил этот номер при попытке логина (PHONE_NUMBER_BANNED)`;
@@ -135,7 +136,9 @@ export async function createGramClient(
 
   const client = new TelegramClient(session, account.api_id, account.api_hash, clientOpts);
 
-  const CONNECT_TIMEOUT_MS = 15_000;
+  // 30s default — 15s was too aggressive for mobile proxies that need a TLS
+  // handshake + obfuscated MTProto negotiation. Override via env if needed.
+  const CONNECT_TIMEOUT_MS = Number(process.env.TG_OUTREACH_CONNECT_TIMEOUT_MS) || 30_000;
   await Promise.race([
     client.connect(),
     new Promise((_, reject) =>
@@ -164,8 +167,8 @@ export async function buildClients(
       continue;
     }
 
+    const proxy = acc.proxy_id ? proxyMap.get(acc.proxy_id) ?? null : null;
     try {
-      const proxy = acc.proxy_id ? proxyMap.get(acc.proxy_id) ?? null : null;
       const client = await createGramClient(acc, proxy, downloadSessionFile);
       clients.push({ client, account: acc });
       log('info', `Аккаунт ${acc.session_name}: подключён`);
@@ -186,7 +189,16 @@ export async function buildClients(
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      log('error', `Аккаунт ${acc.session_name}: не удалось подключиться к Telegram — ${humanizeConnectError(errMsg)}`);
+      // Включаем детали прокси/аккаунта прямо в строку лога — так в UI логов
+      // сразу видно через какую прокси падало подключение.
+      const proxyParsed = proxy ? parseProxyUrl(proxy.url) : undefined;
+      const proxyLabel = proxy
+        ? proxyParsed
+          ? `${proxyParsed.protocol}://${proxyParsed.ip}:${proxyParsed.port}${proxy.name ? ` «${proxy.name}»` : ''}`
+          : `(не удалось разобрать URL прокси)${proxy.name ? ` «${proxy.name}»` : ''}`
+        : 'без прокси';
+      const accountLabel = `acc_id=${acc.id}${acc.phone ? ` тел=${acc.phone}` : ''}${proxy?.id ? ` proxy_id=${proxy.id}` : ''}`;
+      log('error', `Аккаунт ${acc.session_name}: не удалось подключиться к Telegram — ${humanizeConnectError(errMsg)}. Прокси: ${proxyLabel}. [${accountLabel}]`);
 
       // AUTH_KEY_DUPLICATED means Telegram sees a parallel login on this
       // session. It will never recover from retries — the user has to
