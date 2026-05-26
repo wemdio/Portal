@@ -56,6 +56,14 @@ export interface RunClientLaunchInput {
   /** Optional behavior override (open_tracking, stop_on_reply). */
   behaviorOverride?: ClientLaunchBehaviorOverride;
   /**
+   * Optional per-launch subset of mailboxes. When present, validated as
+   * a strict subset of `preset.email_account_ids` and used as Instantly's
+   * `email_list` for this campaign. Used to run two parallel campaigns
+   * on the same base with different mailbox pools. Undefined → full
+   * preset pool (legacy behavior, default).
+   */
+  emailAccountIdsOverride?: string[];
+  /**
    * Optional CSV stats for journaling. Pass only when source is CSV upload —
    * for auto-pipeline bootstrap we leave undefined and the journal records
    * uploaded_rows = leads.length.
@@ -102,7 +110,7 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
     throw new ClientLaunchError('Server misconfigured: supabaseInstantly is not available', 500);
   }
 
-  const { userId, sequence, leads, scheduleOverride, behaviorOverride } = input;
+  const { userId, sequence, leads, scheduleOverride, behaviorOverride, emailAccountIdsOverride } = input;
   const logMeta = { userId };
 
   // 1. Загружаем пресет клиента — без него нельзя запустить ни одну кампанию.
@@ -140,6 +148,33 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
 
   if (leads.length === 0) {
     throw new ClientLaunchError('Нет валидных лидов для отправки', 400);
+  }
+
+  // 2b. Если клиент явно выбрал подмножество ящиков из пула пресета,
+  // валидируем: каждый ID должен быть в presetEmailAccountIds, дублей
+  // быть не должно (для журнала и для email_list в Instantly), и набор
+  // не должен быть пустым (иначе Instantly создаст кампанию без ящиков
+  // отправки — тихая поломка, лучше явно ругнуться 400). Если override
+  // не задан — берём весь пул пресета (legacy default).
+  const presetEmailAccountIds = new Set(preset!.email_account_ids);
+  let validatedEmailAccountIdsOverride: string[] | null = null;
+  if (emailAccountIdsOverride !== undefined) {
+    const unique = Array.from(new Set(emailAccountIdsOverride));
+    if (unique.length === 0) {
+      throw new ClientLaunchError(
+        'Выберите хотя бы один ящик отправки из пула в пресете.',
+        400,
+      );
+    }
+    const notInPool = unique.filter((id) => !presetEmailAccountIds.has(id));
+    if (notInPool.length > 0) {
+      throw new ClientLaunchError(
+        `Ящики не из вашего пресета: ${notInPool.join(', ')}. ` +
+          'Обновите страницу — возможно, пресет изменился.',
+        400,
+      );
+    }
+    validatedEmailAccountIdsOverride = unique;
   }
 
   // 3. Проверяем статус и тарифные лимиты клиента.
@@ -193,6 +228,11 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
       accepted_rows: 0,
       skipped_rows: 0,
       status: 'uploading',
+      // null = «использовать весь пул из пресета». Не-null = клиент явно
+      // выбрал подмножество для этой кампании. Используется и для
+      // Instantly create payload, и для admin-sync (где override
+      // защищает живую кампанию от перетирания при правке пресета).
+      email_account_ids: validatedEmailAccountIdsOverride,
     })
     .select()
     .single();
@@ -212,6 +252,7 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
       sequence,
       scheduleOverride,
       behaviorOverride,
+      emailAccountIdsOverride: validatedEmailAccountIdsOverride ?? undefined,
     });
     const created = await createCampaign(payload, instantlyRequestOptions);
     instantlyCampaignId = (created as { id?: string }).id ?? null;

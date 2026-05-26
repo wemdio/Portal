@@ -49,9 +49,11 @@ import { logAudit, logError } from '@/lib/loggerServer';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { findNewHhEmployers, deriveDomain, type HhEmployer } from './hhAutoParser';
 import { fetchScoreForDomain } from './clientEndpointClient';
+import { getOrFetchScore, emptyCacheStats } from './mailganerScoreCache';
 import { validateEmailForAutoPipeline, type AutoPipelineEmailValidation } from './autoPipelineEmailValidation';
 import { calcPacing } from './autoPipelinePacing';
 import { fetchTopUpFromBaseOfBases } from './baseOfBasesSource';
+import { fetchTopUpFromCache } from './baseOfBasesFromCache';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import type { ClientLaunchSequence } from '@/lib/clientLaunch/types';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
@@ -282,6 +284,11 @@ async function enrichEmployers(
    * сколько именно, чтобы прогон вписался в окно [start..end] UTC.
    */
   perItemPauseMs = 0,
+  /**
+   * Per-domain кэш статистика (передаётся снаружи чтобы вернуть hit-rate
+   * в финальный лог прогона).
+   */
+  mailganerStats?: import('./mailganerScoreCache').MailganerCacheStats,
 ): Promise<EnrichmentResult[]> {
   const results: EnrichmentResult[] = new Array(employers.length);
   let cursor = 0;
@@ -297,17 +304,22 @@ async function enrichEmployers(
       const emp = employers[i];
       const domain = deriveDomain(emp.siteUrl);
       try {
-        // Шаг 1: получаем score (быстрый, ~1s). Без него не понять стоит ли
-        // тратить время на scrape сайта (медленный, до 12s) и SMTP-валидацию
-        // (тоже не бесплатная — SMTP-handshake несколько секунд).
+        // Шаг 1: получаем score. Сначала смотрим в БД-кэш — если домен
+        // скорили в любом прошлом прогоне, возьмём оттуда мгновенно (один
+        // SELECT, ~5ms). Если нет — getOrFetchScore сам дёрнет Mailganer и
+        // сохранит результат для следующих прогонов.
         const endpoint = domain
-          ? await fetchScoreForDomain({
-              url: endpointBase.url,
-              apiKey: endpointBase.apiKey,
-              authScheme: endpointBase.authScheme,
-              timeoutMs: endpointBase.timeoutMs,
+          ? await getOrFetchScore(
               domain,
-            })
+              {
+                url: endpointBase.url,
+                apiKey: endpointBase.apiKey,
+                authScheme: endpointBase.authScheme,
+                timeoutMs: endpointBase.timeoutMs,
+              },
+              'cron',
+              mailganerStats,
+            )
           : { score: null, spf: null, raw: null, ok: false as const, error: 'no domain' as const };
 
         // Шаг 2: scrape + SMTP — только если employer попал бы в активный
@@ -601,25 +613,51 @@ export async function runAutoPipelineForClient(
         if (d) seenDomains.add(d);
       }
       const neededFromBob = config.daily_target_employers - freshFromHh.length;
-      const bobResult = await fetchTopUpFromBaseOfBases({
+
+      // 1. Сначала пробуем взять готовые активные домены из кэша
+      //    (mailganer_domain_scores). Они уже scored через background
+      //    scorer → ни одного Mailganer-вызова в cron'е. Сильно экономит
+      //    время прогона (с 2.5h до 10-15 мин когда кэш покрывает большую
+      //    часть BoB).
+      const cacheResult = await fetchTopUpFromCache({
         neededCount: neededFromBob,
-        revenueFrom: config.base_of_bases_revenue_from,
         seenDomains,
         excludePatterns,
-        log: (m) => void logAudit('auto-pipeline.bob', m, logCtx),
+        log: (m) => void logAudit('auto-pipeline.bob-cache', m, logCtx),
       });
-      fresh = [...freshFromHh, ...bobResult.employers];
+
+      // 2. Если кэш не дал достаточно (background scorer ещё не дошёл до
+      //    нужных доменов или их там просто нет) — fallback на прямой BoB.
+      //    Этот путь scoring'ит домены через Mailganer на лету и тоже
+      //    наполняет кэш через getOrFetchScore (это побочный эффект).
+      const stillNeeded = neededFromBob - cacheResult.employers.length;
+      let bobLiveResult: Awaited<ReturnType<typeof fetchTopUpFromBaseOfBases>> | null = null;
+      if (stillNeeded > 0) {
+        bobLiveResult = await fetchTopUpFromBaseOfBases({
+          neededCount: stillNeeded,
+          revenueFrom: config.base_of_bases_revenue_from,
+          seenDomains,
+          excludePatterns,
+          log: (m) => void logAudit('auto-pipeline.bob-live', m, logCtx),
+        });
+      }
+
+      fresh = [
+        ...freshFromHh,
+        ...cacheResult.employers,
+        ...(bobLiveResult?.employers ?? []),
+      ];
+
       await logAudit(
         'auto-pipeline.top-up.bob',
-        'Topped up from base of bases',
+        'Topped up from base of bases (cache + live)',
         {
           ...logCtx,
           hhCount: freshFromHh.length,
-          bobAdded: bobResult.employers.length,
-          bobScanned: bobResult.scanned,
-          bobDedupSkipped: bobResult.dedupSkipped,
-          bobExcludeSkipped: bobResult.excludeSkipped,
-          bobNoSiteSkipped: bobResult.noSiteSkipped,
+          bobFromCache: cacheResult.employers.length,
+          bobFromLive: bobLiveResult?.employers.length ?? 0,
+          cacheScanned: cacheResult.scanned,
+          bobLiveScanned: bobLiveResult?.scanned ?? 0,
           totalFresh: fresh.length,
         },
       );
@@ -673,6 +711,11 @@ export async function runAutoPipelineForClient(
     }
 
     // 5. Enrich.
+    // Mailganer per-domain кэш статистика для этого прогона — поможет видеть
+    // насколько кэш экономит API-вызовы (через 2-3 недели работы должно быть
+    // >50% hit-rate, что эквивалентно ускорению cron'а в ~2 раза).
+    const mailganerStats = emptyCacheStats();
+
     const enrichments = await enrichEmployers(
       fresh,
       {
@@ -684,6 +727,13 @@ export async function runAutoPipelineForClient(
       config.score_buckets,
       ENRICH_CONCURRENCY,
       pacing.perItemPauseMs,
+      mailganerStats,
+    );
+
+    await logAudit(
+      'auto-pipeline.mailganer-cache',
+      `Mailganer cache: ${mailganerStats.hits} hits, ${mailganerStats.misses} misses, ${mailganerStats.errors} errors`,
+      { ...logCtx, ...mailganerStats },
     );
 
     // 5. Routing.
