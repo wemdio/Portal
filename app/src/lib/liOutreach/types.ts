@@ -60,8 +60,14 @@ export interface LiSettings {
   user_id: string;
   unipile_dsn: string;
   unipile_api_key: string;
-  openai_api_key: string;
-  openai_model: string;
+  // NOTE: the underlying table still has `openai_api_key` / `openai_model`
+  // columns from the BYOK era, but they're deliberately omitted from this
+  // interface so application code can't accidentally read them. AI creds for
+  // outreach now live in process.env.OPENROUTER_LI_OUTREACH_API_KEY (key)
+  // and li_campaigns.ai_model (per-campaign model override). The columns will
+  // be dropped in a follow-up destructive migration once we're confident no
+  // service still reads them — migration 20260525_0003 wiped the *values*
+  // for safety in the meantime.
   webhook_secret: string;
   proxy_url: string;
   created_at: string;

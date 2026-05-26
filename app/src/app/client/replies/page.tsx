@@ -6,7 +6,7 @@ import type { Route } from 'next';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Send, MessageSquare, RefreshCw, Search, X } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
-import { ReplyThreadActions } from '@/components/client-replies/ReplyThreadActions';
+import { ExpandedThread } from '@/components/client-replies/ExpandedThread';
 
 type StatusFilter = 'all' | 'unread' | 'leads';
 
@@ -256,7 +256,7 @@ function LeadDetail({
         )}
 
         {canReplyByEmail && (
-          <ReplyThreadActions
+          <ExpandedThread
             campaignId={lead.campaign_id}
             emailId={lead.email_id!}
           />

@@ -81,11 +81,19 @@ interface DraftPayload {
   savedAt: string;
 }
 
+// Стандартные плейсхолдеры в Instantly v2 используют camelCase, а НЕ
+// snake_case (Instantly hr: см. их доки, пример subject: "Hello {{firstName}}").
+// Раньше мы показывали клиенту `{{first_name}}` и `{{company_name}}` — клиент
+// копировал их в body, при отправке Instantly не находил совпадения и
+// плейсхолдер уходил литералом в письмо. Снизу в mapRowsToLeads мы также
+// дублируем значение в custom_variables со snake_case ключом — это
+// «лечит» уже запущенные кампании, где body набирался по старому чипу
+// (новые лиды смогут подставиться в `{{company_name}}` через custom_var).
 const STANDARD_FIELDS: { key: keyof Omit<ClientLaunchColumnMapping, 'custom_variables_mapping'>; label: string; required?: boolean; variable: string }[] = [
   { key: 'email', label: 'Email', required: true, variable: 'email' },
-  { key: 'first_name', label: 'Имя', variable: 'first_name' },
-  { key: 'last_name', label: 'Фамилия', variable: 'last_name' },
-  { key: 'company_name', label: 'Компания', variable: 'company_name' },
+  { key: 'first_name', label: 'Имя', variable: 'firstName' },
+  { key: 'last_name', label: 'Фамилия', variable: 'lastName' },
+  { key: 'company_name', label: 'Компания', variable: 'companyName' },
   { key: 'website', label: 'Сайт', variable: 'website' },
   { key: 'phone', label: 'Телефон', variable: 'phone' },
 ];
@@ -209,9 +217,6 @@ export default function ClientLaunchPage() {
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState('');
   const [result, setResult] = useState<LaunchResult | null>(null);
-
-  // Brief status drives an inline tip in Step 3. Null until first fetch.
-  const [briefFilled, setBriefFilled] = useState<boolean | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -361,24 +366,6 @@ export default function ClientLaunchPage() {
     void loadPreset();
     void loadHistory();
   }, [loadPreset, loadHistory]);
-
-  // Fire-and-forget: fetch onboarding status to know whether the brief is
-  // filled. Drives the inline tip shown in the Sequence step. Failures are
-  // silent — the tip just won't show.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await clientApiFetch<{ items: { id: string; done: boolean }[] }>(
-          '/onboarding/status',
-        );
-        if (cancelled) return;
-        const brief = res.items.find((i) => i.id === 'brief');
-        setBriefFilled(brief?.done ?? null);
-      } catch { /* ignore — non-critical */ }
-    })();
-    return () => { cancelled = true; };
-  }, []);
 
   // ─── File upload ────────────────────────────────────────────────────────
   async function handleFile(file: File) {
@@ -984,36 +971,6 @@ export default function ClientLaunchPage() {
         {/* Step 3: Sequence */}
         {fileHeaders.length > 0 && (
           <Section number={3} title="Цепочка писем" subtitle="Используйте переменные ниже, чтобы персонализировать сообщения.">
-            {briefFilled === false && (
-              <div
-                className="rounded-md px-4 py-3 sm:px-5 sm:py-3.5 mb-4 flex items-start gap-2.5 text-xs sm:text-sm"
-                style={{
-                  background: 'var(--cp-surface-rest)',
-                  border: '1px solid var(--cp-divider)',
-                }}
-              >
-                <span
-                  aria-hidden
-                  className="ds-status-dot shrink-0"
-                  style={{ background: 'var(--cp-amber)', marginTop: '7px' }}
-                />
-                <div className="flex-1 min-w-0">
-                  <strong style={{ color: 'var(--cp-paper)' }}>Совет.</strong>{' '}
-                  <span style={{ color: 'var(--cp-paper-mute)' }}>
-                    Заполните{' '}
-                    <Link
-                      href={'/client/brief' as Route}
-                      className="font-semibold underline"
-                      style={{ color: 'var(--cp-paper)' }}
-                    >
-                      бриф
-                    </Link>
-                    {' '}— AI-инструменты (Цепочки писем, Оценка ЦА, персонализация) сработают точнее под вашу аудиторию.
-                  </span>
-                </div>
-              </div>
-            )}
-
             <VariableReference
               mapping={mapping}
               customVars={customVars}
@@ -1395,10 +1352,12 @@ function buildAvailableVariables(
     return (firstRow[idx] ?? '').toString().trim();
   };
 
+  // camelCase — единственная форма, которую Instantly понимает для
+  // стандартных полей в шаблонах. См. STANDARD_FIELDS наверху файла.
   const standardKeys: { var: string; header: string | undefined }[] = [
-    { var: 'first_name', header: mapping.first_name },
-    { var: 'last_name', header: mapping.last_name },
-    { var: 'company_name', header: mapping.company_name },
+    { var: 'firstName', header: mapping.first_name },
+    { var: 'lastName', header: mapping.last_name },
+    { var: 'companyName', header: mapping.company_name },
     { var: 'website', header: mapping.website },
     { var: 'phone', header: mapping.phone },
   ];

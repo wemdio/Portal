@@ -145,7 +145,9 @@ async function enrichFromInstantlyReplies(items: LeadListItem[], accessRows: Cli
   await Promise.allSettled([...byCampaign.entries()].map(async ([campaignId, campaignItems]) => {
     const data = await listEmails({
       campaign_id: campaignId,
-      ue_type: 2,
+      // См. /campaigns/[id]/replies/route.ts: правильный фильтр —
+      // `email_type`, не `ue_type` (последнее Instantly игнорирует).
+      email_type: 'received',
       limit: REPLIES_PER_CAMPAIGN,
     }, {
       accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
