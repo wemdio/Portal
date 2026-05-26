@@ -30,7 +30,7 @@ const supabaseState = {
 jest.mock('@/lib/supabaseAdmin', () => ({
   supabaseAdmin: {
     from: (_table: string) => {
-      let filters: Record<string, string> = {};
+      const filters: Record<string, string> = {};
       let patch: Record<string, unknown> | null = null;
       const chain = {
         select: (_cols: string) => chain,
