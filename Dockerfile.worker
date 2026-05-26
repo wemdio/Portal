@@ -40,7 +40,7 @@ COPY app/ ./
 # so loggerServer, tracer, supabaseAdmin etc. work fine outside Next.js.
 # --external:playwright: keep playwright as a runtime require (native binaries).
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-RUN node_modules/.bin/esbuild worker/index.ts worker/hh.ts worker/search.ts worker/enrich.ts worker/yandexmaps.ts worker/runner.ts worker/emailvalidation.ts worker/tgOutreach.ts worker/salesCopilot.ts worker/aiCaller.ts worker/tgParser.ts worker/tgTranscribe.ts worker/instantlyLeads.ts worker/outreach.ts worker/liOutreach.ts worker/baseConstructor.ts worker/autoPipelineCron.ts worker/bobBackgroundScorer.ts \
+RUN node_modules/.bin/esbuild worker/index.ts worker/hh.ts worker/search.ts worker/enrich.ts worker/yandexmaps.ts worker/runner.ts worker/emailvalidation.ts worker/tgOutreach.ts worker/salesCopilot.ts worker/aiCaller.ts worker/tgParser.ts worker/tgTranscribe.ts worker/instantlyLeads.ts worker/outreach.ts worker/liOutreach.ts worker/baseConstructor.ts worker/autoPipelineCron.ts worker/bobBackgroundScorer.ts worker/manualScoringWorker.ts \
   --bundle \
   --platform=node \
   --target=node22 \
