@@ -31,7 +31,13 @@ const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36';
 const SITE_CHECK_TIMEOUT = 12_000;
 
-const EMAIL_CONCURRENCY = 5;
+// Raised from 5 → 15 after polza@polza.ru job 55d37e8e ran for ~8h on
+// 4297 rows with `find_emails` at 75%. Throughput here is wall-clock
+// bound by remote HTTP, not by CPU/memory — higher fan-out gives
+// linear speedup until we hit (a) target-host rate-limits or (b) our
+// outbound socket pool. 15 is conservative for shared infrastructure;
+// can lift further if telemetry shows no upstream complaints.
+const EMAIL_CONCURRENCY = 15;
 const ENRICH_CONCURRENCY = 5;
 /**
  * Hard ceiling per site for enrich. fetchAndExtract internally tries main +
@@ -233,7 +239,15 @@ export async function stepFindEmails(
   await processInPool(toProcess, EMAIL_CONCURRENCY, async (item) => {
     if (isCancelled && await isCancelled()) return;
     try {
-      const { emails } = await scrapeEmails(item.url, { timeout: 15_000, maxPages: 5 });
+      // stopAtFirstUsableEmail: bail as soon as the homepage / first
+      // contact page gives us a usable address. Base-constructor only
+      // needs one — the worker doesn't use the extra addresses, and
+      // crawling 4 more pages per company is the dominant time sink.
+      const { emails } = await scrapeEmails(item.url, {
+        timeout: 15_000,
+        maxPages: 5,
+        stopAtFirstUsableEmail: true,
+      });
       if (emails.length > 0) {
         body[item.i][targetIdx] = emails.join(', ');
       }
