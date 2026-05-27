@@ -277,6 +277,15 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
   const [outputLanguage, setOutputLanguage] = useState<EmailSequenceV2OutputLanguage>('ru');
   const [briefFile, setBriefFile] = useState<File | null>(null);
   const [briefText, setBriefText] = useState<string>('');
+  // Сохранённый бриф из портала: client мог уже заполнить /client/brief,
+  // тогда инструмент должен предложить взять его автоматом, а не
+  // заставлять снова загружать PDF/копировать текст. По умолчанию для
+  // клиента — режим 'saved', если сохранённый бриф не пустой.
+  // Источник: /api/client/brief.compiled_brief_text — то же поле что
+  // использует base-constructor.
+  const [savedBriefText, setSavedBriefText] = useState<string>('');
+  const [savedBriefAvailable, setSavedBriefAvailable] = useState<boolean>(false);
+  const [briefInputMode, setBriefInputMode] = useState<'saved' | 'file' | 'text'>('file');
   const [segmentText, setSegmentText] = useState<string>('');
   const [customerEdits, setCustomerEdits] = useState<string>('');
   const [personalizationOps, setPersonalizationOps] = useState<string>('');
@@ -309,6 +318,31 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
     initialLoaded.current = true;
     loadRuns().catch((e) => setError(e instanceof Error ? e.message : 'Ошибка'));
   }, [loadRuns]);
+
+  // Fire-and-forget: загружаем сохранённый бриф клиента с /api/client/brief.
+  // Если есть compiled_brief_text — переключаем дефолтный режим ввода в
+  // 'saved' и подсовываем его текст в инпут (read-only preview). Без
+  // этого клиент, заполнивший бриф на /client/brief, был вынужден
+  // отдельно загружать PDF/копировать текст — это исходный UX-провал
+  // («у нас цепочка работает только по загруженному брифу, не из
+  // заполненного на сайте?»). Тихий failure: если запрос упал, остаёмся
+  // в режиме file/text как раньше.
+  const savedBriefLoaded = useRef(false);
+  useEffect(() => {
+    if (savedBriefLoaded.current) return;
+    savedBriefLoaded.current = true;
+    void (async () => {
+      try {
+        const res = await authFetchJson<{ compiled_brief_text?: string }>('/api/client/brief');
+        const text = (res.compiled_brief_text ?? '').trim();
+        if (text) {
+          setSavedBriefText(text);
+          setSavedBriefAvailable(true);
+          setBriefInputMode('saved');
+        }
+      } catch { /* non-critical: leave defaults */ }
+    })();
+  }, []);
 
   const showNotice = useCallback((msg: string, ms = 3500) => {
     setNotice(msg);
@@ -371,17 +405,35 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
 
   const extractValues = useCallback(async () => {
     if (!run) return;
-    if (!briefFile && !briefText.trim()) {
-      setError('Загрузите PDF/DOCX файл брифа или вставьте текст брифа.');
+    // Source resolution by mode:
+    //   - saved: используем cached savedBriefText (read-only preview из портала)
+    //   - file: multipart/form-data с PDF/DOCX
+    //   - text: plain text JSON
+    // Если выбранный режим не имеет данных — soft error прежде чем сетевой
+    // запрос. file и saved оба в итоге шлют text через JSON-endpoint, так
+    // что серверный API не меняется (multipart остаётся для file-uploads).
+    const effectiveText =
+      briefInputMode === 'saved' ? savedBriefText :
+      briefInputMode === 'text' ? briefText :
+      '';
+    const useFileUpload = briefInputMode === 'file' && briefFile != null;
+    if (!useFileUpload && !effectiveText.trim()) {
+      setError(
+        briefInputMode === 'saved'
+          ? 'Сохранённый бриф пуст. Заполните его на странице «Бриф» или переключитесь на файл/текст.'
+          : briefInputMode === 'file'
+            ? 'Загрузите PDF/DOCX файл брифа.'
+            : 'Вставьте текст брифа.',
+      );
       return;
     }
     setBusy('extracting-values');
     setError(null);
     try {
       let res: Response;
-      if (briefFile) {
+      if (useFileUpload) {
         const fd = new FormData();
-        fd.append('file', briefFile);
+        fd.append('file', briefFile!);
         fd.append('model', valuesModel);
         fd.append('language', outputLanguage);
         const token = await getAccessToken();
@@ -400,7 +452,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
       } else {
         const fetchedRes = await authFetch(`/api/tools/email-sequence-v2/runs/${run.id}/extract-values`, {
           method: 'POST',
-          body: JSON.stringify({ text: briefText, model: valuesModel, language: outputLanguage }),
+          body: JSON.stringify({ text: effectiveText, model: valuesModel, language: outputLanguage }),
         });
         res = fetchedRes;
       }
@@ -418,7 +470,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
     } finally {
       setBusy(null);
     }
-  }, [briefFile, briefText, loadRuns, run, showNotice, valuesModel, outputLanguage]);
+  }, [briefFile, briefText, briefInputMode, savedBriefText, loadRuns, run, showNotice, valuesModel, outputLanguage]);
 
   const saveStage2 = useCallback(async () => {
     if (!run) return;
@@ -788,35 +840,106 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
               <div className="space-y-3">
                 <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4">
                   <div className="text-sm font-medium text-gray-900 mb-2">Бриф</div>
-                  <input
-                    ref={briefInputRef}
-                    type="file"
-                    accept=".pdf,.docx,.txt"
-                    onChange={(e) => setBriefFile(e.target.files?.[0] ?? null)}
-                    className="block w-full text-sm text-gray-700 file:mr-3 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-blue-700"
-                  />
-                  {briefFile && (
-                    <div className="mt-2 text-xs text-gray-600">
-                      {briefFile.name} · {(briefFile.size / 1024).toFixed(1)} KB
+                  {/* Three-way input mode: 'saved' (auto-loaded from
+                      /client/brief), 'file' (PDF/DOCX upload), 'text'
+                      (paste). Default = 'saved' when saved brief is
+                      available, else 'file'. */}
+                  <div className="mb-3 flex gap-1 rounded-lg bg-gray-100 p-1 text-xs">
+                    {savedBriefAvailable && (
+                      <button
+                        type="button"
+                        onClick={() => setBriefInputMode('saved')}
+                        className={`flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
+                          briefInputMode === 'saved'
+                            ? 'bg-white text-gray-900 shadow-sm'
+                            : 'text-gray-600 hover:text-gray-900'
+                        }`}
+                      >
+                        Сохранённый бриф
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setBriefInputMode('file')}
+                      className={`flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
+                        briefInputMode === 'file'
+                          ? 'bg-white text-gray-900 shadow-sm'
+                          : 'text-gray-600 hover:text-gray-900'
+                      }`}
+                    >
+                      Файл
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBriefInputMode('text')}
+                      className={`flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
+                        briefInputMode === 'text'
+                          ? 'bg-white text-gray-900 shadow-sm'
+                          : 'text-gray-600 hover:text-gray-900'
+                      }`}
+                    >
+                      Текст
+                    </button>
+                  </div>
+
+                  {briefInputMode === 'saved' && savedBriefAvailable && (
+                    <div>
+                      <div className="text-xs text-gray-500 mb-2">
+                        Используем ваш бриф с портала (
+                        <a href="/client/brief" className="underline">страница «Бриф»</a>
+                        ). Чтобы AI пересобрал ценности после изменений — отредактируйте там и запустите этот шаг снова.
+                      </div>
+                      <textarea
+                        value={savedBriefText}
+                        readOnly
+                        rows={8}
+                        className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700"
+                      />
                     </div>
                   )}
-                  {run.brief_file_name && !briefFile && (
-                    <div className="mt-2 text-xs text-gray-600">
-                      Текущий бриф: <span className="font-medium">{run.brief_file_name}</span>
+
+                  {briefInputMode === 'file' && (
+                    <div>
+                      <input
+                        ref={briefInputRef}
+                        type="file"
+                        accept=".pdf,.docx,.txt"
+                        onChange={(e) => setBriefFile(e.target.files?.[0] ?? null)}
+                        className="block w-full text-sm text-gray-700 file:mr-3 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-blue-700"
+                      />
+                      {briefFile && (
+                        <div className="mt-2 text-xs text-gray-600">
+                          {briefFile.name} · {(briefFile.size / 1024).toFixed(1)} KB
+                        </div>
+                      )}
+                      {run.brief_file_name && !briefFile && (
+                        <div className="mt-2 text-xs text-gray-600">
+                          Текущий бриф: <span className="font-medium">{run.brief_file_name}</span>
+                        </div>
+                      )}
                     </div>
                   )}
-                  <textarea
-                    value={briefText}
-                    onChange={(e) => setBriefText(e.target.value)}
-                    rows={5}
-                    placeholder="Или вставьте текст брифа здесь (вместо файла)"
-                    className="mt-3 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
-                  />
+
+                  {briefInputMode === 'text' && (
+                    <textarea
+                      value={briefText}
+                      onChange={(e) => setBriefText(e.target.value)}
+                      rows={8}
+                      placeholder="Вставьте текст брифа сюда"
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                    />
+                  )}
+
                   <div className="mt-3 flex items-center justify-end">
                     <button
                       type="button"
                       onClick={extractValues}
-                      disabled={busy != null || (!briefFile && !briefText.trim())}
+                      disabled={
+                        busy != null ||
+                        (briefInputMode === 'file' && !briefFile) ||
+                        (briefInputMode === 'text' && !briefText.trim()) ||
+                        (briefInputMode === 'saved' && !savedBriefText.trim())
+                      }
                       className="inline-flex items-center rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
                     >
                       {busy === 'extracting-values' ? 'Извлечение…' : 'Отправить → выделить ценности'}
