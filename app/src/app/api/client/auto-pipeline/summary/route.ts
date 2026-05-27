@@ -46,10 +46,26 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Последний прогон.
-    const { data: lastRun } = await supabaseAdmin
+    // Последний УСПЕШНЫЙ прогон — главные цифры в плитке. completed = это
+    // тот, который реально дошёл до finishRunRow и обновил счётчики. Failed
+    // прогоны (killed by redeploy, network errors etc) — это технические
+    // факты, которые не должны драматизировать UX клиента.
+    const { data: lastCompletedRun } = await supabaseAdmin
       .from('client_auto_pipeline_runs')
-      .select('status, started_at, finished_at, parsed_count, new_count, routed_count, stored_count, skipped_count, failed_count, error_message')
+      .select('status, started_at, finished_at, parsed_count, new_count, routed_count, stored_count, skipped_count, failed_count')
+      .eq('client_user_id', user.id)
+      .eq('status', 'completed')
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    // Отдельно — самый последний прогон (любого статуса). Используется
+    // только для тонкого индикатора «есть прерванный прогон» если он
+    // failed/running и свежее completed. error_message в UI не выходит —
+    // показываем дружелюбное сообщение.
+    const { data: lastAttemptedRun } = await supabaseAdmin
+      .from('client_auto_pipeline_runs')
+      .select('status, started_at, finished_at')
       .eq('client_user_id', user.id)
       .order('started_at', { ascending: false })
       .limit(1)
@@ -82,10 +98,31 @@ export async function GET(req: NextRequest) {
       .eq('client_user_id', user.id)
       .eq('status', 'stored');
 
+    // Если последний прогон НЕ completed и НЕ совпадает с last_completed_run —
+    // у нас есть прерванный/работающий прогон поверх успешного. Возвращаем
+    // флаг для UI чтобы показал тонкий индикатор.
+    const lastCompletedStartedAt = (lastCompletedRun as { started_at?: string } | null)?.started_at ?? null;
+    const lastAttempted = lastAttemptedRun as { status?: string; started_at?: string; finished_at?: string | null } | null;
+    const lastAttemptedIsFresher =
+      lastAttempted &&
+      lastAttempted.status !== 'completed' &&
+      lastAttempted.started_at &&
+      (!lastCompletedStartedAt || lastAttempted.started_at > lastCompletedStartedAt);
+
     return NextResponse.json({
       enabled: true,
       daily_limit: (config as { daily_limit?: number | null }).daily_limit ?? null,
-      last_run: lastRun ?? null,
+      // Главная плитка — последний completed (или null если ни одного не было).
+      last_run: lastCompletedRun ?? null,
+      // Тонкий индикатор «есть прерванный прогон поверх» — UI рисует
+      // мини-badge без error_message; что именно случилось (zombie, network)
+      // клиент видеть не должен.
+      pending_attempt: lastAttemptedIsFresher
+        ? {
+            status: lastAttempted.status,
+            started_at: lastAttempted.started_at,
+          }
+        : null,
       totals_30d: totals30d,
       stored_count: storedCount ?? 0,
     });
