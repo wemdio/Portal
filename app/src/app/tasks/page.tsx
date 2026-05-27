@@ -106,6 +106,14 @@ type ProjectTaskGroup = {
   tasks: EnrichedTask[];
 };
 
+type CompactTaskGroup = {
+  key: string;
+  title: string;
+  tasks: EnrichedTask[];
+  emptyLabel: string;
+  getMetaLabel: (task: EnrichedTask) => string;
+};
+
 function getProjectGroupKey(projectId: string | null, projectName: string): string {
   return projectId ?? `no-project:${projectName}`;
 }
@@ -1267,10 +1275,11 @@ export default function TasksPage() {
     );
   }
 
-  function renderProjectTaskRow(task: EnrichedTask) {
+  function renderCompactTaskRow(task: EnrichedTask, metaLabel: string) {
     const isDone = task.status === 'done';
     const isExpanded = expandedTaskIds.has(task.id);
     const canExpand = !task.isLegacy;
+    const isEditingResult = editingResultId === task.id;
 
     return (
       <div
@@ -1298,7 +1307,7 @@ export default function TasksPage() {
               <span className="h-4 w-4 shrink-0" />
             )}
             <span className="min-w-0">
-              <span className="block truncate text-[11px] text-gray-500">{task.specialistName}</span>
+              <span className="block truncate text-[11px] text-gray-500">{metaLabel}</span>
               <span className={`block truncate text-sm font-medium ${isDone ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
                 {task.title}
               </span>
@@ -1331,10 +1340,43 @@ export default function TasksPage() {
             {task.image_url && (
               <img src={task.image_url} alt="" className="mt-2 max-h-40 w-full rounded-lg object-contain" />
             )}
-            {task.result && (
-              <p className="mt-2 text-xs leading-relaxed text-gray-700">
-                <span className="font-medium text-gray-500">Результат:</span> {task.result}
-              </p>
+            {isEditingResult ? (
+              <div className="mt-2 flex gap-1.5">
+                <input
+                  type="text"
+                  autoFocus
+                  value={editingResultValue}
+                  onChange={(e) => setEditingResultValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void updateTaskResult(task.id, editingResultValue);
+                    if (e.key === 'Escape') setEditingResultId(null);
+                  }}
+                  className="min-w-0 flex-1 rounded-lg border border-gray-200 px-2 py-1 text-xs outline-none focus:border-blue-400"
+                  placeholder="Результат задачи..."
+                />
+                <button
+                  type="button"
+                  onClick={() => void updateTaskResult(task.id, editingResultValue)}
+                  className="rounded-lg bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                >
+                  ✓
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="mt-2 block w-full rounded px-1 py-0.5 text-left text-xs text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700"
+                onClick={() => {
+                  setEditingResultId(task.id);
+                  setEditingResultValue(task.result || '');
+                }}
+              >
+                {task.result ? (
+                  <span><span className="font-medium">Результат:</span> {task.result}</span>
+                ) : (
+                  '+ Добавить результат'
+                )}
+              </button>
             )}
           </div>
         )}
@@ -1342,17 +1384,16 @@ export default function TasksPage() {
     );
   }
 
-  function renderProjectGroup(group: ProjectTaskGroup) {
+  function renderCompactTaskGroup(group: CompactTaskGroup) {
     const { active, done } = splitDoneTasks(group.tasks);
-    const projectKey = getProjectGroupKey(group.projectId, group.projectName);
-    const showDone = expandedDoneProjectKeys.has(projectKey);
+    const showDone = expandedDoneProjectKeys.has(group.key);
 
     return (
-      <section key={projectKey} className="flex min-h-[190px] max-h-[72vh] flex-col rounded-xl border border-gray-200 bg-white shadow-sm">
+      <section key={group.key} className="flex min-h-[190px] max-h-[72vh] flex-col rounded-xl border border-gray-200 bg-white shadow-sm">
         <div className="border-b border-gray-100 px-4 py-3">
           <div className="flex min-w-0 items-start justify-between gap-3">
             <div className="min-w-0">
-              <h3 className="truncate text-base font-semibold text-gray-900">{group.projectName}</h3>
+              <h3 className="truncate text-base font-semibold text-gray-900">{group.title}</h3>
               <p className="mt-0.5 text-xs text-gray-500">
                 {active.length} активных, {done.length} завершенных
               </p>
@@ -1367,146 +1408,46 @@ export default function TasksPage() {
         </div>
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
           {active.length > 0 ? (
-            active.map(renderProjectTaskRow)
+            active.map((task) => renderCompactTaskRow(task, group.getMetaLabel(task)))
           ) : (
             <div className="rounded-lg border border-dashed border-gray-200 px-3 py-3 text-center text-xs text-gray-400">
-              Активных задач нет
+              {group.emptyLabel}
             </div>
           )}
           {done.length > 0 && (
             <button
               type="button"
-              onClick={() => toggleDoneProject(projectKey)}
+              onClick={() => toggleDoneProject(group.key)}
               className="flex min-h-[38px] w-full items-center justify-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
             >
               <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showDone ? 'rotate-90' : ''}`} />
               {showDone ? 'Скрыть завершенные' : `Показать завершенные (${done.length})`}
             </button>
           )}
-          {showDone && done.map(renderProjectTaskRow)}
+          {showDone && done.map((task) => renderCompactTaskRow(task, group.getMetaLabel(task)))}
         </div>
       </section>
     );
   }
 
-  function renderTaskCard(task: EnrichedTask) {
-    const isEditingResult = editingResultId === task.id;
+  function renderProjectGroup(group: ProjectTaskGroup) {
+    return renderCompactTaskGroup({
+      key: getProjectGroupKey(group.projectId, group.projectName),
+      title: group.projectName,
+      tasks: group.tasks,
+      emptyLabel: 'Активных задач нет',
+      getMetaLabel: (task) => task.specialistName,
+    });
+  }
 
-    return (
-      <div key={task.id} className={`rounded-lg border p-3 transition-colors ${task.status === 'done' ? 'bg-gray-50 border-gray-200' : 'bg-white border-gray-200'}`}>
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex-1 min-w-0">
-            <p className="text-xs text-gray-500">{view === 'projects' ? task.specialistName : task.projectName}</p>
-            <p className={`break-words text-sm font-medium mt-0.5 ${task.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
-              {task.title}
-            </p>
-          </div>
-          <div className="flex items-center gap-1.5 flex-shrink-0">
-            {!task.isLegacy && (
-              <button
-                type="button"
-                onClick={() => openTaskEditModal(task)}
-                className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
-                title="Редактировать задачу"
-                aria-label="Редактировать задачу"
-              >
-                <Pencil className="h-3.5 w-3.5" />
-              </button>
-            )}
-            {renderTaskStatusSelect(task)}
-          </div>
-        </div>
-
-        {!task.isLegacy && (
-          <div className="flex items-center gap-2 mt-1.5">
-            {task.deadline && task.status !== 'done' ? (() => {
-              const now = new Date();
-              const dl = new Date(task.deadline);
-              const diffMs = dl.getTime() - now.getTime();
-              const diffDays = Math.floor(diffMs / (1000*60*60*24));
-              const dateFmt = dl.toLocaleDateString(uiDateLocale, { day: 'numeric', month: 'short' });
-              const timeFmt = dl.toLocaleTimeString(uiDateLocale, { hour: '2-digit', minute: '2-digit' });
-              const hasTime = !/^[\d-]+$/.test(task.deadline) && (dl.getHours() !== 0 || dl.getMinutes() !== 0);
-              const label = hasTime ? `${dateFmt}, ${timeFmt}` : dateFmt;
-              const cls = diffMs < 0 ? 'text-red-600 bg-red-50' : diffDays === 0 ? 'text-amber-700 bg-amber-50' : diffDays <= 2 ? 'text-amber-600 bg-amber-50' : 'text-gray-500 bg-gray-100';
-              const suffix = diffMs < 0 ? (isEn ? ' (overdue)' : ' (просрочено)') : diffDays === 0 ? (isEn ? ' (today)' : ' (сегодня)') : '';
-              return (
-                <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-md ${cls}`}>
-                  <svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M12 2H4a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2V4a2 2 0 00-2-2zM2 6h12M5 1v2M11 1v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
-                  {label}{suffix}
-                </span>
-              );
-            })() : null}
-            <span className="relative inline-flex items-center">
-              <input
-                type="datetime-local"
-                lang={isEn ? 'en-GB' : 'ru-RU'}
-                value={task.deadline ? (() => { const d = new Date(task.deadline); const pad = (n: number) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; })() : ''}
-                onChange={(e) => void updateTaskDeadline(task.id, e.target.value ? new Date(e.target.value).toISOString() : null)}
-                onClick={(e) => openNativePicker(e.currentTarget)}
-                onFocus={(e) => openNativePicker(e.currentTarget)}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                style={{ colorScheme: 'light' }}
-              />
-              <span className="inline-flex items-center text-[10px] text-gray-400 hover:text-gray-600 pointer-events-none">
-                {task.deadline ? '✏' : isEn ? '+ deadline' : '+ срок'}
-              </span>
-            </span>
-            {task.deadline && task.status !== 'done' && (
-              <button type="button" onClick={() => void updateTaskDeadline(task.id, null)} className="text-[10px] text-gray-400 hover:text-red-500 transition-colors" title={isEn ? 'Remove deadline' : 'Убрать дедлайн'}>✕</button>
-            )}
-          </div>
-        )}
-
-        {!task.isLegacy && ((task.description != null && task.description !== '') || (task.image_url != null && task.image_url !== '')) && (
-          <div className="mt-2 pt-2 border-t border-gray-100">
-            {task.description && <p className="text-xs text-gray-600 line-clamp-2">{task.description}</p>}
-            {task.image_url && <img src={task.image_url} alt="" className="mt-1 h-16 w-full rounded object-cover" />}
-          </div>
-        )}
-        {!task.isLegacy && (
-          <div className="mt-2 pt-2 border-t border-gray-100">
-            {isEditingResult ? (
-              <div className="flex gap-1.5">
-                <input
-                  type="text"
-                  autoFocus
-                  value={editingResultValue}
-                  onChange={(e) => setEditingResultValue(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void updateTaskResult(task.id, editingResultValue);
-                    if (e.key === 'Escape') setEditingResultId(null);
-                  }}
-                  className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-1 outline-none focus:border-blue-400"
-                  placeholder="Результат задачи..."
-                />
-                <button
-                  type="button"
-                  onClick={() => void updateTaskResult(task.id, editingResultValue)}
-                  className="text-xs bg-blue-600 text-white px-2 py-1 rounded-lg hover:bg-blue-700"
-                >
-                  ✓
-                </button>
-              </div>
-            ) : (
-              <div
-                className="cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5 -mx-1 transition-colors"
-                onClick={() => {
-                  setEditingResultId(task.id);
-                  setEditingResultValue(task.result || '');
-                }}
-              >
-                {task.result ? (
-                  <p className="text-xs text-gray-700"><span className="font-medium text-gray-500">Результат:</span> {task.result}</p>
-                ) : (
-                  <p className="text-xs text-gray-400">+ Добавить результат</p>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    );
+  function renderSpecialistGroup(specialist: string, tasks: EnrichedTask[]) {
+    return renderCompactTaskGroup({
+      key: `specialist:${specialist}`,
+      title: specialist,
+      tasks,
+      emptyLabel: 'Активных задач нет',
+      getMetaLabel: (task) => task.projectName,
+    });
   }
 
   if (loading) {
@@ -1898,24 +1839,9 @@ export default function TasksPage() {
       </div>
 
       {view === 'specialists' && (
-        <div className={isTma ? 'grid grid-cols-1 gap-4' : 'grid grid-cols-1 gap-6 lg:grid-cols-3'}>
+        <div className={isTma ? 'grid grid-cols-1 gap-4' : 'grid grid-cols-1 gap-4 xl:grid-cols-2 2xl:grid-cols-3'}>
           {tasksBySpecialist.map(([specialist, list]) => (
-            <div key={specialist} className={`rounded-xl border border-gray-200 bg-white shadow-sm ${isTma ? 'p-4' : 'p-5'}`}>
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900">{specialist}</h3>
-                  <p className="text-xs text-gray-500">{list.length} задач</p>
-                </div>
-              </div>
-              <div className="mt-4 space-y-3">
-                {list.map(renderTaskCard)}
-                {list.length === 0 && (
-                  <div className="rounded-lg border border-dashed border-gray-200 p-3 text-center text-sm text-gray-400">
-                    Нет задач
-                  </div>
-                )}
-              </div>
-            </div>
+            renderSpecialistGroup(specialist, list)
           ))}
           {tasksBySpecialist.length === 0 && (
             <div className={`rounded-xl border border-dashed border-gray-200 text-center text-sm text-gray-500 col-span-full ${isTma ? 'p-5' : 'p-6'}`}>
