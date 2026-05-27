@@ -515,6 +515,43 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
           : {}),
       };
 
+      // Eagerly merge «Найденный Email» в исходную email-колонку
+      // ПЕРЕД запуском шага, если эта колонка уже есть в данных.
+      //
+      // Сценарий №1 (happy path): на предыдущей итерации find_emails
+      // добавил FOUND_EMAIL_COL. Сейчас следующая итерация (например
+      // split_emails) — мерджим прямо сейчас, до runner'а, чтобы
+      // split увидел все скрапленные адреса в email-колонке и разнёс
+      // каждый в отдельную строку. Без этого split трогает только
+      // исходную email-колонку, найденные идут в финальный merge
+      // через запятую — и в итоговом файле получаются multi-email
+      // cells, которые Instantly валидирует как одну строку и
+      // отбрасывает (реальный кейс polza@polza.ru
+      // constructor_2026-05-27 (1).csv: у Okkam одна строка с
+      // email=«jobs@okkam.ru, ekaterina.fisher@…, marina.…»).
+      //
+      // Сценарий №2 (resume edge case): worker умер сразу после
+      // find_emails (progress=100 в DB, current_step_key='find_emails')
+      // но до моего merge'а. Новый worker на resume пропускает
+      // find_emails (progress=100), приходит на следующий шаг.
+      // FOUND_EMAIL_COL ещё в данных — merge сделает то же что и
+      // happy path, до runner'а split_emails / последующих шагов.
+      //
+      // No-op когда FOUND_EMAIL_COL отсутствует (~95% итераций):
+      // дешёвый header-only check без копирования данных.
+      const preHeader = data[0] ?? [];
+      const hasFoundCol = preHeader.some(
+        (h) => typeof h === 'string' && h.trim() === FOUND_EMAIL_COL,
+      );
+      if (hasFoundCol) {
+        const beforeMergeCols = preHeader.length;
+        data = mergeFoundEmailColumn(data);
+        const afterMergeCols = data[0]?.length ?? 0;
+        console.log(
+          `[base-constructor][${jobId}] eager-merged FOUND_EMAIL_COL into email column before step '${stepKey}' (cols ${beforeMergeCols} → ${afterMergeCols})`,
+        );
+      }
+
       const stepStart = Date.now();
       console.log(
         `[base-constructor][${jobId}] step ${i + 1}/${selectedSteps.length} '${stepKey}' starting (input rows=${Math.max(0, data.length - 1)}, cols=${data[0]?.length ?? 0})`,

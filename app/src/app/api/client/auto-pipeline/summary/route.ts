@@ -50,9 +50,15 @@ export async function GET(req: NextRequest) {
     // тот, который реально дошёл до finishRunRow и обновил счётчики. Failed
     // прогоны (killed by redeploy, network errors etc) — это технические
     // факты, которые не должны драматизировать UX клиента.
+    //
+    // was_dry_run + воронка-поля (with_site/with_score/with_email/email_valid)
+    // нужны UI чтобы в dry_run показать «сколько обработано / валидно» вместо
+    // routing-нулей.
     const { data: lastCompletedRun } = await supabaseAdmin
       .from('client_auto_pipeline_runs')
-      .select('status, started_at, finished_at, parsed_count, new_count, routed_count, stored_count, skipped_count, failed_count')
+      .select(
+        'status, started_at, finished_at, parsed_count, new_count, routed_count, stored_count, skipped_count, failed_count, was_dry_run, with_site, with_score, with_email, email_valid',
+      )
       .eq('client_user_id', user.id)
       .eq('status', 'completed')
       .order('started_at', { ascending: false })
