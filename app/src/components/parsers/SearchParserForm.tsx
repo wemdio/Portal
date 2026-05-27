@@ -36,6 +36,13 @@ export function SearchParserForm({ onStart, busy }: Props) {
   // Сохранённый бриф с портала (/client/brief). Если есть — становится
   // дефолтным источником: клиенту не надо снова копировать/загружать
   // PDF. Тот же паттерн что в base-constructor и email-sequence-v2.
+  //
+  // ВАЖНО: savedBriefText и brief — независимые state'ы. brief хранит
+  // ТОЛЬКО то что юзер ввёл/загрузил в режиме «Свой». savedBriefText —
+  // что прилетело с портала. При переключении табов друг друга НЕ
+  // перезаписываем, чтобы не терять ни один из источников. На submit
+  // (handleGenerateQueries, handleStart) выбираем effectiveBrief по
+  // текущему briefSource.
   const [savedBriefText, setSavedBriefText] = useState('');
   const [savedBriefAvailable, setSavedBriefAvailable] = useState(false);
   const [briefSource, setBriefSource] = useState<'saved' | 'custom'>('custom');
@@ -50,27 +57,15 @@ export function SearchParserForm({ onStart, busy }: Props) {
         if (text) {
           setSavedBriefText(text);
           setSavedBriefAvailable(true);
-          // Default to saved mode AND populate the brief field so
-          // «Сгенерировать запросы» works in one click without any
-          // typing/uploading. Если юзер хочет другой бриф — переключит
-          // tab на «Свой» и впишет/загрузит.
           setBriefSource('saved');
-          setBrief(text);
         }
       } catch { /* non-critical: leave defaults */ }
     })();
   }, []);
 
-  // При переключении на 'saved' заливаем saved текст в brief.
-  // При переключении на 'custom' оставляем то, что юзер уже ввёл (если
-  // он только что переключился с saved — оставляем заполненное чтобы
-  // не терять контекст, юзер сам сотрёт если хочет).
-  const switchBriefSource = (next: 'saved' | 'custom') => {
-    setBriefSource(next);
-    if (next === 'saved' && savedBriefAvailable) {
-      setBrief(savedBriefText);
-    }
-  };
+  // Effective brief text для отправки в /api/parsers/search/generate
+  // (генерация запросов) и в onStart (запуск парсинга по брифу).
+  const effectiveBrief = briefSource === 'saved' ? savedBriefText : brief;
 
   const handlePdfUpload = async (file: File) => {
     setPdfUploading(true);
@@ -105,8 +100,12 @@ export function SearchParserForm({ onStart, busy }: Props) {
   };
 
   const handleGenerateQueries = async () => {
-    if (!brief.trim()) {
-      setGenerateError('Введите бриф или описание задачи.');
+    if (!effectiveBrief.trim()) {
+      setGenerateError(
+        briefSource === 'saved'
+          ? 'Сохранённый бриф пуст — заполните его на странице «Бриф» или переключитесь на «Свой».'
+          : 'Введите бриф или описание задачи.',
+      );
       return;
     }
     setGenerateError(null);
@@ -114,7 +113,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
     try {
       const res = await authFetch('/api/parsers/search/generate', {
         method: 'POST',
-        body: JSON.stringify({ brief: brief.trim() }),
+        body: JSON.stringify({ brief: effectiveBrief.trim() }),
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -148,7 +147,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
   };
 
   const handleStart = () => {
-    const hasBrief = brief.trim().length > 0;
+    const hasBrief = effectiveBrief.trim().length > 0;
     const hasQueriesList = queries.length > 0 && queries.some((q) => q.trim().length > 0);
     const hasQueriesText = queriesText.trim().length > 0;
 
@@ -159,7 +158,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
     setError(null);
 
     const payload: SearchParserStartPayload = {};
-    if (hasBrief) payload.brief = brief.trim();
+    if (hasBrief) payload.brief = effectiveBrief.trim();
     if (hasQueriesText) payload.queries_text = queriesText.trim();
     if (hasQueriesList && !hasQueriesText) payload.queries = queries.map((q) => q.trim()).filter(Boolean);
     payload.user_query = payload.brief ?? payload.queries_text ?? (payload.queries?.slice(0, 3).join(', ') ?? 'Запросы');
@@ -168,7 +167,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
   };
 
   const canStart =
-    (brief.trim().length > 0 && (queries.length === 0 || queries.some((q) => q.trim().length > 0))) ||
+    (effectiveBrief.trim().length > 0 && (queries.length === 0 || queries.some((q) => q.trim().length > 0))) ||
     queriesText.trim().length > 0;
 
   return (
@@ -224,7 +223,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
             <div className="mb-2 flex gap-1 rounded-lg bg-gray-100 p-1 text-xs w-fit">
               <button
                 type="button"
-                onClick={() => switchBriefSource('saved')}
+                onClick={() => setBriefSource('saved')}
                 className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
                   briefSource === 'saved'
                     ? 'bg-white text-gray-900 shadow-sm'
@@ -235,7 +234,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
               </button>
               <button
                 type="button"
-                onClick={() => switchBriefSource('custom')}
+                onClick={() => setBriefSource('custom')}
                 className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
                   briefSource === 'custom'
                     ? 'bg-white text-gray-900 shadow-sm'
