@@ -132,6 +132,8 @@ async function handleMessageReceived(payload: Record<string, unknown>): Promise<
 
   if (campaignId) {
     const { data: campaign } = await db.from('li_campaigns').select('*').eq('id', campaignId).maybeSingle<LiCampaign>();
+    // `stop_on_reply` means hand the conversation to a human after any real reply.
+    if (campaign?.stop_on_reply) return;
     if (campaign?.use_ai && campaign.ai_prompt_chat) {
       const reply = await generateAutoReply(
         text,

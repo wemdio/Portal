@@ -143,6 +143,10 @@ beforeEach(() => {
   adminFlag.value = false;
 });
 
+afterEach(() => {
+  jest.useRealTimers();
+});
+
 describe('LI Outreach — user_id isolation on list endpoints', () => {
   it('GET /accounts only returns rows for the authenticated user', async () => {
     state.rowsByTable.li_accounts = [
@@ -240,6 +244,49 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     expect(names).toEqual(['Mine']);
     const companies = (body.by_company as Array<{ company: string }>).map((c) => c.company);
     expect(companies).not.toContain('NotMine');
+  });
+
+  it('GET /dashboard returns zero invites_sent_today when last_invite_date is stale', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-05-28T12:00:00.000Z'));
+
+    state.rowsByTable.li_campaigns = [
+      {
+        id: 'stale',
+        user_id: AUTH_USER_ID,
+        name: 'Stale counter',
+        status: 'running',
+        daily_invite_limit: 30,
+        invites_sent_today: 30,
+        last_invite_date: '2026-05-26T00:00:00.000Z',
+        lead_list_id: null,
+      },
+      {
+        id: 'fresh',
+        user_id: AUTH_USER_ID,
+        name: 'Fresh counter',
+        status: 'running',
+        daily_invite_limit: 30,
+        invites_sent_today: 7,
+        last_invite_date: '2026-05-28T00:00:00.000Z',
+        lead_list_id: null,
+      },
+    ];
+    state.rowsByTable.li_leads = [];
+    state.rowsByTable.li_campaign_leads = [];
+    state.rowsByTable.li_campaign_logs = [];
+
+    const { GET } = await import('@/app/api/tools/li-outreach/dashboard/route');
+    const res = await GET(makeReq('http://x/api/tools/li-outreach/dashboard'));
+    const body = await (res as Response).json();
+    const statsByName = Object.fromEntries(
+      (body.campaign_stats as Array<{ name: string; invites_sent_today: number }>).map((c) => [
+        c.name,
+        c,
+      ]),
+    );
+
+    expect(statsByName['Stale counter'].invites_sent_today).toBe(0);
+    expect(statsByName['Fresh counter'].invites_sent_today).toBe(7);
   });
 
   it('GET /logs scopes by owned campaigns', async () => {
