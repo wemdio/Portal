@@ -320,8 +320,13 @@ function CampaignsPageContent() {
 
       <header className="mb-6 sm:mb-8 flex items-start justify-between gap-4 flex-wrap">
         <div>
+          {/* Page eyebrow — sync with the sidebar's group numbering. Мониторинг
+              is the second group in CLIENT_NAV_GROUPS (after Старт), so the
+              sidebar renders «02 → Мониторинг». Page header must match —
+              otherwise the user sees the same section labelled differently in
+              two places. Flagged on the 2026-05-26 /client screenshot. */}
           <p className="ds-eyebrow mb-2">
-            01<span aria-hidden> → </span>Мониторинг
+            02<span aria-hidden> → </span>Мониторинг
           </p>
           <h1
             className="text-xl sm:text-2xl font-bold m-0"
@@ -333,25 +338,30 @@ function CampaignsPageContent() {
             Статистика по вашим email-кампаниям
           </p>
         </div>
-        {/* Right-aligned actions: «+ Создать» visible at all times (not just
-            in empty state), plus the last-synced timestamp underneath. */}
-        <div className="flex flex-col items-end gap-1.5 shrink-0">
-          <Link
-            href={'/client/launch' as Route}
-            className="ds-btn-secondary inline-flex items-center gap-1.5 px-3 py-2 text-xs"
-          >
-            <Plus className="h-3.5 w-3.5" aria-hidden />
-            Создать
-          </Link>
-          {!loading && syncedLabel && (
-            <p
-              className="ds-mono text-[11px]"
-              style={{ color: 'var(--cp-paper-faint)' }}
+        {/* Right-aligned actions — only when the list has campaigns. On an
+            empty state the inline CTA at the bottom of the empty block is
+            the single primary action; surfacing «+ Создать» twice was a
+            duplicate-CTA finding on the 2026-05-26 screenshot. During load
+            (campaigns array still empty) we also hide it to avoid flash. */}
+        {hasAnyCampaigns && (
+          <div className="flex flex-col items-end gap-1.5 shrink-0">
+            <Link
+              href={'/client/launch' as Route}
+              className="ds-btn-secondary inline-flex items-center gap-1.5 px-3 py-2 text-xs"
             >
-              обновлено {syncedLabel}
-            </p>
-          )}
-        </div>
+              <Plus className="h-3.5 w-3.5" aria-hidden />
+              Создать
+            </Link>
+            {!loading && syncedLabel && (
+              <p
+                className="ds-mono text-[11px]"
+                style={{ color: 'var(--cp-paper-faint)' }}
+              >
+                обновлено {syncedLabel}
+              </p>
+            )}
+          </div>
+        )}
       </header>
 
       {error && (
@@ -382,18 +392,21 @@ function CampaignsPageContent() {
         // Fast path: API resolves under 300ms — show nothing, no flash.
         <div className="py-16" />
       ) : !hasAnyCampaigns ? (
-        <div className="neu-card py-12 sm:py-16 text-center px-6">
-          <Mail
-            className="mx-auto h-8 w-8 mb-3"
-            style={{ color: 'var(--cp-paper-faint)' }}
-            aria-hidden
-          />
-          <p className="text-base sm:text-lg font-bold mb-2" style={{ color: 'var(--cp-paper)' }}>
-            Кампаний пока нет
-          </p>
-          <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-paper-mute)' }}>
-            Запустите первую кампанию: загрузите базу, напишите цепочку и мы покажем
-            здесь её метрики (отправки, открытия, ответы) в реальном времени.
+        /* Distilled empty state — was a ~350px neu-card with icon + h2 + body
+           + CTA for very little information value. Now: editorial centered
+           sentence + primary CTA, no bg-card, no decorative icon. Trims ~60%
+           of vertical footprint and stays in the editorial paper-on-ink
+           voice. Flagged on the 2026-05-26 /client screenshot. */
+        <div className="text-center py-10 sm:py-14 max-w-md mx-auto">
+          <p
+            className="text-sm sm:text-base mb-5 leading-relaxed"
+            style={{ color: 'var(--cp-paper-mute)' }}
+          >
+            <span style={{ color: 'var(--cp-paper)' }} className="font-semibold">
+              Кампаний пока нет.
+            </span>
+            {' '}Запустите первую — мы покажем здесь её метрики (отправки,
+            открытия, ответы) в реальном времени.
           </p>
           <Link
             href={'/client/launch' as Route}

@@ -60,6 +60,15 @@ export interface ClientLaunchBehaviorOverride {
   stop_on_reply: boolean;
 }
 
+/**
+ * Per-launch subset of preset.email_account_ids. Used when the client wants
+ * to run THIS campaign on a hand-picked subset of their preset mailboxes
+ * (e.g. two parallel campaigns on the same base using different mailbox
+ * pools for different offers). Validated on the API side as a strict
+ * subset of the client's current `preset.email_account_ids`.
+ */
+export type ClientLaunchEmailAccountsOverride = string[];
+
 export interface ClientLaunchSequence {
   name: string;
   steps: ClientLaunchSequenceStep[];
@@ -101,4 +110,11 @@ export interface ClientCampaignLaunch {
   status: LaunchStatus;
   error_message: string | null;
   created_at: string;
+  /**
+   * Per-launch subset of preset.email_account_ids that this campaign was
+   * launched with. NULL = full preset pool was used (default / legacy
+   * behavior). Non-null = client explicitly picked a subset for this
+   * launch.
+   */
+  email_account_ids: string[] | null;
 }

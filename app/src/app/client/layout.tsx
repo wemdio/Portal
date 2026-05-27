@@ -131,6 +131,12 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
       <DemoBanner />
       <PaymentLockedBanner />
       <header className="sticky top-0 z-40 px-3 pt-3 pb-1 sm:px-4 sm:pt-4 sm:pb-2">
+        {/* Compact brand-bar: drop the flex-1 spacer between Portal and the
+            language/sign-out cluster — the controls now sit next to the brand
+            on the left. At ≥1400px shell width this collapses ~1100px of dead
+            horizontal space the user flagged on the 2026-05-26 brief
+            screenshot. Right side intentionally empty: editorial brand-bar
+            feel (Linear / Notion / Stripe Press use this pattern). */}
         <div className="neu-card flex items-center gap-2 sm:gap-3 px-3 py-2.5 sm:px-5 sm:py-3 mx-auto max-w-[1400px]">
           <button
             type="button"
@@ -148,8 +154,6 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
           >
             Portal
           </span>
-
-          <div className="flex-1" />
 
           {/* Multi-locale dropdown. Uses the same neu-pill styling as the
               old RU/EN toggle for visual continuity. The dropdown panel is
@@ -239,7 +243,15 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         mode={navMode}
       />
 
-      <div className="flex-1 flex">
+      {/* Layout shell: wrap sidebar + main in the same 1400px viewport-centered
+          column the header uses (line 134), so:
+            (a) sidebar's left edge sits at the header's left edge — they look
+                like one column, not two layout systems competing,
+            (b) main content centers inside `viewport-center-minus-sidebar`
+                rather than `viewport-minus-sidebar`, removing the ~140px
+                perceptual rightward drift the user flagged in the 2026-05-26
+                dashboard screenshot. */}
+      <div className="flex-1 flex w-full max-w-[1400px] mx-auto">
         <ClientSidebar activeId={activeId} locale={locale} mode={navMode} />
         <main className="flex-1 min-w-0 px-3 py-4 sm:px-4 sm:py-6 md:px-8 md:py-8">
           {children}

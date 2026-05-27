@@ -1,0 +1,370 @@
+/**
+ * Manual scoring runner — обрабатывает один прогон.
+ *
+ * Используется воркером manualScoringWorker. Также может быть вызван
+ * напрямую для тестирования.
+ *
+ * Bucket'ы фиксированные (по решению клиента — независимы от auto-pipeline
+ * configs, который может меняться):
+ *   storage:   0 ≤ score ≤ 1000     — «не пишем», только domain+score в CSV
+ *   medium:    1001 ≤ score ≤ 15000 — enrich email + SMTP
+ *   high:      15001 ≤ score ≤ 1M   — enrich email + SMTP
+ *   top:       score > 1M           — enrich email + SMTP
+ *   invalid:   score === null       — Mailganer не ответил / неверный domain
+ */
+
+import 'server-only';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { getOrFetchScore, normalizeDomain } from './mailganerScoreCache';
+import { validateEmailForAutoPipeline } from './autoPipelineEmailValidation';
+import { scrapeEmails } from '@/lib/enrich/emailScraper';
+import type { DomainInfo } from '@/lib/emailValidation/shared';
+
+export type ManualBucket = 'storage' | 'medium' | 'high' | 'top' | 'invalid';
+
+export function classifyScore(score: number | null): ManualBucket {
+  if (score === null) return 'invalid';
+  if (score <= 1000) return 'storage';
+  if (score <= 15000) return 'medium';
+  if (score <= 1_000_000) return 'high';
+  return 'top';
+}
+
+/** Bucket'ы где нужно делать email-enrichment. */
+const ACTIVE_BUCKETS = new Set<ManualBucket>(['medium', 'high', 'top']);
+
+interface EndpointConfig {
+  url: string;
+  apiKey: string;
+  authScheme: string;
+  timeoutMs: number;
+}
+
+interface ProcessOptions {
+  runId: string;
+  endpoint: EndpointConfig;
+  /** Прогресс-callback после каждого batch — даёт воркеру писать в БД. */
+  onProgress?: (processed: number) => Promise<void>;
+  /** Concurrency для Mailganer + scrape. Default 5. */
+  concurrency?: number;
+  /** Лимит на одну строку, чтобы не зависнуть. Default 60 сек. */
+  perRowTimeoutMs?: number;
+}
+
+interface ProcessResult {
+  status: 'completed' | 'failed';
+  total: number;
+  buckets: Record<ManualBucket, number>;
+  error?: string;
+}
+
+/**
+ * Обрабатывает все необработанные строки прогона.
+ * Идемпотентно: повторный вызов берёт только строки где bucket IS NULL.
+ */
+export async function processManualRun(opts: ProcessOptions): Promise<ProcessResult> {
+  if (!supabaseAdmin) {
+    return {
+      status: 'failed',
+      total: 0,
+      buckets: { storage: 0, medium: 0, high: 0, top: 0, invalid: 0 },
+      error: 'supabaseAdmin not initialized',
+    };
+  }
+
+  const concurrency = opts.concurrency ?? 5;
+
+  // 1. Mark as processing
+  await supabaseAdmin
+    .from('client_manual_score_runs')
+    .update({ status: 'processing' })
+    .eq('id', opts.runId);
+
+  // 2. Берём все ещё не обработанные строки этого прогона
+  const { data: rowsData, error: rowsErr } = await supabaseAdmin
+    .from('client_manual_score_rows')
+    .select('id, domain')
+    .eq('run_id', opts.runId)
+    .is('bucket', null)
+    .order('id', { ascending: true });
+
+  if (rowsErr) {
+    return await markFailed(opts.runId, `Failed to load rows: ${rowsErr.message}`);
+  }
+
+  const rows = (rowsData ?? []) as Array<{ id: number; domain: string | null }>;
+  if (rows.length === 0) {
+    // Нечего обрабатывать. Возможно прогон уже завершён или был пуст.
+    return await finalize(opts.runId);
+  }
+
+  // 3. Shared MX cache между всеми row'ами этого прогона — economy для повторяющихся
+  //    доменов внутри одного файла (бывает).
+  const domainInfoCache = new Map<string, DomainInfo>();
+
+  // 4. Worker pool
+  let cursor = 0;
+  let processedSinceLastProgress = 0;
+  const PROGRESS_FLUSH_EVERY = 25;
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = cursor++;
+      if (i >= rows.length) return;
+      const row = rows[i];
+
+      const result = await processOneRow(row, opts.endpoint, domainInfoCache);
+
+      // Сохраняем результат — независимо от ошибки. bucket всегда выставляем,
+      // чтобы при повторном вызове processManualRun row не выбралась снова.
+      await supabaseAdmin!
+        .from('client_manual_score_rows')
+        .update({
+          domain: result.domain,
+          score: result.score,
+          rating: result.rating,
+          spf: result.spf,
+          email: result.email,
+          email_validation_status: result.emailValidationStatus,
+          bucket: result.bucket,
+          error_message: result.errorMessage,
+          processed_at: new Date().toISOString(),
+        })
+        .eq('id', row.id);
+
+      processedSinceLastProgress++;
+      if (processedSinceLastProgress >= PROGRESS_FLUSH_EVERY) {
+        const total = cursor; // приближённо
+        if (opts.onProgress) {
+          await opts.onProgress(total).catch(() => undefined);
+        }
+        processedSinceLastProgress = 0;
+      }
+    }
+  }
+
+  try {
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, rows.length) }, worker),
+    );
+  } catch (err) {
+    return await markFailed(
+      opts.runId,
+      err instanceof Error ? err.message : 'worker pool crashed',
+    );
+  }
+
+  return await finalize(opts.runId);
+}
+
+interface ProcessedRow {
+  domain: string | null;
+  score: number | null;
+  rating: string | null;
+  spf: string | null;
+  email: string | null;
+  emailValidationStatus: string | null;
+  bucket: ManualBucket;
+  errorMessage: string | null;
+}
+
+async function processOneRow(
+  row: { id: number; domain: string | null },
+  endpoint: EndpointConfig,
+  mxCache: Map<string, DomainInfo>,
+): Promise<ProcessedRow> {
+  const domain = row.domain ? normalizeDomain(row.domain) : null;
+  if (!domain) {
+    return {
+      domain: null,
+      score: null,
+      rating: null,
+      spf: null,
+      email: null,
+      emailValidationStatus: null,
+      bucket: 'invalid',
+      errorMessage: 'invalid domain',
+    };
+  }
+
+  // 1. Score (использует кэш — для уже виденных доменов мгновенно)
+  let scoreResult;
+  try {
+    scoreResult = await getOrFetchScore(domain, endpoint, 'manual');
+  } catch (err) {
+    return {
+      domain,
+      score: null,
+      rating: null,
+      spf: null,
+      email: null,
+      emailValidationStatus: null,
+      bucket: 'invalid',
+      errorMessage: err instanceof Error ? err.message : 'mailganer error',
+    };
+  }
+
+  const score = scoreResult.score;
+  const rating =
+    scoreResult.raw && typeof scoreResult.raw === 'object' && 'rating' in scoreResult.raw
+      ? String((scoreResult.raw as Record<string, unknown>).rating ?? '')
+      : null;
+  const bucket = classifyScore(score);
+
+  // 2. Если score ≤ 1000 (storage) или null (invalid) — НЕ обогащаем email
+  if (!ACTIVE_BUCKETS.has(bucket)) {
+    return {
+      domain,
+      score,
+      rating: rating || null,
+      spf: scoreResult.spf,
+      email: null,
+      emailValidationStatus: null,
+      bucket,
+      errorMessage: scoreResult.ok ? null : scoreResult.error || null,
+    };
+  }
+
+  // 3. Активный bucket — scrape сайта + SMTP-валидация
+  let email: string | null = null;
+  let emailValidationStatus: string | null = null;
+  try {
+    const scraped = await scrapeEmails(`https://${domain}`, {
+      timeout: 12_000,
+      maxPages: 5,
+    }).catch(() => ({ emails: [] as string[] }));
+    email = scraped.emails[0] ?? null;
+    if (email) {
+      const validation = await validateEmailForAutoPipeline(email, mxCache);
+      emailValidationStatus = validation.status;
+    }
+  } catch (err) {
+    // Email-enrichment упал — НЕ фейлим всю строку, просто записываем без email
+    return {
+      domain,
+      score,
+      rating: rating || null,
+      spf: scoreResult.spf,
+      email: null,
+      emailValidationStatus: null,
+      bucket,
+      errorMessage: err instanceof Error ? err.message : 'scrape/validate error',
+    };
+  }
+
+  return {
+    domain,
+    score,
+    rating: rating || null,
+    spf: scoreResult.spf,
+    email,
+    emailValidationStatus,
+    bucket,
+    errorMessage: null,
+  };
+}
+
+async function markFailed(runId: string, message: string): Promise<ProcessResult> {
+  if (supabaseAdmin) {
+    await supabaseAdmin
+      .from('client_manual_score_runs')
+      .update({
+        status: 'failed',
+        error_message: message.slice(0, 500),
+        finished_at: new Date().toISOString(),
+      })
+      .eq('id', runId);
+  }
+  return {
+    status: 'failed',
+    total: 0,
+    buckets: { storage: 0, medium: 0, high: 0, top: 0, invalid: 0 },
+    error: message,
+  };
+}
+
+async function finalize(runId: string): Promise<ProcessResult> {
+  if (!supabaseAdmin) {
+    return {
+      status: 'failed',
+      total: 0,
+      buckets: { storage: 0, medium: 0, high: 0, top: 0, invalid: 0 },
+      error: 'supabaseAdmin gone',
+    };
+  }
+  // Считаем breakdown по bucket'ам
+  const { data: bucketCounts } = await supabaseAdmin
+    .from('client_manual_score_rows')
+    .select('bucket')
+    .eq('run_id', runId);
+
+  const buckets: Record<ManualBucket, number> = {
+    storage: 0,
+    medium: 0,
+    high: 0,
+    top: 0,
+    invalid: 0,
+  };
+  for (const r of (bucketCounts ?? []) as Array<{ bucket: ManualBucket | null }>) {
+    if (r.bucket && r.bucket in buckets) buckets[r.bucket]++;
+  }
+
+  const total =
+    buckets.storage + buckets.medium + buckets.high + buckets.top + buckets.invalid;
+
+  await supabaseAdmin
+    .from('client_manual_score_runs')
+    .update({
+      status: 'completed',
+      finished_at: new Date().toISOString(),
+      processed_count: total,
+      bucket_storage_count: buckets.storage,
+      bucket_medium_count: buckets.medium,
+      bucket_high_count: buckets.high,
+      bucket_top_count: buckets.top,
+    })
+    .eq('id', runId);
+
+  return { status: 'completed', total, buckets };
+}
+
+/**
+ * Парсит CSV/text-input и возвращает массив raw доменов (без нормализации,
+ * нормализация будет в processOneRow).
+ *
+ * Поддерживаем:
+ *   - 1 домен на строку (просто text-list)
+ *   - CSV с первой колонкой = домен (заголовок 'domain' опционально)
+ *   - URL'ы с/без http(s):// — оба ok
+ *   - email'ы — берётся часть после @
+ *
+ * Возвращает максимум `maxRows` (default 50000).
+ */
+export function parseDomainsInput(raw: string, maxRows = 50_000): string[] {
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const result: string[] = [];
+  for (const line of lines) {
+    // Если строка похожа на CSV (есть запятая) — берём только первую колонку
+    const first = line.split(',')[0].trim();
+    if (!first) continue;
+    // Если это похоже на header — пропускаем
+    if (
+      result.length === 0 &&
+      /^(domain|domains|url|website|host)$/i.test(first)
+    ) {
+      continue;
+    }
+    // Удалить кавычки
+    const cleaned = first.replace(/^["']|["']$/g, '');
+    // Если выглядит как email — взять домен после @
+    const emailMatch = cleaned.match(/@([^\s]+)$/);
+    const candidate = emailMatch ? emailMatch[1] : cleaned;
+    result.push(candidate);
+    if (result.length >= maxRows) break;
+  }
+  return result;
+}

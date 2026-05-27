@@ -838,6 +838,22 @@ export interface StepValidateEmailsOptions {
  * деградирует до 'original'/no-op без ошибок.
  */
   validateTarget?: ValidateEmailsTarget;
+  /**
+   * Что делать со строками, у которых валидируемая email-колонка ПУСТА
+   * (нет ни нормального адреса, ни мусора-который-стал-после-extractEmail-пустым):
+   *
+   *   - true (default): такие строки фильтруются вместе с теми, у которых
+   *     email невалидный. Семантика «конструктор баз»: на выходе — только
+   *     строки с подтверждённым работающим email'ом. Раньше 74% строк
+   *     возвращалось без email'а (см. реальный кейс polza@polza.ru,
+   *     job 8b188038-…: 1795 пустых из 2418 на выходе).
+   *
+   *   - false: legacy-поведение. Строки без email сохраняются как «не
+   *     валидировались». Бывает полезно когда валидация — не финальный
+   *     шаг, а промежуточный enrich (например, find_emails ещё не
+   *     запустился). Не использовать в base-constructor user flow.
+   */
+  dropRowsWithoutEmail?: boolean;
 }
 
 export async function stepValidateEmails(
@@ -846,6 +862,7 @@ export async function stepValidateEmails(
   isCancelled?: CancelCheckFn,
   options?: StepValidateEmailsOptions,
 ): Promise<string[][]> {
+  const dropRowsWithoutEmail = options?.dropRowsWithoutEmail ?? true;
   const header = data[0];
   const body = data.slice(1);
   const originalEmailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
@@ -953,11 +970,14 @@ export async function stepValidateEmails(
         row[m.srcIdx] = '';
       }
     }
-    // Если ни одна колонка не имела email вовсе — оставляем строку (как раньше,
-    // status='' трактовался как «не валидировался»). Это сохраняет совместимость
-    // со сценариями где email колонка есть, но пустая для конкретной строки.
+    // Строка не имела email ни в одной валидируемой колонке (status='' везде).
+    // По умолчанию (dropRowsWithoutEmail=true, base-constructor user flow) —
+    // дропаем такую строку: в финальном файле нечего слать на почту.
+    // Legacy-режим (dropRowsWithoutEmail=false) — сохраняем строку. Раньше
+    // legacy-поведение было хардкодом и давало 74% мусорных строк на выходе
+    // (см. job polza@polza.ru 8b188038-…: 1795 пустых строк из 2418).
     const hadAnyEmail = meta.some((m) => row[m.statusIdx] !== '');
-    if (!hadAnyEmail) return true;
+    if (!hadAnyEmail) return !dropRowsWithoutEmail;
     return anyValid;
   });
 

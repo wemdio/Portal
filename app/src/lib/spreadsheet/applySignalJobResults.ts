@@ -3,6 +3,10 @@ import { logError, logInfo } from '@/lib/loggerServer';
 import { SIGNAL_ERROR_MARKER, isStackCellRefillable } from '@/lib/enrich/signalConstants';
 import { ExtractorKey } from '@/lib/enrich/extractors/types';
 import { formatExtraValue } from '@/lib/enrich/extractors/formatExtraValue';
+import {
+  loadCompressedState,
+  saveCompressedStateWithCas,
+} from './serverState';
 
 export type SignalResultRow = {
   row_index: number;
@@ -34,21 +38,6 @@ export interface ApplySignalsOptions {
   /** Extra columns to write per row, populated from extractor outputs. */
   extraCols?: ExtraColumnSpec[];
 }
-
-type SpreadsheetTab = {
-  id: string;
-  name: string;
-  data: string[][];
-};
-
-type SpreadsheetState = {
-  version?: number;
-  tabs: SpreadsheetTab[];
-  activeTabId?: string;
-  tabCounter?: number;
-  columnWidths?: Record<string, number[]>;
-  savedAt?: number;
-};
 
 /**
  * Pure function — mutates `tabData` in place.
@@ -167,6 +156,24 @@ function parseSignalResult(resultText: string | null): ParsedSignalResult {
  * to the user's spreadsheet state. Idempotent: re-running with applyOnlyEmpty=true
  * will not overwrite existing values.
  */
+/**
+ * Server-side apply for completed signal job results.
+ *
+ * См. `applyJobResults.ts` для детального обоснования архитектуры (load
+ * через state_compressed + CAS save). Здесь та же логика, но мутация
+ * сложнее — две колонки stack/profile + опциональные extra-колонки
+ * (extractor signals) с разной форматировкой через formatExtraValue.
+ *
+ * Идемпотентен с applyOnlyEmpty=true: повторный вызов с тем же набором
+ * results не перезатрёт ячейки которые юзер уже отредактировал вручную
+ * (см. isStackCellRefillable).
+ *
+ * При CAS-conflict (frontend параллельно сохранил state) retry'имся до
+ * MAX_CAS_RETRIES раз; после — сдаёмся, на следующем тике worker'а
+ * попытка повторится.
+ */
+const MAX_CAS_RETRIES = 2;
+
 export async function applySignalJobResults(
   userId: string,
   jobId: string,
@@ -179,59 +186,59 @@ export async function applySignalJobResults(
     const results = await fetchAllSignalResults(jobId);
     if (results.length === 0) return true;
 
-    const state = await loadSpreadsheetState(userId);
-    if (!state) return false;
+    for (let attempt = 1; attempt <= MAX_CAS_RETRIES + 1; attempt += 1) {
+      const loaded = await loadCompressedState(userId);
+      if (!loaded) {
+        if (attempt === 1) {
+          await logInfo('spreadsheet.apply.signals.no_state', 'No spreadsheet state for user', {
+            userId, jobId, tabId,
+          });
+        }
+        return false;
+      }
+      const { state, loadedUpdatedAt } = loaded;
 
-    const tabIdx = state.tabs.findIndex((t) => t.id === tabId);
-    if (tabIdx < 0) {
-      await logInfo('spreadsheet.apply.tab_not_found', 'Tab not found for signal results', {
-        userId, jobId, tabId,
+      const tabIdx = state.tabs.findIndex((t) => t.id === tabId);
+      if (tabIdx < 0) {
+        await logInfo('spreadsheet.apply.tab_not_found', 'Tab not found for signal results', {
+          userId, jobId, tabId,
+        });
+        return false;
+      }
+
+      const tab = state.tabs[tabIdx];
+      const summary = applySignalsToTabData(tab.data, results, options);
+
+      state.tabs[tabIdx] = tab;
+      state.savedAt = Date.now();
+
+      const save = await saveCompressedStateWithCas(userId, state, loadedUpdatedAt);
+      if (save.ok) {
+        await logInfo('spreadsheet.apply.signals_done', `Applied ${summary.applied} signal results`, {
+          userId, jobId, tabId, applied: summary.applied, skipped: summary.skipped, attempt,
+        });
+
+        // Free up storage: delete completed/failed queue rows for this job
+        // (results are now in the spreadsheet — keeping queue would duplicate data).
+        await purgeSignalQueue(jobId);
+        return true;
+      }
+      if (save.reason === 'conflict' && attempt <= MAX_CAS_RETRIES) {
+        await logInfo('spreadsheet.apply.signals.cas_retry', 'CAS conflict, retrying', {
+          userId, jobId, tabId, attempt,
+        });
+        continue;
+      }
+      await logInfo('spreadsheet.apply.signals.skipped', `Skipped after attempt ${attempt}`, {
+        userId, jobId, tabId, reason: save.reason, details: save.details,
       });
       return false;
     }
-
-    const tab = state.tabs[tabIdx];
-    const summary = applySignalsToTabData(tab.data, results, options);
-
-    state.tabs[tabIdx] = tab;
-    state.savedAt = Date.now();
-
-    await saveSpreadsheetState(userId, state);
-    await logInfo('spreadsheet.apply.signals_done', `Applied ${summary.applied} signal results`, {
-      userId, jobId, tabId, applied: summary.applied, skipped: summary.skipped,
-    });
-
-    // Free up storage: delete completed/failed queue rows for this job
-    // (results are now in the spreadsheet — keeping queue would duplicate data).
-    await purgeSignalQueue(jobId);
-
-    return true;
+    return false;
   } catch (err) {
     await logError('spreadsheet.apply.signals_failed', err, { userId, jobId, tabId });
     return false;
   }
-}
-
-async function loadSpreadsheetState(userId: string): Promise<SpreadsheetState | null> {
-  if (!supabaseAdmin) return null;
-  const { data, error } = await supabaseAdmin
-    .from('database_spreadsheet_states')
-    .select('state')
-    .eq('user_id', userId)
-    .single();
-  if (error || !data?.state) return null;
-  return typeof data.state === 'string' ? JSON.parse(data.state) : data.state;
-}
-
-async function saveSpreadsheetState(userId: string, state: SpreadsheetState): Promise<void> {
-  if (!supabaseAdmin) return;
-  await supabaseAdmin
-    .from('database_spreadsheet_states')
-    .upsert({
-      user_id: userId,
-      state,
-      updated_at: new Date().toISOString(),
-    });
 }
 
 async function fetchAllSignalResults(jobId: string): Promise<SignalResultRow[]> {

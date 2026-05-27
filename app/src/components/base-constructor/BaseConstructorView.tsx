@@ -11,6 +11,10 @@ import {
 } from '@/lib/tools/baseConstructorClientGuard';
 import { parseCSV } from '@/lib/spreadsheet/parseCSV';
 import {
+  estimateProcessingMinutes,
+  formatProcessingTimeBand,
+} from '@/lib/tools/baseConstructorEta';
+import {
   Eraser, CopyMinus, MailMinus, Sparkles, MailSearch, MailCheck,
   Globe, FileText, Target, PenLine, Upload, Play, X, Check,
   Download, ArrowRight, Loader2, ChevronDown, ChevronUp, RotateCcw,
@@ -338,6 +342,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const briefFileRef = useRef<HTMLInputElement | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
+  // Секунды, прошедшие с момента нажатия «Запустить». Используется ТОЛЬКО
+  // во время `submitting=true` для дружелюбного hint'а под кнопкой («идёт
+  // загрузка большого файла, обычно до минуты»). Без этого юзер на больших
+  // базах (несколько мегабайт jsonb-payload в POST'е) видит крутящееся «Запуск...»
+  // и думает что зависло — жалоба клиента polza@polza.ru от 26 мая.
+  const [submittingElapsedSec, setSubmittingElapsedSec] = useState(0);
   const [error, setError] = useState('');
 
   const [activeJob, setActiveJob] = useState<ConstructorJob | null>(null);
@@ -438,6 +448,64 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     pollRef.current = setInterval(poll, 3000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [activeJob, loadHistory]);
+
+  /* ─── Submitting elapsed timer ──────────────────────────────────────
+   *
+   * Пока submitting=true (юзер нажал «Запустить» и ждёт ответа POST'а),
+   * тикаем секундомер раз в секунду. Используется UI-кнопкой для показа
+   * дружелюбного hint'а («загружаем большой файл, обычно до минуты»).
+   *
+   * Сбрасывается в 0 как только submitting=false.
+   */
+  useEffect(() => {
+    if (!submitting) {
+      setSubmittingElapsedSec(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const id = setInterval(() => {
+      setSubmittingElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [submitting]);
+
+  /* ─── Polling fallback while submitting ─────────────────────────────
+   *
+   * Сценарий клиента polza@polza.ru: загрузил 4297 строк CSV (6.5 МБ jsonb
+   * payload в POST'е), фронт повис на «Запуск...» больше минуты — backend
+   * принимал большой body и не успевал ответить ДО того как worker уже
+   * создал job в БД и начал его обрабатывать. Юзер видит «Запуск...»,
+   * думает что зависло, паникует.
+   *
+   * Защита: после 25 секунд ожидания начинаем фоном поллить активный
+   * job через GET /api/tools/base-constructor (loadHistory). Если в БД
+   * уже появилась running/pending запись этого юзера (POST успел дойти,
+   * просто ответ ещё едет) — переключаем UI в processing view, не дожидаясь
+   * ответа POST'а. POST потом ответит, но мы уже в правильном состоянии.
+   */
+  useEffect(() => {
+    if (!submitting || submittingElapsedSec < 25) return;
+    let cancelled = false;
+    const checkActiveJob = async () => {
+      try {
+        const res = await authFetch('/api/tools/base-constructor');
+        if (!res.ok || cancelled) return;
+        const { jobs } = (await res.json()) as { jobs?: ConstructorJob[] };
+        const running = (jobs ?? []).find((j) =>
+          ['pending', 'processing'].includes(j.status),
+        );
+        if (running && !cancelled) {
+          setActiveJob(running);
+          setSubmitting(false);
+        }
+      } catch {
+        // Игнорируем — следующий тик попробует ещё раз.
+      }
+    };
+    void checkActiveJob();
+    const id = setInterval(() => { void checkActiveJob(); }, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [submitting, submittingElapsedSec]);
 
   /* ─── Load job result data ─── */
 
@@ -912,20 +980,21 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     AI category (with the 2 interactive cards) below.
                   */}
                   {clientMode && (
-                    <div
-                      className="rounded-md px-4 py-3"
-                      style={{
-                        background: 'var(--cp-surface-rest)',
-                        border: '1px solid var(--cp-divider)',
-                      }}
-                    >
+                    /* Bridge #5: flatten the «автоматически» inner box. The
+                       framed wrapper inside an already-bordered outer card
+                       was the hairline-on-hairline anti-pattern visible in
+                       the 2026-05-26 screenshot review. The eyebrow + tight
+                       paragraph speak for themselves; the outer section card
+                       already provides the frame. clientMode-gated → admin
+                       (/tools/our-bases) unaffected. */
+                    <div className="px-1 py-2">
                       <p
                         className="ds-eyebrow mb-1"
                         style={{ color: 'var(--cp-paper-mute)' }}
                       >
                         автоматически
                       </p>
-                      <p className="text-xs" style={{ color: 'var(--cp-paper)' }}>
+                      <p className="text-xs leading-relaxed" style={{ color: 'var(--cp-paper)' }}>
                         Очистка пустых, дедуп строк/email, разделение почт, очистка названий,
                         проверка сайтов, поиск email, валидация и обогащение описаниями —
                         выполняются по умолчанию для каждой базы.
@@ -1478,7 +1547,10 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   {submitting ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      Запуск...
+                      {submittingElapsedSec < 5 && 'Запуск...'}
+                      {submittingElapsedSec >= 5 && submittingElapsedSec < 20 && 'Загружаем базу...'}
+                      {submittingElapsedSec >= 20 && submittingElapsedSec < 60 && `Сохраняем... ${submittingElapsedSec}s`}
+                      {submittingElapsedSec >= 60 && `Большой файл, ещё немного... ${submittingElapsedSec}s`}
                     </>
                   ) : (
                     <>
@@ -1487,24 +1559,44 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     </>
                   )}
                 </button>
-                {/* Pre-flight summary — facts the user can verify, plus a vague
-                    time band (without false precision). Earlier version used
-                    serial worker timings (0.5s/row × AI steps) that
-                    overshot 9× for 10K-row jobs because real workers parallel-
-                    fire AI requests. Per re-critique 2026-05-25T21-57-33Z
-                    (N2 vibes-based math + N3 dead plural ternary). */}
+                {/* Фазированный hint под кнопкой — синхронизируется с таймером
+                    выше. До 5s — ничего (быстрый ответ выглядит как обычная
+                    форма). 5-30s — мягкое объяснение что нормально. 30s+ —
+                    подсказка что фоновый polling уже работает (см. useEffect
+                    в начале файла, который ловит активный job через GET).
+                    60s+ — финальный совет про F5 если совсем хочется
+                    подействовать. */}
+                {submitting && submittingElapsedSec >= 5 && (
+                  <p className="text-xs text-gray-500 leading-relaxed">
+                    {submittingElapsedSec < 30 && (
+                      <>Загружаем базу на сервер. На больших файлах (несколько мегабайт) это занимает до минуты — это нормально.</>
+                    )}
+                    {submittingElapsedSec >= 30 && submittingElapsedSec < 90 && (
+                      <>Файл большой, продолжаем сохранение. Задача наверняка уже запущена на сервере — если ответ долго не приходит, мы переключим экран автоматически.</>
+                    )}
+                    {submittingElapsedSec >= 90 && (
+                      <>Сохранение затянулось. Обновите страницу (F5) — задача почти наверняка уже запущена и появится в «Прогрессе».</>
+                    )}
+                  </p>
+                )}
+                {/* Pre-flight summary — facts the user can verify, plus a
+                    rough time band based on per-step empirical timings
+                    (see estimateProcessingMinutes below).
+                    History: earlier formula ignored `cheap` cost (site-scrape
+                    steps like find_emails, check_sites, enrich_descriptions)
+                    and only counted `ai`/`api`. For polza@polza.ru job on
+                    4297 rows it predicted «5–15 минут» but actual was 2h —
+                    because the 3 cheap site-scraping steps dominated, and
+                    they weren't in the formula at all. Now `cheap` is the
+                    biggest coefficient. */}
                 {!submitting && (() => {
                   const rows = Math.max(0, (fileData?.length ?? 0) - 1);
                   const aiSteps = selectedSteps.filter((k) => STEP_MAP.get(k)?.cost === 'ai').length;
                   const apiSteps = selectedSteps.filter((k) => STEP_MAP.get(k)?.cost === 'api').length;
-                  // Vague time band — honest about not having real telemetry.
-                  // Tiers: <5K rows or no AI/API = «несколько минут»; up to
-                  // 20K rows or 1 AI step = «5–15 минут»; otherwise «10+ мин».
-                  const sizeFactor = rows + aiSteps * 2000 + apiSteps * 500;
-                  const timeLabel =
-                    sizeFactor < 5000 ? 'несколько минут'
-                    : sizeFactor < 20000 ? '5–15 минут'
-                    : '10–30 минут';
+                  const cheapSteps = selectedSteps.filter((k) => STEP_MAP.get(k)?.cost === 'cheap').length;
+                  const timeLabel = formatProcessingTimeBand(
+                    estimateProcessingMinutes({ rows, cheapSteps, apiSteps, aiSteps }),
+                  );
                   return (
                     <p
                       className="ds-mono text-xs text-center"
