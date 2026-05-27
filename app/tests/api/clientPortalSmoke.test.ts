@@ -1101,6 +1101,45 @@ describe('Client Portal — RBAC isolation across clients', () => {
     expect(mockGetCampaign).toHaveBeenCalledWith(ALLOWED_CAMPAIGN, { accountId: 'main' });
   });
 
+  it('GET /campaigns/[id] falls back to launch journal sequence when Instantly returns an empty sequence', async () => {
+    dbState.rowsByTable.client_campaign_launches = [
+      {
+        client_user_id: AUTH_USER_ID,
+        instantly_campaign_id: ALLOWED_CAMPAIGN,
+        sequence_steps: [
+          { subject: 'Hello', body: 'Line 1\nLine 2', wait_days: 0 },
+          { subject: '', body: 'Follow-up body', wait_days: 3 },
+        ],
+      },
+    ];
+    mockGetCampaign.mockResolvedValueOnce({
+      id: ALLOWED_CAMPAIGN,
+      name: 'My Campaign',
+      sequences: [],
+    });
+
+    const { GET } = await import('@/app/api/client/campaigns/[id]/route');
+    const res = await GET(
+      makeReq(`http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}`),
+      { params: Promise.resolve({ id: ALLOWED_CAMPAIGN }) },
+    );
+    expect((res as Response).status).toBe(200);
+
+    const body = await (res as Response).json();
+    expect(body.campaign.sequences).toEqual([
+      {
+        steps: [
+          expect.objectContaining({
+            variants: [expect.objectContaining({ subject: 'Hello', body: 'Line 1\nLine 2' })],
+          }),
+          expect.objectContaining({
+            variants: [expect.objectContaining({ subject: '', body: 'Follow-up body' })],
+          }),
+        ],
+      },
+    ]);
+  });
+
   it('GET /campaigns/[id]/replies of unallowed campaign → 404', async () => {
     const { GET } = await import('@/app/api/client/campaigns/[id]/replies/route');
     const res = await GET(
