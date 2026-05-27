@@ -295,7 +295,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
             <button
               type="button"
               onClick={() => void handleGenerateQueries()}
-              disabled={generatingQueries || !brief.trim()}
+              disabled={generatingQueries || !effectiveBrief.trim()}
               className="inline-flex items-center rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-medium text-violet-800 hover:bg-violet-100 hover:border-violet-300 disabled:opacity-50"
             >
               {generatingQueries ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-2" />}
