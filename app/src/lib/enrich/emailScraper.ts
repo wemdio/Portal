@@ -488,12 +488,29 @@ export type ScrapeEmailsResult = {
  */
 export async function scrapeEmails(
   rawUrl: string,
-  options?: { timeout?: number; signal?: AbortSignal; maxPages?: number },
+  options?: {
+    timeout?: number;
+    signal?: AbortSignal;
+    maxPages?: number;
+    /**
+     * When true, scraping returns as soon as ≥1 email survives the
+     * `filterJunkEmails` filter. Skips the rest of the candidate
+     * page crawl. Used by base-constructor's `find_emails` step where
+     * one usable address per company is enough — saves up to 4 extra
+     * page fetches × per dead/slow host × 4000+ rows.
+     *
+     * Default false: callers (e.g. websiteEnrichmentWorker, bugor /
+     * eventOutreach findEmails) want as many addresses as they can
+     * get and don't mind crawling more pages.
+     */
+    stopAtFirstUsableEmail?: boolean;
+  },
 ): Promise<ScrapeEmailsResult> {
   const url = normalizeUrl(rawUrl);
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   const signal = options?.signal;
   const maxPages = Math.max(1, Math.min(20, options?.maxPages ?? DEFAULT_MAX_PAGES));
+  const stopAtFirstUsableEmail = options?.stopAtFirstUsableEmail === true;
   const origin = new URL(url).origin;
   const tryWithWww = !/^https?:\/\/www\./i.test(url);
   const wwwOrigin = tryWithWww ? origin.replace(/^https?:\/\//i, (m) => `${m}www.`) : null;
@@ -501,6 +518,15 @@ export async function scrapeEmails(
   const allEmails = new Set<string>();
   const checkedUrls: string[] = [];
   const checkedNormalized = new Set<string>();
+
+  // Helper: have we collected at least one email that survives the
+  // junk filter? Cheap enough to call between pages — filterJunkEmails
+  // is pure regex on a small set. Used for early-exit when caller
+  // opted in via stopAtFirstUsableEmail.
+  const hasUsableEmail = (): boolean =>
+    stopAtFirstUsableEmail &&
+    allEmails.size > 0 &&
+    filterJunkEmails(Array.from(allEmails)).length > 0;
 
   const normalizeForDedupe = (u: string) => u.replace(/[#?].*$/, '').replace(/\/+$/, '');
 
@@ -529,6 +555,20 @@ export async function scrapeEmails(
   let discoveredLinks: string[] = [];
   if (mainHtml) {
     processPage(mainHtml);
+    // Early-exit: if the main page already gave us a usable address,
+    // skip the link discovery + candidate crawl. Saves up to 4 extra
+    // fetches per company. The typical healthy B2B site has its
+    // contact email on the homepage or in the header, so this lands
+    // on most rows. Opt-in per caller via stopAtFirstUsableEmail.
+    if (hasUsableEmail()) {
+      const allEmailsRawEarly = Array.from(allEmails);
+      return {
+        emails: filterJunkEmails(allEmailsRawEarly),
+        allEmailsRaw: allEmailsRawEarly,
+        checkedUrls,
+        pagesScanned: checkedUrls.length,
+      };
+    }
     discoveredLinks = await discoverEmailPageLinks(mainHtml, url);
   }
 
@@ -554,12 +594,16 @@ export async function scrapeEmails(
     for (const path of ALL_STATIC_PATHS) addCandidate(`${wwwOrigin}${path}`);
   }
 
-  // 3. Crawl candidate pages (all of them, up to maxPages)
+  // 3. Crawl candidate pages (all of them, up to maxPages). Break early
+  // after each successful page if caller asked for stopAtFirstUsableEmail
+  // and we already have a clean address — same rationale as the post-
+  // main-page check above. Bail on first satisfied iteration.
   for (const candidate of candidateUrls) {
     if (signal?.aborted) break;
     if (checkedUrls.length >= maxPages) break;
     const html = await tryFetch(candidate);
     if (html) processPage(html);
+    if (hasUsableEmail()) break;
   }
 
   // 4. Filter and return

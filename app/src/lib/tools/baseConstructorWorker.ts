@@ -264,11 +264,20 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       // скрапленные email НЕ перетирают исходные данные юзера, кладутся отдельно.
       // Legacy-юзер с прежним поведением может явно поставить 'same' в UI.
       target: cfg.find_emails_target ?? 'separate',
+      // Прокидываем чекпоинт из cfg — позволяет resume'у на redeploy
+      // продолжить find_emails с того места, где упал, а не с нуля.
+      // Без этой строчки шаг рестартанул для polza@polza.ru job 55d37e8e
+      // (с 84% → 28%) после утреннего деплоя.
+      onCheckpoint: cfg.onCheckpoint,
     }),
   split_emails: (data, prog) => stepSplitEmails(data, prog),
   validate_emails: (data, prog, cancel, cfg) =>
     stepValidateEmails(data, prog, cancel, {
       validateTarget: cfg.validate_target ?? 'original',
+      // onCheckpoint прокидываем из cfg чтобы базовый runner мог
+      // персистить промежуточные состояния каждые N строк — иначе
+      // resume после redeploy перезапускает весь validate с нуля.
+      onCheckpoint: cfg.onCheckpoint,
     }),
   check_sites: (data, prog, cancel) => stepSiteCheck(data, prog, cancel),
   enrich_descriptions: (data, prog, cancel, cfg) => stepEnrich(data, prog, cancel, cfg.onCheckpoint),
@@ -471,28 +480,40 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
       const progressFn: ProgressFn = (progress) => updateJobProgress(jobId, i, stepKey, progress);
       await progressFn(0);
 
-      const effectiveStepConfig: StepConfig =
-        stepKey === 'enrich_descriptions'
+      // Шаги которые мутируют состояние строк И идут >> минуты — у них в
+      // памяти worker'а копится прогресс, который без mid-step checkpoint'а
+      // теряется при redeploy/crash. Раньше только enrich_descriptions
+      // имел checkpoint, find_emails и validate_emails — нет. Реальный
+      // случай: polza@polza.ru job 55d37e8e на redeploy потерял find_emails
+      // прогресс с 84% → 28% (рестарт с нуля для 4297 строк).
+      const stepsNeedingCheckpoint = new Set<string>([
+        'enrich_descriptions',
+        'find_emails',
+        'validate_emails',
+      ]);
+      const effectiveStepConfig: StepConfig = {
+        ...stepConfig,
+        ...(stepsNeedingCheckpoint.has(stepKey)
           ? {
-              ...stepConfig,
               onCheckpoint: async (checkpointData) => {
                 await persistData(`checkpoint:${stepKey}`, checkpointData);
               },
             }
-          : stepKey === 'ta_scoring'
-            ? {
-                ...stepConfig,
-                onTaScoringStats: (stats) => {
-                  taScoringStats = stats;
-                  console.log(
-                    `[base-constructor][${jobId}] ta_scoring stats: scored=${stats.pre_filter_rows}, ` +
-                      `avg=${stats.pre_filter_avg_score.toFixed(2)}, ` +
-                      `filtered_out=${stats.filtered_out_count}` +
-                      (stepConfig.keepAllScored ? ' (keepAllScored=true → no filter)' : ''),
-                  );
-                },
-              }
-            : stepConfig;
+          : {}),
+        ...(stepKey === 'ta_scoring'
+          ? {
+              onTaScoringStats: (stats) => {
+                taScoringStats = stats;
+                console.log(
+                  `[base-constructor][${jobId}] ta_scoring stats: scored=${stats.pre_filter_rows}, ` +
+                    `avg=${stats.pre_filter_avg_score.toFixed(2)}, ` +
+                    `filtered_out=${stats.filtered_out_count}` +
+                    (stepConfig.keepAllScored ? ' (keepAllScored=true → no filter)' : ''),
+                );
+              },
+            }
+          : {}),
+      };
 
       const stepStart = Date.now();
       console.log(
