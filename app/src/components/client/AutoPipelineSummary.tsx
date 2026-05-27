@@ -32,7 +32,11 @@ interface LastRun {
   stored_count: number;
   skipped_count: number;
   failed_count: number;
-  error_message: string | null;
+}
+
+interface PendingAttempt {
+  status: 'running' | 'failed' | 'pending' | 'cancelled';
+  started_at: string;
 }
 
 interface Totals30d {
@@ -45,7 +49,10 @@ interface Totals30d {
 interface SummaryResponse {
   enabled: boolean;
   daily_limit: number | null;
+  /** Последний completed прогон — основной источник цифр плитки. */
   last_run: LastRun | null;
+  /** Прерванный/работающий прогон поверх completed — тонкий индикатор. */
+  pending_attempt: PendingAttempt | null;
   totals_30d: Totals30d | null;
   stored_count: number;
 }
@@ -102,18 +109,12 @@ export function AutoPipelineSummary() {
     );
   }
 
-  const { last_run, totals_30d, stored_count } = data;
-  const lastRunStatus = last_run?.status ?? null;
+  const { last_run, pending_attempt, totals_30d, stored_count } = data;
 
-  // Status-as-Data dot: одна точка несёт всю семантику прогона.
-  const statusDotColor =
-    lastRunStatus === 'failed'
-      ? 'var(--cp-red)'
-      : lastRunStatus === 'completed'
-        ? 'var(--cp-green)'
-        : lastRunStatus === 'running'
-          ? 'var(--cp-amber)'
-          : 'var(--cp-paper-faint)';
+  // Status dot: зелёная если completed, серая если ни разу не было
+  // прогонов. Прерванный прогон (pending_attempt) НЕ красит точку
+  // красным — это normal operational event, не error для клиента.
+  const statusDotColor = last_run ? 'var(--cp-green)' : 'var(--cp-paper-faint)';
 
   const timeLabel = last_run
     ? relativeTime(last_run.finished_at ?? last_run.started_at)
@@ -162,12 +163,24 @@ export function AutoPipelineSummary() {
         </p>
       )}
 
-      {last_run?.status === 'failed' && last_run.error_message && (
+      {/* Тонкий индикатор прерванного прогона: только если ПОСЛЕ последнего
+          completed был ещё один (failed/running). Не пугаем клиента — это
+          может случиться при редеплое или сетевом сбое, и не критично:
+          следующий cron-прогон отработает штатно. error_message сюда не
+          выходит, это технический admin-only факт. */}
+      {pending_attempt && (
         <p
-          className="mt-4 text-xs ds-mono"
-          style={{ color: 'var(--cp-red)' }}
+          className="mt-3 text-xs"
+          style={{ color: 'var(--cp-paper-mute)' }}
         >
-          Ошибка: {last_run.error_message}
+          <span
+            className="inline-block h-1.5 w-1.5 rounded-full mr-1.5 align-middle"
+            style={{ background: 'var(--cp-amber)' }}
+            aria-hidden
+          />
+          {pending_attempt.status === 'running'
+            ? `Сейчас идёт прогон (запустился ${relativeTime(pending_attempt.started_at)})`
+            : `Последний прогон ${relativeTime(pending_attempt.started_at)} не завершился — следующий пройдёт штатно`}
         </p>
       )}
     </section>
