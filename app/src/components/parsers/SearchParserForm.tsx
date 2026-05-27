@@ -1,8 +1,8 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Loader2, Play, Sparkles, Trash2, Search } from 'lucide-react';
-import { authFetch, getAccessToken } from '@/lib/authFetch';
+import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
 
 export type SearchParserStartPayload = {
   brief?: string;
@@ -32,6 +32,40 @@ export function SearchParserForm({ onStart, busy }: Props) {
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Сохранённый бриф с портала (/client/brief). Если есть — становится
+  // дефолтным источником: клиенту не надо снова копировать/загружать
+  // PDF. Тот же паттерн что в base-constructor и email-sequence-v2.
+  //
+  // ВАЖНО: savedBriefText и brief — независимые state'ы. brief хранит
+  // ТОЛЬКО то что юзер ввёл/загрузил в режиме «Свой». savedBriefText —
+  // что прилетело с портала. При переключении табов друг друга НЕ
+  // перезаписываем, чтобы не терять ни один из источников. На submit
+  // (handleGenerateQueries, handleStart) выбираем effectiveBrief по
+  // текущему briefSource.
+  const [savedBriefText, setSavedBriefText] = useState('');
+  const [savedBriefAvailable, setSavedBriefAvailable] = useState(false);
+  const [briefSource, setBriefSource] = useState<'saved' | 'custom'>('custom');
+  const savedBriefLoaded = useRef(false);
+  useEffect(() => {
+    if (savedBriefLoaded.current) return;
+    savedBriefLoaded.current = true;
+    void (async () => {
+      try {
+        const res = await authFetchJson<{ compiled_brief_text?: string }>('/api/client/brief');
+        const text = (res.compiled_brief_text ?? '').trim();
+        if (text) {
+          setSavedBriefText(text);
+          setSavedBriefAvailable(true);
+          setBriefSource('saved');
+        }
+      } catch { /* non-critical: leave defaults */ }
+    })();
+  }, []);
+
+  // Effective brief text для отправки в /api/parsers/search/generate
+  // (генерация запросов) и в onStart (запуск парсинга по брифу).
+  const effectiveBrief = briefSource === 'saved' ? savedBriefText : brief;
 
   const handlePdfUpload = async (file: File) => {
     setPdfUploading(true);
@@ -66,8 +100,12 @@ export function SearchParserForm({ onStart, busy }: Props) {
   };
 
   const handleGenerateQueries = async () => {
-    if (!brief.trim()) {
-      setGenerateError('Введите бриф или описание задачи.');
+    if (!effectiveBrief.trim()) {
+      setGenerateError(
+        briefSource === 'saved'
+          ? 'Сохранённый бриф пуст — заполните его на странице «Бриф» или переключитесь на «Свой».'
+          : 'Введите бриф или описание задачи.',
+      );
       return;
     }
     setGenerateError(null);
@@ -75,7 +113,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
     try {
       const res = await authFetch('/api/parsers/search/generate', {
         method: 'POST',
-        body: JSON.stringify({ brief: brief.trim() }),
+        body: JSON.stringify({ brief: effectiveBrief.trim() }),
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -109,7 +147,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
   };
 
   const handleStart = () => {
-    const hasBrief = brief.trim().length > 0;
+    const hasBrief = effectiveBrief.trim().length > 0;
     const hasQueriesList = queries.length > 0 && queries.some((q) => q.trim().length > 0);
     const hasQueriesText = queriesText.trim().length > 0;
 
@@ -120,7 +158,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
     setError(null);
 
     const payload: SearchParserStartPayload = {};
-    if (hasBrief) payload.brief = brief.trim();
+    if (hasBrief) payload.brief = effectiveBrief.trim();
     if (hasQueriesText) payload.queries_text = queriesText.trim();
     if (hasQueriesList && !hasQueriesText) payload.queries = queries.map((q) => q.trim()).filter(Boolean);
     payload.user_query = payload.brief ?? payload.queries_text ?? (payload.queries?.slice(0, 3).join(', ') ?? 'Запросы');
@@ -129,7 +167,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
   };
 
   const canStart =
-    (brief.trim().length > 0 && (queries.length === 0 || queries.some((q) => q.trim().length > 0))) ||
+    (effectiveBrief.trim().length > 0 && (queries.length === 0 || queries.some((q) => q.trim().length > 0))) ||
     queriesText.trim().length > 0;
 
   return (
@@ -178,12 +216,58 @@ export function SearchParserForm({ onStart, busy }: Props) {
           <label className="block text-sm font-medium text-gray-700 mb-1">
             Бриф / Описание целевой аудитории (для генерации запросов)
           </label>
-          <textarea
-            value={brief}
-            onChange={(e) => setBrief(e.target.value)}
-            className="w-full min-h-[8rem] resize-y rounded-lg border border-gray-300 py-3 px-3 pb-4 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none"
-            placeholder="Вставьте описание компании..."
-          />
+          {/* Source switcher: «Сохранённый» (из /client/brief) vs «Свой».
+              Отображается только когда сохранённый бриф доступен —
+              иначе скрываем чтобы не запутывать. */}
+          {savedBriefAvailable && (
+            <div className="mb-2 flex gap-1 rounded-lg bg-gray-100 p-1 text-xs w-fit">
+              <button
+                type="button"
+                onClick={() => setBriefSource('saved')}
+                className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
+                  briefSource === 'saved'
+                    ? 'bg-white text-gray-900 shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Из сохранённого брифа
+              </button>
+              <button
+                type="button"
+                onClick={() => setBriefSource('custom')}
+                className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
+                  briefSource === 'custom'
+                    ? 'bg-white text-gray-900 shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Свой
+              </button>
+            </div>
+          )}
+
+          {briefSource === 'saved' && savedBriefAvailable ? (
+            <>
+              <textarea
+                value={savedBriefText}
+                readOnly
+                className="w-full min-h-[8rem] resize-y rounded-lg border border-gray-200 bg-gray-50 py-3 px-3 pb-4 text-sm text-gray-700"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Подгружен ваш бриф со{' '}
+                <a href="/client/brief" className="underline">страницы «Бриф»</a>.
+                Чтобы изменить — отредактируйте там, или переключитесь на «Свой».
+              </p>
+            </>
+          ) : (
+            <textarea
+              value={brief}
+              onChange={(e) => setBrief(e.target.value)}
+              className="w-full min-h-[8rem] resize-y rounded-lg border border-gray-300 py-3 px-3 pb-4 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none"
+              placeholder="Вставьте описание компании..."
+            />
+          )}
+
           <div className="mt-4 flex flex-wrap items-center gap-3">
             <input
               ref={fileInputRef}
@@ -195,19 +279,23 @@ export function SearchParserForm({ onStart, busy }: Props) {
                 if (file) void handlePdfUpload(file);
               }}
             />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={pdfUploading}
-              className="inline-flex items-center rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-400 hover:shadow-sm disabled:opacity-50"
-            >
-              {pdfUploading ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" /> : null}
-              Загрузить PDF бриф
-            </button>
+            {/* PDF-загрузку прячем в saved-mode: там бриф ридонли,
+                загрузка туда не положит ничего. */}
+            {briefSource === 'custom' && (
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={pdfUploading}
+                className="inline-flex items-center rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-400 hover:shadow-sm disabled:opacity-50"
+              >
+                {pdfUploading ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" /> : null}
+                Загрузить PDF бриф
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void handleGenerateQueries()}
-              disabled={generatingQueries || !brief.trim()}
+              disabled={generatingQueries || !effectiveBrief.trim()}
               className="inline-flex items-center rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-medium text-violet-800 hover:bg-violet-100 hover:border-violet-300 disabled:opacity-50"
             >
               {generatingQueries ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-2" />}
