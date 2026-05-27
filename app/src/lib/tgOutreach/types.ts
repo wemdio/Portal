@@ -203,7 +203,7 @@ export interface OutreachBlockedUser {
 }
 
 export const DEFAULT_OPENAI_SETTINGS: OpenAISettings = {
-  llm_model: 'openai/gpt-5-mini',
+  llm_model: 'policy/tg-outreach',
   system_prompt: '',
   project_name: '',
   trigger_phrases_positive: '',

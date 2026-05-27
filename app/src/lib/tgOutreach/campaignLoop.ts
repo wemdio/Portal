@@ -60,13 +60,13 @@ function randomRange([min, max]: [number, number]): number {
 
 /**
  * Сколько диалогов аккаунта забирать из getDialogs за итерацию.
- * Было 20 — если аккаунт состоит в активных группах, болтовня в них
- * выталкивает группы в топ списка, и личка от новых лидов проваливается
- * ниже 20-й позиции → handleChat её не видит. 100 даёт большой запас
- * (фактически обрабатываются только непрочитанные User-диалоги, так что
- * лишние метаданные почти бесплатны — один MTProto-запрос).
+ * Было 100 — снизили до 50: меньше данных через прокси = меньше шанс
+ * таймаута на getDialogs (3 аккаунта стабильно зависали на 180с).
+ * 50 достаточно, т.к. обрабатываются только непрочитанные User-диалоги,
+ * а группы/каналы скипаются. Если лиды проваливаются ниже 50-й позиции —
+ * поднять через env TG_OUTREACH_DIALOGS_LIMIT.
  */
-const DIALOGS_FETCH_LIMIT = Number(process.env.TG_OUTREACH_DIALOGS_LIMIT ?? '100');
+const DIALOGS_FETCH_LIMIT = Number(process.env.TG_OUTREACH_DIALOGS_LIMIT ?? '50');
 
 /**
  * Hard per-account ceiling on the first gramJS call of each iteration
