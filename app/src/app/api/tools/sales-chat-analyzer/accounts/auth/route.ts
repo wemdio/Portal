@@ -180,6 +180,8 @@ export async function POST(req: NextRequest) {
         user_id: guard.userId,
         phone,
         sent_type: sentType,
+        sent_type_raw: sent.type?.className ?? null,
+        result_class: result?.className ?? null,
         next_type: sent.nextType?.className ?? null,
         timeout: sent.timeout ?? null,
         phone_code_hash_prefix: phoneCodeHash.slice(0, 6),
