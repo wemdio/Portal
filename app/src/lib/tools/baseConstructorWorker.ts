@@ -524,6 +524,35 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
         `[base-constructor][${jobId}] step '${stepKey}' returned in ${Date.now() - stepStart}ms (output rows=${Math.max(0, data.length - 1)}, cols=${data[0]?.length ?? 0})`,
       );
 
+      // Eagerly merge «Найденный Email» в исходную email-колонку как
+      // только колонка появилась в данных. Без этого split_emails видит
+      // только ОДНУ исходную почту на строку (найденные лежат отдельно),
+      // а финальный merge склеивает их в одну ячейку с запятыми — уже
+      // после split'а. Реальный кейс из job polza@polza.ru
+      // constructor_2026-05-27 (1).csv: у Okkam строка с email =
+      // «jobs@okkam.ru, ekaterina.fisher@…, marina.…», Instantly такую
+      // ячейку валидирует как одну строку и отбрасывает.
+      //
+      // Делаем безусловный check на наличие FOUND_EMAIL_COL (а не «после
+      // find_emails»), чтобы покрыть resume edge case: если worker умер
+      // сразу после find_emails завершился, но до моего merge'а — DB
+      // зафиксировала current_step_key='find_emails', progress=100,
+      // данные с FOUND_EMAIL_COL. Новый worker пропустит find_emails
+      // (progress=100), но эта defensive проверка отработает на следующей
+      // итерации и доделает merge до split'а.
+      const headerNow = data[0] ?? [];
+      const hasFoundCol = headerNow.some(
+        (h) => typeof h === 'string' && h.trim() === FOUND_EMAIL_COL,
+      );
+      if (hasFoundCol) {
+        const beforeMergeCols = headerNow.length;
+        data = mergeFoundEmailColumn(data);
+        const afterMergeCols = data[0]?.length ?? 0;
+        console.log(
+          `[base-constructor][${jobId}] merged FOUND_EMAIL_COL into email column after step '${stepKey}' (cols ${beforeMergeCols} → ${afterMergeCols})`,
+        );
+      }
+
       const isLast = i === selectedSteps.length - 1;
       if (!isLast) {
         // Persist intermediate data so the next step has it on resume.
