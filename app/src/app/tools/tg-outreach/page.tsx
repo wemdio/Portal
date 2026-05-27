@@ -220,18 +220,6 @@ function SettingsTab({ campaign, onSave }: {
         <h3 className="text-sm font-semibold text-gray-800">OpenRouter</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <Field label="Название проекта" value={openai.project_name} onChange={v => setOAI('project_name', v)} />
-          <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-semibold text-gray-700">Модель</label>
-            <select
-              value={openai.llm_model || 'openai/gpt-5-mini'}
-              onChange={e => setOAI('llm_model', e.target.value)}
-              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-            >
-              <option value="openai/gpt-5-mini">openai/gpt-5-mini</option>
-              <option value="openai/gpt-4o-mini">openai/gpt-4o-mini</option>
-              <option value="openai/gpt-5">openai/gpt-5</option>
-            </select>
-          </div>
         </div>
         <FieldArea label="Системный промпт" value={openai.system_prompt} onChange={v => setOAI('system_prompt', v)} rows={6} />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
