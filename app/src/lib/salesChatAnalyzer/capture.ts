@@ -18,6 +18,43 @@ const MAX_ATTACHMENT_BYTES = Math.max(
   Number(process.env.SALES_CHAT_MAX_ATTACHMENT_BYTES ?? DEFAULT_MAX_ATTACHMENT_BYTES),
 );
 
+/** Сколько диалогов одного аккаунта обрабатывать параллельно. */
+const DIALOG_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.SALES_CHAT_SYNC_DIALOG_CONCURRENCY ?? 3),
+);
+/** Сколько вложений одного аккаунта скачивать параллельно (общий пул на все диалоги). */
+const ATTACHMENT_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.SALES_CHAT_SYNC_ATTACHMENT_CONCURRENCY ?? 3),
+);
+
+/**
+ * Минималистичный семафор для ограничения параллелизма промисов.
+ * Возвращает функцию-обёртку: `await limit(() => doWork())`.
+ */
+function createSemaphore(concurrency: number) {
+  const queue: Array<() => void> = [];
+  let active = 0;
+  const next = (): void => {
+    active -= 1;
+    const fn = queue.shift();
+    if (fn) fn();
+  };
+  return function run<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const start = (): void => {
+        active += 1;
+        fn().then(resolve, reject).finally(next);
+      };
+      if (active < concurrency) start();
+      else queue.push(start);
+    });
+  };
+}
+
+type Semaphore = ReturnType<typeof createSemaphore>;
+
 export interface SalesChatAccountLite {
   id: string;
   tg_user_id: number | null;
@@ -211,12 +248,14 @@ async function dialogNeedsAttachmentBackfill(admin: SupabaseClient, dialogId: st
     .filter((id) => Number.isFinite(id));
   if (ids.length === 0) return false;
 
+  // Берём все загруженные вложения этого диалога одним запросом БЕЗ .in([...]) —
+  // .in() на 1000 bigint'ов раздувает URL до ~11KB и упирается в nginx-лимит на длину URI.
+  // Индекс (dialog_id, tg_message_id) обслуживает запрос так же быстро.
   const { data: uploaded, error: uploadedError } = await admin
     .from('sales_chat_message_attachments')
     .select('tg_message_id')
     .eq('dialog_id', dialogId)
-    .eq('status', 'uploaded')
-    .in('tg_message_id', ids);
+    .eq('status', 'uploaded');
   if (uploadedError) throw new Error(`dialogNeedsAttachmentBackfill uploaded: ${uploadedError.message}`);
 
   const uploadedIds = new Set((uploaded ?? []).map((row) => Number((row as { tg_message_id?: unknown }).tg_message_id)));
@@ -327,10 +366,95 @@ async function insertMessages(admin: SupabaseClient, rows: ReturnType<typeof toR
 }
 
 /**
+ * Обрабатывает один диалог: текстовые сообщения → вставка батчами,
+ * вложения → отложенный параллельный пул (общий на аккаунт).
+ */
+async function syncOneDialog(opts: {
+  admin: SupabaseClient;
+  client: TelegramClient;
+  entity: unknown;
+  dialogId: string;
+  peer: PeerInfo;
+  accountId: string;
+  selfName: string;
+  sinceUnix: number;
+  attachmentBackfillOnly: boolean;
+  attachmentLimit: Semaphore;
+  log: LogFn;
+}): Promise<void> {
+  const {
+    admin,
+    client,
+    entity,
+    dialogId,
+    peer,
+    accountId,
+    selfName,
+    sinceUnix,
+    attachmentBackfillOnly,
+    attachmentLimit,
+    log,
+  } = opts;
+
+  let batch: ReturnType<typeof toRow>[] = [];
+  let inserted = false;
+  // Сначала ПОТОКОВО прогоняем все сообщения и собираем задачи на вложения.
+  // Сами вложения качаем во второй фазе через общий семафор аккаунта,
+  // чтобы не блокировать iterMessages I/O-боундом скачивания файлов.
+  const pendingAttachments: Array<{ msg: Api.Message; mapped: MappedMessage }> = [];
+
+  for await (const msg of client.iterMessages(
+    entity as Parameters<typeof client.iterMessages>[0],
+    { limit: MAX_MESSAGES_PER_DIALOG },
+  )) {
+    // iterMessages идёт от новых к старым — на старых обрываем инкремент.
+    const msgDate = rawMessageDate(msg);
+    if (!attachmentBackfillOnly && sinceUnix > 0 && msgDate !== null && msgDate <= sinceUnix) break;
+    const mapped = mapMessage(msg);
+    if (!mapped) continue;
+    if (attachmentBackfillOnly && !mapped.attachment) continue;
+    batch.push(toRow(mapped, accountId, dialogId, peer, selfName));
+    if (mapped.attachment && msg instanceof Api.Message) {
+      pendingAttachments.push({ msg, mapped });
+    }
+    if (batch.length >= INSERT_BATCH) {
+      await insertMessages(admin, batch);
+      batch = [];
+      inserted = true;
+    }
+  }
+  if (batch.length) {
+    await insertMessages(admin, batch);
+    inserted = true;
+  }
+
+  // Все сообщения теперь в БД — captureAttachment может находить message_id по (dialog_id, tg_message_id).
+  if (pendingAttachments.length > 0) {
+    await Promise.all(
+      pendingAttachments.map(({ msg, mapped }) =>
+        attachmentLimit(() =>
+          captureAttachment({ admin, client, msg, mapped, accountId, dialogId, peer, log }),
+        ),
+      ),
+    );
+    inserted = true;
+  }
+
+  if (inserted) await recountDialog(admin, dialogId);
+}
+
+/**
  * Синхронизирует переписки аккаунта.
  * sinceUnix = 0 — полная выгрузка истории (первый запуск).
  * sinceUnix > 0 — инкремент: тянем только сообщения новее этой отметки;
  *   диалоги без новой активности пропускаются целиком.
+ *
+ * Параллелизм:
+ *  - до DIALOG_CONCURRENCY диалогов обрабатываются одновременно (default 3);
+ *  - до ATTACHMENT_CONCURRENCY вложений качаются одновременно на аккаунт (default 3);
+ *  - параметры можно крутить через env SALES_CHAT_SYNC_DIALOG_CONCURRENCY /
+ *    SALES_CHAT_SYNC_ATTACHMENT_CONCURRENCY (повышать осторожно — Telegram даёт
+ *    FLOOD_WAIT при > ~30 RPS на client).
  */
 export async function syncAccount(opts: {
   admin: SupabaseClient;
@@ -351,70 +475,60 @@ export async function syncAccount(opts: {
     .from('sales_chat_accounts')
     .update({ backfill_dialogs_total: dialogs.length, backfill_dialogs_done: 0 })
     .eq('id', account.id);
-  log('info', `[${account.id}] sync: ${dialogs.length} dialogs (since=${sinceUnix})`);
+  log(
+    'info',
+    `[${account.id}] sync: ${dialogs.length} dialogs (since=${sinceUnix}, ` +
+      `dlg_concurrency=${DIALOG_CONCURRENCY}, att_concurrency=${ATTACHMENT_CONCURRENCY})`,
+  );
+
+  const dialogLimit = createSemaphore(DIALOG_CONCURRENCY);
+  const attachmentLimit = createSemaphore(ATTACHMENT_CONCURRENCY);
 
   let done = 0;
-  for (const { entity, lastDate } of dialogs) {
-    const peer = extractPeer(entity);
-    if (peer) {
-      try {
-        const dialogId = await upsertDialog(admin, account.id, peer);
-        // Инкремент: если в диалоге нет ничего нового — пропускаем сообщения.
-        const unchanged = sinceUnix > 0 && lastDate !== null && lastDate <= sinceUnix;
-        const attachmentBackfillOnly = unchanged && await dialogNeedsAttachmentBackfill(admin, dialogId);
-        if (!unchanged || attachmentBackfillOnly) {
-          let batch: ReturnType<typeof toRow>[] = [];
-          let inserted = false;
-          for await (const msg of client.iterMessages(
-            entity as Parameters<typeof client.iterMessages>[0],
-            { limit: MAX_MESSAGES_PER_DIALOG },
-          )) {
-            // iterMessages идёт от новых к старым — на старых обрываем инкремент.
-            const msgDate = rawMessageDate(msg);
-            if (!attachmentBackfillOnly && sinceUnix > 0 && msgDate !== null && msgDate <= sinceUnix) break;
-            const mapped = mapMessage(msg);
-            if (!mapped) continue;
-            if (attachmentBackfillOnly && !mapped.attachment) continue;
-            batch.push(toRow(mapped, account.id, dialogId, peer, selfName));
-            if (mapped.attachment && msg instanceof Api.Message) {
-              await insertMessages(admin, batch);
-              batch = [];
-              inserted = true;
-              await captureAttachment({
+  let lastReported = 0;
+  const reportProgress = async (force = false): Promise<void> => {
+    if (!force && done - lastReported < 10) return;
+    lastReported = done;
+    await admin
+      .from('sales_chat_accounts')
+      .update({ backfill_dialogs_done: done })
+      .eq('id', account.id);
+  };
+
+  await Promise.all(
+    dialogs.map(({ entity, lastDate }) =>
+      dialogLimit(async () => {
+        const peer = extractPeer(entity);
+        if (peer) {
+          try {
+            const dialogId = await upsertDialog(admin, account.id, peer);
+            const unchanged = sinceUnix > 0 && lastDate !== null && lastDate <= sinceUnix;
+            const attachmentBackfillOnly =
+              unchanged && (await dialogNeedsAttachmentBackfill(admin, dialogId));
+            if (!unchanged || attachmentBackfillOnly) {
+              await syncOneDialog({
                 admin,
                 client,
-                msg,
-                mapped,
-                accountId: account.id,
+                entity,
                 dialogId,
                 peer,
+                accountId: account.id,
+                selfName,
+                sinceUnix,
+                attachmentBackfillOnly,
+                attachmentLimit,
                 log,
               });
-              continue;
             }
-            if (batch.length >= INSERT_BATCH) {
-              await insertMessages(admin, batch);
-              batch = [];
-              inserted = true;
-            }
+          } catch (err) {
+            log('warn', `[${account.id}] sync dialog ${peer.tg_peer_id} failed`, err);
           }
-          if (batch.length) {
-            await insertMessages(admin, batch);
-            inserted = true;
-          }
-          if (inserted) await recountDialog(admin, dialogId);
         }
-      } catch (err) {
-        log('warn', `[${account.id}] sync dialog ${peer.tg_peer_id} failed`, err);
-      }
-    }
-    done += 1;
-    if (done % 10 === 0 || done === dialogs.length) {
-      await admin
-        .from('sales_chat_accounts')
-        .update({ backfill_dialogs_done: done })
-        .eq('id', account.id);
-    }
-  }
+        done += 1;
+        await reportProgress().catch(() => {});
+      }),
+    ),
+  );
+  await reportProgress(true).catch(() => {});
   log('info', `[${account.id}] sync done (${done} dialogs)`);
 }

@@ -27,13 +27,14 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   const messages = data ?? [];
-  const messageIds = messages.map((m) => m.id).filter(Boolean);
-  const { data: attachments, error: attachError } = messageIds.length
-    ? await supabaseAdmin!
-        .from('sales_chat_message_attachments')
-        .select('id,message_id,tg_message_id,media_type,file_name,mime_type,file_size_bytes,status,error_message')
-        .in('message_id', messageIds)
-    : { data: [], error: null };
+  // ВАЖНО: запрашиваем вложения по dialog_id, а НЕ через .in('message_id', [...uuids]).
+  // При больших диалогах список UUID превышал nginx-лимит на длину URL (8 KB) и
+  // PostgREST возвращал 414 Request-URI Too Large. На sales_chat_message_attachments
+  // есть индекс (dialog_id, tg_message_id), запрос быстрый.
+  const { data: attachments, error: attachError } = await supabaseAdmin!
+    .from('sales_chat_message_attachments')
+    .select('id,message_id,tg_message_id,media_type,file_name,mime_type,file_size_bytes,status,error_message')
+    .eq('dialog_id', id);
   if (attachError) return NextResponse.json({ error: attachError.message }, { status: 500 });
 
   const byMessage = new Map<string, unknown[]>();
