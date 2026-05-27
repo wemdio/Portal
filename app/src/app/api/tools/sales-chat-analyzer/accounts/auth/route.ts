@@ -48,7 +48,8 @@ function unsealAuth(token: string): PendingAuthPayload {
 }
 
 function sentTypeLabel(className: string | undefined | null): string {
-  switch (className) {
+  const name = className?.replace(/^auth\./, '') ?? '';
+  switch (name) {
     case 'SentCodeTypeApp':
       return 'app';
     case 'SentCodeTypeSms':
@@ -56,15 +57,16 @@ function sentTypeLabel(className: string | undefined | null): string {
     case 'SentCodeTypeCall':
       return 'call';
     case 'SentCodeTypeFlashCall':
-      return 'flash_call';
     case 'SentCodeTypeMissedCall':
-      return 'missed_call';
+      return 'call';
     case 'SentCodeTypeFragmentSms':
       return 'fragment_sms';
     case 'SentCodeTypeEmailCode':
       return 'email';
     case 'SentCodeTypeFirebaseSms':
       return 'firebase_sms';
+    case 'SentCodeTypeSetUpEmailRequired':
+      return 'email_setup_required';
     default:
       return 'unknown';
   }
