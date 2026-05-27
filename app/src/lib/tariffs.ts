@@ -32,6 +32,33 @@ export const SETUP_DAYS = 3;
 
 export type BillingMode = 'invoice' | 'autopayment';
 
+export type BillingPeriod = 'month' | 'half_year' | 'year';
+
+/**
+ * Цены тарифов за месяц для выставления счёта (отличаются от цен автопродления
+ * в /api/cron/auto-renew). Custom — сумма проставляется вручную.
+ */
+export const TARIFF_MONTHLY_PRICE: Record<'standard' | 'pro', number> = {
+  standard: 40_000,
+  pro: 80_000,
+};
+
+/** Множители месяцев для периодов оплаты (без скидок). */
+export const BILLING_PERIOD_MONTHS: Record<BillingPeriod, number> = {
+  month: 1,
+  half_year: 6,
+  year: 12,
+};
+
+/**
+ * Считает сумму к оплате за выбранный период. Для custom возвращает null —
+ * сумма проставляется вручную при выставлении счёта.
+ */
+export function calcBillingAmount(tariff: TariffType, period: BillingPeriod): number | null {
+  if (tariff === 'custom') return null;
+  return TARIFF_MONTHLY_PRICE[tariff] * BILLING_PERIOD_MONTHS[period];
+}
+
 export type ClientTariffRow = {
   id: string;
   user_id: string;
@@ -47,6 +74,8 @@ export type ClientTariffRow = {
   is_active: boolean;
   billing_mode: BillingMode | null;
   payment_locked: boolean;
+  billing_period: BillingPeriod | null;
+  billing_amount: number | null;
   yookassa_payment_method_id?: string | null;
   auto_renew?: boolean;
   last_renewal_error?: string | null;

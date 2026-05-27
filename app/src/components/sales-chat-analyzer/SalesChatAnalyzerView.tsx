@@ -189,6 +189,8 @@ export function SalesChatAnalyzerView() {
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
   const [authId, setAuthId] = useState('');
+  const [authToken, setAuthToken] = useState('');
+  const [sentType, setSentType] = useState<string | null>(null);
 
   const initialLoaded = useRef(false);
 
@@ -302,6 +304,8 @@ export function SalesChatAnalyzerView() {
     setCode('');
     setPassword('');
     setAuthId('');
+    setAuthToken('');
+    setSentType(null);
   }, []);
 
   const sendCode = useCallback(async () => {
@@ -312,11 +316,20 @@ export function SalesChatAnalyzerView() {
     setBusy('auth');
     setError(null);
     try {
-      const data = await authFetchJson<{ step: string; auth_id: string }>(`${API}/accounts/auth`, {
+      const data = await authFetchJson<{
+        step: string;
+        auth_id: string;
+        auth_token: string;
+        sent_type: string;
+        next_type: string;
+        timeout: number | null;
+      }>(`${API}/accounts/auth`, {
         method: 'POST',
         body: JSON.stringify({ step: 'send_code', phone: phone.trim(), label: label.trim() }),
       });
       setAuthId(data.auth_id);
+      setAuthToken(data.auth_token);
+      setSentType(data.sent_type);
       setAuthStep('code');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Ошибка');
@@ -333,11 +346,13 @@ export function SalesChatAnalyzerView() {
     setBusy('auth');
     setError(null);
     try {
-      const data = await authFetchJson<{ step: string }>(`${API}/accounts/auth`, {
+      const data = await authFetchJson<{ step: string; auth_id?: string; auth_token?: string }>(`${API}/accounts/auth`, {
         method: 'POST',
-        body: JSON.stringify({ step: 'sign_in', auth_id: authId, code: code.trim() }),
+        body: JSON.stringify({ step: 'sign_in', auth_id: authId, auth_token: authToken, code: code.trim() }),
       });
       if (data.step === 'password_needed') {
+        if (data.auth_id) setAuthId(data.auth_id);
+        if (data.auth_token) setAuthToken(data.auth_token);
         setAuthStep('password');
         return;
       }
@@ -348,7 +363,7 @@ export function SalesChatAnalyzerView() {
     } finally {
       setBusy(null);
     }
-  }, [code, authId, resetConnect, loadAccounts]);
+  }, [code, authId, authToken, resetConnect, loadAccounts]);
 
   const checkPassword = useCallback(async () => {
     if (!password) {
@@ -360,7 +375,7 @@ export function SalesChatAnalyzerView() {
     try {
       await authFetchJson<{ step: string }>(`${API}/accounts/auth`, {
         method: 'POST',
-        body: JSON.stringify({ step: 'check_password', auth_id: authId, password }),
+        body: JSON.stringify({ step: 'check_password', auth_id: authId, auth_token: authToken, password }),
       });
       resetConnect();
       await loadAccounts();
@@ -369,7 +384,8 @@ export function SalesChatAnalyzerView() {
     } finally {
       setBusy(null);
     }
-  }, [password, authId, resetConnect, loadAccounts]);
+  }, [password, authId, authToken, resetConnect, loadAccounts]);
+
 
   const toggleAccount = useCallback(
     async (acc: AccountListRow) => {
@@ -548,9 +564,13 @@ export function SalesChatAnalyzerView() {
           {authStep === 'code' ? (
             <div className="mt-4">
               <p className="text-sm text-gray-600 mb-2">
-                Код отправлен в приложение Telegram на номер {phone}. Введите его:
+                {sentType === 'sms'
+                  ? `Код отправлен по SMS на номер ${phone}. Введите его:`
+                  : sentType === 'call' || sentType === 'flash_call' || sentType === 'missed_call'
+                    ? `Telegram позвонит на номер ${phone}. Введите код из звонка:`
+                    : `Код отправлен в приложение Telegram на номер ${phone}. Введите его:`}
               </p>
-              <div className="flex items-end gap-3">
+              <div className="flex items-center gap-3">
                 <input
                   value={code}
                   onChange={(e) => setCode(e.target.value)}
@@ -564,6 +584,14 @@ export function SalesChatAnalyzerView() {
                   className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
                 >
                   {busy === 'auth' ? 'Вход…' : 'Войти'}
+                </button>
+                <button
+                  type="button"
+                  onClick={sendCode}
+                  disabled={busy === 'auth'}
+                  className="text-sm text-blue-600 hover:text-blue-800 disabled:text-gray-400"
+                >
+                  Отправить повторно
                 </button>
               </div>
             </div>
