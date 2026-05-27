@@ -31,7 +31,13 @@ const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36';
 const SITE_CHECK_TIMEOUT = 12_000;
 
-const EMAIL_CONCURRENCY = 5;
+// Raised from 5 → 15 after polza@polza.ru job 55d37e8e ran for ~8h on
+// 4297 rows with `find_emails` at 75%. Throughput here is wall-clock
+// bound by remote HTTP, not by CPU/memory — higher fan-out gives
+// linear speedup until we hit (a) target-host rate-limits or (b) our
+// outbound socket pool. 15 is conservative for shared infrastructure;
+// can lift further if telemetry shows no upstream complaints.
+const EMAIL_CONCURRENCY = 15;
 const ENRICH_CONCURRENCY = 5;
 /**
  * Hard ceiling per site for enrich. fetchAndExtract internally tries main +
@@ -180,6 +186,18 @@ export interface StepFindEmailsOptions {
    * на 'same' (создаём «Email» как раньше). Опция теряет смысл когда нет «исходных».
    */
   target?: 'same' | 'separate';
+  /**
+   * Callback для checkpoint'а данных в DB jsonb каждые N строк. Если worker
+   * умирает посреди шага (redeploy, OOM, hard crash) — на resume следующий
+   * worker читает свежий checkpoint, фильтрует строки с уже найденным
+   * email'ом и продолжает с того места. Без этого callback'а — restart с нуля.
+   *
+   * Симптом который этот колбэк закрывает: polza@polza.ru job 55d37e8e на
+   * redeploy потерял прогресс с 84% → 28% (рестарт всего шага с 4297 строк).
+   * Тяжёлые checkpoint'ы (4MB jsonb) делаются раз в 250 строк — ~17 раз
+   * за prod-base ≈ 70MB суммарной записи, что приемлемо.
+   */
+  onCheckpoint?: CheckpointFn;
 }
 
 export async function stepFindEmails(
@@ -230,10 +248,23 @@ export async function stepFindEmails(
   if (toProcess.length === 0) { await onProgress(100); return [header, ...body]; }
 
   let done = 0;
+  // checkpoint каждые 250 строк — мерж между «свежими данными при resume»
+  // и «не флудим DB на каждой строке». На 4297-строчной базе это ~17
+  // запросов общим объёмом ~70MB (один update jsonb ~4MB).
+  const checkpointEvery = 250;
+  const onCheckpoint = options?.onCheckpoint;
   await processInPool(toProcess, EMAIL_CONCURRENCY, async (item) => {
     if (isCancelled && await isCancelled()) return;
     try {
-      const { emails } = await scrapeEmails(item.url, { timeout: 15_000, maxPages: 5 });
+      // stopAtFirstUsableEmail: bail as soon as the homepage / first
+      // contact page gives us a usable address. Base-constructor only
+      // needs one — the worker doesn't use the extra addresses, and
+      // crawling 4 more pages per company is the dominant time sink.
+      const { emails } = await scrapeEmails(item.url, {
+        timeout: 15_000,
+        maxPages: 5,
+        stopAtFirstUsableEmail: true,
+      });
       if (emails.length > 0) {
         body[item.i][targetIdx] = emails.join(', ');
       }
@@ -241,6 +272,9 @@ export async function stepFindEmails(
     done++;
     if (done % 10 === 0 || done === toProcess.length) {
       await onProgress(Math.round((done / toProcess.length) * 100));
+    }
+    if (onCheckpoint && (done % checkpointEvery === 0 || done === toProcess.length)) {
+      await onCheckpoint([header, ...body]);
     }
   });
 
@@ -854,6 +888,14 @@ export interface StepValidateEmailsOptions {
    *     запустился). Не использовать в base-constructor user flow.
    */
   dropRowsWithoutEmail?: boolean;
+  /**
+   * Callback для checkpoint'а данных каждые N строк. То же зачем что
+   * и в stepFindEmails: на redeploy/crash посреди шага следующий worker
+   * читает свежий checkpoint вместо стартовых данных и продолжает с
+   * проверенной части. Validate медленнее scrape'а (SMTP+DNS), так что
+   * без checkpoint'а потеря прогресса на длинных базах особенно болезненна.
+   */
+  onCheckpoint?: CheckpointFn;
 }
 
 export async function stepValidateEmails(
@@ -932,6 +974,11 @@ export async function stepValidateEmails(
 
   const domainCache = new Map<string, DomainInfo>();
   let done = 0;
+  // checkpoint каждые 250 валидаций. Validate медленнее scrape'а (SMTP+DNS
+  // round-trip может быть 1-3s), так что 250 ≈ 5-10 мин работы — окно
+  // потенциальной потери прогресса на redeploy не больше.
+  const checkpointEvery = 250;
+  const onCheckpoint = options?.onCheckpoint;
 
   await processInPool(toValidate, VALIDATION_CONCURRENCY, async (item) => {
     if (isCancelled && await isCancelled()) return;
@@ -946,6 +993,9 @@ export async function stepValidateEmails(
     done++;
     if (done % 5 === 0 || done === toValidate.length) {
       await onProgress(Math.round((done / toValidate.length) * 100));
+    }
+    if (onCheckpoint && (done % checkpointEvery === 0 || done === toValidate.length)) {
+      await onCheckpoint([newHeader, ...newBody]);
     }
   });
 

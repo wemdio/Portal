@@ -35,12 +35,55 @@ import {
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 /** Сколько job'ов параллельно один воркер берёт. Память: 1 job ≈ 0.5–1.5GB JS heap (большой `data` в памяти). */
 const MAX_CONCURRENCY = Math.max(1, Number(process.env.BASE_CONSTRUCTOR_CONCURRENCY ?? '2'));
-/** Через сколько минут «застрявшая» processing-задача считается умершей и её надо резумнуть. */
-const STALE_JOB_MINUTES = Math.max(2, Number(process.env.BASE_CONSTRUCTOR_STALE_MINUTES ?? '15'));
+/**
+ * Через сколько минут «застрявшая» processing-задача считается умершей и
+ * её надо резумнуть. Heartbeat в `updateJobProgress` шлёт started_at на
+ * каждый прогресс-тик (find_emails — каждые 10 строк), так что в норме
+ * между двумя heartbeat'ами проходит секунды, максимум 1-2 мин в самых
+ * медленных шагах. 5 мин = ~30× нормального интервала: достаточно
+ * консервативно чтобы не воровать живые job'ы, и достаточно быстро
+ * чтобы redeploy не оставлял клиента ждать 15 мин до пере-claim'а
+ * (как было в реальном случае polza@polza.ru job 55d37e8e — потеряли
+ * почти час между «worker умер при redeploy» и «новый worker подобрал»).
+ */
+const STALE_JOB_MINUTES = Math.max(2, Number(process.env.BASE_CONSTRUCTOR_STALE_MINUTES ?? '5'));
 const WORKER_ID = `baseconstructor-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 
 const running = new Set<Promise<void>>();
+/**
+ * Job IDs currently executing on this worker. Used by the SIGTERM handler
+ * below to bump their `started_at` to a past timestamp before the process
+ * exits — that way the next worker reclaims them on the next poll tick
+ * (≈5s) instead of waiting STALE_JOB_MINUTES.
+ */
+const runningJobIds = new Set<string>();
+
+/**
+ * Best-effort: ageing `started_at` on every job this worker is mid-flight
+ * for, so the next worker after a redeploy can reclaim immediately. Called
+ * from the SIGTERM/SIGINT handler. Failures are logged but don't block —
+ * Docker's stop-timeout (10s by default) is our hard ceiling, and a stale-
+ * window fallback still works in the worst case.
+ */
+async function ageRunningJobsForFastHandoff(): Promise<void> {
+  if (runningJobIds.size === 0) return;
+  const ids = Array.from(runningJobIds);
+  const db = requireSupabaseAdmin(log);
+  // Far enough past that any STALE_JOB_MINUTES setting < 60min instantly
+  // counts these as stale. The next polling worker's claimStaleResumable()
+  // CAS will pick them up within ~5s.
+  const farPast = new Date(Date.now() - 60 * 60_000).toISOString();
+  log(
+    'info',
+    `marking ${ids.length} in-flight job(s) for fast handoff after shutdown: ${ids.join(', ')}`,
+  );
+  await db
+    .from('base_constructor_jobs')
+    .update({ started_at: farPast })
+    .in('id', ids)
+    .eq('status', 'processing');
+}
 
 /**
  * Атомарно подбирает один pending-job: UPDATE WHERE status=pending.
@@ -127,11 +170,14 @@ async function pollOnce(): Promise<boolean> {
 
   const task = (async () => {
     log('info', `Running base-constructor job ${jobId}${isResume ? ' (RESUME)' : ''}`);
+    runningJobIds.add(jobId);
     try {
       await runBaseConstructorJob(jobId);
       log('info', `Finished base-constructor job ${jobId}`);
     } catch (err) {
       log('error', `base-constructor job ${jobId} crashed`, err);
+    } finally {
+      runningJobIds.delete(jobId);
     }
   })();
   running.add(task);
@@ -146,6 +192,25 @@ async function main(): Promise<void> {
   );
   requireSupabaseAdmin(log);
   const shouldStop = setupGracefulShutdown(log);
+
+  // На SIGTERM/SIGINT — параллельно к стандартному `shouldStop`-флагу —
+  // отметить in-flight job'ы как «протухшие», чтобы следующий worker после
+  // redeploy подобрал их на ближайшем poll tick (~5 сек) вместо ожидания
+  // STALE_JOB_MINUTES. Эти listener'ы fire-and-forget'ят async UPDATE до
+  // того, как Docker'у выпадет SIGKILL по stop-timeout (обычно 10s).
+  // Бывшая логика без этого hand-off'а оставляла polza@polza.ru job
+  // 55d37e8e ждать почти час пока новый worker дотерпел stale cutoff.
+  let bumpFired = false;
+  const onShutdownSignal = (sig: string) => {
+    if (bumpFired) return; // дубль-сигнал — без работы
+    bumpFired = true;
+    log('info', `${sig} received — ageing in-flight job(s) for fast handoff`);
+    void ageRunningJobsForFastHandoff().catch((err) => {
+      log('error', 'failed to age in-flight jobs during shutdown', err);
+    });
+  };
+  process.on('SIGTERM', () => onShutdownSignal('SIGTERM'));
+  process.on('SIGINT', () => onShutdownSignal('SIGINT'));
 
   // NB: startup recovery нам не нужен. processing-задачи без heartbeat
   // (до stale cutoff) подберутся claimStaleResumable() на следующих тиках —
