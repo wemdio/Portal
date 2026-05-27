@@ -34,6 +34,9 @@ export function createSalesChatClient(sessionString: string): TelegramClient {
   const session = new StringSession(sessionString);
   return new TelegramClient(session, apiId, apiHash, {
     connectionRetries: 5,
+    deviceModel: 'Desktop',
+    systemVersion: 'Windows 10',
+    appVersion: '1.0.0',
     ...(proxy ? { proxy } : {}),
   });
 }
