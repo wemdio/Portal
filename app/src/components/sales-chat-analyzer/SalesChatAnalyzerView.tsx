@@ -188,6 +188,7 @@ export function SalesChatAnalyzerView() {
   const [label, setLabel] = useState('');
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
+  const [authId, setAuthId] = useState('');
   const [authToken, setAuthToken] = useState('');
   const [sentType, setSentType] = useState<string | null>(null);
 
@@ -302,6 +303,7 @@ export function SalesChatAnalyzerView() {
     setLabel('');
     setCode('');
     setPassword('');
+    setAuthId('');
     setAuthToken('');
     setSentType(null);
   }, []);
@@ -316,6 +318,7 @@ export function SalesChatAnalyzerView() {
     try {
       const data = await authFetchJson<{
         step: string;
+        auth_id: string;
         auth_token: string;
         sent_type: string;
         next_type: string;
@@ -324,6 +327,7 @@ export function SalesChatAnalyzerView() {
         method: 'POST',
         body: JSON.stringify({ step: 'send_code', phone: phone.trim(), label: label.trim() }),
       });
+      setAuthId(data.auth_id);
       setAuthToken(data.auth_token);
       setSentType(data.sent_type);
       setAuthStep('code');
@@ -342,11 +346,12 @@ export function SalesChatAnalyzerView() {
     setBusy('auth');
     setError(null);
     try {
-      const data = await authFetchJson<{ step: string; auth_token?: string }>(`${API}/accounts/auth`, {
+      const data = await authFetchJson<{ step: string; auth_id?: string; auth_token?: string }>(`${API}/accounts/auth`, {
         method: 'POST',
-        body: JSON.stringify({ step: 'sign_in', auth_token: authToken, code: code.trim() }),
+        body: JSON.stringify({ step: 'sign_in', auth_id: authId, auth_token: authToken, code: code.trim() }),
       });
       if (data.step === 'password_needed') {
+        if (data.auth_id) setAuthId(data.auth_id);
         if (data.auth_token) setAuthToken(data.auth_token);
         setAuthStep('password');
         return;
@@ -358,7 +363,7 @@ export function SalesChatAnalyzerView() {
     } finally {
       setBusy(null);
     }
-  }, [code, authToken, resetConnect, loadAccounts]);
+  }, [code, authId, authToken, resetConnect, loadAccounts]);
 
   const checkPassword = useCallback(async () => {
     if (!password) {
@@ -370,7 +375,7 @@ export function SalesChatAnalyzerView() {
     try {
       await authFetchJson<{ step: string }>(`${API}/accounts/auth`, {
         method: 'POST',
-        body: JSON.stringify({ step: 'check_password', auth_token: authToken, password }),
+        body: JSON.stringify({ step: 'check_password', auth_id: authId, auth_token: authToken, password }),
       });
       resetConnect();
       await loadAccounts();
@@ -379,7 +384,7 @@ export function SalesChatAnalyzerView() {
     } finally {
       setBusy(null);
     }
-  }, [password, authToken, resetConnect, loadAccounts]);
+  }, [password, authId, authToken, resetConnect, loadAccounts]);
 
 
   const toggleAccount = useCallback(

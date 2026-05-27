@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { Api } from 'telegram';
+import { randomUUID } from 'crypto';
+import { Api, type TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import { computeCheck } from 'telegram/Password';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -20,7 +21,25 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-interface PendingAuthPayload {
+// ─── In-memory Map (primary, same-worker) ─────────────────────────────
+// Telegram не доставляет код, если запрашивающая сессия отключена.
+// Поэтому клиент живёт в памяти до завершения авторизации.
+// Для кросс-воркерного fallback (WEB_CONCURRENCY=8) вместе с authId
+// возвращаем зашифрованный auth_token с сессией + phoneCodeHash.
+
+type PendingAuth = {
+  client: TelegramClient;
+  userId: string;
+  label: string;
+  phone: string;
+  phoneCodeHash: string;
+  createdAt: number;
+};
+
+const pendingAuths = new Map<string, PendingAuth>();
+const TTL_MS = 5 * 60 * 1000;
+
+interface AuthTokenPayload {
   session: string;
   phoneCodeHash: string;
   phone: string;
@@ -29,22 +48,33 @@ interface PendingAuthPayload {
   createdAt: number;
 }
 
-const TTL_MS = 5 * 60 * 1000;
-
 const LOG_PREFIX = '[scA][auth]';
 function log(event: string, fields: Record<string, unknown> = {}) {
   // eslint-disable-next-line no-console
   console.error(
-    `${LOG_PREFIX} pid=${process.pid} event=${event} ${JSON.stringify(fields)}`,
+    `${LOG_PREFIX} pid=${process.pid} pending=${pendingAuths.size} event=${event} ${JSON.stringify(fields)}`,
   );
 }
 
-function sealAuth(payload: PendingAuthPayload): string {
+function cleanup() {
+  const now = Date.now();
+  let removed = 0;
+  for (const [id, entry] of pendingAuths) {
+    if (now - entry.createdAt > TTL_MS) {
+      entry.client.disconnect().catch(() => {});
+      pendingAuths.delete(id);
+      removed += 1;
+    }
+  }
+  if (removed > 0) log('cleanup_expired', { removed });
+}
+
+function sealAuth(payload: AuthTokenPayload): string {
   return encryptJsonAes256Gcm(payload, getSalesChatCipherKey());
 }
 
-function unsealAuth(token: string): PendingAuthPayload {
-  return decryptJsonAes256Gcm<PendingAuthPayload>(token, getSalesChatCipherKey());
+function unsealAuth(token: string): AuthTokenPayload {
+  return decryptJsonAes256Gcm<AuthTokenPayload>(token, getSalesChatCipherKey());
 }
 
 function sentTypeLabel(className: string | undefined | null): string {
@@ -55,7 +85,6 @@ function sentTypeLabel(className: string | undefined | null): string {
     case 'SentCodeTypeSms':
       return 'sms';
     case 'SentCodeTypeCall':
-      return 'call';
     case 'SentCodeTypeFlashCall':
     case 'SentCodeTypeMissedCall':
       return 'call';
@@ -72,9 +101,64 @@ function sentTypeLabel(className: string | undefined | null): string {
   }
 }
 
-/** Сохраняет авторизованный аккаунт: шифрует сессию, тянет мета через getMe. */
+/** Получает live-клиент из Map или восстанавливает из токена (cross-worker). */
+async function resolveAuth(
+  authId: string | undefined,
+  authTokenStr: string | undefined,
+  userId: string,
+): Promise<{ entry: PendingAuth; authId: string; fromToken: boolean } | { error: string; status: number }> {
+  // 1. Пробуем in-memory (same worker)
+  if (authId) {
+    const entry = pendingAuths.get(authId);
+    if (entry) {
+      if (entry.userId !== userId) return { error: 'Unauthorized', status: 401 };
+      return { entry, authId, fromToken: false };
+    }
+  }
+  // 2. Fallback: восстанавливаем из токена (cross-worker)
+  if (authTokenStr) {
+    let payload: AuthTokenPayload;
+    try {
+      payload = unsealAuth(authTokenStr);
+    } catch {
+      return { error: 'Невалидный auth_token', status: 400 };
+    }
+    if (payload.userId !== userId) return { error: 'Unauthorized', status: 401 };
+    if (Date.now() - payload.createdAt > TTL_MS) {
+      return { error: 'Сессия авторизации истекла. Начните заново.', status: 410 };
+    }
+    const client = createSalesChatClient(payload.session);
+    await client.connect();
+    const newId = authId || randomUUID();
+    const entry: PendingAuth = {
+      client,
+      userId: payload.userId,
+      label: payload.label,
+      phone: payload.phone,
+      phoneCodeHash: payload.phoneCodeHash,
+      createdAt: payload.createdAt,
+    };
+    pendingAuths.set(newId, entry);
+    log('restored_from_token', { auth_id: newId, user_id: userId });
+    return { entry, authId: newId, fromToken: true };
+  }
+  return { error: 'Сессия авторизации не найдена. Начните заново.', status: 404 };
+}
+
+function buildAuthToken(entry: PendingAuth): string {
+  return sealAuth({
+    session: (entry.client.session as StringSession).save(),
+    phoneCodeHash: entry.phoneCodeHash,
+    phone: entry.phone,
+    userId: entry.userId,
+    label: entry.label,
+    createdAt: entry.createdAt,
+  });
+}
+
+/** Сохраняет авторизованный аккаунт. */
 async function saveAccount(
-  client: import('telegram').TelegramClient,
+  client: TelegramClient,
   userId: string,
   phone: string,
   label: string,
@@ -95,7 +179,7 @@ async function saveAccount(
       lastName = me.lastName ?? null;
     }
   } catch {
-    // мета не критична — продолжаем без неё
+    // мета не критична
   }
 
   const displayLabel =
@@ -123,6 +207,8 @@ async function saveAccount(
 }
 
 export async function POST(req: NextRequest) {
+  cleanup();
+
   const guard = await requireSalesChatAccess(req);
   if (!guard.ok) return jsonError(guard.error, guard.status);
 
@@ -163,27 +249,27 @@ export async function POST(req: NextRequest) {
       );
       const sent = result as Api.auth.SentCode;
       const phoneCodeHash = sent.phoneCodeHash;
-      const sessionStr = (client.session as StringSession).save();
 
-      await client.disconnect().catch(() => {});
-
-      const authToken = sealAuth({
-        session: sessionStr,
-        phoneCodeHash,
-        phone,
+      const authId = randomUUID();
+      const entry: PendingAuth = {
+        client,
         userId: guard.userId,
         label,
+        phone,
+        phoneCodeHash,
         createdAt: Date.now(),
-      });
+      };
+      pendingAuths.set(authId, entry);
 
+      const authToken = buildAuthToken(entry);
       const sentType = sentTypeLabel(sent.type?.className);
 
       log('send_code_ok', {
+        auth_id: authId,
         user_id: guard.userId,
         phone,
         sent_type: sentType,
         sent_type_raw: sent.type?.className ?? null,
-        result_class: result?.className ?? null,
         next_type: sent.nextType?.className ?? null,
         timeout: sent.timeout ?? null,
         phone_code_hash_prefix: phoneCodeHash.slice(0, 6),
@@ -191,6 +277,7 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json({
         step: 'code_needed',
+        auth_id: authId,
         auth_token: authToken,
         sent_type: sentType,
         next_type: sentTypeLabel(sent.nextType?.className),
@@ -204,164 +291,82 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // ─── Шаг 1b: resend_code ──────────────────────────────────────────
-  if (step === 'resend_code') {
-    const tokenStr = body.auth_token as string;
-    if (!tokenStr) return jsonError('auth_token обязателен', 400);
-
-    let payload: PendingAuthPayload;
-    try {
-      payload = unsealAuth(tokenStr);
-    } catch {
-      return jsonError('Невалидный или повреждённый auth_token', 400);
-    }
-    if (payload.userId !== guard.userId) return jsonError('Unauthorized', 401);
-    if (Date.now() - payload.createdAt > TTL_MS) {
-      return jsonError('Сессия авторизации истекла. Начните заново.', 410);
-    }
-
-    const client = createSalesChatClient(payload.session);
-    try {
-      await client.connect();
-      const result = await client.invoke(
-        new Api.auth.ResendCode({
-          phoneNumber: payload.phone,
-          phoneCodeHash: payload.phoneCodeHash,
-        }),
-      );
-      const sent = result as Api.auth.SentCode;
-      const newPhoneCodeHash = sent.phoneCodeHash;
-      const newSessionStr = (client.session as StringSession).save();
-
-      await client.disconnect().catch(() => {});
-
-      const newToken = sealAuth({
-        ...payload,
-        session: newSessionStr,
-        phoneCodeHash: newPhoneCodeHash,
-        createdAt: Date.now(),
-      });
-
-      const sentType = sentTypeLabel(sent.type?.className);
-
-      log('resend_code_ok', {
-        user_id: guard.userId,
-        phone: payload.phone,
-        sent_type: sentType,
-        next_type: sent.nextType?.className ?? null,
-        timeout: sent.timeout ?? null,
-      });
-
-      return NextResponse.json({
-        step: 'code_needed',
-        auth_token: newToken,
-        sent_type: sentType,
-        next_type: sentTypeLabel(sent.nextType?.className),
-        timeout: sent.timeout ?? null,
-      });
-    } catch (e) {
-      await client.disconnect().catch(() => {});
-      const msg = e instanceof Error ? e.message : String(e);
-      log('resend_code_fail', { phone: payload.phone, error: msg });
-      return jsonError(`Не удалось повторно отправить код: ${msg}`, 400);
-    }
-  }
-
   // ─── Шаг 2: sign_in ─────────────────────────────────────────────────
   if (step === 'sign_in') {
-    const tokenStr = body.auth_token as string;
     const code = (body.code as string)?.trim();
-    if (!tokenStr || !code) return jsonError('auth_token и code обязательны', 400);
+    if (!code) return jsonError('code обязателен', 400);
 
-    let payload: PendingAuthPayload;
-    try {
-      payload = unsealAuth(tokenStr);
-    } catch {
-      return jsonError('Невалидный или повреждённый auth_token', 400);
-    }
-    if (payload.userId !== guard.userId) {
-      log('sign_in_user_mismatch', { owner: payload.userId, requester: guard.userId });
-      return jsonError('Unauthorized', 401);
-    }
-    if (Date.now() - payload.createdAt > TTL_MS) {
-      return jsonError('Сессия авторизации истекла. Начните заново.', 410);
-    }
+    const resolved = await resolveAuth(
+      body.auth_id as string | undefined,
+      body.auth_token as string | undefined,
+      guard.userId,
+    );
+    if ('error' in resolved) return jsonError(resolved.error, resolved.status);
+    const { entry, authId, fromToken } = resolved;
 
-    const client = createSalesChatClient(payload.session);
     try {
-      await client.connect();
-      await client.invoke(
+      await entry.client.invoke(
         new Api.auth.SignIn({
-          phoneNumber: payload.phone,
-          phoneCodeHash: payload.phoneCodeHash,
+          phoneNumber: entry.phone,
+          phoneCodeHash: entry.phoneCodeHash,
           phoneCode: code,
         }),
       );
-      const account = await saveAccount(client, payload.userId, payload.phone, payload.label);
-      await client.disconnect().catch(() => {});
-      log('sign_in_ok', { user_id: guard.userId, phone: payload.phone });
+      const account = await saveAccount(entry.client, entry.userId, entry.phone, entry.label);
+      await entry.client.disconnect().catch(() => {});
+      pendingAuths.delete(authId);
+      log('sign_in_ok', { auth_id: authId, user_id: guard.userId, phone: entry.phone, fromToken });
       return NextResponse.json({ step: 'done', account });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes('SESSION_PASSWORD_NEEDED')) {
-        const updatedSession = (client.session as StringSession).save();
-        await client.disconnect().catch(() => {});
-        const newToken = sealAuth({
-          ...payload,
-          session: updatedSession,
-        });
-        log('sign_in_2fa_required', { user_id: guard.userId });
-        return NextResponse.json({ step: 'password_needed', auth_token: newToken });
+        const newToken = buildAuthToken(entry);
+        log('sign_in_2fa_required', { auth_id: authId, user_id: guard.userId });
+        return NextResponse.json({ step: 'password_needed', auth_id: authId, auth_token: newToken });
       }
-      await client.disconnect().catch(() => {});
-      log('sign_in_fail', { user_id: guard.userId, error: msg });
+      await entry.client.disconnect().catch(() => {});
+      pendingAuths.delete(authId);
+      log('sign_in_fail', { auth_id: authId, user_id: guard.userId, error: msg, fromToken });
       return jsonError(`Ошибка входа: ${msg}`, 400);
     }
   }
 
   // ─── Шаг 3: check_password (2FA) ────────────────────────────────────
   if (step === 'check_password') {
-    const tokenStr = body.auth_token as string;
     const password = (body.password as string) ?? '';
-    if (!tokenStr || !password) return jsonError('auth_token и password обязательны', 400);
+    if (!password) return jsonError('password обязателен', 400);
 
-    let payload: PendingAuthPayload;
-    try {
-      payload = unsealAuth(tokenStr);
-    } catch {
-      return jsonError('Невалидный или повреждённый auth_token', 400);
-    }
-    if (payload.userId !== guard.userId) {
-      log('check_password_user_mismatch', { owner: payload.userId, requester: guard.userId });
-      return jsonError('Unauthorized', 401);
-    }
-    if (Date.now() - payload.createdAt > TTL_MS) {
-      return jsonError('Сессия авторизации истекла. Начните заново.', 410);
-    }
+    const resolved = await resolveAuth(
+      body.auth_id as string | undefined,
+      body.auth_token as string | undefined,
+      guard.userId,
+    );
+    if ('error' in resolved) return jsonError(resolved.error, resolved.status);
+    const { entry, authId, fromToken } = resolved;
 
-    const client = createSalesChatClient(payload.session);
     try {
-      await client.connect();
-      const passwordSrp = await client.invoke(new Api.account.GetPassword());
+      const passwordSrp = await entry.client.invoke(new Api.account.GetPassword());
       const srpResult = await computeCheck(passwordSrp, password);
-      await client.invoke(new Api.auth.CheckPassword({ password: srpResult }));
+      await entry.client.invoke(new Api.auth.CheckPassword({ password: srpResult }));
 
-      const account = await saveAccount(client, payload.userId, payload.phone, payload.label);
-      await client.disconnect().catch(() => {});
-      log('check_password_ok', { user_id: guard.userId });
+      const account = await saveAccount(entry.client, entry.userId, entry.phone, entry.label);
+      await entry.client.disconnect().catch(() => {});
+      pendingAuths.delete(authId);
+      log('check_password_ok', { auth_id: authId, user_id: guard.userId, fromToken });
       return NextResponse.json({ step: 'done', account });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      await client.disconnect().catch(() => {});
+      await entry.client.disconnect().catch(() => {});
+      pendingAuths.delete(authId);
       if (msg.includes('PASSWORD_HASH_INVALID')) {
-        log('check_password_invalid', { user_id: guard.userId });
+        log('check_password_invalid', { auth_id: authId, user_id: guard.userId });
         return jsonError('Неверный пароль 2FA', 400);
       }
-      log('check_password_fail', { user_id: guard.userId, error: msg });
+      log('check_password_fail', { auth_id: authId, user_id: guard.userId, error: msg, fromToken });
       return jsonError(`Ошибка 2FA: ${msg}`, 400);
     }
   }
 
   log('unknown_step', { step });
-  return jsonError('Неизвестный step. Ожидается: send_code, resend_code, sign_in, check_password', 400);
+  return jsonError('Неизвестный step. Ожидается: send_code, sign_in, check_password', 400);
 }
