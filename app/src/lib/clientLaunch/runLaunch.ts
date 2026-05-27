@@ -32,9 +32,10 @@ import type {
   ClientLaunchScheduleOverride,
   ClientLaunchSequence,
 } from './types';
-import { activateCampaign, createCampaign, createLeads } from '@/lib/instantly/client';
+import { activateCampaign, createCampaign, createLeads, updateCampaign } from '@/lib/instantly/client';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
+import { hasUsableCampaignSequences } from './campaignSequences';
 import {
   countClientContacts,
   getBillingPeriodStart,
@@ -262,6 +263,14 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
       .from('client_campaign_launches')
       .update({ instantly_campaign_id: instantlyCampaignId })
       .eq('id', launchId);
+
+    if (!hasUsableCampaignSequences(created.sequences)) {
+      await updateCampaign(
+        instantlyCampaignId,
+        { sequences: payload.sequences },
+        instantlyRequestOptions,
+      );
+    }
 
     // 6. Грузим лидов. skip_if_in_workspace НЕ выставляем (иначе Instantly
     //    пропустит лида, который уже есть в воркспейсе из прошлых кампаний,

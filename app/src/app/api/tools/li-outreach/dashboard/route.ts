@@ -34,9 +34,18 @@ type CampaignRow = {
   status: string;
   daily_invite_limit: number;
   invites_sent_today: number;
+  last_invite_date: string | null;
   lead_list_id: string | null;
 };
 type LogRow = { campaign_id: string; level: string; created_at: string };
+
+function todayStr(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function visibleInvitesSentToday(campaign: CampaignRow, today: string): number {
+  return campaign.last_invite_date?.slice(0, 10) === today ? campaign.invites_sent_today : 0;
+}
 
 export async function GET(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.li-outreach.dashboard' }, async () => {
@@ -52,7 +61,7 @@ export async function GET(req: NextRequest) {
       db.from('li_leads').select('id, company, status').eq('user_id', auth.user.id),
       db
         .from('li_campaigns')
-        .select('id, name, status, daily_invite_limit, invites_sent_today, lead_list_id')
+        .select('id, name, status, daily_invite_limit, invites_sent_today, last_invite_date, lead_list_id')
         .eq('user_id', auth.user.id),
       campaignIds.length > 0
         ? db.from('li_campaign_leads')
@@ -106,6 +115,7 @@ export async function GET(req: NextRequest) {
     for (const lead of leads) leadStatusById.set(lead.id, lead.status);
 
     // --- Per-campaign stats ---
+    const today = todayStr();
     const campaignStats = campaigns.map((c) => {
       const cls = campaignLeads.filter((cl) => cl.campaign_id === c.id);
       const pending = cls.filter((cl) => cl.status === 'pending').length;
@@ -128,7 +138,7 @@ export async function GET(req: NextRequest) {
         funnel: campaignFunnel,
         status: c.status,
         daily_invite_limit: c.daily_invite_limit,
-        invites_sent_today: c.invites_sent_today,
+        invites_sent_today: visibleInvitesSentToday(c, today),
         leads_total: cls.length,
         pending,
         in_progress: inProgress,
