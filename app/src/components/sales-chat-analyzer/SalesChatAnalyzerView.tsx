@@ -190,7 +190,6 @@ export function SalesChatAnalyzerView() {
   const [password, setPassword] = useState('');
   const [authToken, setAuthToken] = useState('');
   const [sentType, setSentType] = useState<string | null>(null);
-  const [resendBusy, setResendBusy] = useState(false);
 
   const initialLoaded = useRef(false);
 
@@ -382,26 +381,6 @@ export function SalesChatAnalyzerView() {
     }
   }, [password, authToken, resetConnect, loadAccounts]);
 
-  const resendCode = useCallback(async () => {
-    setResendBusy(true);
-    setError(null);
-    try {
-      const data = await authFetchJson<{
-        step: string;
-        auth_token: string;
-        sent_type: string;
-      }>(`${API}/accounts/auth`, {
-        method: 'POST',
-        body: JSON.stringify({ step: 'resend_code', auth_token: authToken }),
-      });
-      setAuthToken(data.auth_token);
-      setSentType(data.sent_type);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Ошибка при повторной отправке');
-    } finally {
-      setResendBusy(false);
-    }
-  }, [authToken]);
 
   const toggleAccount = useCallback(
     async (acc: AccountListRow) => {
@@ -603,11 +582,11 @@ export function SalesChatAnalyzerView() {
                 </button>
                 <button
                   type="button"
-                  onClick={resendCode}
-                  disabled={resendBusy || busy === 'auth'}
+                  onClick={sendCode}
+                  disabled={busy === 'auth'}
                   className="text-sm text-blue-600 hover:text-blue-800 disabled:text-gray-400"
                 >
-                  {resendBusy ? 'Отправка…' : 'Отправить повторно'}
+                  Отправить повторно
                 </button>
               </div>
             </div>
