@@ -1,8 +1,8 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Loader2, Play, Sparkles, Trash2, Search } from 'lucide-react';
-import { authFetch, getAccessToken } from '@/lib/authFetch';
+import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
 
 export type SearchParserStartPayload = {
   brief?: string;
@@ -32,6 +32,45 @@ export function SearchParserForm({ onStart, busy }: Props) {
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Сохранённый бриф с портала (/client/brief). Если есть — становится
+  // дефолтным источником: клиенту не надо снова копировать/загружать
+  // PDF. Тот же паттерн что в base-constructor и email-sequence-v2.
+  const [savedBriefText, setSavedBriefText] = useState('');
+  const [savedBriefAvailable, setSavedBriefAvailable] = useState(false);
+  const [briefSource, setBriefSource] = useState<'saved' | 'custom'>('custom');
+  const savedBriefLoaded = useRef(false);
+  useEffect(() => {
+    if (savedBriefLoaded.current) return;
+    savedBriefLoaded.current = true;
+    void (async () => {
+      try {
+        const res = await authFetchJson<{ compiled_brief_text?: string }>('/api/client/brief');
+        const text = (res.compiled_brief_text ?? '').trim();
+        if (text) {
+          setSavedBriefText(text);
+          setSavedBriefAvailable(true);
+          // Default to saved mode AND populate the brief field so
+          // «Сгенерировать запросы» works in one click without any
+          // typing/uploading. Если юзер хочет другой бриф — переключит
+          // tab на «Свой» и впишет/загрузит.
+          setBriefSource('saved');
+          setBrief(text);
+        }
+      } catch { /* non-critical: leave defaults */ }
+    })();
+  }, []);
+
+  // При переключении на 'saved' заливаем saved текст в brief.
+  // При переключении на 'custom' оставляем то, что юзер уже ввёл (если
+  // он только что переключился с saved — оставляем заполненное чтобы
+  // не терять контекст, юзер сам сотрёт если хочет).
+  const switchBriefSource = (next: 'saved' | 'custom') => {
+    setBriefSource(next);
+    if (next === 'saved' && savedBriefAvailable) {
+      setBrief(savedBriefText);
+    }
+  };
 
   const handlePdfUpload = async (file: File) => {
     setPdfUploading(true);
@@ -178,12 +217,58 @@ export function SearchParserForm({ onStart, busy }: Props) {
           <label className="block text-sm font-medium text-gray-700 mb-1">
             Бриф / Описание целевой аудитории (для генерации запросов)
           </label>
-          <textarea
-            value={brief}
-            onChange={(e) => setBrief(e.target.value)}
-            className="w-full min-h-[8rem] resize-y rounded-lg border border-gray-300 py-3 px-3 pb-4 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none"
-            placeholder="Вставьте описание компании..."
-          />
+          {/* Source switcher: «Сохранённый» (из /client/brief) vs «Свой».
+              Отображается только когда сохранённый бриф доступен —
+              иначе скрываем чтобы не запутывать. */}
+          {savedBriefAvailable && (
+            <div className="mb-2 flex gap-1 rounded-lg bg-gray-100 p-1 text-xs w-fit">
+              <button
+                type="button"
+                onClick={() => switchBriefSource('saved')}
+                className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
+                  briefSource === 'saved'
+                    ? 'bg-white text-gray-900 shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Из сохранённого брифа
+              </button>
+              <button
+                type="button"
+                onClick={() => switchBriefSource('custom')}
+                className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
+                  briefSource === 'custom'
+                    ? 'bg-white text-gray-900 shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Свой
+              </button>
+            </div>
+          )}
+
+          {briefSource === 'saved' && savedBriefAvailable ? (
+            <>
+              <textarea
+                value={savedBriefText}
+                readOnly
+                className="w-full min-h-[8rem] resize-y rounded-lg border border-gray-200 bg-gray-50 py-3 px-3 pb-4 text-sm text-gray-700"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Подгружен ваш бриф со{' '}
+                <a href="/client/brief" className="underline">страницы «Бриф»</a>.
+                Чтобы изменить — отредактируйте там, или переключитесь на «Свой».
+              </p>
+            </>
+          ) : (
+            <textarea
+              value={brief}
+              onChange={(e) => setBrief(e.target.value)}
+              className="w-full min-h-[8rem] resize-y rounded-lg border border-gray-300 py-3 px-3 pb-4 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none"
+              placeholder="Вставьте описание компании..."
+            />
+          )}
+
           <div className="mt-4 flex flex-wrap items-center gap-3">
             <input
               ref={fileInputRef}
@@ -195,15 +280,19 @@ export function SearchParserForm({ onStart, busy }: Props) {
                 if (file) void handlePdfUpload(file);
               }}
             />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={pdfUploading}
-              className="inline-flex items-center rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-400 hover:shadow-sm disabled:opacity-50"
-            >
-              {pdfUploading ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" /> : null}
-              Загрузить PDF бриф
-            </button>
+            {/* PDF-загрузку прячем в saved-mode: там бриф ридонли,
+                загрузка туда не положит ничего. */}
+            {briefSource === 'custom' && (
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={pdfUploading}
+                className="inline-flex items-center rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-400 hover:shadow-sm disabled:opacity-50"
+              >
+                {pdfUploading ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" /> : null}
+                Загрузить PDF бриф
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void handleGenerateQueries()}
