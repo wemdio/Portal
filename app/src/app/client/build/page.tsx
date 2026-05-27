@@ -170,22 +170,6 @@ export default function ClientBuildHubPage() {
         </Link>
       </section>
 
-      {/* ── Tip ────────────────────────────────────────────────────────── */}
-      <aside
-        className="neu-inset rounded-lg px-4 py-3 sm:px-5 sm:py-4 text-xs sm:text-sm flex items-start gap-2.5"
-        style={{ color: 'var(--cp-paper-mute)' }}
-      >
-        <span
-          aria-hidden
-          className="ds-status-dot shrink-0"
-          style={{ background: 'var(--cp-amber)', marginTop: '7px' }}
-        />
-        <span>
-          <strong style={{ color: 'var(--cp-paper)' }}>Совет.</strong>{' '}
-          Один источник можно совмещать с другим — например, собрать список из B2B-поиска,
-          затем добавить компании из Яндекс.Карт, и пропустить всё вместе через Конструктор.
-        </span>
-      </aside>
     </div>
   );
 }
