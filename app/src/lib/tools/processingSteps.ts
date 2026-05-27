@@ -186,6 +186,18 @@ export interface StepFindEmailsOptions {
    * на 'same' (создаём «Email» как раньше). Опция теряет смысл когда нет «исходных».
    */
   target?: 'same' | 'separate';
+  /**
+   * Callback для checkpoint'а данных в DB jsonb каждые N строк. Если worker
+   * умирает посреди шага (redeploy, OOM, hard crash) — на resume следующий
+   * worker читает свежий checkpoint, фильтрует строки с уже найденным
+   * email'ом и продолжает с того места. Без этого callback'а — restart с нуля.
+   *
+   * Симптом который этот колбэк закрывает: polza@polza.ru job 55d37e8e на
+   * redeploy потерял прогресс с 84% → 28% (рестарт всего шага с 4297 строк).
+   * Тяжёлые checkpoint'ы (4MB jsonb) делаются раз в 250 строк — ~17 раз
+   * за prod-base ≈ 70MB суммарной записи, что приемлемо.
+   */
+  onCheckpoint?: CheckpointFn;
 }
 
 export async function stepFindEmails(
@@ -236,6 +248,11 @@ export async function stepFindEmails(
   if (toProcess.length === 0) { await onProgress(100); return [header, ...body]; }
 
   let done = 0;
+  // checkpoint каждые 250 строк — мерж между «свежими данными при resume»
+  // и «не флудим DB на каждой строке». На 4297-строчной базе это ~17
+  // запросов общим объёмом ~70MB (один update jsonb ~4MB).
+  const checkpointEvery = 250;
+  const onCheckpoint = options?.onCheckpoint;
   await processInPool(toProcess, EMAIL_CONCURRENCY, async (item) => {
     if (isCancelled && await isCancelled()) return;
     try {
@@ -255,6 +272,9 @@ export async function stepFindEmails(
     done++;
     if (done % 10 === 0 || done === toProcess.length) {
       await onProgress(Math.round((done / toProcess.length) * 100));
+    }
+    if (onCheckpoint && (done % checkpointEvery === 0 || done === toProcess.length)) {
+      await onCheckpoint([header, ...body]);
     }
   });
 
@@ -868,6 +888,14 @@ export interface StepValidateEmailsOptions {
    *     запустился). Не использовать в base-constructor user flow.
    */
   dropRowsWithoutEmail?: boolean;
+  /**
+   * Callback для checkpoint'а данных каждые N строк. То же зачем что
+   * и в stepFindEmails: на redeploy/crash посреди шага следующий worker
+   * читает свежий checkpoint вместо стартовых данных и продолжает с
+   * проверенной части. Validate медленнее scrape'а (SMTP+DNS), так что
+   * без checkpoint'а потеря прогресса на длинных базах особенно болезненна.
+   */
+  onCheckpoint?: CheckpointFn;
 }
 
 export async function stepValidateEmails(
@@ -946,6 +974,11 @@ export async function stepValidateEmails(
 
   const domainCache = new Map<string, DomainInfo>();
   let done = 0;
+  // checkpoint каждые 250 валидаций. Validate медленнее scrape'а (SMTP+DNS
+  // round-trip может быть 1-3s), так что 250 ≈ 5-10 мин работы — окно
+  // потенциальной потери прогресса на redeploy не больше.
+  const checkpointEvery = 250;
+  const onCheckpoint = options?.onCheckpoint;
 
   await processInPool(toValidate, VALIDATION_CONCURRENCY, async (item) => {
     if (isCancelled && await isCancelled()) return;
@@ -960,6 +993,9 @@ export async function stepValidateEmails(
     done++;
     if (done % 5 === 0 || done === toValidate.length) {
       await onProgress(Math.round((done / toValidate.length) * 100));
+    }
+    if (onCheckpoint && (done % checkpointEvery === 0 || done === toValidate.length)) {
+      await onCheckpoint([newHeader, ...newBody]);
     }
   });
 
