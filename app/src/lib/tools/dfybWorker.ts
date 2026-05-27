@@ -318,7 +318,14 @@ async function stepFindEmails(jobId: string, data: string[][]): Promise<string[]
   let done = 0;
   await processInPool(toProcess, EMAIL_CONCURRENCY, async (item) => {
     try {
-      const { emails } = await scrapeEmails(item.url, { timeout: 15_000, maxPages: 5 });
+      // Only first email used downstream → early-exit on first usable
+      // address. Same speedup pattern as the base-constructor find_emails
+      // step.
+      const { emails } = await scrapeEmails(item.url, {
+        timeout: 15_000,
+        maxPages: 5,
+        stopAtFirstUsableEmail: true,
+      });
       if (emails.length > 0) body[item.i][emailIdx] = emails[0];
     } catch {
       // skip
