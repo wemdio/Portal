@@ -317,6 +317,35 @@ services:
     networks:
       - portal-network
 
+  worker-sales-chat-logger:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-sales-chat-logger
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - SALES_CHAT_CIPHER_KEY=${SALES_CHAT_CIPHER_KEY}
+      - MAIN_S3_ENDPOINT=${MAIN_S3_ENDPOINT}
+      - MAIN_S3_REGION=${MAIN_S3_REGION:-ru-1}
+      - MAIN_S3_BUCKET=${MAIN_S3_BUCKET}
+      - MAIN_S3_ACCESS_KEY_ID=${MAIN_S3_ACCESS_KEY_ID}
+      - MAIN_S3_SECRET_ACCESS_KEY=${MAIN_S3_SECRET_ACCESS_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=saleschatlogger
+    stop_grace_period: 5m
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '0.5'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   worker-tg-parser:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-tg-parser
