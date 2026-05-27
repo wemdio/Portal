@@ -55,6 +55,9 @@ switch (kind) {
   case 'baseconstructor':
     run('./baseConstructor');
     break;
+  case 'saleschatlogger':
+    run('./salesChatLogger');
+    break;
   case 'all':
   default:
     run('./index');
