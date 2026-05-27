@@ -32,6 +32,11 @@ interface LastRun {
   stored_count: number;
   skipped_count: number;
   failed_count: number;
+  was_dry_run: boolean;
+  with_site: number | null;
+  with_score: number | null;
+  with_email: number | null;
+  email_valid: number | null;
 }
 
 interface PendingAttempt {
@@ -140,26 +145,62 @@ export function AutoPipelineSummary() {
       </header>
 
       {last_run ? (
-        <div className="space-y-0">
-          <LedgerRow
-            label="Добавлено в работу"
-            value={last_run.routed_count}
-            primary
-          />
-          <LedgerRow label="В очереди" value={stored_count} />
-          <LedgerRow
-            label="Отброшено"
-            value={last_run.skipped_count + last_run.failed_count}
-          />
-          <LedgerRow
-            label="Всего за 30 дней"
-            value={totals_30d?.routed ?? 0}
-          />
-        </div>
+        last_run.was_dry_run ? (
+          // Dry-run режим: ничего не отправляется в Instantly — показываем
+          // ВОРОНКУ ОБРАБОТКИ (parsed → score → email_valid) вместо routing-
+          // нулей. Это и есть «полезный результат» dry-run прогона.
+          <div className="space-y-0">
+            <LedgerRow
+              label="Готовых контактов"
+              value={last_run.email_valid ?? 0}
+              primary
+            />
+            <LedgerRow
+              label="Найдено email"
+              value={last_run.with_email ?? 0}
+            />
+            <LedgerRow
+              label="Обработано компаний"
+              value={last_run.new_count}
+            />
+            <LedgerRow
+              label="Всего в базе"
+              value={stored_count}
+            />
+          </div>
+        ) : (
+          // Production режим: показываем что реально ушло в Instantly.
+          <div className="space-y-0">
+            <LedgerRow
+              label="Добавлено в работу"
+              value={last_run.routed_count}
+              primary
+            />
+            <LedgerRow label="В очереди" value={stored_count} />
+            <LedgerRow
+              label="Отброшено"
+              value={last_run.skipped_count + last_run.failed_count}
+            />
+            <LedgerRow
+              label="Всего за 30 дней"
+              value={totals_30d?.routed ?? 0}
+            />
+          </div>
+        )
       ) : (
         <p className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
           Кампании собираются автоматически каждое утро в 07:00 МСК.
           Первый прогон ещё не запускался.
+        </p>
+      )}
+
+      {last_run?.was_dry_run && (
+        <p
+          className="mt-3 text-xs"
+          style={{ color: 'var(--cp-paper-mute)' }}
+        >
+          Тестовый режим — данные собираются, но в кампании не отправляются.
+          Свяжитесь с менеджером, чтобы переключить на боевой запуск.
         </p>
       )}
 
