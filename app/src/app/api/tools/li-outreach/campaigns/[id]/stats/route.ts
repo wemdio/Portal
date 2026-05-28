@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError, checkIsAdmin } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -11,11 +11,14 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
     const { id } = await ctx.params;
-    const admin = await checkIsAdmin(auth.user.id);
 
-    let campQ = supabaseAdmin.from('li_campaigns').select('id').eq('id', id);
-    if (!admin) campQ = campQ.eq('user_id', auth.user.id);
-    const { data: campaign } = await campQ.maybeSingle();
+    // Cross-specialist read: any specialist can view any campaign's funnel
+    // stats. Read-only — no mutations live on this route.
+    const { data: campaign } = await supabaseAdmin
+      .from('li_campaigns')
+      .select('id')
+      .eq('id', id)
+      .maybeSingle();
     if (!campaign) return jsonError('Campaign not found', 404);
 
     const { data: stats } = await supabaseAdmin

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError, checkIsAdmin } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError, fetchOwnerNames } from '@/lib/liOutreach/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -11,19 +11,21 @@ export async function GET(req: NextRequest) {
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
 
-    const admin = await checkIsAdmin(auth.user.id);
-
-    let query = supabaseAdmin
+    // Cross-specialist visibility: every specialist sees ALL campaigns, not
+    // just their own. This is read-only for campaigns you don't own — the
+    // mutation routes (PUT/DELETE/start/stop) still guard on user_id, so a
+    // viewer can't edit/start/stop someone else's launch. `owner_name` lets
+    // the UI tag + colour-code launches that belong to another specialist.
+    const { data, error } = await supabaseAdmin
       .from('li_campaigns')
       .select('*')
       .order('created_at', { ascending: false });
-    if (!admin) {
-      query = query.eq('user_id', auth.user.id);
-    }
-
-    const { data, error } = await query;
     if (error) return jsonError(error.message, 500);
-    return NextResponse.json({ campaigns: data ?? [] });
+
+    const campaigns = (data ?? []) as Array<Record<string, unknown> & { user_id: string }>;
+    const ownerMap = await fetchOwnerNames(campaigns.map((c) => c.user_id));
+    const withOwner = campaigns.map((c) => ({ ...c, owner_name: ownerMap.get(c.user_id) ?? null }));
+    return NextResponse.json({ campaigns: withOwner });
   });
 }
 
