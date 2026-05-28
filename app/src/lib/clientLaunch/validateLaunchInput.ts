@@ -60,30 +60,9 @@ export type ValidateClientLaunchResult =
   | { ok: true }
   | { ok: false; error: string };
 
-export function validateClientLaunchInput(
-  input: ValidateClientLaunchInput,
+export function validateClientLaunchSequence(
+  sequence: ClientLaunchSequence,
 ): ValidateClientLaunchResult {
-  const { preset, sequence, mapping, rowCount, scheduleOverride } = input;
-
-  if (scheduleOverride) {
-    const r = validateScheduleOverride(scheduleOverride);
-    if (!r.ok) return r;
-  }
-
-  if (!preset) {
-    return {
-      ok: false,
-      error: 'Пресет ещё не настроен. Обратитесь к менеджеру для настройки кампаний.',
-    };
-  }
-
-  if (!preset.email_account_ids || preset.email_account_ids.length === 0) {
-    return {
-      ok: false,
-      error: 'В пресете нет привязанных email-аккаунтов. Обратитесь к менеджеру.',
-    };
-  }
-
   if (!sequence.name || !sequence.name.trim()) {
     return { ok: false, error: 'Укажите название кампании.' };
   }
@@ -129,6 +108,36 @@ export function validateClientLaunchInput(
       }
     }
   }
+
+  return { ok: true };
+}
+
+export function validateClientLaunchInput(
+  input: ValidateClientLaunchInput,
+): ValidateClientLaunchResult {
+  const { preset, sequence, mapping, rowCount, scheduleOverride } = input;
+
+  if (scheduleOverride) {
+    const r = validateScheduleOverride(scheduleOverride);
+    if (!r.ok) return r;
+  }
+
+  if (!preset) {
+    return {
+      ok: false,
+      error: 'Пресет ещё не настроен. Обратитесь к менеджеру для настройки кампаний.',
+    };
+  }
+
+  if (!preset.email_account_ids || preset.email_account_ids.length === 0) {
+    return {
+      ok: false,
+      error: 'В пресете нет привязанных email-аккаунтов. Обратитесь к менеджеру.',
+    };
+  }
+
+  const sequenceValidation = validateClientLaunchSequence(sequence);
+  if (!sequenceValidation.ok) return sequenceValidation;
 
   if (!mapping.email || !mapping.email.trim()) {
     return { ok: false, error: 'Сопоставьте колонку с email-адресом.' };

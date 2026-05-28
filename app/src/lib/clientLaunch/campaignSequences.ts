@@ -16,8 +16,11 @@ export function hasUsableCampaignSequences(sequences?: CampaignSequence[] | null
 
 export function clientLaunchStepsToCampaignSequences(
   steps: ClientLaunchSequenceStep[] | unknown,
+  options?: { bodyFormatter?: (body: string) => string },
 ): CampaignSequence[] | null {
   if (!Array.isArray(steps)) return null;
+
+  const formatBody = options?.bodyFormatter ?? ((body: string) => body);
 
   const convertedSteps: SequenceStep[] = steps
     .filter((step): step is ClientLaunchSequenceStep => {
@@ -28,10 +31,10 @@ export function clientLaunchStepsToCampaignSequences(
       delay: index < allSteps.length - 1 ? allSteps[index + 1].wait_days : 1,
       delay_unit: 'days',
       variants: [
-        { subject: step.subject ?? '', body: step.body },
+        { subject: step.subject ?? '', body: formatBody(step.body) },
         ...(step.variants ?? []).map((variant) => ({
           subject: variant.subject ?? '',
-          body: variant.body,
+          body: formatBody(variant.body),
         })),
       ],
     }));

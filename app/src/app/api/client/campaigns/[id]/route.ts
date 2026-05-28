@@ -8,16 +8,28 @@ import {
   getCampaign,
   getCampaignAnalytics,
   getCampaignAnalyticsSteps,
+  updateCampaign,
 } from '@/lib/instantly/client';
-import { cached } from '@/lib/clientCache';
+import { cached, invalidate } from '@/lib/clientCache';
 import {
   clientLaunchStepsToCampaignSequences,
   hasUsableCampaignSequences,
 } from '@/lib/clientLaunch/campaignSequences';
+import { normalizeClientLaunchSequenceSteps } from '@/lib/clientLaunch/requestParsing';
+import { toInstantlyHtmlBody } from '@/lib/clientLaunch/buildCampaignPayload';
+import { validateClientLaunchSequence } from '@/lib/clientLaunch/validateLaunchInput';
+import type { ClientLaunchSequence } from '@/lib/clientLaunch/types';
+import { logAudit, logError } from '@/lib/loggerServer';
+import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
 
 export const dynamic = 'force-dynamic';
 
 const DETAIL_TTL = 15 * 60 * 1000;
+
+interface CampaignPatchBody {
+  campaign_name?: unknown;
+  sequence_steps?: unknown;
+}
 
 export async function GET(
   req: NextRequest,
@@ -91,6 +103,109 @@ export async function GET(
     return NextResponse.json({ campaign: campaignForResponse, analytics, steps });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Ошибка загрузки';
+    return jsonError(message, 500);
+  }
+}
+
+export async function PATCH(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string }> },
+) {
+  const result = await requireClientAuth(req);
+  if ('error' in result) return result.error;
+  if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
+  const { userId, accessRows } = result.auth;
+
+  const { id: campaignId } = await ctx.params;
+
+  if (!isResourceAllowed(campaignId, accessRows, 'campaign')) {
+    return jsonError('Кампания не найдена или доступ запрещён', 404);
+  }
+
+  let body: CampaignPatchBody;
+  try {
+    body = (await req.json()) as CampaignPatchBody;
+  } catch {
+    return jsonError('Invalid body', 400);
+  }
+
+  const sequence: ClientLaunchSequence = {
+    name: typeof body.campaign_name === 'string' ? body.campaign_name : '',
+    steps: normalizeClientLaunchSequenceSteps(body.sequence_steps),
+  };
+
+  const validation = validateClientLaunchSequence(sequence);
+  if (!validation.ok) return jsonError(validation.error, 400);
+
+  const sequences = clientLaunchStepsToCampaignSequences(sequence.steps, {
+    bodyFormatter: toInstantlyHtmlBody,
+  });
+  if (!sequences) {
+    return jsonError('Добавьте хотя бы один шаг в цепочку писем.', 400);
+  }
+
+  const instantlyRequestOptions = {
+    accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
+  };
+  const campaignName = sequence.name.trim();
+
+  try {
+    const { data: launchRow, error: launchErr } = await supabaseInstantly
+      .from('client_campaign_launches')
+      .select('id')
+      .eq('client_user_id', userId)
+      .eq('instantly_campaign_id', campaignId)
+      .maybeSingle();
+
+    if (launchErr) {
+      await logError('client.campaign.patch.launch_load_failed', launchErr, { campaignId }, { userId });
+      return jsonError('Не удалось загрузить запуск кампании', 500);
+    }
+
+    const launchId = (launchRow as { id?: string } | null)?.id;
+    if (!launchId) {
+      return jsonError('Кампания не найдена или доступ запрещён', 404);
+    }
+
+    const updatedCampaign = await updateCampaign(
+      campaignId,
+      { name: campaignName, sequences },
+      instantlyRequestOptions,
+    );
+
+    const { error: updateErr } = await supabaseInstantly
+      .from('client_campaign_launches')
+      .update({
+        campaign_name: campaignName,
+        sequence_steps: sequence.steps,
+      })
+      .eq('id', launchId);
+
+    if (updateErr) {
+      await logError('client.campaign.patch.launch_update_failed', updateErr, { campaignId, launchId }, { userId });
+      return jsonError('Не удалось сохранить изменения запуска', 500);
+    }
+
+    invalidate(`instantly:${instantlyRequestOptions.accountId}:campaign:${campaignId}`);
+    invalidate(`instantly:${instantlyRequestOptions.accountId}:steps:${campaignId}`);
+    await upsertInstantlyCatalogFromCampaign(updatedCampaign, instantlyRequestOptions.accountId);
+    await logAudit('client.campaign.patch', 'Client edited campaign launch', { campaignId, launchId }, { userId });
+
+    const campaignForResponse = hasUsableCampaignSequences(updatedCampaign.sequences)
+      ? updatedCampaign
+      : { ...updatedCampaign, name: campaignName, sequences };
+
+    return NextResponse.json({
+      campaign: campaignForResponse,
+      launch: {
+        id: launchId,
+        campaign_name: campaignName,
+        sequence_steps: sequence.steps,
+      },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Не удалось сохранить кампанию';
+    await logError('client.campaign.patch.failed', err, { campaignId }, { userId });
     return jsonError(message, 500);
   }
 }

@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
-import { getEmail, listEmails } from '@/lib/instantly/client';
+import { getEmail, listEmails, markThreadAsRead } from '@/lib/instantly/client';
 import { mapInstantlyEmailToThreadMessage } from '@/lib/clientCampaignReplies/mapEmail';
 import type { ClientReplyThread } from '@/lib/clientCampaignReplies/types';
 import { logError } from '@/lib/loggerServer';
@@ -59,6 +59,18 @@ export async function GET(
       const tb = b.timestamp ? Date.parse(b.timestamp) : 0;
       return ta - tb;
     });
+
+    if (threadId) {
+      try {
+        await markThreadAsRead(threadId, instantlyRequestOptions);
+      } catch (err) {
+        await logError('client.campaign.replies.thread.mark_read_failed', err, {
+          campaignId,
+          emailId,
+          threadId,
+        });
+      }
+    }
 
     const payload: ClientReplyThread = {
       thread_id: threadId,
