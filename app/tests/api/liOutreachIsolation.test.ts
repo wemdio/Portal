@@ -18,33 +18,40 @@ const AUTH_USER_ID = 'user-A';
 const OTHER_USER_ID = 'user-B';
 
 type EqCall = { table: string; column: string; value: unknown };
+type IsCall = { table: string; column: string; value: unknown };
 type InCall = { table: string; column: string; values: unknown[] };
 
 interface ChainState {
   table: string;
   eqCalls: EqCall[];
+  isCalls: IsCall[];
   inCalls: InCall[];
 }
 
 const state = {
   rowsByTable: {} as Record<string, Array<Record<string, unknown>>>,
   allEqCalls: [] as EqCall[],
+  allIsCalls: [] as IsCall[],
   allInCalls: [] as InCall[],
 };
 
 function resetState() {
   state.rowsByTable = {};
   state.allEqCalls = [];
+  state.allIsCalls = [];
   state.allInCalls = [];
 }
 
 function makeBuilder(table: string) {
-  const local: ChainState = { table, eqCalls: [], inCalls: [] };
+  const local: ChainState = { table, eqCalls: [], isCalls: [], inCalls: [] };
 
   const finalize = () => {
     let rows = state.rowsByTable[table] ?? [];
     for (const eq of local.eqCalls) {
       rows = rows.filter((r) => r[eq.column] === eq.value);
+    }
+    for (const isFilter of local.isCalls) {
+      rows = rows.filter((r) => r[isFilter.column] === isFilter.value);
     }
     for (const inFilter of local.inCalls) {
       rows = rows.filter((r) => inFilter.values.includes(r[inFilter.column]));
@@ -60,6 +67,11 @@ function makeBuilder(table: string) {
     eq: (column: string, value: unknown) => {
       local.eqCalls.push({ table, column, value });
       state.allEqCalls.push({ table, column, value });
+      return builder;
+    },
+    is: (column: string, value: unknown) => {
+      local.isCalls.push({ table, column, value });
+      state.allIsCalls.push({ table, column, value });
       return builder;
     },
     in: (column: string, values: unknown[]) => {
@@ -195,6 +207,20 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     const body = await (res as Response).json();
     expect(ownsUserScope('li_leads')).toBe(true);
     expect((body.leads as Array<{ id: string }>).map((l) => l.id)).toEqual(['L1']);
+  });
+
+  it('GET /leads can filter orphan leads without leaving user scope', async () => {
+    state.rowsByTable.li_leads = [
+      { id: 'L1', user_id: AUTH_USER_ID, name: 'Listed', lead_list_id: 'list-1' },
+      { id: 'L2', user_id: AUTH_USER_ID, name: 'Unlisted', lead_list_id: null },
+      { id: 'L3', user_id: OTHER_USER_ID, name: 'OtherUnlisted', lead_list_id: null },
+    ];
+    const { GET } = await import('@/app/api/tools/li-outreach/leads/route');
+    const res = await GET(makeReq('http://x/api/tools/li-outreach/leads?lead_list_id=__none'));
+    const body = await (res as Response).json();
+    expect(ownsUserScope('li_leads')).toBe(true);
+    expect(state.allIsCalls).toContainEqual({ table: 'li_leads', column: 'lead_list_id', value: null });
+    expect((body.leads as Array<{ id: string }>).map((l) => l.id)).toEqual(['L2']);
   });
 
   it('GET /leads/export only includes rows for the authenticated user', async () => {

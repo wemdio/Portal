@@ -88,6 +88,9 @@ type LiCampaignLog = { id: number; level: string; message: string; lead_name: st
 type LiSettings = { unipile_dsn: string; unipile_api_key: string; webhook_secret: string; proxy_url: string };
 type CampaignStep = { type?: unknown; message?: unknown; days?: unknown; hours?: unknown };
 
+const UNLISTED_LEAD_LIST_FILTER = '__unlisted__';
+const UNLISTED_LEAD_LIST_QUERY = '__none';
+
 const DEFAULT_CAMPAIGN_FORM = {
   name: '',
   account_id: '',
@@ -137,6 +140,8 @@ export default function LiOutreachPage() {
   const [leads, setLeads] = useState<LiLead[]>([]);
   const [leadsTotal, setLeadsTotal] = useState(0);
   const [leadListFilterId, setLeadListFilterId] = useState('');
+  const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(() => new Set());
+  const [deletingLeads, setDeletingLeads] = useState(false);
   const [campaigns, setCampaigns] = useState<LiCampaign[]>([]);
   const [tasks, setTasks] = useState<LiTask[]>([]);
   const [_settings, setSettings] = useState<LiSettings | null>(null);
@@ -155,6 +160,13 @@ export default function LiOutreachPage() {
   const [scraperListId, setScraperListId] = useState('');
   const [scraperMax, setScraperMax] = useState(100);
   const [scraperType, setScraperType] = useState<'search' | 'reactions'>('search');
+
+  const visibleLeadIds = useMemo(() => leads.map((lead) => lead.id), [leads]);
+  const selectedVisibleLeadCount = useMemo(
+    () => visibleLeadIds.filter((id) => selectedLeadIds.has(id)).length,
+    [selectedLeadIds, visibleLeadIds],
+  );
+  const allVisibleLeadsSelected = visibleLeadIds.length > 0 && selectedVisibleLeadCount === visibleLeadIds.length;
 
   // Campaign creation
   const [showCreate, setShowCreate] = useState(false);
@@ -200,10 +212,12 @@ export default function LiOutreachPage() {
   const loadLeads = useCallback(async (listId?: string) => {
     try {
       const params = new URLSearchParams({ limit: '200' });
-      if (listId) params.set('lead_list_id', listId);
+      if (listId === UNLISTED_LEAD_LIST_FILTER) params.set('lead_list_id', UNLISTED_LEAD_LIST_QUERY);
+      else if (listId) params.set('lead_list_id', listId);
       const d = await api<{ leads: LiLead[]; total: number }>(`/leads?${params.toString()}`);
       setLeads(d.leads);
       setLeadsTotal(d.total);
+      setSelectedLeadIds(new Set());
     } catch (e) {
       console.error('[li-outreach] loadLeads failed', e);
     }
@@ -268,7 +282,7 @@ export default function LiOutreachPage() {
   useEffect(() => {
     if (tab === 'dashboard') { void loadDashboard(); void loadLeads(); void loadCampaigns(); }
     if (tab === 'campaigns') void loadCampaigns();
-    if (tab === 'leads') void loadLeads(leadListFilterId || undefined);
+    if (tab === 'leads') void loadLeads(leadListFilterId);
     if (tab === 'scraper' || tab === 'dashboard') void loadTasks();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, leadListFilterId]);
@@ -474,11 +488,12 @@ export default function LiOutreachPage() {
   const importLeadsCsv = async (file: File) => {
     setImporting(true);
     try {
+      if (!importListId) throw new Error('Выберите список для импорта');
       const token = await getAccessToken();
       if (!token) throw new Error('Not authenticated');
       const fd = new FormData();
       fd.append('file', file);
-      if (importListId) fd.append('lead_list_id', importListId);
+      fd.append('lead_list_id', importListId);
       const res = await fetch('/api/tools/li-outreach/leads/import', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
@@ -488,7 +503,7 @@ export default function LiOutreachPage() {
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
       alert(`Импортировано: ${data.imported}, пропущено: ${data.skipped ?? 0}`);
       setShowImportModal(false);
-      await loadLeads();
+      await loadLeads(leadListFilterId);
       await loadLeadLists();
     } catch (e) {
       alert('Ошибка импорта: ' + (e instanceof Error ? e.message : e));
@@ -510,6 +525,53 @@ export default function LiOutreachPage() {
       await loadLeads(nextFilterId || undefined);
     } catch (e) {
       alert('Ошибка удаления списка: ' + (e instanceof Error ? e.message : e));
+    }
+  };
+
+  const toggleLeadSelection = (id: string, checked: boolean) => {
+    setSelectedLeadIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const toggleVisibleLeadSelection = (checked: boolean) => {
+    setSelectedLeadIds((prev) => {
+      const next = new Set(prev);
+      for (const id of visibleLeadIds) {
+        if (checked) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
+  };
+
+  const deleteSelectedLeads = async () => {
+    const ids = Array.from(selectedLeadIds);
+    if (!ids.length) return;
+
+    const currentListName = leadLists.find((list) => list.id === leadListFilterId)?.name;
+    const scopeLabel = leadListFilterId === UNLISTED_LEAD_LIST_FILTER
+      ? 'без списка'
+      : currentListName
+        ? `из списка "${currentListName}"`
+        : 'из общего списка';
+
+    if (!confirm(`Удалить ${ids.length} выбранных лидов ${scopeLabel}? Это удалит их из базы.`)) return;
+
+    setDeletingLeads(true);
+    try {
+      await api('/leads', { method: 'DELETE', json: { ids } });
+      setSelectedLeadIds(new Set());
+      await loadLeads(leadListFilterId);
+      await loadLeadLists();
+      if (tab === 'dashboard') await loadDashboard();
+    } catch (e) {
+      alert('Ошибка удаления лидов: ' + (e instanceof Error ? e.message : e));
+    } finally {
+      setDeletingLeads(false);
     }
   };
 
@@ -1095,7 +1157,13 @@ export default function LiOutreachPage() {
               <button onClick={() => setShowCreateListModal(true)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
                 Управление листами
               </button>
-              <button onClick={() => setShowImportModal(true)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
+              <button
+                onClick={() => {
+                  if (leadListFilterId && leadListFilterId !== UNLISTED_LEAD_LIST_FILTER) setImportListId(leadListFilterId);
+                  setShowImportModal(true);
+                }}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              >
                 Импорт CSV
               </button>
               <button onClick={() => void exportLeadsCsv()} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
@@ -1112,6 +1180,12 @@ export default function LiOutreachPage() {
                 className={`rounded-md px-2 py-1 text-xs ${leadListFilterId === '' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
               >
                 Все
+              </button>
+              <button
+                onClick={() => setLeadListFilterId(UNLISTED_LEAD_LIST_FILTER)}
+                className={`rounded-md px-2 py-1 text-xs ${leadListFilterId === UNLISTED_LEAD_LIST_FILTER ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+              >
+                Без списка
               </button>
               {leadLists.map((list) => (
                 <button
@@ -1192,9 +1266,9 @@ export default function LiOutreachPage() {
               </p>
               <div className="flex gap-3 items-end flex-wrap">
                 <div>
-                  <label className="text-xs text-gray-600 block mb-1">Список (опционально)</label>
+                  <label className="text-xs text-gray-600 block mb-1">Список для импорта</label>
                   <select value={importListId} onChange={(e) => setImportListId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
-                    <option value="">Без списка</option>
+                    <option value="">Выберите список...</option>
                     {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
                   </select>
                 </div>
@@ -1216,10 +1290,44 @@ export default function LiOutreachPage() {
             </div>
           )}
 
+          {selectedLeadIds.size > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2">
+              <span className="text-sm text-red-800">Выбрано лидов: {selectedLeadIds.size}</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedLeadIds(new Set())}
+                  disabled={deletingLeads}
+                  className="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                >
+                  Снять выбор
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void deleteSelectedLeads()}
+                  disabled={deletingLeads}
+                  className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                >
+                  {deletingLeads ? 'Удаление...' : 'Удалить выбранных'}
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="max-h-[600px] overflow-y-auto">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 sticky top-0">
                 <tr>
+                  <th className="w-10 px-3 py-2">
+                    <input
+                      type="checkbox"
+                      aria-label="Выбрать все видимые лиды"
+                      checked={allVisibleLeadsSelected}
+                      disabled={visibleLeadIds.length === 0 || deletingLeads}
+                      onChange={(e) => toggleVisibleLeadSelection(e.target.checked)}
+                      className="h-4 w-4 rounded border-gray-300 text-blue-600"
+                    />
+                  </th>
                   <th className="text-left px-3 py-2 text-xs text-gray-500">Имя</th>
                   <th className="text-left px-3 py-2 text-xs text-gray-500">Должность</th>
                   <th className="text-left px-3 py-2 text-xs text-gray-500">Компания</th>
@@ -1229,6 +1337,16 @@ export default function LiOutreachPage() {
               <tbody>
                 {leads.map((lead) => (
                   <tr key={lead.id} className="border-b border-gray-100 hover:bg-gray-50">
+                    <td className="px-3 py-2">
+                      <input
+                        type="checkbox"
+                        aria-label={`Выбрать лида ${lead.name}`}
+                        checked={selectedLeadIds.has(lead.id)}
+                        disabled={deletingLeads}
+                        onChange={(e) => toggleLeadSelection(lead.id, e.target.checked)}
+                        className="h-4 w-4 rounded border-gray-300 text-blue-600"
+                      />
+                    </td>
                     <td className="px-3 py-2">
                       {lead.profile_url ? (
                         <a href={lead.profile_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">{lead.name}</a>
