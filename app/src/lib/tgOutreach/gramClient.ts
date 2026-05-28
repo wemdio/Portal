@@ -89,6 +89,19 @@ function parseProxyUrl(url: string): ParsedProxy | undefined {
   }
 }
 
+export function describeProxyForLog(proxy: OutreachProxy): string {
+  const parsed = parseProxyUrl(proxy.url);
+  if (!parsed) return `proxy_id=${proxy.id}${proxy.name ? ` "${proxy.name}"` : ''}, url не разобран`;
+  return [
+    `proxy_id=${proxy.id}`,
+    proxy.name ? `name="${proxy.name}"` : null,
+    `type=${parsed.protocol}`,
+    `host=${parsed.ip}`,
+    `port=${parsed.port}`,
+    parsed.username ? 'auth=yes' : 'auth=no',
+  ].filter(Boolean).join(', ');
+}
+
 /**
  * Низкоуровневая TCP-проверка прокси: открываем сокет к host:port прокси и
  * ждём ответа на TCP-уровне. Не проверяет ни SOCKS-handshake, ни HTTP CONNECT —
@@ -98,7 +111,7 @@ function parseProxyUrl(url: string): ParsedProxy | undefined {
  * важно понять — прокси мёртвая (TCP не отвечает) или дело в Telegram
  * (TCP жив, но Telegram не пускает / тормозит).
  */
-async function probeProxyTcp(
+export async function probeProxyTcp(
   proxy: OutreachProxy,
   timeoutMs = 5_000,
 ): Promise<{ alive: boolean; latencyMs: number; error?: string }> {
