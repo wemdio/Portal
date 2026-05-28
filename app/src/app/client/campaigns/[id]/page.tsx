@@ -27,7 +27,7 @@ import type { Route } from 'next';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   Pause, Play, Loader2, Search, ChevronDown, ChevronRight, Inbox, Sparkles,
-  RefreshCw,
+  RefreshCw, Pencil, Save, Plus, Trash2, X,
 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ExpandedThread } from '@/components/client-replies/ExpandedThread';
@@ -38,6 +38,7 @@ import {
 import type {
   ClientReply, ClientRepliesPage,
 } from '@/lib/clientCampaignReplies/types';
+import type { ClientLaunchSequenceStep } from '@/lib/clientLaunch/types';
 
 // Map campaign status number → semantic dot color (Status-as-Data rule).
 function statusDotColor(status: number): string {
@@ -66,6 +67,76 @@ function stripHtml(value?: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .trim();
+}
+
+const MAX_EDIT_VARIANTS = 3;
+
+function clampWaitDays(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(60, Math.floor(n)));
+}
+
+function emptyEditStep(waitDays = 0): ClientLaunchSequenceStep {
+  return { subject: '', body: '', wait_days: waitDays };
+}
+
+function variantsFromCampaignStep(step: SequenceStep): Array<{ subject: string; body: string }> {
+  const variants = step.variants?.length
+    ? step.variants
+    : [{ subject: step.subject ?? '', body: step.body ?? '' }];
+
+  return variants.map((variant) => ({
+    subject: variant.subject ?? '',
+    body: stripHtml(variant.body),
+  }));
+}
+
+function editableStepsFromCampaignSteps(steps: SequenceStep[]): ClientLaunchSequenceStep[] {
+  if (steps.length === 0) return [emptyEditStep()];
+
+  return steps.map((step, idx, allSteps) => {
+    const variants = variantsFromCampaignStep(step);
+    const primary = variants[0] ?? { subject: '', body: '' };
+    const previousStep = idx > 0 ? allSteps[idx - 1] : null;
+    const waitDays =
+      idx === 0
+        ? 0
+        : previousStep?.delay_unit === 'days' && typeof previousStep.delay === 'number'
+          ? previousStep.delay
+          : typeof step.wait_days === 'number'
+            ? step.wait_days
+            : 0;
+    const extraVariants = variants
+      .slice(1)
+      .map((variant) => ({ subject: variant.subject, body: variant.body }))
+      .filter((variant) => variant.subject.trim() || variant.body.trim());
+
+    return {
+      subject: primary.subject,
+      body: primary.body,
+      wait_days: clampWaitDays(waitDays),
+      ...(extraVariants.length ? { variants: extraVariants } : {}),
+    };
+  });
+}
+
+function cleanEditSteps(steps: ClientLaunchSequenceStep[]): ClientLaunchSequenceStep[] {
+  return steps.map((step, idx) => {
+    const variants = (step.variants ?? [])
+      .map((variant) => ({
+        subject: variant.subject ?? '',
+        body: variant.body ?? '',
+      }))
+      .filter((variant) => variant.subject.trim() || variant.body.trim());
+
+    return {
+      subject: step.subject ?? '',
+      body: step.body ?? '',
+      wait_days: idx === 0 ? 0 : clampWaitDays(step.wait_days),
+      ...(variants.length ? { variants } : {}),
+    };
+  });
 }
 
 function formatReplyDate(iso: string | null): string {
@@ -332,6 +403,11 @@ function CampaignDetailPageContent() {
   const [pendingToggle, setPendingToggle] = useState<'pause' | 'activate' | null>(null);
   const [actionPending, setActionPending] = useState<'pause' | 'activate' | null>(null);
   const [actionError, setActionError] = useState('');
+  const [editMode, setEditMode] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editSteps, setEditSteps] = useState<ClientLaunchSequenceStep[]>([]);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState('');
 
   // Replies tab state
   const [replies, setReplies] = useState<ClientReply[]>([]);
@@ -489,6 +565,89 @@ function CampaignDetailPageContent() {
   const sequences: SequenceStep[] = (campaign.sequences ?? []).flatMap((s) => s.steps ?? []);
 
   const statusLabel = CampaignStatusLabels[campaign.status] ?? `Статус ${campaign.status}`;
+
+  const startEdit = () => {
+    setEditName(campaign.name);
+    setEditSteps(editableStepsFromCampaignSteps(sequences));
+    setEditError('');
+    setEditMode(true);
+  };
+
+  const cancelEdit = () => {
+    setEditMode(false);
+    setEditError('');
+  };
+
+  const updateEditStep = (idx: number, patch: Partial<ClientLaunchSequenceStep>) => {
+    setEditSteps((prev) => prev.map((step, i) => (i === idx ? { ...step, ...patch } : step)));
+  };
+
+  const updateEditVariant = (
+    stepIdx: number,
+    variantIdx: number,
+    patch: { subject?: string; body?: string },
+  ) => {
+    setEditSteps((prev) => prev.map((step, i) => {
+      if (i !== stepIdx) return step;
+      const variants = [...(step.variants ?? [])];
+      variants[variantIdx] = {
+        subject: variants[variantIdx]?.subject ?? '',
+        body: variants[variantIdx]?.body ?? '',
+        ...patch,
+      };
+      return { ...step, variants };
+    }));
+  };
+
+  const addEditStep = () => {
+    setEditSteps((prev) => [...prev, emptyEditStep(prev.length === 0 ? 0 : 3)]);
+  };
+
+  const removeEditStep = (idx: number) => {
+    setEditSteps((prev) => {
+      if (prev.length <= 1) return prev;
+      return prev
+        .filter((_, i) => i !== idx)
+        .map((step, i) => (i === 0 ? { ...step, wait_days: 0 } : step));
+    });
+  };
+
+  const addEditVariant = (stepIdx: number) => {
+    setEditSteps((prev) => prev.map((step, i) => {
+      if (i !== stepIdx) return step;
+      const variants = step.variants ?? [];
+      if (1 + variants.length >= MAX_EDIT_VARIANTS) return step;
+      return { ...step, variants: [...variants, { subject: '', body: '' }] };
+    }));
+  };
+
+  const removeEditVariant = (stepIdx: number, variantIdx: number) => {
+    setEditSteps((prev) => prev.map((step, i) => {
+      if (i !== stepIdx) return step;
+      const variants = (step.variants ?? []).filter((_, vIdx) => vIdx !== variantIdx);
+      return variants.length ? { ...step, variants } : { ...step, variants: undefined };
+    }));
+  };
+
+  const saveEdit = async () => {
+    setEditSaving(true);
+    setEditError('');
+    try {
+      const data = await clientApiFetch<{ campaign: Campaign }>(`/campaigns/${campaignId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          campaign_name: editName,
+          sequence_steps: cleanEditSteps(editSteps),
+        }),
+      });
+      setCampaign(data.campaign);
+      setEditMode(false);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Не удалось сохранить кампанию');
+    } finally {
+      setEditSaving(false);
+    }
+  };
 
   return (
     <div className="mx-auto max-w-4xl">
@@ -749,15 +908,204 @@ function CampaignDetailPageContent() {
 
       {tab === 'steps' && (
         <div className="space-y-3">
-          {sequences.length === 0 ? (
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <p className="ds-eyebrow">цепочка</p>
+            {editMode ? (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void saveEdit()}
+                  disabled={editSaving}
+                  className="ds-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"
+                >
+                  {editSaving ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Save className="h-3.5 w-3.5" aria-hidden />
+                  )}
+                  Сохранить
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelEdit}
+                  disabled={editSaving}
+                  className="ds-btn-ghost inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden />
+                  Отмена
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={startEdit}
+                className="ds-btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
+              >
+                <Pencil className="h-3.5 w-3.5" aria-hidden />
+                Редактировать
+              </button>
+            )}
+          </div>
+
+          {editMode ? (
+            <>
+              {editError && (
+                <div className="text-xs flex items-center gap-2">
+                  <span aria-hidden className="ds-status-dot shrink-0" style={{ background: 'var(--cp-red)' }} />
+                  <span className="flex-1" style={{ color: 'var(--cp-paper)' }}>{editError}</span>
+                </div>
+              )}
+
+              <div className="neu-sm px-3 sm:px-5 py-3 sm:py-4">
+                <label htmlFor="campaign-edit-name" className="ds-eyebrow block mb-2">
+                  Название
+                </label>
+                <input
+                  id="campaign-edit-name"
+                  type="text"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="ds-input w-full text-sm"
+                />
+              </div>
+
+              {editSteps.map((step, idx) => {
+                const num = String(idx + 1).padStart(2, '0');
+                const variants = step.variants ?? [];
+                const canAddVariant = 1 + variants.length < MAX_EDIT_VARIANTS;
+
+                return (
+                  <div key={idx} className="neu-sm overflow-hidden">
+                    <div className="px-3 sm:px-5 py-3 sm:py-4 flex items-center gap-3 border-b" style={{ borderColor: 'var(--cp-divider)' }}>
+                      <span className="ds-mono text-xs font-semibold shrink-0" style={{ color: 'var(--cp-paper-faint)' }}>
+                        {num}
+                        <span aria-hidden> → </span>
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs sm:text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
+                          Письмо {idx + 1}
+                        </p>
+                      </div>
+                      {idx > 0 && (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-xs" style={{ color: 'var(--cp-paper-mute)' }}>через</span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={60}
+                            value={step.wait_days}
+                            onChange={(e) => updateEditStep(idx, { wait_days: clampWaitDays(e.target.value) })}
+                            className="ds-input ds-mono w-14 text-sm text-center"
+                            aria-label={`Дней до письма ${idx + 1}`}
+                          />
+                          <span className="text-xs" style={{ color: 'var(--cp-paper-mute)' }}>дн.</span>
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => removeEditStep(idx)}
+                        disabled={editSteps.length <= 1 || editSaving}
+                        className="ds-btn-ghost p-1.5 shrink-0 disabled:opacity-30"
+                        aria-label="Удалить шаг"
+                      >
+                        <Trash2 className="h-4 w-4" aria-hidden />
+                      </button>
+                    </div>
+
+                    <div className="px-3 sm:px-5 py-3 sm:py-4 space-y-4">
+                      <div className="space-y-2">
+                        <p className="ds-mono text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                          Вариант A
+                        </p>
+                        <input
+                          type="text"
+                          value={step.subject}
+                          onChange={(e) => updateEditStep(idx, { subject: e.target.value })}
+                          placeholder={idx === 0 ? 'Тема письма' : 'Тема продолжения'}
+                          className="ds-input w-full text-sm"
+                        />
+                        <textarea
+                          value={step.body}
+                          onChange={(e) => updateEditStep(idx, { body: e.target.value })}
+                          rows={6}
+                          placeholder="Текст письма"
+                          className="ds-input w-full text-sm resize-y"
+                        />
+                      </div>
+
+                      {variants.map((variant, variantIdx) => {
+                        const letter = String.fromCharCode(66 + variantIdx);
+                        return (
+                          <div key={variantIdx} className="space-y-2 pt-3 border-t" style={{ borderColor: 'var(--cp-divider)' }}>
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="ds-mono text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                                Вариант {letter}
+                              </p>
+                              <button
+                                type="button"
+                                onClick={() => removeEditVariant(idx, variantIdx)}
+                                disabled={editSaving}
+                                className="ds-btn-ghost p-1 disabled:opacity-50"
+                                aria-label={`Удалить вариант ${letter}`}
+                              >
+                                <X className="h-3.5 w-3.5" aria-hidden />
+                              </button>
+                            </div>
+                            <input
+                              type="text"
+                              value={variant.subject ?? ''}
+                              onChange={(e) => updateEditVariant(idx, variantIdx, { subject: e.target.value })}
+                              placeholder={idx === 0 ? 'Тема письма' : 'Тема продолжения'}
+                              className="ds-input w-full text-sm"
+                            />
+                            <textarea
+                              value={variant.body}
+                              onChange={(e) => updateEditVariant(idx, variantIdx, { body: e.target.value })}
+                              rows={6}
+                              placeholder="Текст письма"
+                              className="ds-input w-full text-sm resize-y"
+                            />
+                          </div>
+                        );
+                      })}
+
+                      {canAddVariant && (
+                        <button
+                          type="button"
+                          onClick={() => addEditVariant(idx)}
+                          disabled={editSaving}
+                          className="ds-btn-ghost inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"
+                        >
+                          <Plus className="h-3.5 w-3.5" aria-hidden />
+                          Вариант
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+
+              <button
+                type="button"
+                onClick={addEditStep}
+                disabled={editSaving}
+                className="ds-btn-secondary inline-flex items-center gap-1.5 px-4 py-2 text-xs disabled:opacity-50"
+              >
+                <Plus className="h-3.5 w-3.5" aria-hidden />
+                Письмо
+              </button>
+            </>
+          ) : sequences.length === 0 ? (
             <div className="neu-card py-14 text-center">
               <p className="text-sm mb-4" style={{ color: 'var(--cp-paper-mute)' }}>Цепочка не настроена</p>
-              <Link
-                href={'/client/launch' as Route}
+              <button
+                type="button"
+                onClick={startEdit}
                 className="ds-btn-secondary inline-flex items-center gap-1.5 px-4 py-2 text-xs"
               >
-                Настроить через запуск
-              </Link>
+                <Pencil className="h-3.5 w-3.5" aria-hidden />
+                Редактировать
+              </button>
             </div>
           ) : (
             sequences.map((step, idx) => {

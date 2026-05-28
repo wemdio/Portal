@@ -158,7 +158,11 @@ interface AuthState {
   authed: boolean;
   errorStatus: number;
   errorMessage: string;
-  accessRows: Array<{ resource_type: 'campaign' | 'lead_list'; resource_id: string }>;
+  accessRows: Array<{
+    resource_type: 'campaign' | 'lead_list';
+    resource_id: string;
+    instantly_account_id?: string | null;
+  }>;
   isDemo: boolean;
 }
 
@@ -199,6 +203,7 @@ jest.mock('@/lib/clientApiHelper', () => {
 
 jest.mock('@/lib/clientCache', () => ({
   cached: jest.fn(<T,>(_key: string, fn: () => Promise<T>) => fn()),
+  invalidate: jest.fn(),
 }));
 
 // ── Logger noop ──────────────────────────────────────────────────────────────
@@ -218,6 +223,7 @@ const mockGetEmail = jest.fn();
 const mockReplyToEmail = jest.fn();
 const mockForwardEmail = jest.fn();
 const mockMarkThreadAsRead = jest.fn();
+const mockUpdateCampaign = jest.fn();
 const mockActivateCampaign = jest.fn();
 const mockPauseCampaign = jest.fn();
 
@@ -230,6 +236,7 @@ jest.mock('@/lib/instantly/client', () => ({
   replyToEmail: (...args: unknown[]) => mockReplyToEmail(...args),
   forwardEmail: (...args: unknown[]) => mockForwardEmail(...args),
   markThreadAsRead: (...args: unknown[]) => mockMarkThreadAsRead(...args),
+  updateCampaign: (...args: unknown[]) => mockUpdateCampaign(...args),
   activateCampaign: (...args: unknown[]) => mockActivateCampaign(...args),
   pauseCampaign: (...args: unknown[]) => mockPauseCampaign(...args),
 }));
@@ -256,6 +263,7 @@ const mockBuildClientReport = jest.fn<ClientReportResult, [unknown[]]>();
 jest.mock('@/lib/tools/instantlyCampaignCatalog', () => ({
   readCampaignAnalyticsFromDb: (ids: string[]) => mockReadCampaignAnalyticsFromDb(ids),
   buildClientReport: (campaigns: unknown[]) => mockBuildClientReport(campaigns),
+  upsertInstantlyCatalogFromCampaign: jest.fn(async () => {}),
 }));
 
 // ── Hypotheses generator (LLM-bound) ─────────────────────────────────────────
@@ -329,6 +337,7 @@ beforeEach(() => {
   mockReplyToEmail.mockReset().mockResolvedValue({ ok: true });
   mockForwardEmail.mockReset().mockResolvedValue({ ok: true });
   mockMarkThreadAsRead.mockReset().mockResolvedValue({ ok: true });
+  mockUpdateCampaign.mockReset();
   mockActivateCampaign.mockReset().mockResolvedValue({ ok: true });
   mockPauseCampaign.mockReset().mockResolvedValue({ ok: true });
 
@@ -1140,6 +1149,129 @@ describe('Client Portal — RBAC isolation across clients', () => {
     ]);
   });
 
+  it('PATCH /campaigns/[id] updates the client launch name and sequence', async () => {
+    dbState.rowsByTable.client_campaign_launches = [
+      {
+        id: 'launch-1',
+        client_user_id: AUTH_USER_ID,
+        instantly_campaign_id: ALLOWED_CAMPAIGN,
+        campaign_name: 'Old name',
+        status: 'active',
+        sequence_steps: [{ subject: 'Old', body: 'Old body', wait_days: 0 }],
+      },
+    ];
+    mockUpdateCampaign.mockResolvedValueOnce({
+      id: ALLOWED_CAMPAIGN,
+      name: 'Edited launch',
+      status: 1,
+      sequences: [],
+    });
+
+    const { PATCH } = await import('@/app/api/client/campaigns/[id]/route');
+    const res = await PATCH(
+      makeJsonReq(`http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}`, 'PATCH', {
+        campaign_name: 'Edited launch',
+        sequence_steps: [
+          { subject: 'Intro', body: 'Line 1\nLine 2', wait_days: 0 },
+          {
+            subject: '',
+            body: 'Follow-up body',
+            wait_days: 3,
+            variants: [{ subject: '', body: 'Variant B\nBody' }],
+          },
+        ],
+      }),
+      { params: Promise.resolve({ id: ALLOWED_CAMPAIGN }) },
+    );
+    const body = await (res as Response).json();
+
+    expect((res as Response).status).toBe(200);
+    expect(mockUpdateCampaign).toHaveBeenCalledWith(
+      ALLOWED_CAMPAIGN,
+      expect.objectContaining({
+        name: 'Edited launch',
+        sequences: [
+          {
+            steps: [
+              expect.objectContaining({
+                delay: 3,
+                delay_unit: 'days',
+                variants: [
+                  expect.objectContaining({
+                    subject: 'Intro',
+                    body: 'Line 1<br>\nLine 2',
+                  }),
+                ],
+              }),
+              expect.objectContaining({
+                delay: 1,
+                delay_unit: 'days',
+                variants: [
+                  expect.objectContaining({ body: 'Follow-up body' }),
+                  expect.objectContaining({ body: 'Variant B<br>\nBody' }),
+                ],
+              }),
+            ],
+          },
+        ],
+      }),
+      { accountId: 'main' },
+    );
+    expect(
+      dbState.updateCalls.some(
+        (call) =>
+          call.table === 'client_campaign_launches' &&
+          call.payload.campaign_name === 'Edited launch' &&
+          Array.isArray(call.payload.sequence_steps),
+      ),
+    ).toBe(true);
+    expect(
+      dbState.allEqCalls.some(
+        (eq) => eq.table === 'client_campaign_launches' && eq.column === 'id' && eq.value === 'launch-1',
+      ),
+    ).toBe(true);
+    expect(body.campaign.sequences[0].steps[0].variants[0].body).toBe('Line 1<br>\nLine 2');
+  });
+
+  it('PATCH /campaigns/[id] of unallowed campaign -> 404 and does not call Instantly', async () => {
+    const { PATCH } = await import('@/app/api/client/campaigns/[id]/route');
+    const res = await PATCH(
+      makeJsonReq(`http://x/api/client/campaigns/${FORBIDDEN_CAMPAIGN}`, 'PATCH', {
+        campaign_name: 'No access',
+        sequence_steps: [{ subject: 'Intro', body: 'Body', wait_days: 0 }],
+      }),
+      { params: Promise.resolve({ id: FORBIDDEN_CAMPAIGN }) },
+    );
+
+    expect((res as Response).status).toBe(404);
+    expect(mockUpdateCampaign).not.toHaveBeenCalled();
+  });
+
+  it('PATCH /campaigns/[id] rejects an empty sequence before Instantly', async () => {
+    dbState.rowsByTable.client_campaign_launches = [
+      {
+        id: 'launch-1',
+        client_user_id: AUTH_USER_ID,
+        instantly_campaign_id: ALLOWED_CAMPAIGN,
+        campaign_name: 'Old name',
+        status: 'active',
+        sequence_steps: [{ subject: 'Old', body: 'Old body', wait_days: 0 }],
+      },
+    ];
+
+    const { PATCH } = await import('@/app/api/client/campaigns/[id]/route');
+    const res = await PATCH(
+      makeJsonReq(`http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}`, 'PATCH', {
+        campaign_name: 'Edited launch',
+        sequence_steps: [],
+      }),
+      { params: Promise.resolve({ id: ALLOWED_CAMPAIGN }) },
+    );
+
+    expect((res as Response).status).toBe(400);
+    expect(mockUpdateCampaign).not.toHaveBeenCalled();
+  });
+
   it('GET /campaigns/[id]/replies of unallowed campaign → 404', async () => {
     const { GET } = await import('@/app/api/client/campaigns/[id]/replies/route');
     const res = await GET(
@@ -1158,6 +1290,72 @@ describe('Client Portal — RBAC isolation across clients', () => {
     );
     expect((res as Response).status).toBe(404);
     expect(mockGetEmail).not.toHaveBeenCalled();
+  });
+
+  it('GET /campaigns/[id]/replies/[emailId]/thread marks the Instantly thread as read', async () => {
+    mockGetEmail.mockResolvedValueOnce({
+      id: 'e1',
+      campaign_id: ALLOWED_CAMPAIGN,
+      thread_id: 't1',
+      lead: 'l1',
+      subject: 'Re: Intro',
+      body: { text: 'Interested, send details.' },
+      from_address_email: 'lead@example.com',
+      timestamp_email: '2026-05-19T10:00:00.000Z',
+      ue_type: 2,
+    });
+    mockListEmails.mockResolvedValueOnce({
+      items: [
+        {
+          id: 'sent-1',
+          campaign_id: ALLOWED_CAMPAIGN,
+          thread_id: 't1',
+          lead: 'l1',
+          subject: 'Intro',
+          body: { text: 'Hi' },
+          timestamp_email: '2026-05-18T10:00:00.000Z',
+          ue_type: 1,
+        },
+      ],
+      next_starting_after: null,
+    });
+
+    const { GET } = await import('@/app/api/client/campaigns/[id]/replies/[emailId]/thread/route');
+    const res = await GET(
+      makeReq(`http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}/replies/e1/thread`),
+      { params: Promise.resolve({ id: ALLOWED_CAMPAIGN, emailId: 'e1' }) },
+    );
+
+    expect((res as Response).status).toBe(200);
+    expect(mockMarkThreadAsRead).toHaveBeenCalledWith('t1', { accountId: 'main' });
+  });
+
+  it('GET /campaigns/[id]/replies/[emailId]/thread still returns the thread if marking read fails', async () => {
+    mockGetEmail.mockResolvedValueOnce({
+      id: 'e1',
+      campaign_id: ALLOWED_CAMPAIGN,
+      thread_id: 't1',
+      lead: 'l1',
+      subject: 'Re: Intro',
+      body: { text: 'Interested, send details.' },
+      from_address_email: 'lead@example.com',
+      timestamp_email: '2026-05-19T10:00:00.000Z',
+      ue_type: 2,
+    });
+    mockMarkThreadAsRead.mockRejectedValueOnce(new Error('Instantly read marker failed'));
+
+    const { GET } = await import('@/app/api/client/campaigns/[id]/replies/[emailId]/thread/route');
+    const res = await GET(
+      makeReq(`http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}/replies/e1/thread`),
+      { params: Promise.resolve({ id: ALLOWED_CAMPAIGN, emailId: 'e1' }) },
+    );
+    const body = await (res as Response).json();
+
+    expect((res as Response).status).toBe(200);
+    expect(mockMarkThreadAsRead).toHaveBeenCalledWith('t1', { accountId: 'main' });
+    expect(body.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'e1', direction: 'inbound' }),
+    ]));
   });
 
   it('POST /campaigns/[id]/replies/[emailId]/reply of unallowed campaign → 404', async () => {
