@@ -353,6 +353,36 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
     }
   });
 
+  it('blog_last_post follows the latest post link from the listing and extracts the full text', async () => {
+    const listing = `
+      <a href="/blog">Blog</a>
+      <article><time datetime="2026-01-10">old</time><h2><a href="/blog/old-post">Old launch</a></h2><p>teaser</p></article>
+      <article><time datetime="2026-05-20">new</time><h2><a href="/blog/may-update">May update</a></h2><p>teaser</p></article>
+    `;
+    const fullPost = `<article class="post-content"><h1>May product update</h1>`
+      + `<p>${'We shipped many new things this month. '.repeat(12)}</p>`
+      + `<p>${'Full details about the release are described here. '.repeat(8)}</p></article>`;
+
+    mockUrlResponses({
+      'example.com/blog/may-update': fullPost,
+      'example.com/blog': listing,
+      'example.com': '<a href="/blog">Blog</a>',
+    });
+
+    const result = await processSignalsForUrl('example.com', { extractors: ['blog_last_post'] });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.blog_last_post).toContain('May product update');
+      expect(result.blog_last_post).toContain('We shipped many new things');
+      expect((result.blog_last_post ?? '').length).toBeGreaterThan(300);
+      // Must have navigated to the latest post page, not the old one.
+      const fetched = fetchHtmlWithRetryMock.mock.calls.map((c) => c[0] as string);
+      expect(fetched.some((u) => u.includes('/blog/may-update'))).toBe(true);
+      expect(fetched.some((u) => u.includes('/blog/old-post'))).toBe(false);
+    }
+  });
+
   it('blog_last_post falls back to a discovered social link when no blog page is present', async () => {
     mockUrlResponses({
       '/blog': '',
