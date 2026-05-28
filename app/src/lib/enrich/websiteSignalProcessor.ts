@@ -19,7 +19,12 @@ import { extractHiring } from '@/lib/enrich/extractors/hiringExtractor';
 import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtractor';
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
-import { discoverBlogOrSocialUrls, extractBlogLastPost } from '@/lib/enrich/extractors/blogActivityExtractor';
+import {
+  discoverBlogOrSocialUrls,
+  extractBlogLastPost,
+  extractFullPostText,
+  findLatestPostUrl,
+} from '@/lib/enrich/extractors/blogActivityExtractor';
 import { llmExtractFields } from '@/lib/enrich/extractors/llmExtractor';
 
 const DEFAULT_TIMEOUT_MS = 12_000;
@@ -178,6 +183,7 @@ export async function processSignalsForUrl(
   }
 
   const subpageHtml: Partial<Record<SubpageKind, string>> = {};
+  const subpageUrls: Partial<Record<SubpageKind, string>> = {};
 
   if (requestedSubpages.size > 0) {
     const discovered = discoverSubpaths(main.html, normalized, Array.from(requestedSubpages));
@@ -215,6 +221,7 @@ export async function processSignalsForUrl(
       Array.from(requestedSubpages).map(async (kind) => {
         const url = discovered[kind];
         if (!url) return;
+        subpageUrls[kind] = url;
         const html = await fetchSubpageHtml(url, subpageTimeout, signal);
         if (html) subpageHtml[kind] = html;
       }),
@@ -311,23 +318,50 @@ export async function processSignalsForUrl(
     if (!out.team_size) out.team_size = extractTeamSize(main.html);
   }
   if (extractors.includes('blog_last_post')) {
-    out.blog_last_post = subpageHtml.blog ? extractBlogLastPost(subpageHtml.blog) : undefined;
-    if (!out.blog_last_post) {
-      out.blog_last_post = extractBlogLastPost(main.html);
+    // Two-step crawl: from a blog *listing* we locate the latest post link and
+    // fetch that page to capture the FULL post text — not just the listing
+    // excerpt. Falls back through: listing-as-single-post → listing excerpt →
+    // main page → discovered blog/social links.
+    const fullPostFromListing = async (
+      pageHtml: string,
+      pageUrl: string,
+    ): Promise<string | undefined> => {
+      if (!pageHtml || signal?.aborted) return undefined;
+      const postUrl = findLatestPostUrl(pageHtml, pageUrl);
+      if (!postUrl || signal?.aborted) return undefined;
+      const postHtml = await fetchSubpageHtml(postUrl, subpageTimeout, signal);
+      if (!postHtml) return undefined;
+      return extractFullPostText(postHtml);
+    };
+
+    let post: string | undefined;
+
+    if (subpageHtml.blog && subpageUrls.blog) {
+      post = await fullPostFromListing(subpageHtml.blog, subpageUrls.blog);
+      if (!post) post = extractFullPostText(subpageHtml.blog);
+      if (!post) post = extractBlogLastPost(subpageHtml.blog);
     }
-    if (!out.blog_last_post && !signal?.aborted) {
+
+    if (!post) {
+      post = await fullPostFromListing(main.html, normalized);
+      if (!post) post = extractBlogLastPost(main.html);
+    }
+
+    if (!post && !signal?.aborted) {
       const contentUrls = discoverBlogOrSocialUrls(main.html, normalized);
       for (const contentUrl of contentUrls) {
         if (signal?.aborted) break;
+        if (subpageUrls.blog && contentUrl === subpageUrls.blog) continue;
         const html = await fetchSubpageHtml(contentUrl, subpageTimeout, signal);
         if (!html) continue;
-        const post = extractBlogLastPost(html);
-        if (post) {
-          out.blog_last_post = post;
-          break;
-        }
+        post = await fullPostFromListing(html, contentUrl);
+        if (!post) post = extractFullPostText(html);
+        if (!post) post = extractBlogLastPost(html);
+        if (post) break;
       }
     }
+
+    out.blog_last_post = post;
   }
 
   // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.
