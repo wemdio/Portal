@@ -818,13 +818,19 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   return (
     <div className="min-h-screen bg-gray-50/60 px-4 py-6 sm:px-6 lg:px-8">
       <div className="max-w-[1000px] mx-auto space-y-6">
-        {/* Header */}
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight text-gray-900">Конструктор баз</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Загрузите базу, выберите шаги обработки — всё выполнится автоматически
-          </p>
-        </div>
+        {/* Header — admin-only. /client/base-constructor wraps this view
+            with its own client-friendly h1 «Подготовить базу к запуску»;
+            rendering both produced the duplicate-titles anti-pattern the
+            user flagged on the 2026-05-26 screenshot. Admin /tools/our-bases
+            keeps the «Конструктор баз» header because it has no wrapper. */}
+        {!clientMode && (
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight text-gray-900">Конструктор баз</h1>
+            <p className="mt-1 text-sm text-gray-500">
+              Загрузите базу, выберите шаги обработки — всё выполнится автоматически
+            </p>
+          </div>
+        )}
 
         {/* ═══════════ UPLOAD + CONSTRUCTOR ═══════════ */}
         {!isRunning && !isComplete && !isFailed && (
