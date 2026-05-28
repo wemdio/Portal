@@ -11,15 +11,15 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
     const { id } = await ctx.params;
-    const admin = await checkIsAdmin(auth.user.id);
 
-    let query = supabaseAdmin
+    // Cross-specialist visibility (view-only): any specialist can open any
+    // campaign's detail. Mutations below (PUT/DELETE) still scope by user_id,
+    // so a viewer can read a foreign launch but not change it.
+    const { data, error } = await supabaseAdmin
       .from('li_campaigns')
       .select('*')
-      .eq('id', id);
-    if (!admin) query = query.eq('user_id', auth.user.id);
-
-    const { data, error } = await query.maybeSingle();
+      .eq('id', id)
+      .maybeSingle();
     if (error || !data) return jsonError('Campaign not found', 404);
     return NextResponse.json({ campaign: data });
   });

@@ -216,8 +216,38 @@ async function loadSeenDomains(clientUserId: string): Promise<Set<string>> {
   return set;
 }
 
+/**
+ * Закрывает «протухшие» running-прогоны клиента перед стартом нового.
+ *
+ * Зачем: если прогон убили на полпути (редеплой пересоздал контейнер, OOM,
+ * SIGKILL) — finishRunRow не вызывается, и запись навечно висит в running.
+ * Дашборд тогда видит «сейчас идёт прогон» от мёртвого процесса, а сами
+ * zombie засоряют журнал.
+ *
+ * Burst-прогон укладывается в ~2 часа, поэтому порог 4 часа гарантированно
+ * не заденет легитимный текущий прогон, но поймает любой брошенный.
+ * Вызывается в начале runAutoPipelineForClient (до startRunRow).
+ */
+async function closeStaleRuns(clientUserId: string, maxAgeHours = 4): Promise<void> {
+  if (!supabaseAdmin) return;
+  const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000).toISOString();
+  await supabaseAdmin
+    .from('client_auto_pipeline_runs')
+    .update({
+      status: 'failed',
+      error_message: 'stale — auto-closed (процесс был прерван, finishRunRow не вызван)',
+      finished_at: new Date().toISOString(),
+    })
+    .eq('client_user_id', clientUserId)
+    .eq('status', 'running')
+    .lt('started_at', cutoff);
+}
+
 async function startRunRow(clientUserId: string): Promise<string | null> {
   if (!supabaseAdmin) return null;
+  // Сначала подчищаем брошенные running-записи — чтобы дашборд не показывал
+  // вечный «идёт прогон» от убитого процесса.
+  await closeStaleRuns(clientUserId);
   const { data, error } = await supabaseAdmin
     .from('client_auto_pipeline_runs')
     .insert({ client_user_id: clientUserId, status: 'running' })
