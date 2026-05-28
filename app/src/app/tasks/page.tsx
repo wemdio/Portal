@@ -85,6 +85,7 @@ const TASK_STATUS_CONFIG: Record<TaskStatus, { label: string; className: string 
 };
 
 const TASK_STATUS_OPTIONS: TaskStatus[] = ['pending', 'in_progress', 'done'];
+const ACTIVE_TASK_PREVIEW_LIMIT = 8;
 
 const splitLegacyTasks = (value: string | null | undefined) => {
   if (!value) return [];
@@ -435,6 +436,7 @@ export default function TasksPage() {
   const [specialistSearch, setSpecialistSearch] = useState('');
   const [projectSearch, setProjectSearch] = useState('');
   const [expandedTaskIds, setExpandedTaskIds] = useState<Set<string>>(() => new Set());
+  const [expandedActiveGroupKeys, setExpandedActiveGroupKeys] = useState<Set<string>>(() => new Set());
   const [expandedDoneProjectKeys, setExpandedDoneProjectKeys] = useState<Set<string>>(() => new Set());
   // Set initial view: force board on /board page, or read ?view= param on /tasks
   useEffect(() => {
@@ -520,6 +522,15 @@ export default function TasksPage() {
       const next = new Set(prev);
       if (next.has(projectKey)) next.delete(projectKey);
       else next.add(projectKey);
+      return next;
+    });
+  }, []);
+
+  const toggleActiveGroup = useCallback((groupKey: string) => {
+    setExpandedActiveGroupKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
       return next;
     });
   }, []);
@@ -1386,7 +1397,10 @@ export default function TasksPage() {
 
   function renderCompactTaskGroup(group: CompactTaskGroup) {
     const { active, done } = splitDoneTasks(group.tasks);
+    const showAllActive = expandedActiveGroupKeys.has(group.key);
     const showDone = expandedDoneProjectKeys.has(group.key);
+    const visibleActive = showAllActive ? active : active.slice(0, ACTIVE_TASK_PREVIEW_LIMIT);
+    const hiddenActiveCount = active.length - visibleActive.length;
 
     return (
       <section key={group.key} className="flex min-h-[190px] max-h-[72vh] flex-col rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -1408,11 +1422,21 @@ export default function TasksPage() {
         </div>
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
           {active.length > 0 ? (
-            active.map((task) => renderCompactTaskRow(task, group.getMetaLabel(task)))
+            visibleActive.map((task) => renderCompactTaskRow(task, group.getMetaLabel(task)))
           ) : (
             <div className="rounded-lg border border-dashed border-gray-200 px-3 py-3 text-center text-xs text-gray-400">
               {group.emptyLabel}
             </div>
+          )}
+          {active.length > ACTIVE_TASK_PREVIEW_LIMIT && (
+            <button
+              type="button"
+              onClick={() => toggleActiveGroup(group.key)}
+              className="flex min-h-[38px] w-full items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
+            >
+              <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showAllActive ? 'rotate-90' : ''}`} />
+              {showAllActive ? 'Свернуть активные' : `Показать еще ${hiddenActiveCount} активных`}
+            </button>
           )}
           {done.length > 0 && (
             <button
