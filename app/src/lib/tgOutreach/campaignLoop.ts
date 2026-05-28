@@ -1,19 +1,22 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { Api } from 'telegram';
+import { Api, helpers, utils } from 'telegram';
 import type { Dialog } from 'telegram/tl/custom/dialog';
+import { Dialog as GramDialog } from 'telegram/tl/custom/dialog';
 import type { TelegramClient } from 'telegram';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import bigInt from 'big-integer';
 import type {
   OutreachCampaign,
   OutreachAccount,
   TelegramSettings,
   OpenAISettings,
   DialogMessage,
+  OutreachProxy,
 } from './types';
 import { DEFAULT_FOLLOW_UP } from './types';
-import { buildClients, disconnectAll, getUpdatedSessionString } from './gramClient';
+import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp } from './gramClient';
 import { openaiGenerate, detectTrigger } from './openaiChat';
 import { loadBlockedUserIds } from './blockedUsers';
 import { truncateMessage } from '@/lib/logger';
@@ -85,6 +88,115 @@ const PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS =
 /** Marker string included in the Error message so the catch branch can
  *  distinguish our explicit timeout from generic TIMEOUT errors. */
 const PER_ACCOUNT_TIMEOUT_MARKER = 'per-account first-call TIMEOUT';
+
+function isOffsetOutOfRangeError(err: unknown): boolean {
+  const errMsg = err instanceof Error ? err.message : String(err);
+  return errMsg.includes('offset') && errMsg.includes('out of range');
+}
+
+function dialogMessageKey(peer: Api.TypePeer | undefined, messageId: number | undefined): string {
+  return `${peer instanceof Api.PeerChannel ? peer.channelId : undefined},${messageId}`;
+}
+
+async function loadDialogsPageWithoutGramPagination(
+  client: TelegramClient,
+  limit: number,
+  archived: boolean,
+): Promise<helpers.TotalList<Dialog>> {
+  const response = await client.invoke(new Api.messages.GetDialogs({
+    offsetDate: 0,
+    offsetId: 0,
+    offsetPeer: new Api.InputPeerEmpty(),
+    limit,
+    hash: bigInt.zero,
+    folderId: archived ? 1 : 0,
+  }));
+
+  const result = new helpers.TotalList<Dialog>();
+  if (response instanceof Api.messages.DialogsNotModified) return result;
+  result.total = 'count' in response ? response.count : response.dialogs.length;
+
+  const entities = new Map<string, unknown>();
+  const messages = new Map<string, Api.Message>();
+
+  for (const entity of [...response.users, ...response.chats]) {
+    if (entity instanceof Api.UserEmpty || entity instanceof Api.ChatEmpty) continue;
+    entities.set(utils.getPeerId(entity), entity);
+  }
+
+  for (const rawMessage of response.messages) {
+    if (!(rawMessage instanceof Api.Message)) continue;
+    try {
+      const finishInit = (rawMessage as { _finishInit?: (c: TelegramClient, e: Map<string, unknown>, chat?: unknown) => void })._finishInit;
+      if (finishInit) finishInit.call(rawMessage, client, entities, undefined);
+    } catch {
+      // Keep the fallback best-effort: one malformed top message should not drop the whole account.
+    }
+    messages.set(dialogMessageKey(rawMessage.peerId, rawMessage.id), rawMessage);
+  }
+
+  for (const rawDialog of response.dialogs) {
+    if (rawDialog instanceof Api.DialogFolder) continue;
+    const message = messages.get(dialogMessageKey(rawDialog.peer, rawDialog.topMessage));
+    if (!message) continue;
+    const peerId = utils.getPeerId(rawDialog.peer);
+    if (!entities.has(peerId)) continue;
+    try {
+      result.push(new GramDialog(client, rawDialog, entities as never, message) as Dialog);
+    } catch {
+      // Same as GramJS iterator: skip dialogs that cannot be materialized.
+    }
+  }
+
+  return result;
+}
+
+async function loadOutreachDialogs(
+  client: TelegramClient,
+  limit: number,
+): Promise<{ dialogs: helpers.TotalList<Dialog>; usedRawPageFallback: boolean }> {
+  try {
+    return {
+      dialogs: await client.getDialogs({ limit, archived: false }),
+      usedRawPageFallback: false,
+    };
+  } catch (err) {
+    if (!isOffsetOutOfRangeError(err)) throw err;
+    return {
+      dialogs: await loadDialogsPageWithoutGramPagination(client, limit, false),
+      usedRawPageFallback: true,
+    };
+  }
+}
+
+async function probeAccountProxyForLog(
+  account: OutreachAccount,
+  proxyMap: Map<string, OutreachProxy>,
+): Promise<string> {
+  if (!account.proxy_id) return 'Прокси: не назначен, тест прокси не выполнялся';
+
+  const proxy = proxyMap.get(account.proxy_id);
+  if (!proxy) {
+    return `Прокси: proxy_id=${account.proxy_id} не найден среди активных прокси кампании, тест прокси не выполнялся`;
+  }
+
+  const startedAt = Date.now();
+  try {
+    const probe = await probeProxyTcp(proxy);
+    const durationMs = Date.now() - startedAt;
+    return (
+      `Прокси-тест выполнен: ${describeProxyForLog(proxy)}; ` +
+      `tcp_alive=${probe.alive ? 'yes' : 'no'}, latency_ms=${probe.latencyMs}, ` +
+      `probe_duration_ms=${durationMs}` +
+      (probe.error ? `, error="${probe.error}"` : '')
+    );
+  } catch (err) {
+    return (
+      `Прокси-тест не смог завершиться: ${describeProxyForLog(proxy)}; ` +
+      `error="${err instanceof Error ? err.message : String(err)}"`
+    );
+  }
+}
 
 /**
  * Таймстамп последнего сообщения, у которого есть дата. null — если ни у
@@ -1074,6 +1186,7 @@ export async function runCampaignLoop(
 
   log('info', `Запускаю кампанию "${campaign.name}": ${accounts.length} аккаунтов, ${proxies?.length ?? 0} прокси`);
 
+  const proxyMap = new Map((proxies ?? []).map((proxy: OutreachProxy) => [proxy.id, proxy]));
   const downloadSessionFile = (storagePath: string) => downloadSessionToTemp(db, storagePath);
   let clients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile, db);
   log('info', `Подключились ${clients.length} из ${accounts.length} аккаунтов${clients.length < accounts.length ? ` (остальные с ошибками подключения, смотри строки выше)` : ''}`);
@@ -1179,11 +1292,12 @@ export async function runCampaignLoop(
           // we never message archived contacts anyway, and shrinking the
           // result set reduces the chance gramJS's internal pagination
           // overshoots the dialog count (the "offset out of range" bug).
-          // The bug itself is now handled in the outer catch with a
-          // dedicated branch — the old inner retry never succeeded
-          // (1:1 retry-to-fail ratio in 7d of prod logs), so we drop it.
-          const dialogs = await Promise.race([
-            client.getDialogs({ limit: DIALOGS_FETCH_LIMIT, archived: false }),
+          // The bug itself is handled inside loadOutreachDialogs: if GramJS
+          // tries to paginate past the first page and throws "offset out of
+          // range", we fall back to one raw GetDialogs page instead of
+          // skipping the account.
+          const { dialogs, usedRawPageFallback } = await Promise.race([
+            loadOutreachDialogs(client, DIALOGS_FETCH_LIMIT),
             new Promise<never>((_, reject) =>
               setTimeout(
                 () =>
@@ -1198,6 +1312,12 @@ export async function runCampaignLoop(
           ]);
           // Successful fetch — reset the chronic paging failure counter.
           if (pagingFailureCounts.has(account.id)) pagingFailureCounts.delete(account.id);
+          if (usedRawPageFallback) {
+            log(
+              'warning',
+              `Аккаунт ${account.session_name}: штатная пагинация GramJS упала с offset out of range — загрузил первый page диалогов через прямой GetDialogs без внутренней пагинации`,
+            );
+          }
           cycleStats.dialogs_total = dialogs.length;
           cycleStats.unread = dialogs.filter(d => d.unreadCount > 0).length;
           log(
@@ -1357,9 +1477,10 @@ export async function runCampaignLoop(
             // stuck on a stale/bad MTProto state. The watchdog at 15 min is
             // there to backstop the rest of the iteration, but bailing this
             // account here keeps all the other accounts moving.
+            const proxyProbeLog = await probeAccountProxyForLog(account, proxyMap);
             log(
               'warning',
-              `Аккаунт ${account.session_name}: подключение зависло дольше ${PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS / 1000} секунд при загрузке диалогов. Пропускаю этот аккаунт в текущем круге, попробую снова на следующем.`,
+              `Аккаунт ${account.session_name}: подключение зависло дольше ${PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS / 1000} секунд при загрузке диалогов. ${proxyProbeLog}. Пропускаю этот аккаунт в текущем круге, попробую снова на следующем.`,
             );
           } else if (
             // gramJS internal pagination bug: throws RangeError when offset
