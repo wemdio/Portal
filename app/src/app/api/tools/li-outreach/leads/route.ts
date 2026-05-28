@@ -22,14 +22,14 @@ export async function GET(req: NextRequest) {
       .from('li_leads')
       .select('*', { count: 'exact' })
       .eq('user_id', auth.user.id)
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
+      .order('created_at', { ascending: false });
 
-    if (listId) q = q.eq('lead_list_id', listId);
+    if (listId === '__none') q = q.is('lead_list_id', null);
+    else if (listId) q = q.eq('lead_list_id', listId);
     if (status) q = q.eq('status', status);
     if (search) q = q.or(`name.ilike.%${search}%,company.ilike.%${search}%,position.ilike.%${search}%`);
 
-    const { data, count, error } = await q;
+    const { data, count, error } = await q.range(offset, offset + limit - 1);
     if (error) return jsonError(error.message, 500);
     return NextResponse.json({ leads: data ?? [], total: count ?? 0 });
   });
