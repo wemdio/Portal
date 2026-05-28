@@ -8,6 +8,7 @@ const AUTH_USER_ID = 'client-user-1';
 let mockInstantlyDb: MockSupabaseClient = createMockSupabase();
 
 const mockCreateCampaign = jest.fn();
+const mockUpdateCampaign = jest.fn();
 const mockCreateLeads = jest.fn();
 const mockActivateCampaign = jest.fn();
 const mockUpsertInstantlyCatalogFromCampaign = jest.fn();
@@ -41,6 +42,7 @@ jest.mock('@/lib/clientApiHelper', () => {
 
 jest.mock('@/lib/instantly/client', () => ({
   createCampaign: (...args: unknown[]) => mockCreateCampaign(...args),
+  updateCampaign: (...args: unknown[]) => mockUpdateCampaign(...args),
   createLeads: (...args: unknown[]) => mockCreateLeads(...args),
   activateCampaign: (...args: unknown[]) => mockActivateCampaign(...args),
 }));
@@ -113,6 +115,7 @@ beforeEach(() => {
   jest.resetModules();
   seedDb();
   mockCreateCampaign.mockReset().mockResolvedValue({ id: 'cmp-new', name: 'Client B Launch', status: 0 });
+  mockUpdateCampaign.mockReset().mockResolvedValue({ id: 'cmp-new', name: 'Client B Launch', status: 0 });
   mockCreateLeads.mockReset().mockResolvedValue({ uploaded: 1 });
   mockActivateCampaign.mockReset().mockResolvedValue({ id: 'cmp-new', name: 'Client B Launch', status: 1 });
   mockUpsertInstantlyCatalogFromCampaign.mockReset().mockResolvedValue(undefined);
@@ -159,6 +162,38 @@ describe('POST /api/client/launches — Instantly account selection', () => {
           ],
         }),
       ]),
+    );
+  });
+
+  it('repairs campaign sequences before activation when Instantly create response omits them', async () => {
+    mockCreateCampaign.mockResolvedValueOnce({
+      id: 'cmp-new',
+      name: 'Client B Launch',
+      status: 0,
+      sequences: [],
+    });
+    const { POST } = await import('@/app/api/client/launches/route');
+
+    const res = await POST(makeLaunchReq());
+    expect(res.status).toBe(200);
+
+    const createPayload = mockCreateCampaign.mock.calls[0][0] as { sequences?: unknown };
+    expect(createPayload.sequences).toEqual([
+      expect.objectContaining({
+        steps: [
+          expect.objectContaining({
+            variants: [expect.objectContaining({ subject: 'Hello', body: 'Body text' })],
+          }),
+        ],
+      }),
+    ]);
+    expect(mockUpdateCampaign).toHaveBeenCalledWith(
+      'cmp-new',
+      { sequences: createPayload.sequences },
+      { accountId: 'client-b' },
+    );
+    expect(mockUpdateCampaign.mock.invocationCallOrder[0]).toBeLessThan(
+      mockActivateCampaign.mock.invocationCallOrder[0],
     );
   });
 });

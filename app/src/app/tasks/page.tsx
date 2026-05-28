@@ -2,7 +2,7 @@
 'use client';
 
 import { useEffect, useMemo, useState, useCallback, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { Search, X, ChevronDown, Trash2, Pencil } from 'lucide-react';
+import { Search, X, ChevronDown, Trash2, Pencil, ChevronRight, CheckCircle2 } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import {
   DndContext,
@@ -84,6 +84,8 @@ const TASK_STATUS_CONFIG: Record<TaskStatus, { label: string; className: string 
   done: { label: 'Завершено', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
 };
 
+const TASK_STATUS_OPTIONS: TaskStatus[] = ['pending', 'in_progress', 'done'];
+
 const splitLegacyTasks = (value: string | null | undefined) => {
   if (!value) return [];
   return value
@@ -97,6 +99,26 @@ type EnrichedTask = Task & {
   specialistName: string;
   isLegacy?: boolean;
 };
+
+type ProjectTaskGroup = {
+  projectId: string | null;
+  projectName: string;
+  tasks: EnrichedTask[];
+};
+
+function getProjectGroupKey(projectId: string | null, projectName: string): string {
+  return projectId ?? `no-project:${projectName}`;
+}
+
+function splitDoneTasks(tasks: EnrichedTask[]) {
+  const active: EnrichedTask[] = [];
+  const done: EnrichedTask[] = [];
+  tasks.forEach((task) => {
+    if (task.status === 'done') done.push(task);
+    else active.push(task);
+  });
+  return { active, done };
+}
 
 type TaskDeadlineDefaultMode = 'tomorrow' | 'fixed';
 
@@ -404,6 +426,8 @@ export default function TasksPage() {
   const [view, setView] = useState<'specialists' | 'projects' | 'board'>('specialists');
   const [specialistSearch, setSpecialistSearch] = useState('');
   const [projectSearch, setProjectSearch] = useState('');
+  const [expandedTaskIds, setExpandedTaskIds] = useState<Set<string>>(() => new Set());
+  const [expandedDoneProjectKeys, setExpandedDoneProjectKeys] = useState<Set<string>>(() => new Set());
   // Set initial view: force board on /board page, or read ?view= param on /tasks
   useEffect(() => {
     if (isBoardPage) { setView('board'); return; }
@@ -473,6 +497,24 @@ export default function TasksPage() {
   }, []);
 
   const userIsLead = checkIsLead(currentUserRole);
+
+  const toggleTaskExpanded = useCallback((taskId: string) => {
+    setExpandedTaskIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
+  }, []);
+
+  const toggleDoneProject = useCallback((projectKey: string) => {
+    setExpandedDoneProjectKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(projectKey)) next.delete(projectKey);
+      else next.add(projectKey);
+      return next;
+    });
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -727,7 +769,7 @@ export default function TasksPage() {
       const p = t.project_id != null ? projectMap.get(t.project_id) : undefined;
       return {
         ...t,
-        projectName: p?.client || 'Без проекта',
+        projectName: p?.client || p?.name || 'Без проекта',
         specialistName: t.specialist?.trim() || p?.specialist || 'Без специалиста',
       };
     });
@@ -780,11 +822,11 @@ export default function TasksPage() {
     return result.sort((a, b) => b[1].length - a[1].length);
   }, [currentTasks, specialistSearch]);
 
-  const tasksByProject = useMemo(() => {
-    const map = new Map<string | null, { projectName: string; tasks: EnrichedTask[] }>();
+  const tasksByProject = useMemo<ProjectTaskGroup[]>(() => {
+    const map = new Map<string | null, ProjectTaskGroup>();
     currentTasks.forEach((t) => {
       const key = t.project_id;
-      if (!map.has(key)) map.set(key, { projectName: t.projectName, tasks: [] });
+      if (!map.has(key)) map.set(key, { projectId: key, projectName: t.projectName, tasks: [] });
       map.get(key)!.tasks.push(t);
     });
     let result = Array.from(map.values()).filter((e) => e.tasks.length > 0);
@@ -792,8 +834,20 @@ export default function TasksPage() {
       const q = projectSearch.toLowerCase();
       result = result.filter((e) => e.projectName.toLowerCase().includes(q));
     }
-    return result;
-  }, [currentTasks, projectSearch]);
+    return result.sort((a, b) => {
+      const aSplit = splitDoneTasks(a.tasks);
+      const bSplit = splitDoneTasks(b.tasks);
+      const aNoProject = a.projectId == null;
+      const bNoProject = b.projectId == null;
+      const aQuietNoProject = aNoProject && aSplit.active.length === 0;
+      const bQuietNoProject = bNoProject && bSplit.active.length === 0;
+      if (aQuietNoProject !== bQuietNoProject) return aQuietNoProject ? 1 : -1;
+      if (aSplit.active.length !== bSplit.active.length) return bSplit.active.length - aSplit.active.length;
+      if (aNoProject !== bNoProject) return aNoProject ? 1 : -1;
+      if (a.tasks.length !== b.tasks.length) return b.tasks.length - a.tasks.length;
+      return a.projectName.localeCompare(b.projectName, isEn ? 'en' : 'ru');
+    });
+  }, [currentTasks, projectSearch, isEn]);
 
   const specialistOptions = useMemo(() => {
     if (allProfiles.length > 0) return allProfiles;
@@ -1149,20 +1203,194 @@ export default function TasksPage() {
     [boards]
   );
 
-  function renderTaskCard(task: EnrichedTask) {
+  function openTaskEditModal(task: EnrichedTask) {
+    setTaskModalTaskId(task.id);
+    setIsModalInEditMode(true);
+    setEditingTitleValue(task.title);
+    setEditingProjectId(task.project_id ?? '');
+    setEditingSpecialists((task.specialist ?? '').split(',').map((s) => s.trim()).filter(Boolean));
+    setEditingDescriptionValue(task.description || '');
+    setEditingImageUrlValue(task.image_url || '');
+    setEditingDeadlineValue(toDatetimeLocalValue(task.deadline));
+  }
+
+  function renderTaskStatusSelect(task: EnrichedTask, compact = false) {
     const statusCfg = TASK_STATUS_CONFIG[task.status as TaskStatus] ?? TASK_STATUS_CONFIG.pending;
+    const selectValue = TASK_STATUS_OPTIONS.includes(task.status as TaskStatus) ? task.status : 'pending';
+
+    return (
+      <select
+        aria-label="Статус задачи"
+        value={selectValue}
+        onChange={(e) => {
+          const newStatus = e.target.value as TaskStatus;
+          if (task.isLegacy) {
+            void promoteLegacyTask(task, newStatus);
+          } else {
+            void updateTaskStatus(task.id, newStatus);
+          }
+        }}
+        className={`appearance-none cursor-pointer rounded-full border font-semibold leading-none text-center align-middle outline-none ${
+          compact ? 'h-7 px-2.5 text-[10px]' : 'h-6 px-3 text-[10px]'
+        } ${statusCfg.className}`}
+      >
+        {TASK_STATUS_OPTIONS.map((s) => (
+          <option key={s} value={s}>{TASK_STATUS_CONFIG[s].label}</option>
+        ))}
+      </select>
+    );
+  }
+
+  function renderCompactDeadline(task: EnrichedTask) {
+    if (!task.deadline || task.status === 'done') return null;
+    const dl = new Date(task.deadline);
+    if (Number.isNaN(dl.getTime())) return null;
+    const diffMs = dl.getTime() - Date.now();
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    const dateFmt = dl.toLocaleDateString(uiDateLocale, { day: 'numeric', month: 'short' });
+    const timeFmt = dl.toLocaleTimeString(uiDateLocale, { hour: '2-digit', minute: '2-digit' });
+    const hasTime = !/^[\d-]+$/.test(task.deadline) && (dl.getHours() !== 0 || dl.getMinutes() !== 0);
+    const label = hasTime ? `${dateFmt}, ${timeFmt}` : dateFmt;
+    const cls = diffMs < 0
+      ? 'text-red-600 bg-red-50'
+      : diffDays === 0
+        ? 'text-amber-700 bg-amber-50'
+        : diffDays <= 2
+          ? 'text-amber-600 bg-amber-50'
+          : 'text-gray-500 bg-gray-100';
+    const suffix = diffMs < 0 ? ' !' : diffDays === 0 ? (isEn ? ' today' : ' сегодня') : '';
+
+    return (
+      <span className={`hidden shrink-0 items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium sm:inline-flex ${cls}`}>
+        {label}{suffix}
+      </span>
+    );
+  }
+
+  function renderProjectTaskRow(task: EnrichedTask) {
+    const isDone = task.status === 'done';
+    const isExpanded = expandedTaskIds.has(task.id);
+    const canExpand = !task.isLegacy;
+
+    return (
+      <div
+        key={task.id}
+        className={`rounded-lg border transition-colors ${
+          isDone ? 'border-gray-200 bg-gray-50/80' : 'border-gray-200 bg-white hover:bg-slate-50'
+        }`}
+      >
+        <div className="grid min-h-[58px] grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-2.5 py-2">
+          <button
+            type="button"
+            disabled={!canExpand}
+            onClick={() => {
+              if (canExpand) {
+                toggleTaskExpanded(task.id);
+              }
+            }}
+            className={`flex min-w-0 items-center gap-2 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-slate-300 ${
+              canExpand ? 'cursor-pointer' : 'cursor-default'
+            }`}
+          >
+            {canExpand ? (
+              <ChevronRight className={`h-4 w-4 shrink-0 text-gray-400 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+            ) : (
+              <span className="h-4 w-4 shrink-0" />
+            )}
+            <span className="min-w-0">
+              <span className="block truncate text-[11px] text-gray-500">{task.specialistName}</span>
+              <span className={`block truncate text-sm font-medium ${isDone ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                {task.title}
+              </span>
+            </span>
+          </button>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {renderCompactDeadline(task)}
+            {!task.isLegacy && (
+              <button
+                type="button"
+                onClick={() => openTaskEditModal(task)}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
+                title="Редактировать задачу"
+                aria-label="Редактировать задачу"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {renderTaskStatusSelect(task, true)}
+          </div>
+        </div>
+        {canExpand && isExpanded && (
+          <div className="max-h-56 overflow-y-auto border-t border-gray-100 px-3 py-2">
+            <p className={`whitespace-pre-wrap text-sm font-medium ${isDone ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+              {task.title}
+            </p>
+            {task.description && (
+              <p className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-gray-600">{task.description}</p>
+            )}
+            {task.image_url && (
+              <img src={task.image_url} alt="" className="mt-2 max-h-40 w-full rounded-lg object-contain" />
+            )}
+            {task.result && (
+              <p className="mt-2 text-xs leading-relaxed text-gray-700">
+                <span className="font-medium text-gray-500">Результат:</span> {task.result}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderProjectGroup(group: ProjectTaskGroup) {
+    const { active, done } = splitDoneTasks(group.tasks);
+    const projectKey = getProjectGroupKey(group.projectId, group.projectName);
+    const showDone = expandedDoneProjectKeys.has(projectKey);
+
+    return (
+      <section key={projectKey} className="flex min-h-[190px] max-h-[72vh] flex-col rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="border-b border-gray-100 px-4 py-3">
+          <div className="flex min-w-0 items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h3 className="truncate text-base font-semibold text-gray-900">{group.projectName}</h3>
+              <p className="mt-0.5 text-xs text-gray-500">
+                {active.length} активных, {done.length} завершенных
+              </p>
+            </div>
+            {done.length > 0 && (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-gray-100 px-2 py-1 text-[11px] font-medium text-gray-500">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                {done.length}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+          {active.length > 0 ? (
+            active.map(renderProjectTaskRow)
+          ) : (
+            <div className="rounded-lg border border-dashed border-gray-200 px-3 py-3 text-center text-xs text-gray-400">
+              Активных задач нет
+            </div>
+          )}
+          {done.length > 0 && (
+            <button
+              type="button"
+              onClick={() => toggleDoneProject(projectKey)}
+              className="flex min-h-[38px] w-full items-center justify-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
+            >
+              <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showDone ? 'rotate-90' : ''}`} />
+              {showDone ? 'Скрыть завершенные' : `Показать завершенные (${done.length})`}
+            </button>
+          )}
+          {showDone && done.map(renderProjectTaskRow)}
+        </div>
+      </section>
+    );
+  }
+
+  function renderTaskCard(task: EnrichedTask) {
     const isEditingResult = editingResultId === task.id;
-    const statusOptions: TaskStatus[] = ['pending', 'in_progress', 'done'];
-    const selectValue = statusOptions.includes(task.status as TaskStatus) ? task.status : 'pending';
-    const openTaskEditModal = () => {
-      setTaskModalTaskId(task.id);
-      setIsModalInEditMode(true);
-      setEditingTitleValue(task.title);
-      setEditingProjectId(task.project_id ?? '');
-      setEditingSpecialists((task.specialist ?? '').split(',').map((s) => s.trim()).filter(Boolean));
-      setEditingDescriptionValue(task.description || '');
-      setEditingImageUrlValue(task.image_url || '');
-    };
 
     return (
       <div key={task.id} className={`rounded-lg border p-3 transition-colors ${task.status === 'done' ? 'bg-gray-50 border-gray-200' : 'bg-white border-gray-200'}`}>
@@ -1177,7 +1405,7 @@ export default function TasksPage() {
             {!task.isLegacy && (
               <button
                 type="button"
-                onClick={openTaskEditModal}
+                onClick={() => openTaskEditModal(task)}
                 className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
                 title="Редактировать задачу"
                 aria-label="Редактировать задачу"
@@ -1185,22 +1413,7 @@ export default function TasksPage() {
                 <Pencil className="h-3.5 w-3.5" />
               </button>
             )}
-            <select
-              value={selectValue}
-              onChange={(e) => {
-                const newStatus = e.target.value as TaskStatus;
-                if (task.isLegacy) {
-                  void promoteLegacyTask(task, newStatus);
-                } else {
-                  void updateTaskStatus(task.id, newStatus);
-                }
-              }}
-              className={`appearance-none cursor-pointer rounded-full border px-3 h-6 text-[10px] font-semibold leading-none text-center align-middle outline-none ${statusCfg.className}`}
-            >
-              {statusOptions.map((s) => (
-                <option key={s} value={s}>{TASK_STATUS_CONFIG[s].label}</option>
-              ))}
-            </select>
+            {renderTaskStatusSelect(task)}
           </div>
         </div>
 
@@ -1713,18 +1926,8 @@ export default function TasksPage() {
       )}
 
       {view === 'projects' && (
-        <div className={isTma ? 'grid grid-cols-1 gap-4' : 'grid grid-cols-1 gap-6 lg:grid-cols-3'}>
-          {tasksByProject.map(({ projectName, tasks: list }) => (
-            <div key={projectName} className={`rounded-xl border border-gray-200 bg-white shadow-sm ${isTma ? 'p-4' : 'p-5'}`}>
-              <div>
-                <h3 className="text-lg font-semibold text-gray-900">{projectName}</h3>
-                <p className="text-xs text-gray-500">{list.length} задач</p>
-              </div>
-              <div className="mt-4 space-y-3">
-                {list.map(renderTaskCard)}
-              </div>
-            </div>
-          ))}
+        <div className={isTma ? 'grid grid-cols-1 gap-4' : 'grid grid-cols-1 gap-4 xl:grid-cols-2 2xl:grid-cols-3'}>
+          {tasksByProject.map(renderProjectGroup)}
           {tasksByProject.length === 0 && (
             <div className={`rounded-xl border border-dashed border-gray-200 text-center text-sm text-gray-500 col-span-full ${isTma ? 'p-5' : 'p-6'}`}>
               Нет проектов для отображения.
