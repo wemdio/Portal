@@ -98,6 +98,48 @@ const BODY_SELECTOR = [
   'p',
 ].join(', ');
 
+/**
+ * Selectors that identify the BODY of a single blog/news post page (not a
+ * listing card). Used by extractFullPostText to pull the complete post text.
+ */
+const ARTICLE_BODY_SELECTOR = [
+  '[class*="post-content"]',
+  '[class*="post__content"]',
+  '[class*="post-body"]',
+  '[class*="post__text"]',
+  '[class*="entry-content"]',
+  '[class*="entry__content"]',
+  '[class*="article-content"]',
+  '[class*="article__content"]',
+  '[class*="article-body"]',
+  '[class*="article__body"]',
+  '[class*="article__text"]',
+  '[class*="single-post"]',
+  '[class*="blog-detail"]',
+  '[class*="news-detail"]',
+  '[class*="detail__text"]',
+  '[class*="detail-text"]',
+  '[itemprop="articleBody"]',
+].join(', ');
+
+/** Elements inside a post body that are chrome/noise, not prose. */
+const ARTICLE_NOISE_SELECTOR = [
+  'script', 'style', 'noscript', 'svg', 'nav', 'header', 'footer', 'aside', 'form', 'button',
+  '[class*="share"]', '[class*="social"]', '[class*="related"]', '[class*="comment"]',
+  '[class*="subscribe"]', '[class*="breadcrumb"]', '[class*="tags"]', '[class*="author"]',
+  '[class*="sidebar"]', '[class*="newsletter"]', '[class*="banner"]', '[class*="advert"]',
+].join(', ');
+
+/** A real post body must reach this length to count as "full" (else fall back to excerpt). */
+const MIN_FULL_POST_BODY = 200;
+/** Upper bound on stored full-post text — keeps spreadsheet cells bounded. */
+const FULL_POST_MAX = 4000;
+
+/** Listing helper URLs that are NOT individual posts. */
+const NON_POST_PATH = /\/(page|tag|tags|category|categories|rubric|rubriki|topic|topics|author|authors|search|feed|rss|archive|sitemap)(\/|$)/i;
+/** A blog/news content root followed by a slug segment ⇒ an individual post. */
+const CONTENT_ROOT_WITH_SLUG = /\/(blog|news|novosti|press|articles?|stati|statya|posts?|journal|insights?|publikacii|media)\/[^/?#]+/i;
+
 const SOCIAL_HOST_PATTERNS = [
   /(^|\.)t\.me$/i,
   /(^|\.)telegram\.me$/i,
@@ -281,4 +323,169 @@ export function extractBlogLastPost(html: string): string | undefined {
   if (metaPreview) return metaPreview;
 
   return fallbackCandidates[0];
+}
+
+function stripTrailingSlash(path: string): string {
+  return path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
+}
+
+function extractArticleBodyText($: cheerio.CheerioAPI, el: AnyNode): string {
+  const node = $(el).clone();
+  node.find(ARTICLE_NOISE_SELECTOR).remove();
+
+  const blocks: string[] = [];
+  node.find('p, li, h2, h3, h4, blockquote, pre').each((_, blockEl) => {
+    const text = cleanText($(blockEl).text());
+    if (text.length >= 2 && !blocks.includes(text)) blocks.push(text);
+  });
+
+  const joined = blocks.join('\n\n');
+  if (joined.length >= 40) return joined;
+  return cleanText(node.text());
+}
+
+/**
+ * Extract the full text of a single blog/news post page (title + body).
+ *
+ * Targets explicit article-body containers first, then a lone <article>, then a
+ * lone <main>. Returns undefined when the page has no dominant single-post body
+ * (e.g. a listing of many short cards), so callers can fall back to an excerpt.
+ */
+export function extractFullPostText(html: string, max = FULL_POST_MAX): string | undefined {
+  if (!html) return undefined;
+  const $ = cheerio.load(html);
+
+  const title = cleanText(
+    $('article h1').first().text() ||
+    $('h1').first().text() ||
+    $('meta[property="og:title"]').attr('content') ||
+    $('[class*="post-title"], [class*="entry-title"], [class*="article-title"]').first().text() ||
+    '',
+  );
+
+  let bodyText = '';
+  const bodyContainers = $(ARTICLE_BODY_SELECTOR);
+  if (bodyContainers.length > 0) {
+    bodyContainers.each((_, el) => {
+      const text = extractArticleBodyText($, el);
+      if (text.length > bodyText.length) bodyText = text;
+    });
+  }
+  if (bodyText.length < MIN_FULL_POST_BODY) {
+    const articles = $('article');
+    if (articles.length === 1) {
+      const only = articles.get(0);
+      if (only) bodyText = extractArticleBodyText($, only);
+    }
+  }
+  if (bodyText.length < MIN_FULL_POST_BODY) {
+    const mains = $('main');
+    if (mains.length === 1) {
+      const only = mains.get(0);
+      if (only) bodyText = extractArticleBodyText($, only);
+    }
+  }
+
+  if (bodyText.length < MIN_FULL_POST_BODY) return undefined;
+
+  const combined = (title && !bodyText.startsWith(title) ? `${title}\n\n${bodyText}` : bodyText).trim();
+  if (!isReasonablePostText(combined)) return undefined;
+  if (combined.length <= max) return combined;
+  return `${combined.slice(0, max - 1).trimEnd()}…`;
+}
+
+/**
+ * Find the URL of the most recent post on a blog/news listing page.
+ *
+ * Only same-host links that live under the company's blog/news section are
+ * considered — pagination, category, tag, author and external links are
+ * excluded — so we follow into the company's own latest article rather than a
+ * random link. Sorted by detected post date (newest first), then DOM order.
+ */
+export function findLatestPostUrl(html: string, listingUrl: string): string | null {
+  if (!html) return null;
+  let base: URL;
+  try {
+    base = new URL(listingUrl);
+  } catch {
+    return null;
+  }
+
+  const $ = cheerio.load(html);
+  let listingPath: string;
+  try {
+    listingPath = stripTrailingSlash(decodeURIComponent(base.pathname).toLowerCase());
+  } catch {
+    listingPath = stripTrailingSlash(base.pathname.toLowerCase());
+  }
+
+  interface Candidate { url: string; date: string | null; order: number; }
+  const candidates: Candidate[] = [];
+  const seen = new Set<string>();
+  let order = 0;
+
+  const looksLikePost = (path: string): boolean => {
+    const p = stripTrailingSlash(path);
+    if (!p || p === '/' || p === listingPath) return false;
+    if (NON_POST_PATH.test(p)) return false;
+    if (listingPath && listingPath !== '/' && p.startsWith(`${listingPath}/`)) return true;
+    if (/\/\d{4}\/\d{2}\//.test(p)) return true;
+    if (CONTENT_ROOT_WITH_SLUG.test(p)) return true;
+    return false;
+  };
+
+  const consider = (rawHref: string | undefined, date: string | null) => {
+    const href = (rawHref ?? '').trim();
+    if (!href || /^(#|javascript:|mailto:|tel:|\?)/i.test(href)) return;
+    let url: URL;
+    try {
+      url = new URL(href, base);
+    } catch {
+      return;
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+    if (url.host !== base.host) return;
+    let path: string;
+    try {
+      path = decodeURIComponent(url.pathname).toLowerCase();
+    } catch {
+      path = url.pathname.toLowerCase();
+    }
+    if (!looksLikePost(path)) return;
+    url.hash = '';
+    const normalized = url.toString();
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push({ url: normalized, date, order: order++ });
+  };
+
+  $(POST_CONTAINER_SELECTOR).each((_, el) => {
+    const node = $(el);
+    const date = extractDateFromElement($, el);
+    const href =
+      node.find('a[rel="bookmark"]').first().attr('href') ||
+      node.find('h1 a[href], h2 a[href], h3 a[href]').first().attr('href') ||
+      node.find('[class*="title"] a[href], [class*="heading"] a[href]').first().attr('href') ||
+      node.find('a[href]').first().attr('href');
+    consider(href, date);
+  });
+
+  if (candidates.length === 0) {
+    $('a[href]').each((_, el) => {
+      const node = $(el);
+      const date = findDateInText(node.closest('li, article, div').first().text());
+      consider(node.attr('href'), date);
+    });
+  }
+
+  if (candidates.length === 0) return null;
+
+  candidates.sort((a, b) => {
+    if (a.date && b.date) return a.date === b.date ? a.order - b.order : b.date.localeCompare(a.date);
+    if (a.date) return -1;
+    if (b.date) return 1;
+    return a.order - b.order;
+  });
+
+  return candidates[0].url;
 }

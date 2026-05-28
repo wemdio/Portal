@@ -1,6 +1,11 @@
 /** @jest-environment node */
 
-import { discoverBlogOrSocialUrls, extractBlogLastPost } from '@/lib/enrich/extractors/blogActivityExtractor';
+import {
+  discoverBlogOrSocialUrls,
+  extractBlogLastPost,
+  extractFullPostText,
+  findLatestPostUrl,
+} from '@/lib/enrich/extractors/blogActivityExtractor';
 
 describe('extractBlogLastPost', () => {
   it('returns the text from the most recent dated post', () => {
@@ -59,5 +64,66 @@ describe('extractBlogLastPost', () => {
       'https://example.com/blog',
       'https://vk.com/company_page',
     ]);
+  });
+});
+
+describe('findLatestPostUrl', () => {
+  it('picks the most recent post link under the blog path', () => {
+    const html = `
+      <article><time datetime="2026-02-01">f</time><h2><a href="/blog/post-a">A</a></h2></article>
+      <article><time datetime="2026-06-15">s</time><h2><a href="/blog/post-b">B</a></h2></article>
+      <a href="/blog?page=2">Next</a>
+      <a href="/blog/category/news">Category</a>
+    `;
+    expect(findLatestPostUrl(html, 'https://acme.com/blog')).toBe('https://acme.com/blog/post-b');
+  });
+
+  it('ignores pagination, category and external links (bare anchor lists)', () => {
+    const html = `
+      <a href="/blog/category/news">Cat</a>
+      <a href="/blog?page=3">Next</a>
+      <a href="https://twitter.com/acme">Tw</a>
+      <a href="/blog/real-post">Real</a>
+    `;
+    expect(findLatestPostUrl(html, 'https://acme.com/blog')).toBe('https://acme.com/blog/real-post');
+  });
+
+  it('returns null when there are no post-like links', () => {
+    const html = `<a href="/about">About</a><a href="/contacts">Contacts</a>`;
+    expect(findLatestPostUrl(html, 'https://acme.com/blog')).toBeNull();
+  });
+});
+
+describe('extractFullPostText', () => {
+  it('extracts the full post body from a single article page and strips chrome', () => {
+    const html = `<html><body><article class="entry-content">
+      <h1>Our new release</h1>
+      <p>${'Paragraph one with enough text to be meaningful. '.repeat(8)}</p>
+      <p>${'Paragraph two continues the story for a while. '.repeat(8)}</p>
+      <div class="share">share buttons</div>
+    </article></body></html>`;
+
+    const text = extractFullPostText(html);
+    expect(text).toContain('Our new release');
+    expect(text).toContain('Paragraph one');
+    expect(text).toContain('Paragraph two');
+    expect(text).not.toContain('share buttons');
+  });
+
+  it('returns undefined for a listing of many short cards (no single post body)', () => {
+    const html = `
+      <article class="post"><h2>One</h2><p>short</p></article>
+      <article class="post"><h2>Two</h2><p>short</p></article>
+      <article class="post"><h2>Three</h2><p>short</p></article>`;
+    expect(extractFullPostText(html)).toBeUndefined();
+  });
+
+  it('truncates very long posts to the configured maximum', () => {
+    const longBody = `<p>${'word '.repeat(2000)}</p>`;
+    const html = `<article class="post-content"><h1>Big</h1>${longBody}</article>`;
+    const text = extractFullPostText(html);
+    expect(text).toBeDefined();
+    expect((text ?? '').length).toBeLessThanOrEqual(4000);
+    expect((text ?? '').endsWith('…')).toBe(true);
   });
 });
