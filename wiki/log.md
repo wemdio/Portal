@@ -8,6 +8,7 @@ Format: `YYYY-MM-DD: <one-line summary>. Details: [link to page or analysis]`
 
 ## 2026-05-29
 
+- **Agent ran 3 clients (query_log id=3,4,5).** inMyRoom (звезда, 2.9% reply, 14 лидов/нед, формула «вопрос про клиентов адресата»); ЮРКОМ («0 лидов» не баг — 171/175 ответов not_lead, аудит-коммодити + bounce 7%); НАФИ (не безнадёжен — тема «Исследовательский чекап» 7.45% на СМБ замаскирована мисс-таргет кампанией на девелоперов). Паттерны → [subjects/winning-patterns.md](./subjects/winning-patterns.md).
 - **Dropped "System A" (migration 006).** Briefly built a deterministic SQL health-calculator (`health-check.mjs` + dim tables + snapshot storage) — wrong approach, removed it. The eval loop is AI-agent-in-the-loop: the agent answers client questions on demand and logs to `query_log`; weekly we review + improve. Client→campaign map queried LIVE (no rot). KEPT the genuine wins: `v_subject_performance` fix + `v_campaign_mailboxes` (migration 005), and `sync.mjs` now refreshes step+daily analytics. See [client-health-questions.md](./concepts/client-health-questions.md).
 - **Eval loop first real iteration (query_log id=2, ДПО ПРОФ).** Acting as the agent surfaced 2 dataset bugs (subjects NULL for all campaigns; mailbox health blind to tag-based senders), both fixed same session. Diagnosis that a calculator couldn't reach: ДПО's low reply is the client's base quality, not our delivery (64 mailboxes healthy, reply uniformly low across all subjects).
 
