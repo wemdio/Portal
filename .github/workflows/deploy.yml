@@ -97,6 +97,13 @@ jobs:
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/portal-backup:prod
 
+      - name: Push health-check image to Docker Hub
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/health-check
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/portal-health-check:prod
+
   deploy_to_prod_dir:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: self-hosted
@@ -114,7 +121,7 @@ jobs:
             cd /home/Portal/prod/
             echo "${{ secrets.DOCKER_PASSWORD }}" | sudo docker login --username ${{ secrets.DOCKER_USERNAME }} --password-stdin
             sudo docker compose version
-            sudo docker compose -p portal -f docker-compose.prod.yml pull portal worker-baseconstructor worker-li-outreach instantly-sync-bot portal-backup
+            sudo docker compose -p portal -f docker-compose.prod.yml pull portal worker-baseconstructor worker-li-outreach instantly-sync-bot portal-backup health-check
             sudo docker ps -a --filter "label=com.docker.compose.service=portal" -q | xargs -r sudo docker rm -f
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps instantly-sync-bot portal-backup
@@ -126,5 +133,10 @@ jobs:
             # startChat fixes shipped in code but the worker kept running the
             # bug until someone restarted it manually).
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps worker-li-outreach
+            # health-check has its OWN image (portal-health-check:prod, built
+            # above). Recreate it so changes to services/health-check/main.py
+            # (e.g. the daily LinkedIn-outreach digest) actually ship instead of
+            # the container staying on the old image.
+            sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate health-check
             sudo docker image prune --force
             sudo docker volume prune --force
