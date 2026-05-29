@@ -11,6 +11,8 @@ type Tab = 'dashboard' | 'campaigns' | 'leads' | 'scraper' | 'accounts' | 'logs'
 type LiAccountCooldownReason = 'invitation_limit' | 'already_invited' | 'account_restricted';
 type LiAccount = {
   id: string;
+  user_id: string;
+  owner_name: string | null;
   unipile_account_id: string;
   name: string | null;
   is_active: boolean;
@@ -64,6 +66,8 @@ type DashboardData = {
 
 type LiCampaign = {
   id: string;
+  user_id: string;
+  owner_name: string | null;
   name: string;
   account_id: string | null;
   lead_list_id: string | null;
@@ -128,6 +132,9 @@ async function api<T = unknown>(path: string, opts?: RequestInit & { json?: unkn
 
 export default function LiOutreachPage() {
   const [tab, setTab] = useState<Tab>('dashboard');
+  // Logged-in user — used to tell own vs other specialists' campaigns/accounts
+  // apart now that everyone sees everyone's launches (read-only for others).
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<LiAccount[]>([]);
   // Per-account error/warning counts from li_campaign_logs over the last 24h
   // (rendered as a chip on each AccountCard). Map keyed by account_id.
@@ -172,6 +179,9 @@ export default function LiOutreachPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
   const [editingCampaignId, setEditingCampaignId] = useState<string | null>(null);
+  // When true the campaign panel is opened to inspect ANOTHER specialist's
+  // campaign — every field is rendered read-only and Save/Start are hidden.
+  const [campaignFormReadOnly, setCampaignFormReadOnly] = useState(false);
   const [cf, setCf] = useState(DEFAULT_CAMPAIGN_FORM);
 
   // Dashboard data
@@ -258,6 +268,7 @@ export default function LiOutreachPage() {
         // Session not ready yet — listen for auth state change
         const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
           if (s && !cancelled) {
+            setCurrentUserId(s.user.id);
             void loadAccounts();
             void loadAccountErrorCounts();
             void loadCampaigns();
@@ -268,6 +279,7 @@ export default function LiOutreachPage() {
         });
         return () => { cancelled = true; subscription.unsubscribe(); };
       }
+      setCurrentUserId(session.user.id);
       void loadAccounts();
       void loadAccountErrorCounts();
       void loadCampaigns();
@@ -398,11 +410,13 @@ export default function LiOutreachPage() {
 
   const openCreateCampaignForm = () => {
     setEditingCampaignId(null);
+    setCampaignFormReadOnly(false);
     setCf(DEFAULT_CAMPAIGN_FORM);
     setShowCreate(true);
   };
 
-  const openEditCampaignForm = (campaign: LiCampaign) => {
+  const openEditCampaignForm = (campaign: LiCampaign, readOnly = false) => {
+    setCampaignFormReadOnly(readOnly);
     const steps = Array.isArray(campaign.steps) ? (campaign.steps as CampaignStep[]) : [];
     const inviteStep = steps.find((step) => step?.type === 'invite');
     const waitSteps = steps.filter((step) => step?.type === 'wait');
@@ -655,7 +669,7 @@ export default function LiOutreachPage() {
 
           {/* Top stats row */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active).length} total={accounts.length} accent="green" />
+            <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active && a.user_id === currentUserId).length} total={accounts.filter((a) => a.user_id === currentUserId).length} accent="green" />
             <StatCard label="Кампании" value={campaigns.filter((c) => c.status === 'running').length} total={campaigns.length} accent="blue" />
             <StatCard
               label={dashFunnelCampaign ? `Лиды · ${dashFunnelCampaign.name}` : 'Лиды'}
@@ -837,11 +851,11 @@ export default function LiOutreachPage() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="rounded-xl border border-gray-200 bg-white p-4">
               <h3 className="text-sm font-semibold text-gray-900 mb-3">Аккаунты</h3>
-              {accounts.length === 0 ? (
+              {accounts.filter((a) => a.user_id === currentUserId).length === 0 ? (
                 <p className="text-xs text-gray-400">Нет аккаунтов. Подключите через Настройки → Синхронизация.</p>
               ) : (
                 <div className="space-y-2">
-                  {accounts.map((a) => {
+                  {accounts.filter((a) => a.user_id === currentUserId).map((a) => {
                     const cooling = isAccountInCooldown(a);
                     return (
                       <div key={a.id} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${cooling ? 'bg-amber-50 border border-amber-200' : 'bg-gray-50'}`}>
@@ -906,11 +920,19 @@ export default function LiOutreachPage() {
         <div className="space-y-4">
           {/* Create Campaign Panel */}
           {showCreate && (
-            <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-4 space-y-4">
+            <div className={`rounded-xl border p-4 space-y-4 ${campaignFormReadOnly ? 'border-purple-200 bg-purple-50/40' : 'border-blue-200 bg-blue-50/40'}`}>
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-gray-900">{editingCampaignId ? 'Редактирование кампании' : 'Новая кампания'}</h2>
-                <button onClick={() => { setShowCreate(false); setEditingCampaignId(null); }} className="text-xs text-gray-500 hover:text-gray-700">Отмена</button>
+                <h2 className="text-sm font-semibold text-gray-900">
+                  {campaignFormReadOnly ? 'Просмотр кампании (только чтение)' : editingCampaignId ? 'Редактирование кампании' : 'Новая кампания'}
+                </h2>
+                <button onClick={() => { setShowCreate(false); setEditingCampaignId(null); setCampaignFormReadOnly(false); }} className="text-xs text-gray-500 hover:text-gray-700">{campaignFormReadOnly ? 'Закрыть' : 'Отмена'}</button>
               </div>
+              {campaignFormReadOnly && (
+                <div className="rounded-lg bg-purple-100 px-3 py-2 text-xs text-purple-700">
+                  Это кампания другого специалиста. Видно, как она настроена (шаги, тексты, промты), но редактировать нельзя.
+                </div>
+              )}
+              <fieldset disabled={campaignFormReadOnly} className="space-y-4 border-0 p-0 m-0 min-w-0 disabled:opacity-90">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div>
                   <label className="text-xs text-gray-600 block mb-1">Название *</label>
@@ -920,7 +942,9 @@ export default function LiOutreachPage() {
                   <label className="text-xs text-gray-600 block mb-1">Аккаунт *</label>
                   <select value={cf.account_id} onChange={(e) => setCf({ ...cf, account_id: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm">
                     <option value="">Выберите...</option>
-                    {accounts.filter((a) => a.is_active).map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}</option>)}
+                    {accounts
+                      .filter((a) => (a.is_active && a.user_id === currentUserId) || (campaignFormReadOnly && a.id === cf.account_id))
+                      .map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}{a.user_id !== currentUserId ? ` (${a.owner_name ?? 'другой спец'})` : ''}</option>)}
                   </select>
                 </div>
                 <div>
@@ -1070,10 +1094,13 @@ export default function LiOutreachPage() {
                   </div>
                 </div>
               </details>
+              </fieldset>
 
-              <button onClick={() => void createCampaign()} disabled={creating} className="rounded-lg bg-green-600 text-white px-5 py-2 text-sm font-medium disabled:opacity-50">
-                {creating ? (editingCampaignId ? 'Сохранение...' : 'Создание...') : (editingCampaignId ? 'Сохранить изменения' : 'Создать кампанию')}
-              </button>
+              {!campaignFormReadOnly && (
+                <button onClick={() => void createCampaign()} disabled={creating} className="rounded-lg bg-green-600 text-white px-5 py-2 text-sm font-medium disabled:opacity-50">
+                  {creating ? (editingCampaignId ? 'Сохранение...' : 'Создание...') : (editingCampaignId ? 'Сохранить изменения' : 'Создать кампанию')}
+                </button>
+              )}
             </div>
           )}
 
@@ -1087,21 +1114,35 @@ export default function LiOutreachPage() {
               </div>
               {campaigns.length === 0 ? (
                 <div className="text-sm text-gray-500">Нет кампаний</div>
-              ) : campaigns.map((c) => (
-                <div key={c.id} className={`rounded-xl border p-3 text-sm cursor-pointer ${selectedCampaignId === c.id ? 'border-blue-300 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`} onClick={() => setSelectedCampaignId(c.id)}>
-                  <div className="flex items-center justify-between">
-                    <div className="font-medium text-gray-900">{c.name}</div>
-                    <span className={`text-xs px-2 py-0.5 rounded-md ${c.status === 'running' ? 'bg-green-100 text-green-700' : c.status === 'draft' ? 'bg-gray-100 text-gray-600' : 'bg-amber-100 text-amber-700'}`}>{c.status}</span>
+              ) : campaigns.map((c) => {
+                const isOwn = currentUserId != null && c.user_id === currentUserId;
+                return (
+                <div key={c.id} className={`rounded-xl border p-3 text-sm cursor-pointer ${selectedCampaignId === c.id ? 'border-blue-300 bg-blue-50' : isOwn ? 'border-gray-200 hover:bg-gray-50' : 'border-l-4 border-l-purple-400 border-y border-r border-purple-200 bg-purple-50/40 hover:bg-purple-50'}`} onClick={() => setSelectedCampaignId(c.id)}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="font-medium text-gray-900 min-w-0 truncate">{c.name}</div>
+                    <span className={`text-xs px-2 py-0.5 rounded-md shrink-0 ${c.status === 'running' ? 'bg-green-100 text-green-700' : c.status === 'draft' ? 'bg-gray-100 text-gray-600' : 'bg-amber-100 text-amber-700'}`}>{c.status}</span>
                   </div>
+                  {!isOwn && (
+                    <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-medium text-purple-700" title="Запуск другого специалиста — доступен только для просмотра">
+                      👤 {c.owner_name ?? 'другой спец'} · только просмотр
+                    </div>
+                  )}
                   <div className="text-xs text-gray-500 mt-1">{(c.steps ?? []).length} шагов • AI: {c.use_ai ? 'вкл' : 'выкл'} • лимит: {c.daily_invite_limit}/день</div>
-                  <div className="flex gap-2 mt-2">
-                    <button onClick={(e) => { e.stopPropagation(); openEditCampaignForm(c); }} className="text-xs text-blue-700 hover:underline">Редактировать</button>
-                    {c.status !== 'running' && <button onClick={(e) => { e.stopPropagation(); void startCampaign(c.id); }} className="text-xs text-green-700 hover:underline">▶ Запустить</button>}
-                    {c.status === 'running' && <button onClick={(e) => { e.stopPropagation(); void stopCampaign(c.id); }} className="text-xs text-amber-700 hover:underline">⏹ Остановить</button>}
-                    <button onClick={(e) => { e.stopPropagation(); void deleteCampaign(c.id); }} className="text-xs text-red-600 hover:underline">Удалить</button>
-                  </div>
+                  {isOwn ? (
+                    <div className="flex gap-2 mt-2">
+                      <button onClick={(e) => { e.stopPropagation(); openEditCampaignForm(c); }} className="text-xs text-blue-700 hover:underline">Редактировать</button>
+                      {c.status !== 'running' && <button onClick={(e) => { e.stopPropagation(); void startCampaign(c.id); }} className="text-xs text-green-700 hover:underline">▶ Запустить</button>}
+                      {c.status === 'running' && <button onClick={(e) => { e.stopPropagation(); void stopCampaign(c.id); }} className="text-xs text-amber-700 hover:underline">⏹ Остановить</button>}
+                      <button onClick={(e) => { e.stopPropagation(); void deleteCampaign(c.id); }} className="text-xs text-red-600 hover:underline">Удалить</button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2 mt-2">
+                      <button onClick={(e) => { e.stopPropagation(); openEditCampaignForm(c, true); }} className="text-xs text-purple-700 hover:underline">👁 Посмотреть настройки</button>
+                    </div>
+                  )}
                 </div>
-              ))}
+                );
+              })}
             </div>
             <div className="rounded-xl border border-gray-200 p-4 min-h-[200px]">
               {!selectedCampaign ? (
@@ -1376,7 +1417,7 @@ export default function LiOutreachPage() {
             <div className="flex gap-3 flex-wrap">
               <select value={scraperAccountId} onChange={(e) => setScraperAccountId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
                 <option value="">Аккаунт...</option>
-                {accounts.filter((a) => a.is_active).map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}</option>)}
+                {accounts.filter((a) => a.is_active && a.user_id === currentUserId).map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}</option>)}
               </select>
               <select value={scraperListId} onChange={(e) => setScraperListId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
                 <option value="">Список (опционально)</option>
@@ -1418,6 +1459,7 @@ export default function LiOutreachPage() {
             <AccountCard
               key={a.id}
               account={a}
+              isOwn={currentUserId != null && a.user_id === currentUserId}
               errorCounts24h={accountErrorCounts[a.id]}
               onUpdated={() => { void loadAccounts(); void loadAccountErrorCounts(); }}
               onShowLogs={() => setAccountLogsModal(a)}
@@ -1468,11 +1510,13 @@ export default function LiOutreachPage() {
 
 function AccountCard({
   account: a,
+  isOwn,
   errorCounts24h,
   onUpdated,
   onShowLogs,
 }: {
   account: LiAccount;
+  isOwn: boolean;
   errorCounts24h?: { error: number; warning: number };
   onUpdated: () => void;
   onShowLogs: () => void;
@@ -1515,10 +1559,10 @@ function AccountCard({
   };
 
   return (
-    <div className={`rounded-xl border px-4 py-3 text-sm space-y-2 ${cooling ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200'}`}>
+    <div className={`rounded-xl border px-4 py-3 text-sm space-y-2 ${!isOwn ? 'border-l-4 border-l-purple-400 border-y border-r border-purple-200 bg-purple-50/40' : cooling ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200'}`}>
       <div className="flex items-center justify-between">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button
               type="button"
               onClick={onShowLogs}
@@ -1527,6 +1571,11 @@ function AccountCard({
             >
               {a.name || a.unipile_account_id}
             </button>
+            {!isOwn && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-purple-100 px-1.5 py-0.5 text-[10px] font-medium text-purple-700 shrink-0" title="Аккаунт другого специалиста — только просмотр">
+                👤 {a.owner_name ?? 'другой спец'}
+              </span>
+            )}
             {errorCounts24h && errorCounts24h.error > 0 && (
               <button
                 type="button"
@@ -1552,37 +1601,45 @@ function AccountCard({
           <span className={`text-xs px-2 py-0.5 rounded ${cooling ? 'bg-amber-100 text-amber-700' : a.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
             {cooling ? 'В отлёжке' : a.is_active ? 'Активен' : 'Неактивен'}
           </span>
+          {isOwn && (
+            <button
+              onClick={() => void remove()}
+              disabled={deleting}
+              title="Удалить локальную запись аккаунта (устаревший дубликат)"
+              className="text-xs text-gray-400 hover:text-red-600 disabled:opacity-40"
+            >
+              {deleting ? '...' : 'Удалить'}
+            </button>
+          )}
+        </div>
+      </div>
+      {isOwn ? (
+        <div className="flex items-end gap-2">
+          <div className="flex-1">
+            <label className="text-xs text-gray-500">
+              Proxy <span className="text-gray-400">(любой формат: ip:port:user:pass, http://user:pass@host:port, host:port)</span>
+            </label>
+            <input
+              type="text"
+              placeholder="154.81.199.122:63310:VtVmt51R:7GnJr2Yb"
+              value={proxyDraft}
+              onChange={(e) => { setProxyDraft(e.target.value); setMsg(null); }}
+              className="w-full rounded-lg border border-gray-200 px-3 py-1.5 text-sm mt-0.5 font-mono"
+            />
+          </div>
           <button
-            onClick={() => void remove()}
-            disabled={deleting}
-            title="Удалить локальную запись аккаунта (устаревший дубликат)"
-            className="text-xs text-gray-400 hover:text-red-600 disabled:opacity-40"
+            onClick={() => void save()}
+            disabled={saving || !dirty}
+            className="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium disabled:opacity-40 shrink-0"
           >
-            {deleting ? '...' : 'Удалить'}
+            {saving ? '...' : 'Сохранить'}
           </button>
         </div>
-      </div>
-      <div className="flex items-end gap-2">
-        <div className="flex-1">
-          <label className="text-xs text-gray-500">
-            Proxy <span className="text-gray-400">(любой формат: ip:port:user:pass, http://user:pass@host:port, host:port)</span>
-          </label>
-          <input
-            type="text"
-            placeholder="154.81.199.122:63310:VtVmt51R:7GnJr2Yb"
-            value={proxyDraft}
-            onChange={(e) => { setProxyDraft(e.target.value); setMsg(null); }}
-            className="w-full rounded-lg border border-gray-200 px-3 py-1.5 text-sm mt-0.5 font-mono"
-          />
+      ) : (
+        <div className="text-xs text-purple-600/80">
+          Прокси и настройки скрыты — аккаунт другого специалиста, доступен только для просмотра.
         </div>
-        <button
-          onClick={() => void save()}
-          disabled={saving || !dirty}
-          className="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium disabled:opacity-40 shrink-0"
-        >
-          {saving ? '...' : 'Сохранить'}
-        </button>
-      </div>
+      )}
       {msg && <div className={`text-xs ${msg.startsWith('Ошибка') ? 'text-red-600' : 'text-green-600'}`}>{msg}</div>}
     </div>
   );

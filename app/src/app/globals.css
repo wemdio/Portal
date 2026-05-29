@@ -2311,3 +2311,153 @@ body:has(.client-portal) {
 .client-portal .text-emerald-700 {
   color: var(--cp-green) !important;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   ADMIN PORTAL — "Editorial-Light"
+   ───────────────────────────────────────────────────────────────────────
+   The light-surface sibling of .client-portal. Same role-based --cp-* token
+   vocabulary and the same ds-*/neu-* utility grammar, but:
+     • surface is paper-white instead of ink-black, and
+     • semantic status COLOUR is kept — power users triage 50-row tables and
+       rely on red/amber as the fastest "where do I look" signal, so the
+       client-side Invisible-Accent rule is deliberately relaxed here.
+
+   Tokens are ROLE-based, not colour-literal:
+     --cp-ink    = page background         (dark in client, light here)
+     --cp-paper  = primary foreground text (light in client, dark here)
+   Flipping their lightness makes every inherited utility render correctly —
+   .ds-btn-primary (paper-bg / ink-text) is a light button on a dark page in
+   client and a dark button on a light page here: same role, right look.
+
+   Scoped additively: zero edits to .client-portal rules. The two scopes never
+   co-occur (different route trees), so reusing --cp-* names is safe. Pilot:
+   /analytics/projects — grow the utility set here as more admin pages migrate.
+   ═══════════════════════════════════════════════════════════════════════ */
+.admin-portal {
+  /* surfaces — grey canvas under white cards. The first pilot pass used a
+     #fafafa canvas + #e6e6e9 hairlines; on a dense data view the white-on-
+     near-white separation was imperceptible. Bumped: canvas is clearly grey,
+     card OUTLINES use --cp-divider-strong, inner row hairlines stay --cp-divider. */
+  --cp-ink: #f4f5f7;
+  --cp-surface-rest: #ffffff;
+  --cp-surface-elev: #eceef1;
+  --cp-surface-active: #e4e6ea;
+  --cp-divider: #e4e6ea;
+  --cp-divider-strong: #cfd2d8;
+  --cp-scrim: rgba(24, 24, 27, 0.4);
+
+  /* foreground — ink-on-paper text ramp */
+  --cp-paper: #18181b;
+  --cp-paper-mute: #56565e;
+  --cp-paper-faint: #9b9ba3;
+
+  /* semantic status — darkened for AA contrast on white */
+  --cp-amber: #b45309;
+  --cp-red: #dc2626;
+  --cp-green: #15803d;
+  --cp-grey: #9b9ba3;
+
+  /* urgency washes — the one tinted-background concession (overdue rows) */
+  --cp-red-wash: #fef2f2;
+  --cp-amber-wash: #fffbeb;
+
+  background: var(--cp-ink);
+  color: var(--cp-paper);
+}
+
+/* mono — system monospace; admin pages don't load the JetBrains webfont.
+   tabular-nums baked in so every number column aligns (P2-A). */
+.admin-portal .ds-mono,
+.admin-portal [data-mono] {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-portal .ds-eyebrow {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--cp-paper-faint);
+  letter-spacing: 0.02em;
+}
+
+.admin-portal .ds-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.admin-portal .ds-status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* card — white surface, visible outline + a whisper of elevation. The dark
+   client theme is strictly Hairline-Not-Shadow (shadows don't read on ink),
+   but on a light surface a 1px border alone is too weak to separate white
+   cards from a near-white page — so we keep the strong hairline AND add a
+   barely-there shadow (far lighter than the original neumorphic shadow-sm).
+   This is the deliberate light-mode divergence from the client system. */
+.admin-portal .ds-card,
+.admin-portal .neu-card {
+  background: var(--cp-surface-rest);
+  border: 1px solid var(--cp-divider-strong);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.06), 0 1px 1px rgba(24, 24, 27, 0.03);
+}
+
+.admin-portal .ds-card-pressable {
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.admin-portal .ds-card-pressable:hover {
+  background: var(--cp-surface-elev);
+}
+
+.admin-portal .ds-btn-secondary {
+  background: var(--cp-surface-rest);
+  color: var(--cp-paper);
+  border: 1px solid var(--cp-divider-strong);
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-weight: 500;
+  font-size: 13px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  cursor: pointer;
+}
+.admin-portal .ds-btn-secondary:hover:not(:disabled) {
+  background: var(--cp-surface-elev);
+  border-color: var(--cp-paper-faint);
+}
+
+.admin-portal .neu-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--cp-divider-strong);
+  border-top-color: var(--cp-paper);
+  border-radius: 50%;
+}
+
+/* focus halo — ink ring on the light surface for keyboard nav */
+.admin-portal .ds-card-pressable:focus-visible,
+.admin-portal .ds-btn-secondary:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--cp-ink), 0 0 0 4px var(--cp-paper);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-portal *,
+  .admin-portal *::before,
+  .admin-portal *::after {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+  }
+}
