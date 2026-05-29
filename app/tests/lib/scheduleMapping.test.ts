@@ -122,18 +122,33 @@ describe('campaignScheduleToOverride', () => {
 });
 
 describe('round-trip override ↔ campaign_schedule', () => {
-  it('override → schedule → override is stable', () => {
+  it('override → schedule → override is stable for a valid (whitelisted) timezone', () => {
+    // Europe/Kirov is in Instantly's whitelist, so normalizeInstantlyTimezone
+    // is the identity on it → full round-trip including timezone holds.
     const original = {
       from: '11:15',
       to: '20:45',
       days: [0, 2, 4, 6],
-      timezone: 'Europe/Moscow',
+      timezone: 'Europe/Kirov',
     };
     const schedule = buildCampaignSchedule(original);
     const back = campaignScheduleToOverride(schedule);
     expect(back.from).toBe(original.from);
     expect(back.to).toBe(original.to);
     expect(back.days).toEqual(original.days);
+    expect(back.timezone).toBe(original.timezone);
+  });
+
+  it('legacy timezone (Europe/Moscow) normalizes to its whitelisted equivalent on the way in', () => {
+    // Documents the one intentional non-identity: a legacy tz gets mapped
+    // to the canonical Instantly id and stays there. Not a round-trip bug —
+    // the stored value is the normalized one.
+    const schedule = buildCampaignSchedule({
+      from: '09:00', to: '18:00', days: [1], timezone: 'Europe/Moscow',
+    });
+    expect(schedule.schedules[0].timezone).toBe('Europe/Kirov');
+    const back = campaignScheduleToOverride(schedule);
+    expect(back.timezone).toBe('Europe/Kirov');
   });
 });
 

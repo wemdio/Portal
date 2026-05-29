@@ -237,9 +237,16 @@ export async function PATCH(
     await upsertInstantlyCatalogFromCampaign(updatedCampaign, instantlyRequestOptions.accountId);
     await logAudit('client.campaign.patch', 'Client edited campaign launch', { campaignId, launchId }, { userId });
 
-    const campaignForResponse = hasUsableCampaignSequences(updatedCampaign.sequences)
+    const baseCampaignForResponse = hasUsableCampaignSequences(updatedCampaign.sequences)
       ? updatedCampaign
       : { ...updatedCampaign, name: campaignName, sequences };
+
+    // If we just changed the schedule, guarantee the response reflects it —
+    // so when the client re-opens edit mode it sees the value it just set,
+    // even if Instantly's PATCH response omitted/staled campaign_schedule.
+    const campaignForResponse = scheduleOverride
+      ? { ...baseCampaignForResponse, campaign_schedule: buildCampaignSchedule(scheduleOverride) }
+      : baseCampaignForResponse;
 
     return NextResponse.json({
       campaign: campaignForResponse,

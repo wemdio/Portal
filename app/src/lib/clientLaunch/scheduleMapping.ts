@@ -21,7 +21,12 @@ export const SCHEDULE_DEFAULTS = {
   from: '09:00',
   to: '18:00',
   days: [1, 2, 3, 4, 5] as const,
-  timezone: 'Europe/Moscow',
+  // Europe/Kirov is Instantly's canonical UTC+3 (Moscow/SPb) id — same
+  // value the launch-page default and the timezone dropdown use. Note
+  // 'Europe/Moscow' is NOT in Instantly's whitelist; it only survives via
+  // the legacy normalization map. Using the canonical id here means the
+  // ScheduleEditor dropdown matches an option directly.
+  timezone: 'Europe/Kirov',
 } as const;
 
 /** Build Instantly's `campaign_schedule` from the flat override shape. */
