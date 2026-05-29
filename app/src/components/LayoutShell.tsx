@@ -100,6 +100,14 @@ export function LayoutShell({
     return <>{children}</>;
   }
 
+  // Editorial-DARK admin: reuse the .client-portal scope (dark tokens + bridge
+  // layers + ds-/neu- utilities) on the whole admin shell so chrome and every
+  // page turn dark at once — same mechanism that flipped the client portal.
+  // Excluded: full-bleed custom-UI tools (spreadsheet, RDP) and standalone
+  // pages (guest review, maintenance) where bridge remaps would clash.
+  const useDarkAdminShell =
+    !isSpreadsheetPage && !isRdpPage && !isGuestReviewPage && !isMaintenancePage;
+
   return (
     <>
     <UserProvider initialLocale={locale}>
@@ -107,7 +115,7 @@ export function LayoutShell({
     <PortalDocumentTitle />
     <PortalLoadingProvider>
     <div
-      className={shellClassName}
+      className={`${useDarkAdminShell ? 'client-portal admin-portal ' : ''}${shellClassName}`}
       style={{
         minHeight: 'var(--app-viewport-height, 100vh)',
         ...(!isTma ? { height: 'var(--app-viewport-height, 100vh)' } : {}),

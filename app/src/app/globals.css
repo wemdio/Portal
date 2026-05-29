@@ -2334,32 +2334,33 @@ body:has(.client-portal) {
    /analytics/projects — grow the utility set here as more admin pages migrate.
    ═══════════════════════════════════════════════════════════════════════ */
 .admin-portal {
-  /* surfaces — grey canvas under white cards. The first pilot pass used a
-     #fafafa canvas + #e6e6e9 hairlines; on a dense data view the white-on-
-     near-white separation was imperceptible. Bumped: canvas is clearly grey,
-     card OUTLINES use --cp-divider-strong, inner row hairlines stay --cp-divider. */
-  --cp-ink: #f4f5f7;
-  --cp-surface-rest: #ffffff;
-  --cp-surface-elev: #eceef1;
-  --cp-surface-active: #e4e6ea;
-  --cp-divider: #e4e6ea;
-  --cp-divider-strong: #cfd2d8;
-  --cp-scrim: rgba(24, 24, 27, 0.4);
+  /* Editorial-DARK. The light pilot (2026-05-29) read as a timid reskin; per
+     user direction the admin side adopts the SAME bold dark system as
+     .client-portal — values mirror it exactly. The admin shell also carries
+     the .client-portal class (see LayoutShell) so raw-Tailwind admin pages and
+     chrome get the full bridge + utility set, the same mechanism that turned
+     the whole client portal dark at once. This block keeps .admin-portal
+     self-consistent for standalone use and leaves room for admin-only deltas. */
+  --cp-ink: #0a0a0a;
+  --cp-surface-rest: #111213;
+  --cp-surface-elev: #18191c;
+  --cp-surface-active: #1f2023;
+  --cp-divider: #1f2023;
+  --cp-divider-strong: #2a2b2f;
+  --cp-scrim: rgba(10, 10, 10, 0.6);
 
-  /* foreground — ink-on-paper text ramp */
-  --cp-paper: #18181b;
-  --cp-paper-mute: #56565e;
-  --cp-paper-faint: #9b9ba3;
+  --cp-paper: #fafafa;
+  --cp-paper-mute: #a1a1a3;
+  --cp-paper-faint: #6c6c70;
 
-  /* semantic status — darkened for AA contrast on white */
-  --cp-amber: #b45309;
-  --cp-red: #dc2626;
-  --cp-green: #15803d;
-  --cp-grey: #9b9ba3;
+  --cp-amber: #f5a623;
+  --cp-red: #e5484d;
+  --cp-green: #46a758;
+  --cp-grey: #6c6c70;
 
-  /* urgency washes — the one tinted-background concession (overdue rows) */
-  --cp-red-wash: #fef2f2;
-  --cp-amber-wash: #fffbeb;
+  /* urgency washes — subtle tinted row bg on dark (overdue emphasis) */
+  --cp-red-wash: rgba(229, 72, 77, 0.10);
+  --cp-amber-wash: rgba(245, 166, 35, 0.10);
 
   background: var(--cp-ink);
   color: var(--cp-paper);
@@ -2400,18 +2401,14 @@ body:has(.client-portal) {
   text-transform: uppercase;
 }
 
-/* card — white surface, visible outline + a whisper of elevation. The dark
-   client theme is strictly Hairline-Not-Shadow (shadows don't read on ink),
-   but on a light surface a 1px border alone is too weak to separate white
-   cards from a near-white page — so we keep the strong hairline AND add a
-   barely-there shadow (far lighter than the original neumorphic shadow-sm).
-   This is the deliberate light-mode divergence from the client system. */
+/* card — flat dark surface, hairline border, no shadow (Hairline-Not-Shadow;
+   on ink the surface-rest vs ink contrast does the elevation work). */
 .admin-portal .ds-card,
 .admin-portal .neu-card {
   background: var(--cp-surface-rest);
-  border: 1px solid var(--cp-divider-strong);
+  border: 1px solid var(--cp-divider);
   border-radius: 10px;
-  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.06), 0 1px 1px rgba(24, 24, 27, 0.03);
+  box-shadow: none;
 }
 
 .admin-portal .ds-card-pressable {
