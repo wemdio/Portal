@@ -109,6 +109,17 @@ export interface AutoPipelineConfig {
   /** Минимальный годовой оборот компании для top-up из BoB. В рублях. */
   base_of_bases_revenue_from: number;
   /**
+   * Разрешить live-добор из «базы баз» прямо в cron-прогоне (легаси-путь:
+   * берём сырые домены и скорим их Mailganer'ом на лету). По умолчанию ВЫКЛ.
+   *
+   * Зачем выкл: ~94.6% доменов базы получают score=0 (нет SPF) → их НЕ
+   * скрейпят, но они раздувают new_count и жгут Mailganer-вызовы. Фоновый
+   * скорер теперь наполняет кэш активными доменами 24/7, а cron берёт
+   * готовые score>0 из кэша (fetchTopUpFromCache). Live-путь оставлен как
+   * аварийный fallback под флагом.
+   */
+  base_of_bases_live_fallback?: boolean;
+  /**
    * Целевое количество компаний на enrichment. HH парсит сколько может, BoB
    * добирает до этого числа. При конверсии 6.3% (parsed → ready) 10 000 target
    * даёт ~630 ready/день ≈ 19k/мес.
@@ -681,13 +692,15 @@ export async function runAutoPipelineForClient(
         log: (m) => void logAudit('auto-pipeline.bob-cache', m, logCtx),
       });
 
-      // 2. Если кэш не дал достаточно (background scorer ещё не дошёл до
-      //    нужных доменов или их там просто нет) — fallback на прямой BoB.
-      //    Этот путь scoring'ит домены через Mailganer на лету и тоже
-      //    наполняет кэш через getOrFetchScore (это побочный эффект).
+      // 2. Если кэш не дал достаточно — ТОЛЬКО при включённом флаге
+      //    base_of_bases_live_fallback идём в прямой BoB. По умолчанию ВЫКЛ:
+      //    этот путь тянет сырые домены, ~94.6% из которых score=0 (их не
+      //    скрейпят) — они лишь раздувают new_count и жгут Mailganer-вызовы.
+      //    Фоновый скорер наполняет кэш активными доменами 24/7, поэтому cron
+      //    полагается на кэш, а не доскоривает сырьё на лету.
       const stillNeeded = neededFromBob - cacheResult.employers.length;
       let bobLiveResult: Awaited<ReturnType<typeof fetchTopUpFromBaseOfBases>> | null = null;
-      if (stillNeeded > 0) {
+      if (config.base_of_bases_live_fallback === true && stillNeeded > 0) {
         bobLiveResult = await fetchTopUpFromBaseOfBases({
           neededCount: stillNeeded,
           revenueFrom: config.base_of_bases_revenue_from,
