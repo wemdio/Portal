@@ -359,13 +359,13 @@ export default function ProjectsAnalyticsPage() {
     [enrichedProjects],
   );
 
+  // Full-width on purpose: the admin shell tags data pages
+  // `.ui-density-compact`, which forces `max-width: 100% !important` for
+  // power-user density — so we don't fight it with a content cap.
   return (
-    {/* Full-width on purpose: the admin shell tags data pages
-        `.ui-density-compact`, which forces `max-width: 100% !important` for
-        power-user density — so we don't fight it with a content cap. */}
     <div className="admin-portal space-y-6">
-        <header>
-          <p className="ds-eyebrow mb-1">аналитика</p>
+      <header>
+        <p className="ds-eyebrow mb-1">аналитика</p>
         <h1 className="m-0 text-2xl font-semibold" style={{ color: 'var(--cp-paper)' }}>
           Проекты
         </h1>
