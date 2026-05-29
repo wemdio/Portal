@@ -664,7 +664,7 @@ export default function LiOutreachPage() {
 
           {/* Top stats row */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active).length} total={accounts.length} accent="green" />
+            <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active && a.user_id === currentUserId).length} total={accounts.filter((a) => a.user_id === currentUserId).length} accent="green" />
             <StatCard label="Кампании" value={campaigns.filter((c) => c.status === 'running').length} total={campaigns.length} accent="blue" />
             <StatCard
               label={dashFunnelCampaign ? `Лиды · ${dashFunnelCampaign.name}` : 'Лиды'}
@@ -846,11 +846,11 @@ export default function LiOutreachPage() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="rounded-xl border border-gray-200 bg-white p-4">
               <h3 className="text-sm font-semibold text-gray-900 mb-3">Аккаунты</h3>
-              {accounts.length === 0 ? (
+              {accounts.filter((a) => a.user_id === currentUserId).length === 0 ? (
                 <p className="text-xs text-gray-400">Нет аккаунтов. Подключите через Настройки → Синхронизация.</p>
               ) : (
                 <div className="space-y-2">
-                  {accounts.map((a) => {
+                  {accounts.filter((a) => a.user_id === currentUserId).map((a) => {
                     const cooling = isAccountInCooldown(a);
                     return (
                       <div key={a.id} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${cooling ? 'bg-amber-50 border border-amber-200' : 'bg-gray-50'}`}>
@@ -929,7 +929,7 @@ export default function LiOutreachPage() {
                   <label className="text-xs text-gray-600 block mb-1">Аккаунт *</label>
                   <select value={cf.account_id} onChange={(e) => setCf({ ...cf, account_id: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm">
                     <option value="">Выберите...</option>
-                    {accounts.filter((a) => a.is_active).map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}</option>)}
+                    {accounts.filter((a) => a.is_active && a.user_id === currentUserId).map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}</option>)}
                   </select>
                 </div>
                 <div>
@@ -1395,7 +1395,7 @@ export default function LiOutreachPage() {
             <div className="flex gap-3 flex-wrap">
               <select value={scraperAccountId} onChange={(e) => setScraperAccountId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
                 <option value="">Аккаунт...</option>
-                {accounts.filter((a) => a.is_active).map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}</option>)}
+                {accounts.filter((a) => a.is_active && a.user_id === currentUserId).map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}</option>)}
               </select>
               <select value={scraperListId} onChange={(e) => setScraperListId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
                 <option value="">Список (опционально)</option>

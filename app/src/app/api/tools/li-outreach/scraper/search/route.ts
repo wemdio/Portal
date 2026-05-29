@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError, userOwnsAccount } from '@/lib/liOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { scrapeLinkedInSearch } from '@/lib/liOutreach/scraperLogic';
 
@@ -19,6 +19,11 @@ export async function POST(req: NextRequest) {
     };
     if (!body.search_url) return jsonError('search_url is required', 400);
     if (!body.account_id) return jsonError('account_id is required', 400);
+    // Accounts are visible cross-specialist but only usable by their owner —
+    // don't let someone scrape through another specialist's LinkedIn account.
+    if (!(await userOwnsAccount(auth.user.id, body.account_id))) {
+      return jsonError('Нельзя запускать скрапинг через LinkedIn-аккаунт другого специалиста', 403);
+    }
 
     // Create task
     const { data: task, error } = await auth.supabase
