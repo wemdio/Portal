@@ -1,6 +1,12 @@
 -- ============================================================================
 -- 004: client health monitoring — dimensional model + daily snapshots
 -- Per-client daily health questions (Tier-1 SQL). Source: user spec 2026-05.
+--
+-- ⚠️ SUPERSEDED BY 006 — everything this migration creates was dropped in
+-- 006_drop_system_a.sql. We pivoted from a deterministic SQL calculator
+-- ("System A") to an AI-agent-in-the-loop eval loop. The client→campaign map
+-- is now queried LIVE from operational DBs (see wiki/concepts/client-health-questions.md).
+-- This file is kept only for migration-history continuity; do NOT re-run it.
 -- ============================================================================
 
 -- ─── dimensions (synced daily from operational DBs) ────────────────────────
