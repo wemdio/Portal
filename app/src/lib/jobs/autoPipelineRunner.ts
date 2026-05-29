@@ -293,12 +293,25 @@ async function updateConfigLastRun(
 
 // ── Enrichment ───────────────────────────────────────────────────────────
 
+/**
+ * Сколько адресов берём с одного домена → столько лидов на компанию.
+ * Клиент выбрал «до 2»: если на сайте несколько почт, берём 2 (напр. info@
+ * + sales@). Скрейпер в среднем находит ~3/домен, остальные отбрасываем.
+ */
+const MAX_EMAILS_PER_DOMAIN = 2;
+
 export interface EnrichmentResult {
   employer: HhEmployer;
   domain: string | null;
+  /** Первичный адрес (первый найденный) — пишется в seen как resolved_email. */
   email: string | null;
-  /** Результат DNS+MX+SMTP-валидации найденного email. null если email не нашли. */
+  /** Результат DNS+MX+SMTP-валидации первичного email. null если email не нашли. */
   emailValidation: AutoPipelineEmailValidation | null;
+  /**
+   * Доп. адреса свыше первого (до MAX_EMAILS_PER_DOMAIN-1 штук). Каждый
+   * становится отдельным лидом в той же кампании. Пусто, если найден ≤1 адрес.
+   */
+  additionalEmails: { address: string; validation: AutoPipelineEmailValidation | null }[];
   score: number | null;
   spf: string | null;
   endpointRaw: Record<string, unknown> | null;
@@ -368,14 +381,23 @@ async function enrichEmployers(
         // или `skipped`, и email нам не нужен.
         let email: string | null = null;
         let emailValidation: AutoPipelineEmailValidation | null = null;
+        const additionalEmails: { address: string; validation: AutoPipelineEmailValidation | null }[] = [];
         if (shouldDoEmailWork(endpoint.score, scoreBuckets) && emp.siteUrl) {
           const scrape = await scrapeEmails(emp.siteUrl, {
             timeout: 12_000,
             maxPages: 5,
           }).catch(() => ({ emails: [] as string[] }));
-          email = scrape.emails[0] ?? null;
-          if (email) {
-            emailValidation = await validateEmailForAutoPipeline(email, domainCache);
+          // Берём до MAX_EMAILS_PER_DOMAIN адресов — первый primary, остальные
+          // как доп. лиды. Валидируем каждый (domainCache переиспользует MX).
+          const candidates = scrape.emails.slice(0, MAX_EMAILS_PER_DOMAIN);
+          for (let c = 0; c < candidates.length; c++) {
+            const validation = await validateEmailForAutoPipeline(candidates[c], domainCache);
+            if (c === 0) {
+              email = candidates[0];
+              emailValidation = validation;
+            } else {
+              additionalEmails.push({ address: candidates[c], validation });
+            }
           }
         }
 
@@ -384,6 +406,7 @@ async function enrichEmployers(
           domain,
           email,
           emailValidation,
+          additionalEmails,
           score: endpoint.score,
           spf: endpoint.spf,
           endpointRaw: endpoint.raw,
@@ -395,6 +418,7 @@ async function enrichEmployers(
           domain,
           email: null,
           emailValidation: null,
+          additionalEmails: [],
           score: null,
           spf: null,
           endpointRaw: null,
@@ -824,7 +848,12 @@ export async function runAutoPipelineForClient(
         if (enr.employer.siteUrl) withSiteCount++;
         if (enr.score !== null) withScoreCount++;
         if (enr.email) withEmailCount++;
+        // «Готовых контактов» = валидные адреса (до 2 на домен), т.к. каждый
+        // станет отдельным лидом. with_email остаётся «доменов с ≥1 почтой».
         if (enr.emailValidation?.isValid) emailValidCount++;
+        for (const extra of enr.additionalEmails) {
+          if (extra.validation?.isValid) emailValidCount++;
+        }
 
         const decision = decideRoute(enr, config);
         const base: Omit<SeenEmployerUpsert, 'status' | 'skip_reason' | 'error_message' | 'routed_bucket_id' | 'routed_campaign_id'> = {
@@ -883,26 +912,33 @@ export async function runAutoPipelineForClient(
           storedCount++;
         } else {
           const bucket = decision.bucket;
-          const lead: LeadCreatePayload = {
-            email: enr.email!,
-            company_name: enr.employer.name,
-            website: enr.employer.siteUrl ?? undefined,
-            custom_variables: {
-              hh_employer_id: enr.employer.id,
-              hh_url: enr.employer.hhUrl ?? '',
-              score: String(enr.score),
-              spf: enr.spf ?? '',
-            },
+          const customVars = {
+            hh_employer_id: enr.employer.id,
+            hh_url: enr.employer.hhUrl ?? '',
+            score: String(enr.score),
+            spf: enr.spf ?? '',
           };
+          // До MAX_EMAILS_PER_DOMAIN лидов на компанию: primary + доп. адреса
+          // (напр. info@ и sales@) — отдельными лидами в той же кампании.
+          const leadEmails = [enr.email!, ...enr.additionalEmails.map((a) => a.address)];
 
           let group = groupedLeads.get(bucket.id);
           if (!group) {
             group = { bucket, leads: [] };
             groupedLeads.set(bucket.id, group);
           }
-          group.leads.push(lead);
+          for (const addr of leadEmails) {
+            group.leads.push({
+              email: addr,
+              company_name: enr.employer.name,
+              website: enr.employer.siteUrl ?? undefined,
+              custom_variables: customVars,
+            });
+          }
 
-          // Запись в seen — статус=routed мы зафиксируем ПОСЛЕ успешного append.
+          // seen — одна строка на домен (resolved_email = primary). Статус
+          // routed фиксируем ПОСЛЕ успешного append. routedCount считает
+          // ЛИДЫ (адреса), а не домены — это «добавлено в работу».
           seenUpserts.push({
             ...base,
             status: 'routed',
@@ -911,7 +947,7 @@ export async function runAutoPipelineForClient(
             routed_bucket_id: bucket.id,
             routed_campaign_id: bucket.instantly_campaign_id,
           });
-          routedCount++;
+          routedCount += leadEmails.length;
         }
       } // конец for (enr of enrichments)
 
