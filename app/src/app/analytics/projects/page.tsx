@@ -360,9 +360,13 @@ export default function ProjectsAnalyticsPage() {
   );
 
   return (
-    <div className="admin-portal space-y-6">
-      <header>
-        <p className="ds-eyebrow mb-1">аналитика</p>
+    <div className="admin-portal -m-3 p-3 md:-m-4 md:p-4">
+      {/* Full-bleed grey canvas (cancels the shell's compact padding with a
+          negative margin, then re-pads) so cards float on tinted ground edge
+          to edge; content itself is capped for readability on wide screens. */}
+      <div className="mx-auto max-w-6xl space-y-6">
+        <header>
+          <p className="ds-eyebrow mb-1">аналитика</p>
         <h1 className="m-0 text-2xl font-semibold" style={{ color: 'var(--cp-paper)' }}>
           Проекты
         </h1>
@@ -522,6 +526,7 @@ export default function ProjectsAnalyticsPage() {
           )}
         </>
       )}
+      </div>
     </div>
   );
 }

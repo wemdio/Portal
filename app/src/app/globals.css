@@ -2334,14 +2334,16 @@ body:has(.client-portal) {
    /analytics/projects — grow the utility set here as more admin pages migrate.
    ═══════════════════════════════════════════════════════════════════════ */
 .admin-portal {
-  /* surfaces — canvas (zinc-50) < card (white) so cards read as raised with
-     no shadow; hover/elev goes grey so it shows against the white card. */
-  --cp-ink: #fafafa;
+  /* surfaces — grey canvas under white cards. The first pilot pass used a
+     #fafafa canvas + #e6e6e9 hairlines; on a dense data view the white-on-
+     near-white separation was imperceptible. Bumped: canvas is clearly grey,
+     card OUTLINES use --cp-divider-strong, inner row hairlines stay --cp-divider. */
+  --cp-ink: #f4f5f7;
   --cp-surface-rest: #ffffff;
-  --cp-surface-elev: #f4f4f5;
-  --cp-surface-active: #ededee;
-  --cp-divider: #e6e6e9;
-  --cp-divider-strong: #d4d4d8;
+  --cp-surface-elev: #eceef1;
+  --cp-surface-active: #e4e6ea;
+  --cp-divider: #e4e6ea;
+  --cp-divider-strong: #cfd2d8;
   --cp-scrim: rgba(24, 24, 27, 0.4);
 
   /* foreground — ink-on-paper text ramp */
@@ -2398,13 +2400,18 @@ body:has(.client-portal) {
   text-transform: uppercase;
 }
 
-/* card — flat, hairline border, no shadow (Hairline-Not-Shadow) */
+/* card — white surface, visible outline + a whisper of elevation. The dark
+   client theme is strictly Hairline-Not-Shadow (shadows don't read on ink),
+   but on a light surface a 1px border alone is too weak to separate white
+   cards from a near-white page — so we keep the strong hairline AND add a
+   barely-there shadow (far lighter than the original neumorphic shadow-sm).
+   This is the deliberate light-mode divergence from the client system. */
 .admin-portal .ds-card,
 .admin-portal .neu-card {
   background: var(--cp-surface-rest);
-  border: 1px solid var(--cp-divider);
+  border: 1px solid var(--cp-divider-strong);
   border-radius: 10px;
-  box-shadow: none;
+  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.06), 0 1px 1px rgba(24, 24, 27, 0.03);
 }
 
 .admin-portal .ds-card-pressable {
