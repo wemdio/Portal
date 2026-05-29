@@ -513,9 +513,21 @@ export default function LiOutreachPage() {
         headers: { Authorization: `Bearer ${token}` },
         body: fd,
       });
-      const data = await res.json() as { imported?: number; skipped?: number; error?: string };
+      const data = await res.json() as {
+        imported?: number;
+        skipped?: number;
+        already_contacted_skipped?: number;
+        dup_in_file_skipped?: number;
+        error?: string;
+      };
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-      alert(`Импортировано: ${data.imported}, пропущено: ${data.skipped ?? 0}`);
+      const alreadyContacted = data.already_contacted_skipped ?? 0;
+      const dupInFile = data.dup_in_file_skipped ?? 0;
+      const parts = [`Импортировано новых: ${data.imported ?? 0}`];
+      if (alreadyContacted > 0) parts.push(`⚠️ Уже контактировали ранее (пропущено): ${alreadyContacted}`);
+      if (dupInFile > 0) parts.push(`Дублей в файле (пропущено): ${dupInFile}`);
+      if ((data.skipped ?? 0) > 0) parts.push(`Без валидных данных: ${data.skipped}`);
+      alert(parts.join('\n'));
       setShowImportModal(false);
       await loadLeads(leadListFilterId);
       await loadLeadLists();
