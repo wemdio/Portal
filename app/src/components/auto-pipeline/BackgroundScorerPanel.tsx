@@ -126,9 +126,10 @@ export function BackgroundScorerPanel({ isAdmin = false }: BackgroundScorerPanel
     );
   }
 
-  // Грубая оценка прогресса. Точное число всех BoB-доменов с revenue ≥ 40M
-  // мы не знаем без отдельного COUNT() — берём приближение 600 000.
-  const ESTIMATED_TOTAL_BOB = 600_000;
+  // Грубая оценка прогресса. С revenue_from=0 (без фильтра по выручке) скорер
+  // проходит ВСЕ компании с сайтом, исключая ИП — на 2026-05 это ~483k
+  // (COUNT по companies_directory). Берём с небольшим запасом.
+  const ESTIMATED_TOTAL_BOB = 485_000;
   const progressPct = Math.min(
     100,
     Math.round((state.current_offset / ESTIMATED_TOTAL_BOB) * 100),
@@ -246,7 +247,7 @@ export function BackgroundScorerPanel({ isAdmin = false }: BackgroundScorerPanel
           <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1">
             <dt>Размер батча:</dt><dd>{state.batch_size}</dd>
             <dt>Пауза между батчами:</dt><dd>{state.sleep_between_batches_ms} мс</dd>
-            <dt>Мин. оборот:</dt><dd>{state.revenue_from.toLocaleString('ru-RU')} ₽</dd>
+            <dt>Мин. оборот:</dt><dd>{state.revenue_from > 0 ? `${state.revenue_from.toLocaleString('ru-RU')} ₽` : 'без фильтра (все сайты)'}</dd>
             <dt>Всего скорено:</dt><dd>{state.domains_scored_total.toLocaleString('ru-RU')}</dd>
             <dt>Из них активных:</dt><dd>{state.domains_active_total.toLocaleString('ru-RU')}</dd>
             <dt>Последний тик:</dt><dd>{state.last_tick_at ?? '—'}</dd>
