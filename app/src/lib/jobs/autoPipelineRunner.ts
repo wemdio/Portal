@@ -527,6 +527,31 @@ async function upsertSeenEmployers(rows: SeenEmployerUpsert[]): Promise<void> {
   }
 }
 
+/**
+ * Помечает уже записанные seen-строки bucket'а как failed.
+ *
+ * При батчевой обработке seen-строки upsert'ятся со status='routed' ПО ЧАНКАМ,
+ * до того как leads реально отправлены в Instantly. Если append лидов в
+ * кампанию падает — нужно откатить статус этих строк на 'failed' прямо в БД
+ * (массива в памяти уже нет). Матчим по routed_bucket_id + processed_at
+ * (метка текущего прогона), чтобы не задеть строки прошлых прогонов.
+ */
+async function markRoutedBucketFailed(
+  clientUserId: string,
+  bucketId: string,
+  processedAt: string,
+  errorMessage: string,
+): Promise<void> {
+  if (!supabaseAdmin) return;
+  await supabaseAdmin
+    .from('client_auto_pipeline_seen_employers')
+    .update({ status: 'failed', error_message: errorMessage })
+    .eq('client_user_id', clientUserId)
+    .eq('routed_bucket_id', bucketId)
+    .eq('processed_at', processedAt)
+    .eq('status', 'routed');
+}
+
 // ── Main entry ───────────────────────────────────────────────────────────
 
 export async function runAutoPipelineForClient(
@@ -740,25 +765,148 @@ export async function runAutoPipelineForClient(
       );
     }
 
-    // 5. Enrich.
-    // Mailganer per-domain кэш статистика для этого прогона — поможет видеть
-    // насколько кэш экономит API-вызовы (через 2-3 недели работы должно быть
-    // >50% hit-rate, что эквивалентно ускорению cron'а в ~2 раза).
+    // 5. Enrich + route + upsert БАТЧАМИ по CHUNK_SIZE.
+    //
+    // Раньше держали все ~11k EnrichmentResult + ~11k SeenUpsert в памяти
+    // разом до финального bulk-upsert'а → OOM (SIGKILL 137) на больших
+    // прогонах (employer-объекты + endpoint_raw JSON + scrape-результаты +
+    // MX-cache). Теперь обрабатываем чанками: enrich → route → upsert seen →
+    // следующий чанк (ссылки выходят из scope, GC освобождает). В памяти
+    // одновременно максимум 1 чанк + накопленный groupedLeads (только routed —
+    // их кратно меньше, в dry-run вообще пусто).
     const mailganerStats = emptyCacheStats();
+    const groupedLeads = new Map<string, { bucket: ScoreBucket; leads: LeadCreatePayload[] }>();
+    const now = new Date().toISOString();
 
-    const enrichments = await enrichEmployers(
-      fresh,
-      {
-        url: config.endpoint_url,
-        apiKey: config.endpoint_api_key ?? '',
-        authScheme: config.endpoint_auth_scheme ?? 'Bearer',
-        timeoutMs: config.endpoint_timeout_ms,
-      },
-      config.score_buckets,
-      ENRICH_CONCURRENCY,
-      pacing.perItemPauseMs,
-      mailganerStats,
-    );
+    let routedCount = 0;
+    let storedCount = 0;
+    let skippedCount = 0;
+    let withSiteCount = 0;
+    let withScoreCount = 0;
+    let withEmailCount = 0;
+    let emailValidCount = 0;
+
+    const CHUNK_SIZE = 500;
+    for (let chunkStart = 0; chunkStart < fresh.length; chunkStart += CHUNK_SIZE) {
+      const chunk = fresh.slice(chunkStart, chunkStart + CHUNK_SIZE);
+
+      const enrichments = await enrichEmployers(
+        chunk,
+        {
+          url: config.endpoint_url,
+          apiKey: config.endpoint_api_key ?? '',
+          authScheme: config.endpoint_auth_scheme ?? 'Bearer',
+          timeoutMs: config.endpoint_timeout_ms,
+        },
+        config.score_buckets,
+        ENRICH_CONCURRENCY,
+        pacing.perItemPauseMs,
+        mailganerStats,
+      );
+
+      const seenUpserts: SeenEmployerUpsert[] = [];
+
+      for (const enr of enrichments) {
+        // Воронка — считаем по каждому enrichment независимо от routing'а.
+        if (enr.employer.siteUrl) withSiteCount++;
+        if (enr.score !== null) withScoreCount++;
+        if (enr.email) withEmailCount++;
+        if (enr.emailValidation?.isValid) emailValidCount++;
+
+        const decision = decideRoute(enr, config);
+        const base: Omit<SeenEmployerUpsert, 'status' | 'skip_reason' | 'error_message' | 'routed_bucket_id' | 'routed_campaign_id'> = {
+          client_user_id: clientUserId,
+          hh_employer_id: enr.employer.id,
+          hh_employer_name: enr.employer.name,
+          domain: enr.domain,
+          site_url: enr.employer.siteUrl,
+          endpoint_score: enr.score,
+          endpoint_spf: enr.spf,
+          endpoint_raw: enr.endpointRaw,
+          resolved_email: enr.email,
+          email_found: enr.email,
+          email_validation_status: enr.emailValidation?.status ?? null,
+          email_validation_details: enr.emailValidation?.details ?? null,
+          source: detectSource(enr.employer.id),
+          processed_at: now,
+        };
+
+        // Dry-run shortcut — пишем всё как 'dry_run' и не идём ни в routing,
+        // ни в Instantly. Это даёт «измерительный» прогон без побочных эффектов.
+        if (config.dry_run) {
+          seenUpserts.push({
+            ...base,
+            status: 'dry_run',
+            skip_reason: null,
+            error_message: null,
+            routed_bucket_id: null,
+            routed_campaign_id: null,
+          });
+          continue;
+        }
+
+        if (decision.kind === 'skipped') {
+          seenUpserts.push({
+            ...base,
+            status: 'skipped',
+            skip_reason: decision.reason,
+            error_message: null,
+            routed_bucket_id: null,
+            routed_campaign_id: null,
+          });
+          skippedCount++;
+        } else if (decision.kind === 'stored') {
+          // Stored = score попал в bucket, но bucket с пустой sequence
+          // (клиент решил не отправлять). Записываем routed_bucket_id, чтобы
+          // в журнале было видно — попал в этот диапазон, просто не отправили.
+          seenUpserts.push({
+            ...base,
+            status: 'stored',
+            skip_reason: null,
+            error_message: null,
+            routed_bucket_id: decision.bucket.id,
+            routed_campaign_id: null,
+          });
+          storedCount++;
+        } else {
+          const bucket = decision.bucket;
+          const lead: LeadCreatePayload = {
+            email: enr.email!,
+            company_name: enr.employer.name,
+            website: enr.employer.siteUrl ?? undefined,
+            custom_variables: {
+              hh_employer_id: enr.employer.id,
+              hh_url: enr.employer.hhUrl ?? '',
+              score: String(enr.score),
+              spf: enr.spf ?? '',
+            },
+          };
+
+          let group = groupedLeads.get(bucket.id);
+          if (!group) {
+            group = { bucket, leads: [] };
+            groupedLeads.set(bucket.id, group);
+          }
+          group.leads.push(lead);
+
+          // Запись в seen — статус=routed мы зафиксируем ПОСЛЕ успешного append.
+          seenUpserts.push({
+            ...base,
+            status: 'routed',
+            skip_reason: null,
+            error_message: null,
+            routed_bucket_id: bucket.id,
+            routed_campaign_id: bucket.instantly_campaign_id,
+          });
+          routedCount++;
+        }
+      } // конец for (enr of enrichments)
+
+      // Upsert seen ЭТОГО чанка сразу — освобождаем память перед следующим.
+      // chunk + enrichments + seenUpserts выходят из scope на следующей
+      // итерации, GC их собирает. Это и есть фикс OOM.
+      await upsertSeenEmployers(seenUpserts);
+    } // конец for (chunkStart) — chunk loop
 
     await logAudit(
       'auto-pipeline.mailganer-cache',
@@ -766,122 +914,8 @@ export async function runAutoPipelineForClient(
       { ...logCtx, ...mailganerStats },
     );
 
-    // 5. Routing.
-    const groupedLeads = new Map<string, { bucket: ScoreBucket; leads: LeadCreatePayload[] }>();
-    const seenUpserts: SeenEmployerUpsert[] = [];
-    const now = new Date().toISOString();
-
-    let routedCount = 0;
-    let storedCount = 0;
-    let skippedCount = 0;
-
-    // Воронка (для dashboard/отчёта) — считаем по enrichments независимо от
-    // routing'а. Это даёт клиенту увидеть в dry-run «сколько в день готовых
-    // контактов выходит» без участия Instantly.
-    let withSiteCount = 0;
-    let withScoreCount = 0;
-    let withEmailCount = 0;
-    let emailValidCount = 0;
-    for (const enr of enrichments) {
-      if (enr.employer.siteUrl) withSiteCount++;
-      if (enr.score !== null) withScoreCount++;
-      if (enr.email) withEmailCount++;
-      if (enr.emailValidation?.isValid) emailValidCount++;
-    }
-
-    for (const enr of enrichments) {
-      const decision = decideRoute(enr, config);
-      const base: Omit<SeenEmployerUpsert, 'status' | 'skip_reason' | 'error_message' | 'routed_bucket_id' | 'routed_campaign_id'> = {
-        client_user_id: clientUserId,
-        hh_employer_id: enr.employer.id,
-        hh_employer_name: enr.employer.name,
-        domain: enr.domain,
-        site_url: enr.employer.siteUrl,
-        endpoint_score: enr.score,
-        endpoint_spf: enr.spf,
-        endpoint_raw: enr.endpointRaw,
-        resolved_email: enr.email,
-        email_found: enr.email,
-        email_validation_status: enr.emailValidation?.status ?? null,
-        email_validation_details: enr.emailValidation?.details ?? null,
-        source: detectSource(enr.employer.id),
-        processed_at: now,
-      };
-
-      // Dry-run shortcut — пишем всё как 'dry_run' и не идём ни в routing,
-      // ни в Instantly. Это даёт «измерительный» прогон без побочных эффектов.
-      if (config.dry_run) {
-        seenUpserts.push({
-          ...base,
-          status: 'dry_run',
-          skip_reason: null,
-          error_message: null,
-          routed_bucket_id: null,
-          routed_campaign_id: null,
-        });
-        continue;
-      }
-
-      if (decision.kind === 'skipped') {
-        seenUpserts.push({
-          ...base,
-          status: 'skipped',
-          skip_reason: decision.reason,
-          error_message: null,
-          routed_bucket_id: null,
-          routed_campaign_id: null,
-        });
-        skippedCount++;
-      } else if (decision.kind === 'stored') {
-        // Stored = score попал в bucket, но bucket с пустой sequence
-        // (клиент решил не отправлять). Записываем routed_bucket_id, чтобы
-        // в журнале было видно — попал в этот диапазон, просто не отправили.
-        seenUpserts.push({
-          ...base,
-          status: 'stored',
-          skip_reason: null,
-          error_message: null,
-          routed_bucket_id: decision.bucket.id,
-          routed_campaign_id: null,
-        });
-        storedCount++;
-      } else {
-        const bucket = decision.bucket;
-        const lead: LeadCreatePayload = {
-          email: enr.email!,
-          company_name: enr.employer.name,
-          website: enr.employer.siteUrl ?? undefined,
-          custom_variables: {
-            hh_employer_id: enr.employer.id,
-            hh_url: enr.employer.hhUrl ?? '',
-            score: String(enr.score),
-            spf: enr.spf ?? '',
-          },
-        };
-
-        let group = groupedLeads.get(bucket.id);
-        if (!group) {
-          group = { bucket, leads: [] };
-          groupedLeads.set(bucket.id, group);
-        }
-        group.leads.push(lead);
-
-        // Запись в seen — статус=routed мы зафиксируем ПОСЛЕ успешного append.
-        seenUpserts.push({
-          ...base,
-          status: 'routed',
-          skip_reason: null,
-          error_message: null,
-          routed_bucket_id: bucket.id,
-          routed_campaign_id: bucket.instantly_campaign_id,
-        });
-        routedCount++;
-      }
-    }
-
     // 6. Append leads per bucket. В dry-run шаг пропускаем целиком —
-    // groupedLeads будет пустым, потому что routing-блок выше делает
-    // continue для каждого employer'а ещё ДО groupedLeads.set.
+    // groupedLeads пуст (routing-блок делает continue ещё ДО groupedLeads.set).
     let failedCount = 0;
     for (const group of groupedLeads.values()) {
       try {
@@ -898,20 +932,13 @@ export async function runAutoPipelineForClient(
           err,
           { ...logCtx, bucket: group.bucket.label, leadCount: group.leads.length },
         );
-        // Пометить все employers этого bucket как failed.
-        for (const su of seenUpserts) {
-          if (su.routed_bucket_id === group.bucket.id) {
-            su.status = 'failed';
-            su.error_message = msg.slice(0, 500);
-          }
-        }
+        // seen уже записаны по чанкам со status='routed' — обновляем их в БД
+        // на 'failed' (массива seenUpserts в памяти больше нет).
+        await markRoutedBucketFailed(clientUserId, group.bucket.id, now, msg.slice(0, 500));
         failedCount += group.leads.length;
         routedCount -= group.leads.length;
       }
     }
-
-    // 7. Upsert seen.
-    await upsertSeenEmployers(seenUpserts);
 
     // 8. Finalize run row.
     await finishRunRow(runId, {
