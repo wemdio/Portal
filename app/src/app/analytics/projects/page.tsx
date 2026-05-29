@@ -297,7 +297,11 @@ export default function ProjectsAnalyticsPage() {
   );
 
   return (
-    <div className="space-y-6">
+    // Capped reading column: the attention feed is a triage list, not a wide
+    // data table — full width left rows sparse with a huge empty middle on big
+    // screens. max-w-5xl is NOT in the .ui-density-compact override list (which
+    // forces 100% on 6xl/1400/1600/900), so the cap actually holds here.
+    <div className="space-y-6 max-w-5xl">
       <header>
         <p className="ds-eyebrow mb-1">аналитика</p>
         <h1 className="m-0 text-2xl font-semibold" style={{ color: 'var(--cp-paper)' }}>Проекты</h1>
