@@ -1,6 +1,5 @@
 import type {
   CampaignCreatePayload,
-  CampaignScheduleDays,
   CampaignUpdatePayload,
   SequenceStep,
   SequenceVariant,
@@ -11,7 +10,7 @@ import type {
   ClientLaunchScheduleOverride,
   ClientLaunchSequence,
 } from './types';
-import { normalizeInstantlyTimezone } from './timezones';
+import { buildCampaignSchedule } from './scheduleMapping';
 
 /**
  * Preset field keys that map to Instantly campaign fields when admin edits
@@ -106,25 +105,14 @@ export function buildCampaignPayloadFromPreset(
   const dayValues = scheduleOverride?.days ?? preset.schedule_days;
   const tzValue = scheduleOverride?.timezone ?? preset.schedule_timezone;
 
-  const days: CampaignScheduleDays = {};
-  for (const d of dayValues) {
-    if (d >= 0 && d <= 6) {
-      (days as Record<number, boolean>)[d] = true;
-    }
-  }
-
   return {
     name: sequence.name.trim(),
-    campaign_schedule: {
-      schedules: [
-        {
-          name: 'Schedule',
-          timing: { from: fromValue, to: toValue },
-          days,
-          timezone: normalizeInstantlyTimezone(tzValue),
-        },
-      ],
-    },
+    campaign_schedule: buildCampaignSchedule({
+      from: fromValue,
+      to: toValue,
+      days: dayValues,
+      timezone: tzValue,
+    }),
     sequences: [
       {
         steps: sequence.steps.map<SequenceStep>((s, i, arr) => {
@@ -245,22 +233,12 @@ export function buildCampaignPresetUpdatePayload(
     changedPresetKeys.has('schedule_timezone');
 
   if (scheduleTouched) {
-    const days: CampaignScheduleDays = {};
-    for (const d of preset.schedule_days) {
-      if (d >= 0 && d <= 6) {
-        (days as Record<number, boolean>)[d] = true;
-      }
-    }
-    payload.campaign_schedule = {
-      schedules: [
-        {
-          name: 'Schedule',
-          timing: { from: preset.schedule_from, to: preset.schedule_to },
-          days,
-          timezone: normalizeInstantlyTimezone(preset.schedule_timezone),
-        },
-      ],
-    };
+    payload.campaign_schedule = buildCampaignSchedule({
+      from: preset.schedule_from,
+      to: preset.schedule_to,
+      days: preset.schedule_days,
+      timezone: preset.schedule_timezone,
+    });
   }
 
   return payload;

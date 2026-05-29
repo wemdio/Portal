@@ -126,8 +126,23 @@ jest.mock('@/lib/liOutreach/apiHelpers', () => {
     // fetchOwnerNames to label foreign rows. Stub it to an empty map — owner_name
     // resolution itself is not what these isolation tests assert.
     fetchOwnerNames: jest.fn(async () => new Map<string, string>()),
+    // Write-path account guard: mirror the real implementation against the
+    // seeded li_accounts rows so the foreign-account rejection tests below
+    // exercise the same own-vs-foreign decision the route makes.
+    userOwnsAccount: jest.fn(async (userId: string, accountId: string) => {
+      const rows = state.rowsByTable.li_accounts ?? [];
+      return rows.some((r) => r.id === accountId && r.user_id === userId);
+    }),
   };
 });
+
+// Scraper routes import scraperLogic for the fire-and-forget run; stub it so
+// importing the route is hermetic (we only assert the authz gate, never run a
+// real scrape).
+jest.mock('@/lib/liOutreach/scraperLogic', () => ({
+  scrapeLinkedInSearch: jest.fn(async () => {}),
+  scrapePostReactions: jest.fn(async () => {}),
+}));
 
 jest.mock('@/lib/toolTrace', () => ({
   withToolTrace: async (
@@ -536,5 +551,94 @@ describe('LI Outreach — admin bypass on campaign endpoints', () => {
     );
     expect((res as Response).status).toBe(200);
     expect(liCampaignsScopedToAuthUser()).toBe(false);
+  });
+});
+
+/**
+ * Account-ownership guard on WRITE paths. The accounts list is visible
+ * cross-specialist, so the campaign/scraper account dropdowns can surface
+ * another specialist's account. These routes must refuse to *use* a foreign
+ * account (403) — otherwise A could run invites/scrapes through B's LinkedIn
+ * account (quota theft / actions attributed to B / ban risk on B's account).
+ */
+describe('LI Outreach — account ownership guard on write paths', () => {
+  function seedAccounts() {
+    state.rowsByTable.li_accounts = [
+      { id: 'a1', user_id: AUTH_USER_ID, name: 'Mine', is_active: true },
+      { id: 'a2', user_id: OTHER_USER_ID, name: 'NotMine', is_active: true },
+    ];
+  }
+
+  it('POST /campaigns rejects attaching another specialist’s account (403)', async () => {
+    seedAccounts();
+    const { POST } = await import('@/app/api/tools/li-outreach/campaigns/route');
+    const res = await POST(
+      makeReq('http://x/api/tools/li-outreach/campaigns', {
+        method: 'POST',
+        body: JSON.stringify({ name: 'New', account_id: 'a2' }),
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    expect((res as Response).status).toBe(403);
+  });
+
+  it('PUT /campaigns/[id] rejects reassigning to another specialist’s account (403)', async () => {
+    state.rowsByTable.li_campaigns = [
+      { id: 'c1', user_id: AUTH_USER_ID, name: 'Mine', status: 'draft', lead_list_id: null },
+    ];
+    seedAccounts();
+    const { PUT } = await import('@/app/api/tools/li-outreach/campaigns/[id]/route');
+    const res = await PUT(
+      makeReq('http://x/api/tools/li-outreach/campaigns/c1', {
+        method: 'PUT',
+        body: JSON.stringify({ account_id: 'a2' }),
+        headers: { 'content-type': 'application/json' },
+      }),
+      { params: Promise.resolve({ id: 'c1' }) },
+    );
+    expect((res as Response).status).toBe(403);
+  });
+
+  it('PUT /campaigns/[id] allows reassigning to your OWN account', async () => {
+    state.rowsByTable.li_campaigns = [
+      { id: 'c1', user_id: AUTH_USER_ID, name: 'Mine', status: 'draft', lead_list_id: null },
+    ];
+    seedAccounts();
+    const { PUT } = await import('@/app/api/tools/li-outreach/campaigns/[id]/route');
+    const res = await PUT(
+      makeReq('http://x/api/tools/li-outreach/campaigns/c1', {
+        method: 'PUT',
+        body: JSON.stringify({ account_id: 'a1' }),
+        headers: { 'content-type': 'application/json' },
+      }),
+      { params: Promise.resolve({ id: 'c1' }) },
+    );
+    expect((res as Response).status).toBe(200);
+  });
+
+  it('POST /scraper/search rejects another specialist’s account (403)', async () => {
+    seedAccounts();
+    const { POST } = await import('@/app/api/tools/li-outreach/scraper/search/route');
+    const res = await POST(
+      makeReq('http://x/api/tools/li-outreach/scraper/search', {
+        method: 'POST',
+        body: JSON.stringify({ search_url: 'https://www.linkedin.com/search/x', account_id: 'a2' }),
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    expect((res as Response).status).toBe(403);
+  });
+
+  it('POST /scraper/reactions rejects another specialist’s account (403)', async () => {
+    seedAccounts();
+    const { POST } = await import('@/app/api/tools/li-outreach/scraper/reactions/route');
+    const res = await POST(
+      makeReq('http://x/api/tools/li-outreach/scraper/reactions', {
+        method: 'POST',
+        body: JSON.stringify({ post_url: 'https://www.linkedin.com/posts/x', account_id: 'a2' }),
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    expect((res as Response).status).toBe(403);
   });
 });

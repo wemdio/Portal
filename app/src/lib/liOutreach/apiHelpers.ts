@@ -37,3 +37,23 @@ export async function fetchOwnerNames(
   }
   return map;
 }
+
+/**
+ * True if `accountId` belongs to `userId`. Used to gate WRITE paths that act
+ * through a LinkedIn account (attaching an account to a campaign, launching a
+ * scrape) now that the accounts LIST is visible cross-specialist: a viewer can
+ * see another specialist's account but must not be able to run invites/scrapes
+ * through it (quota theft / actions attributed to someone else / ban risk).
+ * Returns false (deny) if the admin client is missing or the row isn't owned.
+ */
+export async function userOwnsAccount(userId: string, accountId: string): Promise<boolean> {
+  if (!supabaseAdmin) return false;
+  if (!accountId) return false;
+  const { data } = await supabaseAdmin
+    .from('li_accounts')
+    .select('id')
+    .eq('id', accountId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  return !!data;
+}
