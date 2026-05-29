@@ -1,9 +1,15 @@
 import type { NextConfig } from "next";
 import { config } from 'dotenv';
 import { resolve } from 'path';
+// UI_ONLY=1 skips loading the real ../.env — no Supabase env means middleware
+// disables auth (renders pages without login) and the browser client falls
+// back to a dead URL, so data fetches surface the empty/error states. Lets us
+// review the UI locally with zero backend. `npm run dev:ui` sets the flag.
 const envCandidates = [resolve(__dirname, '..', '.env.local'), resolve(__dirname, '..', '.env')];
-for (const envPath of envCandidates) {
-  config({ path: envPath, override: true });
+if (process.env.UI_ONLY !== '1') {
+  for (const envPath of envCandidates) {
+    config({ path: envPath, override: true });
+  }
 }
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
