@@ -179,6 +179,9 @@ export default function LiOutreachPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
   const [editingCampaignId, setEditingCampaignId] = useState<string | null>(null);
+  // When true the campaign panel is opened to inspect ANOTHER specialist's
+  // campaign — every field is rendered read-only and Save/Start are hidden.
+  const [campaignFormReadOnly, setCampaignFormReadOnly] = useState(false);
   const [cf, setCf] = useState(DEFAULT_CAMPAIGN_FORM);
 
   // Dashboard data
@@ -407,11 +410,13 @@ export default function LiOutreachPage() {
 
   const openCreateCampaignForm = () => {
     setEditingCampaignId(null);
+    setCampaignFormReadOnly(false);
     setCf(DEFAULT_CAMPAIGN_FORM);
     setShowCreate(true);
   };
 
-  const openEditCampaignForm = (campaign: LiCampaign) => {
+  const openEditCampaignForm = (campaign: LiCampaign, readOnly = false) => {
+    setCampaignFormReadOnly(readOnly);
     const steps = Array.isArray(campaign.steps) ? (campaign.steps as CampaignStep[]) : [];
     const inviteStep = steps.find((step) => step?.type === 'invite');
     const waitSteps = steps.filter((step) => step?.type === 'wait');
@@ -915,11 +920,19 @@ export default function LiOutreachPage() {
         <div className="space-y-4">
           {/* Create Campaign Panel */}
           {showCreate && (
-            <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-4 space-y-4">
+            <div className={`rounded-xl border p-4 space-y-4 ${campaignFormReadOnly ? 'border-purple-200 bg-purple-50/40' : 'border-blue-200 bg-blue-50/40'}`}>
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-gray-900">{editingCampaignId ? 'Редактирование кампании' : 'Новая кампания'}</h2>
-                <button onClick={() => { setShowCreate(false); setEditingCampaignId(null); }} className="text-xs text-gray-500 hover:text-gray-700">Отмена</button>
+                <h2 className="text-sm font-semibold text-gray-900">
+                  {campaignFormReadOnly ? 'Просмотр кампании (только чтение)' : editingCampaignId ? 'Редактирование кампании' : 'Новая кампания'}
+                </h2>
+                <button onClick={() => { setShowCreate(false); setEditingCampaignId(null); setCampaignFormReadOnly(false); }} className="text-xs text-gray-500 hover:text-gray-700">{campaignFormReadOnly ? 'Закрыть' : 'Отмена'}</button>
               </div>
+              {campaignFormReadOnly && (
+                <div className="rounded-lg bg-purple-100 px-3 py-2 text-xs text-purple-700">
+                  Это кампания другого специалиста. Видно, как она настроена (шаги, тексты, промты), но редактировать нельзя.
+                </div>
+              )}
+              <fieldset disabled={campaignFormReadOnly} className="space-y-4 border-0 p-0 m-0 min-w-0 disabled:opacity-90">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div>
                   <label className="text-xs text-gray-600 block mb-1">Название *</label>
@@ -929,7 +942,9 @@ export default function LiOutreachPage() {
                   <label className="text-xs text-gray-600 block mb-1">Аккаунт *</label>
                   <select value={cf.account_id} onChange={(e) => setCf({ ...cf, account_id: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm">
                     <option value="">Выберите...</option>
-                    {accounts.filter((a) => a.is_active && a.user_id === currentUserId).map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}</option>)}
+                    {accounts
+                      .filter((a) => (a.is_active && a.user_id === currentUserId) || (campaignFormReadOnly && a.id === cf.account_id))
+                      .map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}{a.user_id !== currentUserId ? ` (${a.owner_name ?? 'другой спец'})` : ''}</option>)}
                   </select>
                 </div>
                 <div>
@@ -1079,10 +1094,13 @@ export default function LiOutreachPage() {
                   </div>
                 </div>
               </details>
+              </fieldset>
 
-              <button onClick={() => void createCampaign()} disabled={creating} className="rounded-lg bg-green-600 text-white px-5 py-2 text-sm font-medium disabled:opacity-50">
-                {creating ? (editingCampaignId ? 'Сохранение...' : 'Создание...') : (editingCampaignId ? 'Сохранить изменения' : 'Создать кампанию')}
-              </button>
+              {!campaignFormReadOnly && (
+                <button onClick={() => void createCampaign()} disabled={creating} className="rounded-lg bg-green-600 text-white px-5 py-2 text-sm font-medium disabled:opacity-50">
+                  {creating ? (editingCampaignId ? 'Сохранение...' : 'Создание...') : (editingCampaignId ? 'Сохранить изменения' : 'Создать кампанию')}
+                </button>
+              )}
             </div>
           )}
 
@@ -1110,12 +1128,16 @@ export default function LiOutreachPage() {
                     </div>
                   )}
                   <div className="text-xs text-gray-500 mt-1">{(c.steps ?? []).length} шагов • AI: {c.use_ai ? 'вкл' : 'выкл'} • лимит: {c.daily_invite_limit}/день</div>
-                  {isOwn && (
+                  {isOwn ? (
                     <div className="flex gap-2 mt-2">
                       <button onClick={(e) => { e.stopPropagation(); openEditCampaignForm(c); }} className="text-xs text-blue-700 hover:underline">Редактировать</button>
                       {c.status !== 'running' && <button onClick={(e) => { e.stopPropagation(); void startCampaign(c.id); }} className="text-xs text-green-700 hover:underline">▶ Запустить</button>}
                       {c.status === 'running' && <button onClick={(e) => { e.stopPropagation(); void stopCampaign(c.id); }} className="text-xs text-amber-700 hover:underline">⏹ Остановить</button>}
                       <button onClick={(e) => { e.stopPropagation(); void deleteCampaign(c.id); }} className="text-xs text-red-600 hover:underline">Удалить</button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2 mt-2">
+                      <button onClick={(e) => { e.stopPropagation(); openEditCampaignForm(c, true); }} className="text-xs text-purple-700 hover:underline">👁 Посмотреть настройки</button>
                     </div>
                   )}
                 </div>
