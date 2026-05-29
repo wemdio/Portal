@@ -28,6 +28,8 @@ interface LastRun {
   finished_at: string | null;
   parsed_count: number;
   new_count: number;
+  new_from_hh: number | null;
+  new_from_bob: number | null;
   routed_count: number;
   stored_count: number;
   skipped_count: number;
@@ -60,6 +62,8 @@ interface SummaryResponse {
   pending_attempt: PendingAttempt | null;
   totals_30d: Totals30d | null;
   stored_count: number;
+  /** Активные домены (score>0) в общем кэше — «готовый резерв» для запусков. */
+  reserve_active: number;
 }
 
 function relativeTime(iso: string | null | undefined): string {
@@ -114,7 +118,16 @@ export function AutoPipelineSummary() {
     );
   }
 
-  const { last_run, pending_attempt, totals_30d, stored_count } = data;
+  const { last_run, pending_attempt, totals_30d, stored_count, reserve_active } = data;
+
+  // Разбивка обработанных по источникам (HH + база баз). Показываем только
+  // когда колонки заполнены (новые прогоны) — у легаси-прогонов оба 0.
+  const hhCount = last_run?.new_from_hh ?? 0;
+  const bobCount = last_run?.new_from_bob ?? 0;
+  const sourceSplitLabel =
+    hhCount + bobCount > 0
+      ? `HH ${hhCount.toLocaleString('ru-RU')} · база баз ${bobCount.toLocaleString('ru-RU')}`
+      : undefined;
 
   // Status dot: зелёная если completed, серая если ни разу не было
   // прогонов. Прерванный прогон (pending_attempt) НЕ красит точку
@@ -162,10 +175,12 @@ export function AutoPipelineSummary() {
             <LedgerRow
               label="Обработано компаний"
               value={last_run.new_count}
+              sub={sourceSplitLabel}
             />
             <LedgerRow
-              label="Всего в базе"
-              value={stored_count}
+              label="Готовый резерв"
+              value={reserve_active}
+              sub="активных доменов в базе для запусков"
             />
           </div>
         ) : (
@@ -175,8 +190,14 @@ export function AutoPipelineSummary() {
               label="Добавлено в работу"
               value={last_run.routed_count}
               primary
+              sub={sourceSplitLabel}
             />
             <LedgerRow label="В очереди" value={stored_count} />
+            <LedgerRow
+              label="Готовый резерв"
+              value={reserve_active}
+              sub="активных доменов в базе для запусков"
+            />
             <LedgerRow
               label="Отброшено"
               value={last_run.skipped_count + last_run.failed_count}
@@ -237,24 +258,34 @@ function LedgerRow({
   label,
   value,
   primary,
+  sub,
 }: {
   label: string;
   value: number;
   primary?: boolean;
+  /** Маленькая подпись под лейблом (напр. разбивка источников). */
+  sub?: string;
 }) {
   return (
     <div
       className={`flex items-baseline justify-between gap-3 ${primary ? 'py-2' : 'py-2.5'}`}
       style={primary ? undefined : { borderTop: '1px solid var(--cp-divider)' }}
     >
+      <div className="min-w-0">
+        <p
+          className={`text-sm ${primary ? 'font-semibold' : ''}`}
+          style={{ color: primary ? 'var(--cp-paper)' : 'var(--cp-paper-mute)' }}
+        >
+          {label}
+        </p>
+        {sub && (
+          <p className="text-xs ds-mono mt-0.5" style={{ color: 'var(--cp-paper-faint)' }}>
+            {sub}
+          </p>
+        )}
+      </div>
       <p
-        className={`text-sm ${primary ? 'font-semibold' : ''}`}
-        style={{ color: primary ? 'var(--cp-paper)' : 'var(--cp-paper-mute)' }}
-      >
-        {label}
-      </p>
-      <p
-        className={`ds-mono tabular-nums ${primary ? 'text-2xl font-bold' : 'text-sm'}`}
+        className={`ds-mono tabular-nums shrink-0 ${primary ? 'text-2xl font-bold' : 'text-sm'}`}
         style={{ color: 'var(--cp-paper)' }}
       >
         {value.toLocaleString('ru-RU')}
