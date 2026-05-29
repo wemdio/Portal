@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError, checkIsAdmin } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError, checkIsAdmin, userOwnsAccount } from '@/lib/liOutreach/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -39,6 +39,11 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     if (!existing) return jsonError('Campaign not found', 404);
 
     const body = (await req.json()) as Record<string, unknown>;
+    // Reassigning the campaign's LinkedIn account is only allowed to an account
+    // the editor owns (accounts are visible cross-specialist but not usable).
+    if (body.account_id && !(await userOwnsAccount(auth.user.id, String(body.account_id)))) {
+      return jsonError('Нельзя привязать кампанию к LinkedIn-аккаунту другого специалиста', 403);
+    }
     const allowed = [
       'name', 'account_id', 'lead_list_id', 'steps', 'use_ai', 'ai_prompt_invite', 'ai_prompt_chat',
       'stop_on_reply', 'min_delay', 'max_delay', 'daily_invite_limit', 'welcome_message',
