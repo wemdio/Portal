@@ -940,11 +940,18 @@ export async function runAutoPipelineForClient(
       }
     }
 
+    // Разбивка new_count по источникам — для дашборда (HH vs база баз).
+    // BoB-employers имеют id с префиксом 'bob:' (см. detectSource).
+    const newFromBob = fresh.filter((e) => detectSource(e.id) === 'base_of_bases').length;
+    const newFromHh = fresh.length - newFromBob;
+
     // 8. Finalize run row.
     await finishRunRow(runId, {
       status: 'completed',
       parsed_count: employers.length,
       new_count: fresh.length,
+      new_from_hh: newFromHh,
+      new_from_bob: newFromBob,
       with_site: withSiteCount,
       with_score: withScoreCount,
       with_email: withEmailCount,
