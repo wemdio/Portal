@@ -18,7 +18,12 @@ import {
 import { normalizeClientLaunchSequenceSteps } from '@/lib/clientLaunch/requestParsing';
 import { toInstantlyHtmlBody } from '@/lib/clientLaunch/buildCampaignPayload';
 import { validateClientLaunchSequence } from '@/lib/clientLaunch/validateLaunchInput';
-import type { ClientLaunchSequence } from '@/lib/clientLaunch/types';
+import {
+  buildCampaignSchedule,
+  validateScheduleOverride,
+} from '@/lib/clientLaunch/scheduleMapping';
+import type { ClientLaunchScheduleOverride, ClientLaunchSequence } from '@/lib/clientLaunch/types';
+import type { CampaignUpdatePayload } from '@/lib/instantly/types';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
 
@@ -29,6 +34,34 @@ const DETAIL_TTL = 15 * 60 * 1000;
 interface CampaignPatchBody {
   campaign_name?: unknown;
   sequence_steps?: unknown;
+  /**
+   * Optional per-edit schedule override. When present, validated and pushed
+   * to Instantly as campaign_schedule. Shape mirrors ClientLaunchScheduleOverride.
+   * Omit to leave the campaign's current schedule untouched.
+   */
+  schedule?: unknown;
+}
+
+/**
+ * Parse the optional `schedule` field from the PATCH body into a
+ * ClientLaunchScheduleOverride, or undefined if absent/malformed. Strict
+ * validation (HH:MM, days, to>from) happens after via validateScheduleOverride.
+ */
+function parseScheduleFromBody(raw: unknown): ClientLaunchScheduleOverride | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const obj = raw as Record<string, unknown>;
+  const from = typeof obj.from === 'string' ? obj.from : undefined;
+  const to = typeof obj.to === 'string' ? obj.to : undefined;
+  const timezone = typeof obj.timezone === 'string' ? obj.timezone : undefined;
+  const days = Array.isArray(obj.days)
+    ? obj.days.filter((n): n is number => Number.isInteger(n) && (n as number) >= 0 && (n as number) <= 6)
+    : undefined;
+  // Require all four fields — a partial schedule is meaningless for Instantly
+  // (it replaces the whole campaign_schedule block).
+  if (from === undefined || to === undefined || timezone === undefined || days === undefined) {
+    return undefined;
+  }
+  return { from, to, days, timezone };
 }
 
 export async function GET(
@@ -144,6 +177,15 @@ export async function PATCH(
     return jsonError('Добавьте хотя бы один шаг в цепочку писем.', 400);
   }
 
+  // Optional schedule edit. If present in the body, validate it (HH:MM,
+  // to>from, ≥1 day) and build Instantly's campaign_schedule. Absent →
+  // we don't touch the campaign's current schedule.
+  const scheduleOverride = parseScheduleFromBody(body.schedule);
+  if (scheduleOverride) {
+    const scheduleValidation = validateScheduleOverride(scheduleOverride);
+    if (!scheduleValidation.ok) return jsonError(scheduleValidation.error, 400);
+  }
+
   const instantlyRequestOptions = {
     accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
   };
@@ -167,9 +209,13 @@ export async function PATCH(
       return jsonError('Кампания не найдена или доступ запрещён', 404);
     }
 
+    const updatePayload: CampaignUpdatePayload = { name: campaignName, sequences };
+    if (scheduleOverride) {
+      updatePayload.campaign_schedule = buildCampaignSchedule(scheduleOverride);
+    }
     const updatedCampaign = await updateCampaign(
       campaignId,
-      { name: campaignName, sequences },
+      updatePayload,
       instantlyRequestOptions,
     );
 

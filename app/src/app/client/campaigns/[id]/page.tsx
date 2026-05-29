@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ExpandedThread } from '@/components/client-replies/ExpandedThread';
+import { ScheduleEditor } from '@/components/client/ScheduleEditor';
 import {
   CampaignStatus, CampaignStatusLabels,
   type Campaign, type CampaignAnalytics, type CampaignStepAnalytics, type SequenceStep,
@@ -38,7 +39,11 @@ import {
 import type {
   ClientReply, ClientRepliesPage,
 } from '@/lib/clientCampaignReplies/types';
-import type { ClientLaunchSequenceStep } from '@/lib/clientLaunch/types';
+import type { ClientLaunchScheduleOverride, ClientLaunchSequenceStep } from '@/lib/clientLaunch/types';
+import {
+  campaignScheduleToOverride,
+  validateScheduleOverride,
+} from '@/lib/clientLaunch/scheduleMapping';
 
 // Map campaign status number → semantic dot color (Status-as-Data rule).
 function statusDotColor(status: number): string {
@@ -406,6 +411,9 @@ function CampaignDetailPageContent() {
   const [editMode, setEditMode] = useState(false);
   const [editName, setEditName] = useState('');
   const [editSteps, setEditSteps] = useState<ClientLaunchSequenceStep[]>([]);
+  // Editable schedule (sending window). Loaded from campaign.campaign_schedule
+  // on entering edit mode, sent back as part of the PATCH.
+  const [editSchedule, setEditSchedule] = useState<ClientLaunchScheduleOverride | null>(null);
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState('');
 
@@ -569,6 +577,9 @@ function CampaignDetailPageContent() {
   const startEdit = () => {
     setEditName(campaign.name);
     setEditSteps(editableStepsFromCampaignSteps(sequences));
+    // Load current schedule from Instantly's campaign_schedule into the
+    // flat editor shape. Missing/garbage → defaults (handled in mapper).
+    setEditSchedule(campaignScheduleToOverride(campaign.campaign_schedule));
     setEditError('');
     setEditMode(true);
   };
@@ -630,6 +641,15 @@ function CampaignDetailPageContent() {
   };
 
   const saveEdit = async () => {
+    // Validate schedule client-side before the request so the user gets an
+    // instant inline error instead of a 400 round-trip.
+    if (editSchedule) {
+      const sv = validateScheduleOverride(editSchedule);
+      if (!sv.ok) {
+        setEditError(sv.error);
+        return;
+      }
+    }
     setEditSaving(true);
     setEditError('');
     try {
@@ -638,6 +658,7 @@ function CampaignDetailPageContent() {
         body: JSON.stringify({
           campaign_name: editName,
           sequence_steps: cleanEditSteps(editSteps),
+          ...(editSchedule ? { schedule: editSchedule } : {}),
         }),
       });
       setCampaign(data.campaign);
@@ -968,6 +989,17 @@ function CampaignDetailPageContent() {
                   className="ds-input w-full text-sm"
                 />
               </div>
+
+              {editSchedule && (
+                <div className="neu-sm px-3 sm:px-5 py-3 sm:py-4">
+                  <p className="ds-eyebrow mb-3">Расписание отправки</p>
+                  <ScheduleEditor
+                    schedule={editSchedule}
+                    onChange={setEditSchedule}
+                    hydrated
+                  />
+                </div>
+              )}
 
               {editSteps.map((step, idx) => {
                 const num = String(idx + 1).padStart(2, '0');
