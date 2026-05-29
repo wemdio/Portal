@@ -57,7 +57,7 @@ export async function GET(req: NextRequest) {
     const { data: lastCompletedRun } = await supabaseAdmin
       .from('client_auto_pipeline_runs')
       .select(
-        'status, started_at, finished_at, parsed_count, new_count, routed_count, stored_count, skipped_count, failed_count, was_dry_run, with_site, with_score, with_email, email_valid',
+        'status, started_at, finished_at, parsed_count, new_count, new_from_hh, new_from_bob, routed_count, stored_count, skipped_count, failed_count, was_dry_run, with_site, with_score, with_email, email_valid',
       )
       .eq('client_user_id', user.id)
       .eq('status', 'completed')
@@ -104,6 +104,16 @@ export async function GET(req: NextRequest) {
       .eq('client_user_id', user.id)
       .eq('status', 'stored');
 
+    // Готовый резерв — активные домены (score > 0) в общем Mailganer-кэше,
+    // который фоновый сборщик наполняет из «базы баз». Это запас, из которого
+    // ежедневный добор берёт лидов, когда HH дал меньше нормы. Кэш портал-wide
+    // (один Mailganer на портал), для единственного auto-клиента это и есть
+    // его резерв.
+    const { count: reserveActive } = await supabaseAdmin
+      .from('mailganer_domain_scores')
+      .select('domain', { count: 'exact', head: true })
+      .gt('score', 0);
+
     // Если последний прогон НЕ completed и НЕ совпадает с last_completed_run —
     // у нас есть прерванный/работающий прогон поверх успешного. Возвращаем
     // флаг для UI чтобы показал тонкий индикатор.
@@ -131,6 +141,7 @@ export async function GET(req: NextRequest) {
         : null,
       totals_30d: totals30d,
       stored_count: storedCount ?? 0,
+      reserve_active: reserveActive ?? 0,
     });
   } catch (err) {
     return NextResponse.json(

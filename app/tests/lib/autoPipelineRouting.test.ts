@@ -35,6 +35,7 @@ function mockEnrichment(overrides: Partial<EnrichmentResult>): EnrichmentResult 
     domain: 'test.example',
     email: 'info@test.example',
     emailValidation: null,
+    additionalEmails: [],
     score: 100,
     spf: 'v=spf1 -all',
     endpointRaw: null,

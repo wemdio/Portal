@@ -3,7 +3,8 @@
  *
  * Логика:
  *   1. Читаем background_scorer_state — если disabled, выходим.
- *   2. Берём batch_size BoB-строк с offset, фильтр revenue ≥ revenue_from.
+ *   2. Берём batch_size BoB-строк с offset, фильтр revenue ≥ revenue_from
+ *      (revenue_from = 0 → без фильтра по выручке, берём все сайты).
  *   3. Отбрасываем те, чей domain УЖЕ в mailganer_domain_scores (не зачем
  *      повторно скорить).
  *   4. Для оставшихся параллельно (concurrency=5) дёргаем Mailganer +
@@ -92,10 +93,13 @@ export async function runBobScoringTick(
     return { status: 'disabled', domainsScanned: 0, domainsScored: 0, domainsActive: 0, cacheHits: 0 };
   }
 
-  // 1. Берём batch BoB-строк
+  // 1. Берём batch BoB-строк.
+  // revenue_from = 0 трактуем как «без фильтра по выручке»: скорим ВСЕ компании
+  // с сайтом (включая те, у кого оборота нет в данных ФНС). Любое значение >0 —
+  // это минимальный порог выручки. NULL в RPC = условие отключено.
   const { rows, error: searchErr } = await searchRows(
     {
-      revenueFrom: state.revenue_from,
+      revenueFrom: state.revenue_from > 0 ? state.revenue_from : null,
       hasWebsite: true,
       includeIp: false,
     },

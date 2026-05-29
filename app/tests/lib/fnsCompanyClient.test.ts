@@ -2,6 +2,18 @@
 
 import { getCompanyByInn, getCompanyByInnSafe, FnsCompanyError } from '@/lib/cisLeads/fnsCompanyClient';
 
+// Не ходим в реальный DaData из юнит-теста: без мока fetch висит и падает по
+// таймауту в CI (нет сети до dadata.ru). Мокаем только сетевой вызов findByInn —
+// реальный hasDadataKey оставляем, чтобы кейсы no_key/длины работали как есть.
+// Тесты проверяют валидацию длины ИНН + проброс ошибки, а не ответ API.
+jest.mock('@/lib/enrich/dadataClient', () => {
+  const actual = jest.requireActual('@/lib/enrich/dadataClient');
+  return {
+    ...actual,
+    findByInn: jest.fn().mockRejectedValue(new Error('network disabled in test')),
+  };
+});
+
 describe('fnsCompanyClient', () => {
   const originalEnv = process.env.DADATA_API_KEY;
 
