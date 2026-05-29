@@ -217,6 +217,10 @@ async function loadSeenDomains(clientUserId: string): Promise<Set<string>> {
     .from('client_auto_pipeline_seen_employers')
     .select('domain')
     .eq('client_user_id', clientUserId)
+    // dry-run прогоны НЕ «жгут» кэш: их домены не попадают в дедуп, чтобы
+    // боевой запуск (или повторный замер) мог их обработать заново. В дедуп
+    // идут только реально обработанные (routed/stored/skipped/failed).
+    .neq('status', 'dry_run')
     .not('domain', 'is', null);
   if (error || !data) return new Set();
   const set = new Set<string>();
@@ -254,18 +258,39 @@ async function closeStaleRuns(clientUserId: string, maxAgeHours = 4): Promise<vo
     .lt('started_at', cutoff);
 }
 
-async function startRunRow(clientUserId: string): Promise<string | null> {
-  if (!supabaseAdmin) return null;
+/**
+ * Результат попытки начать прогон.
+ *   started        — создали running-запись, можно работать.
+ *   already_running — у клиента уже есть активный (не протухший) прогон;
+ *                     это НЕ ошибка — параллельный запуск (крон + ручной),
+ *                     просто пропускаем (lock через partial unique index).
+ *   error          — не смогли создать запись (БД недоступна и т.п.).
+ */
+type StartRunResult =
+  | { kind: 'started'; runId: string }
+  | { kind: 'already_running' }
+  | { kind: 'error' };
+
+async function startRunRow(clientUserId: string): Promise<StartRunResult> {
+  if (!supabaseAdmin) return { kind: 'error' };
   // Сначала подчищаем брошенные running-записи — чтобы дашборд не показывал
-  // вечный «идёт прогон» от убитого процесса.
+  // вечный «идёт прогон» от убитого процесса И чтобы lock ниже не считал
+  // зомби активным прогоном.
   await closeStaleRuns(clientUserId);
   const { data, error } = await supabaseAdmin
     .from('client_auto_pipeline_runs')
     .insert({ client_user_id: clientUserId, status: 'running' })
     .select('id')
     .single();
-  if (error || !data) return null;
-  return (data as { id: string }).id;
+  if (error) {
+    // 23505 = unique_violation: partial unique index (client_user_id) WHERE
+    // status='running' не дал вставить вторую running-запись → уже идёт
+    // прогон этого клиента. Атомарный lock — гонки check-then-insert нет.
+    if ((error as { code?: string }).code === '23505') return { kind: 'already_running' };
+    return { kind: 'error' };
+  }
+  if (!data) return { kind: 'error' };
+  return { kind: 'started', runId: (data as { id: string }).id };
 }
 
 async function finishRunRow(runId: string, patch: Record<string, unknown>): Promise<void> {
@@ -613,12 +638,24 @@ export async function runAutoPipelineForClient(
     error,
   });
 
-  // 0. Start run row early — фиксируем сам факт прогона.
-  const runId = await startRunRow(clientUserId);
-  if (!runId) {
+  // 0. Start run row early — фиксируем сам факт прогона. Lock: если у клиента
+  //    уже идёт прогон (крон + ручной запуск пересеклись), пропускаем —
+  //    параллельные прогоны конкурируют за HH/scrape/Mailganer и тормозят
+  //    друг друга.
+  const start = await startRunRow(clientUserId);
+  if (start.kind === 'already_running') {
+    await logAudit(
+      'auto-pipeline.skip.concurrent',
+      'Пропуск: у клиента уже идёт активный прогон (lock)',
+      logCtx,
+    );
+    return emptyResult('');
+  }
+  if (start.kind === 'error') {
     await logError('auto-pipeline.run_row.failed', null, logCtx);
     return { ...emptyResult(''), status: 'failed', error: 'Не удалось создать запись прогона' };
   }
+  const runId = start.runId;
 
   try {
     // 1. Конфиг.

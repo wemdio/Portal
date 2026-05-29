@@ -126,10 +126,83 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ imported: 0, skipped: skipped.length, errors: skipped });
     }
 
+    // --- Dedup -----------------------------------------------------------------
+    // 1) Drop exact duplicates WITHIN the uploaded file (same public_id /
+    //    linkedin_id / profile_url twice) — always, cheap.
+    const seenInFile = new Set<string>();
+    const fileDeduped: Record<string, unknown>[] = [];
+    let dupInFile = 0;
+    for (const lead of leadsToInsert) {
+      const key = String(lead.public_identifier || lead.linkedin_id || lead.profile_url || '').toLowerCase();
+      if (key && seenInFile.has(key)) { dupInFile++; continue; }
+      if (key) seenInFile.add(key);
+      fileDeduped.push(lead);
+    }
+
+    // 2) Skip people THIS USER has already contacted (any list/campaign). Re-importing
+    //    them is the root cause of "залил новую базу, а 0 нового охвата": LinkedIn
+    //    returns already_invited and no new invite goes out. We skip at import so the
+    //    operator sees "N новых, M уже контактированы" up front instead of discovering
+    //    it days later. NOTE: dedup is per-user (not per-account) — for a multi-account
+    //    user who legitimately wants to re-contact someone from a DIFFERENT account,
+    //    pass dedup=false. Default on.
+    const dedup = (formData.get('dedup') as string | null) !== 'false';
+    const CONTACTED_STATUSES = ['invited', 'already_invited', 'messaged', 'connected', 'replied'];
+    let alreadyContacted = 0;
+    let toInsert = fileDeduped;
+
+    if (dedup) {
+      const pids = [...new Set(fileDeduped.map((l) => l.public_identifier).filter(Boolean) as string[])];
+      const lids = [...new Set(fileDeduped.map((l) => l.linkedin_id).filter(Boolean) as string[])];
+      const contactedPids = new Set<string>();
+      const contactedLids = new Set<string>();
+      const CHUNK = 200;
+      for (let i = 0; i < pids.length; i += CHUNK) {
+        const { data } = await auth.supabase
+          .from('li_leads')
+          .select('public_identifier')
+          .eq('user_id', auth.user.id)
+          .in('status', CONTACTED_STATUSES)
+          .in('public_identifier', pids.slice(i, i + CHUNK));
+        for (const r of (data ?? []) as Array<{ public_identifier: string | null }>) {
+          if (r.public_identifier) contactedPids.add(r.public_identifier);
+        }
+      }
+      for (let i = 0; i < lids.length; i += CHUNK) {
+        const { data } = await auth.supabase
+          .from('li_leads')
+          .select('linkedin_id')
+          .eq('user_id', auth.user.id)
+          .in('status', CONTACTED_STATUSES)
+          .in('linkedin_id', lids.slice(i, i + CHUNK));
+        for (const r of (data ?? []) as Array<{ linkedin_id: string | null }>) {
+          if (r.linkedin_id) contactedLids.add(r.linkedin_id);
+        }
+      }
+      toInsert = fileDeduped.filter((l) => {
+        const pid = l.public_identifier ? String(l.public_identifier) : '';
+        const lid = l.linkedin_id ? String(l.linkedin_id) : '';
+        const contacted = (pid && contactedPids.has(pid)) || (lid && contactedLids.has(lid));
+        if (contacted) alreadyContacted++;
+        return !contacted;
+      });
+    }
+
+    const result = {
+      skipped: skipped.length,
+      already_contacted_skipped: alreadyContacted,
+      dup_in_file_skipped: dupInFile,
+      total_rows: lines.length - 1,
+    };
+
+    if (toInsert.length === 0) {
+      return NextResponse.json({ imported: 0, ...result });
+    }
+
     const BATCH = 200;
     let imported = 0;
-    for (let i = 0; i < leadsToInsert.length; i += BATCH) {
-      const batch = leadsToInsert.slice(i, i + BATCH);
+    for (let i = 0; i < toInsert.length; i += BATCH) {
+      const batch = toInsert.slice(i, i + BATCH);
       const { error } = await auth.supabase.from('li_leads').insert(batch);
       if (error) {
         return jsonError(`Import error at row ~${i + 2}: ${error.message}`, 500);
@@ -137,6 +210,6 @@ export async function POST(req: NextRequest) {
       imported += batch.length;
     }
 
-    return NextResponse.json({ imported, skipped: skipped.length, total_rows: lines.length - 1 });
+    return NextResponse.json({ imported, ...result });
   });
 }
