@@ -5,18 +5,9 @@ import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
 import { Project } from '@/types';
 import { logError } from '@/lib/loggerClient';
-import {
-  diffDaysFrom,
-  formatDateLabel,
-  isPastDate,
-  isWithinDays,
-  parseFlexibleDate,
-} from '@/lib/dateUtils';
-import {
-  resolveProjectStatus,
-  isCompletedStatus,
-  STATUS_TONE_VAR,
-} from '@/lib/projectStatus';
+import { diffDaysFrom, formatDateLabel, parseFlexibleDate } from '@/lib/dateUtils';
+import { resolveProjectStatus, isCompletedStatus, STATUS_TONE_VAR } from '@/lib/projectStatus';
+import { getDemoProjects } from '@/lib/demo/analyticsProjectsDemo';
 
 const splitTasks = (value: string | null | undefined) => {
   if (!value) return [];
@@ -35,9 +26,32 @@ const normalizeUrl = (value: string | null | undefined): string | null => {
   return null;
 };
 
-type EnrichedProject = Project & {
-  deadlineDate: Date | null;
+type EnrichedProject = Project & { deadlineDate: Date | null };
+
+// Urgency tiers — the spine of the redesign. The old page split renewals
+// (<=30d) and overdue into two blocks far apart; here everything that needs
+// attention lives in ONE feed, ranked overdue → due-soon → renewal.
+type Tier = 'overdue' | 'soon' | 'renewal';
+
+const TIER_META: Record<Tier, { label: string; dot: string; text: string }> = {
+  overdue: { label: 'Просрочено', dot: 'var(--cp-red)', text: 'var(--cp-red)' },
+  soon: { label: 'Скоро дедлайн · ≤7 дней', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
+  renewal: { label: 'Продления · ≤30 дней', dot: 'var(--cp-paper-faint)', text: 'var(--cp-paper-mute)' },
 };
+
+function tierOf(days: number | null): Tier | null {
+  if (days === null) return null;
+  if (days < 0) return 'overdue';
+  if (days <= 7) return 'soon';
+  if (days <= 30) return 'renewal';
+  return null;
+}
+
+function deadlineText(days: number): string {
+  if (days < 0) return `${Math.abs(days)} дн. назад`;
+  if (days === 0) return 'сегодня';
+  return `через ${days} дн.`;
+}
 
 /** 6px semantic dot + mono uppercase label — Status-as-Data. */
 function StatusTag({ status }: { status: string | null | undefined }) {
@@ -50,41 +64,11 @@ function StatusTag({ status }: { status: string | null | undefined }) {
   );
 }
 
-function StatCard({ label, value, tone }: { label: string; value: number; tone?: 'amber' | 'red' }) {
-  const color = tone === 'amber' ? 'var(--cp-amber)' : tone === 'red' ? 'var(--cp-red)' : 'var(--cp-paper)';
-  return (
-    <div className="neu-card p-4">
-      <p className="ds-eyebrow">{label}</p>
-      <p className="ds-mono mt-2 text-2xl font-semibold" style={{ color }}>
-        {value}
-      </p>
-    </div>
-  );
-}
-
-function SectionHeader({ title, hint }: { title: string; hint?: string }) {
-  return (
-    <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--cp-divider)' }}>
-      <h2 className="m-0 text-base font-semibold" style={{ color: 'var(--cp-paper)' }}>
-        {title}
-      </h2>
-      {hint && (
-        <p className="mt-0.5 text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
-          {hint}
-        </p>
-      )}
-    </div>
-  );
-}
-
 function DetailCell({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
   return (
     <div className="min-w-0">
       <p className="ds-eyebrow">{label}</p>
-      <p
-        className="mt-0.5 truncate text-xs font-medium"
-        style={{ color: highlight ? 'var(--cp-paper)' : 'var(--cp-paper-mute)' }}
-      >
+      <p className="mt-0.5 truncate text-xs font-medium" style={{ color: highlight ? 'var(--cp-paper)' : 'var(--cp-paper-mute)' }}>
         {value}
       </p>
     </div>
@@ -94,16 +78,9 @@ function DetailCell({ label, value, highlight }: { label: string; value: string;
 function ProjectExpandedDetails({ project }: { project: EnrichedProject }) {
   const contractUrl = normalizeUrl(project.contract_link);
   const handoffUrl = normalizeUrl(project.handoff_link);
-
   const hasAnyData =
-    project.manager ||
-    project.contacts_obligation ||
-    project.contacts_done ||
-    project.kpi_plan ||
-    project.kpi_fact ||
-    project.budget ||
-    contractUrl ||
-    handoffUrl;
+    project.manager || project.contacts_obligation || project.contacts_done ||
+    project.kpi_plan || project.kpi_fact || project.budget || contractUrl || handoffUrl;
 
   if (!hasAnyData) {
     return (
@@ -116,13 +93,10 @@ function ProjectExpandedDetails({ project }: { project: EnrichedProject }) {
     );
   }
 
-  // Append contacts % when both sides are numeric (P2-D: stop forcing mental math).
   const cDone = Number(project.contacts_done);
   const cObl = Number(project.contacts_obligation);
   const contactsPct =
-    Number.isFinite(cDone) && Number.isFinite(cObl) && cObl > 0
-      ? Math.round((cDone / cObl) * 100)
-      : null;
+    Number.isFinite(cDone) && Number.isFinite(cObl) && cObl > 0 ? Math.round((cDone / cObl) * 100) : null;
 
   return (
     <div className="px-5 pb-4 pt-3" style={{ borderTop: '1px solid var(--cp-divider)' }}>
@@ -131,9 +105,7 @@ function ProjectExpandedDetails({ project }: { project: EnrichedProject }) {
         {(project.contacts_done || project.contacts_obligation) && (
           <DetailCell
             label="контакты"
-            value={`${project.contacts_done || '0'} / ${project.contacts_obligation || '—'}${
-              contactsPct !== null ? ` · ${contactsPct}%` : ''
-            }`}
+            value={`${project.contacts_done || '0'} / ${project.contacts_obligation || '—'}${contactsPct !== null ? ` · ${contactsPct}%` : ''}`}
             highlight={!!project.contacts_done}
           />
         )}
@@ -144,29 +116,13 @@ function ProjectExpandedDetails({ project }: { project: EnrichedProject }) {
         {contractUrl && (
           <div className="min-w-0">
             <p className="ds-eyebrow">договор</p>
-            <a
-              href={contractUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-0.5 block truncate text-xs font-medium underline"
-              style={{ color: 'var(--cp-paper)' }}
-            >
-              Открыть →
-            </a>
+            <a href={contractUrl} target="_blank" rel="noopener noreferrer" className="mt-0.5 block truncate text-xs font-medium underline" style={{ color: 'var(--cp-paper)' }}>Открыть →</a>
           </div>
         )}
         {handoffUrl && (
           <div className="min-w-0">
             <p className="ds-eyebrow">пост передачи</p>
-            <a
-              href={handoffUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-0.5 block truncate text-xs font-medium underline"
-              style={{ color: 'var(--cp-paper)' }}
-            >
-              Открыть →
-            </a>
+            <a href={handoffUrl} target="_blank" rel="noopener noreferrer" className="mt-0.5 block truncate text-xs font-medium underline" style={{ color: 'var(--cp-paper)' }}>Открыть →</a>
           </div>
         )}
       </div>
@@ -176,55 +132,30 @@ function ProjectExpandedDetails({ project }: { project: EnrichedProject }) {
 
 function ChevronIcon({ open }: { open: boolean }) {
   return (
-    <svg
-      className="h-4 w-4 shrink-0 transition-transform duration-200"
-      style={{ color: 'var(--cp-paper-faint)', transform: open ? 'rotate(180deg)' : 'none' }}
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      aria-hidden
-    >
+    <svg className="h-4 w-4 shrink-0 transition-transform duration-200" style={{ color: 'var(--cp-paper-faint)', transform: open ? 'rotate(180deg)' : 'none' }} fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden>
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
     </svg>
   );
 }
 
-function ProjectRow({ project, today, isFirst }: { project: EnrichedProject; today: Date; isFirst: boolean }) {
+/** One project in the unified attention feed. Expandable, keyboard-accessible. */
+function AttentionRow({ project, days, isFirst }: { project: EnrichedProject; days: number; isFirst: boolean }) {
   const [expanded, setExpanded] = useState(false);
-  const days = project.deadlineDate ? diffDaysFrom(project.deadlineDate, today) : null;
-  const isOverdue = days !== null && days < 0;
-  const deadlineTone = isOverdue
-    ? 'var(--cp-red)'
-    : days !== null && days <= 7
-      ? 'var(--cp-amber)'
-      : 'var(--cp-paper-mute)';
-
+  const tier = tierOf(days)!;
   const toggle = () => setExpanded((v) => !v);
 
   return (
-    <div
-      style={{
-        borderTop: isFirst ? undefined : '1px solid var(--cp-divider)',
-        // The single tinted-background concession (Option B): overdue rows get
-        // a faint red wash so they pull the eye in a long renewals list.
-        background: isOverdue ? 'var(--cp-red-wash)' : undefined,
-      }}
-    >
+    <div style={{ borderTop: isFirst ? undefined : '1px solid var(--cp-divider)' }}>
       <div
         role="button"
         tabIndex={0}
         aria-expanded={expanded}
         onClick={toggle}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            toggle();
-          }
-        }}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
         className="ds-card-pressable flex items-center gap-3 px-5 py-3"
       >
+        <span aria-hidden className="ds-status-dot" style={{ background: TIER_META[tier].dot }} />
         <ChevronIcon open={expanded} />
-
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <Link
@@ -233,7 +164,7 @@ function ProjectRow({ project, today, isFirst }: { project: EnrichedProject; tod
               className="truncate text-sm font-medium hover:underline"
               style={{ color: 'var(--cp-paper)' }}
             >
-              {project.client || 'Без названия'}
+              {project.client || project.name || 'Без названия'}
             </Link>
             {project.manager && (
               <span className="ds-mono hidden shrink-0 text-[10px] sm:inline" style={{ color: 'var(--cp-paper-faint)' }}>
@@ -243,23 +174,16 @@ function ProjectRow({ project, today, isFirst }: { project: EnrichedProject; tod
           </div>
           <p className="text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
             {project.specialist || 'Без специалиста'}
-            <span style={{ color: 'var(--cp-paper-faint)' }}>
-              {' · дедлайн '}
-              {formatDateLabel(project.deadlineDate)}
-            </span>
+            <span style={{ color: 'var(--cp-paper-faint)' }}>{' · дедлайн '}{formatDateLabel(project.deadlineDate)}</span>
           </p>
         </div>
-
         <div className="flex shrink-0 items-center gap-3">
-          {days !== null && (
-            <span className="ds-mono text-xs font-medium" style={{ color: deadlineTone }}>
-              {isOverdue ? `${Math.abs(days)} дн. назад` : `через ${days} дн.`}
-            </span>
-          )}
-          <StatusTag status={project.status} />
+          <span className="ds-mono text-xs font-medium" style={{ color: TIER_META[tier].text }}>
+            {deadlineText(days)}
+          </span>
+          <span className="hidden sm:inline"><StatusTag status={project.status} /></span>
         </div>
       </div>
-
       {expanded && <ProjectExpandedDetails project={project} />}
     </div>
   );
@@ -269,260 +193,250 @@ export default function ProjectsAnalyticsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [specialist, setSpecialist] = useState<string>('all');
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    const demoMode = process.env.NEXT_PUBLIC_UI_DEMO === '1';
     try {
       const { data, error: qErr } = await supabase.from('projects').select('*');
       if (qErr) throw qErr;
-      setProjects((data ?? []) as Project[]);
+      const rows = (data ?? []) as Project[];
+      setProjects(rows.length === 0 && demoMode ? getDemoProjects() : rows);
     } catch (err) {
-      void logError('analytics.projects.fetch.failed', err);
-      setError('Не удалось загрузить проекты. Попробуйте ещё раз.');
+      // UI-only/demo mode has no backend — show representative data instead of
+      // an error so the layout can be reviewed populated.
+      if (demoMode) {
+        setProjects(getDemoProjects());
+      } else {
+        void logError('analytics.projects.fetch.failed', err);
+        setError('Не удалось загрузить проекты. Попробуйте ещё раз.');
+      }
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
   const today = useMemo(() => new Date(), []);
 
-  const enrichedProjects = useMemo<EnrichedProject[]>(
-    () =>
-      projects.map((project) => ({
-        ...project,
-        deadlineDate: parseFlexibleDate(project.deadline),
-      })),
+  const enriched = useMemo<EnrichedProject[]>(
+    () => projects.map((p) => ({ ...p, deadlineDate: parseFlexibleDate(p.deadline) })),
     [projects],
   );
 
-  const renewals = useMemo(
+  // The attention feed: every non-completed project with a deadline inside a
+  // tier, ranked most-overdue → furthest-renewal.
+  const attention = useMemo(
     () =>
-      enrichedProjects
-        .filter(
-          (project) =>
-            project.deadlineDate &&
-            isWithinDays(project.deadlineDate, today, 30) &&
-            !isCompletedStatus(project.status),
-        )
-        .sort((a, b) => {
-          const da = a.deadlineDate ? diffDaysFrom(a.deadlineDate, today) : 999;
-          const db = b.deadlineDate ? diffDaysFrom(b.deadlineDate, today) : 999;
-          return da - db;
-        }),
-    [enrichedProjects, today],
+      enriched
+        .filter((p) => !isCompletedStatus(p.status) && p.deadlineDate)
+        .map((p) => ({ p, days: diffDaysFrom(p.deadlineDate as Date, today) }))
+        .filter((x) => tierOf(x.days) !== null)
+        .sort((a, b) => a.days - b.days),
+    [enriched, today],
   );
 
-  const overdueProjects = useMemo(
-    () =>
-      enrichedProjects.filter(
-        (project) =>
-          project.deadlineDate &&
-          isPastDate(project.deadlineDate, today) &&
-          !isCompletedStatus(project.status),
-      ),
-    [enrichedProjects, today],
+  const specialists = useMemo(() => {
+    const set = new Set<string>();
+    attention.forEach((x) => set.add(x.p.specialist || 'Без специалиста'));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'ru'));
+  }, [attention]);
+
+  const visible = useMemo(
+    () => (specialist === 'all' ? attention : attention.filter((x) => (x.p.specialist || 'Без специалиста') === specialist)),
+    [attention, specialist],
   );
+
+  // Group the visible feed by tier, preserving the overdue→soon→renewal order.
+  const grouped = useMemo(() => {
+    const order: Tier[] = ['overdue', 'soon', 'renewal'];
+    return order
+      .map((tier) => ({ tier, items: visible.filter((x) => tierOf(x.days) === tier) }))
+      .filter((g) => g.items.length > 0);
+  }, [visible]);
+
+  const stats = useMemo(() => {
+    const overdue = attention.filter((x) => x.days < 0).length;
+    const renewals = attention.filter((x) => x.days >= 0).length; // 0..30
+    const active = enriched.filter((p) => !isCompletedStatus(p.status)).length;
+    return { total: projects.length, active, renewals, overdue };
+  }, [attention, enriched, projects.length]);
+
+  const specialistLoad = useMemo(() => {
+    const map = new Map<string, { overdue: number; total: number }>();
+    attention.forEach((x) => {
+      const name = x.p.specialist || 'Без специалиста';
+      const cur = map.get(name) ?? { overdue: 0, total: 0 };
+      cur.total += 1;
+      if (x.days < 0) cur.overdue += 1;
+      map.set(name, cur);
+    });
+    return Array.from(map.entries())
+      .map(([name, v]) => ({ name, ...v }))
+      .sort((a, b) => b.overdue - a.overdue || b.total - a.total);
+  }, [attention]);
 
   const overdueTasks = useMemo(
     () =>
-      overdueProjects.flatMap((project) => {
-        const tasks = splitTasks(project.hypotheses || project.weekly_tasks);
-        return tasks.map((task, index) => ({
-          id: `${project.id ?? 'project'}-${index}`,
-          title: task,
-          projectName: project.client || 'Без названия',
-          projectId: project.id,
-          specialist: project.specialist || 'Без специалиста',
-          deadlineDate: project.deadlineDate,
-          status: project.status,
-        }));
-      }),
-    [overdueProjects],
+      attention
+        .filter((x) => x.days < 0)
+        .flatMap(({ p }) =>
+          splitTasks(p.hypotheses || p.weekly_tasks).map((task, i) => ({
+            id: `${p.id ?? 'p'}-${i}`,
+            title: task,
+            projectName: p.client || p.name || 'Без названия',
+            projectId: p.id,
+            specialist: p.specialist || 'Без специалиста',
+            deadlineDate: p.deadlineDate,
+          })),
+        ),
+    [attention],
   );
 
-  const renewalsBySpecialist = useMemo(() => {
-    const map = new Map<string, number>();
-    renewals.forEach((project) => {
-      const name = project.specialist || 'Без специалиста';
-      map.set(name, (map.get(name) ?? 0) + 1);
-    });
-    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
-  }, [renewals]);
-
-  const activeProjects = useMemo(
-    () => enrichedProjects.filter((p) => !isCompletedStatus(p.status)),
-    [enrichedProjects],
-  );
-
-  // Full-width on purpose: the admin shell tags data pages
-  // `.ui-density-compact`, which forces `max-width: 100% !important` for
-  // power-user density — so we don't fight it with a content cap.
   return (
-    <div className="admin-portal space-y-6">
+    <div className="space-y-6">
       <header>
         <p className="ds-eyebrow mb-1">аналитика</p>
-        <h1 className="m-0 text-2xl font-semibold" style={{ color: 'var(--cp-paper)' }}>
-          Проекты
-        </h1>
+        <h1 className="m-0 text-2xl font-semibold" style={{ color: 'var(--cp-paper)' }}>Проекты</h1>
         <p className="mt-1 text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
-          Продления, дедлайны и проблемные задачи по проектам.
+          Что требует внимания: продления, дедлайны и просроченные задачи.
         </p>
       </header>
 
       {error ? (
         <div className="neu-card flex items-center gap-3 px-5 py-3.5" role="alert">
           <span aria-hidden className="ds-status-dot" style={{ background: 'var(--cp-red)' }} />
-          <span className="flex-1 text-sm" style={{ color: 'var(--cp-paper)' }}>
-            {error}
-          </span>
-          <button type="button" onClick={() => void load()} className="ds-btn-secondary shrink-0 text-xs">
-            Повторить
-          </button>
+          <span className="flex-1 text-sm" style={{ color: 'var(--cp-paper)' }}>{error}</span>
+          <button type="button" onClick={() => void load()} className="ds-btn-secondary shrink-0 text-xs">Повторить</button>
         </div>
       ) : loading ? (
-        <div className="flex items-center justify-center py-24">
-          <div className="neu-spinner animate-spin" />
-        </div>
+        <div className="flex items-center justify-center py-24"><div className="neu-spinner animate-spin" /></div>
       ) : (
         <>
-          {/* Stat row — mono tabular numbers; renewals/overdue carry semantic colour. */}
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            <StatCard label="всего проектов" value={projects.length} />
-            <StatCard label="активных" value={activeProjects.length} />
-            <StatCard label="продления · 30 дней" value={renewals.length} tone="amber" />
-            <StatCard label="просроченных" value={overdueProjects.length} tone="red" />
-          </div>
+          {/* Distilled portfolio signal — replaces the 4 stat cards with one
+              editorial mono line; the two urgent figures carry semantic colour. */}
+          <p className="ds-mono text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
+            <span className="font-semibold" style={{ color: 'var(--cp-paper)' }}>{stats.total}</span> проектов
+            <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+            <span className="font-semibold" style={{ color: 'var(--cp-paper)' }}>{stats.active}</span> активных
+            <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+            <span className="font-semibold" style={{ color: 'var(--cp-amber)' }}>{stats.renewals}</span> продлений ≤30 дн
+            <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+            <span className="font-semibold" style={{ color: 'var(--cp-red)' }}>{stats.overdue}</span> просрочено
+          </p>
 
-          {/* Renewals — primary block */}
-          <section className="neu-card overflow-hidden">
-            <SectionHeader
-              title="Продления"
-              hint="Дедлайн в ближайшие 30 дней · нажмите на строку чтобы раскрыть детали"
-            />
-            <div>
-              {renewals.map((project, idx) => (
-                <ProjectRow key={project.id} project={project} today={today} isFirst={idx === 0} />
-              ))}
-              {renewals.length === 0 && (
-                <div className="px-5 py-8 text-center text-sm" style={{ color: 'var(--cp-paper-faint)' }}>
-                  Нет продлений на ближайшие 30 дней.
-                </div>
-              )}
+          {/* Specialist filter — triage one person's at-risk projects fast. */}
+          {specialists.length > 1 && (
+            <div className="flex flex-wrap items-center gap-1.5" role="tablist" aria-label="Фильтр по специалисту">
+              {['all', ...specialists].map((name) => {
+                const active = specialist === name;
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => setSpecialist(name)}
+                    className="rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
+                    style={
+                      active
+                        ? { color: 'var(--cp-ink)', background: 'var(--cp-paper)' }
+                        : { color: 'var(--cp-paper-mute)', background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' }
+                    }
+                  >
+                    {name === 'all' ? 'Все' : name}
+                  </button>
+                );
+              })}
             </div>
+          )}
+
+          {/* Unified attention feed — overdue → due-soon → renewals, ranked. */}
+          <section className="neu-card overflow-hidden">
+            {grouped.length === 0 ? (
+              <div className="px-5 py-10 text-center text-sm" style={{ color: 'var(--cp-paper-faint)' }}>
+                Ничего не требует внимания в ближайшие 30 дней.
+              </div>
+            ) : (
+              grouped.map((group, gi) => (
+                <div key={group.tier}>
+                  <div
+                    className="flex items-center gap-2 px-5 py-2.5"
+                    style={{
+                      borderTop: gi === 0 ? undefined : '1px solid var(--cp-divider)',
+                      background: 'var(--cp-surface-elev)',
+                    }}
+                  >
+                    <span aria-hidden className="ds-status-dot" style={{ background: TIER_META[group.tier].dot }} />
+                    <span className="ds-eyebrow" style={{ color: TIER_META[group.tier].text }}>
+                      {TIER_META[group.tier].label}
+                    </span>
+                    <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                      {group.items.length}
+                    </span>
+                  </div>
+                  {group.items.map((x, i) => (
+                    <AttentionRow key={x.p.id} project={x.p} days={x.days} isFirst={i === 0} />
+                  ))}
+                </div>
+              ))
+            )}
           </section>
 
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            {/* By specialist */}
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            {/* Specialist load */}
             <section className="neu-card overflow-hidden">
-              <SectionHeader title="Продления по специалистам" hint="Сколько проектов требует внимания" />
+              <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--cp-divider)' }}>
+                <h2 className="m-0 text-base font-semibold" style={{ color: 'var(--cp-paper)' }}>Загрузка по специалистам</h2>
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--cp-paper-mute)' }}>Сколько проектов в зоне внимания · из них просрочено</p>
+              </div>
               <div>
-                {renewalsBySpecialist.map(([name, count], idx) => (
-                  <div
-                    key={name}
-                    className="flex items-center justify-between px-5 py-3"
-                    style={{ borderTop: idx === 0 ? undefined : '1px solid var(--cp-divider)' }}
-                  >
-                    <span className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>
-                      {name}
-                    </span>
-                    <span className="ds-mono text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
-                      {count}
+                {specialistLoad.map(({ name, total, overdue }, i) => (
+                  <div key={name} className="flex items-center justify-between px-5 py-3" style={{ borderTop: i === 0 ? undefined : '1px solid var(--cp-divider)' }}>
+                    <span className="text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>{name}</span>
+                    <span className="ds-mono text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
+                      <span className="font-semibold" style={{ color: 'var(--cp-paper)' }}>{total}</span>
+                      {overdue > 0 && (
+                        <>
+                          <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+                          <span className="font-semibold" style={{ color: 'var(--cp-red)' }}>{overdue}</span>
+                          <span style={{ color: 'var(--cp-paper-faint)' }}> просроч.</span>
+                        </>
+                      )}
                     </span>
                   </div>
                 ))}
-                {renewalsBySpecialist.length === 0 && (
-                  <div className="px-5 py-8 text-center text-sm" style={{ color: 'var(--cp-paper-faint)' }}>
-                    Нет данных.
-                  </div>
+                {specialistLoad.length === 0 && (
+                  <div className="px-5 py-8 text-center text-sm" style={{ color: 'var(--cp-paper-faint)' }}>Нет данных.</div>
                 )}
               </div>
             </section>
 
-            {/* Overdue projects */}
+            {/* Problem tasks on overdue projects */}
             <section className="neu-card overflow-hidden">
-              <SectionHeader title="Просроченные проекты" hint="Дедлайн уже прошёл, но проект не завершён" />
+              <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--cp-divider)' }}>
+                <h2 className="m-0 text-base font-semibold" style={{ color: 'var(--cp-paper)' }}>Проблемные задачи</h2>
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--cp-paper-mute)' }}>Задачи на просроченных проектах</p>
+              </div>
               <div>
-                {overdueProjects.map((project, idx) => {
-                  const days = project.deadlineDate ? diffDaysFrom(project.deadlineDate, today) : null;
-                  return (
-                    <div
-                      key={project.id}
-                      className="flex items-center justify-between gap-3 px-5 py-3"
-                      style={{ borderTop: idx === 0 ? undefined : '1px solid var(--cp-divider)' }}
-                    >
-                      <div className="min-w-0">
-                        <Link
-                          href={`/projects/${project.id}`}
-                          className="text-sm font-medium hover:underline"
-                          style={{ color: 'var(--cp-paper)' }}
-                        >
-                          {project.client || 'Без названия'}
-                        </Link>
-                        <p className="text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
-                          {project.specialist || 'Без специалиста'}
-                          <span style={{ color: 'var(--cp-paper-faint)' }}>
-                            {' · дедлайн '}
-                            {formatDateLabel(project.deadlineDate)}
-                          </span>
-                        </p>
-                      </div>
-                      {days !== null && (
-                        <span className="ds-mono shrink-0 text-xs font-medium" style={{ color: 'var(--cp-red)' }}>
-                          {Math.abs(days)} дн. назад
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-                {overdueProjects.length === 0 && (
-                  <div className="px-5 py-8 text-center text-sm" style={{ color: 'var(--cp-paper-faint)' }}>
-                    Просроченных нет.
+                {overdueTasks.map((task, i) => (
+                  <div key={task.id} className="px-5 py-3" style={{ borderTop: i === 0 ? undefined : '1px solid var(--cp-divider)' }}>
+                    <p className="m-0 text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>{task.title}</p>
+                    <p className="mt-0.5 text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+                      <Link href={`/projects/${task.projectId}`} className="hover:underline" style={{ color: 'var(--cp-paper-mute)' }}>{task.projectName}</Link>
+                      <span style={{ color: 'var(--cp-paper-faint)' }}>{' · '}{task.specialist}{' · дедлайн '}{formatDateLabel(task.deadlineDate)}</span>
+                    </p>
                   </div>
+                ))}
+                {overdueTasks.length === 0 && (
+                  <div className="px-5 py-8 text-center text-sm" style={{ color: 'var(--cp-paper-faint)' }}>Просроченных задач нет.</div>
                 )}
               </div>
             </section>
           </div>
-
-          {/* Overdue tasks — block title already says "просроченные", so the
-              per-row "Просрочено" pill is dropped (P2-B, redundant signal). */}
-          {overdueTasks.length > 0 && (
-            <section className="neu-card overflow-hidden">
-              <SectionHeader title="Проблемы по задачам" hint="Просроченные задачи по проектам" />
-              <div>
-                {overdueTasks.map((task, idx) => (
-                  <div
-                    key={task.id}
-                    className="px-5 py-3"
-                    style={{ borderTop: idx === 0 ? undefined : '1px solid var(--cp-divider)' }}
-                  >
-                    <p className="m-0 text-sm font-medium" style={{ color: 'var(--cp-paper)' }}>
-                      {task.title}
-                    </p>
-                    <p className="mt-0.5 text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
-                      <Link
-                        href={`/projects/${task.projectId}`}
-                        className="hover:underline"
-                        style={{ color: 'var(--cp-paper-mute)' }}
-                      >
-                        {task.projectName}
-                      </Link>
-                      <span style={{ color: 'var(--cp-paper-faint)' }}>
-                        {' · '}
-                        {task.specialist}
-                        {' · дедлайн '}
-                        {formatDateLabel(task.deadlineDate)}
-                      </span>
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
         </>
       )}
     </div>

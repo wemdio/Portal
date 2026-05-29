@@ -4,10 +4,13 @@
 // theme review, zero backend. Cross-platform (no cross-env dependency).
 import { spawn } from 'node:child_process';
 
+// NEXT_PUBLIC_UI_DEMO is readable in client components — pages use it to show
+// representative demo data when the real fetch yields nothing (no backend in
+// UI-only mode), so layouts can be reviewed populated. Never set in prod.
 const child = spawn('npx', ['next', 'dev'], {
   stdio: 'inherit',
   shell: true,
-  env: { ...process.env, UI_ONLY: '1' },
+  env: { ...process.env, UI_ONLY: '1', NEXT_PUBLIC_UI_DEMO: '1' },
 });
 
 child.on('exit', (code) => process.exit(code ?? 0));
