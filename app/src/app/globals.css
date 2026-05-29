@@ -2312,27 +2312,21 @@ body:has(.client-portal) {
   color: var(--cp-green) !important;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   ADMIN PORTAL — "Editorial-Light"
-   ───────────────────────────────────────────────────────────────────────
-   The light-surface sibling of .client-portal. Same role-based --cp-* token
-   vocabulary and the same ds-*/neu-* utility grammar, but:
-     • surface is paper-white instead of ink-black, and
-     • semantic status COLOUR is kept — power users triage 50-row tables and
-       rely on red/amber as the fastest "where do I look" signal, so the
-       client-side Invisible-Accent rule is deliberately relaxed here.
+/* =======================================================================
+   ADMIN PORTAL — Editorial-DARK
+   -----------------------------------------------------------------------
+   The admin side adopts the same bold dark system as .client-portal (user
+   direction 2026-05-29; the light pilot read as a timid reskin). Token
+   values mirror .client-portal exactly; the admin shell also carries the
+   .client-portal class (see LayoutShell) so raw-Tailwind admin pages and
+   chrome inherit the full bridge layers plus the ds- and neu- utility set,
+   the same mechanism that flipped the whole client portal dark at once.
 
-   Tokens are ROLE-based, not colour-literal:
-     --cp-ink    = page background         (dark in client, light here)
-     --cp-paper  = primary foreground text (light in client, dark here)
-   Flipping their lightness makes every inherited utility render correctly —
-   .ds-btn-primary (paper-bg / ink-text) is a light button on a dark page in
-   client and a dark button on a light page here: same role, right look.
-
-   Scoped additively: zero edits to .client-portal rules. The two scopes never
-   co-occur (different route trees), so reusing --cp-* names is safe. Pilot:
-   /analytics/projects — grow the utility set here as more admin pages migrate.
-   ═══════════════════════════════════════════════════════════════════════ */
+   NOTE: keep comment text free of the star-slash sequence — it terminates
+   the CSS comment early and breaks the entire stylesheet parse (this block
+   shipped broken in effcb46e because an inline "ds-[star]/neu-" closed the
+   comment; tsc does not lint CSS, so it slipped through until dev render).
+   ======================================================================= */
 .admin-portal {
   /* Editorial-DARK. The light pilot (2026-05-29) read as a timid reskin; per
      user direction the admin side adopts the SAME bold dark system as
