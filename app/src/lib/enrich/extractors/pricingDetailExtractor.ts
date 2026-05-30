@@ -25,6 +25,12 @@ const PRICE_BLOCK_SELECTOR = [
 const BEFORE_CTX_RE = /(?:^|[\s(])(?:от|тариф\w*|стоимост\w*|цен[аеоуы]|прайс\w*|pricing|price)\s*$/i;
 const AFTER_CTX_RE = /^\s*(?:\/|за|в|per)?\s*(?:мес|month|mo\b|год|year|сут|day|чел|user|польз|проект|час|hour)/i;
 
+// Per-unit / per-action rates ("от 590 ₽ за лид", "≈ 43 ₽ за лид", "5 ₽/SMS").
+// These are unit prices, not a service's entry cost — they must not define the
+// minimum unless the company publishes nothing else (see chooser below).
+const PER_UNIT_AFTER_RE =
+  /^\s*(?:\/|за)\s*(?:1\s*)?(?:лид\w*|клик\w*|клиент\w*|контакт\w*|заявк\w*|обращени\w*|показ\w*|подписчик\w*|регистрац\w*|касани\w*|посетител\w*|переход\w*|просмотр\w*|анкет\w*|номер\w*|целев\w*\s*действ\w*|смс|sms|звонок|звонк\w*)|^\s*per\s+(?:lead|click|contact|visit|impression|action)/i;
+
 function detectCurrency(token: string): Currency {
   const lower = token.toLowerCase();
   if (lower.includes('₽') || lower.startsWith('руб')) return 'RUB';
@@ -40,12 +46,15 @@ function parsePriceValue(raw: string): number | null {
   return Math.round(value);
 }
 
-function priceFromMatch(m: RegExpExecArray): PriceValue | null {
+/** A parsed price plus whether it is a per-unit rate (per lead/click/…). */
+type Candidate = PriceValue & { perUnit: boolean };
+
+function priceFromMatch(m: RegExpExecArray, after: string): Candidate | null {
   const cur = m[1] ?? m[4] ?? '';
   const num = m[2] ?? m[3] ?? '';
   const value = parsePriceValue(num);
   if (value === null) return null;
-  return { value, currency: detectCurrency(cur) };
+  return { value, currency: detectCurrency(cur), perUnit: PER_UNIT_AFTER_RE.test(after) };
 }
 
 /** Strip tags so adjacent elements are separated by whitespace, decode the
@@ -63,25 +72,26 @@ function htmlToSpacedText(html: string): string {
 }
 
 /** Collect every price token in a string (used for trusted price blocks). */
-function collectAll(text: string, out: PriceValue[]): void {
+function collectAll(text: string, out: Candidate[]): void {
   PRICE_TOKEN_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = PRICE_TOKEN_RE.exec(text))) {
-    const pv = priceFromMatch(m);
+    const end = m.index + m[0].length;
+    const pv = priceFromMatch(m, text.slice(end, end + 16));
     if (pv) out.push(pv);
   }
 }
 
 /** Collect price tokens that have nearby pricing context (used for body text). */
-function collectInContext(text: string, out: PriceValue[]): void {
+function collectInContext(text: string, out: Candidate[]): void {
   PRICE_TOKEN_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = PRICE_TOKEN_RE.exec(text))) {
     const end = m.index + m[0].length;
     const before = text.slice(Math.max(0, m.index - 24), m.index);
-    const after = text.slice(end, end + 14);
+    const after = text.slice(end, end + 16);
     if (BEFORE_CTX_RE.test(before) || AFTER_CTX_RE.test(after)) {
-      const pv = priceFromMatch(m);
+      const pv = priceFromMatch(m, after);
       if (pv) out.push(pv);
     }
   }
@@ -101,7 +111,7 @@ export function extractPricingDetails(html: string): { pricing_min?: PriceValue;
   const spacedText = htmlToSpacedText(html);
   const free_trial = FREE_TRIAL_RE.test(spacedText);
 
-  const prices: PriceValue[] = [];
+  const prices: Candidate[] = [];
 
   // 1. Any price inside an explicit price/tariff block is trusted as-is.
   const $ = cheerio.load(html);
@@ -115,9 +125,15 @@ export function extractPricingDetails(html: string): { pricing_min?: PriceValue;
 
   if (prices.length === 0) return { free_trial };
 
-  let min = prices[0];
-  for (const p of prices) {
+  // Prefer package/plan/period prices. A per-unit rate ("от 590 ₽ за лид")
+  // defines the service minimum only when nothing else is published — otherwise
+  // a tiny per-lead price would mask the real entry tariff.
+  const packagePrices = prices.filter((p) => !p.perUnit);
+  const pool = packagePrices.length > 0 ? packagePrices : prices;
+
+  let min = pool[0];
+  for (const p of pool) {
     if (p.value < min.value) min = p;
   }
-  return { pricing_min: min, free_trial };
+  return { pricing_min: { value: min.value, currency: min.currency }, free_trial };
 }

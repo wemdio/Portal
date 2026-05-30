@@ -353,6 +353,49 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
     }
   });
 
+  it('integrations — detects martech from the main-page script footprint and merges with showcased logos', async () => {
+    mockUrlResponses({
+      '/integrations': '<section class="integrations"><img alt="Slack" /></section>',
+      'example.com': `
+        <a href="/integrations">I</a>
+        <script src="https://cdn.amocrm.ru/js/button.js"></script>
+        <script src="//code.jivosite.com/widget/abc"></script>
+        <script src="https://widget.cloudpayments.ru/bundles/cloudpayments.js"></script>
+        <a href="https://www.wildberries.ru/catalog/1">WB</a>
+      `,
+    });
+
+    const result = await processSignalsForUrl('example.com', { extractors: ['integrations'] });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      // Signature-detected tools the company actually runs…
+      expect(result.integrations).toEqual(
+        expect.arrayContaining(['amoCRM', 'JivoSite', 'CloudPayments', 'Wildberries']),
+      );
+      // …merged with logos scraped from the explicit integrations section.
+      expect(result.integrations).toContain('Slack');
+    }
+  });
+
+  it('integrations — populates from main-page signatures even when the section has no usable logos', async () => {
+    mockUrlResponses({
+      '/integrations': '<section class="integrations"><p>Мы интегрируемся со множеством сервисов</p></section>',
+      'example.com': `
+        <a href="/integrations">I</a>
+        <script src="https://mod.calltouch.ru/init.js"></script>
+        <script src="https://s.marquiz.ru/v2/quiz.js"></script>
+      `,
+    });
+
+    const result = await processSignalsForUrl('example.com', { extractors: ['integrations'] });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.integrations).toEqual(expect.arrayContaining(['Calltouch', 'Marquiz']));
+    }
+  });
+
   it('blog_last_post follows the latest post link from the listing and extracts the full text', async () => {
     const listing = `
       <a href="/blog">Blog</a>

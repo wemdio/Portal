@@ -79,4 +79,26 @@ describe('extractPricingDetails', () => {
 
     expect(result.pricing_min).toEqual({ value: 45000, currency: 'RUB' });
   });
+
+  it('prefers a plan/period price over per-lead unit rates', () => {
+    const html = `
+      <div class="pricing">
+        <div class="plan"><h3>Старт</h3><div class="price">19 900 ₽/мес</div></div>
+        <div class="plan"><h3>Бизнес</h3><div class="price">69 900 ₽/мес</div></div>
+      </div>
+      <p>Также работаем по модели оплаты за результат — от 590 ₽ за лид</p>
+    `;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toEqual({ value: 19900, currency: 'RUB' });
+  });
+
+  it('falls back to a per-unit rate when the company prices only per lead', () => {
+    const html = `<h2>Генерация лидов от 590 ₽ за лид</h2>`;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toEqual({ value: 590, currency: 'RUB' });
+  });
 });
