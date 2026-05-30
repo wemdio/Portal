@@ -44,7 +44,9 @@
 
 **Чему верить вместо этого:**
 - **`raw_campaign_analytics_overview_snap`** — per-campaign **корректна** (overview endpoint реально принимает `id`; цифры различаются по кампаниям: 1, 2, …, 500). Используй её для lifetime-aggregate.
-- **Дневная динамика кампании** → строй из `raw_emails`: `SELECT timestamp_email::date, count(*) FROM raw_emails WHERE campaign_id = $1 AND ue_type = 1 GROUP BY 1`. Это единственный честный per-campaign дневной ряд отправок.
+- **Дневная динамика кампании** → используй готовый **`v_campaign_daily`** (migration 009, собран из `raw_emails`: `sent`/`lead_replies`/`our_replies`/`threads_with_reply` per campaign×date). Корректный, полный, без API. (Opens/clicks/bounces по дням в `raw_emails` нет — для них только починенный daily_snap для активных кампаний, либо overview lifetime.)
+
+> **Статус (migration 009, 2026-05-30):** код в 3 местах **исправлен** (`campaign_id`, проверено живым вызовом), sync передеплоен. Поломанные строки `raw_campaign_analytics_daily_snap` **удалены** (было 1.94M); починенный nightly sync пишет туда корректные строки, но только для активных кампаний (разреженно). Для полного дневного ряда — `v_campaign_daily`.
 
 **Корень бага (ingestion).** Endpoint `GET /campaigns/analytics/daily` фильтруется параметром **`campaign_id`**, и «если он пуст — возвращаются все кампании» ([Instantly API v2 docs](https://developer.instantly.ai/api/v2/campaign/getcampaignanalytics)). Наш код шлёт UUID под ключом `id`, который endpoint игнорирует → workspace-wide ответ, продублированный под каждой кампанией:
 - [`app/src/lib/instantly/client.ts:175`](../../app/src/lib/instantly/client.ts) — `getCampaignAnalyticsDaily` мапит `campaign_id` → `query.id` (copy-paste из `getCampaignAnalyticsOverview` строкой выше, где `id` корректен для overview).
