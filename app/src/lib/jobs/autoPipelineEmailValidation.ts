@@ -179,10 +179,18 @@ async function fullValidate(
     return 'valid';
   })();
 
-  // isValid: считаем «готовым» только то что точно достижимо.
-  // role_address и free_provider считаем валидными (см. либер-комментарий
-  // в shared.ts — для B2B SMB они работают). catch_all — risky, не считаем.
-  const isValid = result.result === 'ok' || status === 'role_address' || status === 'free_provider';
+  // isValid: считаем «готовым» то что достижимо ИЛИ не бьёт по репутации.
+  // role_address (info@/sales@) и free_provider (mail.ru/yandex) — рабочие
+  // адреса для B2B SMB (см. shared.ts). catch_all берём В РАБОТУ: сервер
+  // принимает любой адрес → нулевой риск hard-bounce, а role-адреса на
+  // catch-all почти всегда доходят до общего ящика компании. Раньше
+  // исключали как «risky» — по решению расширяем воронку. (Routing их и так
+  // не фильтровал по isValid — теперь они ещё и считаются «готовыми».)
+  const isValid =
+    result.result === 'ok' ||
+    status === 'role_address' ||
+    status === 'free_provider' ||
+    status === 'catch_all';
 
   return {
     status,

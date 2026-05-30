@@ -19,6 +19,10 @@ Live table of contents. AI updates this every time a new page is created or a pa
 
 - [eval/TEMPLATE-weekly-review.md](./eval/TEMPLATE-weekly-review.md) — шаблон еженедельного ревью query_log
 
+## Subjects (что работает в темах)
+
+- [subjects/winning-patterns.md](./subjects/winning-patterns.md) — выигрышные/мёртвые паттерны тем + анти-паттерн «тема × неверный ICP»
+
 ## Analyses
 
 _Per-question deep-dives. Format: `YYYY-MM-DD-<topic>.md`._

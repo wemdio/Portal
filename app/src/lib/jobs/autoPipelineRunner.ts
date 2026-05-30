@@ -109,6 +109,17 @@ export interface AutoPipelineConfig {
   /** Минимальный годовой оборот компании для top-up из BoB. В рублях. */
   base_of_bases_revenue_from: number;
   /**
+   * Разрешить live-добор из «базы баз» прямо в cron-прогоне (легаси-путь:
+   * берём сырые домены и скорим их Mailganer'ом на лету). По умолчанию ВЫКЛ.
+   *
+   * Зачем выкл: ~94.6% доменов базы получают score=0 (нет SPF) → их НЕ
+   * скрейпят, но они раздувают new_count и жгут Mailganer-вызовы. Фоновый
+   * скорер теперь наполняет кэш активными доменами 24/7, а cron берёт
+   * готовые score>0 из кэша (fetchTopUpFromCache). Live-путь оставлен как
+   * аварийный fallback под флагом.
+   */
+  base_of_bases_live_fallback?: boolean;
+  /**
    * Целевое количество компаний на enrichment. HH парсит сколько может, BoB
    * добирает до этого числа. При конверсии 6.3% (parsed → ready) 10 000 target
    * даёт ~630 ready/день ≈ 19k/мес.
@@ -206,6 +217,10 @@ async function loadSeenDomains(clientUserId: string): Promise<Set<string>> {
     .from('client_auto_pipeline_seen_employers')
     .select('domain')
     .eq('client_user_id', clientUserId)
+    // dry-run прогоны НЕ «жгут» кэш: их домены не попадают в дедуп, чтобы
+    // боевой запуск (или повторный замер) мог их обработать заново. В дедуп
+    // идут только реально обработанные (routed/stored/skipped/failed).
+    .neq('status', 'dry_run')
     .not('domain', 'is', null);
   if (error || !data) return new Set();
   const set = new Set<string>();
@@ -243,18 +258,39 @@ async function closeStaleRuns(clientUserId: string, maxAgeHours = 4): Promise<vo
     .lt('started_at', cutoff);
 }
 
-async function startRunRow(clientUserId: string): Promise<string | null> {
-  if (!supabaseAdmin) return null;
+/**
+ * Результат попытки начать прогон.
+ *   started        — создали running-запись, можно работать.
+ *   already_running — у клиента уже есть активный (не протухший) прогон;
+ *                     это НЕ ошибка — параллельный запуск (крон + ручной),
+ *                     просто пропускаем (lock через partial unique index).
+ *   error          — не смогли создать запись (БД недоступна и т.п.).
+ */
+type StartRunResult =
+  | { kind: 'started'; runId: string }
+  | { kind: 'already_running' }
+  | { kind: 'error' };
+
+async function startRunRow(clientUserId: string): Promise<StartRunResult> {
+  if (!supabaseAdmin) return { kind: 'error' };
   // Сначала подчищаем брошенные running-записи — чтобы дашборд не показывал
-  // вечный «идёт прогон» от убитого процесса.
+  // вечный «идёт прогон» от убитого процесса И чтобы lock ниже не считал
+  // зомби активным прогоном.
   await closeStaleRuns(clientUserId);
   const { data, error } = await supabaseAdmin
     .from('client_auto_pipeline_runs')
     .insert({ client_user_id: clientUserId, status: 'running' })
     .select('id')
     .single();
-  if (error || !data) return null;
-  return (data as { id: string }).id;
+  if (error) {
+    // 23505 = unique_violation: partial unique index (client_user_id) WHERE
+    // status='running' не дал вставить вторую running-запись → уже идёт
+    // прогон этого клиента. Атомарный lock — гонки check-then-insert нет.
+    if ((error as { code?: string }).code === '23505') return { kind: 'already_running' };
+    return { kind: 'error' };
+  }
+  if (!data) return { kind: 'error' };
+  return { kind: 'started', runId: (data as { id: string }).id };
 }
 
 async function finishRunRow(runId: string, patch: Record<string, unknown>): Promise<void> {
@@ -282,12 +318,25 @@ async function updateConfigLastRun(
 
 // ── Enrichment ───────────────────────────────────────────────────────────
 
+/**
+ * Сколько адресов берём с одного домена → столько лидов на компанию.
+ * Клиент выбрал «до 2»: если на сайте несколько почт, берём 2 (напр. info@
+ * + sales@). Скрейпер в среднем находит ~3/домен, остальные отбрасываем.
+ */
+const MAX_EMAILS_PER_DOMAIN = 2;
+
 export interface EnrichmentResult {
   employer: HhEmployer;
   domain: string | null;
+  /** Первичный адрес (первый найденный) — пишется в seen как resolved_email. */
   email: string | null;
-  /** Результат DNS+MX+SMTP-валидации найденного email. null если email не нашли. */
+  /** Результат DNS+MX+SMTP-валидации первичного email. null если email не нашли. */
   emailValidation: AutoPipelineEmailValidation | null;
+  /**
+   * Доп. адреса свыше первого (до MAX_EMAILS_PER_DOMAIN-1 штук). Каждый
+   * становится отдельным лидом в той же кампании. Пусто, если найден ≤1 адрес.
+   */
+  additionalEmails: { address: string; validation: AutoPipelineEmailValidation | null }[];
   score: number | null;
   spf: string | null;
   endpointRaw: Record<string, unknown> | null;
@@ -357,14 +406,23 @@ async function enrichEmployers(
         // или `skipped`, и email нам не нужен.
         let email: string | null = null;
         let emailValidation: AutoPipelineEmailValidation | null = null;
+        const additionalEmails: { address: string; validation: AutoPipelineEmailValidation | null }[] = [];
         if (shouldDoEmailWork(endpoint.score, scoreBuckets) && emp.siteUrl) {
           const scrape = await scrapeEmails(emp.siteUrl, {
             timeout: 12_000,
             maxPages: 5,
           }).catch(() => ({ emails: [] as string[] }));
-          email = scrape.emails[0] ?? null;
-          if (email) {
-            emailValidation = await validateEmailForAutoPipeline(email, domainCache);
+          // Берём до MAX_EMAILS_PER_DOMAIN адресов — первый primary, остальные
+          // как доп. лиды. Валидируем каждый (domainCache переиспользует MX).
+          const candidates = scrape.emails.slice(0, MAX_EMAILS_PER_DOMAIN);
+          for (let c = 0; c < candidates.length; c++) {
+            const validation = await validateEmailForAutoPipeline(candidates[c], domainCache);
+            if (c === 0) {
+              email = candidates[0];
+              emailValidation = validation;
+            } else {
+              additionalEmails.push({ address: candidates[c], validation });
+            }
           }
         }
 
@@ -373,6 +431,7 @@ async function enrichEmployers(
           domain,
           email,
           emailValidation,
+          additionalEmails,
           score: endpoint.score,
           spf: endpoint.spf,
           endpointRaw: endpoint.raw,
@@ -384,6 +443,7 @@ async function enrichEmployers(
           domain,
           email: null,
           emailValidation: null,
+          additionalEmails: [],
           score: null,
           spf: null,
           endpointRaw: null,
@@ -527,6 +587,31 @@ async function upsertSeenEmployers(rows: SeenEmployerUpsert[]): Promise<void> {
   }
 }
 
+/**
+ * Помечает уже записанные seen-строки bucket'а как failed.
+ *
+ * При батчевой обработке seen-строки upsert'ятся со status='routed' ПО ЧАНКАМ,
+ * до того как leads реально отправлены в Instantly. Если append лидов в
+ * кампанию падает — нужно откатить статус этих строк на 'failed' прямо в БД
+ * (массива в памяти уже нет). Матчим по routed_bucket_id + processed_at
+ * (метка текущего прогона), чтобы не задеть строки прошлых прогонов.
+ */
+async function markRoutedBucketFailed(
+  clientUserId: string,
+  bucketId: string,
+  processedAt: string,
+  errorMessage: string,
+): Promise<void> {
+  if (!supabaseAdmin) return;
+  await supabaseAdmin
+    .from('client_auto_pipeline_seen_employers')
+    .update({ status: 'failed', error_message: errorMessage })
+    .eq('client_user_id', clientUserId)
+    .eq('routed_bucket_id', bucketId)
+    .eq('processed_at', processedAt)
+    .eq('status', 'routed');
+}
+
 // ── Main entry ───────────────────────────────────────────────────────────
 
 export async function runAutoPipelineForClient(
@@ -553,12 +638,24 @@ export async function runAutoPipelineForClient(
     error,
   });
 
-  // 0. Start run row early — фиксируем сам факт прогона.
-  const runId = await startRunRow(clientUserId);
-  if (!runId) {
+  // 0. Start run row early — фиксируем сам факт прогона. Lock: если у клиента
+  //    уже идёт прогон (крон + ручной запуск пересеклись), пропускаем —
+  //    параллельные прогоны конкурируют за HH/scrape/Mailganer и тормозят
+  //    друг друга.
+  const start = await startRunRow(clientUserId);
+  if (start.kind === 'already_running') {
+    await logAudit(
+      'auto-pipeline.skip.concurrent',
+      'Пропуск: у клиента уже идёт активный прогон (lock)',
+      logCtx,
+    );
+    return emptyResult('');
+  }
+  if (start.kind === 'error') {
     await logError('auto-pipeline.run_row.failed', null, logCtx);
     return { ...emptyResult(''), status: 'failed', error: 'Не удалось создать запись прогона' };
   }
+  const runId = start.runId;
 
   try {
     // 1. Конфиг.
@@ -656,13 +753,15 @@ export async function runAutoPipelineForClient(
         log: (m) => void logAudit('auto-pipeline.bob-cache', m, logCtx),
       });
 
-      // 2. Если кэш не дал достаточно (background scorer ещё не дошёл до
-      //    нужных доменов или их там просто нет) — fallback на прямой BoB.
-      //    Этот путь scoring'ит домены через Mailganer на лету и тоже
-      //    наполняет кэш через getOrFetchScore (это побочный эффект).
+      // 2. Если кэш не дал достаточно — ТОЛЬКО при включённом флаге
+      //    base_of_bases_live_fallback идём в прямой BoB. По умолчанию ВЫКЛ:
+      //    этот путь тянет сырые домены, ~94.6% из которых score=0 (их не
+      //    скрейпят) — они лишь раздувают new_count и жгут Mailganer-вызовы.
+      //    Фоновый скорер наполняет кэш активными доменами 24/7, поэтому cron
+      //    полагается на кэш, а не доскоривает сырьё на лету.
       const stillNeeded = neededFromBob - cacheResult.employers.length;
       let bobLiveResult: Awaited<ReturnType<typeof fetchTopUpFromBaseOfBases>> | null = null;
-      if (stillNeeded > 0) {
+      if (config.base_of_bases_live_fallback === true && stillNeeded > 0) {
         bobLiveResult = await fetchTopUpFromBaseOfBases({
           neededCount: stillNeeded,
           revenueFrom: config.base_of_bases_revenue_from,
@@ -740,25 +839,160 @@ export async function runAutoPipelineForClient(
       );
     }
 
-    // 5. Enrich.
-    // Mailganer per-domain кэш статистика для этого прогона — поможет видеть
-    // насколько кэш экономит API-вызовы (через 2-3 недели работы должно быть
-    // >50% hit-rate, что эквивалентно ускорению cron'а в ~2 раза).
+    // 5. Enrich + route + upsert БАТЧАМИ по CHUNK_SIZE.
+    //
+    // Раньше держали все ~11k EnrichmentResult + ~11k SeenUpsert в памяти
+    // разом до финального bulk-upsert'а → OOM (SIGKILL 137) на больших
+    // прогонах (employer-объекты + endpoint_raw JSON + scrape-результаты +
+    // MX-cache). Теперь обрабатываем чанками: enrich → route → upsert seen →
+    // следующий чанк (ссылки выходят из scope, GC освобождает). В памяти
+    // одновременно максимум 1 чанк + накопленный groupedLeads (только routed —
+    // их кратно меньше, в dry-run вообще пусто).
     const mailganerStats = emptyCacheStats();
+    const groupedLeads = new Map<string, { bucket: ScoreBucket; leads: LeadCreatePayload[] }>();
+    const now = new Date().toISOString();
 
-    const enrichments = await enrichEmployers(
-      fresh,
-      {
-        url: config.endpoint_url,
-        apiKey: config.endpoint_api_key ?? '',
-        authScheme: config.endpoint_auth_scheme ?? 'Bearer',
-        timeoutMs: config.endpoint_timeout_ms,
-      },
-      config.score_buckets,
-      ENRICH_CONCURRENCY,
-      pacing.perItemPauseMs,
-      mailganerStats,
-    );
+    let routedCount = 0;
+    let storedCount = 0;
+    let skippedCount = 0;
+    let withSiteCount = 0;
+    let withScoreCount = 0;
+    let withEmailCount = 0;
+    let emailValidCount = 0;
+
+    const CHUNK_SIZE = 500;
+    for (let chunkStart = 0; chunkStart < fresh.length; chunkStart += CHUNK_SIZE) {
+      const chunk = fresh.slice(chunkStart, chunkStart + CHUNK_SIZE);
+
+      const enrichments = await enrichEmployers(
+        chunk,
+        {
+          url: config.endpoint_url,
+          apiKey: config.endpoint_api_key ?? '',
+          authScheme: config.endpoint_auth_scheme ?? 'Bearer',
+          timeoutMs: config.endpoint_timeout_ms,
+        },
+        config.score_buckets,
+        ENRICH_CONCURRENCY,
+        pacing.perItemPauseMs,
+        mailganerStats,
+      );
+
+      const seenUpserts: SeenEmployerUpsert[] = [];
+
+      for (const enr of enrichments) {
+        // Воронка — считаем по каждому enrichment независимо от routing'а.
+        if (enr.employer.siteUrl) withSiteCount++;
+        if (enr.score !== null) withScoreCount++;
+        if (enr.email) withEmailCount++;
+        // «Готовых контактов» = валидные адреса (до 2 на домен), т.к. каждый
+        // станет отдельным лидом. with_email остаётся «доменов с ≥1 почтой».
+        if (enr.emailValidation?.isValid) emailValidCount++;
+        for (const extra of enr.additionalEmails) {
+          if (extra.validation?.isValid) emailValidCount++;
+        }
+
+        const decision = decideRoute(enr, config);
+        const base: Omit<SeenEmployerUpsert, 'status' | 'skip_reason' | 'error_message' | 'routed_bucket_id' | 'routed_campaign_id'> = {
+          client_user_id: clientUserId,
+          hh_employer_id: enr.employer.id,
+          hh_employer_name: enr.employer.name,
+          domain: enr.domain,
+          site_url: enr.employer.siteUrl,
+          endpoint_score: enr.score,
+          endpoint_spf: enr.spf,
+          endpoint_raw: enr.endpointRaw,
+          resolved_email: enr.email,
+          email_found: enr.email,
+          email_validation_status: enr.emailValidation?.status ?? null,
+          email_validation_details: enr.emailValidation?.details ?? null,
+          source: detectSource(enr.employer.id),
+          processed_at: now,
+        };
+
+        // Dry-run shortcut — пишем всё как 'dry_run' и не идём ни в routing,
+        // ни в Instantly. Это даёт «измерительный» прогон без побочных эффектов.
+        if (config.dry_run) {
+          seenUpserts.push({
+            ...base,
+            status: 'dry_run',
+            skip_reason: null,
+            error_message: null,
+            routed_bucket_id: null,
+            routed_campaign_id: null,
+          });
+          continue;
+        }
+
+        if (decision.kind === 'skipped') {
+          seenUpserts.push({
+            ...base,
+            status: 'skipped',
+            skip_reason: decision.reason,
+            error_message: null,
+            routed_bucket_id: null,
+            routed_campaign_id: null,
+          });
+          skippedCount++;
+        } else if (decision.kind === 'stored') {
+          // Stored = score попал в bucket, но bucket с пустой sequence
+          // (клиент решил не отправлять). Записываем routed_bucket_id, чтобы
+          // в журнале было видно — попал в этот диапазон, просто не отправили.
+          seenUpserts.push({
+            ...base,
+            status: 'stored',
+            skip_reason: null,
+            error_message: null,
+            routed_bucket_id: decision.bucket.id,
+            routed_campaign_id: null,
+          });
+          storedCount++;
+        } else {
+          const bucket = decision.bucket;
+          const customVars = {
+            hh_employer_id: enr.employer.id,
+            hh_url: enr.employer.hhUrl ?? '',
+            score: String(enr.score),
+            spf: enr.spf ?? '',
+          };
+          // До MAX_EMAILS_PER_DOMAIN лидов на компанию: primary + доп. адреса
+          // (напр. info@ и sales@) — отдельными лидами в той же кампании.
+          const leadEmails = [enr.email!, ...enr.additionalEmails.map((a) => a.address)];
+
+          let group = groupedLeads.get(bucket.id);
+          if (!group) {
+            group = { bucket, leads: [] };
+            groupedLeads.set(bucket.id, group);
+          }
+          for (const addr of leadEmails) {
+            group.leads.push({
+              email: addr,
+              company_name: enr.employer.name,
+              website: enr.employer.siteUrl ?? undefined,
+              custom_variables: customVars,
+            });
+          }
+
+          // seen — одна строка на домен (resolved_email = primary). Статус
+          // routed фиксируем ПОСЛЕ успешного append. routedCount считает
+          // ЛИДЫ (адреса), а не домены — это «добавлено в работу».
+          seenUpserts.push({
+            ...base,
+            status: 'routed',
+            skip_reason: null,
+            error_message: null,
+            routed_bucket_id: bucket.id,
+            routed_campaign_id: bucket.instantly_campaign_id,
+          });
+          routedCount += leadEmails.length;
+        }
+      } // конец for (enr of enrichments)
+
+      // Upsert seen ЭТОГО чанка сразу — освобождаем память перед следующим.
+      // chunk + enrichments + seenUpserts выходят из scope на следующей
+      // итерации, GC их собирает. Это и есть фикс OOM.
+      await upsertSeenEmployers(seenUpserts);
+    } // конец for (chunkStart) — chunk loop
 
     await logAudit(
       'auto-pipeline.mailganer-cache',
@@ -766,122 +1000,8 @@ export async function runAutoPipelineForClient(
       { ...logCtx, ...mailganerStats },
     );
 
-    // 5. Routing.
-    const groupedLeads = new Map<string, { bucket: ScoreBucket; leads: LeadCreatePayload[] }>();
-    const seenUpserts: SeenEmployerUpsert[] = [];
-    const now = new Date().toISOString();
-
-    let routedCount = 0;
-    let storedCount = 0;
-    let skippedCount = 0;
-
-    // Воронка (для dashboard/отчёта) — считаем по enrichments независимо от
-    // routing'а. Это даёт клиенту увидеть в dry-run «сколько в день готовых
-    // контактов выходит» без участия Instantly.
-    let withSiteCount = 0;
-    let withScoreCount = 0;
-    let withEmailCount = 0;
-    let emailValidCount = 0;
-    for (const enr of enrichments) {
-      if (enr.employer.siteUrl) withSiteCount++;
-      if (enr.score !== null) withScoreCount++;
-      if (enr.email) withEmailCount++;
-      if (enr.emailValidation?.isValid) emailValidCount++;
-    }
-
-    for (const enr of enrichments) {
-      const decision = decideRoute(enr, config);
-      const base: Omit<SeenEmployerUpsert, 'status' | 'skip_reason' | 'error_message' | 'routed_bucket_id' | 'routed_campaign_id'> = {
-        client_user_id: clientUserId,
-        hh_employer_id: enr.employer.id,
-        hh_employer_name: enr.employer.name,
-        domain: enr.domain,
-        site_url: enr.employer.siteUrl,
-        endpoint_score: enr.score,
-        endpoint_spf: enr.spf,
-        endpoint_raw: enr.endpointRaw,
-        resolved_email: enr.email,
-        email_found: enr.email,
-        email_validation_status: enr.emailValidation?.status ?? null,
-        email_validation_details: enr.emailValidation?.details ?? null,
-        source: detectSource(enr.employer.id),
-        processed_at: now,
-      };
-
-      // Dry-run shortcut — пишем всё как 'dry_run' и не идём ни в routing,
-      // ни в Instantly. Это даёт «измерительный» прогон без побочных эффектов.
-      if (config.dry_run) {
-        seenUpserts.push({
-          ...base,
-          status: 'dry_run',
-          skip_reason: null,
-          error_message: null,
-          routed_bucket_id: null,
-          routed_campaign_id: null,
-        });
-        continue;
-      }
-
-      if (decision.kind === 'skipped') {
-        seenUpserts.push({
-          ...base,
-          status: 'skipped',
-          skip_reason: decision.reason,
-          error_message: null,
-          routed_bucket_id: null,
-          routed_campaign_id: null,
-        });
-        skippedCount++;
-      } else if (decision.kind === 'stored') {
-        // Stored = score попал в bucket, но bucket с пустой sequence
-        // (клиент решил не отправлять). Записываем routed_bucket_id, чтобы
-        // в журнале было видно — попал в этот диапазон, просто не отправили.
-        seenUpserts.push({
-          ...base,
-          status: 'stored',
-          skip_reason: null,
-          error_message: null,
-          routed_bucket_id: decision.bucket.id,
-          routed_campaign_id: null,
-        });
-        storedCount++;
-      } else {
-        const bucket = decision.bucket;
-        const lead: LeadCreatePayload = {
-          email: enr.email!,
-          company_name: enr.employer.name,
-          website: enr.employer.siteUrl ?? undefined,
-          custom_variables: {
-            hh_employer_id: enr.employer.id,
-            hh_url: enr.employer.hhUrl ?? '',
-            score: String(enr.score),
-            spf: enr.spf ?? '',
-          },
-        };
-
-        let group = groupedLeads.get(bucket.id);
-        if (!group) {
-          group = { bucket, leads: [] };
-          groupedLeads.set(bucket.id, group);
-        }
-        group.leads.push(lead);
-
-        // Запись в seen — статус=routed мы зафиксируем ПОСЛЕ успешного append.
-        seenUpserts.push({
-          ...base,
-          status: 'routed',
-          skip_reason: null,
-          error_message: null,
-          routed_bucket_id: bucket.id,
-          routed_campaign_id: bucket.instantly_campaign_id,
-        });
-        routedCount++;
-      }
-    }
-
     // 6. Append leads per bucket. В dry-run шаг пропускаем целиком —
-    // groupedLeads будет пустым, потому что routing-блок выше делает
-    // continue для каждого employer'а ещё ДО groupedLeads.set.
+    // groupedLeads пуст (routing-блок делает continue ещё ДО groupedLeads.set).
     let failedCount = 0;
     for (const group of groupedLeads.values()) {
       try {
@@ -898,26 +1018,26 @@ export async function runAutoPipelineForClient(
           err,
           { ...logCtx, bucket: group.bucket.label, leadCount: group.leads.length },
         );
-        // Пометить все employers этого bucket как failed.
-        for (const su of seenUpserts) {
-          if (su.routed_bucket_id === group.bucket.id) {
-            su.status = 'failed';
-            su.error_message = msg.slice(0, 500);
-          }
-        }
+        // seen уже записаны по чанкам со status='routed' — обновляем их в БД
+        // на 'failed' (массива seenUpserts в памяти больше нет).
+        await markRoutedBucketFailed(clientUserId, group.bucket.id, now, msg.slice(0, 500));
         failedCount += group.leads.length;
         routedCount -= group.leads.length;
       }
     }
 
-    // 7. Upsert seen.
-    await upsertSeenEmployers(seenUpserts);
+    // Разбивка new_count по источникам — для дашборда (HH vs база баз).
+    // BoB-employers имеют id с префиксом 'bob:' (см. detectSource).
+    const newFromBob = fresh.filter((e) => detectSource(e.id) === 'base_of_bases').length;
+    const newFromHh = fresh.length - newFromBob;
 
     // 8. Finalize run row.
     await finishRunRow(runId, {
       status: 'completed',
       parsed_count: employers.length,
       new_count: fresh.length,
+      new_from_hh: newFromHh,
+      new_from_bob: newFromBob,
       with_site: withSiteCount,
       with_score: withScoreCount,
       with_email: withEmailCount,

@@ -1454,6 +1454,117 @@ async def run_deadman_check():
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
+async def run_li_outreach_report() -> None:
+    """Ежедневный дайджест здоровья LinkedIn-аутрича → health-бот (19:00 МСК).
+
+    Зеркалит app/scripts/li-outreach-healthcheck.sql. Каждый инвариант должен
+    быть 0; пункты GPT и «ошибки» — информационный контекст, не фейл.
+    """
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+    except Exception as e:
+        await send_telegram(
+            f"🔗 <b>LinkedIn outreach</b>\nНе смог подключиться к БД для отчёта: "
+            f"{_normalize_network_error(e)}",
+            force=True,
+        )
+        return
+    try:
+        raw_ph = await conn.fetchval(r"""
+            SELECT COUNT(*) FROM li_leads l
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(l.conversation_history,'[]'::jsonb)) m
+            WHERE m->>'role'='assistant' AND (m->>'content') ~ '\{\{.*\}\}'
+        """) or 0
+        dups = await conn.fetchval("""
+            SELECT COUNT(*) FROM (
+              SELECT l.id, m->>'content' AS content, COUNT(*) AS n
+              FROM li_leads l
+              CROSS JOIN LATERAL jsonb_array_elements(COALESCE(l.conversation_history,'[]'::jsonb)) m
+              WHERE m->>'role'='assistant' AND length(m->>'content')>20
+              GROUP BY l.id, m->>'content' HAVING COUNT(*)>1
+            ) d
+        """) or 0
+        replied_not_stopped = await conn.fetchval("""
+            SELECT COUNT(*) FROM li_campaign_leads cl
+            JOIN li_campaigns c ON c.id=cl.campaign_id
+            WHERE cl.user_replied=true AND c.stop_on_reply=true
+              AND cl.status NOT IN ('completed','error','skipped')
+        """) or 0
+        conn_no_welcome = await conn.fetchval("""
+            SELECT COUNT(*) FROM li_campaign_leads cl
+            JOIN li_campaigns c ON c.id=cl.campaign_id
+            JOIN li_leads l ON l.id=cl.lead_id
+            WHERE cl.invite_accepted=true AND c.status='running'
+              AND c.welcome_message IS NOT NULL AND c.welcome_message<>''
+              AND cl.welcome_sent_at IS NULL AND l.status='connected'
+        """) or 0
+        gpt = await conn.fetchrow("""
+            SELECT
+              COUNT(*) FILTER (WHERE message ILIKE '%GPT персонализировал%') AS ok,
+              COUNT(*) FILTER (WHERE message ILIKE '%вернул шаблон без изменений%') AS noop,
+              COUNT(*) FILTER (WHERE message ILIKE '%Ошибка GPT%') AS err
+            FROM li_campaign_logs WHERE created_at > NOW() - INTERVAL '24 hours'
+        """)
+        bare = await conn.fetchrow("""
+            SELECT
+              (SELECT COUNT(*) FROM li_campaigns WHERE ai_model IS NOT NULL AND ai_model<>'' AND ai_model NOT LIKE '%/%') AS camp,
+              (SELECT COUNT(*) FROM li_settings  WHERE openai_model IS NOT NULL AND openai_model<>'' AND openai_model NOT LIKE '%/%') AS sett
+        """)
+        byok = await conn.fetchval("""
+            SELECT COUNT(*) FROM li_settings WHERE openai_api_key IS NOT NULL AND openai_api_key<>''
+        """) or 0
+        errs_24h = await conn.fetchval("""
+            SELECT COUNT(*) FROM li_campaign_logs
+            WHERE created_at > NOW() - INTERVAL '24 hours'
+              AND level IN ('warning','error') AND message NOT ILIKE '%Дневной лимит%'
+        """) or 0
+        invites_today = await conn.fetchval("""
+            SELECT COUNT(*) FROM li_campaign_logs
+            WHERE created_at >= CURRENT_DATE AND message ILIKE '%Инвайт отправлен%'
+        """) or 0
+    except Exception as e:
+        await send_telegram(
+            f"🔗 <b>LinkedIn outreach</b>\nОшибка при сборе отчёта: "
+            f"{_format_exception_message(e)}",
+            force=True,
+        )
+        return
+    finally:
+        await conn.close()
+
+    gpt_ok, gpt_noop, gpt_err = (gpt["ok"] or 0), (gpt["noop"] or 0), (gpt["err"] or 0)
+    bare_total = (bare["camp"] or 0) + (bare["sett"] or 0)
+
+    def mark(v: int) -> str:
+        return "✅" if v == 0 else "⚠️"
+
+    hard_fail = any(v > 0 for v in (
+        raw_ph, dups, replied_not_stopped, conn_no_welcome, bare_total, byok, gpt_err,
+    ))
+    header = (
+        "🔴 LinkedIn outreach — есть отклонения"
+        if hard_fail else
+        "🟢 LinkedIn outreach — всё чисто"
+    )
+
+    lines = [
+        f"<b>{header}</b>",
+        f"<i>{_now_msk()}</i>",
+        "",
+        f"{mark(raw_ph)} Сырые плейсхолдеры в отправленных: {raw_ph}",
+        f"{mark(dups)} Дубли сообщений лиду: {dups}",
+        f"{mark(replied_not_stopped)} Ответили, но не остановлены: {replied_not_stopped}",
+        f"{mark(conn_no_welcome)} Connected без welcome (running): {conn_no_welcome}",
+        f"{mark(bare_total)} Bare-модели без provider/: {bare_total}",
+        f"{mark(byok)} Остаточные BYOK-ключи: {byok}",
+        f"{mark(gpt_err)} GPT за 24ч: ok {gpt_ok} / шаблон {gpt_noop} / ошибок {gpt_err}",
+        "",
+        f"ℹ️ Инвайтов сегодня: {invites_today} · прочих ошибок за 24ч: {errs_24h} "
+        f"(обычно битые профили из импорта)",
+    ]
+    await send_telegram("\n".join(lines), force=True)
+
+
 async def main():
     _require("DATABASE_URL or SUPABASE_DB_URL", DATABASE_URL)
     _require("TELEGRAM_HEALTH_CHAT_ID", TELEGRAM_CHAT_ID)
@@ -1494,6 +1605,18 @@ async def main():
             max_instances=2,
             misfire_grace_time=SUPABASE_KEEPALIVE_INTERVAL_SEC,
         )
+
+    # Daily LinkedIn-outreach health digest at 19:00 MSK == 16:00 UTC.
+    # MSK is a fixed UTC+3 (no DST since 2014), so a UTC cron hour is stable.
+    # misfire_grace_time=1h: if the container was down at 16:00, still fire on
+    # the next start within the hour rather than silently skipping the day.
+    scheduler.add_job(
+        run_li_outreach_report, "cron",
+        hour=16, minute=0, timezone="UTC",
+        id="li_outreach_report",
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
 
     # Run first health check now
     await run_health_check()
