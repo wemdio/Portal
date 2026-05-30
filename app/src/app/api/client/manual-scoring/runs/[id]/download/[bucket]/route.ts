@@ -74,12 +74,19 @@ export async function GET(
     ? 'domain, score, rating, error_message'
     : 'company_name, domain, score, rating, email, email_validation_status';
 
-  const { data: rowsData, error: rowsErr } = await supabase
+  let rowsQuery = supabase
     .from('client_manual_score_rows')
     .select(columns)
     .eq('run_id', id)
-    .eq('bucket', bucket)
-    .order('score', { ascending: false });
+    .eq('bucket', bucket);
+  if (!isStorage) {
+    // Активные файлы — только готовые к аутричу: есть почта И название.
+    // Высоко-отскоренные «без почты» сюда не попадают (они не контакты).
+    rowsQuery = rowsQuery.not('email', 'is', null).not('company_name', 'is', null);
+  }
+  const { data: rowsData, error: rowsErr } = await rowsQuery.order('score', {
+    ascending: false,
+  });
 
   if (rowsErr) {
     return new Response('DB error', { status: 500 });

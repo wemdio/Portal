@@ -431,10 +431,13 @@ async function finalize(runId: string): Promise<ProcessResult> {
       error: 'supabaseAdmin gone',
     };
   }
-  // Считаем breakdown по bucket'ам
+  // Считаем breakdown по bucket'ам. ВАЖНО: активные тиры (medium/high/top)
+  // считаем ТОЛЬКО готовых к аутричу — с почтой И названием. Высоко-
+  // отскоренные «без почты» не контакты и в эти счётчики/файлы не идут.
+  // storage/invalid считаем как есть. processed_count — все обработанные.
   const { data: bucketCounts } = await supabaseAdmin
     .from('client_manual_score_rows')
-    .select('bucket')
+    .select('bucket, email, company_name')
     .eq('run_id', runId);
 
   const buckets: Record<ManualBucket, number> = {
@@ -444,19 +447,30 @@ async function finalize(runId: string): Promise<ProcessResult> {
     top: 0,
     invalid: 0,
   };
-  for (const r of (bucketCounts ?? []) as Array<{ bucket: ManualBucket | null }>) {
-    if (r.bucket && r.bucket in buckets) buckets[r.bucket]++;
+  let processed = 0;
+  const isReady = (r: { email: string | null; company_name: string | null }) =>
+    !!r.email && !!r.company_name && r.company_name.trim().length > 0;
+  for (const r of (bucketCounts ?? []) as Array<{
+    bucket: ManualBucket | null;
+    email: string | null;
+    company_name: string | null;
+  }>) {
+    if (!r.bucket || !(r.bucket in buckets)) continue;
+    processed += 1;
+    if (r.bucket === 'storage' || r.bucket === 'invalid') {
+      buckets[r.bucket] += 1;
+    } else if (isReady(r)) {
+      // активный тир — только готовый контакт
+      buckets[r.bucket] += 1;
+    }
   }
-
-  const total =
-    buckets.storage + buckets.medium + buckets.high + buckets.top + buckets.invalid;
 
   await supabaseAdmin
     .from('client_manual_score_runs')
     .update({
       status: 'completed',
       finished_at: new Date().toISOString(),
-      processed_count: total,
+      processed_count: processed,
       bucket_storage_count: buckets.storage,
       bucket_medium_count: buckets.medium,
       bucket_high_count: buckets.high,
@@ -464,7 +478,7 @@ async function finalize(runId: string): Promise<ProcessResult> {
     })
     .eq('id', runId);
 
-  return { status: 'completed', total, buckets };
+  return { status: 'completed', total: processed, buckets };
 }
 
 /**
