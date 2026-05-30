@@ -956,9 +956,28 @@ export async function runAutoPipelineForClient(
             score: String(enr.score),
             spf: enr.spf ?? '',
           };
-          // До MAX_EMAILS_PER_DOMAIN лидов на компанию: primary + доп. адреса
-          // (напр. info@ и sales@) — отдельными лидами в той же кампании.
-          const leadEmails = [enr.email!, ...enr.additionalEmails.map((a) => a.address)];
+          // В работу — только ВАЛИДНЫЕ почты (valid/role/free/catch_all):
+          // правило «готовый = почта валидная или catch-all + название».
+          // До MAX_EMAILS_PER_DOMAIN лидов на компанию (напр. info@ + sales@).
+          const leadEmails: string[] = [];
+          if (enr.email && enr.emailValidation?.isValid) leadEmails.push(enr.email);
+          for (const ae of enr.additionalEmails) {
+            if (ae.validation?.isValid) leadEmails.push(ae.address);
+          }
+
+          if (leadEmails.length === 0) {
+            // Score в активном bucket, но валидной почты нет → не контакт.
+            seenUpserts.push({
+              ...base,
+              status: 'skipped',
+              skip_reason: 'no_valid_email',
+              error_message: null,
+              routed_bucket_id: null,
+              routed_campaign_id: null,
+            });
+            skippedCount++;
+            continue;
+          }
 
           let group = groupedLeads.get(bucket.id);
           if (!group) {
