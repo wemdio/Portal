@@ -109,4 +109,70 @@ describe('extractCustomers', () => {
 
     expect(result).toEqual([]);
   });
+
+  it('drops metrics, form labels, roles, industries and article titles, keeping only real clients', () => {
+    const html = `
+      <section class="clients">
+        <span>Сбербанк</span>
+        <span>456 обращений в месяц</span>
+        <span>Среднегодовая выручка:</span>
+        <span>генеральный директор ООО «Перегородки в офис»</span>
+        <span>Медицина</span>
+        <span>Что такое AI маркетинг?</span>
+        <span>реклама в яндекс директ</span>
+        <span>Менеджер маркетплейсов</span>
+        <span>Татьяна</span>
+        <span>Газпром нефть</span>
+      </section>
+    `;
+
+    const result = extractCustomers(html);
+
+    expect(result).toEqual(expect.arrayContaining(['Сбербанк', 'Газпром нефть']));
+    expect(result).not.toContain('456 обращений в месяц');
+    expect(result).not.toContain('Среднегодовая выручка:');
+    expect(result).not.toContain('Медицина');
+    expect(result).not.toContain('Что такое AI маркетинг?');
+    expect(result).not.toContain('реклама в яндекс директ');
+    expect(result).not.toContain('Менеджер маркетплейсов');
+    expect(result).not.toContain('Татьяна');
+    expect(result.some((s) => s.includes('директор'))).toBe(false);
+  });
+
+  it('drops cities, countries and product-feature phrases, keeping only real clients', () => {
+    const html = `
+      <section class="clients">
+        <span>Сбербанк</span>
+        <span>Москва</span>
+        <span>Нью-Йорк</span>
+        <span>Соединенные Штаты Америки</span>
+        <span>Вся команда в одном месте</span>
+        <span>График активности и скорость ответа</span>
+        <span>Крылатская ул.</span>
+        <span>Тинькофф</span>
+      </section>
+    `;
+
+    const result = extractCustomers(html);
+
+    expect(result).toEqual(expect.arrayContaining(['Сбербанк', 'Тинькофф']));
+    expect(result).not.toContain('Москва');
+    expect(result).not.toContain('Нью-Йорк');
+    expect(result).not.toContain('Соединенные Штаты Америки');
+    expect(result).not.toContain('Вся команда в одном месте');
+    expect(result).not.toContain('Крылатская ул.');
+  });
+
+  it('recovers the real brand from a leading CMS hash prefix', () => {
+    const html = `
+      <section class="clients">
+        <img alt="ddec1ab1 verticali" src="/1.png" />
+        <img alt="cfbaa2cdac8ff alfa money" src="/2.png" />
+      </section>
+    `;
+
+    const result = extractCustomers(html);
+
+    expect(result).toEqual(expect.arrayContaining(['verticali', 'alfa money']));
+  });
 });

@@ -1,4 +1,4 @@
-import { detectSignals, determineProfile } from '@/lib/enrich/signalDetector';
+import { detectSignals, determineProfile, integrationsFromSignals, type DetectedSignal } from '@/lib/enrich/signalDetector';
 
 describe('detectSignals', () => {
   it('returns empty array for empty HTML', () => {
@@ -196,6 +196,61 @@ describe('detectSignals', () => {
     expect(signals.some((s) => s.id === 'sendpulse')).toBe(true);
   });
 
+  it('detects Google Tag Manager container', () => {
+    const html = '<script src="https://www.googletagmanager.com/gtm.js?id=GTM-ABCDE"></script>';
+    expect(detectSignals(html).some((s) => s.id === 'gtm')).toBe(true);
+  });
+
+  it('detects Roistat call-tracking', () => {
+    const html = '<script>var roistatProjectId="123"; (function(w,d){})(window,document);</script>';
+    expect(detectSignals(html).some((s) => s.id === 'roistat')).toBe(true);
+  });
+
+  it('detects Tidio chat', () => {
+    const html = '<script src="//code.tidio.co/abc123.js"></script>';
+    expect(detectSignals(html).some((s) => s.id === 'tidio')).toBe(true);
+  });
+
+  it('detects Webim chat', () => {
+    const html = '<script src="https://demo.webim.ru/js/button.js"></script>';
+    expect(detectSignals(html).some((s) => s.id === 'webim')).toBe(true);
+  });
+
+  it('detects Marquiz quiz', () => {
+    const html = '<script src="https://s.marquiz.ru/v2/quiz.js"></script>';
+    expect(detectSignals(html).some((s) => s.id === 'marquiz')).toBe(true);
+  });
+
+  it('detects YClients booking widget', () => {
+    const html = '<script src="https://w123.yclients.com/widgetJS"></script>';
+    expect(detectSignals(html).some((s) => s.id === 'yclients')).toBe(true);
+  });
+
+  it('detects Salesforce', () => {
+    const html = '<script src="https://abc.my.salesforce.com/embed.js"></script>';
+    expect(detectSignals(html).some((s) => s.id === 'salesforce')).toBe(true);
+  });
+
+  it('detects PayKeeper payment', () => {
+    const html = '<form action="https://demo.paykeeper.ru/create/">';
+    expect(detectSignals(html).some((s) => s.id === 'paykeeper')).toBe(true);
+  });
+
+  it('detects Avito marketplace link', () => {
+    const html = '<a href="https://www.avito.ru/user/shop">Наш магазин</a>';
+    expect(detectSignals(html).some((s) => s.id === 'avito')).toBe(true);
+  });
+
+  it('detects МойСклад ERP', () => {
+    const html = '<a href="https://online.moysklad.ru/app/">МойСклад</a>';
+    expect(detectSignals(html).some((s) => s.id === 'moysklad')).toBe(true);
+  });
+
+  it('detects Mailchimp', () => {
+    const html = '<script src="https://chimpstatic.com/mcjs-connected/abc.js"></script>';
+    expect(detectSignals(html).some((s) => s.id === 'mailchimp')).toBe(true);
+  });
+
   it('detects hh.ru hiring link', () => {
     const html = '<a href="https://hh.ru/employer/12345">Вакансии</a>';
     const signals = detectSignals(html);
@@ -327,5 +382,56 @@ describe('determineProfile', () => {
     const profile = determineProfile(signals);
     expect(typeof profile).toBe('string');
     expect(profile.length).toBeGreaterThan(0);
+  });
+});
+
+describe('integrationsFromSignals', () => {
+  it('returns empty for no signals', () => {
+    expect(integrationsFromSignals([])).toEqual([]);
+  });
+
+  it('keeps business-tool integrations (CRM, chat, payments, marketplace)', () => {
+    const signals = detectSignals(`
+      <script src="https://cdn.amocrm.ru/js/button.js"></script>
+      <script src="//code.jivosite.com/widget/abc"></script>
+      <script src="https://widget.cloudpayments.ru/bundles/cloudpayments.js"></script>
+      <a href="https://www.wildberries.ru/catalog/1">WB</a>
+    `);
+    expect(integrationsFromSignals(signals)).toEqual(
+      expect.arrayContaining(['amoCRM', 'JivoSite', 'CloudPayments', 'Wildberries']),
+    );
+  });
+
+  it('keeps lead-capture and call-tracking widgets', () => {
+    const signals = detectSignals(`
+      <script src="https://s.marquiz.ru/v2/quiz.js"></script>
+      <script src="https://w42.yclients.com/widgetJS"></script>
+      <script src="https://mod.calltouch.ru/init.js"></script>
+    `);
+    expect(integrationsFromSignals(signals)).toEqual(
+      expect.arrayContaining(['Marquiz', 'YClients', 'Calltouch']),
+    );
+  });
+
+  it('excludes ubiquitous/technical footprints (analytics, ad pixels, CMS, frameworks, multilingual)', () => {
+    const signals = detectSignals(`
+      <script src="https://mc.yandex.ru/metrika/tag.js"></script>
+      <script src="https://yandex.ru/ads/system/context.js"></script>
+      <script src="https://www.googletagmanager.com/gtm.js?id=GTM-X"></script>
+      <meta name="generator" content="Tilda Publishing">
+      <script src="/_next/static/chunks/main.js"></script>
+      <link rel="alternate" hreflang="en" href="/en/">
+      <a href="/careers">Карьера</a>
+    `);
+    expect(integrationsFromSignals(signals)).toEqual([]);
+  });
+
+  it('dedups by display name, preserving order', () => {
+    const signals: DetectedSignal[] = [
+      { id: 'amocrm', name: 'amoCRM', category: 'crm', level: 2 },
+      { id: 'jivosite', name: 'JivoSite', category: 'chat', level: 2 },
+      { id: 'amocrm_dup', name: 'amoCRM', category: 'crm', level: 2 },
+    ];
+    expect(integrationsFromSignals(signals)).toEqual(['amoCRM', 'JivoSite']);
   });
 });
