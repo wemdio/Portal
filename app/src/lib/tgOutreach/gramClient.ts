@@ -198,6 +198,36 @@ export async function createGramClient(
   return client;
 }
 
+/**
+ * Force-rebuild a client whose MTProto connection has wedged. Residential/mobile
+ * proxies (Infatica) silently drop the long-lived TCP socket half-open (no RST),
+ * so gramJS's recvLoop waits forever on bytes that never arrive and its auto-
+ * reconnect never fires — every subsequent `getDialogs` hangs until the campaign
+ * loop's per-account timeout fires, round after round. The proxy itself is fine
+ * (its TCP probe passes); only this stale socket is dead.
+ *
+ * We tear the old client down — bounding the disconnect so we don't hang on the
+ * dead socket — then create a fresh connection through the same proxy. A brand-
+ * new socket clears the wedge. createGramClient already bounds the reconnect
+ * with its own connect-timeout race, so this call is time-bounded overall.
+ */
+export async function reconnectClient(
+  account: OutreachAccount,
+  proxy: OutreachProxy | null,
+  oldClient: TelegramClient | null,
+  downloadSessionFile?: SessionFactory,
+): Promise<TelegramClient> {
+  if (oldClient) {
+    // disconnect() on a half-open socket can itself stall; race it so a dead
+    // connection can't block the rebuild.
+    await Promise.race([
+      oldClient.disconnect().catch(() => {}),
+      new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+    ]);
+  }
+  return createGramClient(account, proxy, downloadSessionFile);
+}
+
 export async function buildClients(
   accounts: OutreachAccount[],
   proxies: OutreachProxy[],

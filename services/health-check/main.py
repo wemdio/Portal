@@ -59,6 +59,10 @@ SERVER_IP = os.environ.get("HEALTH_SERVER_IP", "139.60.162.12")
 HEALTH_RETRY_ATTEMPTS = max(1, int(os.environ.get("HEALTH_RETRY_ATTEMPTS", "3")))
 HEALTH_RETRY_DELAY_SEC = max(0.0, float(os.environ.get("HEALTH_RETRY_DELAY_SEC", "1.0")))
 HEALTH_INTERVAL_SEC = int(os.environ.get("HEALTH_INTERVAL_SEC", "120"))
+# Proxies are checked on their own slower cadence (default 5 min) so a flaky
+# test target can't spam the chat, and so we don't hammer the proxy pool every
+# health cycle. The main cycle (site/DB) still runs every HEALTH_INTERVAL_SEC.
+PROXY_CHECK_INTERVAL_SEC = max(60, int(os.environ.get("PROXY_CHECK_INTERVAL_SEC", "300")))
 HEARTBEAT_INTERVAL_SEC = max(60, int(os.environ.get("HEARTBEAT_INTERVAL_SEC", "1800")))
 DEADMAN_GRACE_SEC = max(120, int(os.environ.get("HEALTH_DEADMAN_GRACE_SEC", str(HEALTH_INTERVAL_SEC * 3))))
 HEALTH_CRITICAL_ENDPOINTS_RAW = os.environ.get(
@@ -103,6 +107,9 @@ DISK_WARN_GB = float(os.environ.get("HEALTH_DISK_WARN_GB", "18"))
 PROXY_URLS: list[str] = []
 
 LAST_HEALTH_CHECK_TS = 0.0
+# Loop-clock timestamp of the last proxy check; gates proxies to their own
+# slower cadence (PROXY_CHECK_INTERVAL_SEC) inside the faster health cycle.
+LAST_PROXY_CHECK_TS = 0.0
 HEARTBEAT_STARTED = False
 
 # ── Metrics buffer for heartbeat charts ──────────────────────────────────────
@@ -150,6 +157,18 @@ def _parse_proxy_list(raw: str) -> list[str]:
 
 PROXY_URLS = _parse_proxy_list(os.environ.get("PROXY_URLS", ""))
 CRITICAL_ENDPOINTS = _parse_proxy_list(HEALTH_CRITICAL_ENDPOINTS_RAW)
+
+# Targets used to probe whether a proxy can carry traffic. Tried in order until
+# one gives a definitive answer. Using several independent, high-uptime targets
+# means one target's outage (the old single httpbin.org would 5xx for days at a
+# time) can't make every proxy look dead. Cloudflare's trace endpoint is first
+# because of its uptime and because it echoes the exit IP for free.
+PROXY_TEST_URLS = _parse_proxy_list(
+    os.environ.get(
+        "PROXY_TEST_URLS",
+        "https://www.cloudflare.com/cdn-cgi/trace,https://api.ipify.org?format=json",
+    )
+) or ["https://www.cloudflare.com/cdn-cgi/trace"]
 
 ALL_PROXIES: list[tuple[str, str]] = [(f"Proxy{i+1}", url) for i, url in enumerate(PROXY_URLS)]
 
@@ -558,30 +577,49 @@ async def check_instantly_db() -> tuple[bool, str, int | None, int | None]:
 
 
 async def check_proxy(proxy_url: str) -> tuple[bool, str]:
-    """Try to make a request through the proxy to httpbin."""
+    """Check that a proxy can carry traffic.
+
+    A proxy is ALIVE if any test request traverses it and comes back with a
+    non-5xx HTTP response (2xx/3xx/4xx) — that proves bytes flowed through the
+    proxy and returned. A 5xx is treated as the *target* being down, not the
+    proxy, so we fall through to the next target before judging. The proxy is
+    only DEAD when every target, across all retries, either fails at the
+    transport layer (timeout / connection refused / DNS), returns 407 (proxy
+    auth), or keeps returning 5xx — the latter only when ALL independent targets
+    5xx through this proxy, which points at the proxy's own gateway rather than a
+    single flaky target.
+    """
     last_error: Exception | None = None
     last_http_status: int | None = None
 
     for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
-        try:
-            async with httpx.AsyncClient(
-                proxy=proxy_url,
-                timeout=HTTP_TIMEOUT,
-            ) as c:
-                r = await c.get("https://httpbin.org/ip")
-                if r.status_code == 200:
+        for test_url in PROXY_TEST_URLS:
+            try:
+                async with httpx.AsyncClient(
+                    proxy=proxy_url,
+                    timeout=HTTP_TIMEOUT,
+                ) as c:
+                    r = await c.get(test_url)
+                # 407 = the proxy itself rejected our credentials → proxy fault.
+                if r.status_code == 407:
+                    last_http_status = 407
+                    continue
+                if r.status_code < 500:
                     return True, "OK"
+                # 5xx — likely the target, not the proxy. Try the next target.
                 last_http_status = r.status_code
-        except Exception as e:
-            last_error = e
+            except Exception as e:
+                last_error = e
 
         if attempt < HEALTH_RETRY_ATTEMPTS and HEALTH_RETRY_DELAY_SEC > 0:
             await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
 
-    if last_http_status is not None:
-        return False, f"HTTP {last_http_status}"
     if last_error is not None:
         return False, _normalize_network_error(last_error, limit=80)
+    if last_http_status == 407:
+        return False, "HTTP 407 (proxy auth)"
+    if last_http_status is not None:
+        return False, f"HTTP {last_http_status} (target?)"
     return False, "unknown proxy error"
 
 
@@ -677,8 +715,9 @@ HEALTH_CHECK_TIMEOUT_SEC = max(60, HEALTH_INTERVAL_SEC - 10)
 
 async def _run_health_check_inner():
     """Check all services. Alert on sustained failures (>= HEALTH_ALERT_MIN_CONSECUTIVE)."""
-    global LAST_HEALTH_CHECK_TS
-    LAST_HEALTH_CHECK_TS = asyncio.get_running_loop().time()
+    global LAST_HEALTH_CHECK_TS, LAST_PROXY_CHECK_TS
+    loop_now = asyncio.get_running_loop().time()
+    LAST_HEALTH_CHECK_TS = loop_now
     problems: list[str] = []
     recoveries: list[str] = []
 
@@ -768,22 +807,29 @@ async def _run_health_check_inner():
                     f"🟡 <b>Instantly Postgres connections</b>: {idb_cur}/{idb_max} ({idb_pct:.0f}%)"
                 )
 
-    proxy_results = await check_all_proxies()
-    dead_proxies = [(g, addr, msg) for g, addr, ok, msg in proxy_results if not ok]
-    if dead_proxies:
-        total = len(ALL_PROXIES)
-        alive = total - len(dead_proxies)
-        lines = [f"🔴 <b>Прокси</b>: {alive}/{total} работают"]
-        for g, addr, msg in dead_proxies:
-            lines.append(f"  ✖ [{g}] {addr}: {msg}")
-        proxy_problem = "\n".join(lines)
-    else:
-        proxy_problem = ""
-    _check(
-        "proxies", bool(dead_proxies),
-        proxy_problem,
-        "✅ <b>Прокси</b>: все работают",
-    )
+    # Proxies run on a slower cadence than the rest of the cycle: the main check
+    # fires every HEALTH_INTERVAL_SEC (~2 min) for site/DB, but proxies are only
+    # probed every PROXY_CHECK_INTERVAL_SEC (~5 min). Skipping the proxy block on
+    # the in-between cycles leaves the "proxies" failure counter untouched, so
+    # the consecutive-failure / recovery logic still works across the gaps.
+    if loop_now - LAST_PROXY_CHECK_TS >= PROXY_CHECK_INTERVAL_SEC:
+        LAST_PROXY_CHECK_TS = loop_now
+        proxy_results = await check_all_proxies()
+        dead_proxies = [(g, addr, msg) for g, addr, ok, msg in proxy_results if not ok]
+        if dead_proxies:
+            total = len(ALL_PROXIES)
+            alive = total - len(dead_proxies)
+            lines = [f"🔴 <b>Прокси</b>: {alive}/{total} работают"]
+            for g, addr, msg in dead_proxies:
+                lines.append(f"  ✖ [{g}] {addr}: {msg}")
+            proxy_problem = "\n".join(lines)
+        else:
+            proxy_problem = ""
+        _check(
+            "proxies", bool(dead_proxies),
+            proxy_problem,
+            "✅ <b>Прокси</b>: все работают",
+        )
 
     s3_ok, s3_msg = await check_s3()
     _check(
@@ -1274,13 +1320,18 @@ async def _ping_one_proxy(url: str, count: int) -> tuple[int, list[float]]:
     try:
         async with httpx.AsyncClient(proxy=url, timeout=HTTP_TIMEOUT) as client:
             for _ in range(count):
-                try:
-                    r = await client.get("https://httpbin.org/ip")
-                    if r.status_code == 200:
-                        ok += 1
-                        latencies.append(r.elapsed.total_seconds() * 1000)
-                except Exception:
-                    pass
+                # Same rule as check_proxy: any non-5xx, non-407 response means
+                # the ping traversed the proxy. Fall back across targets so one
+                # flaky target doesn't drag the success rate to 0.
+                for test_url in PROXY_TEST_URLS:
+                    try:
+                        r = await client.get(test_url)
+                        if r.status_code < 500 and r.status_code != 407:
+                            ok += 1
+                            latencies.append(r.elapsed.total_seconds() * 1000)
+                            break
+                    except Exception:
+                        continue
     except Exception:
         pass
     return ok, latencies

@@ -16,7 +16,7 @@ import type {
   OutreachProxy,
 } from './types';
 import { DEFAULT_FOLLOW_UP } from './types';
-import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp } from './gramClient';
+import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
 import { openaiGenerate, detectTrigger } from './openaiChat';
 import { loadBlockedUserIds } from './blockedUsers';
 import { truncateMessage } from '@/lib/logger';
@@ -89,10 +89,56 @@ const PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS =
  *  distinguish our explicit timeout from generic TIMEOUT errors. */
 const PER_ACCOUNT_TIMEOUT_MARKER = 'per-account first-call TIMEOUT';
 
+/** Marker for the terminal case: getDialogs hung, we rebuilt the client on a
+ *  fresh socket and retried in the same round, and the retry ALSO failed. At
+ *  that point it's no longer a stale-socket glitch — we emit a full error with
+ *  maximum diagnostic context and skip the account for this round. */
+const PER_ACCOUNT_RECONNECT_FAILED_MARKER = 'per-account reconnect+retry FAILED';
+
 function isOffsetOutOfRangeError(err: unknown): boolean {
   const errMsg = err instanceof Error ? err.message : String(err);
   return errMsg.includes('offset') && errMsg.includes('out of range');
 }
+
+/**
+ * gramJS is patched (patches/telegram+2.26.22.patch) to skip TL constructors it
+ * doesn't recognise instead of crashing, and to `console.warn`:
+ *   "[gramjs-patch] Unknown TL constructor <id> (0x…), skipping…"
+ * That id is the exact thing Telegram added that our gramJS layer can't decode
+ * — the real cause behind the "offset out of range" failures on big accounts —
+ * but the warning only goes to the worker's stdout. We tee console.warn into a
+ * small shared ring buffer (kept on globalThis so it survives across bundles and
+ * is shared if several campaigns run in one process) so the campaign loop can
+ * fold the id into the DB log right where a dialog decode fails. The tap is
+ * installed once and is best-effort — it must never throw into console.warn.
+ */
+interface GramjsUnknownTlEntry { msg: string; at: number }
+const GRAMJS_UNKNOWN_TL_MAX = 50;
+function gramjsUnknownTlBuf(): GramjsUnknownTlEntry[] {
+  const g = globalThis as { __gramjsUnknownTL?: GramjsUnknownTlEntry[] };
+  if (!g.__gramjsUnknownTL) g.__gramjsUnknownTL = [];
+  return g.__gramjsUnknownTL;
+}
+function installGramjsWarnTap(): void {
+  const g = globalThis as { __gramjsWarnTapped?: boolean };
+  if (g.__gramjsWarnTapped) return;
+  g.__gramjsWarnTapped = true;
+  const orig = console.warn.bind(console);
+  console.warn = (...args: unknown[]) => {
+    try {
+      const first = args[0];
+      if (typeof first === 'string' && first.includes('[gramjs-patch]')) {
+        const buf = gramjsUnknownTlBuf();
+        buf.push({ msg: first, at: Date.now() });
+        if (buf.length > GRAMJS_UNKNOWN_TL_MAX) buf.shift();
+      }
+    } catch {
+      // Never let diagnostics break logging.
+    }
+    orig(...(args as Parameters<typeof console.warn>));
+  };
+}
+installGramjsWarnTap();
 
 function dialogMessageKey(peer: Api.TypePeer | undefined, messageId: number | undefined): string {
   return `${peer instanceof Api.PeerChannel ? peer.channelId : undefined},${messageId}`;
@@ -1253,7 +1299,12 @@ export async function runCampaignLoop(
       let tlSchemaErrorCount = 0;
       log('info', `Начинаю обход ${clients.length} аккаунтов`);
 
-      for (const { client, account } of clients) {
+      for (const entry of clients) {
+        const { account } = entry;
+        // `let`, not destructured const: if getDialogs wedges we rebuild the
+        // client mid-iteration and must point every downstream call (handleChat,
+        // follow-up, session save) at the fresh client, not the dead one.
+        let client = entry.client;
         if (shouldStop()) break;
         tick();
         // Bump heartbeat per account so the Docker healthcheck doesn't
@@ -1280,36 +1331,111 @@ export async function runCampaignLoop(
           errors: 0,
         };
         const accountStartMs = Date.now();
+        // Snapshot the gramJS unknown-constructor buffer so that, if this
+        // account fails to decode its dialogs below, we can attribute exactly
+        // which TL constructor(s) gramJS choked on during THIS account's calls.
+        const tlWarnMark = gramjsUnknownTlBuf().length;
 
         try {
-          // Race against a hard per-account timeout. We do not abort the
-          // gramJS call (Promise.race leaves it dangling), but the worker
-          // moves on, which is what matters for keeping the watchdog happy.
-          // A dangling getDialogs eventually resolves or errors into a
-          // detached promise — gramJS swallows the result.
+          // Load dialogs, racing each attempt against a hard per-account
+          // timeout. We don't abort the gramJS call (Promise.race leaves it
+          // dangling), but the worker moves on — what matters for the watchdog.
           //
-          // `archived: false` skips dialogs the user has moved to Archive —
-          // we never message archived contacts anyway, and shrinking the
-          // result set reduces the chance gramJS's internal pagination
-          // overshoots the dialog count (the "offset out of range" bug).
-          // The bug itself is handled inside loadOutreachDialogs: if GramJS
-          // tries to paginate past the first page and throws "offset out of
-          // range", we fall back to one raw GetDialogs page instead of
-          // skipping the account.
-          const { dialogs, usedRawPageFallback } = await Promise.race([
-            loadOutreachDialogs(client, DIALOGS_FETCH_LIMIT),
-            new Promise<never>((_, reject) =>
-              setTimeout(
-                () =>
-                  reject(
-                    new Error(
-                      `${PER_ACCOUNT_TIMEOUT_MARKER} (${PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS / 1000}s) on getDialogs`,
+          // `archived: false` (inside loadOutreachDialogs) skips dialogs moved
+          // to Archive — we never message archived contacts anyway, and a
+          // smaller result set reduces the chance gramJS's internal pagination
+          // overshoots the dialog count (the "offset out of range" bug, also
+          // handled there via a raw single-page GetDialogs fallback).
+          const raceGetDialogs = () => {
+            // Always read entry.client: after a mid-iteration reconnect the
+            // retry must hit the fresh client, not the wedged one.
+            const loadDialogsPromise = loadOutreachDialogs(entry.client, DIALOGS_FETCH_LIMIT);
+            // If the timeout wins, this promise is left dangling on the (about
+            // to be replaced) client; gramJS rejects it on disconnect — swallow
+            // that late rejection so it can't surface as an unhandledRejection
+            // and crash the worker.
+            loadDialogsPromise.catch(() => {});
+            return Promise.race([
+              loadDialogsPromise,
+              new Promise<never>((_, reject) =>
+                setTimeout(
+                  () =>
+                    reject(
+                      new Error(
+                        `${PER_ACCOUNT_TIMEOUT_MARKER} (${PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS / 1000}s) on getDialogs`,
+                      ),
                     ),
-                  ),
-                PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS,
+                  PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS,
+                ),
               ),
-            ),
-          ]);
+            ]);
+          };
+
+          let dialogs: helpers.TotalList<Dialog>;
+          let usedRawPageFallback: boolean;
+          try {
+            ({ dialogs, usedRawPageFallback } = await raceGetDialogs());
+          } catch (firstErr) {
+            const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+            // Only the wedged-socket timeout gets the reconnect-and-retry-now
+            // treatment. Every other error (AUTH_KEY_*, USER_DEACTIVATED,
+            // Constructor ID, offset out of range, …) keeps its existing
+            // dedicated handling in the outer catch below — a fresh socket
+            // wouldn't fix those.
+            if (!firstMsg.includes(PER_ACCOUNT_TIMEOUT_MARKER)) throw firstErr;
+
+            // The long-lived gramJS socket went half-open through the proxy
+            // (recvLoop waits forever; the proxy itself is healthy). Don't wait
+            // for the next round — rebuild on a fresh socket and retry getDialogs
+            // immediately, in this same round.
+            const proxyProbeLog = await probeAccountProxyForLog(account, proxyMap);
+            const proxy = account.proxy_id ? proxyMap.get(account.proxy_id) ?? null : null;
+            const acctRef = `acc_id=${account.id}${account.phone ? ` тел=${account.phone}` : ''}${account.proxy_id ? ` proxy_id=${account.proxy_id}` : ''}`;
+            const firstHangSec = ((Date.now() - accountStartMs) / 1000).toFixed(1);
+
+            const reconnectStartMs = Date.now();
+            try {
+              entry.client = await reconnectClient(account, proxy, entry.client, downloadSessionFile);
+              client = entry.client;
+            } catch (reErr) {
+              const reMsg = reErr instanceof Error ? reErr.message : String(reErr);
+              const reSec = ((Date.now() - reconnectStartMs) / 1000).toFixed(1);
+              throw new Error(
+                `${PER_ACCOUNT_RECONNECT_FAILED_MARKER}: загрузка диалогов зависла на первой попытке (${firstHangSec}с, мёртвый сокет), ` +
+                  `и переподключение на свежую сессию НЕ удалось за ${reSec}с — ${reMsg}. ${proxyProbeLog}. ${acctRef}`,
+              );
+            }
+
+            const reconnectSec = ((Date.now() - reconnectStartMs) / 1000).toFixed(1);
+            log(
+              'warning',
+              `Аккаунт ${account.session_name}: загрузка диалогов зависла (${firstHangSec}с, мёртвый сокет) — ` +
+                `переподключил на свежее соединение за ${reconnectSec}с, повторяю загрузку сразу в этом же круге. ${proxyProbeLog}.`,
+            );
+
+            const retryStartMs = Date.now();
+            try {
+              ({ dialogs, usedRawPageFallback } = await raceGetDialogs());
+            } catch (secondErr) {
+              const secMsg = secondErr instanceof Error ? secondErr.message : String(secondErr);
+              const retrySec = ((Date.now() - retryStartMs) / 1000).toFixed(1);
+              // Non-timeout failures after reconnect (AUTH_KEY_*, offset, …)
+              // route to their proper outer-catch branch instead of the generic
+              // "reconnect failed" line.
+              if (!secMsg.includes(PER_ACCOUNT_TIMEOUT_MARKER)) throw secondErr;
+              // Still wedged on a brand-new socket — genuinely abnormal. Loud,
+              // fully-attributed error, then skip the account this round.
+              throw new Error(
+                `${PER_ACCOUNT_RECONNECT_FAILED_MARKER}: загрузка диалогов зависла на первой попытке (${firstHangSec}с), ` +
+                  `переподключение прошло за ${reconnectSec}с, но повторная загрузка на свежем сокете ТОЖЕ зависла (${retrySec}с). ` +
+                  `Похоже на проблему не с сокетом (битая сессия / теневой бан аккаунта / прокси режет MTProto). ${proxyProbeLog}. ${acctRef}`,
+              );
+            }
+            log(
+              'info',
+              `Аккаунт ${account.session_name}: повторная загрузка после переподключения удалась за ${((Date.now() - retryStartMs) / 1000).toFixed(1)}с.`,
+            );
+          }
           // Successful fetch — reset the chronic paging failure counter.
           if (pagingFailureCounts.has(account.id)) pagingFailureCounts.delete(account.id);
           if (usedRawPageFallback) {
@@ -1471,34 +1597,47 @@ export async function runCampaignLoop(
               (account as OutreachAccount).cooldown_until = cooldownUntil;
               log('warning', `Аккаунт ${account.session_name}: ошибка чтения .session-файла (попытка ${count}). Пауза 1 час. Если повторится — аккаунт будет выключен.`);
             }
-          } else if (errMsg.includes(PER_ACCOUNT_TIMEOUT_MARKER)) {
-            // Our own 60s ceiling on the first call. Most often this means
-            // the session is alive enough to connect but gramJS recvLoop is
-            // stuck on a stale/bad MTProto state. The watchdog at 15 min is
-            // there to backstop the rest of the iteration, but bailing this
-            // account here keeps all the other accounts moving.
-            const proxyProbeLog = await probeAccountProxyForLog(account, proxyMap);
+          } else if (errMsg.includes(PER_ACCOUNT_RECONNECT_FAILED_MARKER)) {
+            // Terminal path: getDialogs wedged, we rebuilt the client on a fresh
+            // socket and retried in the same round, and the retry still failed
+            // (see the fully-attributed message built at the throw site). This is
+            // no longer a transient stale-socket glitch, so we surface it as a
+            // real error with maximum context and skip the account this round.
+            // The watchdog at 15 min still backstops the rest of the iteration.
+            cycleStats.errors++;
             log(
-              'warning',
-              `Аккаунт ${account.session_name}: подключение зависло дольше ${PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS / 1000} секунд при загрузке диалогов. ${proxyProbeLog}. Пропускаю этот аккаунт в текущем круге, попробую снова на следующем.`,
+              'error',
+              `Аккаунт ${account.session_name}: ${errMsg} Пропускаю аккаунт в этом круге, попробую снова на следующем.`,
             );
           } else if (
-            // gramJS internal pagination bug: throws RangeError when offset
-            // overshoots dialog count by a few. Distinct from the session-
-            // corruption case handled above (no `.session`/`readSqliteSession`
-            // in the stack) and from generic MTProto/network glitches.
+            // "offset out of range" while loading dialogs. The session-
+            // corruption branch above deliberately EXCLUDES decoder stacks
+            // (BinaryReader/tgReadObject/MTProtoState), so what lands here is a
+            // TL-DESERIALIZATION failure, not a pagination overshoot: even our
+            // raw single-page GetDialogs fallback (no pagination) hits it. The
+            // real cause is a TL constructor newer than gramJS 2.26.22 — see the
+            // captured ids below — so dump maximum context to diagnose it.
             errMsg.includes('offset') && errMsg.includes('out of range')
           ) {
-            // Single, clearly-attributed warning per failed attempt. We used
-            // to log a retry message followed by a generic "разовый сбой",
-            // duplicating every failure — production showed 100% retry-fail
-            // rate, so we collapse to one line and skip the cycle.
+            // Real error text + a short stack so we can confirm the decode site
+            // (tgReadObject/BinaryReader) instead of guessing "pagination".
+            const errStack = err instanceof Error && err.stack
+              ? err.stack.split('\n').slice(0, 6).map(s => s.trim()).join(' ⟶ ')
+              : '(стек недоступен)';
+            // Constructor ids gramJS skipped during THIS account's dialog load
+            // (teed from the gramjs-patch console.warn). This is the smoking gun:
+            // it names exactly what Telegram added that we can't decode yet.
+            const newTlWarns = gramjsUnknownTlBuf().slice(tlWarnMark);
+            const tlIdsNote = newTlWarns.length
+              ? ` Незнакомые TL-конструкторы за эту попытку (${newTlWarns.length}): ` +
+                newTlWarns.map(w => w.msg.replace('[gramjs-patch] ', '').replace(/, skipping.*$/, '')).join(' | ') + '.'
+              : ' Незнакомых TL-конструкторов за эту попытку не зафиксировано (см. stdout воркера на предмет [gramjs-patch]).';
+            const diag = `Реальная ошибка: "${errMsg}".${tlIdsNote} Стек: ${errStack}`;
+
             const count = (pagingFailureCounts.get(account.id) ?? 0) + 1;
             pagingFailureCounts.set(account.id, count);
             // After many consecutive failures the account is effectively
-            // disabled — sit it out for 6h so operators can diagnose
-            // (typical fix: reduce account's dialog count, archive old
-            // chats, or re-issue the session).
+            // disabled — sit it out for 6h so operators can diagnose.
             const PAGING_FAILURE_COOLDOWN_THRESHOLD = 5;
             if (count >= PAGING_FAILURE_COOLDOWN_THRESHOLD) {
               const cooldownMs = 6 * 3600 * 1000;
@@ -1511,14 +1650,14 @@ export async function runCampaignLoop(
                 (account as OutreachAccount).cooldown_until = cooldownUntil;
               }
               log(
-                'warning',
-                `Аккаунт ${account.session_name}: ${count} подряд сбоев пагинации диалогов (известный баг gramJS на больших аккаунтах). Пауза 6ч до ${cooldownDisplay}. Рекомендация: вручную очистить архив / удалить старые чаты или перевыпустить сессию.`,
+                'error',
+                `Аккаунт ${account.session_name}: ${count} подряд сбоев загрузки диалогов (gramJS не смог декодировать ответ GetDialogs — НЕ пагинация). Пауза 6ч до ${cooldownDisplay}. ${diag}`,
               );
               pagingFailureCounts.delete(account.id);
             } else {
               log(
                 'warning',
-                `Аккаунт ${account.session_name}: сбой пагинации диалогов (offset out of range, попытка ${count}/${PAGING_FAILURE_COOLDOWN_THRESHOLD}) — пропускаю круг. Это известный баг gramJS на аккаунтах с тысячами диалогов.`,
+                `Аккаунт ${account.session_name}: сбой загрузки диалогов — gramJS не смог декодировать ответ GetDialogs (попытка ${count}/${PAGING_FAILURE_COOLDOWN_THRESHOLD}), пропускаю круг. ${diag}`,
               );
             }
           } else if (errMsg.includes('TIMEOUT') || errMsg.includes('Constructor ID')) {
