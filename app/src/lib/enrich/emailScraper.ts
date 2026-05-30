@@ -301,6 +301,51 @@ export function extractEmailsFromHtmlAdvanced(html: string): string[] {
   return results;
 }
 
+// ── Company name extraction from page ──────────────────────────
+
+const BASIC_HTML_ENTITIES: Record<string, string> = {
+  '&amp;': '&',
+  '&quot;': '"',
+  '&#39;': "'",
+  '&apos;': "'",
+  '&lt;': '<',
+  '&gt;': '>',
+  '&nbsp;': ' ',
+  '&mdash;': '—',
+  '&ndash;': '–',
+  '&laquo;': '«',
+  '&raquo;': '»',
+};
+
+function decodeBasicEntities(s: string): string {
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    .replace(/&[a-z]+;/gi, (m) => BASIC_HTML_ENTITIES[m.toLowerCase()] ?? m);
+}
+
+/**
+ * Кандидат-название компании со страницы: og:site_name (чистый бренд) →
+ * <title> (шумный, но почти всегда есть). Сырое — финальная чистка отдельно
+ * (AI cleanCompanyNames: обрежет после -|/,:, снимет ООО/«» и т.п.).
+ */
+export function extractSiteName(html: string): string | null {
+  const candidates: string[] = [];
+
+  const ogTag = html.match(/<meta[^>]*\bproperty=["']og:site_name["'][^>]*>/i)?.[0];
+  const ogContent = ogTag?.match(/\bcontent=["']([^"']+)["']/i)?.[1];
+  if (ogContent) candidates.push(ogContent);
+
+  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  if (title) candidates.push(title);
+
+  for (const raw of candidates) {
+    const v = decodeBasicEntities(raw).replace(/\s+/g, ' ').trim();
+    if (v.length >= 2 && v.length <= 200) return v;
+  }
+  return null;
+}
+
 // ── Junk email filtering ───────────────────────────────────────
 
 /**
@@ -473,6 +518,9 @@ export type ScrapeEmailsResult = {
   allEmailsRaw: string[];
   checkedUrls: string[];
   pagesScanned: number;
+  /** Кандидат-название компании с главной страницы (og:site_name / <title>).
+   *  Сырое — финальная чистка делается отдельно (AI cleanCompanyNames). */
+  siteName: string | null;
 };
 
 /**
@@ -551,6 +599,10 @@ export async function scrapeEmails(
     mainHtml = await tryFetch(wwwOrigin);
   }
 
+  // Название компании берём с главной (og:site_name / <title>) — бесплатно,
+  // страница уже загружена. Используется как фоллбек когда нет имени из ФНС.
+  const siteName = mainHtml ? extractSiteName(mainHtml) : null;
+
   // Discover internal links from main page
   let discoveredLinks: string[] = [];
   if (mainHtml) {
@@ -567,6 +619,7 @@ export async function scrapeEmails(
         allEmailsRaw: allEmailsRawEarly,
         checkedUrls,
         pagesScanned: checkedUrls.length,
+        siteName,
       };
     }
     discoveredLinks = await discoverEmailPageLinks(mainHtml, url);
@@ -615,5 +668,6 @@ export async function scrapeEmails(
     allEmailsRaw,
     checkedUrls,
     pagesScanned: checkedUrls.length,
+    siteName,
   };
 }

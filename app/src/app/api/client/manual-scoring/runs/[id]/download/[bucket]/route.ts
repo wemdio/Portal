@@ -72,7 +72,7 @@ export async function GET(
   const isStorage = bucket === 'storage' || bucket === 'invalid';
   const columns = isStorage
     ? 'domain, score, rating, error_message'
-    : 'domain, score, rating, email, email_validation_status';
+    : 'company_name, domain, score, rating, email, email_validation_status';
 
   const { data: rowsData, error: rowsErr } = await supabase
     .from('client_manual_score_rows')
@@ -88,7 +88,7 @@ export async function GET(
   // Формируем CSV
   const header = isStorage
     ? ['domain', 'score', 'rating', 'error']
-    : ['domain', 'score', 'rating', 'email', 'email_status'];
+    : ['company', 'domain', 'score', 'rating', 'email', 'email_status'];
 
   const lines: string[] = [header.join(',')];
   type Row = Record<string, unknown>;
@@ -99,7 +99,7 @@ export async function GET(
       );
     } else {
       lines.push(
-        [row.domain, row.score, row.rating, row.email, row.email_validation_status].map(csvEscape).join(','),
+        [row.company_name, row.domain, row.score, row.rating, row.email, row.email_validation_status].map(csvEscape).join(','),
       );
     }
   }
