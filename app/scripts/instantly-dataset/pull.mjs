@@ -406,7 +406,7 @@ async function phaseOverviewAnalytics(campaigns) {
 
 async function phaseDailyAnalytics(campaigns) {
   return perCampaignMapPhase('daily', 'analytics-daily-by-campaign.json', campaigns,
-    (c) => call('/campaigns/analytics/daily', { params: { id: c.id } }));
+    (c) => call('/campaigns/analytics/daily', { params: { campaign_id: c.id } })); // campaign_id, NOT id (id → workspace-wide). Fixed 2026-05-30.
 }
 
 async function phaseStepAnalytics(campaigns) {

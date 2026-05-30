@@ -29,9 +29,29 @@
 | Snapshot table | Гранулярность | Ключевое использование |
 |---|---|---|
 | `raw_campaign_analytics_overview_snap` | per (snapshot, campaign) | Текущие aggregate-цифры кампании на момент snapshot |
-| `raw_campaign_analytics_daily_snap` | per (snapshot, campaign, date) | Time-series: opens/replies/clicks по дням |
+| `raw_campaign_analytics_daily_snap` | per (snapshot, ~~campaign~~, date) — `campaign` фиктивен | ❌ **СЛОМАНА для per-campaign.** Хранит workspace-wide дневной ряд, продублированный под каждым `campaign_id`. **Не суммируй `sent`/любые метрики per-campaign.** См. ⚠️ ниже. |
 | `raw_campaign_step_analytics_snap` | per (snapshot, campaign, step_n, variant_n) | **Главное** для subject performance |
 | `raw_warmup_analytics_snap` | per (snapshot, email, date) | Здоровье mailbox-а по дням |
+
+### ⚠️ `raw_campaign_analytics_daily_snap` сломана: workspace-wide ряд под каждым `campaign_id` (2026-05-30)
+
+**Не используй `sent` / `opened` / `replies` / любую дневную метрику этой таблицы для per-campaign анализа.** Это НЕ данные кампании — это дневной ряд по **всему workspace**, записанный одинаково под каждым `campaign_id`. `campaign_id` в этой таблице несёт ноль информации.
+
+**Доказательство** (snapshot `98974f54-…`, full pull 2026-05-21):
+- **1881 кампания → у ВСЕХ `sum(sent)` ровно `7 381 152`** (один distinct-значение на всю таблицу), один и тот же 965-дневный ряд `2023-09-30 … 2026-05-21`, пиковый день = 36030.
+- Кампании с lifetime `contacted_count` = 1, 2, 4, 5, 500 — у всех **byte-identical** дневной ряд (27026 sent на 2026-05-21). Кампания, написавшая 1 письмо за всю жизнь, не может иметь историю на 7.38M отправок.
+- `raw_payload` дневной строки содержит те же инфлированные числа (`"sent": 27026`, `"contacted": 26369`) → это **не** ошибка нашего парсинга, Instantly API реально вернул workspace-данные.
+
+**Чему верить вместо этого:**
+- **`raw_campaign_analytics_overview_snap`** — per-campaign **корректна** (overview endpoint реально принимает `id`; цифры различаются по кампаниям: 1, 2, …, 500). Используй её для lifetime-aggregate.
+- **Дневная динамика кампании** → строй из `raw_emails`: `SELECT timestamp_email::date, count(*) FROM raw_emails WHERE campaign_id = $1 AND ue_type = 1 GROUP BY 1`. Это единственный честный per-campaign дневной ряд отправок.
+
+**Корень бага (ingestion).** Endpoint `GET /campaigns/analytics/daily` фильтруется параметром **`campaign_id`**, и «если он пуст — возвращаются все кампании» ([Instantly API v2 docs](https://developer.instantly.ai/api/v2/campaign/getcampaignanalytics)). Наш код шлёт UUID под ключом `id`, который endpoint игнорирует → workspace-wide ответ, продублированный под каждой кампанией:
+- [`app/src/lib/instantly/client.ts:175`](../../app/src/lib/instantly/client.ts) — `getCampaignAnalyticsDaily` мапит `campaign_id` → `query.id` (copy-paste из `getCampaignAnalyticsOverview` строкой выше, где `id` корректен для overview).
+- [`app/scripts/instantly-dataset/sync.mjs:436`](../../app/scripts/instantly-dataset/sync.mjs) — `syncDailyAnalytics` шлёт `params: { id }`.
+- [`app/scripts/instantly-dataset/pull.mjs:409`](../../app/scripts/instantly-dataset/pull.mjs) — `phaseDailyAnalytics` шлёт `params: { id }`.
+
+Фикс: слать `{ campaign_id: id, start_date, end_date }` (`start_date`/`end_date` обязательны по докам). Для сравнения `syncStepAnalytics` уже шлёт `campaign_id` правильно. Баг **продолжается каждую ночь** (`sync.mjs` nightly cron): каждый новый snapshot тоже workspace-wide. Все исторические snapshot'ы уже отравлены — фикс кода починит только **будущие** pull'ы; для корректной истории нужен разовый ре-pull дневной аналитики с `campaign_id` (API отдаёт историю по диапазону дат). До этого вся таблица — мусор для per-campaign. См. [log.md](../log.md) `2026-05-30`.
 
 ## Lookup-таблицы
 

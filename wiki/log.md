@@ -6,6 +6,10 @@ Format: `YYYY-MM-DD: <one-line summary>. Details: [link to page or analysis]`
 
 ---
 
+## 2026-05-30
+
+- **`raw_campaign_analytics_daily_snap` сломана: workspace-wide ряд под каждым `campaign_id`.** Все 1881 кампаний имеют идентичный `sum(sent)=7 381 152` и byte-identical 965-дневный ряд — включая кампании с lifetime `contacted_count`=1..5. `raw_payload` содержит те же числа → не наш парсинг, API вернул workspace-данные. Это и есть «1.8M daily metrics» из 2026-05-23 (1881×965 ≈ 1.8M — один ряд, размноженный по кампаниям). **Корень:** `/campaigns/analytics/daily` фильтруется по `campaign_id`, а наш код шлёт UUID под ключом `id` (endpoint его игнорирует → отдаёт все кампании). Баг в 3 местах: [`client.ts:175`](../app/src/lib/instantly/client.ts), [`sync.mjs:436`](../app/scripts/instantly-dataset/sync.mjs), [`pull.mjs:409`](../app/scripts/instantly-dataset/pull.mjs); `syncStepAnalytics` рядом шлёт `campaign_id` правильно. Overview — корректна, ей верим. Дневной ряд кампании строй из `raw_emails`. Поправил COMMENT на таблице (migration 008) + caveat в [dataset-schema.md](./concepts/dataset-schema.md#️-raw_campaign_analytics_daily_snap-сломана-workspace-wide-ряд-под-каждым-campaign_id-2026-05-30). Фикс кода + ре-pull дневной аналитики — TODO (баг продолжается каждую ночь, sync.mjs nightly).
+
 ## 2026-05-29
 
 - **Agent ran 3 clients (query_log id=3,4,5), then SELF-CORRECTED id=3.** Initially claimed inMyRoom succeeds because of its subject line — user challenged it. Verification (within-campaign A/B) refuted: same subject 2.74% on one list, 0.00% on another; all 36 leads came from the real-estate-agency segment, not any subject. Real driver = segment/ICP. Lesson written to [subjects/winning-patterns.md](./subjects/winning-patterns.md): subject affects only reply (inconsistently, list-dependent), never attributable to leads. ЮРКОМ («0 лидов» не баг — 171/175 not_lead, аудит-коммодити, bounce 7%) and НАФИ (winning «Исследовательский чекап» 7.45% on SMB diluted by wrong-ICP developer campaign) hold up.
