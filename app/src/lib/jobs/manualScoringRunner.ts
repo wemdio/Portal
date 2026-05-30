@@ -131,6 +131,7 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
           email_validation_status: result.emailValidationStatus,
           bucket: result.bucket,
           error_message: result.errorMessage,
+          scraped_name: result.scrapedName,
           processed_at: new Date().toISOString(),
         })
         .eq('id', row.id);
@@ -169,6 +170,12 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
   return await finalize(opts.runId);
 }
 
+/** Имя-кандидат из домена (крайний фоллбек): "stripe.com" → "Stripe". */
+function domainToNameCandidate(domain: string): string {
+  const label = (domain.replace(/^www\./, '').split('.')[0] ?? '').trim();
+  return label ? label.charAt(0).toUpperCase() + label.slice(1) : domain;
+}
+
 /**
  * Для активных строк прогона: находит название компании (из кэша
  * mailganer_domain_scores, наполняемого BoB-скорером из базы ФНС), чистит его
@@ -194,12 +201,12 @@ async function resolveNamesAndRoute(runId: string): Promise<void> {
 
   const { data: rowsData } = await supabaseAdmin
     .from('client_manual_score_rows')
-    .select('id, domain, score, email')
+    .select('id, domain, score, email, scraped_name')
     .eq('run_id', runId)
     .in('bucket', ['medium', 'high', 'top'])
     .not('email', 'is', null)
     .is('company_name', null);
-  const rows = (rowsData ?? []) as Array<{ id: number; domain: string | null; score: number | null; email: string | null }>;
+  const rows = (rowsData ?? []) as Array<{ id: number; domain: string | null; score: number | null; email: string | null; scraped_name: string | null }>;
   if (rows.length === 0) return;
 
   // 1. Название из кэша (BoB-скорер кладёт company_name из ФНС по домену).
@@ -217,9 +224,17 @@ async function resolveNamesAndRoute(runId: string): Promise<void> {
     }
   }
 
-  // 2. Чистка названий (AI, тот же механизм что кнопка). Без эвристики.
+  // 2. Сырое имя по фоллбек-цепочке: ФНС-кэш → scraped_name (с сайта) → из
+  //    домена. Затем AI-чистка (тот же механизм, что кнопка). Так название
+  //    есть у КАЖДОГО живого контакта, даже если домена нет в базе ФНС.
   const cleaned = await cleanCompanyNames(
-    rows.map((r) => ({ name: r.domain ? nameByDomain.get(r.domain) ?? '' : '', domain: r.domain })),
+    rows.map((r) => ({
+      name:
+        (r.domain ? nameByDomain.get(r.domain) : null) ||
+        r.scraped_name ||
+        (r.domain ? domainToNameCandidate(r.domain) : ''),
+      domain: r.domain,
+    })),
   );
 
   // 3. Сохраняем company_name ('' = резолв выполнен, имени нет → идемпотентность).
@@ -293,6 +308,8 @@ interface ProcessedRow {
   emailValidationStatus: string | null;
   bucket: ManualBucket;
   errorMessage: string | null;
+  /** Сырое название с сайта (og:site_name/<title>) — фоллбек к ФНС-имени. */
+  scrapedName: string | null;
 }
 
 async function processOneRow(
@@ -311,6 +328,7 @@ async function processOneRow(
       emailValidationStatus: null,
       bucket: 'invalid',
       errorMessage: 'invalid domain',
+      scrapedName: null,
     };
   }
 
@@ -328,6 +346,7 @@ async function processOneRow(
       emailValidationStatus: null,
       bucket: 'invalid',
       errorMessage: err instanceof Error ? err.message : 'mailganer error',
+      scrapedName: null,
     };
   }
 
@@ -349,34 +368,26 @@ async function processOneRow(
       emailValidationStatus: null,
       bucket,
       errorMessage: scoreResult.ok ? null : scoreResult.error || null,
+      scrapedName: null,
     };
   }
 
-  // 3. Активный bucket — scrape сайта + SMTP-валидация
-  let email: string | null = null;
+  // 3. Активный bucket — scrape сайта (email + название) + SMTP-валидация.
+  //    scrapedName (og:site_name/<title>) — фоллбек к ФНС-имени в resolveNamesAndRoute.
+  const scraped = await scrapeEmails(`https://${domain}`, {
+    timeout: 12_000,
+    maxPages: 5,
+  }).catch(() => ({ emails: [] as string[], siteName: null as string | null }));
+  const scrapedName = scraped.siteName ?? null;
+  const email = scraped.emails[0] ?? null;
   let emailValidationStatus: string | null = null;
-  try {
-    const scraped = await scrapeEmails(`https://${domain}`, {
-      timeout: 12_000,
-      maxPages: 5,
-    }).catch(() => ({ emails: [] as string[] }));
-    email = scraped.emails[0] ?? null;
-    if (email) {
+  if (email) {
+    try {
       const validation = await validateEmailForAutoPipeline(email, mxCache);
       emailValidationStatus = validation.status;
+    } catch {
+      // Валидация упала — оставляем email без статуса, строку не фейлим.
     }
-  } catch (err) {
-    // Email-enrichment упал — НЕ фейлим всю строку, просто записываем без email
-    return {
-      domain,
-      score,
-      rating: rating || null,
-      spf: scoreResult.spf,
-      email: null,
-      emailValidationStatus: null,
-      bucket,
-      errorMessage: err instanceof Error ? err.message : 'scrape/validate error',
-    };
   }
 
   return {
@@ -388,6 +399,7 @@ async function processOneRow(
     emailValidationStatus,
     bucket,
     errorMessage: null,
+    scrapedName,
   };
 }
 
