@@ -14,6 +14,8 @@
 
 **Подводный камень:** `emails_sent_count` ≠ `count(raw_emails WHERE ue_type=1)` точно. Снапшот это Instantly's точка зрения; raw_emails это то что мы реально стянули. Расхождение бывает из-за того что Instantly иногда удаляет очень старые письма из feed'a /emails, но они остаются в campaign analytics.
 
+**⚠️ Дневной ряд отправок per-campaign:** НЕ бери из `raw_campaign_analytics_daily_snap` — она [сломана](dataset-schema.md#️-raw_campaign_analytics_daily_snap-сломана-workspace-wide-ряд-под-каждым-campaign_id-2026-05-30) (workspace-wide ряд под каждым `campaign_id`). Строй из `raw_emails`: `GROUP BY timestamp_email::date WHERE campaign_id=$1 AND ue_type=1`.
+
 ---
 
 ## Open metrics

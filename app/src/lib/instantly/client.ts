@@ -172,7 +172,10 @@ export async function getCampaignAnalyticsOverview(params?: { campaign_id?: stri
 
 export async function getCampaignAnalyticsDaily(params?: { campaign_id?: string; start_date?: string; end_date?: string }, requestOptions?: InstantlyRequestOptions) {
   const query: Record<string, string> = {};
-  if (params?.campaign_id) query.id = params.campaign_id;
+  // /campaigns/analytics/daily filters by `campaign_id` (NOT `id` like overview).
+  // Sending `id` is silently ignored → workspace-wide series for every campaign.
+  // Verified live 2026-05-30; see wiki/concepts/dataset-schema.md daily-snap caveat.
+  if (params?.campaign_id) query.campaign_id = params.campaign_id;
   if (params?.start_date) query.start_date = params.start_date;
   if (params?.end_date) query.end_date = params.end_date;
   return request<unknown>('/campaigns/analytics/daily', { params: query }, requestOptions);

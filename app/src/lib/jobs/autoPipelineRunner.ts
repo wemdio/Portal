@@ -54,6 +54,7 @@ import { validateEmailForAutoPipeline, type AutoPipelineEmailValidation } from '
 import { calcPacing } from './autoPipelinePacing';
 import { fetchTopUpFromBaseOfBases } from './baseOfBasesSource';
 import { fetchTopUpFromCache } from './baseOfBasesFromCache';
+import { cleanCompanyNames } from '@/lib/companyNameCleanupBatch';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import type { ClientLaunchSequence } from '@/lib/clientLaunch/types';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
@@ -1000,15 +1001,35 @@ export async function runAutoPipelineForClient(
       { ...logCtx, ...mailganerStats },
     );
 
+    // 5.5. Чистка названий routed-лидов — ТЕМ ЖЕ AI, что кнопка «Очистить
+    //      названия» (cleanCompanyNames → stepNameCleanup, батчи по 100).
+    //      В dry-run groupedLeads пуст — шаг сам собой пропускается.
+    const leadsToClean = [...groupedLeads.values()].flatMap((g) => g.leads);
+    if (leadsToClean.length > 0) {
+      const cleanedNames = await cleanCompanyNames(
+        leadsToClean.map((l) => ({ name: l.company_name, domain: l.website })),
+      );
+      leadsToClean.forEach((l, i) => {
+        if (cleanedNames[i]) l.company_name = cleanedNames[i];
+      });
+      await logAudit('auto-pipeline.names-cleaned', `Очищено названий лидов: ${leadsToClean.length}`, logCtx);
+    }
+
     // 6. Append leads per bucket. В dry-run шаг пропускаем целиком —
     // groupedLeads пуст (routing-блок делает continue ещё ДО groupedLeads.set).
+    // Финальная гарантия полей: у КАЖДОГО лида должны быть email + название +
+    // сайт. Неполные отбрасываем с логом — в Instantly не уходят.
     let failedCount = 0;
+    let droppedIncomplete = 0;
     for (const group of groupedLeads.values()) {
+      const readyLeads = group.leads.filter((l) => l.email && l.company_name && l.website);
+      droppedIncomplete += group.leads.length - readyLeads.length;
+      if (readyLeads.length === 0) continue;
       try {
         await appendLeadsToClientCampaign({
           userId: clientUserId,
           campaignId: group.bucket.instantly_campaign_id!,
-          leads: group.leads,
+          leads: readyLeads,
           contextLabel: group.bucket.label,
         });
       } catch (err) {
@@ -1016,14 +1037,22 @@ export async function runAutoPipelineForClient(
         await logError(
           'auto-pipeline.append.failed',
           err,
-          { ...logCtx, bucket: group.bucket.label, leadCount: group.leads.length },
+          { ...logCtx, bucket: group.bucket.label, leadCount: readyLeads.length },
         );
         // seen уже записаны по чанкам со status='routed' — обновляем их в БД
         // на 'failed' (массива seenUpserts в памяти больше нет).
         await markRoutedBucketFailed(clientUserId, group.bucket.id, now, msg.slice(0, 500));
-        failedCount += group.leads.length;
-        routedCount -= group.leads.length;
+        failedCount += readyLeads.length;
+        routedCount -= readyLeads.length;
       }
+    }
+    if (droppedIncomplete > 0) {
+      routedCount -= droppedIncomplete;
+      await logAudit(
+        'auto-pipeline.dropped-incomplete',
+        `Отброшено неполных лидов (нет email/названия/сайта): ${droppedIncomplete}`,
+        logCtx,
+      );
     }
 
     // Разбивка new_count по источникам — для дашборда (HH vs база баз).
