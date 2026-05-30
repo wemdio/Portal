@@ -24,7 +24,9 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 const MAX_DOMAINS = 50_000;
-const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 МБ
+// 50 МБ: домен-лист на 50k — это ~1.5 МБ, но клиенты грузят многоколоночные
+// CSV (берём только 1-ю колонку), которые легко перевалят за 10 МБ.
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50 МБ
 
 export async function POST(req: NextRequest) {
   if (!supabaseAdmin) {
