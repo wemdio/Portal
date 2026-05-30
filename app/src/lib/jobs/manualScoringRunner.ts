@@ -129,6 +129,8 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
           spf: result.spf,
           email: result.email,
           email_validation_status: result.emailValidationStatus,
+          email2: result.email2 ?? null,
+          email2_validation_status: result.email2ValidationStatus ?? null,
           bucket: result.bucket,
           error_message: result.errorMessage,
           scraped_name: result.scrapedName,
@@ -201,12 +203,21 @@ async function resolveNamesAndRoute(runId: string): Promise<void> {
 
   const { data: rowsData } = await supabaseAdmin
     .from('client_manual_score_rows')
-    .select('id, domain, score, email, scraped_name')
+    .select('id, domain, score, email, email_validation_status, email2, email2_validation_status, scraped_name')
     .eq('run_id', runId)
     .in('bucket', ['medium', 'high', 'top'])
     .not('email', 'is', null)
     .is('company_name', null);
-  const rows = (rowsData ?? []) as Array<{ id: number; domain: string | null; score: number | null; email: string | null; scraped_name: string | null }>;
+  const rows = (rowsData ?? []) as Array<{
+    id: number;
+    domain: string | null;
+    score: number | null;
+    email: string | null;
+    email_validation_status: string | null;
+    email2: string | null;
+    email2_validation_status: string | null;
+    scraped_name: string | null;
+  }>;
   if (rows.length === 0) return;
 
   // 1. Название из кэша (BoB-скорер кладёт company_name из ФНС по домену).
@@ -264,8 +275,13 @@ async function resolveNamesAndRoute(runId: string): Promise<void> {
   for (let i = 0; i < rows.length; i += 1) {
     const r = rows[i];
     const name = cleaned[i];
-    // Гарантия полей: email + название + сайт обязательны.
-    if (!r.email || !name || !r.domain || r.score === null) continue;
+    if (!name || !r.domain || r.score === null) continue;
+    // Готовые почты (valid/role/free/catch_all) — каждая = отдельный лид.
+    // Невалидные не берём (правило «почта валидная или catch-all»).
+    const validEmails: string[] = [];
+    if (r.email && isReadyEmailStatus(r.email_validation_status)) validEmails.push(r.email);
+    if (r.email2 && isReadyEmailStatus(r.email2_validation_status)) validEmails.push(r.email2);
+    if (validEmails.length === 0) continue; // нет валидной почты → не контакт
     const bucket = buckets.find(
       (b) => r.score! >= b.score_min && (b.score_max === null || r.score! <= b.score_max),
     );
@@ -277,12 +293,14 @@ async function resolveNamesAndRoute(runId: string): Promise<void> {
       g = { campaignId: bucket.instantly_campaign_id, label: bucket.label ?? 'manual', leads: [] };
       groups.set(bucket.instantly_campaign_id, g);
     }
-    g.leads.push({
-      email: r.email,
-      company_name: name,
-      website: `https://${r.domain}`,
-      custom_variables: { source: 'manual', score: String(r.score), domain: r.domain },
-    });
+    for (const addr of validEmails) {
+      g.leads.push({
+        email: addr,
+        company_name: name,
+        website: `https://${r.domain}`,
+        custom_variables: { source: 'manual', score: String(r.score), domain: r.domain },
+      });
+    }
   }
 
   for (const g of groups.values()) {
@@ -310,6 +328,15 @@ interface ProcessedRow {
   errorMessage: string | null;
   /** Сырое название с сайта (og:site_name/<title>) — фоллбек к ФНС-имени. */
   scrapedName: string | null;
+  /** Вторая почта с домена (до 2 на домен, как авто). Опционально. */
+  email2?: string | null;
+  email2ValidationStatus?: string | null;
+}
+
+/** Статусы, при которых почта считается готовой к аутричу (как isValid в авто). */
+const READY_EMAIL_STATUSES = new Set(['valid', 'role_address', 'free_provider', 'catch_all']);
+function isReadyEmailStatus(status: string | null | undefined): boolean {
+  return !!status && READY_EMAIL_STATUSES.has(status);
 }
 
 async function processOneRow(
@@ -379,16 +406,19 @@ async function processOneRow(
     maxPages: 5,
   }).catch(() => ({ emails: [] as string[], siteName: null as string | null }));
   const scrapedName = scraped.siteName ?? null;
-  const email = scraped.emails[0] ?? null;
-  let emailValidationStatus: string | null = null;
-  if (email) {
+  // До 2 почт с домена (как авто) — каждая станет отдельным лидом/строкой.
+  const candidates = scraped.emails.slice(0, 2);
+  const validateSafe = async (e: string): Promise<string | null> => {
     try {
-      const validation = await validateEmailForAutoPipeline(email, mxCache);
-      emailValidationStatus = validation.status;
+      return (await validateEmailForAutoPipeline(e, mxCache)).status;
     } catch {
-      // Валидация упала — оставляем email без статуса, строку не фейлим.
+      return null; // валидация упала — строку не фейлим
     }
-  }
+  };
+  const email = candidates[0] ?? null;
+  const emailValidationStatus = email ? await validateSafe(email) : null;
+  const email2 = candidates[1] ?? null;
+  const email2ValidationStatus = email2 ? await validateSafe(email2) : null;
 
   return {
     domain,
@@ -397,6 +427,8 @@ async function processOneRow(
     spf: scoreResult.spf,
     email,
     emailValidationStatus,
+    email2,
+    email2ValidationStatus,
     bucket,
     errorMessage: null,
     scrapedName,
@@ -431,10 +463,13 @@ async function finalize(runId: string): Promise<ProcessResult> {
       error: 'supabaseAdmin gone',
     };
   }
-  // Считаем breakdown по bucket'ам
+  // Считаем breakdown по bucket'ам. ВАЖНО: активные тиры (medium/high/top)
+  // считаем ТОЛЬКО готовых к аутричу — с почтой И названием. Высоко-
+  // отскоренные «без почты» не контакты и в эти счётчики/файлы не идут.
+  // storage/invalid считаем как есть. processed_count — все обработанные.
   const { data: bucketCounts } = await supabaseAdmin
     .from('client_manual_score_rows')
-    .select('bucket')
+    .select('bucket, email, email_validation_status, email2, email2_validation_status, company_name')
     .eq('run_id', runId);
 
   const buckets: Record<ManualBucket, number> = {
@@ -444,19 +479,35 @@ async function finalize(runId: string): Promise<ProcessResult> {
     top: 0,
     invalid: 0,
   };
-  for (const r of (bucketCounts ?? []) as Array<{ bucket: ManualBucket | null }>) {
-    if (r.bucket && r.bucket in buckets) buckets[r.bucket]++;
+  let processed = 0;
+  for (const r of (bucketCounts ?? []) as Array<{
+    bucket: ManualBucket | null;
+    email: string | null;
+    email_validation_status: string | null;
+    email2: string | null;
+    email2_validation_status: string | null;
+    company_name: string | null;
+  }>) {
+    if (!r.bucket || !(r.bucket in buckets)) continue;
+    processed += 1;
+    if (r.bucket === 'storage' || r.bucket === 'invalid') {
+      buckets[r.bucket] += 1;
+      continue;
+    }
+    // Активный тир — считаем готовые КОНТАКТЫ: каждая валидная почта (с
+    // названием) = отдельный контакт/лид. Домен с 2 валидными → +2.
+    const hasName = !!r.company_name && r.company_name.trim().length > 0;
+    if (!hasName) continue;
+    if (r.email && isReadyEmailStatus(r.email_validation_status)) buckets[r.bucket] += 1;
+    if (r.email2 && isReadyEmailStatus(r.email2_validation_status)) buckets[r.bucket] += 1;
   }
-
-  const total =
-    buckets.storage + buckets.medium + buckets.high + buckets.top + buckets.invalid;
 
   await supabaseAdmin
     .from('client_manual_score_runs')
     .update({
       status: 'completed',
       finished_at: new Date().toISOString(),
-      processed_count: total,
+      processed_count: processed,
       bucket_storage_count: buckets.storage,
       bucket_medium_count: buckets.medium,
       bucket_high_count: buckets.high,
@@ -464,7 +515,7 @@ async function finalize(runId: string): Promise<ProcessResult> {
     })
     .eq('id', runId);
 
-  return { status: 'completed', total, buckets };
+  return { status: 'completed', total: processed, buckets };
 }
 
 /**

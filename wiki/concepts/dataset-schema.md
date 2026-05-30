@@ -107,6 +107,19 @@ ORDER BY a.attnum;
 
 ---
 
+## Сегментация по вертикали — `dim_campaign_segment` (migration 010)
+
+**Для вопросов «что у клиентов в вертикали X» используй `v_campaign_segment`, НЕ regex по названию.**
+
+У лидов нет ОКВЭД/индустрии (0.025% записей), ОКВЭД-коды в названиях кампаний — лишь 4.4%. Поэтому вертикаль определена **LLM-классификацией названий кампаний** по целевой аудитории (1946 кампаний → 14 вертикалей: `logistics_transport`, `construction_realestate`, `medical_pharma`, `retail_ecommerce`, `manufacturing_industrial`, `food_horeca`, `it_software_saas`, `finance_legal`, `marketing_media_events`, `education_hr`, `beauty_wellness`, `auto`, `agriculture`, `other_unclear`). Воспроизводится workflow `classify-campaign-segments`.
+
+```sql
+-- кампании логистики (чисто)
+SELECT campaign_name FROM v_campaign_segment WHERE segment='logistics_transport';
+```
+
+> ⚠️ **Урок (2026-05-31):** keyword-regex по названию для сегмента — мусор. Проверено: regex `(логист|перевозк|склад|вэд…)` дал 138 «логистов», из которых **только 46 истинных (67% ложных)** + пропустил 29 настоящих. Любой вертикальный вопрос на regex-сегменте загрязнён на ~2/3. Всегда `dim_campaign_segment`.
+
 ## Что вне scope
 
 - **Полный текст ВСЕХ писем за всё время** — иммутабельная история, не модифицируется sync'ом. Только append новых.
