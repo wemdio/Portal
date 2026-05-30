@@ -21,6 +21,7 @@
 import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
+import { supabase } from '@/lib/supabaseClient';
 
 interface LastRun {
   status: 'running' | 'completed' | 'failed';
@@ -82,6 +83,7 @@ function relativeTime(iso: string | null | undefined): string {
 export function AutoPipelineSummary() {
   const [data, setData] = useState<SummaryResponse | null>(null);
   const [error, setError] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -137,6 +139,33 @@ export function AutoPipelineSummary() {
   const timeLabel = last_run
     ? relativeTime(last_run.finished_at ?? last_run.started_at)
     : 'ни одного прогона';
+
+  // Выгрузка «склада» (контакты score 0-1000) — fetch с токеном → blob → download.
+  const downloadStored = async () => {
+    setDownloading(true);
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) return;
+      const res = await fetch('/api/client/auto-pipeline/stored/export', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'auto-pipeline-sklad.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   return (
     <section className="neu-card px-5 py-4" aria-labelledby="auto-pipeline-label">
@@ -213,6 +242,18 @@ export function AutoPipelineSummary() {
           Кампании собираются автоматически каждое утро в 07:00 МСК.
           Первый прогон ещё не запускался.
         </p>
+      )}
+
+      {stored_count > 0 && (
+        <button
+          type="button"
+          onClick={() => void downloadStored()}
+          disabled={downloading}
+          className="mt-3 text-xs underline disabled:opacity-50"
+          style={{ color: 'var(--cp-paper-mute)' }}
+        >
+          {downloading ? 'Готовлю файл…' : `Скачать склад (${stored_count.toLocaleString('ru-RU')})`}
+        </button>
       )}
 
       {last_run?.was_dry_run && (

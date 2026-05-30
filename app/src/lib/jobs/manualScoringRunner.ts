@@ -19,6 +19,9 @@ import { getOrFetchScore, normalizeDomain } from './mailganerScoreCache';
 import { validateEmailForAutoPipeline } from './autoPipelineEmailValidation';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import type { DomainInfo } from '@/lib/emailValidation/shared';
+import { cleanCompanyNames } from '@/lib/companyNameCleanupBatch';
+import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
+import type { LeadCreatePayload } from '@/lib/instantly/types';
 
 export type ManualBucket = 'storage' | 'medium' | 'high' | 'top' | 'invalid';
 
@@ -154,7 +157,131 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
     );
   }
 
+  // 4.5. Резолв названий (кэш ФНС) + чистка (AI как кнопка «Очистить названия»)
+  //      + маршрутизация активных контактов в СУЩЕСТВУЮЩИЕ кампании авто-
+  //      пайплайна по скорингу. Не валит прогон при сбое.
+  try {
+    await resolveNamesAndRoute(opts.runId);
+  } catch (err) {
+    console.error('[manual-scoring] resolveNamesAndRoute failed', err);
+  }
+
   return await finalize(opts.runId);
+}
+
+/**
+ * Для активных строк прогона: находит название компании (из кэша
+ * mailganer_domain_scores, наполняемого BoB-скорером из базы ФНС), чистит его
+ * тем же AI, что кнопка «Очистить названия», сохраняет в company_name и грузит
+ * контакты в существующие Instantly-кампании авто-пайплайна по скорингу.
+ *
+ * Идемпотентно: берёт только активные строки с email и company_name IS NULL.
+ * После резолва company_name всегда НЕ NULL (''=имени нет) → повтор не дублирует.
+ *
+ * Маршрутизация только если у клиента настроены кампании (bucket с
+ * instantly_campaign_id и непустой цепочкой). Иначе — только CSV (как раньше).
+ */
+async function resolveNamesAndRoute(runId: string): Promise<void> {
+  if (!supabaseAdmin) return;
+
+  const { data: run } = await supabaseAdmin
+    .from('client_manual_score_runs')
+    .select('client_user_id')
+    .eq('id', runId)
+    .single();
+  const clientUserId = (run as { client_user_id?: string } | null)?.client_user_id;
+  if (!clientUserId) return;
+
+  const { data: rowsData } = await supabaseAdmin
+    .from('client_manual_score_rows')
+    .select('id, domain, score, email')
+    .eq('run_id', runId)
+    .in('bucket', ['medium', 'high', 'top'])
+    .not('email', 'is', null)
+    .is('company_name', null);
+  const rows = (rowsData ?? []) as Array<{ id: number; domain: string | null; score: number | null; email: string | null }>;
+  if (rows.length === 0) return;
+
+  // 1. Название из кэша (BoB-скорер кладёт company_name из ФНС по домену).
+  const domains = [...new Set(rows.map((r) => r.domain).filter((d): d is string => !!d))];
+  const nameByDomain = new Map<string, string>();
+  for (let i = 0; i < domains.length; i += 500) {
+    const chunk = domains.slice(i, i + 500);
+    const { data } = await supabaseAdmin
+      .from('mailganer_domain_scores')
+      .select('domain, company_name')
+      .in('domain', chunk)
+      .not('company_name', 'is', null);
+    for (const d of (data ?? []) as Array<{ domain: string; company_name: string | null }>) {
+      if (d.company_name) nameByDomain.set(d.domain, d.company_name);
+    }
+  }
+
+  // 2. Чистка названий (AI, тот же механизм что кнопка). Без эвристики.
+  const cleaned = await cleanCompanyNames(
+    rows.map((r) => ({ name: r.domain ? nameByDomain.get(r.domain) ?? '' : '', domain: r.domain })),
+  );
+
+  // 3. Сохраняем company_name ('' = резолв выполнен, имени нет → идемпотентность).
+  for (let i = 0; i < rows.length; i += 1) {
+    await supabaseAdmin
+      .from('client_manual_score_rows')
+      .update({ company_name: cleaned[i] || '' })
+      .eq('id', rows[i].id);
+  }
+
+  // 4. Маршрутизация в существующие кампании по скорингу — если настроены.
+  const { data: cfg } = await supabaseAdmin
+    .from('client_auto_pipeline_configs')
+    .select('score_buckets')
+    .eq('client_user_id', clientUserId)
+    .maybeSingle();
+  const buckets = ((cfg as { score_buckets?: unknown } | null)?.score_buckets ?? []) as Array<{
+    score_min: number;
+    score_max: number | null;
+    instantly_campaign_id: string | null;
+    sequence?: { steps?: unknown[] };
+    label?: string;
+  }>;
+  if (!Array.isArray(buckets) || buckets.length === 0) return; // кампании не настроены → только CSV
+
+  const groups = new Map<string, { campaignId: string; label: string; leads: LeadCreatePayload[] }>();
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i];
+    const name = cleaned[i];
+    // Гарантия полей: email + название + сайт обязательны.
+    if (!r.email || !name || !r.domain || r.score === null) continue;
+    const bucket = buckets.find(
+      (b) => r.score! >= b.score_min && (b.score_max === null || r.score! <= b.score_max),
+    );
+    if (!bucket || !bucket.instantly_campaign_id) continue; // нет кампании для диапазона
+    const hasSteps = Array.isArray(bucket.sequence?.steps) && bucket.sequence!.steps!.length > 0;
+    if (!hasSteps) continue; // bucket без цепочки = склад, не шлём
+    let g = groups.get(bucket.instantly_campaign_id);
+    if (!g) {
+      g = { campaignId: bucket.instantly_campaign_id, label: bucket.label ?? 'manual', leads: [] };
+      groups.set(bucket.instantly_campaign_id, g);
+    }
+    g.leads.push({
+      email: r.email,
+      company_name: name,
+      website: `https://${r.domain}`,
+      custom_variables: { source: 'manual', score: String(r.score), domain: r.domain },
+    });
+  }
+
+  for (const g of groups.values()) {
+    try {
+      await appendLeadsToClientCampaign({
+        userId: clientUserId,
+        campaignId: g.campaignId,
+        leads: g.leads,
+        contextLabel: `manual:${g.label}`,
+      });
+    } catch (err) {
+      console.error('[manual-scoring] append to campaign failed', g.campaignId, err);
+    }
+  }
 }
 
 interface ProcessedRow {
