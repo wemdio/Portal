@@ -36,11 +36,12 @@ const REQUEST_GAP_MS = 250;
 const MAX_PAGES = 20;
 const PAGE_SIZE = 100;
 
-// До 2026-04 HH банил по IP — приходилось ходить через proxy (undici.ProxyAgent).
-// С обязательным OAuth идентификация per-token, не per-IP, и партнёрский токен
-// HH_ACCESS_TOKEN даёт лимит ~10 RPS напрямую с любого IP. Поэтому undici/proxy
-// инфраструктура удалена — простой глобальный fetch (Node 18+) + Bearer header.
-// Проверка реальными запросами с моей машины (вне РФ) → 200 OK, 0 ошибок.
+// HH API: OAuth Bearer (HH_ACCESS_TOKEN) ОБЯЗАТЕЛЕН, но его НЕ достаточно с
+// зарубежного IP — HH всё равно отдаёт 403 (geo-блок). Поэтому ходим через
+// RU-прокси (PROXY_URLS), как рабочий админский/клиентский hhParser. undici
+// подключаем лениво (см. getProxyDispatcher ниже) — статический import ломал jest.
+// (Раньше прокси ошибочно убрали, понадеявшись на «токен работает с любого IP»
+//  — на проде вне РФ это давало сплошные 403.)
 
 export interface HhAutoParserConfig {
   /** Only include vacancies published at or after this moment. */
@@ -110,16 +111,54 @@ function buildHeaders(): Record<string, string> {
   return headers;
 }
 
+// HH блокирует зарубежные IP (403) даже с валидным токеном — ходим через
+// RU-прокси (тот же PROXY_URLS, что и рабочий админский/клиентский hhParser).
+// undici импортируем ЛЕНИВО: статический import ломал jest («TextDecoder is
+// not defined»). Берём первый прокси из PROXY_URLS (JSON-массив) или HH_PROXY_URL.
+function firstProxyUrl(): string | null {
+  if (process.env.PROXY_URLS) {
+    try {
+      const arr = JSON.parse(process.env.PROXY_URLS);
+      if (Array.isArray(arr) && arr.length > 0 && typeof arr[0] === 'string') {
+        return arr[0].trim();
+      }
+    } catch {
+      /* malformed PROXY_URLS — игнорируем */
+    }
+  }
+  return process.env.HH_PROXY_URL?.trim() || null;
+}
+
+let cachedDispatcher: { value: unknown } | null = null;
+async function getProxyDispatcher(): Promise<unknown> {
+  if (cachedDispatcher) return cachedDispatcher.value;
+  const url = firstProxyUrl();
+  if (!url) {
+    cachedDispatcher = { value: null };
+    return null;
+  }
+  try {
+    const { ProxyAgent } = await import('undici');
+    cachedDispatcher = { value: new ProxyAgent(url) as unknown };
+  } catch {
+    cachedDispatcher = { value: null };
+  }
+  return cachedDispatcher.value;
+}
+
 async function fetchJson<T>(url: string): Promise<T | null> {
   try {
-    const res = await fetch(url, {
-      headers: buildHeaders(),
-    });
+    const dispatcher = await getProxyDispatcher();
+    const init: RequestInit & { dispatcher?: unknown } = { headers: buildHeaders() };
+    if (dispatcher) init.dispatcher = dispatcher;
+    const res = await fetch(url, init);
     if (!res.ok) {
       // Полезный сигнал для отладки — HH 403 (geo-блок) или 429 (rate-limit)
       // должны быть видны в логе, а не теряться молча.
       if (res.status === 403 || res.status === 429) {
-        console.warn(`[hhAutoParser] HH returned ${res.status} for ${url} — proxy issue?`);
+        console.warn(
+          `[hhAutoParser] HH returned ${res.status} for ${url}${dispatcher ? '' : ' — прокси не настроен (PROXY_URLS пуст)'}`,
+        );
       }
       return null;
     }

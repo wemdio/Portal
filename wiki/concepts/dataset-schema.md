@@ -107,18 +107,27 @@ ORDER BY a.attnum;
 
 ---
 
-## Сегментация по вертикали — `dim_campaign_segment` (migration 010)
+## Две оси сегментации: КЛИЕНТ (чисто) и target-вертикаль (migrations 010-011)
 
-**Для вопросов «что у клиентов в вертикали X» используй `v_campaign_segment`, НЕ regex по названию.**
+**Ключевой факт:** название кампании ≈ `<НАШ КЛИЕНТ-отправитель> + <источник базы> + <target-хинты/ОКВЭД>`. Клиент почти всегда первым.
 
-У лидов нет ОКВЭД/индустрии (0.025% записей), ОКВЭД-коды в названиях кампаний — лишь 4.4%. Поэтому вертикаль определена **LLM-классификацией названий кампаний** по целевой аудитории (1946 кампаний → 14 вертикалей: `logistics_transport`, `construction_realestate`, `medical_pharma`, `retail_ecommerce`, `manufacturing_industrial`, `food_horeca`, `it_software_saas`, `finance_legal`, `marketing_media_events`, `education_hr`, `beauty_wellness`, `auto`, `agriculture`, `other_unclear`). Воспроизводится workflow `classify-campaign-segments`.
-
+### Ось 1 — клиент (авторитетно): `v_campaign_client`
+Кто из клиентов студии вёл кампанию. Источник: `projects.client` через `project_instantly_campaigns` (чисто, 940 кампаний) + name-match по 107 известным клиентам (66). Покрытие ~52%.
 ```sql
--- кампании логистики (чисто)
-SELECT campaign_name FROM v_campaign_segment WHERE segment='logistics_transport';
+SELECT campaign_name, client FROM v_campaign_client WHERE client ILIKE '%inmyroom%';
 ```
 
-> ⚠️ **Урок (2026-05-31):** keyword-regex по названию для сегмента — мусор. Проверено: regex `(логист|перевозк|склад|вэд…)` дал 138 «логистов», из которых **только 46 истинных (67% ложных)** + пропустил 29 настоящих. Любой вертикальный вопрос на regex-сегменте загрязнён на ~2/3. Всегда `dim_campaign_segment`.
+### Ось 2 — target-вертикаль получателей: `v_campaign_segment`
+Индустрия ПОЛУЧАТЕЛЕЙ. У лидов ОКВЭД нет (0.025%), брифы пусты → выводится из названия **после вычитания клиента** + декода ОКВЭД-кодов (workflow `classify-campaign-segments-v2`). 14 вертикалей. Где после вычитания клиента остаётся только источник/роль (HH/руспрофайл/ЛПРы) без индустрии → честно **`other_unclear`** (481 кампания, 25% — НЕ угадываем).
+```sql
+SELECT campaign_name FROM v_campaign_segment WHERE segment='logistics_transport' AND confidence='high';
+```
+
+> ⚠️ **Двойной урок (2026-05-31), оба найдены вызовом пользователя:**
+> 1. **keyword-regex по названию = мусор.** `(логист|перевозк|склад…)` дал 138 «логистов»: только 46 истинных (67% ложных) + пропустил 29.
+> 2. **LLM-классификация v1 тоже текла** — путала индустрию КЛИЕНТА с target (Smartway/Инфолоджистикс — наши клиенты, не получатели). v2 чинит это вычитанием известного клиента ПЕРЕД классификацией + декодом ОКВЭД. Smartway→manufacturing(ОКВЭД 28) или other_unclear(если только продукт), не logistics.
+>
+> **Правило:** target-вертикаль — best-effort (low/other_unclear где не выводимо), КЛИЕНТ — авторитетен. Для решений опирайся на клиента; вертикаль — для приблизительных срезов с фильтром `confidence='high'`.
 
 ## Что вне scope
 
