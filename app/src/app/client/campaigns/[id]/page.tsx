@@ -63,7 +63,13 @@ function stripHtml(value?: string): string {
   if (!value) return '';
   return value
     .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
+    // Bodies are <div>line</div> per line (see toInstantlyHtmlBody). Convert
+    // only the CLOSING block tag to a newline; opening <div> is stripped by
+    // the general tag-strip below. Converting BOTH would insert a blank line
+    // between every adjacent line (<div>A</div><div>B</div> → "A\n\nB" instead
+    // of "A\nB"). Closing-only keeps single line breaks faithful and makes the
+    // edit round-trip (load → save → load) stable.
+    .replace(/<\/(div|p|li)>/gi, '\n')
     .replace(/<[^>]+>/g, '')
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
@@ -71,6 +77,8 @@ function stripHtml(value?: string): string {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
