@@ -178,8 +178,8 @@ describe('buildCampaignPayloadFromPreset', () => {
     expect(step0.delay_unit).toBe('days');
     // Content lives in variants[], not on the step itself (Instantly v2).
     expect(step0.variants?.[0].subject).toBe('Hi {{firstName}}');
-    expect(step0.variants?.[0].body).toBe('Body 1');
-    expect(payload.sequences?.[0].steps[1].variants?.[0].body).toBe('Body 2');
+    expect(step0.variants?.[0].body).toBe('<div>Body 1</div>');
+    expect(payload.sequences?.[0].steps[1].variants?.[0].body).toBe('<div>Body 2</div>');
   });
 
   it('sets per-step delay to the NEXT step wait_days; last step is filler', () => {
@@ -229,9 +229,9 @@ describe('buildCampaignPayloadFromPreset', () => {
     });
     const step = payload.sequences?.[0].steps[0];
     expect(step?.variants).toHaveLength(3);
-    expect(step?.variants?.[0]).toEqual({ subject: 'A subj', body: 'A body' });
-    expect(step?.variants?.[1]).toEqual({ subject: 'B subj', body: 'B body' });
-    expect(step?.variants?.[2]).toEqual({ subject: 'C subj', body: 'C body' });
+    expect(step?.variants?.[0]).toEqual({ subject: 'A subj', body: '<div>A body</div>' });
+    expect(step?.variants?.[1]).toEqual({ subject: 'B subj', body: '<div>B body</div>' });
+    expect(step?.variants?.[2]).toEqual({ subject: 'C subj', body: '<div>C body</div>' });
   });
 
   it('always emits variants[]: a step with no extra variants still has Variant A', () => {
@@ -241,7 +241,7 @@ describe('buildCampaignPayloadFromPreset', () => {
     });
     const step = payload.sequences?.[0].steps[0];
     expect(step?.variants).toHaveLength(1);
-    expect(step?.variants?.[0].body).toBe('Body 1');
+    expect(step?.variants?.[0].body).toBe('<div>Body 1</div>');
   });
 });
 
@@ -855,34 +855,43 @@ describe('buildCampaignPresetUpdatePayload', () => {
 });
 
 describe('toInstantlyHtmlBody', () => {
-  it('leaves single-line text without special chars unchanged', () => {
-    expect(toInstantlyHtmlBody('Hello world')).toBe('Hello world');
+  // CRITICAL FORMAT: each line MUST be wrapped in <div>…</div>. Instantly's
+  // storage sanitizer DELETES bare text nodes not inside a block tag — verified
+  // on prod campaign e69ceef5 (2026-05-31): a body of `text<br>text` ended up
+  // stored as `<br /><br />` with all text gone. Per-line <div> survives.
+
+  it('wraps a single line in <div>', () => {
+    expect(toInstantlyHtmlBody('Hello world')).toBe('<div>Hello world</div>');
   });
 
-  it('converts a single \\n to <br> + newline so Instantly editor renders the break', () => {
-    expect(toInstantlyHtmlBody('Line 1\nLine 2')).toBe('Line 1<br>\nLine 2');
+  it('wraps each line in its own <div> (one \\n → two divs)', () => {
+    expect(toInstantlyHtmlBody('Line 1\nLine 2')).toBe('<div>Line 1</div><div>Line 2</div>');
   });
 
-  it('preserves paragraph spacing (\\n\\n becomes two <br>s)', () => {
-    expect(toInstantlyHtmlBody('Para 1\n\nPara 2')).toBe('Para 1<br>\n<br>\nPara 2');
+  it('represents a blank line as <div><br></div> (preserves paragraph spacing)', () => {
+    expect(toInstantlyHtmlBody('Para 1\n\nPara 2')).toBe(
+      '<div>Para 1</div><div><br></div><div>Para 2</div>',
+    );
   });
 
-  it('normalizes CRLF to LF before substitution (no double-<br>)', () => {
-    expect(toInstantlyHtmlBody('Line 1\r\nLine 2')).toBe('Line 1<br>\nLine 2');
+  it('normalizes CRLF to LF before splitting (no stray blank divs)', () => {
+    expect(toInstantlyHtmlBody('Line 1\r\nLine 2')).toBe('<div>Line 1</div><div>Line 2</div>');
   });
 
-  it('HTML-escapes &, <, > so client text "5 < 10 & rising" does not break markup', () => {
-    expect(toInstantlyHtmlBody('5 < 10 & rising > 3')).toBe('5 &lt; 10 &amp; rising &gt; 3');
+  it('HTML-escapes &, <, > inside the div so client text does not break markup', () => {
+    expect(toInstantlyHtmlBody('5 < 10 & rising > 3')).toBe(
+      '<div>5 &lt; 10 &amp; rising &gt; 3</div>',
+    );
   });
 
   it('leaves Instantly variable braces {{firstName}} untouched (they are not HTML special)', () => {
-    expect(toInstantlyHtmlBody('Hi {{firstName}}')).toBe('Hi {{firstName}}');
+    expect(toInstantlyHtmlBody('Hi {{firstName}}')).toBe('<div>Hi {{firstName}}</div>');
   });
 
   it('escapes & BEFORE other entities (so `&lt;` stays one entity, not double-escaped)', () => {
     // If we escaped < first then &, the output of `<` would be `&lt;`,
     // which would then turn into `&amp;lt;`. Order matters.
-    expect(toInstantlyHtmlBody('<b>')).toBe('&lt;b&gt;');
+    expect(toInstantlyHtmlBody('<b>')).toBe('<div>&lt;b&gt;</div>');
   });
 
   it('handles realistic multi-paragraph client body with a bulleted list', () => {
@@ -898,16 +907,16 @@ describe('toInstantlyHtmlBody', () => {
       'С уважением, Иван',
     ].join('\n');
     const html = toInstantlyHtmlBody(raw);
-    // Each \n becomes <br>\n — and bullets / paragraphs survive intact.
-    expect(html).toContain('Добрый день! Это Иван из «Чизмол».<br>');
-    expect(html).toContain('Почему с нами работают:<br>');
-    expect(html).toContain('• качественное масло по ГОСТ<br>');
-    expect(html).toContain('С уважением, Иван');
-    // Empty line between paragraphs preserved as <br><br>:
-    expect(html).toMatch(/Чизмол».<br>\n<br>\nПочему/);
+    // Each line is its own <div>; bullets / text survive (not stripped).
+    expect(html).toContain('<div>Добрый день! Это Иван из «Чизмол».</div>');
+    expect(html).toContain('<div>Почему с нами работают:</div>');
+    expect(html).toContain('<div>• качественное масло по ГОСТ</div>');
+    expect(html).toContain('<div>С уважением, Иван</div>');
+    // Empty line between paragraphs preserved as a blank-line div:
+    expect(html).toContain('«Чизмол».</div><div><br></div><div>Почему');
   });
 
-  it('handles empty body without throwing', () => {
+  it('returns empty string for empty input (no stray blank div)', () => {
     expect(toInstantlyHtmlBody('')).toBe('');
   });
 
@@ -923,25 +932,25 @@ describe('toInstantlyHtmlBody', () => {
     // The assertions below pin the escape behavior. If anyone ever drops the
     // escape step from toInstantlyHtmlBody, this test will catch it.
 
-    // Script tag — the canonical XSS payload.
+    // Script tag — the canonical XSS payload. Escaped, wrapped in our div.
     expect(toInstantlyHtmlBody('<script>alert(1)</script>')).toBe(
-      '&lt;script&gt;alert(1)&lt;/script&gt;',
+      '<div>&lt;script&gt;alert(1)&lt;/script&gt;</div>',
     );
 
     // img+onerror — common XSS without explicit <script>.
     expect(toInstantlyHtmlBody('<img src=x onerror="alert(1)">')).toBe(
-      '&lt;img src=x onerror="alert(1)"&gt;',
+      '<div>&lt;img src=x onerror="alert(1)"&gt;</div>',
     );
 
     // Plain formatting tags — client cannot smuggle bold/italic/links into
-    // what should be a text-only email.
+    // the body; they're escaped to visible text inside our div.
     expect(toInstantlyHtmlBody('<b>bold</b> and <a href="https://evil">click</a>')).toBe(
-      '&lt;b&gt;bold&lt;/b&gt; and &lt;a href="https://evil"&gt;click&lt;/a&gt;',
+      '<div>&lt;b&gt;bold&lt;/b&gt; and &lt;a href="https://evil"&gt;click&lt;/a&gt;</div>',
     );
 
     // Pre-encoded entities stay encoded (no double-decode that could let
     // someone smuggle real HTML via `&lt;script&gt;`).
-    expect(toInstantlyHtmlBody('&lt;script&gt;')).toBe('&amp;lt;script&amp;gt;');
+    expect(toInstantlyHtmlBody('&lt;script&gt;')).toBe('<div>&amp;lt;script&amp;gt;</div>');
   });
 });
 
@@ -964,8 +973,8 @@ describe('buildCampaignPayloadFromPreset — body HTML conversion', () => {
       },
     });
     const step = payload.sequences?.[0].steps[0];
-    expect(step?.variants?.[0].body).toBe('Line 1<br>\nLine 2');
-    expect(step?.variants?.[1].body).toBe('B line 1<br>\nB line 2');
+    expect(step?.variants?.[0].body).toBe('<div>Line 1</div><div>Line 2</div>');
+    expect(step?.variants?.[1].body).toBe('<div>B line 1</div><div>B line 2</div>');
   });
 
   it('does not HTML-escape the subject (subjects are single-line plain text in Instantly)', () => {
