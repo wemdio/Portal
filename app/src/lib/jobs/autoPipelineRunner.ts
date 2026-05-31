@@ -619,6 +619,15 @@ export async function runAutoPipelineForClient(
   clientUserId: string,
 ): Promise<AutoPipelineRunResult> {
   const logCtx = { clientUserId };
+  // Поэтапное логирование в stdout (→ /var/log/auto-pipeline.log) с памятью.
+  // Если процесс умрёт — последняя строка покажет фазу и rss перед смертью
+  // (напр. «chunk from=3000 rss=1800MB» = OOM на 7-м чанке).
+  const logPhase = (phase: string, extra?: Record<string, unknown>): void => {
+    const mu = process.memoryUsage();
+    console.log(
+      `[auto-pipeline][PHASE] ${phase} | rss=${Math.round(mu.rss / 1048576)}MB heap=${Math.round(mu.heapUsed / 1048576)}MB${extra ? ' | ' + JSON.stringify(extra) : ''}`,
+    );
+  };
   const emptyResult = (
     runId: string,
     error?: string,
@@ -718,6 +727,7 @@ export async function runAutoPipelineForClient(
     // 3. Дедуп HH-результатов по hh_employer_id.
     const seen = await loadSeenEmployerIds(clientUserId);
     const freshFromHh = employers.filter((e) => !seen.has(e.id));
+    logPhase('parse-done', { parsed: employers.length, freshFromHh: freshFromHh.length, seen: seen.size });
 
     await logAudit(
       'auto-pipeline.parsed',
@@ -861,9 +871,11 @@ export async function runAutoPipelineForClient(
     let withEmailCount = 0;
     let emailValidCount = 0;
 
+    logPhase('enrich-start', { fresh: fresh.length, parsed: employers.length, dryRun: config.dry_run });
     const CHUNK_SIZE = 500;
     for (let chunkStart = 0; chunkStart < fresh.length; chunkStart += CHUNK_SIZE) {
       const chunk = fresh.slice(chunkStart, chunkStart + CHUNK_SIZE);
+      logPhase('chunk', { from: chunkStart, of: fresh.length });
 
       const enrichments = await enrichEmployers(
         chunk,
@@ -1013,6 +1025,7 @@ export async function runAutoPipelineForClient(
       // итерации, GC их собирает. Это и есть фикс OOM.
       await upsertSeenEmployers(seenUpserts);
     } // конец for (chunkStart) — chunk loop
+    logPhase('enrich-done', { routed: routedCount, stored: storedCount, skipped: skippedCount, emailValid: emailValidCount });
 
     await logAudit(
       'auto-pipeline.mailganer-cache',
@@ -1079,6 +1092,7 @@ export async function runAutoPipelineForClient(
     const newFromBob = fresh.filter((e) => detectSource(e.id) === 'base_of_bases').length;
     const newFromHh = fresh.length - newFromBob;
 
+    logPhase('finalizing', { routed: routedCount, stored: storedCount, skipped: skippedCount, failed: failedCount });
     // 8. Finalize run row.
     await finishRunRow(runId, {
       status: 'completed',
