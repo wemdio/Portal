@@ -571,6 +571,11 @@ interface SeenEmployerUpsert {
   client_user_id: string;
   hh_employer_id: string;
   hh_employer_name: string;
+  /** Очищенное название (AI «Очистить названия»). Заполняется для would-be-ready
+   *  строк (валидная почта + имя + сайт) ПРЯМО в чанке — и в dry-run, и в боевом,
+   *  чтобы дашборд/выгрузка показывали готовое к аутричу имя. null если строка
+   *  не готова или чистка недоступна. hh_employer_name остаётся сырым. */
+  company_name: string | null;
   domain: string | null;
   site_url: string | null;
   endpoint_score: number | null;
@@ -912,6 +917,30 @@ export async function runAutoPipelineForClient(
         mailganerStats,
       );
 
+      // 5.1. Чистка названий would-be-ready строк ЭТОГО чанка — ТЕМ ЖЕ AI, что
+      //      кнопка «Очистить названия» (cleanCompanyNames → stepNameCleanup).
+      //      «Готовый» = валидная почта (primary или доп.) + имя + сайт; это НЕ
+      //      зависит от настройки кампаний, поэтому работает и в чистом dry-run
+      //      (измерение качества до настройки sequence'ов). Кладём результат в
+      //      company_name каждой seen-строки — и dry-run, и боевой пишут готовое
+      //      имя. cleanCompanyNames никогда не бросает: при сбое AI → исходное.
+      const readyEnrichments = enrichments.filter((enr) => {
+        const hasValidEmail =
+          (enr.email && enr.emailValidation?.isValid) ||
+          enr.additionalEmails.some((ae) => ae.validation?.isValid);
+        return Boolean(hasValidEmail && enr.employer.name && enr.employer.siteUrl);
+      });
+      const cleanedById = new Map<string, string>();
+      if (readyEnrichments.length > 0) {
+        const cleaned = await cleanCompanyNames(
+          readyEnrichments.map((enr) => ({ name: enr.employer.name, domain: enr.domain })),
+        );
+        readyEnrichments.forEach((enr, i) => {
+          if (cleaned[i]) cleanedById.set(enr.employer.id, cleaned[i]);
+        });
+        logPhase('names-cleaned', { from: chunkStart, ready: readyEnrichments.length });
+      }
+
       const seenUpserts: SeenEmployerUpsert[] = [];
 
       for (const enr of enrichments) {
@@ -931,6 +960,7 @@ export async function runAutoPipelineForClient(
           client_user_id: clientUserId,
           hh_employer_id: enr.employer.id,
           hh_employer_name: enr.employer.name,
+          company_name: cleanedById.get(enr.employer.id) ?? null,
           domain: enr.domain,
           site_url: enr.employer.siteUrl,
           endpoint_score: enr.score,
@@ -1020,7 +1050,7 @@ export async function runAutoPipelineForClient(
           for (const addr of leadEmails) {
             group.leads.push({
               email: addr,
-              company_name: enr.employer.name,
+              company_name: cleanedById.get(enr.employer.id) ?? enr.employer.name,
               website: enr.employer.siteUrl ?? undefined,
               custom_variables: customVars,
             });
@@ -1054,19 +1084,8 @@ export async function runAutoPipelineForClient(
       { ...logCtx, ...mailganerStats },
     );
 
-    // 5.5. Чистка названий routed-лидов — ТЕМ ЖЕ AI, что кнопка «Очистить
-    //      названия» (cleanCompanyNames → stepNameCleanup, батчи по 100).
-    //      В dry-run groupedLeads пуст — шаг сам собой пропускается.
-    const leadsToClean = [...groupedLeads.values()].flatMap((g) => g.leads);
-    if (leadsToClean.length > 0) {
-      const cleanedNames = await cleanCompanyNames(
-        leadsToClean.map((l) => ({ name: l.company_name, domain: l.website })),
-      );
-      leadsToClean.forEach((l, i) => {
-        if (cleanedNames[i]) l.company_name = cleanedNames[i];
-      });
-      await logAudit('auto-pipeline.names-cleaned', `Очищено названий лидов: ${leadsToClean.length}`, logCtx);
-    }
+    // 5.5. (Чистка названий перенесена ВНУТРЬ чанк-цикла — см. шаг 5.1. Лиды в
+    //      groupedLeads уже несут очищенное имя, повторно чистить не нужно.)
 
     // 6. Append leads per bucket. В dry-run шаг пропускаем целиком —
     // groupedLeads пуст (routing-блок делает continue ещё ДО groupedLeads.set).
