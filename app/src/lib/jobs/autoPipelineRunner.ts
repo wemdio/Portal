@@ -326,6 +326,15 @@ async function updateConfigLastRun(
  */
 const MAX_EMAILS_PER_DOMAIN = 2;
 
+/**
+ * Жёсткий потолок на обработку ОДНОГО домена в enrichment. Если scrape/SMTP
+ * зависает (mail-сервер принял коннект и молчит, не рвёт его), Promise.race
+ * выкидывает worker дальше через этот таймаут. Иначе один домен вешал весь
+ * worker-пул на часы — это и была причина «зомби»-прогонов (пул застревал на
+ * ~7-м чанке). 3 минуты с запасом на медленные сайты (до 5 страниц × ретраи).
+ */
+const ENRICH_ITEM_TIMEOUT_MS = 180_000;
+
 export interface EnrichmentResult {
   employer: HhEmployer;
   domain: string | null;
@@ -384,6 +393,10 @@ async function enrichEmployers(
       const emp = employers[i];
       const domain = deriveDomain(emp.siteUrl);
       try {
+        // Таймаут на ОДИН домен (Promise.race) — зависший scrape/SMTP не должен
+        // застопорить весь worker-пул (это была причина «зомби»-прогонов).
+        results[i] = await Promise.race<EnrichmentResult>([
+          (async (): Promise<EnrichmentResult> => {
         // Шаг 1: получаем score. Сначала смотрим в БД-кэш — если домен
         // скорили в любом прошлом прогоне, возьмём оттуда мгновенно (один
         // SELECT, ~5ms). Если нет — getOrFetchScore сам дёрнет Mailganer и
@@ -427,7 +440,7 @@ async function enrichEmployers(
           }
         }
 
-        results[i] = {
+        return {
           employer: emp,
           domain,
           email,
@@ -438,6 +451,14 @@ async function enrichEmployers(
           endpointRaw: endpoint.raw,
           enrichError: endpoint.ok ? null : (endpoint.error ?? 'endpoint failed'),
         };
+          })(),
+          new Promise<EnrichmentResult>((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`enrich item timeout ${ENRICH_ITEM_TIMEOUT_MS}ms`)),
+              ENRICH_ITEM_TIMEOUT_MS,
+            ),
+          ),
+        ]);
       } catch (err) {
         results[i] = {
           employer: emp,
