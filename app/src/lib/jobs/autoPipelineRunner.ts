@@ -326,6 +326,15 @@ async function updateConfigLastRun(
  */
 const MAX_EMAILS_PER_DOMAIN = 2;
 
+/**
+ * Жёсткий потолок на обработку ОДНОГО домена в enrichment. Если scrape/SMTP
+ * зависает (mail-сервер принял коннект и молчит, не рвёт его), Promise.race
+ * выкидывает worker дальше через этот таймаут. Иначе один домен вешал весь
+ * worker-пул на часы — это и была причина «зомби»-прогонов (пул застревал на
+ * ~7-м чанке). 3 минуты с запасом на медленные сайты (до 5 страниц × ретраи).
+ */
+const ENRICH_ITEM_TIMEOUT_MS = 180_000;
+
 export interface EnrichmentResult {
   employer: HhEmployer;
   domain: string | null;
@@ -384,6 +393,10 @@ async function enrichEmployers(
       const emp = employers[i];
       const domain = deriveDomain(emp.siteUrl);
       try {
+        // Таймаут на ОДИН домен (Promise.race) — зависший scrape/SMTP не должен
+        // застопорить весь worker-пул (это была причина «зомби»-прогонов).
+        results[i] = await Promise.race<EnrichmentResult>([
+          (async (): Promise<EnrichmentResult> => {
         // Шаг 1: получаем score. Сначала смотрим в БД-кэш — если домен
         // скорили в любом прошлом прогоне, возьмём оттуда мгновенно (один
         // SELECT, ~5ms). Если нет — getOrFetchScore сам дёрнет Mailganer и
@@ -427,7 +440,7 @@ async function enrichEmployers(
           }
         }
 
-        results[i] = {
+        return {
           employer: emp,
           domain,
           email,
@@ -438,6 +451,14 @@ async function enrichEmployers(
           endpointRaw: endpoint.raw,
           enrichError: endpoint.ok ? null : (endpoint.error ?? 'endpoint failed'),
         };
+          })(),
+          new Promise<EnrichmentResult>((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`enrich item timeout ${ENRICH_ITEM_TIMEOUT_MS}ms`)),
+              ENRICH_ITEM_TIMEOUT_MS,
+            ),
+          ),
+        ]);
       } catch (err) {
         results[i] = {
           employer: emp,
@@ -619,6 +640,15 @@ export async function runAutoPipelineForClient(
   clientUserId: string,
 ): Promise<AutoPipelineRunResult> {
   const logCtx = { clientUserId };
+  // Поэтапное логирование в stdout (→ /var/log/auto-pipeline.log) с памятью.
+  // Если процесс умрёт — последняя строка покажет фазу и rss перед смертью
+  // (напр. «chunk from=3000 rss=1800MB» = OOM на 7-м чанке).
+  const logPhase = (phase: string, extra?: Record<string, unknown>): void => {
+    const mu = process.memoryUsage();
+    console.log(
+      `[auto-pipeline][PHASE] ${phase} | rss=${Math.round(mu.rss / 1048576)}MB heap=${Math.round(mu.heapUsed / 1048576)}MB${extra ? ' | ' + JSON.stringify(extra) : ''}`,
+    );
+  };
   const emptyResult = (
     runId: string,
     error?: string,
@@ -718,6 +748,7 @@ export async function runAutoPipelineForClient(
     // 3. Дедуп HH-результатов по hh_employer_id.
     const seen = await loadSeenEmployerIds(clientUserId);
     const freshFromHh = employers.filter((e) => !seen.has(e.id));
+    logPhase('parse-done', { parsed: employers.length, freshFromHh: freshFromHh.length, seen: seen.size });
 
     await logAudit(
       'auto-pipeline.parsed',
@@ -861,9 +892,11 @@ export async function runAutoPipelineForClient(
     let withEmailCount = 0;
     let emailValidCount = 0;
 
+    logPhase('enrich-start', { fresh: fresh.length, parsed: employers.length, dryRun: config.dry_run });
     const CHUNK_SIZE = 500;
     for (let chunkStart = 0; chunkStart < fresh.length; chunkStart += CHUNK_SIZE) {
       const chunk = fresh.slice(chunkStart, chunkStart + CHUNK_SIZE);
+      logPhase('chunk', { from: chunkStart, of: fresh.length });
 
       const enrichments = await enrichEmployers(
         chunk,
@@ -1013,6 +1046,7 @@ export async function runAutoPipelineForClient(
       // итерации, GC их собирает. Это и есть фикс OOM.
       await upsertSeenEmployers(seenUpserts);
     } // конец for (chunkStart) — chunk loop
+    logPhase('enrich-done', { routed: routedCount, stored: storedCount, skipped: skippedCount, emailValid: emailValidCount });
 
     await logAudit(
       'auto-pipeline.mailganer-cache',
@@ -1079,6 +1113,7 @@ export async function runAutoPipelineForClient(
     const newFromBob = fresh.filter((e) => detectSource(e.id) === 'base_of_bases').length;
     const newFromHh = fresh.length - newFromBob;
 
+    logPhase('finalizing', { routed: routedCount, stored: storedCount, skipped: skippedCount, failed: failedCount });
     // 8. Finalize run row.
     await finishRunRow(runId, {
       status: 'completed',
