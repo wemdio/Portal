@@ -6,6 +6,11 @@ Format: `YYYY-MM-DD: <one-line summary>. Details: [link to page or analysis]`
 
 ---
 
+## 2026-05-31
+
+- **Датасет — НЕ «годы», а ~6 месяцев гранулярных данных (фундаментальная коррекция).** Найдено вызовом пользователя. Отправки (ue_type=1) только с 11 дек 2025; до этого — лишь осиротевшие ответы. Instantly стирает per-email историю через ~5-6 мес (живой /emails по кампании от фев-2025 → 0 писем). 584 старых кампании отправили ~1.2M писем, в датасете осталось 1.4% — остальное только в lifetime-агрегатах (overview). Два слоя: гранулярный дек'25–май'26 + агрегатный с начала 2025. Детальную историю назад расширить НЕЛЬЗЯ (нет у источника). Исходное «годы / 1.8M daily metrics» при пуле — двойная ошибка (см. также migration 009 про daily_snap). Горизонт зафиксирован в [dataset-schema.md](./concepts/dataset-schema.md).
+- **«Лиды» — операционный сигнал, не свойство датасета.** Метки `status='lead'` — выхлоп live-квалификатора портала (с 13 апр, OpenRouter, для ТГ-алертов СЕЙЧАС), покрывает 6% ответов / ~7 недель. Весь лид-анализ сессии (Чизмол/inMyRoom/НАФИ/Roistat) — на этом 7-недельном срезе, не на «годах». Датасет нативно лидов НЕ содержит; «лид=деньги» вообще в CRM, которой нет. Анализ датасета держать на том, чем владеет: reply-поведение, темы, sequences, клиенты, доставка.
+
 ## 2026-05-30
 
 - **Adversarial workflow (22 агента, 1.8M токенов): 3 из 4 глубоких гипотез УБИТЫ скепсисом, 1 выжила.** query_log id=18-21. ✅ ВЫЖИЛА (conf 78, прошла все атаки): **глубина последовательности** — follow-up ответы конвертят в лид ~2× лучше первого касания (within-campaign 4.59% vs 10.66%, z=6.35, paired p=0.0022); шаги 2-3 несут ~47% лидов. НЕ резать последовательности. ❌ УБИТЫ (все три — конфаунд **возраста кампании**): «reply-only = мусорные ответы» (позитив-доля идентична 47.6 vs 46.5%, p=0.28); «mailbox health = рычаг на лиды» (60× градиент = age+coverage конфаунд); «малые списки бьют большие» (артефакт раздутого `contacted_count` + возраста; корреляция меняет знак). Все выводы → [playbook.md](./playbook.md). Операционный claim агента про «краш квалификатора на 412» опровергнут живыми логами (0 ошибок, здоров).
@@ -27,7 +32,7 @@ Format: `YYYY-MM-DD: <one-line summary>. Details: [link to page or analysis]`
 
 ## 2026-05-23..25
 
-- **Initial full dataset pull.** Snapshot `98974f54-5723-4555-9ca9-20499b79cd2c`. 1,881 campaigns / 167,735 leads / 1,715,907 emails / 1.8M daily metrics. Total DB size ~7.4 GB (now 9 GB after lookups + indices).
+- **Initial full dataset pull.** Snapshot `98974f54-5723-4555-9ca9-20499b79cd2c`. 1,881 campaigns / 167,735 leads / 1,715,907 emails. ~~1.8M daily metrics~~ → **WRONG on two counts (corrected 2026-05-31):** (1) the "1.8M daily metrics" were the poisoned workspace-replicated `daily_snap` (see migration 009); (2) "years of history" is FALSE — granular sends only go back to **11 Dec 2025** (~5.5 mo); Instantly purged older per-email data (~1.2M old sends survive only as overview aggregates). The dataset is a ~6-month granular window, not multi-year. Total DB ~9 GB.
 - **Discovered Instantly /emails rate limit ~10-15 RPM sustained** (regardless of API key — workspace-wide). 20+ RPM triggers throttling with sliding penalty. Detail: [pull-campaign-analytics.mjs](../app/scripts/pull-campaign-analytics.mjs) header comment.
 - **Worker interference incident.** Running pull at 30+ RPM degraded `portal-worker-instantly-leads` poll cycle from 30s to 20+ min between 14:12-15:25 UTC on 22 May. ~2-4 missed lead qualifications. Lesson: any /emails pulling shares budget with the qualifier worker. Mitigation: `docker stop portal-worker-instantly-leads` during heavy pulls, restore after.
 - **Per-V8-string-limit crash.** `JSON.stringify` of `emails-by-campaign.json` at 646 MB exceeded V8's ~512 MB string limit. Migrated cache to per-campaign files (`emails/<id>.json`) in `pull.mjs`. Won't recur. Detail: [migrate-cache-to-per-campaign-files.mjs](../app/scripts/instantly-dataset/migrate-cache-to-per-campaign-files.mjs).
