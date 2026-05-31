@@ -38,34 +38,44 @@ export const PRESET_KEYS_THAT_SYNC_TO_CAMPAIGN = [
 export type PresetKeyThatSyncsToCampaign = (typeof PRESET_KEYS_THAT_SYNC_TO_CAMPAIGN)[number];
 
 /**
- * Converts client-authored plain-text email body into the minimal HTML that
- * Instantly's API expects.
+ * Converts client-authored plain-text email body into the HTML shape that
+ * Instantly's API actually persists.
  *
- * Why this is required even with `text_only: true`:
+ * CRITICAL — Instantly drops bare text nodes. Verified empirically against the
+ * prod Instantly API (campaign e69ceef5, 2026-05-31): when the body is
+ * `Строка 1<br>строка 2<br>...` (bare text joined with <br>, no block wrapper),
+ * Instantly's storage sanitizer KEEPS the <br> tags but DELETES all the text —
+ * the campaign ends up with `<br /><br /><br />` and no visible content (the
+ * "невидимые символы" the client reported). Every working campaign in the
+ * workspace wraps each line in `<div>…</div>`, and that text survives. So the
+ * body MUST be block-wrapped, not bare-text-with-<br>.
  *
- * Instantly's POST /api/v2/campaigns spec says the `body` field is "HTML body
- * of the email" — meaning Instantly's editor parses it as HTML on input. If we
- * send raw text with `\n`, the HTML parser collapses every newline to a single
- * space (standard HTML whitespace handling), and the campaign editor displays
- * one solid block. At send time `text_only: true` strips HTML to plain text,
- * but by then the newlines are already gone — what client sees in the editor
- * is exactly what the recipient gets.
+ * Format (matches Instantly's own editor output):
+ *   - each non-empty line  → `<div>escaped line</div>`
+ *   - each empty line       → `<div><br></div>`   (preserves blank lines)
  *
- * Fix: HTML-escape the special chars (so things like "5 < 10" don't break the
- * markup), then convert each `\n` to `<br>`. Instantly's editor renders this
- * correctly with line breaks; `text_only: true` converts `<br>` back to `\n`
- * at send time; recipient sees the same paragraphing the client typed.
+ * This survives storage under BOTH text_only:true and text_only:false
+ * (verified) — we keep text_only:true so emails still send as plain text;
+ * Instantly converts the <div>/<br> structure back to line breaks at send.
  *
- * Note: Instantly's `{{firstName}}`-style variables use `{` / `}` which are
- * NOT HTML special chars, so escaping leaves them untouched.
+ * HTML-escaping `< > &` stays: a client typing `<script>` or `5 < 10` gets
+ * `&lt;script&gt;` / `5 &lt; 10` — visible literal text, never markup. The
+ * only HTML we emit is our own <div>/<br>, so clients still cannot inject HTML.
+ *
+ * Note: Instantly's `{{firstName}}` variables use `{`/`}` which are not HTML
+ * special chars, so escaping leaves them untouched.
  */
 export function toInstantlyHtmlBody(plainText: string): string {
-  return plainText
+  if (plainText === '') return '';
+  const escaped = plainText
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/\r\n/g, '\n')
-    .replace(/\n/g, '<br>\n');
+    .replace(/\r\n/g, '\n');
+  return escaped
+    .split('\n')
+    .map((line) => (line.length > 0 ? `<div>${line}</div>` : '<div><br></div>'))
+    .join('');
 }
 
 export interface BuildCampaignPayloadInput {

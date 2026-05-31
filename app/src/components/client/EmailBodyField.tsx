@@ -2,6 +2,7 @@
 
 import { useRef, useState } from 'react';
 import { Link2, X } from 'lucide-react';
+import { buildPlainTextLinkSnippet } from '@/lib/clientLaunch/linkSnippet';
 
 interface EmailBodyFieldProps {
   value: string;
@@ -26,17 +27,18 @@ function looksLikeLink(raw: string): boolean {
 /**
  * Поле текста письма + inline-форма «Вставить ссылку».
  *
- * UTM-метки клиент проставляет на ссылку сам (своим конструктором / Campaign
- * URL Builder и т.п.) и вставляет УЖЕ ГОТОВУЮ ссылку. Кнопка раскрывает
- * inline-форму прямо под textarea — без модалки, без scrim'а: текст письма
- * всегда виден, фокус не теряется, Esc закрывает, Enter вставляет.
+ * Письма клиента уходят PLAIN-TEXT (text_only — см. buildCampaignPayload).
+ * В plain-text нельзя «спрятать» ссылку под слово, как HTML `<a href>`:
+ * нет способа сделать кликабельным именно слово «Егор», скрыв URL. Поэтому
+ * при вставке ссылки мы НЕ заменяем выделенный текст (старое поведение,
+ * на которое жаловался клиент — «Егор» исчезал), а СОХРАНЯЕМ слово и ставим
+ * URL рядом: `Егор (https://…)`. Почтовые клиенты сами делают голый URL
+ * кликабельным, слово остаётся видимым. Логика сборки — в
+ * buildPlainTextLinkSnippet (отдельно покрыта тестами).
  *
- * Раньше это была full-screen модалка со stale tokens (`--cp-accent`,
- * `--cp-text`, `--cp-text-m`) и warm-stone classes (neu-input/pill/btn) —
- * absolute-ban «modal as first thought» + off-doctrine в conversion path
- * (см. /impeccable critique 2026-05-24).
- *
- * HTML не используется — ссылка остаётся обычным текстом (письма plain-text).
+ * Клиент вставляет УЖЕ ГОТОВУЮ ссылку (с UTM, если нужно) — конструктор UTM
+ * не наша забота. Inline-форма без модалки: текст письма виден, Esc
+ * закрывает, Enter вставляет.
  */
 export function EmailBodyField({
   value,
@@ -50,34 +52,52 @@ export function EmailBodyField({
   const [sel, setSel] = useState({ start: 0, end: 0 });
   const [open, setOpen] = useState(false);
   const [link, setLink] = useState('');
+  // Выделенное слово, которое мы СОХРАНИМ рядом со ссылкой. Пусто, если
+  // ничего не выделено или выделение само похоже на URL (тогда это
+  // «перевставить ссылку», anchor не нужен).
+  const [anchor, setAnchor] = useState('');
 
   const openInline = () => {
     const ta = textareaRef.current;
     const start = ta?.selectionStart ?? 0;
     const end = ta?.selectionEnd ?? 0;
     setSel({ start, end });
-    // Если клиент выделил фрагмент в тексте — подставим его как ссылку.
-    setLink(value.slice(start, end).trim());
+    const selected = value.slice(start, end).trim();
+    if (selected && looksLikeLink(selected)) {
+      // Выделена уже-ссылка → режим «заменить/обновить URL». Префиллим
+      // инпут ей, anchor не используем.
+      setLink(selected);
+      setAnchor('');
+    } else {
+      // Выделено обычное слово (или ничего) → это anchor, который сохраним.
+      // Инпут ссылки начинается пустым (раньше сюда ошибочно клали «Егор»).
+      setLink('');
+      setAnchor(selected);
+    }
     setOpen(true);
-    // Focus инпута после монтирования (rAF чтобы поймать ref).
     requestAnimationFrame(() => linkInputRef.current?.focus());
   };
 
   const closeInline = () => {
     setOpen(false);
     setLink('');
+    setAnchor('');
     requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
   const canInsert = looksLikeLink(link);
 
+  // Превью того, что встанет в текст письма (и как увидит получатель).
+  const previewSnippet = canInsert ? buildPlainTextLinkSnippet(anchor, link.trim()) : '';
+
   const insert = () => {
     if (!canInsert) return;
-    const clean = link.trim();
-    onChange(value.slice(0, sel.start) + clean + value.slice(sel.end));
+    const snippet = buildPlainTextLinkSnippet(anchor, link.trim());
+    onChange(value.slice(0, sel.start) + snippet + value.slice(sel.end));
     setOpen(false);
     setLink('');
-    const caret = sel.start + clean.length;
+    setAnchor('');
+    const caret = sel.start + snippet.length;
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
       if (ta) {
@@ -137,7 +157,9 @@ export function EmailBodyField({
             </button>
           </div>
           <p className="text-[11px] m-0" style={{ color: 'var(--cp-paper-mute)' }}>
-            Вставьте готовую ссылку (с UTM-метками, если нужно). Она встанет в текст письма — заменит выделенный фрагмент или вставится в позицию курсора.
+            {anchor
+              ? `Письма уходят обычным текстом, поэтому ссылку нельзя «спрятать» под слово. Слово «${anchor}» останется, а ссылка встанет рядом и будет кликабельной в почте.`
+              : 'Вставьте готовую ссылку (с UTM, если нужно). В обычном письме она кликабельна сама по себе — почтовый клиент подсветит её автоматически.'}
           </p>
           <div className="flex gap-2">
             <input
@@ -162,6 +184,11 @@ export function EmailBodyField({
               Вставить
             </button>
           </div>
+          {previewSnippet && (
+            <p className="text-[11px] m-0 break-all" style={{ color: 'var(--cp-paper-faint)' }}>
+              В письме: <span style={{ color: 'var(--cp-paper-mute)' }}>{previewSnippet}</span>
+            </p>
+          )}
         </div>
       )}
     </div>

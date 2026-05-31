@@ -182,7 +182,7 @@ describe('POST /api/client/launches — Instantly account selection', () => {
       expect.objectContaining({
         steps: [
           expect.objectContaining({
-            variants: [expect.objectContaining({ subject: 'Hello', body: 'Body text' })],
+            variants: [expect.objectContaining({ subject: 'Hello', body: '<div>Body text</div>' })],
           }),
         ],
       }),

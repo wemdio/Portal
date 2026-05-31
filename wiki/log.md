@@ -6,6 +6,11 @@ Format: `YYYY-MM-DD: <one-line summary>. Details: [link to page or analysis]`
 
 ---
 
+## 2026-05-31
+
+- **Горизонт датасета: ~6 мес гранулярно, расширить назад НЕЛЬЗЯ (3 метания за день, решено ИЗМЕРЕНИЕМ).** Цепочка моих ошибок на вопросе «точно нельзя больше полугода?»: (1) «стёрто, нельзя» — на дырявом тесте («пробная» кампания, не слала → ложный 0); (2) «можно, 2.63M недотянуто, дотянем до 15 мес» — принял 2.8%-хвост ProdavAI (471 из 16916) за полную доступность; (3) ИЗМЕРИЛ 40 случайных недотянутых кампаний против живого API → **восстановимо лишь 1–5% от slate** (фев–июл'25 ~0%, авг–ноя 1–3%, дек 5%). Реально вернётся ~50–130K из 2.63M. Instantly стёр основное. Итог: ~6 мес (дек'25–май'26) — почти полный гранулярный горизонт, backfill не стоит того. Для старого — только overview-агрегаты. **Урок: МЕРЬ до того как утверждать — я ошибся в ОБЕ стороны, пока не измерил.** Зафиксировано в [dataset-schema.md](./concepts/dataset-schema.md).
+- **«Лиды» — операционный сигнал, не свойство датасета.** Метки `status='lead'` — выхлоп live-квалификатора портала (с 13 апр, OpenRouter, для ТГ-алертов СЕЙЧАС), покрывает 6% ответов / ~7 недель. Весь лид-анализ сессии (Чизмол/inMyRoom/НАФИ/Roistat) — на этом 7-недельном срезе, не на «годах». Датасет нативно лидов НЕ содержит; «лид=деньги» вообще в CRM, которой нет. Анализ датасета держать на том, чем владеет: reply-поведение, темы, sequences, клиенты, доставка.
+
 ## 2026-05-30
 
 - **Adversarial workflow (22 агента, 1.8M токенов): 3 из 4 глубоких гипотез УБИТЫ скепсисом, 1 выжила.** query_log id=18-21. ✅ ВЫЖИЛА (conf 78, прошла все атаки): **глубина последовательности** — follow-up ответы конвертят в лид ~2× лучше первого касания (within-campaign 4.59% vs 10.66%, z=6.35, paired p=0.0022); шаги 2-3 несут ~47% лидов. НЕ резать последовательности. ❌ УБИТЫ (все три — конфаунд **возраста кампании**): «reply-only = мусорные ответы» (позитив-доля идентична 47.6 vs 46.5%, p=0.28); «mailbox health = рычаг на лиды» (60× градиент = age+coverage конфаунд); «малые списки бьют большие» (артефакт раздутого `contacted_count` + возраста; корреляция меняет знак). Все выводы → [playbook.md](./playbook.md). Операционный claim агента про «краш квалификатора на 412» опровергнут живыми логами (0 ошибок, здоров).
@@ -27,7 +32,7 @@ Format: `YYYY-MM-DD: <one-line summary>. Details: [link to page or analysis]`
 
 ## 2026-05-23..25
 
-- **Initial full dataset pull.** Snapshot `98974f54-5723-4555-9ca9-20499b79cd2c`. 1,881 campaigns / 167,735 leads / 1,715,907 emails / 1.8M daily metrics. Total DB size ~7.4 GB (now 9 GB after lookups + indices).
+- **Initial full dataset pull.** Snapshot `98974f54-5723-4555-9ca9-20499b79cd2c`. 1,881 campaigns / 167,735 leads / 1,715,907 emails. ~~1.8M daily metrics~~ → **WRONG on two counts (corrected 2026-05-31):** (1) the "1.8M daily metrics" were the poisoned workspace-replicated `daily_snap` (see migration 009); (2) "years of history" is FALSE — granular sends only go back to **11 Dec 2025** (~5.5 mo); Instantly purged older per-email data (~1.2M old sends survive only as overview aggregates). The dataset is a ~6-month granular window, not multi-year. Total DB ~9 GB.
 - **Discovered Instantly /emails rate limit ~10-15 RPM sustained** (regardless of API key — workspace-wide). 20+ RPM triggers throttling with sliding penalty. Detail: [pull-campaign-analytics.mjs](../app/scripts/pull-campaign-analytics.mjs) header comment.
 - **Worker interference incident.** Running pull at 30+ RPM degraded `portal-worker-instantly-leads` poll cycle from 30s to 20+ min between 14:12-15:25 UTC on 22 May. ~2-4 missed lead qualifications. Lesson: any /emails pulling shares budget with the qualifier worker. Mitigation: `docker stop portal-worker-instantly-leads` during heavy pulls, restore after.
 - **Per-V8-string-limit crash.** `JSON.stringify` of `emails-by-campaign.json` at 646 MB exceeded V8's ~512 MB string limit. Migrated cache to per-campaign files (`emails/<id>.json`) in `pull.mjs`. Won't recur. Detail: [migrate-cache-to-per-campaign-files.mjs](../app/scripts/instantly-dataset/migrate-cache-to-per-campaign-files.mjs).
