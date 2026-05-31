@@ -587,6 +587,9 @@ interface SeenEmployerUpsert {
   email_found: string | null;
   email_validation_status: string | null;
   email_validation_details: Record<string, unknown> | null;
+  /** Вторая почта домена (если скрейп нашёл 2) + её статус. NULL если одна. */
+  email2: string | null;
+  email2_validation_status: string | null;
   routed_bucket_id: string | null;
   routed_campaign_id: string | null;
   status: 'routed' | 'stored' | 'skipped' | 'failed' | 'dry_run';
@@ -970,6 +973,11 @@ export async function runAutoPipelineForClient(
           email_found: enr.email,
           email_validation_status: enr.emailValidation?.status ?? null,
           email_validation_details: enr.emailValidation?.details ?? null,
+          // 2-я почта домена (info@ + sales@). Скрейп уже находит до 2 (MAX_
+          // EMAILS_PER_DOMAIN), но раньше в dry-run вторая выбрасывалась. Теперь
+          // храним — и dry-run-резерв сразу несёт 2-ю почту (как ручной).
+          email2: enr.additionalEmails[0]?.address ?? null,
+          email2_validation_status: enr.additionalEmails[0]?.validation?.status ?? null,
           source: detectSource(enr.employer.id),
           processed_at: now,
         };
@@ -1013,11 +1021,13 @@ export async function runAutoPipelineForClient(
           storedCount++;
         } else {
           const bucket = decision.bucket;
+          // Custom-переменные ВЫРОВНЕНЫ с ручным скорингом (manualScoringRunner):
+          // одинаковый набор ключей score/source/domain → {{...}} в письме
+          // резолвятся идентично в обоих потоках (лиды идут в ОДНИ кампании).
           const customVars = {
-            hh_employer_id: enr.employer.id,
-            hh_url: enr.employer.hhUrl ?? '',
             score: String(enr.score),
-            spf: enr.spf ?? '',
+            source: detectSource(enr.employer.id),
+            domain: enr.domain ?? '',
           };
           // В работу — только ВАЛИДНЫЕ почты (valid/role/free/catch_all):
           // правило «готовый = почта валидная или catch-all + название».

@@ -26,7 +26,10 @@ interface SeenRow {
   domain: string | null;
 }
 
-export async function runNameBackfill(clientUserId: string): Promise<{
+export async function runNameBackfill(
+  clientUserId: string,
+  limit?: number,
+): Promise<{
   total: number;
   updated: number;
   changed: number;
@@ -36,7 +39,7 @@ export async function runNameBackfill(clientUserId: string): Promise<{
     throw new Error('supabaseAdmin not initialized');
   }
 
-  const { data, error } = await supabaseAdmin
+  let query = supabaseAdmin
     .from('client_auto_pipeline_seen_employers')
     .select('hh_employer_id, hh_employer_name, domain')
     .eq('client_user_id', clientUserId)
@@ -45,6 +48,9 @@ export async function runNameBackfill(clientUserId: string): Promise<{
     .not('hh_employer_name', 'is', null)
     .not('site_url', 'is', null)
     .is('company_name', null);
+  if (limit && limit > 0) query = query.limit(limit);
+
+  const { data, error } = await query;
 
   if (error) throw error;
 
