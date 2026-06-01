@@ -1,47 +1,51 @@
 /**
  * @jest-environment node
  *
- * Tests for buildPlainTextLinkSnippet — the «Вставить ссылку» behaviour in
- * the client launch wizard.
+ * Tests for buildMarkdownLink — the «Вставить ссылку» behaviour in the client
+ * launch wizard.
  *
- * Bug it fixes: client selected «Егор», inserted a UTM link, and the link
- * REPLACED «Егор» (the word vanished). Since client emails are plain-text
- * (no HTML anchors possible), the fix keeps the word and appends the URL
- * next to it: `Егор (https://…)`.
+ * The client selects a word (e.g. «Егор» / «наш сайт») and inserts a UTM URL;
+ * the button wraps it as markdown `[Егор](https://…)`. toInstantlyHtmlBody
+ * later turns that into `<a href>` so the word is clickable and the URL is
+ * hidden from the recipient. Nothing else the client types can become HTML.
  */
 
-import { buildPlainTextLinkSnippet } from '@/lib/clientLaunch/linkSnippet';
+import { buildMarkdownLink } from '@/lib/clientLaunch/linkSnippet';
 
-describe('buildPlainTextLinkSnippet', () => {
-  it('keeps the selected word and appends the URL in parens', () => {
-    expect(buildPlainTextLinkSnippet('Егор', 'https://polzaagency.ru/?utm_source=x')).toBe(
-      'Егор (https://polzaagency.ru/?utm_source=x)',
+describe('buildMarkdownLink', () => {
+  it('wraps the selected word as a markdown link hiding the URL', () => {
+    expect(buildMarkdownLink('Егор', 'https://polzaagency.ru/?utm_source=x')).toBe(
+      '[Егор](https://polzaagency.ru/?utm_source=x)',
     );
   });
 
-  it('no selected word → just the URL', () => {
-    expect(buildPlainTextLinkSnippet('', 'https://example.com')).toBe('https://example.com');
-  });
-
-  it('trims whitespace around both anchor and url', () => {
-    expect(buildPlainTextLinkSnippet('  наш сайт  ', '  https://x.ru  ')).toBe(
-      'наш сайт (https://x.ru)',
+  it('no selected word → the URL becomes its own clickable text', () => {
+    expect(buildMarkdownLink('', 'https://example.com')).toBe(
+      '[https://example.com](https://example.com)',
     );
   });
 
-  it('whitespace-only anchor is treated as empty → just the URL', () => {
-    expect(buildPlainTextLinkSnippet('   ', 'https://x.ru')).toBe('https://x.ru');
+  it('trims whitespace around the anchor', () => {
+    expect(buildMarkdownLink('  наш сайт  ', 'https://x.ru')).toBe('[наш сайт](https://x.ru)');
   });
 
-  it('anchor identical to the URL collapses to one (re-insert over an existing link)', () => {
-    // Avoids «https://x.ru (https://x.ru)» when the selection was already
-    // the same URL.
-    expect(buildPlainTextLinkSnippet('https://x.ru', 'https://x.ru')).toBe('https://x.ru');
+  it('whitespace-only anchor → URL as its own text', () => {
+    expect(buildMarkdownLink('   ', 'https://x.ru')).toBe('[https://x.ru](https://x.ru)');
+  });
+
+  it('anchor identical to the URL → URL as its own text (re-link over existing)', () => {
+    expect(buildMarkdownLink('https://x.ru', 'https://x.ru')).toBe('[https://x.ru](https://x.ru)');
   });
 
   it('preserves multi-word anchors', () => {
-    expect(buildPlainTextLinkSnippet('перейти на сайт', 'https://x.ru')).toBe(
-      'перейти на сайт (https://x.ru)',
+    expect(buildMarkdownLink('перейти на сайт', 'https://x.ru')).toBe(
+      '[перейти на сайт](https://x.ru)',
     );
+  });
+
+  it('sanitizes anchor chars that would break the markdown parse (] and newlines)', () => {
+    // The link regex forbids `]` and newlines inside the anchor — strip/collapse
+    // them so a selection containing those still produces a valid link.
+    expect(buildMarkdownLink('a] b\nc', 'https://x.ru')).toBe('[a  b c](https://x.ru)');
   });
 });

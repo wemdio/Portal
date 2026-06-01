@@ -11,6 +11,7 @@ import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 import { deletePendingDbImport, readPendingDbImport } from '@/lib/databases/pendingImport';
 import { parseXlsxInWorker } from '@/lib/databases/xlsxWorker';
+import { readXlsxRows } from '@/lib/spreadsheet/parseCSV';
 import { backgroundSave, cancelBackgroundSave } from '@/lib/databases/backgroundSave';
 import { decompressStateFromBase64 } from '@/lib/databases/stateCompression';
 import { loadStateViaWorker } from '@/lib/databases/backgroundLoad';
@@ -2384,17 +2385,7 @@ export function DatabaseSpreadsheet() {
         applyRowsToNewTab(workerRows, file.name);
         finalizeImport('done', file.name);
       } else {
-        const XLSX = await import('xlsx');
-        const workbook = XLSX.read(buffer, { type: 'array' });
-        const sheetName = workbook.SheetNames[0];
-        const sheet = workbook.Sheets[sheetName];
-        const rows = XLSX.utils.sheet_to_json<string[]>(sheet, {
-          header: 1,
-          raw: false,
-          blankrows: true,
-          defval: '',
-        });
-        const normalizedRows = rows.map((row) => row.map((cell) => `${cell ?? ''}`));
+        const normalizedRows = await readXlsxRows(buffer);
         setImportStatus({ status: 'parsing', progress: 95, filename: file.name });
         applyRowsToNewTab(normalizedRows, file.name);
         finalizeImport('done', file.name);

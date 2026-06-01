@@ -9,7 +9,7 @@ import {
   ALWAYS_ON_STEPS_FOR_CLIENT,
   CLIENT_ROW_LIMIT,
 } from '@/lib/tools/baseConstructorClientGuard';
-import { parseCSV } from '@/lib/spreadsheet/parseCSV';
+import { parseCSV, readXlsxRows } from '@/lib/spreadsheet/parseCSV';
 import {
   estimateProcessingMinutes,
   formatProcessingTimeBand,
@@ -537,18 +537,15 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
         setFileData(rows);
         setColumnMapping(autoDetectMapping(rows[0]));
       } else if (ext === 'xlsx' || ext === 'xls') {
-        const { read, utils } = await import('xlsx');
         const buffer = await file.arrayBuffer();
-        const wb = read(buffer, { type: 'array' });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const rows: string[][] = utils.sheet_to_json(ws, { header: 1, defval: '' });
+        const rows = await readXlsxRows(buffer);
         if (rows.length < 2) { setParseError('Файл пустой или содержит только заголовок'); return; }
         if (clientMode && rows.length - 1 > CLIENT_ROW_LIMIT) {
           setParseError(`Лимит ${CLIENT_ROW_LIMIT.toLocaleString('ru-RU')} строк для клиентского доступа. В файле ${(rows.length - 1).toLocaleString('ru-RU')} строк.`);
           return;
         }
-        setFileData(rows.map((r) => r.map(String)));
-        setColumnMapping(autoDetectMapping(rows[0].map(String)));
+        setFileData(rows);
+        setColumnMapping(autoDetectMapping(rows[0]));
       } else {
         setParseError('Поддерживаются форматы: CSV, TSV, XLSX, XLS');
       }

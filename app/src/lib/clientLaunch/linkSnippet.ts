@@ -1,25 +1,27 @@
 /**
- * Build the plain-text snippet inserted by the «Вставить ссылку» action in
+ * Build the markdown snippet inserted by the «Вставить ссылку» action in
  * EmailBodyField.
  *
- * Client emails are plain-text (text_only — see buildCampaignPayload). A
- * plain-text email CANNOT anchor display text to a URL the way HTML's
- * `<a href>` does — there's no way to make the word «Егор» itself clickable
- * while hiding the URL. The honest plain-text equivalent: keep the selected
- * word and put the URL right next to it, e.g. `Егор (https://…)`. Mail
- * clients auto-linkify the bare URL, so it's clickable; the word stays
- * visible. No selected word → just the URL on its own.
+ * Client emails now support ONE rich element: a hidden hyperlink. The client
+ * selects a word (e.g. «наш сайт» / «Егор»), the button wraps it as a
+ * markdown link `[наш сайт](https://…)`. At build time toInstantlyHtmlBody
+ * converts that to `<a href="https://…">наш сайт</a>` (URL validated http(s),
+ * everything else escaped) and the campaign goes out as HTML so the link is
+ * clickable with the URL hidden from the recipient.
  *
- * This replaces the old behaviour where inserting a link REPLACED the
- * selected text with the raw URL (so selecting «Егор» and adding a link
- * deleted «Егор»).
+ * Markdown shape is the editable plain-text representation: the client sees
+ * `[наш сайт](https://…)` in the textarea and can edit/remove it; nothing
+ * else they type can become HTML.
+ *
+ * No selected anchor (or anchor equals the URL) → the URL itself becomes the
+ * clickable text: `[https://…](https://…)`.
+ *
+ * Anchor is sanitized so it can't break the markdown parse: `]` and newlines
+ * (which the link regex forbids in the anchor) are stripped/space-collapsed.
  */
-export function buildPlainTextLinkSnippet(anchorText: string, url: string): string {
-  const anchor = anchorText.trim();
+export function buildMarkdownLink(anchorText: string, url: string): string {
   const link = url.trim();
-  if (!anchor) return link;
-  // If the selected text IS the same URL (e.g. re-inserting over an existing
-  // link), don't produce «https://… (https://…)» — just keep one.
-  if (anchor === link) return link;
-  return `${anchor} (${link})`;
+  const anchor = anchorText.replace(/[\]\r\n]+/g, ' ').trim();
+  if (!anchor || anchor === link) return `[${link}](${link})`;
+  return `[${anchor}](${link})`;
 }

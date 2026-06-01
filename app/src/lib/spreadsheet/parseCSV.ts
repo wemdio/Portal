@@ -115,6 +115,51 @@ export function parseCSV(text: string, delimiterOverride?: CsvDelimiter): string
   return rows;
 }
 
+type XlsxCell = {
+  t?: string;
+  v?: unknown;
+  w?: string;
+  z?: string | number;
+};
+
+function formatXlsxCell(cell: XlsxCell | undefined, ssf: typeof import('xlsx').SSF): string {
+  if (!cell || cell.v == null) return '';
+
+  if (cell.t === 'n' && typeof cell.v === 'number') {
+    const format = typeof cell.z === 'string' ? cell.z : '';
+    if (format && ssf.is_date(format)) {
+      return ssf.format(format, cell.v);
+    }
+    return Number.isFinite(cell.v) ? String(cell.v) : '';
+  }
+
+  if (cell.t === 'd' && cell.v instanceof Date) {
+    return cell.w || cell.v.toISOString().slice(0, 10);
+  }
+
+  return String(cell.v);
+}
+
+export async function readXlsxRows(buffer: ArrayBuffer): Promise<string[][]> {
+  const XLSX = await import('xlsx');
+  const wb = XLSX.read(buffer, { type: 'array', cellNF: true });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const ref = ws?.['!ref'];
+  if (!ws || !ref) return [];
+
+  const range = XLSX.utils.decode_range(ref);
+  const rows: string[][] = [];
+  for (let r = range.s.r; r <= range.e.r; r += 1) {
+    const row: string[] = [];
+    for (let c = range.s.c; c <= range.e.c; c += 1) {
+      const address = XLSX.utils.encode_cell({ r, c });
+      row.push(formatXlsxCell(ws[address] as XlsxCell | undefined, XLSX.SSF));
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
 /**
  * Read a File (CSV/TSV/TXT/XLSX/XLS) into a 2D string array (header + rows).
  * Throws on unsupported format or empty file.
@@ -128,12 +173,8 @@ export async function readSpreadsheetFile(file: File): Promise<string[][]> {
   }
 
   if (ext === 'xlsx' || ext === 'xls') {
-    const { read, utils } = await import('xlsx');
     const buffer = await file.arrayBuffer();
-    const wb = read(buffer, { type: 'array' });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const rows: unknown[][] = utils.sheet_to_json(ws, { header: 1, defval: '' });
-    return rows.map((r) => r.map((c) => (c == null ? '' : String(c))));
+    return readXlsxRows(buffer);
   }
 
   throw new Error('Поддерживаются форматы: CSV, TSV, XLSX, XLS');
