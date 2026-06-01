@@ -54,6 +54,7 @@ import { validateEmailForAutoPipeline, type AutoPipelineEmailValidation } from '
 import { calcPacing } from './autoPipelinePacing';
 import { fetchTopUpFromBaseOfBases } from './baseOfBasesSource';
 import { fetchTopUpFromCache } from './baseOfBasesFromCache';
+import { cleanCompanyNames } from '@/lib/companyNameCleanupBatch';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import type { ClientLaunchSequence } from '@/lib/clientLaunch/types';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
@@ -325,6 +326,15 @@ async function updateConfigLastRun(
  */
 const MAX_EMAILS_PER_DOMAIN = 2;
 
+/**
+ * Жёсткий потолок на обработку ОДНОГО домена в enrichment. Если scrape/SMTP
+ * зависает (mail-сервер принял коннект и молчит, не рвёт его), Promise.race
+ * выкидывает worker дальше через этот таймаут. Иначе один домен вешал весь
+ * worker-пул на часы — это и была причина «зомби»-прогонов (пул застревал на
+ * ~7-м чанке). 3 минуты с запасом на медленные сайты (до 5 страниц × ретраи).
+ */
+const ENRICH_ITEM_TIMEOUT_MS = 180_000;
+
 export interface EnrichmentResult {
   employer: HhEmployer;
   domain: string | null;
@@ -383,6 +393,10 @@ async function enrichEmployers(
       const emp = employers[i];
       const domain = deriveDomain(emp.siteUrl);
       try {
+        // Таймаут на ОДИН домен (Promise.race) — зависший scrape/SMTP не должен
+        // застопорить весь worker-пул (это была причина «зомби»-прогонов).
+        results[i] = await Promise.race<EnrichmentResult>([
+          (async (): Promise<EnrichmentResult> => {
         // Шаг 1: получаем score. Сначала смотрим в БД-кэш — если домен
         // скорили в любом прошлом прогоне, возьмём оттуда мгновенно (один
         // SELECT, ~5ms). Если нет — getOrFetchScore сам дёрнет Mailganer и
@@ -426,7 +440,7 @@ async function enrichEmployers(
           }
         }
 
-        results[i] = {
+        return {
           employer: emp,
           domain,
           email,
@@ -437,6 +451,14 @@ async function enrichEmployers(
           endpointRaw: endpoint.raw,
           enrichError: endpoint.ok ? null : (endpoint.error ?? 'endpoint failed'),
         };
+          })(),
+          new Promise<EnrichmentResult>((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`enrich item timeout ${ENRICH_ITEM_TIMEOUT_MS}ms`)),
+              ENRICH_ITEM_TIMEOUT_MS,
+            ),
+          ),
+        ]);
       } catch (err) {
         results[i] = {
           employer: emp,
@@ -549,6 +571,11 @@ interface SeenEmployerUpsert {
   client_user_id: string;
   hh_employer_id: string;
   hh_employer_name: string;
+  /** Очищенное название (AI «Очистить названия»). Заполняется для would-be-ready
+   *  строк (валидная почта + имя + сайт) ПРЯМО в чанке — и в dry-run, и в боевом,
+   *  чтобы дашборд/выгрузка показывали готовое к аутричу имя. null если строка
+   *  не готова или чистка недоступна. hh_employer_name остаётся сырым. */
+  company_name: string | null;
   domain: string | null;
   site_url: string | null;
   endpoint_score: number | null;
@@ -560,6 +587,9 @@ interface SeenEmployerUpsert {
   email_found: string | null;
   email_validation_status: string | null;
   email_validation_details: Record<string, unknown> | null;
+  /** Вторая почта домена (если скрейп нашёл 2) + её статус. NULL если одна. */
+  email2: string | null;
+  email2_validation_status: string | null;
   routed_bucket_id: string | null;
   routed_campaign_id: string | null;
   status: 'routed' | 'stored' | 'skipped' | 'failed' | 'dry_run';
@@ -618,6 +648,15 @@ export async function runAutoPipelineForClient(
   clientUserId: string,
 ): Promise<AutoPipelineRunResult> {
   const logCtx = { clientUserId };
+  // Поэтапное логирование в stdout (→ /var/log/auto-pipeline.log) с памятью.
+  // Если процесс умрёт — последняя строка покажет фазу и rss перед смертью
+  // (напр. «chunk from=3000 rss=1800MB» = OOM на 7-м чанке).
+  const logPhase = (phase: string, extra?: Record<string, unknown>): void => {
+    const mu = process.memoryUsage();
+    console.log(
+      `[auto-pipeline][PHASE] ${phase} | rss=${Math.round(mu.rss / 1048576)}MB heap=${Math.round(mu.heapUsed / 1048576)}MB${extra ? ' | ' + JSON.stringify(extra) : ''}`,
+    );
+  };
   const emptyResult = (
     runId: string,
     error?: string,
@@ -717,6 +756,7 @@ export async function runAutoPipelineForClient(
     // 3. Дедуп HH-результатов по hh_employer_id.
     const seen = await loadSeenEmployerIds(clientUserId);
     const freshFromHh = employers.filter((e) => !seen.has(e.id));
+    logPhase('parse-done', { parsed: employers.length, freshFromHh: freshFromHh.length, seen: seen.size });
 
     await logAudit(
       'auto-pipeline.parsed',
@@ -860,9 +900,11 @@ export async function runAutoPipelineForClient(
     let withEmailCount = 0;
     let emailValidCount = 0;
 
+    logPhase('enrich-start', { fresh: fresh.length, parsed: employers.length, dryRun: config.dry_run });
     const CHUNK_SIZE = 500;
     for (let chunkStart = 0; chunkStart < fresh.length; chunkStart += CHUNK_SIZE) {
       const chunk = fresh.slice(chunkStart, chunkStart + CHUNK_SIZE);
+      logPhase('chunk', { from: chunkStart, of: fresh.length });
 
       const enrichments = await enrichEmployers(
         chunk,
@@ -877,6 +919,30 @@ export async function runAutoPipelineForClient(
         pacing.perItemPauseMs,
         mailganerStats,
       );
+
+      // 5.1. Чистка названий would-be-ready строк ЭТОГО чанка — ТЕМ ЖЕ AI, что
+      //      кнопка «Очистить названия» (cleanCompanyNames → stepNameCleanup).
+      //      «Готовый» = валидная почта (primary или доп.) + имя + сайт; это НЕ
+      //      зависит от настройки кампаний, поэтому работает и в чистом dry-run
+      //      (измерение качества до настройки sequence'ов). Кладём результат в
+      //      company_name каждой seen-строки — и dry-run, и боевой пишут готовое
+      //      имя. cleanCompanyNames никогда не бросает: при сбое AI → исходное.
+      const readyEnrichments = enrichments.filter((enr) => {
+        const hasValidEmail =
+          (enr.email && enr.emailValidation?.isValid) ||
+          enr.additionalEmails.some((ae) => ae.validation?.isValid);
+        return Boolean(hasValidEmail && enr.employer.name && enr.employer.siteUrl);
+      });
+      const cleanedById = new Map<string, string>();
+      if (readyEnrichments.length > 0) {
+        const cleaned = await cleanCompanyNames(
+          readyEnrichments.map((enr) => ({ name: enr.employer.name, domain: enr.domain })),
+        );
+        readyEnrichments.forEach((enr, i) => {
+          if (cleaned[i]) cleanedById.set(enr.employer.id, cleaned[i]);
+        });
+        logPhase('names-cleaned', { from: chunkStart, ready: readyEnrichments.length });
+      }
 
       const seenUpserts: SeenEmployerUpsert[] = [];
 
@@ -897,6 +963,7 @@ export async function runAutoPipelineForClient(
           client_user_id: clientUserId,
           hh_employer_id: enr.employer.id,
           hh_employer_name: enr.employer.name,
+          company_name: cleanedById.get(enr.employer.id) ?? null,
           domain: enr.domain,
           site_url: enr.employer.siteUrl,
           endpoint_score: enr.score,
@@ -906,6 +973,11 @@ export async function runAutoPipelineForClient(
           email_found: enr.email,
           email_validation_status: enr.emailValidation?.status ?? null,
           email_validation_details: enr.emailValidation?.details ?? null,
+          // 2-я почта домена (info@ + sales@). Скрейп уже находит до 2 (MAX_
+          // EMAILS_PER_DOMAIN), но раньше в dry-run вторая выбрасывалась. Теперь
+          // храним — и dry-run-резерв сразу несёт 2-ю почту (как ручной).
+          email2: enr.additionalEmails[0]?.address ?? null,
+          email2_validation_status: enr.additionalEmails[0]?.validation?.status ?? null,
           source: detectSource(enr.employer.id),
           processed_at: now,
         };
@@ -949,15 +1021,36 @@ export async function runAutoPipelineForClient(
           storedCount++;
         } else {
           const bucket = decision.bucket;
+          // Custom-переменные ВЫРОВНЕНЫ с ручным скорингом (manualScoringRunner):
+          // одинаковый набор ключей score/source/domain → {{...}} в письме
+          // резолвятся идентично в обоих потоках (лиды идут в ОДНИ кампании).
           const customVars = {
-            hh_employer_id: enr.employer.id,
-            hh_url: enr.employer.hhUrl ?? '',
             score: String(enr.score),
-            spf: enr.spf ?? '',
+            source: detectSource(enr.employer.id),
+            domain: enr.domain ?? '',
           };
-          // До MAX_EMAILS_PER_DOMAIN лидов на компанию: primary + доп. адреса
-          // (напр. info@ и sales@) — отдельными лидами в той же кампании.
-          const leadEmails = [enr.email!, ...enr.additionalEmails.map((a) => a.address)];
+          // В работу — только ВАЛИДНЫЕ почты (valid/role/free/catch_all):
+          // правило «готовый = почта валидная или catch-all + название».
+          // До MAX_EMAILS_PER_DOMAIN лидов на компанию (напр. info@ + sales@).
+          const leadEmails: string[] = [];
+          if (enr.email && enr.emailValidation?.isValid) leadEmails.push(enr.email);
+          for (const ae of enr.additionalEmails) {
+            if (ae.validation?.isValid) leadEmails.push(ae.address);
+          }
+
+          if (leadEmails.length === 0) {
+            // Score в активном bucket, но валидной почты нет → не контакт.
+            seenUpserts.push({
+              ...base,
+              status: 'skipped',
+              skip_reason: 'no_valid_email',
+              error_message: null,
+              routed_bucket_id: null,
+              routed_campaign_id: null,
+            });
+            skippedCount++;
+            continue;
+          }
 
           let group = groupedLeads.get(bucket.id);
           if (!group) {
@@ -967,7 +1060,7 @@ export async function runAutoPipelineForClient(
           for (const addr of leadEmails) {
             group.leads.push({
               email: addr,
-              company_name: enr.employer.name,
+              company_name: cleanedById.get(enr.employer.id) ?? enr.employer.name,
               website: enr.employer.siteUrl ?? undefined,
               custom_variables: customVars,
             });
@@ -993,6 +1086,7 @@ export async function runAutoPipelineForClient(
       // итерации, GC их собирает. Это и есть фикс OOM.
       await upsertSeenEmployers(seenUpserts);
     } // конец for (chunkStart) — chunk loop
+    logPhase('enrich-done', { routed: routedCount, stored: storedCount, skipped: skippedCount, emailValid: emailValidCount });
 
     await logAudit(
       'auto-pipeline.mailganer-cache',
@@ -1000,15 +1094,24 @@ export async function runAutoPipelineForClient(
       { ...logCtx, ...mailganerStats },
     );
 
+    // 5.5. (Чистка названий перенесена ВНУТРЬ чанк-цикла — см. шаг 5.1. Лиды в
+    //      groupedLeads уже несут очищенное имя, повторно чистить не нужно.)
+
     // 6. Append leads per bucket. В dry-run шаг пропускаем целиком —
     // groupedLeads пуст (routing-блок делает continue ещё ДО groupedLeads.set).
+    // Финальная гарантия полей: у КАЖДОГО лида должны быть email + название +
+    // сайт. Неполные отбрасываем с логом — в Instantly не уходят.
     let failedCount = 0;
+    let droppedIncomplete = 0;
     for (const group of groupedLeads.values()) {
+      const readyLeads = group.leads.filter((l) => l.email && l.company_name && l.website);
+      droppedIncomplete += group.leads.length - readyLeads.length;
+      if (readyLeads.length === 0) continue;
       try {
         await appendLeadsToClientCampaign({
           userId: clientUserId,
           campaignId: group.bucket.instantly_campaign_id!,
-          leads: group.leads,
+          leads: readyLeads,
           contextLabel: group.bucket.label,
         });
       } catch (err) {
@@ -1016,14 +1119,22 @@ export async function runAutoPipelineForClient(
         await logError(
           'auto-pipeline.append.failed',
           err,
-          { ...logCtx, bucket: group.bucket.label, leadCount: group.leads.length },
+          { ...logCtx, bucket: group.bucket.label, leadCount: readyLeads.length },
         );
         // seen уже записаны по чанкам со status='routed' — обновляем их в БД
         // на 'failed' (массива seenUpserts в памяти больше нет).
         await markRoutedBucketFailed(clientUserId, group.bucket.id, now, msg.slice(0, 500));
-        failedCount += group.leads.length;
-        routedCount -= group.leads.length;
+        failedCount += readyLeads.length;
+        routedCount -= readyLeads.length;
       }
+    }
+    if (droppedIncomplete > 0) {
+      routedCount -= droppedIncomplete;
+      await logAudit(
+        'auto-pipeline.dropped-incomplete',
+        `Отброшено неполных лидов (нет email/названия/сайта): ${droppedIncomplete}`,
+        logCtx,
+      );
     }
 
     // Разбивка new_count по источникам — для дашборда (HH vs база баз).
@@ -1031,6 +1142,7 @@ export async function runAutoPipelineForClient(
     const newFromBob = fresh.filter((e) => detectSource(e.id) === 'base_of_bases').length;
     const newFromHh = fresh.length - newFromBob;
 
+    logPhase('finalizing', { routed: routedCount, stored: storedCount, skipped: skippedCount, failed: failedCount });
     // 8. Finalize run row.
     await finishRunRow(runId, {
       status: 'completed',

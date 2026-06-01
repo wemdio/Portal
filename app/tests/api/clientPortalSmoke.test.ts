@@ -1199,7 +1199,7 @@ describe('Client Portal — RBAC isolation across clients', () => {
                 variants: [
                   expect.objectContaining({
                     subject: 'Intro',
-                    body: 'Line 1<br>\nLine 2',
+                    body: '<div>Line 1</div><div>Line 2</div>',
                   }),
                 ],
               }),
@@ -1207,8 +1207,8 @@ describe('Client Portal — RBAC isolation across clients', () => {
                 delay: 1,
                 delay_unit: 'days',
                 variants: [
-                  expect.objectContaining({ body: 'Follow-up body' }),
-                  expect.objectContaining({ body: 'Variant B<br>\nBody' }),
+                  expect.objectContaining({ body: '<div>Follow-up body</div>' }),
+                  expect.objectContaining({ body: '<div>Variant B</div><div>Body</div>' }),
                 ],
               }),
             ],
@@ -1230,7 +1230,7 @@ describe('Client Portal — RBAC isolation across clients', () => {
         (eq) => eq.table === 'client_campaign_launches' && eq.column === 'id' && eq.value === 'launch-1',
       ),
     ).toBe(true);
-    expect(body.campaign.sequences[0].steps[0].variants[0].body).toBe('Line 1<br>\nLine 2');
+    expect(body.campaign.sequences[0].steps[0].variants[0].body).toBe('<div>Line 1</div><div>Line 2</div>');
   });
 
   it('PATCH /campaigns/[id] of unallowed campaign -> 404 and does not call Instantly', async () => {

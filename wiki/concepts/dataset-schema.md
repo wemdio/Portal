@@ -29,9 +29,31 @@
 | Snapshot table | Гранулярность | Ключевое использование |
 |---|---|---|
 | `raw_campaign_analytics_overview_snap` | per (snapshot, campaign) | Текущие aggregate-цифры кампании на момент snapshot |
-| `raw_campaign_analytics_daily_snap` | per (snapshot, campaign, date) | Time-series: opens/replies/clicks по дням |
+| `raw_campaign_analytics_daily_snap` | per (snapshot, ~~campaign~~, date) — `campaign` фиктивен | ❌ **СЛОМАНА для per-campaign.** Хранит workspace-wide дневной ряд, продублированный под каждым `campaign_id`. **Не суммируй `sent`/любые метрики per-campaign.** См. ⚠️ ниже. |
 | `raw_campaign_step_analytics_snap` | per (snapshot, campaign, step_n, variant_n) | **Главное** для subject performance |
 | `raw_warmup_analytics_snap` | per (snapshot, email, date) | Здоровье mailbox-а по дням |
+
+### ⚠️ `raw_campaign_analytics_daily_snap` сломана: workspace-wide ряд под каждым `campaign_id` (2026-05-30)
+
+**Не используй `sent` / `opened` / `replies` / любую дневную метрику этой таблицы для per-campaign анализа.** Это НЕ данные кампании — это дневной ряд по **всему workspace**, записанный одинаково под каждым `campaign_id`. `campaign_id` в этой таблице несёт ноль информации.
+
+**Доказательство** (snapshot `98974f54-…`, full pull 2026-05-21):
+- **1881 кампания → у ВСЕХ `sum(sent)` ровно `7 381 152`** (один distinct-значение на всю таблицу), один и тот же 965-дневный ряд `2023-09-30 … 2026-05-21`, пиковый день = 36030.
+- Кампании с lifetime `contacted_count` = 1, 2, 4, 5, 500 — у всех **byte-identical** дневной ряд (27026 sent на 2026-05-21). Кампания, написавшая 1 письмо за всю жизнь, не может иметь историю на 7.38M отправок.
+- `raw_payload` дневной строки содержит те же инфлированные числа (`"sent": 27026`, `"contacted": 26369`) → это **не** ошибка нашего парсинга, Instantly API реально вернул workspace-данные.
+
+**Чему верить вместо этого:**
+- **`raw_campaign_analytics_overview_snap`** — per-campaign **корректна** (overview endpoint реально принимает `id`; цифры различаются по кампаниям: 1, 2, …, 500). Используй её для lifetime-aggregate.
+- **Дневная динамика кампании** → используй готовый **`v_campaign_daily`** (migration 009, собран из `raw_emails`: `sent`/`lead_replies`/`our_replies`/`threads_with_reply` per campaign×date). Корректный, полный, без API. (Opens/clicks/bounces по дням в `raw_emails` нет — для них только починенный daily_snap для активных кампаний, либо overview lifetime.)
+
+> **Статус (migration 009, 2026-05-30):** код в 3 местах **исправлен** (`campaign_id`, проверено живым вызовом), sync передеплоен. Поломанные строки `raw_campaign_analytics_daily_snap` **удалены** (было 1.94M); починенный nightly sync пишет туда корректные строки, но только для активных кампаний (разреженно). Для полного дневного ряда — `v_campaign_daily`.
+
+**Корень бага (ingestion).** Endpoint `GET /campaigns/analytics/daily` фильтруется параметром **`campaign_id`**, и «если он пуст — возвращаются все кампании» ([Instantly API v2 docs](https://developer.instantly.ai/api/v2/campaign/getcampaignanalytics)). Наш код шлёт UUID под ключом `id`, который endpoint игнорирует → workspace-wide ответ, продублированный под каждой кампанией:
+- [`app/src/lib/instantly/client.ts:175`](../../app/src/lib/instantly/client.ts) — `getCampaignAnalyticsDaily` мапит `campaign_id` → `query.id` (copy-paste из `getCampaignAnalyticsOverview` строкой выше, где `id` корректен для overview).
+- [`app/scripts/instantly-dataset/sync.mjs:436`](../../app/scripts/instantly-dataset/sync.mjs) — `syncDailyAnalytics` шлёт `params: { id }`.
+- [`app/scripts/instantly-dataset/pull.mjs:409`](../../app/scripts/instantly-dataset/pull.mjs) — `phaseDailyAnalytics` шлёт `params: { id }`.
+
+Фикс: слать `{ campaign_id: id, start_date, end_date }` (`start_date`/`end_date` обязательны по докам). Для сравнения `syncStepAnalytics` уже шлёт `campaign_id` правильно. Баг **продолжается каждую ночь** (`sync.mjs` nightly cron): каждый новый snapshot тоже workspace-wide. Все исторические snapshot'ы уже отравлены — фикс кода починит только **будущие** pull'ы; для корректной истории нужен разовый ре-pull дневной аналитики с `campaign_id` (API отдаёт историю по диапазону дат). До этого вся таблица — мусор для per-campaign. См. [log.md](../log.md) `2026-05-30`.
 
 ## Lookup-таблицы
 
@@ -84,6 +106,46 @@ ORDER BY a.attnum;
 74 описания всего: 23 на таблицы, 51 на колонки.
 
 ---
+
+## ⚠️ Датасет НЕДОПУЛЕН на 60% — старые письма ДОСТУПНЫ, надо дотянуть (2026-05-31)
+
+**Текущий датасет содержит только ~40% писем; ~2.6M писем (60%) НЕ выкачаны, но живы в Instantly.**
+
+| | |
+|---|---|
+| Lifetime отправок (по `overview`, надёжно) | **4 420 784** |
+| `raw_emails` ue_type=1 сейчас | 1 789 648 (40%) |
+| **Недотянуто** | **2 631 136 (60%)**, 1206 из 1925 кампаний >50% |
+
+`raw_emails` начинается с 11 дек 2025 (отправки). Из 4.42M lifetime-отправок (overview) в датасете 1.79M (40%); 2.63M «недотянуто». **НО измерено (40 случайных недотянутых кампаний, живой API): восстановимо лишь ~1–5% от slate каждой** — Instantly стёр основную массу. По месяцам: фев–июл 2025 → ~0%; авг–ноя 2025 → 1–3%; дек 2025 → ~5%. Т.е. из 2.63M реально вернётся **~50–130K** (свежие хвосты), не 2.6M.
+
+**Вывод: гранулярную историю назад заметно НЕ расширить** — данных нет у источника (стёрты). ~6 месяцев (дек'25–май'26) — реальный и почти полный гранулярный горизонт. Backfill недотянутых кампаний даст ~2–4% прибавки — не стоит многодневного пула.
+
+**Для старых кампаний (с нач. 2025)** — только `overview` lifetime-агрегаты (sent/open/reply totals), per-email детали утеряны.
+
+> ⚠️ История метаний (урок: МЕРЬ до того как утверждать): сначала «стёрто, нельзя» (тест на «пробной» кампании → ложно), потом «можно 2.6M/15мес» (принял 2.8%-хвост ProdavAI за полную доступность → ложно), измерение показало правду — ~1–5% восстановимо, т.е. практически нельзя.
+
+## Две оси сегментации: КЛИЕНТ (чисто) и target-вертикаль (migrations 010-011)
+
+**Ключевой факт:** название кампании ≈ `<НАШ КЛИЕНТ-отправитель> + <источник базы> + <target-хинты/ОКВЭД>`. Клиент почти всегда первым.
+
+### Ось 1 — клиент (авторитетно): `v_campaign_client`
+Кто из клиентов студии вёл кампанию. Источник: `projects.client` через `project_instantly_campaigns` (чисто, 940 кампаний) + name-match по 107 известным клиентам (66). Покрытие ~52%.
+```sql
+SELECT campaign_name, client FROM v_campaign_client WHERE client ILIKE '%inmyroom%';
+```
+
+### Ось 2 — target-вертикаль получателей: `v_campaign_segment`
+Индустрия ПОЛУЧАТЕЛЕЙ. У лидов ОКВЭД нет (0.025%), брифы пусты → выводится из названия **после вычитания клиента** + декода ОКВЭД-кодов (workflow `classify-campaign-segments-v2`). 14 вертикалей. Где после вычитания клиента остаётся только источник/роль (HH/руспрофайл/ЛПРы) без индустрии → честно **`other_unclear`** (481 кампания, 25% — НЕ угадываем).
+```sql
+SELECT campaign_name FROM v_campaign_segment WHERE segment='logistics_transport' AND confidence='high';
+```
+
+> ⚠️ **Двойной урок (2026-05-31), оба найдены вызовом пользователя:**
+> 1. **keyword-regex по названию = мусор.** `(логист|перевозк|склад…)` дал 138 «логистов»: только 46 истинных (67% ложных) + пропустил 29.
+> 2. **LLM-классификация v1 тоже текла** — путала индустрию КЛИЕНТА с target (Smartway/Инфолоджистикс — наши клиенты, не получатели). v2 чинит это вычитанием известного клиента ПЕРЕД классификацией + декодом ОКВЭД. Smartway→manufacturing(ОКВЭД 28) или other_unclear(если только продукт), не logistics.
+>
+> **Правило:** target-вертикаль — best-effort (low/other_unclear где не выводимо), КЛИЕНТ — авторитетен. Для решений опирайся на клиента; вертикаль — для приблизительных срезов с фильтром `confidence='high'`.
 
 ## Что вне scope
 

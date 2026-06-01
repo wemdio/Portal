@@ -16,7 +16,7 @@ import {
   hasUsableCampaignSequences,
 } from '@/lib/clientLaunch/campaignSequences';
 import { normalizeClientLaunchSequenceSteps } from '@/lib/clientLaunch/requestParsing';
-import { toInstantlyHtmlBody } from '@/lib/clientLaunch/buildCampaignPayload';
+import { toInstantlyHtmlBody, sequenceHasMarkdownLink } from '@/lib/clientLaunch/buildCampaignPayload';
 import { validateClientLaunchSequence } from '@/lib/clientLaunch/validateLaunchInput';
 import {
   buildCampaignSchedule,
@@ -209,7 +209,14 @@ export async function PATCH(
       return jsonError('Кампания не найдена или доступ запрещён', 404);
     }
 
-    const updatePayload: CampaignUpdatePayload = { name: campaignName, sequences };
+    const updatePayload: CampaignUpdatePayload = {
+      name: campaignName,
+      sequences,
+      // Mirror the create path: a body with a hidden link → HTML email
+      // (text_only false) so the <a> survives; otherwise plain text. Editing
+      // a campaign re-derives this from the (possibly changed) body.
+      text_only: !sequenceHasMarkdownLink(sequence.steps),
+    };
     if (scheduleOverride) {
       updatePayload.campaign_schedule = buildCampaignSchedule(scheduleOverride);
     }

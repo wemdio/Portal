@@ -72,14 +72,21 @@ export async function GET(
   const isStorage = bucket === 'storage' || bucket === 'invalid';
   const columns = isStorage
     ? 'domain, score, rating, error_message'
-    : 'domain, score, rating, email, email_validation_status';
+    : 'company_name, domain, score, rating, email, email_validation_status, email2, email2_validation_status';
 
-  const { data: rowsData, error: rowsErr } = await supabase
+  let rowsQuery = supabase
     .from('client_manual_score_rows')
     .select(columns)
     .eq('run_id', id)
-    .eq('bucket', bucket)
-    .order('score', { ascending: false });
+    .eq('bucket', bucket);
+  if (!isStorage) {
+    // Активные файлы — только готовые к аутричу: есть почта И название.
+    // Высоко-отскоренные «без почты» сюда не попадают (они не контакты).
+    rowsQuery = rowsQuery.not('email', 'is', null).not('company_name', 'is', null);
+  }
+  const { data: rowsData, error: rowsErr } = await rowsQuery.order('score', {
+    ascending: false,
+  });
 
   if (rowsErr) {
     return new Response('DB error', { status: 500 });
@@ -88,8 +95,10 @@ export async function GET(
   // Формируем CSV
   const header = isStorage
     ? ['domain', 'score', 'rating', 'error']
-    : ['domain', 'score', 'rating', 'email', 'email_status'];
+    : ['company', 'domain', 'score', 'rating', 'email', 'email_status'];
 
+  // Готовые статусы почты (valid/role/free/catch_all). Невалидные не выгружаем.
+  const READY = new Set(['valid', 'role_address', 'free_provider', 'catch_all']);
   const lines: string[] = [header.join(',')];
   type Row = Record<string, unknown>;
   for (const row of (rowsData ?? []) as unknown as Row[]) {
@@ -98,9 +107,21 @@ export async function GET(
         [row.domain, row.score, row.rating, row.error_message].map(csvEscape).join(','),
       );
     } else {
-      lines.push(
-        [row.domain, row.score, row.rating, row.email, row.email_validation_status].map(csvEscape).join(','),
-      );
+      // Активные: 1 строка = 1 валидная почта (до 2 на домен). Без названия —
+      // не контакт, пропускаем.
+      if (!row.company_name) continue;
+      const emails: Array<[unknown, unknown]> = [];
+      if (row.email && READY.has(String(row.email_validation_status))) {
+        emails.push([row.email, row.email_validation_status]);
+      }
+      if (row.email2 && READY.has(String(row.email2_validation_status))) {
+        emails.push([row.email2, row.email2_validation_status]);
+      }
+      for (const [em, st] of emails) {
+        lines.push(
+          [row.company_name, row.domain, row.score, row.rating, em, st].map(csvEscape).join(','),
+        );
+      }
     }
   }
   const csv = '﻿' + lines.join('\n'); // BOM для корректной кодировки в Excel

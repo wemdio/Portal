@@ -38,34 +38,124 @@ export const PRESET_KEYS_THAT_SYNC_TO_CAMPAIGN = [
 export type PresetKeyThatSyncsToCampaign = (typeof PRESET_KEYS_THAT_SYNC_TO_CAMPAIGN)[number];
 
 /**
- * Converts client-authored plain-text email body into the minimal HTML that
- * Instantly's API expects.
+ * Markdown-style hidden link: `[anchor text](https://url)`. This is how the
+ * client expresses "make this word clickable, hide the URL" in the otherwise
+ * plain-text body (inserted by EmailBodyField's «Вставить ссылку»). Only
+ * http(s) URLs match — `javascript:`/`data:`/etc. simply don't match and stay
+ * as literal escaped text (no link created). No `)` or whitespace allowed in
+ * the URL; anchor can't contain `]` or a newline.
+ */
+const MARKDOWN_LINK_RE = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
+
+/**
+ * Detects raw HTML tags in client input — used by the launch/edit guard to
+ * BLOCK sending a designed HTML email (banners, tables, styles). Matches an
+ * angle bracket + optional slash + a letter (tag name) + anything up to `>`.
  *
- * Why this is required even with `text_only: true`:
+ * Deliberately does NOT flag:
+ *   - `5 < 10` / `цена < 1000`  → `<` followed by space/digit, not a letter
+ *   - `<3` emoticon             → digit after `<`
+ *   - `[наш сайт](https://…)`   → markdown link has no `<>`
+ * Does flag: `<table>`, `<div>`, `<img src=x>`, `</p>`, `<br>`, `<b>` …
+ */
+const RAW_HTML_TAG_RE = /<\/?[a-zA-Z][^>]*>/;
+
+/** True if the client typed/pasted something that looks like an HTML tag. */
+export function detectRawHtmlTags(plainText: string): boolean {
+  return RAW_HTML_TAG_RE.test(plainText);
+}
+
+/** True if the body contains at least one valid markdown hidden-link. */
+export function bodyHasMarkdownLink(plainText: string): boolean {
+  MARKDOWN_LINK_RE.lastIndex = 0;
+  return MARKDOWN_LINK_RE.test(plainText);
+}
+
+/**
+ * True if ANY step (or variant) body in the sequence contains a hidden link.
+ * Drives `text_only`: a campaign with links must go out as HTML (text_only
+ * false) so the <a> survives to the recipient; a link-free campaign stays
+ * plain-text (text_only true) for best deliverability.
+ */
+export function sequenceHasMarkdownLink(
+  steps: Array<{ body?: string; variants?: Array<{ body?: string }> }>,
+): boolean {
+  return steps.some(
+    (s) =>
+      bodyHasMarkdownLink(s.body ?? '') ||
+      (s.variants ?? []).some((v) => bodyHasMarkdownLink(v.body ?? '')),
+  );
+}
+
+function escapeHtmlText(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function escapeHtmlAttr(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Render one line of plain text into HTML: escape all text, but turn
+ * `[anchor](https://url)` markdown into `<a href="url">anchor</a>`. The anchor
+ * text is escaped (so `[<x>](url)` → `&lt;x&gt;` inside the link) and the URL
+ * is attribute-escaped + already validated as http(s) by the regex. Nothing
+ * else can become a tag — bare `<…>` the client typed is escaped here too.
+ */
+function lineToHtml(line: string): string {
+  let out = '';
+  let last = 0;
+  MARKDOWN_LINK_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = MARKDOWN_LINK_RE.exec(line)) !== null) {
+    out += escapeHtmlText(line.slice(last, m.index));
+    out += `<a href="${escapeHtmlAttr(m[2])}">${escapeHtmlText(m[1])}</a>`;
+    last = m.index + m[0].length;
+  }
+  out += escapeHtmlText(line.slice(last));
+  return out;
+}
+
+/**
+ * Converts client-authored plain-text email body into the HTML shape that
+ * Instantly's API actually persists.
  *
- * Instantly's POST /api/v2/campaigns spec says the `body` field is "HTML body
- * of the email" — meaning Instantly's editor parses it as HTML on input. If we
- * send raw text with `\n`, the HTML parser collapses every newline to a single
- * space (standard HTML whitespace handling), and the campaign editor displays
- * one solid block. At send time `text_only: true` strips HTML to plain text,
- * but by then the newlines are already gone — what client sees in the editor
- * is exactly what the recipient gets.
+ * CRITICAL — Instantly drops bare text nodes. Verified empirically against the
+ * prod Instantly API (campaign e69ceef5, 2026-05-31): when the body is
+ * `Строка 1<br>строка 2<br>...` (bare text joined with <br>, no block wrapper),
+ * Instantly's storage sanitizer KEEPS the <br> tags but DELETES all the text —
+ * the campaign ends up with `<br /><br /><br />` and no visible content (the
+ * "невидимые символы" the client reported). Every working campaign in the
+ * workspace wraps each line in `<div>…</div>`, and that text survives. So the
+ * body MUST be block-wrapped, not bare-text-with-<br>.
  *
- * Fix: HTML-escape the special chars (so things like "5 < 10" don't break the
- * markup), then convert each `\n` to `<br>`. Instantly's editor renders this
- * correctly with line breaks; `text_only: true` converts `<br>` back to `\n`
- * at send time; recipient sees the same paragraphing the client typed.
+ * Format (matches Instantly's own editor output):
+ *   - each non-empty line  → `<div>escaped line</div>`
+ *   - each empty line       → `<div><br></div>`   (preserves blank lines)
+ *   - `[anchor](https://url)` markdown → `<a href="url">anchor</a>` (hidden link)
  *
- * Note: Instantly's `{{firstName}}`-style variables use `{` / `}` which are
- * NOT HTML special chars, so escaping leaves them untouched.
+ * HTML-escaping `< > &` stays: a client typing `<script>` or `5 < 10` gets
+ * `&lt;script&gt;` / `5 &lt; 10` — visible literal text, never markup. The only
+ * HTML we emit is our own <div>/<br> and the validated <a> from markdown links,
+ * so clients still cannot inject arbitrary HTML.
+ *
+ * Note: Instantly's `{{firstName}}` variables use `{`/`}` which are not HTML
+ * special chars, so escaping leaves them untouched.
  */
 export function toInstantlyHtmlBody(plainText: string): string {
+  if (plainText === '') return '';
   return plainText
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
     .replace(/\r\n/g, '\n')
-    .replace(/\n/g, '<br>\n');
+    .split('\n')
+    .map((line) => {
+      const html = lineToHtml(line);
+      return html.length > 0 ? `<div>${html}</div>` : '<div><br></div>';
+    })
+    .join('');
 }
 
 export interface BuildCampaignPayloadInput {
@@ -157,13 +247,17 @@ export function buildCampaignPayloadFromPreset(
     open_tracking: behaviorOverride?.open_tracking ?? preset.open_tracking,
     link_tracking: preset.link_tracking,
     stop_on_reply: behaviorOverride?.stop_on_reply ?? preset.stop_on_reply,
-    // Клиентские письма всегда уходят plain-text (без видимой клиенту
-    // разметки) — поэтому text_only форсим в true независимо от пресета.
-    // ВАЖНО: Instantly API на входе ждёт body именно как HTML (даже при
-    // text_only=true) — иначе схлопывает все \n. См. toInstantlyHtmlBody
-    // выше: мы конвертируем plain-text → минимальный HTML с <br>,
-    // а text_only=true распаковывает обратно в текст при отправке.
-    text_only: true,
+    // text_only is CONDITIONAL on whether the body has a hidden link:
+    //   - no link  → text_only:true  → email sends as plain text (best
+    //     deliverability). Body is still HTML on input (div-wrapped, required
+    //     so Instantly doesn't drop the text — see toInstantlyHtmlBody), and
+    //     Instantly converts it back to plain text at send.
+    //   - has link → text_only:false → email sends as HTML, so the <a href>
+    //     survives to the recipient (a hidden link only exists in HTML; under
+    //     text_only:true Instantly would strip the <a> at send). Only the
+    //     client's own div/br/validated-<a> markup is present — they still
+    //     cannot inject arbitrary HTML (everything else is escaped).
+    text_only: !sequenceHasMarkdownLink(sequence.steps),
   };
 }
 

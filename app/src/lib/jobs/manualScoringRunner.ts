@@ -19,6 +19,9 @@ import { getOrFetchScore, normalizeDomain } from './mailganerScoreCache';
 import { validateEmailForAutoPipeline } from './autoPipelineEmailValidation';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import type { DomainInfo } from '@/lib/emailValidation/shared';
+import { cleanCompanyNames } from '@/lib/companyNameCleanupBatch';
+import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
+import type { LeadCreatePayload } from '@/lib/instantly/types';
 
 export type ManualBucket = 'storage' | 'medium' | 'high' | 'top' | 'invalid';
 
@@ -126,8 +129,11 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
           spf: result.spf,
           email: result.email,
           email_validation_status: result.emailValidationStatus,
+          email2: result.email2 ?? null,
+          email2_validation_status: result.email2ValidationStatus ?? null,
           bucket: result.bucket,
           error_message: result.errorMessage,
+          scraped_name: result.scrapedName,
           processed_at: new Date().toISOString(),
         })
         .eq('id', row.id);
@@ -154,7 +160,161 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
     );
   }
 
+  // 4.5. Резолв названий (кэш ФНС) + чистка (AI как кнопка «Очистить названия»)
+  //      + маршрутизация активных контактов в СУЩЕСТВУЮЩИЕ кампании авто-
+  //      пайплайна по скорингу. Не валит прогон при сбое.
+  try {
+    await resolveNamesAndRoute(opts.runId);
+  } catch (err) {
+    console.error('[manual-scoring] resolveNamesAndRoute failed', err);
+  }
+
   return await finalize(opts.runId);
+}
+
+/** Имя-кандидат из домена (крайний фоллбек): "stripe.com" → "Stripe". */
+function domainToNameCandidate(domain: string): string {
+  const label = (domain.replace(/^www\./, '').split('.')[0] ?? '').trim();
+  return label ? label.charAt(0).toUpperCase() + label.slice(1) : domain;
+}
+
+/**
+ * Для активных строк прогона: находит название компании (из кэша
+ * mailganer_domain_scores, наполняемого BoB-скорером из базы ФНС), чистит его
+ * тем же AI, что кнопка «Очистить названия», сохраняет в company_name и грузит
+ * контакты в существующие Instantly-кампании авто-пайплайна по скорингу.
+ *
+ * Идемпотентно: берёт только активные строки с email и company_name IS NULL.
+ * После резолва company_name всегда НЕ NULL (''=имени нет) → повтор не дублирует.
+ *
+ * Маршрутизация только если у клиента настроены кампании (bucket с
+ * instantly_campaign_id и непустой цепочкой). Иначе — только CSV (как раньше).
+ */
+async function resolveNamesAndRoute(runId: string): Promise<void> {
+  if (!supabaseAdmin) return;
+
+  const { data: run } = await supabaseAdmin
+    .from('client_manual_score_runs')
+    .select('client_user_id')
+    .eq('id', runId)
+    .single();
+  const clientUserId = (run as { client_user_id?: string } | null)?.client_user_id;
+  if (!clientUserId) return;
+
+  const { data: rowsData } = await supabaseAdmin
+    .from('client_manual_score_rows')
+    .select('id, domain, score, email, email_validation_status, email2, email2_validation_status, scraped_name')
+    .eq('run_id', runId)
+    .in('bucket', ['medium', 'high', 'top'])
+    .not('email', 'is', null)
+    .is('company_name', null);
+  const rows = (rowsData ?? []) as Array<{
+    id: number;
+    domain: string | null;
+    score: number | null;
+    email: string | null;
+    email_validation_status: string | null;
+    email2: string | null;
+    email2_validation_status: string | null;
+    scraped_name: string | null;
+  }>;
+  if (rows.length === 0) return;
+
+  // 1. Название из кэша (BoB-скорер кладёт company_name из ФНС по домену).
+  const domains = [...new Set(rows.map((r) => r.domain).filter((d): d is string => !!d))];
+  const nameByDomain = new Map<string, string>();
+  for (let i = 0; i < domains.length; i += 500) {
+    const chunk = domains.slice(i, i + 500);
+    const { data } = await supabaseAdmin
+      .from('mailganer_domain_scores')
+      .select('domain, company_name')
+      .in('domain', chunk)
+      .not('company_name', 'is', null);
+    for (const d of (data ?? []) as Array<{ domain: string; company_name: string | null }>) {
+      if (d.company_name) nameByDomain.set(d.domain, d.company_name);
+    }
+  }
+
+  // 2. Сырое имя по фоллбек-цепочке: ФНС-кэш → scraped_name (с сайта) → из
+  //    домена. Затем AI-чистка (тот же механизм, что кнопка). Так название
+  //    есть у КАЖДОГО живого контакта, даже если домена нет в базе ФНС.
+  const cleaned = await cleanCompanyNames(
+    rows.map((r) => ({
+      name:
+        (r.domain ? nameByDomain.get(r.domain) : null) ||
+        r.scraped_name ||
+        (r.domain ? domainToNameCandidate(r.domain) : ''),
+      domain: r.domain,
+    })),
+  );
+
+  // 3. Сохраняем company_name ('' = резолв выполнен, имени нет → идемпотентность).
+  for (let i = 0; i < rows.length; i += 1) {
+    await supabaseAdmin
+      .from('client_manual_score_rows')
+      .update({ company_name: cleaned[i] || '' })
+      .eq('id', rows[i].id);
+  }
+
+  // 4. Маршрутизация в существующие кампании по скорингу — если настроены.
+  const { data: cfg } = await supabaseAdmin
+    .from('client_auto_pipeline_configs')
+    .select('score_buckets')
+    .eq('client_user_id', clientUserId)
+    .maybeSingle();
+  const buckets = ((cfg as { score_buckets?: unknown } | null)?.score_buckets ?? []) as Array<{
+    score_min: number;
+    score_max: number | null;
+    instantly_campaign_id: string | null;
+    sequence?: { steps?: unknown[] };
+    label?: string;
+  }>;
+  if (!Array.isArray(buckets) || buckets.length === 0) return; // кампании не настроены → только CSV
+
+  const groups = new Map<string, { campaignId: string; label: string; leads: LeadCreatePayload[] }>();
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i];
+    const name = cleaned[i];
+    if (!name || !r.domain || r.score === null) continue;
+    // Готовые почты (valid/role/free/catch_all) — каждая = отдельный лид.
+    // Невалидные не берём (правило «почта валидная или catch-all»).
+    const validEmails: string[] = [];
+    if (r.email && isReadyEmailStatus(r.email_validation_status)) validEmails.push(r.email);
+    if (r.email2 && isReadyEmailStatus(r.email2_validation_status)) validEmails.push(r.email2);
+    if (validEmails.length === 0) continue; // нет валидной почты → не контакт
+    const bucket = buckets.find(
+      (b) => r.score! >= b.score_min && (b.score_max === null || r.score! <= b.score_max),
+    );
+    if (!bucket || !bucket.instantly_campaign_id) continue; // нет кампании для диапазона
+    const hasSteps = Array.isArray(bucket.sequence?.steps) && bucket.sequence!.steps!.length > 0;
+    if (!hasSteps) continue; // bucket без цепочки = склад, не шлём
+    let g = groups.get(bucket.instantly_campaign_id);
+    if (!g) {
+      g = { campaignId: bucket.instantly_campaign_id, label: bucket.label ?? 'manual', leads: [] };
+      groups.set(bucket.instantly_campaign_id, g);
+    }
+    for (const addr of validEmails) {
+      g.leads.push({
+        email: addr,
+        company_name: name,
+        website: `https://${r.domain}`,
+        custom_variables: { source: 'manual', score: String(r.score), domain: r.domain },
+      });
+    }
+  }
+
+  for (const g of groups.values()) {
+    try {
+      await appendLeadsToClientCampaign({
+        userId: clientUserId,
+        campaignId: g.campaignId,
+        leads: g.leads,
+        contextLabel: `manual:${g.label}`,
+      });
+    } catch (err) {
+      console.error('[manual-scoring] append to campaign failed', g.campaignId, err);
+    }
+  }
 }
 
 interface ProcessedRow {
@@ -166,6 +326,17 @@ interface ProcessedRow {
   emailValidationStatus: string | null;
   bucket: ManualBucket;
   errorMessage: string | null;
+  /** Сырое название с сайта (og:site_name/<title>) — фоллбек к ФНС-имени. */
+  scrapedName: string | null;
+  /** Вторая почта с домена (до 2 на домен, как авто). Опционально. */
+  email2?: string | null;
+  email2ValidationStatus?: string | null;
+}
+
+/** Статусы, при которых почта считается готовой к аутричу (как isValid в авто). */
+const READY_EMAIL_STATUSES = new Set(['valid', 'role_address', 'free_provider', 'catch_all']);
+function isReadyEmailStatus(status: string | null | undefined): boolean {
+  return !!status && READY_EMAIL_STATUSES.has(status);
 }
 
 async function processOneRow(
@@ -184,6 +355,7 @@ async function processOneRow(
       emailValidationStatus: null,
       bucket: 'invalid',
       errorMessage: 'invalid domain',
+      scrapedName: null,
     };
   }
 
@@ -201,6 +373,7 @@ async function processOneRow(
       emailValidationStatus: null,
       bucket: 'invalid',
       errorMessage: err instanceof Error ? err.message : 'mailganer error',
+      scrapedName: null,
     };
   }
 
@@ -222,35 +395,30 @@ async function processOneRow(
       emailValidationStatus: null,
       bucket,
       errorMessage: scoreResult.ok ? null : scoreResult.error || null,
+      scrapedName: null,
     };
   }
 
-  // 3. Активный bucket — scrape сайта + SMTP-валидация
-  let email: string | null = null;
-  let emailValidationStatus: string | null = null;
-  try {
-    const scraped = await scrapeEmails(`https://${domain}`, {
-      timeout: 12_000,
-      maxPages: 5,
-    }).catch(() => ({ emails: [] as string[] }));
-    email = scraped.emails[0] ?? null;
-    if (email) {
-      const validation = await validateEmailForAutoPipeline(email, mxCache);
-      emailValidationStatus = validation.status;
+  // 3. Активный bucket — scrape сайта (email + название) + SMTP-валидация.
+  //    scrapedName (og:site_name/<title>) — фоллбек к ФНС-имени в resolveNamesAndRoute.
+  const scraped = await scrapeEmails(`https://${domain}`, {
+    timeout: 12_000,
+    maxPages: 5,
+  }).catch(() => ({ emails: [] as string[], siteName: null as string | null }));
+  const scrapedName = scraped.siteName ?? null;
+  // До 2 почт с домена (как авто) — каждая станет отдельным лидом/строкой.
+  const candidates = scraped.emails.slice(0, 2);
+  const validateSafe = async (e: string): Promise<string | null> => {
+    try {
+      return (await validateEmailForAutoPipeline(e, mxCache)).status;
+    } catch {
+      return null; // валидация упала — строку не фейлим
     }
-  } catch (err) {
-    // Email-enrichment упал — НЕ фейлим всю строку, просто записываем без email
-    return {
-      domain,
-      score,
-      rating: rating || null,
-      spf: scoreResult.spf,
-      email: null,
-      emailValidationStatus: null,
-      bucket,
-      errorMessage: err instanceof Error ? err.message : 'scrape/validate error',
-    };
-  }
+  };
+  const email = candidates[0] ?? null;
+  const emailValidationStatus = email ? await validateSafe(email) : null;
+  const email2 = candidates[1] ?? null;
+  const email2ValidationStatus = email2 ? await validateSafe(email2) : null;
 
   return {
     domain,
@@ -259,8 +427,11 @@ async function processOneRow(
     spf: scoreResult.spf,
     email,
     emailValidationStatus,
+    email2,
+    email2ValidationStatus,
     bucket,
     errorMessage: null,
+    scrapedName,
   };
 }
 
@@ -292,10 +463,13 @@ async function finalize(runId: string): Promise<ProcessResult> {
       error: 'supabaseAdmin gone',
     };
   }
-  // Считаем breakdown по bucket'ам
+  // Считаем breakdown по bucket'ам. ВАЖНО: активные тиры (medium/high/top)
+  // считаем ТОЛЬКО готовых к аутричу — с почтой И названием. Высоко-
+  // отскоренные «без почты» не контакты и в эти счётчики/файлы не идут.
+  // storage/invalid считаем как есть. processed_count — все обработанные.
   const { data: bucketCounts } = await supabaseAdmin
     .from('client_manual_score_rows')
-    .select('bucket')
+    .select('bucket, email, email_validation_status, email2, email2_validation_status, company_name')
     .eq('run_id', runId);
 
   const buckets: Record<ManualBucket, number> = {
@@ -305,19 +479,35 @@ async function finalize(runId: string): Promise<ProcessResult> {
     top: 0,
     invalid: 0,
   };
-  for (const r of (bucketCounts ?? []) as Array<{ bucket: ManualBucket | null }>) {
-    if (r.bucket && r.bucket in buckets) buckets[r.bucket]++;
+  let processed = 0;
+  for (const r of (bucketCounts ?? []) as Array<{
+    bucket: ManualBucket | null;
+    email: string | null;
+    email_validation_status: string | null;
+    email2: string | null;
+    email2_validation_status: string | null;
+    company_name: string | null;
+  }>) {
+    if (!r.bucket || !(r.bucket in buckets)) continue;
+    processed += 1;
+    if (r.bucket === 'storage' || r.bucket === 'invalid') {
+      buckets[r.bucket] += 1;
+      continue;
+    }
+    // Активный тир — считаем готовые КОНТАКТЫ: каждая валидная почта (с
+    // названием) = отдельный контакт/лид. Домен с 2 валидными → +2.
+    const hasName = !!r.company_name && r.company_name.trim().length > 0;
+    if (!hasName) continue;
+    if (r.email && isReadyEmailStatus(r.email_validation_status)) buckets[r.bucket] += 1;
+    if (r.email2 && isReadyEmailStatus(r.email2_validation_status)) buckets[r.bucket] += 1;
   }
-
-  const total =
-    buckets.storage + buckets.medium + buckets.high + buckets.top + buckets.invalid;
 
   await supabaseAdmin
     .from('client_manual_score_runs')
     .update({
       status: 'completed',
       finished_at: new Date().toISOString(),
-      processed_count: total,
+      processed_count: processed,
       bucket_storage_count: buckets.storage,
       bucket_medium_count: buckets.medium,
       bucket_high_count: buckets.high,
@@ -325,7 +515,7 @@ async function finalize(runId: string): Promise<ProcessResult> {
     })
     .eq('id', runId);
 
-  return { status: 'completed', total, buckets };
+  return { status: 'completed', total: processed, buckets };
 }
 
 /**
