@@ -79,4 +79,87 @@ describe('extractPricingDetails', () => {
 
     expect(result.pricing_min).toEqual({ value: 45000, currency: 'RUB' });
   });
+
+  it('prefers a plan/period price over per-lead unit rates', () => {
+    const html = `
+      <div class="pricing">
+        <div class="plan"><h3>Старт</h3><div class="price">19 900 ₽/мес</div></div>
+        <div class="plan"><h3>Бизнес</h3><div class="price">69 900 ₽/мес</div></div>
+      </div>
+      <p>Также работаем по модели оплаты за результат — от 590 ₽ за лид</p>
+    `;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toEqual({ value: 19900, currency: 'RUB' });
+  });
+
+  it('falls back to a per-unit rate when the company prices only per lead', () => {
+    const html = `<h2>Генерация лидов от 590 ₽ за лид</h2>`;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toEqual({ value: 590, currency: 'RUB' });
+  });
+
+  it('skips pricing extraction on a JSON-LD JobPosting page so salary cannot leak', () => {
+    const html = `
+      <script type="application/ld+json">{"@type":"JobPosting","title":"Директор по развитию"}</script>
+      <h1>Вакансия: Директор по развитию</h1>
+      <p>Зарплата: от 150 000 ₽ до 250 000 ₽</p>
+      <p>Опыт работы: от 3 лет</p>
+    `;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toBeUndefined();
+    expect(result.free_trial).toBe(false);
+  });
+
+  it('skips pricing extraction on a job-posting page with 2+ characteristic text markers', () => {
+    const html = `
+      <h1>Региональный директор по продажам</h1>
+      <h2>Обязанности:</h2>
+      <ul><li>Развитие продаж</li></ul>
+      <h2>Требования к кандидату</h2>
+      <ul><li>Опыт работы от 5 лет</li></ul>
+      <p>Зарплата — от 200 000 ₽</p>
+    `;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toBeUndefined();
+  });
+
+  it('does NOT mistake a normal service page mentioning "опыт работы" once for a job posting', () => {
+    // One isolated mention of "опыт работы" without 2+ supporting markers is
+    // common copy — the page is a real pricing page.
+    const html = `
+      <h1>SEO-продвижение</h1>
+      <p>Опыт работы — более 10 лет.</p>
+      <div class="pricing">
+        <div class="plan"><div class="price">19 900 ₽/мес</div></div>
+      </div>
+    `;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toEqual({ value: 19900, currency: 'RUB' });
+  });
+
+  it('detects a free trial when the company offers a free consultation or audit (agency pattern)', () => {
+    // Agencies do not have SaaS-style trials; their equivalent is the free
+    // first call / pilot / audit — that's what the user wants flagged.
+    const cases = [
+      '<p>Запишитесь на бесплатную консультацию</p>',
+      '<p>Закажите бесплатный аудит вашего сайта</p>',
+      '<p>Первая консультация бесплатна</p>',
+      '<p>Free consultation with our experts</p>',
+      '<p>Free audit of your marketing</p>',
+      '<p>Пробный урок бесплатно</p>',
+    ];
+    for (const html of cases) {
+      expect(extractPricingDetails(html).free_trial).toBe(true);
+    }
+  });
 });

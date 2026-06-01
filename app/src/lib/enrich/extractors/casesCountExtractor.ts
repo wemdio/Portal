@@ -9,7 +9,14 @@ const CASE_SELECTOR = [
   '[class*="success-story"]',
 ].join(', ');
 
-const MAX_CASES = 200;
+// Realistic upper bound for what a real agency portfolio actually publishes
+// on a page. Anything above this is almost always a CMS that emits 100+ items
+// matching our `case-*` selector for unrelated reasons (blog listings, nav
+// widgets, hidden carousel duplicates) — the count is no longer trustworthy.
+const MAX_CASES = 100;
+// When DOM matches go above this without a corroborating text claim, we
+// treat the count as untrusted (returns 0) so the LLM fallback can decide.
+const DOM_TRUST_LIMIT = 60;
 
 const TEXT_COUNT_RE = /(?:более\s+|свыше\s+|>?\s*)(\d+)\s*(?:\+\s*)?(?:кейс|проект|работ|клиент|case|project|client)/i;
 const TEXT_COUNT_RE2 = /(\d+)\s*\+?\s*(?:выполненных|реализованных|завершённых|завершенных|успешных)/i;
@@ -24,16 +31,17 @@ export function extractCasesCount(html: string): number {
     const isNested = $(el).parents(CASE_SELECTOR).length > 0;
     if (!isNested) domCount++;
   });
-  if (domCount > 0) return Math.min(domCount, MAX_CASES);
 
   const text = $('body').text();
-  const m = text.match(TEXT_COUNT_RE) ?? text.match(TEXT_COUNT_RE2);
-  if (m) {
-    const n = parseInt(m[1], 10);
-    // A stated count larger than the cap is still a valid "many cases"
-    // signal — clamp it rather than discarding the match.
-    if (n > 0) return Math.min(n, MAX_CASES);
-  }
+  const textMatch = text.match(TEXT_COUNT_RE) ?? text.match(TEXT_COUNT_RE2);
+  const textClaim = textMatch ? parseInt(textMatch[1], 10) : 0;
 
+  // High DOM counts without an explicit textual claim are almost always a
+  // selector false-positive (CMS list widgets, footers, blog grids). Drop the
+  // count so the LLM fallback can produce a real number.
+  if (domCount > DOM_TRUST_LIMIT && textClaim <= 0) return 0;
+
+  if (domCount > 0) return Math.min(domCount, MAX_CASES);
+  if (textClaim > 0) return Math.min(textClaim, MAX_CASES);
   return 0;
 }

@@ -1,5 +1,20 @@
 import * as cheerio from 'cheerio';
-import { isHashLike, isDesignArtifact, isNavOrCtaText, isServiceText } from './nameQuality';
+import {
+  isHashLike,
+  isDesignArtifact,
+  isNavOrCtaText,
+  isServiceText,
+  isMetricText,
+  isFormLabel,
+  isRoleTitle,
+  isSentenceLike,
+  isIndustryOrSector,
+  isPersonName,
+  isMostlyHexTokens,
+  isPlaceName,
+  isAddressLike,
+  isUiFragment,
+} from './nameQuality';
 
 const JUNK_PATTERNS: RegExp[] = [
   /^logo$/i, /^image$/i, /^icon$/i, /^photo$/i, /^avatar$/i,
@@ -33,8 +48,18 @@ function isJunk(s: string): boolean {
   if (/%/.test(s)) return true;  // any percent: URL-encoded chars, "ppc%world"
   // CMS image hashes, design-tool exports, nav/CTA labels and marketing
   // service names are the dominant noise classes — reject them outright.
-  if (isHashLike(s) || isDesignArtifact(s)) return true;
+  if (isHashLike(s) || isDesignArtifact(s) || isMostlyHexTokens(s)) return true;
   if (isNavOrCtaText(s) || isServiceText(s)) return true;
+  // Statistics, brief-form labels, testimonial author roles/names, blog/FAQ
+  // titles and industry-segment words are all NOT client company names.
+  if (isMetricText(s) || isFormLabel(s)) return true;
+  if (isRoleTitle(s) || isSentenceLike(s)) return true;
+  if (isIndustryOrSector(s) || isPersonName(s)) return true;
+  if (isPlaceName(s) || isAddressLike(s)) return true;
+  // CSS-class fragments ("hero img", "blue circle color"), generic UI words
+  // ("services", "more", "subscribe") and category labels ("SaaS / IT") are
+  // never client names.
+  if (isUiFragment(s)) return true;
   return false;
 }
 
@@ -46,6 +71,13 @@ function cleanName(s: string): string {
   if (m && m[1].trim()) cleaned = m[1].trim();
   cleaned = cleaned.replace(LOGO_PREFIX_RE, '').trim();
   cleaned = cleaned.replace(REVIEW_PREFIX_RE, '').trim();
+  // Strip leading CMS hash/hex-blob tokens so the real brand survives:
+  // "ddec1ab1 verticali" → "verticali", "cfbaa2cdac8ff alfa money" → "alfa money".
+  const parts = cleaned.split(/\s+/);
+  while (parts.length > 1 && (/^[0-9a-f]{6,}$/i.test(parts[0]) || isHashLike(parts[0]))) {
+    parts.shift();
+  }
+  cleaned = parts.join(' ');
   // Strip trailing CMS number suffixes: "friends 1", "bbdo n 1", "elama logo 1"
   cleaned = cleaned.replace(/\s+(?:logo\s+)?\d{1,2}$/, '').trim();
   // Strip trailing " n \d+" pattern (alt="brand n 1" from numbered logo walls)

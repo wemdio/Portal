@@ -346,6 +346,42 @@ services:
     networks:
       - portal-network
 
+  # Воркер архивации диалогов sales-chat-аккаунта в ZIP (1 диалог = 1 DOCX).
+  # Запускается по pending-задачам в sales_chat_archive_jobs (UI кладёт их,
+  # когда РОП/менеджер жмёт «Скачать архив» в Анализаторе сейлз-переписок).
+  # Telegram-сессии не нужны — читает только нашу БД и льёт ZIP в MAIN S3
+  # multipart-стримом, так что env-переменных меньше, чем у logger'а.
+  worker-sales-chat-archive:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-sales-chat-archive
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - MAIN_S3_ENDPOINT=${MAIN_S3_ENDPOINT}
+      - MAIN_S3_REGION=${MAIN_S3_REGION:-ru-1}
+      - MAIN_S3_BUCKET=${MAIN_S3_BUCKET}
+      - MAIN_S3_ACCESS_KEY_ID=${MAIN_S3_ACCESS_KEY_ID}
+      - MAIN_S3_SECRET_ACCESS_KEY=${MAIN_S3_SECRET_ACCESS_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=saleschatarchive
+    # Жоб может крутиться 10-20 минут на 1000+ диалогов аккаунта. SIGTERM
+    # на деплое прервёт текущую сборку — startupRecovery вернёт её в pending
+    # при следующем старте, воркер пересоберёт с нуля.
+    stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          # 1 GB даёт запас на один DOCX в RAM (до ~50 MB на крупный диалог)
+          # + буферы archiver и lib-storage (5 MB × 4 in-flight multipart).
+          memory: 1024M
+          cpus: '0.5'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   worker-tg-parser:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-tg-parser

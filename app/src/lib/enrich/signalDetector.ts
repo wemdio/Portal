@@ -35,6 +35,8 @@ const SIGNAL_PATTERNS: SignalPattern[] = [
   // --- Level 1: Client acquisition ---
   { id: 'yandex_metrika', name: 'Яндекс.Метрика', category: 'analytics', level: 1, regex: /mc\.yandex\.ru\/metrika|mc\.yandex\.ru\/watch/i },
   { id: 'google_analytics', name: 'Google Analytics', category: 'analytics', level: 1, regex: /google-analytics\.com\/analytics|googletagmanager\.com\/gtag\/js\?id=(?:G-|UA-)/i },
+  { id: 'gtm', name: 'Google Tag Manager', category: 'analytics', level: 1, regex: /googletagmanager\.com\/gtm\.js/i },
+  { id: 'hotjar', name: 'Hotjar', category: 'analytics', level: 1, regex: /static\.hotjar\.com|hotjar\.com\/c\//i },
   { id: 'yandex_direct', name: 'Яндекс.Директ', category: 'ad_pixel', level: 1, regex: /yandex\.ru\/ads\/|an\.yandex\.ru\/system\/context|yastatic\.net\/.*direct/i },
   { id: 'vk_pixel', name: 'VK Pixel', category: 'ad_pixel', level: 1, regex: /vk\.com\/rtrg|VK\.Retargeting|top-fwz1\.mail\.ru.*vk/i },
   { id: 'google_ads', name: 'Google Ads', category: 'ad_pixel', level: 1, regex: /googletagmanager\.com\/gtag\/.*AW-|googlesyndication\.com|googleadservices\.com/i },
@@ -46,6 +48,8 @@ const SIGNAL_PATTERNS: SignalPattern[] = [
   { id: 'mango_office', name: 'Mango Office', category: 'call_tracking', level: 1, regex: /mango-office\.ru/i },
   { id: 'ringostat', name: 'Ringostat', category: 'call_tracking', level: 1, regex: /ringostat\.com|ringostat\.net/i },
   { id: 'callibri', name: 'Callibri', category: 'call_tracking', level: 1, regex: /callibri\.ru/i },
+  { id: 'roistat', name: 'Roistat', category: 'call_tracking', level: 1, regex: /roistat/i },
+  { id: 'uis', name: 'UIS', category: 'call_tracking', level: 1, regex: /uiscom\.ru|app\.uiscom/i },
 
   // --- Level 2: Sales stack ---
   { id: 'amocrm', name: 'amoCRM', category: 'crm', level: 2, regex: /amocrm\.ru|amocrm\.com/i },
@@ -53,6 +57,11 @@ const SIGNAL_PATTERNS: SignalPattern[] = [
   { id: 'hubspot', name: 'HubSpot', category: 'crm', level: 2, regex: /hs-scripts\.com|hubspot\.com\/|hs-analytics/i },
   { id: 'retailcrm', name: 'RetailCRM', category: 'crm', level: 2, regex: /retailcrm\./i },
   { id: 'megaplan', name: 'Мегаплан', category: 'crm', level: 2, regex: /megaplan\.ru/i },
+  { id: 'salesforce', name: 'Salesforce', category: 'crm', level: 2, regex: /salesforce\.com|force\.com|pardot\.com/i },
+  { id: 'zohocrm', name: 'Zoho CRM', category: 'crm', level: 2, regex: /crm\.zoho|zoho\.(?:com|eu)\/crm/i },
+  { id: 'pipedrive', name: 'Pipedrive', category: 'crm', level: 2, regex: /pipedrive\.com/i },
+  { id: 'creatio', name: 'Creatio', category: 'crm', level: 2, regex: /creatio\.com/i },
+  { id: 'planfix', name: 'Planfix', category: 'crm', level: 2, regex: /planfix\.(?:ru|com)/i },
 
   { id: 'jivosite', name: 'JivoSite', category: 'chat', level: 2, regex: /jivosite\.com|jivo\.chat/i },
   { id: 'carrotquest', name: 'Carrot Quest', category: 'chat', level: 2, regex: /carrotquest\.(app|io|ru)/i },
@@ -61,6 +70,21 @@ const SIGNAL_PATTERNS: SignalPattern[] = [
   { id: 'verbox', name: 'Verbox', category: 'chat', level: 2, regex: /verbox\.ru/i },
   { id: 'livetex', name: 'LiveTex', category: 'chat', level: 2, regex: /livetex\.ru/i },
   { id: 'whatsapp_widget', name: 'WhatsApp', category: 'chat', level: 2, regex: /wa\.me\/|api\.whatsapp\.com|whatsapp.*widget/i },
+  { id: 'tidio', name: 'Tidio', category: 'chat', level: 2, regex: /tidio\.(?:co|com)|code\.tidio/i },
+  { id: 'webim', name: 'Webim', category: 'chat', level: 2, regex: /webim\.ru/i },
+  { id: 'chat2desk', name: 'Chat2Desk', category: 'chat', level: 2, regex: /chat2desk\.com/i },
+  { id: 'intercom', name: 'Intercom', category: 'chat', level: 2, regex: /widget\.intercom\.io|js\.intercomcdn\.com/i },
+  { id: 'usedesk', name: 'UseDesk', category: 'chat', level: 2, regex: /usedesk\.ru/i },
+  { id: 'omnidesk', name: 'Omnidesk', category: 'chat', level: 2, regex: /omnidesk\.ru/i },
+
+  // --- Lead capture: quizzes, callback widgets, booking & scheduling ---
+  { id: 'marquiz', name: 'Marquiz', category: 'lead_capture', level: 1, regex: /marquiz\.ru|quiz\.marquiz/i },
+  { id: 'envybox', name: 'Envybox', category: 'lead_capture', level: 1, regex: /envybox\.(?:io|ru)/i },
+  { id: 'callbackhunter', name: 'CallbackHunter', category: 'lead_capture', level: 1, regex: /callbackhunter\.com|cbk\.cm/i },
+  { id: 'yclients', name: 'YClients', category: 'lead_capture', level: 1, regex: /yclients\.com|\.yclients\b/i },
+  { id: 'dikidi', name: 'DIKIDI', category: 'lead_capture', level: 1, regex: /dikidi\.(?:ru|net|app)/i },
+  { id: 'typeform', name: 'Typeform', category: 'lead_capture', level: 1, regex: /typeform\.com/i },
+  { id: 'calendly', name: 'Calendly', category: 'lead_capture', level: 1, regex: /calendly\.com|assets\.calendly/i },
 
   // --- Level 3: Payments & business model ---
   { id: 'yukassa', name: 'ЮKassa', category: 'payment', level: 3, regex: /yookassa\.ru|yoomoney\.ru|kassa\.yandex/i },
@@ -69,18 +93,34 @@ const SIGNAL_PATTERNS: SignalPattern[] = [
   { id: 'sberpay', name: 'SberPay', category: 'payment', level: 3, regex: /securepayments\.sberbank\.ru|sber-pay|sberpay/i },
   { id: 'robokassa', name: 'Робокасса', category: 'payment', level: 3, regex: /robokassa\.ru/i },
   { id: 'stripe', name: 'Stripe', category: 'payment', level: 3, regex: /js\.stripe\.com/i },
+  { id: 'paykeeper', name: 'PayKeeper', category: 'payment', level: 3, regex: /paykeeper\.ru/i },
+  { id: 'paymaster', name: 'PayMaster', category: 'payment', level: 3, regex: /paymaster\.ru/i },
+  { id: 'prodamus', name: 'Prodamus', category: 'payment', level: 3, regex: /prodamus\.ru/i },
+  { id: 'modulbank', name: 'Modulbank', category: 'payment', level: 3, regex: /pay\.modulbank\.ru|modulkassa/i },
+  { id: 'paypal', name: 'PayPal', category: 'payment', level: 3, regex: /paypal\.com\/sdk|paypalobjects\.com/i },
 
   { id: 'wildberries', name: 'Wildberries', category: 'marketplace', level: 3, regex: /wildberries\.ru/i },
   { id: 'ozon', name: 'Ozon', category: 'marketplace', level: 3, regex: /ozon\.ru/i },
   { id: 'yandex_market', name: 'Яндекс.Маркет', category: 'marketplace', level: 3, regex: /market\.yandex\.ru/i },
+  { id: 'avito', name: 'Avito', category: 'marketplace', level: 3, regex: /avito\.ru/i },
+  { id: 'aliexpress', name: 'AliExpress', category: 'marketplace', level: 3, regex: /aliexpress\.(?:ru|com)/i },
+  { id: 'megamarket', name: 'МегаМаркет', category: 'marketplace', level: 3, regex: /megamarket\.ru|sbermegamarket\.ru/i },
+  { id: 'lamoda', name: 'Lamoda', category: 'marketplace', level: 3, regex: /lamoda\.ru/i },
 
   // --- Level 4: Operations ---
   { id: '1c_erp', name: '1С', category: 'erp', level: 4, regex: /интеграц\S*\s+с\s+1[CСс]|1[CСс]-?(предприят|битрикс|enterprise)|1[CСс]\s*:\s*(предприят|бухгалтер|управлен)/i },
+  { id: 'moysklad', name: 'МойСклад', category: 'erp', level: 4, regex: /moysklad\.(?:ru|com)/i },
+  { id: 'kontur', name: 'Контур', category: 'erp', level: 4, regex: /kontur\.ru|kontur\.market/i },
   { id: 'unisender', name: 'Unisender', category: 'email_marketing', level: 4, regex: /unisender\.com/i },
   { id: 'sendpulse', name: 'SendPulse', category: 'email_marketing', level: 4, regex: /sendpulse\.com/i },
   { id: 'dashamail', name: 'DashaMail', category: 'email_marketing', level: 4, regex: /dashamail\.ru/i },
   { id: 'mindbox', name: 'Mindbox', category: 'email_marketing', level: 4, regex: /mindbox\.ru|mindbox\.cloud/i },
   { id: 'sendsay', name: 'Sendsay', category: 'email_marketing', level: 4, regex: /sendsay\.ru/i },
+  { id: 'mailchimp', name: 'Mailchimp', category: 'email_marketing', level: 4, regex: /mailchimp\.com|list-manage\.com|chimpstatic\.com/i },
+  { id: 'getresponse', name: 'GetResponse', category: 'email_marketing', level: 4, regex: /getresponse\.com/i },
+  { id: 'esputnik', name: 'eSputnik', category: 'email_marketing', level: 4, regex: /esputnik\.com/i },
+  { id: 'enkod', name: 'enKod', category: 'email_marketing', level: 4, regex: /enkod\.ru/i },
+  { id: 'klaviyo', name: 'Klaviyo', category: 'email_marketing', level: 4, regex: /klaviyo\.com|static\.klaviyo\.com/i },
 
   { id: 'hiring_hh', name: 'HeadHunter', category: 'hiring', level: 4, regex: /hh\.ru\/employer|hh\.ru\/vacancy/i },
   { id: 'hiring_careers', name: 'Карьера', category: 'hiring', level: 4, regex: /href=["'][^"']*\/(careers|vacancies|вакансии|карьера)\b/i },
@@ -297,4 +337,34 @@ export function determineProfile(signals: DetectedSignal[]): string {
 
 export function formatStack(signals: DetectedSignal[]): string {
   return signals.map((s) => s.name).join(', ');
+}
+
+/**
+ * Business-tool categories that constitute a usable "integration" for outreach
+ * personalisation — the third-party services a company actively runs (CRM,
+ * chat, call-tracking, payments, e-mail marketing, ERP, marketplaces and
+ * lead-capture widgets). Ubiquitous or purely-technical footprints
+ * (analytics, ad pixels, CMS, frameworks, multilingual, hiring) are excluded:
+ * they belong to the "Стек"/"Профиль" columns and would only add noise here.
+ */
+const INTEGRATION_CATEGORIES: ReadonlySet<SignalCategory> = new Set<SignalCategory>([
+  'crm', 'chat', 'call_tracking', 'payment', 'email_marketing', 'erp', 'marketplace', 'lead_capture',
+]);
+
+/**
+ * Derive the "Интеграции" column from detected signals: keep only the
+ * business-tool integrations a company can be told "we see you use X", dedup by
+ * display name (case-insensitive) and preserve detection order.
+ */
+export function integrationsFromSignals(signals: DetectedSignal[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const s of signals) {
+    if (!INTEGRATION_CATEGORIES.has(s.category)) continue;
+    const key = s.name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(s.name);
+  }
+  return result;
 }

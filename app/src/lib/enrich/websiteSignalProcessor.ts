@@ -1,6 +1,6 @@
 import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websiteParser';
 import { normalizeUrl } from '@/lib/enrich/urlUtils';
-import { detectSignals, determineProfile, formatStack } from '@/lib/enrich/signalDetector';
+import { detectSignals, determineProfile, formatStack, integrationsFromSignals } from '@/lib/enrich/signalDetector';
 import { discoverSubpaths, FALLBACK_PATHS } from '@/lib/enrich/subpathDiscovery';
 import {
   ExtractorKey,
@@ -169,11 +169,13 @@ export async function processSignalsForUrl(
     method: main.method,
   };
 
+  // Signature engine runs once on the main page and feeds both the
+  // Стек/Профиль columns and the Интеграции column further down.
+  const mainSignals = detectSignals(main.html);
   if (extractors.includes('stack') || extractors.includes('profile')) {
-    const signals = detectSignals(main.html);
-    if (extractors.includes('stack')) out.stack = formatStack(signals);
-    if (extractors.includes('profile')) out.profile = determineProfile(signals);
-    out.signalIds = signals.map((s) => s.id);
+    if (extractors.includes('stack')) out.stack = formatStack(mainSignals);
+    if (extractors.includes('profile')) out.profile = determineProfile(mainSignals);
+    out.signalIds = mainSignals.map((s) => s.id);
   }
 
   // Determine which subpages we need based on selected extractors.
@@ -304,10 +306,29 @@ export async function processSignalsForUrl(
 
   // Single-extractor subpages (with main page fallback)
   if (extractors.includes('integrations')) {
-    out.integrations = extractIntegrations(subpageHtml.integrations ?? '');
-    if (out.integrations.length === 0) out.integrations = extractIntegrations(main.html);
-    // Trust gate: drop a thin or junk-heavy result so the LLM fallback runs.
-    if (!nameListLooksReal(out.integrations)) out.integrations = [];
+    // High-confidence: third-party tools detected by their live script/widget
+    // footprint (CRM, chat, call-tracking, payments, e-mail, ERP, marketplaces,
+    // lead-capture). This is what "интеграции" means for outreach — the services
+    // the company actually runs — so signature hits lead the list.
+    const fromSignals = integrationsFromSignals(mainSignals);
+
+    // Heuristic: scrape an explicit integrations/partners section for logo
+    // alt-text and labels — catches tools we have no signature for (e.g. Slack).
+    let heuristic = extractIntegrations(subpageHtml.integrations ?? '');
+    if (heuristic.length === 0) heuristic = extractIntegrations(main.html);
+    // Trust-gate only the scraped names; signature hits are already trusted.
+    if (!nameListLooksReal(heuristic)) heuristic = [];
+
+    // Merge (signatures first), dedup case-insensitively, cap at 20.
+    const merged: string[] = [];
+    const seenInt = new Set<string>();
+    for (const name of [...fromSignals, ...heuristic]) {
+      const key = name.toLowerCase();
+      if (seenInt.has(key)) continue;
+      seenInt.add(key);
+      merged.push(name);
+    }
+    out.integrations = merged.slice(0, 20);
   }
   if (extractors.includes('founded_year')) {
     out.founded_year = subpageHtml.about ? extractFoundedYear(subpageHtml.about) : undefined;
