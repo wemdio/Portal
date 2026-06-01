@@ -1087,9 +1087,9 @@ function CampaignDetailPageContent() {
                         <textarea
                           value={step.body}
                           onChange={(e) => updateEditStep(idx, { body: e.target.value })}
-                          rows={6}
+                          rows={14}
                           placeholder="Текст письма"
-                          className="ds-input w-full text-sm resize-y"
+                          className="ds-input w-full text-sm resize-y min-h-[18rem] leading-relaxed"
                         />
                       </div>
 
@@ -1121,9 +1121,9 @@ function CampaignDetailPageContent() {
                             <textarea
                               value={variant.body}
                               onChange={(e) => updateEditVariant(idx, variantIdx, { body: e.target.value })}
-                              rows={6}
+                              rows={12}
                               placeholder="Текст письма"
-                              className="ds-input w-full text-sm resize-y"
+                              className="ds-input w-full text-sm resize-y min-h-[14rem] leading-relaxed"
                             />
                           </div>
                         );

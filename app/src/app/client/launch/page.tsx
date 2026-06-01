@@ -1912,8 +1912,8 @@ function SequenceStepEditor({
           value={activeContent.body}
           onChange={(v) => onUpdateActive({ body: v })}
           placeholder="Текст письма — обычный текст, HTML не используется"
-          rows={6}
-          className="ds-input w-full text-sm resize-y"
+          rows={14}
+          className="ds-input w-full text-sm resize-y min-h-[18rem] leading-relaxed"
         />
       </div>
     </div>
