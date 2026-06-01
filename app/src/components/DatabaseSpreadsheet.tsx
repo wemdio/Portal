@@ -1652,6 +1652,13 @@ export function DatabaseSpreadsheet() {
   }, [lastRedo]);
 
 
+  // Один snapshot на edit-сессию ячейки: ставится в true в handleCellFocus,
+  // снимается в первом handleValueChange (вместе с записью snapshot'а).
+  // Без этого каждое нажатие клавиши делало бы snapshot и Ctrl+Z откатывал
+  // бы по символу — не то что хочется. А раньше snapshot вообще не делался
+  // на ручной ввод текста, и Ctrl+Z был полностью бесполезен.
+  const cellEditSnapshotPendingRef = useRef(false);
+
   // Свежие версии хендлеров через ref — чтобы keydown-listener не пересоздавался
   // на каждое изменение selection/tabs/etc. (это ловит actual stale-closure баги).
   // Инициализируем no-op'ами — реальные функции объявлены сильно ниже в файле
@@ -2213,9 +2220,18 @@ export function DatabaseSpreadsheet() {
     setSelection({ startRow: row, startCol: col, endRow: row, endCol: col });
     setSelectionAnchor({ row, col });
     setSelectionMode('cell');
+    // Новая edit-сессия — снимок данных нужно взять перед первым изменением
+    // (см. handleValueChange ниже). Без этого Ctrl+Z не имеет что вернуть,
+    // потому что у нас одношаговый undo и каждый keystroke не должен
+    // создавать отдельный snapshot.
+    cellEditSnapshotPendingRef.current = true;
   };
 
   const handleValueChange = (row: number, col: number, value: string) => {
+    if (cellEditSnapshotPendingRef.current) {
+      setUndoSnapshot('Изменение ячейки');
+      cellEditSnapshotPendingRef.current = false;
+    }
     updateActiveSheet((sheet) => {
       const nextData = [...sheet.data];
       if (!nextData[row]) return sheet;
@@ -2296,6 +2312,12 @@ export function DatabaseSpreadsheet() {
 
   const applyPaste = (values: string[][]) => {
     if (!activeTab || values.length === 0) return;
+    // Snapshot для Ctrl+Z до того как переписали ячейки. Pendi-флаг
+    // edit-сессии тоже снимаем — иначе при следующем вводе текста в эту
+    // ячейку был бы лишний snapshot поверх только что сделанной paste.
+    setUndoSnapshot(`Вставка (${values.length}×${values[0]?.length ?? 0})`);
+    cellEditSnapshotPendingRef.current = false;
+
     const maxCols = safeMaxCols(values);
 
     const { startRow, startCol } = normalizedSelection;
