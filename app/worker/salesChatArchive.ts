@@ -13,6 +13,8 @@
  * `idx_sales_chat_archive_jobs_one_active`).
  */
 
+import { PassThrough } from 'node:stream';
+
 import archiver from 'archiver';
 import { uploadMainS3Stream } from '@/lib/mainS3Server';
 import {
@@ -119,10 +121,19 @@ async function runJob(job: ArchiveJob): Promise<void> {
     log('warn', `[zip warn] ${err.message}`, err);
   });
 
-  // Стартуем S3-стрим заранее — Upload читает archive по мере поступления.
+  // ВАЖНО: archiver@7 экстендит `readable-stream` (npm-пакет), а не нативный
+  // `node:stream` — `@aws-sdk/lib-storage` Upload делает `instanceof Readable`
+  // от node:stream и НЕ узнаёт archiver-Transform, кидая «Body Data is
+  // unsupported format». Пропускаем через нативный PassThrough — он валидный
+  // node:stream.Readable, SDK его принимает.
+  const body = new PassThrough();
+  archive.pipe(body);
+  archive.on('error', (err) => body.destroy(err));
+
+  // Стартуем S3-стрим заранее — Upload читает body по мере поступления.
   const uploadPromise = uploadMainS3Stream({
     key: s3Key,
-    body: archive,
+    body,
     contentType: 'application/zip',
   });
 
