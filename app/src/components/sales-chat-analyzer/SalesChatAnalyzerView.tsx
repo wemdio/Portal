@@ -1,13 +1,30 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Download } from 'lucide-react';
+import { Download, Loader2, Package } from 'lucide-react';
 import { authFetch, authFetchJson } from '@/lib/authFetch';
 import type {
   SalesChatAccountRow,
   SalesChatAccountStatus,
   SalesChatSyncRunRow,
 } from '@/types';
+
+/** Состояние задания на сборку ZIP-архива всех диалогов аккаунта. */
+interface ArchiveJobRow {
+  id: string;
+  account_id: string;
+  status: 'pending' | 'running' | 'done' | 'error';
+  dialogs_total: number | null;
+  dialogs_done: number;
+  file_size_bytes: number | null;
+  s3_key: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+const ARCHIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const API = '/api/tools/sales-chat-analyzer';
 const POLL_MS = 10_000;
@@ -180,6 +197,7 @@ export function SalesChatAnalyzerView() {
   const [busy, setBusy] = useState<string | null>(null);
   const [dialogsLoading, setDialogsLoading] = useState(false);
   const [messagesLoading, setMessagesLoading] = useState(false);
+  const [archiveJob, setArchiveJob] = useState<ArchiveJobRow | null>(null);
 
   // Мастер подключения.
   const [connectOpen, setConnectOpen] = useState(false);
@@ -228,6 +246,56 @@ export function SalesChatAnalyzerView() {
     setSyncRuns(data.runs ?? []);
   }, []);
 
+  const loadArchiveJob = useCallback(async (accountId: string) => {
+    const data = await authFetchJson<{ job: ArchiveJobRow | null }>(
+      `${API}/accounts/${accountId}/archive`,
+      { method: 'GET' },
+    );
+    setArchiveJob(data.job ?? null);
+  }, []);
+
+  const startArchive = useCallback(async () => {
+    if (!selectedAccount) return;
+    setBusy('archive-start');
+    setError(null);
+    try {
+      const data = await authFetchJson<{ job: ArchiveJobRow }>(
+        `${API}/accounts/${selectedAccount}/archive`,
+        { method: 'POST' },
+      );
+      setArchiveJob(data.job);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка');
+    } finally {
+      setBusy(null);
+    }
+  }, [selectedAccount]);
+
+  const downloadArchive = useCallback(async (jobId: string) => {
+    setBusy('archive-download');
+    setError(null);
+    try {
+      const data = await authFetchJson<{ url: string; filename: string }>(
+        `${API}/archives/${jobId}/download`,
+        { method: 'GET' },
+      );
+      // Триггерим скачивание через клик по ссылке — браузер сам обработает
+      // 7-дневный presigned URL и скачает файл (для больших ZIP это сильно
+      // лучше, чем грузить blob в RAM вкладки).
+      const a = document.createElement('a');
+      a.href = data.url;
+      a.download = data.filename;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка');
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
   const triggerSync = useCallback(async () => {
     if (
       !window.confirm(
@@ -256,16 +324,22 @@ export function SalesChatAnalyzerView() {
     loadSync().catch(() => {});
   }, [loadAccounts, loadSync]);
 
-  // Периодическое обновление: статусы аккаунтов, диалоги, сообщения открытого диалога.
+  // Периодическое обновление: статусы аккаунтов, диалоги, сообщения открытого
+  // диалога, прогресс архива (если он собирается прямо сейчас).
+  const archiveActive = archiveJob?.status === 'pending' || archiveJob?.status === 'running';
   useEffect(() => {
     const timer = window.setInterval(() => {
       loadAccounts().catch(() => {});
       loadSync().catch(() => {});
       if (selectedAccount) loadDialogs(selectedAccount, dialogQuery, true).catch(() => {});
       if (selectedDialog) loadMessages(selectedDialog.id, true).catch(() => {});
+      if (selectedAccount && archiveActive) loadArchiveJob(selectedAccount).catch(() => {});
     }, POLL_MS);
     return () => window.clearInterval(timer);
-  }, [loadAccounts, loadSync, loadDialogs, loadMessages, selectedAccount, selectedDialog, dialogQuery]);
+  }, [
+    loadAccounts, loadSync, loadDialogs, loadMessages, loadArchiveJob,
+    selectedAccount, selectedDialog, dialogQuery, archiveActive,
+  ]);
 
   const selectAccount = useCallback(
     async (accountId: string) => {
@@ -274,13 +348,19 @@ export function SalesChatAnalyzerView() {
       setDialogs([]);
       setMessages([]);
       setDialogQuery('');
+      setArchiveJob(null);
       try {
-        await loadDialogs(accountId, '');
+        await Promise.all([
+          loadDialogs(accountId, ''),
+          // Подтягиваем последний архив для аккаунта: если уже собирался —
+          // покажем готовую ссылку или прогресс прямо в шапке колонки.
+          loadArchiveJob(accountId).catch(() => {}),
+        ]);
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Ошибка');
       }
     },
-    [loadDialogs],
+    [loadDialogs, loadArchiveJob],
   );
 
   const selectDialog = useCallback(
@@ -483,6 +563,83 @@ export function SalesChatAnalyzerView() {
   }, []);
 
   const selectedAccountRow = accounts.find((acc) => acc.id === selectedAccount) ?? null;
+
+  /** Архив считаем «свежим» (можно качать) если done и моложе 7 дней. */
+  const isArchiveDownloadable = (() => {
+    if (!archiveJob || archiveJob.status !== 'done' || !archiveJob.finished_at) return false;
+    return Date.now() - new Date(archiveJob.finished_at).getTime() <= ARCHIVE_TTL_MS;
+  })();
+
+  /** Рисует управление архивом справа от заголовка «Диалоги». */
+  const renderArchiveControl = () => {
+    const isPending = archiveJob?.status === 'pending';
+    const isRunning = archiveJob?.status === 'running';
+
+    if (isPending || isRunning) {
+      const total = archiveJob?.dialogs_total ?? 0;
+      const done = archiveJob?.dialogs_done ?? 0;
+      const label = isPending && total === 0
+        ? 'Ставим в очередь…'
+        : `Собираем архив: ${done}${total ? ` / ${total}` : ''}`;
+      return (
+        <div className="flex items-center gap-1.5 text-xs text-gray-600 min-w-0">
+          <Loader2 className="h-3.5 w-3.5 text-blue-600 animate-spin shrink-0" aria-hidden />
+          <span className="truncate">{label}</span>
+        </div>
+      );
+    }
+
+    if (isArchiveDownloadable && archiveJob) {
+      const sizeLabel = archiveJob.file_size_bytes ? ` · ${formatBytes(archiveJob.file_size_bytes)}` : '';
+      return (
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => void downloadArchive(archiveJob.id)}
+            disabled={busy === 'archive-download'}
+            title="Скачать готовый ZIP-архив"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
+          >
+            <Download className="h-3.5 w-3.5" aria-hidden />
+            {busy === 'archive-download' ? 'Готовим…' : `Скачать .zip${sizeLabel}`}
+          </button>
+          <button
+            type="button"
+            onClick={() => void startArchive()}
+            disabled={busy != null}
+            title="Пересобрать архив с актуальными данными"
+            className="text-xs text-gray-500 hover:text-gray-700 underline-offset-2 hover:underline disabled:opacity-50"
+          >
+            пересобрать
+          </button>
+        </div>
+      );
+    }
+
+    // Дефолт: архив не собран / истёк / упал — кнопка запуска (+ текст ошибки).
+    return (
+      <div className="flex flex-col items-end gap-0.5 min-w-0">
+        <button
+          type="button"
+          onClick={() => void startArchive()}
+          disabled={busy != null || dialogs.length === 0}
+          title="Собрать ZIP со всеми диалогами этого аккаунта (1 диалог = 1 DOCX)"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          <Package className="h-3.5 w-3.5" aria-hidden />
+          {busy === 'archive-start' ? 'Создаём…' : 'Скачать архив'}
+        </button>
+        {archiveJob?.status === 'error' ? (
+          <span
+            className="text-[10px] text-red-600 max-w-[180px] truncate"
+            title={archiveJob.error_message ?? 'unknown error'}
+          >
+            Ошибка: {archiveJob.error_message ?? 'unknown'}
+          </span>
+        ) : null}
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-6">
@@ -706,7 +863,10 @@ export function SalesChatAnalyzerView() {
 
         {/* Колонка 2: диалоги */}
         <div className="lg:col-span-3 rounded-2xl border border-gray-200 bg-white p-4">
-          <h2 className="text-sm font-semibold text-gray-900 mb-3">Диалоги</h2>
+          <div className="flex items-start justify-between gap-2 mb-3 min-h-[2rem]">
+            <h2 className="text-sm font-semibold text-gray-900 shrink-0 pt-1">Диалоги</h2>
+            {selectedAccount ? renderArchiveControl() : null}
+          </div>
           {!selectedAccount ? (
             <div className="text-sm text-gray-500">Выберите аккаунт слева.</div>
           ) : (

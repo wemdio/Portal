@@ -2,7 +2,8 @@
  * Worker runner for Docker: selects a specific worker kind.
  *
  * Usage:
- *  WORKER_KIND=hh|search|enrich|yandexmaps|tgparser|tgtranscribe|all (default: all)
+ *  WORKER_KIND=hh|search|enrich|yandexmaps|tgparser|tgtranscribe|
+ *              saleschatlogger|saleschatarchive|all (default: all)
  */
 
 const kind = String(process.env.WORKER_KIND ?? 'all').trim().toLowerCase();
@@ -57,6 +58,9 @@ switch (kind) {
     break;
   case 'saleschatlogger':
     run('./salesChatLogger');
+    break;
+  case 'saleschatarchive':
+    run('./salesChatArchive');
     break;
   case 'all':
   default:
