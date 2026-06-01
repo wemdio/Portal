@@ -56,6 +56,8 @@ interface Totals30d {
 
 interface SummaryResponse {
   enabled: boolean;
+  /** Текущий режим клиента (config.dry_run), не режим последнего прогона. */
+  dry_run: boolean;
   daily_limit: number | null;
   /** Последний completed прогон — основной источник цифр плитки. */
   last_run: LastRun | null;
@@ -120,7 +122,7 @@ export function AutoPipelineSummary() {
     );
   }
 
-  const { last_run, pending_attempt, totals_30d, stored_count, reserve_active } = data;
+  const { last_run, pending_attempt, totals_30d, stored_count, reserve_active, dry_run } = data;
 
   // Разбивка обработанных по источникам (HH + база баз). Показываем только
   // когда колонки заполнены (новые прогоны) — у легаси-прогонов оба 0.
@@ -256,7 +258,7 @@ export function AutoPipelineSummary() {
         </button>
       )}
 
-      {last_run?.was_dry_run && (
+      {dry_run && (
         <p
           className="mt-3 text-xs"
           style={{ color: 'var(--cp-paper-mute)' }}
