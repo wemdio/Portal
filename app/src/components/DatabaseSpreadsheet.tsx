@@ -1799,8 +1799,11 @@ export function DatabaseSpreadsheet() {
       }
     };
 
-    window.addEventListener('keydown', handleGlobalKeyDown);
-    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+    // Capture phase, не bubble. Иначе textarea сам обработает Shift+Arrow
+    // как расширение text-selection ДО того как наш хендлер вызовет
+    // preventDefault — расширение выделения по ячейкам не сработает.
+    window.addEventListener('keydown', handleGlobalKeyDown, true);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown, true);
   }, [activeTab, activeCell, selectionAnchor, handleUndo]);
 
   useEffect(() => {
@@ -9761,7 +9764,28 @@ export function DatabaseSpreadsheet() {
                                     e.target.style.height = `${e.target.scrollHeight}px`;
                                   }
                                 }}
-                                onKeyDown={handleKeyDown}
+                                onKeyDown={(event) => {
+                                  // Если только что вошли в ячейку (snapshot
+                                  // pending = true, ещё не редактировали) и
+                                  // нажали Del/Backspace — очищаем содержимое
+                                  // ячейки целиком (поведение Excel/Sheets).
+                                  // После первого keystroke ref становится
+                                  // false и Del/Backspace работают как обычное
+                                  // редактирование текста.
+                                  if (
+                                    (event.key === 'Delete' || event.key === 'Backspace') &&
+                                    !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey &&
+                                    cellEditSnapshotPendingRef.current &&
+                                    value !== ''
+                                  ) {
+                                    event.preventDefault();
+                                    setUndoSnapshot('Очистка ячейки');
+                                    cellEditSnapshotPendingRef.current = false;
+                                    handleValueChange(rowIndex, colIndex, '');
+                                    return;
+                                  }
+                                  handleKeyDown(event);
+                                }}
                                 onPaste={handlePaste}
                                 rows={1}
                               wrap={effectiveWrapCells ? 'soft' : 'off'}
