@@ -108,21 +108,7 @@ export function deduplicateByEmail(data: string[][]): string[][] {
     ...rowsWithoutEmail,
   ];
 
-  if (emailColumns.length === 0) return [header, ...afterEmailDedup];
-
-  const ignoreSet = new Set(emailColumns);
-  const rowMap = new Map<string, { row: string[]; score: number }>();
-  for (const row of afterEmailDedup) {
-    const keyParts = row.filter((_, idx) => !ignoreSet.has(idx)).map((c) => c.trim());
-    const hasNonEmail = keyParts.some((v) => v.length > 0);
-    const key = hasNonEmail ? keyParts.join('\u0001') : row.join('\u0001');
-    const score = countFilledCells(row);
-    const existing = rowMap.get(key);
-    if (!existing || score > existing.score) {
-      rowMap.set(key, { row, score });
-    }
-  }
-  return [header, ...Array.from(rowMap.values()).map((item) => item.row)];
+  return [header, ...afterEmailDedup];
 }
 
 export function findColumnIndex(header: string[], ...names: string[]): number {

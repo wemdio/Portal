@@ -2,6 +2,9 @@ import {
   buildCampaignPayloadFromPreset,
   buildCampaignPresetUpdatePayload,
   toInstantlyHtmlBody,
+  bodyHasMarkdownLink,
+  sequenceHasMarkdownLink,
+  detectRawHtmlTags,
 } from '@/lib/clientLaunch/buildCampaignPayload';
 import { validateClientLaunchInput } from '@/lib/clientLaunch/validateLaunchInput';
 import { mapCsvRowsToLeads } from '@/lib/clientLaunch/mapRowsToLeads';
@@ -273,6 +276,34 @@ describe('validateClientLaunchInput', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).toMatch(/аккаунт/i);
+  });
+
+  it('HTML GUARD: rejects a body containing raw HTML tags', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [{ subject: 'Hi', body: 'Скидка <table><tr><td>50%</td></tr></table>', wait_days: 0 }],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/HTML/);
+  });
+
+  it('HTML GUARD: allows a body with a markdown hidden link (not HTML)', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [{ subject: 'Hi', body: 'смотрите [наш сайт](https://x.ru/?utm=1)', wait_days: 0 }],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(true);
   });
 
   it('rejects sequence with no steps', () => {
@@ -951,6 +982,124 @@ describe('toInstantlyHtmlBody', () => {
     // Pre-encoded entities stay encoded (no double-decode that could let
     // someone smuggle real HTML via `&lt;script&gt;`).
     expect(toInstantlyHtmlBody('&lt;script&gt;')).toBe('<div>&amp;lt;script&amp;gt;</div>');
+  });
+});
+
+describe('toInstantlyHtmlBody — hidden markdown links', () => {
+  it('converts [anchor](https url) → <a href> inside the div', () => {
+    expect(toInstantlyHtmlBody('Смотрите [наш сайт](https://polza.ru/?utm=1) тут')).toBe(
+      '<div>Смотрите <a href="https://polza.ru/?utm=1">наш сайт</a> тут</div>',
+    );
+  });
+
+  it('escapes the anchor text (no HTML injection via the link label)', () => {
+    expect(toInstantlyHtmlBody('[<b>x</b>](https://x.ru)')).toBe(
+      '<div><a href="https://x.ru">&lt;b&gt;x&lt;/b&gt;</a></div>',
+    );
+  });
+
+  it('attribute-escapes & in the URL', () => {
+    expect(toInstantlyHtmlBody('[t](https://x.ru/?a=1&b=2)')).toBe(
+      '<div><a href="https://x.ru/?a=1&amp;b=2">t</a></div>',
+    );
+  });
+
+  it('does NOT linkify javascript: / data: URLs (stays escaped text, no <a>)', () => {
+    // The regex only matches http(s); other schemes are left as literal text.
+    const js = toInstantlyHtmlBody('[click](javascript:alert(1))');
+    expect(js).not.toContain('<a ');
+    expect(js).toContain('[click](javascript:alert(1))');
+    const data = toInstantlyHtmlBody('[x](data:text/html,<script>)');
+    expect(data).not.toContain('<a ');
+  });
+
+  it('a link survives a multi-line body (div per line, <a> intact)', () => {
+    const out = toInstantlyHtmlBody('Привет\n[сайт](https://x.ru)\nпока');
+    expect(out).toBe(
+      '<div>Привет</div><div><a href="https://x.ru">сайт</a></div><div>пока</div>',
+    );
+  });
+});
+
+describe('bodyHasMarkdownLink', () => {
+  it('true for a valid http(s) markdown link', () => {
+    expect(bodyHasMarkdownLink('текст [сайт](https://x.ru) текст')).toBe(true);
+  });
+  it('false when there is no link', () => {
+    expect(bodyHasMarkdownLink('просто текст без ссылок')).toBe(false);
+  });
+  it('false for a non-http scheme (not a usable hidden link)', () => {
+    expect(bodyHasMarkdownLink('[x](javascript:alert(1))')).toBe(false);
+  });
+});
+
+describe('sequenceHasMarkdownLink', () => {
+  it('true when any step body has a link', () => {
+    expect(sequenceHasMarkdownLink([
+      { body: 'no link here' },
+      { body: 'see [site](https://x.ru)' },
+    ])).toBe(true);
+  });
+  it('true when a variant has a link', () => {
+    expect(sequenceHasMarkdownLink([
+      { body: 'plain', variants: [{ body: '[a](https://x.ru)' }] },
+    ])).toBe(true);
+  });
+  it('false when nothing has a link', () => {
+    expect(sequenceHasMarkdownLink([{ body: 'a', variants: [{ body: 'b' }] }])).toBe(false);
+  });
+});
+
+describe('detectRawHtmlTags (HTML guard)', () => {
+  it('flags pasted HTML markup', () => {
+    expect(detectRawHtmlTags('<table><tr><td>x</td></tr></table>')).toBe(true);
+    expect(detectRawHtmlTags('<div style="color:red">hi</div>')).toBe(true);
+    expect(detectRawHtmlTags('text <br> more')).toBe(true);
+    expect(detectRawHtmlTags('<img src=x onerror=alert(1)>')).toBe(true);
+    expect(detectRawHtmlTags('</p>')).toBe(true);
+  });
+
+  it('does NOT flag math/comparison with spaces', () => {
+    expect(detectRawHtmlTags('цена < 1000 руб')).toBe(false);
+    expect(detectRawHtmlTags('5 < 10 and 20 > 15')).toBe(false);
+    expect(detectRawHtmlTags('p < 0.05')).toBe(false);
+  });
+
+  it('does NOT flag the <3 emoticon', () => {
+    expect(detectRawHtmlTags('люблю вас <3')).toBe(false);
+  });
+
+  it('does NOT flag a markdown hidden link', () => {
+    expect(detectRawHtmlTags('перейдите на [наш сайт](https://x.ru/?utm=1)')).toBe(false);
+  });
+
+  it('does NOT flag plain text', () => {
+    expect(detectRawHtmlTags('Здравствуйте! Это Иван из «Чизмол».')).toBe(false);
+  });
+});
+
+describe('buildCampaignPayloadFromPreset — conditional text_only', () => {
+  it('text_only:true for a link-free body (plain-text send)', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: { name: 'X', steps: [{ subject: 'Hi', body: 'no link here', wait_days: 0 }] },
+    });
+    expect(payload.text_only).toBe(true);
+  });
+
+  it('text_only:false when a body has a hidden link (HTML send so <a> survives)', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [{ subject: 'Hi', body: 'смотрите [сайт](https://x.ru)', wait_days: 0 }],
+      },
+    });
+    expect(payload.text_only).toBe(false);
+    // and the link is rendered as an anchor in the payload body
+    expect(payload.sequences?.[0].steps[0].variants?.[0].body).toContain(
+      '<a href="https://x.ru">сайт</a>',
+    );
   });
 });
 

@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react';
 import { Link2, X } from 'lucide-react';
-import { buildPlainTextLinkSnippet } from '@/lib/clientLaunch/linkSnippet';
+import { buildMarkdownLink } from '@/lib/clientLaunch/linkSnippet';
 
 interface EmailBodyFieldProps {
   value: string;
@@ -27,18 +27,17 @@ function looksLikeLink(raw: string): boolean {
 /**
  * Поле текста письма + inline-форма «Вставить ссылку».
  *
- * Письма клиента уходят PLAIN-TEXT (text_only — см. buildCampaignPayload).
- * В plain-text нельзя «спрятать» ссылку под слово, как HTML `<a href>`:
- * нет способа сделать кликабельным именно слово «Егор», скрыв URL. Поэтому
- * при вставке ссылки мы НЕ заменяем выделенный текст (старое поведение,
- * на которое жаловался клиент — «Егор» исчезал), а СОХРАНЯЕМ слово и ставим
- * URL рядом: `Егор (https://…)`. Почтовые клиенты сами делают голый URL
- * кликабельным, слово остаётся видимым. Логика сборки — в
- * buildPlainTextLinkSnippet (отдельно покрыта тестами).
+ * Скрытая ссылка: клиент выделяет слово («наш сайт» / «Егор») и вставляет
+ * URL — слово становится кликабельным, а URL скрыт от получателя. В поле
+ * это хранится как markdown `[наш сайт](https://…)`; при отправке
+ * toInstantlyHtmlBody превращает в `<a href>`, и письмо С этой ссылкой
+ * уходит в HTML-формате (без ссылок — остаётся текстовым). Логика сборки
+ * markdown — в buildMarkdownLink (покрыта тестами).
  *
  * Клиент вставляет УЖЕ ГОТОВУЮ ссылку (с UTM, если нужно) — конструктор UTM
- * не наша забота. Inline-форма без модалки: текст письма виден, Esc
- * закрывает, Enter вставляет.
+ * не наша забота. Произвольный HTML вставить нельзя: всё кроме этой
+ * markdown-ссылки экранируется. Inline-форма без модалки: текст письма
+ * виден, Esc закрывает, Enter вставляет.
  */
 export function EmailBodyField({
   value,
@@ -87,12 +86,19 @@ export function EmailBodyField({
 
   const canInsert = looksLikeLink(link);
 
-  // Превью того, что встанет в текст письма (и как увидит получатель).
-  const previewSnippet = canInsert ? buildPlainTextLinkSnippet(anchor, link.trim()) : '';
+  // Normalize the URL: add https:// if the client pasted a bare domain, so
+  // the markdown link is a valid http(s) URL that toInstantlyHtmlBody accepts.
+  const normalizedLink = (() => {
+    const s = link.trim();
+    return /^https?:\/\//i.test(s) ? s : `https://${s}`;
+  })();
+
+  // Превью markdown-метки, которая встанет в поле.
+  const previewSnippet = canInsert ? buildMarkdownLink(anchor, normalizedLink) : '';
 
   const insert = () => {
     if (!canInsert) return;
-    const snippet = buildPlainTextLinkSnippet(anchor, link.trim());
+    const snippet = buildMarkdownLink(anchor, normalizedLink);
     onChange(value.slice(0, sel.start) + snippet + value.slice(sel.end));
     setOpen(false);
     setLink('');
@@ -158,8 +164,8 @@ export function EmailBodyField({
           </div>
           <p className="text-[11px] m-0" style={{ color: 'var(--cp-paper-mute)' }}>
             {anchor
-              ? `Письма уходят обычным текстом, поэтому ссылку нельзя «спрятать» под слово. Слово «${anchor}» останется, а ссылка встанет рядом и будет кликабельной в почте.`
-              : 'Вставьте готовую ссылку (с UTM, если нужно). В обычном письме она кликабельна сама по себе — почтовый клиент подсветит её автоматически.'}
+              ? `Слово «${anchor}» станет кликабельным, а ссылка (с UTM) будет скрыта от получателя. Письмо с ссылкой уходит в HTML-формате.`
+              : 'Вставьте готовую ссылку (с UTM, если нужно). Выделите слово в тексте перед вставкой, чтобы кликабельным стало именно оно, а URL скрылся.'}
           </p>
           <div className="flex gap-2">
             <input
@@ -186,7 +192,7 @@ export function EmailBodyField({
           </div>
           {previewSnippet && (
             <p className="text-[11px] m-0 break-all" style={{ color: 'var(--cp-paper-faint)' }}>
-              В письме: <span style={{ color: 'var(--cp-paper-mute)' }}>{previewSnippet}</span>
+              В поле: <span style={{ color: 'var(--cp-paper-mute)' }}>{previewSnippet}</span>
             </p>
           )}
         </div>

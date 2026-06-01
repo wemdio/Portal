@@ -44,6 +44,7 @@ import {
   campaignScheduleToOverride,
   validateScheduleOverride,
 } from '@/lib/clientLaunch/scheduleMapping';
+import { detectRawHtmlTags } from '@/lib/clientLaunch/buildCampaignPayload';
 
 // Map campaign status number → semantic dot color (Status-as-Data rule).
 function statusDotColor(status: number): string {
@@ -63,6 +64,13 @@ function stripHtml(value?: string): string {
   if (!value) return '';
   return value
     .replace(/<br\s*\/?>/gi, '\n')
+    // Hidden links round-trip: <a href="url">text</a> → [text](url) markdown,
+    // so loading a campaign into edit mode shows the editable markdown the
+    // client typed, and re-saving rebuilds the same <a>. Must run BEFORE the
+    // general tag-strip below (else the <a> is stripped to bare text + the URL
+    // is lost). Entities inside (&amp; in the URL) are decoded by the entity
+    // replacements further down.
+    .replace(/<a\b[^>]*\bhref="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)')
     // Bodies are <div>line</div> per line (see toInstantlyHtmlBody). Convert
     // only the CLOSING block tag to a newline; opening <div> is stripped by
     // the general tag-strip below. Converting BOTH would insert a blank line
@@ -658,6 +666,18 @@ function CampaignDetailPageContent() {
         return;
       }
     }
+    // HTML guard (same as launch): block raw HTML tags with a clear message.
+    for (let i = 0; i < editSteps.length; i += 1) {
+      const step = editSteps[i];
+      if (detectRawHtmlTags(step.body ?? '')) {
+        setEditError(`Шаг ${i + 1}: HTML не поддерживается. Пишите текстом; для ссылки выделите слово и нажмите «Вставить ссылку».`);
+        return;
+      }
+      if ((step.variants ?? []).some((v) => detectRawHtmlTags(v.body ?? ''))) {
+        setEditError(`Шаг ${i + 1}: HTML в варианте не поддерживается.`);
+        return;
+      }
+    }
     setEditSaving(true);
     setEditError('');
     try {
@@ -1067,9 +1087,9 @@ function CampaignDetailPageContent() {
                         <textarea
                           value={step.body}
                           onChange={(e) => updateEditStep(idx, { body: e.target.value })}
-                          rows={6}
+                          rows={14}
                           placeholder="Текст письма"
-                          className="ds-input w-full text-sm resize-y"
+                          className="ds-input w-full text-sm resize-y min-h-[18rem] leading-relaxed"
                         />
                       </div>
 
@@ -1101,9 +1121,9 @@ function CampaignDetailPageContent() {
                             <textarea
                               value={variant.body}
                               onChange={(e) => updateEditVariant(idx, variantIdx, { body: e.target.value })}
-                              rows={6}
+                              rows={12}
                               placeholder="Текст письма"
-                              className="ds-input w-full text-sm resize-y"
+                              className="ds-input w-full text-sm resize-y min-h-[14rem] leading-relaxed"
                             />
                           </div>
                         );
