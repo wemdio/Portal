@@ -119,18 +119,25 @@ function ToolLinkCard({
   const title = locale === 'en' ? (config.title_en ?? config.title) : config.title;
   const description = locale === 'en' ? (config.description_en ?? config.description) : config.description;
 
-  // Глобальный статус из шестерёнки имеет приоритет над хардкодом в реестре.
-  // Если статус есть и он не 'active' — рисуем плашку под него; иначе берём
-  // хардкод-плашку (например, у reputation-finder зашит 'BETA' в реестре).
+  // Если есть admin-override (effectiveStatus передан) — он ПОЛНОСТЬЮ
+  // побеждает хардкод в реестре, включая «без плашки» для 'active'.
+  // Без override'а фоллбэчимся на config.badge/config.disabled из реестра.
+  // Это чинит баг: admin ставит 'active' тулу с зашитым badge: 'Новое'
+  // (email-sequence-v2 и т.п.) — плашка должна пропадать, а не оставаться
+  // из реестра.
+  const hasOverride = effectiveStatus !== undefined;
   const dynamicBadge = badgeForStatus(effectiveStatus, locale);
-  const badgeText = dynamicBadge?.text
-    ?? (locale === 'en' ? (config.badge_en ?? config.badge) : config.badge);
-  const badgeVariant: 'emerald' | 'amber' | undefined =
-    dynamicBadge?.variant ?? config.badgeVariant;
+  const badgeText = hasOverride
+    ? dynamicBadge?.text
+    : (locale === 'en' ? (config.badge_en ?? config.badge) : config.badge);
+  const badgeVariant: 'emerald' | 'amber' | undefined = hasOverride
+    ? dynamicBadge?.variant
+    : config.badgeVariant;
 
-  // «В разработке» через шестерёнку или ручной `disabled: true` в реестре —
-  // одно и то же визуально (серая некликабельная карточка).
-  const isDisabled = effectiveStatus === 'in_development' || Boolean(config.disabled);
+  // «В разработке» через override ИЛИ (нет override AND config.disabled).
+  // Если override='active' — config.disabled из реестра тоже игнорится.
+  const isDisabled = effectiveStatus === 'in_development'
+    || (!hasOverride && Boolean(config.disabled));
 
   if (isDisabled) {
     const badgeClass = badgeVariant === 'emerald'
