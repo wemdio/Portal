@@ -87,3 +87,26 @@ export function effectiveToolStatus(
   if (status === 'new' && isNewExpired(newSinceIso, nowMs)) return 'active';
   return status;
 }
+
+/**
+ * Дефолтный статус для инструмента без записи в global_tool_visibility —
+ * выводится из хардкод-полей реестра (disabled / badge / badgeVariant).
+ * Нужен чтобы admin-модалка по дефолту показывала ту же визуальную
+ * картину, что юзер видит на /tools, а не плоский «Активный» для всех.
+ *
+ * Маппинг:
+ *   disabled === true            → 'in_development'
+ *   badgeVariant === 'emerald'   → 'new'    (плашка «Новое»)
+ *   badgeVariant === 'amber'     → 'beta'   (плашка «BETA»)
+ *   нет badge / disabled         → 'active'
+ */
+export function inferToolStatusFromRegistry(
+  config: { disabled?: boolean; badge?: string; badgeVariant?: 'emerald' | 'amber' },
+): ToolStatus {
+  if (config.disabled) return 'in_development';
+  if (config.badge) {
+    if (config.badgeVariant === 'emerald') return 'new';
+    return 'beta';
+  }
+  return 'active';
+}

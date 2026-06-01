@@ -984,6 +984,11 @@ export function DatabaseSpreadsheet() {
   const [lastAction, setLastAction] = useState<ActionSummary | null>(null);
   const [copyNotice, setCopyNotice] = useState<CopyNotice | null>(null);
   const [lastUndo, setLastUndo] = useState<UndoState | null>(null);
+  /** Состояние для Ctrl+Y / Ctrl+Shift+Z. Наполняется когда сработал handleUndo
+   *  (туда уходит «текущее ДО undo» состояние, чтобы можно было его вернуть).
+   *  Любое новое действие через setUndoSnapshot() сбрасывает redo — это
+   *  стандартное Excel-поведение: после undo любой ввод обрывает ветку redo. */
+  const [lastRedo, setLastRedo] = useState<UndoState | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [selection, setSelection] = useState<Selection>({
@@ -1607,32 +1612,129 @@ export function DatabaseSpreadsheet() {
 
   const handleUndo = useCallback(() => {
     if (!lastUndo) return;
-    setTabs((prev) =>
-      prev.map((tab) => (tab.id === lastUndo.tabId ? { ...tab, data: lastUndo.data } : tab)),
-    );
+    // Перед откатом сохраняем «текущее ДО undo» в lastRedo — чтобы Ctrl+Y
+    // мог вернуть это состояние. Тот же tabId и тот же message — после
+    // redo он снова появится в lastUndo как обычный snapshot.
+    setTabs((prev) => {
+      const currentTab = prev.find((t) => t.id === lastUndo.tabId);
+      if (currentTab) {
+        setLastRedo({
+          tabId: lastUndo.tabId,
+          data: cloneData(currentTab.data),
+          message: lastUndo.message,
+          time: Date.now(),
+        });
+      }
+      return prev.map((tab) => (tab.id === lastUndo.tabId ? { ...tab, data: lastUndo.data } : tab));
+    });
     setLastAction({ message: `Вернули: ${lastUndo.message}`, time: Date.now() });
     setLastUndo(null);
   }, [lastUndo]);
 
+  const handleRedo = useCallback(() => {
+    if (!lastRedo) return;
+    // Симметрично undo: сохраняем «текущее ДО redo» в lastUndo, чтобы
+    // следующий Ctrl+Z вернул обратно.
+    setTabs((prev) => {
+      const currentTab = prev.find((t) => t.id === lastRedo.tabId);
+      if (currentTab) {
+        setLastUndo({
+          tabId: lastRedo.tabId,
+          data: cloneData(currentTab.data),
+          message: lastRedo.message,
+          time: Date.now(),
+        });
+      }
+      return prev.map((tab) => (tab.id === lastRedo.tabId ? { ...tab, data: lastRedo.data } : tab));
+    });
+    setLastAction({ message: `Повтор: ${lastRedo.message}`, time: Date.now() });
+    setLastRedo(null);
+  }, [lastRedo]);
+
+
+  // Свежие версии хендлеров через ref — чтобы keydown-listener не пересоздавался
+  // на каждое изменение selection/tabs/etc. (это ловит actual stale-closure баги).
+  // Инициализируем no-op'ами — реальные функции объявлены сильно ниже в файле
+  // (copySelection и т.п. ~строка 2200+) и ссылка на них прямо в useRef-инициализации
+  // ловится TS как TDZ. Реальные хендлеры наполняет useEffect ниже.
+  const clipboardHandlersRef = useRef<{
+    copy: () => Promise<void>;
+    cut: () => Promise<void>;
+    paste: () => Promise<void>;
+    redo: () => void;
+  }>({
+    copy: async () => {},
+    cut: async () => {},
+    paste: async () => {},
+    redo: () => {},
+  });
 
   useEffect(() => {
     const handleGlobalKeyDown = (e: globalThis.KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'z' || e.code === 'KeyZ')) {
+      const isMod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+
+      // Ctrl+Z (без shift) = undo.
+      if (isMod && !e.shiftKey && (key === 'z' || e.code === 'KeyZ')) {
         e.preventDefault();
         handleUndo();
         return;
       }
 
-      const inCellInput =
-        (document.activeElement instanceof HTMLInputElement ||
-          document.activeElement instanceof HTMLTextAreaElement) &&
-        document.activeElement.closest('td');
+      // Ctrl+Y или Ctrl+Shift+Z = redo. Оба варианта — потому что Win/Linux
+      // обычно Ctrl+Y, mac/Sheets — Cmd+Shift+Z.
+      if (isMod && ((key === 'y' || e.code === 'KeyY') || (e.shiftKey && (key === 'z' || e.code === 'KeyZ')))) {
+        e.preventDefault();
+        clipboardHandlersRef.current.redo();
+        return;
+      }
 
-      if (
-        (document.activeElement instanceof HTMLInputElement ||
-          document.activeElement instanceof HTMLTextAreaElement) &&
-        !inCellInput
-      ) {
+      const inInput =
+        document.activeElement instanceof HTMLInputElement ||
+        document.activeElement instanceof HTMLTextAreaElement;
+      const inCellInput = inInput && document.activeElement?.closest('td');
+
+      // Если фокус в input ВНЕ сетки (поиск по таблице, переименование вкладки
+      // и т.п.) — не трогаем Ctrl+C/V/X, пусть браузер сам копирует/вставляет
+      // текст в этот input. Для cell-input разрешаем — там копирование/вставка
+      // должны работать по spreadsheet-логике (целые ячейки).
+      const isClipboardKey = isMod && (key === 'c' || key === 'v' || key === 'x'
+        || e.code === 'KeyC' || e.code === 'KeyV' || e.code === 'KeyX');
+      if (isClipboardKey && inInput && !inCellInput) {
+        return;
+      }
+
+      // Ctrl+C — копирование выделения. Если фокус на cell-input, его
+      // собственный onKeyDown уже отработает — но мы тут продублируем,
+      // чтобы работало и когда фокуса нигде нет (просто кликнул на ячейки).
+      if (isMod && !e.shiftKey && (key === 'c' || e.code === 'KeyC')) {
+        e.preventDefault();
+        void clipboardHandlersRef.current.copy();
+        return;
+      }
+
+      // Ctrl+X — вырезать: copy + clear, без подтверждения. Undo возвращает.
+      if (isMod && (key === 'x' || e.code === 'KeyX')) {
+        e.preventDefault();
+        void clipboardHandlersRef.current.cut();
+        return;
+      }
+
+      // Ctrl+V — вставка. Если фокус на cell-input/grid, нативный onPaste
+      // event уже сработает на этих элементах (см. handlePaste). Если же
+      // фокус нигде (body) — нативное событие не дойдёт до нашего хендлера,
+      // поэтому читаем буфер через Clipboard API напрямую.
+      if (isMod && !e.shiftKey && (key === 'v' || e.code === 'KeyV')) {
+        const willHandleNatively = !!(inCellInput
+          || (document.activeElement && document.activeElement.closest('[data-spreadsheet-grid]')));
+        if (willHandleNatively) return; // onPaste сработает сам
+        e.preventDefault();
+        void clipboardHandlersRef.current.paste();
+        return;
+      }
+
+      // Если фокус в input ВНЕ сетки — дальше (стрелки, и т.п.) тоже не лезем.
+      if (inInput && !inCellInput) {
         return;
       }
 
@@ -2147,6 +2249,50 @@ export function DatabaseSpreadsheet() {
       showCopyNotice('Не удалось скопировать выделение в буфер обмена', 'error');
     }
   };
+
+  /** Ctrl+X — копирует выделение в буфер и сразу чистит ячейки. Без
+   *  диалога подтверждения, в отличие от Delete на большом выделении —
+   *  это «cut», поведение Excel'я. Откатить можно через Ctrl+Z. */
+  const cutSelection = async () => {
+    if (!activeTab) return;
+    await copySelection();
+    setUndoSnapshot('Вырезано');
+    clearSelectedCells();
+    const rows = normalizedSelection.endRow - normalizedSelection.startRow + 1;
+    const cols = normalizedSelection.endCol - normalizedSelection.startCol + 1;
+    setLastAction({ message: `Вырезано ячеек: ${rows * cols}`, time: Date.now() });
+  };
+
+  /** Ctrl+V когда нет нативного onPaste-фокуса (фокус на body или вне input/grid).
+   *  Берём текст из буфера через Clipboard API и кидаем в applyPaste. */
+  const pasteFromClipboard = async () => {
+    if (!activeTab) return;
+    if (typeof navigator === 'undefined' || !navigator.clipboard?.readText) {
+      showCopyNotice('Браузер не поддерживает чтение буфера обмена', 'error');
+      return;
+    }
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) return;
+      const values = parseBestClipboard(text, '');
+      applyPaste(values);
+    } catch (error) {
+      void logError('spreadsheet.paste.failed', error);
+      showCopyNotice('Не удалось прочитать буфер обмена (нужно разрешение браузера)', 'error');
+    }
+  };
+
+  // Наполняем clipboardHandlersRef свежими версиями функций после их объявления.
+  // useRef инициализируется no-op'ами выше (TS не даёт ссылаться на эти `const`
+  // в `useRef(...)` напрямую — TDZ).
+  useEffect(() => {
+    clipboardHandlersRef.current = {
+      copy: copySelection,
+      cut: cutSelection,
+      paste: pasteFromClipboard,
+      redo: handleRedo,
+    };
+  });
 
   const applyPaste = (values: string[][]) => {
     if (!activeTab || values.length === 0) return;
@@ -3279,6 +3425,10 @@ export function DatabaseSpreadsheet() {
       message,
       time: Date.now(),
     });
+    // Любое новое действие обрывает redo-ветку — после undo пользователь
+    // что-то изменил, значит «вперёд» уже идти некуда (стандартное поведение
+    // Excel/Sheets/любого редактора).
+    setLastRedo(null);
   };
 
   const openPersonalizationModal = () => {
@@ -9296,6 +9446,7 @@ export function DatabaseSpreadsheet() {
             className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 pb-6 dark-scrollbar"
             style={{ maxHeight: 'calc(100vh - 130px)' }}
             tabIndex={-1}
+            data-spreadsheet-grid="true"
             onKeyDownCapture={handleGridKeyDown}
             onPaste={handlePaste as unknown as React.ClipboardEventHandler<HTMLDivElement>}
             onScroll={handleTableScroll}
@@ -9782,15 +9933,28 @@ export function DatabaseSpreadsheet() {
                     </span>
                     <div className="flex items-center justify-between">
                         <span className="text-blue-400 text-[10px]">{formatTime(lastAction.time)}</span>
-                        {lastUndo && (
-                        <button
-                            type="button"
-                            onClick={handleUndo}
-                            className="rounded bg-white px-2 py-1 text-[10px] font-semibold text-blue-700 shadow-sm border border-blue-100 hover:bg-blue-50 transition-colors"
-                        >
-                            Отменить
-                        </button>
-                        )}
+                        <div className="flex items-center gap-1.5">
+                          {lastUndo && (
+                          <button
+                              type="button"
+                              onClick={handleUndo}
+                              title="Ctrl+Z"
+                              className="rounded bg-white px-2 py-1 text-[10px] font-semibold text-blue-700 shadow-sm border border-blue-100 hover:bg-blue-50 transition-colors"
+                          >
+                              Отменить
+                          </button>
+                          )}
+                          {lastRedo && (
+                          <button
+                              type="button"
+                              onClick={handleRedo}
+                              title="Ctrl+Y / Ctrl+Shift+Z"
+                              className="rounded bg-white px-2 py-1 text-[10px] font-semibold text-blue-700 shadow-sm border border-blue-100 hover:bg-blue-50 transition-colors"
+                          >
+                              Повторить
+                          </button>
+                          )}
+                        </div>
                     </div>
                   </div>
                 </div>

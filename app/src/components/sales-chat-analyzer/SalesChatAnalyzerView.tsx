@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Download, Loader2, Package } from 'lucide-react';
+import { Download, Loader2, MoreVertical, Package } from 'lucide-react';
 import { authFetch, authFetchJson } from '@/lib/authFetch';
 import type {
   SalesChatAccountRow,
@@ -198,6 +198,8 @@ export function SalesChatAnalyzerView() {
   const [dialogsLoading, setDialogsLoading] = useState(false);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [archiveJob, setArchiveJob] = useState<ArchiveJobRow | null>(null);
+  /** id аккаунта с открытым меню действий (⋮). null = все закрыты. */
+  const [openMenuAccountId, setOpenMenuAccountId] = useState<string | null>(null);
 
   // Мастер подключения.
   const [connectOpen, setConnectOpen] = useState(false);
@@ -323,6 +325,21 @@ export function SalesChatAnalyzerView() {
     loadAccounts().catch((e) => setError(e instanceof Error ? e.message : 'Ошибка'));
     loadSync().catch(() => {});
   }, [loadAccounts, loadSync]);
+
+  // Закрытие меню ⋮ по клику в любом месте кроме самого меню. setTimeout 0 —
+  // чтобы клик-открытие меню (stopPropagation внутри) не словил тот же
+  // обработчик сразу после установки.
+  useEffect(() => {
+    if (!openMenuAccountId) return;
+    const close = () => setOpenMenuAccountId(null);
+    const t = window.setTimeout(() => {
+      document.addEventListener('click', close);
+    }, 0);
+    return () => {
+      window.clearTimeout(t);
+      document.removeEventListener('click', close);
+    };
+  }, [openMenuAccountId]);
 
   // Периодическое обновление: статусы аккаунтов, диалоги, сообщения открытого
   // диалога, прогресс архива (если он собирается прямо сейчас).
@@ -591,27 +608,34 @@ export function SalesChatAnalyzerView() {
 
     if (isArchiveDownloadable && archiveJob) {
       const sizeLabel = archiveJob.file_size_bytes ? ` · ${formatBytes(archiveJob.file_size_bytes)}` : '';
+      // Дата сборки — чтобы понимать какой версией архива выкачаешь данные.
+      const builtAt = archiveJob.finished_at ? formatDate(archiveJob.finished_at) : null;
       return (
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => void downloadArchive(archiveJob.id)}
-            disabled={busy === 'archive-download'}
-            title="Скачать готовый ZIP-архив"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
-          >
-            <Download className="h-3.5 w-3.5" aria-hidden />
-            {busy === 'archive-download' ? 'Готовим…' : `Скачать .zip${sizeLabel}`}
-          </button>
-          <button
-            type="button"
-            onClick={() => void startArchive()}
-            disabled={busy != null}
-            title="Пересобрать архив с актуальными данными"
-            className="text-xs text-gray-500 hover:text-gray-700 underline-offset-2 hover:underline disabled:opacity-50"
-          >
-            пересобрать
-          </button>
+        <div className="flex flex-col items-end gap-0.5">
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => void downloadArchive(archiveJob.id)}
+              disabled={busy === 'archive-download'}
+              title={builtAt ? `Архив собран ${builtAt}` : 'Скачать готовый ZIP-архив'}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
+            >
+              <Download className="h-3.5 w-3.5" aria-hidden />
+              {busy === 'archive-download' ? 'Готовим…' : `Скачать .zip${sizeLabel}`}
+            </button>
+            <button
+              type="button"
+              onClick={() => void startArchive()}
+              disabled={busy != null}
+              title="Пересобрать архив с актуальными данными"
+              className="text-xs text-gray-500 hover:text-gray-700 underline-offset-2 hover:underline disabled:opacity-50"
+            >
+              пересобрать
+            </button>
+          </div>
+          {builtAt ? (
+            <span className="text-[10px] text-gray-400">собран {builtAt}</span>
+          ) : null}
         </div>
       );
     }
@@ -797,6 +821,7 @@ export function SalesChatAnalyzerView() {
             ) : (
               accounts.map((acc) => {
                 const badge = statusBadge(acc.status);
+                const menuOpen = openMenuAccountId === acc.id;
                 return (
                   <div
                     key={acc.id}
@@ -809,13 +834,13 @@ export function SalesChatAnalyzerView() {
                         selectAccount(acc.id);
                       }
                     }}
-                    className={`cursor-pointer rounded-xl border p-3 text-sm transition ${
+                    className={`relative cursor-pointer rounded-xl border p-3 text-sm transition ${
                       selectedAccount === acc.id
                         ? 'border-blue-300 bg-blue-50'
                         : 'border-gray-200 bg-white hover:bg-gray-50'
                     }`}
                   >
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center justify-between gap-2 pr-7">
                       <span className="font-medium text-gray-900 truncate">
                         {acc.label ?? acc.phone}
                       </span>
@@ -830,30 +855,57 @@ export function SalesChatAnalyzerView() {
                     {acc.last_error ? (
                       <div className="mt-1 text-xs text-red-600 truncate">{acc.last_error}</div>
                     ) : null}
-                    <div className="mt-2 flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleAccount(acc);
-                        }}
-                        disabled={busy === acc.id}
-                        className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+
+                    {/* Кнопка-меню «⋮» в правом верхнем углу карточки.
+                        stopPropagation чтобы клик не выбирал аккаунт. */}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenMenuAccountId((prev) => (prev === acc.id ? null : acc.id));
+                      }}
+                      aria-label="Меню аккаунта"
+                      aria-haspopup="menu"
+                      aria-expanded={menuOpen}
+                      className="absolute right-1.5 top-1.5 rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                    >
+                      <MoreVertical className="h-3.5 w-3.5" aria-hidden />
+                    </button>
+
+                    {menuOpen ? (
+                      <div
+                        role="menu"
+                        onClick={(e) => e.stopPropagation()}
+                        className="absolute right-1.5 top-9 z-20 w-36 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
                       >
-                        {acc.status === 'disabled' ? 'Включить' : 'Выключить'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteAccount(acc);
-                        }}
-                        disabled={busy === acc.id}
-                        className="rounded-lg border border-red-200 bg-white px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
-                      >
-                        Удалить
-                      </button>
-                    </div>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpenMenuAccountId(null);
+                            toggleAccount(acc);
+                          }}
+                          disabled={busy === acc.id}
+                          className="block w-full px-3 py-1.5 text-left text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                        >
+                          {acc.status === 'disabled' ? 'Включить' : 'Выключить'}
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpenMenuAccountId(null);
+                            deleteAccount(acc);
+                          }}
+                          disabled={busy === acc.id}
+                          className="block w-full px-3 py-1.5 text-left text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+                        >
+                          Удалить
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 );
               })
@@ -864,7 +916,9 @@ export function SalesChatAnalyzerView() {
         {/* Колонка 2: диалоги */}
         <div className="lg:col-span-3 rounded-2xl border border-gray-200 bg-white p-4">
           <div className="flex items-start justify-between gap-2 mb-3 min-h-[2rem]">
-            <h2 className="text-sm font-semibold text-gray-900 shrink-0 pt-1">Диалоги</h2>
+            <h2 className="text-sm font-semibold text-gray-900 shrink-0 pt-1">
+              {selectedAccount ? `Диалоги: ${dialogs.length}` : 'Диалоги'}
+            </h2>
             {selectedAccount ? renderArchiveControl() : null}
           </div>
           {!selectedAccount ? (

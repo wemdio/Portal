@@ -21,8 +21,8 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { isAdmin } from '@/lib/roles';
 import { logError } from '@/lib/loggerServer';
-import { ALL_TOOL_IDS, type ToolId } from '@/lib/toolsRegistry';
-import { TOOL_STATUSES, type ToolStatus } from '@/lib/toolStatus';
+import { ALL_TOOL_IDS, TOOLS_CONFIG, type ToolId } from '@/lib/toolsRegistry';
+import { TOOL_STATUSES, inferToolStatusFromRegistry, type ToolStatus } from '@/lib/toolStatus';
 import type { UserRole } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -82,13 +82,21 @@ export async function GET(req: NextRequest) {
     ((rows ?? []) as ToolStatusRow[]).map((r) => [r.tool_id, r]),
   );
 
-  const states: Record<string, { status: ToolStatus; new_since: string | null }> = {};
+  // Когда в БД нет записи — выводим дефолт из реестра (config.disabled,
+  // config.badge*). Так в модалке сразу виден текущий вид карточки, а не
+  // плоский «Активный» для всех.
+  const states: Record<string, { status: ToolStatus; new_since: string | null; from_registry: boolean }> = {};
   for (const id of ALL_TOOL_IDS) {
     const row = byTool.get(id);
-    states[id] = {
-      status: row?.status ?? 'active',
-      new_since: row?.new_since ?? null,
-    };
+    if (row) {
+      states[id] = { status: row.status, new_since: row.new_since, from_registry: false };
+    } else {
+      states[id] = {
+        status: inferToolStatusFromRegistry(TOOLS_CONFIG[id]),
+        new_since: null,
+        from_registry: true,
+      };
+    }
   }
   return NextResponse.json({ states });
 }

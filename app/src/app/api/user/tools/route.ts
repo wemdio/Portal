@@ -67,8 +67,13 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Возвращаем статус в UI только если он не дефолтный.
-    if (effective !== 'active') statuses[id] = effective;
+    // Если в БД есть строка (admin что-то выставлял) — шлём статус в UI
+    // ВСЕГДА, даже если effective='active'. Это сигнал фронту: «здесь есть
+    // явный admin-override, не используй хардкод-плашку из реестра».
+    // Без этого admin выставляет 'active' тулу с зашитым в реестре badge:
+    // 'Новое' (например email-sequence-v2), плашка не убирается, потому что
+    // фронт думает override'а нет и берёт реестр.
+    if (effectiveByTool.has(id)) statuses[id] = effective;
     return true;
   });
 
