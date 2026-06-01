@@ -1,8 +1,62 @@
 diff --git a/node_modules/telegram/extensions/BinaryReader.js b/node_modules/telegram/extensions/BinaryReader.js
-index 26a439a..41a597a 100644
+index 26a439a..32c6121 100644
 --- a/node_modules/telegram/extensions/BinaryReader.js
 +++ b/node_modules/telegram/extensions/BinaryReader.js
-@@ -183,18 +183,26 @@ class BinaryReader {
+@@ -170,6 +170,53 @@ class BinaryReader {
+              * chance of it being a manually parsed value like bool!
+              */
+             const value = constructorId;
++            if (value === 0xfc89f7f3) {
++                // dialog#fc89f7f3 — Telegram's newer wire format for Dialog. It
++                // adds unread_poll_votes_count:int (4 bare bytes) between
++                // unread_reactions_count and notify_settings; every other field
++                // matches the older dialog#d58a08c6 that gramJS 2.26.22 knows.
++                // Without this shim every dialog in messages.GetDialogs crashes
++                // the whole response and breaks accounts with thousands of
++                // dialogs. We read the new layout manually and return an
++                // instance of the existing Dialog class so every downstream
++                // check (instanceof Api.Dialog, .peer/.unreadCount/…) just works.
++                const Dialog = AllTLObjects_1.tlobjects[0xd58a08c6];
++                if (Dialog) {
++                    const flags = this.readInt();
++                    const peer = this.tgReadObject();
++                    const topMessage = this.readInt();
++                    const readInboxMaxId = this.readInt();
++                    const readOutboxMaxId = this.readInt();
++                    const unreadCount = this.readInt();
++                    const unreadMentionsCount = this.readInt();
++                    const unreadReactionsCount = this.readInt();
++                    const unreadPollVotesCount = this.readInt(); // new bare int field
++                    const notifySettings = this.tgReadObject();
++                    const pts = (flags & 1) ? this.readInt() : undefined;
++                    const draft = (flags & 2) ? this.tgReadObject() : undefined;
++                    const folderId = (flags & 16) ? this.readInt() : undefined;
++                    const ttlPeriod = (flags & 32) ? this.readInt() : undefined;
++                    return new Dialog({
++                        flags,
++                        pinned: !!(flags & 4),
++                        unreadMark: !!(flags & 8),
++                        viewForumAsMessages: !!(flags & 64),
++                        peer,
++                        topMessage,
++                        readInboxMaxId,
++                        readOutboxMaxId,
++                        unreadCount,
++                        unreadMentionsCount,
++                        unreadReactionsCount,
++                        notifySettings,
++                        pts,
++                        draft,
++                        folderId,
++                        ttlPeriod,
++                        unreadPollVotesCount,
++                    });
++                }
++            }
+             if (value === 0x997275b5) {
+                 // boolTrue
+                 return true;
+@@ -183,18 +230,26 @@ class BinaryReader {
                  const temp = [];
                  const length = this.readInt();
                  for (let i = 0; i < length; i++) {
@@ -36,7 +90,7 @@ index 26a439a..41a597a 100644
              }
          }
          return clazz.fromReader(this);
-@@ -210,7 +218,12 @@ class BinaryReader {
+@@ -210,7 +265,12 @@ class BinaryReader {
          const count = this.readInt();
          const temp = [];
          for (let i = 0; i < count; i++) {
