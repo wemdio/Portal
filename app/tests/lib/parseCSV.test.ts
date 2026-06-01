@@ -14,7 +14,8 @@
  * и использовать только его.
  */
 
-import { parseCSV, detectDelimiter } from '@/lib/spreadsheet/parseCSV';
+import * as XLSX from 'xlsx';
+import { parseCSV, detectDelimiter, readXlsxRows } from '@/lib/spreadsheet/parseCSV';
 
 describe('detectDelimiter', () => {
   it('comma-CSV header → ","', () => {
@@ -129,5 +130,26 @@ describe('parseCSV', () => {
     const csv = 'a;b;c\n1,2;hi;ok';
     const rows = parseCSV(csv, ';');
     expect(rows[1]).toEqual(['1,2', 'hi', 'ok']);
+  });
+});
+
+describe('readXlsxRows', () => {
+  it('keeps Excel dates formatted and long numeric IDs as plain strings', async () => {
+    const sheet = XLSX.utils.aoa_to_sheet([
+      ['ID продавца', 'Дата регистрации на Wildberries', 'ОГРН', 'Организация'],
+      [1107548066689, 43978, 1111111111111, 'ООО Тест'],
+      [7725693620, '', '', 'ИП Тест'],
+    ]);
+    sheet.B2.z = 'yyyy-mm-dd';
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, sheet, 'Sheet1');
+    const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
+
+    await expect(readXlsxRows(buffer)).resolves.toEqual([
+      ['ID продавца', 'Дата регистрации на Wildberries', 'ОГРН', 'Организация'],
+      ['1107548066689', '2020-05-27', '1111111111111', 'ООО Тест'],
+      ['7725693620', '', '', 'ИП Тест'],
+    ]);
   });
 });
