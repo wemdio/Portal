@@ -1,7 +1,9 @@
 import 'server-only';
 
 import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import type { Readable } from 'stream';
 
 /**
  * MAIN S3 client (TWC s3.twcstorage.ru). Используется для:
@@ -79,6 +81,42 @@ export async function putMainS3Object(params: {
     }),
   );
   return { key: params.key, bucket, size: body.length };
+}
+
+/**
+ * Стримящая multipart-загрузка в MAIN S3. Полезно когда тело — большой поток
+ * (например ZIP-архив, который собирается в реальном времени из множества
+ * DOCX по мере выгрузки): не держим всё в памяти, S3-SDK заливает чанками
+ * по 5 MB параллельно.
+ */
+export async function uploadMainS3Stream(params: {
+  key: string;
+  body: Readable;
+  contentType?: string;
+  cacheControl?: string;
+}): Promise<MainS3PutResult> {
+  const { s3, bucket } = getConfig();
+  const upload = new Upload({
+    client: s3,
+    params: {
+      Bucket: bucket,
+      Key: params.key,
+      Body: params.body,
+      ContentType: params.contentType ?? 'application/octet-stream',
+      CacheControl: params.cacheControl ?? 'private, max-age=300',
+    },
+    queueSize: 4,
+    partSize: 5 * 1024 * 1024,
+    leavePartsOnError: false,
+  });
+
+  let totalSize = 0;
+  upload.on('httpUploadProgress', (p) => {
+    if (typeof p.loaded === 'number') totalSize = p.loaded;
+  });
+
+  await upload.done();
+  return { key: params.key, bucket, size: totalSize };
 }
 
 export async function getMainS3ObjectText(key: string): Promise<string | null> {
