@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, type ComponentType } from 'react';
+import { useCallback, useEffect, useState, type ComponentType } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
@@ -15,6 +15,7 @@ import {
   FileSpreadsheet,
   ClipboardCheck,
   Send,
+  Settings,
   Waves,
   Video,
   MessageSquareMore,
@@ -29,7 +30,9 @@ import {
 } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/toolsRegistry';
+import { isAdmin } from '@/lib/roles';
 import { RdpToolCard } from './RdpToolCard';
+import { ToolVisibilityModal } from './ToolVisibilityModal';
 import { usePortalBlockingLoad } from '@/components/PortalLoadingProvider';
 import { useUser } from '@/lib/UserProvider';
 import type { Locale } from '@/lib/i18n';
@@ -147,11 +150,23 @@ function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: Locale }) {
 }
 
 export default function ToolsPage() {
-  const { locale } = useUser();
+  const { locale, userRole } = useUser();
   const [toolIds, setToolIds] = useState<string[] | null>(null);
   const [loading, setLoading] = useState(true);
+  const [visibilityModalOpen, setVisibilityModalOpen] = useState(false);
 
   usePortalBlockingLoad(loading);
+
+  const reloadVisibleTools = useCallback(async () => {
+    try {
+      const res = await authFetch('/api/user/tools');
+      if (!res.ok) return;
+      const data = (await res.json()) as { toolIds?: string[] };
+      setToolIds(Array.isArray(data.toolIds) ? data.toolIds : [...ALL_TOOL_IDS]);
+    } catch {
+      setToolIds([...ALL_TOOL_IDS]);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -178,16 +193,44 @@ export default function ToolsPage() {
     .map((g) => ({ ...g, toolIds: g.toolIds.filter((id) => visibleSet.has(id)) }))
     .filter((g) => g.toolIds.length > 0);
 
+  const adminViewer = isAdmin(userRole);
+
   return (
     <div className="space-y-6 text-left max-w-full">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">{locale === 'en' ? 'Tools' : 'Инструменты'}</h1>
-        <p className="text-sm text-gray-500">
-          {locale === 'en'
-            ? 'A set of utilities for data and process workflows.'
-            : 'Набор утилит для работы с данными и процессами.'}
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">{locale === 'en' ? 'Tools' : 'Инструменты'}</h1>
+          <p className="text-sm text-gray-500">
+            {locale === 'en'
+              ? 'A set of utilities for data and process workflows.'
+              : 'Набор утилит для работы с данными и процессами.'}
+          </p>
+        </div>
+        {adminViewer ? (
+          <button
+            type="button"
+            onClick={() => setVisibilityModalOpen(true)}
+            title={locale === 'en'
+              ? 'Tool visibility (global, all users)'
+              : 'Видимость инструментов (глобально, для всех)'}
+            aria-label={locale === 'en'
+              ? 'Tool visibility settings'
+              : 'Настройки видимости инструментов'}
+            className="mt-1 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700"
+          >
+            <Settings className="h-4 w-4" aria-hidden />
+          </button>
+        ) : null}
       </div>
+
+      {adminViewer ? (
+        <ToolVisibilityModal
+          open={visibilityModalOpen}
+          locale={locale}
+          onClose={() => setVisibilityModalOpen(false)}
+          onChanged={() => void reloadVisibleTools()}
+        />
+      ) : null}
 
       {loading ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">

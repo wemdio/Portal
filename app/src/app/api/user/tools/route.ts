@@ -20,9 +20,11 @@ export async function GET(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) return jsonError('Unauthorized', 401);
 
-  const [{ data: rows }, { data: profile }] = await Promise.all([
+  const [{ data: userRows }, { data: profile }, { data: globalRows }] = await Promise.all([
     supabase.from('user_tool_visibility').select('tool_id, enabled').eq('user_id', user.id),
     supabase.from('profiles').select('role').eq('id', user.id).single(),
+    // Глобальные «выключатели» из шестерёнки админа — побеждают всё остальное.
+    supabase.from('global_tool_visibility').select('tool_id, enabled'),
   ]);
 
   const role = (profile?.role ?? null) as UserRole | null;
@@ -34,14 +36,17 @@ export async function GET(req: NextRequest) {
   const isDefaultOn = (id: string): boolean =>
     !defaultOffSet.has(id) || roleOnSet.has(id);
 
-  if (!rows || rows.length === 0) {
-    const toolIds = ALL_TOOL_IDS.filter(isDefaultOn);
-    return NextResponse.json({ toolIds });
-  }
+  // Глобальный OFF — жёсткое скрытие для всех (включая admin). Глобальный ON
+  // или отсутствующая запись — fallback на обычную per-user логику.
+  const globallyDisabled = new Set<string>(
+    (globalRows ?? []).filter((r) => r.enabled === false).map((r) => r.tool_id),
+  );
 
-  const visibilityByTool = Object.fromEntries(rows.map((r) => [r.tool_id, r.enabled]));
+  const userVisibility = Object.fromEntries((userRows ?? []).map((r) => [r.tool_id, r.enabled]));
+
   const toolIds = ALL_TOOL_IDS.filter((id) => {
-    if (id in visibilityByTool) return visibilityByTool[id] !== false;
+    if (globallyDisabled.has(id)) return false;
+    if (id in userVisibility) return userVisibility[id] !== false;
     return isDefaultOn(id);
   });
   return NextResponse.json({ toolIds });
