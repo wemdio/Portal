@@ -51,7 +51,7 @@ export const GET = withAuth(async (req) => {
         const lastSyncedAt = maxSyncMs > 0 ? new Date(maxSyncMs).toISOString() : null;
 
         if (INSTANTLY_API_KEY && isCatalogStale(lastSyncedAt)) {
-          void syncInstantlyCampaignCatalog(INSTANTLY_API_KEY).catch((err) => {
+          void syncInstantlyCampaignCatalog().catch((err) => {
             console.error('[instantly-catalog] background sync failed', err);
           });
         }
