@@ -1,7 +1,36 @@
 import * as cheerio from 'cheerio';
 import { Currency, PriceValue } from './types';
 
-const FREE_TRIAL_RE = /free trial|free forever|бесплатно навсегда|14[-\s]?days?\s+(?:free\s+)?trial|пробный период|попроб[а-яё]+\s+бесплатно|start (?:your )?free trial|тестовый доступ|демо[-\s]?доступ|бесплатная версия|free plan|try (?:it )?free|бесплатный тариф|бесплатный план|0\s*[₽$€]\s*\/\s*мес/i;
+const FREE_TRIAL_RE = /free trial|free forever|бесплатно навсегда|14[-\s]?days?\s+(?:free\s+)?trial|пробный период|попроб[а-яё]+\s+бесплатно|start (?:your )?free trial|тестовый доступ|демо[-\s]?доступ|бесплатная версия|free plan|try (?:it )?free|бесплатный тариф|бесплатный план|0\s*[₽$€]\s*\/\s*мес|бесплатн[а-яё]*\s+(?:консультац|аудит|демо|тест|урок|пилот|разбор|стратег[а-яё]*\s*сесси|вебинар|занятие|тренировк|пробник)|free\s+(?:consultation|audit|demo|pilot|strategy\s+session|sample|workshop)|первая\s+(?:консультаци|встреч|сесси|урок|занятие|тренировк)[а-яё]*\s+бесплатн|первое\s+занятие\s+бесплатн|пробн[а-яё]+\s+(?:урок|занятие|тренировк|встреч|консультац)/i;
+
+// Job-posting pages (hh.ru, careers pages, LinkedIn-style vacancies) carry
+// salary numbers that otherwise pass our context regex as a "price". When the
+// HTML carries a JSON-LD JobPosting type or 2+ characteristic text markers,
+// we abort pricing extraction so the salary cannot be misattributed.
+const JOBPOSTING_MICRODATA_RE =
+  /"@type"\s*:\s*"JobPosting"|itemtype\s*=\s*["'][^"']*JobPosting/i;
+
+const JOBPOSTING_TEXT_MARKERS: RegExp[] = [
+  /(?:зарплата|оклад|заработная\s+плата|з\/п)\s*[:—\-]/i,
+  /требования\s+к\s+кандидату/i,
+  /условия\s+работы/i,
+  /обязанност[иеяй]\s*[:—\-]/i,
+  /опыт\s+работы\s+(?:от\s+\d|не\s+мене[еа])/i,
+  /(?:salary|compensation)\s*[:—\-]/i,
+  /job\s+(?:description|requirements?|responsibilities)/i,
+  /резюме\s+отклика/i,
+  /отклик\s+на\s+вакансию/i,
+];
+
+function looksLikeJobPosting(html: string): boolean {
+  if (JOBPOSTING_MICRODATA_RE.test(html)) return true;
+  let score = 0;
+  for (const re of JOBPOSTING_TEXT_MARKERS) {
+    if (re.test(html)) score++;
+    if (score >= 2) return true;
+  }
+  return false;
+}
 
 const MAX_PRICE = 100_000_000;
 // A real service starting price is never a single-digit token — this floor
@@ -107,6 +136,11 @@ function collectInContext(text: string, out: Candidate[]): void {
  */
 export function extractPricingDetails(html: string): { pricing_min?: PriceValue; free_trial: boolean } {
   if (!html) return { free_trial: false };
+
+  // Job-posting pages carry salary numbers (зарплата, оклад, salary) that
+  // otherwise pass our context regex as "price". Abort early so the salary
+  // can never be misattributed as the company's service price.
+  if (looksLikeJobPosting(html)) return { free_trial: false };
 
   const spacedText = htmlToSpacedText(html);
   const free_trial = FREE_TRIAL_RE.test(spacedText);
