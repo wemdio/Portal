@@ -195,11 +195,16 @@ async function resolveNamesAndRoute(runId: string): Promise<void> {
 
   const { data: run } = await supabaseAdmin
     .from('client_manual_score_runs')
-    .select('client_user_id')
+    .select('client_user_id, route_to_instantly')
     .eq('id', runId)
     .single();
   const clientUserId = (run as { client_user_id?: string } | null)?.client_user_id;
   if (!clientUserId) return;
+  // Тест-режим: route_to_instantly=false (дефолт) → прогон обрабатывается
+  // полностью (скоринг/скрейп/валидация/чистка имён + CSV-выгрузки), но в
+  // Instantly НЕ льётся. Включается явно (true) для боевых ручных доливов.
+  const routeToInstantly =
+    (run as { route_to_instantly?: boolean } | null)?.route_to_instantly === true;
 
   const { data: rowsData } = await supabaseAdmin
     .from('client_manual_score_rows')
@@ -254,6 +259,12 @@ async function resolveNamesAndRoute(runId: string): Promise<void> {
       .from('client_manual_score_rows')
       .update({ company_name: cleaned[i] || '' })
       .eq('id', rows[i].id);
+  }
+
+  // Тест-режим — имена почищены и сохранены, но в Instantly НЕ льём.
+  if (!routeToInstantly) {
+    console.log(`[manual-scoring] run ${runId}: ТЕСТ-режим — routing в Instantly пропущен (${rows.length} строк обработано)`);
+    return;
   }
 
   // 4. Маршрутизация в существующие кампании по скорингу — если настроены.
