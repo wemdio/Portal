@@ -864,7 +864,9 @@ export function SalesChatAnalyzerView() {
         {/* Колонка 2: диалоги */}
         <div className="lg:col-span-3 rounded-2xl border border-gray-200 bg-white p-4">
           <div className="flex items-start justify-between gap-2 mb-3 min-h-[2rem]">
-            <h2 className="text-sm font-semibold text-gray-900 shrink-0 pt-1">Диалоги</h2>
+            <h2 className="text-sm font-semibold text-gray-900 shrink-0 pt-1">
+              {selectedAccount ? `Диалоги: ${dialogs.length}` : 'Диалоги'}
+            </h2>
             {selectedAccount ? renderArchiveControl() : null}
           </div>
           {!selectedAccount ? (
