@@ -30,12 +30,33 @@ import {
 } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/toolsRegistry';
+import { type ToolStatus } from '@/lib/toolStatus';
 import { isAdmin } from '@/lib/roles';
 import { RdpToolCard } from './RdpToolCard';
 import { ToolVisibilityModal } from './ToolVisibilityModal';
 import { usePortalBlockingLoad } from '@/components/PortalLoadingProvider';
 import { useUser } from '@/lib/UserProvider';
 import type { Locale } from '@/lib/i18n';
+
+/**
+ * Маппинг глобального статуса инструмента (из шестерёнки) в плашку.
+ * Возвращает null если статус не требует плашки или его нужно скрыть.
+ */
+function badgeForStatus(
+  status: ToolStatus | undefined,
+  locale: Locale,
+): { text: string; variant: 'emerald' | 'amber' } | null {
+  switch (status) {
+    case 'new':
+      return { text: locale === 'en' ? 'New' : 'Новое', variant: 'emerald' };
+    case 'beta':
+      return { text: 'BETA', variant: 'amber' };
+    case 'in_development':
+      return { text: locale === 'en' ? 'In development' : 'В разработке', variant: 'amber' };
+    default:
+      return null;
+  }
+}
 
 /** Логотип Telegram (lucide не содержит брендовых иконок). */
 function TelegramIcon({ className }: { className?: string }) {
@@ -78,16 +99,35 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'sales-chat-analyzer': TelegramIcon,
 };
 
-function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: Locale }) {
+function ToolLinkCard({
+  toolId,
+  locale,
+  effectiveStatus,
+}: {
+  toolId: ToolId;
+  locale: Locale;
+  effectiveStatus?: ToolStatus;
+}) {
   const config = TOOLS_CONFIG[toolId];
   const Icon = TOOL_ICONS[toolId];
-  const hasBadge = Boolean(config.badge);
   const title = locale === 'en' ? (config.title_en ?? config.title) : config.title;
   const description = locale === 'en' ? (config.description_en ?? config.description) : config.description;
-  const badge = locale === 'en' ? (config.badge_en ?? config.badge) : config.badge;
 
-  if (config.disabled) {
-    const badgeClass = config.badgeVariant === 'emerald'
+  // Глобальный статус из шестерёнки имеет приоритет над хардкодом в реестре.
+  // Если статус есть и он не 'active' — рисуем плашку под него; иначе берём
+  // хардкод-плашку (например, у reputation-finder зашит 'BETA' в реестре).
+  const dynamicBadge = badgeForStatus(effectiveStatus, locale);
+  const badgeText = dynamicBadge?.text
+    ?? (locale === 'en' ? (config.badge_en ?? config.badge) : config.badge);
+  const badgeVariant: 'emerald' | 'amber' | undefined =
+    dynamicBadge?.variant ?? config.badgeVariant;
+
+  // «В разработке» через шестерёнку или ручной `disabled: true` в реестре —
+  // одно и то же визуально (серая некликабельная карточка).
+  const isDisabled = effectiveStatus === 'in_development' || Boolean(config.disabled);
+
+  if (isDisabled) {
+    const badgeClass = badgeVariant === 'emerald'
       ? 'bg-emerald-100 text-emerald-700'
       : 'bg-amber-100 text-amber-700';
     return (
@@ -96,11 +136,11 @@ function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: Locale }) {
           <div>
             <div className="flex items-center gap-2">
               <p className="text-base font-semibold text-gray-400">{title}</p>
-              {config.badge && (
+              {badgeText && (
                 <span
                   className={`px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded ${badgeClass}`}
                 >
-                  {badge}
+                  {badgeText}
                 </span>
               )}
             </div>
@@ -113,10 +153,11 @@ function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: Locale }) {
     );
   }
 
+  const hasBadge = Boolean(badgeText);
   const borderClass = hasBadge
     ? 'border border-gray-200 bg-gray-50 hover:border-blue-300 hover:bg-blue-50/60'
     : 'border border-gray-200 bg-white';
-  const badgeClass = config.badgeVariant === 'emerald'
+  const badgeClass = badgeVariant === 'emerald'
     ? 'bg-emerald-100 text-emerald-700'
     : 'bg-amber-100 text-amber-700';
   const linkClass = 'text-blue-600 group-hover:text-blue-700';
@@ -132,11 +173,11 @@ function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: Locale }) {
         <div className={toolId === 'auto-report' ? 'min-w-0' : undefined}>
           <div className="flex items-center gap-2">
             <p className="text-base font-semibold text-gray-900">{title}</p>
-            {config.badge && (
+            {badgeText && (
               <span
                 className={`px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded ${badgeClass}`}
               >
-                {badge}
+                {badgeText}
               </span>
             )}
           </div>
@@ -152,6 +193,7 @@ function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: Locale }) {
 export default function ToolsPage() {
   const { locale, userRole } = useUser();
   const [toolIds, setToolIds] = useState<string[] | null>(null);
+  const [statuses, setStatuses] = useState<Record<string, ToolStatus>>({});
   const [loading, setLoading] = useState(true);
   const [visibilityModalOpen, setVisibilityModalOpen] = useState(false);
 
@@ -161,10 +203,12 @@ export default function ToolsPage() {
     try {
       const res = await authFetch('/api/user/tools');
       if (!res.ok) return;
-      const data = (await res.json()) as { toolIds?: string[] };
+      const data = (await res.json()) as { toolIds?: string[]; statuses?: Record<string, ToolStatus> };
       setToolIds(Array.isArray(data.toolIds) ? data.toolIds : [...ALL_TOOL_IDS]);
+      setStatuses(data.statuses ?? {});
     } catch {
       setToolIds([...ALL_TOOL_IDS]);
+      setStatuses({});
     }
   }, []);
 
@@ -174,10 +218,16 @@ export default function ToolsPage() {
       try {
         const res = await authFetch('/api/user/tools');
         if (!res.ok || cancelled) return;
-        const data = (await res.json()) as { toolIds?: string[] };
-        if (!cancelled) setToolIds(Array.isArray(data.toolIds) ? data.toolIds : [...ALL_TOOL_IDS]);
+        const data = (await res.json()) as { toolIds?: string[]; statuses?: Record<string, ToolStatus> };
+        if (!cancelled) {
+          setToolIds(Array.isArray(data.toolIds) ? data.toolIds : [...ALL_TOOL_IDS]);
+          setStatuses(data.statuses ?? {});
+        }
       } catch {
-        if (!cancelled) setToolIds([...ALL_TOOL_IDS]);
+        if (!cancelled) {
+          setToolIds([...ALL_TOOL_IDS]);
+          setStatuses({});
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -269,7 +319,12 @@ export default function ToolsPage() {
                       <RdpToolCard />
                     </div>
                   ) : (
-                    <ToolLinkCard key={toolId} toolId={toolId} locale={locale} />
+                    <ToolLinkCard
+                      key={toolId}
+                      toolId={toolId}
+                      locale={locale}
+                      effectiveStatus={statuses[toolId]}
+                    />
                   )
                 )}
               </div>

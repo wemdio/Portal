@@ -5,31 +5,42 @@ import { X, Loader2 } from 'lucide-react';
 
 import { authFetch, authFetchJson } from '@/lib/authFetch';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, type ToolId } from '@/lib/toolsRegistry';
+import {
+  TOOL_STATUS_OPTIONS,
+  effectiveToolStatus,
+  type ToolStatus,
+} from '@/lib/toolStatus';
 import type { Locale } from '@/lib/i18n';
 
 interface Props {
   open: boolean;
   locale: Locale;
   onClose: () => void;
-  /** Зовётся после успешного изменения хотя бы одного тумблера — родитель
-   *  должен пере-фетчить `/api/user/tools` и обновить отрисовку. */
+  /** Вызывается после успешного PUT'a статуса хотя бы для одного тула —
+   *  родитель должен пере-фетчить `/api/user/tools` и обновить /tools. */
   onChanged: () => void;
 }
 
+interface ToolStateRow {
+  status: ToolStatus;
+  new_since: string | null;
+}
+
 /**
- * Админская модалка глобальной видимости инструментов.
- * Каждый тумблер сразу шлёт POST — без отдельной кнопки «Сохранить».
- * При выключении инструмент исчезает у ВСЕХ (включая самого админа);
- * вернуть можно только через эту же модалку.
+ * Админская модалка глобальных статусов инструментов. На каждый клик в select
+ * улетает POST в `/api/admin/tool-visibility` с одним апдейтом — без отдельной
+ * кнопки «Сохранить». Эффективный статус (с учётом 7-дневного истечения 'new')
+ * считается через `effectiveToolStatus` — в селекторе показывается именно он,
+ * чтобы admin не видел «протухшее» состояние БД.
  */
 export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props) {
-  const [visibility, setVisibility] = useState<Record<string, boolean> | null>(null);
+  const [states, setStates] = useState<Record<string, ToolStateRow> | null>(null);
   const [loading, setLoading] = useState(false);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Загружаем актуальную карту при каждом открытии — состояние могло
-  // измениться с предыдущего раза (например, другим админом).
+  // Грузим актуальную карту при каждом открытии — состояние мог изменить
+  // другой админ за прошедшее с прошлого раза время.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -37,11 +48,11 @@ export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props)
     setError(null);
     void (async () => {
       try {
-        const data = await authFetchJson<{ visibility: Record<string, boolean> }>(
+        const data = await authFetchJson<{ states: Record<string, ToolStateRow> }>(
           '/api/admin/tool-visibility',
           { method: 'GET' },
         );
-        if (!cancelled) setVisibility(data.visibility ?? {});
+        if (!cancelled) setStates(data.states ?? {});
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Ошибка загрузки');
       } finally {
@@ -63,17 +74,28 @@ export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props)
     return () => window.removeEventListener('keydown', handler);
   }, [open, onClose]);
 
-  const toggle = useCallback(
-    async (toolId: ToolId, nextEnabled: boolean) => {
+  const changeStatus = useCallback(
+    async (toolId: ToolId, nextStatus: ToolStatus) => {
       if (savingId) return;
       setSavingId(toolId);
       setError(null);
-      // Оптимистично обновляем UI — пока POST не упал.
-      setVisibility((prev) => (prev ? { ...prev, [toolId]: nextEnabled } : prev));
+      // Оптимистично обновляем UI. Если status='new' — выставляем new_since
+      // в локальном состоянии тоже (сервер сделает то же самое).
+      setStates((prev) =>
+        prev
+          ? {
+              ...prev,
+              [toolId]: {
+                status: nextStatus,
+                new_since: nextStatus === 'new' ? new Date().toISOString() : null,
+              },
+            }
+          : prev,
+      );
       try {
         const res = await authFetch('/api/admin/tool-visibility', {
           method: 'POST',
-          body: JSON.stringify({ visibility: { [toolId]: nextEnabled } }),
+          body: JSON.stringify({ updates: { [toolId]: { status: nextStatus } } }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({ error: res.statusText }));
@@ -81,8 +103,16 @@ export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props)
         }
         onChanged();
       } catch (e) {
-        // Откатываем — состояние из БД не поменялось.
-        setVisibility((prev) => (prev ? { ...prev, [toolId]: !nextEnabled } : prev));
+        // Откат: перечитываем состояние с сервера, чтобы не остаться рассинхронизированными.
+        try {
+          const data = await authFetchJson<{ states: Record<string, ToolStateRow> }>(
+            '/api/admin/tool-visibility',
+            { method: 'GET' },
+          );
+          setStates(data.states ?? {});
+        } catch {
+          // ignore — модалка покажет ошибку и юзер закроет/откроет заново
+        }
         setError(e instanceof Error ? e.message : 'Не удалось сохранить');
       } finally {
         setSavingId(null);
@@ -95,8 +125,8 @@ export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props)
 
   const title = locale === 'en' ? 'Tool visibility (global)' : 'Видимость инструментов (глобально)';
   const subtitle = locale === 'en'
-    ? 'Off = hidden from /tools for everyone, including admins. Per-user toggles still apply on top of this.'
-    : 'Выключено = скрыто на /tools у всех, включая админов. Per-user тумблеры применяются поверх.';
+    ? 'Status applies to everyone, including admin. “New” auto-clears after 7 days.'
+    : 'Статус действует на всех, включая admin. «Новое» снимается автоматически через 7 дней.';
 
   return (
     <div
@@ -108,7 +138,7 @@ export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props)
       }}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
     >
-      <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-2xl bg-white shadow-xl">
+      <div className="w-full max-w-3xl max-h-[85vh] flex flex-col rounded-2xl bg-white shadow-xl">
         <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-6 py-4">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
@@ -131,7 +161,7 @@ export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props)
         ) : null}
 
         <div className="flex-1 overflow-y-auto px-6 py-4">
-          {loading || !visibility ? (
+          {loading || !states ? (
             <div className="flex items-center justify-center py-12 text-sm text-gray-500">
               <Loader2 className="mr-2 h-4 w-4 animate-spin text-blue-600" aria-hidden />
               {locale === 'en' ? 'Loading…' : 'Загрузка…'}
@@ -141,8 +171,15 @@ export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props)
               {ALL_TOOL_IDS.map((toolId) => {
                 const config = TOOLS_CONFIG[toolId];
                 const toolTitle = locale === 'en' ? (config.title_en ?? config.title) : config.title;
-                const enabled = visibility[toolId] !== false;
+                const row = states[toolId];
+                // Show effective status в селекторе, чтобы admin видел то же что юзеры.
+                const effective = row
+                  ? effectiveToolStatus(row.status, row.new_since)
+                  : ('active' as ToolStatus);
                 const isSaving = savingId === toolId;
+                const sinceLabel = effective === 'new' && row?.new_since
+                  ? new Date(row.new_since).toLocaleDateString('ru-RU')
+                  : null;
                 return (
                   <li
                     key={toolId}
@@ -150,24 +187,26 @@ export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props)
                   >
                     <div className="min-w-0">
                       <div className="text-sm font-medium text-gray-900 truncate">{toolTitle}</div>
-                      <div className="text-[11px] text-gray-400 font-mono truncate">{toolId}</div>
+                      <div className="text-[11px] text-gray-400 font-mono truncate">
+                        {toolId}
+                        {sinceLabel ? ` · «Новое» c ${sinceLabel}` : ''}
+                      </div>
                     </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={enabled}
+                    <select
+                      value={effective}
                       disabled={isSaving}
-                      onClick={() => void toggle(toolId, !enabled)}
-                      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
-                        enabled ? 'bg-blue-600' : 'bg-gray-300'
-                      }`}
+                      onChange={(e) => void changeStatus(toolId, e.target.value as ToolStatus)}
+                      title={
+                        TOOL_STATUS_OPTIONS.find((o) => o.value === effective)?.[locale === 'en' ? 'hint_en' : 'hint_ru']
+                      }
+                      className="shrink-0 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
                     >
-                      <span
-                        className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
-                          enabled ? 'translate-x-5' : 'translate-x-0.5'
-                        }`}
-                      />
-                    </button>
+                      {TOOL_STATUS_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {locale === 'en' ? opt.label_en : opt.label_ru}
+                        </option>
+                      ))}
+                    </select>
                   </li>
                 );
               })}

@@ -1,13 +1,18 @@
 /**
- * Глобальная видимость инструментов — админский «выключатель» инструмента
- * сразу для всех (включая самого админа). См. миграцию
- * `20260601_0023_global_tool_visibility.sql`.
+ * Глобальная видимость и статусы инструментов — админский «выключатель»
+ * сразу для всех (включая самого админа). См. миграции:
+ *   20260601_0023_global_tool_visibility.sql — boolean enabled (deprecated)
+ *   20260601_0024_tool_status_states.sql     — multi-status (active/new/beta/in_development/disabled)
  *
- * GET  — текущая карта { tool_id: enabled } по ВСЕМ инструментам из реестра
- *        (для тулов без записи в global_tool_visibility — enabled=true).
- * POST — массовое обновление: тело `{ visibility: { tool_id: boolean, ... } }`.
- *        Перезаписывает строки только для ключей из payload — остальные не
- *        трогает. Достаточно для UI с одним тумблером за клик.
+ * GET  — карта { tool_id: { status, new_since } } по ВСЕМ инструментам.
+ *        Для тулов без записи в global_tool_visibility — status='active'.
+ *        Effective-статус (с учётом 7-дневного истечения 'new') рассчитывается
+ *        отдельно — у самого DB-значения должна оставаться правда.
+ * POST — массовое обновление: тело `{ updates: { tool_id: { status }, ... } }`.
+ *        Перезаписывает строки только для ключей из payload. Если status='new',
+ *        new_since выставляется в now() — каждый раз когда админ ставит 'new',
+ *        счётчик 7 дней начинается заново. На других статусах new_since
+ *        сбрасывается в null.
  */
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
@@ -17,9 +22,16 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { isAdmin } from '@/lib/roles';
 import { logError } from '@/lib/loggerServer';
 import { ALL_TOOL_IDS, type ToolId } from '@/lib/toolsRegistry';
+import { TOOL_STATUSES, type ToolStatus } from '@/lib/toolStatus';
 import type { UserRole } from '@/types';
 
 export const dynamic = 'force-dynamic';
+
+interface ToolStatusRow {
+  tool_id: string;
+  status: ToolStatus;
+  new_since: string | null;
+}
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -60,18 +72,25 @@ export async function GET(req: NextRequest) {
 
   const { data: rows, error } = await auth.supabaseAdmin
     .from('global_tool_visibility')
-    .select('tool_id, enabled');
+    .select('tool_id, status, new_since');
   if (error) {
     await logError('admin.tool-visibility.get.failed', error);
     return jsonError(error.message, 500);
   }
 
-  const byTool = new Map<string, boolean>((rows ?? []).map((r) => [r.tool_id, r.enabled]));
-  const visibility: Record<string, boolean> = {};
+  const byTool = new Map<string, ToolStatusRow>(
+    ((rows ?? []) as ToolStatusRow[]).map((r) => [r.tool_id, r]),
+  );
+
+  const states: Record<string, { status: ToolStatus; new_since: string | null }> = {};
   for (const id of ALL_TOOL_IDS) {
-    visibility[id] = byTool.get(id) ?? true; // missing row = enabled by default
+    const row = byTool.get(id);
+    states[id] = {
+      status: row?.status ?? 'active',
+      new_since: row?.new_since ?? null,
+    };
   }
-  return NextResponse.json({ visibility });
+  return NextResponse.json({ states });
 }
 
 export async function POST(req: NextRequest) {
@@ -79,21 +98,34 @@ export async function POST(req: NextRequest) {
   if ('error' in auth) return auth.error;
 
   const text = await req.text().catch(() => '');
-  const body = safeJsonParse<{ visibility?: Record<string, unknown> }>(text);
-  const incoming = body?.visibility;
+  const body = safeJsonParse<{ updates?: Record<string, { status?: string }> }>(text);
+  const incoming = body?.updates;
   if (!incoming || typeof incoming !== 'object') {
-    return jsonError('Missing visibility object', 400);
+    return jsonError('Missing updates object', 400);
   }
 
-  const allowed = new Set<string>(ALL_TOOL_IDS);
-  const rowsToUpsert: { tool_id: ToolId; enabled: boolean; updated_by: string; updated_at: string }[] = [];
-  for (const [toolId, raw] of Object.entries(incoming)) {
-    if (!allowed.has(toolId)) continue; // молча игнорим неизвестные
+  const allowedTools = new Set<string>(ALL_TOOL_IDS);
+  const allowedStatuses = new Set<string>(TOOL_STATUSES);
+
+  const rowsToUpsert: Array<{
+    tool_id: ToolId;
+    status: ToolStatus;
+    new_since: string | null;
+    updated_by: string;
+    updated_at: string;
+  }> = [];
+  const now = new Date().toISOString();
+  for (const [toolId, payload] of Object.entries(incoming)) {
+    if (!allowedTools.has(toolId)) continue;
+    const status = payload?.status;
+    if (typeof status !== 'string' || !allowedStatuses.has(status)) continue;
     rowsToUpsert.push({
       tool_id: toolId as ToolId,
-      enabled: raw !== false,
+      status: status as ToolStatus,
+      // Каждый set 'new' = заново сбрасываем 7-дневный счётчик.
+      new_since: status === 'new' ? now : null,
       updated_by: auth.user.id,
-      updated_at: new Date().toISOString(),
+      updated_at: now,
     });
   }
 
