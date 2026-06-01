@@ -33,7 +33,7 @@ export async function GET(req: NextRequest) {
     // Конфиг.
     const { data: config } = await supabaseAdmin
       .from('client_auto_pipeline_configs')
-      .select('enabled, last_run_at, last_run_status, daily_limit')
+      .select('enabled, last_run_at, last_run_status, daily_limit, dry_run')
       .eq('client_user_id', user.id)
       .maybeSingle();
 
@@ -127,6 +127,10 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       enabled: true,
+      // Текущий режим клиента (config), НЕ режим последнего прогона. Баннер
+      // «тестовый режим» должен отражать актуальный dry_run, а не was_dry_run
+      // прошлого прогона (иначе после перехода в live баннер висит до след. прогона).
+      dry_run: (config as { dry_run?: boolean }).dry_run === true,
       daily_limit: (config as { daily_limit?: number | null }).daily_limit ?? null,
       // Главная плитка — последний completed (или null если ни одного не было).
       last_run: lastCompletedRun ?? null,
