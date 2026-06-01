@@ -6,6 +6,7 @@ import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
 import { createCampaign, updateCampaign } from '@/lib/instantly/client';
+import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import type {
   ClientCampaignPreset,
@@ -316,6 +317,11 @@ export async function PUT(req: NextRequest) {
             },
             { onConflict: 'client_user_id,resource_type,resource_id' },
           );
+          // Мгновенно в каталог (с instantly_account_id) — чтобы кампания сразу
+          // появилась в портале (Кампании/Отчёты), не дожидаясь часового синка,
+          // как при стандартном запуске (runLaunch). Без этого авто-кампании на
+          // любом аккаунте «висели» невидимыми до следующего синк-прохода.
+          await upsertInstantlyCatalogFromCampaign(created, instantlyAccountId);
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Instantly sync failed';
