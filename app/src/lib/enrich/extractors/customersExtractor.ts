@@ -13,6 +13,7 @@ import {
   isMostlyHexTokens,
   isPlaceName,
   isAddressLike,
+  isUiFragment,
 } from './nameQuality';
 
 const JUNK_PATTERNS: RegExp[] = [
@@ -55,6 +56,10 @@ function isJunk(s: string): boolean {
   if (isRoleTitle(s) || isSentenceLike(s)) return true;
   if (isIndustryOrSector(s) || isPersonName(s)) return true;
   if (isPlaceName(s) || isAddressLike(s)) return true;
+  // CSS-class fragments ("hero img", "blue circle color"), generic UI words
+  // ("services", "more", "subscribe") and category labels ("SaaS / IT") are
+  // never client names.
+  if (isUiFragment(s)) return true;
   return false;
 }
 

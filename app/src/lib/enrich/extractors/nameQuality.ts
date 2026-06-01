@@ -296,6 +296,78 @@ export function isPersonName(s: string): boolean {
 }
 
 /**
+ * UI/CSS-class fragments and generic category words that leak from logo-wall
+ * alt-texts and `<span class="...">` labels into integrations/customers:
+ *   "hero img", "blue circle color", "material symbols light mail",
+ *   "Read more", "Why choose us", bare "analytics" / "services" / "integration"
+ *   / "teamwork", category labels like "SaaS / IT", "HR / Рекрутинг".
+ * A real product or client name is never one of these.
+ */
+const UI_FRAGMENT_PATTERNS: RegExp[] = [
+  // 2-word "<role/region> <ui-noun>" CSS fragments turned into alt text.
+  /^(?:hero|about|main|side|nav|footer|header|content|wrap|wrapper|container|inner|outer|primary|secondary)\s+(?:img|image|icon|wrap|item|block|section|box|bg|background)$/i,
+  // Material/Fluent icon family class names.
+  /^material\s+symbols\b/i,
+  /^fa[-\s]/i, // FontAwesome leaks like "fa solid envelope"
+  // "<color> <shape> <ui-noun>" — pure CSS-class-as-alt artifacts.
+  /^(?:blue|red|green|yellow|orange|purple|pink|black|white|gray|grey|dark|light|brown|cyan|magenta)\s+(?:circle|square|triangle|line|dot|bar|stripe|gradient|wave|bg|background)\s+(?:color|bg|background|shape|fill|stroke)$/i,
+  // Inline icon descriptors like "img logo", "icon close", "btn arrow".
+  /^(?:img|icon|btn|button|arrow|chevron|cross|close|menu|burger|hamburger)\s+\w+$/i,
+];
+
+// Single-word generic UI / tech-category words. Never a real product or client.
+const GENERIC_TERM_EXACT = new Set<string>([
+  // English tech-category nouns
+  'analytics', 'integration', 'integrations', 'service', 'services',
+  'teamwork', 'workflow', 'automation', 'platform', 'platforms', 'cloud',
+  'product', 'products', 'features', 'feature', 'pricing', 'documentation',
+  'docs', 'support', 'help', 'search', 'login', 'signin', 'sign-in',
+  'signup', 'sign-up', 'register', 'subscribe', 'newsletter',
+  // UI containers
+  'banner', 'overlay', 'modal', 'dialog', 'tooltip', 'sidebar', 'navbar',
+  'header', 'footer', 'content', 'wrapper', 'container', 'section',
+  'block', 'card', 'cards', 'tile', 'tiles', 'grid', 'list',
+  // Generic CTAs / actions
+  'read', 'more', 'view', 'show', 'hide', 'toggle', 'open', 'close',
+  'next', 'prev', 'previous', 'submit', 'send', 'cancel', 'ok',
+  'yes', 'no',
+  // Section headings missed elsewhere
+  'hero', 'about', 'contact', 'home', 'main',
+]);
+
+// Multi-word generic UI strings: marketing section headings and CTA copy.
+const GENERIC_PHRASE_EXACT = new Set<string>([
+  'why choose us', 'who we are', 'what we do', 'how we work',
+  'our work', 'our services', 'our team', 'our story', 'our mission',
+  'read more', 'view all', 'view more', 'show more', 'see all',
+  'see more', 'learn more', 'find out more', 'get started',
+  'sign in', 'sign up', 'log in', 'log out',
+  'free trial', 'start free', 'try now', 'try free',
+  'все услуги', 'все товары', 'все категории', 'смотреть все',
+  'смотреть всё', 'показать все', 'показать всё', 'показать ещё',
+  'показать еще', 'свернуть', 'развернуть',
+]);
+
+// Category labels like "SaaS / IT", "HR / Рекрутинг", "B2B / B2C" — slash-
+// separated lists of category words. These describe market segments, not
+// products. The token on either side must be short (≤ 16 chars), start with
+// a letter, and the slash itself must carry whitespace on both sides — so
+// brands with an embedded slash like "AC/DC" never match.
+const CATEGORY_SLASH_RE =
+  /^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9&\s]{0,16}\s+\/\s+[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9&\s]{0,20}$/;
+
+export function isUiFragment(s: string): boolean {
+  const t = s.trim();
+  if (!t) return false;
+  const lower = t.toLowerCase();
+  if (GENERIC_TERM_EXACT.has(lower)) return true;
+  if (GENERIC_PHRASE_EXACT.has(lower)) return true;
+  if (UI_FRAGMENT_PATTERNS.some((re) => re.test(t))) return true;
+  if (CATEGORY_SLASH_RE.test(t)) return true;
+  return false;
+}
+
+/**
  * Multi-token CMS gibberish: "a1 4bf9 ad ebcab", "7f9baf a1 4bf9". Every token
  * is a short hex blob and at least one carries a digit (so real words built
  * only from a–f letters like "cafe" or "ada" are left alone).
@@ -315,7 +387,7 @@ export function isPlausibleName(s: string): boolean {
     isHashLike(t) || isDesignArtifact(t) || isNavOrCtaText(t) || isServiceText(t) ||
     isMetricText(t) || isFormLabel(t) || isRoleTitle(t) || isSentenceLike(t) ||
     isIndustryOrSector(t) || isPersonName(t) || isMostlyHexTokens(t) ||
-    isPlaceName(t) || isAddressLike(t)
+    isPlaceName(t) || isAddressLike(t) || isUiFragment(t)
   ) return false;
   if (/\s/.test(t)) {
     const words = t.split(/\s+/);
