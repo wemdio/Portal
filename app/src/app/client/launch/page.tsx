@@ -17,6 +17,7 @@ import {
   type ClientLaunchSequenceVariant,
 } from '@/lib/clientLaunch/types';
 import { normalizeInstantlyTimezone } from '@/lib/clientLaunch/timezones';
+import { detectRawHtmlTags } from '@/lib/clientLaunch/buildCampaignPayload';
 import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 import { EmailBodyField } from '@/components/client/EmailBodyField';
 import { ScheduleEditor } from '@/components/client/ScheduleEditor';
@@ -569,6 +570,10 @@ export default function ClientLaunchPage() {
       const isFirst = i === 0;
       if (isFirst && !s.subject.trim()) { setLaunchError(`Шаг ${i + 1}: укажите тему`); return; }
       if (!s.body.trim()) { setLaunchError(`Шаг ${i + 1}: укажите текст`); return; }
+      if (detectRawHtmlTags(s.body)) {
+        setLaunchError(`Шаг ${i + 1}: HTML не поддерживается. Пишите текстом; для ссылки выделите слово и нажмите «Вставить ссылку».`);
+        return;
+      }
       if (s.variants && s.variants.length > 0) {
         for (let v = 0; v < s.variants.length; v++) {
           const variant = s.variants[v];
@@ -578,6 +583,9 @@ export default function ClientLaunchPage() {
           }
           if (!variant.body.trim()) {
             setLaunchError(`Шаг ${i + 1}, вариант ${letter}: укажите текст`); return;
+          }
+          if (detectRawHtmlTags(variant.body)) {
+            setLaunchError(`Шаг ${i + 1}, вариант ${letter}: HTML не поддерживается.`); return;
           }
         }
       }

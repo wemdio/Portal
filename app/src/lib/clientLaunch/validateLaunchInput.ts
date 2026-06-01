@@ -1,5 +1,6 @@
 import { CLIENT_LAUNCH_ROW_LIMIT } from './constants';
 import { normalizeInstantlyTimezone, isInstantlyValidTimezone } from './timezones';
+import { detectRawHtmlTags } from './buildCampaignPayload';
 import {
   CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP,
   type ClientCampaignPreset,
@@ -81,6 +82,17 @@ export function validateClientLaunchSequence(
     if (!step.body || !step.body.trim()) {
       return { ok: false, error: `Шаг ${i + 1}: укажите текст письма.` };
     }
+    // HTML guard: cold-outreach emails are plain text. Block a body that
+    // contains raw HTML tags (pasted markup, banners, styling) with a clear
+    // message instead of silently escaping it into ugly literal-tag text.
+    // A hidden link is the only rich element and uses [текст](url) markdown,
+    // which has no `<>` — so it never trips this.
+    if (detectRawHtmlTags(step.body)) {
+      return {
+        ok: false,
+        error: `Шаг ${i + 1}: HTML в письме не поддерживается. Пишите обычным текстом; для ссылки выделите слово и нажмите «Вставить ссылку».`,
+      };
+    }
 
     if (step.variants && step.variants.length > 0) {
       const totalVariants = 1 + step.variants.length;
@@ -103,6 +115,12 @@ export function validateClientLaunchSequence(
           return {
             ok: false,
             error: `Шаг ${i + 1}, вариант ${variantLetter}: укажите текст письма.`,
+          };
+        }
+        if (detectRawHtmlTags(variant.body)) {
+          return {
+            ok: false,
+            error: `Шаг ${i + 1}, вариант ${variantLetter}: HTML в письме не поддерживается. Пишите обычным текстом; для ссылки используйте «Вставить ссылку».`,
           };
         }
       }
