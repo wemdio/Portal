@@ -999,6 +999,13 @@ export function DatabaseSpreadsheet() {
   });
   const [selectionAnchor, setSelectionAnchor] = useState({ row: 0, col: 0 });
   const [activeCell, setActiveCell] = useState({ row: 0, col: 0 });
+  /** Какая ячейка СЕЙЧАС в режиме редактирования (textarea-фокус, ввод текста).
+   *  Отдельно от activeCell: клик по ячейке делает её активной (выделение),
+   *  но НЕ переводит в edit-mode. Edit включается повторным кликом по уже
+   *  активной ячейке / double-click / F2 / Enter / печатью любого символа.
+   *  Так горячие клавиши (Del, Shift+Arrow, и т.д.) работают на выделенной
+   *  ячейке без перехвата textarea'ой. */
+  const [editingCell, setEditingCell] = useState<{ row: number; col: number } | null>(null);
   const [isSelecting, setIsSelecting] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const selectAllRef = useRef<HTMLInputElement | null>(null);
@@ -1669,11 +1676,13 @@ export function DatabaseSpreadsheet() {
     cut: () => Promise<void>;
     paste: () => Promise<void>;
     redo: () => void;
+    clearCells: () => void;
   }>({
     copy: async () => {},
     cut: async () => {},
     paste: async () => {},
     redo: () => {},
+    clearCells: () => {},
   });
 
   useEffect(() => {
@@ -1751,13 +1760,53 @@ export function DatabaseSpreadsheet() {
       const maxRow = activeTab.data.length - 1;
       const maxCol = (activeTab.data[0]?.length ?? 1) - 1;
 
+      // Edit-mode переходы и работа с активной ячейкой когда она НЕ в edit.
+      // inCellInput = true когда уже редактируем — не вмешиваемся.
+      if (!inCellInput) {
+        // F2 — войти в edit (Excel-pattern).
+        if (e.key === 'F2') {
+          e.preventDefault();
+          setEditingCell({ row, col });
+          return;
+        }
+        // Enter на выделенной ячейке — войти в edit.
+        if (e.key === 'Enter' && !e.shiftKey && !isMod) {
+          e.preventDefault();
+          setEditingCell({ row, col });
+          return;
+        }
+        // Del/Backspace на выделенных ячейках — очистка диапазона (1 или
+        // много ячеек, без диалога подтверждения). Откат — Ctrl+Z.
+        if ((e.key === 'Delete' || e.key === 'Backspace') && !isMod) {
+          e.preventDefault();
+          clipboardHandlersRef.current.clearCells();
+          return;
+        }
+        // Печатный символ — вход в edit с заменой содержимого. e.key.length === 1
+        // ловит обычные буквы/цифры/знаки. Исключаем модификаторы и спец-клавиши.
+        if (!isMod && !e.altKey && e.key.length === 1) {
+          e.preventDefault();
+          setUndoSnapshot('Изменение ячейки');
+          handleValueChange(row, col, e.key);
+          setEditingCell({ row, col });
+          // Ref'у не до этого — мы уже сделали snapshot руками, отметим что
+          // следующий ввод в этой edit-сессии не должен делать ещё один.
+          cellEditSnapshotPendingRef.current = false;
+          return;
+        }
+      }
+
       let nextRow = row;
       let nextCol = col;
       let handled = false;
 
       const isArrow = e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight';
 
-      if (inCellInput && isArrow && !e.shiftKey) return;
+      // В edit-mode ВСЕ стрелки (включая Shift+Arrow) уходят textarea-е:
+      // cursor по тексту, selection текста внутри ячейки. Расширение
+      // выделения по ячейкам работает когда edit-mode выключен (просто
+      // выделение, без курсора в ячейке) — Excel-pattern.
+      if (inCellInput && isArrow) return;
 
       if (e.key === 'ArrowUp') {
         nextRow = Math.max(0, row - 1);
@@ -1796,6 +1845,10 @@ export function DatabaseSpreadsheet() {
         }
 
         setActiveCell({ row: nextRow, col: nextCol });
+        // Любая навигация по сетке выходит из edit (даже если editingCell был
+        // на предыдущей ячейке — оставлять textarea там, пока ушли стрелками,
+        // некорректно).
+        setEditingCell(null);
       }
     };
 
@@ -1804,6 +1857,12 @@ export function DatabaseSpreadsheet() {
     // preventDefault — расширение выделения по ячейкам не сработает.
     window.addEventListener('keydown', handleGlobalKeyDown, true);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown, true);
+    // setUndoSnapshot и handleValueChange — closure over fresh activeTab/data,
+    // и listener re-attach'ится на каждое изменение activeTab (через
+    // useMemo он меняется при cell-edit'ах), так что stale-closure не успевает
+    // ничего сломать. Не включаем их в deps явно — это создавало бы
+    // re-attach на каждый ререндер.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, activeCell, selectionAnchor, handleUndo]);
 
   useEffect(() => {
@@ -2191,6 +2250,12 @@ export function DatabaseSpreadsheet() {
     event: MouseEvent<HTMLTableCellElement>,
   ) => {
     if (event.button !== 0) return;
+
+    // Excel-pattern: повторный простой клик по уже-активной ячейке = войти
+    // в edit. Клик с модификаторами (Shift/Ctrl/Cmd) — это селекция, не edit.
+    const wasActive = activeCell.row === row && activeCell.col === col;
+    const isPlainClick = !event.shiftKey && !event.ctrlKey && !event.metaKey;
+
     setIsSelecting(true);
     setActiveCell({ row, col });
     if (event.shiftKey) {
@@ -2211,7 +2276,21 @@ export function DatabaseSpreadsheet() {
       setSelectionAnchor({ row, col });
     }
     setSelectionMode('cell');
+
+    if (isPlainClick && wasActive) {
+      // Второй клик по той же ячейке — режим редактирования (точечный курсор).
+      setEditingCell({ row, col });
+    } else if (!isPlainClick || !wasActive) {
+      // Любая смена активной ячейки или клик с модификатором — выйти из edit.
+      setEditingCell(null);
+    }
   };
+
+  /** Double-click — сразу в edit, минуя «select-then-click-again». */
+  const handleCellDoubleClick = (row: number, col: number) => {
+    setEditingCell({ row, col });
+  };
+
 
   const handleCellMouseOver = (row: number, col: number) => {
     if (!isSelecting) return;
@@ -2310,6 +2389,12 @@ export function DatabaseSpreadsheet() {
       cut: cutSelection,
       paste: pasteFromClipboard,
       redo: handleRedo,
+      clearCells: () => {
+        // Очистка диапазона выделения — Del/Backspace на не-edit ячейках.
+        // Без диалога подтверждения, поведение Excel. Откат через Ctrl+Z.
+        setUndoSnapshot('Очистка');
+        clearSelectedCells();
+      },
     };
   });
 
@@ -9685,8 +9770,10 @@ export function DatabaseSpreadsheet() {
                           rowIndex <= normalizedSelection.endRow &&
                           colIndex >= normalizedSelection.startCol &&
                           colIndex <= normalizedSelection.endCol;
-                        const isActive =
-                          activeCell.row === rowIndex && activeCell.col === colIndex;
+                        const isEditing =
+                          editingCell !== null &&
+                          editingCell.row === rowIndex &&
+                          editingCell.col === colIndex;
                         const cellMatchesSearch =
                           searchTerms.length > 0 &&
                           searchTerms.some((term) =>
@@ -9705,6 +9792,7 @@ export function DatabaseSpreadsheet() {
                           <td
                             key={`cell-${rowIndex}-${colIndex}`}
                             onMouseDown={(event) => handleCellMouseDown(rowIndex, colIndex, event)}
+                            onDoubleClick={() => handleCellDoubleClick(rowIndex, colIndex)}
                             onMouseOver={() => handleCellMouseOver(rowIndex, colIndex)}
                             onContextMenu={(event) => {
                               const isRowSelected =
@@ -9747,7 +9835,7 @@ export function DatabaseSpreadsheet() {
                             }}
                             className={`border-b border-r border-gray-200 p-0 align-top overflow-hidden ${cellBackground}`}
                           >
-                            {isActive ? (
+                            {isEditing ? (
                               <textarea
                                 value={value}
                                 onChange={(event) => {
@@ -9764,24 +9852,20 @@ export function DatabaseSpreadsheet() {
                                     e.target.style.height = `${e.target.scrollHeight}px`;
                                   }
                                 }}
+                                onBlur={() => {
+                                  // Потеря фокуса (клик по другой ячейке/вне сетки) =
+                                  // выход из edit-mode. Значение уже в state через
+                                  // handleValueChange — ничего дополнительно
+                                  // сохранять не нужно.
+                                  setEditingCell(null);
+                                }}
                                 onKeyDown={(event) => {
-                                  // Если только что вошли в ячейку (snapshot
-                                  // pending = true, ещё не редактировали) и
-                                  // нажали Del/Backspace — очищаем содержимое
-                                  // ячейки целиком (поведение Excel/Sheets).
-                                  // После первого keystroke ref становится
-                                  // false и Del/Backspace работают как обычное
-                                  // редактирование текста.
-                                  if (
-                                    (event.key === 'Delete' || event.key === 'Backspace') &&
-                                    !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey &&
-                                    cellEditSnapshotPendingRef.current &&
-                                    value !== ''
-                                  ) {
+                                  // Escape — выйти из edit без явного reverta
+                                  // (значение уже записано через handleValueChange;
+                                  // если надо откатить — Ctrl+Z).
+                                  if (event.key === 'Escape') {
                                     event.preventDefault();
-                                    setUndoSnapshot('Очистка ячейки');
-                                    cellEditSnapshotPendingRef.current = false;
-                                    handleValueChange(rowIndex, colIndex, '');
+                                    setEditingCell(null);
                                     return;
                                   }
                                   handleKeyDown(event);
