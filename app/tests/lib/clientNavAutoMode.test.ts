@@ -26,10 +26,12 @@ describe('filterClientNavGroupsForMode', () => {
     expect(manual).toBe(CLIENT_NAV_GROUPS);
   });
 
-  it('keeps only replies / leads / reports for auto mode', () => {
+  it('keeps only campaigns / replies / leads / reports for auto mode', () => {
     const auto = filterClientNavGroupsForMode(CLIENT_NAV_GROUPS, 'auto');
     const visibleIds = auto.flatMap((g) => g.items.map((i) => i.id));
-    expect(visibleIds.sort()).toEqual(['leads', 'replies', 'reports'].sort());
+    // «Кампании» возвращена в auto-режим (статистика по кампаниям из Instantly),
+    // как у стандартного клиента — см. fix(client-nav).
+    expect(visibleIds.sort()).toEqual(['campaigns', 'leads', 'replies', 'reports'].sort());
   });
 
   it('drops empty groups in auto mode', () => {

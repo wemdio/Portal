@@ -24,7 +24,7 @@ async function runSync() {
     return jsonError('Сервис не настроен (INSTANTLY_API_KEY)', 503);
   }
   try {
-    const result = await syncInstantlyCampaignCatalog(INSTANTLY_API_KEY);
+    const result = await syncInstantlyCampaignCatalog();
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Ошибка синхронизации';
