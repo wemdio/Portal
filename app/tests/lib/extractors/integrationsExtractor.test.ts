@@ -49,4 +49,40 @@ describe('extractIntegrations', () => {
 
     expect(extractIntegrations(html)).toEqual([]);
   });
+
+  it('drops CSS-class fragments, generic UI words and category labels — real tools only', () => {
+    // The exact noise patterns observed in the spreadsheet rows:
+    //   "blue circle color", "hero img", "material symbols light mail",
+    //   "analytics", "integration", "services", "Read more",
+    //   "SaaS / IT", "HR / Рекрутинг".
+    const html = `
+      <section class="integrations">
+        <img alt="blue circle color" src="/1.svg" />
+        <img alt="hero img" src="/2.png" />
+        <img alt="material symbols light mail" src="/3.svg" />
+        <img alt="analytics" src="/4.png" />
+        <img alt="integration" src="/5.png" />
+        <img alt="services" src="/6.png" />
+        <img alt="Read more" src="/7.png" />
+        <img alt="SaaS / IT" src="/8.png" />
+        <img alt="HR / Рекрутинг" src="/9.png" />
+        <img alt="Битрикс24" src="/10.png" />
+        <img alt="amoCRM" src="/11.png" />
+        <img alt="Slack" src="/12.png" />
+      </section>
+    `;
+
+    const result = extractIntegrations(html);
+
+    expect(result).toEqual(expect.arrayContaining(['Битрикс24', 'amoCRM', 'Slack']));
+    expect(result).not.toContain('blue circle color');
+    expect(result).not.toContain('hero img');
+    expect(result).not.toContain('material symbols light mail');
+    expect(result).not.toContain('analytics');
+    expect(result).not.toContain('integration');
+    expect(result).not.toContain('services');
+    expect(result).not.toContain('Read more');
+    expect(result).not.toContain('SaaS / IT');
+    expect(result).not.toContain('HR / Рекрутинг');
+  });
 });

@@ -14,6 +14,7 @@ import {
   isMostlyHexTokens,
   isPlaceName,
   isAddressLike,
+  isUiFragment,
   isPlausibleName,
   nameListLooksReal,
 } from '@/lib/enrich/extractors/nameQuality';
@@ -87,6 +88,28 @@ const PERSON_NAMES = [
 // Multi-token CMS gibberish.
 const HEX_TOKEN_JUNK = ['a1 4bf9 ad ebcab', '7f9baf a1 4bf9'];
 
+// CSS-class fragments leaked into alt attributes, generic UI words, and
+// "X / Y" category labels — all observed in the spreadsheet noise rows.
+const UI_FRAGMENTS = [
+  // CSS-class-as-alt artifacts
+  'hero img', 'about img', 'main bg', 'header background', 'wrapper item',
+  'blue circle color', 'red circle color', 'green circle background',
+  'material symbols light mail', 'material symbols outlined send',
+  'fa solid envelope', 'fa-brands telegram',
+  'icon close', 'btn arrow', 'img logo',
+  // Generic tech-category single words
+  'analytics', 'integration', 'integrations', 'services', 'service',
+  'teamwork', 'workflow', 'automation', 'platform', 'cloud',
+  // Generic UI / nav single words
+  'banner', 'overlay', 'modal', 'sidebar', 'header', 'footer',
+  'subscribe', 'newsletter', 'login', 'signup',
+  // Marketing section headings
+  'Why choose us', 'What we do', 'Our services', 'Our team',
+  'Read more', 'View all', 'Show more', 'Learn more',
+  // Category labels with slash
+  'SaaS / IT', 'HR / Рекрутинг', 'B2B / B2C', 'Digital / Performance',
+];
+
 const REAL_NAMES = [
   'Газпром нефть', 'Росбанк', 'Сколково', 'Samsung', 'Metro', 'amoCRM', 'mindbox', 'Тинькофф',
   // real clients observed in the spreadsheet — must never be flagged as noise
@@ -143,6 +166,21 @@ describe('nameQuality predicates', () => {
     for (const h of HEX_TOKEN_JUNK) expect(isMostlyHexTokens(h)).toBe(true);
   });
 
+  it('flags CSS-class fragments, generic UI words and category labels', () => {
+    for (const f of UI_FRAGMENTS) expect(isUiFragment(f)).toBe(true);
+  });
+
+  it('does not flag real product/integration names as UI fragments', () => {
+    // Google Analytics is a real product; bare "analytics" is not — and the
+    // brand prefix is what keeps the heuristic safe.
+    const realProducts = [
+      'Google Analytics', 'Битрикс24', 'amoCRM', 'Roistat', 'JivoSite',
+      'Slack', 'Calendly', 'Mango Office', 'ЮKassa', 'CloudPayments',
+      'Wildberries', 'Ozon', 'Lamoda',
+    ];
+    for (const p of realProducts) expect(isUiFragment(p)).toBe(false);
+  });
+
   it('flags city / region / country labels', () => {
     for (const p of PLACES) expect(isPlaceName(p)).toBe(true);
   });
@@ -177,7 +215,7 @@ describe('nameQuality predicates', () => {
       ...CMS_HASHES, ...DESIGN_ARTIFACTS, ...NAV_CTA, ...SERVICES,
       ...METRICS, ...FORM_LABELS, ...ROLE_TITLES, ...ARTICLE_TITLES,
       ...INDUSTRIES, ...PERSON_NAMES, ...HEX_TOKEN_JUNK,
-      ...PLACES, ...ADDRESSES, ...FEATURE_PHRASES,
+      ...PLACES, ...ADDRESSES, ...FEATURE_PHRASES, ...UI_FRAGMENTS,
     ]) {
       expect(isPlausibleName(junk)).toBe(false);
     }

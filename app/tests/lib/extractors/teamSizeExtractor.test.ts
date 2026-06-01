@@ -27,11 +27,20 @@ describe('extractTeamSize', () => {
     expect(extractTeamSize(html)).toBe(3);
   });
 
-  it('caps result at 200 to ignore wrong markup', () => {
+  it('returns 0 when strict team selector blows past the trust limit without a textual claim — almost always a CMS false positive (LLM fallback runs instead)', () => {
     const items = Array.from({ length: 500 }, () => `<div class="member-card">x</div>`).join('');
     const html = `<main>${items}</main>`;
 
-    expect(extractTeamSize(html)).toBe(200);
+    expect(extractTeamSize(html)).toBe(0);
+  });
+
+  it('trusts a high team-photo count only when corroborated by text', () => {
+    const photos = Array.from({ length: 60 }, (_, i) => `<img alt="Member ${i}" src="/m${i}.jpg" />`).join('');
+    const html = `<section class="team"><p>Команда из 45 человек</p>${photos}</section>`;
+
+    // Loose-selector count 60 is above its 30-photo trust limit; the text
+    // claim of "45 человек" wins.
+    expect(extractTeamSize(html)).toBe(45);
   });
 
   it('returns 0 when no team-related markup is present', () => {

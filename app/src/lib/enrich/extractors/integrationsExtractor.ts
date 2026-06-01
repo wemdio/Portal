@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import { isHashLike, isDesignArtifact, isNavOrCtaText, isServiceText } from './nameQuality';
+import { isHashLike, isDesignArtifact, isNavOrCtaText, isServiceText, isUiFragment, isMostlyHexTokens } from './nameQuality';
 
 const JUNK_RE: RegExp[] = [
   /^logo$/i, /^image$/i, /^icon$/i, /^photo$/i, /^avatar$/i,
@@ -30,8 +30,13 @@ function isJunk(s: string): boolean {
   if (/%/.test(s)) return true;              // any percent: "ppc%world", "%D0%9F…"
   // CMS image hashes, design-tool exports, nav/CTA labels and marketing
   // service names are the dominant noise classes — reject them outright.
-  if (isHashLike(s) || isDesignArtifact(s)) return true;
+  if (isHashLike(s) || isDesignArtifact(s) || isMostlyHexTokens(s)) return true;
   if (isNavOrCtaText(s) || isServiceText(s)) return true;
+  // UI/CSS-class fragments ("hero img", "blue circle color"), generic
+  // tech-category words ("analytics", "integration", "services"), category
+  // labels ("SaaS / IT") leak from alt attributes and `<span class="...">`
+  // labels — never a real third-party integration.
+  if (isUiFragment(s)) return true;
   return false;
 }
 
