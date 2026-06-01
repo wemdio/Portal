@@ -216,6 +216,7 @@ export type ClientNavMode = 'manual' | 'auto';
  * отфильтровывать незачем.
  */
 const AUTO_MODE_VISIBLE_ITEM_IDS: ReadonlySet<string> = new Set([
+  'campaigns',
   'replies',
   'leads',
   'reports',

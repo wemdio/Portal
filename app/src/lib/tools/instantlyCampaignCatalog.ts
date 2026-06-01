@@ -3,7 +3,11 @@ import 'server-only';
 import type { Campaign } from '@/lib/instantly/types';
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
-import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
+import {
+  resolveInstantlyAccountId,
+  listInstantlyAccounts,
+  getInstantlyAccountApiKey,
+} from '@/lib/instantly/accounts';
 import { getCampaignAnalytics } from '@/lib/instantly/client';
 import {
   iterateInstantlyCampaignPages,
@@ -102,7 +106,7 @@ export async function readInstantlyCampaignCatalog(): Promise<{
 /**
  * Полная синхронизация с Instantly: постранично upsert, затем удаление строк не из этого прохода.
  */
-export async function syncInstantlyCampaignCatalog(apiKey: string): Promise<{
+export async function syncInstantlyCampaignCatalog(): Promise<{
   pages: number;
   rows: number;
 }> {
@@ -113,35 +117,53 @@ export async function syncInstantlyCampaignCatalog(apiKey: string): Promise<{
   const syncMarker = new Date().toISOString();
   let pages = 0;
   let rows = 0;
+  let allAccountsOk = true;
 
-  for await (const page of iterateInstantlyCampaignPages(apiKey)) {
-    pages += 1;
-    const batch = page.map((c) => ({
-      id: c.id,
-      name: String(c.name ?? '').slice(0, NAME_MAX_LEN),
-      status: typeof c.status === 'number' ? c.status : null,
-      timestamp_created: c.timestamp_created ?? null,
-      timestamp_updated: c.timestamp_updated ?? null,
-      synced_at: syncMarker,
-    }));
+  // Мульти-аккаунт: синкаем КАЖДЫЙ Instantly-аккаунт своим ключом, проставляя
+  // instantly_account_id. Один общий syncMarker на весь проход — чтобы удаление
+  // устаревших (ниже) охватывало ВСЕ аккаунты, а не затирало чужие кампании.
+  for (const account of listInstantlyAccounts()) {
+    try {
+      const apiKey = getInstantlyAccountApiKey(account.id);
+      for await (const page of iterateInstantlyCampaignPages(apiKey)) {
+        pages += 1;
+        const batch = page.map((c) => ({
+          id: c.id,
+          instantly_account_id: account.id,
+          name: String(c.name ?? '').slice(0, NAME_MAX_LEN),
+          status: typeof c.status === 'number' ? c.status : null,
+          timestamp_created: c.timestamp_created ?? null,
+          timestamp_updated: c.timestamp_updated ?? null,
+          synced_at: syncMarker,
+        }));
 
-    rows += batch.length;
-    const { error } = await supabaseAdmin.from('instantly_campaign_catalog').upsert(batch, {
-      onConflict: 'id',
-    });
-    if (error) {
-      throw new Error(error.message);
+        rows += batch.length;
+        const { error } = await supabaseAdmin.from('instantly_campaign_catalog').upsert(batch, {
+          onConflict: 'id',
+        });
+        if (error) {
+          throw new Error(error.message);
+        }
+      }
+    } catch (err) {
+      // Один аккаунт упал — НЕ валим весь синк и пропускаем delete-фазу (иначе
+      // затрём живые кампании упавшего аккаунта). Остальные аккаунты синкаются.
+      allAccountsOk = false;
+      console.error(`[instantly-catalog] catalog sync failed for account ${account.id}`, err);
     }
   }
 
-  // Кампании, которых больше нет в Instantly (удалены в UI Instantly или API), исчезают из каталога.
-  const { error: delError } = await supabaseAdmin
-    .from('instantly_campaign_catalog')
-    .delete()
-    .lt('synced_at', syncMarker);
+  // Кампании, которых больше нет НИ В ОДНОМ аккаунте — удаляем. Только если все
+  // аккаунты синканулись успешно: иначе риск стереть живые из упавшего аккаунта.
+  if (allAccountsOk) {
+    const { error: delError } = await supabaseAdmin
+      .from('instantly_campaign_catalog')
+      .delete()
+      .lt('synced_at', syncMarker);
 
-  if (delError) {
-    throw new Error(delError.message);
+    if (delError) {
+      throw new Error(delError.message);
+    }
   }
 
   // Auto-match campaigns to projects by client name
@@ -200,44 +222,52 @@ export async function syncInstantlyCampaignAnalytics(): Promise<{ rows: number }
 
   let rows = 0;
 
-  for (const _account of [null]) {
-    const analyticsData = await getCampaignAnalytics({});
-    if (!Array.isArray(analyticsData) || analyticsData.length === 0) continue;
+  // Мульти-аккаунт: аналитику тянем по КАЖДОМУ Instantly-аккаунту своим ключом
+  // и проставляем instantly_account_id. Раньше синкался только дефолтный аккаунт
+  // (for ... of [null]) → клиенты на доп-аккаунтах (account-2 и т.д.) не видели
+  // статистику. Один аккаунт упал — логируем и идём дальше, не валим весь синк.
+  for (const account of listInstantlyAccounts()) {
+    try {
+      const analyticsData = await getCampaignAnalytics({}, { accountId: account.id });
+      if (!Array.isArray(analyticsData) || analyticsData.length === 0) continue;
 
-    const syncedAt = new Date().toISOString();
+      const syncedAt = new Date().toISOString();
 
-    // Готовим batch: только кампании у которых есть campaign_id
-    const batch = analyticsData
-      .filter((a) => typeof a.campaign_id === 'string' && a.campaign_id)
-      .map((a) => ({
-        id: a.campaign_id as string,
-        // name нужен для upsert (NOT NULL в таблице) — используем пустую строку как fallback
-        // при конфликте по id поле name НЕ перезаписывается (onConflict merge excludes it)
-        name: typeof a.campaign_name === 'string' ? a.campaign_name : '',
-        emails_sent_count: typeof a.emails_sent_count === 'number' ? a.emails_sent_count : null,
-        open_count: typeof a.open_count === 'number' ? a.open_count : null,
-        reply_count: typeof a.reply_count === 'number' ? a.reply_count : null,
-        new_leads_contacted_count:
-          typeof a.new_leads_contacted_count === 'number' ? a.new_leads_contacted_count : null,
-        bounced_count: typeof a.bounced_count === 'number' ? a.bounced_count : null,
-        unsubscribed_count: typeof a.unsubscribed_count === 'number' ? a.unsubscribed_count : null,
-        leads_count: typeof a.leads_count === 'number' ? a.leads_count : null,
-        analytics_synced_at: syncedAt,
-        synced_at: syncedAt,
-      }));
+      // Готовим batch: только кампании у которых есть campaign_id
+      const batch = analyticsData
+        .filter((a) => typeof a.campaign_id === 'string' && a.campaign_id)
+        .map((a) => ({
+          id: a.campaign_id as string,
+          instantly_account_id: account.id,
+          // name нужен для upsert (NOT NULL в таблице) — campaign_name из аналитики
+          name: typeof a.campaign_name === 'string' ? a.campaign_name : '',
+          emails_sent_count: typeof a.emails_sent_count === 'number' ? a.emails_sent_count : null,
+          open_count: typeof a.open_count === 'number' ? a.open_count : null,
+          reply_count: typeof a.reply_count === 'number' ? a.reply_count : null,
+          new_leads_contacted_count:
+            typeof a.new_leads_contacted_count === 'number' ? a.new_leads_contacted_count : null,
+          bounced_count: typeof a.bounced_count === 'number' ? a.bounced_count : null,
+          unsubscribed_count: typeof a.unsubscribed_count === 'number' ? a.unsubscribed_count : null,
+          leads_count: typeof a.leads_count === 'number' ? a.leads_count : null,
+          analytics_synced_at: syncedAt,
+          synced_at: syncedAt,
+        }));
 
-    if (batch.length === 0) continue;
+      if (batch.length === 0) continue;
 
-    // Один bulk-upsert — щадящий для БД
-    const { error } = await supabaseAdmin
-      .from('instantly_campaign_catalog')
-      .upsert(batch, {
-        onConflict: 'id',
-        ignoreDuplicates: false,
-      });
+      // Один bulk-upsert на аккаунт — щадящий для БД
+      const { error } = await supabaseAdmin
+        .from('instantly_campaign_catalog')
+        .upsert(batch, {
+          onConflict: 'id',
+          ignoreDuplicates: false,
+        });
 
-    if (error) throw new Error(error.message);
-    rows += batch.length;
+      if (error) throw new Error(error.message);
+      rows += batch.length;
+    } catch (err) {
+      console.error(`[instantly-catalog] analytics sync failed for account ${account.id}`, err);
+    }
   }
 
   return { rows };
