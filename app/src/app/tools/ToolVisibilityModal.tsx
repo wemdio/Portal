@@ -6,6 +6,7 @@ import { X, Loader2 } from 'lucide-react';
 
 import { authFetch, authFetchJson } from '@/lib/authFetch';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, type ToolId } from '@/lib/toolsRegistry';
+import { sortToolIdsByTitle } from '@/lib/toolsSort';
 import {
   TOOL_STATUS_OPTIONS,
   effectiveToolStatus,
@@ -154,27 +155,9 @@ export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props)
     setMounted(true);
   }, []);
 
-  // Сортировка: для RU-локали кириллица первой (А-Я) по алфавиту, затем
-  // латиница (A-Z) тоже по алфавиту. Для EN-локали — просто алфавитно,
-  // все названия и так латиницей. Юникод-диапазон [Ѐ-ӿ] покрывает
-  // основной кириллический блок (русские буквы попадают в [А-я]).
-  const sortedToolIds = useMemo(() => {
-    const titleFor = (id: typeof ALL_TOOL_IDS[number]): string => {
-      const cfg = TOOLS_CONFIG[id];
-      return locale === 'en' ? (cfg.title_en ?? cfg.title) : cfg.title;
-    };
-    return [...ALL_TOOL_IDS].sort((a, b) => {
-      const ta = titleFor(a).trim();
-      const tb = titleFor(b).trim();
-      if (locale !== 'en') {
-        const aIsCyr = /^[Ѐ-ӿ]/.test(ta);
-        const bIsCyr = /^[Ѐ-ӿ]/.test(tb);
-        if (aIsCyr && !bIsCyr) return -1;
-        if (!aIsCyr && bIsCyr) return 1;
-      }
-      return ta.localeCompare(tb, locale);
-    });
-  }, [locale]);
+  // Сортировка: для RU-локали кириллица первой (А-Я), затем латиница
+  // (A-Z). Для EN-локали — просто алфавитно. Логика общая с /tools-страницей.
+  const sortedToolIds = useMemo(() => sortToolIdsByTitle(ALL_TOOL_IDS, locale), [locale]);
 
   if (!open || !mounted || typeof document === 'undefined') return null;
 

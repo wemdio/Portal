@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState, type ComponentType } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ComponentType } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
@@ -27,9 +27,12 @@ import {
   ShieldAlert,
   Blocks,
   PartyPopper,
+  LayoutGrid,
+  List,
 } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/toolsRegistry';
+import { sortToolIdsByTitle } from '@/lib/toolsSort';
 import { type ToolStatus } from '@/lib/toolStatus';
 import { isAdmin } from '@/lib/roles';
 import { RdpToolCard } from './RdpToolCard';
@@ -37,6 +40,9 @@ import { ToolVisibilityModal } from './ToolVisibilityModal';
 import { usePortalBlockingLoad } from '@/components/PortalLoadingProvider';
 import { useUser } from '@/lib/UserProvider';
 import type { Locale } from '@/lib/i18n';
+
+type ToolsLayoutMode = 'grouped' | 'list';
+const LAYOUT_MODE_STORAGE_KEY = 'tools-layout-mode';
 
 /**
  * Маппинг глобального статуса инструмента (из шестерёнки) в плашку.
@@ -197,6 +203,21 @@ export default function ToolsPage() {
   const [loading, setLoading] = useState(true);
   const [visibilityModalOpen, setVisibilityModalOpen] = useState(false);
 
+  // Per-user раскладка списка инструментов. localStorage достаточно —
+  // настройка чисто UI, не критична для миграции между устройствами.
+  const [layoutMode, setLayoutMode] = useState<ToolsLayoutMode>('grouped');
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const stored = window.localStorage.getItem(LAYOUT_MODE_STORAGE_KEY);
+    if (stored === 'grouped' || stored === 'list') setLayoutMode(stored);
+  }, []);
+  const changeLayoutMode = useCallback((mode: ToolsLayoutMode) => {
+    setLayoutMode(mode);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(LAYOUT_MODE_STORAGE_KEY, mode);
+    }
+  }, []);
+
   usePortalBlockingLoad(loading);
 
   const reloadVisibleTools = useCallback(async () => {
@@ -243,7 +264,31 @@ export default function ToolsPage() {
     .map((g) => ({ ...g, toolIds: g.toolIds.filter((id) => visibleSet.has(id)) }))
     .filter((g) => g.toolIds.length > 0);
 
+  // Плоский алфавитный список (для режима «Списком»). Сортируем общим
+  // хелпером — кириллица первой (А-Я), потом латиница (A-Z).
+  const flatSortedToolIds = useMemo(
+    () => sortToolIdsByTitle(ALL_TOOL_IDS.filter((id) => visibleSet.has(id)), locale),
+    // visibleSet — новый объект на каждый render; считаем по toolIds.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [toolIds, locale],
+  );
+
   const adminViewer = isAdmin(userRole);
+
+  /** Карточка одного тула (RDP — особый, у него своя card-компонента). */
+  const renderToolCard = (toolId: string) =>
+    toolId === 'rdp' ? (
+      <div key="rdp" className="min-w-0 flex flex-col h-full">
+        <RdpToolCard />
+      </div>
+    ) : (
+      <ToolLinkCard
+        key={toolId}
+        toolId={toolId as ToolId}
+        locale={locale}
+        effectiveStatus={statuses[toolId]}
+      />
+    );
 
   return (
     <div className="space-y-6 text-left max-w-full">
@@ -256,21 +301,62 @@ export default function ToolsPage() {
               : 'Набор утилит для работы с данными и процессами.'}
           </p>
         </div>
-        {adminViewer ? (
-          <button
-            type="button"
-            onClick={() => setVisibilityModalOpen(true)}
-            title={locale === 'en'
-              ? 'Tool visibility (global, all users)'
-              : 'Видимость инструментов (глобально, для всех)'}
-            aria-label={locale === 'en'
-              ? 'Tool visibility settings'
-              : 'Настройки видимости инструментов'}
-            className="mt-1 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700"
+        <div className="mt-1 flex items-center gap-2 shrink-0">
+          {/* Per-user раскладка: «По блокам» (как было раньше — группы Аутрич/
+              Базы/Парсеры/Утилиты/AI) или «Списком» (плоский алфавитный список,
+              кириллица первой). Хранится в localStorage. */}
+          <div
+            role="group"
+            aria-label={locale === 'en' ? 'Layout mode' : 'Раскладка'}
+            className="inline-flex h-9 items-center rounded-lg border border-gray-200 bg-white p-0.5"
           >
-            <Settings className="h-4 w-4" aria-hidden />
-          </button>
-        ) : null}
+            <button
+              type="button"
+              onClick={() => changeLayoutMode('grouped')}
+              title={locale === 'en' ? 'Group by category' : 'По блокам (по категориям)'}
+              aria-pressed={layoutMode === 'grouped'}
+              className={`inline-flex h-full items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors ${
+                layoutMode === 'grouped'
+                  ? 'bg-gray-100 text-gray-900'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <LayoutGrid className="h-3.5 w-3.5" aria-hidden />
+              <span>{locale === 'en' ? 'Groups' : 'По блокам'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => changeLayoutMode('list')}
+              title={locale === 'en'
+                ? 'Flat alphabetical list (Cyrillic first, then Latin)'
+                : 'Списком, по алфавиту (сначала русские, затем английские)'}
+              aria-pressed={layoutMode === 'list'}
+              className={`inline-flex h-full items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors ${
+                layoutMode === 'list'
+                  ? 'bg-gray-100 text-gray-900'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <List className="h-3.5 w-3.5" aria-hidden />
+              <span>{locale === 'en' ? 'List' : 'Списком'}</span>
+            </button>
+          </div>
+          {adminViewer ? (
+            <button
+              type="button"
+              onClick={() => setVisibilityModalOpen(true)}
+              title={locale === 'en'
+                ? 'Tool visibility (global, all users)'
+                : 'Видимость инструментов (глобально, для всех)'}
+              aria-label={locale === 'en'
+                ? 'Tool visibility settings'
+                : 'Настройки видимости инструментов'}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700"
+            >
+              <Settings className="h-4 w-4" aria-hidden />
+            </button>
+          ) : null}
+        </div>
       </div>
 
       {adminViewer ? (
@@ -303,6 +389,12 @@ export default function ToolsPage() {
             {locale === 'en' ? 'Please contact your administrator.' : 'Пожалуйста, обратитесь к администратору.'}
           </p>
         </div>
+      ) : layoutMode === 'list' ? (
+        // Плоский алфавитный список. Все видимые тулы одним грид'ом, без
+        // делителей-секций. Сортировка: cyrillic → latin, А-Я / A-Z.
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
+          {flatSortedToolIds.map((toolId) => renderToolCard(toolId))}
+        </div>
       ) : (
         <div className="space-y-6">
           {visibleGroups.map((group) => (
@@ -313,20 +405,7 @@ export default function ToolsPage() {
                 <div className="h-px flex-1 bg-gray-200" />
               </div>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
-                {group.toolIds.map((toolId) =>
-                  toolId === 'rdp' ? (
-                    <div key="rdp" className="min-w-0 flex flex-col h-full">
-                      <RdpToolCard />
-                    </div>
-                  ) : (
-                    <ToolLinkCard
-                      key={toolId}
-                      toolId={toolId}
-                      locale={locale}
-                      effectiveStatus={statuses[toolId]}
-                    />
-                  )
-                )}
+                {group.toolIds.map((toolId) => renderToolCard(toolId))}
               </div>
             </section>
           ))}
