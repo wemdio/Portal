@@ -347,6 +347,8 @@ blocks:
                   send_health_alert \"\${ALERT}\";
                   exit 1;
                 fi;
+                echo '--- Step 1.2: cleanup expired tool statuses (new -> active after 7 days) ---';
+                sudo -n docker run --rm --network host --env-file .env ${DOCKER_USERNAME}/portal:prod node scripts/db/cleanupExpiredToolStatuses.js 2>&1 || echo \"[scheduled] tool-status cleanup failed, continuing\";
                 wait_port_free() {
                   local port=\"\$1\" max_wait=\"\${2:-30}\";
                   local i=0;
