@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { X, Loader2 } from 'lucide-react';
 
 import { authFetch, authFetchJson } from '@/lib/authFetch';
@@ -11,6 +12,30 @@ import {
   type ToolStatus,
 } from '@/lib/toolStatus';
 import type { Locale } from '@/lib/i18n';
+
+/**
+ * Цвет select'а под текущий effective-статус. Должен совпадать с плашкой
+ * на карточке инструмента (см. ToolLinkCard / badgeForStatus):
+ *   active          — серый (нейтрал)
+ *   new             — emerald (зелёная плашка «Новое»)
+ *   beta            — amber (жёлтая плашка «BETA»)
+ *   in_development  — amber (жёлтая плашка «В разработке»)
+ *   disabled        — серый-красноватый (явно отключено)
+ */
+function selectColorClasses(status: ToolStatus): string {
+  switch (status) {
+    case 'new':
+      return 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100';
+    case 'beta':
+    case 'in_development':
+      return 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100';
+    case 'disabled':
+      return 'border-red-200 bg-red-50 text-red-700 hover:bg-red-100';
+    case 'active':
+    default:
+      return 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50';
+  }
+}
 
 interface Props {
   open: boolean;
@@ -121,14 +146,22 @@ export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props)
     [savingId, onChanged],
   );
 
-  if (!open) return null;
+  // Портал нужен чтобы overlay растягивался на ВЕСЬ viewport, а не упирался
+  // в скролл-контейнер `<main>` из LayoutShell. Без этого фон останавливался
+  // на нижней границе скролла, а не на экране.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!open || !mounted || typeof document === 'undefined') return null;
 
   const title = locale === 'en' ? 'Tool visibility (global)' : 'Видимость инструментов (глобально)';
   const subtitle = locale === 'en'
     ? 'Status applies to everyone, including admin. “New” auto-clears after 7 days.'
     : 'Статус действует на всех, включая admin. «Новое» снимается автоматически через 7 дней.';
 
-  return (
+  const overlay = (
     <div
       role="dialog"
       aria-modal="true"
@@ -199,7 +232,7 @@ export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props)
                       title={
                         TOOL_STATUS_OPTIONS.find((o) => o.value === effective)?.[locale === 'en' ? 'hint_en' : 'hint_ru']
                       }
-                      className="shrink-0 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                      className={`shrink-0 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${selectColorClasses(effective)}`}
                     >
                       {TOOL_STATUS_OPTIONS.map((opt) => (
                         <option key={opt.value} value={opt.value}>
@@ -226,4 +259,6 @@ export function ToolVisibilityModal({ open, locale, onClose, onChanged }: Props)
       </div>
     </div>
   );
+
+  return createPortal(overlay, document.body);
 }
