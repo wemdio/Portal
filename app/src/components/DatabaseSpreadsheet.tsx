@@ -1654,19 +1654,19 @@ export function DatabaseSpreadsheet() {
 
   // Свежие версии хендлеров через ref — чтобы keydown-listener не пересоздавался
   // на каждое изменение selection/tabs/etc. (это ловит actual stale-closure баги).
-  const clipboardHandlersRef = useRef({
-    copy: copySelection,
-    cut: cutSelection,
-    paste: pasteFromClipboard,
-    redo: handleRedo,
-  });
-  useEffect(() => {
-    clipboardHandlersRef.current = {
-      copy: copySelection,
-      cut: cutSelection,
-      paste: pasteFromClipboard,
-      redo: handleRedo,
-    };
+  // Инициализируем no-op'ами — реальные функции объявлены сильно ниже в файле
+  // (copySelection и т.п. ~строка 2200+) и ссылка на них прямо в useRef-инициализации
+  // ловится TS как TDZ. Реальные хендлеры наполняет useEffect ниже.
+  const clipboardHandlersRef = useRef<{
+    copy: () => Promise<void>;
+    cut: () => Promise<void>;
+    paste: () => Promise<void>;
+    redo: () => void;
+  }>({
+    copy: async () => {},
+    cut: async () => {},
+    paste: async () => {},
+    redo: () => {},
   });
 
   useEffect(() => {
@@ -2281,6 +2281,18 @@ export function DatabaseSpreadsheet() {
       showCopyNotice('Не удалось прочитать буфер обмена (нужно разрешение браузера)', 'error');
     }
   };
+
+  // Наполняем clipboardHandlersRef свежими версиями функций после их объявления.
+  // useRef инициализируется no-op'ами выше (TS не даёт ссылаться на эти `const`
+  // в `useRef(...)` напрямую — TDZ).
+  useEffect(() => {
+    clipboardHandlersRef.current = {
+      copy: copySelection,
+      cut: cutSelection,
+      paste: pasteFromClipboard,
+      redo: handleRedo,
+    };
+  });
 
   const applyPaste = (values: string[][]) => {
     if (!activeTab || values.length === 0) return;
