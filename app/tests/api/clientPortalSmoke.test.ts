@@ -1422,7 +1422,9 @@ describe('Client Portal — RBAC isolation across clients', () => {
       reply_to_uuid: 'e1',
       eaccount: 'sender@me.com',
       subject: 'Re: Intro',
-      body: { text: 'Hi' },
+      // body теперь { html, text }: html сохраняет переносы строк (\n -> <br>),
+      // text — plain-text fallback. Для 'Hi' переносов нет → html === 'Hi'.
+      body: { html: 'Hi', text: 'Hi' },
     }), { accountId: 'main' });
   });
 
@@ -1447,7 +1449,7 @@ describe('Client Portal — RBAC isolation across clients', () => {
     expect((res as Response).status).toBe(200);
     expect(mockReplyToEmail).toHaveBeenCalledWith(expect.objectContaining({
       subject: 'Re: Intro',
-      body: { text: 'Hi again' },
+      body: { html: 'Hi again', text: 'Hi again' },
     }), { accountId: 'main' });
   });
 
