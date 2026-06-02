@@ -397,9 +397,10 @@ export default function ToolsPage() {
           </p>
         </div>
       ) : layoutMode === 'list' ? (
-        // Плоский алфавитный список. Все видимые тулы одним грид'ом, без
-        // делителей-секций. Сортировка: cyrillic → latin, А-Я / A-Z.
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
+        // Плоский алфавитный список — реально по одному в строке, без секций.
+        // Ширина ограничена max-w-3xl и центрирована, чтобы карточки не
+        // растягивались на весь экран. Сортировка: cyrillic → latin, А-Я / A-Z.
+        <div className="mx-auto flex max-w-3xl flex-col gap-4">
           {flatSortedToolIds.map((toolId) => renderToolCard(toolId))}
         </div>
       ) : (
