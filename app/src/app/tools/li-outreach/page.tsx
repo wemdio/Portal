@@ -1247,7 +1247,7 @@ export default function LiOutreachPage() {
                   {c.use_custom_invites && (
                     <div
                       className="mt-1 inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 border border-emerald-200"
-                      title="На шаге 1 берётся персональный invite_text каждого лида (use_custom_invites=true). AI-персонализация для инвайта пропускается."
+                      title="На шаге 1 берётся персональный текст инвайта каждого лида из CSV. AI-персонализация для инвайта пропускается."
                     >
                       ✎ персональные инвайты
                     </div>
@@ -1330,7 +1330,7 @@ export default function LiOutreachPage() {
                 return (
                   <span
                     className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 border border-emerald-200"
-                    title="Список импортирован через «Импорт CSV с инвайтами». У лидов заполнена колонка invite_text, кампания может использовать её через тумблер use_custom_invites."
+                    title="Список импортирован через «Импорт CSV с инвайтами». У лидов есть свой персональный текст, кампания может использовать его через тумблер на шаге 1."
                   >
                     ✎ персональные инвайты
                   </span>
@@ -1584,7 +1584,7 @@ export default function LiOutreachPage() {
                       <th className="text-left px-3 py-2 text-xs text-gray-500">Компания</th>
                       <th className="text-left px-3 py-2 text-xs text-gray-500">Статус</th>
                       {anyInvite && (
-                        <th className="text-left px-3 py-2 text-xs text-emerald-700" title="Персонализированный текст инвайта (li_leads.invite_text)">
+                        <th className="text-left px-3 py-2 text-xs text-emerald-700" title="Персонализированный текст инвайта">
                           Инвайт ✎
                         </th>
                       )}
