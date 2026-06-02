@@ -43,6 +43,8 @@ export interface BackgroundScorerState {
   batch_size: number;
   sleep_between_batches_ms: number;
   revenue_from: number;
+  /** Параллельных запросов к Mailganer = фактический RPS-потолок (из конфига). */
+  concurrency?: number;
 }
 
 export interface TickResult {
@@ -123,7 +125,9 @@ export async function runBobScoringTick(
   let activeCount = 0;
   let cacheHitCount = 0;
 
-  const concurrency = 5;
+  // RPS-потолок берём из конфига (background_scorer_state.concurrency).
+  // Фоллбэк 5 — на случай если миграция ещё не применена и поля нет в строке.
+  const concurrency = state.concurrency ?? 5;
   let cursor = 0;
   async function worker() {
     while (true) {
