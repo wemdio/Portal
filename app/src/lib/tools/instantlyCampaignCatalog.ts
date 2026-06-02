@@ -229,6 +229,11 @@ export async function syncInstantlyCampaignAnalytics(): Promise<{ rows: number }
   for (const account of listInstantlyAccounts()) {
     try {
       const analyticsData = await getCampaignAnalytics({}, { accountId: account.id });
+      console.log(
+        `[instantly-catalog] analytics account=${account.id}: api returned ${
+          Array.isArray(analyticsData) ? analyticsData.length : 'non-array(' + typeof analyticsData + ')'
+        }`,
+      );
       if (!Array.isArray(analyticsData) || analyticsData.length === 0) continue;
 
       const syncedAt = new Date().toISOString();
@@ -236,6 +241,12 @@ export async function syncInstantlyCampaignAnalytics(): Promise<{ rows: number }
       // Готовим batch: только кампании у которых есть campaign_id
       const batch = analyticsData
         .filter((a) => typeof a.campaign_id === 'string' && a.campaign_id)
+        // ЗАЩИТА ОТ ЗАТИРАНИЯ: пропускаем кампании без числового emails_sent_count.
+        // Instantly иногда отдаёт кампании с null-счётчиками (сырой/частичный
+        // ответ) — запись таких ЗАТЁРЛА БЫ готовую статистику в null. Не кладём
+        // их в батч → PostgREST не трогает эти строки, прошлые цифры сохраняются.
+        // 0 — валидное число (реальный ноль), проходит; null/undefined — нет.
+        .filter((a) => typeof a.emails_sent_count === 'number')
         .map((a) => ({
           id: a.campaign_id as string,
           instantly_account_id: account.id,
@@ -253,6 +264,9 @@ export async function syncInstantlyCampaignAnalytics(): Promise<{ rows: number }
           synced_at: syncedAt,
         }));
 
+      console.log(
+        `[instantly-catalog] analytics account=${account.id}: api=${analyticsData.length} withMetrics=${batch.length}`,
+      );
       if (batch.length === 0) continue;
 
       // Один bulk-upsert на аккаунт — щадящий для БД

@@ -5,6 +5,7 @@ import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAc
 import { getEmail, listEmails, replyToEmail } from '@/lib/instantly/client';
 import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
 import { validateReplyInput } from '@/lib/clientCampaignReplies/validate';
+import { textToReplyHtml } from '@/lib/clientCampaignReplies/bodyHtml';
 import { logAudit, logError } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
@@ -71,7 +72,12 @@ export async function POST(
         reply_to_uuid: emailId,
         eaccount,
         subject: buildReplySubject(original.subject),
-        body: { text: validation.body_text! },
+        // HTML с <br> сохраняет переносы строк (иначе письмо уходит «простынёй»);
+        // text — plain-text fallback.
+        body: {
+          html: textToReplyHtml(validation.body_text!),
+          text: validation.body_text!,
+        },
         ...(validation.cc ? { cc_address_email_list: validation.cc } : {}),
         ...(validation.bcc ? { bcc_address_email_list: validation.bcc } : {}),
       },
