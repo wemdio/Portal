@@ -101,6 +101,14 @@ export interface LiLeadList {
   description: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Список был импортирован через «Импорт CSV с инвайтами» — у его лидов
+   * заполнена колонка `invite_text` с персонализированным текстом инвайта.
+   * Кампания может использовать его вместо общего шаблона (тумблер
+   * `use_custom_invites`). UI редактора кампании показывает тумблер только
+   * для списков с этим флагом.
+   */
+  has_custom_invites: boolean;
   /** Virtual — filled by API. */
   leads_count?: number;
 }
@@ -121,6 +129,13 @@ export interface LiLead {
   status: LiLeadStatus;
   account_id: string | null;
   conversation_history: Array<{ role: string; content: string; ts?: string }>;
+  /**
+   * Персонализированный текст инвайта, заданный для этого конкретного лида
+   * при импорте «CSV с инвайтами». Используется runner'ом, когда у
+   * привязанной кампании включён `use_custom_invites`. NULL — нет своего
+   * текста, используем шаблон `step.message`.
+   */
+  invite_text: string | null;
   extra_data: Record<string, unknown>;
   last_activity: string | null;
   created_at: string;
@@ -148,6 +163,14 @@ export interface LiCampaign {
   use_ai_welcome: boolean;
   use_ai_followup: boolean;
   ai_model: string | null;
+  /**
+   * Если true — runner на шаге `invite` берёт `lead.invite_text` вместо
+   * шаблона `step.message`. AI-персонализация для инвайта при этом
+   * пропускается: персонализация уже сделана на стороне CSV. Если у лида
+   * нет своего invite_text — fallback на шаблон с обычным флоу. Тумблер в
+   * UI показывается только для списков с `has_custom_invites=true`.
+   */
+  use_custom_invites: boolean;
   status: LiCampaignStatus;
   created_at: string;
   updated_at: string;
