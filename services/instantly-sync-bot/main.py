@@ -533,12 +533,15 @@ async def sync_to_db(campaigns: list[dict]) -> dict[str, int]:
 
             after_upsert = await _db_count(conn)
 
-            deleted_result = await conn.execute(
-                "DELETE FROM public.instantly_campaign_catalog WHERE synced_at < $1",
-                sync_marker,
-            )
-            # asyncpg returns "DELETE N"
-            removed = int(deleted_result.split()[-1]) if deleted_result else 0
+            # ВАЖНО: НЕ удаляем «осиротевшие» строки здесь. Этот бот ОДНО-АККАУНТНЫЙ
+            # (INSTANTLY_API_KEY = только main), поэтому глобальный
+            # `DELETE WHERE synced_at < marker` сносил кампании ДРУГИХ аккаунтов
+            # (account-2 и т.д.) — каждый час, вместе с их аналитикой (которую
+            # пишет мультиаккаунтный TS-синк). main не страдал, т.к. его кампании
+            # были в выборке. Удаление осиротевших делает мультиаккаунтный TS-синк
+            # syncInstantlyCampaignCatalog (его дёргаем ниже через auto-match роут):
+            # он удаляет корректно, по всем аккаунтам, с учётом instantly_account_id.
+            removed = 0
 
             after = await _db_count(conn)
 
