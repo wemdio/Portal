@@ -261,24 +261,42 @@ export async function syncInstantlyCampaignAnalytics(): Promise<{ rows: number }
           unsubscribed_count: typeof a.unsubscribed_count === 'number' ? a.unsubscribed_count : null,
           leads_count: typeof a.leads_count === 'number' ? a.leads_count : null,
           analytics_synced_at: syncedAt,
-          synced_at: syncedAt,
+          // synced_at НЕ трогаем: это staleness-маркер метадата-синка
+          // (syncInstantlyCampaignCatalog) и база его DELETE. Если синк аналитики
+          // перезапишет его более старым значением, чем маркер метадата-синка,
+          // DELETE может снести строку. Аналитика метит свои строки своим
+          // analytics_synced_at; staleness каталога — забота метадата-синка.
         }));
 
-      console.log(
-        `[instantly-catalog] analytics account=${account.id}: api=${analyticsData.length} withMetrics=${batch.length}`,
-      );
       if (batch.length === 0) continue;
 
-      // Один bulk-upsert на аккаунт — щадящий для БД
-      const { error } = await supabaseAdmin
-        .from('instantly_campaign_catalog')
-        .upsert(batch, {
-          onConflict: 'id',
-          ignoreDuplicates: false,
-        });
+      // Bulk-upsert на аккаунт + ПРОВЕРКА персистентности с ретраем.
+      // На доп-аккаунтах (account-2) наблюдали: upsert рапортует успех (no error),
+      // но строки не обновляются — analytics_synced_at остаётся NULL (видимо гонка
+      // с параллельным метадата-синком на тех же строках). Делаем read-back по
+      // analytics_synced_at: если записалось меньше, чем в батче — повторяем.
+      let persisted = 0;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const { error } = await supabaseAdmin
+          .from('instantly_campaign_catalog')
+          .upsert(batch, { onConflict: 'id', ignoreDuplicates: false });
+        if (error) throw new Error(error.message);
 
-      if (error) throw new Error(error.message);
-      rows += batch.length;
+        const { count } = await supabaseAdmin
+          .from('instantly_campaign_catalog')
+          .select('id', { count: 'exact', head: true })
+          .eq('instantly_account_id', account.id)
+          .eq('analytics_synced_at', syncedAt);
+        persisted = count ?? 0;
+        if (persisted >= batch.length) break;
+        console.warn(
+          `[instantly-catalog] analytics account=${account.id}: persisted ${persisted}/${batch.length} (attempt ${attempt}) — retrying`,
+        );
+      }
+      console.log(
+        `[instantly-catalog] analytics account=${account.id}: api=${analyticsData.length} batch=${batch.length} persisted=${persisted}`,
+      );
+      rows += persisted;
     } catch (err) {
       console.error(`[instantly-catalog] analytics sync failed for account ${account.id}`, err);
     }
