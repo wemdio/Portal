@@ -573,6 +573,33 @@ async function projectContactsSyncScheduler(): Promise<void> {
   }
 }
 
+const ANALYTICS_SYNC_INTERVAL_MS = Number(
+  process.env.WORKER_ANALYTICS_SYNC_INTERVAL_MS ?? String(60 * 60 * 1000),
+);
+
+/**
+ * Periodic Instantly -> DB campaign-analytics sync (multi-account).
+ * Re-homed here from worker/index.ts: the worker-split architecture no longer
+ * runs the WORKER_KIND=all path that owned index.ts's periodicSyncLoop, so the
+ * hourly analytics sync had stopped running in prod entirely (the Campaigns
+ * page showed zeros for every account). Uses getCampaignAnalytics (NOT the
+ * /emails API), so it is safe to run next to the instantly-leads worker.
+ * Runs once on startup, then every ANALYTICS_SYNC_INTERVAL_MS.
+ */
+async function analyticsSyncScheduler(): Promise<void> {
+  while (!_shuttingDown) {
+    try {
+      log('info', 'analytics-sync: syncing Instantly campaign analytics to DB...');
+      const { rows } = await syncInstantlyCampaignAnalytics();
+      log('info', `analytics-sync: done, ${rows} campaign(s) updated`);
+    } catch (err) {
+      log('warn', 'analytics-sync: failed', err);
+    }
+    await sleep(ANALYTICS_SYNC_INTERVAL_MS);
+    if (_shuttingDown) break;
+  }
+}
+
 async function main(): Promise<void> {
   log('info', `Starting Outreach worker (pid=${process.pid})`);
   requireSupabaseAdmin(log);
@@ -590,6 +617,7 @@ async function main(): Promise<void> {
   void bugorRetryScheduler();
   void nashRetryScheduler();
   void projectContactsSyncScheduler();
+  void analyticsSyncScheduler();
 
   await pollLoop({
     log,

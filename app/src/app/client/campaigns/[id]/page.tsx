@@ -894,7 +894,7 @@ function CampaignDetailPageContent() {
               value={contactedCount}
             />
             <FunnelRow
-              label="Помечено лидами"
+              label="Контактов в кампании"
               value={leadsCount}
             />
             <FunnelRow
