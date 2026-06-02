@@ -59,36 +59,61 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
           }
           update.status = body.status as DialogStatus;
         }
-        // Сохраняем «до» только если меняем can_send — нужно для лога ниже и
-        // чтобы не писать audit-fields на noop (request с тем же значением).
+        // Пре-чек владельца. Cross-specialist read разрешён
+        // (`tg_outreach_dialogs_select_all using (true)` в миграции
+        // 20260320_0003), а UPDATE остался scoped по c.user_id = auth.uid().
+        // Без явной проверки тут пользователь, открывший чужую кампанию,
+        // получал от Supabase криптовый «JSON object requested, multiple
+        // (or no) rows returned» — это UPDATE затрагивал 0 строк под RLS,
+        // и .select().single() рапортовал об этом. Теперь сначала JOIN'имся
+        // с campaigns, понимаем владельца и при чужой кампании возвращаем
+        // понятный 403 — без невнятной ошибки supabase.
+        const { data: existing, error: existingErr } = await auth.supabase
+          .from('tg_outreach_dialogs')
+          .select('can_send, campaign_id, tg_user_id, tg_username, campaign:tg_outreach_campaigns(user_id)')
+          .eq('id', id)
+          .maybeSingle();
+        if (existingErr) return jsonError(existingErr.message, 500);
+        if (!existing) return jsonError('Диалог не найден', 404);
+        const existingRow = existing as {
+          can_send: boolean;
+          campaign_id: string;
+          tg_user_id: number | string;
+          tg_username: string | null;
+          campaign: { user_id: string } | { user_id: string }[] | null;
+        };
+        // supabase-js может вернуть JOIN как массив (зависит от FK-кардинальности),
+        // нормализуем к одному объекту.
+        const campaign = Array.isArray(existingRow.campaign)
+          ? existingRow.campaign[0]
+          : existingRow.campaign;
+        if (!campaign) return jsonError('У диалога не нашлась родительская кампания', 500);
+        if (campaign.user_id !== auth.user.id) {
+          return jsonError(
+            'Кампания принадлежит другому специалисту — только просмотр. Откройте свою кампанию, чтобы менять статусы и переключать отправку.',
+            403,
+          );
+        }
+
         let canSendBefore: boolean | null = null;
-        let canSendDialogMeta: { campaign_id: string; tg_user_id: number | string; tg_username: string | null } | null = null;
+        const canSendDialogMeta = {
+          campaign_id: existingRow.campaign_id,
+          tg_user_id: existingRow.tg_user_id,
+          tg_username: existingRow.tg_username,
+        };
         if (body.can_send !== undefined) {
           if (typeof body.can_send !== 'boolean') {
             return jsonError('can_send должен быть boolean', 400);
           }
-          // Считываем текущее значение, чтобы (а) не плодить лишний audit-row
-          // при тыкании одной и той же галки, (б) понять что писать в лог.
-          const { data: existing, error: existingErr } = await auth.supabase
-            .from('tg_outreach_dialogs')
-            .select('can_send, campaign_id, tg_user_id, tg_username')
-            .eq('id', id)
-            .maybeSingle();
-          if (existingErr || !existing) return jsonError('Диалог не найден', 404);
-          canSendBefore = (existing as { can_send: boolean }).can_send;
-          canSendDialogMeta = {
-            campaign_id: (existing as { campaign_id: string }).campaign_id,
-            tg_user_id: (existing as { tg_user_id: number | string }).tg_user_id,
-            tg_username: (existing as { tg_username: string | null }).tg_username,
-          };
+          canSendBefore = existingRow.can_send;
           if (canSendBefore !== body.can_send) {
             update.can_send = body.can_send;
             update.can_send_changed_at = new Date().toISOString();
             update.can_send_changed_by = auth.user.id;
             update.can_send_changed_reason = 'manual';
           }
-          // Если значение совпадает — просто не добавляем can_send в update
-          // (status может всё равно прийти в этом же запросе).
+          // noop (request с тем же значением) — не добавляем can_send в
+          // update. status может всё равно прийти в этом же запросе.
         }
         if (Object.keys(update).length === 0) {
           return jsonError('Передайте status и/или can_send', 400);
@@ -108,7 +133,7 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
         // (на самом диалоге хранится только последнее изменение).
         // Fire-and-forget: если INSERT упадёт (RLS, timeout), пользователь
         // всё равно получит обновлённый диалог.
-        if (canSendDialogMeta && body.can_send !== undefined && canSendBefore !== body.can_send) {
+        if (body.can_send !== undefined && canSendBefore !== body.can_send) {
           const label = canSendDialogMeta.tg_username
             ? `@${canSendDialogMeta.tg_username}`
             : `id ${canSendDialogMeta.tg_user_id}`;
