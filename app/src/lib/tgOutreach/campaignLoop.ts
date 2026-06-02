@@ -552,9 +552,25 @@ async function disableDialogIfUnreachable(
     return reasonCode;
   }
 
+  // Маппинг Telegram-кода на короткую категорию для audit-поля
+  // can_send_changed_reason. UI решает, как это рендерить (например,
+  // «Telegram: пользователь удалил аккаунт» вместо `tg_user_deactivated`).
+  const audit_reason =
+    reasonCode === 'INPUT_USER_DEACTIVATED' ? 'tg_user_deactivated' :
+    reasonCode === 'PEER_ID_INVALID' ? 'tg_peer_invalid' :
+    reasonCode === 'USER_BANNED_IN_CHANNEL' ? 'tg_user_banned_in_channel' :
+    reasonCode === 'USER_IS_BLOCKED' ? 'tg_user_blocked_bot' :
+    'tg_unreachable';
+
   const { error: csErr } = await ctx.db
     .from('tg_outreach_dialogs')
-    .update({ can_send: false })
+    .update({
+      can_send: false,
+      can_send_changed_at: new Date().toISOString(),
+      // changed_by = NULL: переключение сделал воркер, не человек.
+      can_send_changed_by: null,
+      can_send_changed_reason: audit_reason,
+    })
     .eq('campaign_id', ctx.campaignId)
     .eq('account_id', ctx.accountId)
     .eq('tg_user_id', ctx.tgUserId);
