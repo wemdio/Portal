@@ -160,6 +160,26 @@ export interface OutreachDialog {
   tg_username: string | null;
   tg_is_bot?: boolean;
   can_send?: boolean;
+  /**
+   * Audit-поля смены can_send. Заполняются и API-эндпоинтом ручного
+   * переключения, и blockedUsers helpers, и воркером (`disableDialogIfUnreachable`).
+   * NULL до первой смены — диалог унаследовал дефолт при создании.
+   */
+  can_send_changed_at?: string | null;
+  /** UUID пользователя портала. NULL = переключил воркер автоматически. */
+  can_send_changed_by?: string | null;
+  /**
+   * Короткий код источника последнего изменения can_send:
+   *   - 'manual'                 — оператор кликнул тумблер в UI;
+   *   - 'blocklist_add'          — добавили в ЧС (addBlockedUser);
+   *   - 'blocklist_remove'       — убрали из ЧС (removeBlockedUser);
+   *   - 'tg_user_deactivated'    — Telegram вернул INPUT_USER_DEACTIVATED;
+   *   - 'tg_peer_invalid'        — PEER_ID_INVALID;
+   *   - 'tg_user_blocked_bot'    — USER_IS_BLOCKED;
+   *   - 'tg_user_banned_in_channel' — USER_BANNED_IN_CHANNEL;
+   *   - 'tg_unreachable'         — fallback для прочих кодов недоступности.
+   */
+  can_send_changed_reason?: string | null;
   messages: DialogMessage[];
   status: DialogStatus;
   last_message_at: string | null;
