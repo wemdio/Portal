@@ -487,9 +487,22 @@ async function processInviteStep(
   }
 
   let message: string | null = step.message ?? null;
+  // Персонализированный инвайт из CSV. Когда у кампании выставлен флаг
+  // `use_custom_invites` и у конкретного лида есть свой `invite_text` (импорт
+  // через /leads/import-with-invites), берём его как есть и пропускаем AI-
+  // персонализацию: инвайт уже подготовлен индивидуально на стороне CSV.
+  // Шаблоны `{{name}}` всё равно прогоняем — менеджер мог их использовать.
+  // Fallback на `step.message` сохраняем: если лид без своего текста попал
+  // в кампанию с включённым тумблером (например, лист подмешали из другого
+  // источника) — отправляем шаблон, а не пустоту.
+  const usedCustomInvite = Boolean(campaign.use_custom_invites && lead.invite_text);
+  if (usedCustomInvite) {
+    message = lead.invite_text!;
+    log('info', 'Использую персонализированный инвайт из CSV-колонки (AI-персонализация пропущена)', lead.name, stepIdx);
+  }
   if (message) {
     message = parseMessageTemplate(message, leadToInfo(lead));
-    if (campaign.use_ai && aiConfig.apiKey) {
+    if (!usedCustomInvite && campaign.use_ai && aiConfig.apiKey) {
       log('info', 'Прошу GPT персонализировать инвайт...', lead.name, stepIdx);
       const aiStart = Date.now();
       try {
