@@ -108,7 +108,15 @@ describe('tgOutreach blockedUsers helpers', () => {
 
     const bulkUpdate = calls.find(c => c.table === 'tg_outreach_dialogs' && c.op === 'update');
     expect(bulkUpdate).toBeDefined();
-    expect(bulkUpdate?.payload).toEqual({ can_send: false });
+    // Audit: помимо самого can_send=false проставляем changed_at/by/reason —
+    // без них невозможно потом понять, можно ли безопасно вернуть can_send=true
+    // через removeBlockedUser (см. ниже).
+    expect(bulkUpdate?.payload).toMatchObject({
+      can_send: false,
+      can_send_changed_by: 'user-1',
+      can_send_changed_reason: 'blocklist_add',
+    });
+    expect((bulkUpdate?.payload as Record<string, unknown>).can_send_changed_at).toEqual(expect.any(String));
     expect(bulkUpdate?.filter).toMatchObject({ tg_user_id: 77700123 });
   });
 
@@ -138,6 +146,40 @@ describe('tgOutreach blockedUsers helpers', () => {
     const del = calls.find(c => c.table === 'tg_outreach_blocked_users' && c.op === 'delete');
     expect(del).toBeDefined();
     expect(del?.filter).toEqual({ user_id: 'user-1', tg_user_id: 77700123 });
+  });
+
+  it('removeBlockedUser ALSO restores can_send=true on dialogs that were disabled by THIS blocklist', async () => {
+    // Симметрия с addBlockedUser. Без неё «отжать кнопку» в ЧС не возвращало
+    // диалоги в писабельное состояние — баг был, чинится этим тестом.
+    const { db, calls } = makeMockDb();
+
+    await removeBlockedUser(db as never, 'user-1', 77700123);
+
+    const restore = calls.find(c => c.table === 'tg_outreach_dialogs' && c.op === 'update');
+    expect(restore).toBeDefined();
+    expect(restore?.payload).toMatchObject({
+      can_send: true,
+      can_send_changed_by: 'user-1',
+      can_send_changed_reason: 'blocklist_remove',
+    });
+    // Главное: восстанавливаем ТОЛЬКО те диалоги, которые этот же блоклист и
+    // отключил. Если diaлог поставил «Не писать» воркер (USER_DEACTIVATED) —
+    // unblocklisting не должен его трогать, потому что аккаунт всё ещё мёртв.
+    expect(restore?.filter).toMatchObject({
+      tg_user_id: 77700123,
+      can_send_changed_reason: 'blocklist_add',
+    });
+  });
+
+  it('removeBlockedUser still succeeds if dialog UPDATE fails (delete already happened)', async () => {
+    // Restore — best-effort: запись из ЧС уже удалена, и пользователь видит
+    // «успех». Если RLS/таймаут не дали обновить диалоги, мы логируем варнинг
+    // в console, но не валим основной поток (иначе пользователь жмёт «убрать
+    // из ЧС» ещё раз и получает ошибку, хотя запись из ЧС уже ушла).
+    const { db } = makeMockDb({
+      updateResult: { data: null, error: { message: 'rls denied' } },
+    });
+    await expect(removeBlockedUser(db as never, 'user-1', 77700123)).resolves.toBeUndefined();
   });
 
   it('listBlockedUsers returns array of full rows for user_id', async () => {

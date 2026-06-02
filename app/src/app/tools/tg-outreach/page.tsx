@@ -52,6 +52,26 @@ function formatDate(iso: string) {
   });
 }
 
+/**
+ * Маппинг короткого кода `can_send_changed_reason` в человекочитаемую
+ * подпись для UI. Коды одобрены схемой (см. migration / blockedUsers /
+ * disableDialogIfUnreachable); если приходит неизвестный код — отдаём
+ * сам код как есть, чтобы оператор хотя бы видел сигнал, а не пустоту.
+ */
+function describeCanSendReason(reason: string | null | undefined): string {
+  switch (reason) {
+    case 'manual': return 'вручную';
+    case 'blocklist_add': return 'добавлен в чёрный список';
+    case 'blocklist_remove': return 'удалён из чёрного списка';
+    case 'tg_user_deactivated': return 'Telegram: пользователь удалил аккаунт';
+    case 'tg_peer_invalid': return 'Telegram: невалидный peer';
+    case 'tg_user_blocked_bot': return 'Telegram: пользователь заблокировал бота';
+    case 'tg_user_banned_in_channel': return 'Telegram: пользователь забанен в канале';
+    case 'tg_unreachable': return 'Telegram: пользователь недоступен';
+    default: return reason ?? '';
+  }
+}
+
 const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   stopped: { label: 'Остановлена', cls: 'bg-gray-100 text-gray-600' },
   running: { label: 'Запущена', cls: 'bg-emerald-100 text-emerald-700' },
@@ -869,7 +889,32 @@ function DialogsTab({ campaignId }: {
                       ) : (
                         <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-600">Пользователь</span>
                       )}
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${d.can_send === false ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => {
+                          // Бейдж лежит внутри кнопки-аккордеона (раскрытие
+                          // диалога). Без stopPropagation клик одновременно
+                          // переключал can_send и раскрывал/сворачивал — оператор
+                          // видит «дёрнулось», а раскрыт диалог или нет —
+                          // непонятно.
+                          e.stopPropagation();
+                          void updateDialog(d.id, { can_send: d.can_send === false });
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            void updateDialog(d.id, { can_send: d.can_send === false });
+                          }
+                        }}
+                        title={
+                          d.can_send === false
+                            ? 'Сейчас отправка отключена — клик включит «Можно писать».'
+                            : 'Сейчас отправка разрешена — клик переключит в «Не писать».'
+                        }
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-medium cursor-pointer transition hover:opacity-80 ${d.can_send === false ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}
+                      >
                         {d.can_send === false ? 'Не писать' : 'Можно писать'}
                       </span>
                       <span className="text-[10px] text-gray-400">{d.messages.length} сообщ.</span>
@@ -898,6 +943,46 @@ function DialogsTab({ campaignId }: {
                       </button>
                       <button type="button" onClick={() => void deleteDialog(d.id)} className="ml-auto p-2 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"><Trash2 className="h-3.5 w-3.5" /></button>
                     </div>
+                    {/* Аудит can_send: кто/когда/почему последний раз менял.
+                        Показываем, только если запись о смене есть. До первого
+                        переключения поля NULL — диалог унаследовал дефолт при
+                        создании, и подпись была бы шумом. Также рендерим
+                        крупную кнопку «Разрешить отправку», когда диалог в
+                        статусе «Не писать» — чтобы оператор не искал
+                        кликабельный бейдж в шапке. */}
+                    {(d.can_send_changed_at || d.can_send === false) && (
+                      <div className={`flex items-center gap-2 flex-wrap rounded-lg px-3 py-2 text-[11px] ${d.can_send === false ? 'bg-rose-50 text-rose-800 border border-rose-100' : 'bg-emerald-50 text-emerald-800 border border-emerald-100'}`}>
+                        <span className="font-medium">
+                          Отправка: {d.can_send === false ? 'отключена' : 'разрешена'}
+                        </span>
+                        {d.can_send_changed_at && (
+                          <>
+                            <span className="text-gray-400">·</span>
+                            <span>
+                              {d.can_send_changed_by ? 'переключил оператор' : 'переключил воркер'}
+                            </span>
+                            <span className="text-gray-400">·</span>
+                            <span>{formatDate(d.can_send_changed_at)}</span>
+                            {d.can_send_changed_reason && (
+                              <>
+                                <span className="text-gray-400">·</span>
+                                <span>{describeCanSendReason(d.can_send_changed_reason)}</span>
+                              </>
+                            )}
+                          </>
+                        )}
+                        {d.can_send === false && (
+                          <button
+                            type="button"
+                            onClick={() => void updateDialog(d.id, { can_send: true })}
+                            className="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-600 px-3 py-1 text-[10px] font-medium text-white hover:bg-emerald-700 transition cursor-pointer"
+                            title="Разрешить отправку в этот диалог. История изменений сохранится в логах кампании."
+                          >
+                            Разрешить отправку
+                          </button>
+                        )}
+                      </div>
+                    )}
                     <div className="max-h-72 overflow-auto space-y-1.5 rounded-lg bg-gray-50 p-2">
                       {d.messages.map((m, i) => {
                         const senderName = m.role === 'user'
