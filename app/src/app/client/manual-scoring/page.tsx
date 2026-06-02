@@ -32,6 +32,21 @@ interface RunRow {
   expires_at: string;
 }
 
+interface LargeJob {
+  id: string;
+  source_filename: string | null;
+  status: 'uploading' | 'parsing' | 'scoring' | 'completed' | 'failed' | 'cancelled';
+  total_domains: number;
+  parsed_domains: number;
+  scored_domains: number;
+  active_domains: number;
+  cached_domains: number;
+  junk_domains: number;
+  error_message: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
 const BUCKETS = [
   { id: 'storage', label: 'До 1 000 (не пишем)', countKey: 'bucket_storage_count' as const, accent: 'gray' },
   { id: 'medium',  label: '1 001 – 15 000',     countKey: 'bucket_medium_count' as const,  accent: 'blue' },
@@ -47,6 +62,10 @@ export default function ManualScoringPage() {
   const [textInput, setTextInput] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const largeFileRef = useRef<HTMLInputElement>(null);
+  const [largeJobs, setLargeJobs] = useState<LargeJob[]>([]);
+  const [largeBusy, setLargeBusy] = useState(false);
+  const [largeError, setLargeError] = useState<string | null>(null);
 
   const fetchRuns = useCallback(async (silent = false) => {
     if (!silent) setError(null);
@@ -75,6 +94,22 @@ export default function ManualScoringPage() {
     }
   }, []);
 
+  const fetchLargeJobs = useCallback(async (silent = false) => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) return;
+      const res = await fetch('/api/client/manual-scoring/large', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { jobs: LargeJob[] };
+      setLargeJobs(data.jobs);
+    } catch {
+      if (!silent) setLargeError('Не удалось загрузить задачи');
+    }
+  }, []);
+
   // Initial + auto-refresh while any run is processing/pending
   useEffect(() => {
     void fetchRuns();
@@ -86,6 +121,19 @@ export default function ManualScoringPage() {
     const interval = setInterval(() => void fetchRuns(true), 5_000);
     return () => clearInterval(interval);
   }, [runs, fetchRuns]);
+
+  useEffect(() => {
+    void fetchLargeJobs();
+  }, [fetchLargeJobs]);
+
+  useEffect(() => {
+    const hasActive = largeJobs.some(
+      (j) => j.status === 'parsing' || j.status === 'scoring' || j.status === 'uploading',
+    );
+    if (!hasActive) return;
+    const interval = setInterval(() => void fetchLargeJobs(true), 5_000);
+    return () => clearInterval(interval);
+  }, [largeJobs, fetchLargeJobs]);
 
   async function submitUpload(file: File | null, text: string | null) {
     setError(null);
@@ -139,6 +187,61 @@ export default function ManualScoringPage() {
       setError(e instanceof Error ? e.message : 'Ошибка сети');
     } finally {
       setUploadBusy(false);
+    }
+  }
+
+  // Большой файл: presign → прямой PUT в S3 → создание джоба (фоновый скоринг).
+  async function submitLargeFile(file: File | null) {
+    if (!file) return;
+    setLargeError(null);
+    setLargeBusy(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) {
+        setLargeError('Не авторизован');
+        return;
+      }
+      const ct = file.type || 'text/plain';
+      const presignRes = await fetch('/api/client/manual-scoring/large/presign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ filename: file.name, contentType: ct }),
+      });
+      if (!presignRes.ok) {
+        setLargeError('Не удалось получить ссылку загрузки');
+        return;
+      }
+      const { uploadUrl, key, contentType } = (await presignRes.json()) as {
+        uploadUrl: string;
+        key: string;
+        contentType: string;
+      };
+      const putRes = await fetch(uploadUrl, {
+        method: 'PUT',
+        body: file,
+        headers: { 'Content-Type': contentType },
+      });
+      if (!putRes.ok) {
+        setLargeError('Загрузка в хранилище не удалась');
+        return;
+      }
+      const createRes = await fetch('/api/client/manual-scoring/large', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ s3_key: key, filename: file.name }),
+      });
+      if (!createRes.ok) {
+        const b = await createRes.text().catch(() => '');
+        setLargeError(b || `Ошибка ${createRes.status}`);
+        return;
+      }
+      if (largeFileRef.current) largeFileRef.current.value = '';
+      await fetchLargeJobs();
+    } catch (e) {
+      setLargeError(e instanceof Error ? e.message : 'Ошибка сети');
+    } finally {
+      setLargeBusy(false);
     }
   }
 
@@ -262,6 +365,49 @@ export default function ManualScoringPage() {
         </div>
       </section>
 
+      {/* Large file → background scoring into reserve (drips to campaigns via daily dobor) */}
+      <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm space-y-4">
+        <h2 className="text-base font-semibold text-gray-900">Большой файл (миллионы доменов)</h2>
+        <p className="text-sm text-gray-600">
+          Для очень больших файлов (сотни тысяч–миллионы доменов). Файл загружается
+          напрямую в хранилище и скорится в фоне в общий резерв — это занимает время.
+          Активные домены затем автоматически попадают в кампании через ежедневный
+          добор, в темпе вашего дневного лимита. CSV здесь не выдаётся — результат
+          уходит в работу сам. Можно закрыть страницу: процесс идёт в фоне и
+          переживает перезапуски.
+        </p>
+        <div className="flex items-center gap-3">
+          <input
+            ref={largeFileRef}
+            type="file"
+            accept=".csv,.txt,text/csv,text/plain"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void submitLargeFile(file);
+            }}
+            disabled={largeBusy}
+          />
+          <button
+            type="button"
+            onClick={() => largeFileRef.current?.click()}
+            disabled={largeBusy}
+            className="inline-flex h-9 items-center justify-center rounded-lg border border-gray-300 px-4 text-sm font-medium text-gray-800 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {largeBusy ? '…загружается' : 'Выбрать большой файл'}
+          </button>
+          {largeError && <span className="text-sm text-red-600">{largeError}</span>}
+        </div>
+
+        {largeJobs.length > 0 && (
+          <div className="space-y-2 pt-2">
+            {largeJobs.map((job) => (
+              <LargeJobCard key={job.id} job={job} />
+            ))}
+          </div>
+        )}
+      </section>
+
       {/* History */}
       <section>
         <h2 className="text-base font-semibold text-gray-900 mb-3">
@@ -380,5 +526,64 @@ function StatusBadge({ status }: { status: RunRow['status'] }) {
     <span className={`shrink-0 inline-block text-[10px] font-medium px-2 py-0.5 rounded-full ${c.cls}`}>
       {c.label}
     </span>
+  );
+}
+
+function LargeJobCard({ job }: { job: LargeJob }) {
+  const scoringPct =
+    job.total_domains > 0
+      ? Math.min(100, Math.round((job.scored_domains / job.total_domains) * 100))
+      : 0;
+  const statusCfg: Record<string, { label: string; cls: string }> = {
+    uploading: { label: 'Загрузка', cls: 'bg-gray-100 text-gray-700' },
+    parsing: { label: 'Парсинг файла', cls: 'bg-amber-100 text-amber-700' },
+    scoring: { label: 'Скоринг', cls: 'bg-blue-100 text-blue-700' },
+    completed: { label: 'Готово', cls: 'bg-green-100 text-green-700' },
+    failed: { label: 'Ошибка', cls: 'bg-red-100 text-red-700' },
+    cancelled: { label: 'Отменён', cls: 'bg-gray-100 text-gray-500' },
+  };
+  const c = statusCfg[job.status] ?? statusCfg.parsing;
+  return (
+    <article className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+      <header className="flex items-baseline justify-between gap-3">
+        <h4 className="text-sm font-medium text-gray-900 truncate">
+          {job.source_filename || 'Файл'}
+        </h4>
+        <span className={`shrink-0 inline-block text-[10px] font-medium px-2 py-0.5 rounded-full ${c.cls}`}>
+          {c.label}
+        </span>
+      </header>
+      <p className="text-xs text-gray-500 mt-0.5">
+        {new Date(job.created_at).toLocaleString('ru-RU')}
+      </p>
+
+      {job.status === 'parsing' && (
+        <p className="mt-2 text-xs text-gray-600">
+          Прочитано строк: {job.parsed_domains.toLocaleString('ru-RU')}
+          {job.junk_domains > 0 &&
+            ` · отброшено мусора: ${job.junk_domains.toLocaleString('ru-RU')}`}
+        </p>
+      )}
+
+      {(job.status === 'scoring' || job.status === 'completed') && (
+        <div className="mt-2">
+          <div className="flex items-baseline justify-between text-xs text-gray-600 mb-1">
+            <span>
+              Отскорено {job.scored_domains.toLocaleString('ru-RU')} /{' '}
+              {job.total_domains.toLocaleString('ru-RU')} · активных{' '}
+              {job.active_domains.toLocaleString('ru-RU')}
+            </span>
+            <span>{scoringPct}%</span>
+          </div>
+          <div className="h-2 rounded-full bg-gray-200 overflow-hidden">
+            <div className="h-full bg-blue-500 transition-all" style={{ width: `${scoringPct}%` }} />
+          </div>
+        </div>
+      )}
+
+      {job.status === 'failed' && job.error_message && (
+        <p className="mt-2 text-xs text-red-700">{job.error_message}</p>
+      )}
+    </article>
   );
 }
