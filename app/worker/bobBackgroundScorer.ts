@@ -25,6 +25,7 @@
 
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 import { runBobScoringTick, loadScorerState } from '@/lib/jobs/bobScoringRunner';
+import { processNextLargeScoreWork } from '@/lib/jobs/largeScoreEngine';
 
 const WORKER_ID = 'bob-bg-scorer';
 
@@ -72,9 +73,25 @@ async function main(): Promise<void> {
         continue;
       }
 
+      const concurrency = state.concurrency ?? 5;
+
+      // 1. Большие пользовательские файлы (large_score_jobs) — ПРИОРИТЕТ.
+      //    Работают даже если фоновый BoB-филлер выключен (enabled=false):
+      //    это явные джобы клиента, а не фоновое наполнение базы.
+      let didLargeWork = false;
+      try {
+        didLargeWork = await processNextLargeScoreWork(endpoint, concurrency, (m) => log('info', m));
+      } catch (err) {
+        log('error', 'large-score work error', err);
+      }
+      if (didLargeWork) {
+        await sleep(state.sleep_between_batches_ms);
+        continue;
+      }
+
+      // 2. Фоновый BoB-филлер базы — под флагом enabled.
       if (!state.enabled) {
         // UI кнопкой выключили — спим 30s, потом проверяем снова.
-        // Не паникуем, не логируем каждый раз (заспамит лог).
         await sleep(30_000);
         continue;
       }
