@@ -62,6 +62,7 @@ export async function POST(req: NextRequest) {
         use_ai_welcome: !!body.use_ai_welcome,
         use_ai_followup: body.use_ai_followup !== false,
         ai_model: body.ai_model || null,
+        use_custom_invites: !!body.use_custom_invites,
         status: 'draft',
       })
       .select()
