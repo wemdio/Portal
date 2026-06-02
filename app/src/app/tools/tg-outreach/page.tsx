@@ -2,6 +2,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
+import { supabase } from '@/lib/supabaseClient';
 import {
   MessageSquareMore,
   Plus,
@@ -721,8 +722,15 @@ function LogsTab({ campaignId }: { campaignId: string }) {
 }
 
 /* =================== DIALOGS TAB =================== */
-function DialogsTab({ campaignId }: {
+function DialogsTab({ campaignId, isOwn }: {
   campaignId: string;
+  // false = кампания принадлежит другому специалисту. Read-only: переключение
+  // can_send / смена статуса / удаление / отправка сообщения упрётся в RLS
+  // (миграция 20260320_0003 расширяет SELECT до всех, но не UPDATE/DELETE/INSERT).
+  // Без флага UI пускал клики, бэк возвращал криптовое
+  // «JSON object requested, multiple (or no) rows returned» от .single() на
+  // нулевом результате UPDATE — пользователь не понимал, почему «не работает».
+  isOwn: boolean;
 }) {
   const [dialogs, setDialogs] = useState<OutreachDialog[]>([]);
   const [total, setTotal] = useState(0);
@@ -770,19 +778,39 @@ function DialogsTab({ campaignId }: {
   useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); }); }, [fetchDialogs, fetchAccounts]);
 
   const updateDialog = async (id: string, patch: { status?: string; can_send?: boolean }) => {
-    await authFetch(`${API_BASE}/dialogs/${id}`, {
+    if (!isOwn) {
+      // Защита от случая «кнопка disabled не сработала» (например, hotkey).
+      // На бэке тот же чек есть (см. PUT /dialogs/[id]) — это просто чтобы UI
+      // не отправлял заведомо неуспешный запрос.
+      alert('Эту кампанию запустил другой специалист — действия недоступны, только просмотр.');
+      return;
+    }
+    const res = await authFetch(`${API_BASE}/dialogs/${id}`, {
       method: 'PUT',
       body: JSON.stringify(patch),
     });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { error?: string } | null;
+      alert(body?.error ?? `Не удалось обновить диалог (HTTP ${res.status})`);
+      return;
+    }
     void fetchDialogs();
   };
 
   const deleteDialog = async (id: string) => {
+    if (!isOwn) {
+      alert('Эту кампанию запустил другой специалист — действия недоступны, только просмотр.');
+      return;
+    }
     await authFetch(`${API_BASE}/dialogs/${id}`, { method: 'DELETE' });
     void fetchDialogs();
   };
 
   const addToBlacklist = async (dialog: OutreachDialog) => {
+    if (!isOwn) {
+      alert('Эту кампанию запустил другой специалист — действия недоступны, только просмотр.');
+      return;
+    }
     const username = (dialog.tg_username ?? '').toLowerCase().replace(/^@/, '');
     // Глобальный блок-лист по tg_user_id: запись применяется ко всем кампаниям и
     // аккаунтам пользователя; API сам выставит can_send=false на всех существующих
@@ -798,6 +826,10 @@ function DialogsTab({ campaignId }: {
   };
 
   const sendMessage = async (id: string) => {
+    if (!isOwn) {
+      alert('Эту кампанию запустил другой специалист — отправка сообщений недоступна.');
+      return;
+    }
     if (!sendText.trim()) return;
     setSending(true);
     await authFetch(`${API_BASE}/dialogs/${id}/send`, {
@@ -825,6 +857,12 @@ function DialogsTab({ campaignId }: {
 
   return (
     <div className="space-y-4">
+      {!isOwn && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <span className="font-medium">👁 Только просмотр.</span>
+          <span>Кампанию запустил другой специалист — менять статусы, переключать отправку и отправлять сообщения нельзя.</span>
+        </div>
+      )}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs text-gray-500">Статус:</span>
@@ -890,9 +928,9 @@ function DialogsTab({ campaignId }: {
                         <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-600">Пользователь</span>
                       )}
                       <span
-                        role="button"
-                        tabIndex={0}
-                        onClick={(e) => {
+                        role={isOwn ? 'button' : undefined}
+                        tabIndex={isOwn ? 0 : undefined}
+                        onClick={isOwn ? (e) => {
                           // Бейдж лежит внутри кнопки-аккордеона (раскрытие
                           // диалога). Без stopPropagation клик одновременно
                           // переключал can_send и раскрывал/сворачивал — оператор
@@ -900,20 +938,22 @@ function DialogsTab({ campaignId }: {
                           // непонятно.
                           e.stopPropagation();
                           void updateDialog(d.id, { can_send: d.can_send === false });
-                        }}
-                        onKeyDown={(e) => {
+                        } : undefined}
+                        onKeyDown={isOwn ? (e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault();
                             e.stopPropagation();
                             void updateDialog(d.id, { can_send: d.can_send === false });
                           }
-                        }}
+                        } : undefined}
                         title={
-                          d.can_send === false
-                            ? 'Сейчас отправка отключена — клик включит «Можно писать».'
-                            : 'Сейчас отправка разрешена — клик переключит в «Не писать».'
+                          !isOwn
+                            ? 'Чужая кампания — переключение недоступно.'
+                            : d.can_send === false
+                              ? 'Сейчас отправка отключена — клик включит «Можно писать».'
+                              : 'Сейчас отправка разрешена — клик переключит в «Не писать».'
                         }
-                        className={`rounded-full px-2 py-0.5 text-[10px] font-medium cursor-pointer transition hover:opacity-80 ${d.can_send === false ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition ${isOwn ? 'cursor-pointer hover:opacity-80' : 'cursor-default opacity-80'} ${d.can_send === false ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}
                       >
                         {d.can_send === false ? 'Не писать' : 'Можно писать'}
                       </span>
@@ -928,20 +968,28 @@ function DialogsTab({ campaignId }: {
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-gray-500">Статус:</span>
                       {['none', 'lead', 'not_lead', 'later'].map(s => (
-                        <button key={s} type="button" onClick={() => void updateDialog(d.id, { status: s })}
-                          className={`rounded-full px-3 py-1 text-[10px] font-medium transition border cursor-pointer ${d.status === s ? 'bg-indigo-100 border-indigo-300 text-indigo-700' : 'border-gray-200 text-gray-600 hover:border-indigo-200 hover:bg-indigo-50'}`}>
+                        <button key={s} type="button" disabled={!isOwn}
+                          onClick={() => void updateDialog(d.id, { status: s })}
+                          title={!isOwn ? 'Чужая кампания — смена статуса недоступна.' : undefined}
+                          className={`rounded-full px-3 py-1 text-[10px] font-medium transition border ${!isOwn ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'} ${d.status === s ? 'bg-indigo-100 border-indigo-300 text-indigo-700' : 'border-gray-200 text-gray-600 hover:border-indigo-200 hover:bg-indigo-50'}`}>
                           {DIALOG_STATUS_LABELS[s]?.label}
                         </button>
                       ))}
                       <button
                         type="button"
+                        disabled={!isOwn}
                         onClick={() => void addToBlacklist(d)}
-                        className="ml-2 inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-100 hover:border-rose-300 transition cursor-pointer"
+                        title={!isOwn ? 'Чужая кампания — добавление в чёрный список недоступно.' : undefined}
+                        className={`ml-2 inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-100 hover:border-rose-300 transition ${!isOwn ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
                       >
                         <Ban className="h-3 w-3" />
                         В черный список
                       </button>
-                      <button type="button" onClick={() => void deleteDialog(d.id)} className="ml-auto p-2 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"><Trash2 className="h-3.5 w-3.5" /></button>
+                      <button type="button" disabled={!isOwn} onClick={() => void deleteDialog(d.id)}
+                        title={!isOwn ? 'Чужая кампания — удаление недоступно.' : undefined}
+                        className={`ml-auto p-2 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition ${!isOwn ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
                     </div>
                     {/* Аудит can_send: кто/когда/почему последний раз менял.
                         Показываем, только если запись о смене есть. До первого
@@ -974,9 +1022,10 @@ function DialogsTab({ campaignId }: {
                         {d.can_send === false && (
                           <button
                             type="button"
+                            disabled={!isOwn}
                             onClick={() => void updateDialog(d.id, { can_send: true })}
-                            className="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-600 px-3 py-1 text-[10px] font-medium text-white hover:bg-emerald-700 transition cursor-pointer"
-                            title="Разрешить отправку в этот диалог. История изменений сохранится в логах кампании."
+                            className={`ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-600 px-3 py-1 text-[10px] font-medium text-white hover:bg-emerald-700 transition ${!isOwn ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
+                            title={!isOwn ? 'Чужая кампания — изменение недоступно.' : 'Разрешить отправку в этот диалог. История изменений сохранится в логах кампании.'}
                           >
                             Разрешить отправку
                           </button>
@@ -996,9 +1045,13 @@ function DialogsTab({ campaignId }: {
                       })}
                     </div>
                     <div className="flex gap-2">
-                      <input value={sendText} onChange={e => setSendText(e.target.value)} placeholder="Написать сообщение..."
-                        className="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs outline-none focus:border-indigo-400" onKeyDown={e => { if (e.key === 'Enter') void sendMessage(d.id); }} />
-                      <button type="button" onClick={() => void sendMessage(d.id)} disabled={sending || d.can_send === false}
+                      <input value={sendText} onChange={e => setSendText(e.target.value)}
+                        placeholder={!isOwn ? 'Чужая кампания — отправка недоступна' : 'Написать сообщение...'}
+                        disabled={!isOwn}
+                        className="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs outline-none focus:border-indigo-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                        onKeyDown={e => { if (isOwn && e.key === 'Enter') void sendMessage(d.id); }} />
+                      <button type="button" onClick={() => void sendMessage(d.id)} disabled={!isOwn || sending || d.can_send === false}
+                        title={!isOwn ? 'Чужая кампания — отправка недоступна.' : undefined}
                         className="rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
                         <Send className="h-3.5 w-3.5" />
                       </button>
@@ -1798,8 +1851,9 @@ const TABS = [
   { id: 'processed', label: 'Обработанные', icon: UserCheck },
 ] as const;
 
-function CampaignView({ campaign, onUpdate, onDelete }: {
+function CampaignView({ campaign, isOwn, onUpdate, onDelete }: {
   campaign: OutreachCampaign;
+  isOwn: boolean;
   onUpdate: () => void;
   onDelete: (id: string) => void;
 }) {
@@ -1996,7 +2050,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
         {tab === 'accounts' && <CampaignAccountsTab campaignId={campaign.id} />}
         {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
-        {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
+        {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} isOwn={isOwn} />}
         {tab === 'processed' && <ProcessedTab campaignId={campaign.id} />}
       </div>
     </div>
@@ -2057,6 +2111,25 @@ function CampaignsSection() {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const [creating, setCreating] = useState(false);
+  // Текущий портальный юзер — нужен, чтобы понять, своя ли это кампания.
+  // TG-аутрич с миграции 20260320_0003 даёт всем читать любые кампании, но
+  // писать (в том числе менять can_send/status диалогов) можно только в своих.
+  // Без сравнения с currentUserId UI не отличает «своё» от «чужое», и кнопки
+  // молча падают с криптовой ошибкой supabase про 0 строк после UPDATE.
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!cancelled) setCurrentUserId(session?.user?.id ?? null);
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+        if (!cancelled) setCurrentUserId(s?.user?.id ?? null);
+      });
+      return () => subscription.unsubscribe();
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const fetchCampaigns = useCallback(async () => {
     const token = await getAccessToken();
@@ -2156,7 +2229,12 @@ function CampaignsSection() {
         )}
 
         {selected && (
-          <CampaignView campaign={selected} onUpdate={() => void fetchCampaigns()} onDelete={deleteCampaign} />
+          <CampaignView
+            campaign={selected}
+            isOwn={currentUserId != null && selected.user_id === currentUserId}
+            onUpdate={() => void fetchCampaigns()}
+            onDelete={deleteCampaign}
+          />
         )}
       </div>
     </div>
