@@ -445,10 +445,11 @@ async function processInviteStep(
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      log('error', `Не смог получить LinkedIn ID через Unipile — ${msg}. Лид этим тиком обработать не получится.`, lead.name, stepIdx);
 
+      // Account-level back-off takes priority (invitation_limit / restricted).
       const cooldown = detectAccountCooldownError(e);
       if (cooldown && accountDbId) {
+        log('error', `Не смог получить LinkedIn ID через Unipile — ${msg}. Лид этим тиком обработать не получится.`, lead.name, stepIdx);
         const { cooldownUntil, error: cooldownErr } = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
         const untilHuman = new Date(cooldownUntil).toLocaleString('ru-RU');
         if (cooldownErr) {
@@ -459,6 +460,24 @@ async function processInviteStep(
         throw new AccountCooldownTriggered(cooldown.kind);
       }
 
+      // Unresolvable recipient (deleted / invalid / private profile, bad
+      // public_identifier from import) — Unipile returns 422 invalid_recipient
+      // / "Recipient cannot…". Retrying never helps, so mark the lead 'skipped'
+      // (dead) rather than letting it bubble to 'error', where it clutters the
+      // campaign as a fixable failure and gets manually retried. Genuinely
+      // transient resolve failures (timeout / 5xx / network) still throw →
+      // 'error' as before. This is the auto-skip that keeps the funnel clean
+      // (prod 2026-05/06: 82 such leads piled up as errors in "Stape продажа").
+      if (/\b422\b|invalid_recipient|recipient cannot/i.test(msg)) {
+        log('warning', `Профиль не резолвится (битый/удалён) — лид пропущен (skipped): ${msg}`, lead.name, stepIdx);
+        await db
+          .from('li_campaign_leads')
+          .update({ status: 'skipped', error_message: msg, updated_at: now })
+          .eq('id', cl.id);
+        return false;
+      }
+
+      log('error', `Не смог получить LinkedIn ID через Unipile — ${msg}. Лид этим тиком обработать не получится.`, lead.name, stepIdx);
       throw new Error('Cannot resolve provider_id');
     }
   }
