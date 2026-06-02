@@ -185,3 +185,40 @@ export async function createMainS3DownloadUrl(params: { key: string; expiresInSe
   });
   return getSignedUrl(s3, cmd, { expiresIn: params.expiresInSeconds ?? 60 * 10 });
 }
+
+/**
+ * Presigned PUT URL — браузер заливает файл НАПРЯМУЮ в S3, минуя наш сервер
+ * (обходит лимит размера тела роута Next). Тот же механизм, что у аватарок/
+ * картинок задач. Клиент делает: fetch(url, { method:'PUT', body:file,
+ * headers:{ 'Content-Type': contentType } }).
+ */
+export async function createMainS3UploadUrl(params: {
+  key: string;
+  contentType?: string;
+  expiresInSeconds?: number;
+}): Promise<string> {
+  const { s3, bucket } = getConfig();
+  const cmd = new PutObjectCommand({
+    Bucket: bucket,
+    Key: params.key,
+    ContentType: params.contentType ?? 'application/octet-stream',
+  });
+  return getSignedUrl(s3, cmd, { expiresIn: params.expiresInSeconds ?? 60 * 30 });
+}
+
+/**
+ * Стримящее чтение объекта из S3. Для парсинга больших файлов (миллионы
+ * строк) — не грузим весь файл в память, читаем потоком построчно.
+ * Возвращает null если ключа нет.
+ */
+export async function getMainS3ObjectStream(key: string): Promise<Readable | null> {
+  const { s3, bucket } = getConfig();
+  try {
+    const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    return (res.Body as Readable) ?? null;
+  } catch (err) {
+    const code = (err as { name?: string; Code?: string })?.name ?? (err as { Code?: string })?.Code ?? '';
+    if (/NoSuchKey|NotFound/i.test(String(code))) return null;
+    throw err;
+  }
+}
