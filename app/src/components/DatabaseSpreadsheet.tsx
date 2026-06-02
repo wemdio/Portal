@@ -1015,15 +1015,6 @@ export function DatabaseSpreadsheet() {
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const scrollRafRef = useRef<number | null>(null);
   const [scrollMetrics, setScrollMetrics] = useState({ scrollTop: 0, height: 0 });
-  const [horizontalScrollLeft, setHorizontalScrollLeft] = useState(0);
-  const [horizontalScrollbarMetrics, setHorizontalScrollbarMetrics] = useState({
-    scrollWidth: 0,
-    clientWidth: 0,
-  });
-  const [fixedScrollbarViewport, setFixedScrollbarViewport] = useState({
-    left: 0,
-    width: 0,
-  });
   const confirmActionRef = useRef<(() => void) | null>(null);
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
   const [highlightedCol, setHighlightedCol] = useState<number | null>(null);
@@ -1482,24 +1473,6 @@ export function DatabaseSpreadsheet() {
     const next = { scrollTop: wrapper.scrollTop, height: wrapper.clientHeight };
     setScrollMetrics((prev) =>
       prev.scrollTop === next.scrollTop && prev.height === next.height ? prev : next,
-    );
-    setHorizontalScrollLeft((prev) =>
-      Math.abs(prev - wrapper.scrollLeft) < 1 ? prev : wrapper.scrollLeft,
-    );
-    setHorizontalScrollbarMetrics((prev) => {
-      const nextWidth = wrapper.scrollWidth;
-      const nextClientWidth = wrapper.clientWidth;
-      return prev.scrollWidth === nextWidth && prev.clientWidth === nextClientWidth
-        ? prev
-        : { scrollWidth: nextWidth, clientWidth: nextClientWidth };
-    });
-    const rect = wrapper.getBoundingClientRect();
-    const nextLeft = Math.max(8, Math.round(rect.left));
-    const nextWidth = Math.max(0, Math.round(rect.width));
-    setFixedScrollbarViewport((prev) =>
-      prev.left === nextLeft && prev.width === nextWidth
-        ? prev
-        : { left: nextLeft, width: nextWidth },
     );
   }, []);
 
@@ -3257,28 +3230,6 @@ export function DatabaseSpreadsheet() {
 
   const rowCount = activeTab?.data.length ?? 0;
   const colCount = activeTab?.data[0]?.length ?? 0;
-  const estimatedTableScrollWidth = useMemo(() => {
-    if (colCount <= 0) return 0;
-    const columnsWidth = Array.from({ length: colCount }, (_, index) => {
-      return columnWidths[index] ?? DEFAULT_COLUMN_WIDTH;
-    }).reduce((sum, width) => sum + width, 0);
-    return columnsWidth + 32 + 28 + 20;
-  }, [colCount, columnWidths]);
-  const showBottomHorizontalScrollbar = colCount > 0;
-  const bottomScrollbarContentWidth = Math.max(
-    estimatedTableScrollWidth,
-    horizontalScrollbarMetrics.scrollWidth,
-    horizontalScrollbarMetrics.clientWidth + 1,
-  );
-  const horizontalScrollMax = Math.max(
-    0,
-    bottomScrollbarContentWidth - horizontalScrollbarMetrics.clientWidth,
-  );
-  const horizontalSliderMax = Math.max(1, Math.round(horizontalScrollMax));
-  const horizontalSliderValue = Math.max(
-    0,
-    Math.min(horizontalSliderMax, Math.round(horizontalScrollLeft)),
-  );
   const filterSearch = debouncedFilterMenuSearch.trim().toLowerCase();
   const filteredFilterOptions = filterMenu
     ? filterMenu.options.filter((option) =>
@@ -9553,8 +9504,7 @@ export function DatabaseSpreadsheet() {
           })()}
           <div
             ref={tableWrapperRef}
-            className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 pb-6 dark-scrollbar"
-            style={{ maxHeight: 'calc(100vh - 130px)' }}
+            className="overflow-y-auto overflow-x-auto flex-1 min-h-0 dark-scrollbar overscroll-x-contain"
             tabIndex={-1}
             data-spreadsheet-grid="true"
             onKeyDownCapture={handleGridKeyDown}
@@ -10216,32 +10166,6 @@ export function DatabaseSpreadsheet() {
         </aside>
         )}
       </div>
-      {showBottomHorizontalScrollbar && fixedScrollbarViewport.width > 0 && (
-        <div
-          className="pointer-events-none fixed bottom-2 z-40"
-          style={{ left: fixedScrollbarViewport.left, width: fixedScrollbarViewport.width }}
-        >
-          <div className="rounded border border-gray-300 bg-white/90 px-1 py-0.5 shadow-md backdrop-blur">
-            <input
-              type="range"
-              min={0}
-              max={horizontalSliderMax}
-              value={horizontalSliderValue}
-              onChange={(event) => {
-                const wrapper = tableWrapperRef.current;
-                const next = Number(event.target.value);
-                if (wrapper) {
-                  wrapper.scrollLeft = next;
-                }
-                setHorizontalScrollLeft(next);
-              }}
-              disabled={horizontalScrollMax <= 0}
-              className="pointer-events-auto block h-2 w-full cursor-ew-resize accent-gray-700 disabled:cursor-default"
-              aria-label="Горизонтальный скролл таблицы"
-            />
-          </div>
-        </div>
-      )}
       {filterMenu && (
         <div
           ref={filterMenuRef}
