@@ -274,6 +274,11 @@ function SettingsTab({ campaign, onSave }: {
           <RangeField label="Задержка до ответа" value={telegram.read_reply_delay_range} onChange={v => setTG('read_reply_delay_range', v)} />
           <RangeField label="Задержка между аккаунтами" value={telegram.account_loop_delay_range} onChange={v => setTG('account_loop_delay_range', v)} />
           <RangeField label="Окно ожидания диалога" value={telegram.dialog_wait_window_range} onChange={v => setTG('dialog_wait_window_range', v)} />
+          {/* Пауза между полными кругами по всем аккаунтам. Раньше была
+              захардкожена в 30 секунд, что на «горячих» mobile-pool IP
+              слишком быстро (Telegram продолжал отвечать silent throttle).
+              Сейчас вынесено в настройки с дефолтом [300, 600] сек. */}
+          <RangeField label="Пауза между кругами" value={telegram.cycle_delay_range ?? [300, 600]} onChange={v => setTG('cycle_delay_range', v)} />
         </div>
         <Field label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00, 19:00-00:00" />
         <div className="flex flex-wrap items-center gap-4">

@@ -174,16 +174,20 @@ function collectInContext(text: string, out: Candidate[]): void {
  * "990 ₽/мес"). A bare "<number><currency>" anywhere on the page is ignored —
  * the old "global minimum of every number" logic produced noise like "2 ₽".
  */
-export function extractPricingDetails(html: string): { pricing_min?: PriceValue; free_trial: boolean } {
-  if (!html) return { free_trial: false };
+export function extractPricingDetails(html: string): { pricing_min?: PriceValue; free_trial?: boolean } {
+  // Tri-state contract: this heuristic can ONLY confirm a free trial
+  // (regex matched) or stay silent (returns undefined). It cannot say
+  // "definitely no free trial" — that's an LLM-only call. The processor
+  // merges these two sources and the applier renders undefined as DASH.
+  if (!html) return {};
 
   // Job-posting pages carry salary numbers (зарплата, оклад, salary) that
   // otherwise pass our context regex as "price". Abort early so the salary
   // can never be misattributed as the company's service price.
-  if (looksLikeJobPosting(html)) return { free_trial: false };
+  if (looksLikeJobPosting(html)) return {};
 
   const spacedText = htmlToSpacedText(html);
-  const free_trial = FREE_TRIAL_RE.test(spacedText);
+  const free_trial = FREE_TRIAL_RE.test(spacedText) ? true : undefined;
 
   const prices: Candidate[] = [];
 
@@ -197,7 +201,7 @@ export function extractPricingDetails(html: string): { pricing_min?: PriceValue;
   // 2. Prices elsewhere need nearby pricing context.
   collectInContext(spacedText, prices);
 
-  if (prices.length === 0) return { free_trial };
+  if (prices.length === 0) return free_trial ? { free_trial } : {};
 
   // Prefer package/plan/period prices. A per-unit rate ("от 590 ₽ за лид")
   // defines the service minimum only when nothing else is published — otherwise
@@ -209,5 +213,9 @@ export function extractPricingDetails(html: string): { pricing_min?: PriceValue;
   for (const p of pool) {
     if (p.value < min.value) min = p;
   }
-  return { pricing_min: { value: min.value, currency: min.currency }, free_trial };
+  const result: { pricing_min: PriceValue; free_trial?: boolean } = {
+    pricing_min: { value: min.value, currency: min.currency },
+  };
+  if (free_trial) result.free_trial = true;
+  return result;
 }

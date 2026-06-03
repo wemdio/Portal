@@ -47,6 +47,34 @@ const MAX_VACANCIES = 500;
 
 const VACANCY_TEXT_COUNT_RE = /(\d+)\s*(?:\+\s*)?(?:вакан|открыт|позици|open\s+position|job opening)/i;
 
+// External career pages we can extract from when the company has no /careers
+// of its own but links out to an aggregator. Most RU B2B companies that hire
+// publicly use hh.ru/employer/<id> or career.habr.com/companies/<slug>.
+const EXTERNAL_CAREER_HOSTS_RE =
+  /^https?:\/\/(?:[\w-]+\.)?(?:hh\.ru\/employer\/\d|career\.habr\.com\/companies\/[\w-]|career\.habr\.com\/companies\?|getmatch\.ru\/companies\/[\w-]|sm-art\.com\/c\/[\w-]|huntmore\.io\/c\/[\w-])/i;
+
+/**
+ * Locate external career-page URLs linked from the main page (hh.ru/employer,
+ * career.habr.com/companies, ...). The processor uses these as a fallback when
+ * the company has no /careers subpage of its own but does publish vacancies
+ * via an aggregator.
+ */
+export function findExternalCareerLinks(html: string): string[] {
+  if (!html) return [];
+  const $ = cheerio.load(html);
+  const seen = new Set<string>();
+  $('a[href]').each((_, el) => {
+    const href = ($(el).attr('href') ?? '').trim();
+    if (!href) return;
+    if (EXTERNAL_CAREER_HOSTS_RE.test(href)) {
+      // Strip trailing query/fragment to avoid duplicates for the same page.
+      const clean = href.replace(/[?#].*$/, '');
+      seen.add(clean);
+    }
+  });
+  return Array.from(seen).slice(0, 3);
+}
+
 export interface HiringResult {
   vacancies_count: number;
   has_marketing: boolean;
