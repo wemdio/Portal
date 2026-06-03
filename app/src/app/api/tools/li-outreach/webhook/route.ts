@@ -102,6 +102,34 @@ async function handleMessageReceived(payload: Record<string, unknown>): Promise<
     .update({ user_replied: true, updated_at: new Date().toISOString() })
     .eq('lead_id', lead.id);
 
+  // Eager stop_on_reply: complete this lead's campaign-leads in stop_on_reply
+  // campaigns NOW, on reply — instead of letting the runner lazily complete them
+  // only when their wait-timer next expires (up to the full wait window later).
+  // Mirrors the runner's stop_on_reply guard. The scheduled follow-up never goes
+  // out either way (the runner completes before the message step), but eager
+  // completion keeps state honest: the lead shows 'completed' immediately and the
+  // health digest stops flagging "ответили, но не остановлены". The AI auto-reply
+  // below still fires — it's a direct response to the reply, not a scheduled step.
+  const { data: leadCls } = await db
+    .from('li_campaign_leads')
+    .select('id, campaign_id, status')
+    .eq('lead_id', lead.id);
+  const campaignIds = [...new Set((leadCls ?? []).map((r) => (r as { campaign_id: string }).campaign_id))];
+  if (campaignIds.length > 0) {
+    const { data: stopCamps } = await db
+      .from('li_campaigns')
+      .select('id')
+      .eq('stop_on_reply', true)
+      .in('id', campaignIds);
+    const stopSet = new Set((stopCamps ?? []).map((r) => (r as { id: string }).id));
+    const completedAt = new Date().toISOString();
+    for (const cl of (leadCls ?? []) as Array<{ id: string; campaign_id: string; status: string }>) {
+      if (stopSet.has(cl.campaign_id) && cl.status !== 'completed') {
+        await db.from('li_campaign_leads').update({ status: 'completed', updated_at: completedAt }).eq('id', cl.id);
+      }
+    }
+  }
+
   // Update lead status
   const history = [...(lead.conversation_history ?? []), { role: 'user', content: text, ts: new Date().toISOString() }];
   await db.from('li_leads').update({

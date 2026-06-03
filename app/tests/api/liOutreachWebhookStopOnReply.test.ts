@@ -88,6 +88,7 @@ function resetState(): void {
 
 function makeBuilder(table: string): Record<string, unknown> {
   const filters: Record<string, unknown> = {};
+  const inFilters: Record<string, unknown[]> = {};
   let mode: 'select' | 'insert' | 'update' = 'select';
   let payload: unknown = null;
 
@@ -96,6 +97,9 @@ function makeBuilder(table: string): Record<string, unknown> {
     for (const [col, val] of Object.entries(filters)) {
       rows = rows.filter((r) => r[col] === val);
     }
+    for (const [col, vals] of Object.entries(inFilters)) {
+      rows = rows.filter((r) => vals.includes(r[col]));
+    }
     return rows;
   };
 
@@ -103,6 +107,10 @@ function makeBuilder(table: string): Record<string, unknown> {
     select: () => builder,
     eq: (col: string, val: unknown) => {
       filters[col] = val;
+      return builder;
+    },
+    in: (col: string, vals: unknown[]) => {
+      inFilters[col] = vals;
       return builder;
     },
     limit: () => builder,
