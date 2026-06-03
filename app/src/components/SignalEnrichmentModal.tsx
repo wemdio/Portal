@@ -58,6 +58,20 @@ function estimateSecondsPerUrl(selected: ExtractorKey[]): number {
   return 2 + subpages.size * 2;
 }
 
+/**
+ * How many URLs really run in parallel on prod, after all friction.
+ *
+ * Nominal capacity is 3 worker-enrich replicas × WEBSITE_ENRICHMENT_CONCURRENCY
+ * (=25) = 75 slots. Actual throughput is lower because of: Playwright fallback
+ * (~5-10× slower than HTTP for the slowest 10-20% of URLs), DOMAIN_CONCURRENCY=1
+ * (same-domain URLs serialize), subpage fan-out per URL, and the 60s hard cap
+ * on pathological pages. ~50 is the observed effective number.
+ *
+ * Keep in sync with docker-compose.prod.yml `WEBSITE_ENRICHMENT_CONCURRENCY`
+ * and the `worker-enrich-*` replica count if either changes.
+ */
+const EFFECTIVE_PROD_PARALLELISM = 50;
+
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `~${seconds} сек`;
   const minutes = Math.round(seconds / 60);
@@ -109,7 +123,15 @@ export default function SignalEnrichmentModal({
   }, [state.totalRows]);
 
   const secondsPerUrl = estimateSecondsPerUrl(state.selectedExtractors);
-  const estimatedTotalSeconds = urlsWithData > 0 ? urlsWithData * secondsPerUrl : 0;
+  // Real estimate = serial seconds ÷ how many URLs really run in parallel.
+  // Without the divisor the UI used to advertise "~64ч" for a 16k-URL job
+  // that actually finished in ~1ч because 3 worker replicas were chewing
+  // through ~50 URLs at a time. Floor at 60s so a tiny 10-URL job doesn't
+  // read as "12 секунд" when in reality just spinning up has overhead.
+  const estimatedTotalSeconds =
+    urlsWithData > 0
+      ? Math.max(60, Math.ceil((urlsWithData * secondsPerUrl) / EFFECTIVE_PROD_PARALLELISM))
+      : 0;
 
   const allPresets: Array<{
     id: string;
@@ -314,7 +336,7 @@ export default function SignalEnrichmentModal({
               </div>
               <p className="mt-2 text-[11px] text-indigo-600">
                 {urlsWithData > 0
-                  ? `Ожидаемое время: ${formatDuration(estimatedTotalSeconds)} (${secondsPerUrl}с / URL × ${urlsWithData})`
+                  ? `Ожидаемое время: ${formatDuration(estimatedTotalSeconds)} (${urlsWithData.toLocaleString('ru-RU')} URL × ~${secondsPerUrl}с, ~${EFFECTIVE_PROD_PARALLELISM} параллельно)`
                   : `Ожидаемое время: ${secondsPerUrl}с / URL`}
               </p>
               <p className="mt-1 text-[11px] text-indigo-600">
