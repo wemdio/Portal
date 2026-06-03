@@ -356,15 +356,65 @@ const GENERIC_PHRASE_EXACT = new Set<string>([
 const CATEGORY_SLASH_RE =
   /^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9&\s]{0,16}\s+\/\s+[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9&\s]{0,20}$/;
 
+// Ranking-list prefixes from "Топ-30 ..." articles: "1 AKAR", "3 Mospoliteh",
+// "23 RKS Group". The leading digit token is the list position, not part of
+// the brand. Real brands with a leading digit (1С, 7ЦВЕТОВ-ДЕКОР, 36.6) never
+// have a SPACE between the digit and the rest, so the whitespace guard
+// preserves them.
+const RANKING_PREFIX_RE = /^\d{1,3}\s+[A-Za-zА-Яа-яЁё]/;
+
+// Common form-table column headers that leak from "Бриф клиента" / "Карточка"
+// pages into the clients column: "Клиент", "Клиника", "Параметр", "Описание".
+// These are field labels, not company names.
+const TABLE_HEADER_EXACT = new Set<string>([
+  'клиент', 'клиника', 'параметр', 'описание', 'наименование', 'название',
+  'характеристика', 'значение', 'категория', 'тип', 'статус', 'комментарий',
+  'примечание', 'тариф', 'продукт', 'товар', 'отрасль', 'индустрия',
+  'сфера', 'сегмент', 'регион', 'локация', 'дата', 'период', 'количество',
+  'сумма', 'цена', 'цвет', 'размер', 'формат',
+]);
+
+// Marketing benefit/feature phrases that start with a Russian adjective stem.
+// "Выгодная стоимость", "Круглосуточное обслуживание", "Удобный сервис" —
+// the agency's own offering, never a client. Two tokens are typical, so the
+// generic isSentenceLike (which needs 3+) misses them. JS `\w` is ASCII-only
+// so the token-2 anchor must spell the Cyrillic class explicitly.
+const FEATURE_BENEFIT_STEM_RE =
+  /^(?:выгодн|удобн|профессиональн|качественн|гарантированн|эффективн|круглосуточн|надёжн|надежн|быстр|оперативн|индивидуальн|комплексн|современн|инновационн|уникальн|стабильн|опытн|экспертн|кастомн|клиентоориентированн)[а-яё]*\s+[А-Яа-яЁёA-Za-z]/i;
+
+// Photo/avatar filenames seen as alt text on testimonial blocks: "mikh fresh2",
+// "kate fin" — short lowercase first-name-ish token followed by a known CMS
+// status suffix ("fresh"/"fin"/"new"/"old"/...) and an optional digit. Real
+// lowercase product names like "amocrm" / "salesforce" / "slack" are single
+// tokens and never carry these status suffixes, so they are safe.
+const PHOTO_FILENAME_RE =
+  /^[a-z]{2,12}\s+(?:fresh|fin|finish|new|old|done|main|logo|big|small|sm|md|lg|temp|tmp|copy|edit|final|orig|prev|next|v)\d{0,2}$/i;
+
 export function isUiFragment(s: string): boolean {
   const t = s.trim();
   if (!t) return false;
   const lower = t.toLowerCase();
   if (GENERIC_TERM_EXACT.has(lower)) return true;
   if (GENERIC_PHRASE_EXACT.has(lower)) return true;
+  if (TABLE_HEADER_EXACT.has(lower)) return true;
   if (UI_FRAGMENT_PATTERNS.some((re) => re.test(t))) return true;
   if (CATEGORY_SLASH_RE.test(t)) return true;
+  if (RANKING_PREFIX_RE.test(t)) return true;
+  if (FEATURE_BENEFIT_STEM_RE.test(t)) return true;
   return false;
+}
+
+/**
+ * Multi-token lowercase CMS photo filenames like "mikh fresh2", "kate fin" —
+ * testimonial / team avatars exposed via alt text. Restricted to the
+ * "<short-name> <status-suffix>" pattern so single-word lowercase brands
+ * like "amocrm" / "salesforce" / "slack" are not affected.
+ */
+export function isPhotoFilename(s: string): boolean {
+  const t = s.trim();
+  if (!t || t.length > 24) return false;
+  if (/[A-ZА-ЯЁ]/.test(t)) return false; // any uppercase → not a CMS-style file slug
+  return PHOTO_FILENAME_RE.test(t);
 }
 
 /**
@@ -387,7 +437,7 @@ export function isPlausibleName(s: string): boolean {
     isHashLike(t) || isDesignArtifact(t) || isNavOrCtaText(t) || isServiceText(t) ||
     isMetricText(t) || isFormLabel(t) || isRoleTitle(t) || isSentenceLike(t) ||
     isIndustryOrSector(t) || isPersonName(t) || isMostlyHexTokens(t) ||
-    isPlaceName(t) || isAddressLike(t) || isUiFragment(t)
+    isPlaceName(t) || isAddressLike(t) || isUiFragment(t) || isPhotoFilename(t)
   ) return false;
   if (/\s/.test(t)) {
     const words = t.split(/\s+/);

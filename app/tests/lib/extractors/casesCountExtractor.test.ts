@@ -23,12 +23,26 @@ describe('extractCasesCount', () => {
     expect(extractCasesCount(html)).toBe(0);
   });
 
-  it('trusts a high DOM count when text on the same page corroborates it', () => {
+  it('trusts the text claim (not the inflated DOM count) when both are present', () => {
     const items = Array.from({ length: 220 }, () => `<div class="case-card">x</div>`).join('');
-    const html = `<main><p>Более 150 успешных проектов</p>${items}</main>`;
+    const html = `<main><p>Более 30 успешных проектов</p>${items}</main>`;
 
-    // Text claim is 150 → clamped to MAX_CASES (100).
-    expect(extractCasesCount(html)).toBe(100);
+    // Inflated DOM count (220) is dropped; text claim 30 wins.
+    expect(extractCasesCount(html)).toBe(30);
+  });
+
+  it('drops a wildly inflated text claim (>200) as marketing puff', () => {
+    const items = Array.from({ length: 220 }, () => `<div class="case-card">x</div>`).join('');
+    const html = `<main><p>Более 5000 успешных проектов</p>${items}</main>`;
+
+    // DOM count is over the trust limit AND text claim is unrealistic → drop.
+    expect(extractCasesCount(html)).toBe(0);
+  });
+
+  it('caps strict DOM counts up to the trust limit (30) at MAX_CASES (50)', () => {
+    // DOM count exactly at the limit is trusted as-is.
+    const items = Array.from({ length: 25 }, () => `<div class="case-card">x</div>`).join('');
+    expect(extractCasesCount(`<main>${items}</main>`)).toBe(25);
   });
 
   it('returns 0 when page has no case-related markup', () => {

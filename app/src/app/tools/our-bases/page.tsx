@@ -48,6 +48,14 @@ export default function OurBasesPage() {
 
   const [exportLoading, setExportLoading] = useState<'csv' | 'xlsx' | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  // Live progress while the export streams to the browser. `done` is rows
+  // processed (CSV) or bytes received (XLSX); `total` is the known target.
+  // `mode` decides which units we render.
+  const [exportProgress, setExportProgress] = useState<{
+    mode: 'rows' | 'bytes';
+    done: number;
+    total: number;
+  } | null>(null);
 
   const selectedRegionsCount = selectedRegions.size;
   const selectedOkvedTopCount = useMemo(
@@ -121,6 +129,14 @@ export default function OurBasesPage() {
   const handleExport = async (format: 'csv' | 'xlsx') => {
     setExportLoading(format);
     setExportError(null);
+    // For CSV we know the target row count up front (calcResult.count).
+    // For XLSX we don't know the byte size until the server starts sending,
+    // so leave total at 0 and let the stream-reader fill it from Content-Length.
+    setExportProgress({
+      mode: format === 'csv' ? 'rows' : 'bytes',
+      done: 0,
+      total: format === 'csv' ? (calcResult?.count ?? 0) : 0,
+    });
 
     try {
       const res = await authFetch(`/api/tools/our-bases/export?format=${format}`, {
@@ -133,23 +149,81 @@ export default function OurBasesPage() {
         const err = await res.json().catch(() => ({ error: 'Ошибка' }));
         setExportError(err.error || `HTTP ${res.status}`);
         setExportLoading(null);
+        setExportProgress(null);
         return;
       }
 
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `companies_${new Date().toISOString().slice(0, 10)}.${format}`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      // Stream the response body so the user sees real progress instead of
+      // a frozen spinner. For CSV we count `\n` bytes (each row ends in one)
+      // to get a "X / Y строк" indicator. For XLSX we report bytes received
+      // against Content-Length when the server publishes it.
+      if (!res.body) {
+        const blob = await res.blob();
+        triggerDownload(blob, format);
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      const totalBytes = Number(res.headers.get('Content-Length')) || 0;
+      let bytesReceived = 0;
+      let rowsReceived = 0; // CSV only — counted by newlines
+
+      // First newline closes the CSV header, subsequent ones close data rows.
+      // We subtract one (the header) when displaying.
+      let sawFirstNewline = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        bytesReceived += value.byteLength;
+
+        if (format === 'csv') {
+          for (let i = 0; i < value.byteLength; i++) {
+            if (value[i] === 0x0a /* \n */) {
+              if (!sawFirstNewline) sawFirstNewline = true;
+              else rowsReceived++;
+            }
+          }
+          setExportProgress({
+            mode: 'rows',
+            done: rowsReceived,
+            total: calcResult?.count ?? 0,
+          });
+        } else {
+          setExportProgress({
+            mode: 'bytes',
+            done: bytesReceived,
+            total: totalBytes,
+          });
+        }
+      }
+
+      // Cast to BlobPart[]: lib.dom types require ArrayBuffer-backed views,
+      // but our reader yields Uint8Array<ArrayBufferLike> (Node-style typing
+      // leaking through Next's bundled .d.ts). The runtime accepts it.
+      const blob = new Blob(chunks as unknown as BlobPart[], {
+        type: res.headers.get('Content-Type') ?? 'application/octet-stream',
+      });
+      triggerDownload(blob, format);
     } catch (err) {
       setExportError(err instanceof Error ? err.message : 'Ошибка');
     } finally {
       setExportLoading(null);
+      setExportProgress(null);
     }
+  };
+
+  const triggerDownload = (blob: Blob, format: 'csv' | 'xlsx') => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `companies_${new Date().toISOString().slice(0, 10)}.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -446,29 +520,33 @@ export default function OurBasesPage() {
         )}
 
         {calcResult && calcResult.count > 0 && (
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => handleExport('xlsx')}
-              disabled={exportLoading !== null}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-50 px-4 py-2.5 text-sm font-medium transition-colors"
-            >
-              <svg className="w-4 h-4 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-              </svg>
-              {exportLoading === 'xlsx' ? 'Формируем...' : 'Excel'}
-            </button>
-            <button
-              type="button"
-              onClick={() => handleExport('csv')}
-              disabled={exportLoading !== null}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-50 px-4 py-2.5 text-sm font-medium transition-colors"
-            >
-              <svg className="w-4 h-4 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m.75 12 3 3m0 0 3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-              </svg>
-              {exportLoading === 'csv' ? 'Формируем...' : 'CSV'}
-            </button>
+          <div className="flex flex-col items-center gap-3 w-full max-w-md">
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => handleExport('xlsx')}
+                disabled={exportLoading !== null}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-50 px-4 py-2.5 text-sm font-medium transition-colors"
+              >
+                <svg className="w-4 h-4 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                </svg>
+                {exportLoading === 'xlsx' ? 'Формируем...' : 'Excel'}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleExport('csv')}
+                disabled={exportLoading !== null}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-50 px-4 py-2.5 text-sm font-medium transition-colors"
+              >
+                <svg className="w-4 h-4 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m.75 12 3 3m0 0 3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                </svg>
+                {exportLoading === 'csv' ? 'Формируем...' : 'CSV'}
+              </button>
+            </div>
+
+            {exportLoading && <ExportProgressBar progress={exportProgress} />}
           </div>
         )}
 
@@ -493,6 +571,76 @@ export default function OurBasesPage() {
       )}
     </div>
   );
+}
+
+/**
+ * Linear progress bar shown while the export streams to the browser.
+ *
+ * - CSV: `mode='rows'`, total = expected company count (from the calc step).
+ *   `done` counts newlines as they arrive, so the user sees "23 500 / 73 126".
+ * - XLSX: `mode='bytes'`, total = Content-Length when the server publishes it.
+ *   Falls back to an indeterminate ("Формируем...") bar when total is unknown.
+ */
+function ExportProgressBar({
+  progress,
+}: {
+  progress: { mode: 'rows' | 'bytes'; done: number; total: number } | null;
+}) {
+  // The very first frame, before the stream actually starts producing data,
+  // we may not yet have a non-zero total — render an indeterminate sliver.
+  const total = progress?.total ?? 0;
+  const done = progress?.done ?? 0;
+  const indeterminate = total <= 0;
+  const percent = indeterminate
+    ? 0
+    : Math.min(100, Math.max(0, (done / total) * 100));
+
+  const label = (() => {
+    if (!progress) return 'Формируем...';
+    if (progress.mode === 'rows') {
+      if (indeterminate) return 'Формируем CSV...';
+      return `${done.toLocaleString('ru-RU')} из ${total.toLocaleString('ru-RU')} строк · ${percent.toFixed(0)}%`;
+    }
+    if (indeterminate) return `Скачано ${formatBytes(done)}`;
+    return `${formatBytes(done)} из ${formatBytes(total)} · ${percent.toFixed(0)}%`;
+  })();
+
+  return (
+    <div className="w-full">
+      <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
+        {indeterminate ? (
+          // Animated indeterminate bar: a sliding 30%-wide block.
+          <div className="h-full w-1/3 bg-blue-500/80 animate-[exportProgressSlide_1.4s_ease-in-out_infinite] rounded-full" />
+        ) : (
+          <div
+            className="h-full bg-blue-500 transition-[width] duration-150 ease-out rounded-full"
+            style={{ width: `${percent}%` }}
+          />
+        )}
+      </div>
+      <div className="mt-2 text-xs text-gray-600 text-center tabular-nums">
+        {label}
+      </div>
+      <style jsx global>{`
+        @keyframes exportProgressSlide {
+          0% { margin-left: -33%; }
+          100% { margin-left: 100%; }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 Б';
+  const units = ['Б', 'КБ', 'МБ', 'ГБ'];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
 }
 
 function RegionsModal({

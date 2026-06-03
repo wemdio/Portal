@@ -139,7 +139,11 @@ services:
     networks:
       - portal-network
 
-  worker-enrich:
+  # Шаблон конфигурации enrich-воркера. Подгружается через `<<: *worker-enrich`
+  # в worker-enrich / worker-enrich-2 / worker-enrich-3 ниже — три реплики
+  # делят одну очередь Supabase через FOR UPDATE SKIP LOCKED, так что каждый
+  # job-item получает только одна реплика.
+  worker-enrich: &worker-enrich
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-enrich
     env_file:
@@ -154,14 +158,14 @@ services:
       - WORKER_KIND=enrich
       # Тюнинг производительности email/text/signals enrichment'а:
       # - WEBSITE_ENRICHMENT_CONCURRENCY: сколько сайтов в одном job'е скрапится
-      #   параллельно (10 → 15). Domain-throttle (=1 на домен) ограничивает
-      #   нагрузку на target-сайты, так что +50% concurrency не вызовет ban'ов.
+      #   параллельно (15 → 25). Domain-throttle (=1 на домен) ограничивает
+      #   нагрузку на target-сайты, так что boost не вызовет ban'ов.
       # - ENRICH_MAX_CONCURRENCY: сколько job'ов одна реплика обслуживает
-      #   одновременно (5 → 8). Раньше юзеры на 50к-базах вставали в очередь
-      #   когда параллельно запускались несколько Поисков почт.
-      # Memory limit поднял до 2G чтобы покрыть +50% concurrency
-      # (8 job × ~250MB peak in-flight ≈ 2G с запасом на cheerio HTML buffers).
-      - WEBSITE_ENRICHMENT_CONCURRENCY=${WEBSITE_ENRICHMENT_CONCURRENCY:-15}
+      #   одновременно. Параллельно работают 3 реплики (worker-enrich/-2/-3),
+      #   итого ~3 × 25 = 75 URL в полёте против ~3 × 8 = 24 job'ов в очереди.
+      # Memory limit держим 2G — реальный peak в проде при concurrency=25
+      # на job ≈ ~900-1100MB (cheerio HTML + Playwright temp). 2G с запасом.
+      - WEBSITE_ENRICHMENT_CONCURRENCY=${WEBSITE_ENRICHMENT_CONCURRENCY:-25}
       - ENRICH_MAX_CONCURRENCY=${ENRICH_MAX_CONCURRENCY:-8}
     stop_grace_period: 30m
     deploy:
@@ -172,6 +176,14 @@ services:
     restart: unless-stopped
     networks:
       - portal-network
+
+  worker-enrich-2:
+    <<: *worker-enrich
+    container_name: portal-worker-enrich-2
+
+  worker-enrich-3:
+    <<: *worker-enrich
+    container_name: portal-worker-enrich-3
 
   worker-yandexmaps:
     image: ${DOCKER_USERNAME}/portal-worker:prod

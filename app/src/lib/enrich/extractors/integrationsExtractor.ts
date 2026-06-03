@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import { isHashLike, isDesignArtifact, isNavOrCtaText, isServiceText, isUiFragment, isMostlyHexTokens } from './nameQuality';
+import { isHashLike, isDesignArtifact, isNavOrCtaText, isServiceText, isUiFragment, isMostlyHexTokens, isPhotoFilename } from './nameQuality';
 
 const JUNK_RE: RegExp[] = [
   /^logo$/i, /^image$/i, /^icon$/i, /^photo$/i, /^avatar$/i,
@@ -37,6 +37,9 @@ function isJunk(s: string): boolean {
   // labels ("SaaS / IT") leak from alt attributes and `<span class="...">`
   // labels — never a real third-party integration.
   if (isUiFragment(s)) return true;
+  // Lowercase photo filenames ("mikh fresh", "kate fin") leak from
+  // testimonial avatars rather than a real third-party logo.
+  if (isPhotoFilename(s)) return true;
   return false;
 }
 
