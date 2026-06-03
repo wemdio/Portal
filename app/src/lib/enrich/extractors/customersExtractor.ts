@@ -14,6 +14,7 @@ import {
   isPlaceName,
   isAddressLike,
   isUiFragment,
+  isPhotoFilename,
 } from './nameQuality';
 
 const JUNK_PATTERNS: RegExp[] = [
@@ -60,6 +61,9 @@ function isJunk(s: string): boolean {
   // ("services", "more", "subscribe") and category labels ("SaaS / IT") are
   // never client names.
   if (isUiFragment(s)) return true;
+  // Photo/avatar filenames leaking from testimonial blocks: "mikh fresh2",
+  // "kate fin", "aziz".
+  if (isPhotoFilename(s)) return true;
   return false;
 }
 

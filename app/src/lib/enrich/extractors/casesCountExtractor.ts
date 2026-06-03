@@ -9,14 +9,16 @@ const CASE_SELECTOR = [
   '[class*="success-story"]',
 ].join(', ');
 
-// Realistic upper bound for what a real agency portfolio actually publishes
-// on a page. Anything above this is almost always a CMS that emits 100+ items
-// matching our `case-*` selector for unrelated reasons (blog listings, nav
-// widgets, hidden carousel duplicates) — the count is no longer trustworthy.
-const MAX_CASES = 100;
-// When DOM matches go above this without a corroborating text claim, we
-// treat the count as untrusted (returns 0) so the LLM fallback can decide.
-const DOM_TRUST_LIMIT = 60;
+// Realistic upper bound for a case-portfolio published on one page. Above
+// this most counts are inflated by CMS list widgets / blog grids, so we cap
+// here and let the LLM fallback produce a precise number if available.
+const MAX_CASES = 50;
+// Strict DOM count is trusted up to this; beyond it we require a textual
+// claim with a reasonable value to confirm.
+const DOM_TRUST_LIMIT = 30;
+// Marketing claims like "5000+ проектов" are almost always puff — we trust
+// the text claim only when it falls inside this window.
+const REASONABLE_TEXT_CLAIM_MAX = 200;
 
 const TEXT_COUNT_RE = /(?:более\s+|свыше\s+|>?\s*)(\d+)\s*(?:\+\s*)?(?:кейс|проект|работ|клиент|case|project|client)/i;
 const TEXT_COUNT_RE2 = /(\d+)\s*\+?\s*(?:выполненных|реализованных|завершённых|завершенных|успешных)/i;
@@ -34,14 +36,20 @@ export function extractCasesCount(html: string): number {
 
   const text = $('body').text();
   const textMatch = text.match(TEXT_COUNT_RE) ?? text.match(TEXT_COUNT_RE2);
-  const textClaim = textMatch ? parseInt(textMatch[1], 10) : 0;
+  const rawTextClaim = textMatch ? parseInt(textMatch[1], 10) : 0;
+  const textClaim = rawTextClaim > 0 && rawTextClaim <= REASONABLE_TEXT_CLAIM_MAX ? rawTextClaim : 0;
 
-  // High DOM counts without an explicit textual claim are almost always a
-  // selector false-positive (CMS list widgets, footers, blog grids). Drop the
-  // count so the LLM fallback can produce a real number.
-  if (domCount > DOM_TRUST_LIMIT && textClaim <= 0) return 0;
+  // Strict, modest DOM count → trust it.
+  if (domCount > 0 && domCount <= DOM_TRUST_LIMIT) return domCount;
 
-  if (domCount > 0) return Math.min(domCount, MAX_CASES);
+  // Inflated DOM count: only believe a reasonable text claim, otherwise drop.
+  if (domCount > DOM_TRUST_LIMIT) {
+    if (textClaim > 0) return Math.min(textClaim, MAX_CASES);
+    return 0;
+  }
+
+  // No DOM matches: text claim alone is acceptable.
   if (textClaim > 0) return Math.min(textClaim, MAX_CASES);
+
   return 0;
 }
