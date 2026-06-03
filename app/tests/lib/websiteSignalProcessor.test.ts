@@ -179,6 +179,65 @@ describe('processSignalsForUrl', () => {
       expect(result.signalIds).toEqual([]);
     }
   });
+
+  // Multi-URL: cells from "Наша база баз" exports often carry several sites
+  // ("t-paritet.ru, paritet-te.ru", "sportcover.ru, ipksport.ru"). When the
+  // first URL is dead we must fall through to the second one.
+
+  it('multi-URL: when the first site fails DNS, falls back to the second one and succeeds', async () => {
+    fetchHtmlWithRetryMock.mockImplementation(async (url: string) => {
+      if (url.includes('paritet-te.ru')) return { html: HTML_WITH_SIGNALS, status: 200 };
+      // First URL: simulate a hard failure (null/empty body)
+      return null;
+    });
+    fetchHtmlWithPlaywrightMock.mockImplementation(async (url: string) => {
+      if (url.includes('paritet-te.ru')) return HTML_WITH_SIGNALS;
+      throw new Error('page.goto: net::ERR_NAME_NOT_RESOLVED at https://t-paritet.ru/');
+    });
+
+    const result = await processSignalsForUrl('t-paritet.ru, paritet-te.ru');
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.stack).toContain('Яндекс.Метрика');
+    }
+    // Both URLs should have been tried (first failed → second succeeded).
+    expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('multi-URL: when ALL sites fail, returns the FIRST error (primary domain is the most informative)', async () => {
+    fetchHtmlWithRetryMock.mockResolvedValue(null);
+    fetchHtmlWithPlaywrightMock.mockImplementation(async (url: string) => {
+      if (url.includes('t-paritet.ru')) {
+        throw new Error('page.goto: net::ERR_NAME_NOT_RESOLVED at https://t-paritet.ru/');
+      }
+      // Second URL: connection refused — should NOT be the surfaced error.
+      throw new Error('page.goto: net::ERR_CONNECTION_REFUSED at https://paritet-te.ru/');
+    });
+
+    const result = await processSignalsForUrl('t-paritet.ru, paritet-te.ru');
+
+    expect('error' in result).toBe(true);
+    if ('error' in result) {
+      // First-URL error (DNS) wins, not the second-URL error.
+      expect(result.error).toMatch(/Домен не найден|DNS/i);
+    }
+  });
+
+  it('multi-URL: stops at the first success — does not waste time probing the rest', async () => {
+    fetchHtmlWithRetryMock.mockImplementation(async (url: string) => {
+      if (url.includes('sportcover.ru')) return { html: HTML_WITH_SIGNALS, status: 200 };
+      return null;
+    });
+    fetchHtmlWithPlaywrightMock.mockResolvedValue(null);
+
+    const result = await processSignalsForUrl('sportcover.ru, ipksport.ru');
+
+    expect('stack' in result).toBe(true);
+    // Only the first URL was probed — the second never got touched.
+    expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(1);
+    expect(fetchHtmlWithPlaywrightMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('processSignalsForUrl — deep fetch and per-extractor selection', () => {

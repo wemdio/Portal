@@ -1,5 +1,5 @@
 import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websiteParser';
-import { normalizeUrl } from '@/lib/enrich/urlUtils';
+import { normalizeUrl, extractNormalizedUrls } from '@/lib/enrich/urlUtils';
 import { detectSignals, determineProfile, formatStack, integrationsFromSignals } from '@/lib/enrich/signalDetector';
 import { discoverSubpaths, FALLBACK_PATHS } from '@/lib/enrich/subpathDiscovery';
 import {
@@ -146,12 +146,27 @@ export async function processSignalsForUrl(
   const trimmed = String(rawUrl ?? '').trim();
   if (!trimmed) return { error: 'Пустой URL' };
 
-  let normalized: string;
+  // The "Site" column in exports often carries 2+ URLs in a single cell
+  // ("t-paritet.ru, paritet-te.ru", "sportcover.ru, ipksport.ru"). The
+  // email path already iterates through every URL it finds; do the same
+  // here so a dead first URL doesn't kill the row when a working sibling
+  // is right next to it.
+  let targets: string[];
   try {
-    normalized = normalizeUrl(trimmed);
-    if (!normalized) throw new Error('Невалидный URL');
+    targets = extractNormalizedUrls(trimmed);
   } catch (err) {
     return { error: err instanceof Error ? err.message : 'Невалидный URL' };
+  }
+  if (targets.length === 0) {
+    // Fall back to the single-URL parser so the existing error message
+    // shape ("Пустой URL" vs "Невалидный URL") is preserved.
+    try {
+      const fallback = normalizeUrl(trimmed);
+      if (!fallback) throw new Error('Невалидный URL');
+      targets = [fallback];
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Невалидный URL' };
+    }
   }
 
   const httpTimeout = options?.timeout ?? DEFAULT_TIMEOUT_MS;
@@ -159,8 +174,27 @@ export async function processSignalsForUrl(
   const extractors = options?.extractors ?? DEFAULT_EXTRACTORS;
   const subpageTimeout = options?.subpageTimeout ?? DEFAULT_SUBPAGE_TIMEOUT_MS;
 
-  const main = await fetchMainHtml(normalized, httpTimeout, signal);
-  if ('error' in main) return main;
+  // Try each candidate URL until one returns usable HTML. Keep the first
+  // error message we saw — that's almost always the primary domain and
+  // the most informative thing to show the user when the whole row fails.
+  let normalized = '';
+  let main: Awaited<ReturnType<typeof fetchMainHtml>> | null = null;
+  let firstError: string | null = null;
+
+  for (const candidate of targets) {
+    if (signal?.aborted) return { error: 'Прервано' };
+    const probe = await fetchMainHtml(candidate, httpTimeout, signal);
+    if (!('error' in probe)) {
+      normalized = candidate;
+      main = probe;
+      break;
+    }
+    if (firstError === null) firstError = probe.error;
+  }
+
+  if (!main) {
+    return { error: firstError ?? 'Сайт недоступен' };
+  }
 
   const out: ExtractedData & { stack: string; profile: string; signalIds: string[]; method: 'http' | 'playwright' } = {
     stack: '',
