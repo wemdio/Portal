@@ -109,6 +109,29 @@ jobs:
     runs-on: self-hosted
     needs: push_docker_hub_prod
     steps:
+      # Check out the repo so the compose file is available in $GITHUB_WORKSPACE
+      # for the scp step below. Previously the compose file on the server was
+      # synced manually — that meant any change to docker-compose.prod.yml
+      # (new service blocks, env tweaks, resource limits) had to be copied by
+      # hand before the next deploy could pick it up.
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      # Ship the current main's docker-compose.prod.yml to the prod server
+      # BEFORE the SSH step runs `docker compose up`. This makes the compose
+      # file on /home/Portal/prod/ always match what's on `main`, so newly
+      # added services (e.g. worker-enrich-2 / worker-enrich-3) are visible
+      # to the `up -d` commands without any manual sync.
+      - name: Sync docker-compose.prod.yml to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          source: docker-compose.prod.yml
+          target: /home/Portal/prod/
+          overwrite: true
+
       - name: executing remote ssh commands to deploy
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -121,7 +144,7 @@ jobs:
             cd /home/Portal/prod/
             echo "${{ secrets.DOCKER_PASSWORD }}" | sudo docker login --username ${{ secrets.DOCKER_USERNAME }} --password-stdin
             sudo docker compose version
-            sudo docker compose -p portal -f docker-compose.prod.yml pull portal worker-baseconstructor worker-li-outreach instantly-sync-bot portal-backup health-check
+            sudo docker compose -p portal -f docker-compose.prod.yml pull portal worker-baseconstructor worker-li-outreach worker-enrich worker-enrich-2 worker-enrich-3 instantly-sync-bot portal-backup health-check
             sudo docker ps -a --filter "label=com.docker.compose.service=portal" -q | xargs -r sudo docker rm -f
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps instantly-sync-bot portal-backup
@@ -133,6 +156,14 @@ jobs:
             # startChat fixes shipped in code but the worker kept running the
             # bug until someone restarted it manually).
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps worker-li-outreach
+            # worker-enrich + 2 additional replicas (worker-enrich-2 / -3).
+            # `--force-recreate` is required because most enrichment-related
+            # changes ship via env-var tweaks in docker-compose.prod.yml
+            # (e.g. WEBSITE_ENRICHMENT_CONCURRENCY) — without recreate the
+            # running container stays on the old env and the speed-up never
+            # lands. The three replicas share the Supabase queue via FOR
+            # UPDATE SKIP LOCKED, so concurrent claims are safe.
+            sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-enrich worker-enrich-2 worker-enrich-3
             # health-check has its OWN image (portal-health-check:prod, built
             # above). Recreate it so changes to services/health-check/main.py
             # (e.g. the daily LinkedIn-outreach digest) actually ship instead of
