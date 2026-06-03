@@ -134,6 +134,13 @@ create policy tg_outreach_proxy_swaps_insert_own on public.tg_outreach_proxy_swa
 comment on table public.tg_outreach_proxy_swaps is
   'История смены прокси на аккаунтах. Заполняется воркером (автоматический свап при cooldown) и API (ручной свап). Нужно для разбора инцидентов — почему аккаунт ушёл в AUTH_KEY_DUPLICATED через час после свапа и т.п.';
 
+-- GRANTs. Воркер ходит под service_role (через supabaseAdmin), читать таблицу
+-- может любой залогинившийся специалист — RLS уже фильтрует по campaign-ownership
+-- + cross-specialist read через политики родительских tables. tests/migrations/
+-- grants.test.ts падает, если для новой public-таблицы нет GRANT to service_role.
+grant all on public.tg_outreach_proxy_swaps to service_role;
+grant select, insert on public.tg_outreach_proxy_swaps to authenticated;
+
 -- ---------------------------------------------------------------------------
 -- 4) RPC для атомарного дневного счётчика proxy_swaps_today
 -- ---------------------------------------------------------------------------
