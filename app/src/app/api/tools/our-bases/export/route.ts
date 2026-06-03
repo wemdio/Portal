@@ -73,6 +73,72 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
+  const dateSuffix = new Date().toISOString().slice(0, 10);
+
+  // CSV is streamed: each DB chunk is flushed to the response body as soon as
+  // it arrives. This lets the client display real "X / Y строк" progress
+  // instead of a spinner that says nothing until everything is ready.
+  if (format === 'csv') {
+    // Probe the first batch up-front so we can return a clean 404 when the
+    // filter matches nothing (rather than streaming an empty CSV with just
+    // the header). After this, the stream picks up where the probe left off.
+    const probe = await searchRows(body, CHUNK_SIZE, 0);
+    if (probe.error) {
+      return NextResponse.json({ error: probe.error }, { status: 500 });
+    }
+    if (probe.rows.length === 0) {
+      return NextResponse.json({ error: 'Нет данных по заданным фильтрам' }, { status: 404 });
+    }
+
+    const encoder = new TextEncoder();
+    const header = COLUMNS.map((c) => c.label).join(',');
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        try {
+          // Header line.
+          controller.enqueue(encoder.encode(header + '\n'));
+          // First batch (already fetched as the probe).
+          controller.enqueue(encoder.encode(rowsToCsv(probe.rows) + '\n'));
+
+          if (probe.rows.length < CHUNK_SIZE) {
+            controller.close();
+            return;
+          }
+
+          let offset = CHUNK_SIZE;
+          for (;;) {
+            const { rows, error } = await searchRows(body, CHUNK_SIZE, offset);
+            if (error) {
+              controller.error(new Error(error));
+              return;
+            }
+            if (rows.length === 0) break;
+            controller.enqueue(encoder.encode(rowsToCsv(rows) + '\n'));
+            offset += CHUNK_SIZE;
+            if (rows.length < CHUNK_SIZE) break;
+          }
+          controller.close();
+        } catch (e) {
+          controller.error(e instanceof Error ? e : new Error(String(e)));
+        }
+      },
+    });
+
+    return new NextResponse(stream, {
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="companies_${dateSuffix}.csv"`,
+        'Cache-Control': 'no-store',
+        // Hint to the client that it can count newlines to track row progress.
+        'X-Streaming': '1',
+      },
+    });
+  }
+
+  // XLSX: the xlsx library writes a complete ZIP archive, so we still build
+  // it fully in memory before responding. Client falls back to byte-level
+  // download progress for this format (via Content-Length).
   const allRows: Row[] = [];
   let offset = 0;
 
@@ -88,24 +154,6 @@ export async function POST(req: NextRequest) {
 
   if (allRows.length === 0) {
     return NextResponse.json({ error: 'Нет данных по заданным фильтрам' }, { status: 404 });
-  }
-
-  const dateSuffix = new Date().toISOString().slice(0, 10);
-
-  if (format === 'csv') {
-    const header = COLUMNS.map((c) => c.label).join(',');
-    const csvRows = allRows.map((row) =>
-      COLUMNS.map((c) => escapeCSV(row[c.key])).join(','),
-    );
-    const csv = [header, ...csvRows].join('\n');
-
-    return new NextResponse(csv, {
-      headers: {
-        'Content-Type': 'text/csv; charset=utf-8',
-        'Content-Disposition': `attachment; filename="companies_${dateSuffix}.csv"`,
-        'X-Rows-Count': String(allRows.length),
-      },
-    });
   }
 
   const sheetRows = allRows.map(toSheetRow);
@@ -134,4 +182,10 @@ export async function POST(req: NextRequest) {
       'X-Rows-Count': String(allRows.length),
     },
   });
+}
+
+function rowsToCsv(rows: Row[]): string {
+  return rows
+    .map((row) => COLUMNS.map((c) => escapeCSV(row[c.key])).join(','))
+    .join('\n');
 }
