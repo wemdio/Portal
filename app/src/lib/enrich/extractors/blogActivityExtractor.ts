@@ -178,11 +178,33 @@ function isReasonablePostText(text: string): boolean {
 }
 
 function isDateAcceptable(iso: string): boolean {
+  // Cheap structural check first: a malformed ISO date ("2024-13-45") slips
+  // through the regex parsers because they don't enforce real-calendar limits.
+  // new Date(iso) will yield NaN for an impossible date.
+  const parsed = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return false;
+  // Verify the round-trip — `new Date("2024-13-45")` is normalized to a
+  // valid date in Chromium, so we need to ensure the components match.
+  const y = parsed.getUTCFullYear();
+  const m = parsed.getUTCMonth() + 1;
+  const d = parsed.getUTCDate();
+  const reIso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  if (reIso !== iso) return false;
+
   const today = new Date();
-  const cutoffMs = today.getTime() + 7 * 24 * 3600 * 1000;
-  const cutoff = new Date(cutoffMs);
-  const cutoffIso = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, '0')}-${String(cutoff.getDate()).padStart(2, '0')}`;
-  return iso <= cutoffIso;
+  // Reject anything more than 7 days in the future — that's a typo or a
+  // misparsed locale (e.g. dd.mm.yyyy read as mm.dd.yyyy).
+  const futureCutoffMs = today.getTime() + 7 * 24 * 3600 * 1000;
+  if (parsed.getTime() > futureCutoffMs) return false;
+
+  // Reject anything older than 10 years — almost always a stale archive
+  // widget, a static "Опубликовано в 2014" footer, or a misparsed
+  // copyright year. We want the LATEST post, so multi-year-old candidates
+  // are noise that crowds out a legitimate recent post.
+  const pastCutoffMs = today.getTime() - 10 * 365 * 24 * 3600 * 1000;
+  if (parsed.getTime() < pastCutoffMs) return false;
+
+  return true;
 }
 
 function extractDateFromElement($: cheerio.CheerioAPI, el: AnyNode): string | null {

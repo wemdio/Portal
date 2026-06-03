@@ -41,13 +41,16 @@ describe('extractPricingDetails', () => {
     expect(result.free_trial).toBe(true);
   });
 
-  it('returns no pricing_min when no prices are found, free_trial=false by default', () => {
+  it('returns no pricing_min when no prices are found; free_trial stays undefined (LLM will decide)', () => {
+    // New tristate contract: the heuristic only confirms a free trial (true)
+    // or stays silent (undefined). It never returns false — that's an LLM-
+    // only call. The applier renders undefined as DASH.
     const html = `<p>Contact us for pricing</p>`;
 
     const result = extractPricingDetails(html);
 
     expect(result.pricing_min).toBeUndefined();
-    expect(result.free_trial).toBe(false);
+    expect(result.free_trial).toBeUndefined();
   });
 
   it('ignores prices >100M (likely IDs / phone numbers / wrong matches)', () => {
@@ -113,7 +116,8 @@ describe('extractPricingDetails', () => {
     const result = extractPricingDetails(html);
 
     expect(result.pricing_min).toBeUndefined();
-    expect(result.free_trial).toBe(false);
+    // Tristate: job-posting page → abort early, free_trial stays undefined.
+    expect(result.free_trial).toBeUndefined();
   });
 
   it('skips pricing extraction on a job-posting page with 2+ characteristic text markers', () => {
