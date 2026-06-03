@@ -3,27 +3,42 @@ import { Currency, PriceValue } from './types';
 
 const FREE_TRIAL_RE = /free trial|free forever|бесплатно навсегда|14[-\s]?days?\s+(?:free\s+)?trial|пробный период|попроб[а-яё]+\s+бесплатно|start (?:your )?free trial|тестовый доступ|демо[-\s]?доступ|бесплатная версия|free plan|try (?:it )?free|бесплатный тариф|бесплатный план|0\s*[₽$€]\s*\/\s*мес|бесплатн[а-яё]*\s+(?:консультац|аудит|демо|тест|урок|пилот|разбор|стратег[а-яё]*\s*сесси|вебинар|занятие|тренировк|пробник)|free\s+(?:consultation|audit|demo|pilot|strategy\s+session|sample|workshop)|первая\s+(?:консультаци|встреч|сесси|урок|занятие|тренировк)[а-яё]*\s+бесплатн|первое\s+занятие\s+бесплатн|пробн[а-яё]+\s+(?:урок|занятие|тренировк|встреч|консультац)/i;
 
-// Job-posting pages (hh.ru, careers pages, LinkedIn-style vacancies) carry
-// salary numbers that otherwise pass our context regex as a "price". When the
-// HTML carries a JSON-LD JobPosting type or 2+ characteristic text markers,
-// we abort pricing extraction so the salary cannot be misattributed.
+// Job-posting / job-board pages carry salary numbers that otherwise pass our
+// context regex as a "price". We treat the page as a job posting when ANY of
+// the following holds, so the salary cannot leak as the company's price.
 const JOBPOSTING_MICRODATA_RE =
   /"@type"\s*:\s*"JobPosting"|itemtype\s*=\s*["'][^"']*JobPosting/i;
 
+// One strong signal is enough: salary or compensation token directly followed
+// by a number (or "от/до/from"). Words like "зарплата" or "оклад" are very
+// rare on a real services page, especially when stuck to a number.
+const JOBPOSTING_SALARY_RE =
+  /(?:зарплата|оклад|заработная\s+плата|з\/п|salary|compensation)[^а-яА-ЯёЁa-zA-Z\d]{0,12}(?:от|до|from|up\s+to|—|-|:)?\s*\d/i;
+
+// Job-board pages (rabix.ru, hh.ru, superjob.ru, ...) saturate the markup
+// with /vacancy/ links and class names like `vacancy-card`. A handful of
+// such markers is enough to identify the page as a job board.
+const JOBBOARD_SATURATION_RE = /\/vacancy\/|class\s*=\s*["'][^"']*vacancy|вакансия\s+\d|вакансий\s+(?:в|по)/gi;
+
 const JOBPOSTING_TEXT_MARKERS: RegExp[] = [
-  /(?:зарплата|оклад|заработная\s+плата|з\/п)\s*[:—\-]/i,
   /требования\s+к\s+кандидату/i,
   /условия\s+работы/i,
   /обязанност[иеяй]\s*[:—\-]/i,
   /опыт\s+работы\s+(?:от\s+\d|не\s+мене[еа])/i,
-  /(?:salary|compensation)\s*[:—\-]/i,
   /job\s+(?:description|requirements?|responsibilities)/i,
   /резюме\s+отклика/i,
   /отклик\s+на\s+вакансию/i,
+  /(?:оформление|оформляем)\s+по\s+тк\s+рф/i,
 ];
 
 function looksLikeJobPosting(html: string): boolean {
+  // 1 strong signal is enough.
   if (JOBPOSTING_MICRODATA_RE.test(html)) return true;
+  if (JOBPOSTING_SALARY_RE.test(html)) return true;
+  // Job-board saturation: ≥4 vacancy-class/path markers across the page.
+  const boardMatches = html.match(JOBBOARD_SATURATION_RE);
+  if (boardMatches && boardMatches.length >= 4) return true;
+  // Otherwise need 2+ softer text markers.
   let score = 0;
   for (const re of JOBPOSTING_TEXT_MARKERS) {
     if (re.test(html)) score++;
@@ -32,14 +47,25 @@ function looksLikeJobPosting(html: string): boolean {
   return false;
 }
 
+// Number multiplier suffix: "60 тыс / в месяц" → 60 × 1000 = 60 000.
+// Without this leadconnect.ru's "₽ 60 тыс / мес" reads as a 60 ₽ price floor.
+function readMultiplier(after: string): number {
+  const trimmed = after.replace(/^\s+/, '').toLowerCase();
+  if (trimmed.startsWith('млрд')) return 1_000_000_000;
+  if (trimmed.startsWith('млн')) return 1_000_000;
+  if (/^(?:тыс[\.а-яё]*|тыщ|k\b)/i.test(trimmed)) return 1000;
+  return 1;
+}
+
 const MAX_PRICE = 100_000_000;
 // A real service starting price is never a single-digit token — this floor
 // kills the "1 ₽ / 2 ₽ / 5 ₽" noise the old global-minimum logic produced.
 const MIN_PRICE = 10;
 
-/** One price token — currency may sit before or after the number. */
+/** One price token — currency may sit before or after the number, and a
+ *  thousand/million suffix may sit between number and currency. */
 const PRICE_TOKEN_RE =
-  /(₽|руб(?:лей|ля|\.)?|\$|usd|eur|€)\s*(\d[\d\s]{0,8}\d|\d)|(\d[\d\s]{0,8}\d|\d)\s*(₽|руб(?:лей|ля|\.)?|\$|usd|eur|€)/gi;
+  /(₽|руб(?:лей|ля|\.)?|\$|usd|eur|€)\s*(\d[\d\s]{0,8}\d|\d)|(\d[\d\s]{0,8}\d|\d)\s*(тыс[\.а-яё]*|млн[\.а-яё]*|млрд[\.а-яё]*|тыщ\w*)?\s*(₽|руб(?:лей|ля|\.)?|\$|usd|eur|€)/gi;
 
 /** CSS classes / ids / microdata that reliably mark a price or tariff block. */
 const PRICE_BLOCK_SELECTOR = [
@@ -68,21 +94,35 @@ function detectCurrency(token: string): Currency {
   return 'unknown';
 }
 
-function parsePriceValue(raw: string): number | null {
+/** Raw numeric value with no range checks (the floor/ceiling are applied
+ *  after multipliers like "тыс"/"млн" so that "1 млн" survives the MIN floor). */
+function parsePriceRaw(raw: string): number | null {
   const clean = raw.replace(/\s/g, '').replace(/,(\d{2})$/, '.$1');
   const value = parseFloat(clean);
-  if (isNaN(value) || value < MIN_PRICE || value > MAX_PRICE) return null;
-  return Math.round(value);
+  if (isNaN(value) || value <= 0) return null;
+  return value;
 }
 
 /** A parsed price plus whether it is a per-unit rate (per lead/click/…). */
 type Candidate = PriceValue & { perUnit: boolean };
 
 function priceFromMatch(m: RegExpExecArray, after: string): Candidate | null {
-  const cur = m[1] ?? m[4] ?? '';
+  // Group layout for the extended PRICE_TOKEN_RE:
+  //   m[1]: currency when before — "₽ 60 тыс"
+  //   m[2]: number when currency-before
+  //   m[3]: number when currency-after
+  //   m[4]: multiplier between number and currency-after — "1 млн ₽"
+  //   m[5]: currency when after
+  const cur = m[1] ?? m[5] ?? '';
   const num = m[2] ?? m[3] ?? '';
-  const value = parsePriceValue(num);
-  if (value === null) return null;
+  const baseValue = parsePriceRaw(num);
+  if (baseValue === null) return null;
+  // Inline multiplier (between number and currency, e.g. "1 млн ₽") takes
+  // precedence; otherwise look in the after-window (e.g. "₽ 60 тыс /мес").
+  const inlineMul = m[4] ? readMultiplier(m[4]) : 1;
+  const multiplier = inlineMul > 1 ? inlineMul : readMultiplier(after);
+  const value = Math.round(baseValue * multiplier);
+  if (value < MIN_PRICE || value > MAX_PRICE) return null;
   return { value, currency: detectCurrency(cur), perUnit: PER_UNIT_AFTER_RE.test(after) };
 }
 

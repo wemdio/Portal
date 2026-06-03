@@ -162,4 +162,58 @@ describe('extractPricingDetails', () => {
       expect(extractPricingDetails(html).free_trial).toBe(true);
     }
   });
+
+  it('parses "тыс" multiplier so "₽ 60 тыс / в месяц" is read as 60 000, not 60', () => {
+    // The leadconnect.ru pattern: currency before the number followed by the
+    // тысячи suffix. Without the multiplier this used to surface as a 60 ₽
+    // service price.
+    const html = `
+      <div class="elementskit-pricing-price">₽ 60 тыс / в месяц</div>
+      <div class="elementskit-pricing-price">₽ 105 тыс / в месяц</div>
+      <div class="elementskit-pricing-price">₽ 430 тыс / в месяц</div>
+    `;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toEqual({ value: 60000, currency: 'RUB' });
+  });
+
+  it('parses "млн" multiplier: "от 1 млн ₽" → 1 000 000', () => {
+    const html = `<h2>Корпоративные решения от 1 млн ₽ в месяц</h2>`;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toEqual({ value: 1_000_000, currency: 'RUB' });
+  });
+
+  it('skips pricing extraction on a job-board page saturated with "vacancy" class names and links', () => {
+    // The rabix.ru pattern: a job aggregator with many vacancy-card divs and
+    // /vacancy/... hrefs. There's no JSON-LD microdata, but the saturation
+    // makes the page a job board.
+    const html = `
+      <body>
+        <a href="/search_vacancy/">Все вакансии</a>
+        <div class="vacancy-card"><a class="vacancy-card__title" href="/vacancy/100001-s">Должность 1</a><div class="vacancy-card__price">от 55 000 ₽</div></div>
+        <div class="vacancy-card"><a class="vacancy-card__title" href="/vacancy/100002-s">Должность 2</a><div class="vacancy-card__price">от 70 000 ₽</div></div>
+        <div class="vacancy-card"><a class="vacancy-card__title" href="/vacancy/100003-s">Должность 3</a><div class="vacancy-card__price">от 85 000 ₽</div></div>
+      </body>
+    `;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toBeUndefined();
+  });
+
+  it('treats a salary-with-number as a definitive job-posting signal (1 marker is enough)', () => {
+    // "Оклад от 75 000 ₽" is itself the give-away — even without other markers.
+    const html = `
+      <h1>Менеджер по продажам</h1>
+      <p>Оклад от 75 000 ₽</p>
+      <p>Работаем в офисе на Тверской.</p>
+    `;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toBeUndefined();
+  });
 });
