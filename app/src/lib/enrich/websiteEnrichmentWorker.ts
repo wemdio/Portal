@@ -65,7 +65,7 @@ function parseExtractors(value: unknown): ExtractorKey[] | undefined {
 
 type FetchResult = { text?: string; error?: string };
 
-const WORKER_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_CONCURRENCY ?? '10');
+const WORKER_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_CONCURRENCY ?? '25');
 const WORKER_BATCH_SIZE = Number(process.env.WEBSITE_ENRICHMENT_BATCH_SIZE ?? '60');
 const CACHE_SUCCESS_DAYS = Number(process.env.WEBSITE_ENRICHMENT_CACHE_DAYS ?? '7');
 const CACHE_ERROR_HOURS = Number(process.env.WEBSITE_ENRICHMENT_ERROR_TTL_HOURS ?? '6');
