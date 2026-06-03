@@ -15,7 +15,7 @@ import { extractCaseIndustries } from '@/lib/enrich/extractors/caseIndustriesExt
 import { detectEnterpriseLogos, detectEnterpriseInHtml } from '@/lib/enrich/extractors/enterpriseLogosDetector';
 import { extractPricingModel } from '@/lib/enrich/extractors/pricingModelExtractor';
 import { extractPricingDetails } from '@/lib/enrich/extractors/pricingDetailExtractor';
-import { extractHiring } from '@/lib/enrich/extractors/hiringExtractor';
+import { extractHiring, findExternalCareerLinks } from '@/lib/enrich/extractors/hiringExtractor';
 import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtractor';
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
@@ -119,6 +119,18 @@ async function fetchMainHtml(
 
   if (!html) return { error: classifyFetchError(httpError, pwError) };
   return { html, method };
+}
+
+/**
+ * Cheap count of `<img alt="...">` occurrences without parsing the full DOM.
+ * Used by enterprise_logos to decide whether we actually had anything to
+ * inspect — "no clients + no images" means "we couldn't tell" (undefined),
+ * not "no enterprise logos" (false).
+ */
+function countImgWithAlt(html: string): number {
+  if (!html) return 0;
+  const matches = html.match(/<img\b[^>]*\balt\s*=\s*["'][^"']{2,}["']/gi);
+  return matches ? matches.length : 0;
 }
 
 /**
@@ -283,9 +295,24 @@ export async function processSignalsForUrl(
   }
   if (extractors.includes('enterprise_logos')) {
     const cust = out.customers ?? extractCustomers(casesHtml ?? '');
-    out.enterprise_logos = detectEnterpriseLogos(cust)
+    const found =
+      detectEnterpriseLogos(cust)
       || detectEnterpriseInHtml(casesHtml ?? '')
       || detectEnterpriseInHtml(main.html);
+    // Tri-state: true → "Да", false → "Нет", undefined → DASH. A confident
+    // "no" requires that we actually had something to check (clients list or
+    // logo images on the page). With nothing to inspect we leave it undefined
+    // so the cell renders as DASH instead of a misleading "Нет".
+    const inspectableCount =
+      cust.length
+      + countImgWithAlt(casesHtml ?? '')
+      + countImgWithAlt(main.html);
+    if (found) {
+      out.enterprise_logos = true;
+    } else if (inspectableCount >= 3) {
+      out.enterprise_logos = false;
+    }
+    // else leave undefined → DASH
   }
 
   // Pricing-related extractors (share /pricing HTML, fallback to main)
@@ -299,42 +326,58 @@ export async function processSignalsForUrl(
   if (extractors.includes('pricing_min') || extractors.includes('free_trial')) {
     const details = extractPricingDetails(pricingHtml ?? '');
     if (extractors.includes('pricing_min')) out.pricing_min = details.pricing_min;
-    if (extractors.includes('free_trial')) out.free_trial = details.free_trial;
-    // Fallback to main page if subpage had nothing
+    // Heuristic only confirms a free trial (true); silence (undefined) means
+    // "we didn't see a trial phrase" — LLM gets to weigh in below. We never
+    // write false from the heuristic side.
+    if (extractors.includes('free_trial') && details.free_trial === true) {
+      out.free_trial = true;
+    }
+    // Fallback to main page if subpage had nothing.
     if (!pricingHtml) {
       const mainDetails = extractPricingDetails(main.html);
       if (extractors.includes('pricing_min') && !out.pricing_min) out.pricing_min = mainDetails.pricing_min;
-      if (extractors.includes('free_trial') && !out.free_trial) out.free_trial = mainDetails.free_trial;
+      if (extractors.includes('free_trial') && out.free_trial !== true && mainDetails.free_trial === true) {
+        out.free_trial = true;
+      }
     }
   }
 
-  // Careers-related extractors (share /careers HTML, fallback to main)
+  // Careers-related extractors (share /careers HTML, fallback to main,
+  // and as a last resort follow an external hh.ru / career.habr link).
   const careersHtml = subpageHtml.careers ?? null;
   if (extractors.includes('vacancies_count') || extractors.includes('hiring_roles')) {
-    const hiring = extractHiring(careersHtml ?? '');
+    let hiring = extractHiring(careersHtml ?? '');
     if (hiring.vacancies_count === 0 && !careersHtml) {
-      const mainHiring = extractHiring(main.html);
-      if (extractors.includes('vacancies_count')) out.vacancies_count = mainHiring.vacancies_count;
-      if (extractors.includes('hiring_roles')) {
-        out.hiring_roles = {
-          marketing: mainHiring.has_marketing,
-          engineering: mainHiring.has_engineering,
-          sales: mainHiring.has_sales,
-          design: mainHiring.has_design,
-          product: mainHiring.has_product,
-        };
+      hiring = extractHiring(main.html);
+    }
+
+    // External aggregator fallback: when neither the /careers subpage nor the
+    // main page yielded vacancies, try the first hh.ru/employer or
+    // career.habr.com/companies link we can find. Many B2B сompanies publish
+    // hiring only via these aggregators rather than maintaining a /careers page.
+    if (hiring.vacancies_count === 0 && !signal?.aborted) {
+      const externalLinks = findExternalCareerLinks(main.html);
+      for (const url of externalLinks) {
+        if (signal?.aborted) break;
+        const html = await fetchSubpageHtml(url, subpageTimeout, signal);
+        if (!html) continue;
+        const externalHiring = extractHiring(html);
+        if (externalHiring.vacancies_count > 0) {
+          hiring = externalHiring;
+          break;
+        }
       }
-    } else {
-      if (extractors.includes('vacancies_count')) out.vacancies_count = hiring.vacancies_count;
-      if (extractors.includes('hiring_roles')) {
-        out.hiring_roles = {
-          marketing: hiring.has_marketing,
-          engineering: hiring.has_engineering,
-          sales: hiring.has_sales,
-          design: hiring.has_design,
-          product: hiring.has_product,
-        };
-      }
+    }
+
+    if (extractors.includes('vacancies_count')) out.vacancies_count = hiring.vacancies_count;
+    if (extractors.includes('hiring_roles')) {
+      out.hiring_roles = {
+        marketing: hiring.has_marketing,
+        engineering: hiring.has_engineering,
+        sales: hiring.has_sales,
+        design: hiring.has_design,
+        product: hiring.has_product,
+      };
     }
   }
 
@@ -427,7 +470,10 @@ export async function processSignalsForUrl(
   if (extractors.includes('customers') && (!out.customers || out.customers.length === 0)) llmNeeded.add('customers');
   if (extractors.includes('founded_year') && !out.founded_year) llmNeeded.add('founded_year');
   if (extractors.includes('team_size') && !out.team_size) llmNeeded.add('team_size');
-  if (extractors.includes('free_trial') && out.free_trial !== true) llmNeeded.add('free_trial');
+  // free_trial: ask the LLM whenever the heuristic didn't confirm (undefined).
+  // It may return true OR false; we accept both so the user sees "Нет" instead
+  // of the misleading DASH when the LLM is confident there's no trial.
+  if (extractors.includes('free_trial') && out.free_trial === undefined) llmNeeded.add('free_trial');
   if (extractors.includes('case_industries') && (!out.case_industries || out.case_industries.length === 0)) llmNeeded.add('case_industries');
   if (extractors.includes('cases_count') && !out.cases_count) llmNeeded.add('cases_count');
   if (extractors.includes('integrations') && (!out.integrations || out.integrations.length === 0)) llmNeeded.add('integrations');
@@ -441,7 +487,14 @@ export async function processSignalsForUrl(
       if (llmResult.customers && llmResult.customers.length > 0 && llmNeeded.has('customers')) out.customers = llmResult.customers;
       if (llmResult.founded_year && llmNeeded.has('founded_year')) out.founded_year = llmResult.founded_year;
       if (llmResult.team_size && llmNeeded.has('team_size')) out.team_size = llmResult.team_size;
-      if (llmResult.free_trial === true && llmNeeded.has('free_trial')) out.free_trial = true;
+      // Tri-state merge: heuristic only sets true. Now accept either side of
+      // the LLM's verdict so "Нет" (confident no) lands in the cell when the
+      // model spotted a Contact-Sales-only page. Heuristic-true is preserved
+      // (we don't downgrade Да → Нет just because LLM disagrees).
+      if (llmNeeded.has('free_trial') && out.free_trial !== true) {
+        if (llmResult.free_trial === true) out.free_trial = true;
+        else if (llmResult.free_trial === false) out.free_trial = false;
+      }
       if (llmResult.case_industries && llmResult.case_industries.length > 0 && llmNeeded.has('case_industries')) out.case_industries = llmResult.case_industries;
       if (typeof llmResult.cases_count === 'number' && llmResult.cases_count > 0 && llmNeeded.has('cases_count')) out.cases_count = llmResult.cases_count;
       if (llmResult.integrations && llmResult.integrations.length > 0 && llmNeeded.has('integrations')) out.integrations = llmResult.integrations;

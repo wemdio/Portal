@@ -97,6 +97,14 @@ export interface TelegramSettings {
   pre_read_delay_range: [number, number];
   read_reply_delay_range: [number, number];
   account_loop_delay_range: [number, number];
+  /**
+   * Пауза между полными кругами по всем аккаунтам, в секундах. Раньше
+   * cycleDelay был захардкожен в 30с и после ~3 часов прохождения 29 аккаунтов
+   * воркер бежал на новый круг уже через 30с — на «горячих» mobile-pool IP
+   * этого мало, Telegram продолжал отвечать silent throttle. Делаем настройкой
+   * с дефолтом [300, 600] (5-10 минут рандом).
+   */
+  cycle_delay_range: [number, number];
   dialog_wait_window_range: [number, number];
   sleep_periods: string[];
   timezone_offset: number;
@@ -251,6 +259,7 @@ export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   pre_read_delay_range: [5, 10],
   read_reply_delay_range: [5, 10],
   account_loop_delay_range: [300, 600],
+  cycle_delay_range: [300, 600],
   dialog_wait_window_range: [40, 60],
   sleep_periods: ['00:00-08:00'],
   timezone_offset: 3,

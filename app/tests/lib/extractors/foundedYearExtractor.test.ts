@@ -28,4 +28,35 @@ describe('extractFoundedYear', () => {
   it('returns undefined when no year-related phrase is found', () => {
     expect(extractFoundedYear(`<p>About our company</p>`)).toBeUndefined();
   });
+
+  it('extracts year from JSON-LD foundingDate (most reliable source)', () => {
+    const html = `<script type="application/ld+json">{"@type":"Organization","name":"Acme","foundingDate":"2007-03-15"}</script>`;
+    expect(extractFoundedYear(html)).toBe(2007);
+  });
+
+  it('extracts year from microdata itemprop="foundingDate" content/datetime/value', () => {
+    expect(extractFoundedYear(`<meta itemprop="foundingDate" content="2011">`)).toBe(2011);
+    expect(extractFoundedYear(`<time itemprop="foundingDate" datetime="2013-08-20">2013</time>`)).toBe(2013);
+  });
+
+  it('extracts year from short-form "Founded 2015" without "in"', () => {
+    expect(extractFoundedYear(`<p>Founded 2015</p>`)).toBe(2015);
+  });
+
+  it('extracts year from "Year founded: 2020" / "Год основания: 2020"', () => {
+    expect(extractFoundedYear(`<p>Year founded: 2020</p>`)).toBe(2020);
+    expect(extractFoundedYear(`<p>Год основания — 2019</p>`)).toBe(2019);
+  });
+
+  it('derives founding year from "N лет на рынке" / "10 years in business"', () => {
+    const currentYear = new Date().getFullYear();
+    expect(extractFoundedYear(`<p>Более 15 лет на рынке</p>`)).toBe(currentYear - 15);
+    expect(extractFoundedYear(`<p>10 years in business</p>`)).toBe(currentYear - 10);
+    expect(extractFoundedYear(`<p>Опыт работы более 12 лет</p>`)).toBe(currentYear - 12);
+  });
+
+  it('rejects derived years older than 50 years (would imply pre-1975 founding)', () => {
+    // "Более 80 лет" is rarely true and almost always marketing copy.
+    expect(extractFoundedYear(`<p>Более 80 лет на рынке</p>`)).toBeUndefined();
+  });
 });

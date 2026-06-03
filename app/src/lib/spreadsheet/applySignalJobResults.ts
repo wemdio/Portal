@@ -2,7 +2,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { SIGNAL_ERROR_MARKER, isStackCellRefillable } from '@/lib/enrich/signalConstants';
 import { ExtractorKey } from '@/lib/enrich/extractors/types';
-import { formatExtraValue } from '@/lib/enrich/extractors/formatExtraValue';
+import { formatExtraValue, EMPTY_CELL_DASH } from '@/lib/enrich/extractors/formatExtraValue';
 import {
   loadCompressedState,
   saveCompressedStateWithCas,
@@ -121,8 +121,10 @@ export function applySignalsToTabData(
     } else {
       row[stackColIndex] = SIGNAL_ERROR_MARKER;
       row[profileColIndex] = r.last_error ?? 'Не удалось обработать сайт';
+      // Failed rows: write DASH (not '') to every extra column so the user
+      // requirement "no cell is ever empty" holds end-to-end.
       for (const ec of allExtras) {
-        row[ec.colIndex] = '';
+        row[ec.colIndex] = EMPTY_CELL_DASH;
       }
       applied += 1;
     }
