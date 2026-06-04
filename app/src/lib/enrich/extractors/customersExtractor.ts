@@ -61,6 +61,30 @@ const LOGO_PREFIX_RE = /^(?:лого(?:тип)?|logo)\s+/i;
 const REVIEW_PREFIX_RE = /^(?:review|otziv\w*|отзыв(?:\s+от)?)\s+/i;
 const DESCRIPTION_RE = /(?:клиент по|продвижен|кейс[аыов]*\s+с\s+описани|стратеги[яи]|результат|рекоменд|стать клиентом|видеоотзыв|мониторим|фильтруем|передаём|почему|юридическ|эффективнее|слайд|читать кейс|подробн|услуг[аи])/i;
 
+/**
+ * Прогон списка кандидатов на клиентов через тот же junk-фильтр и cleanName,
+ * что используются в heuristic-extractor'е. Экспортируется для LLM-fallback'а:
+ * модель может вернуть «visa», «card img» или часть заголовка раздела —
+ * фильтр гарантирует что в выгрузку идёт то же качество, что у heuristic.
+ *
+ * Возвращает дедуплицированный list (по lowercase form'е), c сохранением
+ * исходного порядка.
+ */
+export function filterCustomerCandidates(raw: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const r of raw) {
+    if (typeof r !== 'string') continue;
+    const cleaned = cleanName(r);
+    if (isJunk(cleaned)) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+  }
+  return out;
+}
+
 function isJunk(s: string): boolean {
   if (!s || s.length > 80) return true;
   if (s.length < 2) return true;
