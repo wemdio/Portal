@@ -19,6 +19,7 @@ import { extractHiring, findExternalCareerLinks } from '@/lib/enrich/extractors/
 import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtractor';
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
+import { extractSocialMedia } from '@/lib/enrich/extractors/socialMediaExtractor';
 import {
   discoverBlogOrSocialUrls,
   extractBlogLastPost,
@@ -451,6 +452,21 @@ export async function processSignalsForUrl(
   if (extractors.includes('team_size')) {
     out.team_size = subpageHtml.about ? extractTeamSize(subpageHtml.about) : 0;
     if (!out.team_size) out.team_size = extractTeamSize(main.html);
+  }
+  if (extractors.includes('social_media')) {
+    // Соцсети ищем сразу на main+about и мерджим — у b2b-сайтов на главной
+    // обычно footer с иконками, на about — текстовые ссылки. Дедуп идёт
+    // внутри extractSocialMedia по нормализованному URL.
+    const mainSocials = extractSocialMedia(main.html);
+    const aboutSocials = subpageHtml.about ? extractSocialMedia(subpageHtml.about) : [];
+    const merged: string[] = [];
+    const seen = new Set<string>();
+    for (const url of [...mainSocials, ...aboutSocials]) {
+      if (seen.has(url)) continue;
+      seen.add(url);
+      merged.push(url);
+    }
+    out.social_media = merged;
   }
   if (extractors.includes('blog_last_post')) {
     // Two-step crawl: from a blog *listing* we locate the latest post link and

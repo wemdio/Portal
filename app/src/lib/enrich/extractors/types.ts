@@ -43,7 +43,8 @@ export type ExtractorKey =
   | 'integrations'
   | 'founded_year'
   | 'team_size'
-  | 'blog_last_post';
+  | 'blog_last_post'
+  | 'social_media';
 
 export const ALL_EXTRACTOR_KEYS: ExtractorKey[] = [
   'stack',
@@ -61,6 +62,7 @@ export const ALL_EXTRACTOR_KEYS: ExtractorKey[] = [
   'founded_year',
   'team_size',
   'blog_last_post',
+  'social_media',
 ];
 
 /** Which subpages each extractor needs to be fetched. Empty = main page only. */
@@ -80,6 +82,10 @@ export const EXTRACTOR_TO_SUBPAGES: Record<ExtractorKey, SubpageKind[]> = {
   founded_year: ['about'],
   team_size: ['about'],
   blog_last_post: ['blog'],
+  // Соцсети традиционно живут в footer'е главной + в контактах. Подгружаем
+  // about/contact-страницу как fallback, потому что у многих b2b-сайтов
+  // главная — это лендинг с прицепами на «контакты» отдельно.
+  social_media: ['about'],
 };
 
 /**
@@ -115,6 +121,7 @@ export const EXTRACTOR_LABELS: Record<ExtractorKey, string> = {
   founded_year: 'Год основания',
   team_size: 'Размер команды',
   blog_last_post: 'Последний пост',
+  social_media: 'Соцсети',
 };
 
 /**
@@ -154,7 +161,7 @@ export const BUILTIN_PRESETS: Readonly<Record<SignalPresetId, SignalPreset>> = {
   audit: {
     id: 'audit',
     name: 'Аудит',
-    description: 'Максимум сигналов: клиенты, кейсы, отрасли, цены, интеграции, найм, возраст компании, последний пост.',
+    description: 'Максимум сигналов: клиенты, кейсы, отрасли, цены, интеграции, найм, возраст компании, последний пост, соцсети.',
     extractors: [
       'stack',
       'profile',
@@ -170,6 +177,7 @@ export const BUILTIN_PRESETS: Readonly<Record<SignalPresetId, SignalPreset>> = {
       'integrations',
       'founded_year',
       'blog_last_post',
+      'social_media',
     ],
   },
 };
@@ -214,7 +222,7 @@ export const EXTRACTOR_GROUPS: ExtractorGroup[] = [
     id: 'company',
     title: 'Компания и интеграции',
     description: 'Подгружает /about, /integrations, /blog.',
-    extractors: ['integrations', 'founded_year', 'team_size', 'blog_last_post'],
+    extractors: ['integrations', 'founded_year', 'team_size', 'blog_last_post', 'social_media'],
   },
 ];
 
@@ -258,4 +266,6 @@ export interface ExtractedData {
   founded_year?: number;
   team_size?: number;
   blog_last_post?: string;
+  /** Список нормализованных URL'ов всех найденных соцсетей компании. */
+  social_media?: string[];
 }
