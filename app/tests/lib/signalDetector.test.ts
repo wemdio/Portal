@@ -325,53 +325,53 @@ describe('determineProfile', () => {
     expect(determineProfile([])).toBe('');
   });
 
-  it('returns "Тратит, но не считает" for ad pixels without CRM/call-tracking', () => {
+  it('returns the "ads without CRM/call-tracking" profile for ad pixels alone', () => {
     const signals = detectSignals(`
       <script src="https://mc.yandex.ru/metrika/tag.js"></script>
       <script src="https://yandex.ru/ads/system/context.js"></script>
       <script>VK.Retargeting.Init("VK-RTRG-1");</script>
     `);
-    expect(determineProfile(signals)).toBe('Тратит, но не считает');
+    expect(determineProfile(signals)).toBe('Реклама есть, CRM и call-трекинга нет');
   });
 
-  it('returns "Вырос из инструментов" for budget stack combo', () => {
+  it('returns the "3+ budget tools" profile for budget stack combo', () => {
     const signals = detectSignals(`
       <script src="//code.jivosite.com/widget/abc"></script>
       <script src="https://cdn.amocrm.ru/js/button.js"></script>
       <script src="https://cdn.unisender.com/widget.js"></script>
       <meta name="generator" content="Tilda Publishing">
     `);
-    expect(determineProfile(signals)).toBe('Вырос из инструментов');
+    expect(determineProfile(signals)).toBe('3+ бюджетных инструмента (Tilda, AmoCRM, JivoSite и т.п.)');
   });
 
-  it('returns "Зависимость от одного канала" for only Yandex.Direct', () => {
+  it('returns the "single ad channel" profile for only Yandex.Direct', () => {
     const signals = detectSignals(`
       <script src="https://yandex.ru/ads/system/context.js"></script>
     `);
-    expect(determineProfile(signals)).toBe('Зависимость от одного канала');
+    expect(determineProfile(signals)).toBe('Один рекламный канал, без CRM/email/звонков');
   });
 
-  it('returns "Маркетплейс-зависимый" for marketplace links without own payments', () => {
+  it('returns the "marketplace-only" profile for marketplace links without own payments', () => {
     const signals = detectSignals(`
       <a href="https://www.wildberries.ru/catalog/12345">WB</a>
       <a href="https://www.ozon.ru/product/12345">Ozon</a>
     `);
-    expect(determineProfile(signals)).toBe('Маркетплейс-зависимый');
+    expect(determineProfile(signals)).toBe('Продают через маркетплейсы, без своих платежей');
   });
 
-  it('returns "Технически зрелый, но без маркетинга" for tech stack without marketing', () => {
+  it('returns the "tech stack without marketing" profile for Next.js without ads', () => {
     const signals = detectSignals(`
       <script src="/_next/static/chunks/main.js"></script>
       <meta name="generator" content="Next.js">
     `);
-    expect(determineProfile(signals)).toBe('Технически зрелый, но без маркетинга');
+    expect(determineProfile(signals)).toBe('Next.js/React стек, без рекламы и email');
   });
 
-  it('returns "Офлайн пытается стать онлайн" for minimal online presence', () => {
+  it('returns the "constructor site without analytics" profile for minimal Tilda presence', () => {
     const signals = detectSignals(`
       <meta name="generator" content="Tilda Publishing">
     `);
-    expect(determineProfile(signals)).toBe('Офлайн пытается стать онлайн');
+    expect(determineProfile(signals)).toBe('Сайт-визитка на конструкторе (Tilda/WP/Bitrix), без аналитики');
   });
 
   it('picks most specific profile when multiple match', () => {
