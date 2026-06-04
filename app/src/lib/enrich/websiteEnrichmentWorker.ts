@@ -10,6 +10,7 @@ import { applySignalJobResults, type ExtraColumnSpec } from '@/lib/spreadsheet/a
 import type { ExtractorKey } from '@/lib/enrich/extractors/types';
 import { startTrace } from '@/lib/tracer';
 import type { Span } from '@/lib/tracer';
+import { isBufferEnabled, writeEnrichResult, type EnrichBufferStatus } from '@/lib/enrich/enrichBuffer';
 
 type QueueItem = {
   id: string;
@@ -212,6 +213,12 @@ async function getCache(urlNormalized: string) {
 
 async function setCache(urlNormalized: string, payload: { text?: string; error?: string; sourceUrl?: string }) {
   if (!supabaseAdmin) return;
+  // Buffer-режим: cache-upsert делает coordinator в составе того же batch'а,
+  // что и UPDATE queue.status. scraper кладёт всё в одну строку buffer'а
+  // через writeEnrichResult в updateQueueItem ниже. Чтобы не сделать UPSERT
+  // дважды (один здесь, один coordinator'ом), здесь пропускаем — payload
+  // прилетит coordinator'у вместе с queue-finalize'ом.
+  if (isBufferEnabled()) return;
   const now = new Date();
   const expiresAt =
     payload.text && payload.text.length > 0
@@ -524,6 +531,40 @@ async function updateQueueItem(
   status: 'pending' | 'completed' | 'failed' | 'skipped',
 ): Promise<boolean> {
   if (!supabaseAdmin) return false;
+
+  // Buffer-режим: терминальные статусы (completed/failed/skipped) уходят
+  // в `website_enrichment_results_buffer` одной строкой, потом coordinator
+  // batch'ит их в queue/cache/jobs (см. enrichBuffer.ts).
+  //
+  // Status='pending' (retry) НЕ кладём в buffer: scraper должен сразу
+  // вернуть item в очередь, иначе claim_website_enrichment_items не
+  // подхватит его снова в этом же цикле. retry — мгновенный prepared
+  // UPDATE, нагрузку он не создаёт (≤MAX_ATTEMPTS=3 раз на item).
+  if (isBufferEnabled() && status !== 'pending') {
+    const bufStatus: EnrichBufferStatus = status;
+    const r = await writeEnrichResult(supabaseAdmin, {
+      queue_id: item.id,
+      job_id: item.job_id,
+      status: bufStatus,
+      result_text: status === 'completed' ? result.text ?? null : null,
+      last_error: status === 'completed' ? null : result.error ?? null,
+      // Передаём cache-payload вместе с queue-finalize'ом, чтобы coordinator
+      // сделал UPSERT в website_enrichment_cache в составе того же batch'а.
+      cache_url_normalized: item.url_normalized || null,
+      cache_source_url: item.url_raw || null,
+      attempt_count: item.attempt_count,
+    });
+    if (!r.ok) {
+      await logError(
+        'website.enrichment.worker.buffer_write_failed',
+        new Error(r.error),
+        { jobId: item.job_id, itemId: item.id, status },
+      );
+      return false;
+    }
+    return true;
+  }
+
   const now = new Date().toISOString();
   try {
     const { error } = await withSupabaseTimeout(
