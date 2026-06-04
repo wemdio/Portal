@@ -272,6 +272,8 @@ type DetectedSignalJob = {
   total: number;
   processed: number;
   progress: number;
+  /** ISO timestamp когда задача была создана в БД — для UI «начат в HH:MM». */
+  created_at?: string;
   spreadsheet_tab_id: string | null;
   result_col_index: number | null;
   result_col_header: string | null;
@@ -290,6 +292,13 @@ type SignalEnrichmentState = {
   currentRow: number;
   error: string | null;
   jobId: string | null;
+  /**
+   * Время старта активной задачи, epoch ms. Заполняется в момент клика
+   * «Запустить» (= Date.now()) либо при resume по существующему job'у
+   * (= парсинг `created_at` из active_job). UI показывает «Процесс начат
+   * в HH:MM» и считает «Примерное время окончания» = startedAt + ETA.
+   */
+  startedAt: number | null;
   detectedJob: DetectedSignalJob | null;
   /**
    * Atomic extractors the user has enabled. Always includes 'stack' and
@@ -1318,6 +1327,7 @@ export function DatabaseSpreadsheet() {
     currentRow: 0,
     error: null,
     jobId: null,
+    startedAt: null,
     detectedJob: null,
     selectedExtractors: SIGNAL_DEFAULT_EXTRACTORS,
     presetId: 'basic',
@@ -7468,6 +7478,7 @@ export function DatabaseSpreadsheet() {
         isProcessing: false,
         isOpen: false,
         jobId: null,
+        startedAt: null,
         detectedJob: null,
       }));
     } catch (err) {
@@ -7737,6 +7748,11 @@ export function DatabaseSpreadsheet() {
       totalRows: rowsToProcess.length,
       currentRow: 0,
       error: null,
+      // POST к /api/enrich/website/jobs ещё не успел вернуть created_at,
+      // поэтому фиксируем локальный Date.now() — расхождение с server-side
+      // created_at в худшем случае ~сотни ms, для UI «начат в HH:MM» это
+      // несущественно. На resume время подтянется из server'a — см. ниже.
+      startedAt: Date.now(),
       detectedJob: null,
     }));
 
@@ -7822,6 +7838,7 @@ export function DatabaseSpreadsheet() {
       isProcessing: false,
       isOpen: false,
       jobId: null,
+      startedAt: null,
       detectedJob: null,
     }));
     setLastAction({ message: 'Анализ сигналов остановлен', time: Date.now() });
@@ -7840,6 +7857,16 @@ export function DatabaseSpreadsheet() {
       setSignalEnrichment((prev) => ({ ...prev, error: 'Необходима авторизация' }));
       return;
     }
+
+    // На resume время старта берём из server-side `created_at` (там оно
+    // зафиксировано в момент INSERT'a job'a). Если по какой-то причине поле
+    // отсутствует (старая запись, до этой миграции UI), фолбэк — Date.now(),
+    // тогда «начат в HH:MM» совпадёт с моментом resume — это всё равно
+    // лучше, чем не показывать ничего.
+    const startedAtMs = detected.created_at
+      ? new Date(detected.created_at).getTime()
+      : Date.now();
+    setSignalEnrichment((prev) => ({ ...prev, startedAt: startedAtMs }));
 
     void runSignalJobPolling({
       jobId: detected.id,
