@@ -49,7 +49,7 @@ describe('processSignalsForUrl', () => {
       expect(result.stack).toContain('Яндекс.Метрика');
       expect(result.stack).toContain('Яндекс.Директ');
       expect(result.stack).toContain('VK Pixel');
-      expect(result.profile).toBe('Тратит, но не считает');
+      expect(result.profile).toBe('Реклама есть, CRM и call-трекинга нет');
       expect(result.signalIds.length).toBeGreaterThan(0);
     }
     expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(1);

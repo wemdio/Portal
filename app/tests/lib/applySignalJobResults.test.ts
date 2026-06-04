@@ -24,12 +24,12 @@ describe('applySignalsToTabData (pure helper)', () => {
       {
         row_index: 1,
         status: 'completed',
-        result_text: JSON.stringify({ stack: 'Яндекс.Метрика, WordPress', profile: 'Базовое онлайн-присутствие' }),
+        result_text: JSON.stringify({ stack: 'Яндекс.Метрика, WordPress', profile: 'Только аналитика, без рекламы/CRM/чата/платежей' }),
       },
       {
         row_index: 2,
         status: 'completed',
-        result_text: JSON.stringify({ stack: 'Calltouch, JivoSite', profile: 'Продаёт через звонки' }),
+        result_text: JSON.stringify({ stack: 'Calltouch, JivoSite', profile: 'Call-трекинг есть, платежей и маркетплейса нет' }),
       },
     ];
 
@@ -44,9 +44,9 @@ describe('applySignalsToTabData (pure helper)', () => {
     expect(tabData[0][STACK_COL]).toBe('Стек');
     expect(tabData[0][PROFILE_COL]).toBe('Профиль');
     expect(tabData[1][STACK_COL]).toBe('Яндекс.Метрика, WordPress');
-    expect(tabData[1][PROFILE_COL]).toBe('Базовое онлайн-присутствие');
+    expect(tabData[1][PROFILE_COL]).toBe('Только аналитика, без рекламы/CRM/чата/платежей');
     expect(tabData[2][STACK_COL]).toBe('Calltouch, JivoSite');
-    expect(tabData[2][PROFILE_COL]).toBe('Продаёт через звонки');
+    expect(tabData[2][PROFILE_COL]).toBe('Call-трекинг есть, платежей и маркетплейса нет');
   });
 
   it('extends rows that are shorter than profile column index', () => {
@@ -55,7 +55,7 @@ describe('applySignalsToTabData (pure helper)', () => {
       {
         row_index: 1,
         status: 'completed',
-        result_text: JSON.stringify({ stack: 'WordPress', profile: 'Офлайн пытается стать онлайн' }),
+        result_text: JSON.stringify({ stack: 'WordPress', profile: 'Сайт-визитка на конструкторе (Tilda/WP/Bitrix), без аналитики' }),
       },
     ];
 
@@ -67,7 +67,7 @@ describe('applySignalsToTabData (pure helper)', () => {
     });
 
     expect(tabData[1][STACK_COL]).toBe('WordPress');
-    expect(tabData[1][PROFILE_COL]).toBe('Офлайн пытается стать онлайн');
+    expect(tabData[1][PROFILE_COL]).toBe('Сайт-визитка на конструкторе (Tilda/WP/Bitrix), без аналитики');
     expect(tabData[1].length).toBeGreaterThanOrEqual(PROFILE_COL + 1);
   });
 

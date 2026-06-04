@@ -37,6 +37,13 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
       const items = nonEmptyStrings(value);
       return items.length > 0 ? items.join(', ') : EMPTY_CELL_DASH;
     }
+    case 'social_media': {
+      // Нормализованные URL'ы всех найденных соцсетей компании. Разделитель —
+      // запятая, как у других мульти-string полей (customers/integrations),
+      // чтобы оператор / Excel читали колонку одинаково.
+      const items = nonEmptyStrings(value);
+      return items.length > 0 ? items.join(', ') : EMPTY_CELL_DASH;
+    }
     case 'enterprise_logos':
     case 'free_trial':
       // Tri-state booleans (see ExtractedData): true → "Да", false → "Нет",

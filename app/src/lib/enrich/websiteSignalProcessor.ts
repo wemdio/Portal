@@ -8,8 +8,9 @@ import {
   EXTRACTOR_TO_SUBPAGES,
   SubpageKind,
 } from '@/lib/enrich/extractors/types';
-import { extractCustomers } from '@/lib/enrich/extractors/customersExtractor';
+import { extractCustomers, filterCustomerCandidates } from '@/lib/enrich/extractors/customersExtractor';
 import { nameListLooksReal } from '@/lib/enrich/extractors/nameQuality';
+import { llmExtractCustomers } from '@/lib/enrich/extractors/llmCustomersExtractor';
 import { extractCasesCount } from '@/lib/enrich/extractors/casesCountExtractor';
 import { extractCaseIndustries } from '@/lib/enrich/extractors/caseIndustriesExtractor';
 import { detectEnterpriseLogos, detectEnterpriseInHtml } from '@/lib/enrich/extractors/enterpriseLogosDetector';
@@ -19,6 +20,7 @@ import { extractHiring, findExternalCareerLinks } from '@/lib/enrich/extractors/
 import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtractor';
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
+import { extractSocialMedia } from '@/lib/enrich/extractors/socialMediaExtractor';
 import {
   discoverBlogOrSocialUrls,
   extractBlogLastPost,
@@ -321,6 +323,32 @@ export async function processSignalsForUrl(
     // Trust gate: a thin or junk-heavy heuristic result is dropped so the
     // LLM fallback below produces clean company names instead.
     if (!nameListLooksReal(out.customers)) out.customers = [];
+    // Specialized LLM fallback for «Клиенты» (см. llmCustomersExtractor.ts).
+    // Триггер: heuristic дал < 3 имён ИЛИ ничего — heuristic покрывает
+    // только структурированные logo wall'ы с правильными class-нэймами,
+    // а для российского b2b большинство сайтов используют другие классы /
+    // вообще без класс-нэймов. LLM получает structured input (alt-атрибуты
+    // logo wall'ов + текст разделов под client-headings) и выдаёт чистый
+    // список. Поднимает покрытие с ~2% до 80%+ на российском b2b-сегменте
+    // (см. промежуточные результаты.txt от 04.06 — повод для этой работы).
+    if (out.customers.length < 3) {
+      const llmCustomers = await llmExtractCustomers(main.html, casesHtml);
+      if (llmCustomers.length > 0) {
+        // Merge: keep existing heuristic hits at the front (они уже прошли
+        // junk-filter и nameListLooksReal), добавляем уникальные от LLM.
+        const merged: string[] = [...out.customers];
+        const seen = new Set(out.customers.map((c) => c.toLowerCase()));
+        for (const c of llmCustomers) {
+          const key = c.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          merged.push(c);
+        }
+        // Финальный прогон через filterCustomerCandidates — еще одна линия
+        // защиты от мусора (LLM может пропустить «card img», edge-кейсы).
+        out.customers = filterCustomerCandidates(merged).slice(0, 30);
+      }
+    }
   }
   if (extractors.includes('cases_count')) {
     out.cases_count = extractCasesCount(casesHtml ?? '');
@@ -452,6 +480,21 @@ export async function processSignalsForUrl(
     out.team_size = subpageHtml.about ? extractTeamSize(subpageHtml.about) : 0;
     if (!out.team_size) out.team_size = extractTeamSize(main.html);
   }
+  if (extractors.includes('social_media')) {
+    // Соцсети ищем сразу на main+about и мерджим — у b2b-сайтов на главной
+    // обычно footer с иконками, на about — текстовые ссылки. Дедуп идёт
+    // внутри extractSocialMedia по нормализованному URL.
+    const mainSocials = extractSocialMedia(main.html);
+    const aboutSocials = subpageHtml.about ? extractSocialMedia(subpageHtml.about) : [];
+    const merged: string[] = [];
+    const seen = new Set<string>();
+    for (const url of [...mainSocials, ...aboutSocials]) {
+      if (seen.has(url)) continue;
+      seen.add(url);
+      merged.push(url);
+    }
+    out.social_media = merged;
+  }
   if (extractors.includes('blog_last_post')) {
     // Two-step crawl: from a blog *listing* we locate the latest post link and
     // fetch that page to capture the FULL post text — not just the listing
@@ -504,7 +547,9 @@ export async function processSignalsForUrl(
   const llmNeeded = new Set<LlmField>();
   if (extractors.includes('pricing_model') && (out.pricing_model === 'unknown' || !out.pricing_model)) llmNeeded.add('pricing_model');
   if (extractors.includes('pricing_min') && !out.pricing_min) llmNeeded.add('pricing_min');
-  if (extractors.includes('customers') && (!out.customers || out.customers.length === 0)) llmNeeded.add('customers');
+  // customers вынесены в специализированный llmExtractCustomers выше —
+  // там structured input и шире окно контекста, общий extractor не догоняет
+  // (см. блок «if (extractors.includes('customers'))»).
   if (extractors.includes('founded_year') && !out.founded_year) llmNeeded.add('founded_year');
   if (extractors.includes('team_size') && !out.team_size) llmNeeded.add('team_size');
   // free_trial: ask the LLM whenever the heuristic didn't confirm (undefined).
