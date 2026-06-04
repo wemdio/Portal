@@ -244,19 +244,39 @@ async function loadSeenDomains(clientUserId: string): Promise<Set<string>> {
  * не заденет легитимный текущий прогон, но поймает любой брошенный.
  * Вызывается в начале runAutoPipelineForClient (до startRunRow).
  */
-async function closeStaleRuns(clientUserId: string, maxAgeHours = 4): Promise<void> {
+async function closeStaleRuns(clientUserId: string, staleMinutes = 8): Promise<void> {
   if (!supabaseAdmin) return;
-  const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000).toISOString();
+  // Живой прогон бьёт heartbeat_at раз в ~90с. Мёртвый (OOM/SIGKILL/редеплой
+  // пересоздал контейнер) перестаёт → закрываем как failed, чтобы воркер тут же
+  // перезапустил прогон (resume). Две ветки вместо .or() — проще и без риска
+  // PostgREST or-синтаксиса:
+  const heartbeatCutoff = new Date(Date.now() - staleMinutes * 60 * 1000).toISOString();
+  // 1. Есть heartbeat, но он протух.
   await supabaseAdmin
     .from('client_auto_pipeline_runs')
     .update({
       status: 'failed',
-      error_message: 'stale — auto-closed (процесс был прерван, finishRunRow не вызван)',
+      error_message: 'stale — auto-closed (heartbeat протух, процесс прерван)',
       finished_at: new Date().toISOString(),
     })
     .eq('client_user_id', clientUserId)
     .eq('status', 'running')
-    .lt('started_at', cutoff);
+    .lt('heartbeat_at', heartbeatCutoff);
+  // 2. heartbeat отсутствует (старые строки до миграции / процесс умер до
+  //    первого тика) — fallback по started_at (4ч, гарантированно не заденет
+  //    легитимный текущий прогон ≤2ч44м).
+  const startedCutoff = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+  await supabaseAdmin
+    .from('client_auto_pipeline_runs')
+    .update({
+      status: 'failed',
+      error_message: 'stale — auto-closed (нет heartbeat, процесс прерван)',
+      finished_at: new Date().toISOString(),
+    })
+    .eq('client_user_id', clientUserId)
+    .eq('status', 'running')
+    .is('heartbeat_at', null)
+    .lt('started_at', startedCutoff);
 }
 
 /**
@@ -280,7 +300,7 @@ async function startRunRow(clientUserId: string): Promise<StartRunResult> {
   await closeStaleRuns(clientUserId);
   const { data, error } = await supabaseAdmin
     .from('client_auto_pipeline_runs')
-    .insert({ client_user_id: clientUserId, status: 'running' })
+    .insert({ client_user_id: clientUserId, status: 'running', heartbeat_at: new Date().toISOString() })
     .select('id')
     .single();
   if (error) {
@@ -617,35 +637,21 @@ async function upsertSeenEmployers(rows: SeenEmployerUpsert[]): Promise<void> {
   }
 }
 
-/**
- * Помечает уже записанные seen-строки bucket'а как failed.
- *
- * При батчевой обработке seen-строки upsert'ятся со status='routed' ПО ЧАНКАМ,
- * до того как leads реально отправлены в Instantly. Если append лидов в
- * кампанию падает — нужно откатить статус этих строк на 'failed' прямо в БД
- * (массива в памяти уже нет). Матчим по routed_bucket_id + processed_at
- * (метка текущего прогона), чтобы не задеть строки прошлых прогонов.
- */
-async function markRoutedBucketFailed(
-  clientUserId: string,
-  bucketId: string,
-  processedAt: string,
-  errorMessage: string,
-): Promise<void> {
-  if (!supabaseAdmin) return;
-  await supabaseAdmin
-    .from('client_auto_pipeline_seen_employers')
-    .update({ status: 'failed', error_message: errorMessage })
-    .eq('client_user_id', clientUserId)
-    .eq('routed_bucket_id', bucketId)
-    .eq('processed_at', processedAt)
-    .eq('status', 'routed');
-}
-
 // ── Main entry ───────────────────────────────────────────────────────────
+
+export interface RunAutoPipelineOptions {
+  /**
+   * Вызывается между чанками. Если вернёт true — прогон останавливается ПОСЛЕ
+   * текущего чанка (он уже закоммичен: заливка в Instantly + seen), остаток
+   * докатит resume. Для graceful shutdown воркера на редеплое. По умолчанию
+   * прогон идёт целиком (HTTP-крон, autoPipelineCron one-shot).
+   */
+  shouldStop?: () => boolean;
+}
 
 export async function runAutoPipelineForClient(
   clientUserId: string,
+  opts: RunAutoPipelineOptions = {},
 ): Promise<AutoPipelineRunResult> {
   const logCtx = { clientUserId };
   // Поэтапное логирование в stdout (→ /var/log/auto-pipeline.log) с памятью.
@@ -695,6 +701,18 @@ export async function runAutoPipelineForClient(
     return { ...emptyResult(''), status: 'failed', error: 'Не удалось создать запись прогона' };
   }
   const runId = start.runId;
+
+  // Heartbeat живого прогона — раз в 90с. Позволяет closeStaleRuns быстро
+  // (через ~staleMinutes) отличить мёртвый прогон (OOM/SIGKILL/редеплой) от
+  // живого и подобрать брошенный для resume. clearInterval — в finally.
+  const heartbeat = setInterval(() => {
+    if (!supabaseAdmin) return;
+    void supabaseAdmin
+      .from('client_auto_pipeline_runs')
+      .update({ heartbeat_at: new Date().toISOString() })
+      .eq('id', runId)
+      .then(undefined, () => {}); // best-effort, не валим прогон
+  }, 90_000);
 
   try {
     // 1. Конфиг.
@@ -889,7 +907,6 @@ export async function runAutoPipelineForClient(
     // одновременно максимум 1 чанк + накопленный groupedLeads (только routed —
     // их кратно меньше, в dry-run вообще пусто).
     const mailganerStats = emptyCacheStats();
-    const groupedLeads = new Map<string, { bucket: ScoreBucket; leads: LeadCreatePayload[] }>();
     const now = new Date().toISOString();
 
     let routedCount = 0;
@@ -899,10 +916,21 @@ export async function runAutoPipelineForClient(
     let withScoreCount = 0;
     let withEmailCount = 0;
     let emailValidCount = 0;
+    let failedCount = 0;
+    let droppedIncomplete = 0;
+    let interrupted = false;
 
     logPhase('enrich-start', { fresh: fresh.length, parsed: employers.length, dryRun: config.dry_run });
     const CHUNK_SIZE = 500;
     for (let chunkStart = 0; chunkStart < fresh.length; chunkStart += CHUNK_SIZE) {
+      // Graceful stop (SIGTERM воркера на редеплое): останавливаемся МЕЖДУ
+      // чанками — текущий прогресс уже закоммичен (append + seen), остаток
+      // докатит resume на следующем тике воркера.
+      if (opts.shouldStop?.()) {
+        interrupted = true;
+        logPhase('graceful-stop', { processedUpTo: chunkStart, of: fresh.length });
+        break;
+      }
       const chunk = fresh.slice(chunkStart, chunkStart + CHUNK_SIZE);
       logPhase('chunk', { from: chunkStart, of: fresh.length });
 
@@ -945,6 +973,10 @@ export async function runAutoPipelineForClient(
       }
 
       const seenUpserts: SeenEmployerUpsert[] = [];
+      // Лиды ЭТОГО чанка по bucket'ам — заливаем сразу после чанка
+      // (инкрементально), не копим до конца прогона. Так обрыв (редеплой/OOM)
+      // теряет максимум 1 чанк, а не весь прогон.
+      const groupedLeads = new Map<string, { bucket: ScoreBucket; leads: LeadCreatePayload[] }>();
 
       for (const enr of enrichments) {
         // Воронка — считаем по каждому enrichment независимо от routing'а.
@@ -1081,9 +1113,45 @@ export async function runAutoPipelineForClient(
         }
       } // конец for (enr of enrichments)
 
-      // Upsert seen ЭТОГО чанка сразу — освобождаем память перед следующим.
-      // chunk + enrichments + seenUpserts выходят из scope на следующей
-      // итерации, GC их собирает. Это и есть фикс OOM.
+      // Заливаем лиды ЭТОГО чанка в Instantly ДО upsert'а seen. Если процесс
+      // умрёт до append — employer'ы НЕ помечены seen → следующий прогон их
+      // переобработает и дозальёт. Дубли исключены: createLeads идёт с
+      // skip_if_in_campaign=true (идемпотентно). В dry-run groupedLeads пуст
+      // (routing делает continue до groupedLeads.set), поэтому цикл — no-op.
+      for (const group of groupedLeads.values()) {
+        const readyLeads = group.leads.filter((l) => l.email && l.company_name && l.website);
+        droppedIncomplete += group.leads.length - readyLeads.length;
+        if (readyLeads.length === 0) continue;
+        try {
+          await appendLeadsToClientCampaign({
+            userId: clientUserId,
+            campaignId: group.bucket.instantly_campaign_id!,
+            leads: readyLeads,
+            contextLabel: group.bucket.label,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'append failed';
+          await logError(
+            'auto-pipeline.append.failed',
+            err,
+            { ...logCtx, bucket: group.bucket.label, leadCount: readyLeads.length },
+          );
+          // Помечаем seen-строки этого bucket'а (в памяти, ДО upsert) как failed —
+          // не отдельным DB-запросом, т.к. seen ещё не записаны.
+          for (const s of seenUpserts) {
+            if (s.routed_bucket_id === group.bucket.id && s.status === 'routed') {
+              s.status = 'failed';
+              s.error_message = msg.slice(0, 500);
+            }
+          }
+          failedCount += readyLeads.length;
+          routedCount -= readyLeads.length;
+        }
+      }
+
+      // Upsert seen ЭТОГО чанка (статусы уже финальные после append) —
+      // освобождаем память перед следующим. chunk + enrichments + seenUpserts +
+      // groupedLeads выходят из scope на след. итерации, GC их собирает (фикс OOM).
       await upsertSeenEmployers(seenUpserts);
     } // конец for (chunkStart) — chunk loop
     logPhase('enrich-done', { routed: routedCount, stored: storedCount, skipped: skippedCount, emailValid: emailValidCount });
@@ -1094,40 +1162,9 @@ export async function runAutoPipelineForClient(
       { ...logCtx, ...mailganerStats },
     );
 
-    // 5.5. (Чистка названий перенесена ВНУТРЬ чанк-цикла — см. шаг 5.1. Лиды в
-    //      groupedLeads уже несут очищенное имя, повторно чистить не нужно.)
-
-    // 6. Append leads per bucket. В dry-run шаг пропускаем целиком —
-    // groupedLeads пуст (routing-блок делает continue ещё ДО groupedLeads.set).
-    // Финальная гарантия полей: у КАЖДОГО лида должны быть email + название +
-    // сайт. Неполные отбрасываем с логом — в Instantly не уходят.
-    let failedCount = 0;
-    let droppedIncomplete = 0;
-    for (const group of groupedLeads.values()) {
-      const readyLeads = group.leads.filter((l) => l.email && l.company_name && l.website);
-      droppedIncomplete += group.leads.length - readyLeads.length;
-      if (readyLeads.length === 0) continue;
-      try {
-        await appendLeadsToClientCampaign({
-          userId: clientUserId,
-          campaignId: group.bucket.instantly_campaign_id!,
-          leads: readyLeads,
-          contextLabel: group.bucket.label,
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'append failed';
-        await logError(
-          'auto-pipeline.append.failed',
-          err,
-          { ...logCtx, bucket: group.bucket.label, leadCount: readyLeads.length },
-        );
-        // seen уже записаны по чанкам со status='routed' — обновляем их в БД
-        // на 'failed' (массива seenUpserts в памяти больше нет).
-        await markRoutedBucketFailed(clientUserId, group.bucket.id, now, msg.slice(0, 500));
-        failedCount += readyLeads.length;
-        routedCount -= readyLeads.length;
-      }
-    }
+    // (Заливка в Instantly + подсчёт failedCount/droppedIncomplete перенесены
+    //  ВНУТРЬ чанк-цикла — инкрементально, см. блок «Заливаем лиды ЭТОГО чанка»
+    //  выше. Чистка названий — тоже внутри цикла, шаг 5.1.)
     if (droppedIncomplete > 0) {
       routedCount -= droppedIncomplete;
       await logAudit(
@@ -1142,10 +1179,15 @@ export async function runAutoPipelineForClient(
     const newFromBob = fresh.filter((e) => detectSource(e.id) === 'base_of_bases').length;
     const newFromHh = fresh.length - newFromBob;
 
-    logPhase('finalizing', { routed: routedCount, stored: storedCount, skipped: skippedCount, failed: failedCount });
+    // interrupted (graceful stop воркера) → 'failed' с пометкой resume, чтобы
+    // воркер на следующем тике перезапустил и докатил остаток (resume через
+    // дедуп seen + идемпотентный createLeads). Иначе 'completed'.
+    const finalStatus: 'completed' | 'failed' = interrupted ? 'failed' : 'completed';
+    logPhase('finalizing', { status: finalStatus, routed: routedCount, stored: storedCount, skipped: skippedCount, failed: failedCount });
     // 8. Finalize run row.
     await finishRunRow(runId, {
-      status: 'completed',
+      status: finalStatus,
+      error_message: interrupted ? 'interrupted (graceful shutdown) — resume pending' : null,
       parsed_count: employers.length,
       new_count: fresh.length,
       new_from_hh: newFromHh,
@@ -1160,7 +1202,7 @@ export async function runAutoPipelineForClient(
       failed_count: failedCount,
       was_dry_run: config.dry_run,
     });
-    await updateConfigLastRun(clientUserId, 'completed');
+    await updateConfigLastRun(clientUserId, finalStatus);
 
     await logAudit(
       'auto-pipeline.completed',
@@ -1184,7 +1226,7 @@ export async function runAutoPipelineForClient(
 
     return {
       runId,
-      status: 'completed',
+      status: finalStatus,
       parsed: employers.length,
       new: fresh.length,
       withSite: withSiteCount,
@@ -1196,6 +1238,7 @@ export async function runAutoPipelineForClient(
       skipped: skippedCount,
       failed: failedCount,
       wasDryRun: config.dry_run,
+      error: interrupted ? 'interrupted_graceful' : undefined,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'unknown error';
@@ -1203,5 +1246,7 @@ export async function runAutoPipelineForClient(
     await finishRunRow(runId, { status: 'failed', error_message: msg.slice(0, 500) });
     await updateConfigLastRun(clientUserId, 'failed');
     return { ...emptyResult(runId), status: 'failed', error: msg };
+  } finally {
+    clearInterval(heartbeat);
   }
 }
