@@ -153,23 +153,23 @@ async function flushBatch(db: SupabaseClient, rows: EnrichBufferDrainedRow[]): P
     }
   }
 
-  // 3. jobs counters. Делаем RPC-инкремент, чтобы было атомарно для каждого
-  //    job_id и не race'ило с другими источниками jobs.processed (старый
-  //    websiteEnrichmentWorker.flushProgress тоже пишет туда).
-  //    Если RPC ещё нет — фоллбекаем на read-modify-write.
-  if (plan.jobsProcessedInc.size > 0) {
-    for (const [jobId, inc] of plan.jobsProcessedInc.entries()) {
-      const { error: rpcErr } = await db.rpc('increment_website_enrichment_job_counters', {
-        p_job_id: jobId,
-        p_processed_inc: inc.processed,
-        p_success_inc: inc.success,
-        p_error_inc: inc.error,
-      });
-      if (rpcErr) {
-        // Fallback: legacy путь — websiteEnrichmentWorker сам пересчитает
-        // processed по COUNT'у queue при следующем flushProgress. Не критично.
-        log('warn', `jobs counter inc failed for ${jobId} (will recover on next worker flush): ${rpcErr.message}`);
-      }
+  // 3. jobs counters — единственный writer теперь coordinator (flushProgress
+  // удалён из websiteEnrichmentWorker, см. историю коммитов 04.06). Per-job
+  // атомарный RPC: UPDATE jobs SET processed = processed + p_processed_inc, …
+  // — race-free между параллельными drain'ами (coordinator-single-instance).
+  // Failure'ы логируем, но не throw: данные в queue уже обновлены, лучше
+  // продолжить flush'ить следующие batch'ы. Если counter'ы расходятся,
+  // оператор увидит это в UI и можно будет руками синхронизировать через
+  // SELECT count(*) ... WHERE status IN (…) GROUP BY job_id.
+  for (const [jobId, inc] of plan.jobsProcessedInc.entries()) {
+    const { error: rpcErr } = await db.rpc('increment_website_enrichment_job_counters', {
+      p_job_id: jobId,
+      p_processed_inc: inc.processed,
+      p_success_inc: inc.success,
+      p_error_inc: inc.error,
+    });
+    if (rpcErr) {
+      log('warn', `jobs counter inc failed for ${jobId}: ${rpcErr.message}`);
     }
   }
 
