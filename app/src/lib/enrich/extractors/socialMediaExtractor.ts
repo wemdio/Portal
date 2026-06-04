@@ -253,7 +253,7 @@ function normalizeUrl(raw: string): string {
   try {
     const u = new URL(s.startsWith('http') ? s : `https://${s}`);
     const host = u.hostname.toLowerCase().replace(/^www\./, '');
-    let path = u.pathname.replace(/\/+$/, '');
+    const path = u.pathname.replace(/\/+$/, '');
     let query = '';
     // Facebook profile.php?id=N: id — primary key страницы, сохраняем.
     // Все остальные query (utm_*, ref, share-source, lang) выкидываем.
