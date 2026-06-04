@@ -1,7 +1,24 @@
 import * as cheerio from 'cheerio';
 import { Currency, PriceValue } from './types';
 
-const FREE_TRIAL_RE = /free trial|free forever|бесплатно навсегда|14[-\s]?days?\s+(?:free\s+)?trial|пробный период|попроб[а-яё]+\s+бесплатно|start (?:your )?free trial|тестовый доступ|демо[-\s]?доступ|бесплатная версия|free plan|try (?:it )?free|бесплатный тариф|бесплатный план|0\s*[₽$€]\s*\/\s*мес|бесплатн[а-яё]*\s+(?:консультац|аудит|демо|тест|урок|пилот|разбор|стратег[а-яё]*\s*сесси|вебинар|занятие|тренировк|пробник)|free\s+(?:consultation|audit|demo|pilot|strategy\s+session|sample|workshop)|первая\s+(?:консультаци|встреч|сесси|урок|занятие|тренировк)[а-яё]*\s+бесплатн|первое\s+занятие\s+бесплатн|пробн[а-яё]+\s+(?:урок|занятие|тренировк|встреч|консультац)/i;
+/**
+ * Matches any "free entry-point" phrasing the company offers to try its
+ * service. Covers four registers:
+ *
+ *  1. SaaS classics — "free trial", "free plan", "14-day free trial",
+ *     "0₽/мес", "тестовый доступ", "демо-доступ".
+ *  2. Agency / consulting — "бесплатная консультация / аудит / демо",
+ *     "первая консультация бесплатно", "free strategy session".
+ *  3. Education — "пробный урок", "первое занятие бесплатно".
+ *  4. RU SMB / services-on-site — "бесплатный замер / выезд / расчёт /
+ *     диагностика / доставка", "первый заказ бесплатно", "бесплатный
+ *     звонок" — these are how small Russian construction / landscape /
+ *     repair / delivery businesses advertise their try-before-you-buy.
+ *
+ * The trailing "бесплатн[а-яё]+ + X" alternation uses `[а-яё]+` instead of
+ * `\w+` because JS `\w` is ASCII-only and would never match "бесплатную".
+ */
+const FREE_TRIAL_RE = /free trial|free forever|бесплатно навсегда|14[-\s]?days?\s+(?:free\s+)?trial|пробный период|попроб[а-яё]+\s+бесплатно|start (?:your )?free trial|тестовый доступ|демо[-\s]?доступ|бесплатная версия|free plan|try (?:it )?free|бесплатный тариф|бесплатный план|0\s*[₽$€]\s*\/\s*мес|бесплатн[а-яё]*\s+(?:консультац|аудит|демо|тест|урок|пилот|разбор|стратег[а-яё]*\s*сесси|вебинар|занятие|тренировк|пробник|замер|выезд|расч[её]т|диагностик|доставк|звонок|примерк|осмотр|обмер|анализ|проект|эскиз|тестирован|подбор|подключени|настройк|зам[её]р)|free\s+(?:consultation|audit|demo|pilot|strategy\s+session|sample|workshop|estimate|quote|measurement|delivery|installation|setup|onboarding)|первая\s+(?:консультаци|встреч|сесси|урок|занятие|тренировк)[а-яё]*\s+бесплатн|первое\s+(?:занятие|посещени|обращени)\s+бесплатн|первый\s+(?:заказ|выезд|урок|замер|осмотр|месяц)\s+бесплатн|пробн[а-яё]+\s+(?:урок|занятие|тренировк|встреч|консультац|период|доступ)/i;
 
 // Job-posting / job-board pages carry salary numbers that otherwise pass our
 // context regex as a "price". We treat the page as a job posting when ANY of

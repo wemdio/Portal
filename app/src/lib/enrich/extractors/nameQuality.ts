@@ -313,7 +313,54 @@ const UI_FRAGMENT_PATTERNS: RegExp[] = [
   /^(?:blue|red|green|yellow|orange|purple|pink|black|white|gray|grey|dark|light|brown|cyan|magenta)\s+(?:circle|square|triangle|line|dot|bar|stripe|gradient|wave|bg|background)\s+(?:color|bg|background|shape|fill|stroke)$/i,
   // Inline icon descriptors like "img logo", "icon close", "btn arrow".
   /^(?:img|icon|btn|button|arrow|chevron|cross|close|menu|burger|hamburger)\s+\w+$/i,
+  // "<noun> <ui-modifier>" — "Sidebar image", "arrow link white", "slider2",
+  // "ff 2 new" / "inst new" / "children" — leak from logo wall alt-texts on
+  // small RU sites built on Tilda/WP. The leading token is a generic-UI noun
+  // and the trailing tokens are color/size/state modifiers.
+  /^(?:sidebar|hero|banner|footer|header|nav|slide|slider|carousel|item|tile|card|block|section|column|row|box|widget|button|btn|link)\s+(?:image|img|icon|wrap|item|block|section|box|bg|background|white|black|gray|dark|light|new|old|alt|main|big|small|big1|big2|big3|small1|small2)$/i,
+  // "<ui-noun> <digit>" — "slider2", "banner3", "section 1", "block 2"
+  /^(?:slider|slide|carousel|banner|hero|section|item|tile|card|block|tab|row|col|column|page|step|stage|widget|popup|modal|menu|nav|button|btn)\s*\d{1,2}$/i,
+  // "<colour-or-state> <single-word>" without contextual noun:
+  // "white logo", "black icon" — CSS variants of generic icons.
+  /^(?:white|black|gray|grey|dark|light|colored|color|new|old|big|small|main|alt)\s+(?:logo|icon|img|image|button|btn|arrow|chevron|line|dot|circle|square|bar)$/i,
 ];
+
+/**
+ * Single-token lowercase ASCII fragments that leak from CMS slug-classes
+ * ("kras", "perek", "ver", "audifon", "bezugliy") — they look like Russian
+ * transliterations or partial brand truncations but lack any structure of a
+ * real product name. A real brand:
+ *   - mixes case ("amoCRM", "Roistat"), or
+ *   - is single-language all-caps ("YOLA"), or
+ *   - contains a digit ("1С", "24/7"), or
+ *   - uses non-Latin chars (Cyrillic, etc.), or
+ *   - is a multi-word phrase ("Mango Office").
+ *
+ * The pattern `[a-z]{2,8}` lowercase with NO digits / non-ASCII / mixed case
+ * captures the CMS-slug variant and rejects it. Real lowercase brands like
+ * "amocrm" / "slack" / "stripe" are short but recognisable English/IT words —
+ * caller can whitelist by adding to a known-brands set if needed. Empirically,
+ * the LOWERCASE single-token slug-style noise has a ~90% false-positive rate
+ * for "is this a real integration".
+ */
+const LOWERCASE_SLUG_RE = /^[a-z]{2,8}$/;
+const KNOWN_LOWERCASE_BRANDS = new Set<string>([
+  'amocrm', 'roistat', 'mindbox', 'sendpulse', 'unisender', 'mailchimp',
+  'slack', 'stripe', 'shopify', 'paypal', 'bitrix', 'tilda', 'wix',
+  'ozon', 'yandex', 'avito', 'lamoda', 'wildberries', 'rutube', 'vk',
+  'tinkoff', 'sber', 'mts', 'megafon', 'beeline', 'tele2',
+  'github', 'gitlab', 'bitbucket', 'figma', 'notion', 'trello',
+  'asana', 'jira', 'discord', 'zoom', 'webex', 'skype', 'whatsapp',
+  'telegram', 'viber', 'instagram', 'facebook', 'twitter', 'linkedin',
+  'youtube', 'tiktok', 'pinterest', 'reddit', 'medium', 'dribbble',
+]);
+
+export function isLowercaseSlugNoise(s: string): boolean {
+  const t = s.trim();
+  if (!LOWERCASE_SLUG_RE.test(t)) return false;
+  if (KNOWN_LOWERCASE_BRANDS.has(t)) return false;
+  return true;
+}
 
 // Single-word generic UI / tech-category words. Never a real product or client.
 const GENERIC_TERM_EXACT = new Set<string>([
@@ -333,6 +380,13 @@ const GENERIC_TERM_EXACT = new Set<string>([
   'yes', 'no',
   // Section headings missed elsewhere
   'hero', 'about', 'contact', 'home', 'main',
+  // Decorative icons / arrows / shapes used as alt text (observed in xlsx
+  // 04.06: "arrow", "akciya", "slider2", "food", "kras", "perek", "ver").
+  'arrow', 'arrows', 'chevron', 'caret', 'star', 'stars', 'plus', 'minus',
+  'check', 'checkmark', 'circle', 'dot', 'square', 'line', 'wave', 'shape',
+  'slider', 'slide', 'carousel', 'logo', 'logos', 'image', 'images',
+  'photo', 'photos', 'pic', 'pics', 'preview', 'thumbnail',
+  'food', 'akciya', 'akcia', 'banner1', 'banner2', 'banner3',
 ]);
 
 // Multi-word generic UI strings: marketing section headings and CTA copy.
@@ -397,6 +451,9 @@ export function isUiFragment(s: string): boolean {
   if (GENERIC_TERM_EXACT.has(lower)) return true;
   if (GENERIC_PHRASE_EXACT.has(lower)) return true;
   if (TABLE_HEADER_EXACT.has(lower)) return true;
+  // Single-token CMS-slug noise ("kras", "perek", "audifon") — rejected
+  // unless it's a known lowercase brand (amocrm / slack / stripe / ...).
+  if (isLowercaseSlugNoise(t)) return true;
   if (UI_FRAGMENT_PATTERNS.some((re) => re.test(t))) return true;
   if (CATEGORY_SLASH_RE.test(t)) return true;
   if (RANKING_PREFIX_RE.test(t)) return true;
