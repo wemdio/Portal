@@ -32,6 +32,29 @@ const JUNK_PATTERNS: RegExp[] = [
   /^review\s*\d*$/i,      // alt="review1" artifacts
   /^shape\s+\d+$/i,       // Figma/design "shape 4"
   /^[a-z]{2,}\s+\d+[a-z]$/i, // "nutriciologiya sm@1x" style image names → caught by @
+  // ─── Декоративные элементы Tilda/конструкторов, которые лезли в выгрузку
+  //     04.06 у 44k базы ("arrow", "gallery grid 1 x", "1 2 1 x", "card img").
+  //     См. промежуточные результаты.txt — это были alt-text слайдеров,
+  //     декоративных фонов и иконок-стрелок, а не имена клиентов.
+  /^arrow\s*\d*$/i, /^dot\s*\d*$/i, /^bullet\s*\d*$/i,
+  /^chevron(?:[-_\s]*(?:left|right|up|down|next|prev))?\s*\d*$/i,
+  /^gallery\s+(?:grid|item|slide|thumb)\s*\d*\s*x?$/i, // "gallery grid 1 x"
+  /^grid\s*\d*\s*x?$/i,
+  /^(?:\d+\s+){1,4}\d*\s*x$/i,                         // "1 2 1 x", "0 2 x", "1 9 x"
+  /^(?:\d+[\s-]+){2,}\d+\s*$/,                         // numeric-only blob "1 2 1"
+  /^card\s+img$/i, /^payment\s+\w+$/i,
+  /^(?:visa|mastercard|master\s*card|maestro|mir|paypal|qiwi|webmoney|sber\s*pay|tinkoff\s*pay|apple\s*pay|google\s*pay)\s*\d*$/i,
+  // Tilda CMS image filenames: "barinhaus1 thumb", "poselok na sokole thumb",
+  // "milenium park9 scaled", "Боровой 1 1 scaled", "DSC 1 scaled" — alt-text
+  // декоративных карточек / превью.
+  /\s+(?:thumb|thumbnail|scaled|small|big|large|medium|preview|cover|min|max)\s*\d*$/i,
+  /^DSC[\s_]*\d+\b/i,                                  // "DSC 1 scaled"
+  /^IMG[\s_]*\d+\b/i,
+  // CSS-классы фоновых элементов: "bg color 1", "main bg", "section bg"
+  /^(?:bg|background)[\s-]+\w+/i, /^(?:main|section|hero|page)[\s-]+(?:bg|background)$/i,
+  // Sentence-ish строки вроде "Соглашение компании «X»" — это заголовок
+  // юридического раздела, а не клиент. Без полной семантики ловим по началу.
+  /^(?:Соглашение|Политика|Договор|Оферта|Условия)\s+(?:компании|использования|оказания)/i,
 ];
 
 const LOGO_PREFIX_RE = /^(?:лого(?:тип)?|logo)\s+/i;
@@ -109,6 +132,13 @@ function nameFromSrc(src: string): string | null {
 const STRICT_CLIENT_SELECTOR = [
   '[class*="client"]', '[class*="customer"]',
   '#clients', '#customers',
+  // Русские альтернативы которые часто встречаются у b2b-сайтов и
+  // которые мы раньше игнорировали (recall был 2.3%, см. промежуточные
+  // результаты.txt от 04.06): «с нами работают», «доверяют», «среди
+  // наших».
+  '[class*="zakazchik"]', '[class*="zakazchiki"]', // транслит
+  '[id*="clients"]', '[id*="customers"]',
+  '[data-section*="client"]', '[data-section*="customer"]',
 ].join(', ');
 
 // Generic logo walls (partners / trust badges / marquees). Text inside these
@@ -117,8 +147,20 @@ const LOGO_WALL_SELECTOR = [
   '[class*="-logos"]', '[class*="_logos"]',
   '[class*="partner"]', '[class*="trust"]',
   '[class*="marquee"]',
-  '[data-record-type="595"]', // Tilda logo gallery block
+  '[data-record-type="595"]', // Tilda logo gallery block (logos grid)
+  '[data-record-type="296"]', // Tilda block-with-photo-grid (sometimes used for logos)
+  '[data-record-type="471"]', // Tilda «партнёры/клиенты» template
   '#partners',
+  // Расширяем по терминам, которые тоже обозначают logo walls на сайтах
+  // российских b2b: «компании», «бренды», «их выбирают», «работаем с»,
+  // «references» (en).
+  '[class*="company-logo"]', '[class*="company_logo"]',
+  '[class*="brand"]', '[class*="brands"]',
+  '[class*="references"]', '[class*="reference-"]', '[class*="reference_"]',
+  '[class*="our-companies"]', '[class*="our_companies"]', '[class*="companies"]',
+  '[class*="who-we-work-with"]', '[class*="work-with"]',
+  '[class*="t-clients"]',  // Tilda кастомный класс для секции клиентов
+  '#brands', '#references', '#companies',
 ].join(', ');
 
 const CASE_CARD_SELECTOR = [
@@ -139,7 +181,42 @@ const SLIDER_SELECTOR = [
   '[class*="t-slds"]',
 ].join(', ');
 
-const SECTION_HEADING_RE = /(?:наши\s+)?клиенты|нам\s+доверяют|(?:наши\s+)?партнёры|(?:наши\s+)?партнеры|они\s+(?:выбрали|доверяют|работают)|(?:our\s+)?clients|(?:our\s+)?customers|trusted\s+by|(?:our\s+)?partners|who\s+(?:we\s+)?work\s+with|работаем\s+с|с\s+нами\s+работают/i;
+const SECTION_HEADING_RE = new RegExp(
+  [
+    // Existing — оставлены как есть, переменные расширены ниже.
+    String.raw`(?:наши\s+)?клиенты`,
+    String.raw`нам\s+доверяют`,
+    String.raw`(?:наши\s+)?партн[еёр]ры`,
+    String.raw`они\s+(?:выбрали|доверяют|работают)`,
+    String.raw`(?:our\s+)?clients`,
+    String.raw`(?:our\s+)?customers`,
+    String.raw`trusted\s+by`,
+    String.raw`(?:our\s+)?partners`,
+    String.raw`who\s+(?:we\s+)?work\s+with`,
+    String.raw`работаем\s+с`,
+    String.raw`с\s+нами\s+работают`,
+    // ─── Расширения 04.06 на основе анализа промежуточные результаты.txt:
+    // 97.7% сайтов имеют контейнер с клиентами под другим заголовком,
+    // которого старый regex не ловил.
+    String.raw`среди\s+наших\s+(?:клиентов|партн[ёе]ров)`,
+    String.raw`нас\s+выбирают`,
+    String.raw`нам\s+(?:доверяют|выбирают)`,
+    String.raw`они\s+(?:уже\s+)?(?:с\s+нами|нам\s+доверяют)`,
+    String.raw`их\s+выбирают`,
+    String.raw`мы\s+(?:работаем|делали)\s+для`,
+    String.raw`компании(?:,)?\s+которые\s+нам\s+довер`,
+    String.raw`(?:наши\s+)?(?:компании|бренды|заказчики|кейсы)`,
+    String.raw`references`,
+    String.raw`brands\s+(?:we|that)\s+work\s+with`,
+    String.raw`featured\s+(?:in|customers)`,
+    String.raw`among\s+our\s+(?:clients|customers|partners)`,
+    String.raw`используют\s+(?:наш|нас|нашу)`,
+    String.raw`выбирают\s+нас`,
+    String.raw`довер(?:яют|ились)\s+нам`,
+    String.raw`для\s+кого\s+мы\s+работаем`,
+  ].join('|'),
+  'i',
+);
 
 const CAP = 30;
 
