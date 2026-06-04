@@ -153,25 +153,21 @@ async function flushBatch(db: SupabaseClient, rows: EnrichBufferDrainedRow[]): P
     }
   }
 
-  // 3. jobs counters. Делаем RPC-инкремент, чтобы было атомарно для каждого
-  //    job_id и не race'ило с другими источниками jobs.processed (старый
-  //    websiteEnrichmentWorker.flushProgress тоже пишет туда).
-  //    Если RPC ещё нет — фоллбекаем на read-modify-write.
-  if (plan.jobsProcessedInc.size > 0) {
-    for (const [jobId, inc] of plan.jobsProcessedInc.entries()) {
-      const { error: rpcErr } = await db.rpc('increment_website_enrichment_job_counters', {
-        p_job_id: jobId,
-        p_processed_inc: inc.processed,
-        p_success_inc: inc.success,
-        p_error_inc: inc.error,
-      });
-      if (rpcErr) {
-        // Fallback: legacy путь — websiteEnrichmentWorker сам пересчитает
-        // processed по COUNT'у queue при следующем flushProgress. Не критично.
-        log('warn', `jobs counter inc failed for ${jobId} (will recover on next worker flush): ${rpcErr.message}`);
-      }
-    }
-  }
+  // 3. jobs counters — НЕ ТРОГАЕМ их здесь. Раньше тут был RPC
+  //    increment_website_enrichment_job_counters(+N), но он race'ил с
+  //    websiteEnrichmentWorker.flushProgress, который каждые 2.5с делает
+  //    SELECT count(*) … WHERE status='completed' и пишет absolute значение.
+  //    Coordinator делает +50, потом legacy SET 350 (включая partial batch),
+  //    coordinator +100 → 450, legacy COUNT попал в момент когда часть queue
+  //    UPDATE'ов ещё не доехала и читает 271 → откат на 271. Юзер видит как
+  //    прогресс в UI прыгает 45 → 350 → 271 → 361 → 375 (прод-инцидент 04.06).
+  //
+  //    flushProgress — самовосстанавливающийся источник правды (COUNT по факту
+  //    в queue), идемпотентный при N параллельных scraper'ах. Лучшее что мы
+  //    можем сделать — НЕ перетирать его. processed/success/error догонят
+  //    реальное состояние на следующем flushProgress-тике (≤2.5с после того
+  //    как наш batch применил queue.status). UI обновится без рывков.
+  void plan.jobsProcessedInc;
 
   totalFlushed += rows.length;
 }
