@@ -10,7 +10,7 @@ import { applySignalJobResults, type ExtraColumnSpec } from '@/lib/spreadsheet/a
 import type { ExtractorKey } from '@/lib/enrich/extractors/types';
 import { startTrace } from '@/lib/tracer';
 import type { Span } from '@/lib/tracer';
-import { isBufferEnabled, writeEnrichResult, type EnrichBufferStatus } from '@/lib/enrich/enrichBuffer';
+import { writeEnrichResult, type EnrichBufferStatus } from '@/lib/enrich/enrichBuffer';
 
 type QueueItem = {
   id: string;
@@ -211,41 +211,18 @@ async function getCache(urlNormalized: string) {
   }
 }
 
-async function setCache(urlNormalized: string, payload: { text?: string; error?: string; sourceUrl?: string }) {
-  if (!supabaseAdmin) return;
-  // Buffer-режим: cache-upsert делает coordinator в составе того же batch'а,
-  // что и UPDATE queue.status. scraper кладёт всё в одну строку buffer'а
-  // через writeEnrichResult в updateQueueItem ниже. Чтобы не сделать UPSERT
-  // дважды (один здесь, один coordinator'ом), здесь пропускаем — payload
-  // прилетит coordinator'у вместе с queue-finalize'ом.
-  if (isBufferEnabled()) return;
-  const now = new Date();
-  const expiresAt =
-    payload.text && payload.text.length > 0
-      ? new Date(now.getTime() + cacheSuccessTtlMs)
-      : new Date(now.getTime() + cacheErrorTtlMs);
-
-  try {
-    await withSupabaseTimeout(
-      supabaseAdmin
-        .from('website_enrichment_cache')
-        .upsert(
-          {
-            url_normalized: urlNormalized,
-            text: payload.text ?? null,
-            last_error: payload.error ?? null,
-            fetched_at: now.toISOString(),
-            expires_at: expiresAt.toISOString(),
-            source_url: payload.sourceUrl ?? null,
-          },
-          { onConflict: 'url_normalized' },
-        ),
-      'Таймаут записи кэша сайта',
-    );
-  } catch {
-    // Cache write should not break item processing.
-  }
+/**
+ * No-op заглушка: cache-upsert делает enrich-coordinator в составе batch'а
+ * вместе с UPDATE queue.status (см. lib/enrich/enrichBuffer.ts → planFlush).
+ * Scraper кладёт cache-payload в одну строку buffer'а через writeEnrichResult
+ * в updateQueueItem ниже. Функция оставлена сигнатурно совместимой потому что
+ * вызывается из fetchWithCache как side-effect — пропуск записи безвреден:
+ * cache HIT обновится при следующем успешном обходе через coordinator.
+ */
+async function setCache(_urlNormalized: string, _payload: { text?: string; error?: string; sourceUrl?: string }): Promise<void> {
+  return;
 }
+void cacheSuccessTtlMs; void cacheErrorTtlMs; // больше не используются здесь, оставлены для legacy-кеш-helper'ов ниже
 
 // ── Email scraper cache (separate table) ──────────────────────
 
@@ -532,15 +509,16 @@ async function updateQueueItem(
 ): Promise<boolean> {
   if (!supabaseAdmin) return false;
 
-  // Buffer-режим: терминальные статусы (completed/failed/skipped) уходят
-  // в `website_enrichment_results_buffer` одной строкой, потом coordinator
-  // batch'ит их в queue/cache/jobs (см. enrichBuffer.ts).
+  // Coordinator pattern: terminal-статусы (completed/failed/skipped) идут
+  // в `website_enrichment_results_buffer` одной строкой; coordinator batch'ит
+  // их и flush'ит в queue/cache/jobs (см. enrichBuffer.ts).
   //
-  // Status='pending' (retry) НЕ кладём в buffer: scraper должен сразу
-  // вернуть item в очередь, иначе claim_website_enrichment_items не
-  // подхватит его снова в этом же цикле. retry — мгновенный prepared
-  // UPDATE, нагрузку он не создаёт (≤MAX_ATTEMPTS=3 раз на item).
-  if (isBufferEnabled() && status !== 'pending') {
+  // Status='pending' (retry) — единственный путь, который остаётся direct
+  // UPDATE'ом: scraper должен сразу вернуть item обратно в очередь, иначе
+  // claim_website_enrichment_items не подхватит его снова в этом же цикле.
+  // Retry — мгновенный UPDATE по PK, нагрузку он не создаёт (≤MAX_ATTEMPTS=3
+  // раз на item за весь job).
+  if (status !== 'pending') {
     const bufStatus: EnrichBufferStatus = status;
     const r = await writeEnrichResult(supabaseAdmin, {
       queue_id: item.id,
@@ -548,8 +526,9 @@ async function updateQueueItem(
       status: bufStatus,
       result_text: status === 'completed' ? result.text ?? null : null,
       last_error: status === 'completed' ? null : result.error ?? null,
-      // Передаём cache-payload вместе с queue-finalize'ом, чтобы coordinator
-      // сделал UPSERT в website_enrichment_cache в составе того же batch'а.
+      // Cache-payload летит coordinator'у в составе этой же buffer-строки —
+      // он сделает UPSERT в website_enrichment_cache одним batch-запросом
+      // вместо отдельной записи на каждый URL.
       cache_url_normalized: item.url_normalized || null,
       cache_source_url: item.url_raw || null,
       attempt_count: item.attempt_count,
@@ -565,17 +544,22 @@ async function updateQueueItem(
     return true;
   }
 
+  // Сюда попадает только status='pending' (retry-путь): scraper возвращает
+  // item в очередь, чтобы его подобрала следующая claim-итерация. Поля
+  // result_text/completed_at нулим напрямую, без ветвлений по status — это
+  // тот же UPDATE что был в legacy-ветке для pending, но без мёртвых
+  // тернарных проверок (TS их теперь видит как unreachable).
   const now = new Date().toISOString();
   try {
     const { error } = await withSupabaseTimeout(
       supabaseAdmin
         .from('website_enrichment_queue')
         .update({
-          status,
-          result_text: status === 'completed' ? result.text ?? null : null,
-          last_error: status === 'completed' ? null : result.error ?? null,
+          status: 'pending',
+          result_text: null,
+          last_error: result.error ?? null,
           updated_at: now,
-          completed_at: status === 'pending' ? null : now,
+          completed_at: null,
         })
         .eq('id', item.id),
       `Таймаут обновления queue item (${item.id})`,

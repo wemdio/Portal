@@ -13,7 +13,6 @@
 import {
   planFlush,
   writeEnrichResult,
-  isBufferEnabled,
   type EnrichBufferDrainedRow,
 } from '@/lib/enrich/enrichBuffer';
 
@@ -129,31 +128,6 @@ describe('enrichBuffer.planFlush', () => {
     expect(p.queueUpdates).toHaveLength(0);
     expect(p.cacheUpserts).toHaveLength(0);
     expect(p.jobsProcessedInc.size).toBe(0);
-  });
-});
-
-// ─── isBufferEnabled — env-flag ─────────────────────────────────────────────
-
-describe('enrichBuffer.isBufferEnabled', () => {
-  const orig = process.env.ENRICH_USE_BUFFER;
-
-  afterEach(() => {
-    if (orig === undefined) delete process.env.ENRICH_USE_BUFFER;
-    else process.env.ENRICH_USE_BUFFER = orig;
-  });
-
-  it('off by default (any value other than "true")', () => {
-    delete process.env.ENRICH_USE_BUFFER;
-    expect(isBufferEnabled()).toBe(false);
-    process.env.ENRICH_USE_BUFFER = 'false';
-    expect(isBufferEnabled()).toBe(false);
-    process.env.ENRICH_USE_BUFFER = '1';
-    expect(isBufferEnabled()).toBe(false); // строго 'true', не «truthy»
-  });
-
-  it('on only when env exactly "true"', () => {
-    process.env.ENRICH_USE_BUFFER = 'true';
-    expect(isBufferEnabled()).toBe(true);
   });
 });
 

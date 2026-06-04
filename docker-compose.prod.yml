@@ -167,21 +167,10 @@ services:
       # на job ≈ ~900-1100MB (cheerio HTML + Playwright temp). 2G с запасом.
       - WEBSITE_ENRICHMENT_CONCURRENCY=${WEBSITE_ENRICHMENT_CONCURRENCY:-25}
       - ENRICH_MAX_CONCURRENCY=${ENRICH_MAX_CONCURRENCY:-8}
-      # Coordinator pattern (см. lib/enrich/enrichBuffer.ts).
-      # ENRICH_USE_BUFFER=true → scraper пишет результат в
-      # website_enrichment_results_buffer одной строкой, coordinator-воркер
-      # batch'ит в queue/cache/jobs. Снимает нагрузку с DB-пула и позволяет
-      # масштабировать scraper'ы без линейного роста подключений.
-      #
-      # Раскатка должна быть поэтапной:
-      #   1) задеплоить (этот image имеет worker-enrich-coordinator)
-      #   2) убедиться что worker-enrich-coordinator живой
-      #      и buffer пуст (SELECT count(*) ...buffer = 0)
-      #   3) выставить ENRICH_USE_BUFFER=true в .env, перезапустить
-      #      worker-enrich/2/3 поэтапно
-      #   4) смотреть buffer depth в логах coordinator'а — если стабильно
-      #      >5×batch (по умолчанию >500) рост = coordinator отстаёт.
-      - ENRICH_USE_BUFFER=${ENRICH_USE_BUFFER:-false}
+      # Coordinator pattern всегда включён (см. lib/enrich/enrichBuffer.ts):
+      # scraper пишет результат в website_enrichment_results_buffer одной
+      # строкой, worker-enrich-coordinator batch'ит в queue/cache/jobs.
+      # Подключения к БД от scraper'а не растут линейно с числом реплик.
     stop_grace_period: 30m
     deploy:
       resources:

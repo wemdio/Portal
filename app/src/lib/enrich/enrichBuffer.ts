@@ -13,10 +13,11 @@
  *   • consumer (coordinator) drain'ит buffer пачками 50-100 и flush'ит в
  *     queue/cache/jobs батч-апсёртом — один UPDATE на 100 строк вместо 100
  *
- * Активация по env-флагу `ENRICH_USE_BUFFER=true`. Когда выключено, scraper
- * работает по старому пути (прямой UPDATE/UPSERT в queue/cache). Это
- * позволяет раскатать coordinator пассивно: миграция + сервис, флаг off,
- * убедиться что buffer пуст, потом переключать воркеры по одному.
+ * Paths:
+ *   • terminal статус (completed/failed/skipped) → writeEnrichResult в buffer
+ *   • status='pending' (retry) → остаётся direct UPDATE через старый
+ *     updateQueueItem, иначе claim_website_enrichment_items не подхватит item
+ *     в текущем цикле scraper'а.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -56,19 +57,6 @@ export interface EnrichBufferDrainedRow {
   cache_url_normalized: string | null;
   cache_source_url: string | null;
   attempt_count: number;
-}
-
-// ---- Feature flag ---------------------------------------------------------
-
-/**
- * Когда true — scraper-воркеры пишут результат в buffer вместо прямого
- * UPDATE/UPSERT в queue/cache/jobs. По умолчанию false для безопасной
- * раскатки: задеплоить coordinator, убедиться что buffer пуст, потом
- * включать ENRICH_USE_BUFFER=true в .env на проде поэтапно (для группы
- * воркеров).
- */
-export function isBufferEnabled(): boolean {
-  return process.env.ENRICH_USE_BUFFER === 'true';
 }
 
 // ---- Producer (scraper side) ---------------------------------------------
