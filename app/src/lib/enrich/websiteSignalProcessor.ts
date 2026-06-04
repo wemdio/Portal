@@ -79,6 +79,33 @@ function classifyFetchError(httpErr: unknown, pwErr: unknown): string {
   return 'Сайт недоступен';
 }
 
+/**
+ * Build the list of URL variants to try when the primary URL fails to
+ * return usable HTML. The pattern mirrors fetchAndExtract (email/text
+ * worker): for `https://acme.ru` we try the apex, then `https://www.acme.ru`,
+ * then `http://acme.ru`, then `http://www.acme.ru`. Each variant is one
+ * cheap extra fetch on the failure path — yields a measurable lift on the
+ * ~40% of RU SMB sites that have DNS only on www, or only on plain HTTP.
+ */
+function buildFetchFallbacks(normalized: string): string[] {
+  const variants: string[] = [normalized];
+  try {
+    const u = new URL(normalized);
+    const hasWww = /^www\./i.test(u.hostname);
+    const wwwHost = hasWww ? u.hostname.replace(/^www\./i, '') : `www.${u.hostname}`;
+    const altHostUrl = `${u.protocol}//${wwwHost}${u.pathname}${u.search}`;
+    if (altHostUrl !== normalized) variants.push(altHostUrl);
+    if (u.protocol === 'https:') {
+      variants.push(`http://${u.hostname}${u.pathname}${u.search}`);
+      variants.push(`http://${wwwHost}${u.pathname}${u.search}`);
+    }
+  } catch {
+    /* normalized URL was malformed — just use the original */
+  }
+  // De-dupe while preserving order.
+  return Array.from(new Set(variants));
+}
+
 async function fetchMainHtml(
   normalized: string,
   httpTimeout: number,
@@ -89,17 +116,27 @@ async function fetchMainHtml(
   let httpError: unknown = null;
   let pwError: unknown = null;
 
-  try {
-    const httpResult = await fetchHtmlWithRetry(normalized, {
-      timeout: httpTimeout,
-      signal,
-      allowHttpErrors: false,
-    });
-    if (httpResult && httpResult.status >= 200 && httpResult.status < 300 && httpResult.html) {
-      html = httpResult.html;
+  // Try each URL variant (apex → www-variant → HTTP-variant) before
+  // surrendering to Playwright. Each variant is much cheaper than the
+  // Playwright fallback (300ms vs 18s), so we exhaust them first.
+  const fallbacks = buildFetchFallbacks(normalized);
+  for (const variant of fallbacks) {
+    if (signal?.aborted) break;
+    try {
+      const httpResult = await fetchHtmlWithRetry(variant, {
+        timeout: httpTimeout,
+        signal,
+        allowHttpErrors: false,
+      });
+      if (httpResult && httpResult.status >= 200 && httpResult.status < 300 && httpResult.html) {
+        html = httpResult.html;
+        break;
+      }
+    } catch (err) {
+      // Keep the FIRST error we see — that's the primary domain, most
+      // informative when everything fails.
+      if (httpError === null) httpError = err;
     }
-  } catch (err) {
-    httpError = err;
   }
 
   if (!html && !signal?.aborted) {
