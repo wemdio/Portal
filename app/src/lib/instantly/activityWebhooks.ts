@@ -90,9 +90,15 @@ function samePath(candidate: string | undefined, desiredPath: string): boolean {
 
 export async function ensureActivityWebhooks(): Promise<EnsureWebhookResult[]> {
   const secret = (process.env.INSTANTLY_WEBHOOK_SECRET || '').trim();
-  const site = (process.env.NEXT_PUBLIC_SITE_URL || '').trim().replace(/\/+$/, '');
+  // PORTAL_PUBLIC_URL is a plain (non-NEXT_PUBLIC_) env var so it resolves at
+  // runtime from the container .env. NEXT_PUBLIC_* would be inlined at build
+  // time and could not be set per-environment via the prod .env. Fallback kept
+  // for envs that do bake in NEXT_PUBLIC_SITE_URL.
+  const site = (process.env.PORTAL_PUBLIC_URL || process.env.NEXT_PUBLIC_SITE_URL || '')
+    .trim()
+    .replace(/\/+$/, '');
   if (!secret) throw new Error('INSTANTLY_WEBHOOK_SECRET is not set');
-  if (!site) throw new Error('NEXT_PUBLIC_SITE_URL is not set');
+  if (!site) throw new Error('PORTAL_PUBLIC_URL is not set');
 
   const results: EnsureWebhookResult[] = [];
 
