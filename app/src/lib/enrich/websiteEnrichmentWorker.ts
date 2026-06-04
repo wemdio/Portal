@@ -727,10 +727,41 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       flushInFlight = true;
       lastProgressFlushAt = Date.now();
       try {
+        // Multi-replica safety: when 2-3 workers co-attach to the same job
+        // (see `claimEnrichJob` in worker/enrich.ts), each has its own local
+        // `processed`/`success`/`errors` counters that count ONLY the items
+        // it personally claimed. If each flushed those values, the last
+        // writer would overwrite the others and progress would jitter
+        // around a smaller-than-reality number.
+        //
+        // Instead, compute the globally correct totals from the queue
+        // itself via a single COUNT-aggregate. Every replica then writes
+        // the same numbers, so concurrent updates are idempotent.
+        const [completedCount, failedCount, skippedCount] = await Promise.all([
+          countQueue(jobId, 'completed'),
+          countQueue(jobId, 'failed'),
+          countQueue(jobId, 'skipped'),
+        ]);
+        const globalProcessed = completedCount + failedCount + skippedCount;
+        const globalSuccess = completedCount;
+        const globalErrors = failedCount + skippedCount;
+
+        // Keep the per-replica locals in sync with the global view so any
+        // logic that reads `processed`/`success`/`errors` later in this
+        // function (final flush, completion detection) sees the real total
+        // and doesn't double-count when multiple replicas finish.
+        processed = globalProcessed;
+        success = globalSuccess;
+        errors = globalErrors;
+
         await withSupabaseTimeout(
           supabaseAdmin!
             .from('website_enrichment_jobs')
-            .update({ processed, success_count: success, error_count: errors })
+            .update({
+              processed: globalProcessed,
+              success_count: globalSuccess,
+              error_count: globalErrors,
+            })
             .eq('id', jobId),
           'Таймаут флэша прогресса',
         );
