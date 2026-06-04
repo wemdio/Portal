@@ -29,7 +29,13 @@ import { filterCustomerCandidates } from './customersExtractor';
  * один источник истины для исключений.
  */
 
-const MODEL = (process.env.OPENROUTER_CUSTOMERS_MODEL ?? 'anthropic/claude-sonnet-4-5-20250514').trim();
+// Дефолт — gpt-5-mini: reasoning-модель, на наш payload ~16k input + ~800
+// output обходится в ~$0.005-0.008 за URL против ~$0.05-0.08 у sonnet-4.5
+// (×10 дешевле). JSON-output надёжный, тот же ключ, что мы используем
+// в других портальных модулях. Если на каком-то сегменте качество падает —
+// переключение через env OPENROUTER_CUSTOMERS_MODEL='anthropic/claude-sonnet-4-5-20250514'
+// или 'openai/o4-mini' / 'google/gemini-2.5-flash-thinking'.
+const MODEL = (process.env.OPENROUTER_CUSTOMERS_MODEL ?? 'openai/gpt-5-mini').trim();
 const TIMEOUT_MS = Number(process.env.LLM_CUSTOMERS_TIMEOUT_MS ?? '30000');
 const MAX_CANDIDATES = 200;
 const MAX_TEXT_CHARS = 8000;
