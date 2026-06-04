@@ -82,34 +82,60 @@ async function flushBatch(db: SupabaseClient, rows: EnrichBufferDrainedRow[]): P
   const plan: FlushPlan = planFlush(rows);
   const now = new Date().toISOString();
 
-  // 1. UPDATE queue.status одним запросом на терминальный статус.
-  // Группируем по status, чтобы один UPDATE сделал N строк с одинаковыми
-  // полями. result_text/last_error разные у разных row'ов — придётся
-  // делать UPDATE через CASE WHEN, что неудобно в supabase-js. Вместо
-  // этого делаем N UPSERT'ов одной операцией через .upsert на PK queue.id.
+  // 1. UPDATE queue.status — N параллельных UPDATE'ов по PK. Раньше пробовали
+  // .upsert({onConflict:'id'}), но Postgres валидирует NOT NULL ДО ON CONFLICT,
+  // а в payload не было job_id / url_raw / url_normalized / row_index (это
+  // NOT NULL без default'ов), и каждый flush падал с
+  // `null value in column "job_id" of relation "website_enrichment_queue"
+  // violates not-null constraint`. Чтобы написать batch UPDATE без full payload
+  // нужна RPC с UPDATE FROM (VALUES …) — будет следующим коммитом. Сейчас
+  // 100 параллельных update().eq() через PG-пул отрабатывают за ~50-100мс,
+  // приемлемо для нашего batch_size=100.
   if (plan.queueUpdates.length > 0) {
-    const queuePayload = plan.queueUpdates.map((u) => ({
-      id: u.queue_id,
-      status: u.status,
-      result_text: u.result_text,
-      last_error: u.last_error,
-      updated_at: now,
-      completed_at: now,
-    }));
-    // upsert {onConflict:'id'} = UPDATE существующей row'и (PK), вставка
-    // не произойдёт потому что строки уже есть (создаются при enqueue job'а).
-    const { error: qErr } = await db
-      .from('website_enrichment_queue')
-      .upsert(queuePayload, { onConflict: 'id' });
-    if (qErr) {
-      log('error', `queue upsert failed (${plan.queueUpdates.length} rows): ${qErr.message}`);
-      throw qErr;
+    const results = await Promise.allSettled(
+      plan.queueUpdates.map((u) =>
+        db
+          .from('website_enrichment_queue')
+          .update({
+            status: u.status,
+            result_text: u.result_text,
+            last_error: u.last_error,
+            updated_at: now,
+            completed_at: now,
+          })
+          .eq('id', u.queue_id),
+      ),
+    );
+    const failed = results.filter(
+      (r) => r.status === 'rejected' || (r.status === 'fulfilled' && r.value.error),
+    );
+    if (failed.length > 0) {
+      // Если упало >50% — это не точечный network glitch, а системная проблема
+      // (схема/RLS/connection). Throw'аем чтобы pollLoop передохнул и логи
+      // показали состояние; точечные сбои просто логируем и идём дальше.
+      const sample = failed[0];
+      const msg =
+        sample.status === 'rejected'
+          ? String((sample as PromiseRejectedResult).reason)
+          : ((sample as PromiseFulfilledResult<{ error?: { message?: string } }>).value.error?.message ?? 'unknown');
+      log(
+        failed.length > plan.queueUpdates.length / 2 ? 'error' : 'warn',
+        `queue update failed for ${failed.length}/${plan.queueUpdates.length} rows. First error: ${msg}`,
+      );
+      if (failed.length > plan.queueUpdates.length / 2) {
+        throw new Error(`queue update mass-failure: ${failed.length}/${plan.queueUpdates.length}`);
+      }
     }
   }
 
   // 2. UPSERT в website_enrichment_cache. Один UPSERT на N domain'ов.
-  if (plan.cacheUpserts.length > 0) {
-    const cachePayload = plan.cacheUpserts.map((c) => ({
+  // Cache-таблица — у неё PK = url_normalized, а остальные NOT NULL колонки
+  // ИМЕЮТ default'ы, так что full-upsert работает (в отличие от queue).
+  // Дополнительно фильтруем пустые url_normalized — это никогда не должно
+  // случаться, но защищаем от NOT NULL crash'а.
+  const cachePayload = plan.cacheUpserts
+    .filter((c) => c.url_normalized && c.url_normalized.length > 0)
+    .map((c) => ({
       url_normalized: c.url_normalized,
       text: c.text,
       last_error: c.last_error,
@@ -117,12 +143,13 @@ async function flushBatch(db: SupabaseClient, rows: EnrichBufferDrainedRow[]): P
       expires_at: new Date(Date.now() + cacheTtlMs(c.text)).toISOString(),
       source_url: c.source_url,
     }));
+  if (cachePayload.length > 0) {
     const { error: cErr } = await db
       .from('website_enrichment_cache')
       .upsert(cachePayload, { onConflict: 'url_normalized' });
     if (cErr) {
       // Cache write — best-effort, не блокирует основной flush.
-      log('warn', `cache upsert failed (${plan.cacheUpserts.length} rows, non-fatal): ${cErr.message}`);
+      log('warn', `cache upsert failed (${cachePayload.length} rows, non-fatal): ${cErr.message}`);
     }
   }
 
