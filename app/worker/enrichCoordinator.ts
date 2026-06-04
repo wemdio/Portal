@@ -131,11 +131,21 @@ async function flushBatch(db: SupabaseClient, rows: EnrichBufferDrainedRow[]): P
   // 2. UPSERT в website_enrichment_cache. Один UPSERT на N domain'ов.
   // Cache-таблица — у неё PK = url_normalized, а остальные NOT NULL колонки
   // ИМЕЮТ default'ы, так что full-upsert работает (в отличие от queue).
-  // Дополнительно фильтруем пустые url_normalized — это никогда не должно
-  // случаться, но защищаем от NOT NULL crash'а.
-  const cachePayload = plan.cacheUpserts
-    .filter((c) => c.url_normalized && c.url_normalized.length > 0)
-    .map((c) => ({
+  //
+  // Дедуп: PG ругается `ON CONFLICT DO UPDATE command cannot affect row a
+  // second time`, если в одном INSERT-batch'е два row'а с одинаковым
+  // url_normalized. Это реально на проде: CSV с дубликатами URL у разных
+  // компаний даёт несколько queue-row'ов с одним cache_url_normalized,
+  // батч флушится одним рывком и UPSERT валится. Дедуп here — last wins
+  // (как делал бы legacy setCache, который шёл в порядке завершения
+  // scrapping'а; последний успешный результат всё равно был бы цели).
+  const cacheBy = new Map<string, typeof plan.cacheUpserts[number]>();
+  for (const c of plan.cacheUpserts) {
+    if (!c.url_normalized) continue;
+    cacheBy.set(c.url_normalized, c);
+  }
+  if (cacheBy.size > 0) {
+    const cachePayload = Array.from(cacheBy.values()).map((c) => ({
       url_normalized: c.url_normalized,
       text: c.text,
       last_error: c.last_error,
@@ -143,7 +153,6 @@ async function flushBatch(db: SupabaseClient, rows: EnrichBufferDrainedRow[]): P
       expires_at: new Date(Date.now() + cacheTtlMs(c.text)).toISOString(),
       source_url: c.source_url,
     }));
-  if (cachePayload.length > 0) {
     const { error: cErr } = await db
       .from('website_enrichment_cache')
       .upsert(cachePayload, { onConflict: 'url_normalized' });
