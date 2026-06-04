@@ -67,7 +67,15 @@ function parseExtractors(value: unknown): ExtractorKey[] | undefined {
 type FetchResult = { text?: string; error?: string };
 
 const WORKER_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_CONCURRENCY ?? '25');
-const WORKER_BATCH_SIZE = Number(process.env.WEBSITE_ENRICHMENT_BATCH_SIZE ?? '60');
+// Сколько items одна реплика клеймит за один claim_website_enrichment_items.
+// Раньше было 60 — но при per-domain throttle=1 и CSV где URL грузятся
+// блоками одного домена, реплика «застревает» на 30+ sequentialы из одного
+// сайта, остальные 9 реплик ждут (виден long tail в конце job'а, прогресс
+// 390/406 ползёт 5 минут). С 15 хвост короче в 4 раза, плюс claim'ы стали
+// чаще → миграция 20260605_0001 берёт diverse domains внутри одного batch'а,
+// тоже снижает latency хвоста. Если CPU нагрузка от учащённых claim-RPC
+// станет проблемой (пока нет признаков), поднять обратно через env.
+const WORKER_BATCH_SIZE = Number(process.env.WEBSITE_ENRICHMENT_BATCH_SIZE ?? '15');
 const CACHE_SUCCESS_DAYS = Number(process.env.WEBSITE_ENRICHMENT_CACHE_DAYS ?? '7');
 const CACHE_ERROR_HOURS = Number(process.env.WEBSITE_ENRICHMENT_ERROR_TTL_HOURS ?? '6');
 const DOMAIN_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_DOMAIN_CONCURRENCY ?? '1');
