@@ -992,6 +992,41 @@ services:
     networks:
       - portal-network
 
+  # Авто-пайплайн (добор HH + база-баз → score-bucket → лиды в Instantly).
+  # Вынесен из HTTP-крона в portal в отдельный демон, чтобы переживать редеплои:
+  # на SIGTERM прогон останавливается между чанками (текущий чанк закоммичен:
+  # append + seen), а остаток докатывается на следующем тике (resume через дедуп
+  # seen_employers + идемпотентный createLeads). Расписание — внутри воркера
+  # (окно parse_window_*_utc), отдельный cron не нужен. См. worker/autoPipeline.ts.
+  # ВАЖНО: после деплоя отключить старый внешний крон на /api/cron/auto-hh-pipeline.
+  worker-autopipeline:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-autopipeline
+    command: ["node", "/app/workers/autoPipeline.js"]
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - AUTOPIPELINE_TICK_MS=${AUTOPIPELINE_TICK_MS:-600000}
+      - AUTOPIPELINE_MAX_ATTEMPTS=${AUTOPIPELINE_MAX_ATTEMPTS:-6}
+    # Прогон идёт чанками по 500. На SIGTERM (редеплой) даём текущему чанку
+    # доделать enrichment + append + seen, затем воркер останавливается
+    # (interrupted → resume на след. тике). 20 мин — с запасом на один чанк.
+    stop_grace_period: 20m
+    deploy:
+      resources:
+        limits:
+          # Один чанк (500 employers) в памяти: scrape-результаты + endpoint_raw
+          # JSON + MX-кэш. Прежний OOM был из-за накопления ВСЕХ чанков; теперь
+          # чанк-локально, но даём запас.
+          memory: 3072M
+          cpus: '1.5'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
 volumes:
   telegram-bot-api-data:
   portal-backup-data:

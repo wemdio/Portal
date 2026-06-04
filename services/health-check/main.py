@@ -709,6 +709,123 @@ def _track(key: str, failed: bool) -> tuple[bool, bool]:
         return False, prev >= HEALTH_ALERT_MIN_CONSECUTIVE  # recovery
 
 
+# ── Stuck-job detection ──────────────────────────────────────────────────────
+#
+# Ловит фоновые задачи, которые «висят»: статус running/pending, а прогресс не
+# двигается N минут. Именно так выглядел инцидент 04.06 — «Поиск почт» у Оли
+# стоял на 0% ~20 мин (воркер захлебнулся, ретраи жгли попытки без финализации),
+# и узнали мы об этом только когда специалист написал в чат. Health-check ловит
+# это раньше человека и шлёт алерт.
+#
+# Для таблиц с числовым счётчиком (processed) сигнал = «значение не изменилось с
+# тех пор как мы впервые увидели задачу running, и прошло > stall_min». Для
+# конструктора баз счётчика на job-строке нет — там сигнал «running дольше
+# stall_min без завершения». Плюс универсальный «pending дольше pending_min» =
+# задачу никто не взял в работу (воркер лежит/перегружен).
+#
+# (table, человекочитаемая метка для кнопки, колонка-счётчик | None, stall_min)
+_STUCK_JOB_SPECS: list[tuple[str, str, str | None, int]] = [
+    ("website_enrichment_jobs", "Поиск почт / обогащение сайтов", "processed",
+     int(os.environ.get("HEALTH_STUCK_ENRICH_MIN", "8"))),
+    ("email_validation_jobs", "Валидация почт", "processed",
+     int(os.environ.get("HEALTH_STUCK_EMAILVAL_MIN", "8"))),
+    ("brief_scoring_jobs", "Оценка ЦА (скоринг)", "processed",
+     int(os.environ.get("HEALTH_STUCK_SCORING_MIN", "10"))),
+    ("base_constructor_jobs", "Конструктор баз", None,
+     int(os.environ.get("HEALTH_STUCK_BASECON_MIN", "60"))),
+]
+STUCK_PENDING_MINUTES = max(2, int(os.environ.get("HEALTH_STUCK_PENDING_MIN", "6")))
+
+# job_key ("table:id") -> (progress fingerprint, loop-clock ts when first seen
+# with this fingerprint). Used to measure how long progress has been frozen.
+_STUCK_TRACKER: dict[str, tuple[str, float]] = {}
+# job_keys already alerted, so we don't repeat the same alert every cycle.
+_STUCK_ALERTED: set[str] = set()
+
+
+async def check_stuck_jobs() -> list[str]:
+    """Return alert lines for background jobs whose progress is frozen.
+
+    Mirrors the worker's own watchdog but lives outside the worker, so it still
+    fires when the worker itself is wedged/down. One alert per stuck job; cleared
+    automatically when the job leaves pending/running.
+    """
+    if not DATABASE_URL:
+        return []
+    loop_now = asyncio.get_running_loop().time()
+    problems: list[str] = []
+    seen_keys: set[str] = set()
+
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+    except Exception as e:
+        print(f"[health] stuck-jobs connect error: {_normalize_network_error(e)}")
+        return []
+    try:
+        for table, label, prog_col, stall_min in _STUCK_JOB_SPECS:
+            prog_select = f"{prog_col}::text" if prog_col else "NULL::text"
+            try:
+                rows = await conn.fetch(
+                    f"SELECT id::text AS id, status, {prog_select} AS progress, "
+                    f"  extract(epoch FROM (now() - coalesce(started_at, created_at)))::int AS active_secs, "
+                    f"  extract(epoch FROM (now() - created_at))::int AS age_secs "
+                    f"FROM public.{table} WHERE status IN ('pending','running')"
+                )
+            except Exception as e:
+                print(f"[health] stuck-jobs query {table} skipped: {e}")
+                continue
+
+            for r in rows:
+                key = f"{table}:{r['id']}"
+                seen_keys.add(key)
+
+                if r["status"] == "pending":
+                    # Nobody claimed it — worker down or queue backed up.
+                    if r["age_secs"] > STUCK_PENDING_MINUTES * 60 and key not in _STUCK_ALERTED:
+                        _STUCK_ALERTED.add(key)
+                        problems.append(
+                            f"🟠 <b>{label}</b>: задача не взята в работу "
+                            f"{r['age_secs'] // 60} мин — воркер не разбирает очередь?"
+                        )
+                    continue
+
+                # status == 'running'
+                if prog_col is None:
+                    # No per-row counter on the job — fall back to wall-clock age.
+                    if r["active_secs"] > stall_min * 60 and key not in _STUCK_ALERTED:
+                        _STUCK_ALERTED.add(key)
+                        problems.append(
+                            f"🔴 <b>{label}</b>: выполняется {r['active_secs'] // 60} мин "
+                            f"без завершения (≥{stall_min} мин — похоже, зависла)"
+                        )
+                    continue
+
+                fp = r["progress"]
+                prev = _STUCK_TRACKER.get(key)
+                if prev is None or prev[0] != fp:
+                    # Progress moved (or first sighting) — reset the stall timer.
+                    _STUCK_TRACKER[key] = (fp, loop_now)
+                    _STUCK_ALERTED.discard(key)
+                elif (loop_now - prev[1]) > stall_min * 60 and key not in _STUCK_ALERTED:
+                    _STUCK_ALERTED.add(key)
+                    problems.append(
+                        f"🔴 <b>{label}</b>: прогресс застрял на {fp} ≥{stall_min} мин — "
+                        f"воркер не двигает задачу (как 0% у «Поиск почт» 04.06)"
+                    )
+    finally:
+        await conn.close()
+
+    # Forget jobs that are no longer active so trackers/alerts don't leak.
+    for key in list(_STUCK_TRACKER.keys()):
+        if key not in seen_keys:
+            _STUCK_TRACKER.pop(key, None)
+    for key in list(_STUCK_ALERTED):
+        if key not in seen_keys:
+            _STUCK_ALERTED.discard(key)
+
+    return problems
+
+
 # ── Health check (every 5 min) ──────────────────────────────────────────────
 
 HEALTH_CHECK_TIMEOUT_SEC = max(60, HEALTH_INTERVAL_SEC - 10)
@@ -844,6 +961,12 @@ async def _run_health_check_inner():
         f"🔴 <b>Сервер {SERVER_IP}</b>: {srv_msg}",
         f"✅ <b>Сервер {SERVER_IP}</b>: восстановлен",
     )
+
+    # Stuck background jobs (progress frozen) — manages its own per-job dedup.
+    try:
+        problems.extend(await check_stuck_jobs())
+    except Exception as e:
+        print(f"[health] stuck-jobs check error: {e}")
 
     if problems:
         header = f"⚠️ <b>HEALTH CHECK</b>  —  {_now_msk()}\n"
