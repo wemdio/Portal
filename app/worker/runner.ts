@@ -23,6 +23,14 @@ switch (kind) {
   case 'enrich':
     run('./enrich');
     break;
+  // Single-writer для website_enrichment_results_buffer. Запускается
+  // отдельным docker-сервисом worker-enrich-coordinator (1 реплика),
+  // активируется выставлением ENRICH_USE_BUFFER=true на scraper'ах.
+  // См. lib/enrich/enrichBuffer.ts и worker/enrichCoordinator.ts.
+  case 'enrichcoordinator':
+  case 'enrich-coordinator':
+    run('./enrichCoordinator');
+    break;
   case 'yandexmaps':
     run('./yandexmaps');
     break;

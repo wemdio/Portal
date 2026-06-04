@@ -167,6 +167,10 @@ services:
       # на job ≈ ~900-1100MB (cheerio HTML + Playwright temp). 2G с запасом.
       - WEBSITE_ENRICHMENT_CONCURRENCY=${WEBSITE_ENRICHMENT_CONCURRENCY:-25}
       - ENRICH_MAX_CONCURRENCY=${ENRICH_MAX_CONCURRENCY:-8}
+      # Coordinator pattern всегда включён (см. lib/enrich/enrichBuffer.ts):
+      # scraper пишет результат в website_enrichment_results_buffer одной
+      # строкой, worker-enrich-coordinator batch'ит в queue/cache/jobs.
+      # Подключения к БД от scraper'а не растут линейно с числом реплик.
     stop_grace_period: 30m
     deploy:
       resources:
@@ -184,6 +188,48 @@ services:
   worker-enrich-3:
     <<: *worker-enrich
     container_name: portal-worker-enrich-3
+
+  # ─── Дополнительные scraper-реплики ────────────────────────────────────
+  # Активны независимо от ENRICH_USE_BUFFER. В legacy-режиме делят очередь
+  # через SKIP LOCKED как и -2/-3. В buffer-режиме пишут в один общий
+  # buffer и один coordinator всё агрегирует — DB-пул не растёт линейно.
+  worker-enrich-4: { <<: *worker-enrich, container_name: portal-worker-enrich-4 }
+  worker-enrich-5: { <<: *worker-enrich, container_name: portal-worker-enrich-5 }
+  worker-enrich-6: { <<: *worker-enrich, container_name: portal-worker-enrich-6 }
+  worker-enrich-7: { <<: *worker-enrich, container_name: portal-worker-enrich-7 }
+  worker-enrich-8: { <<: *worker-enrich, container_name: portal-worker-enrich-8 }
+  worker-enrich-9: { <<: *worker-enrich, container_name: portal-worker-enrich-9 }
+  worker-enrich-10: { <<: *worker-enrich, container_name: portal-worker-enrich-10 }
+
+  # ─── Single-writer coordinator для buffer'а ────────────────────────────
+  # Запускать ровно ОДНУ реплику. Drain RPC SKIP-LOCKED'нится между несколькими
+  # инстансами, но смысла в 2+ нет — flush jobs counter всё равно сериализуется
+  # на per-job RPC. Поднимать 2-ю реплику только как hot-standby при апгрейде.
+  worker-enrich-coordinator:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-enrich-coordinator
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      # Polling интервал короткий — buffer всё равно подписан на Realtime,
+      # этот таймаут только fallback на случай если канал заглох.
+      - WORKER_POLL_INTERVAL_MS=${ENRICH_COORDINATOR_POLL_MS:-1000}
+      - WORKER_KIND=enrich-coordinator
+      - ENRICH_COORDINATOR_BATCH=${ENRICH_COORDINATOR_BATCH:-100}
+      - WEBSITE_ENRICHMENT_CACHE_DAYS=${WEBSITE_ENRICHMENT_CACHE_DAYS:-7}
+      - WEBSITE_ENRICHMENT_ERROR_TTL_HOURS=${WEBSITE_ENRICHMENT_ERROR_TTL_HOURS:-6}
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    restart: unless-stopped
+    networks:
+      - portal-network
 
   worker-yandexmaps:
     image: ${DOCKER_USERNAME}/portal-worker:prod
