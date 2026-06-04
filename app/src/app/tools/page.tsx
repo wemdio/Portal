@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, type ComponentType } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ComponentType } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
@@ -15,6 +15,7 @@ import {
   FileSpreadsheet,
   ClipboardCheck,
   Send,
+  Settings,
   Waves,
   Video,
   MessageSquareMore,
@@ -26,13 +27,42 @@ import {
   ShieldAlert,
   Blocks,
   PartyPopper,
+  LayoutGrid,
+  List,
 } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/toolsRegistry';
+import { sortToolIdsByTitle } from '@/lib/toolsSort';
+import { type ToolStatus } from '@/lib/toolStatus';
+import { isAdmin } from '@/lib/roles';
 import { RdpToolCard } from './RdpToolCard';
+import { ToolVisibilityModal } from './ToolVisibilityModal';
 import { usePortalBlockingLoad } from '@/components/PortalLoadingProvider';
 import { useUser } from '@/lib/UserProvider';
 import type { Locale } from '@/lib/i18n';
+
+type ToolsLayoutMode = 'grouped' | 'list';
+const LAYOUT_MODE_STORAGE_KEY = 'tools-layout-mode';
+
+/**
+ * Маппинг глобального статуса инструмента (из шестерёнки) в плашку.
+ * Возвращает null если статус не требует плашки или его нужно скрыть.
+ */
+function badgeForStatus(
+  status: ToolStatus | undefined,
+  locale: Locale,
+): { text: string; variant: 'emerald' | 'amber' } | null {
+  switch (status) {
+    case 'new':
+      return { text: locale === 'en' ? 'New' : 'Новое', variant: 'emerald' };
+    case 'beta':
+      return { text: 'BETA', variant: 'amber' };
+    case 'in_development':
+      return { text: locale === 'en' ? 'In development' : 'В разработке', variant: 'amber' };
+    default:
+      return null;
+  }
+}
 
 /** Логотип Telegram (lucide не содержит брендовых иконок). */
 function TelegramIcon({ className }: { className?: string }) {
@@ -75,16 +105,42 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'sales-chat-analyzer': TelegramIcon,
 };
 
-function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: Locale }) {
+function ToolLinkCard({
+  toolId,
+  locale,
+  effectiveStatus,
+}: {
+  toolId: ToolId;
+  locale: Locale;
+  effectiveStatus?: ToolStatus;
+}) {
   const config = TOOLS_CONFIG[toolId];
   const Icon = TOOL_ICONS[toolId];
-  const hasBadge = Boolean(config.badge);
   const title = locale === 'en' ? (config.title_en ?? config.title) : config.title;
   const description = locale === 'en' ? (config.description_en ?? config.description) : config.description;
-  const badge = locale === 'en' ? (config.badge_en ?? config.badge) : config.badge;
 
-  if (config.disabled) {
-    const badgeClass = config.badgeVariant === 'emerald'
+  // Если есть admin-override (effectiveStatus передан) — он ПОЛНОСТЬЮ
+  // побеждает хардкод в реестре, включая «без плашки» для 'active'.
+  // Без override'а фоллбэчимся на config.badge/config.disabled из реестра.
+  // Это чинит баг: admin ставит 'active' тулу с зашитым badge: 'Новое'
+  // (email-sequence-v2 и т.п.) — плашка должна пропадать, а не оставаться
+  // из реестра.
+  const hasOverride = effectiveStatus !== undefined;
+  const dynamicBadge = badgeForStatus(effectiveStatus, locale);
+  const badgeText = hasOverride
+    ? dynamicBadge?.text
+    : (locale === 'en' ? (config.badge_en ?? config.badge) : config.badge);
+  const badgeVariant: 'emerald' | 'amber' | undefined = hasOverride
+    ? dynamicBadge?.variant
+    : config.badgeVariant;
+
+  // «В разработке» через override ИЛИ (нет override AND config.disabled).
+  // Если override='active' — config.disabled из реестра тоже игнорится.
+  const isDisabled = effectiveStatus === 'in_development'
+    || (!hasOverride && Boolean(config.disabled));
+
+  if (isDisabled) {
+    const badgeClass = badgeVariant === 'emerald'
       ? 'bg-emerald-100 text-emerald-700'
       : 'bg-amber-100 text-amber-700';
     return (
@@ -93,11 +149,11 @@ function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: Locale }) {
           <div>
             <div className="flex items-center gap-2">
               <p className="text-base font-semibold text-gray-400">{title}</p>
-              {config.badge && (
+              {badgeText && (
                 <span
                   className={`px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded ${badgeClass}`}
                 >
-                  {badge}
+                  {badgeText}
                 </span>
               )}
             </div>
@@ -110,10 +166,11 @@ function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: Locale }) {
     );
   }
 
+  const hasBadge = Boolean(badgeText);
   const borderClass = hasBadge
     ? 'border border-gray-200 bg-gray-50 hover:border-blue-300 hover:bg-blue-50/60'
     : 'border border-gray-200 bg-white';
-  const badgeClass = config.badgeVariant === 'emerald'
+  const badgeClass = badgeVariant === 'emerald'
     ? 'bg-emerald-100 text-emerald-700'
     : 'bg-amber-100 text-amber-700';
   const linkClass = 'text-blue-600 group-hover:text-blue-700';
@@ -129,11 +186,11 @@ function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: Locale }) {
         <div className={toolId === 'auto-report' ? 'min-w-0' : undefined}>
           <div className="flex items-center gap-2">
             <p className="text-base font-semibold text-gray-900">{title}</p>
-            {config.badge && (
+            {badgeText && (
               <span
                 className={`px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded ${badgeClass}`}
               >
-                {badge}
+                {badgeText}
               </span>
             )}
           </div>
@@ -147,11 +204,41 @@ function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: Locale }) {
 }
 
 export default function ToolsPage() {
-  const { locale } = useUser();
+  const { locale, userRole } = useUser();
   const [toolIds, setToolIds] = useState<string[] | null>(null);
+  const [statuses, setStatuses] = useState<Record<string, ToolStatus>>({});
   const [loading, setLoading] = useState(true);
+  const [visibilityModalOpen, setVisibilityModalOpen] = useState(false);
+
+  // Per-user раскладка списка инструментов. localStorage достаточно —
+  // настройка чисто UI, не критична для миграции между устройствами.
+  const [layoutMode, setLayoutMode] = useState<ToolsLayoutMode>('grouped');
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const stored = window.localStorage.getItem(LAYOUT_MODE_STORAGE_KEY);
+    if (stored === 'grouped' || stored === 'list') setLayoutMode(stored);
+  }, []);
+  const changeLayoutMode = useCallback((mode: ToolsLayoutMode) => {
+    setLayoutMode(mode);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(LAYOUT_MODE_STORAGE_KEY, mode);
+    }
+  }, []);
 
   usePortalBlockingLoad(loading);
+
+  const reloadVisibleTools = useCallback(async () => {
+    try {
+      const res = await authFetch('/api/user/tools');
+      if (!res.ok) return;
+      const data = (await res.json()) as { toolIds?: string[]; statuses?: Record<string, ToolStatus> };
+      setToolIds(Array.isArray(data.toolIds) ? data.toolIds : [...ALL_TOOL_IDS]);
+      setStatuses(data.statuses ?? {});
+    } catch {
+      setToolIds([...ALL_TOOL_IDS]);
+      setStatuses({});
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -159,10 +246,16 @@ export default function ToolsPage() {
       try {
         const res = await authFetch('/api/user/tools');
         if (!res.ok || cancelled) return;
-        const data = (await res.json()) as { toolIds?: string[] };
-        if (!cancelled) setToolIds(Array.isArray(data.toolIds) ? data.toolIds : [...ALL_TOOL_IDS]);
+        const data = (await res.json()) as { toolIds?: string[]; statuses?: Record<string, ToolStatus> };
+        if (!cancelled) {
+          setToolIds(Array.isArray(data.toolIds) ? data.toolIds : [...ALL_TOOL_IDS]);
+          setStatuses(data.statuses ?? {});
+        }
       } catch {
-        if (!cancelled) setToolIds([...ALL_TOOL_IDS]);
+        if (!cancelled) {
+          setToolIds([...ALL_TOOL_IDS]);
+          setStatuses({});
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -178,16 +271,109 @@ export default function ToolsPage() {
     .map((g) => ({ ...g, toolIds: g.toolIds.filter((id) => visibleSet.has(id)) }))
     .filter((g) => g.toolIds.length > 0);
 
+  // Плоский алфавитный список (для режима «Списком»). Сортируем общим
+  // хелпером — кириллица первой (А-Я), потом латиница (A-Z).
+  const flatSortedToolIds = useMemo(
+    () => sortToolIdsByTitle(ALL_TOOL_IDS.filter((id) => visibleSet.has(id)), locale),
+    // visibleSet — новый объект на каждый render; считаем по toolIds.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [toolIds, locale],
+  );
+
+  const adminViewer = isAdmin(userRole);
+
+  /** Карточка одного тула (RDP — особый, у него своя card-компонента). */
+  const renderToolCard = (toolId: string) =>
+    toolId === 'rdp' ? (
+      <div key="rdp" className="min-w-0 flex flex-col h-full">
+        <RdpToolCard />
+      </div>
+    ) : (
+      <ToolLinkCard
+        key={toolId}
+        toolId={toolId as ToolId}
+        locale={locale}
+        effectiveStatus={statuses[toolId]}
+      />
+    );
+
   return (
     <div className="space-y-6 text-left max-w-full">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">{locale === 'en' ? 'Tools' : 'Инструменты'}</h1>
-        <p className="text-sm text-gray-500">
-          {locale === 'en'
-            ? 'A set of utilities for data and process workflows.'
-            : 'Набор утилит для работы с данными и процессами.'}
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">{locale === 'en' ? 'Tools' : 'Инструменты'}</h1>
+          <p className="text-sm text-gray-500">
+            {locale === 'en'
+              ? 'A set of utilities for data and process workflows.'
+              : 'Набор утилит для работы с данными и процессами.'}
+          </p>
+        </div>
+        <div className="mt-1 flex items-center gap-2 shrink-0">
+          {/* Per-user раскладка: «По блокам» (как было раньше — группы Аутрич/
+              Базы/Парсеры/Утилиты/AI) или «Списком» (плоский алфавитный список,
+              кириллица первой). Хранится в localStorage. */}
+          <div
+            role="group"
+            aria-label={locale === 'en' ? 'Layout mode' : 'Раскладка'}
+            className="inline-flex h-9 items-center rounded-lg border border-gray-200 bg-white p-0.5"
+          >
+            <button
+              type="button"
+              onClick={() => changeLayoutMode('grouped')}
+              title={locale === 'en' ? 'Group by category' : 'По блокам (по категориям)'}
+              aria-pressed={layoutMode === 'grouped'}
+              className={`inline-flex h-full items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors ${
+                layoutMode === 'grouped'
+                  ? 'bg-gray-100 text-gray-900'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <LayoutGrid className="h-3.5 w-3.5" aria-hidden />
+              <span>{locale === 'en' ? 'Groups' : 'По блокам'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => changeLayoutMode('list')}
+              title={locale === 'en'
+                ? 'Flat alphabetical list (Cyrillic first, then Latin)'
+                : 'Списком, по алфавиту (сначала русские, затем английские)'}
+              aria-pressed={layoutMode === 'list'}
+              className={`inline-flex h-full items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors ${
+                layoutMode === 'list'
+                  ? 'bg-gray-100 text-gray-900'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <List className="h-3.5 w-3.5" aria-hidden />
+              <span>{locale === 'en' ? 'List' : 'Списком'}</span>
+            </button>
+          </div>
+          {adminViewer ? (
+            <button
+              type="button"
+              onClick={() => setVisibilityModalOpen(true)}
+              title={locale === 'en'
+                ? 'Tool visibility (global, all users)'
+                : 'Видимость инструментов (глобально, для всех)'}
+              aria-label={locale === 'en'
+                ? 'Tool visibility settings'
+                : 'Настройки видимости инструментов'}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700"
+            >
+              <Settings className="h-4 w-4" aria-hidden />
+            </button>
+          ) : null}
+        </div>
       </div>
+
+      {adminViewer ? (
+        <ToolVisibilityModal
+          open={visibilityModalOpen}
+          locale={locale}
+          onClose={() => setVisibilityModalOpen(false)}
+          onChanged={() => void reloadVisibleTools()}
+        />
+      ) : null}
 
       {loading ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
@@ -210,6 +396,13 @@ export default function ToolsPage() {
             {locale === 'en' ? 'Please contact your administrator.' : 'Пожалуйста, обратитесь к администратору.'}
           </p>
         </div>
+      ) : layoutMode === 'list' ? (
+        // Плоский алфавитный список — реально по одному в строке, без секций.
+        // Ширина ограничена max-w-3xl и центрирована, чтобы карточки не
+        // растягивались на весь экран. Сортировка: cyrillic → latin, А-Я / A-Z.
+        <div className="mx-auto flex max-w-3xl flex-col gap-4">
+          {flatSortedToolIds.map((toolId) => renderToolCard(toolId))}
+        </div>
       ) : (
         <div className="space-y-6">
           {visibleGroups.map((group) => (
@@ -220,15 +413,7 @@ export default function ToolsPage() {
                 <div className="h-px flex-1 bg-gray-200" />
               </div>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
-                {group.toolIds.map((toolId) =>
-                  toolId === 'rdp' ? (
-                    <div key="rdp" className="min-w-0 flex flex-col h-full">
-                      <RdpToolCard />
-                    </div>
-                  ) : (
-                    <ToolLinkCard key={toolId} toolId={toolId} locale={locale} />
-                  )
-                )}
+                {group.toolIds.map((toolId) => renderToolCard(toolId))}
               </div>
             </section>
           ))}

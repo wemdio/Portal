@@ -12,6 +12,7 @@ interface Props {
 const PLACEHOLDER = `http://login:password@host:port
 socks5://login:password@host:port
 host:port:login:password
+host:port@login:password
 host:port`;
 
 export function BulkPasteProxyModal({ onClose, onCreated }: Props) {
@@ -68,7 +69,7 @@ export function BulkPasteProxyModal({ onClose, onCreated }: Props) {
               Вставьте список прокси, по одной на строку. Поддерживаемые форматы:
             </label>
             <p className="text-xs text-gray-400 mb-2">
-              http://логин:пароль@хост:порт &nbsp;·&nbsp; socks5://логин:пароль@хост:порт &nbsp;·&nbsp; хост:порт:логин:пароль &nbsp;·&nbsp; хост:порт
+              http://логин:пароль@хост:порт &nbsp;·&nbsp; socks5://логин:пароль@хост:порт &nbsp;·&nbsp; хост:порт:логин:пароль &nbsp;·&nbsp; хост:порт@логин:пароль &nbsp;·&nbsp; хост:порт
             </p>
             <textarea
               value={text}

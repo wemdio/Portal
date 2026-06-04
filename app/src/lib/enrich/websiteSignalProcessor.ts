@@ -1,5 +1,5 @@
 import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websiteParser';
-import { normalizeUrl } from '@/lib/enrich/urlUtils';
+import { normalizeUrl, extractNormalizedUrls } from '@/lib/enrich/urlUtils';
 import { detectSignals, determineProfile, formatStack, integrationsFromSignals } from '@/lib/enrich/signalDetector';
 import { discoverSubpaths, FALLBACK_PATHS } from '@/lib/enrich/subpathDiscovery';
 import {
@@ -8,17 +8,19 @@ import {
   EXTRACTOR_TO_SUBPAGES,
   SubpageKind,
 } from '@/lib/enrich/extractors/types';
-import { extractCustomers } from '@/lib/enrich/extractors/customersExtractor';
+import { extractCustomers, filterCustomerCandidates } from '@/lib/enrich/extractors/customersExtractor';
 import { nameListLooksReal } from '@/lib/enrich/extractors/nameQuality';
+import { llmExtractCustomers } from '@/lib/enrich/extractors/llmCustomersExtractor';
 import { extractCasesCount } from '@/lib/enrich/extractors/casesCountExtractor';
 import { extractCaseIndustries } from '@/lib/enrich/extractors/caseIndustriesExtractor';
 import { detectEnterpriseLogos, detectEnterpriseInHtml } from '@/lib/enrich/extractors/enterpriseLogosDetector';
 import { extractPricingModel } from '@/lib/enrich/extractors/pricingModelExtractor';
 import { extractPricingDetails } from '@/lib/enrich/extractors/pricingDetailExtractor';
-import { extractHiring } from '@/lib/enrich/extractors/hiringExtractor';
+import { extractHiring, findExternalCareerLinks } from '@/lib/enrich/extractors/hiringExtractor';
 import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtractor';
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
+import { extractSocialMedia } from '@/lib/enrich/extractors/socialMediaExtractor';
 import {
   discoverBlogOrSocialUrls,
   extractBlogLastPost,
@@ -79,6 +81,33 @@ function classifyFetchError(httpErr: unknown, pwErr: unknown): string {
   return 'Сайт недоступен';
 }
 
+/**
+ * Build the list of URL variants to try when the primary URL fails to
+ * return usable HTML. The pattern mirrors fetchAndExtract (email/text
+ * worker): for `https://acme.ru` we try the apex, then `https://www.acme.ru`,
+ * then `http://acme.ru`, then `http://www.acme.ru`. Each variant is one
+ * cheap extra fetch on the failure path — yields a measurable lift on the
+ * ~40% of RU SMB sites that have DNS only on www, or only on plain HTTP.
+ */
+function buildFetchFallbacks(normalized: string): string[] {
+  const variants: string[] = [normalized];
+  try {
+    const u = new URL(normalized);
+    const hasWww = /^www\./i.test(u.hostname);
+    const wwwHost = hasWww ? u.hostname.replace(/^www\./i, '') : `www.${u.hostname}`;
+    const altHostUrl = `${u.protocol}//${wwwHost}${u.pathname}${u.search}`;
+    if (altHostUrl !== normalized) variants.push(altHostUrl);
+    if (u.protocol === 'https:') {
+      variants.push(`http://${u.hostname}${u.pathname}${u.search}`);
+      variants.push(`http://${wwwHost}${u.pathname}${u.search}`);
+    }
+  } catch {
+    /* normalized URL was malformed — just use the original */
+  }
+  // De-dupe while preserving order.
+  return Array.from(new Set(variants));
+}
+
 async function fetchMainHtml(
   normalized: string,
   httpTimeout: number,
@@ -89,17 +118,27 @@ async function fetchMainHtml(
   let httpError: unknown = null;
   let pwError: unknown = null;
 
-  try {
-    const httpResult = await fetchHtmlWithRetry(normalized, {
-      timeout: httpTimeout,
-      signal,
-      allowHttpErrors: false,
-    });
-    if (httpResult && httpResult.status >= 200 && httpResult.status < 300 && httpResult.html) {
-      html = httpResult.html;
+  // Try each URL variant (apex → www-variant → HTTP-variant) before
+  // surrendering to Playwright. Each variant is much cheaper than the
+  // Playwright fallback (300ms vs 18s), so we exhaust them first.
+  const fallbacks = buildFetchFallbacks(normalized);
+  for (const variant of fallbacks) {
+    if (signal?.aborted) break;
+    try {
+      const httpResult = await fetchHtmlWithRetry(variant, {
+        timeout: httpTimeout,
+        signal,
+        allowHttpErrors: false,
+      });
+      if (httpResult && httpResult.status >= 200 && httpResult.status < 300 && httpResult.html) {
+        html = httpResult.html;
+        break;
+      }
+    } catch (err) {
+      // Keep the FIRST error we see — that's the primary domain, most
+      // informative when everything fails.
+      if (httpError === null) httpError = err;
     }
-  } catch (err) {
-    httpError = err;
   }
 
   if (!html && !signal?.aborted) {
@@ -119,6 +158,18 @@ async function fetchMainHtml(
 
   if (!html) return { error: classifyFetchError(httpError, pwError) };
   return { html, method };
+}
+
+/**
+ * Cheap count of `<img alt="...">` occurrences without parsing the full DOM.
+ * Used by enterprise_logos to decide whether we actually had anything to
+ * inspect — "no clients + no images" means "we couldn't tell" (undefined),
+ * not "no enterprise logos" (false).
+ */
+function countImgWithAlt(html: string): number {
+  if (!html) return 0;
+  const matches = html.match(/<img\b[^>]*\balt\s*=\s*["'][^"']{2,}["']/gi);
+  return matches ? matches.length : 0;
 }
 
 /**
@@ -146,12 +197,27 @@ export async function processSignalsForUrl(
   const trimmed = String(rawUrl ?? '').trim();
   if (!trimmed) return { error: 'Пустой URL' };
 
-  let normalized: string;
+  // The "Site" column in exports often carries 2+ URLs in a single cell
+  // ("t-paritet.ru, paritet-te.ru", "sportcover.ru, ipksport.ru"). The
+  // email path already iterates through every URL it finds; do the same
+  // here so a dead first URL doesn't kill the row when a working sibling
+  // is right next to it.
+  let targets: string[];
   try {
-    normalized = normalizeUrl(trimmed);
-    if (!normalized) throw new Error('Невалидный URL');
+    targets = extractNormalizedUrls(trimmed);
   } catch (err) {
     return { error: err instanceof Error ? err.message : 'Невалидный URL' };
+  }
+  if (targets.length === 0) {
+    // Fall back to the single-URL parser so the existing error message
+    // shape ("Пустой URL" vs "Невалидный URL") is preserved.
+    try {
+      const fallback = normalizeUrl(trimmed);
+      if (!fallback) throw new Error('Невалидный URL');
+      targets = [fallback];
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Невалидный URL' };
+    }
   }
 
   const httpTimeout = options?.timeout ?? DEFAULT_TIMEOUT_MS;
@@ -159,8 +225,27 @@ export async function processSignalsForUrl(
   const extractors = options?.extractors ?? DEFAULT_EXTRACTORS;
   const subpageTimeout = options?.subpageTimeout ?? DEFAULT_SUBPAGE_TIMEOUT_MS;
 
-  const main = await fetchMainHtml(normalized, httpTimeout, signal);
-  if ('error' in main) return main;
+  // Try each candidate URL until one returns usable HTML. Keep the first
+  // error message we saw — that's almost always the primary domain and
+  // the most informative thing to show the user when the whole row fails.
+  let normalized = '';
+  let main: Awaited<ReturnType<typeof fetchMainHtml>> | null = null;
+  let firstError: string | null = null;
+
+  for (const candidate of targets) {
+    if (signal?.aborted) return { error: 'Прервано' };
+    const probe = await fetchMainHtml(candidate, httpTimeout, signal);
+    if (!('error' in probe)) {
+      normalized = candidate;
+      main = probe;
+      break;
+    }
+    if (firstError === null) firstError = probe.error;
+  }
+
+  if (!main) {
+    return { error: firstError ?? 'Сайт недоступен' };
+  }
 
   const out: ExtractedData & { stack: string; profile: string; signalIds: string[]; method: 'http' | 'playwright' } = {
     stack: '',
@@ -238,6 +323,32 @@ export async function processSignalsForUrl(
     // Trust gate: a thin or junk-heavy heuristic result is dropped so the
     // LLM fallback below produces clean company names instead.
     if (!nameListLooksReal(out.customers)) out.customers = [];
+    // Specialized LLM fallback for «Клиенты» (см. llmCustomersExtractor.ts).
+    // Триггер: heuristic дал < 3 имён ИЛИ ничего — heuristic покрывает
+    // только структурированные logo wall'ы с правильными class-нэймами,
+    // а для российского b2b большинство сайтов используют другие классы /
+    // вообще без класс-нэймов. LLM получает structured input (alt-атрибуты
+    // logo wall'ов + текст разделов под client-headings) и выдаёт чистый
+    // список. Поднимает покрытие с ~2% до 80%+ на российском b2b-сегменте
+    // (см. промежуточные результаты.txt от 04.06 — повод для этой работы).
+    if (out.customers.length < 3) {
+      const llmCustomers = await llmExtractCustomers(main.html, casesHtml);
+      if (llmCustomers.length > 0) {
+        // Merge: keep existing heuristic hits at the front (они уже прошли
+        // junk-filter и nameListLooksReal), добавляем уникальные от LLM.
+        const merged: string[] = [...out.customers];
+        const seen = new Set(out.customers.map((c) => c.toLowerCase()));
+        for (const c of llmCustomers) {
+          const key = c.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          merged.push(c);
+        }
+        // Финальный прогон через filterCustomerCandidates — еще одна линия
+        // защиты от мусора (LLM может пропустить «card img», edge-кейсы).
+        out.customers = filterCustomerCandidates(merged).slice(0, 30);
+      }
+    }
   }
   if (extractors.includes('cases_count')) {
     out.cases_count = extractCasesCount(casesHtml ?? '');
@@ -249,9 +360,24 @@ export async function processSignalsForUrl(
   }
   if (extractors.includes('enterprise_logos')) {
     const cust = out.customers ?? extractCustomers(casesHtml ?? '');
-    out.enterprise_logos = detectEnterpriseLogos(cust)
+    const found =
+      detectEnterpriseLogos(cust)
       || detectEnterpriseInHtml(casesHtml ?? '')
       || detectEnterpriseInHtml(main.html);
+    // Tri-state: true → "Да", false → "Нет", undefined → DASH. A confident
+    // "no" requires that we actually had something to check (clients list or
+    // logo images on the page). With nothing to inspect we leave it undefined
+    // so the cell renders as DASH instead of a misleading "Нет".
+    const inspectableCount =
+      cust.length
+      + countImgWithAlt(casesHtml ?? '')
+      + countImgWithAlt(main.html);
+    if (found) {
+      out.enterprise_logos = true;
+    } else if (inspectableCount >= 3) {
+      out.enterprise_logos = false;
+    }
+    // else leave undefined → DASH
   }
 
   // Pricing-related extractors (share /pricing HTML, fallback to main)
@@ -265,42 +391,58 @@ export async function processSignalsForUrl(
   if (extractors.includes('pricing_min') || extractors.includes('free_trial')) {
     const details = extractPricingDetails(pricingHtml ?? '');
     if (extractors.includes('pricing_min')) out.pricing_min = details.pricing_min;
-    if (extractors.includes('free_trial')) out.free_trial = details.free_trial;
-    // Fallback to main page if subpage had nothing
+    // Heuristic only confirms a free trial (true); silence (undefined) means
+    // "we didn't see a trial phrase" — LLM gets to weigh in below. We never
+    // write false from the heuristic side.
+    if (extractors.includes('free_trial') && details.free_trial === true) {
+      out.free_trial = true;
+    }
+    // Fallback to main page if subpage had nothing.
     if (!pricingHtml) {
       const mainDetails = extractPricingDetails(main.html);
       if (extractors.includes('pricing_min') && !out.pricing_min) out.pricing_min = mainDetails.pricing_min;
-      if (extractors.includes('free_trial') && !out.free_trial) out.free_trial = mainDetails.free_trial;
+      if (extractors.includes('free_trial') && out.free_trial !== true && mainDetails.free_trial === true) {
+        out.free_trial = true;
+      }
     }
   }
 
-  // Careers-related extractors (share /careers HTML, fallback to main)
+  // Careers-related extractors (share /careers HTML, fallback to main,
+  // and as a last resort follow an external hh.ru / career.habr link).
   const careersHtml = subpageHtml.careers ?? null;
   if (extractors.includes('vacancies_count') || extractors.includes('hiring_roles')) {
-    const hiring = extractHiring(careersHtml ?? '');
+    let hiring = extractHiring(careersHtml ?? '');
     if (hiring.vacancies_count === 0 && !careersHtml) {
-      const mainHiring = extractHiring(main.html);
-      if (extractors.includes('vacancies_count')) out.vacancies_count = mainHiring.vacancies_count;
-      if (extractors.includes('hiring_roles')) {
-        out.hiring_roles = {
-          marketing: mainHiring.has_marketing,
-          engineering: mainHiring.has_engineering,
-          sales: mainHiring.has_sales,
-          design: mainHiring.has_design,
-          product: mainHiring.has_product,
-        };
+      hiring = extractHiring(main.html);
+    }
+
+    // External aggregator fallback: when neither the /careers subpage nor the
+    // main page yielded vacancies, try the first hh.ru/employer or
+    // career.habr.com/companies link we can find. Many B2B сompanies publish
+    // hiring only via these aggregators rather than maintaining a /careers page.
+    if (hiring.vacancies_count === 0 && !signal?.aborted) {
+      const externalLinks = findExternalCareerLinks(main.html);
+      for (const url of externalLinks) {
+        if (signal?.aborted) break;
+        const html = await fetchSubpageHtml(url, subpageTimeout, signal);
+        if (!html) continue;
+        const externalHiring = extractHiring(html);
+        if (externalHiring.vacancies_count > 0) {
+          hiring = externalHiring;
+          break;
+        }
       }
-    } else {
-      if (extractors.includes('vacancies_count')) out.vacancies_count = hiring.vacancies_count;
-      if (extractors.includes('hiring_roles')) {
-        out.hiring_roles = {
-          marketing: hiring.has_marketing,
-          engineering: hiring.has_engineering,
-          sales: hiring.has_sales,
-          design: hiring.has_design,
-          product: hiring.has_product,
-        };
-      }
+    }
+
+    if (extractors.includes('vacancies_count')) out.vacancies_count = hiring.vacancies_count;
+    if (extractors.includes('hiring_roles')) {
+      out.hiring_roles = {
+        marketing: hiring.has_marketing,
+        engineering: hiring.has_engineering,
+        sales: hiring.has_sales,
+        design: hiring.has_design,
+        product: hiring.has_product,
+      };
     }
   }
 
@@ -337,6 +479,21 @@ export async function processSignalsForUrl(
   if (extractors.includes('team_size')) {
     out.team_size = subpageHtml.about ? extractTeamSize(subpageHtml.about) : 0;
     if (!out.team_size) out.team_size = extractTeamSize(main.html);
+  }
+  if (extractors.includes('social_media')) {
+    // Соцсети ищем сразу на main+about и мерджим — у b2b-сайтов на главной
+    // обычно footer с иконками, на about — текстовые ссылки. Дедуп идёт
+    // внутри extractSocialMedia по нормализованному URL.
+    const mainSocials = extractSocialMedia(main.html);
+    const aboutSocials = subpageHtml.about ? extractSocialMedia(subpageHtml.about) : [];
+    const merged: string[] = [];
+    const seen = new Set<string>();
+    for (const url of [...mainSocials, ...aboutSocials]) {
+      if (seen.has(url)) continue;
+      seen.add(url);
+      merged.push(url);
+    }
+    out.social_media = merged;
   }
   if (extractors.includes('blog_last_post')) {
     // Two-step crawl: from a blog *listing* we locate the latest post link and
@@ -390,10 +547,15 @@ export async function processSignalsForUrl(
   const llmNeeded = new Set<LlmField>();
   if (extractors.includes('pricing_model') && (out.pricing_model === 'unknown' || !out.pricing_model)) llmNeeded.add('pricing_model');
   if (extractors.includes('pricing_min') && !out.pricing_min) llmNeeded.add('pricing_min');
-  if (extractors.includes('customers') && (!out.customers || out.customers.length === 0)) llmNeeded.add('customers');
+  // customers вынесены в специализированный llmExtractCustomers выше —
+  // там structured input и шире окно контекста, общий extractor не догоняет
+  // (см. блок «if (extractors.includes('customers'))»).
   if (extractors.includes('founded_year') && !out.founded_year) llmNeeded.add('founded_year');
   if (extractors.includes('team_size') && !out.team_size) llmNeeded.add('team_size');
-  if (extractors.includes('free_trial') && out.free_trial !== true) llmNeeded.add('free_trial');
+  // free_trial: ask the LLM whenever the heuristic didn't confirm (undefined).
+  // It may return true OR false; we accept both so the user sees "Нет" instead
+  // of the misleading DASH when the LLM is confident there's no trial.
+  if (extractors.includes('free_trial') && out.free_trial === undefined) llmNeeded.add('free_trial');
   if (extractors.includes('case_industries') && (!out.case_industries || out.case_industries.length === 0)) llmNeeded.add('case_industries');
   if (extractors.includes('cases_count') && !out.cases_count) llmNeeded.add('cases_count');
   if (extractors.includes('integrations') && (!out.integrations || out.integrations.length === 0)) llmNeeded.add('integrations');
@@ -407,7 +569,14 @@ export async function processSignalsForUrl(
       if (llmResult.customers && llmResult.customers.length > 0 && llmNeeded.has('customers')) out.customers = llmResult.customers;
       if (llmResult.founded_year && llmNeeded.has('founded_year')) out.founded_year = llmResult.founded_year;
       if (llmResult.team_size && llmNeeded.has('team_size')) out.team_size = llmResult.team_size;
-      if (llmResult.free_trial === true && llmNeeded.has('free_trial')) out.free_trial = true;
+      // Tri-state merge: heuristic only sets true. Now accept either side of
+      // the LLM's verdict so "Нет" (confident no) lands in the cell when the
+      // model spotted a Contact-Sales-only page. Heuristic-true is preserved
+      // (we don't downgrade Да → Нет just because LLM disagrees).
+      if (llmNeeded.has('free_trial') && out.free_trial !== true) {
+        if (llmResult.free_trial === true) out.free_trial = true;
+        else if (llmResult.free_trial === false) out.free_trial = false;
+      }
       if (llmResult.case_industries && llmResult.case_industries.length > 0 && llmNeeded.has('case_industries')) out.case_industries = llmResult.case_industries;
       if (typeof llmResult.cases_count === 'number' && llmResult.cases_count > 0 && llmNeeded.has('cases_count')) out.cases_count = llmResult.cases_count;
       if (llmResult.integrations && llmResult.integrations.length > 0 && llmNeeded.has('integrations')) out.integrations = llmResult.integrations;

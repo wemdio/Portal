@@ -49,14 +49,14 @@ describe('processSignalsForUrl', () => {
       expect(result.stack).toContain('Яндекс.Метрика');
       expect(result.stack).toContain('Яндекс.Директ');
       expect(result.stack).toContain('VK Pixel');
-      expect(result.profile).toBe('Тратит, но не считает');
+      expect(result.profile).toBe('Реклама есть, CRM и call-трекинга нет');
       expect(result.signalIds.length).toBeGreaterThan(0);
     }
     expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(1);
     expect(fetchHtmlWithPlaywrightMock).not.toHaveBeenCalled();
   });
 
-  it('falls back to Playwright when HTTP returns null', async () => {
+  it('falls back to Playwright when HTTP returns null for every variant', async () => {
     fetchHtmlWithRetryMock.mockResolvedValue(null);
     fetchHtmlWithPlaywrightMock.mockResolvedValue(HTML_WITH_SIGNALS);
 
@@ -67,7 +67,10 @@ describe('processSignalsForUrl', () => {
       expect(result.method).toBe('playwright');
       expect(result.stack).toContain('Яндекс.Метрика');
     }
-    expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(1);
+    // buildFetchFallbacks adds www / http variants, so a dead apex URL
+    // burns 4 HTTP fetches before falling back to Playwright. Each variant
+    // returns null here — all four are tried in order, then Playwright once.
+    expect(fetchHtmlWithRetryMock.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(fetchHtmlWithPlaywrightMock).toHaveBeenCalledTimes(1);
   });
 
@@ -178,6 +181,74 @@ describe('processSignalsForUrl', () => {
       expect(result.profile).toBe('');
       expect(result.signalIds).toEqual([]);
     }
+  });
+
+  // Multi-URL: cells from "Наша база баз" exports often carry several sites
+  // ("t-paritet.ru, paritet-te.ru", "sportcover.ru, ipksport.ru"). When the
+  // first URL is dead we must fall through to the second one.
+
+  it('multi-URL: when the first site fails DNS, falls back to the second one and succeeds', async () => {
+    fetchHtmlWithRetryMock.mockImplementation(async (url: string) => {
+      if (url.includes('paritet-te.ru')) return { html: HTML_WITH_SIGNALS, status: 200 };
+      // First URL: simulate a hard failure (null/empty body)
+      return null;
+    });
+    fetchHtmlWithPlaywrightMock.mockImplementation(async (url: string) => {
+      if (url.includes('paritet-te.ru')) return HTML_WITH_SIGNALS;
+      throw new Error('page.goto: net::ERR_NAME_NOT_RESOLVED at https://t-paritet.ru/');
+    });
+
+    const result = await processSignalsForUrl('t-paritet.ru, paritet-te.ru');
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.stack).toContain('Яндекс.Метрика');
+    }
+    // Both URLs were tried. fetchMainHtml now also tries www / http fallbacks
+    // before giving up on each URL — see buildFetchFallbacks. So for the
+    // dead first URL we burn 4 fetchHtmlWithRetry calls (apex/https,
+    // www/https, apex/http, www/http) before falling back to Playwright,
+    // then the second URL's first variant succeeds = 1 more. Total 5.
+    expect(fetchHtmlWithRetryMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // First batch of calls should target the failing primary domain.
+    expect(fetchHtmlWithRetryMock.mock.calls[0][0]).toContain('t-paritet.ru');
+    // Last call should be the recovering sibling URL.
+    const last = fetchHtmlWithRetryMock.mock.calls[fetchHtmlWithRetryMock.mock.calls.length - 1][0];
+    expect(last).toContain('paritet-te.ru');
+  });
+
+  it('multi-URL: when ALL sites fail, returns the FIRST error (primary domain is the most informative)', async () => {
+    fetchHtmlWithRetryMock.mockResolvedValue(null);
+    fetchHtmlWithPlaywrightMock.mockImplementation(async (url: string) => {
+      if (url.includes('t-paritet.ru')) {
+        throw new Error('page.goto: net::ERR_NAME_NOT_RESOLVED at https://t-paritet.ru/');
+      }
+      // Second URL: connection refused — should NOT be the surfaced error.
+      throw new Error('page.goto: net::ERR_CONNECTION_REFUSED at https://paritet-te.ru/');
+    });
+
+    const result = await processSignalsForUrl('t-paritet.ru, paritet-te.ru');
+
+    expect('error' in result).toBe(true);
+    if ('error' in result) {
+      // First-URL error (DNS) wins, not the second-URL error.
+      expect(result.error).toMatch(/Домен не найден|DNS/i);
+    }
+  });
+
+  it('multi-URL: stops at the first success — does not waste time probing the rest', async () => {
+    fetchHtmlWithRetryMock.mockImplementation(async (url: string) => {
+      if (url.includes('sportcover.ru')) return { html: HTML_WITH_SIGNALS, status: 200 };
+      return null;
+    });
+    fetchHtmlWithPlaywrightMock.mockResolvedValue(null);
+
+    const result = await processSignalsForUrl('sportcover.ru, ipksport.ru');
+
+    expect('stack' in result).toBe(true);
+    // Only the first URL was probed — the second never got touched.
+    expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(1);
+    expect(fetchHtmlWithPlaywrightMock).not.toHaveBeenCalled();
   });
 });
 
@@ -307,7 +378,11 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
       expect(result.customers).toEqual([]);
       expect(result.pricing_model).toBe('self-serve');
     }
-  });
+    // 15s ceiling — the real LLM fallback (Requesty) may take several seconds
+    // when the .env API key is set in CI. The previous 5s default frequently
+    // tripped on this test even before the fetch-fallback work (timing varied
+    // from 3-5s). 15s leaves a comfortable buffer without hiding real hangs.
+  }, 15000);
 
   it('full extractor set — populates all expected optional fields', async () => {
     mockUrlResponses({

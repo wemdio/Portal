@@ -103,6 +103,11 @@ New folder/
 *hh_results_*.csv
 *personalization-test-results.csv
 
+# Локальный proxy-монитор — debug-скрипт и его выгрузки результатов,
+# не нужны в общей истории.
+/scripts/proxy_monitor.py
+/proxy_monitor_results/
+
 # Локальные диагностические/debug-скрипты в корне репо (`_check_*`, `_prod_*`,
 # `_extract_*`, `_deploy_*` и т.п.). Это инструменты разработчика для разовых
 # проверок продакшена / отладки, не должны попадать в общую историю.

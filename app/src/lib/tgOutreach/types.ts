@@ -97,6 +97,14 @@ export interface TelegramSettings {
   pre_read_delay_range: [number, number];
   read_reply_delay_range: [number, number];
   account_loop_delay_range: [number, number];
+  /**
+   * Пауза между полными кругами по всем аккаунтам, в секундах. Раньше
+   * cycleDelay был захардкожен в 30с и после ~3 часов прохождения 29 аккаунтов
+   * воркер бежал на новый круг уже через 30с — на «горячих» mobile-pool IP
+   * этого мало, Telegram продолжал отвечать silent throttle. Делаем настройкой
+   * с дефолтом [300, 600] (5-10 минут рандом).
+   */
+  cycle_delay_range: [number, number];
   dialog_wait_window_range: [number, number];
   sleep_periods: string[];
   timezone_offset: number;
@@ -160,6 +168,26 @@ export interface OutreachDialog {
   tg_username: string | null;
   tg_is_bot?: boolean;
   can_send?: boolean;
+  /**
+   * Audit-поля смены can_send. Заполняются и API-эндпоинтом ручного
+   * переключения, и blockedUsers helpers, и воркером (`disableDialogIfUnreachable`).
+   * NULL до первой смены — диалог унаследовал дефолт при создании.
+   */
+  can_send_changed_at?: string | null;
+  /** UUID пользователя портала. NULL = переключил воркер автоматически. */
+  can_send_changed_by?: string | null;
+  /**
+   * Короткий код источника последнего изменения can_send:
+   *   - 'manual'                 — оператор кликнул тумблер в UI;
+   *   - 'blocklist_add'          — добавили в ЧС (addBlockedUser);
+   *   - 'blocklist_remove'       — убрали из ЧС (removeBlockedUser);
+   *   - 'tg_user_deactivated'    — Telegram вернул INPUT_USER_DEACTIVATED;
+   *   - 'tg_peer_invalid'        — PEER_ID_INVALID;
+   *   - 'tg_user_blocked_bot'    — USER_IS_BLOCKED;
+   *   - 'tg_user_banned_in_channel' — USER_BANNED_IN_CHANNEL;
+   *   - 'tg_unreachable'         — fallback для прочих кодов недоступности.
+   */
+  can_send_changed_reason?: string | null;
   messages: DialogMessage[];
   status: DialogStatus;
   last_message_at: string | null;
@@ -231,6 +259,7 @@ export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   pre_read_delay_range: [5, 10],
   read_reply_delay_range: [5, 10],
   account_loop_delay_range: [300, 600],
+  cycle_delay_range: [300, 600],
   dialog_wait_window_range: [40, 60],
   sleep_periods: ['00:00-08:00'],
   timezone_offset: 3,

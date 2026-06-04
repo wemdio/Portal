@@ -19,6 +19,17 @@ import { DEFAULT_FOLLOW_UP } from './types';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
 import { openaiGenerate, detectTrigger } from './openaiChat';
 import { loadBlockedUserIds } from './blockedUsers';
+import {
+  canAutoSwap,
+  findFreeProxy,
+  recordAccountProxyFailure,
+  recordAccountSuccess,
+  recordProxyError,
+  recordProxySuccess,
+  setAccountAfterSwapCooldown,
+  swapAccountProxy,
+  type ProxyErrorReason,
+} from './proxyHealth';
 import { truncateMessage } from '@/lib/logger';
 import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
 
@@ -59,6 +70,122 @@ async function interruptibleSleep(ms: number, shouldStop: () => boolean, chunkMs
 
 function randomRange([min, max]: [number, number]): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+/**
+ * Когда в круге у аккаунта вылетела сетевая ошибка через прокси
+ * (connect_timeout / getDialogs_hung / reconnect_failed):
+ *  1) бьём счётчик на прокси, при достижении порога ставим cooldown
+ *  2) бьём счётчик на аккаунте — если 3 разных прокси подряд провалились,
+ *     помечаем degraded и ставим 24h cooldown
+ *  3) если прокси ушёл в cooldown И аккаунту разрешён автосвап
+ *     (см. canAutoSwap), ищем свободный прокси в той же кампании и
+ *     атомарно свапаем + кладём аккаунт на 30 мин стабилизироваться
+ *
+ * Вынесено в helper, чтобы повторно использовать на всех 3 типах ошибки
+ * (см. campaignLoop.ts ~1411, 1418, 1444 — три места, все симметричные).
+ *
+ * Никогда не throw — вызывающий код продолжает свой error-handling
+ * как раньше (skip account this round, log, etc.). Эта функция — только
+ * запись state и попытка swap, никакой бизнес-логики цикла.
+ */
+async function handleProxyError(args: {
+  db: SupabaseClient;
+  account: OutreachAccount;
+  reason: ProxyErrorReason;
+  log: LogFn;
+}): Promise<void> {
+  const { db, account, reason, log } = args;
+  if (!account.proxy_id) return; // прокси не назначен, нечего обновлять
+
+  // 1) per-proxy
+  let cooldownSet = false;
+  try {
+    const r = await recordProxyError(db, account.proxy_id, reason);
+    cooldownSet = r.cooldownSet;
+    if (cooldownSet) {
+      log(
+        'warning',
+        `Прокси аккаунта ${account.session_name}: ${r.consecutiveErrors} ошибок подряд (${reason}) — ставлю cooldown до ${new Date(r.cooldownUntil ?? '').toLocaleTimeString('ru-RU')}.`,
+      );
+    }
+  } catch (e) {
+    log('warning', `Не смог записать ошибку прокси в БД (${e instanceof Error ? e.message : String(e)}) — продолжаю.`);
+  }
+
+  // 2) per-account «не помог N прокси подряд»
+  let degradedMarked = false;
+  try {
+    const a = await recordAccountProxyFailure(db, account.id);
+    degradedMarked = a.markedDegraded;
+    if (degradedMarked) {
+      log(
+        'error',
+        `Аккаунт ${account.session_name}: ${a.consecutiveProxyFailures} разных прокси подряд не помогли — помечаю degraded, отлёжка 24ч. Похоже на shadow-ban или битую сессию, перевыпустите session_data и снимите degraded в UI.`,
+      );
+    }
+  } catch (e) {
+    log('warning', `Не смог записать degraded-стат аккаунта (${e instanceof Error ? e.message : String(e)}).`);
+  }
+
+  // 3) автосвап имеет смысл только если прокси действительно ушёл в cooldown
+  //    (а не разовый flake) и аккаунт прошёл guard'ы
+  if (!cooldownSet || degradedMarked) return;
+
+  const swapGate = canAutoSwap({
+    created_at: account.created_at,
+    degraded: degradedMarked,
+    last_proxy_swap_at: (account as { last_proxy_swap_at?: string | null }).last_proxy_swap_at ?? null,
+    proxy_swaps_today: (account as { proxy_swaps_today?: number }).proxy_swaps_today ?? 0,
+  });
+  if (!swapGate.ok) {
+    log('info', `Автосвап прокси для аккаунта ${account.session_name} пропущен: ${swapGate.reason}.`);
+    return;
+  }
+
+  let free: { id: string; url: string } | null = null;
+  try {
+    free = await findFreeProxy(db, account.campaign_id, {
+      excludeProxyIds: [account.proxy_id],
+    });
+  } catch (e) {
+    log('warning', `Не смог найти свободный прокси (${e instanceof Error ? e.message : String(e)}).`);
+    return;
+  }
+  if (!free) {
+    log(
+      'warning',
+      `Нет свободного прокси в кампании для свапа у аккаунта ${account.session_name} (все либо в cooldown, либо заняты другими аккаунтами). Аккаунт продолжит на текущем прокси после истечения cooldown.`,
+    );
+    return;
+  }
+
+  try {
+    const res = await swapAccountProxy(db, {
+      accountId: account.id,
+      fromProxyId: account.proxy_id,
+      toProxyId: free.id,
+      reason: `auto:${reason}`,
+    });
+    if (res.swapped) {
+      // даём сессии стабилизироваться на новом IP
+      await setAccountAfterSwapCooldown(db, account.id);
+      log(
+        'warning',
+        `Автосвап прокси: аккаунт ${account.session_name} переведён на ${free.url} (${res.swapsToday}-й свап сегодня). Аккаунт на 30-мин паузе, чтобы Telegram стабилизировался на новом IP.`,
+      );
+      // Обновляем in-memory state, чтобы следующие итерации видели новый proxy_id
+      // и не повторили цикл «свап → ещё ошибка → ещё свап».
+      account.proxy_id = free.id;
+    } else {
+      log(
+        'info',
+        `Автосвап прокси для аккаунта ${account.session_name} не выполнен: ${res.refusalReason ?? 'unknown'}.`,
+      );
+    }
+  } catch (e) {
+    log('warning', `Не смог свапнуть прокси через RPC (${e instanceof Error ? e.message : String(e)}).`);
+  }
 }
 
 /**
@@ -552,9 +679,25 @@ async function disableDialogIfUnreachable(
     return reasonCode;
   }
 
+  // Маппинг Telegram-кода на короткую категорию для audit-поля
+  // can_send_changed_reason. UI решает, как это рендерить (например,
+  // «Telegram: пользователь удалил аккаунт» вместо `tg_user_deactivated`).
+  const audit_reason =
+    reasonCode === 'INPUT_USER_DEACTIVATED' ? 'tg_user_deactivated' :
+    reasonCode === 'PEER_ID_INVALID' ? 'tg_peer_invalid' :
+    reasonCode === 'USER_BANNED_IN_CHANNEL' ? 'tg_user_banned_in_channel' :
+    reasonCode === 'USER_IS_BLOCKED' ? 'tg_user_blocked_bot' :
+    'tg_unreachable';
+
   const { error: csErr } = await ctx.db
     .from('tg_outreach_dialogs')
-    .update({ can_send: false })
+    .update({
+      can_send: false,
+      can_send_changed_at: new Date().toISOString(),
+      // changed_by = NULL: переключение сделал воркер, не человек.
+      can_send_changed_by: null,
+      can_send_changed_reason: audit_reason,
+    })
     .eq('campaign_id', ctx.campaignId)
     .eq('account_id', ctx.accountId)
     .eq('tg_user_id', ctx.tgUserId);
@@ -1393,6 +1536,12 @@ export async function runCampaignLoop(
             const acctRef = `acc_id=${account.id}${account.phone ? ` тел=${account.phone}` : ''}${account.proxy_id ? ` proxy_id=${account.proxy_id}` : ''}`;
             const firstHangSec = ((Date.now() - accountStartMs) / 1000).toFixed(1);
 
+            // Прокси-инцидент №1: getDialogs завис на «мёртвом сокете».
+            // Регистрируем ошибку прокси и при необходимости свапаем — даже
+            // если reconnect ниже потом всё-таки помог. Один и тот же прокси
+            // не должен бесконечно сжигать наш 180с-таймаут на каждом круге.
+            await handleProxyError({ db, account, reason: 'getDialogs_hung', log });
+
             const reconnectStartMs = Date.now();
             try {
               entry.client = await reconnectClient(account, proxy, entry.client, downloadSessionFile);
@@ -1400,6 +1549,8 @@ export async function runCampaignLoop(
             } catch (reErr) {
               const reMsg = reErr instanceof Error ? reErr.message : String(reErr);
               const reSec = ((Date.now() - reconnectStartMs) / 1000).toFixed(1);
+              // Прокси-инцидент №2: reconnect через тот же прокси тоже упал.
+              await handleProxyError({ db, account, reason: 'reconnect_failed', log });
               throw new Error(
                 `${PER_ACCOUNT_RECONNECT_FAILED_MARKER}: загрузка диалогов зависла на первой попытке (${firstHangSec}с, мёртвый сокет), ` +
                   `и переподключение на свежую сессию НЕ удалось за ${reSec}с — ${reMsg}. ${proxyProbeLog}. ${acctRef}`,
@@ -1425,6 +1576,10 @@ export async function runCampaignLoop(
               if (!secMsg.includes(PER_ACCOUNT_TIMEOUT_MARKER)) throw secondErr;
               // Still wedged on a brand-new socket — genuinely abnormal. Loud,
               // fully-attributed error, then skip the account this round.
+              // Прокси-инцидент №3: даже после reconnect зависание — прокси
+              // явно режет MTProto. Свапаем, чтобы следующий круг попробовал
+              // на свежем IP.
+              await handleProxyError({ db, account, reason: 'reconnect_failed', log });
               throw new Error(
                 `${PER_ACCOUNT_RECONNECT_FAILED_MARKER}: загрузка диалогов зависла на первой попытке (${firstHangSec}с), ` +
                   `переподключение прошло за ${reconnectSec}с, но повторная загрузка на свежем сокете ТОЖЕ зависла (${retrySec}с). ` +
@@ -1438,6 +1593,19 @@ export async function runCampaignLoop(
           }
           // Successful fetch — reset the chronic paging failure counter.
           if (pagingFailureCounts.has(account.id)) pagingFailureCounts.delete(account.id);
+          // Также сбрасываем per-proxy и per-account счётчики ошибок:
+          // прокси прошёл круг — значит он жив, аккаунт прошёл круг — значит
+          // сессия валидна. Cooldown не снимаем (если он стоит — значит мы
+          // уже за окном). degraded флаг тоже не снимаем — это всегда ручная
+          // операция оператора (см. proxyHealth.ts).
+          if (account.proxy_id) {
+            void recordProxySuccess(db, account.proxy_id).catch((e) => {
+              log('info', `Не смог записать proxy success в БД: ${e instanceof Error ? e.message : String(e)}`);
+            });
+          }
+          void recordAccountSuccess(db, account.id).catch((e) => {
+            log('info', `Не смог записать account success в БД: ${e instanceof Error ? e.message : String(e)}`);
+          });
           if (usedRawPageFallback) {
             log(
               'warning',
@@ -1680,8 +1848,15 @@ export async function runCampaignLoop(
         await interruptibleSleep(tlBackoff, shouldStop);
       }
 
-      const cycleDelay = 30_000;
-      log('info', `Круг по всем аккаунтам завершён. Пауза ${cycleDelay / 1000} секунд перед следующим кругом.`);
+      // cycle_delay_range появилось в TelegramSettings (миграция
+      // 20260603_0001). Для кампаний, созданных до миграции, поле может
+      // отсутствовать — fallback на 5-10 мин из дефолтов.
+      const cycleDelayRange: [number, number] = Array.isArray(tg.cycle_delay_range)
+        && tg.cycle_delay_range.length === 2
+        ? tg.cycle_delay_range
+        : [300, 600];
+      const cycleDelay = randomRange(cycleDelayRange) * 1000;
+      log('info', `Круг по всем аккаунтам завершён. Пауза ${Math.round(cycleDelay / 1000)} секунд перед следующим кругом (рандом ${cycleDelayRange[0]}-${cycleDelayRange[1]}с).`);
       await interruptibleSleep(cycleDelay, shouldStop);
 
       const { data: fresh, error: freshErr } = await db

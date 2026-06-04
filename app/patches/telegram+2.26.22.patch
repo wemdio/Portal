@@ -104,3 +104,102 @@ index 26a439a..32c6121 100644
          }
          return temp;
      }
+diff --git a/node_modules/telegram/tl/api.js b/node_modules/telegram/tl/api.js
+index c8b6564..0ca1842 100644
+--- a/node_modules/telegram/tl/api.js
++++ b/node_modules/telegram/tl/api.js
+@@ -150,7 +150,22 @@ function getArgFromReader(reader, arg) {
+         const len = reader.readInt();
+         arg.isVector = false;
+         for (let i = 0; i < len; i++) {
+-            temp.push(getArgFromReader(reader, arg));
++            // [gramjs-patch] Telegram периодически добавляет поля в существующие
++            // TL-конструкторы внутри Vector (User, Channel, Message и т.п.).
++            // gramJS 2.26.22 читает их по старой схеме и падает RangeError
++            // "value of 'offset' is out of range" на чтении лишнего int32. При
++            // таком сигнале прерываем Vector — partial-результат лучше, чем
++            // потеря всего GetDialogs ответа. Другие ошибки не маскируем.
++            try {
++                temp.push(getArgFromReader(reader, arg));
++            }
++            catch (e) {
++                // ERR_OUT_OF_RANGE — Buffer.readInt32LE дочитал за конец буфера
++                // (реальный сигнал расхождения TL-схемы у extension-объекта).
++                // 'outside buffer bounds' — внутренний gramJS range-check.
++                if (e && (e.code === 'ERR_OUT_OF_RANGE' || (typeof e.message === 'string' && e.message.includes('outside buffer bounds')))) break;
++                throw e;
++            }
+         }
+         arg.isVector = true;
+         return temp;
+@@ -261,29 +276,58 @@ function createClasses(classesType, params) {
+             init(args) { }
+             static fromReader(reader) {
+                 const args = {};
++                // [gramjs-patch] Когда у Telegram расходится TL-схема известного
++                // конструктора (Telegram добавил поле, gramJS не знает),
++                // getArgFromReader → reader.readInt() падает RangeError. Без
++                // защиты весь GetDialogs-ответ теряется и аккаунт пропускает
++                // круг, а после 5 подряд получает 6h cooldown. Ловим
++                // RangeError и возвращаем partial-объект с null в недочитанных
++                // полях — лучше частичные данные, чем потеря всего ответа.
++                let _bailedOn = null;
+                 for (const argName in argsConfig) {
+                     if (argsConfig.hasOwnProperty(argName)) {
+                         const arg = argsConfig[argName];
+-                        if (arg.isFlag) {
+-                            if (arg.type === "true") {
+-                                args[argName] = Boolean(args[arg.flagName] & (1 << arg.flagIndex));
+-                                continue;
+-                            }
+-                            if (args[arg.flagName] & (1 << arg.flagIndex)) {
+-                                args[argName] = getArgFromReader(reader, arg);
++                        try {
++                            if (arg.isFlag) {
++                                if (arg.type === "true") {
++                                    args[argName] = Boolean(args[arg.flagName] & (1 << arg.flagIndex));
++                                    continue;
++                                }
++                                if (args[arg.flagName] & (1 << arg.flagIndex)) {
++                                    args[argName] = getArgFromReader(reader, arg);
++                                }
++                                else {
++                                    args[argName] = null;
++                                }
+                             }
+                             else {
+-                                args[argName] = null;
++                                if (arg.flagIndicator) {
++                                    arg.name = argName;
++                                }
++                                args[argName] = getArgFromReader(reader, arg);
+                             }
+                         }
+-                        else {
+-                            if (arg.flagIndicator) {
+-                                arg.name = argName;
++                        catch (e) {
++                            // ERR_OUT_OF_RANGE — Buffer.readInt32LE дочитал за
++                            // конец буфера (TL-схема Telegram расширилась).
++                            // 'outside buffer bounds' — внутренний gramJS check.
++                            const oob = e && (e.code === 'ERR_OUT_OF_RANGE' || (typeof e.message === 'string' && e.message.includes('outside buffer bounds')));
++                            if (oob) {
++                                _bailedOn = argName;
++                                args[argName] = null;
++                                break;
+                             }
+-                            args[argName] = getArgFromReader(reader, arg);
++                            throw e;
+                         }
+                     }
+                 }
++                if (_bailedOn) {
++                    if (!createClasses._partialWarnedClasses) createClasses._partialWarnedClasses = new Set();
++                    if (!createClasses._partialWarnedClasses.has(fullName)) {
++                        createClasses._partialWarnedClasses.add(fullName);
++                        console.warn('[gramjs-patch] partial parse for ' + fullName + ' at "' + _bailedOn + '" — Telegram TL schema extended; update telegram pkg when a newer release appears.');
++                    }
++                }
+                 return new this(args);
+             }
+             validate() {

@@ -69,4 +69,45 @@ describe('normalizeProxyUrl', () => {
     expect(normalizeProxyUrl('')).toBe('');
     expect(normalizeProxyUrl('   ')).toBe('');
   });
+
+  // ---- host:port@user:pass (pool.proxy.market и аналоги) ------------------
+  // Провайдер экспортирует строки вида `pool.proxy.market:10989@vvCcRyAQjR:Uifd2wsByc`,
+  // где сначала host:port, потом учётка. Если оставить как
+  // `http://host:port@user:pass`, то new URL() принимает строку, но трактует
+  // host:port как userInfo, а user:pass как hostname:port — реальный коннект
+  // уходит в никуда. Корректная нормализация — переставить стороны:
+  // `http://user:pass@host:port`.
+  describe('host:port@user:pass (reverse order from pool.proxy.market)', () => {
+    it('flips sides into standard userinfo URL', () => {
+      expect(normalizeProxyUrl('pool.proxy.market:10989@vvCcRyAQjR:Uifd2wsByc')).toBe(
+        'http://vvCcRyAQjR:Uifd2wsByc@pool.proxy.market:10989',
+      );
+    });
+
+    it('works with IP host too', () => {
+      expect(normalizeProxyUrl('1.2.3.4:10989@user:pass')).toBe(
+        'http://user:pass@1.2.3.4:10989',
+      );
+    });
+
+    it('URL-encodes user/pass with special chars on flip', () => {
+      expect(normalizeProxyUrl('1.2.3.4:8080@user:p#ss')).toBe(
+        'http://user:p%23ss@1.2.3.4:8080',
+      );
+    });
+
+    it('handles missing pass (only user after @) without throwing data away', () => {
+      expect(normalizeProxyUrl('1.2.3.4:8080@username')).toBe(
+        'http://username@1.2.3.4:8080',
+      );
+    });
+
+    it('keeps standard user:pass@host:port (port on the right) untouched', () => {
+      // Не путаем со старым форматом — там «:<число>» справа, значит userinfo
+      // уже на своём месте и переставлять нельзя.
+      expect(normalizeProxyUrl('user:pass@1.2.3.4:8080')).toBe(
+        'http://user:pass@1.2.3.4:8080',
+      );
+    });
+  });
 });

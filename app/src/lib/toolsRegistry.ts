@@ -358,9 +358,6 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description: 'Подключение Telegram-аккаунтов сейлз-менеджеров и запись всех их диалогов в базу.',
     description_en: 'Connect sales managers’ Telegram accounts and log all their dialogs.',
     href: '/tools/sales-chat-analyzer',
-    badge: 'Новое',
-    badge_en: 'New',
-    badgeVariant: 'emerald',
     accentColor: 'emerald',
   },
 };

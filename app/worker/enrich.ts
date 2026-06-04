@@ -47,8 +47,14 @@ async function startupRecovery(): Promise<void> {
   else if (cryptoJobs?.length) log('info', `Startup recovery: reset ${cryptoJobs.length} crypto_payment_jobs to pending`);
 }
 
+// Track which jobs this replica is already running so we don't re-attach to
+// the same job twice from the same process (would waste a concurrency slot).
+const attachedJobs = new Set<string>();
+
 async function claimEnrichJob(): Promise<string | null> {
   const db = requireSupabaseAdmin(log);
+
+  // Step 1: claim a brand-new pending job (atomic CAS pending→running).
   const { data: pending } = await db
     .from('website_enrichment_jobs')
     .select('id')
@@ -57,17 +63,48 @@ async function claimEnrichJob(): Promise<string | null> {
     .limit(1)
     .maybeSingle();
 
-  if (!pending) return null;
+  if (pending) {
+    const { data: claimed } = await db
+      .from('website_enrichment_jobs')
+      .update({ status: 'running', started_at: new Date().toISOString() })
+      .eq('id', pending.id)
+      .eq('status', 'pending')
+      .select('id')
+      .maybeSingle();
+    if (claimed?.id) {
+      attachedJobs.add(claimed.id);
+      return claimed.id;
+    }
+  }
 
-  const { data: claimed } = await db
+  // Step 2: no pending job to claim — but a job may already be RUNNING with
+  // pending items. Co-attach so this replica processes some of them in
+  // parallel with the original claimer. Pre-fix: only the first replica that
+  // hit the CAS in step 1 ever entered runWebsiteEnrichmentJob, the other
+  // two replicas idled while a single core chewed through 75k items alone.
+  // Items are claimed via `claim_website_enrichment_items` RPC which uses
+  // FOR UPDATE SKIP LOCKED — so concurrent workers naturally split the work.
+  const { data: runningJobs } = await db
     .from('website_enrichment_jobs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
-    .eq('id', pending.id)
-    .eq('status', 'pending')
-    .select('id')
-    .maybeSingle();
+    .select('id, total, processed')
+    .eq('status', 'running')
+    .order('created_at', { ascending: true })
+    .limit(20);
 
-  return claimed?.id ?? null;
+  if (!runningJobs?.length) return null;
+
+  for (const job of runningJobs) {
+    if (attachedJobs.has(job.id)) continue;
+    // Only co-attach when there's actual work left — (total - processed)
+    // is a cheap upper bound on remaining items without a COUNT query.
+    const remaining = (job.total ?? 0) - (job.processed ?? 0);
+    if (remaining <= 0) continue;
+    attachedJobs.add(job.id);
+    log('info', `Co-attaching to running job ${job.id} (${remaining} items remaining)`);
+    return job.id;
+  }
+
+  return null;
 }
 
 async function claimBriefScoringJob(): Promise<string | null> {
@@ -125,7 +162,14 @@ async function pollOnce(): Promise<boolean> {
   if (jobId) {
     const task = (async () => {
       log('info', `Running website enrichment job ${jobId}`);
-      await runWebsiteEnrichmentJob(jobId);
+      try {
+        await runWebsiteEnrichmentJob(jobId);
+      } finally {
+        // Allow this replica to re-attach to the same job later if it
+        // resurfaces (the worker may finish its slice early while other
+        // replicas still have items in flight).
+        attachedJobs.delete(jobId);
+      }
     })();
     running.add(task);
     void task.finally(() => running.delete(task));

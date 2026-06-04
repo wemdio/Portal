@@ -24,12 +24,12 @@ describe('applySignalsToTabData (pure helper)', () => {
       {
         row_index: 1,
         status: 'completed',
-        result_text: JSON.stringify({ stack: 'Яндекс.Метрика, WordPress', profile: 'Базовое онлайн-присутствие' }),
+        result_text: JSON.stringify({ stack: 'Яндекс.Метрика, WordPress', profile: 'Только аналитика, без рекламы/CRM/чата/платежей' }),
       },
       {
         row_index: 2,
         status: 'completed',
-        result_text: JSON.stringify({ stack: 'Calltouch, JivoSite', profile: 'Продаёт через звонки' }),
+        result_text: JSON.stringify({ stack: 'Calltouch, JivoSite', profile: 'Call-трекинг есть, платежей и маркетплейса нет' }),
       },
     ];
 
@@ -44,9 +44,9 @@ describe('applySignalsToTabData (pure helper)', () => {
     expect(tabData[0][STACK_COL]).toBe('Стек');
     expect(tabData[0][PROFILE_COL]).toBe('Профиль');
     expect(tabData[1][STACK_COL]).toBe('Яндекс.Метрика, WordPress');
-    expect(tabData[1][PROFILE_COL]).toBe('Базовое онлайн-присутствие');
+    expect(tabData[1][PROFILE_COL]).toBe('Только аналитика, без рекламы/CRM/чата/платежей');
     expect(tabData[2][STACK_COL]).toBe('Calltouch, JivoSite');
-    expect(tabData[2][PROFILE_COL]).toBe('Продаёт через звонки');
+    expect(tabData[2][PROFILE_COL]).toBe('Call-трекинг есть, платежей и маркетплейса нет');
   });
 
   it('extends rows that are shorter than profile column index', () => {
@@ -55,7 +55,7 @@ describe('applySignalsToTabData (pure helper)', () => {
       {
         row_index: 1,
         status: 'completed',
-        result_text: JSON.stringify({ stack: 'WordPress', profile: 'Офлайн пытается стать онлайн' }),
+        result_text: JSON.stringify({ stack: 'WordPress', profile: 'Сайт-визитка на конструкторе (Tilda/WP/Bitrix), без аналитики' }),
       },
     ];
 
@@ -67,7 +67,7 @@ describe('applySignalsToTabData (pure helper)', () => {
     });
 
     expect(tabData[1][STACK_COL]).toBe('WordPress');
-    expect(tabData[1][PROFILE_COL]).toBe('Офлайн пытается стать онлайн');
+    expect(tabData[1][PROFILE_COL]).toBe('Сайт-визитка на конструкторе (Tilda/WP/Bitrix), без аналитики');
     expect(tabData[1].length).toBeGreaterThanOrEqual(PROFILE_COL + 1);
   });
 
@@ -300,13 +300,16 @@ describe('applySignalsToTabData — extra columns from extractors', () => {
       ],
     });
 
+    // Tri-state booleans (new contract): true → "Да", false → "Нет",
+    // undefined → "–". Row 1: enterprise_logos=true, free_trial=false.
+    // Row 2: enterprise_logos=false, free_trial=true.
     expect(tabData[1][5]).toBe('Да');
-    expect(tabData[1][6]).toBe('');
-    expect(tabData[2][5]).toBe('');
+    expect(tabData[1][6]).toBe('Нет');
+    expect(tabData[2][5]).toBe('Нет');
     expect(tabData[2][6]).toBe('Да');
   });
 
-  it('writes numbers as plain strings, missing fields as empty', () => {
+  it('writes numbers as plain strings, missing fields as dash', () => {
     const tabData = [
       ['Сайт', '', '', 'Стек', 'Профиль', ''],
       ['a.com', '', '', '', '', ''],
@@ -331,8 +334,10 @@ describe('applySignalsToTabData — extra columns from extractors', () => {
       extraCols: [{ key: 'vacancies_count', colIndex: 5, header: 'Вакансий' }],
     });
 
+    // Missing fields (vacancies_count not present in row 2's result_text) →
+    // DASH per the "no cell is ever empty" contract.
     expect(tabData[1][5]).toBe('12');
-    expect(tabData[2][5]).toBe('');
+    expect(tabData[2][5]).toBe('–');
   });
 
   it('writes pricing_min as "<value> <currency>" and pricing_model as plain string', () => {
@@ -392,7 +397,7 @@ describe('applySignalsToTabData — extra columns from extractors', () => {
     expect(tabData[1][5]).toBe('инженеры, маркетинг');
   });
 
-  it('writes empty extra cells for failed rows but still marks ⚠ in stack/profile', () => {
+  it('writes DASH (not empty) extra cells for failed rows; still marks ⚠ in stack/profile', () => {
     const tabData = [
       ['Сайт', '', '', 'Стек', 'Профиль', ''],
       ['a.com', '', '', '', '', ''],
@@ -413,7 +418,9 @@ describe('applySignalsToTabData — extra columns from extractors', () => {
     });
 
     expect(tabData[1][3]).toBe('⚠');
-    expect(tabData[1][5]).toBe('');
+    // DASH instead of '' — failed rows still get a visible "nothing here"
+    // marker so the cell isn't blank and the column stays aligned visually.
+    expect(tabData[1][5]).toBe('–');
   });
 
   it('respects applyOnlyEmpty for extra columns too — does not overwrite filled cells', () => {

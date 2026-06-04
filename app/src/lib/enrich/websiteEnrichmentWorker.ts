@@ -10,6 +10,7 @@ import { applySignalJobResults, type ExtraColumnSpec } from '@/lib/spreadsheet/a
 import type { ExtractorKey } from '@/lib/enrich/extractors/types';
 import { startTrace } from '@/lib/tracer';
 import type { Span } from '@/lib/tracer';
+import { writeEnrichResult, type EnrichBufferStatus } from '@/lib/enrich/enrichBuffer';
 
 type QueueItem = {
   id: string;
@@ -65,8 +66,15 @@ function parseExtractors(value: unknown): ExtractorKey[] | undefined {
 
 type FetchResult = { text?: string; error?: string };
 
-const WORKER_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_CONCURRENCY ?? '10');
-const WORKER_BATCH_SIZE = Number(process.env.WEBSITE_ENRICHMENT_BATCH_SIZE ?? '60');
+const WORKER_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_CONCURRENCY ?? '25');
+// Сколько items одна реплика клеймит за один claim_website_enrichment_items.
+// Раньше было 60 — но при per-domain throttle=1 и CSV где URL грузятся
+// блоками одного домена, реплика «застревает» на 30+ sequentialы из одного
+// сайта, остальные 9 реплик ждут (виден long tail в конце job'а, прогресс
+// 390/406 ползёт 5 минут). С 15 хвост короче в 4 раза, плюс claim'ы стали
+// чаще → миграция 20260605_0001 берёт diverse domains внутри одного batch'а,
+// тоже снижает latency хвоста.
+const WORKER_BATCH_SIZE = 15;
 const CACHE_SUCCESS_DAYS = Number(process.env.WEBSITE_ENRICHMENT_CACHE_DAYS ?? '7');
 const CACHE_ERROR_HOURS = Number(process.env.WEBSITE_ENRICHMENT_ERROR_TTL_HOURS ?? '6');
 const DOMAIN_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_DOMAIN_CONCURRENCY ?? '1');
@@ -210,35 +218,18 @@ async function getCache(urlNormalized: string) {
   }
 }
 
-async function setCache(urlNormalized: string, payload: { text?: string; error?: string; sourceUrl?: string }) {
-  if (!supabaseAdmin) return;
-  const now = new Date();
-  const expiresAt =
-    payload.text && payload.text.length > 0
-      ? new Date(now.getTime() + cacheSuccessTtlMs)
-      : new Date(now.getTime() + cacheErrorTtlMs);
-
-  try {
-    await withSupabaseTimeout(
-      supabaseAdmin
-        .from('website_enrichment_cache')
-        .upsert(
-          {
-            url_normalized: urlNormalized,
-            text: payload.text ?? null,
-            last_error: payload.error ?? null,
-            fetched_at: now.toISOString(),
-            expires_at: expiresAt.toISOString(),
-            source_url: payload.sourceUrl ?? null,
-          },
-          { onConflict: 'url_normalized' },
-        ),
-      'Таймаут записи кэша сайта',
-    );
-  } catch {
-    // Cache write should not break item processing.
-  }
+/**
+ * No-op заглушка: cache-upsert делает enrich-coordinator в составе batch'а
+ * вместе с UPDATE queue.status (см. lib/enrich/enrichBuffer.ts → planFlush).
+ * Scraper кладёт cache-payload в одну строку buffer'а через writeEnrichResult
+ * в updateQueueItem ниже. Функция оставлена сигнатурно совместимой потому что
+ * вызывается из fetchWithCache как side-effect — пропуск записи безвреден:
+ * cache HIT обновится при следующем успешном обходе через coordinator.
+ */
+async function setCache(_urlNormalized: string, _payload: { text?: string; error?: string; sourceUrl?: string }): Promise<void> {
+  return;
 }
+void cacheSuccessTtlMs; void cacheErrorTtlMs; // больше не используются здесь, оставлены для legacy-кеш-helper'ов ниже
 
 // ── Email scraper cache (separate table) ──────────────────────
 
@@ -524,17 +515,58 @@ async function updateQueueItem(
   status: 'pending' | 'completed' | 'failed' | 'skipped',
 ): Promise<boolean> {
   if (!supabaseAdmin) return false;
+
+  // Coordinator pattern: terminal-статусы (completed/failed/skipped) идут
+  // в `website_enrichment_results_buffer` одной строкой; coordinator batch'ит
+  // их и flush'ит в queue/cache/jobs (см. enrichBuffer.ts).
+  //
+  // Status='pending' (retry) — единственный путь, который остаётся direct
+  // UPDATE'ом: scraper должен сразу вернуть item обратно в очередь, иначе
+  // claim_website_enrichment_items не подхватит его снова в этом же цикле.
+  // Retry — мгновенный UPDATE по PK, нагрузку он не создаёт (≤MAX_ATTEMPTS=3
+  // раз на item за весь job).
+  if (status !== 'pending') {
+    const bufStatus: EnrichBufferStatus = status;
+    const r = await writeEnrichResult(supabaseAdmin, {
+      queue_id: item.id,
+      job_id: item.job_id,
+      status: bufStatus,
+      result_text: status === 'completed' ? result.text ?? null : null,
+      last_error: status === 'completed' ? null : result.error ?? null,
+      // Cache-payload летит coordinator'у в составе этой же buffer-строки —
+      // он сделает UPSERT в website_enrichment_cache одним batch-запросом
+      // вместо отдельной записи на каждый URL.
+      cache_url_normalized: item.url_normalized || null,
+      cache_source_url: item.url_raw || null,
+      attempt_count: item.attempt_count,
+    });
+    if (!r.ok) {
+      await logError(
+        'website.enrichment.worker.buffer_write_failed',
+        new Error(r.error),
+        { jobId: item.job_id, itemId: item.id, status },
+      );
+      return false;
+    }
+    return true;
+  }
+
+  // Сюда попадает только status='pending' (retry-путь): scraper возвращает
+  // item в очередь, чтобы его подобрала следующая claim-итерация. Поля
+  // result_text/completed_at нулим напрямую, без ветвлений по status — это
+  // тот же UPDATE что был в legacy-ветке для pending, но без мёртвых
+  // тернарных проверок (TS их теперь видит как unreachable).
   const now = new Date().toISOString();
   try {
     const { error } = await withSupabaseTimeout(
       supabaseAdmin
         .from('website_enrichment_queue')
         .update({
-          status,
-          result_text: status === 'completed' ? result.text ?? null : null,
-          last_error: status === 'completed' ? null : result.error ?? null,
+          status: 'pending',
+          result_text: null,
+          last_error: result.error ?? null,
           updated_at: now,
-          completed_at: status === 'pending' ? null : now,
+          completed_at: null,
         })
         .eq('id', item.id),
       `Таймаут обновления queue item (${item.id})`,
@@ -699,67 +731,24 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
     let consecutiveDbErrors = 0;
     const MAX_CONSECUTIVE_DB_ERRORS = 20;
 
-    // ─── Progress flush (debounced) ─────────────────────────────────
+    // ─── Progress flush — owned by enrich-coordinator now ──────────────
     //
-    // До этого фикса: `processed` обновлялся в БД ОДИН раз — после полного
-    // batch'а (60 items). При темпе ~30 items/мин batch занимает 2 минуты,
-    // и первые 2 минуты после старта frontend читает processed=0. Юзер
-    // видит «0% — Стоп», паникует, нажимает Стоп, перезапускает, опять
-    // первые 2 минуты 0%, опять Стоп → итеративный фрустрационный цикл
-    // (жалоба специалиста Ольги: 3 cancelled job'а подряд в БД).
+    // Раньше тут был debounced absolute COUNT-writer, который каждые 2.5с
+    // делал SELECT count(*) FROM queue WHERE status IN (…) и SET'ил
+    // jobs.processed/success_count/error_count напрямую. Это race'ило с
+    // coordinator'ом, который делал относительные +N инкременты — UI
+    // показывал прыжки прогресса 45 → 350 → 271 → 361 (инцидент 04.06).
     //
-    // Watchdog в `enrich.ts` тоже завязан на `job.processed`: если оно
-    // не изменилось за 10 мин — сбрасывает job в pending. Для batch'а
-    // длиннее 10 мин (например при DOMAIN_CONCURRENCY=1 + много items
-    // одного домена) watchdog убивал живые job'ы.
+    // Теперь jobs counters обновляет ТОЛЬКО enrich-coordinator через RPC
+    // increment_website_enrichment_job_counters(+N) после каждого batch
+    // flush'а. scraper-worker'у counter'ы знать незачем — он только
+    // забирает items и пишет результат в buffer (см. updateQueueItem →
+    // writeEnrichResult выше). Это убирает дублирование writer'ов и
+    // делает progress-bar монотонным.
     //
-    // Фикс: дебаунс-флэш processed каждые ~2.5 секунды. Это даёт юзеру
-    // непрерывный прогресс с первых секунд + успокаивает watchdog.
-    // БД нагружается умеренно: 1 UPDATE на job каждые 2.5s = 0.4 RPS
-    // даже при 8 параллельных job'ах = 3.2 RPS, мизер для PostgREST.
-    const PROGRESS_FLUSH_INTERVAL_MS = 2500;
-    let lastProgressFlushAt = 0;
-    let pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
-    let flushInFlight = false;
-
-    const doFlush = async () => {
-      if (flushInFlight) return; // защита от наложений
-      flushInFlight = true;
-      lastProgressFlushAt = Date.now();
-      try {
-        await withSupabaseTimeout(
-          supabaseAdmin!
-            .from('website_enrichment_jobs')
-            .update({ processed, success_count: success, error_count: errors })
-            .eq('id', jobId),
-          'Таймаут флэша прогресса',
-        );
-      } catch {
-        // Игнорируем — следующий тик сделает свежий снимок.
-      } finally {
-        flushInFlight = false;
-      }
-    };
-
-    const flushProgress = (force = false) => {
-      const now = Date.now();
-      const elapsed = now - lastProgressFlushAt;
-      if (force || elapsed >= PROGRESS_FLUSH_INTERVAL_MS) {
-        if (pendingFlushTimer) {
-          clearTimeout(pendingFlushTimer);
-          pendingFlushTimer = null;
-        }
-        void doFlush();
-        return;
-      }
-      // Debounce: запланировать flush через (interval - elapsed) если ещё не запланировано.
-      if (!pendingFlushTimer) {
-        pendingFlushTimer = setTimeout(() => {
-          pendingFlushTimer = null;
-          void doFlush();
-        }, PROGRESS_FLUSH_INTERVAL_MS - elapsed);
-      }
-    };
+    // Watchdog в worker/enrich.ts всё ещё смотрит на jobs.processed —
+    // coordinator его обновляет с лагом ≤1с (poll interval), что в 10
+    // раз меньше watchdog'овского STALE_JOB_MINUTES=10, безопасно.
 
     // ─── Periodic apply to spreadsheet (email-only) ─────────────────────
     //
@@ -1010,39 +999,27 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
             });
           } finally {
             if (finalized) {
+              // Локальный счётчик per-replica (использует только этот worker
+              // для своих логов «обработал N»). В БД его не пишем — это
+              // делает coordinator после flush'а buffer'а. Многорепличная
+              // безопасность тоже теперь у coordinator'а (он один writer).
               processed += 1;
-              // Дёргаем debounced флэш — фактический UPDATE уйдёт не чаще
-              // раза в 2.5s (или сразу если прошло >2.5s с предыдущего).
-              flushProgress();
             }
             release();
           }
         },
       );
 
-      // По окончании batch'а форсим финальный flush — гарантируем что
-      // последний UPDATE с финальными значениями этого batch'а ушёл.
-      flushProgress(true);
-      // Дебаунс-apply spreadsheet (no-op если не email или нет tab_id;
-      // CAS внутри защитит от race с frontend save'ом).
+      // Spreadsheet apply (email-jobs) делается тут же — это side-effect для
+      // client-таблиц и к jobs.processed отношения не имеет.
       maybeApplyToSpreadsheet();
     }
 
-    // Выходим из batch loop → чистим pending flush + apply таймеры и форсим
-    // последний апдейт. Без cleanup setTimeout мог бы «выстрелить» после того
-    // как Node уже думает что работа закончена.
-    if (pendingFlushTimer) {
-      clearTimeout(pendingFlushTimer);
-      pendingFlushTimer = null;
-    }
+    // Cleanup apply-таймера; jobs counters owned by coordinator.
     if (pendingApplyTimer) {
       clearTimeout(pendingApplyTimer);
       pendingApplyTimer = null;
     }
-    // Финальный force-flush ниже идёт через тот же UPDATE что и завершение
-    // (строка `.update({ status, processed: processedTotal, ... })`), так что
-    // дополнительный flushProgress(true) здесь не нужен — он бы делал лишний
-    // UPDATE дублирующий финальный.
 
     if (cancelled) {
       const now = new Date().toISOString();

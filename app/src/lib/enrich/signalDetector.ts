@@ -190,7 +190,7 @@ function buildProfileContext(signals: DetectedSignal[]): ProfileContext {
 
 const PROFILE_RULES: ProfileRule[] = [
   {
-    name: 'Маркетплейс-зависимый',
+    name: 'Продают через маркетплейсы, без своих платежей',
     priority: 30,
     match: (ctx) => {
       const hasMarketplace = ctx.hasCategory('marketplace');
@@ -198,8 +198,12 @@ const PROFILE_RULES: ProfileRule[] = [
       return hasMarketplace && noPayments;
     },
   },
+  // Подписи профилей — это то, что попадает в колонку «Профиль» в таблице
+  // оператора. Должны читаться без расшифровки: «открыл CSV → понял что это
+  // за компания», без лазания в документацию. Формат: 5-9 слов, описывает
+  // КОНКРЕТНЫЕ артефакты на сайте, а не маркетинговый образ компании.
   {
-    name: 'Вырос из инструментов',
+    name: '3+ бюджетных инструмента (Tilda, AmoCRM, JivoSite и т.п.)',
     priority: 25,
     match: (ctx) => {
       const budgetTools = ['jivosite', 'amocrm', 'unisender', 'sendpulse', 'tilda', 'bitrix24', 'bitrix_cms'];
@@ -208,7 +212,7 @@ const PROFILE_RULES: ProfileRule[] = [
     },
   },
   {
-    name: 'Технически зрелый, но без маркетинга',
+    name: 'Next.js/React стек, без рекламы и email',
     priority: 22,
     match: (ctx) => {
       const hasTech = ctx.hasAny('nextjs', 'react');
@@ -219,7 +223,7 @@ const PROFILE_RULES: ProfileRule[] = [
     },
   },
   {
-    name: 'Тратит, но не считает',
+    name: 'Реклама есть, CRM и call-трекинга нет',
     priority: 20,
     match: (ctx) => {
       const adCount = ctx.countCategory('ad_pixel');
@@ -229,7 +233,7 @@ const PROFILE_RULES: ProfileRule[] = [
     },
   },
   {
-    name: 'Зрелый цифровой бизнес',
+    name: 'Полный стек: реклама + CRM + чат/звонки',
     priority: 18,
     match: (ctx) => {
       const hasAds = ctx.hasCategory('ad_pixel');
@@ -239,7 +243,7 @@ const PROFILE_RULES: ProfileRule[] = [
     },
   },
   {
-    name: 'Битрикс-экосистема',
+    name: 'Битрикс CMS + Битрикс24 / 1С',
     priority: 17,
     match: (ctx) => {
       const bitrixSignals = ['bitrix_cms', 'bitrix24', '1c_erp'];
@@ -248,7 +252,7 @@ const PROFILE_RULES: ProfileRule[] = [
     },
   },
   {
-    name: 'Продаёт через звонки',
+    name: 'Call-трекинг есть, платежей и маркетплейса нет',
     priority: 16,
     match: (ctx) => {
       const hasCallTracking = ctx.hasCategory('call_tracking');
@@ -258,7 +262,7 @@ const PROFILE_RULES: ProfileRule[] = [
     },
   },
   {
-    name: 'Зависимость от одного канала',
+    name: 'Один рекламный канал, без CRM/email/звонков',
     priority: 15,
     match: (ctx) => {
       const adCount = ctx.countCategory('ad_pixel');
@@ -269,7 +273,7 @@ const PROFILE_RULES: ProfileRule[] = [
     },
   },
   {
-    name: 'WhatsApp-first бизнес',
+    name: 'Только WhatsApp-виджет, без рекламы/CRM/платежей',
     priority: 13,
     match: (ctx) => {
       const hasWhatsapp = ctx.ids.has('whatsapp_widget');
@@ -281,7 +285,7 @@ const PROFILE_RULES: ProfileRule[] = [
     },
   },
   {
-    name: 'E-commerce без маркетинга',
+    name: 'Магазин с платежами, без рекламы и email',
     priority: 10,
     match: (ctx) => {
       const hasPayments = ctx.hasCategory('payment');
@@ -291,7 +295,7 @@ const PROFILE_RULES: ProfileRule[] = [
     },
   },
   {
-    name: 'Базовое онлайн-присутствие',
+    name: 'Только аналитика, без рекламы/CRM/чата/платежей',
     priority: 5,
     match: (ctx) => {
       const hasOnlyAnalytics = ctx.hasCategory('analytics') &&
@@ -304,7 +308,7 @@ const PROFILE_RULES: ProfileRule[] = [
     },
   },
   {
-    name: 'Офлайн пытается стать онлайн',
+    name: 'Сайт-визитка на конструкторе (Tilda/WP/Bitrix), без аналитики',
     priority: 3,
     match: (ctx) => {
       const hasSimpleCms = ctx.hasAny('tilda', 'wordpress', 'bitrix_cms');

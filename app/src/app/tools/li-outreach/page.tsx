@@ -45,8 +45,8 @@ function formatCooldownRemaining(until: string): string {
   const mins = minutes % 60;
   return mins > 0 ? `${hours}ч ${mins}м` : `${hours}ч`;
 }
-type LiLeadList = { id: string; name: string; description: string | null; created_at: string; leads_count?: number };
-type LiLead = { id: string; name: string; first_name: string | null; last_name: string | null; position: string | null; company: string | null; profile_url: string | null; status: string; lead_list_id: string | null; created_at: string };
+type LiLeadList = { id: string; name: string; description: string | null; created_at: string; has_custom_invites?: boolean; leads_count?: number };
+type LiLead = { id: string; name: string; first_name: string | null; last_name: string | null; position: string | null; company: string | null; profile_url: string | null; status: string; lead_list_id: string | null; invite_text: string | null; created_at: string };
 
 type DashboardCompanyRow = { company: string; total: number; new: number; invited: number; connected: number; messaged: number; replied: number; completed: number; error: number };
 type DashboardCampaignStat = {
@@ -83,6 +83,7 @@ type LiCampaign = {
   message_existing_connections: boolean;
   use_ai_welcome: boolean;
   use_ai_followup: boolean;
+  use_custom_invites: boolean;
   welcome_message: string | null;
   created_at: string;
   updated_at: string;
@@ -119,6 +120,10 @@ const DEFAULT_CAMPAIGN_FORM = {
   use_ai_welcome: false,
   use_ai_followup: true,
   ai_model: 'openai/gpt-4o-mini',
+  // Использовать персонализированный текст инвайта из колонки li_leads.invite_text
+  // (импорт через «CSV с инвайтами»). Тумблер появляется в редакторе кампании
+  // только если выбранный список имеет has_custom_invites=true.
+  use_custom_invites: false,
 };
 
 // ---- Helpers ----------------------------------------------------------------
@@ -200,6 +205,14 @@ export default function LiOutreachPage() {
   const [creatingList, setCreatingList] = useState(false);
   const [newListName, setNewListName] = useState('');
   const [newListDescription, setNewListDescription] = useState('');
+
+  // CSV import с персонализированными инвайтами. Отдельный поток от обычного:
+  // 1) загружаем CSV с двумя колонками («LinkedIn ID», «Invite»), 2) бэкенд
+  // создаёт новый список лидов с флагом has_custom_invites=true и заполняет
+  // колонку invite_text. UI редактора кампании увидит флаг и покажет тумблер
+  // «Использовать персонализированный инвайт» только для таких списков.
+  const [showImportInvitesModal, setShowImportInvitesModal] = useState(false);
+  const [importInvitesListName, setImportInvitesListName] = useState('');
 
   // ---- Data fetching --------------------------------------------------------
 
@@ -395,6 +408,7 @@ export default function LiOutreachPage() {
           use_ai_welcome: cf.use_ai_welcome,
           use_ai_followup: cf.use_ai_followup,
           ai_model: cf.ai_model || null,
+          use_custom_invites: cf.use_custom_invites,
         },
       });
       setShowCreate(false);
@@ -458,6 +472,7 @@ export default function LiOutreachPage() {
       use_ai_welcome: Boolean(campaign.use_ai_welcome),
       use_ai_followup: campaign.use_ai_followup !== false,
       ai_model: typeof (campaign as Record<string, unknown>).ai_model === 'string' ? String((campaign as Record<string, unknown>).ai_model) : DEFAULT_CAMPAIGN_FORM.ai_model,
+      use_custom_invites: Boolean(campaign.use_custom_invites),
     });
     setEditingCampaignId(campaign.id);
     setShowCreate(true);
@@ -531,6 +546,46 @@ export default function LiOutreachPage() {
       setShowImportModal(false);
       await loadLeads(leadListFilterId);
       await loadLeadLists();
+    } catch (e) {
+      alert('Ошибка импорта: ' + (e instanceof Error ? e.message : e));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const importLeadsWithInvitesCsv = async (file: File) => {
+    setImporting(true);
+    try {
+      const token = await getAccessToken();
+      if (!token) throw new Error('Not authenticated');
+      const fd = new FormData();
+      fd.append('file', file);
+      // Имя списка опционально: если пусто — бэкенд возьмёт имя файла.
+      if (importInvitesListName.trim()) fd.append('list_name', importInvitesListName.trim());
+      const res = await fetch('/api/tools/li-outreach/leads/import-with-invites', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      const data = await res.json() as {
+        imported?: number;
+        skipped?: number;
+        total_rows?: number;
+        lead_list?: { id: string; name: string } | null;
+        error?: string;
+      };
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      const parts = [`Импортировано лидов: ${data.imported ?? 0}`];
+      if (data.lead_list?.name) parts.push(`Создан список: «${data.lead_list.name}»`);
+      if ((data.skipped ?? 0) > 0) parts.push(`Пропущено (нет имени/инвайта): ${data.skipped}`);
+      alert(parts.join('\n'));
+      setShowImportInvitesModal(false);
+      setImportInvitesListName('');
+      await loadLeadLists();
+      // Сразу переключаем фильтр на новый список, чтобы пользователь видел
+      // результат импорта без лишних кликов.
+      if (data.lead_list?.id) setLeadListFilterId(data.lead_list.id);
+      await loadLeads(data.lead_list?.id ?? leadListFilterId);
     } catch (e) {
       alert('Ошибка импорта: ' + (e instanceof Error ? e.message : e));
     } finally {
@@ -963,16 +1018,65 @@ export default function LiOutreachPage() {
                   <label className="text-xs text-gray-600 block mb-1">Список лидов</label>
                   <select value={cf.lead_list_id} onChange={(e) => setCf({ ...cf, lead_list_id: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm">
                     <option value="">Без списка</option>
-                    {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                    {leadLists.map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.name}{l.has_custom_invites ? ' ✎ (с инвайтами)' : ''}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>
 
               {/* Step 1: Invite */}
-              <div className="rounded-lg border-l-4 border-blue-400 bg-white p-3 space-y-2">
-                <div className="text-xs font-semibold text-blue-700">Шаг 1 — Инвайт</div>
-                <textarea rows={2} value={cf.invite_message} onChange={(e) => setCf({ ...cf, invite_message: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-              </div>
+              {(() => {
+                // Тумблер «Использовать персонализированный инвайт» имеет смысл
+                // только если выбранный список лидов был импортирован через
+                // «CSV с инвайтами» — иначе у лидов просто нет колонки
+                // invite_text, и тумблер ничего не сделает. Поэтому отрисовываем
+                // его условно: либо привязан подходящий список, либо тумблер
+                // уже был включён ранее на этой кампании (чтобы при смене
+                // списка пользователь увидел текущее состояние и мог его
+                // выключить).
+                const selectedList = leadLists.find((l) => l.id === cf.lead_list_id);
+                const canUseCustomInvites = Boolean(selectedList?.has_custom_invites);
+                const showCustomInvitesToggle = canUseCustomInvites || cf.use_custom_invites;
+                return (
+                  <div className="rounded-lg border-l-4 border-blue-400 bg-white p-3 space-y-2">
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <div className="text-xs font-semibold text-blue-700">Шаг 1 — Инвайт</div>
+                      {showCustomInvitesToggle && (
+                        <label
+                          className={`flex items-center gap-1.5 text-xs cursor-pointer ${canUseCustomInvites ? 'text-emerald-700' : 'text-amber-700'}`}
+                          title={
+                            canUseCustomInvites
+                              ? 'Брать персональный текст инвайта из CSV (вместо шаблона ниже). AI-персонализация пропускается — инвайт уже персонализирован.'
+                              : 'Текущий список не содержит персонализированных инвайтов — тумблер ничего не изменит, пока не выберете подходящий список.'
+                          }
+                        >
+                          <input
+                            type="checkbox"
+                            checked={cf.use_custom_invites}
+                            onChange={(e) => setCf({ ...cf, use_custom_invites: e.target.checked })}
+                            className="rounded"
+                          />
+                          Использовать персонализированный инвайт из CSV
+                        </label>
+                      )}
+                    </div>
+                    <textarea
+                      rows={2}
+                      value={cf.invite_message}
+                      onChange={(e) => setCf({ ...cf, invite_message: e.target.value })}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                    />
+                    {cf.use_custom_invites && (
+                      <p className="text-[11px] text-emerald-700">
+                        Включён персонализированный инвайт: у каждого лида берётся свой текст из CSV. Если у лида текста нет — fallback на шаблон выше.
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Step 2: Welcome */}
               <div className="rounded-lg border-l-4 border-teal-400 bg-white p-3 space-y-2">
@@ -1140,6 +1244,14 @@ export default function LiOutreachPage() {
                     </div>
                   )}
                   <div className="text-xs text-gray-500 mt-1">{(c.steps ?? []).length} шагов • AI: {c.use_ai ? 'вкл' : 'выкл'} • лимит: {c.daily_invite_limit}/день</div>
+                  {c.use_custom_invites && (
+                    <div
+                      className="mt-1 inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 border border-emerald-200"
+                      title="На шаге 1 берётся персональный текст инвайта каждого лида из CSV. AI-персонализация для инвайта пропускается."
+                    >
+                      ✎ персональные инвайты
+                    </div>
+                  )}
                   {isOwn ? (
                     <div className="flex gap-2 mt-2">
                       <button onClick={(e) => { e.stopPropagation(); openEditCampaignForm(c); }} className="text-xs text-blue-700 hover:underline">Редактировать</button>
@@ -1205,7 +1317,26 @@ export default function LiOutreachPage() {
       {tab === 'leads' && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-900">Лиды ({leadsTotal})</h2>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-sm font-semibold text-gray-900">Лиды ({leadsTotal})</h2>
+              {(() => {
+                // Бейдж «персональные инвайты» рядом с заголовком —
+                // показываем, когда выбран список с has_custom_invites=true.
+                // Это даёт пользователю понять, что у лидов в текущей выборке
+                // есть колонка invite_text, и тумблер в редакторе кампании
+                // действительно сработает.
+                const list = leadLists.find((l) => l.id === leadListFilterId);
+                if (!list?.has_custom_invites) return null;
+                return (
+                  <span
+                    className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 border border-emerald-200"
+                    title="Список импортирован через «Импорт CSV с инвайтами». У лидов есть свой персональный текст, кампания может использовать его через тумблер на шаге 1."
+                  >
+                    ✎ персональные инвайты
+                  </span>
+                );
+              })()}
+            </div>
             <div className="flex gap-2">
               <button onClick={() => setShowCreateListModal(true)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
                 Управление листами
@@ -1218,6 +1349,16 @@ export default function LiOutreachPage() {
                 className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
               >
                 Импорт CSV
+              </button>
+              <button
+                onClick={() => {
+                  setImportInvitesListName('');
+                  setShowImportInvitesModal(true);
+                }}
+                className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100"
+                title="Импорт CSV формата «LinkedIn ID, Invite» — у каждого лида свой персонализированный текст инвайта"
+              >
+                Импорт CSV с инвайтами
               </button>
               <button onClick={() => void exportLeadsCsv()} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
                 Экспорт CSV
@@ -1244,9 +1385,13 @@ export default function LiOutreachPage() {
                 <button
                   key={list.id}
                   onClick={() => setLeadListFilterId(list.id)}
-                  className={`rounded-md px-2 py-1 text-xs ${leadListFilterId === list.id ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                  className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs ${leadListFilterId === list.id ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                  title={list.has_custom_invites ? 'Список с персонализированными инвайтами' : undefined}
                 >
                   {list.name}
+                  {list.has_custom_invites && (
+                    <span className="text-emerald-600" aria-label="Список с персонализированными инвайтами">✎</span>
+                  )}
                 </button>
               ))}
             </div>
@@ -1302,6 +1447,49 @@ export default function LiOutreachPage() {
                     ))}
                   </div>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Import CSV with personalized invites */}
+          {showImportInvitesModal && (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-900">Импорт CSV с персонализированными инвайтами</h3>
+                <button onClick={() => setShowImportInvitesModal(false)} className="text-xs text-gray-500 hover:text-gray-700">Закрыть</button>
+              </div>
+              <p className="text-xs text-gray-600">
+                Формат CSV: <code className="bg-gray-100 px-1 rounded">LinkedIn ID, Invite</code>
+                {' '}— первая колонка имя/идентификатор лида, вторая — готовый текст инвайта для него.
+                <br />
+                На каждый импорт создаётся <b>новый список лидов</b> с пометкой «персонализированные инвайты».
+                В редакторе кампании для такого списка появится тумблер «Использовать персонализированный инвайт» на шаге&nbsp;1.
+              </p>
+              <div className="flex gap-3 items-end flex-wrap">
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Название списка</label>
+                  <input
+                    type="text"
+                    value={importInvitesListName}
+                    onChange={(e) => setImportInvitesListName(e.target.value)}
+                    placeholder="Пусто = имя файла"
+                    className="rounded-lg border border-gray-200 px-3 py-2 text-sm w-56"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Файл CSV</label>
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    disabled={importing}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void importLeadsWithInvitesCsv(f);
+                    }}
+                    className="text-sm file:mr-2 file:rounded-lg file:border-0 file:bg-emerald-600 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-emerald-700 disabled:opacity-50"
+                  />
+                </div>
+                {importing && <span className="text-xs text-gray-500">Импорт...</span>}
               </div>
             </div>
           )}
@@ -1367,52 +1555,97 @@ export default function LiOutreachPage() {
             </div>
           )}
 
-          <div className="max-h-[600px] overflow-y-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 sticky top-0">
-                <tr>
-                  <th className="w-10 px-3 py-2">
-                    <input
-                      type="checkbox"
-                      aria-label="Выбрать все видимые лиды"
-                      checked={allVisibleLeadsSelected}
-                      disabled={visibleLeadIds.length === 0 || deletingLeads}
-                      onChange={(e) => toggleVisibleLeadSelection(e.target.checked)}
-                      className="h-4 w-4 rounded border-gray-300 text-blue-600"
-                    />
-                  </th>
-                  <th className="text-left px-3 py-2 text-xs text-gray-500">Имя</th>
-                  <th className="text-left px-3 py-2 text-xs text-gray-500">Должность</th>
-                  <th className="text-left px-3 py-2 text-xs text-gray-500">Компания</th>
-                  <th className="text-left px-3 py-2 text-xs text-gray-500">Статус</th>
-                </tr>
-              </thead>
-              <tbody>
-                {leads.map((lead) => (
-                  <tr key={lead.id} className="border-b border-gray-100 hover:bg-gray-50">
-                    <td className="px-3 py-2">
-                      <input
-                        type="checkbox"
-                        aria-label={`Выбрать лида ${lead.name}`}
-                        checked={selectedLeadIds.has(lead.id)}
-                        disabled={deletingLeads}
-                        onChange={(e) => toggleLeadSelection(lead.id, e.target.checked)}
-                        className="h-4 w-4 rounded border-gray-300 text-blue-600"
-                      />
-                    </td>
-                    <td className="px-3 py-2">
-                      {lead.profile_url ? (
-                        <a href={lead.profile_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">{lead.name}</a>
-                      ) : lead.name}
-                    </td>
-                    <td className="px-3 py-2 text-gray-600">{lead.position ?? ''}</td>
-                    <td className="px-3 py-2 text-gray-600">{lead.company ?? ''}</td>
-                    <td className="px-3 py-2"><span className={`text-xs px-2 py-0.5 rounded ${lead.status === 'replied' ? 'bg-green-100 text-green-700' : lead.status === 'connected' ? 'bg-blue-100 text-blue-700' : lead.status === 'invited' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'}`}>{lead.status}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          {(() => {
+            // Колонку «Инвайт» (li_leads.invite_text) показываем, если хоть у
+            // одного из видимых лидов он заполнен. Это покрывает оба сценария:
+            // фильтр на список с has_custom_invites=true (там у всех лидов
+            // invite_text есть) и фильтр «Все» / «Без списка», когда среди
+            // лидов попадаются персонализированные. Если ни у одного лида
+            // invite_text не задан — колонка просто не рендерится, чтобы не
+            // занимать место для обычных списков.
+            const anyInvite = leads.some((l) => l.invite_text && l.invite_text.trim());
+            return (
+              <div className="max-h-[600px] overflow-y-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 sticky top-0">
+                    <tr>
+                      <th className="w-10 px-3 py-2">
+                        <input
+                          type="checkbox"
+                          aria-label="Выбрать все видимые лиды"
+                          checked={allVisibleLeadsSelected}
+                          disabled={visibleLeadIds.length === 0 || deletingLeads}
+                          onChange={(e) => toggleVisibleLeadSelection(e.target.checked)}
+                          className="h-4 w-4 rounded border-gray-300 text-blue-600"
+                        />
+                      </th>
+                      <th className="text-left px-3 py-2 text-xs text-gray-500">Имя</th>
+                      <th className="text-left px-3 py-2 text-xs text-gray-500">Должность</th>
+                      <th className="text-left px-3 py-2 text-xs text-gray-500">Компания</th>
+                      <th className="text-left px-3 py-2 text-xs text-gray-500">Статус</th>
+                      {anyInvite && (
+                        <th className="text-left px-3 py-2 text-xs text-emerald-700" title="Персонализированный текст инвайта">
+                          Инвайт ✎
+                        </th>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {leads.map((lead) => {
+                      const invite = lead.invite_text?.trim() ?? '';
+                      return (
+                        <tr key={lead.id} className="border-b border-gray-100 hover:bg-gray-50">
+                          <td className="px-3 py-2">
+                            <input
+                              type="checkbox"
+                              aria-label={`Выбрать лида ${lead.name}`}
+                              checked={selectedLeadIds.has(lead.id)}
+                              disabled={deletingLeads}
+                              onChange={(e) => toggleLeadSelection(lead.id, e.target.checked)}
+                              className="h-4 w-4 rounded border-gray-300 text-blue-600"
+                            />
+                          </td>
+                          <td className="px-3 py-2">
+                            <div className="flex items-center gap-1.5">
+                              {lead.profile_url ? (
+                                <a href={lead.profile_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">{lead.name}</a>
+                              ) : lead.name}
+                              {invite && (
+                                <span
+                                  className="text-emerald-600 text-xs"
+                                  title="У лида есть персонализированный текст инвайта"
+                                  aria-label="Персонализированный инвайт"
+                                >
+                                  ✎
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 text-gray-600">{lead.position ?? ''}</td>
+                          <td className="px-3 py-2 text-gray-600">{lead.company ?? ''}</td>
+                          <td className="px-3 py-2"><span className={`text-xs px-2 py-0.5 rounded ${lead.status === 'replied' ? 'bg-green-100 text-green-700' : lead.status === 'connected' ? 'bg-blue-100 text-blue-700' : lead.status === 'invited' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'}`}>{lead.status}</span></td>
+                          {anyInvite && (
+                            <td className="px-3 py-2 max-w-[420px]">
+                              {invite ? (
+                                <span
+                                  className="text-xs text-gray-700 line-clamp-2 block"
+                                  title={invite}
+                                >
+                                  {invite}
+                                </span>
+                              ) : (
+                                <span className="text-xs text-gray-300" title="У этого лида нет персонального инвайта — runner возьмёт шаблон кампании">—</span>
+                              )}
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
         </div>
       )}
 

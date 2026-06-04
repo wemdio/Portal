@@ -24,8 +24,13 @@ export function jsonError(message: string, status: number) {
  *      парсит — INSERT в БД проходил, но gramClient.parseProxyUrl()
  *      возвращал undefined, кампания подключалась без прокси и сразу банилась.
  *      Теперь конвертим в `http://user:pass@host:port` — валидный URL.
- *   3. `user:pass@host:port` → `http://user:pass@host:port`.
- *   4. `host:port`           → `http://host:port`.
+ *   3. `user:pass@host:port` → `http://user:pass@host:port` (стандарт).
+ *   4. `host:port@user:pass` → `http://user:pass@host:port`.
+ *      Pool.proxy.market и аналогичные провайдеры экспортируют именно так:
+ *      сначала host:port, потом учётка. Если оставить как `http://host:port@user:pass`,
+ *      то `new URL()` принимает строку, но трактует `host:port` как userInfo,
+ *      а `user:pass` как hostname:port — реальный коннект уходит в никуда.
+ *   5. `host:port`           → `http://host:port`.
  */
 export function normalizeProxyUrl(raw: string): string {
   const trimmed = raw.trim();
@@ -45,6 +50,43 @@ export function normalizeProxyUrl(raw: string): string {
         return `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
       }
     }
+    return `http://${trimmed}`;
+  }
+
+  // Дальше есть `@`. Два формата с одной точкой разделения:
+  //   а) user:pass@host:port — стандартный URL userinfo.
+  //   б) host:port@user:pass — pool.proxy.market и т.п.
+  //
+  // Разница в том, на какой стороне от `@` лежит «:<число>» (порт). Если
+  // справа — это (а), оборачиваем в http://. Если слева — это (б),
+  // переставляем стороны местами. lastIndexOf('@') страхует от редкого случая
+  // когда пароль содержит `@` в стандартном формате (а).
+  const atIdx = trimmed.lastIndexOf('@');
+  const left = trimmed.slice(0, atIdx);
+  const right = trimmed.slice(atIdx + 1);
+  const endsWithPort = /:\d+$/;
+
+  if (endsWithPort.test(right)) {
+    // user:pass@host:port — отдаём «как есть» под http://. Кодировать
+    // user/pass смысла нет: если они уже встретили `@`, значит пользователь
+    // подразумевает именно такой формат, и percent-encoding только сломает то,
+    // что уже валидно.
+    return `http://${trimmed}`;
+  }
+
+  if (endsWithPort.test(left)) {
+    // host:port@user:pass — переставляем стороны.
+    const colonIdx = left.lastIndexOf(':');
+    const host = left.slice(0, colonIdx);
+    const port = left.slice(colonIdx + 1);
+    const credIdx = right.indexOf(':');
+    if (credIdx >= 0) {
+      const user = right.slice(0, credIdx);
+      const pass = right.slice(credIdx + 1);
+      return `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
+    }
+    // Только user без пароля справа — нетипично, но не теряем данные.
+    return `http://${encodeURIComponent(right)}@${host}:${port}`;
   }
 
   return `http://${trimmed}`;

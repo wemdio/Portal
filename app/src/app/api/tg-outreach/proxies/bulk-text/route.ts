@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { withTgOutreachAuth } from '@/lib/tgOutreach/apiHelper';
+import { normalizeProxyUrl } from '@/lib/tgOutreach/apiHelpers';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,9 +35,22 @@ function parseProxyLine(value: string) {
   if (!line || line.startsWith('#')) return null;
   if (line.includes('://')) return parseProxyUrl(line);
 
+  // Нестандартные форматы (host:port:user:pass, host:port@user:pass,
+  // user:pass@host:port, host:port) — нормализуем единой утилитой и пускаем
+  // через тот же URL-парсер. Раньше тут был свой split(':') который ломался
+  // на формате pool.proxy.market: `host:port@user:pass` (port парсился как
+  // `10989@vvCcRyAQjR` и улетал в NaN).
+  const normalized = normalizeProxyUrl(line);
+  if (normalized.includes('://')) {
+    const parsed = parseProxyUrl(normalized);
+    if (parsed) return parsed;
+  }
+
+  // Defensive fallback: чистый `host:port` мог не пройти normalizeProxyUrl
+  // (теоретически), но это валидный прокси без креденшлов — пытаемся
+  // распарсить как раньше split'ом.
   const chunks = line.split(':').map((s) => s.trim()).filter(Boolean);
   if (chunks.length < 2) return null;
-
   const [ip, rawPort, login = '', password = ''] = chunks;
   const port = Number(rawPort);
   if (!ip || !port) return null;

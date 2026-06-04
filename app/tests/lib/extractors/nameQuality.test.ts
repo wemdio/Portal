@@ -15,6 +15,7 @@ import {
   isPlaceName,
   isAddressLike,
   isUiFragment,
+  isPhotoFilename,
   isPlausibleName,
   nameListLooksReal,
 } from '@/lib/enrich/extractors/nameQuality';
@@ -87,6 +88,19 @@ const PERSON_NAMES = [
 ];
 // Multi-token CMS gibberish.
 const HEX_TOKEN_JUNK = ['a1 4bf9 ad ebcab', '7f9baf a1 4bf9'];
+
+// Ranking-list prefixes from "Top-30" articles: "1 AKAR", "3 Mospoliteh".
+const RANKING_PREFIXES = ['1 AKAR', '3 Mospoliteh', '5 RKS', '23 SuperGroup', '10 Yandex'];
+// Common form-table headers leaking from "Бриф клиента" / "Карточка" pages.
+const TABLE_HEADERS = ['Клиент', 'Клиника', 'Параметр', 'Описание', 'Наименование', 'Категория', 'Регион', 'Локация'];
+// Marketing benefit/feature 2-word phrases that isSentenceLike (needs 3+ tokens) misses.
+const FEATURE_BENEFITS = [
+  'Выгодная стоимость', 'Удобный сервис', 'Качественное обслуживание',
+  'Круглосуточная поддержка', 'Профессиональная команда', 'Гарантированный результат',
+  'Эффективная лидогенерация', 'Индивидуальный подход', 'Комплексное решение',
+];
+// Photo / avatar filenames seen on testimonial blocks. Lowercase "<short-name> <status>".
+const PHOTO_FILENAMES = ['mikh fresh2', 'kate fin', 'olya new', 'sasha old', 'misha big'];
 
 // CSS-class fragments leaked into alt attributes, generic UI words, and
 // "X / Y" category labels — all observed in the spreadsheet noise rows.
@@ -181,6 +195,28 @@ describe('nameQuality predicates', () => {
     for (const p of realProducts) expect(isUiFragment(p)).toBe(false);
   });
 
+  it('flags "Top-N" ranking-list prefixes: "1 AKAR", "3 Mospoliteh"', () => {
+    for (const r of RANKING_PREFIXES) expect(isUiFragment(r)).toBe(true);
+  });
+
+  it('flags common form-table column headers as UI fragments', () => {
+    for (const h of TABLE_HEADERS) expect(isUiFragment(h)).toBe(true);
+  });
+
+  it('flags 2-word marketing benefit phrases isSentenceLike misses', () => {
+    for (const f of FEATURE_BENEFITS) expect(isUiFragment(f)).toBe(true);
+  });
+
+  it('flags CMS photo/avatar filenames like "mikh fresh2" / "kate fin"', () => {
+    for (const p of PHOTO_FILENAMES) expect(isPhotoFilename(p)).toBe(true);
+  });
+
+  it('does NOT flag lowercase real brand names ("amocrm", "salesforce", "slack") as photo filenames', () => {
+    // Critical: a single-word lowercase brand must not trip the photo filter.
+    const realLowercaseBrands = ['amocrm', 'salesforce', 'slack', 'stripe', 'shopify', 'mindbox', 'roistat'];
+    for (const b of realLowercaseBrands) expect(isPhotoFilename(b)).toBe(false);
+  });
+
   it('flags city / region / country labels', () => {
     for (const p of PLACES) expect(isPlaceName(p)).toBe(true);
   });
@@ -216,6 +252,7 @@ describe('nameQuality predicates', () => {
       ...METRICS, ...FORM_LABELS, ...ROLE_TITLES, ...ARTICLE_TITLES,
       ...INDUSTRIES, ...PERSON_NAMES, ...HEX_TOKEN_JUNK,
       ...PLACES, ...ADDRESSES, ...FEATURE_PHRASES, ...UI_FRAGMENTS,
+      ...RANKING_PREFIXES, ...TABLE_HEADERS, ...FEATURE_BENEFITS, ...PHOTO_FILENAMES,
     ]) {
       expect(isPlausibleName(junk)).toBe(false);
     }

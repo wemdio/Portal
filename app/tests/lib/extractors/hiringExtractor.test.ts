@@ -1,6 +1,6 @@
 /** @jest-environment node */
 
-import { extractHiring } from '@/lib/enrich/extractors/hiringExtractor';
+import { extractHiring, findExternalCareerLinks } from '@/lib/enrich/extractors/hiringExtractor';
 
 describe('extractHiring', () => {
   it('counts vacancy items by typical class patterns', () => {
@@ -130,5 +130,45 @@ describe('extractHiring', () => {
     expect(result.has_sales).toBe(true);
     expect(result.has_design).toBe(true);
     expect(result.has_product).toBe(true);
+  });
+});
+
+describe('findExternalCareerLinks', () => {
+  it('finds hh.ru/employer/N links in page anchors', () => {
+    const html = `
+      <footer>
+        <a href="https://hh.ru/employer/123456">Наши вакансии на HH</a>
+        <a href="https://example.com">other</a>
+      </footer>
+    `;
+    expect(findExternalCareerLinks(html)).toContain('https://hh.ru/employer/123456');
+  });
+
+  it('finds career.habr.com/companies links', () => {
+    const html = `
+      <a href="https://career.habr.com/companies/acme">Хабр Карьера</a>
+    `;
+    expect(findExternalCareerLinks(html)).toContain('https://career.habr.com/companies/acme');
+  });
+
+  it('strips query and fragment to dedupe the same link', () => {
+    const html = `
+      <a href="https://hh.ru/employer/111?from=footer">A</a>
+      <a href="https://hh.ru/employer/111#vacancies">B</a>
+    `;
+    const links = findExternalCareerLinks(html);
+    expect(links).toEqual(['https://hh.ru/employer/111']);
+  });
+
+  it('returns empty for pages with no external-career links', () => {
+    expect(findExternalCareerLinks(`<p>About us</p>`)).toEqual([]);
+  });
+
+  it('does not match generic hh.ru profile / search URLs', () => {
+    const html = `
+      <a href="https://hh.ru/">HH</a>
+      <a href="https://hh.ru/search/vacancy?text=devops">search</a>
+    `;
+    expect(findExternalCareerLinks(html)).toEqual([]);
   });
 });

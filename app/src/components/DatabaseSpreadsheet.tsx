@@ -984,6 +984,11 @@ export function DatabaseSpreadsheet() {
   const [lastAction, setLastAction] = useState<ActionSummary | null>(null);
   const [copyNotice, setCopyNotice] = useState<CopyNotice | null>(null);
   const [lastUndo, setLastUndo] = useState<UndoState | null>(null);
+  /** Состояние для Ctrl+Y / Ctrl+Shift+Z. Наполняется когда сработал handleUndo
+   *  (туда уходит «текущее ДО undo» состояние, чтобы можно было его вернуть).
+   *  Любое новое действие через setUndoSnapshot() сбрасывает redo — это
+   *  стандартное Excel-поведение: после undo любой ввод обрывает ветку redo. */
+  const [lastRedo, setLastRedo] = useState<UndoState | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [selection, setSelection] = useState<Selection>({
@@ -994,6 +999,13 @@ export function DatabaseSpreadsheet() {
   });
   const [selectionAnchor, setSelectionAnchor] = useState({ row: 0, col: 0 });
   const [activeCell, setActiveCell] = useState({ row: 0, col: 0 });
+  /** Какая ячейка СЕЙЧАС в режиме редактирования (textarea-фокус, ввод текста).
+   *  Отдельно от activeCell: клик по ячейке делает её активной (выделение),
+   *  но НЕ переводит в edit-mode. Edit включается повторным кликом по уже
+   *  активной ячейке / double-click / F2 / Enter / печатью любого символа.
+   *  Так горячие клавиши (Del, Shift+Arrow, и т.д.) работают на выделенной
+   *  ячейке без перехвата textarea'ой. */
+  const [editingCell, setEditingCell] = useState<{ row: number; col: number } | null>(null);
   const [isSelecting, setIsSelecting] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const selectAllRef = useRef<HTMLInputElement | null>(null);
@@ -1003,15 +1015,6 @@ export function DatabaseSpreadsheet() {
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const scrollRafRef = useRef<number | null>(null);
   const [scrollMetrics, setScrollMetrics] = useState({ scrollTop: 0, height: 0 });
-  const [horizontalScrollLeft, setHorizontalScrollLeft] = useState(0);
-  const [horizontalScrollbarMetrics, setHorizontalScrollbarMetrics] = useState({
-    scrollWidth: 0,
-    clientWidth: 0,
-  });
-  const [fixedScrollbarViewport, setFixedScrollbarViewport] = useState({
-    left: 0,
-    width: 0,
-  });
   const confirmActionRef = useRef<(() => void) | null>(null);
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
   const [highlightedCol, setHighlightedCol] = useState<number | null>(null);
@@ -1471,24 +1474,6 @@ export function DatabaseSpreadsheet() {
     setScrollMetrics((prev) =>
       prev.scrollTop === next.scrollTop && prev.height === next.height ? prev : next,
     );
-    setHorizontalScrollLeft((prev) =>
-      Math.abs(prev - wrapper.scrollLeft) < 1 ? prev : wrapper.scrollLeft,
-    );
-    setHorizontalScrollbarMetrics((prev) => {
-      const nextWidth = wrapper.scrollWidth;
-      const nextClientWidth = wrapper.clientWidth;
-      return prev.scrollWidth === nextWidth && prev.clientWidth === nextClientWidth
-        ? prev
-        : { scrollWidth: nextWidth, clientWidth: nextClientWidth };
-    });
-    const rect = wrapper.getBoundingClientRect();
-    const nextLeft = Math.max(8, Math.round(rect.left));
-    const nextWidth = Math.max(0, Math.round(rect.width));
-    setFixedScrollbarViewport((prev) =>
-      prev.left === nextLeft && prev.width === nextWidth
-        ? prev
-        : { left: nextLeft, width: nextWidth },
-    );
   }, []);
 
   const handleTableScroll = useCallback(() => {
@@ -1607,32 +1592,138 @@ export function DatabaseSpreadsheet() {
 
   const handleUndo = useCallback(() => {
     if (!lastUndo) return;
-    setTabs((prev) =>
-      prev.map((tab) => (tab.id === lastUndo.tabId ? { ...tab, data: lastUndo.data } : tab)),
-    );
+    // Перед откатом сохраняем «текущее ДО undo» в lastRedo — чтобы Ctrl+Y
+    // мог вернуть это состояние. Тот же tabId и тот же message — после
+    // redo он снова появится в lastUndo как обычный snapshot.
+    setTabs((prev) => {
+      const currentTab = prev.find((t) => t.id === lastUndo.tabId);
+      if (currentTab) {
+        setLastRedo({
+          tabId: lastUndo.tabId,
+          data: cloneData(currentTab.data),
+          message: lastUndo.message,
+          time: Date.now(),
+        });
+      }
+      return prev.map((tab) => (tab.id === lastUndo.tabId ? { ...tab, data: lastUndo.data } : tab));
+    });
     setLastAction({ message: `Вернули: ${lastUndo.message}`, time: Date.now() });
     setLastUndo(null);
   }, [lastUndo]);
 
+  const handleRedo = useCallback(() => {
+    if (!lastRedo) return;
+    // Симметрично undo: сохраняем «текущее ДО redo» в lastUndo, чтобы
+    // следующий Ctrl+Z вернул обратно.
+    setTabs((prev) => {
+      const currentTab = prev.find((t) => t.id === lastRedo.tabId);
+      if (currentTab) {
+        setLastUndo({
+          tabId: lastRedo.tabId,
+          data: cloneData(currentTab.data),
+          message: lastRedo.message,
+          time: Date.now(),
+        });
+      }
+      return prev.map((tab) => (tab.id === lastRedo.tabId ? { ...tab, data: lastRedo.data } : tab));
+    });
+    setLastAction({ message: `Повтор: ${lastRedo.message}`, time: Date.now() });
+    setLastRedo(null);
+  }, [lastRedo]);
+
+
+  // Один snapshot на edit-сессию ячейки: ставится в true в handleCellFocus,
+  // снимается в первом handleValueChange (вместе с записью snapshot'а).
+  // Без этого каждое нажатие клавиши делало бы snapshot и Ctrl+Z откатывал
+  // бы по символу — не то что хочется. А раньше snapshot вообще не делался
+  // на ручной ввод текста, и Ctrl+Z был полностью бесполезен.
+  const cellEditSnapshotPendingRef = useRef(false);
+
+  // Свежие версии хендлеров через ref — чтобы keydown-listener не пересоздавался
+  // на каждое изменение selection/tabs/etc. (это ловит actual stale-closure баги).
+  // Инициализируем no-op'ами — реальные функции объявлены сильно ниже в файле
+  // (copySelection и т.п. ~строка 2200+) и ссылка на них прямо в useRef-инициализации
+  // ловится TS как TDZ. Реальные хендлеры наполняет useEffect ниже.
+  const clipboardHandlersRef = useRef<{
+    copy: () => Promise<void>;
+    cut: () => Promise<void>;
+    paste: () => Promise<void>;
+    redo: () => void;
+    clearCells: () => void;
+  }>({
+    copy: async () => {},
+    cut: async () => {},
+    paste: async () => {},
+    redo: () => {},
+    clearCells: () => {},
+  });
 
   useEffect(() => {
     const handleGlobalKeyDown = (e: globalThis.KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'z' || e.code === 'KeyZ')) {
+      const isMod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+
+      // Ctrl+Z (без shift) = undo.
+      if (isMod && !e.shiftKey && (key === 'z' || e.code === 'KeyZ')) {
         e.preventDefault();
         handleUndo();
         return;
       }
 
-      const inCellInput =
-        (document.activeElement instanceof HTMLInputElement ||
-          document.activeElement instanceof HTMLTextAreaElement) &&
-        document.activeElement.closest('td');
+      // Ctrl+Y или Ctrl+Shift+Z = redo. Оба варианта — потому что Win/Linux
+      // обычно Ctrl+Y, mac/Sheets — Cmd+Shift+Z.
+      if (isMod && ((key === 'y' || e.code === 'KeyY') || (e.shiftKey && (key === 'z' || e.code === 'KeyZ')))) {
+        e.preventDefault();
+        clipboardHandlersRef.current.redo();
+        return;
+      }
 
-      if (
-        (document.activeElement instanceof HTMLInputElement ||
-          document.activeElement instanceof HTMLTextAreaElement) &&
-        !inCellInput
-      ) {
+      const inInput =
+        document.activeElement instanceof HTMLInputElement ||
+        document.activeElement instanceof HTMLTextAreaElement;
+      const inCellInput = inInput && document.activeElement?.closest('td');
+
+      // Если фокус в input ВНЕ сетки (поиск по таблице, переименование вкладки
+      // и т.п.) — не трогаем Ctrl+C/V/X, пусть браузер сам копирует/вставляет
+      // текст в этот input. Для cell-input разрешаем — там копирование/вставка
+      // должны работать по spreadsheet-логике (целые ячейки).
+      const isClipboardKey = isMod && (key === 'c' || key === 'v' || key === 'x'
+        || e.code === 'KeyC' || e.code === 'KeyV' || e.code === 'KeyX');
+      if (isClipboardKey && inInput && !inCellInput) {
+        return;
+      }
+
+      // Ctrl+C — копирование выделения. Если фокус на cell-input, его
+      // собственный onKeyDown уже отработает — но мы тут продублируем,
+      // чтобы работало и когда фокуса нигде нет (просто кликнул на ячейки).
+      if (isMod && !e.shiftKey && (key === 'c' || e.code === 'KeyC')) {
+        e.preventDefault();
+        void clipboardHandlersRef.current.copy();
+        return;
+      }
+
+      // Ctrl+X — вырезать: copy + clear, без подтверждения. Undo возвращает.
+      if (isMod && (key === 'x' || e.code === 'KeyX')) {
+        e.preventDefault();
+        void clipboardHandlersRef.current.cut();
+        return;
+      }
+
+      // Ctrl+V — вставка. Если фокус на cell-input/grid, нативный onPaste
+      // event уже сработает на этих элементах (см. handlePaste). Если же
+      // фокус нигде (body) — нативное событие не дойдёт до нашего хендлера,
+      // поэтому читаем буфер через Clipboard API напрямую.
+      if (isMod && !e.shiftKey && (key === 'v' || e.code === 'KeyV')) {
+        const willHandleNatively = !!(inCellInput
+          || (document.activeElement && document.activeElement.closest('[data-spreadsheet-grid]')));
+        if (willHandleNatively) return; // onPaste сработает сам
+        e.preventDefault();
+        void clipboardHandlersRef.current.paste();
+        return;
+      }
+
+      // Если фокус в input ВНЕ сетки — дальше (стрелки, и т.п.) тоже не лезем.
+      if (inInput && !inCellInput) {
         return;
       }
 
@@ -1642,13 +1733,53 @@ export function DatabaseSpreadsheet() {
       const maxRow = activeTab.data.length - 1;
       const maxCol = (activeTab.data[0]?.length ?? 1) - 1;
 
+      // Edit-mode переходы и работа с активной ячейкой когда она НЕ в edit.
+      // inCellInput = true когда уже редактируем — не вмешиваемся.
+      if (!inCellInput) {
+        // F2 — войти в edit (Excel-pattern).
+        if (e.key === 'F2') {
+          e.preventDefault();
+          setEditingCell({ row, col });
+          return;
+        }
+        // Enter на выделенной ячейке — войти в edit.
+        if (e.key === 'Enter' && !e.shiftKey && !isMod) {
+          e.preventDefault();
+          setEditingCell({ row, col });
+          return;
+        }
+        // Del/Backspace на выделенных ячейках — очистка диапазона (1 или
+        // много ячеек, без диалога подтверждения). Откат — Ctrl+Z.
+        if ((e.key === 'Delete' || e.key === 'Backspace') && !isMod) {
+          e.preventDefault();
+          clipboardHandlersRef.current.clearCells();
+          return;
+        }
+        // Печатный символ — вход в edit с заменой содержимого. e.key.length === 1
+        // ловит обычные буквы/цифры/знаки. Исключаем модификаторы и спец-клавиши.
+        if (!isMod && !e.altKey && e.key.length === 1) {
+          e.preventDefault();
+          setUndoSnapshot('Изменение ячейки');
+          handleValueChange(row, col, e.key);
+          setEditingCell({ row, col });
+          // Ref'у не до этого — мы уже сделали snapshot руками, отметим что
+          // следующий ввод в этой edit-сессии не должен делать ещё один.
+          cellEditSnapshotPendingRef.current = false;
+          return;
+        }
+      }
+
       let nextRow = row;
       let nextCol = col;
       let handled = false;
 
       const isArrow = e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight';
 
-      if (inCellInput && isArrow && !e.shiftKey) return;
+      // В edit-mode ВСЕ стрелки (включая Shift+Arrow) уходят textarea-е:
+      // cursor по тексту, selection текста внутри ячейки. Расширение
+      // выделения по ячейкам работает когда edit-mode выключен (просто
+      // выделение, без курсора в ячейке) — Excel-pattern.
+      if (inCellInput && isArrow) return;
 
       if (e.key === 'ArrowUp') {
         nextRow = Math.max(0, row - 1);
@@ -1687,11 +1818,24 @@ export function DatabaseSpreadsheet() {
         }
 
         setActiveCell({ row: nextRow, col: nextCol });
+        // Любая навигация по сетке выходит из edit (даже если editingCell был
+        // на предыдущей ячейке — оставлять textarea там, пока ушли стрелками,
+        // некорректно).
+        setEditingCell(null);
       }
     };
 
-    window.addEventListener('keydown', handleGlobalKeyDown);
-    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+    // Capture phase, не bubble. Иначе textarea сам обработает Shift+Arrow
+    // как расширение text-selection ДО того как наш хендлер вызовет
+    // preventDefault — расширение выделения по ячейкам не сработает.
+    window.addEventListener('keydown', handleGlobalKeyDown, true);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown, true);
+    // setUndoSnapshot и handleValueChange — closure over fresh activeTab/data,
+    // и listener re-attach'ится на каждое изменение activeTab (через
+    // useMemo он меняется при cell-edit'ах), так что stale-closure не успевает
+    // ничего сломать. Не включаем их в deps явно — это создавало бы
+    // re-attach на каждый ререндер.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, activeCell, selectionAnchor, handleUndo]);
 
   useEffect(() => {
@@ -2079,6 +2223,12 @@ export function DatabaseSpreadsheet() {
     event: MouseEvent<HTMLTableCellElement>,
   ) => {
     if (event.button !== 0) return;
+
+    // Excel-pattern: повторный простой клик по уже-активной ячейке = войти
+    // в edit. Клик с модификаторами (Shift/Ctrl/Cmd) — это селекция, не edit.
+    const wasActive = activeCell.row === row && activeCell.col === col;
+    const isPlainClick = !event.shiftKey && !event.ctrlKey && !event.metaKey;
+
     setIsSelecting(true);
     setActiveCell({ row, col });
     if (event.shiftKey) {
@@ -2099,7 +2249,21 @@ export function DatabaseSpreadsheet() {
       setSelectionAnchor({ row, col });
     }
     setSelectionMode('cell');
+
+    if (isPlainClick && wasActive) {
+      // Второй клик по той же ячейке — режим редактирования (точечный курсор).
+      setEditingCell({ row, col });
+    } else if (!isPlainClick || !wasActive) {
+      // Любая смена активной ячейки или клик с модификатором — выйти из edit.
+      setEditingCell(null);
+    }
   };
+
+  /** Double-click — сразу в edit, минуя «select-then-click-again». */
+  const handleCellDoubleClick = (row: number, col: number) => {
+    setEditingCell({ row, col });
+  };
+
 
   const handleCellMouseOver = (row: number, col: number) => {
     if (!isSelecting) return;
@@ -2111,9 +2275,18 @@ export function DatabaseSpreadsheet() {
     setSelection({ startRow: row, startCol: col, endRow: row, endCol: col });
     setSelectionAnchor({ row, col });
     setSelectionMode('cell');
+    // Новая edit-сессия — снимок данных нужно взять перед первым изменением
+    // (см. handleValueChange ниже). Без этого Ctrl+Z не имеет что вернуть,
+    // потому что у нас одношаговый undo и каждый keystroke не должен
+    // создавать отдельный snapshot.
+    cellEditSnapshotPendingRef.current = true;
   };
 
   const handleValueChange = (row: number, col: number, value: string) => {
+    if (cellEditSnapshotPendingRef.current) {
+      setUndoSnapshot('Изменение ячейки');
+      cellEditSnapshotPendingRef.current = false;
+    }
     updateActiveSheet((sheet) => {
       const nextData = [...sheet.data];
       if (!nextData[row]) return sheet;
@@ -2148,8 +2321,64 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  /** Ctrl+X — копирует выделение в буфер и сразу чистит ячейки. Без
+   *  диалога подтверждения, в отличие от Delete на большом выделении —
+   *  это «cut», поведение Excel'я. Откатить можно через Ctrl+Z. */
+  const cutSelection = async () => {
+    if (!activeTab) return;
+    await copySelection();
+    setUndoSnapshot('Вырезано');
+    clearSelectedCells();
+    const rows = normalizedSelection.endRow - normalizedSelection.startRow + 1;
+    const cols = normalizedSelection.endCol - normalizedSelection.startCol + 1;
+    setLastAction({ message: `Вырезано ячеек: ${rows * cols}`, time: Date.now() });
+  };
+
+  /** Ctrl+V когда нет нативного onPaste-фокуса (фокус на body или вне input/grid).
+   *  Берём текст из буфера через Clipboard API и кидаем в applyPaste. */
+  const pasteFromClipboard = async () => {
+    if (!activeTab) return;
+    if (typeof navigator === 'undefined' || !navigator.clipboard?.readText) {
+      showCopyNotice('Браузер не поддерживает чтение буфера обмена', 'error');
+      return;
+    }
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) return;
+      const values = parseBestClipboard(text, '');
+      applyPaste(values);
+    } catch (error) {
+      void logError('spreadsheet.paste.failed', error);
+      showCopyNotice('Не удалось прочитать буфер обмена (нужно разрешение браузера)', 'error');
+    }
+  };
+
+  // Наполняем clipboardHandlersRef свежими версиями функций после их объявления.
+  // useRef инициализируется no-op'ами выше (TS не даёт ссылаться на эти `const`
+  // в `useRef(...)` напрямую — TDZ).
+  useEffect(() => {
+    clipboardHandlersRef.current = {
+      copy: copySelection,
+      cut: cutSelection,
+      paste: pasteFromClipboard,
+      redo: handleRedo,
+      clearCells: () => {
+        // Очистка диапазона выделения — Del/Backspace на не-edit ячейках.
+        // Без диалога подтверждения, поведение Excel. Откат через Ctrl+Z.
+        setUndoSnapshot('Очистка');
+        clearSelectedCells();
+      },
+    };
+  });
+
   const applyPaste = (values: string[][]) => {
     if (!activeTab || values.length === 0) return;
+    // Snapshot для Ctrl+Z до того как переписали ячейки. Pendi-флаг
+    // edit-сессии тоже снимаем — иначе при следующем вводе текста в эту
+    // ячейку был бы лишний snapshot поверх только что сделанной paste.
+    setUndoSnapshot(`Вставка (${values.length}×${values[0]?.length ?? 0})`);
+    cellEditSnapshotPendingRef.current = false;
+
     const maxCols = safeMaxCols(values);
 
     const { startRow, startCol } = normalizedSelection;
@@ -3001,28 +3230,6 @@ export function DatabaseSpreadsheet() {
 
   const rowCount = activeTab?.data.length ?? 0;
   const colCount = activeTab?.data[0]?.length ?? 0;
-  const estimatedTableScrollWidth = useMemo(() => {
-    if (colCount <= 0) return 0;
-    const columnsWidth = Array.from({ length: colCount }, (_, index) => {
-      return columnWidths[index] ?? DEFAULT_COLUMN_WIDTH;
-    }).reduce((sum, width) => sum + width, 0);
-    return columnsWidth + 32 + 28 + 20;
-  }, [colCount, columnWidths]);
-  const showBottomHorizontalScrollbar = colCount > 0;
-  const bottomScrollbarContentWidth = Math.max(
-    estimatedTableScrollWidth,
-    horizontalScrollbarMetrics.scrollWidth,
-    horizontalScrollbarMetrics.clientWidth + 1,
-  );
-  const horizontalScrollMax = Math.max(
-    0,
-    bottomScrollbarContentWidth - horizontalScrollbarMetrics.clientWidth,
-  );
-  const horizontalSliderMax = Math.max(1, Math.round(horizontalScrollMax));
-  const horizontalSliderValue = Math.max(
-    0,
-    Math.min(horizontalSliderMax, Math.round(horizontalScrollLeft)),
-  );
   const filterSearch = debouncedFilterMenuSearch.trim().toLowerCase();
   const filteredFilterOptions = filterMenu
     ? filterMenu.options.filter((option) =>
@@ -3279,6 +3486,10 @@ export function DatabaseSpreadsheet() {
       message,
       time: Date.now(),
     });
+    // Любое новое действие обрывает redo-ветку — после undo пользователь
+    // что-то изменил, значит «вперёд» уже идти некуда (стандартное поведение
+    // Excel/Sheets/любого редактора).
+    setLastRedo(null);
   };
 
   const openPersonalizationModal = () => {
@@ -9293,9 +9504,9 @@ export function DatabaseSpreadsheet() {
           })()}
           <div
             ref={tableWrapperRef}
-            className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 pb-6 dark-scrollbar"
-            style={{ maxHeight: 'calc(100vh - 130px)' }}
+            className="overflow-y-auto overflow-x-auto flex-1 min-h-0 dark-scrollbar overscroll-x-contain"
             tabIndex={-1}
+            data-spreadsheet-grid="true"
             onKeyDownCapture={handleGridKeyDown}
             onPaste={handlePaste as unknown as React.ClipboardEventHandler<HTMLDivElement>}
             onScroll={handleTableScroll}
@@ -9509,8 +9720,10 @@ export function DatabaseSpreadsheet() {
                           rowIndex <= normalizedSelection.endRow &&
                           colIndex >= normalizedSelection.startCol &&
                           colIndex <= normalizedSelection.endCol;
-                        const isActive =
-                          activeCell.row === rowIndex && activeCell.col === colIndex;
+                        const isEditing =
+                          editingCell !== null &&
+                          editingCell.row === rowIndex &&
+                          editingCell.col === colIndex;
                         const cellMatchesSearch =
                           searchTerms.length > 0 &&
                           searchTerms.some((term) =>
@@ -9529,6 +9742,7 @@ export function DatabaseSpreadsheet() {
                           <td
                             key={`cell-${rowIndex}-${colIndex}`}
                             onMouseDown={(event) => handleCellMouseDown(rowIndex, colIndex, event)}
+                            onDoubleClick={() => handleCellDoubleClick(rowIndex, colIndex)}
                             onMouseOver={() => handleCellMouseOver(rowIndex, colIndex)}
                             onContextMenu={(event) => {
                               const isRowSelected =
@@ -9571,7 +9785,7 @@ export function DatabaseSpreadsheet() {
                             }}
                             className={`border-b border-r border-gray-200 p-0 align-top overflow-hidden ${cellBackground}`}
                           >
-                            {isActive ? (
+                            {isEditing ? (
                               <textarea
                                 value={value}
                                 onChange={(event) => {
@@ -9588,7 +9802,24 @@ export function DatabaseSpreadsheet() {
                                     e.target.style.height = `${e.target.scrollHeight}px`;
                                   }
                                 }}
-                                onKeyDown={handleKeyDown}
+                                onBlur={() => {
+                                  // Потеря фокуса (клик по другой ячейке/вне сетки) =
+                                  // выход из edit-mode. Значение уже в state через
+                                  // handleValueChange — ничего дополнительно
+                                  // сохранять не нужно.
+                                  setEditingCell(null);
+                                }}
+                                onKeyDown={(event) => {
+                                  // Escape — выйти из edit без явного reverta
+                                  // (значение уже записано через handleValueChange;
+                                  // если надо откатить — Ctrl+Z).
+                                  if (event.key === 'Escape') {
+                                    event.preventDefault();
+                                    setEditingCell(null);
+                                    return;
+                                  }
+                                  handleKeyDown(event);
+                                }}
                                 onPaste={handlePaste}
                                 rows={1}
                               wrap={effectiveWrapCells ? 'soft' : 'off'}
@@ -9782,15 +10013,28 @@ export function DatabaseSpreadsheet() {
                     </span>
                     <div className="flex items-center justify-between">
                         <span className="text-blue-400 text-[10px]">{formatTime(lastAction.time)}</span>
-                        {lastUndo && (
-                        <button
-                            type="button"
-                            onClick={handleUndo}
-                            className="rounded bg-white px-2 py-1 text-[10px] font-semibold text-blue-700 shadow-sm border border-blue-100 hover:bg-blue-50 transition-colors"
-                        >
-                            Отменить
-                        </button>
-                        )}
+                        <div className="flex items-center gap-1.5">
+                          {lastUndo && (
+                          <button
+                              type="button"
+                              onClick={handleUndo}
+                              title="Ctrl+Z"
+                              className="rounded bg-white px-2 py-1 text-[10px] font-semibold text-blue-700 shadow-sm border border-blue-100 hover:bg-blue-50 transition-colors"
+                          >
+                              Отменить
+                          </button>
+                          )}
+                          {lastRedo && (
+                          <button
+                              type="button"
+                              onClick={handleRedo}
+                              title="Ctrl+Y / Ctrl+Shift+Z"
+                              className="rounded bg-white px-2 py-1 text-[10px] font-semibold text-blue-700 shadow-sm border border-blue-100 hover:bg-blue-50 transition-colors"
+                          >
+                              Повторить
+                          </button>
+                          )}
+                        </div>
                     </div>
                   </div>
                 </div>
@@ -9922,32 +10166,6 @@ export function DatabaseSpreadsheet() {
         </aside>
         )}
       </div>
-      {showBottomHorizontalScrollbar && fixedScrollbarViewport.width > 0 && (
-        <div
-          className="pointer-events-none fixed bottom-2 z-40"
-          style={{ left: fixedScrollbarViewport.left, width: fixedScrollbarViewport.width }}
-        >
-          <div className="rounded border border-gray-300 bg-white/90 px-1 py-0.5 shadow-md backdrop-blur">
-            <input
-              type="range"
-              min={0}
-              max={horizontalSliderMax}
-              value={horizontalSliderValue}
-              onChange={(event) => {
-                const wrapper = tableWrapperRef.current;
-                const next = Number(event.target.value);
-                if (wrapper) {
-                  wrapper.scrollLeft = next;
-                }
-                setHorizontalScrollLeft(next);
-              }}
-              disabled={horizontalScrollMax <= 0}
-              className="pointer-events-auto block h-2 w-full cursor-ew-resize accent-gray-700 disabled:cursor-default"
-              aria-label="Горизонтальный скролл таблицы"
-            />
-          </div>
-        </div>
-      )}
       {filterMenu && (
         <div
           ref={filterMenuRef}
