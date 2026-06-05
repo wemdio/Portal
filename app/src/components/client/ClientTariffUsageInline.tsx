@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { authFetchJson } from '@/lib/authFetch';
+import { clientApiFetch } from '@/lib/clientFetcher';
 
 export type ClientLimitMetric =
   | 'max_contacts'
@@ -47,7 +47,7 @@ export function ClientTariffUsageInline({
     let cancelled = false;
     void (async () => {
       try {
-        const data = await authFetchJson<TariffUsageResponse>('/api/client/tariff');
+        const data = await clientApiFetch<TariffUsageResponse>('/tariff');
         if (cancelled) return;
         setUsage(data.usage?.[metric] ?? null);
       } catch {
