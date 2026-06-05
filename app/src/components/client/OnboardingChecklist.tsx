@@ -218,16 +218,27 @@ function ChecklistRow({
       ? 'var(--cp-paper-faint)'
       : 'var(--cp-paper-mute)';
 
-  const Wrapper: React.ElementType = item.href ? Link : 'div';
-  const wrapperProps = item.href
-    ? ({ href: item.href as Route } as { href: Route })
+  const presetNeedsManager = item.id === 'preset' && !item.done;
+  const displayHref = item.href ?? (presetNeedsManager ? '/client/support' : null);
+  const displayReason = presetNeedsManager
+    ? 'Менеджер создает email-аккаунты, прогревает почты и подключает их к вашему пресету. Имя отправителя он возьмет из поля «От чьего лица ведём диалог» в брифе, заполните его, если еще не заполнили.'
+    : item.blocked_reason;
+  const actionLabel = presetNeedsManager
+    ? 'Написать менеджеру в чат →'
+    : isNext && displayHref
+      ? 'Сделать сейчас →'
+      : null;
+
+  const Wrapper: React.ElementType = displayHref ? Link : 'div';
+  const wrapperProps = displayHref
+    ? ({ href: displayHref as Route } as { href: Route })
     : ({} as Record<string, never>);
 
   return (
     <Wrapper
       {...wrapperProps}
       className={`flex items-start gap-3 px-3.5 py-3 rounded-xl ${
-        item.href ? 'cursor-pointer' : ''
+        displayHref ? 'cursor-pointer' : ''
       } ${isNext ? '' : 'neu-row'}`}
       style={
         isNext
@@ -237,7 +248,7 @@ function ChecklistRow({
             }
           : undefined
       }
-      title={item.blocked_reason ?? undefined}
+      title={displayReason ?? undefined}
     >
       <span
         className="inline-flex items-center justify-center h-6 w-6 rounded-full shrink-0 mt-0.5"
@@ -270,17 +281,17 @@ function ChecklistRow({
         >
           {item.label}
         </p>
-        {isNext && item.href && (
+        {actionLabel && (
           <p
             className="text-xs font-semibold mt-2 ds-mono"
             style={{ color: 'var(--cp-amber)' }}
           >
-            Сделать сейчас →
+            {actionLabel}
           </p>
         )}
-        {!item.done && item.blocked_reason && (
+        {!item.done && displayReason && (
           <p className="text-[11px] mt-1" style={{ color: 'var(--cp-text-m)' }}>
-            {item.blocked_reason}
+            {displayReason}
           </p>
         )}
       </div>
