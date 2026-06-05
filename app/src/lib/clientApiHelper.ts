@@ -4,6 +4,7 @@ import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteC
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import type { ClientAccessRow } from '@/lib/clientAccess';
+import { withApiTiming } from '@/lib/apiTiming';
 
 export function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -50,20 +51,36 @@ export function demoReadonlyError(): NextResponse {
 export async function requireClientAuth(
   req: NextRequest,
 ): Promise<{ auth: ClientAuthResult } | { error: NextResponse }> {
+  const timingMeta = {
+    route: req.nextUrl.pathname,
+    method: req.method,
+  };
+
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return { error: jsonError('Unauthorized', 401) };
 
   const supabase = createAuthedSupabaseClient(token);
-  const { data: { user } } = await supabase.auth.getUser();
+  const { data: { user } } = await withApiTiming(
+    'client.auth.getUser',
+    () => supabase.auth.getUser(),
+    timingMeta,
+  );
   if (!user) return { error: jsonError('Unauthorized', 401) };
   if (!supabaseAdmin) return { error: jsonError('Server misconfigured', 500) };
   if (!supabaseInstantly) return { error: jsonError('Server misconfigured', 500) };
+  const admin = supabaseAdmin;
+  const instantly = supabaseInstantly;
 
-  const { data: profile } = await supabaseAdmin
-    .from('profiles')
-    .select('role, is_demo')
-    .eq('id', user.id)
-    .single();
+  const { data: profile } = await withApiTiming(
+    'client.auth.profile',
+    () =>
+      admin
+        .from('profiles')
+        .select('role, is_demo')
+        .eq('id', user.id)
+        .single(),
+    timingMeta,
+  );
 
   const role = profile?.role ?? null;
   if (role !== 'client' && role !== 'admin') {
@@ -84,10 +101,15 @@ export async function requireClientAuth(
     return { error: demoReadonlyError() };
   }
 
-  const { data: rows } = await supabaseInstantly
-    .from('client_instantly_access')
-    .select('resource_type, resource_id, instantly_account_id')
-    .eq('client_user_id', user.id);
+  const { data: rows } = await withApiTiming(
+    'client.auth.accessRows',
+    () =>
+      instantly
+        .from('client_instantly_access')
+        .select('resource_type, resource_id, instantly_account_id')
+        .eq('client_user_id', user.id),
+    timingMeta,
+  );
 
   return {
     auth: {

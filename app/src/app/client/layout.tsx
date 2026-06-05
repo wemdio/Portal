@@ -23,6 +23,7 @@ import { ClientSidebar } from '@/components/client/ClientSidebar';
 import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
 import { DemoBanner } from '@/components/client/DemoBanner';
 import { PaymentLockedBanner } from '@/components/client/PaymentLockedBanner';
+import { ClientPortalProvider } from '@/lib/clientPortalContext';
 
 const inter = Inter({
   subsets: ['latin', 'cyrillic'],
@@ -120,11 +121,13 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   };
 
   const activeId = useMemo(() => resolveActiveNavId(pathname), [pathname]);
+  const portalContextValue = useMemo(() => ({ portalMode: navMode }), [navMode]);
 
   const currentLocaleDesc = LOCALE_DESCRIPTORS[locale];
 
   return (
     <PortalLoadingProvider>
+    <ClientPortalProvider value={portalContextValue}>
     <GlobalTextTranslator locale={locale} />
     <LanguageLoadingOverlay />
     <div className={`client-portal ${inter.variable} ${jetbrainsMono.variable} flex flex-col min-h-screen`}>
@@ -265,6 +268,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         </main>
       </div>
     </div>
+    </ClientPortalProvider>
     </PortalLoadingProvider>
   );
 }
