@@ -126,6 +126,9 @@ export interface AutoPipelineConfig {
    * даёт ~630 ready/день ≈ 19k/мес.
    */
   daily_target_employers: number;
+  /** Потолок новых контактов (routed) в сутки. Добор стопает enrichment, как
+   *  только сумма routed за текущее окно достигла этого числа. null = без капа. */
+  daily_contacts_target: number | null;
   last_run_at: string | null;
   /**
    * Распределение нагрузки. 'burst' — старый поведение (один прогон ~35 мин).
@@ -277,6 +280,15 @@ async function closeStaleRuns(clientUserId: string, staleMinutes = 8): Promise<v
     .eq('status', 'running')
     .is('heartbeat_at', null)
     .lt('started_at', startedCutoff);
+}
+
+/** ISO начала текущего окна добора: самое позднее наступление startHourUtc:00 UTC <= now. */
+function currentWindowStartIso(startHourUtc: number): string {
+  const nowMs = Date.now();
+  const d = new Date(nowMs);
+  d.setUTCHours(startHourUtc, 0, 0, 0);
+  if (d.getTime() > nowMs) d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString();
 }
 
 /**
@@ -755,6 +767,40 @@ export async function runAutoPipelineForClient(
       }
     }
 
+    // Дневной кап по контактам: если за текущее окно уже залито >= target
+    // (учитывая прошлые прогоны/резюмы сегодня) — выходим сразу, не парсим HH.
+    const dailyContactsTarget =
+      typeof config.daily_contacts_target === 'number' && config.daily_contacts_target > 0
+        ? config.daily_contacts_target
+        : null;
+    let contactsToday = 0;
+    if (dailyContactsTarget && supabaseAdmin) {
+      const windowStartIso = currentWindowStartIso(config.parse_window_start_utc);
+      const { data: priorRuns } = await supabaseAdmin
+        .from('client_auto_pipeline_runs')
+        .select('routed_count')
+        .eq('client_user_id', clientUserId)
+        .neq('id', runId)
+        .gte('started_at', windowStartIso)
+        .in('status', ['completed', 'failed']);
+      contactsToday = (priorRuns ?? []).reduce(
+        (sum, r) => sum + (Number((r as { routed_count?: number }).routed_count) || 0),
+        0,
+      );
+      if (contactsToday >= dailyContactsTarget) {
+        logPhase('daily-target-already-met', { contactsToday, target: dailyContactsTarget });
+        await finishRunRow(runId, {
+          status: 'completed',
+          parsed_count: 0,
+          new_count: 0,
+          routed_count: 0,
+          was_dry_run: config.dry_run,
+        });
+        await updateConfigLastRun(clientUserId, 'completed');
+        return { ...emptyResult(runId), status: 'completed' };
+      }
+    }
+
     // 2. HH parse.
     const since = new Date(Date.now() - config.hh_date_window_hours * 60 * 60 * 1000);
     const excludePatterns = buildExcludePatterns(config.hh_extra_exclude_patterns ?? []);
@@ -919,6 +965,7 @@ export async function runAutoPipelineForClient(
     let failedCount = 0;
     let droppedIncomplete = 0;
     let interrupted = false;
+    let targetReached = false;
 
     logPhase('enrich-start', { fresh: fresh.length, parsed: employers.length, dryRun: config.dry_run });
     const CHUNK_SIZE = 500;
@@ -1153,6 +1200,20 @@ export async function runAutoPipelineForClient(
       // освобождаем память перед следующим. chunk + enrichments + seenUpserts +
       // groupedLeads выходят из scope на след. итерации, GC их собирает (фикс OOM).
       await upsertSeenEmployers(seenUpserts);
+
+      // Дневной кап: как только суммарно за сегодня (прошлые прогоны + текущий)
+      // набрали target контактов — стопаем enrichment. Это УСПЕШНЫЙ стоп (не
+      // interrupted) → run завершится 'completed', демон не перезапустит.
+      if (dailyContactsTarget && contactsToday + routedCount >= dailyContactsTarget) {
+        targetReached = true;
+        logPhase('daily-target-reached', {
+          contactsToday,
+          runRouted: routedCount,
+          total: contactsToday + routedCount,
+          target: dailyContactsTarget,
+        });
+        break;
+      }
     } // конец for (chunkStart) — chunk loop
     logPhase('enrich-done', { routed: routedCount, stored: storedCount, skipped: skippedCount, emailValid: emailValidCount });
 
@@ -1183,7 +1244,7 @@ export async function runAutoPipelineForClient(
     // воркер на следующем тике перезапустил и докатил остаток (resume через
     // дедуп seen + идемпотентный createLeads). Иначе 'completed'.
     const finalStatus: 'completed' | 'failed' = interrupted ? 'failed' : 'completed';
-    logPhase('finalizing', { status: finalStatus, routed: routedCount, stored: storedCount, skipped: skippedCount, failed: failedCount });
+    logPhase('finalizing', { status: finalStatus, targetReached, routed: routedCount, stored: storedCount, skipped: skippedCount, failed: failedCount });
     // 8. Finalize run row.
     await finishRunRow(runId, {
       status: finalStatus,
