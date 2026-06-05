@@ -23,6 +23,13 @@ export interface SignalEnrichmentModalState {
   totalRows: number;
   currentRow: number;
   error: string | null;
+  /**
+   * Epoch ms момента запуска активной задачи. Заполняется владельцем
+   * (`DatabaseSpreadsheet`) — здесь только читается для отрисовки
+   * «Процесс начат в HH:MM / Примерное время окончания HH:MM».
+   * `null` пока задача не запущена.
+   */
+  startedAt: number | null;
   detectedJob: { id: string; total: number; processed: number; progress: number } | null;
   selectedExtractors: ExtractorKey[];
   presetId: SignalPresetId | string | null;
@@ -79,6 +86,14 @@ function formatDuration(seconds: number): string {
   const hours = Math.floor(minutes / 60);
   const remMin = minutes % 60;
   return remMin > 0 ? `~${hours} ч ${remMin} мин` : `~${hours} ч`;
+}
+
+/** Локальное HH:MM (без секунд) — для UI плашек «начат в» / «окончание в». */
+function formatTimeHHMM(epochMs: number): string {
+  const d = new Date(epochMs);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
 }
 
 /** Russian noun pluralization (1 сигнал, 2 сигнала, 5 сигналов). */
@@ -334,6 +349,19 @@ export default function SignalEnrichmentModal({
                   </span>
                 ))}
               </div>
+              {state.isProcessing && state.startedAt != null && (
+                <>
+                  <p className="mt-2 text-[11px] text-indigo-600">
+                    Процесс начат в: {formatTimeHHMM(state.startedAt)}
+                  </p>
+                  {estimatedTotalSeconds > 0 && (
+                    <p className="mt-0.5 text-[11px] text-indigo-600">
+                      Примерное время окончания:{' '}
+                      {formatTimeHHMM(state.startedAt + estimatedTotalSeconds * 1000)}
+                    </p>
+                  )}
+                </>
+              )}
               <p className="mt-2 text-[11px] text-indigo-600">
                 {urlsWithData > 0
                   ? `Ожидаемое время: ${formatDuration(estimatedTotalSeconds)} (${urlsWithData.toLocaleString('ru-RU')} URL × ~${secondsPerUrl}с, ~${EFFECTIVE_PROD_PARALLELISM} параллельно)`

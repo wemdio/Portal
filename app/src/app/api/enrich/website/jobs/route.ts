@@ -41,6 +41,7 @@ export async function GET(req: NextRequest) {
     const activeJob = (jobs ?? [])[0] as {
       id: string; status: string; extraction_type: string;
       total: number; processed: number;
+      created_at: string;
       spreadsheet_tab_id: string | null;
       result_col_index: number | null;
       result_col_header: string | null;
@@ -84,6 +85,9 @@ export async function GET(req: NextRequest) {
         total: activeJob.total,
         processed: activeJob.processed,
         progress,
+        // Нужно UI'ю чтобы показать «Процесс начат в HH:MM»
+        // при resume'е (когда пользователь закрыл и вернулся).
+        created_at: activeJob.created_at,
         spreadsheet_tab_id: activeJob.spreadsheet_tab_id,
         result_col_index: activeJob.result_col_index,
         result_col_header: activeJob.result_col_header,
