@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import type { HHSearchConfig, HHVacancyRow, ParserJobStatus } from '@/types';
 import { Download, ExternalLink, Copy, Check, ChevronLeft, ChevronRight, Database, Table2 } from 'lucide-react';
 
+type BusyAction = 'csv' | 'excel' | 'copy' | 'database' | null;
+
 type Props = {
   items: HHVacancyRow[];
   count: number;
@@ -11,6 +13,7 @@ type Props = {
   offset: number;
   loading: boolean;
   actionsBusy: boolean;
+  busyAction?: BusyAction;
   exportProgress?: string | null;
   addToDatabaseDisabled?: boolean;
   jobId?: string | null;
@@ -189,6 +192,7 @@ export function VacancyResults({
   offset,
   loading,
   actionsBusy,
+  busyAction = null,
   exportProgress,
   addToDatabaseDisabled,
   jobId,
@@ -236,6 +240,10 @@ export function VacancyResults({
   const filters = buildFilters(searchConfig);
   const canPrev = currentPage > 1;
   const canNext = currentPage < totalPages;
+  const isDatabaseBusy = busyAction === 'database';
+  const isCsvBusy = busyAction === 'csv';
+  const isExcelBusy = busyAction === 'excel';
+  const isCopyBusy = busyAction === 'copy';
   const maxButtons = 5;
   const pageButtons: Array<number | 'ellipsis'> = [];
   const start = Math.max(1, Math.min(currentPage - 2, totalPages - maxButtons + 1));
@@ -304,7 +312,7 @@ export function VacancyResults({
 
           <div className="grid grid-cols-4 gap-2 w-full sm:flex sm:w-auto sm:flex-wrap sm:justify-end sm:gap-2 sm:items-center">
             {exportProgress ? (
-              <div className="col-span-4 flex items-center justify-center gap-2 text-xs text-gray-500 sm:col-span-1 sm:mr-1">
+              <div className="col-span-4 flex min-h-9 items-center justify-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 text-xs text-gray-600 sm:col-span-1 sm:mr-1">
                 <div className="h-3.5 w-3.5 rounded-full border-2 border-gray-300 border-t-transparent animate-spin flex-shrink-0" />
                 <span className="whitespace-nowrap">{exportProgress}</span>
               </div>
@@ -316,8 +324,13 @@ export function VacancyResults({
               disabled={addToDbDisabled}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
               title="Откроет “Базы” и добавит результаты новой вкладкой"
+              aria-busy={isDatabaseBusy}
             >
-              <Database className="h-4 w-4" />
+              {isDatabaseBusy ? (
+                <span className="h-4 w-4 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
+              ) : (
+                <Database className="h-4 w-4" />
+              )}
               В базу
             </button>
             ) : null}
@@ -326,8 +339,13 @@ export function VacancyResults({
               onClick={onExportCsv}
               disabled={actionsDisabled}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+              aria-busy={isCsvBusy}
             >
-              <Download className="h-4 w-4" />
+              {isCsvBusy ? (
+                <span className="h-4 w-4 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
+              ) : (
+                <Download className="h-4 w-4" />
+              )}
               CSV
             </button>
             <button
@@ -335,8 +353,13 @@ export function VacancyResults({
               onClick={onExportExcel}
               disabled={actionsDisabled}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+              aria-busy={isExcelBusy}
             >
-              <Download className="h-4 w-4" />
+              {isExcelBusy ? (
+                <span className="h-4 w-4 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
+              ) : (
+                <Download className="h-4 w-4" />
+              )}
               Excel
             </button>
             <button
@@ -344,8 +367,13 @@ export function VacancyResults({
               onClick={onCopy}
               disabled={actionsDisabled}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+              aria-busy={isCopyBusy}
             >
-              <Copy className="h-4 w-4" />
+              {isCopyBusy ? (
+                <span className="h-4 w-4 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
+              ) : (
+                <Copy className="h-4 w-4" />
+              )}
               Копировать
             </button>
           </div>
