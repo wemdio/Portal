@@ -12,6 +12,7 @@
 
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 import { processManualRun } from '@/lib/jobs/manualScoringRunner';
+import { resolveMailganerScoringConcurrency } from '@/lib/jobs/mailganerScoringThrottle';
 
 const WORKER_ID = 'manual-scoring';
 
@@ -35,6 +36,11 @@ async function main(): Promise<void> {
   }
 
   log('info', `Started. Endpoint=${endpoint.url}`);
+  const scoringConcurrency = resolveMailganerScoringConcurrency({
+    endpointUrl: endpoint.url,
+    defaultConcurrency: 5,
+  });
+  log('info', `Scoring concurrency=${scoringConcurrency}`);
 
   // Cleanup истёкших прогонов при старте
   try {
@@ -75,6 +81,7 @@ async function main(): Promise<void> {
       const result = await processManualRun({
         runId: run.id,
         endpoint,
+        concurrency: scoringConcurrency,
         onProgress: async (processed) => {
           await supabase
             .from('client_manual_score_runs')

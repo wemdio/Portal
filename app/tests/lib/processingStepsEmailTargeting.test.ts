@@ -129,6 +129,48 @@ describe('stepFindEmails', () => {
     expect(out[2][2]).toBe('already@b.ru'); // сохранили
     expect(scrapeEmails).toHaveBeenCalledTimes(1); // только a.ru
   });
+  it('prefers HH company_site_url over vacancy and employer hh.ru links', async () => {
+    (scrapeEmails as jest.Mock).mockResolvedValue({ emails: ['hello@acme.ru'] });
+    const data = [
+      ['vacancy_id', 'name', 'url', 'company_name', 'company_url', 'company_site_url'],
+      [
+        '123',
+        'Marketing manager',
+        'https://hh.ru/vacancy/123',
+        'Acme',
+        'https://hh.ru/employer/456',
+        'https://acme.ru',
+      ],
+    ];
+
+    const out = await stepFindEmails(data, noopProgress, undefined, { target: 'separate' });
+
+    expect(scrapeEmails).toHaveBeenCalledTimes(1);
+    expect(scrapeEmails).toHaveBeenCalledWith('https://acme.ru', expect.any(Object));
+    expect(out[0]).toEqual([...data[0], 'Email']);
+    expect(out[1][6]).toBe('hello@acme.ru');
+  });
+
+  it('does not scrape HH vacancy or employer links when no real company site is present', async () => {
+    (scrapeEmails as jest.Mock).mockResolvedValue({ emails: ['wrong@hh.ru'] });
+    const data = [
+      ['vacancy_id', 'name', 'url', 'company_name', 'company_url', 'company_site_url'],
+      [
+        '123',
+        'Marketing manager',
+        'https://hh.ru/vacancy/123',
+        'Acme',
+        'https://hh.ru/employer/456',
+        '',
+      ],
+    ];
+
+    const out = await stepFindEmails(data, noopProgress, undefined, { target: 'separate' });
+
+    expect(scrapeEmails).not.toHaveBeenCalled();
+    expect(out[0]).toEqual([...data[0], 'Email']);
+    expect(out[1][6]).toBe('');
+  });
 });
 
 describe('stepValidateEmails', () => {

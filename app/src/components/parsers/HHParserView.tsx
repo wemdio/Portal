@@ -216,6 +216,16 @@ function downloadBlob(content: string, mime: string, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
+function waitForBrowserPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+      resolve();
+      return;
+    }
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
 function toUiError(error: unknown, fallback: string): UiError {
   if (error instanceof ApiError) {
     return {
@@ -273,6 +283,7 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
   const [resultsPage, setResultsPage] = useState(1);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportKind, setExportKind] = useState<'csv' | 'excel' | null>(null);
   const [copying, setCopying] = useState(false);
   const [addingToDb, setAddingToDb] = useState(false);
   const [exportProgress, setExportProgress] = useState<string | null>(null);
@@ -324,12 +335,15 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
     }
   }, []);
 
-  const fetchAllResults = useCallback(async (jobId: string) => {
+  const fetchAllResults = useCallback(async (jobId: string, progressLabel = 'Экспорт') => {
     const all: HHVacancyRow[] = [];
     let offset = 0;
     let total = Infinity;
 
     while (offset < total) {
+      if (offset === 0) {
+        setExportProgress(`${progressLabel}: загружаем результаты`);
+      }
       const data = await apiFetch<ResultsResponse>(`/api/parsers/hh/${jobId}/results?limit=${exportLimit}&offset=${offset}`, {
         method: 'GET',
       });
@@ -339,18 +353,17 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
       if (chunk.length === 0) break;
       offset += chunk.length;
       if (total > 0) {
-        setExportProgress(`${Math.min(offset, total)} / ${total}`);
+        setExportProgress(`${progressLabel}: ${Math.min(offset, total)} / ${total}`);
       }
     }
 
-    setExportProgress(null);
     return all;
   }, []);
 
-  const resolveExportItems = useCallback(async () => {
+  const resolveExportItems = useCallback(async (progressLabel = 'Экспорт') => {
     if (!activeJobId) return results;
     if (resultsCount > 0 && results.length >= resultsCount) return results;
-    return fetchAllResults(activeJobId);
+    return fetchAllResults(activeJobId, progressLabel);
   }, [activeJobId, fetchAllResults, results, resultsCount]);
 
   useEffect(() => {
@@ -551,58 +564,80 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
 
   const exportCsv = useCallback(async () => {
     setExporting(true);
+    setExportKind('csv');
+    setExportProgress('CSV: готовим выгрузку');
     setError(null);
     try {
-      const items = await resolveExportItems();
+      await waitForBrowserPaint();
+      const items = await resolveExportItems('CSV');
       if (items.length === 0) {
         setToast({ tone: 'error', message: 'Нет данных для экспорта' });
         return;
       }
+      setExportProgress(`CSV: формируем файл (${items.length} строк)`);
+      await waitForBrowserPaint();
       const csv = '\uFEFF' + buildCsv(items);
+      setExportProgress('CSV: запускаем скачивание');
       downloadBlob(csv, 'text/csv;charset=utf-8', `hh_results_${activeJobId ?? 'job'}.csv`);
       setToast({ tone: 'success', message: `CSV: скачано ${items.length} строк` });
     } catch (e: unknown) {
       setError(toUiError(e, 'Ошибка экспорта CSV'));
     } finally {
       setExporting(false);
+      setExportKind(null);
+      setExportProgress(null);
     }
   }, [activeJobId, resolveExportItems]);
 
   const exportExcel = useCallback(async () => {
     setExporting(true);
+    setExportKind('excel');
+    setExportProgress('Excel: готовим выгрузку');
     setError(null);
     try {
-      const items = await resolveExportItems();
+      await waitForBrowserPaint();
+      const items = await resolveExportItems('Excel');
       if (items.length === 0) {
         setToast({ tone: 'error', message: 'Нет данных для экспорта' });
         return;
       }
+      setExportProgress(`Excel: формируем файл (${items.length} строк)`);
+      await waitForBrowserPaint();
       const html = buildExcelHtml(items);
+      setExportProgress('Excel: запускаем скачивание');
       downloadBlob(html, 'application/vnd.ms-excel;charset=utf-8', `hh_results_${activeJobId ?? 'job'}.xls`);
       setToast({ tone: 'success', message: `Excel: скачано ${items.length} строк` });
     } catch (e: unknown) {
       setError(toUiError(e, 'Ошибка экспорта Excel'));
     } finally {
       setExporting(false);
+      setExportKind(null);
+      setExportProgress(null);
     }
   }, [activeJobId, resolveExportItems]);
 
   const copyResults = useCallback(async () => {
     setCopying(true);
+    setExportProgress('Копируем: готовим данные');
     setError(null);
     try {
-      const items = await resolveExportItems();
+      await waitForBrowserPaint();
+      const items = await resolveExportItems('Копируем');
       if (items.length === 0) return;
+      setExportProgress(`Копируем: ${items.length} строк`);
+      await waitForBrowserPaint();
       await writeTextToClipboard(buildTsv(items));
       setToast({ tone: 'success', message: `Скопировано строк: ${items.length}` });
     } catch (e: unknown) {
       setError(toUiError(e, 'Ошибка копирования результатов'));
     } finally {
       setCopying(false);
+      setExportProgress(null);
     }
   }, [resolveExportItems]);
 
   const actionsBusy = exporting || copying || addingToDb;
+  const busyAction = exportKind ?? (copying ? 'copy' : addingToDb ? 'database' : null);
 
   useEffect(() => {
     if (!toast) return;
@@ -616,8 +651,10 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
       return;
     }
     setAddingToDb(true);
+    setExportProgress('Базы: готовим компании');
     try {
-      const items = await resolveExportItems();
+      await waitForBrowserPaint();
+      const items = await resolveExportItems('Базы');
       if (items.length === 0) {
         setToast({ tone: 'error', message: 'Нет результатов для добавления' });
         return;
@@ -696,6 +733,7 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
       setToast({ tone: 'error', message: e instanceof Error ? e.message : 'Ошибка добавления в базу' });
     } finally {
       setAddingToDb(false);
+      setExportProgress(null);
     }
   }, [activeJobId, resolveExportItems]);
 
@@ -773,6 +811,7 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
           offset={resultsOffset}
           loading={resultsLoading}
           actionsBusy={actionsBusy}
+          busyAction={busyAction}
           exportProgress={exportProgress}
           addToDatabaseDisabled={addingToDb}
           jobId={activeJob?.id ?? null}

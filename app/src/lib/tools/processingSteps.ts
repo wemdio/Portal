@@ -9,6 +9,8 @@ import {
   deduplicateRows,
   deduplicateByEmail,
   findColumnIndex,
+  findPreferredSiteColumnIndexes,
+  getPreferredSiteUrl,
   processInPool,
   extractEmail,
 } from './dfybUtils';
@@ -208,8 +210,8 @@ export async function stepFindEmails(
 ): Promise<string[][]> {
   let header = [...data[0]];
   let body = data.slice(1).map((r) => [...r]);
-  const siteIdx = findColumnIndex(header, 'сайт', 'site', 'website', 'url', 'домен', 'domain');
-  if (siteIdx < 0) { await onProgress(100); return data; }
+  const siteColumnIndexes = findPreferredSiteColumnIndexes(header);
+  if (siteColumnIndexes.length === 0) { await onProgress(100); return data; }
 
   const existingEmailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
   const wantsSeparate = options?.target === 'separate';
@@ -242,7 +244,7 @@ export async function stepFindEmails(
   // при resume, и сохраняет ручной ввод когда target='same').
   // Для 'separate' это значит «не перезатираем найденный ранее scrape-результат».
   const toProcess = body
-    .map((row, i) => ({ row, i, url: (row[siteIdx] || '').trim() }))
+    .map((row, i) => ({ row, i, url: getPreferredSiteUrl(row, siteColumnIndexes) }))
     .filter((r) => r.url && !extractEmail(r.row[targetIdx] || ''));
 
   if (toProcess.length === 0) { await onProgress(100); return [header, ...body]; }
@@ -406,7 +408,7 @@ export async function stepEnrich(
       // tarpit website's fetch is aborted at ENRICH_PER_SITE_TIMEOUT_MS.
       const text = await fetchAndExtract(item.url, { timeout: 15_000, signal });
       if (text) newBody[item.i][targetDescIdx] = text.slice(0, 2000);
-    } catch (err) {
+    } catch {
       if (signal?.aborted) {
         timedOut += 1;
         // No log per-site to avoid spamming — aggregate count printed below.
