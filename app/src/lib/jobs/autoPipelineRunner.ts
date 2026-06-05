@@ -48,8 +48,8 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { findNewHhEmployers, deriveDomain, type HhEmployer } from './hhAutoParser';
-import { fetchScoreForDomain } from './clientEndpointClient';
 import { getOrFetchScore, emptyCacheStats } from './mailganerScoreCache';
+import { resolveMailganerScoringConcurrency } from './mailganerScoringThrottle';
 import { validateEmailForAutoPipeline, type AutoPipelineEmailValidation } from './autoPipelineEmailValidation';
 import { calcPacing } from './autoPipelinePacing';
 import { fetchTopUpFromBaseOfBases } from './baseOfBasesSource';
@@ -908,7 +908,10 @@ export async function runAutoPipelineForClient(
 
     // 4. Pacing — nightly растягивает enrichment на окно [start..end] UTC,
     //    burst прогоняет прямо сейчас.
-    const ENRICH_CONCURRENCY = 5;
+    const ENRICH_CONCURRENCY = resolveMailganerScoringConcurrency({
+      endpointUrl: config.endpoint_url,
+      defaultConcurrency: 5,
+    });
     const pacing = calcPacing({
       pacing: config.parse_pacing,
       window: {

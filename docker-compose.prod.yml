@@ -954,6 +954,7 @@ services:
       - MAILGANER_ENDPOINT_URL=${MAILGANER_ENDPOINT_URL}
       - MAILGANER_API_KEY=${MAILGANER_API_KEY}
       - MAILGANER_AUTH_SCHEME=${MAILGANER_AUTH_SCHEME}
+      - MAILGANER_SCORING_CONCURRENCY=${MAILGANER_SCORING_CONCURRENCY:-}
     stop_grace_period: 30s
     deploy:
       resources:
@@ -982,6 +983,7 @@ services:
       - MAILGANER_ENDPOINT_URL=${MAILGANER_ENDPOINT_URL}
       - MAILGANER_API_KEY=${MAILGANER_API_KEY}
       - MAILGANER_AUTH_SCHEME=${MAILGANER_AUTH_SCHEME}
+      - MAILGANER_SCORING_CONCURRENCY=${MAILGANER_SCORING_CONCURRENCY:-}
     stop_grace_period: 30s
     deploy:
       resources:
@@ -1011,6 +1013,7 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - AUTOPIPELINE_TICK_MS=${AUTOPIPELINE_TICK_MS:-600000}
       - AUTOPIPELINE_MAX_ATTEMPTS=${AUTOPIPELINE_MAX_ATTEMPTS:-6}
+      - MAILGANER_SCORING_CONCURRENCY=${MAILGANER_SCORING_CONCURRENCY:-}
     # Прогон идёт чанками по 500. На SIGTERM (редеплой) даём текущему чанку
     # доделать enrichment + append + seen, затем воркер останавливается
     # (interrupted → resume на след. тике). 20 мин — с запасом на один чанк.
