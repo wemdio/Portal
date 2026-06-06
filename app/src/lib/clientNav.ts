@@ -255,6 +255,21 @@ export const CLIENT_NAV_MANUAL_SCORING: ClientNavItem = {
 };
 
 /**
+ * BYO-почты (пилот). Top-level пункт, видим ТОЛЬКО пользователям из пилотного
+ * allowlist'а (env BYO_MAILBOX_PILOT_USER_IDS). ClientNavList подгружает признак
+ * через /api/client/mailboxes/enabled и рендерит условно — у остальных клиентов
+ * пункта не существует.
+ */
+export const CLIENT_NAV_MAILBOXES: ClientNavItem = {
+  id: 'mailboxes',
+  label: 'Мои почты',
+  labelEn: 'My mailboxes',
+  href: '/client/mailboxes',
+  description: 'Подключите свои почтовые ящики для отправки кампаний',
+  descriptionEn: 'Connect your own mailboxes for sending campaigns',
+};
+
+/**
  * Возвращает группы, отфильтрованные под текущий mode. В 'manual' — без
  * изменений; в 'auto' — оставляем только items из AUTO_MODE_VISIBLE_ITEM_IDS
  * и группы, в которых что-то осталось.
@@ -310,6 +325,9 @@ export function resolveActiveNavId(pathname: string): string | null {
     pathname.startsWith('/client/manual-scoring/')
   ) {
     return 'manual-scoring';
+  }
+  if (pathname === '/client/mailboxes' || pathname.startsWith('/client/mailboxes/')) {
+    return 'mailboxes';
   }
   // Кампании — both the list (/client) and the detail page (/client/campaigns/:id).
   if (pathname === '/client' || pathname.startsWith('/client/campaigns')) {
