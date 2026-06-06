@@ -36,3 +36,29 @@ export function resolveMailganerScoringConcurrency({
 
   return Math.max(1, Math.floor(normalizedDefault / 2));
 }
+
+/**
+ * Concurrency для Mailganer-скоринга, где `defaultConcurrency` — УЖЕ осознанно
+ * выставленное значение (background_scorer_state.concurrency у bob-scorer'а,
+ * который скорит большой файл и наполняет BoB-кэш). В отличие от
+ * resolveMailganerScoringConcurrency, НЕ уполовинивает default — только
+ * применяет env-оверрайд MAILGANER_SCORING_CONCURRENCY, если он задан.
+ *
+ * Так MAILGANER_SCORING_CONCURRENCY становится единым рычагом для ВСЕХ путей к
+ * Mailganer: добор/ручной скоринг — через resolveMailganerScoringConcurrency,
+ * большой файл/BoB-филлер — через эту функцию.
+ */
+export function applyMailganerConcurrencyOverride({
+  endpointUrl,
+  defaultConcurrency,
+  env = process.env,
+}: {
+  endpointUrl: string | null | undefined;
+  defaultConcurrency: number;
+  env?: EnvLike;
+}): number {
+  const normalizedDefault = Math.max(1, Math.floor(defaultConcurrency));
+  if (!isMailganerEndpointUrl(endpointUrl)) return normalizedDefault;
+  const configured = positiveInteger(env[MAILGANER_CONCURRENCY_ENV]);
+  return configured ?? normalizedDefault;
+}
