@@ -26,6 +26,7 @@
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 import { runBobScoringTick, loadScorerState } from '@/lib/jobs/bobScoringRunner';
 import { processNextLargeScoreWork } from '@/lib/jobs/largeScoreEngine';
+import { applyMailganerConcurrencyOverride } from '@/lib/jobs/mailganerScoringThrottle';
 
 const WORKER_ID = 'bob-bg-scorer';
 
@@ -73,7 +74,12 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const concurrency = state.concurrency ?? 5;
+      // Единый троттл к Mailganer: env MAILGANER_SCORING_CONCURRENCY (если задан)
+      // переопределяет state.concurrency — для скоринга большого файла тоже.
+      const concurrency = applyMailganerConcurrencyOverride({
+        endpointUrl: endpoint.url,
+        defaultConcurrency: state.concurrency ?? 5,
+      });
 
       // 1. Большие пользовательские файлы (large_score_jobs) — ПРИОРИТЕТ.
       //    Работают даже если фоновый BoB-филлер выключен (enabled=false):
