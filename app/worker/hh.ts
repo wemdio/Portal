@@ -1,6 +1,7 @@
 import { runHHParserJob } from '@/lib/parsers/hhRunner';
 import { runHHArchiveJob } from '@/lib/parsers/hhArchive/runner';
 import { runYandexDirectJob } from '@/lib/parsers/yandexDirect/runner';
+import { runAtsParserJob } from '@/lib/parsers/atsRunner';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
@@ -18,6 +19,9 @@ let archiveJobActive = false;
 // аккаунт. Источник данных (xmlstock.com) не пересекается с hh.ru, поэтому
 // может бежать параллельно обычным HH-парс задачам.
 let yandexDirectJobActive = false;
+// ATS-парсер (Greenhouse/Lever/Ashby) — глобально один за раз: ходит по тысячам
+// внешних бордов + Clearbit, держим concurrency=1, чтобы не словить rate-limit.
+let atsJobActive = false;
 
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
@@ -61,6 +65,7 @@ async function claimHHJob(): Promise<string | null> {
     .from('parser_jobs')
     .select('id')
     .eq('status', 'pending')
+    .eq('parser_type', 'hh_vacancies')
     .order('created_at', { ascending: true })
     .limit(1)
     .maybeSingle();
@@ -129,6 +134,34 @@ async function claimYandexDirectJob(): Promise<string | null> {
   return claimed?.id ?? null;
 }
 
+/**
+ * Атомарно клеймит один pending ATS parser_jobs (parser_type='ats_companies').
+ * Глобальная concurrency=1 (atsJobActive): много внешних запросов + Clearbit.
+ */
+async function claimAtsJob(): Promise<string | null> {
+  if (atsJobActive) return null;
+  const db = requireSupabaseAdmin(log);
+
+  const { data: pending } = await db
+    .from('parser_jobs')
+    .select('id')
+    .eq('status', 'pending')
+    .eq('parser_type', 'ats_companies')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (!pending) return null;
+
+  const { data: claimed } = await db
+    .from('parser_jobs')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+  return claimed?.id ?? null;
+}
+
 async function pollOnce(): Promise<boolean> {
   // Сначала пробуем обычный HH-парсер (concurrency=3, обычно есть свободный слот).
   if (running.size < MAX_CONCURRENCY) {
@@ -140,6 +173,28 @@ async function pollOnce(): Promise<boolean> {
       })();
       running.add(task);
       void task.finally(() => running.delete(task));
+      return true;
+    }
+  }
+
+  // ATS-парсер (Greenhouse/Lever/Ashby) — глобально один на воркер.
+  if (!atsJobActive) {
+    const atsJobId = await claimAtsJob();
+    if (atsJobId) {
+      atsJobActive = true;
+      const task = (async () => {
+        log('info', `Running ATS parser job ${atsJobId}`);
+        try {
+          await runAtsParserJob(atsJobId);
+        } catch (err) {
+          log('error', `ATS parser job ${atsJobId} crashed`, err);
+        }
+      })();
+      running.add(task);
+      void task.finally(() => {
+        running.delete(task);
+        atsJobActive = false;
+      });
       return true;
     }
   }
