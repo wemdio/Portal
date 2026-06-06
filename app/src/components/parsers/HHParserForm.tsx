@@ -272,7 +272,7 @@ export function HHParserForm({ onStart, busy, clientMode }: Props) {
             </div>
             <div>
               <label className="ds-eyebrow mb-1.5 block">регион</label>
-              <RegionPicker value={areas} onChange={setAreas} />
+              <RegionPicker value={areas} onChange={setAreas} clientMode />
             </div>
           </div>
         ) : (
