@@ -154,7 +154,8 @@ function parseHhSearchLink(value: string): LinkParseResult {
 }
 
 export function HHParserForm({ onStart, busy, clientMode }: Props) {
-  const [mode, setMode] = useState<'link' | 'manual'>('link');
+  // Clients default to the friendly fields; operators keep the link-first flow.
+  const [mode, setMode] = useState<'link' | 'manual'>(clientMode ? 'manual' : 'link');
   const [searchLink, setSearchLink] = useState('');
   const [text, setText] = useState('');
   const [area, setArea] = useState('');
@@ -207,59 +208,112 @@ export function HHParserForm({ onStart, busy, clientMode }: Props) {
     [text, areas],
   );
 
-  // ── Client portal: a deliberately small, jargon-free form. The default
-  // operator form asks for a raw HH.ru search URL or an "area id" — both
-  // hostile to a non-technical client. Here it's two fields: who to look for
-  // and where. Operators (clientMode off) keep the full form untouched. ──
+  // Client portal: a small, jargon-free form. The operator form defaults to
+  // pasting a raw HH.ru URL or typing an "area id"; both are hostile to a
+  // non-technical client. Here: friendly fields by default, plus the link
+  // option kept (clients asked for it) behind a toggle. Operators untouched.
   if (clientMode) {
-    const ready = Boolean(text.trim());
+    const manualReady = Boolean(text.trim());
+    const ready = mode === 'link' ? linkReady : manualReady;
+    const cfg: HHSearchConfig | undefined =
+      mode === 'link'
+        ? (linkConfig ? { ...linkConfig, fetch_employers: true } : undefined)
+        : clientConfig;
+    const submit = () => {
+      if (!busy && ready && cfg) void onStart(cfg);
+    };
+
     return (
       <div className="neu-card p-5 sm:p-6">
-        <div className="mb-5">
+        <div className="mb-4">
           <h2 className="text-base font-semibold m-0" style={{ color: 'var(--cp-paper)' }}>
             Найти компании по вакансиям
           </h2>
           <p className="mt-1 text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
-            Компании, которые сейчас нанимают, растут и имеют бюджет — хорошие цели для рассылки.
+            Компании, которые сейчас нанимают, растут и имеют бюджет: хорошие цели для рассылки.
           </p>
         </div>
 
-        <div className="space-y-4">
-          <div>
-            <label className="ds-eyebrow mb-1.5 block">кого ищете</label>
+        {/* Two ways in: fill simple fields (default) or paste a ready HH.ru link. */}
+        <div
+          className="inline-flex rounded-md p-0.5 mb-4"
+          style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' }}
+        >
+          {([['manual', 'Заполнить поля'], ['link', 'Вставить ссылку HH.ru']] as const).map(([m, label]) => {
+            const on = mode === m;
+            return (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setMode(m)}
+                className="rounded px-3 py-1.5 text-xs font-medium transition-colors"
+                style={on ? { background: 'var(--cp-paper)', color: 'var(--cp-ink)' } : { color: 'var(--cp-paper-mute)' }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {mode === 'manual' ? (
+          <div className="space-y-4">
+            <div>
+              <label className="ds-eyebrow mb-1.5 block">кого ищете</label>
+              <input
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+                placeholder="например: менеджер по продажам"
+                className="ds-input w-full text-sm"
+              />
+              <p className="mt-1.5 text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                Роль или должность, по ней ищем открытые вакансии.
+              </p>
+            </div>
+            <div>
+              <label className="ds-eyebrow mb-1.5 block">регион</label>
+              <RegionPicker value={areas} onChange={setAreas} />
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <label className="ds-eyebrow block">ссылка на поиск hh.ru</label>
             <input
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && text.trim() && !busy) onStart(clientConfig);
-              }}
-              placeholder="например: менеджер по продажам"
+              value={searchLink}
+              onChange={(e) => setSearchLink(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+              placeholder="https://hh.ru/search/vacancy?text=…"
               className="ds-input w-full text-sm"
             />
-            <p className="mt-1.5 text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
-              Роль или должность — по ней ищем открытые вакансии.
+            <p className="text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
+              Откройте нужный поиск на hh.ru и скопируйте ссылку из адресной строки браузера.
             </p>
+            {linkError ? (
+              <p className="text-[11px]" style={{ color: 'var(--cp-red)' }}>{linkError}</p>
+            ) : linkConfig ? (
+              <p className="ds-mono text-[11px]" style={{ color: 'var(--cp-paper-mute)' }}>
+                распознано: «{linkConfig.text || 'без запроса'}»
+                {linkConfig.area
+                  ? `, регион ${Array.isArray(linkConfig.area) ? linkConfig.area.join(', ') : linkConfig.area}`
+                  : ''}
+              </p>
+            ) : null}
           </div>
+        )}
 
-          <div>
-            <label className="ds-eyebrow mb-1.5 block">регион</label>
-            <RegionPicker value={areas} onChange={setAreas} />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3 pt-1">
-            <button
-              type="button"
-              onClick={() => (ready && !busy ? onStart(clientConfig) : undefined)}
-              disabled={busy || !ready}
-              className="ds-btn-primary inline-flex items-center gap-2 px-5 disabled:opacity-40"
-            >
-              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-              Запустить
-            </button>
-            <span className="text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
-              На выходе: компании с сайтами и описанием.
-            </span>
-          </div>
+        <div className="flex flex-wrap items-center gap-3 pt-4">
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy || !ready}
+            className="ds-btn-primary inline-flex items-center gap-2 px-5 disabled:opacity-40"
+          >
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+            Запустить
+          </button>
+          <span className="text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
+            На выходе: компании с сайтами и описанием.
+          </span>
         </div>
       </div>
     );
