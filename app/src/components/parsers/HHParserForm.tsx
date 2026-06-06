@@ -3,10 +3,13 @@
 import { useMemo, useState } from 'react';
 import { Info, Play, Loader2, Briefcase } from 'lucide-react';
 import type { HHSearchConfig } from '@/types';
+import { RegionPicker } from './RegionPicker';
 
 type Props = {
   onStart: (config: HHSearchConfig) => Promise<void>;
   busy: boolean;
+  /** Client portal: render the simplified, jargon-free form. Operators keep the full one. */
+  clientMode?: boolean;
 };
 
 function parseArea(value: string): string | string[] | undefined {
@@ -150,11 +153,13 @@ function parseHhSearchLink(value: string): LinkParseResult {
   };
 }
 
-export function HHParserForm({ onStart, busy }: Props) {
+export function HHParserForm({ onStart, busy, clientMode }: Props) {
   const [mode, setMode] = useState<'link' | 'manual'>('link');
   const [searchLink, setSearchLink] = useState('');
   const [text, setText] = useState('');
   const [area, setArea] = useState('');
+  // clientMode region selection (area ids). Empty = all Russia (113), per HH default.
+  const [areas, setAreas] = useState<string[]>([]);
   const [salaryFrom, setSalaryFrom] = useState('');
   const [currency, setCurrency] = useState('RUR');
   const [dateFrom, setDateFrom] = useState('');
@@ -190,6 +195,75 @@ export function HHParserForm({ onStart, busy }: Props) {
     }
     return { ...manualConfig, fetch_employers: true };
   }, [linkConfig, manualConfig, mode]);
+
+  // Client form config: just role text + picked regions. No URL paste, no
+  // salary/date/per-page knobs.
+  const clientConfig: HHSearchConfig = useMemo(
+    () => ({
+      text,
+      area: areas.length === 0 ? undefined : areas.length === 1 ? areas[0] : areas,
+      fetch_employers: true,
+    }),
+    [text, areas],
+  );
+
+  // ── Client portal: a deliberately small, jargon-free form. The default
+  // operator form asks for a raw HH.ru search URL or an "area id" — both
+  // hostile to a non-technical client. Here it's two fields: who to look for
+  // and where. Operators (clientMode off) keep the full form untouched. ──
+  if (clientMode) {
+    const ready = Boolean(text.trim());
+    return (
+      <div className="neu-card p-5 sm:p-6">
+        <div className="mb-5">
+          <h2 className="text-base font-semibold m-0" style={{ color: 'var(--cp-paper)' }}>
+            Найти компании по вакансиям
+          </h2>
+          <p className="mt-1 text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+            Компании, которые сейчас нанимают, растут и имеют бюджет — хорошие цели для рассылки.
+          </p>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <label className="ds-eyebrow mb-1.5 block">кого ищете</label>
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && text.trim() && !busy) onStart(clientConfig);
+              }}
+              placeholder="например: менеджер по продажам"
+              className="ds-input w-full text-sm"
+            />
+            <p className="mt-1.5 text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
+              Роль или должность — по ней ищем открытые вакансии.
+            </p>
+          </div>
+
+          <div>
+            <label className="ds-eyebrow mb-1.5 block">регион</label>
+            <RegionPicker value={areas} onChange={setAreas} />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 pt-1">
+            <button
+              type="button"
+              onClick={() => (ready && !busy ? onStart(clientConfig) : undefined)}
+              disabled={busy || !ready}
+              className="ds-btn-primary inline-flex items-center gap-2 px-5 disabled:opacity-40"
+            >
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+              Запустить
+            </button>
+            <span className="text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
+              На выходе: компании с сайтами и описанием.
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6" style={{ borderTop: '3px solid #6366F1' }}>
