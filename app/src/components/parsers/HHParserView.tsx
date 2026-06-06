@@ -781,7 +781,7 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
         </div>
       ) : null}
 
-      <HHParserForm onStart={start} busy={busy} />
+      <HHParserForm onStart={start} busy={busy} clientMode={clientMode} />
 
       {clientMode && activeJob ? (
         <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-900">

@@ -1,6 +1,6 @@
 'use client';
 
-import type { ParserJob, PartitionProgressDetail } from '@/types';
+import type { ParserJob, AtsParserJob, PartitionProgressDetail } from '@/types';
 import { isStoppedByUser, JobStatus } from './JobStatus';
 import { ChevronRight, RefreshCw, Clock } from 'lucide-react';
 
@@ -9,13 +9,17 @@ const STAGE_LABELS: Record<string, string> = {
   partitioning: 'Подготавливаем запрос',
   fetching_vacancies: 'Ищем вакансии',
   fetching_employers: 'Подгружаем работодателей',
+  // ATS parser stages
+  loading_companies: 'Загружаем компании',
+  scanning: 'Сканируем вакансии',
+  enriching: 'Определяем домены',
   saving: 'Сохраняем в базу',
   completed: 'Завершено',
   failed: 'Ошибка',
   cancelled: 'Остановлено',
 };
 
-function resolveStageLabel(job: ParserJob) {
+function resolveStageLabel(job: ParserJob | AtsParserJob) {
   if (job.progress_stage === 'partitioning') {
     const detail = getPartitionDetail(job);
     if (detail) {
@@ -42,7 +46,7 @@ function resolveStageLabel(job: ParserJob) {
   return 'В процессе';
 }
 
-function getPartitionDetail(job: ParserJob): PartitionProgressDetail | null {
+function getPartitionDetail(job: ParserJob | AtsParserJob): PartitionProgressDetail | null {
   if (!job.progress_detail) return null;
   const d = job.progress_detail;
   if (typeof d.total_subqueries !== 'number' || d.total_subqueries <= 1) return null;
@@ -50,7 +54,7 @@ function getPartitionDetail(job: ParserJob): PartitionProgressDetail | null {
 }
 
 type Props = {
-  jobs: ParserJob[];
+  jobs: Array<ParserJob | AtsParserJob>;
   activeJobId: string | null;
   onSelect: (jobId: string) => void;
   onRefresh: () => void;
