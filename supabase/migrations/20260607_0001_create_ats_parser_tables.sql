@@ -89,3 +89,8 @@ create policy ats_companies_delete_own_job
         and j.user_id = auth.uid()
     )
   );
+
+-- Grants. service_role (the parser workers) bypasses RLS to write results;
+-- authenticated users reach only their own rows through the RLS policies above.
+grant all on public.ats_companies to service_role;
+grant select, insert, update, delete on public.ats_companies to authenticated;
