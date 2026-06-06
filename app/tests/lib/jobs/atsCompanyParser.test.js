@@ -1,6 +1,6 @@
 /** @jest-environment node */
 
-const {
+import {
   buildCompanyLeads,
   domainFromJobUrls,
   exportCompanyLeadsToCsv,
@@ -10,7 +10,7 @@ const {
   parseCompanyCsv,
   pickDomainFromSuggestions,
   roleTagsForTitle,
-} = require('../../../src/lib/jobs/atsCompanyParser');
+} from '../../../src/lib/jobs/atsCompanyParser';
 
 describe('atsCompanyParser — normalizers', () => {
   it('normalizes a Greenhouse job (uses company_name and updated_at)', () => {
