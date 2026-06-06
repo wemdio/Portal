@@ -29,6 +29,7 @@ import {
   extractFirstWebsite,
   extractCityFromAddress,
 } from './baseOfBasesSource';
+import { applyMailganerConcurrencyOverride } from './mailganerScoringThrottle';
 
 export interface BackgroundScorerState {
   id: number;
@@ -125,9 +126,13 @@ export async function runBobScoringTick(
   let activeCount = 0;
   let cacheHitCount = 0;
 
-  // RPS-потолок берём из конфига (background_scorer_state.concurrency).
-  // Фоллбэк 5 — на случай если миграция ещё не применена и поля нет в строке.
-  const concurrency = state.concurrency ?? 5;
+  // RPS-потолок берём из конфига (background_scorer_state.concurrency), но env
+  // MAILGANER_SCORING_CONCURRENCY (если задан) переопределяет — единый рычаг для
+  // всех путей к Mailganer. Фоллбэк 5 — если миграция concurrency ещё не применена.
+  const concurrency = applyMailganerConcurrencyOverride({
+    endpointUrl: endpoint.url,
+    defaultConcurrency: state.concurrency ?? 5,
+  });
   let cursor = 0;
   async function worker() {
     while (true) {
