@@ -153,3 +153,56 @@ export interface HHVacancyRow {
   created_at: string;
 }
 
+// ── ATS parser (Greenhouse / Lever / Ashby) ──
+
+export type AtsType = 'greenhouse' | 'lever' | 'ashby';
+
+export interface AtsSearchConfig {
+  /** Human-readable label shown in the jobs list (niche label or custom query). */
+  text: string;
+  ats: AtsType[];
+  /** Niche preset key (see lib/parsers/atsNiches). */
+  niche?: string;
+  /** Free-text role keywords (comma-separated); overrides the niche preset. */
+  match?: string;
+  /** Companies scanned per ATS (0 = all; capped server-side). */
+  companies_limit?: number;
+  /** Resolve company domains via enrichment (default true). */
+  enrich?: boolean;
+}
+
+export interface AtsParserJob {
+  id: string;
+  user_id: string;
+  parser_type: 'ats_companies';
+  status: ParserJobStatus;
+  config: AtsSearchConfig;
+  total_found?: number | null;
+  total_parsed?: number | null;
+  progress_percent?: number | null;
+  progress_stage?: string | null;
+  progress_detail?: PartitionProgressDetail | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+}
+
+export interface AtsCompanyRow {
+  id: string;
+  job_id: string;
+  company: string;
+  domain?: string | null;
+  ats: string;
+  slug: string;
+  country?: string | null;
+  cities: string[];
+  roles_found: string[];
+  job_count: number;
+  job_titles: string[];
+  job_urls: string[];
+  careers_url?: string | null;
+  latest_posted_at?: string | null;
+  created_at: string;
+}
+
