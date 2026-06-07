@@ -300,9 +300,11 @@ export function VacancyResults({
           <div className="min-w-0">
             <div className="flex items-start justify-between gap-3">
               <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-emerald-100 text-emerald-600">
-                  <Table2 className="h-4 w-4" />
-                </span>
+                {!clientMode && (
+                  <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-emerald-100 text-emerald-600">
+                    <Table2 className="h-4 w-4" />
+                  </span>
+                )}
                 Результаты
               </h3>
               {jobId ? (
@@ -515,7 +517,7 @@ export function VacancyResults({
                       title={v.name}
                     >
                       <span className="line-clamp-2">{v.name}</span>
-                      <ExternalLink className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                      {!clientMode && <ExternalLink className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />}
                     </a>
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-700">

@@ -103,9 +103,11 @@ export function JobsList({
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
       <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between gap-4 flex-nowrap">
         <div className="flex items-center gap-2">
-          <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-amber-100 text-amber-600">
-            <Clock className="h-4 w-4" />
-          </span>
+          {!clientMode && (
+            <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-amber-100 text-amber-600">
+              <Clock className="h-4 w-4" />
+            </span>
+          )}
           <h3 className="text-lg font-semibold text-gray-900 whitespace-nowrap">
             {clientMode ? 'Мои запросы' : 'История запусков'} ({displayJobs.length})
           </h3>
