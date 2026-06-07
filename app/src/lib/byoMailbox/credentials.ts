@@ -8,8 +8,11 @@ import { encryptJsonAes256Gcm, decryptJsonAes256Gcm } from '@/lib/cryptoGcm';
  */
 
 export interface MailboxSecret {
-  smtpPassword: string;
+  /** app-password для SMTP (auth_type='password'). */
+  smtpPassword?: string;
   imapPassword?: string;
+  /** refresh-token для OAuth (auth_type='oauth_google'). */
+  oauthRefreshToken?: string;
 }
 
 function getCipherKey(): string {
@@ -26,7 +29,11 @@ function getCipherKey(): string {
 /** AES-256-GCM seal — значение для client_mailbox_accounts.secret_encrypted. */
 export function sealMailboxSecret(secret: MailboxSecret): string {
   return encryptJsonAes256Gcm(
-    { smtpPassword: secret.smtpPassword, imapPassword: secret.imapPassword },
+    {
+      smtpPassword: secret.smtpPassword,
+      imapPassword: secret.imapPassword,
+      oauthRefreshToken: secret.oauthRefreshToken,
+    },
     getCipherKey(),
   );
 }
@@ -35,7 +42,8 @@ export function sealMailboxSecret(secret: MailboxSecret): string {
 export function unsealMailboxSecret(sealed: string): MailboxSecret {
   const decoded = decryptJsonAes256Gcm<MailboxSecret>(sealed, getCipherKey());
   return {
-    smtpPassword: String(decoded?.smtpPassword ?? ''),
+    smtpPassword: decoded?.smtpPassword ? String(decoded.smtpPassword) : undefined,
     imapPassword: decoded?.imapPassword ? String(decoded.imapPassword) : undefined,
+    oauthRefreshToken: decoded?.oauthRefreshToken ? String(decoded.oauthRefreshToken) : undefined,
   };
 }

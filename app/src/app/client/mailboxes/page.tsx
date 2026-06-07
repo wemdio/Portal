@@ -106,6 +106,42 @@ export default function ClientMailboxesPage() {
     void fetchMailboxes();
   }, [fetchMailboxes]);
 
+  // Возврат из Google OAuth: ?connected=<email> или ?oauth_error=<code>
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search);
+    const connected = sp.get('connected');
+    const oerr = sp.get('oauth_error');
+    if (connected) {
+      setOkMsg(`Подключено через Google: ${connected} ✓`);
+      window.history.replaceState({}, '', '/client/mailboxes');
+      void fetchMailboxes();
+    } else if (oerr) {
+      setFormError('Не удалось подключить через Google: ' + oerr);
+      window.history.replaceState({}, '', '/client/mailboxes');
+    }
+  }, [fetchMailboxes]);
+
+  async function connectGoogle() {
+    setFormError(null);
+    setOkMsg(null);
+    try {
+      const headers = await authHeaders();
+      if (!headers) {
+        setFormError('Не авторизованы');
+        return;
+      }
+      const res = await fetch('/api/client/mailboxes/oauth/google/start', { headers });
+      const data = (await res.json().catch(() => ({}))) as { url?: string; error?: string };
+      if (!res.ok || !data.url) {
+        setFormError(data.error || `Не удалось начать OAuth (${res.status})`);
+        return;
+      }
+      window.location.href = data.url;
+    } catch (e) {
+      setFormError(e instanceof Error ? e.message : 'Ошибка сети');
+    }
+  }
+
   async function onConnect(e: React.FormEvent) {
     e.preventDefault();
     setFormError(null);
@@ -179,9 +215,24 @@ export default function ClientMailboxesPage() {
         но быстро улетят в спам и могут быть заблокированы.
       </div>
 
-      {/* Форма подключения */}
+      {/* Gmail / Workspace — подключение в один клик через OAuth */}
+      <div className="mb-6 rounded-lg border border-zinc-800 p-4">
+        <h2 className="mb-1 text-sm font-semibold text-zinc-300">Gmail / Google Workspace — в один клик</h2>
+        <p className="mb-3 text-xs text-zinc-500">
+          Без пароля приложения: войдёте на странице Google и подтвердите доступ. Рекомендуемый способ для Gmail/Workspace.
+        </p>
+        <button
+          type="button"
+          onClick={connectGoogle}
+          className="rounded-md border border-zinc-600 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-100 hover:border-zinc-400"
+        >
+          Подключить через Google
+        </button>
+      </div>
+
+      {/* Подключение по паролю приложения / произвольный SMTP */}
       <form onSubmit={onConnect} className="mb-8 rounded-lg border border-zinc-800 p-4">
-        <h2 className="mb-3 text-sm font-semibold text-zinc-300">Подключить ящик</h2>
+        <h2 className="mb-3 text-sm font-semibold text-zinc-300">Подключить по паролю приложения / другой SMTP</h2>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="text-sm">
