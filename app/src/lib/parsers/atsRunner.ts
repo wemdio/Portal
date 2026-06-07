@@ -17,7 +17,7 @@ import {
   pickDomainFromSuggestions,
   type AtsNormalizedJob,
 } from '@/lib/jobs/atsCompanyParser';
-import { resolveAtsMatch } from '@/lib/parsers/atsNiches';
+import { buildRolesRegex, buildCountryRegex } from '@/lib/parsers/atsFilters';
 import type { AtsSearchConfig } from '@/types';
 
 const execFileP = promisify(execFile);
@@ -82,14 +82,6 @@ async function clearbitDomain(name: string): Promise<string> {
   return '';
 }
 
-function titleRegex(config: AtsSearchConfig): RegExp {
-  try {
-    return new RegExp(resolveAtsMatch(config.niche, config.match), 'i');
-  } catch {
-    return /.*/;
-  }
-}
-
 export async function runAtsParserJob(jobId: string): Promise<void> {
   const db = supabaseAdmin;
   if (!db) {
@@ -120,7 +112,17 @@ export async function runAtsParserJob(jobId: string): Promise<void> {
     const finalAts = atsList.length ? atsList : [...SUPPORTED];
     const limit = Math.min(MAX_LIMIT, Math.max(0, Number(config.companies_limit ?? DEFAULT_LIMIT)));
     const enrich = config.enrich !== false;
-    const re = titleRegex(config);
+    const rolesRe = buildRolesRegex(config.text);
+    const countryRe = buildCountryRegex(config.countries);
+    const withinDays = Number(config.posted_within_days ?? 0);
+    const cutoffIso =
+      withinDays > 0 ? new Date(Date.now() - withinDays * 86_400_000).toISOString() : null;
+    const matches = (j: AtsNormalizedJob): boolean => {
+      if (!rolesRe.test(j.title)) return false;
+      if (countryRe && !countryRe.test(`${j.location} ${j.country}`)) return false;
+      if (cutoffIso && (!j.posted_at || j.posted_at < cutoffIso)) return false;
+      return true;
+    };
 
     await setProgress({
       progress_stage: 'loading_companies',
@@ -148,7 +150,7 @@ export async function runAtsParserJob(jobId: string): Promise<void> {
         const payload = await fetchJson(postingsUrl(c.ats, c.slug));
         for (const raw of extractJobs(c.ats, payload)) {
           const norm = normalizeJob(c.ats, raw, { slug: c.slug, companyName: c.name });
-          if (norm && re.test(norm.title)) jobs.push(norm);
+          if (norm && matches(norm)) jobs.push(norm);
         }
       } catch {
         /* board moved off ATS, private, or rate-limited — skip */

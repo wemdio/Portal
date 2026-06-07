@@ -62,6 +62,8 @@ type Props = {
   refreshing?: boolean;
   /** Фактическое количество строк в hh_vacancies для активного запуска */
   activeJobParsedCount?: number;
+  /** Client portal: readable query (no OR-pipes), plain-language errors. */
+  clientMode?: boolean;
 };
 
 const MAX_JOBS = 20;
@@ -90,6 +92,7 @@ export function JobsList({
   busy,
   refreshing,
   activeJobParsedCount,
+  clientMode,
 }: Props) {
   const displayJobs = jobs.slice(0, MAX_JOBS);
   return (
@@ -159,7 +162,8 @@ export function JobsList({
                       <span className="text-xs text-gray-400">{formatDate(job.created_at)}</span>
                     </div>
                     <div className="mt-2 text-sm text-gray-700 line-clamp-2">
-                      <span className="font-medium text-gray-900">Запрос:</span> {job.config?.text}
+                      <span className="font-medium text-gray-900">Запрос:</span>{' '}
+                      {clientMode ? (job.config?.text ?? '').replace(/\s*\|\s*/g, ', ') : job.config?.text}
                     </div>
                     {isPartitioning ? (
                       <div className="mt-2 rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2">
@@ -217,7 +221,11 @@ export function JobsList({
                         ) : null}
                         {job.error_message ? (
                           <span className={`${stoppedByUser ? 'text-amber-700' : 'text-red-600'} line-clamp-1`}>
-                            {stoppedByUser ? 'Остановлено' : job.error_message}
+                            {stoppedByUser
+                              ? 'Остановлено'
+                              : clientMode
+                                ? 'Не удалось завершить — попробуйте запустить снова'
+                                : job.error_message}
                           </span>
                         ) : null}
                       </div>
