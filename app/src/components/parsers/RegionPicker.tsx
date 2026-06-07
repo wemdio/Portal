@@ -50,10 +50,25 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
     return Array.from(groups.entries());
   }, [suggestions]);
 
+  // «Вся Россия» (area 113) already covers every city, so mixing it with
+  // specific cities is meaningless. In clientMode make them mutually exclusive.
+  const ALL_RUSSIA_ID = '113';
   function add(id: string) {
     if (!id) return;
     if (selectedSet.has(id)) return;
     if (value.length >= max) return;
+    if (clientMode) {
+      if (id === ALL_RUSSIA_ID) {
+        // Picking «Вся Россия» clears any specific cities.
+        onChange([ALL_RUSSIA_ID]);
+        setQuery('');
+        return;
+      }
+      // Picking a specific city drops the all-Russia selection.
+      onChange([...value.filter((x) => x !== ALL_RUSSIA_ID), id]);
+      setQuery('');
+      return;
+    }
     onChange([...value, id]);
     setQuery('');
   }

@@ -65,7 +65,11 @@ services:
       - TG_TARGET_API_HASH=${TG_TARGET_API_HASH}
       - TG_TARGET_SESSION=${TG_TARGET_SESSION}
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ >/dev/null 2>&1 || exit 1"]
+      # 127.0.0.1, НЕ localhost: next 16.2.x слушает только IPv4 (0.0.0.0:3000), а
+      # localhost в контейнере резолвится сначала в ::1 (IPv6) → wget localhost
+      # ловит connection refused и healthcheck ложно красит контейнер unhealthy
+      # (сайт при этом полностью жив через IPv4/nginx). См. инцидент 07.06.2026.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
