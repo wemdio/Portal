@@ -47,18 +47,24 @@ const RUNNING_EMPTY_MESSAGES = [
   'Еще чуть-чуть — скоро все появится.',
 ] as const;
 
-function RunningEmptyState() {
+function RunningEmptyState({ clientMode }: { clientMode?: boolean }) {
   const [index, setIndex] = useState(0);
   useEffect(() => {
+    // Clients get one honest line — no rotating carousel of contentless reassurances.
+    if (clientMode) return;
     const intervalId = window.setInterval(() => {
       setIndex((prev) => (prev + 1) % RUNNING_EMPTY_MESSAGES.length);
     }, 25000);
     return () => window.clearInterval(intervalId);
-  }, []);
+  }, [clientMode]);
   return (
     <div className="px-6 py-12 text-center text-gray-500">
       <div className="mx-auto mb-3 h-8 w-8 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
-      <div className="text-sm">{RUNNING_EMPTY_MESSAGES[index]}</div>
+      <div className="text-sm">
+        {clientMode
+          ? 'Идёт поиск вакансий на HH.ru. Это может занять несколько минут.'
+          : RUNNING_EMPTY_MESSAGES[index]}
+      </div>
     </div>
   );
 }
@@ -294,9 +300,11 @@ export function VacancyResults({
           <div className="min-w-0">
             <div className="flex items-start justify-between gap-3">
               <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-emerald-100 text-emerald-600">
-                  <Table2 className="h-4 w-4" />
-                </span>
+                {!clientMode && (
+                  <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-emerald-100 text-emerald-600">
+                    <Table2 className="h-4 w-4" />
+                  </span>
+                )}
                 Результаты
               </h3>
               {jobId ? (
@@ -466,7 +474,7 @@ export function VacancyResults({
 
       {items.length === 0 ? (
         jobStatus === 'running' ? (
-          <RunningEmptyState key={jobId ?? 'running'} />
+          <RunningEmptyState key={jobId ?? 'running'} clientMode={clientMode} />
         ) : (!hasJob || loading) ? (
           <LoadingEmptyState />
         ) : (
@@ -477,11 +485,24 @@ export function VacancyResults({
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">Вакансия</th>
-                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">Компания</th>
-                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">Регион</th>
-                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">ЗП</th>
-                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">Дата</th>
+                {/* Client: align headers to their columns (text left, numbers right).
+                    Operators keep the original centered headers. */}
+                {([
+                  { label: 'Вакансия', align: 'left' },
+                  { label: 'Компания', align: 'left' },
+                  { label: 'Регион', align: 'left' },
+                  { label: 'ЗП', align: 'right' },
+                  { label: 'Дата', align: 'right' },
+                ] as const).map(({ label, align }) => (
+                  <th
+                    key={label}
+                    className={`px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50 ${
+                      clientMode ? (align === 'right' ? 'text-right' : 'text-left') : 'text-center'
+                    }`}
+                  >
+                    {label}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -496,7 +517,7 @@ export function VacancyResults({
                       title={v.name}
                     >
                       <span className="line-clamp-2">{v.name}</span>
-                      <ExternalLink className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                      {!clientMode && <ExternalLink className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />}
                     </a>
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-700">

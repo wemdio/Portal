@@ -84,6 +84,8 @@ function MultiSelect({
 
 export function YandexMapsParserForm(props: {
   busy?: boolean;
+  /** Client portal: client-language wording (no «URL», «парсер»). */
+  clientMode?: boolean;
   onCreate: (payload: {
     search_urls: string[];
     max_results: number;
@@ -91,6 +93,7 @@ export function YandexMapsParserForm(props: {
     proxy: ProxyForm;
   }) => Promise<void> | void;
 }) {
+  const clientMode = props.clientMode;
   const [searchUrlsText, setSearchUrlsText] = useState('');
   const [maxResults, _setMaxResults] = useState(1000);
   const [headless, _setHeadless] = useState(true);
@@ -185,15 +188,17 @@ export function YandexMapsParserForm(props: {
                 <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
                   <Globe className="h-3.5 w-3.5" />
                 </span>
-                URL поиска
+                {clientMode ? 'Поиск по городам и категориям' : 'URL поиска'}
               </h3>
               <p className="text-sm text-gray-500 mt-1">
-                Добавьте ссылки на поиск в Яндекс.Картах вручную или сгенерируйте их по городам и рубрикам.
+                {clientMode
+                  ? 'Выберите города и категории бизнеса — соберём организации с Яндекс.Карт. Можно и вставить ссылки на поиск вручную.'
+                  : 'Добавьте ссылки на поиск в Яндекс.Картах вручную или сгенерируйте их по городам и рубрикам.'}
               </p>
             </div>
             <div className="flex flex-col items-end gap-1">
               <span className="inline-flex items-center rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-700/10">
-                {searchUrls.length} URL
+                {searchUrls.length} {clientMode ? 'запросов' : 'URL'}
               </span>
               <button
                 type="button"
@@ -201,7 +206,7 @@ export function YandexMapsParserForm(props: {
                 className="mt-1 inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 border border-amber-200 hover:bg-amber-100 hover:border-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-1"
               >
                 <Info className="h-3.5 w-3.5 mr-1" />
-                <span>Как работает парсер</span>
+                <span>{clientMode ? 'Как это работает' : 'Как работает парсер'}</span>
               </button>
             </div>
           </div>
@@ -303,7 +308,7 @@ export function YandexMapsParserForm(props: {
           disabled={props.busy || !canSubmit}
           className="inline-flex items-center justify-center rounded-lg bg-emerald-600 px-6 py-3 text-base font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all transform active:scale-95"
         >
-          {props.busy ? 'Запуск...' : 'Запустить парсинг'}
+          {props.busy ? 'Запуск...' : clientMode ? 'Запустить поиск' : 'Запустить парсинг'}
         </button>
       </div>
 
