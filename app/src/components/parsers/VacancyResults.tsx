@@ -539,9 +539,11 @@ export function VacancyResults({
                           target="_blank"
                           rel="noopener noreferrer"
                           className="text-xs text-blue-600 hover:underline"
-                          title="Открыть сайт компании"
+                          title={v.company_site_url ? 'Открыть сайт компании' : 'Открыть страницу компании на hh.ru'}
                         >
-                          сайт
+                          {/* Client: label honestly — «сайт» only for a real site;
+                              the HH employer page (fallback) is labelled «hh.ru». */}
+                          {clientMode && !v.company_site_url ? 'hh.ru' : 'сайт'}
                         </a>
                       </div>
                     ) : (
