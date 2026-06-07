@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { ATS_COUNTRY_CODES } from '@/lib/parsers/atsFilters';
 import type { AtsSearchConfig, AtsType } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -9,6 +10,7 @@ export const dynamic = 'force-dynamic';
 const PARSER_TYPE = 'ats_companies' as const;
 const SUPPORTED_ATS: AtsType[] = ['greenhouse', 'lever', 'ashby'];
 const MAX_COMPANIES_LIMIT = 2000;
+const VALID_COUNTRIES = new Set<string>(ATS_COUNTRY_CODES);
 
 function jsonError(message: string, status: number, extra?: Record<string, unknown>) {
   return NextResponse.json({ error: message, ...(extra ?? {}) }, { status });
@@ -67,17 +69,23 @@ function sanitizeConfig(raw: Partial<AtsSearchConfig>): AtsSearchConfig {
     : [];
   const finalAts = ats.length ? Array.from(new Set(ats)) : [...SUPPORTED_ATS];
 
+  const countries = Array.isArray(raw.countries)
+    ? Array.from(new Set(raw.countries.map((c) => String(c).toLowerCase()).filter((c) => VALID_COUNTRIES.has(c))))
+    : [];
+
+  const daysNum = Number(raw.posted_within_days);
+  const posted_within_days = Number.isFinite(daysNum) ? Math.max(0, Math.min(3650, Math.trunc(daysNum))) : 0;
+
   const limitNum = Number(raw.companies_limit);
   const companies_limit = Number.isFinite(limitNum) ? Math.max(0, Math.min(MAX_COMPANIES_LIMIT, Math.trunc(limitNum))) : 200;
 
   const text = String(raw.text ?? '').trim().slice(0, 200);
-  const match = raw.match ? String(raw.match).trim().slice(0, 300) : undefined;
 
   return {
     text: text || 'ATS companies',
     ats: finalAts,
-    niche: raw.niche ? String(raw.niche).slice(0, 64) : undefined,
-    match: match || undefined,
+    countries: countries.length ? countries : undefined,
+    posted_within_days,
     companies_limit,
     enrich: raw.enrich !== false,
   };
