@@ -41,6 +41,16 @@ describe('atsFilters — countries', () => {
     expect(re!.test('Berlin, Germany')).toBe(false);
   });
 
+  it('matches the common "City, ST" US format (state codes)', () => {
+    const re = buildCountryRegex(['us'])!;
+    expect(re.test('New York, NY')).toBe(true);
+    expect(re.test('San Francisco, CA')).toBe(true);
+    expect(re.test('Austin, TX')).toBe(true);
+    // Canadian province codes are not US states
+    expect(re.test('Toronto, ON')).toBe(false);
+    expect(re.test('Berlin, Germany')).toBe(false);
+  });
+
   it('remote matches remote postings', () => {
     const re = buildCountryRegex(['remote']);
     expect(re!.test('Remote — North America')).toBe(true);
