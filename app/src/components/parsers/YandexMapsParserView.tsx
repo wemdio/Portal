@@ -732,7 +732,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                       type="button"
                       onClick={handleSaveLinks}
                       disabled={jobActionId === activeJob.id}
-                      className="inline-flex items-center justify-center rounded-lg bg-white border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50"
+                      className={clientMode ? 'ds-btn-ghost inline-flex items-center justify-center disabled:opacity-40' : 'inline-flex items-center justify-center rounded-lg bg-white border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50'}
                     >
                       Сохранить
                     </button>
@@ -779,7 +779,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                       type="button"
                       onClick={handleExportExcel}
                       disabled={results.length === 0}
-                      className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-emerald-500 disabled:opacity-50 shadow-sm transition-colors"
+                      className={clientMode ? 'ds-btn-ghost inline-flex items-center gap-2 disabled:opacity-40' : 'inline-flex items-center gap-2 rounded-lg bg-emerald-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-emerald-500 disabled:opacity-50 shadow-sm transition-colors'}
                     >
                       <FileSpreadsheet className="h-3.5 w-3.5" />
                       Скачать Excel
@@ -788,7 +788,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                       type="button"
                       onClick={handleExportCsv}
                       disabled={!activeJobId}
-                      className="inline-flex items-center gap-2 rounded-lg bg-gray-900 text-white px-3 py-1.5 text-xs font-medium hover:bg-gray-800 disabled:opacity-50 shadow-sm transition-colors"
+                      className={clientMode ? 'ds-btn-ghost inline-flex items-center gap-2 disabled:opacity-40' : 'inline-flex items-center gap-2 rounded-lg bg-gray-900 text-white px-3 py-1.5 text-xs font-medium hover:bg-gray-800 disabled:opacity-50 shadow-sm transition-colors'}
                     >
                       <Download className="h-3.5 w-3.5" />
                       Скачать CSV
@@ -811,7 +811,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                       <p>Нет результатов</p>
                     </div>
                   ) : (
-                    <table className="min-w-full text-sm divide-y divide-gray-200">
+                    <table className={clientMode ? 'min-w-full divide-y divide-gray-200 cp-dense-table' : 'min-w-full text-sm divide-y divide-gray-200'}>
                       <thead className="bg-gray-50 sticky top-0 z-10 shadow-sm">
                         <tr>
                           <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-[350px]">Название</th>
