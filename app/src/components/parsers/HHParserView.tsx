@@ -784,7 +784,7 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
       <HHParserForm onStart={start} busy={busy} clientMode={clientMode} />
 
       {clientMode && activeJob ? (
-        <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+        <div className="rounded-xl px-4 py-3 text-sm" style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)', color: 'var(--cp-paper-mute)' }}>
           <ClientTariffUsageInline
             metric="max_rows"
             spent={Math.max(resultsCount, activeJob.total_parsed ?? 0, activeJob.total_found ?? 0)}
