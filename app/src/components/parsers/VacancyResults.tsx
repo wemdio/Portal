@@ -7,6 +7,9 @@ import { findRegionById } from '@/lib/parsers/hhArchive/regions';
 
 type BusyAction = 'csv' | 'excel' | 'copy' | 'database' | null;
 
+// Client view shows a short preview; the full base is available via the export.
+const CLIENT_PREVIEW_LIMIT = 20;
+
 type Props = {
   items: HHVacancyRow[];
   count: number;
@@ -253,7 +256,9 @@ export function VacancyResults({
   const shownFrom = hasItems ? offset + 1 : 0;
   const shownTo = hasItems ? Math.min(count, offset + items.length) : 0;
   const shownLabel = statsReady
-    ? (hasItems ? `${shownFrom}–${shownTo} из ${count}` : `0 из ${count}`)
+    ? clientMode
+      ? (hasItems ? `Показаны первые ${Math.min(count, CLIENT_PREVIEW_LIMIT)} из ${count}` : `0 из ${count}`)
+      : (hasItems ? `${shownFrom}–${shownTo} из ${count}` : `0 из ${count}`)
     : '';
   const limitLabel = !clientMode && statsReady && limit ? ` · по ${limit}` : '';
   const actionsDisabled = actionsBusy || (count === 0 && items.length === 0);
@@ -333,6 +338,11 @@ export function VacancyResults({
             <p className="text-sm text-gray-500">
               {shownLabel}{limitLabel}
             </p>
+            {clientMode && hasItems && count > CLIENT_PREVIEW_LIMIT ? (
+              <p className="text-xs text-gray-400 mt-0.5">
+                Вся база ({count}) — в выгрузке CSV или Excel.
+              </p>
+            ) : null}
           </div>
 
           <div className="grid grid-cols-4 gap-2 w-full sm:flex sm:w-auto sm:flex-wrap sm:justify-end sm:gap-2 sm:items-center">
@@ -506,7 +516,7 @@ export function VacancyResults({
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {items.map((v) => (
+              {(clientMode ? items.slice(0, CLIENT_PREVIEW_LIMIT) : items).map((v) => (
                 <tr key={v.vacancy_id} className="hover:bg-gray-50">
                   <td className="px-4 py-3">
                     <a
@@ -550,7 +560,7 @@ export function VacancyResults({
         </div>
       )}
 
-      <div className="px-4 sm:px-6 py-3 sm:py-4 border-t border-gray-200 flex flex-wrap items-center justify-between gap-3">
+      <div className={clientMode ? 'hidden' : 'px-4 sm:px-6 py-3 sm:py-4 border-t border-gray-200 flex flex-wrap items-center justify-between gap-3'}>
         <div className="hidden sm:block text-sm text-gray-500 whitespace-nowrap">
           Страница {Math.min(currentPage, totalPages)} из {totalPages}
         </div>
