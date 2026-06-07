@@ -437,19 +437,23 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
         </div>
       ) : null}
       {/* Top Section: New Run */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden" style={{ borderTop: '3px solid #F43F5E' }}>
-        <div className="p-4 border-b border-gray-100 bg-gray-50/50">
-          <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-            <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-rose-100 text-rose-600">
-              <MapPin className="h-4 w-4" />
-            </span>
-            Новый парсинг
-          </h3>
+      {clientMode ? (
+        <YandexMapsParserForm busy={busy} onCreate={handleCreate} clientMode={clientMode} />
+      ) : (
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden" style={{ borderTop: '3px solid #F43F5E' }}>
+          <div className="p-4 border-b border-gray-100 bg-gray-50/50">
+            <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+              <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-rose-100 text-rose-600">
+                <MapPin className="h-4 w-4" />
+              </span>
+              Новый парсинг
+            </h3>
+          </div>
+          <div className="p-6">
+            <YandexMapsParserForm busy={busy} onCreate={handleCreate} clientMode={clientMode} />
+          </div>
         </div>
-        <div className="p-6">
-          <YandexMapsParserForm busy={busy} onCreate={handleCreate} clientMode={clientMode} />
-        </div>
-      </div>
+      )}
 
       {clientMode && activeJob ? (
         <div className="rounded-xl px-4 py-3 text-sm" style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)', color: 'var(--cp-paper-mute)' }}>
@@ -464,13 +468,18 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Left Sidebar: History */}
         <div className="lg:col-span-3 space-y-6">
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col h-[800px]">
+          <div className={`${clientMode ? 'neu-card' : 'bg-white rounded-xl border border-gray-200 shadow-sm'} overflow-hidden flex flex-col h-[800px]`}>
             <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-              <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-                <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-amber-100 text-amber-600">
-                  <Clock className="h-3.5 w-3.5" />
-                </span>
-                История запусков
+              <h3
+                className={clientMode ? 'text-base font-semibold flex items-center gap-2' : 'text-base font-semibold text-gray-900 flex items-center gap-2'}
+                style={clientMode ? { color: 'var(--cp-paper)' } : undefined}
+              >
+                {!clientMode && (
+                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-amber-100 text-amber-600">
+                    <Clock className="h-3.5 w-3.5" />
+                  </span>
+                )}
+                {clientMode ? 'Мои запросы' : 'История запусков'}
               </h3>
               <button
                 type="button"
@@ -702,12 +711,17 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
               </div>
 
               {/* Links Editor */}
-              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+              <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden'}>
                 <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-                  <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-                    <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
-                      <Link2 className="h-3.5 w-3.5" />
-                    </span>
+                  <h3
+                    className={clientMode ? 'text-base font-semibold flex items-center gap-2' : 'text-base font-semibold text-gray-900 flex items-center gap-2'}
+                    style={clientMode ? { color: 'var(--cp-paper)' } : undefined}
+                  >
+                    {!clientMode && (
+                      <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
+                        <Link2 className="h-3.5 w-3.5" />
+                      </span>
+                    )}
                     Ссылки организаций
                   </h3>
                   <div className="flex items-center gap-3">
@@ -735,12 +749,17 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
               </div>
 
               {/* Results Table */}
-              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col h-[600px]">
+              <div className={`${clientMode ? 'neu-card' : 'bg-white rounded-xl border border-gray-200 shadow-sm'} overflow-hidden flex flex-col h-[600px]`}>
                 <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-                  <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-                    <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-emerald-100 text-emerald-600">
-                      <Table2 className="h-3.5 w-3.5" />
-                    </span>
+                  <h3
+                    className={clientMode ? 'text-base font-semibold flex items-center gap-2' : 'text-base font-semibold text-gray-900 flex items-center gap-2'}
+                    style={clientMode ? { color: 'var(--cp-paper)' } : undefined}
+                  >
+                    {!clientMode && (
+                      <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-emerald-100 text-emerald-600">
+                        <Table2 className="h-3.5 w-3.5" />
+                      </span>
+                    )}
                     Результаты
                   </h3>
                   <div className="flex gap-2">

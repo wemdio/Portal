@@ -726,13 +726,18 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
 
       <div className="grid grid-cols-1 xl:grid-cols-[380px_minmax(0,1fr)] gap-6 items-start">
         {/* Jobs List */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden'}>
           <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-              <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-amber-100 text-amber-600">
-                <Clock className="h-3.5 w-3.5" />
-              </span>
-              История ({jobs.length})
+            <h3
+              className={clientMode ? 'text-base font-semibold flex items-center gap-2 m-0' : 'text-lg font-semibold text-gray-900 flex items-center gap-2'}
+              style={clientMode ? { color: 'var(--cp-paper)' } : undefined}
+            >
+              {!clientMode && (
+                <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-amber-100 text-amber-600">
+                  <Clock className="h-3.5 w-3.5" />
+                </span>
+              )}
+              {clientMode ? 'Мои запросы' : 'История'} ({jobs.length})
             </h3>
             <button onClick={refreshJobs} className="text-gray-500 hover:text-gray-700">
               <RefreshCw className="h-4 w-4" />
@@ -810,16 +815,21 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
         </div>
 
         {/* Results */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden'}>
           <div className="px-4 sm:px-6 py-4 border-b border-gray-200">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-center gap-2 min-w-0">
-                    <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                      <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-emerald-100 text-emerald-600">
-                        <Table2 className="h-3.5 w-3.5" />
-                      </span>
+                    <h3
+                      className={clientMode ? 'text-base font-semibold flex items-center gap-2 m-0' : 'text-lg font-semibold text-gray-900 flex items-center gap-2'}
+                      style={clientMode ? { color: 'var(--cp-paper)' } : undefined}
+                    >
+                      {!clientMode && (
+                        <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-emerald-100 text-emerald-600">
+                          <Table2 className="h-3.5 w-3.5" />
+                        </span>
+                      )}
                       Результаты
                     </h3>
                     {activeJob ? <JobStatus status={activeJob.status} errorMessage={activeJob.error_message} /> : null}
