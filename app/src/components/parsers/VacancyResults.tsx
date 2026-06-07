@@ -491,7 +491,7 @@ export function VacancyResults({
           <div className="px-6 py-10 text-center text-gray-500">Нет результатов</div>
         )
       ) : (
-        <div className="overflow-x-auto">
+        <div className={clientMode ? 'overflow-auto max-h-[400px]' : 'overflow-x-auto'}>
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
@@ -506,7 +506,7 @@ export function VacancyResults({
                 ] as const).map(({ label, align }) => (
                   <th
                     key={label}
-                    className={`px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50 ${
+                    className={`${clientMode ? 'px-3 py-2' : 'px-4 py-3'} text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50 ${
                       clientMode ? (align === 'right' ? 'text-right' : 'text-left') : 'text-center'
                     }`}
                   >
@@ -518,27 +518,27 @@ export function VacancyResults({
             <tbody className="divide-y divide-gray-100">
               {(clientMode ? items.slice(0, CLIENT_PREVIEW_LIMIT) : items).map((v) => (
                 <tr key={v.vacancy_id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3">
+                  <td className={clientMode ? 'px-3 py-1.5' : 'px-4 py-3'}>
                     <a
                       href={v.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-sm font-medium text-blue-600 hover:underline inline-flex items-start gap-1"
+                      className={`font-medium text-blue-600 hover:underline inline-flex items-start gap-1 ${clientMode ? 'text-xs' : 'text-sm'}`}
                       title={v.name}
                     >
-                      <span className="line-clamp-2">{v.name}</span>
+                      <span className={clientMode ? 'line-clamp-1' : 'line-clamp-2'}>{v.name}</span>
                       {!clientMode && <ExternalLink className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />}
                     </a>
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-700">
+                  <td className={`text-gray-700 ${clientMode ? 'px-3 py-1.5 text-xs' : 'px-4 py-3 text-sm'}`}>
                     {v.company_site_url || v.company_url ? (
-                      <div className="inline-flex items-center gap-2">
-                        <span title={v.company_name}>{v.company_name}</span>
+                      <div className="inline-flex items-center gap-2 max-w-full">
+                        <span className={clientMode ? 'truncate max-w-[150px]' : ''} title={v.company_name}>{v.company_name}</span>
                         <a
                           href={v.company_site_url ?? v.company_url ?? '#'}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-xs text-blue-600 hover:underline"
+                          className="shrink-0 text-xs text-blue-600 hover:underline"
                           title={v.company_site_url ? 'Открыть сайт компании' : 'Открыть страницу компании на hh.ru'}
                         >
                           {/* Client: label honestly — «сайт» only for a real site;
@@ -547,14 +547,14 @@ export function VacancyResults({
                         </a>
                       </div>
                     ) : (
-                      <span title={v.company_name}>{v.company_name}</span>
+                      <span className={clientMode ? 'inline-block truncate max-w-[150px] align-bottom' : ''} title={v.company_name}>{v.company_name}</span>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-700" title={v.area}>
+                  <td className={`text-gray-700 ${clientMode ? 'px-3 py-1.5 text-xs whitespace-nowrap' : 'px-4 py-3 text-sm'}`} title={v.area}>
                     {v.area}
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-700 text-right whitespace-nowrap">{formatSalary(v)}</td>
-                  <td className="px-4 py-3 text-sm text-gray-700 text-right whitespace-nowrap">{formatDate(v.published_at)}</td>
+                  <td className={`text-gray-700 text-right whitespace-nowrap ${clientMode ? 'px-3 py-1.5 text-xs' : 'px-4 py-3 text-sm'}`}>{formatSalary(v)}</td>
+                  <td className={`text-gray-700 text-right whitespace-nowrap ${clientMode ? 'px-3 py-1.5 text-xs' : 'px-4 py-3 text-sm'}`}>{formatDate(v.published_at)}</td>
                 </tr>
               ))}
             </tbody>
