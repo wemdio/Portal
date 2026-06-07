@@ -803,6 +803,10 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
           busy={busy}
           refreshing={manualRefreshing}
           clientMode={clientMode}
+          onRetry={(job) => {
+            const cfg = (job as { config?: HHSearchConfig }).config;
+            if (cfg) void start(cfg);
+          }}
         />
 
         <VacancyResults

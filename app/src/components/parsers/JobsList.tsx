@@ -64,6 +64,9 @@ type Props = {
   activeJobParsedCount?: number;
   /** Client portal: readable query (no OR-pipes), plain-language errors. */
   clientMode?: boolean;
+  /** Client retry: re-run a failed job's search. When set, a «Повторить» button
+   *  shows on failed rows in clientMode. */
+  onRetry?: (job: ParserJob | AtsParserJob) => void;
 };
 
 const MAX_JOBS = 20;
@@ -93,6 +96,7 @@ export function JobsList({
   refreshing,
   activeJobParsedCount,
   clientMode,
+  onRetry,
 }: Props) {
   const displayJobs = jobs.slice(0, MAX_JOBS);
   return (
@@ -103,7 +107,7 @@ export function JobsList({
             <Clock className="h-4 w-4" />
           </span>
           <h3 className="text-lg font-semibold text-gray-900 whitespace-nowrap">
-            История запусков ({displayJobs.length})
+            {clientMode ? 'Мои запросы' : 'История запусков'} ({displayJobs.length})
           </h3>
         </div>
         <button
@@ -230,6 +234,16 @@ export function JobsList({
                         ) : null}
                       </div>
                     </div>
+                    {clientMode && onRetry && job.status === 'failed' ? (
+                      <button
+                        type="button"
+                        onClick={() => onRetry(job)}
+                        className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Повторить
+                      </button>
+                    ) : null}
                   </div>
                   <button
                     onClick={() => onSelect(job.id)}
