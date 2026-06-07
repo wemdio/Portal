@@ -66,7 +66,10 @@ COPY --from=deps /ms-playwright /ms-playwright
 RUN chmod -R a+rX /ms-playwright
 
 # ffmpeg for audio/video extraction (transcription workers)
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+# curl for the ATS parser's domain enrichment (Clearbit's WAF 403s node/undici
+# by TLS fingerprint, but lets curl through — see lib/parsers/atsRunner.ts)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Install only Playwright system libraries (no browser download)
