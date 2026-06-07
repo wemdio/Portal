@@ -18,9 +18,11 @@ export type SearchParserStartPayload = {
 interface Props {
   onStart: (payload: SearchParserStartPayload) => void;
   busy: boolean;
+  /** Client portal: client-language wording (no «парсинг», «страниц Google», site: syntax). */
+  clientMode?: boolean;
 }
 
-export function SearchParserForm({ onStart, busy }: Props) {
+export function SearchParserForm({ onStart, busy, clientMode }: Props) {
   const [brief, setBrief] = useState('');
   const [queries, setQueries] = useState<string[]>([]);
   const [queriesText, setQueriesText] = useState('');
@@ -178,10 +180,12 @@ export function SearchParserForm({ onStart, busy }: Props) {
             <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-blue-100 text-blue-600">
               <Search className="h-4 w-4" />
             </span>
-            Поиск Google/Yandex
+            {clientMode ? 'Поиск компаний' : 'Поиск Google/Yandex'}
           </h2>
           <p className="text-sm text-gray-500 mt-1">
-            Сгенерируйте запросы по брифу или вставьте свой список (один запрос на строку), затем запустите парсинг.
+            {clientMode
+              ? 'Сгенерируйте запросы по брифу или вставьте свой список (по одному на строку), затем запустите поиск.'
+              : 'Сгенерируйте запросы по брифу или вставьте свой список (один запрос на строку), затем запустите парсинг.'}
           </p>
         </div>
         <div className="shrink-0 text-right max-w-xs text-[11px] leading-4 text-gray-500">
@@ -191,7 +195,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
             className="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 border border-amber-200 hover:bg-amber-100 hover:border-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-1"
           >
             <span className="mr-1">★</span>
-            <span>Как работает парсер</span>
+            <span>{clientMode ? 'Как это работает' : 'Как работает парсер'}</span>
           </button>
         </div>
       </div>
@@ -204,7 +208,9 @@ export function SearchParserForm({ onStart, busy }: Props) {
           <textarea
             value={queriesText}
             onChange={(e) => setQueriesText(e.target.value)}
-            placeholder={'веб-студия B2B портфолио site:ru\ndigital агентство корпоративные сайты B2B\nагентство разработки сайтов для производственных компаний'}
+            placeholder={clientMode
+              ? 'производители мебели, Москва\nоптовые поставщики упаковки\nстудии веб-дизайна B2B'
+              : 'веб-студия B2B портфолио site:ru\ndigital агентство корпоративные сайты B2B\nагентство разработки сайтов для производственных компаний'}
             className="w-full min-h-[12rem] resize-y rounded-lg border border-gray-300 py-2 px-3 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none font-mono placeholder:font-sans"
           />
           <p className="text-xs text-gray-500 mt-1">
@@ -343,7 +349,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
 
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
-            Глубина поиска (страниц Google на запрос)
+            {clientMode ? 'Насколько глубоко искать' : 'Глубина поиска (страниц Google на запрос)'}
           </label>
           <div className="flex items-center gap-3">
             <input
@@ -357,7 +363,9 @@ export function SearchParserForm({ onStart, busy }: Props) {
             <span className="text-sm font-mono font-semibold text-gray-900 w-8 text-center tabular-nums">{searchDepth}</span>
           </div>
           <p className="text-xs text-gray-500 mt-1">
-            По умолчанию: 5. Чем больше — тем глубже поиск, но дольше выполнение.
+            {clientMode
+              ? 'Больше — найдём больше компаний, но поиск займёт дольше. По умолчанию 5.'
+              : 'По умолчанию: 5. Чем больше — тем глубже поиск, но дольше выполнение.'}
           </p>
         </div>
 
@@ -377,7 +385,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
             ) : (
               <Play className="h-5 w-5 mr-2" />
             )}
-            Запустить парсинг
+            {clientMode ? 'Запустить поиск' : 'Запустить парсинг'}
           </button>
         </div>
       </div>

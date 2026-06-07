@@ -447,7 +447,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
           </h3>
         </div>
         <div className="p-6">
-          <YandexMapsParserForm busy={busy} onCreate={handleCreate} />
+          <YandexMapsParserForm busy={busy} onCreate={handleCreate} clientMode={clientMode} />
         </div>
       </div>
 

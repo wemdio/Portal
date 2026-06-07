@@ -712,7 +712,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
         </div>
       ) : null}
 
-      <SearchParserForm onStart={(payload) => void handleStart(payload)} busy={busy} />
+      <SearchParserForm onStart={(payload) => void handleStart(payload)} busy={busy} clientMode={clientMode} />
 
       {clientMode && activeJob ? (
         <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-900">

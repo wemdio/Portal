@@ -793,44 +793,64 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
         </div>
       ) : null}
 
-      <div className="grid grid-cols-1 xl:grid-cols-[380px_minmax(0,1fr)] gap-6 items-start">
-        <JobsList
-          jobs={jobs}
-          activeJobId={activeJobId}
-          activeJobParsedCount={resultsCount}
-          onSelect={(id) => setActiveJobId(id)}
-          onRefresh={() => void handleManualRefresh()}
-          busy={busy}
-          refreshing={manualRefreshing}
-          clientMode={clientMode}
-        />
-
-        <VacancyResults
-          items={results}
-          count={resultsCount}
-          limit={resultsLimit}
-          offset={resultsOffset}
-          loading={resultsLoading}
-          actionsBusy={actionsBusy}
-          busyAction={busyAction}
-          exportProgress={exportProgress}
-          addToDatabaseDisabled={addingToDb}
-          jobId={activeJob?.id ?? null}
-          jobStatus={activeJob?.status ?? null}
-          jobActionBusy={jobActionId === activeJob?.id}
-          searchConfig={activeJob?.config ?? null}
-          currentPage={resultsPage}
-          totalPages={totalPages}
-          onPageChange={handlePageChange}
-          onExportCsv={exportCsv}
-          onExportExcel={exportExcel}
-          onCopy={copyResults}
-          onAddToDatabase={clientMode ? undefined : () => void addCompaniesToDatabase()}
-          onStopJob={activeJob?.id ? () => stopJob(activeJob.id) : undefined}
-          onDeleteJob={activeJob?.id ? () => deleteJob(activeJob.id) : undefined}
-          clientMode={clientMode}
-        />
-      </div>
+      {(() => {
+        const historyPanel = (
+          <JobsList
+            jobs={jobs}
+            activeJobId={activeJobId}
+            activeJobParsedCount={resultsCount}
+            onSelect={(id) => setActiveJobId(id)}
+            onRefresh={() => void handleManualRefresh()}
+            busy={busy}
+            refreshing={manualRefreshing}
+            clientMode={clientMode}
+            onRetry={(job) => {
+              const cfg = (job as { config?: HHSearchConfig }).config;
+              if (cfg) void start(cfg);
+            }}
+          />
+        );
+        const resultsPanel = (
+          <VacancyResults
+            items={results}
+            count={resultsCount}
+            limit={resultsLimit}
+            offset={resultsOffset}
+            loading={resultsLoading}
+            actionsBusy={actionsBusy}
+            busyAction={busyAction}
+            exportProgress={exportProgress}
+            addToDatabaseDisabled={addingToDb}
+            jobId={activeJob?.id ?? null}
+            jobStatus={activeJob?.status ?? null}
+            jobActionBusy={jobActionId === activeJob?.id}
+            searchConfig={activeJob?.config ?? null}
+            currentPage={resultsPage}
+            totalPages={totalPages}
+            onPageChange={handlePageChange}
+            onExportCsv={exportCsv}
+            onExportExcel={exportExcel}
+            onCopy={copyResults}
+            onAddToDatabase={clientMode ? undefined : () => void addCompaniesToDatabase()}
+            onStopJob={activeJob?.id ? () => stopJob(activeJob.id) : undefined}
+            onDeleteJob={activeJob?.id ? () => deleteJob(activeJob.id) : undefined}
+            clientMode={clientMode}
+          />
+        );
+        // Client: results full-width on top, history below. The two-column
+        // grid squeezed the results table so its right columns ran off-screen.
+        return clientMode ? (
+          <div className="flex flex-col gap-6">
+            {resultsPanel}
+            {historyPanel}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 xl:grid-cols-[380px_minmax(0,1fr)] gap-6 items-start">
+            {historyPanel}
+            {resultsPanel}
+          </div>
+        );
+      })()}
 
       {deleteCandidateId ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
