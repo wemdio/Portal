@@ -13,7 +13,14 @@ export interface AtsCountry {
 // Country matching is best-effort: Ashby returns a structured country, Greenhouse
 // usually includes it in the location string, Lever often omits it.
 export const ATS_COUNTRIES: AtsCountry[] = [
-  { code: 'us', label: 'США', match: 'united states|\\bu\\.?s\\.?a\\.?|\\busa\\b|\\bus\\b' },
+  // US: explicit country names PLUS the very common "City, ST" format (state
+  // codes), otherwise "New York, NY" / "San Francisco, CA" get dropped.
+  {
+    code: 'us',
+    label: 'США',
+    match:
+      'united states|\\busa?\\b|u\\.s\\.a?\\.?|,\\s*(?:al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy)\\b',
+  },
   { code: 'gb', label: 'Великобритания', match: 'united kingdom|\\bu\\.?k\\.?\\b|england|scotland|wales|london|manchester' },
   { code: 'ca', label: 'Канада', match: 'canada|toronto|vancouver|montreal|ontario' },
   { code: 'de', label: 'Германия', match: 'germany|deutschland|berlin|munich|münchen|hamburg' },
