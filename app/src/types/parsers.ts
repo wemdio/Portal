@@ -158,13 +158,13 @@ export interface HHVacancyRow {
 export type AtsType = 'greenhouse' | 'lever' | 'ashby';
 
 export interface AtsSearchConfig {
-  /** Human-readable label shown in the jobs list (niche label or custom query). */
+  /** Role keywords (comma-separated); also shown as the jobs-list label. */
   text: string;
   ats: AtsType[];
-  /** Niche preset key (see lib/parsers/atsNiches). */
-  niche?: string;
-  /** Free-text role keywords (comma-separated); overrides the niche preset. */
-  match?: string;
+  /** Country codes from lib/parsers/atsFilters (empty/undefined = any country). */
+  countries?: string[];
+  /** Keep only postings newer than this many days (0/undefined = any). */
+  posted_within_days?: number;
   /** Companies scanned per ATS (0 = all; capped server-side). */
   companies_limit?: number;
   /** Resolve company domains via enrichment (default true). */

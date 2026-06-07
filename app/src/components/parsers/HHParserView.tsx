@@ -802,6 +802,7 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
           onRefresh={() => void handleManualRefresh()}
           busy={busy}
           refreshing={manualRefreshing}
+          clientMode={clientMode}
         />
 
         <VacancyResults
@@ -827,6 +828,7 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
           onAddToDatabase={clientMode ? undefined : () => void addCompaniesToDatabase()}
           onStopJob={activeJob?.id ? () => stopJob(activeJob.id) : undefined}
           onDeleteJob={activeJob?.id ? () => deleteJob(activeJob.id) : undefined}
+          clientMode={clientMode}
         />
       </div>
 

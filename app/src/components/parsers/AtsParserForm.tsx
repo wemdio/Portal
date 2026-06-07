@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { Play, Loader2, Building2, Info } from 'lucide-react';
 import type { AtsSearchConfig, AtsType } from '@/types';
-import { ATS_NICHES, nicheLabel } from '@/lib/parsers/atsNiches';
+import { ATS_COUNTRIES, ATS_RECENCY_OPTIONS } from '@/lib/parsers/atsFilters';
 
 type Props = {
   onStart: (config: AtsSearchConfig) => Promise<void>;
@@ -17,33 +17,32 @@ const ATS_OPTIONS: { key: AtsType; label: string }[] = [
 ];
 
 export function AtsParserForm({ onStart, busy }: Props) {
+  const [roles, setRoles] = useState('');
   const [ats, setAts] = useState<AtsType[]>(['greenhouse', 'lever', 'ashby']);
-  const [niche, setNiche] = useState<string>(ATS_NICHES[0].key);
-  const [match, setMatch] = useState('');
+  const [countries, setCountries] = useState<string[]>([]);
+  const [days, setDays] = useState<number>(30);
   const [limit, setLimit] = useState('150');
   const [enrich, setEnrich] = useState(true);
   const [showHelp, setShowHelp] = useState(false);
 
-  const toggleAts = (key: AtsType) => {
+  const toggleAts = (key: AtsType) =>
     setAts((prev) => (prev.includes(key) ? prev.filter((a) => a !== key) : [...prev, key]));
-  };
+  const toggleCountry = (code: string) =>
+    setCountries((prev) => (prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]));
 
   const config: AtsSearchConfig = useMemo(() => {
-    const customMatch = match.trim();
-    const text = customMatch || nicheLabel(niche);
     const limitNum = Number(limit);
     return {
-      text,
+      text: roles.trim(),
       ats,
-      niche: customMatch ? undefined : niche,
-      match: customMatch || undefined,
+      countries: countries.length ? countries : undefined,
+      posted_within_days: days,
       companies_limit: Number.isFinite(limitNum) ? Math.max(0, Math.trunc(limitNum)) : 150,
       enrich,
     };
-  }, [ats, niche, match, limit, enrich]);
+  }, [roles, ats, countries, days, limit, enrich]);
 
-  const canStart = ats.length > 0 && (Boolean(match.trim()) || Boolean(niche));
-
+  const canStart = Boolean(roles.trim()) && ats.length > 0;
   const submit = () => {
     if (!busy && canStart) void onStart(config);
   };
@@ -82,66 +81,90 @@ export function AtsParserForm({ onStart, busy }: Props) {
         </div>
       </div>
 
-      {/* Niche presets */}
+      {/* Roles — the primary signal */}
       <div className="mt-6">
-        <label className="block text-sm font-medium text-gray-700 mb-2">Ниша</label>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Роли / ключевые слова <span className="text-red-500">*</span>
+          <span className="text-gray-400 font-normal"> — через запятую, ищем по названию вакансии</span>
+        </label>
+        <input
+          value={roles}
+          onChange={(e) => setRoles(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') submit();
+          }}
+          placeholder="напр.: head of marketing, demand generation, account executive"
+          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-sky-400 focus:border-sky-400"
+        />
+      </div>
+
+      {/* Countries */}
+      <div className="mt-5">
+        <label className="block text-sm font-medium text-gray-700 mb-2">
+          Страны <span className="text-gray-400 font-normal">(ничего не выбрано = любая)</span>
+        </label>
         <div className="flex flex-wrap gap-2">
-          {ATS_NICHES.map((n) => {
-            const on = niche === n.key && !match.trim();
+          {ATS_COUNTRIES.map((c) => {
+            const on = countries.includes(c.code);
             return (
               <button
-                key={n.key}
+                key={c.code}
                 type="button"
-                onClick={() => {
-                  setNiche(n.key);
-                  setMatch('');
-                }}
+                onClick={() => toggleCountry(c.code)}
                 className={`rounded-full px-3 py-1.5 text-sm font-medium border transition-colors ${
                   on
                     ? 'bg-sky-600 text-white border-sky-600'
                     : 'bg-white text-gray-600 border-gray-300 hover:border-sky-400 hover:text-sky-700'
                 }`}
               >
-                {n.label}
+                {c.label}
               </button>
             );
           })}
         </div>
+        <p className="mt-1.5 text-[11px] text-gray-400">
+          Фильтр по локации вакансии. Best-effort: Ashby отдаёт страну точно, Greenhouse обычно в тексте, Lever часто без страны.
+        </p>
       </div>
 
-      {/* Custom role keywords (overrides niche) */}
-      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-        <div className="md:col-span-2">
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Или свои роли <span className="text-gray-400 font-normal">(через запятую — переопределяет нишу)</span>
-          </label>
-          <input
-            value={match}
-            onChange={(e) => setMatch(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submit();
-            }}
-            placeholder="напр.: growth, demand gen, head of marketing"
-            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-sky-400 focus:border-sky-400"
-          />
+      {/* Recency + depth + enrich */}
+      <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-5">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Свежесть вакансий</label>
+          <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1 flex-wrap">
+            {ATS_RECENCY_OPTIONS.map((o) => {
+              const on = days === o.days;
+              return (
+                <button
+                  key={o.days}
+                  type="button"
+                  onClick={() => setDays(o.days)}
+                  className={`px-3 py-1.5 text-sm rounded-md font-medium transition ${
+                    on ? 'bg-sky-600 text-white shadow-sm' : 'text-gray-500 hover:text-gray-900'
+                  }`}
+                >
+                  {o.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Компаний на ATS <span className="text-gray-400 font-normal">(0 = все)</span>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Компаний на источник <span className="text-gray-400 font-normal">(0 = все)</span>
           </label>
           <input
             value={limit}
             onChange={(e) => setLimit(e.target.value.replace(/\D/g, ''))}
             inputMode="numeric"
             placeholder="150"
-            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-sky-400 focus:border-sky-400"
+            className="w-40 rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-sky-400 focus:border-sky-400"
           />
         </div>
       </div>
 
-      {/* ATS pickers + enrich */}
-      <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-3">
+      <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-3">
         <div className="flex items-center gap-3">
           <span className="text-sm font-medium text-gray-700">Источники:</span>
           {ATS_OPTIONS.map((o) => (
@@ -180,12 +203,14 @@ export function AtsParserForm({ onStart, busy }: Props) {
             </div>
             <div className="px-6 py-4 space-y-3 text-sm text-gray-700">
               <p>
-                Это англоязычный аналог HH-парсера. Открытая вакансия = сигнал к покупке, нанимающая компания = лид.
+                Англоязычный аналог HH-парсера: открытая вакансия = сигнал к покупке, нанимающая компания = лид.
                 Источник — карьерные страницы самих компаний на Greenhouse, Lever и Ashby.
               </p>
               <p>
-                Выберите нишу (или впишите свои роли через запятую), источники и лимит компаний. Инструмент пройдёт
-                по компаниям, отфильтрует вакансии по нише, соберёт компании и определит их домены.
+                Настраивается тремя реальными фильтрами: <span className="font-semibold">роли</span> (по названию
+                вакансии), <span className="font-semibold">страна</span> (по локации) и{' '}
+                <span className="font-semibold">свежесть</span> (по дате публикации). «Ниш/отраслей» у этих
+                источников нет — поэтому только то, что в данных действительно есть.
               </p>
               <p className="text-xs text-gray-500">
                 Списки компаний берутся из открытого датасета. «Определять домен» подтягивает сайт компании, чтобы
