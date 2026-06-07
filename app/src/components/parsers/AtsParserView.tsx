@@ -192,9 +192,13 @@ export function AtsParserView() {
     void loadResults(activeJobId, 1);
   }, [activeJobId, loadResults]);
 
-  // Poll while running (results stream in)
+  // Poll while pending OR running. Realtime can be unreliable on the self-hosted
+  // Supabase, so polling is what moves the UI off "В очереди" once the worker
+  // claims the job (status pending -> running) and as it progresses.
   useEffect(() => {
-    if (!activeJobId || activeJob?.status !== 'running') return;
+    if (!activeJobId) return;
+    const st = activeJob?.status;
+    if (st !== 'running' && st !== 'pending') return;
     const id = window.setInterval(() => {
       void refreshJobs();
       void loadResults(activeJobId, resultsPage);
