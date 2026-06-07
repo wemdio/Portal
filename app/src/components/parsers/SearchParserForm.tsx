@@ -33,6 +33,9 @@ export function SearchParserForm({ onStart, busy, clientMode }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
+  // clientMode only: which way the client supplies queries — paste their own,
+  // or generate from a brief. Operators never see this (early-return below).
+  const [searchMode, setSearchMode] = useState<'own' | 'brief'>('own');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Сохранённый бриф с портала (/client/brief). Если есть — становится
@@ -60,6 +63,8 @@ export function SearchParserForm({ onStart, busy, clientMode }: Props) {
           setSavedBriefText(text);
           setSavedBriefAvailable(true);
           setBriefSource('saved');
+          // A client with a saved brief: default them into the one-click path.
+          setSearchMode('brief');
         }
       } catch { /* non-critical: leave defaults */ }
     })();
@@ -171,6 +176,284 @@ export function SearchParserForm({ onStart, busy, clientMode }: Props) {
   const canStart =
     (effectiveBrief.trim().length > 0 && (queries.length === 0 || queries.some((q) => q.trim().length > 0))) ||
     queriesText.trim().length > 0;
+
+  // ── Client portal: purpose-built editorial form. Operators fall through to
+  // the full operator card below (untouched). Built on the .client-portal
+  // ds-*/neu-* system, same as the HH client form — no icon-chips, no jargon.
+  if (clientMode) {
+    const ownReady = queriesText.trim().length > 0;
+    const briefReady = effectiveBrief.trim().length > 0 || queries.some((q) => q.trim().length > 0);
+    const ready = searchMode === 'own' ? ownReady : briefReady;
+
+    const clientSubmit = () => {
+      if (busy) return;
+      if (searchMode === 'own') {
+        if (!queriesText.trim()) {
+          setError('Вставьте хотя бы один запрос — по одному на строку.');
+          return;
+        }
+        setError(null);
+        onStart({
+          queries_text: queriesText.trim(),
+          user_query: queriesText.trim(),
+          search_depth: searchDepth,
+        });
+        return;
+      }
+      // brief mode: prefer the (editable) generated list; else send the brief.
+      const hasQueries = queries.length > 0 && queries.some((q) => q.trim().length > 0);
+      if (!effectiveBrief.trim() && !hasQueries) {
+        setError('Опишите целевую аудиторию или сгенерируйте запросы.');
+        return;
+      }
+      setError(null);
+      const payload: SearchParserStartPayload = { search_depth: searchDepth };
+      if (hasQueries) payload.queries = queries.map((q) => q.trim()).filter(Boolean);
+      else if (effectiveBrief.trim()) payload.brief = effectiveBrief.trim();
+      payload.user_query = effectiveBrief.trim() || payload.queries?.slice(0, 3).join(', ') || 'Запросы';
+      onStart(payload);
+    };
+
+    const segmented = (
+      options: ReadonlyArray<readonly [string, string]>,
+      active: string,
+      onPick: (v: string) => void,
+    ) => (
+      <div
+        className="inline-flex rounded-md p-0.5"
+        style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' }}
+      >
+        {options.map(([v, label]) => {
+          const on = active === v;
+          return (
+            <button
+              key={v}
+              type="button"
+              onClick={() => onPick(v)}
+              className="rounded px-3 py-1.5 text-xs font-medium transition-colors"
+              style={on ? { background: 'var(--cp-paper)', color: 'var(--cp-ink)' } : { color: 'var(--cp-paper-mute)' }}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+    );
+
+    return (
+      <div className="neu-card p-5 sm:p-6">
+        {/* Header — no icon-chip, no amber star */}
+        <div className="mb-5 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold m-0" style={{ color: 'var(--cp-paper)' }}>
+              Поиск компаний
+            </h2>
+            <p className="mt-1 text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+              Соберём компании из поиска Google и Яндекса — по вашим запросам или по брифу.
+            </p>
+          </div>
+          <button type="button" onClick={() => setShowHowItWorks(true)} className="ds-btn-ghost shrink-0 text-xs">
+            Как это работает
+          </button>
+        </div>
+
+        {/* Mode toggle */}
+        <div className="mb-5">
+          {segmented(
+            [['own', 'Свои запросы'], ['brief', 'Из брифа']] as const,
+            searchMode,
+            (v) => setSearchMode(v as 'own' | 'brief'),
+          )}
+        </div>
+
+        {searchMode === 'own' ? (
+          <div className="space-y-2">
+            <label className="ds-eyebrow block">ваши запросы</label>
+            <textarea
+              value={queriesText}
+              onChange={(e) => setQueriesText(e.target.value)}
+              placeholder={'производители мебели Москва\nоптовые поставщики упаковки\nстудии веб-дизайна B2B'}
+              className="ds-input w-full min-h-[10rem] resize-y leading-relaxed"
+            />
+            <p className="text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
+              По одному запросу на строку (или через запятую). Пустые строки пропускаем.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {savedBriefAvailable &&
+              segmented(
+                [['saved', 'Мой бриф'], ['custom', 'Другой текст']] as const,
+                briefSource,
+                (v) => setBriefSource(v as 'saved' | 'custom'),
+              )}
+
+            <div>
+              <label className="ds-eyebrow mb-1.5 block">кого ищем</label>
+              {briefSource === 'saved' && savedBriefAvailable ? (
+                <>
+                  <textarea
+                    value={savedBriefText}
+                    readOnly
+                    className="ds-input w-full min-h-[7rem] resize-y leading-relaxed"
+                    style={{ color: 'var(--cp-paper-mute)' }}
+                  />
+                  <p className="mt-1.5 text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                    Подгружен ваш бриф со{' '}
+                    <a href="/client/brief" className="underline">страницы «Бриф»</a>. Изменить — там же,
+                    или переключитесь на «Другой текст».
+                  </p>
+                </>
+              ) : (
+                <textarea
+                  value={brief}
+                  onChange={(e) => setBrief(e.target.value)}
+                  placeholder="Опишите, какие компании ищете: отрасль, размер, регион, чем занимаются…"
+                  className="ds-input w-full min-h-[7rem] resize-y leading-relaxed"
+                />
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/pdf"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void handlePdfUpload(file);
+                }}
+              />
+              {briefSource === 'custom' && (
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={pdfUploading}
+                  className="ds-btn-ghost inline-flex items-center gap-1.5 text-xs disabled:opacity-40"
+                >
+                  {pdfUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                  Загрузить PDF
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void handleGenerateQueries()}
+                disabled={generatingQueries || !effectiveBrief.trim()}
+                className="ds-btn-secondary inline-flex items-center gap-1.5 disabled:opacity-40"
+              >
+                {generatingQueries ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                Сгенерировать запросы
+              </button>
+              {pdfStatus ? <span className="text-[11px]" style={{ color: 'var(--cp-green)' }}>{pdfStatus}</span> : null}
+            </div>
+
+            {generateError && <p className="text-[11px]" style={{ color: 'var(--cp-red)' }}>{generateError}</p>}
+
+            {queries.length > 0 && (
+              <div className="overflow-hidden rounded-md" style={{ background: 'var(--cp-ink)', border: '1px solid var(--cp-divider)' }}>
+                <div className="px-3 py-2" style={{ borderBottom: '1px solid var(--cp-divider)' }}>
+                  <span className="ds-eyebrow">запросы · {queries.length}</span>
+                </div>
+                <ul className="max-h-[300px] overflow-y-auto">
+                  {queries.map((q, index) => (
+                    <li
+                      key={index}
+                      className="flex items-center gap-2 px-3 py-2"
+                      style={index > 0 ? { borderTop: '1px solid var(--cp-divider)' } : undefined}
+                    >
+                      <span className="ds-mono text-[11px] shrink-0 w-5 text-right" style={{ color: 'var(--cp-paper-faint)' }}>
+                        {index + 1}
+                      </span>
+                      <input
+                        type="text"
+                        value={q}
+                        onChange={(e) => updateQuery(index, e.target.value)}
+                        className="ds-input flex-1 min-w-0"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeQuery(index)}
+                        aria-label="Удалить запрос"
+                        className="ds-btn-ghost shrink-0 p-1.5"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Depth */}
+        <div className="mt-5">
+          <div className="mb-1.5 flex items-center justify-between">
+            <label className="ds-eyebrow">насколько глубоко искать</label>
+            <span className="ds-mono text-xs" style={{ color: 'var(--cp-paper)' }}>{searchDepth}</span>
+          </div>
+          <input
+            type="range"
+            min={1}
+            max={30}
+            value={searchDepth}
+            onChange={(e) => setSearchDepth(Number(e.target.value))}
+            className="w-full"
+            style={{ accentColor: 'var(--cp-paper)' }}
+          />
+          <div className="mt-1 flex items-center justify-between text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
+            <span>быстрее</span>
+            <span>больше компаний</span>
+          </div>
+        </div>
+
+        {error && <p className="mt-4 text-[11px]" style={{ color: 'var(--cp-red)' }}>{error}</p>}
+
+        {/* CTA */}
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={clientSubmit}
+            disabled={busy || !ready}
+            className="ds-btn-primary inline-flex items-center gap-2 px-5 disabled:opacity-40"
+          >
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+            Запустить поиск
+          </button>
+          <span className="text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
+            На выходе: компании с сайтами и описанием.
+          </span>
+        </div>
+
+        {/* How it works — editorial-dark modal */}
+        {showHowItWorks && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{ background: 'var(--cp-scrim)' }}>
+            <div className="w-full max-w-lg neu-card overflow-hidden">
+              <div className="px-6 py-4" style={{ borderBottom: '1px solid var(--cp-divider)' }}>
+                <h3 className="text-base font-semibold m-0" style={{ color: 'var(--cp-paper)' }}>
+                  Как работает поиск компаний
+                </h3>
+              </div>
+              <div className="px-6 py-4 space-y-3 text-xs leading-relaxed" style={{ color: 'var(--cp-paper-mute)' }}>
+                <p>Инструмент берёт ваши запросы и проходит несколько страниц поисковой выдачи по каждому — это «глубина».</p>
+                <p>На каждой странице он находит сайты компаний, отсеивает каталоги и статьи и собирает карточку: название, сайт, описание.</p>
+                <p>
+                  Итого компаний ≈ <span style={{ color: 'var(--cp-paper)' }}>число запросов × глубина</span>. Больше
+                  запросов и выше глубина — больше компаний, но дольше.
+                </p>
+              </div>
+              <div className="flex items-center justify-end px-6 py-4" style={{ borderTop: '1px solid var(--cp-divider)' }}>
+                <button type="button" onClick={() => setShowHowItWorks(false)} className="ds-btn-primary">
+                  Понятно
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-6" style={{ borderTop: '3px solid #3B82F6' }}>
