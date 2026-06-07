@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { HHSearchConfig, HHVacancyRow, ParserJobStatus } from '@/types';
 import { Download, ExternalLink, Copy, Check, ChevronLeft, ChevronRight, Database, Table2 } from 'lucide-react';
+import { findRegionById } from '@/lib/parsers/hhArchive/regions';
 
 type BusyAction = 'csv' | 'excel' | 'copy' | 'database' | null;
 
@@ -29,6 +30,8 @@ type Props = {
   onAddToDatabase?: () => void;
   onStopJob?: () => void;
   onDeleteJob?: () => void;
+  /** Client portal: hide operator plumbing — search URL, per-page, raw area ids, jargon chips. */
+  clientMode?: boolean;
 };
 
 const RUNNING_EMPTY_MESSAGES = [
@@ -145,23 +148,36 @@ function formatArea(area?: string | string[]) {
   return area;
 }
 
-function buildFilters(config?: HHSearchConfig | null) {
+// Client view shows region NAMES, not raw HH area ids («Регион: 1» → «Москва»).
+function regionNames(area?: string | string[]): string | null {
+  if (!area) return null;
+  const ids = Array.isArray(area) ? area : [area];
+  const names = ids
+    .map((id) => String(id).trim())
+    .filter(Boolean)
+    .map((id) => findRegionById(id)?.name ?? id);
+  return names.length ? names.join(', ') : null;
+}
+
+function buildFilters(config?: HHSearchConfig | null, clientMode?: boolean) {
   if (!config) return [];
   const filters: Array<{ label: string; value: string; tone?: 'yellow' }> = [];
   const text = config.text?.trim();
-  if (text) filters.push({ label: 'Запрос', value: text });
-  const area = formatArea(config.area);
+  // Client: split the operator OR-pipe syntax «a|b|c» into a readable list.
+  if (text) filters.push({ label: 'Запрос', value: clientMode ? text.replace(/\s*\|\s*/g, ', ') : text });
+  const area = clientMode ? regionNames(config.area) : formatArea(config.area);
   if (area) filters.push({ label: 'Регион', value: area });
   if (config.salary_from !== undefined) {
     const currency = config.currency ? ` ${config.currency}` : '';
     filters.push({ label: 'Зарплата от', value: `${config.salary_from}${currency}`.trim() });
-  } else if (config.currency && config.params && Object.prototype.hasOwnProperty.call(config.params, 'currency')) {
+  } else if (!clientMode && config.currency && config.params && Object.prototype.hasOwnProperty.call(config.params, 'currency')) {
     filters.push({ label: 'Валюта', value: config.currency });
   }
   if (config.date_from) filters.push({ label: 'Дата от', value: config.date_from });
   if (config.date_to) filters.push({ label: 'Дата до', value: config.date_to });
-  if (config.per_page !== undefined) filters.push({ label: 'Per page', value: String(config.per_page) });
-  if (config.fetch_employers) filters.push({ label: 'Работодатели', value: 'с деталями', tone: 'yellow' });
+  // Operator-only telemetry — meaningless to a client.
+  if (!clientMode && config.per_page !== undefined) filters.push({ label: 'Per page', value: String(config.per_page) });
+  if (!clientMode && config.fetch_employers) filters.push({ label: 'Работодатели', value: 'с деталями', tone: 'yellow' });
   return filters;
 }
 
@@ -208,6 +224,7 @@ export function VacancyResults({
   onAddToDatabase,
   onStopJob,
   onDeleteJob,
+  clientMode,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const copiedTimeoutRef = useRef<number | null>(null);
@@ -232,12 +249,12 @@ export function VacancyResults({
   const shownLabel = statsReady
     ? (hasItems ? `${shownFrom}–${shownTo} из ${count}` : `0 из ${count}`)
     : '';
-  const limitLabel = statsReady && limit ? ` · по ${limit}` : '';
+  const limitLabel = !clientMode && statsReady && limit ? ` · по ${limit}` : '';
   const actionsDisabled = actionsBusy || (count === 0 && items.length === 0);
   const addToDbDisabled = actionsDisabled || !onAddToDatabase || Boolean(addToDatabaseDisabled);
   const jobControlsDisabled = jobActionBusy || !jobId;
   const searchUrl = buildSearchUrl(searchConfig);
-  const filters = buildFilters(searchConfig);
+  const filters = buildFilters(searchConfig, clientMode);
   const canPrev = currentPage > 1;
   const canNext = currentPage < totalPages;
   const isDatabaseBusy = busyAction === 'database';
@@ -382,7 +399,7 @@ export function VacancyResults({
 
       {searchConfig ? (
         <div className="px-6 py-3 border-b border-gray-200 bg-gray-50 text-xs text-gray-600">
-          {searchUrl ? (
+          {!clientMode && searchUrl ? (
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-gray-500 whitespace-nowrap">Ссылка поиска:</span>
               <a
