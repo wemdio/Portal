@@ -887,7 +887,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
                   type="button"
                   onClick={addToDatabase}
                   disabled={companyLeads.length === 0}
-                  className="inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                  className={clientMode ? 'ds-btn-ghost inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap disabled:opacity-40 sm:w-auto' : 'inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700'}
                   title="Добавит результаты в “Базы” (без открытия новой вкладки)"
                 >
                   <Database className="h-4 w-4" />
@@ -898,7 +898,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
                   type="button"
                   onClick={handleRepeat}
                   disabled={!activeJob || busy}
-                  className="inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                  className={clientMode ? 'ds-btn-ghost inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap disabled:opacity-40 sm:w-auto' : 'inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700'}
                   title="Повторить запуск"
                 >
                   <RefreshCw className="h-4 w-4" />
@@ -908,7 +908,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
                   type="button"
                   onClick={handleExportCsv}
                   disabled={exportDisabled}
-                  className="inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                  className={clientMode ? 'ds-btn-ghost inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap disabled:opacity-40 sm:w-auto' : 'inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700'}
                 >
                   <Download className="h-4 w-4" />
                   CSV
@@ -917,7 +917,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
                   type="button"
                   onClick={handleExportExcel}
                   disabled={exportDisabled}
-                  className="inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                  className={clientMode ? 'ds-btn-ghost inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap disabled:opacity-40 sm:w-auto' : 'inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700'}
                 >
                   <FileSpreadsheet className="h-4 w-4" />
                   Excel
@@ -926,7 +926,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
                   type="button"
                   onClick={() => void handleCopy()}
                   disabled={copyDisabled}
-                  className="inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                  className={clientMode ? 'ds-btn-ghost inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap disabled:opacity-40 sm:w-auto' : 'inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700'}
                   title="Копировать компании в буфер (TSV для вставки в таблицы)"
                 >
                   {copying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />}
@@ -1076,8 +1076,8 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
           ) : null}
 
           {activeJobId ? (
-             <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
+             <div className={clientMode ? 'overflow-auto max-h-[460px]' : 'overflow-x-auto'}>
+                <table className={clientMode ? 'min-w-full divide-y divide-gray-200 cp-dense-table' : 'min-w-full divide-y divide-gray-200'}>
                    <thead className={activeJobStoppedByUser ? 'bg-amber-50' : 'bg-gray-50'}>
                       <tr>
                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Компания</th>

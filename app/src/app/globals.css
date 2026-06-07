@@ -1205,7 +1205,7 @@ body:has(.client-portal) {
   --cp-scrim: rgba(10, 10, 10, 0.6);
   --cp-paper: #fafafa;
   --cp-paper-mute: #a1a1a3;
-  --cp-paper-faint: #6c6c70;
+  --cp-paper-faint: #84848c;
   --cp-amber: #f5a623;
   --cp-red: #e5484d;
   --cp-green: #46a758;
@@ -1510,6 +1510,18 @@ body:has(.client-portal) {
 }
 .client-portal .ds-input:focus {
   border-color: var(--cp-paper);
+}
+
+/* Dense results table — brings client parser result grids to base-constructor /
+   VacancyResults density without per-cell utilities. Apply as a clientMode-only
+   class on the <table>; operators (outside .client-portal) are unaffected. */
+.client-portal .cp-dense-table th {
+  padding: 8px 12px;
+}
+.client-portal .cp-dense-table td {
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .client-portal .ds-nav-item {
