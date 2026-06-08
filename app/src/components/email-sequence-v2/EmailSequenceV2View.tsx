@@ -802,7 +802,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                   type="button"
                   onClick={deleteRun}
                   disabled={busy != null}
-                  className="inline-flex items-center rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                  className={clientMode ? 'ds-btn-ghost inline-flex items-center text-xs text-[var(--cp-red)] disabled:opacity-40' : 'inline-flex items-center rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50'}
                 >
                   Удалить запуск
                 </button>
@@ -811,7 +811,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                 type="button"
                 onClick={resetForNewRun}
                 disabled={busy != null || !run}
-                className="inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                className={clientMode ? 'ds-btn-ghost inline-flex items-center text-xs disabled:opacity-40' : 'inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50'}
               >
                 Закрыть
               </button>
@@ -887,12 +887,12 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
             right={
               <div className="flex items-end gap-3">
                 <label className="block">
-                  <div className="text-xs font-medium text-gray-600 mb-1">Модель ценностей</div>
+                  <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-xs font-medium text-gray-600 mb-1'}>Модель ценностей</div>
                   <select
                     value={valuesModel}
                     onChange={(e) => setValuesModel(e.target.value)}
                     disabled={busy != null}
-                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                    className={clientMode ? 'ds-input' : 'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
                   >
                     {VALUES_MODEL_OPTIONS.map((o) => (
                       <option key={o.value} value={o.value}>{o.label}</option>
@@ -904,22 +904,24 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
           >
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <div className="space-y-3">
-                <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4">
-                  <div className="text-sm font-medium text-gray-900 mb-2">Бриф</div>
+                <div className={clientMode ? 'rounded-md p-4' : 'rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4'} style={clientMode ? { border: '1px solid var(--cp-divider)', background: 'var(--cp-ink)' } : undefined}>
+                  <div className={clientMode ? 'text-sm font-medium mb-2' : 'text-sm font-medium text-gray-900 mb-2'} style={clientMode ? { color: 'var(--cp-paper)' } : undefined}>Бриф</div>
                   {/* Three-way input mode: 'saved' (auto-loaded from
                       /client/brief), 'file' (PDF/DOCX upload), 'text'
                       (paste). Default = 'saved' when saved brief is
                       available, else 'file'. */}
-                  <div className="mb-3 flex gap-1 rounded-lg bg-gray-100 p-1 text-xs">
+                  <div className={clientMode ? 'mb-3 flex gap-1 rounded-md p-0.5 text-xs' : 'mb-3 flex gap-1 rounded-lg bg-gray-100 p-1 text-xs'} style={clientMode ? { background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' } : undefined}>
                     {savedBriefAvailable && (
                       <button
                         type="button"
                         onClick={() => setBriefInputMode('saved')}
-                        className={`flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
-                          briefInputMode === 'saved'
-                            ? 'bg-white text-gray-900 shadow-sm'
-                            : 'text-gray-600 hover:text-gray-900'
-                        }`}
+                        className={clientMode
+                          ? `flex-1 rounded px-3 py-1.5 font-medium transition-colors ${briefInputMode === 'saved' ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)]' : 'text-[var(--cp-paper-mute)]'}`
+                          : `flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
+                              briefInputMode === 'saved'
+                                ? 'bg-white text-gray-900 shadow-sm'
+                                : 'text-gray-600 hover:text-gray-900'
+                            }`}
                       >
                         Сохранённый бриф
                       </button>
@@ -927,22 +929,26 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                     <button
                       type="button"
                       onClick={() => setBriefInputMode('file')}
-                      className={`flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
-                        briefInputMode === 'file'
-                          ? 'bg-white text-gray-900 shadow-sm'
-                          : 'text-gray-600 hover:text-gray-900'
-                      }`}
+                      className={clientMode
+                        ? `flex-1 rounded px-3 py-1.5 font-medium transition-colors ${briefInputMode === 'file' ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)]' : 'text-[var(--cp-paper-mute)]'}`
+                        : `flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
+                            briefInputMode === 'file'
+                              ? 'bg-white text-gray-900 shadow-sm'
+                              : 'text-gray-600 hover:text-gray-900'
+                          }`}
                     >
                       Файл
                     </button>
                     <button
                       type="button"
                       onClick={() => setBriefInputMode('text')}
-                      className={`flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
-                        briefInputMode === 'text'
-                          ? 'bg-white text-gray-900 shadow-sm'
-                          : 'text-gray-600 hover:text-gray-900'
-                      }`}
+                      className={clientMode
+                        ? `flex-1 rounded px-3 py-1.5 font-medium transition-colors ${briefInputMode === 'text' ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)]' : 'text-[var(--cp-paper-mute)]'}`
+                        : `flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
+                            briefInputMode === 'text'
+                              ? 'bg-white text-gray-900 shadow-sm'
+                              : 'text-gray-600 hover:text-gray-900'
+                          }`}
                     >
                       Текст
                     </button>
@@ -959,7 +965,8 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                         value={savedBriefText}
                         readOnly
                         rows={8}
-                        className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700"
+                        className={clientMode ? 'ds-input w-full' : 'w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700'}
+                        style={clientMode ? { color: 'var(--cp-paper-mute)' } : undefined}
                       />
                     </div>
                   )}
@@ -971,7 +978,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                         type="file"
                         accept=".pdf,.docx,.txt"
                         onChange={(e) => setBriefFile(e.target.files?.[0] ?? null)}
-                        className="block w-full text-sm text-gray-700 file:mr-3 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-blue-700"
+                        className={clientMode ? 'block w-full text-sm text-[var(--cp-paper-mute)] file:mr-3 file:rounded-md file:border-0 file:bg-[var(--cp-paper)] file:px-3 file:py-2 file:text-sm file:font-semibold file:text-[var(--cp-ink)]' : 'block w-full text-sm text-gray-700 file:mr-3 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-blue-700'}
                       />
                       {briefFile && (
                         <div className="mt-2 text-xs text-gray-600">
@@ -992,7 +999,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                       onChange={(e) => setBriefText(e.target.value)}
                       rows={8}
                       placeholder="Вставьте текст брифа сюда"
-                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                      className={clientMode ? 'ds-input w-full' : 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
                     />
                   )}
 
@@ -1015,10 +1022,10 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
               </div>
 
               <div className="space-y-3">
-                <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 max-h-[420px] overflow-auto">
+                <div className={clientMode ? 'rounded-md p-4 max-h-[420px] overflow-auto' : 'rounded-xl border border-gray-200 bg-gray-50 p-4 max-h-[420px] overflow-auto'} style={clientMode ? { border: '1px solid var(--cp-divider)', background: 'var(--cp-ink)' } : undefined}>
                   <div className="flex items-center justify-between">
-                    <div className="text-sm font-medium text-gray-900">
-                      Ценности {run.company_name ? <span className="text-gray-500">({run.company_name})</span> : null}
+                    <div className={clientMode ? 'text-sm font-medium' : 'text-sm font-medium text-gray-900'} style={clientMode ? { color: 'var(--cp-paper)' } : undefined}>
+                      Ценности {run.company_name ? <span className={clientMode ? '' : 'text-gray-500'} style={clientMode ? { color: 'var(--cp-paper-faint)' } : undefined}>({run.company_name})</span> : null}
                     </div>
                     <div className="flex items-center gap-2">
                       {run.values_text && (
@@ -1027,7 +1034,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                             type="button"
                             onClick={downloadValuesDocx}
                             disabled={busy != null}
-                            className="inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                            className={clientMode ? 'ds-btn-ghost inline-flex items-center text-xs disabled:opacity-40' : 'inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50'}
                           >
                             {busy === 'export-docx' ? 'Готовим…' : 'Скачать DOCX'}
                           </button>
@@ -1035,7 +1042,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                             type="button"
                             onClick={downloadValuesPdf}
                             disabled={busy != null}
-                            className="inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                            className={clientMode ? 'ds-btn-ghost inline-flex items-center text-xs disabled:opacity-40' : 'inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50'}
                           >
                             Скачать PDF
                           </button>
@@ -1043,7 +1050,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                       )}
                     </div>
                   </div>
-                  <pre className="mt-3 whitespace-pre-wrap text-sm text-gray-800 font-mono leading-relaxed">
+                  <pre className={clientMode ? 'mt-3 whitespace-pre-wrap text-sm ds-mono leading-relaxed' : 'mt-3 whitespace-pre-wrap text-sm text-gray-800 font-mono leading-relaxed'} style={clientMode ? { color: 'var(--cp-paper-mute)' } : undefined}>
                     {run.values_text ?? '— ещё не сгенерировано —'}
                   </pre>
                 </div>
@@ -1059,33 +1066,33 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
           >
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <label className="block">
-                <div className="text-sm font-medium text-gray-700 mb-1">Сегмент базы (по гипотезе)*</div>
+                <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-sm font-medium text-gray-700 mb-1'}>Сегмент базы (по гипотезе)*</div>
                 <textarea
                   value={segmentText}
                   onChange={(e) => setSegmentText(e.target.value)}
                   rows={8}
                   placeholder={'Например: Сборщик рекламных конструкций, Макетчик наружной рекламы, Дизайнер-конструктор, Оператор 3D-печати. Регионы: РФ, СФО, Забайкальский край…'}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                  className={clientMode ? 'ds-input w-full' : 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
                 />
               </label>
               <label className="block">
-                <div className="text-sm font-medium text-gray-700 mb-1">Правки от заказчика</div>
+                <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-sm font-medium text-gray-700 mb-1'}>Правки от заказчика</div>
                 <textarea
                   value={customerEdits}
                   onChange={(e) => setCustomerEdits(e.target.value)}
                   rows={8}
                   placeholder={'Триггеры для ЛПР, страхи которые нужно закрыть, специальные предложения, цены…'}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                  className={clientMode ? 'ds-input w-full' : 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
                 />
               </label>
               <label className="lg:col-span-2 block">
-                <div className="text-sm font-medium text-gray-700 mb-1">Операторы для персонализации (опционально)</div>
+                <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-sm font-medium text-gray-700 mb-1'}>Операторы для персонализации (опционально)</div>
                 <textarea
                   value={personalizationOps}
                   onChange={(e) => setPersonalizationOps(e.target.value)}
                   rows={5}
                   placeholder={'Например:\n- {{companyName}}\n- {{firstName}}\n- {{Personalization}}\n- {% if last_email_opened %}…{% else %}…{% endif %}'}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                  className={clientMode ? 'ds-input ds-mono w-full' : 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
                 />
               </label>
             </div>
@@ -1109,12 +1116,12 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
             right={
               <div className="flex items-end gap-3">
                 <label className="block">
-                  <div className="text-xs font-medium text-gray-600 mb-1">Язык цепочки</div>
+                  <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-xs font-medium text-gray-600 mb-1'}>Язык цепочки</div>
                   <select
                     value={outputLanguage}
                     onChange={(e) => changeLanguage(e.target.value as EmailSequenceV2OutputLanguage)}
                     disabled={busy != null}
-                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400 disabled:opacity-50"
+                    className={clientMode ? 'ds-input disabled:opacity-40' : 'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400 disabled:opacity-50'}
                   >
                     {LANGUAGE_OPTIONS.map((o) => (
                       <option key={o.value} value={o.value}>{o.label}</option>
@@ -1122,12 +1129,12 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                   </select>
                 </label>
                 <label className="block">
-                  <div className="text-xs font-medium text-gray-600 mb-1">Модель писем</div>
+                  <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-xs font-medium text-gray-600 mb-1'}>Модель писем</div>
                   <select
                     value={writerModel}
                     onChange={(e) => setWriterModel(e.target.value)}
                     disabled={busy != null}
-                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                    className={clientMode ? 'ds-input' : 'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
                   >
                     {WRITER_MODEL_OPTIONS.map((o) => (
                       <option key={o.value} value={o.value}>{o.label}</option>
