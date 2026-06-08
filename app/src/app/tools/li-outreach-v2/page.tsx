@@ -22,7 +22,6 @@ type Campaign = {
   product_description: string;
   target_market: string;
   campaign_objective: string;
-  booking_link: string;
   seed_profile_urls: string;
   /** Window(s) during which the bot is allowed to send invites and replies. */
   working_hours: string[];
@@ -82,7 +81,6 @@ const DEFAULT_CAMPAIGN = {
   product_description: '',
   target_market: '',
   campaign_objective: '',
-  booking_link: '',
   seed_profile_urls: '',
   // Same format as TG sleep_periods but inverted in meaning — when the bot is
   // ALLOWED to send. Comma-separated to support a lunch break, e.g.
@@ -348,7 +346,6 @@ export default function LiOutreachV2Page() {
                 <TextArea label="Описание продукта" value={campaignForm.product_description} onChange={(v) => setCampaignForm({ ...campaignForm, product_description: v })} rows={4} />
                 <TextArea label="Целевой рынок / ICP" value={campaignForm.target_market} onChange={(v) => setCampaignForm({ ...campaignForm, target_market: v })} rows={4} />
                 <TextArea label="Цель кампании" value={campaignForm.campaign_objective} onChange={(v) => setCampaignForm({ ...campaignForm, campaign_objective: v })} rows={3} />
-                <Input label="Ссылка для бронирования" value={campaignForm.booking_link} onChange={(v) => setCampaignForm({ ...campaignForm, booking_link: v })} />
                 <TextArea label="Seed LinkedIn profiles" value={campaignForm.seed_profile_urls} onChange={(v) => setCampaignForm({ ...campaignForm, seed_profile_urls: v })} rows={3} />
                 <div className="grid grid-cols-[1fr_120px] gap-3">
                   <Input

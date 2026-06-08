@@ -10,7 +10,6 @@ const ALLOWED = [
   'product_description',
   'target_market',
   'campaign_objective',
-  'booking_link',
   'seed_profile_urls',
 ] as const;
 
