@@ -171,6 +171,15 @@ export interface LiCampaign {
    * UI показывается только для списков с `has_custom_invites=true`.
    */
   use_custom_invites: boolean;
+  /**
+   * Windows during which the runner is allowed to send invites and messages.
+   * Format "HH:MM-HH:MM"; multiple windows supported (lunch break). Empty
+   * array means 24/7 — no restriction (legacy campaigns from before
+   * migration 20260608_0003).
+   */
+  working_hours: string[];
+  /** Hours from UTC (e.g. 3 for MSK). Compared against `working_hours`. */
+  timezone_offset: number;
   status: LiCampaignStatus;
   created_at: string;
   updated_at: string;

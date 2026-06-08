@@ -9,6 +9,7 @@ import {
   personalizeFollowUp,
 } from './aiService';
 import { extractPublicIdentifier } from './leadHelpers';
+import { isInWorkingHours } from './schedule';
 import {
   applyCooldownToAccount,
   COOLDOWN_MINUTES,
@@ -105,6 +106,22 @@ export async function runCampaignTick(
     .eq('id', campaignId)
     .single<LiCampaign>();
   if (!campaign || campaign.status !== 'running') return { processed: 0, errors: 0 };
+
+  // Working-hours gate. Empty array (default for legacy campaigns predating
+  // migration 20260608_0003) is treated as "always on" — no behaviour change
+  // for existing launches. New campaigns with a real window will skip ticks
+  // outside business hours instead of pushing invites/follow-ups around the
+  // clock. Cheaper than the cooldown branch above because we exit BEFORE
+  // loading Unipile creds / hitting the network.
+  if (!isInWorkingHours(campaign.working_hours, campaign.timezone_offset)) {
+    const tz = campaign.timezone_offset ?? 0;
+    const tzSign = tz >= 0 ? '+' : '-';
+    log(
+      'info',
+      `Тик пропущен — сейчас вне рабочего окна кампании (UTC${tzSign}${Math.abs(tz)}, окна: ${(campaign.working_hours ?? []).join(', ') || '—'}). Следующий тик попробует снова.`,
+    );
+    return { processed: 0, errors: 0 };
+  }
 
   // Load settings (for Unipile + OpenAI credentials)
   const { data: settings } = await db

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError, fetchOwnerNames, userOwnsAccount } from '@/lib/liOutreach/apiHelpers';
+import { normalizeTimezoneOffset, normalizeWorkingHours } from '@/lib/liOutreach/schedule';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -42,29 +43,39 @@ export async function POST(req: NextRequest) {
     if (body.account_id && !(await userOwnsAccount(auth.user.id, String(body.account_id)))) {
       return jsonError('Нельзя привязать кампанию к LinkedIn-аккаунту другого специалиста', 403);
     }
+    const workingHours = normalizeWorkingHours(body.working_hours);
+    const timezoneOffset = normalizeTimezoneOffset(body.timezone_offset);
+
+    const insertRow: Record<string, unknown> = {
+      user_id: auth.user.id,
+      name: String(body.name ?? 'Новая кампания'),
+      account_id: body.account_id || null,
+      lead_list_id: body.lead_list_id || null,
+      steps: body.steps ?? [],
+      use_ai: !!body.use_ai,
+      ai_prompt_invite: body.ai_prompt_invite || null,
+      ai_prompt_chat: body.ai_prompt_chat || null,
+      stop_on_reply: body.stop_on_reply !== false,
+      min_delay: Number(body.min_delay) || 60,
+      max_delay: Number(body.max_delay) || 180,
+      daily_invite_limit: Number(body.daily_invite_limit) || 25,
+      welcome_message: body.welcome_message || null,
+      message_existing_connections: !!body.message_existing_connections,
+      use_ai_welcome: !!body.use_ai_welcome,
+      use_ai_followup: body.use_ai_followup !== false,
+      ai_model: body.ai_model || null,
+      use_custom_invites: !!body.use_custom_invites,
+      timezone_offset: timezoneOffset,
+      status: 'draft',
+    };
+    // Only set working_hours when the caller actually sent a value — keeps
+    // the DB default (`{}` = always-on) for clients that don't know about
+    // the field yet.
+    if (workingHours !== null) insertRow.working_hours = workingHours;
+
     const { data, error } = await auth.supabase
       .from('li_campaigns')
-      .insert({
-        user_id: auth.user.id,
-        name: String(body.name ?? 'Новая кампания'),
-        account_id: body.account_id || null,
-        lead_list_id: body.lead_list_id || null,
-        steps: body.steps ?? [],
-        use_ai: !!body.use_ai,
-        ai_prompt_invite: body.ai_prompt_invite || null,
-        ai_prompt_chat: body.ai_prompt_chat || null,
-        stop_on_reply: body.stop_on_reply !== false,
-        min_delay: Number(body.min_delay) || 60,
-        max_delay: Number(body.max_delay) || 180,
-        daily_invite_limit: Number(body.daily_invite_limit) || 25,
-        welcome_message: body.welcome_message || null,
-        message_existing_connections: !!body.message_existing_connections,
-        use_ai_welcome: !!body.use_ai_welcome,
-        use_ai_followup: body.use_ai_followup !== false,
-        ai_model: body.ai_model || null,
-        use_custom_invites: !!body.use_custom_invites,
-        status: 'draft',
-      })
+      .insert(insertRow)
       .select()
       .single();
     if (error) return jsonError(error.message, 500);
