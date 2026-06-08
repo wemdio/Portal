@@ -1,8 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Bot, MessageSquareText, Play, RefreshCw, Save, Square, Trash2 } from 'lucide-react';
+import { Bot, MessageSquareText, Play, RefreshCw, RotateCcw, Save, Square, Trash2 } from 'lucide-react';
 import { authFetchJson } from '@/lib/authFetch';
+import { V2_DEFAULT_PROMPTS, type V2PromptKey } from '@/lib/liOutreach/v2DefaultPrompts';
 
 type Tab = 'campaigns' | 'leads' | 'dialogs' | 'logs' | 'settings';
 
@@ -14,6 +15,12 @@ type Settings = {
   connect_weekly_limit: number;
   follow_up_daily_limit: number;
   legal_accepted: boolean;
+  /** OpenOutreach follow_up_agent.j2 override. Empty = use upstream default. */
+  prompt_follow_up_agent: string;
+  /** OpenOutreach qualify_lead.j2 override. Empty = use upstream default. */
+  prompt_qualify_lead: string;
+  /** OpenOutreach search_keywords.j2 override. Empty = use upstream default. */
+  prompt_search_keywords: string;
 };
 
 type Campaign = {
@@ -22,7 +29,6 @@ type Campaign = {
   product_description: string;
   target_market: string;
   campaign_objective: string;
-  booking_link: string;
   seed_profile_urls: string;
   /** Window(s) during which the bot is allowed to send invites and replies. */
   working_hours: string[];
@@ -75,6 +81,13 @@ const DEFAULT_SETTINGS: Settings = {
   connect_weekly_limit: 100,
   follow_up_daily_limit: 25,
   legal_accepted: false,
+  // Seed the textareas with the upstream OpenOutreach defaults so users see
+  // the actual prompt the worker would use. When DB has an empty string the
+  // start route falls back to the same default, so what the user sees here
+  // matches what the worker receives.
+  prompt_follow_up_agent: V2_DEFAULT_PROMPTS.follow_up_agent,
+  prompt_qualify_lead: V2_DEFAULT_PROMPTS.qualify_lead,
+  prompt_search_keywords: V2_DEFAULT_PROMPTS.search_keywords,
 };
 
 const DEFAULT_CAMPAIGN = {
@@ -82,7 +95,6 @@ const DEFAULT_CAMPAIGN = {
   product_description: '',
   target_market: '',
   campaign_objective: '',
-  booking_link: '',
   seed_profile_urls: '',
   // Same format as TG sleep_periods but inverted in meaning — when the bot is
   // ALLOWED to send. Comma-separated to support a lunch break, e.g.
@@ -147,7 +159,18 @@ export default function LiOutreachV2Page() {
 
   const loadSettings = useCallback(async () => {
     const data = await api<{ settings: Partial<Settings> | null }>('/settings');
-    if (data.settings) setSettings({ ...DEFAULT_SETTINGS, ...data.settings });
+    if (!data.settings) return;
+    // Plain spread would let empty-string prompts from DB clobber the
+    // upstream defaults. Per-prompt fallback keeps "не редактировал" rows
+    // showing the actual default text in the textarea.
+    const loaded = data.settings;
+    setSettings({
+      ...DEFAULT_SETTINGS,
+      ...loaded,
+      prompt_follow_up_agent: loaded.prompt_follow_up_agent?.trim() || V2_DEFAULT_PROMPTS.follow_up_agent,
+      prompt_qualify_lead:    loaded.prompt_qualify_lead?.trim()    || V2_DEFAULT_PROMPTS.qualify_lead,
+      prompt_search_keywords: loaded.prompt_search_keywords?.trim() || V2_DEFAULT_PROMPTS.search_keywords,
+    });
   }, []);
 
   const loadCampaigns = useCallback(async () => {
@@ -204,13 +227,34 @@ export default function LiOutreachV2Page() {
     setSaving(true);
     setError('');
     try {
-      const data = await api<{ settings: Settings }>('/settings', { method: 'PUT', json: settings });
-      setSettings({ ...DEFAULT_SETTINGS, ...data.settings });
+      // Strip prompts that exactly match the upstream default before saving —
+      // we want "user has not customised this slot" to round-trip as empty in
+      // the DB so future upstream changes can take effect without each user
+      // resetting their copy. The start route falls back to the same default
+      // when the column is empty, so payload behaviour is identical.
+      const toSave = {
+        ...settings,
+        prompt_follow_up_agent: settings.prompt_follow_up_agent === V2_DEFAULT_PROMPTS.follow_up_agent ? '' : settings.prompt_follow_up_agent,
+        prompt_qualify_lead:    settings.prompt_qualify_lead    === V2_DEFAULT_PROMPTS.qualify_lead    ? '' : settings.prompt_qualify_lead,
+        prompt_search_keywords: settings.prompt_search_keywords === V2_DEFAULT_PROMPTS.search_keywords ? '' : settings.prompt_search_keywords,
+      };
+      await api<{ settings: Settings }>('/settings', { method: 'PUT', json: toSave });
+      // Don't trust the server's echo: it stores the stripped-empty value but
+      // the UI still wants to show the default in the textarea. Refetch via
+      // loadSettings so the per-prompt fallback re-applies.
+      await loadSettings();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Ошибка сохранения');
     } finally {
       setSaving(false);
     }
+  }
+
+  function resetPromptToDefault(key: V2PromptKey) {
+    setSettings((current) => ({
+      ...current,
+      [`prompt_${key}`]: V2_DEFAULT_PROMPTS[key],
+    }));
   }
 
   async function createCampaign() {
@@ -348,8 +392,19 @@ export default function LiOutreachV2Page() {
                 <TextArea label="Описание продукта" value={campaignForm.product_description} onChange={(v) => setCampaignForm({ ...campaignForm, product_description: v })} rows={4} />
                 <TextArea label="Целевой рынок / ICP" value={campaignForm.target_market} onChange={(v) => setCampaignForm({ ...campaignForm, target_market: v })} rows={4} />
                 <TextArea label="Цель кампании" value={campaignForm.campaign_objective} onChange={(v) => setCampaignForm({ ...campaignForm, campaign_objective: v })} rows={3} />
-                <Input label="Ссылка для бронирования" value={campaignForm.booking_link} onChange={(v) => setCampaignForm({ ...campaignForm, booking_link: v })} />
-                <TextArea label="Seed LinkedIn profiles" value={campaignForm.seed_profile_urls} onChange={(v) => setCampaignForm({ ...campaignForm, seed_profile_urls: v })} rows={3} />
+                <label className="block text-sm">
+                  <span className="font-medium text-gray-700">Seed LinkedIn profiles</span>
+                  <textarea
+                    value={campaignForm.seed_profile_urls}
+                    rows={5}
+                    onChange={(e) => setCampaignForm({ ...campaignForm, seed_profile_urls: e.target.value })}
+                    placeholder={'https://www.linkedin.com/in/john-doe/\nhttps://www.linkedin.com/in/jane-smith/'}
+                    className="mt-1 w-full resize-y rounded-lg border border-gray-200 px-3 py-2 text-sm font-mono outline-none focus:border-emerald-400"
+                  />
+                  <span className="mt-1 block text-[11px] text-gray-500">
+                    По одной ссылке на строку. Это стартовые «семена» — от этих профилей агент будет искать похожих (1-degree, «people also viewed»). Пусто = чисто по target_market.
+                  </span>
+                </label>
                 <div className="grid grid-cols-[1fr_120px] gap-3">
                   <Input
                     label="Часы работы (рассылки и ответы)"
@@ -537,6 +592,43 @@ export default function LiOutreachV2Page() {
                 Принимаю риски LinkedIn automation
               </label>
             </div>
+
+            <details className="mt-6 rounded-lg border border-gray-200 bg-gray-50/50">
+              <summary className="cursor-pointer select-none px-4 py-3 text-sm font-semibold text-gray-900">
+                AI-промпты для OpenOutreach <span className="text-xs font-normal text-gray-500">(3 шаблона — раскрыть)</span>
+              </summary>
+              <div className="space-y-5 px-4 pb-4 pt-2">
+                <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  Шаблоны на Jinja2 — переменные в {'{{ ... }}'} и блоки {'{% if ... %}'} нельзя переименовывать,
+                  иначе раннер не сможет подставить значения. Пустое поле = использовать дефолт OpenOutreach
+                  (он отображается ниже как стартовая точка).
+                </div>
+                <PromptEditor
+                  label="Follow-up agent (system prompt диалога)"
+                  hint="Главный промпт агента, ведущего LinkedIn-переписку. Решает send_message / wait / mark_completed."
+                  value={settings.prompt_follow_up_agent}
+                  onChange={(v) => setSettings({ ...settings, prompt_follow_up_agent: v })}
+                  onReset={() => resetPromptToDefault('follow_up_agent')}
+                  rows={20}
+                />
+                <PromptEditor
+                  label="Qualify lead (AI-квалификация ICP)"
+                  hint="Промпт для классификатора: подходит ли найденный профиль под целевой рынок кампании."
+                  value={settings.prompt_qualify_lead}
+                  onChange={(v) => setSettings({ ...settings, prompt_qualify_lead: v })}
+                  onReset={() => resetPromptToDefault('qualify_lead')}
+                  rows={10}
+                />
+                <PromptEditor
+                  label="Search keywords (генерация поисковых запросов)"
+                  hint="Промпт для составления коротких поисковых фраз для LinkedIn People search."
+                  value={settings.prompt_search_keywords}
+                  onChange={(v) => setSettings({ ...settings, prompt_search_keywords: v })}
+                  onReset={() => resetPromptToDefault('search_keywords')}
+                  rows={10}
+                />
+              </div>
+            </details>
           </section>
         )}
       </div>
@@ -549,6 +641,49 @@ function Stat({ label, value }: { label: string; value: number }) {
     <div className="rounded-lg border border-gray-200 bg-white p-4">
       <div className="text-xs font-medium uppercase text-gray-500">{label}</div>
       <div className="mt-1 text-2xl font-semibold text-gray-900">{value}</div>
+    </div>
+  );
+}
+
+function PromptEditor({
+  label,
+  hint,
+  value,
+  onChange,
+  onReset,
+  rows,
+}: {
+  label: string;
+  hint: string;
+  value: string;
+  onChange: (value: string) => void;
+  onReset: () => void;
+  rows: number;
+}) {
+  return (
+    <div className="rounded-md border border-gray-200 bg-white p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-gray-900">{label}</div>
+          <div className="mt-0.5 text-xs text-gray-500">{hint}</div>
+        </div>
+        <button
+          type="button"
+          onClick={onReset}
+          className="inline-flex shrink-0 items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-700 hover:bg-gray-50"
+          title="Вернуть текст из апстрима OpenOutreach"
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          Дефолт
+        </button>
+      </div>
+      <textarea
+        value={value}
+        rows={rows}
+        onChange={(e) => onChange(e.target.value)}
+        spellCheck={false}
+        className="mt-2 w-full resize-y rounded-lg border border-gray-200 px-3 py-2 font-mono text-[12px] leading-relaxed outline-none focus:border-emerald-400"
+      />
     </div>
   );
 }

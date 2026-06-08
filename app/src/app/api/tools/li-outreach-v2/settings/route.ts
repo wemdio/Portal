@@ -12,6 +12,11 @@ const ALLOWED = [
   'connect_weekly_limit',
   'follow_up_daily_limit',
   'legal_accepted',
+  // OpenOutreach prompt overrides — empty string falls back to the upstream
+  // default at job-start time (see campaigns/[id]/start/route.ts).
+  'prompt_follow_up_agent',
+  'prompt_qualify_lead',
+  'prompt_search_keywords',
 ] as const;
 
 export async function GET(req: NextRequest) {
