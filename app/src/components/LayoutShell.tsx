@@ -94,9 +94,16 @@ export function LayoutShell({
       : 'flex flex-col min-h-0 overflow-hidden';
 
   const isClientPortal = pathname.startsWith('/client');
-  const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || isClientPortal;
+  // Public offer agreement page (/offer) is the legal footer linked from
+  // both /login and the client sidebar. It must render as a bare standalone
+  // sheet — no TopNav, no client sidebar, no container chrome — so an
+  // unauthenticated visitor reading the offer doesn't see Portal navigation
+  // they can't use, and an authenticated user gets a clean printable-feeling
+  // legal page instead of the page nested inside the workflow shell.
+  const isOfferPage = pathname === '/offer';
+  const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || isClientPortal || isOfferPage;
 
-  if (isClientPortal) {
+  if (isClientPortal || isOfferPage) {
     return <>{children}</>;
   }
 

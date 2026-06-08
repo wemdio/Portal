@@ -73,6 +73,23 @@ export const CLIENT_NAV_SUPPORT: ClientNavItem = {
   descriptionEn: 'Chat with your manager — we reply during business hours',
 };
 
+/**
+ * Link to the offer agreement page. Lives in the bottom block of the sidebar
+ * next to Support. The client-portal version of the page sits INSIDE
+ * /client/* so it inherits the top bar + sidebar shell and the same dark
+ * editorial theme as every other client surface. The standalone /offer page
+ * (no chrome, white sheet) is reserved for the /login footer link, where
+ * there's no session and the portal shell isn't available.
+ */
+export const CLIENT_NAV_OFFER: ClientNavItem = {
+  id: 'offer',
+  label: 'Договор оферты',
+  labelEn: 'Terms of service',
+  href: '/client/offer',
+  description: 'Публичная оферта — правила использования платформы',
+  descriptionEn: 'Public offer — platform terms of service',
+};
+
 const startGroup: ClientNavGroup = {
   id: 'start',
   label: 'Старт',
@@ -335,6 +352,9 @@ export function resolveActiveNavId(pathname: string): string | null {
   }
   if (pathname === CLIENT_NAV_SUPPORT.href || pathname.startsWith(`${CLIENT_NAV_SUPPORT.href}/`)) {
     return CLIENT_NAV_SUPPORT.id;
+  }
+  if (pathname === CLIENT_NAV_OFFER.href || pathname.startsWith(`${CLIENT_NAV_OFFER.href}/`)) {
+    return CLIENT_NAV_OFFER.id;
   }
   // «Базы» hub absorbs the legacy URLs (companies-search, parsers, base-constructor).
   for (const prefix of BUILD_LEGACY_PREFIXES) {

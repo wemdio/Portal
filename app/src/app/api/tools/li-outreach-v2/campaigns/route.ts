@@ -46,7 +46,6 @@ export async function POST(req: NextRequest) {
       product_description: product,
       target_market: target,
       campaign_objective: objective,
-      booking_link: String(body.booking_link ?? '').trim(),
       seed_profile_urls: String(body.seed_profile_urls ?? '').trim(),
       status: 'draft',
       timezone_offset: timezoneOffset,
