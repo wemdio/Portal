@@ -85,6 +85,9 @@ type LiCampaign = {
   use_ai_followup: boolean;
   use_custom_invites: boolean;
   welcome_message: string | null;
+  /** Окна "HH:MM-HH:MM", в которые runner работает. Пустой массив = 24/7. */
+  working_hours: string[] | null;
+  timezone_offset: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -124,6 +127,11 @@ const DEFAULT_CAMPAIGN_FORM = {
   // (импорт через «CSV с инвайтами»). Тумблер появляется в редакторе кампании
   // только если выбранный список имеет has_custom_invites=true.
   use_custom_invites: false,
+  // Окна, в которые runner отправляет инвайты и сообщения. Формат
+  // "HH:MM-HH:MM", несколько окон через запятую. Пустая строка = всегда
+  // работает (24/7). Для новых кампаний дефолт — рабочий день MSK.
+  working_hours: '09:00-18:00',
+  timezone_offset: 3,
 };
 
 // ---- Helpers ----------------------------------------------------------------
@@ -409,6 +417,13 @@ export default function LiOutreachPage() {
           use_ai_followup: cf.use_ai_followup,
           ai_model: cf.ai_model || null,
           use_custom_invites: cf.use_custom_invites,
+          // UI хранит окна как строку через запятую (см. TG outreach
+          // sleep_periods), API нормализатор принимает оба формата.
+          working_hours: cf.working_hours
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
+          timezone_offset: cf.timezone_offset,
         },
       });
       setShowCreate(false);
@@ -473,6 +488,14 @@ export default function LiOutreachPage() {
       use_ai_followup: campaign.use_ai_followup !== false,
       ai_model: typeof (campaign as Record<string, unknown>).ai_model === 'string' ? String((campaign as Record<string, unknown>).ai_model) : DEFAULT_CAMPAIGN_FORM.ai_model,
       use_custom_invites: Boolean(campaign.use_custom_invites),
+      // Из БД working_hours приходит массивом, в форме храним строкой через
+      // запятую для редактирования. Пустой массив (legacy 24/7) → пустая
+      // строка в поле, юзер видит что окон нет, и может либо оставить как
+      // есть, либо ввести своё.
+      working_hours: Array.isArray(campaign.working_hours) ? campaign.working_hours.join(', ') : '',
+      timezone_offset: Number.isFinite(Number(campaign.timezone_offset))
+        ? Number(campaign.timezone_offset)
+        : DEFAULT_CAMPAIGN_FORM.timezone_offset,
     });
     setEditingCampaignId(campaign.id);
     setShowCreate(true);
@@ -1133,6 +1156,25 @@ export default function LiOutreachPage() {
                 <div className="flex items-center gap-1.5">
                   <label className="text-xs text-gray-600">Лимит/день:</label>
                   <input type="number" min={1} max={100} value={cf.daily_invite_limit} onChange={(e) => setCf({ ...cf, daily_invite_limit: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <label className="text-xs text-gray-600" title="Окна, в которые runner отправляет инвайты и сообщения. Несколько через запятую (например, 09:00-13:00, 14:00-18:00 для перерыва на обед). Пустое поле = работает 24/7.">Часы работы:</label>
+                  <input
+                    type="text"
+                    value={cf.working_hours}
+                    onChange={(e) => setCf({ ...cf, working_hours: e.target.value })}
+                    placeholder="09:00-18:00"
+                    className="w-40 rounded border border-gray-200 px-2 py-1 text-xs"
+                  />
+                  <label className="text-xs text-gray-600" title="Часовой пояс кампании в часах от UTC. Например, 3 для MSK.">UTC:</label>
+                  <input
+                    type="number"
+                    min={-12}
+                    max={14}
+                    value={cf.timezone_offset}
+                    onChange={(e) => setCf({ ...cf, timezone_offset: Number(e.target.value) || 0 })}
+                    className="w-14 rounded border border-gray-200 px-2 py-1 text-xs"
+                  />
                 </div>
                 <div className="flex items-center gap-1.5">
                   <label className="text-xs text-gray-600">Задержка (сек):</label>
