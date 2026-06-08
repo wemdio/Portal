@@ -12,6 +12,7 @@ import {
   type AdzunaNormalizedJob,
 } from '@/lib/jobs/adzunaCompanyParser';
 import { ADZUNA_COUNTRY_CODES, isExcludedCompany } from '@/lib/parsers/adzunaConfig';
+import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import type { AdzunaSearchConfig } from '@/types';
 
 const PER_PAGE = 50;
@@ -45,7 +46,9 @@ function adzunaUrl(
     app_id: appId,
     app_key: appKey,
     results_per_page: String(PER_PAGE),
-    what: query,
+    // what_phrase = exact-phrase candidate search; we still title-filter below,
+    // because Adzuna full-text-matches the description too (~⅔ of `what` is noise).
+    what_phrase: query,
     sort_by: 'date',
   });
   if (maxDaysOld > 0) p.set('max_days_old', String(maxDaysOld));
@@ -95,6 +98,9 @@ export async function runAdzunaParserJob(jobId: string): Promise<void> {
     const pages = Math.min(MAX_PAGES, Math.max(1, Number(config.pages ?? DEFAULT_PAGES)));
     const maxDays = Math.max(0, Number(config.posted_within_days ?? 0));
     const enrich = config.enrich !== false;
+    // Keep only postings whose TITLE matches the roles — Adzuna's what/what_phrase
+    // also matches the job description, so ~⅔ of raw results are off-target.
+    const titleRe = buildRolesRegex(config.text);
 
     await setProgress({ progress_stage: 'fetching', progress_percent: 0, total_found: 0, total_parsed: 0 });
 
@@ -115,6 +121,7 @@ export async function runAdzunaParserJob(jobId: string): Promise<void> {
             for (const raw of results) {
               const norm = normalizeAdzunaJob(raw, { country, query });
               if (!norm) continue;
+              if (!titleRe.test(norm.title)) continue; // drop description-only matches
               if (isExcludedCompany(norm.company)) {
                 excluded += 1;
                 continue;
