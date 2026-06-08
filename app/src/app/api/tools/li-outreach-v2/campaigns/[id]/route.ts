@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { normalizeTimezoneOffset, normalizeWorkingHours } from '@/lib/liOutreach/schedule';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -9,7 +10,6 @@ const ALLOWED = [
   'product_description',
   'target_market',
   'campaign_objective',
-  'booking_link',
   'seed_profile_urls',
 ] as const;
 
@@ -23,6 +23,13 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     for (const key of ALLOWED) {
       if (key in body) patch[key] = String(body[key] ?? '').trim();
+    }
+    if ('working_hours' in body) {
+      const hours = normalizeWorkingHours(body.working_hours);
+      if (hours !== null) patch.working_hours = hours;
+    }
+    if ('timezone_offset' in body) {
+      patch.timezone_offset = normalizeTimezoneOffset(body.timezone_offset);
     }
 
     const { data, error } = await auth.supabase

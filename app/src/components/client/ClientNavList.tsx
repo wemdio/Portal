@@ -10,6 +10,7 @@ import {
   CLIENT_NAV_MAILBOXES,
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_GROUPS,
+  CLIENT_NAV_OFFER,
   CLIENT_NAV_SUPPORT,
   filterClientNavGroupsForMode,
   type ClientNavItem,
@@ -219,13 +220,28 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
         );
       })}
 
-      <div className="mt-5 pt-4 border-t" style={{ borderColor: 'var(--cp-divider)' }}>
+      {/* Bottom block: Поддержка + Договор оферты. flex-col gap matches the
+          group-items wrapper above — without it the two NavItemRow <a>s
+          render side-by-side because <a> is inline by default. */}
+      <div
+        className="mt-5 pt-4 border-t flex flex-col gap-0.5"
+        style={{ borderColor: 'var(--cp-divider)' }}
+      >
         <NavItemRow
           item={CLIENT_NAV_SUPPORT}
           active={activeId === CLIENT_NAV_SUPPORT.id}
           locale={locale}
           onItemClick={onItemClick}
           badge={supportBadge}
+        />
+        {/* Договор оферты — in-portal version at /client/offer (wrapped by
+            the client layout's top bar + sidebar). The standalone /offer
+            page is reserved for the /login footer flow. */}
+        <NavItemRow
+          item={CLIENT_NAV_OFFER}
+          active={activeId === CLIENT_NAV_OFFER.id}
+          locale={locale}
+          onItemClick={onItemClick}
         />
       </div>
     </nav>

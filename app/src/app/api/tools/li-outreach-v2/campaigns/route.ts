@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { normalizeTimezoneOffset, normalizeWorkingHours } from '@/lib/liOutreach/schedule';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -36,18 +37,27 @@ export async function POST(req: NextRequest) {
       return jsonError('Product description, target market and campaign objective are required', 400);
     }
 
+    const workingHours = normalizeWorkingHours(body.working_hours);
+    const timezoneOffset = normalizeTimezoneOffset(body.timezone_offset);
+
+    const insertRow: Record<string, unknown> = {
+      user_id: auth.user.id,
+      name,
+      product_description: product,
+      target_market: target,
+      campaign_objective: objective,
+      seed_profile_urls: String(body.seed_profile_urls ?? '').trim(),
+      status: 'draft',
+      timezone_offset: timezoneOffset,
+    };
+    // Only override the DB default if the caller actually sent a value — keeps
+    // existing clients (that don't know about working_hours yet) on the
+    // 09:00-18:00 default.
+    if (workingHours !== null) insertRow.working_hours = workingHours;
+
     const { data, error } = await auth.supabase
       .from('li2_campaigns')
-      .insert({
-        user_id: auth.user.id,
-        name,
-        product_description: product,
-        target_market: target,
-        campaign_objective: objective,
-        booking_link: String(body.booking_link ?? '').trim(),
-        seed_profile_urls: String(body.seed_profile_urls ?? '').trim(),
-        status: 'draft',
-      })
+      .insert(insertRow)
       .select()
       .single();
 

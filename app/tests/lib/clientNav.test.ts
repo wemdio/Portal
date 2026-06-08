@@ -13,6 +13,7 @@
 import {
   CLIENT_NAV_GROUPS,
   CLIENT_NAV_DASHBOARD,
+  CLIENT_NAV_OFFER,
   CLIENT_NAV_SUPPORT,
   ClientNavGroupId,
   resolveActiveNavId,
@@ -20,6 +21,12 @@ import {
   type ClientNavItem,
 } from '@/lib/clientNav';
 
+// CLIENT_NAV_OFFER intentionally excluded from this list: the legal-footer
+// link surfaces in the same sidebar block as Support but is conceptually a
+// reference page, not a workflow surface. Keeping it out of `allItems` means
+// the IA invariants below (workflow group structure, locked URL set) stay
+// scoped to the workflow proper. CLIENT_NAV_OFFER gets its own dedicated
+// test (`exposes an offer root item linking to /client/offer`).
 const allItems: readonly ClientNavItem[] = [
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_SUPPORT,
@@ -101,6 +108,25 @@ describe('client nav IA', () => {
     for (const g of CLIENT_NAV_GROUPS) {
       expect(g.items.some((i) => i.id === 'support')).toBe(false);
     }
+  });
+
+  it('exposes an offer root item linking to /client/offer', () => {
+    // In-portal version: the client sidebar opens /client/offer (wrapped by
+    // the client layout's top bar + sidebar + theme tokens). The standalone
+    // /offer page is reserved for the /login footer link, where there's no
+    // session and a chromeless legal page is the right surface.
+    expect(CLIENT_NAV_OFFER.href).toBe('/client/offer');
+    expect(CLIENT_NAV_OFFER.id).toBe('offer');
+    expect(CLIENT_NAV_OFFER.label).toBeTruthy();
+    expect(CLIENT_NAV_OFFER.labelEn).toBeTruthy();
+    for (const g of CLIENT_NAV_GROUPS) {
+      expect(g.items.some((i) => i.id === 'offer')).toBe(false);
+    }
+  });
+
+  it('resolveActiveNavId picks offer for /client/offer', () => {
+    expect(resolveActiveNavId('/client/offer')).toBe('offer');
+    expect(resolveActiveNavId('/client/offer/foo')).toBe('offer');
   });
 
   it('resolveActiveNavId picks support for /client/support', () => {

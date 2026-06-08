@@ -117,6 +117,7 @@ export async function middleware(request: NextRequest) {
     const isPublicPath =
       pathname === '/maintenance' ||
       pathname === '/login' ||
+      pathname === '/offer' ||
       pathname.startsWith('/api/telegram/verify') ||
       pathname.startsWith('/api/telegram/link') ||
       pathname.startsWith('/review/base/')

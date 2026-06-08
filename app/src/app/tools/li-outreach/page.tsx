@@ -85,10 +85,34 @@ type LiCampaign = {
   use_ai_followup: boolean;
   use_custom_invites: boolean;
   welcome_message: string | null;
+  /** Окна "HH:MM-HH:MM", в которые runner работает. Пустой массив = 24/7. */
+  working_hours: string[] | null;
+  timezone_offset: number | null;
   created_at: string;
   updated_at: string;
 };
-type LiTask = { id: string; type: string; status: string; progress: number; total: number; error_message: string | null; created_at: string };
+/**
+ * Background task row from `li_tasks`. `params` carries the exact inputs the
+ * scraper was launched with (URL, account, list, max_results) — the UI uses
+ * this to label rows AND repopulate the form via the «Повторить» button so
+ * operators can re-run a scrape without retyping a search URL by hand.
+ */
+type LiTask = {
+  id: string;
+  type: 'search' | 'post_reactions' | 'csv_import' | string;
+  status: string;
+  progress: number;
+  total: number;
+  error_message: string | null;
+  created_at: string;
+  params: {
+    search_url?: string;
+    post_url?: string;
+    account_id?: string;
+    lead_list_id?: string;
+    max_results?: number;
+  } | null;
+};
 type LiCampaignLog = { id: number; level: string; message: string; lead_name: string | null; step_index: number | null; created_at: string };
 type LiSettings = { unipile_dsn: string; unipile_api_key: string; webhook_secret: string; proxy_url: string };
 type CampaignStep = { type?: unknown; message?: unknown; days?: unknown; hours?: unknown };
@@ -124,6 +148,11 @@ const DEFAULT_CAMPAIGN_FORM = {
   // (импорт через «CSV с инвайтами»). Тумблер появляется в редакторе кампании
   // только если выбранный список имеет has_custom_invites=true.
   use_custom_invites: false,
+  // Окна, в которые runner отправляет инвайты и сообщения. Формат
+  // "HH:MM-HH:MM", несколько окон через запятую. Пустая строка = всегда
+  // работает (24/7). Для новых кампаний дефолт — рабочий день MSK.
+  working_hours: '09:00-18:00',
+  timezone_offset: 3,
 };
 
 // ---- Helpers ----------------------------------------------------------------
@@ -363,7 +392,18 @@ export default function LiOutreachPage() {
   const deleteCampaign = async (id: string) => { if (!confirm('Удалить кампанию?')) return; await api(`/campaigns/${id}`, { method: 'DELETE' }); await loadCampaigns(); };
 
   const startScrape = async () => {
-    if (!scraperUrl || !scraperAccountId) { alert('Заполните URL и аккаунт'); return; }
+    // Раньше тут было общее «Заполните URL и аккаунт» — операторы видели его
+    // даже когда аккаунт-то как раз и был выбран, и шли искать причину не
+    // там. Сообщения теперь персональные: говорят ровно про то поле, которое
+    // пустое.
+    if (!scraperAccountId) { alert('Выберите LinkedIn-аккаунт справа от поля URL'); return; }
+    if (!scraperUrl.trim()) {
+      const hint = scraperType === 'search'
+        ? 'Вставьте URL поиска LinkedIn People (https://www.linkedin.com/search/results/people/?keywords=…)'
+        : 'Вставьте URL поста LinkedIn (https://www.linkedin.com/posts/…) — скрапер соберёт реакции';
+      alert(hint);
+      return;
+    }
     const endpoint = scraperType === 'search' ? '/scraper/search' : '/scraper/reactions';
     const body = scraperType === 'search'
       ? { search_url: scraperUrl, account_id: scraperAccountId, lead_list_id: scraperListId || undefined, max_results: scraperMax }
@@ -374,6 +414,40 @@ export default function LiOutreachPage() {
   };
 
   const cancelTask = async (taskId: string) => { await api(`/scraper/tasks/${taskId}/cancel`, { method: 'POST', json: {} }); void loadTasks(); };
+
+  /**
+   * «Повторить» — копирует параметры завершённой задачи в форму скрапера
+   * вверху и переключает вкладку search/reactions, чтобы оператор мог сразу
+   * нажать «Запустить». Поле lead_list_id — мягкий fallback: если список с
+   * того момента удалили, оставляем пустым, иначе селект показал бы пустой
+   * id и сбросился к «—».
+   */
+  const repeatTask = (task: LiTask) => {
+    const params = task.params ?? {};
+    const isReactions = task.type === 'post_reactions';
+    setScraperType(isReactions ? 'reactions' : 'search');
+    setScraperUrl(String(isReactions ? (params.post_url ?? '') : (params.search_url ?? '')));
+    setScraperAccountId(params.account_id ?? '');
+    const listStillExists = params.lead_list_id && leadLists.some((l) => l.id === params.lead_list_id);
+    setScraperListId(listStillExists ? String(params.lead_list_id) : '');
+    setScraperMax(typeof params.max_results === 'number' ? params.max_results : 100);
+    // Прокрутим к форме чтобы оператор сразу увидел подставленные значения.
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  /** Короткое название аккаунта по id — для подписи под задачей. */
+  const accountLabel = (id: string | undefined): string => {
+    if (!id) return '—';
+    const acc = accounts.find((a) => a.id === id);
+    return acc?.name || acc?.unipile_account_id || id.slice(0, 8);
+  };
+
+  /** Название списка лидов по id — для подписи под задачей. */
+  const listLabel = (id: string | undefined): string => {
+    if (!id) return 'без списка';
+    const l = leadLists.find((x) => x.id === id);
+    return l?.name ?? id.slice(0, 8);
+  };
 
   const createCampaign = async () => {
     if (!cf.name.trim()) { alert('Введите название кампании'); return; }
@@ -409,6 +483,13 @@ export default function LiOutreachPage() {
           use_ai_followup: cf.use_ai_followup,
           ai_model: cf.ai_model || null,
           use_custom_invites: cf.use_custom_invites,
+          // UI хранит окна как строку через запятую (см. TG outreach
+          // sleep_periods), API нормализатор принимает оба формата.
+          working_hours: cf.working_hours
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
+          timezone_offset: cf.timezone_offset,
         },
       });
       setShowCreate(false);
@@ -473,6 +554,14 @@ export default function LiOutreachPage() {
       use_ai_followup: campaign.use_ai_followup !== false,
       ai_model: typeof (campaign as Record<string, unknown>).ai_model === 'string' ? String((campaign as Record<string, unknown>).ai_model) : DEFAULT_CAMPAIGN_FORM.ai_model,
       use_custom_invites: Boolean(campaign.use_custom_invites),
+      // Из БД working_hours приходит массивом, в форме храним строкой через
+      // запятую для редактирования. Пустой массив (legacy 24/7) → пустая
+      // строка в поле, юзер видит что окон нет, и может либо оставить как
+      // есть, либо ввести своё.
+      working_hours: Array.isArray(campaign.working_hours) ? campaign.working_hours.join(', ') : '',
+      timezone_offset: Number.isFinite(Number(campaign.timezone_offset))
+        ? Number(campaign.timezone_offset)
+        : DEFAULT_CAMPAIGN_FORM.timezone_offset,
     });
     setEditingCampaignId(campaign.id);
     setShowCreate(true);
@@ -1135,6 +1224,25 @@ export default function LiOutreachPage() {
                   <input type="number" min={1} max={100} value={cf.daily_invite_limit} onChange={(e) => setCf({ ...cf, daily_invite_limit: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
                 </div>
                 <div className="flex items-center gap-1.5">
+                  <label className="text-xs text-gray-600" title="Окна, в которые runner отправляет инвайты и сообщения. Несколько через запятую (например, 09:00-13:00, 14:00-18:00 для перерыва на обед). Пустое поле = работает 24/7.">Часы работы:</label>
+                  <input
+                    type="text"
+                    value={cf.working_hours}
+                    onChange={(e) => setCf({ ...cf, working_hours: e.target.value })}
+                    placeholder="09:00-18:00"
+                    className="w-40 rounded border border-gray-200 px-2 py-1 text-xs"
+                  />
+                  <label className="text-xs text-gray-600" title="Часовой пояс кампании в часах от UTC. Например, 3 для MSK.">UTC:</label>
+                  <input
+                    type="number"
+                    min={-12}
+                    max={14}
+                    value={cf.timezone_offset}
+                    onChange={(e) => setCf({ ...cf, timezone_offset: Number(e.target.value) || 0 })}
+                    className="w-14 rounded border border-gray-200 px-2 py-1 text-xs"
+                  />
+                </div>
+                <div className="flex items-center gap-1.5">
                   <label className="text-xs text-gray-600">Задержка (сек):</label>
                   <input type="number" min={10} value={cf.min_delay} onChange={(e) => setCf({ ...cf, min_delay: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
                   <span className="text-xs text-gray-400">—</span>
@@ -1674,17 +1782,75 @@ export default function LiOutreachPage() {
           </div>
           <div className="space-y-2">
             <h3 className="text-sm font-semibold text-gray-900">Задачи</h3>
-            {tasks.map((t) => (
-              <div key={t.id} className="rounded-xl border border-gray-200 px-3 py-2 text-sm flex items-center justify-between">
-                <div>
-                  <span className="font-medium">{t.type}</span>
-                  <span className={`ml-2 text-xs px-2 py-0.5 rounded ${t.status === 'completed' ? 'bg-green-100 text-green-700' : t.status === 'running' ? 'bg-blue-100 text-blue-700' : t.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>{t.status}</span>
-                  <span className="text-xs text-gray-500 ml-2">{t.progress}/{t.total}</span>
-                  {t.error_message && <span className="text-xs text-red-600 ml-2">{t.error_message}</span>}
+            {tasks.map((t) => {
+              const params = t.params ?? {};
+              const taskUrl = String(t.type === 'post_reactions' ? (params.post_url ?? '') : (params.search_url ?? ''));
+              const taskTypeLabel = t.type === 'search' ? 'search' : t.type === 'post_reactions' ? 'reactions' : t.type;
+              const canRepeat = t.type === 'search' || t.type === 'post_reactions';
+              return (
+                <div key={t.id} className="rounded-xl border border-gray-200 px-3 py-2 text-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{taskTypeLabel}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded ${t.status === 'completed' ? 'bg-green-100 text-green-700' : t.status === 'running' ? 'bg-blue-100 text-blue-700' : t.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>{t.status}</span>
+                      <span className="text-xs text-gray-500">{t.progress}/{t.total}</span>
+                      {t.error_message && <span className="text-xs text-red-600">{t.error_message}</span>}
+                    </div>
+                    <div className="flex items-center gap-3">
+                      {canRepeat && t.status !== 'pending' && t.status !== 'running' && (
+                        <button
+                          onClick={() => repeatTask(t)}
+                          className="text-xs text-blue-600 hover:underline"
+                          title="Подставить параметры этой задачи в форму выше"
+                        >
+                          Повторить
+                        </button>
+                      )}
+                      {(t.status === 'pending' || t.status === 'running') && (
+                        <button onClick={() => void cancelTask(t.id)} className="text-xs text-red-600 hover:underline">Отменить</button>
+                      )}
+                    </div>
+                  </div>
+                  {/* Параметры задачи: URL + аккаунт + список + лимит + время.
+                      Лежат в li_tasks.params (jsonb), а не на отдельных колонках —
+                      воркер парсит payload по типу таски. URL обрезаем CSS-ом
+                      (truncate) чтобы длинная LinkedIn-ссылка не растягивала
+                      строку, при клике открываем в новой вкладке. */}
+                  {(taskUrl || params.account_id || params.lead_list_id) && (
+                    <div className="mt-1.5 space-y-0.5 text-xs text-gray-500">
+                      {taskUrl && (
+                        <div className="truncate">
+                          <a
+                            href={taskUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 hover:underline"
+                            title={taskUrl}
+                          >
+                            {taskUrl}
+                          </a>
+                        </div>
+                      )}
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                        <span>аккаунт: <span className="text-gray-700">{accountLabel(params.account_id)}</span></span>
+                        <span>список: <span className="text-gray-700">{listLabel(params.lead_list_id)}</span></span>
+                        {typeof params.max_results === 'number' && (
+                          <span>лимит: <span className="text-gray-700">{params.max_results}</span></span>
+                        )}
+                        <span className="text-gray-400">
+                          {new Date(t.created_at).toLocaleString('ru-RU', {
+                            day: '2-digit',
+                            month: 'short',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
-                {(t.status === 'pending' || t.status === 'running') && <button onClick={() => void cancelTask(t.id)} className="text-xs text-red-600 hover:underline">Отменить</button>}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

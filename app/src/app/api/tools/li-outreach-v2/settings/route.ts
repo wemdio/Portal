@@ -7,15 +7,16 @@ export const dynamic = 'force-dynamic';
 const ALLOWED = [
   'linkedin_email',
   'linkedin_password',
-  'llm_provider',
-  'llm_api_key',
-  'ai_model',
-  'llm_api_base',
   'proxy_url',
   'connect_daily_limit',
   'connect_weekly_limit',
   'follow_up_daily_limit',
   'legal_accepted',
+  // OpenOutreach prompt overrides — empty string falls back to the upstream
+  // default at job-start time (see campaigns/[id]/start/route.ts).
+  'prompt_follow_up_agent',
+  'prompt_qualify_lead',
+  'prompt_search_keywords',
 ] as const;
 
 export async function GET(req: NextRequest) {
