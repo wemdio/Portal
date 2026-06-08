@@ -57,6 +57,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           product_description: campaign.product_description,
           target_market: campaign.target_market,
           campaign_objective: campaign.campaign_objective,
+          // Stored as a single textarea string ("one URL per line"); parse
+          // into an array of trimmed non-empty URLs for the runtime. These are
+          // starting seeds the agent uses to bootstrap discovery (1st-degree
+          // connections, "people also viewed", etc.).
+          seed_profile_urls: String(campaign.seed_profile_urls ?? '')
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean),
           // Inverse of TG's sleep_periods: the runtime should ONLY send invites
           // and replies during these windows (local time = UTC + timezone_offset).
           schedule: {

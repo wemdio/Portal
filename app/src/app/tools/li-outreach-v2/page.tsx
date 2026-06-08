@@ -346,7 +346,19 @@ export default function LiOutreachV2Page() {
                 <TextArea label="Описание продукта" value={campaignForm.product_description} onChange={(v) => setCampaignForm({ ...campaignForm, product_description: v })} rows={4} />
                 <TextArea label="Целевой рынок / ICP" value={campaignForm.target_market} onChange={(v) => setCampaignForm({ ...campaignForm, target_market: v })} rows={4} />
                 <TextArea label="Цель кампании" value={campaignForm.campaign_objective} onChange={(v) => setCampaignForm({ ...campaignForm, campaign_objective: v })} rows={3} />
-                <TextArea label="Seed LinkedIn profiles" value={campaignForm.seed_profile_urls} onChange={(v) => setCampaignForm({ ...campaignForm, seed_profile_urls: v })} rows={3} />
+                <label className="block text-sm">
+                  <span className="font-medium text-gray-700">Seed LinkedIn profiles</span>
+                  <textarea
+                    value={campaignForm.seed_profile_urls}
+                    rows={5}
+                    onChange={(e) => setCampaignForm({ ...campaignForm, seed_profile_urls: e.target.value })}
+                    placeholder={'https://www.linkedin.com/in/john-doe/\nhttps://www.linkedin.com/in/jane-smith/'}
+                    className="mt-1 w-full resize-y rounded-lg border border-gray-200 px-3 py-2 text-sm font-mono outline-none focus:border-emerald-400"
+                  />
+                  <span className="mt-1 block text-[11px] text-gray-500">
+                    По одной ссылке на строку. Это стартовые «семена» — от этих профилей агент будет искать похожих (1-degree, «people also viewed»). Пусто = чисто по target_market.
+                  </span>
+                </label>
                 <div className="grid grid-cols-[1fr_120px] gap-3">
                   <Input
                     label="Часы работы (рассылки и ответы)"
