@@ -23,7 +23,8 @@ import type {
   WarmupAnalyticsEntry,
   BackgroundJob,
 } from './types';
-import { getInstantlyAccountApiKey, type InstantlyRequestOptions } from './accounts';
+import { getInstantlyAccountApiKey, resolveInstantlyAccountId, type InstantlyRequestOptions } from './accounts';
+import { acquireInstantlyToken } from './rateLimiter';
 import { InstantlyApiError } from './errors';
 export { InstantlyApiError } from './errors';
 
@@ -41,6 +42,11 @@ async function request<T>(
   options: { method?: string; body?: unknown; params?: Record<string, string | number | boolean | undefined> } = {},
   requestOptions?: InstantlyRequestOptions,
 ): Promise<T> {
+  // Общий распределённый rate-limiter (workspace-wide лимит Instantly). Один раз
+  // на логический вызов, ДО retry-цикла. Fail-open: при любой проблеме лимитера
+  // запрос проходит как раньше. По умолчанию выключен (INSTANTLY_RATE_LIMITER_ENABLED).
+  await acquireInstantlyToken(resolveInstantlyAccountId(requestOptions?.accountId));
+
   const apiKey = getApiKey(requestOptions);
   const url = new URL(`${BASE_URL}${path}`);
 

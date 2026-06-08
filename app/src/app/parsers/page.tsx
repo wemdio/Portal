@@ -9,8 +9,9 @@ import { YandexMapsParserView } from '@/components/parsers/YandexMapsParserView'
 import { CryptoPaymentParserView } from '@/components/parsers/CryptoPaymentParserView';
 import { YandexDirectParserView } from '@/components/parsers/YandexDirectParserView';
 import { AtsParserView } from '@/components/parsers/AtsParserView';
+import { AdzunaParserView } from '@/components/parsers/AdzunaParserView';
 
-type Tab = 'hh' | 'ats' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto';
+type Tab = 'hh' | 'ats' | 'adzuna' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto';
 
 export default function ParsersPage() {
   const [activeTab, setActiveTab] = useState<Tab>('hh');
@@ -45,6 +46,17 @@ export default function ParsersPage() {
             `}
           >
             EU/US · Tech-компании
+          </button>
+          <button
+            onClick={() => setActiveTab('adzuna')}
+            className={`
+              whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm
+              ${activeTab === 'adzuna'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}
+            `}
+          >
+            EU/US · Весь рынок
           </button>
           <button
             onClick={() => setActiveTab('hh-archive')}
@@ -108,6 +120,8 @@ export default function ParsersPage() {
         ? <HHParserView />
         : activeTab === 'ats'
         ? <AtsParserView />
+        : activeTab === 'adzuna'
+        ? <AdzunaParserView />
         : activeTab === 'hh-archive'
           ? <HHArchiveParserView />
           : activeTab === 'search'

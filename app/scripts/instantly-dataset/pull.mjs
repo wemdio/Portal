@@ -8,8 +8,11 @@
  * Per-campaign work (leads/emails/analytics) checkpoints to disk every N
  * campaigns so a network drop doesn't lose progress.
  *
- * Uses INSTANTLY_EXPORT_API_KEY (separate per-key rate-limit bucket — does
- * not touch portal traffic on the main key).
+ * Uses INSTANTLY_EXPORT_API_KEY. NB: лимит Instantly — workspace-wide ПОВЕРХ
+ * ключей (отдельный ключ НЕ даёт отдельного бюджета — см. инцидент 22.05.2026 в
+ * wiki/log.md, где этот скрипт задушил qualifier на другом ключе). Поэтому при
+ * INSTANTLY_RATE_LIMITER_ENABLED=1 скрипт берёт общий токен через тот же
+ * Postgres-бакет ('main'), что и portal/qualifier (см. acquireSharedToken ниже).
  *
  * Usage:
  *   cd app
@@ -73,6 +76,39 @@ function rateLimit() {
   return next;
 }
 
+// ─── shared workspace rate-limiter (общий Postgres token-bucket) ─────────
+// pull.mjs делит workspace-лимит Instantly с qualifier/portal/outreach (лимит
+// общий ПОВЕРХ ключей). При INSTANTLY_RATE_LIMITER_ENABLED=1 берём общий токен
+// через RPC основной БД (PostgREST), уступая latency-sensitive потребителям.
+// Batch-скрипт нечувствителен к задержке → ждём долго (а не пропускаем). Любая
+// проблема лимитера → fail-open (идём как раньше, со своим rateLimit()).
+const RL_URL     = (env.NEXT_PUBLIC_SUPABASE_URL || '').replace(/\/+$/, '');
+const RL_KEY     = env.SUPABASE_SERVICE_ROLE_KEY || '';
+const RL_MAX_WAIT_MS = Number(env.INSTANTLY_PULL_RL_MAX_WAIT_MS || 300_000);
+const RL_ON      = env.INSTANTLY_RATE_LIMITER_ENABLED === '1' && !!RL_URL && !!RL_KEY;
+
+async function acquireSharedToken() {
+  if (!RL_ON) return;
+  const deadline = Date.now() + RL_MAX_WAIT_MS;
+  for (;;) {
+    let wait;
+    try {
+      const r = await fetch(`${RL_URL}/rest/v1/rpc/instantly_acquire_token`, {
+        method: 'POST',
+        headers: { apikey: RL_KEY, Authorization: `Bearer ${RL_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ p_account: 'main' }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!r.ok) return;                      // RPC не накатан / ошибка → fail-open
+      wait = Number(await r.json());
+    } catch { return; }                       // таймаут/сеть → fail-open
+    if (!Number.isFinite(wait) || wait <= 0) return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) { log('  ~ shared rate-limiter: max wait reached, proceeding'); return; }
+    await new Promise((res) => setTimeout(res, Math.min(remaining, Math.max(250, wait * 1000))));
+  }
+}
+
 // ─── HTTP w/ retry on 429/5xx ───────────────────────────────────────────
 async function call(path, opts = {}) {
   const url = new URL('https://api.instantly.ai/api/v2' + path);
@@ -87,6 +123,7 @@ async function call(path, opts = {}) {
   let lastErr;
   for (let attempt = 0; attempt < 5; attempt++) {
     await rateLimit();
+    await acquireSharedToken();
     try {
       const r = await fetch(url.toString(), init);
       if (r.status === 429) {
