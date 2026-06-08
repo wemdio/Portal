@@ -38,7 +38,7 @@ import {
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { OnboardingChecklist } from '@/components/client/OnboardingChecklist';
 import { AutoPipelineSummary } from '@/components/client/AutoPipelineSummary';
-import type { ClientNavMode } from '@/lib/clientNav';
+import { useClientPortalContext } from '@/lib/clientPortalContext';
 
 // ───────────────────────── types ─────────────────────────
 
@@ -151,9 +151,7 @@ export default function ClientDashboardPage() {
   const [campaigns, setCampaigns] = useState<CampaignRow[] | null>(null);
   const [replies, setReplies] = useState<ReplyItem[] | null>(null);
   const [onboarding, setOnboarding] = useState<OnboardingResponse | null>(null);
-  // 'auto' клиенты — портал собирает кампании за них; онбординг скрываем,
-  // CTA «Создать кампанию» меняется на блок AutoPipelineSummary.
-  const [portalMode, setPortalMode] = useState<ClientNavMode>('manual');
+  const { portalMode } = useClientPortalContext();
 
   const [campaignsError, setCampaignsError] = useState('');
   const [repliesError, setRepliesError] = useState('');
@@ -206,17 +204,6 @@ export default function ClientDashboardPage() {
       } catch {
         // onboarding is graceful-fallback; absence simply hides the checklist
         if (!cancelled) setOnboarding(null);
-      }
-    })();
-
-    void (async () => {
-      try {
-        const data = await clientApiFetch<{ mode?: ClientNavMode }>('/portal-mode');
-        if (!cancelled && (data.mode === 'auto' || data.mode === 'manual')) {
-          setPortalMode(data.mode);
-        }
-      } catch {
-        // mode fetch failure → falls back to 'manual'; nothing breaks.
       }
     })();
 

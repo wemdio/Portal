@@ -120,6 +120,68 @@ export function findColumnIndex(header: string[], ...names: string[]): number {
   return -1;
 }
 
+const PRIMARY_SITE_HEADERS = [
+  'company_site_url',
+  'company site url',
+  'company website',
+  'company_website',
+  'company site',
+  'company domain',
+  'company_domain',
+  'сайт компании',
+  'сайт_компании',
+  'url сайта компании',
+];
+
+const GENERIC_SITE_HEADERS = ['сайт', 'site', 'website', 'домен', 'domain'];
+const LEGACY_URL_HEADERS = ['url'];
+
+export function findPreferredSiteColumnIndexes(header: string[]): number[] {
+  const lower = header.map((h) => h.trim().toLowerCase());
+  const indexes: number[] = [];
+
+  for (const group of [PRIMARY_SITE_HEADERS, GENERIC_SITE_HEADERS, LEGACY_URL_HEADERS]) {
+    for (const name of group) {
+      const idx = lower.indexOf(name.toLowerCase());
+      if (idx >= 0 && !indexes.includes(idx)) indexes.push(idx);
+    }
+  }
+
+  return indexes;
+}
+
+function parseUrlForLookup(value: string): URL | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const withProtocol = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    return new URL(withProtocol);
+  } catch {
+    return null;
+  }
+}
+
+export function isRejectedSiteLookupUrl(value: string): boolean {
+  const url = parseUrlForLookup(value);
+  if (!url) return false;
+
+  const host = url.hostname.toLowerCase().replace(/^www\./, '');
+  const isHhHost = host === 'hh.ru' || host.endsWith('.hh.ru') || host === 'headhunter.ru' || host.endsWith('.headhunter.ru');
+  if (!isHhHost) return false;
+
+  const pathname = url.pathname.toLowerCase();
+  return pathname.startsWith('/vacancy') || pathname.startsWith('/employer') || pathname.startsWith('/search/vacancy');
+}
+
+export function getPreferredSiteUrl(row: string[], siteColumnIndexes: number[]): string {
+  for (const idx of siteColumnIndexes) {
+    const value = (row[idx] ?? '').trim();
+    if (!value || isRejectedSiteLookupUrl(value)) continue;
+    return value;
+  }
+  return '';
+}
+
 export interface ProcessInPoolOptions<T, R> {
   /**
    * Hard ceiling per task (ms). After this the worker abandons the in-flight

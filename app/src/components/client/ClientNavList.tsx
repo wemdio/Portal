@@ -2,9 +2,12 @@
 
 import Link from 'next/link';
 import type { Route } from 'next';
+import { useEffect, useState } from 'react';
+import { clientApiFetch } from '@/lib/clientFetcher';
 import {
   CLIENT_NAV_AUTO_PIPELINE_SETUP,
   CLIENT_NAV_MANUAL_SCORING,
+  CLIENT_NAV_MAILBOXES,
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_GROUPS,
   CLIENT_NAV_SUPPORT,
@@ -63,6 +66,25 @@ function NavItemRow({
 
 export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }: ClientNavListProps) {
   const groups = filterClientNavGroupsForMode(CLIENT_NAV_GROUPS, mode);
+
+  // BYO-почты (пилот): подгружаем флаг видимости. У обычных клиентов он выключен —
+  // пункт просто не появляется.
+  const [byoEnabled, setByoEnabled] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await clientApiFetch<{ enabled?: boolean }>('/mailboxes/enabled');
+        if (!cancelled) setByoEnabled(data.enabled === true);
+      } catch {
+        /* тихо скрываем пункт при любой ошибке */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <nav aria-label={locale === 'en' ? 'Main navigation' : 'Главное меню'} className="flex flex-col gap-1.5">
       {/* «Главная» eyebrow — gives Dashboard a section anchor so it isn't an
@@ -78,6 +100,16 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
         locale={locale}
         onItemClick={onItemClick}
       />
+
+      {/* BYO-почты (пилот): виден только пользователям из allowlist'а BYO_MAILBOX_PILOT_USER_IDS. */}
+      {byoEnabled && (
+        <NavItemRow
+          item={CLIENT_NAV_MAILBOXES}
+          active={activeId === CLIENT_NAV_MAILBOXES.id}
+          locale={locale}
+          onItemClick={onItemClick}
+        />
+      )}
 
       {/* Auto-mode-only: настройка цепочек под скоры endpoint'а. В manual
           этого пункта не существует — manual-клиент пишет цепочки прямо

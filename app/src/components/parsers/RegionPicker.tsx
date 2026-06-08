@@ -10,6 +10,8 @@ interface Props {
   /** Максимум одновременно выбранных регионов. HH сам по себе допускает много,
    *  но логично ограничить 30 — соответствует серверной валидации. */
   max?: number;
+  /** Client portal: hide operator jargon (area ids, OR logic, custom-code, the N/30 counter). */
+  clientMode?: boolean;
 }
 
 /**
@@ -21,7 +23,7 @@ interface Props {
  *  - «Ввести код вручную» — для экзотики (любой area id из api.hh.ru/areas).
  *  - Если value пустой — поведение API: считаем как '113' (вся РФ).
  */
-export function RegionPicker({ value, onChange, max = 30 }: Props) {
+export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
   const [customInput, setCustomInput] = useState('');
@@ -48,10 +50,25 @@ export function RegionPicker({ value, onChange, max = 30 }: Props) {
     return Array.from(groups.entries());
   }, [suggestions]);
 
+  // «Вся Россия» (area 113) already covers every city, so mixing it with
+  // specific cities is meaningless. In clientMode make them mutually exclusive.
+  const ALL_RUSSIA_ID = '113';
   function add(id: string) {
     if (!id) return;
     if (selectedSet.has(id)) return;
     if (value.length >= max) return;
+    if (clientMode) {
+      if (id === ALL_RUSSIA_ID) {
+        // Picking «Вся Россия» clears any specific cities.
+        onChange([ALL_RUSSIA_ID]);
+        setQuery('');
+        return;
+      }
+      // Picking a specific city drops the all-Russia selection.
+      onChange([...value.filter((x) => x !== ALL_RUSSIA_ID), id]);
+      setQuery('');
+      return;
+    }
     onChange([...value, id]);
     setQuery('');
   }
@@ -95,10 +112,15 @@ export function RegionPicker({ value, onChange, max = 30 }: Props) {
           return (
             <span
               key={id}
-              className="inline-flex items-center gap-1 rounded-md bg-blue-50 border border-blue-200 px-2 py-0.5 text-xs text-blue-800"
+              className={clientMode
+                ? 'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs'
+                : 'inline-flex items-center gap-1 rounded-md bg-blue-50 border border-blue-200 px-2 py-0.5 text-xs text-blue-800'}
+              style={clientMode ? { background: 'var(--cp-surface-elev)', border: '1px solid var(--cp-divider-strong)', color: 'var(--cp-paper)' } : undefined}
             >
               {label}
-              {!region && <span className="text-blue-400">(код {id})</span>}
+              {!region && (
+                <span className={clientMode ? '' : 'text-blue-400'} style={clientMode ? { color: 'var(--cp-paper-faint)' } : undefined}>(код {id})</span>
+              )}
               <button
                 type="button"
                 onClick={(e) => {
@@ -106,7 +128,8 @@ export function RegionPicker({ value, onChange, max = 30 }: Props) {
                   remove(id);
                 }}
                 aria-label={`Убрать ${label}`}
-                className="text-blue-500 hover:text-blue-700 ml-0.5"
+                className={clientMode ? 'ml-0.5' : 'text-blue-500 hover:text-blue-700 ml-0.5'}
+                style={clientMode ? { color: 'var(--cp-paper-mute)' } : undefined}
               >
                 ×
               </button>
@@ -129,17 +152,28 @@ export function RegionPicker({ value, onChange, max = 30 }: Props) {
         />
       </div>
 
-      <div className="text-xs text-gray-500 mt-1 flex items-center gap-2 flex-wrap">
-        <span>
-          Выбрано: {value.length}/{max}
-        </span>
-        {value.length === 0 && <span>· пусто → парсим всю РФ (area=113)</span>}
-        {value.length > 1 && (
-          <span className="text-amber-700">
-            · мульти-регион: HH объединяет через OR (вакансии из любого из выбранных городов)
+      {clientMode ? (
+        // Plain-language hint only — no counter, no "area", no "OR".
+        <div className="text-[11px] mt-1.5" style={{ color: 'var(--cp-paper-faint)' }}>
+          {value.length === 0
+            ? 'Не выбрано: ищем по всей России.'
+            : value.length > 1
+              ? 'Несколько городов: вакансии из любого из них.'
+              : 'Можно добавить ещё города.'}
+        </div>
+      ) : (
+        <div className="text-xs text-gray-500 mt-1 flex items-center gap-2 flex-wrap">
+          <span>
+            Выбрано: {value.length}/{max}
           </span>
-        )}
-      </div>
+          {value.length === 0 && <span>· пусто → парсим всю РФ (area=113)</span>}
+          {value.length > 1 && (
+            <span className="text-amber-700">
+              · мульти-регион: HH объединяет через OR (вакансии из любого из выбранных городов)
+            </span>
+          )}
+        </div>
+      )}
 
       {open && (
         <div className="absolute z-20 left-0 right-0 mt-1 max-h-96 overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
@@ -166,16 +200,22 @@ export function RegionPicker({ value, onChange, max = 30 }: Props) {
                         else add(r.id);
                       }}
                       className={`w-full text-left px-3 py-2 text-sm flex items-center justify-between gap-2 ${
-                        isSelected
-                          ? 'bg-blue-50 text-blue-700'
-                          : isFull
-                            ? 'text-gray-300 cursor-not-allowed'
-                            : 'text-gray-800 hover:bg-blue-50'
+                        clientMode
+                          ? isSelected
+                            ? 'cp-region-opt-selected'
+                            : isFull
+                              ? 'cp-region-opt-full'
+                              : 'cp-region-opt'
+                          : isSelected
+                            ? 'bg-blue-50 text-blue-700'
+                            : isFull
+                              ? 'text-gray-300 cursor-not-allowed'
+                              : 'text-gray-800 hover:bg-blue-50'
                       }`}
                     >
                       <span>
                         {r.name}
-                        <span className="text-xs text-gray-400 ml-2">area={r.id}</span>
+                        {!clientMode && <span className="text-xs text-gray-400 ml-2">area={r.id}</span>}
                       </span>
                       <span className="text-xs">
                         {isSelected ? '✓ выбран' : isFull ? '—' : '+ добавить'}
@@ -187,36 +227,40 @@ export function RegionPicker({ value, onChange, max = 30 }: Props) {
             ))
           )}
 
-          {/* Кастомный код */}
-          <div className="border-t border-gray-100 px-3 py-2 bg-gray-50 flex items-center gap-2">
-            <input
-              type="text"
-              value={customInput}
-              onChange={(e) => setCustomInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  addCustom();
-                }
-              }}
-              placeholder="Свой area id…"
-              className="flex-1 rounded-md border border-gray-200 px-2 py-1 text-xs"
-            />
-            <button
-              type="button"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                addCustom();
-              }}
-              disabled={!customInput.trim() || isFull}
-              className="rounded-md bg-white border border-gray-200 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-            >
-              + добавить код
-            </button>
-          </div>
-          <div className="px-3 py-1.5 text-[11px] text-gray-400 bg-gray-50 border-t border-gray-100">
-            Всего регионов в справочнике: {HH_REGIONS.length}. Не нашли свой — введите код из api.hh.ru/areas.
-          </div>
+          {/* Кастомный код — операторам; клиентам не показываем. */}
+          {!clientMode && (
+            <>
+              <div className="border-t border-gray-100 px-3 py-2 bg-gray-50 flex items-center gap-2">
+                <input
+                  type="text"
+                  value={customInput}
+                  onChange={(e) => setCustomInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      addCustom();
+                    }
+                  }}
+                  placeholder="Свой area id…"
+                  className="flex-1 rounded-md border border-gray-200 px-2 py-1 text-xs"
+                />
+                <button
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    addCustom();
+                  }}
+                  disabled={!customInput.trim() || isFull}
+                  className="rounded-md bg-white border border-gray-200 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                >
+                  + добавить код
+                </button>
+              </div>
+              <div className="px-3 py-1.5 text-[11px] text-gray-400 bg-gray-50 border-t border-gray-100">
+                Всего регионов в справочнике: {HH_REGIONS.length}. Не нашли свой — введите код из api.hh.ru/areas.
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

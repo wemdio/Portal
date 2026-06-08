@@ -153,3 +153,105 @@ export interface HHVacancyRow {
   created_at: string;
 }
 
+// ── ATS parser (Greenhouse / Lever / Ashby) ──
+
+export type AtsType = 'greenhouse' | 'lever' | 'ashby';
+
+export interface AtsSearchConfig {
+  /** Role keywords (comma-separated); also shown as the jobs-list label. */
+  text: string;
+  ats: AtsType[];
+  /** Country codes from lib/parsers/atsFilters (empty/undefined = any country). */
+  countries?: string[];
+  /** Keep only postings newer than this many days (0/undefined = any). */
+  posted_within_days?: number;
+  /** Companies scanned per ATS (0 = all; capped server-side). */
+  companies_limit?: number;
+  /** Resolve company domains via enrichment (default true). */
+  enrich?: boolean;
+}
+
+export interface AtsParserJob {
+  id: string;
+  user_id: string;
+  parser_type: 'ats_companies';
+  status: ParserJobStatus;
+  config: AtsSearchConfig;
+  total_found?: number | null;
+  total_parsed?: number | null;
+  progress_percent?: number | null;
+  progress_stage?: string | null;
+  progress_detail?: PartitionProgressDetail | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+}
+
+export interface AtsCompanyRow {
+  id: string;
+  job_id: string;
+  company: string;
+  domain?: string | null;
+  ats: string;
+  slug: string;
+  country?: string | null;
+  cities: string[];
+  roles_found: string[];
+  job_count: number;
+  job_titles: string[];
+  job_urls: string[];
+  careers_url?: string | null;
+  latest_posted_at?: string | null;
+  created_at: string;
+}
+
+// ── Adzuna parser (whole-market aggregator) ──
+
+export interface AdzunaSearchConfig {
+  /** Role keywords (comma-separated); also shown as the jobs-list label. */
+  text: string;
+  /** Adzuna country codes from lib/parsers/adzunaConfig (empty = US default). */
+  countries?: string[];
+  /** Adzuna max_days_old (0/undefined = any). */
+  posted_within_days?: number;
+  /** Pages per role per country (×50 results each; capped server-side). */
+  pages?: number;
+  /** Resolve company domains via enrichment (default true). */
+  enrich?: boolean;
+}
+
+export interface AdzunaParserJob {
+  id: string;
+  user_id: string;
+  parser_type: 'adzuna_companies';
+  status: ParserJobStatus;
+  config: AdzunaSearchConfig;
+  total_found?: number | null;
+  total_parsed?: number | null;
+  progress_percent?: number | null;
+  progress_stage?: string | null;
+  progress_detail?: PartitionProgressDetail | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+}
+
+export interface AdzunaCompanyRow {
+  id: string;
+  job_id: string;
+  company: string;
+  company_key: string;
+  domain?: string | null;
+  country?: string | null;
+  cities: string[];
+  roles_found: string[];
+  job_count: number;
+  job_titles: string[];
+  job_urls: string[];
+  queries: string[];
+  latest_posted_at?: string | null;
+  created_at: string;
+}
+

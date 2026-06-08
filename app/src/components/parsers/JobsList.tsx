@@ -1,6 +1,6 @@
 'use client';
 
-import type { ParserJob, PartitionProgressDetail } from '@/types';
+import type { ParserJob, AtsParserJob, AdzunaParserJob, PartitionProgressDetail } from '@/types';
 import { isStoppedByUser, JobStatus } from './JobStatus';
 import { ChevronRight, RefreshCw, Clock } from 'lucide-react';
 
@@ -9,13 +9,18 @@ const STAGE_LABELS: Record<string, string> = {
   partitioning: 'Подготавливаем запрос',
   fetching_vacancies: 'Ищем вакансии',
   fetching_employers: 'Подгружаем работодателей',
+  // ATS parser stages
+  loading_companies: 'Загружаем компании',
+  fetching: 'Опрашиваем Adzuna',
+  scanning: 'Сканируем вакансии',
+  enriching: 'Определяем домены',
   saving: 'Сохраняем в базу',
   completed: 'Завершено',
   failed: 'Ошибка',
   cancelled: 'Остановлено',
 };
 
-function resolveStageLabel(job: ParserJob) {
+function resolveStageLabel(job: ParserJob | AtsParserJob | AdzunaParserJob) {
   if (job.progress_stage === 'partitioning') {
     const detail = getPartitionDetail(job);
     if (detail) {
@@ -42,7 +47,7 @@ function resolveStageLabel(job: ParserJob) {
   return 'В процессе';
 }
 
-function getPartitionDetail(job: ParserJob): PartitionProgressDetail | null {
+function getPartitionDetail(job: ParserJob | AtsParserJob | AdzunaParserJob): PartitionProgressDetail | null {
   if (!job.progress_detail) return null;
   const d = job.progress_detail;
   if (typeof d.total_subqueries !== 'number' || d.total_subqueries <= 1) return null;
@@ -50,7 +55,7 @@ function getPartitionDetail(job: ParserJob): PartitionProgressDetail | null {
 }
 
 type Props = {
-  jobs: ParserJob[];
+  jobs: Array<ParserJob | AtsParserJob | AdzunaParserJob>;
   activeJobId: string | null;
   onSelect: (jobId: string) => void;
   onRefresh: () => void;
@@ -58,6 +63,11 @@ type Props = {
   refreshing?: boolean;
   /** Фактическое количество строк в hh_vacancies для активного запуска */
   activeJobParsedCount?: number;
+  /** Client portal: readable query (no OR-pipes), plain-language errors. */
+  clientMode?: boolean;
+  /** Client retry: re-run a failed job's search. When set, a «Повторить» button
+   *  shows on failed rows in clientMode. */
+  onRetry?: (job: ParserJob | AtsParserJob | AdzunaParserJob) => void;
 };
 
 const MAX_JOBS = 20;
@@ -86,17 +96,21 @@ export function JobsList({
   busy,
   refreshing,
   activeJobParsedCount,
+  clientMode,
+  onRetry,
 }: Props) {
   const displayJobs = jobs.slice(0, MAX_JOBS);
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
       <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between gap-4 flex-nowrap">
         <div className="flex items-center gap-2">
-          <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-amber-100 text-amber-600">
-            <Clock className="h-4 w-4" />
-          </span>
+          {!clientMode && (
+            <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-amber-100 text-amber-600">
+              <Clock className="h-4 w-4" />
+            </span>
+          )}
           <h3 className="text-lg font-semibold text-gray-900 whitespace-nowrap">
-            История запусков ({displayJobs.length})
+            {clientMode ? 'Мои запросы' : 'История запусков'} ({displayJobs.length})
           </h3>
         </div>
         <button
@@ -155,7 +169,8 @@ export function JobsList({
                       <span className="text-xs text-gray-400">{formatDate(job.created_at)}</span>
                     </div>
                     <div className="mt-2 text-sm text-gray-700 line-clamp-2">
-                      <span className="font-medium text-gray-900">Запрос:</span> {job.config?.text}
+                      <span className="font-medium text-gray-900">Запрос:</span>{' '}
+                      {clientMode ? (job.config?.text ?? '').replace(/\s*\|\s*/g, ', ') : job.config?.text}
                     </div>
                     {isPartitioning ? (
                       <div className="mt-2 rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2">
@@ -213,11 +228,25 @@ export function JobsList({
                         ) : null}
                         {job.error_message ? (
                           <span className={`${stoppedByUser ? 'text-amber-700' : 'text-red-600'} line-clamp-1`}>
-                            {stoppedByUser ? 'Остановлено' : job.error_message}
+                            {stoppedByUser
+                              ? 'Остановлено'
+                              : clientMode
+                                ? 'Не удалось завершить — попробуйте запустить снова'
+                                : job.error_message}
                           </span>
                         ) : null}
                       </div>
                     </div>
+                    {clientMode && onRetry && job.status === 'failed' ? (
+                      <button
+                        type="button"
+                        onClick={() => onRetry(job)}
+                        className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Повторить
+                      </button>
+                    ) : null}
                   </div>
                   <button
                     onClick={() => onSelect(job.id)}

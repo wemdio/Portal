@@ -3,6 +3,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type { HHSearchConfig, HHVacancyRow, ParserJobStatus } from '@/types';
 import { Download, ExternalLink, Copy, Check, ChevronLeft, ChevronRight, Database, Table2 } from 'lucide-react';
+import { findRegionById } from '@/lib/parsers/hhArchive/regions';
+
+type BusyAction = 'csv' | 'excel' | 'copy' | 'database' | null;
+
+// Client view shows a short preview; the full base is available via the export.
+const CLIENT_PREVIEW_LIMIT = 20;
 
 type Props = {
   items: HHVacancyRow[];
@@ -11,6 +17,7 @@ type Props = {
   offset: number;
   loading: boolean;
   actionsBusy: boolean;
+  busyAction?: BusyAction;
   exportProgress?: string | null;
   addToDatabaseDisabled?: boolean;
   jobId?: string | null;
@@ -26,6 +33,8 @@ type Props = {
   onAddToDatabase?: () => void;
   onStopJob?: () => void;
   onDeleteJob?: () => void;
+  /** Client portal: hide operator plumbing — search URL, per-page, raw area ids, jargon chips. */
+  clientMode?: boolean;
 };
 
 const RUNNING_EMPTY_MESSAGES = [
@@ -41,18 +50,24 @@ const RUNNING_EMPTY_MESSAGES = [
   'Еще чуть-чуть — скоро все появится.',
 ] as const;
 
-function RunningEmptyState() {
+function RunningEmptyState({ clientMode }: { clientMode?: boolean }) {
   const [index, setIndex] = useState(0);
   useEffect(() => {
+    // Clients get one honest line — no rotating carousel of contentless reassurances.
+    if (clientMode) return;
     const intervalId = window.setInterval(() => {
       setIndex((prev) => (prev + 1) % RUNNING_EMPTY_MESSAGES.length);
     }, 25000);
     return () => window.clearInterval(intervalId);
-  }, []);
+  }, [clientMode]);
   return (
     <div className="px-6 py-12 text-center text-gray-500">
       <div className="mx-auto mb-3 h-8 w-8 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
-      <div className="text-sm">{RUNNING_EMPTY_MESSAGES[index]}</div>
+      <div className="text-sm">
+        {clientMode
+          ? 'Идёт поиск вакансий на HH.ru. Это может занять несколько минут.'
+          : RUNNING_EMPTY_MESSAGES[index]}
+      </div>
     </div>
   );
 }
@@ -142,23 +157,36 @@ function formatArea(area?: string | string[]) {
   return area;
 }
 
-function buildFilters(config?: HHSearchConfig | null) {
+// Client view shows region NAMES, not raw HH area ids («Регион: 1» → «Москва»).
+function regionNames(area?: string | string[]): string | null {
+  if (!area) return null;
+  const ids = Array.isArray(area) ? area : [area];
+  const names = ids
+    .map((id) => String(id).trim())
+    .filter(Boolean)
+    .map((id) => findRegionById(id)?.name ?? id);
+  return names.length ? names.join(', ') : null;
+}
+
+function buildFilters(config?: HHSearchConfig | null, clientMode?: boolean) {
   if (!config) return [];
   const filters: Array<{ label: string; value: string; tone?: 'yellow' }> = [];
   const text = config.text?.trim();
-  if (text) filters.push({ label: 'Запрос', value: text });
-  const area = formatArea(config.area);
+  // Client: split the operator OR-pipe syntax «a|b|c» into a readable list.
+  if (text) filters.push({ label: 'Запрос', value: clientMode ? text.replace(/\s*\|\s*/g, ', ') : text });
+  const area = clientMode ? regionNames(config.area) : formatArea(config.area);
   if (area) filters.push({ label: 'Регион', value: area });
   if (config.salary_from !== undefined) {
     const currency = config.currency ? ` ${config.currency}` : '';
     filters.push({ label: 'Зарплата от', value: `${config.salary_from}${currency}`.trim() });
-  } else if (config.currency && config.params && Object.prototype.hasOwnProperty.call(config.params, 'currency')) {
+  } else if (!clientMode && config.currency && config.params && Object.prototype.hasOwnProperty.call(config.params, 'currency')) {
     filters.push({ label: 'Валюта', value: config.currency });
   }
   if (config.date_from) filters.push({ label: 'Дата от', value: config.date_from });
   if (config.date_to) filters.push({ label: 'Дата до', value: config.date_to });
-  if (config.per_page !== undefined) filters.push({ label: 'Per page', value: String(config.per_page) });
-  if (config.fetch_employers) filters.push({ label: 'Работодатели', value: 'с деталями', tone: 'yellow' });
+  // Operator-only telemetry — meaningless to a client.
+  if (!clientMode && config.per_page !== undefined) filters.push({ label: 'Per page', value: String(config.per_page) });
+  if (!clientMode && config.fetch_employers) filters.push({ label: 'Работодатели', value: 'с деталями', tone: 'yellow' });
   return filters;
 }
 
@@ -189,6 +217,7 @@ export function VacancyResults({
   offset,
   loading,
   actionsBusy,
+  busyAction = null,
   exportProgress,
   addToDatabaseDisabled,
   jobId,
@@ -204,6 +233,7 @@ export function VacancyResults({
   onAddToDatabase,
   onStopJob,
   onDeleteJob,
+  clientMode,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const copiedTimeoutRef = useRef<number | null>(null);
@@ -226,16 +256,22 @@ export function VacancyResults({
   const shownFrom = hasItems ? offset + 1 : 0;
   const shownTo = hasItems ? Math.min(count, offset + items.length) : 0;
   const shownLabel = statsReady
-    ? (hasItems ? `${shownFrom}–${shownTo} из ${count}` : `0 из ${count}`)
+    ? clientMode
+      ? (hasItems ? `Показаны первые ${Math.min(count, CLIENT_PREVIEW_LIMIT)} из ${count}` : `0 из ${count}`)
+      : (hasItems ? `${shownFrom}–${shownTo} из ${count}` : `0 из ${count}`)
     : '';
-  const limitLabel = statsReady && limit ? ` · по ${limit}` : '';
+  const limitLabel = !clientMode && statsReady && limit ? ` · по ${limit}` : '';
   const actionsDisabled = actionsBusy || (count === 0 && items.length === 0);
   const addToDbDisabled = actionsDisabled || !onAddToDatabase || Boolean(addToDatabaseDisabled);
   const jobControlsDisabled = jobActionBusy || !jobId;
   const searchUrl = buildSearchUrl(searchConfig);
-  const filters = buildFilters(searchConfig);
+  const filters = buildFilters(searchConfig, clientMode);
   const canPrev = currentPage > 1;
   const canNext = currentPage < totalPages;
+  const isDatabaseBusy = busyAction === 'database';
+  const isCsvBusy = busyAction === 'csv';
+  const isExcelBusy = busyAction === 'excel';
+  const isCopyBusy = busyAction === 'copy';
   const maxButtons = 5;
   const pageButtons: Array<number | 'ellipsis'> = [];
   const start = Math.max(1, Math.min(currentPage - 2, totalPages - maxButtons + 1));
@@ -269,9 +305,11 @@ export function VacancyResults({
           <div className="min-w-0">
             <div className="flex items-start justify-between gap-3">
               <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-emerald-100 text-emerald-600">
-                  <Table2 className="h-4 w-4" />
-                </span>
+                {!clientMode && (
+                  <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-emerald-100 text-emerald-600">
+                    <Table2 className="h-4 w-4" />
+                  </span>
+                )}
                 Результаты
               </h3>
               {jobId ? (
@@ -300,11 +338,16 @@ export function VacancyResults({
             <p className="text-sm text-gray-500">
               {shownLabel}{limitLabel}
             </p>
+            {clientMode && hasItems && count > CLIENT_PREVIEW_LIMIT ? (
+              <p className="text-xs text-gray-400 mt-0.5">
+                Вся база ({count}) — в выгрузке CSV или Excel.
+              </p>
+            ) : null}
           </div>
 
           <div className="grid grid-cols-4 gap-2 w-full sm:flex sm:w-auto sm:flex-wrap sm:justify-end sm:gap-2 sm:items-center">
             {exportProgress ? (
-              <div className="col-span-4 flex items-center justify-center gap-2 text-xs text-gray-500 sm:col-span-1 sm:mr-1">
+              <div className="col-span-4 flex min-h-9 items-center justify-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 text-xs text-gray-600 sm:col-span-1 sm:mr-1">
                 <div className="h-3.5 w-3.5 rounded-full border-2 border-gray-300 border-t-transparent animate-spin flex-shrink-0" />
                 <span className="whitespace-nowrap">{exportProgress}</span>
               </div>
@@ -316,8 +359,13 @@ export function VacancyResults({
               disabled={addToDbDisabled}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
               title="Откроет “Базы” и добавит результаты новой вкладкой"
+              aria-busy={isDatabaseBusy}
             >
-              <Database className="h-4 w-4" />
+              {isDatabaseBusy ? (
+                <span className="h-4 w-4 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
+              ) : (
+                <Database className="h-4 w-4" />
+              )}
               В базу
             </button>
             ) : null}
@@ -326,8 +374,13 @@ export function VacancyResults({
               onClick={onExportCsv}
               disabled={actionsDisabled}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+              aria-busy={isCsvBusy}
             >
-              <Download className="h-4 w-4" />
+              {isCsvBusy ? (
+                <span className="h-4 w-4 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
+              ) : (
+                <Download className="h-4 w-4" />
+              )}
               CSV
             </button>
             <button
@@ -335,8 +388,13 @@ export function VacancyResults({
               onClick={onExportExcel}
               disabled={actionsDisabled}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+              aria-busy={isExcelBusy}
             >
-              <Download className="h-4 w-4" />
+              {isExcelBusy ? (
+                <span className="h-4 w-4 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
+              ) : (
+                <Download className="h-4 w-4" />
+              )}
               Excel
             </button>
             <button
@@ -344,8 +402,13 @@ export function VacancyResults({
               onClick={onCopy}
               disabled={actionsDisabled}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+              aria-busy={isCopyBusy}
             >
-              <Copy className="h-4 w-4" />
+              {isCopyBusy ? (
+                <span className="h-4 w-4 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
+              ) : (
+                <Copy className="h-4 w-4" />
+              )}
               Копировать
             </button>
           </div>
@@ -354,7 +417,7 @@ export function VacancyResults({
 
       {searchConfig ? (
         <div className="px-6 py-3 border-b border-gray-200 bg-gray-50 text-xs text-gray-600">
-          {searchUrl ? (
+          {!clientMode && searchUrl ? (
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-gray-500 whitespace-nowrap">Ссылка поиска:</span>
               <a
@@ -421,62 +484,77 @@ export function VacancyResults({
 
       {items.length === 0 ? (
         jobStatus === 'running' ? (
-          <RunningEmptyState key={jobId ?? 'running'} />
+          <RunningEmptyState key={jobId ?? 'running'} clientMode={clientMode} />
         ) : (!hasJob || loading) ? (
           <LoadingEmptyState />
         ) : (
           <div className="px-6 py-10 text-center text-gray-500">Нет результатов</div>
         )
       ) : (
-        <div className="overflow-x-auto">
+        <div className={clientMode ? 'overflow-auto max-h-[400px]' : 'overflow-x-auto'}>
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">Вакансия</th>
-                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">Компания</th>
-                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">Регион</th>
-                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">ЗП</th>
-                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">Дата</th>
+                {/* Client: align headers to their columns (text left, numbers right).
+                    Operators keep the original centered headers. */}
+                {([
+                  { label: 'Вакансия', align: 'left' },
+                  { label: 'Компания', align: 'left' },
+                  { label: 'Регион', align: 'left' },
+                  { label: 'ЗП', align: 'right' },
+                  { label: 'Дата', align: 'right' },
+                ] as const).map(({ label, align }) => (
+                  <th
+                    key={label}
+                    className={`${clientMode ? 'px-3 py-2' : 'px-4 py-3'} text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50 ${
+                      clientMode ? (align === 'right' ? 'text-right' : 'text-left') : 'text-center'
+                    }`}
+                  >
+                    {label}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {items.map((v) => (
+              {(clientMode ? items.slice(0, CLIENT_PREVIEW_LIMIT) : items).map((v) => (
                 <tr key={v.vacancy_id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3">
+                  <td className={clientMode ? 'px-3 py-1.5' : 'px-4 py-3'}>
                     <a
                       href={v.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-sm font-medium text-blue-600 hover:underline inline-flex items-start gap-1"
+                      className={`font-medium text-blue-600 hover:underline inline-flex items-start gap-1 ${clientMode ? 'text-xs' : 'text-sm'}`}
                       title={v.name}
                     >
-                      <span className="line-clamp-2">{v.name}</span>
-                      <ExternalLink className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                      <span className={clientMode ? 'line-clamp-1' : 'line-clamp-2'}>{v.name}</span>
+                      {!clientMode && <ExternalLink className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />}
                     </a>
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-700">
+                  <td className={`text-gray-700 ${clientMode ? 'px-3 py-1.5 text-xs' : 'px-4 py-3 text-sm'}`}>
                     {v.company_site_url || v.company_url ? (
-                      <div className="inline-flex items-center gap-2">
-                        <span title={v.company_name}>{v.company_name}</span>
+                      <div className="inline-flex items-center gap-2 max-w-full">
+                        <span className={clientMode ? 'truncate max-w-[150px]' : ''} title={v.company_name}>{v.company_name}</span>
                         <a
                           href={v.company_site_url ?? v.company_url ?? '#'}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-xs text-blue-600 hover:underline"
-                          title="Открыть сайт компании"
+                          className="shrink-0 text-xs text-blue-600 hover:underline"
+                          title={v.company_site_url ? 'Открыть сайт компании' : 'Открыть страницу компании на hh.ru'}
                         >
-                          сайт
+                          {/* Client: label honestly — «сайт» only for a real site;
+                              the HH employer page (fallback) is labelled «hh.ru». */}
+                          {clientMode && !v.company_site_url ? 'hh.ru' : 'сайт'}
                         </a>
                       </div>
                     ) : (
-                      <span title={v.company_name}>{v.company_name}</span>
+                      <span className={clientMode ? 'inline-block truncate max-w-[150px] align-bottom' : ''} title={v.company_name}>{v.company_name}</span>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-700" title={v.area}>
+                  <td className={`text-gray-700 ${clientMode ? 'px-3 py-1.5 text-xs whitespace-nowrap' : 'px-4 py-3 text-sm'}`} title={v.area}>
                     {v.area}
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-700 text-right whitespace-nowrap">{formatSalary(v)}</td>
-                  <td className="px-4 py-3 text-sm text-gray-700 text-right whitespace-nowrap">{formatDate(v.published_at)}</td>
+                  <td className={`text-gray-700 text-right whitespace-nowrap ${clientMode ? 'px-3 py-1.5 text-xs' : 'px-4 py-3 text-sm'}`}>{formatSalary(v)}</td>
+                  <td className={`text-gray-700 text-right whitespace-nowrap ${clientMode ? 'px-3 py-1.5 text-xs' : 'px-4 py-3 text-sm'}`}>{formatDate(v.published_at)}</td>
                 </tr>
               ))}
             </tbody>
@@ -484,7 +562,7 @@ export function VacancyResults({
         </div>
       )}
 
-      <div className="px-4 sm:px-6 py-3 sm:py-4 border-t border-gray-200 flex flex-wrap items-center justify-between gap-3">
+      <div className={clientMode ? 'hidden' : 'px-4 sm:px-6 py-3 sm:py-4 border-t border-gray-200 flex flex-wrap items-center justify-between gap-3'}>
         <div className="hidden sm:block text-sm text-gray-500 whitespace-nowrap">
           Страница {Math.min(currentPage, totalPages)} из {totalPages}
         </div>

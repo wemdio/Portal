@@ -437,22 +437,26 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
         </div>
       ) : null}
       {/* Top Section: New Run */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden" style={{ borderTop: '3px solid #F43F5E' }}>
-        <div className="p-4 border-b border-gray-100 bg-gray-50/50">
-          <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-            <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-rose-100 text-rose-600">
-              <MapPin className="h-4 w-4" />
-            </span>
-            Новый парсинг
-          </h3>
+      {clientMode ? (
+        <YandexMapsParserForm busy={busy} onCreate={handleCreate} clientMode={clientMode} />
+      ) : (
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden" style={{ borderTop: '3px solid #F43F5E' }}>
+          <div className="p-4 border-b border-gray-100 bg-gray-50/50">
+            <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+              <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-rose-100 text-rose-600">
+                <MapPin className="h-4 w-4" />
+              </span>
+              Новый парсинг
+            </h3>
+          </div>
+          <div className="p-6">
+            <YandexMapsParserForm busy={busy} onCreate={handleCreate} clientMode={clientMode} />
+          </div>
         </div>
-        <div className="p-6">
-          <YandexMapsParserForm busy={busy} onCreate={handleCreate} />
-        </div>
-      </div>
+      )}
 
       {clientMode && activeJob ? (
-        <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+        <div className="rounded-xl px-4 py-3 text-sm" style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)', color: 'var(--cp-paper-mute)' }}>
           <ClientTariffUsageInline
             metric="max_rows"
             spent={Math.max(totalOrgs, totalLinks, results.length)}
@@ -464,13 +468,18 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Left Sidebar: History */}
         <div className="lg:col-span-3 space-y-6">
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col h-[800px]">
+          <div className={`${clientMode ? 'neu-card' : 'bg-white rounded-xl border border-gray-200 shadow-sm'} overflow-hidden flex flex-col h-[800px]`}>
             <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-              <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-                <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-amber-100 text-amber-600">
-                  <Clock className="h-3.5 w-3.5" />
-                </span>
-                История запусков
+              <h3
+                className={clientMode ? 'text-base font-semibold flex items-center gap-2' : 'text-base font-semibold text-gray-900 flex items-center gap-2'}
+                style={clientMode ? { color: 'var(--cp-paper)' } : undefined}
+              >
+                {!clientMode && (
+                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-amber-100 text-amber-600">
+                    <Clock className="h-3.5 w-3.5" />
+                  </span>
+                )}
+                {clientMode ? 'Мои запросы' : 'История запусков'}
               </h3>
               <button
                 type="button"
@@ -599,11 +608,11 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                                 type="button"
                                 onClick={handleCollectLinks}
                                 disabled={jobActionId === activeJob.id}
-                                className="inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50"
+                                className={clientMode ? 'ds-btn-primary inline-flex items-center justify-center disabled:opacity-40' : 'inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50'}
                               >
-                                Перезапустить
+                                {clientMode ? 'Повторить' : 'Перезапустить'}
                               </button>
-                              {totalLinks > 0 && !isStoppedByUser(activeJob.status, activeJob.error_message) && (
+                              {!clientMode && totalLinks > 0 && !isStoppedByUser(activeJob.status, activeJob.error_message) && (
                                 <button
                                   type="button"
                                   onClick={handleParse}
@@ -701,7 +710,9 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                 </div>
               </div>
 
-              {/* Links Editor */}
+              {/* Links Editor — operator-only: clients never curate the raw org-link
+                  list; the pipeline auto-proceeds collect → parse. */}
+              {!clientMode && (
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
                 <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
                   <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
@@ -733,14 +744,20 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                   />
                 </div>
               </div>
+              )}
 
               {/* Results Table */}
-              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col h-[600px]">
+              <div className={`${clientMode ? 'neu-card' : 'bg-white rounded-xl border border-gray-200 shadow-sm'} overflow-hidden flex flex-col h-[600px]`}>
                 <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-                  <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-                    <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-emerald-100 text-emerald-600">
-                      <Table2 className="h-3.5 w-3.5" />
-                    </span>
+                  <h3
+                    className={clientMode ? 'text-base font-semibold flex items-center gap-2' : 'text-base font-semibold text-gray-900 flex items-center gap-2'}
+                    style={clientMode ? { color: 'var(--cp-paper)' } : undefined}
+                  >
+                    {!clientMode && (
+                      <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-emerald-100 text-emerald-600">
+                        <Table2 className="h-3.5 w-3.5" />
+                      </span>
+                    )}
                     Результаты
                   </h3>
                   <div className="flex gap-2">
@@ -760,7 +777,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                       type="button"
                       onClick={handleExportExcel}
                       disabled={results.length === 0}
-                      className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-emerald-500 disabled:opacity-50 shadow-sm transition-colors"
+                      className={clientMode ? 'ds-btn-ghost inline-flex items-center gap-2 disabled:opacity-40' : 'inline-flex items-center gap-2 rounded-lg bg-emerald-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-emerald-500 disabled:opacity-50 shadow-sm transition-colors'}
                     >
                       <FileSpreadsheet className="h-3.5 w-3.5" />
                       Скачать Excel
@@ -769,7 +786,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                       type="button"
                       onClick={handleExportCsv}
                       disabled={!activeJobId}
-                      className="inline-flex items-center gap-2 rounded-lg bg-gray-900 text-white px-3 py-1.5 text-xs font-medium hover:bg-gray-800 disabled:opacity-50 shadow-sm transition-colors"
+                      className={clientMode ? 'ds-btn-ghost inline-flex items-center gap-2 disabled:opacity-40' : 'inline-flex items-center gap-2 rounded-lg bg-gray-900 text-white px-3 py-1.5 text-xs font-medium hover:bg-gray-800 disabled:opacity-50 shadow-sm transition-colors'}
                     >
                       <Download className="h-3.5 w-3.5" />
                       Скачать CSV
@@ -792,7 +809,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                       <p>Нет результатов</p>
                     </div>
                   ) : (
-                    <table className="min-w-full text-sm divide-y divide-gray-200">
+                    <table className={clientMode ? 'min-w-full divide-y divide-gray-200 cp-dense-table' : 'min-w-full text-sm divide-y divide-gray-200'}>
                       <thead className="bg-gray-50 sticky top-0 z-10 shadow-sm">
                         <tr>
                           <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-[350px]">Название</th>
