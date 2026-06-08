@@ -1,0 +1,13 @@
+-- GRANT companion for 20260607_0002_instantly_rate_budget.sql.
+--
+-- public.instantly_rate_budget is a backend-only token-bucket table: it is
+-- read/written EXCLUSIVELY by workers through the security-definer function
+-- public.instantly_acquire_token(). Callers therefore never need direct table
+-- access, and the table is intentionally NOT granted to `authenticated`
+-- (clients must not touch the shared Instantly rate budget).
+--
+-- The repo's migration grants-guard (tests/migrations/grants.test.ts) still
+-- requires every newly-created public table to have a GRANT to service_role.
+-- Added here as a companion rather than by editing 0002 (which may already be
+-- applied) — the guard scans the whole migrations tree, so this satisfies it.
+grant all on public.instantly_rate_budget to service_role;

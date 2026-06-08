@@ -1524,6 +1524,25 @@ body:has(.client-portal) {
   line-height: 1.4;
 }
 
+/* RegionPicker dropdown options (clientMode). Operator uses light Tailwind
+   classes; in the dark portal those leave an invisible light-on-light hover.
+   These tokenized states fix that and are guaranteed (not arbitrary-hover). */
+.client-portal .cp-region-opt {
+  color: var(--cp-paper-mute);
+}
+.client-portal .cp-region-opt:hover {
+  background: var(--cp-surface-elev);
+  color: var(--cp-paper);
+}
+.client-portal .cp-region-opt-selected {
+  background: var(--cp-surface-active);
+  color: var(--cp-paper);
+}
+.client-portal .cp-region-opt-full {
+  color: var(--cp-paper-faint);
+  cursor: not-allowed;
+}
+
 .client-portal .ds-nav-item {
   display: inline-flex;
   align-items: center;

@@ -206,3 +206,52 @@ export interface AtsCompanyRow {
   created_at: string;
 }
 
+// ── Adzuna parser (whole-market aggregator) ──
+
+export interface AdzunaSearchConfig {
+  /** Role keywords (comma-separated); also shown as the jobs-list label. */
+  text: string;
+  /** Adzuna country codes from lib/parsers/adzunaConfig (empty = US default). */
+  countries?: string[];
+  /** Adzuna max_days_old (0/undefined = any). */
+  posted_within_days?: number;
+  /** Pages per role per country (×50 results each; capped server-side). */
+  pages?: number;
+  /** Resolve company domains via enrichment (default true). */
+  enrich?: boolean;
+}
+
+export interface AdzunaParserJob {
+  id: string;
+  user_id: string;
+  parser_type: 'adzuna_companies';
+  status: ParserJobStatus;
+  config: AdzunaSearchConfig;
+  total_found?: number | null;
+  total_parsed?: number | null;
+  progress_percent?: number | null;
+  progress_stage?: string | null;
+  progress_detail?: PartitionProgressDetail | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+}
+
+export interface AdzunaCompanyRow {
+  id: string;
+  job_id: string;
+  company: string;
+  company_key: string;
+  domain?: string | null;
+  country?: string | null;
+  cities: string[];
+  roles_found: string[];
+  job_count: number;
+  job_titles: string[];
+  job_urls: string[];
+  queries: string[];
+  latest_posted_at?: string | null;
+  created_at: string;
+}
+

@@ -112,10 +112,15 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
           return (
             <span
               key={id}
-              className="inline-flex items-center gap-1 rounded-md bg-blue-50 border border-blue-200 px-2 py-0.5 text-xs text-blue-800"
+              className={clientMode
+                ? 'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs'
+                : 'inline-flex items-center gap-1 rounded-md bg-blue-50 border border-blue-200 px-2 py-0.5 text-xs text-blue-800'}
+              style={clientMode ? { background: 'var(--cp-surface-elev)', border: '1px solid var(--cp-divider-strong)', color: 'var(--cp-paper)' } : undefined}
             >
               {label}
-              {!region && <span className="text-blue-400">(код {id})</span>}
+              {!region && (
+                <span className={clientMode ? '' : 'text-blue-400'} style={clientMode ? { color: 'var(--cp-paper-faint)' } : undefined}>(код {id})</span>
+              )}
               <button
                 type="button"
                 onClick={(e) => {
@@ -123,7 +128,8 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
                   remove(id);
                 }}
                 aria-label={`Убрать ${label}`}
-                className="text-blue-500 hover:text-blue-700 ml-0.5"
+                className={clientMode ? 'ml-0.5' : 'text-blue-500 hover:text-blue-700 ml-0.5'}
+                style={clientMode ? { color: 'var(--cp-paper-mute)' } : undefined}
               >
                 ×
               </button>
@@ -194,11 +200,17 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
                         else add(r.id);
                       }}
                       className={`w-full text-left px-3 py-2 text-sm flex items-center justify-between gap-2 ${
-                        isSelected
-                          ? 'bg-blue-50 text-blue-700'
-                          : isFull
-                            ? 'text-gray-300 cursor-not-allowed'
-                            : 'text-gray-800 hover:bg-blue-50'
+                        clientMode
+                          ? isSelected
+                            ? 'cp-region-opt-selected'
+                            : isFull
+                              ? 'cp-region-opt-full'
+                              : 'cp-region-opt'
+                          : isSelected
+                            ? 'bg-blue-50 text-blue-700'
+                            : isFull
+                              ? 'text-gray-300 cursor-not-allowed'
+                              : 'text-gray-800 hover:bg-blue-50'
                       }`}
                     >
                       <span>

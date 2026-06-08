@@ -608,11 +608,11 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                                 type="button"
                                 onClick={handleCollectLinks}
                                 disabled={jobActionId === activeJob.id}
-                                className="inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50"
+                                className={clientMode ? 'ds-btn-primary inline-flex items-center justify-center disabled:opacity-40' : 'inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50'}
                               >
-                                Перезапустить
+                                {clientMode ? 'Повторить' : 'Перезапустить'}
                               </button>
-                              {totalLinks > 0 && !isStoppedByUser(activeJob.status, activeJob.error_message) && (
+                              {!clientMode && totalLinks > 0 && !isStoppedByUser(activeJob.status, activeJob.error_message) && (
                                 <button
                                   type="button"
                                   onClick={handleParse}
@@ -710,18 +710,15 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                 </div>
               </div>
 
-              {/* Links Editor */}
-              <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden'}>
+              {/* Links Editor — operator-only: clients never curate the raw org-link
+                  list; the pipeline auto-proceeds collect → parse. */}
+              {!clientMode && (
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
                 <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-                  <h3
-                    className={clientMode ? 'text-base font-semibold flex items-center gap-2' : 'text-base font-semibold text-gray-900 flex items-center gap-2'}
-                    style={clientMode ? { color: 'var(--cp-paper)' } : undefined}
-                  >
-                    {!clientMode && (
-                      <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
-                        <Link2 className="h-3.5 w-3.5" />
-                      </span>
-                    )}
+                  <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                    <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
+                      <Link2 className="h-3.5 w-3.5" />
+                    </span>
                     Ссылки организаций
                   </h3>
                   <div className="flex items-center gap-3">
@@ -732,7 +729,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                       type="button"
                       onClick={handleSaveLinks}
                       disabled={jobActionId === activeJob.id}
-                      className={clientMode ? 'ds-btn-ghost inline-flex items-center justify-center disabled:opacity-40' : 'inline-flex items-center justify-center rounded-lg bg-white border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50'}
+                      className="inline-flex items-center justify-center rounded-lg bg-white border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50"
                     >
                       Сохранить
                     </button>
@@ -747,6 +744,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                   />
                 </div>
               </div>
+              )}
 
               {/* Results Table */}
               <div className={`${clientMode ? 'neu-card' : 'bg-white rounded-xl border border-gray-200 shadow-sm'} overflow-hidden flex flex-col h-[600px]`}>
