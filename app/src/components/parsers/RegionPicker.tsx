@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { findRegionById, HH_REGIONS, searchRegions, type HHRegion } from '@/lib/parsers/hhArchive/regions';
+import { authFetchJson } from '@/lib/authFetch';
 
 interface Props {
   /** Массив выбранных area id ('113', '1', '2', ...). */
@@ -14,19 +15,30 @@ interface Props {
   clientMode?: boolean;
 }
 
+/** A suggestion is an HHRegion plus an optional parent-region hint (live HH cities). */
+type Suggestion = HHRegion & { regionHint?: string };
+
 /**
  * Multi-select combobox для регионов HH. Чипы выбранного + поиск + дропдаун.
  *
  * Стратегия:
- *  - Из дропдауна добавляем региона из справочника HH_REGIONS (известный код,
- *    человекочитаемое имя).
- *  - «Ввести код вручную» — для экзотики (любой area id из api.hh.ru/areas).
+ *  - Статический справочник HH_REGIONS (топ-города + все регионы) — мгновенно,
+ *    без сети, дефолт при пустом запросе.
+ *  - clientMode: при вводе ≥2 символов дозапрашиваем полный справочник HH
+ *    (/api/parsers/hh/areas, кеш на сервере) — даёт любой город как на hh.ru.
+ *    При недоступности бэка тихо откатываемся на статический поиск.
  *  - Если value пустой — поведение API: считаем как '113' (вся РФ).
  */
 export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
   const [customInput, setCustomInput] = useState('');
+  // clientMode live search against the full HH areas dictionary.
+  const [liveHits, setLiveHits] = useState<{ id: string; name: string; region: string }[]>([]);
+  const [loadingLive, setLoadingLive] = useState(false);
+  // id → human name, so chips for live-picked cities (not in HH_REGIONS) show a
+  // name rather than "area=NNN". Seeded from picks + live results.
+  const [labelMap, setLabelMap] = useState<Map<string, string>>(new Map());
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -38,10 +50,59 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
     return () => document.removeEventListener('mousedown', handleClick);
   }, []);
 
+  // Debounced live HH lookup (clientMode only). Operators stay fully static.
+  useEffect(() => {
+    if (!clientMode) return;
+    const q = query.trim();
+    if (q.length < 2) {
+      setLiveHits([]);
+      setLoadingLive(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadingLive(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await authFetchJson<{ items: { id: string; name: string; region: string }[] }>(
+          `/api/parsers/hh/areas?q=${encodeURIComponent(q)}`,
+        );
+        if (cancelled) return;
+        const items = Array.isArray(res.items) ? res.items : [];
+        setLiveHits(items);
+        if (items.length > 0) {
+          setLabelMap((prev) => {
+            const next = new Map(prev);
+            for (const it of items) next.set(it.id, it.name);
+            return next;
+          });
+        }
+      } catch {
+        if (!cancelled) setLiveHits([]); // fall back to static matches silently
+      } finally {
+        if (!cancelled) setLoadingLive(false);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [query, clientMode]);
+
   const selectedSet = useMemo(() => new Set(value), [value]);
-  const suggestions = useMemo(() => searchRegions(query, 30), [query]);
+  const staticSuggestions = useMemo(() => searchRegions(query, clientMode ? 12 : 30), [query, clientMode]);
+
+  // clientMode: merge static matches with live HH cities (deduped by id).
+  const suggestions: Suggestion[] = useMemo(() => {
+    if (!clientMode) return staticSuggestions;
+    const seen = new Set(staticSuggestions.map((r) => r.id));
+    const live: Suggestion[] = liveHits
+      .filter((h) => !seen.has(h.id))
+      .map((h) => ({ id: h.id, name: h.name, group: 'Города России', regionHint: h.region || undefined }));
+    return [...staticSuggestions, ...live].slice(0, 40);
+  }, [clientMode, staticSuggestions, liveHits]);
+
   const grouped = useMemo(() => {
-    const groups = new Map<HHRegion['group'], HHRegion[]>();
+    const groups = new Map<HHRegion['group'], Suggestion[]>();
     for (const r of suggestions) {
       const list = groups.get(r.group) ?? [];
       list.push(r);
@@ -53,8 +114,11 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
   // «Вся Россия» (area 113) already covers every city, so mixing it with
   // specific cities is meaningless. In clientMode make them mutually exclusive.
   const ALL_RUSSIA_ID = '113';
-  function add(id: string) {
+  function add(id: string, label?: string) {
     if (!id) return;
+    if (label) {
+      setLabelMap((prev) => (prev.get(id) === label ? prev : new Map(prev).set(id, label)));
+    }
     if (selectedSet.has(id)) return;
     if (value.length >= max) return;
     if (clientMode) {
@@ -84,13 +148,17 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
     setCustomInput('');
   }
 
+  function nameFor(id: string): string | undefined {
+    return labelMap.get(id) ?? findRegionById(id)?.name;
+  }
+
   function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     // Backspace на пустом инпуте — удаляем последний чип.
     if (e.key === 'Backspace' && !query && value.length > 0) {
       remove(value[value.length - 1]);
     } else if (e.key === 'Enter' && suggestions.length > 0 && query.trim()) {
       e.preventDefault();
-      add(suggestions[0].id);
+      add(suggestions[0].id, suggestions[0].name);
     }
   }
 
@@ -107,8 +175,8 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
         className="min-h-[40px] w-full rounded-lg border border-gray-200 px-2 py-1.5 text-sm flex flex-wrap gap-1.5 items-center cursor-text bg-white focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-200"
       >
         {value.map((id) => {
-          const region = findRegionById(id);
-          const label = region?.name ?? `area=${id}`;
+          const name = nameFor(id);
+          const label = name ?? `area=${id}`;
           return (
             <span
               key={id}
@@ -118,7 +186,7 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
               style={clientMode ? { background: 'var(--cp-surface-elev)', border: '1px solid var(--cp-divider-strong)', color: 'var(--cp-paper)' } : undefined}
             >
               {label}
-              {!region && (
+              {!name && (
                 <span className={clientMode ? '' : 'text-blue-400'} style={clientMode ? { color: 'var(--cp-paper-faint)' } : undefined}>(код {id})</span>
               )}
               <button
@@ -156,7 +224,7 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
         // Plain-language hint only — no counter, no "area", no "OR".
         <div className="text-[11px] mt-1.5" style={{ color: 'var(--cp-paper-faint)' }}>
           {value.length === 0
-            ? 'Не выбрано: ищем по всей России.'
+            ? 'Не выбрано: ищем по всей России. Начните вводить город — найдём любой, как на hh.ru.'
             : value.length > 1
               ? 'Несколько городов: вакансии из любого из них.'
               : 'Можно добавить ещё города.'}
@@ -178,9 +246,17 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
       {open && (
         <div className="absolute z-20 left-0 right-0 mt-1 max-h-96 overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
           {suggestions.length === 0 ? (
-            <div className="px-3 py-3 text-sm text-gray-500">
-              В справочнике не нашлось. Попробуй ввести код вручную ниже.
-            </div>
+            clientMode && loadingLive ? (
+              <div className="px-3 py-3 text-sm" style={{ color: 'var(--cp-paper-faint)' }}>Ищем города…</div>
+            ) : clientMode ? (
+              <div className="px-3 py-3 text-sm" style={{ color: 'var(--cp-paper-faint)' }}>
+                {query.trim().length < 2 ? 'Начните вводить название города или региона.' : 'Ничего не нашлось.'}
+              </div>
+            ) : (
+              <div className="px-3 py-3 text-sm text-gray-500">
+                В справочнике не нашлось. Попробуй ввести код вручную ниже.
+              </div>
+            )
           ) : (
             grouped.map(([group, items]) => (
               <div key={group}>
@@ -197,7 +273,7 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
                       onMouseDown={(e) => {
                         e.preventDefault();
                         if (isSelected) remove(r.id);
-                        else add(r.id);
+                        else add(r.id, r.name);
                       }}
                       className={`w-full text-left px-3 py-2 text-sm flex items-center justify-between gap-2 ${
                         clientMode
@@ -213,11 +289,14 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
                               : 'text-gray-800 hover:bg-blue-50'
                       }`}
                     >
-                      <span>
+                      <span className="min-w-0 truncate">
                         {r.name}
+                        {clientMode && r.regionHint ? (
+                          <span className="ml-2 text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>· {r.regionHint}</span>
+                        ) : null}
                         {!clientMode && <span className="text-xs text-gray-400 ml-2">area={r.id}</span>}
                       </span>
-                      <span className="text-xs">
+                      <span className="text-xs shrink-0">
                         {isSelected ? '✓ выбран' : isFull ? '—' : '+ добавить'}
                       </span>
                     </button>

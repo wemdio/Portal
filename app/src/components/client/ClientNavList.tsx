@@ -43,11 +43,17 @@ function NavItemRow({
   active,
   locale,
   onItemClick,
+  badge = 0,
 }: {
   item: ClientNavItem;
   active: boolean;
   locale: Locale;
   onItemClick?: () => void;
+  /**
+   * Unread-count pill shown after the label (currently only «Поддержка»). 0
+   * hides it entirely; >9 collapses to «9+» so it never widens the nav row.
+   */
+  badge?: number;
 }) {
   const label = pickLabel(item, locale);
   const description = pickDescription(item, locale);
@@ -61,6 +67,15 @@ function NavItemRow({
       aria-current={active ? 'page' : undefined}
     >
       <span className="truncate">{label}</span>
+      {badge > 0 && (
+        <span
+          className="ml-auto inline-flex min-w-[1.125rem] items-center justify-center rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none"
+          style={{ background: 'var(--cp-red)', color: '#fff' }}
+          aria-label={locale === 'en' ? `${badge} new messages` : `${badge} новых сообщений`}
+        >
+          {badge > 9 ? '9+' : badge}
+        </span>
+      )}
     </Link>
   );
 }
@@ -85,6 +100,48 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
       cancelled = true;
     };
   }, []);
+
+  // Бейдж непрочитанных сообщений поддержки. Клиент не получает push, поэтому
+  // ответ менеджера он раньше просто не замечал — поллим лёгкий count-эндпоинт
+  // (он считает те же notifications, что гасит открытие треда) и подсвечиваем
+  // пункт «Поддержка». 45 c — достаточно отзывчиво, не нагружает БД.
+  const [supportUnread, setSupportUnread] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const data = await clientApiFetch<{ unread?: number }>('/support/unread');
+        if (!cancelled) {
+          setSupportUnread(typeof data.unread === 'number' ? data.unread : 0);
+        }
+      } catch {
+        /* бейдж не критичен — при ошибке просто не подсвечиваем */
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 45_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
+  // Клиент открыл «Поддержку» → сервер пометил тред прочитанным на GET
+  // /support/thread. Оптимистично обнуляем счётчик прямо при смене activeId
+  // (React-паттерн «правка state при смене пропа во время рендера» — без
+  // эффекта и каскадного рендера), чтобы значок исчез сразу при прочтении, а не
+  // мигал старым числом до следующего поллинга при возврате на другую страницу.
+  const [prevActiveId, setPrevActiveId] = useState(activeId);
+  if (activeId !== prevActiveId) {
+    setPrevActiveId(activeId);
+    if (activeId === CLIENT_NAV_SUPPORT.id && supportUnread !== 0) {
+      setSupportUnread(0);
+    }
+  }
+
+  // Пока клиент находится на странице поддержки, бейдж не показываем вовсе:
+  // он по определению читает тред (а новые ответы видны прямо в нём).
+  const supportBadge = activeId === CLIENT_NAV_SUPPORT.id ? 0 : supportUnread;
 
   return (
     <nav aria-label={locale === 'en' ? 'Main navigation' : 'Главное меню'} className="flex flex-col gap-1.5">
@@ -175,6 +232,7 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
           active={activeId === CLIENT_NAV_SUPPORT.id}
           locale={locale}
           onItemClick={onItemClick}
+          badge={supportBadge}
         />
         {/* Договор оферты — in-portal version at /client/offer (wrapped by
             the client layout's top bar + sidebar). The standalone /offer
