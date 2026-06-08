@@ -9,10 +9,6 @@ type Tab = 'campaigns' | 'leads' | 'dialogs' | 'logs' | 'settings';
 type Settings = {
   linkedin_email: string;
   linkedin_password: string;
-  llm_provider: string;
-  llm_api_key: string;
-  ai_model: string;
-  llm_api_base: string;
   proxy_url: string;
   connect_daily_limit: number;
   connect_weekly_limit: number;
@@ -28,6 +24,10 @@ type Campaign = {
   campaign_objective: string;
   booking_link: string;
   seed_profile_urls: string;
+  /** Window(s) during which the bot is allowed to send invites and replies. */
+  working_hours: string[];
+  /** Hours from UTC, e.g. 3 for MSK. Compared against `working_hours`. */
+  timezone_offset: number;
   status: string;
   runtime_status: string;
   stats: Record<string, unknown>;
@@ -70,10 +70,6 @@ const API = '/api/tools/li-outreach-v2';
 const DEFAULT_SETTINGS: Settings = {
   linkedin_email: '',
   linkedin_password: '',
-  llm_provider: 'openai',
-  llm_api_key: '',
-  ai_model: 'gpt-4o-mini',
-  llm_api_base: '',
   proxy_url: '',
   connect_daily_limit: 20,
   connect_weekly_limit: 100,
@@ -88,6 +84,11 @@ const DEFAULT_CAMPAIGN = {
   campaign_objective: '',
   booking_link: '',
   seed_profile_urls: '',
+  // Same format as TG sleep_periods but inverted in meaning — when the bot is
+  // ALLOWED to send. Comma-separated to support a lunch break, e.g.
+  // "09:00-12:00, 14:00-18:00".
+  working_hours: '09:00-18:00',
+  timezone_offset: 3,
 };
 
 function formatDate(iso?: string | null) {
@@ -216,7 +217,17 @@ export default function LiOutreachV2Page() {
     setSaving(true);
     setError('');
     try {
-      const data = await api<{ campaign: Campaign }>('/campaigns', { method: 'POST', json: campaignForm });
+      const payload = {
+        ...campaignForm,
+        // UI keeps working_hours as a comma-separated string for editing;
+        // the API normalizer accepts both string and array.
+        working_hours: campaignForm.working_hours
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+        timezone_offset: campaignForm.timezone_offset,
+      };
+      const data = await api<{ campaign: Campaign }>('/campaigns', { method: 'POST', json: payload });
       setCampaigns((items) => [data.campaign, ...items]);
       setSelectedCampaignId(data.campaign.id);
       setCampaignForm(DEFAULT_CAMPAIGN);
@@ -224,6 +235,28 @@ export default function LiOutreachV2Page() {
       setError(e instanceof Error ? e.message : 'Ошибка создания кампании');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function updateCampaignSchedule(id: string, workingHours: string, timezoneOffset: number) {
+    setBusyCampaignId(id);
+    setError('');
+    try {
+      const data = await api<{ campaign: Campaign }>(`/campaigns/${id}`, {
+        method: 'PATCH',
+        json: {
+          working_hours: workingHours
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
+          timezone_offset: timezoneOffset,
+        },
+      });
+      setCampaigns((items) => items.map((item) => (item.id === id ? data.campaign : item)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка сохранения расписания');
+    } finally {
+      setBusyCampaignId(null);
     }
   }
 
@@ -317,6 +350,23 @@ export default function LiOutreachV2Page() {
                 <TextArea label="Цель кампании" value={campaignForm.campaign_objective} onChange={(v) => setCampaignForm({ ...campaignForm, campaign_objective: v })} rows={3} />
                 <Input label="Ссылка для бронирования" value={campaignForm.booking_link} onChange={(v) => setCampaignForm({ ...campaignForm, booking_link: v })} />
                 <TextArea label="Seed LinkedIn profiles" value={campaignForm.seed_profile_urls} onChange={(v) => setCampaignForm({ ...campaignForm, seed_profile_urls: v })} rows={3} />
+                <div className="grid grid-cols-[1fr_120px] gap-3">
+                  <Input
+                    label="Часы работы (рассылки и ответы)"
+                    value={campaignForm.working_hours}
+                    onChange={(v) => setCampaignForm({ ...campaignForm, working_hours: v })}
+                    placeholder="09:00-18:00, 14:00-18:00"
+                  />
+                  <NumberInput
+                    label="Таймзона (UTC)"
+                    value={campaignForm.timezone_offset}
+                    onChange={(v) => setCampaignForm({ ...campaignForm, timezone_offset: v })}
+                  />
+                </div>
+                <div className="rounded-md border border-emerald-100 bg-emerald-50/60 px-3 py-2 text-xs text-gray-600">
+                  Бот будет слать инвайты и отвечать только в указанные часы. Формат — как в TG аутриче,
+                  но наоборот: здесь «время работы», а не «периоды сна». Можно указать несколько окон через запятую.
+                </div>
                 <button
                   onClick={() => void createCampaign()}
                   disabled={saving}
@@ -365,6 +415,17 @@ export default function LiOutreachV2Page() {
                     </div>
                     <p className="mt-3 line-clamp-2 text-sm text-gray-600">{campaign.target_market}</p>
                     <div className="mt-3 text-xs text-gray-400">Создана {formatDate(campaign.created_at)}</div>
+                    {selectedCampaign?.id === campaign.id && (
+                      <CampaignScheduleEditor
+                        // Key on the persisted schedule so the editor remounts
+                        // (and re-seeds local state from props) after a save,
+                        // or when the user picks a different campaign.
+                        key={`${campaign.id}-${(campaign.working_hours ?? []).join(',')}-${campaign.timezone_offset}`}
+                        campaign={campaign}
+                        busy={busyCampaignId === campaign.id}
+                        onSave={(hours, tz) => void updateCampaignSchedule(campaign.id, hours, tz)}
+                      />
+                    )}
                   </div>
                 ))}
               </div>
@@ -465,10 +526,6 @@ export default function LiOutreachV2Page() {
             <div className="mt-5 grid gap-4 md:grid-cols-2">
               <Input label="LinkedIn email" value={settings.linkedin_email} onChange={(v) => setSettings({ ...settings, linkedin_email: v })} />
               <Input label="LinkedIn password" type="password" value={settings.linkedin_password} onChange={(v) => setSettings({ ...settings, linkedin_password: v })} />
-              <Select label="LLM provider" value={settings.llm_provider} onChange={(v) => setSettings({ ...settings, llm_provider: v })} options={['openai', 'anthropic', 'google', 'groq', 'mistral', 'cohere', 'openai_compatible']} />
-              <Input label="AI model" value={settings.ai_model} onChange={(v) => setSettings({ ...settings, ai_model: v })} />
-              <Input label="LLM API key" type="password" value={settings.llm_api_key} onChange={(v) => setSettings({ ...settings, llm_api_key: v })} />
-              <Input label="LLM API base" value={settings.llm_api_base} onChange={(v) => setSettings({ ...settings, llm_api_base: v })} />
               <Input label="Proxy / VPN URL" value={settings.proxy_url} onChange={(v) => setSettings({ ...settings, proxy_url: v })} />
               <div className="grid grid-cols-3 gap-3">
                 <NumberInput label="Invite/day" value={settings.connect_daily_limit} onChange={(v) => setSettings({ ...settings, connect_daily_limit: v })} />
@@ -510,11 +567,11 @@ function DataShell({ children, selectedCampaign, campaigns, onCampaignChange }: 
   );
 }
 
-function Input({ label, value, onChange, type = 'text' }: { label: string; value: string; onChange: (value: string) => void; type?: string }) {
+function Input({ label, value, onChange, type = 'text', placeholder }: { label: string; value: string; onChange: (value: string) => void; type?: string; placeholder?: string }) {
   return (
     <label className="block text-sm">
       <span className="font-medium text-gray-700">{label}</span>
-      <input type={type} value={value} onChange={(e) => onChange(e.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-emerald-400" />
+      <input type={type} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-emerald-400" />
     </label>
   );
 }
@@ -537,13 +594,63 @@ function TextArea({ label, value, onChange, rows }: { label: string; value: stri
   );
 }
 
-function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: string[] }) {
+/**
+ * Inline editor for `working_hours` + `timezone_offset` on an existing
+ * campaign. Local state is seeded from props and reset every time a different
+ * card opens so editing one campaign never leaks into another.
+ *
+ * Why inline (not a separate page): the rest of the campaign card is read-only
+ * preview, and the only field users actually want to tweak after creation is
+ * the schedule. A modal/route would be overkill.
+ */
+function CampaignScheduleEditor({
+  campaign,
+  busy,
+  onSave,
+}: {
+  campaign: Campaign;
+  busy: boolean;
+  onSave: (workingHours: string, timezoneOffset: number) => void;
+}) {
+  const initialHours = Array.isArray(campaign.working_hours)
+    ? campaign.working_hours.join(', ')
+    : '';
+  const initialTz = Number.isFinite(Number(campaign.timezone_offset))
+    ? Number(campaign.timezone_offset)
+    : 0;
+  // Local form state seeded from the campaign row. The parent passes a
+  // `key` derived from the persisted schedule, so this component remounts
+  // whenever the persisted values change — no useEffect-based prop sync.
+  const [hours, setHours] = useState(initialHours);
+  const [tz, setTz] = useState(initialTz);
+
+  const dirty = hours !== initialHours || tz !== initialTz;
+
   return (
-    <label className="block text-sm">
-      <span className="font-medium text-gray-700">{label}</span>
-      <select value={value} onChange={(e) => onChange(e.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-emerald-400">
-        {options.map((option) => <option key={option} value={option}>{option}</option>)}
-      </select>
-    </label>
+    <div
+      className="mt-4 rounded-md border border-emerald-100 bg-white p-3"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Расписание</div>
+      <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_110px_auto]">
+        <Input
+          label="Часы работы"
+          value={hours}
+          onChange={setHours}
+          placeholder="09:00-18:00, 14:00-18:00"
+        />
+        <NumberInput label="UTC offset" value={tz} onChange={setTz} />
+        <button
+          onClick={() => onSave(hours, tz)}
+          disabled={busy || !dirty}
+          className="self-end rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+        >
+          {busy ? 'Сохранение…' : 'Сохранить'}
+        </button>
+      </div>
+      <div className="mt-2 text-[11px] text-gray-500">
+        Бот шлёт инвайты и отвечает только в эти часы (локальное время = UTC + offset). Несколько окон — через запятую.
+      </div>
+    </div>
   );
 }

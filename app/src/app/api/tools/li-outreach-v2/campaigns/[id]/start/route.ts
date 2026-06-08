@@ -9,15 +9,19 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
     const { id } = await ctx.params;
+    const requestyKey = (process.env.OPENROUTER_LI_OUTREACH_API_KEY ?? '').trim();
+    if (!requestyKey) {
+      return jsonError('OPENROUTER_LI_OUTREACH_API_KEY is not configured on server', 500);
+    }
 
     const { data: settings } = await auth.supabase
       .from('li2_settings')
-      .select('linkedin_email,llm_api_key,ai_model,legal_accepted')
+      .select('linkedin_email,linkedin_password,legal_accepted')
       .eq('user_id', auth.user.id)
       .maybeSingle();
 
-    if (!settings?.linkedin_email || !settings?.llm_api_key || !settings?.ai_model) {
-      return jsonError('Fill LinkedIn and LLM settings before starting OpenOutreach', 400);
+    if (!settings?.linkedin_email || !settings?.linkedin_password) {
+      return jsonError('Fill LinkedIn settings before starting OpenOutreach', 400);
     }
     if (!settings.legal_accepted) {
       return jsonError('Accept the LinkedIn automation risk notice before starting', 400);
@@ -53,6 +57,22 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           product_description: campaign.product_description,
           target_market: campaign.target_market,
           campaign_objective: campaign.campaign_objective,
+          // Inverse of TG's sleep_periods: the runtime should ONLY send invites
+          // and replies during these windows (local time = UTC + timezone_offset).
+          schedule: {
+            working_hours: Array.isArray(campaign.working_hours)
+              ? campaign.working_hours
+              : ['09:00-18:00'],
+            timezone_offset: Number.isFinite(Number(campaign.timezone_offset))
+              ? Number(campaign.timezone_offset)
+              : 0,
+          },
+          llm: {
+            provider: 'openai_compatible',
+            api_base: 'https://router.requesty.ai/v1',
+            api_key_env: 'OPENROUTER_LI_OUTREACH_API_KEY',
+            model: 'openai/gpt-4o-mini',
+          },
         },
       })
       .select()
