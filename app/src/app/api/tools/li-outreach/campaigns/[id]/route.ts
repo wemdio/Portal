@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError, checkIsAdmin, userOwnsAccount } from '@/lib/liOutreach/apiHelpers';
+import { normalizeTimezoneOffset, normalizeWorkingHours } from '@/lib/liOutreach/schedule';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -52,6 +53,15 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     ];
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     for (const key of allowed) { if (key in body) patch[key] = body[key]; }
+    // working_hours / timezone_offset go through the shared normalizers so
+    // garbage values can't reach the DB (the runner regex-matches each entry).
+    if ('working_hours' in body) {
+      const hours = normalizeWorkingHours(body.working_hours);
+      if (hours !== null) patch.working_hours = hours;
+    }
+    if ('timezone_offset' in body) {
+      patch.timezone_offset = normalizeTimezoneOffset(body.timezone_offset);
+    }
 
     const { error } = await supabaseAdmin
       .from('li_campaigns')
