@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { V2_DEFAULT_PROMPTS } from '@/lib/liOutreach/v2DefaultPrompts';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -16,7 +17,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     const { data: settings } = await auth.supabase
       .from('li2_settings')
-      .select('linkedin_email,linkedin_password,legal_accepted')
+      .select('linkedin_email,linkedin_password,legal_accepted,prompt_follow_up_agent,prompt_qualify_lead,prompt_search_keywords')
       .eq('user_id', auth.user.id)
       .maybeSingle();
 
@@ -80,6 +81,15 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
             api_base: 'https://router.requesty.ai/v1',
             api_key_env: 'OPENROUTER_LI_OUTREACH_API_KEY',
             model: 'openai/gpt-4o-mini',
+          },
+          // Jinja2 prompt overrides for the three OpenOutreach LLM stages.
+          // Empty user setting → falls back to the verbatim upstream default
+          // shipped in v2DefaultPrompts.ts, so the worker always receives a
+          // non-empty string regardless of whether the operator customised it.
+          prompts: {
+            follow_up_agent: (settings.prompt_follow_up_agent ?? '').trim() || V2_DEFAULT_PROMPTS.follow_up_agent,
+            qualify_lead:    (settings.prompt_qualify_lead    ?? '').trim() || V2_DEFAULT_PROMPTS.qualify_lead,
+            search_keywords: (settings.prompt_search_keywords ?? '').trim() || V2_DEFAULT_PROMPTS.search_keywords,
           },
         },
       })
