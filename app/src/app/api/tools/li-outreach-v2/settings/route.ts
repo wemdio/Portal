@@ -7,10 +7,6 @@ export const dynamic = 'force-dynamic';
 const ALLOWED = [
   'linkedin_email',
   'linkedin_password',
-  'llm_provider',
-  'llm_api_key',
-  'ai_model',
-  'llm_api_base',
   'proxy_url',
   'connect_daily_limit',
   'connect_weekly_limit',
