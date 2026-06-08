@@ -14,7 +14,7 @@ INSTALL postgres; LOAD postgres;
 ATTACH '${PG_CONN}' AS pg (TYPE postgres);
 
 -- OPTIONAL: confirm the real column names first (uncomment, run, then re-run insert).
--- DESCRIBE SELECT * FROM read_parquet('hf://datasets/andreaaltomani/company-dataset/*.parquet') LIMIT 1;
+-- DESCRIBE SELECT * FROM read_parquet('hf://datasets/andreaaltomani/company-dataset@~parquet/default/train/*.parquet') LIMIT 1;
 
 -- For a re-run, clear first (DuckDB's postgres writer has no ON CONFLICT):
 -- DELETE FROM pg.public.pdl_companies;
@@ -32,7 +32,7 @@ SELECT
   any_value(locality)    AS locality,
   TRY_CAST(any_value(founded) AS INTEGER) AS founded,
   any_value(linkedin_url) AS linkedin_url
-FROM read_parquet('hf://datasets/andreaaltomani/company-dataset/*.parquet')
+FROM read_parquet('hf://datasets/andreaaltomani/company-dataset@~parquet/default/train/*.parquet')
 WHERE website IS NOT NULL AND website <> ''
   AND name IS NOT NULL AND name <> ''
   AND country IN (
