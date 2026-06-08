@@ -184,6 +184,18 @@ export default function LoginPage() {
         <p className="text-center text-sm text-gray-500">
           Доступ к порталу выдаёт администратор
         </p>
+
+        {/* Public link to the platform offer agreement. Always visible
+            (auth-walled users see it before they log in), styled as a quiet
+            text button so it doesn't compete with the primary Войти CTA. */}
+        <div className="border-t border-gray-100 pt-4">
+          <a
+            href="/offer"
+            className="block text-center text-xs font-medium text-gray-500 hover:text-gray-900 hover:underline"
+          >
+            Договор оферты
+          </a>
+        </div>
       </div>
     </div>
   );
