@@ -151,8 +151,15 @@ export async function scrapeLinkedInSearch(
         const firstName = String(item.first_name ?? '').trim() || null;
         const lastName = String(item.last_name ?? '').trim() || null;
 
-        // Upsert lead (deduplicate by linkedin_id or profile_url)
-        await db.from('li_leads').upsert(
+        // Upsert lead (deduplicate by linkedin_id within list).
+        // The unique index `li_leads_scraper_dedup_idx` is what makes the
+        // onConflict target resolvable — see migration 20260608_0006. Before
+        // that migration this upsert silently 4xx'd ("no unique constraint
+        // matching the ON CONFLICT specification") and we'd still bump
+        // `collected`, producing the infamous "10/10 completed but list is
+        // empty" tasks. We now surface the error to the task row instead of
+        // swallowing it.
+        const { error: upsertError } = await db.from('li_leads').upsert(
           {
             user_id: userId,
             lead_list_id: leadListId,
@@ -169,7 +176,14 @@ export async function scrapeLinkedInSearch(
           },
           { onConflict: 'user_id,lead_list_id,linkedin_id', ignoreDuplicates: true },
         );
-
+        if (upsertError) {
+          console.error(`[li-outreach] scraper.search lead upsert failed for task ${taskId}:`, upsertError.message);
+          await db
+            .from('li_tasks')
+            .update({ status: 'failed', error_message: `Не удалось сохранить лида: ${upsertError.message}`, completed_at: new Date().toISOString() })
+            .eq('id', taskId);
+          return;
+        }
         collected++;
       }
 
@@ -269,7 +283,9 @@ export async function scrapePostReactions(
         const headline = String(item.headline ?? '').trim() || null;
         const { position, company } = parseHeadline(headline);
 
-        await db.from('li_leads').upsert(
+        // Same upsert / dedup contract as search above — see migration
+        // 20260608_0006 for the unique index that backs the onConflict target.
+        const { error: upsertError } = await db.from('li_leads').upsert(
           {
             user_id: userId,
             lead_list_id: leadListId,
@@ -286,7 +302,14 @@ export async function scrapePostReactions(
           },
           { onConflict: 'user_id,lead_list_id,linkedin_id', ignoreDuplicates: true },
         );
-
+        if (upsertError) {
+          console.error(`[li-outreach] scraper.reactions lead upsert failed for task ${taskId}:`, upsertError.message);
+          await db
+            .from('li_tasks')
+            .update({ status: 'failed', error_message: `Не удалось сохранить лида: ${upsertError.message}`, completed_at: new Date().toISOString() })
+            .eq('id', taskId);
+          return;
+        }
         collected++;
       }
 
