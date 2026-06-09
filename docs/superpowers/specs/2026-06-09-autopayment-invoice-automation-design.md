@@ -57,7 +57,8 @@ chargeMonthlyRenewal(tariffRow)
 
 ## БД
 
-Миграция `20260609_0001_client_tariffs_last_payment_error.sql`:
+Миграция `20260609_0004_client_tariffs_last_payment_error.sql`
+(_0001-_0003 заняты прилетевшими из ветки `test`):
 
 ```sql
 ALTER TABLE client_tariffs
