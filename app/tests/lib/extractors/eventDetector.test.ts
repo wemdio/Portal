@@ -211,7 +211,8 @@ describe('detectEventSignals — parsing', () => {
     });
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    const body = JSON.parse((fetchSpy.mock.calls[0][1] as { body: string }).body) as {
+    const callArgs = fetchSpy.mock.calls[0] as unknown as [string, { body: string }];
+    const body = JSON.parse(callArgs[1].body) as {
       messages: Array<{ role: string; content: string }>;
     };
     const userMsg = body.messages.find((m) => m.role === 'user')!.content;
