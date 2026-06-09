@@ -44,7 +44,25 @@ export type ExtractorKey =
   | 'founded_year'
   | 'team_size'
   | 'blog_last_post'
-  | 'social_media';
+  | 'social_media'
+  // ─── Event signals (from social-media posts + blog) ───────────────────────
+  //
+  // Designed for HoReCa outreach personalization: each signal is a Да/Нет
+  // boolean PLUS a paired textual summary so the operator can use the data
+  // directly in an email ("видим, что вы готовите открытие на Тверской...").
+  // All four are produced by an LLM pass over the last ~10 posts from every
+  // social-media URL the company linked + blog_last_post — see Phase 2/3.
+  //
+  // Renders in xlsx as Да/Нет (signal) + "<краткое описание>" (summary).
+  // Empty / unknown → DASH per the formatExtraValue contract.
+  | 'event_opening'         // открытие / готовится открытие нового заведения
+  | 'event_opening_summary'
+  | 'event_redesign'        // ребрендинг / редизайн (готовы к новым решениям)
+  | 'event_redesign_summary'
+  | 'event_renovation'      // предстоящий / идущий ремонт
+  | 'event_renovation_summary'
+  | 'event_geo'             // список городов где у компании есть заведения
+  | 'event_geo_summary';
 
 export const ALL_EXTRACTOR_KEYS: ExtractorKey[] = [
   'stack',
@@ -63,6 +81,14 @@ export const ALL_EXTRACTOR_KEYS: ExtractorKey[] = [
   'team_size',
   'blog_last_post',
   'social_media',
+  'event_opening',
+  'event_opening_summary',
+  'event_redesign',
+  'event_redesign_summary',
+  'event_renovation',
+  'event_renovation_summary',
+  'event_geo',
+  'event_geo_summary',
 ];
 
 /** Which subpages each extractor needs to be fetched. Empty = main page only. */
@@ -86,6 +112,18 @@ export const EXTRACTOR_TO_SUBPAGES: Record<ExtractorKey, SubpageKind[]> = {
   // about/contact-страницу как fallback, потому что у многих b2b-сайтов
   // главная — это лендинг с прицепами на «контакты» отдельно.
   social_media: ['about'],
+  // Event-сигналы анализируют посты соцсетей + блог. Подстраницы те же что
+  // у social_media (для извлечения ссылок на соцсети) и blog (запасной
+  // источник анонсов открытий / ремонтов / ребрендингов для тех компаний у
+  // которых соцсети пустые, но блог ведётся).
+  event_opening: ['about', 'blog'],
+  event_opening_summary: ['about', 'blog'],
+  event_redesign: ['about', 'blog'],
+  event_redesign_summary: ['about', 'blog'],
+  event_renovation: ['about', 'blog'],
+  event_renovation_summary: ['about', 'blog'],
+  event_geo: ['about'],
+  event_geo_summary: ['about'],
 };
 
 /**
@@ -97,6 +135,20 @@ export const CASCADE_RULES: Partial<Record<ExtractorKey, ExtractorKey[]>> = {
   pricing_min: ['pricing_model'],
   free_trial: ['pricing_model'],
   hiring_roles: ['vacancies_count'],
+  // События зависят от social_media (источник постов) и blog_last_post
+  // (запасной источник анонсов). При включении любого event-signal'а в UI
+  // автоматически подсветим и эти два, потому что иначе LLM-анализу
+  // буквально нечего анализировать.
+  event_opening: ['social_media', 'blog_last_post'],
+  event_redesign: ['social_media', 'blog_last_post'],
+  event_renovation: ['social_media', 'blog_last_post'],
+  event_geo: ['social_media'],
+  // Summary-колонки требуют свой parent-signal — иначе оператор видит
+  // только текст без Да/Нет рядом, что для фильтрации в Excel неудобно.
+  event_opening_summary: ['event_opening'],
+  event_redesign_summary: ['event_redesign'],
+  event_renovation_summary: ['event_renovation'],
+  event_geo_summary: ['event_geo'],
 };
 
 /**
@@ -122,13 +174,25 @@ export const EXTRACTOR_LABELS: Record<ExtractorKey, string> = {
   team_size: 'Размер команды',
   blog_last_post: 'Последний пост',
   social_media: 'Соцсети',
+  // Сигналы события — каждый рисуется парой колонок (Да/Нет + выжимка),
+  // чтобы оператор мог отфильтровать по «есть открытие = Да» и сразу прочитать
+  // описание (где, когда, что именно открывается) без раскрытия отдельной
+  // страницы. Названия колонок копируют формулировки спеца HoReCa-направления.
+  event_opening: 'Открытие',
+  event_opening_summary: 'Выжимка открытия',
+  event_redesign: 'Ребрендинг',
+  event_redesign_summary: 'Выжимка ребрендинга',
+  event_renovation: 'Ремонт',
+  event_renovation_summary: 'Выжимка ремонта',
+  event_geo: 'География',
+  event_geo_summary: 'Выжимка географии',
 };
 
 /**
  * Built-in presets the user sees as quick-start buttons. Custom user presets
  * are persisted to localStorage on top of these.
  */
-export type SignalPresetId = 'basic' | 'outreach' | 'audit';
+export type SignalPresetId = 'basic' | 'outreach' | 'audit' | 'horeca';
 
 export interface SignalPreset {
   id: SignalPresetId;
@@ -180,6 +244,32 @@ export const BUILTIN_PRESETS: Readonly<Record<SignalPresetId, SignalPreset>> = {
       'social_media',
     ],
   },
+  // HoReCa-фокус: набор сигналов придуман под B2B-аутрич спецам, продающим
+  // в HoReCa (рестораны / гостиницы / кофейни). Помимо общих сигналов сюда
+  // включены 4 event-signal'а из соцсетей: открытие, ребрендинг, ремонт,
+  // география. LLM-анализатор постов запускается только когда в наборе есть
+  // хотя бы один event_*, поэтому базовые пресеты остаются дешёвыми.
+  horeca: {
+    id: 'horeca',
+    name: 'HoReCa',
+    description: 'Сигналы для аутрича в HoReCa: открытия / ребрендинг / ремонт / география + найм + соцсети.',
+    extractors: [
+      'stack',
+      'profile',
+      'vacancies_count',
+      'hiring_roles',
+      'social_media',
+      'blog_last_post',
+      'event_opening',
+      'event_opening_summary',
+      'event_redesign',
+      'event_redesign_summary',
+      'event_renovation',
+      'event_renovation_summary',
+      'event_geo',
+      'event_geo_summary',
+    ],
+  },
 };
 
 /**
@@ -223,6 +313,17 @@ export const EXTRACTOR_GROUPS: ExtractorGroup[] = [
     title: 'Компания и интеграции',
     description: 'Подгружает /about, /integrations, /blog.',
     extractors: ['integrations', 'founded_year', 'team_size', 'blog_last_post', 'social_media'],
+  },
+  {
+    id: 'events',
+    title: 'События в соцсетях',
+    description: 'Анализ постов из соцсетей и блога LLM-моделью — ищет ключевые события: открытие, ребрендинг, ремонт, география.',
+    extractors: [
+      'event_opening', 'event_opening_summary',
+      'event_redesign', 'event_redesign_summary',
+      'event_renovation', 'event_renovation_summary',
+      'event_geo', 'event_geo_summary',
+    ],
   },
 ];
 
@@ -268,4 +369,22 @@ export interface ExtractedData {
   blog_last_post?: string;
   /** Список нормализованных URL'ов всех найденных соцсетей компании. */
   social_media?: string[];
+
+  // ─── Event signals (HoReCa-style) ───────────────────────────────────────
+  // Заполняются LLM-анализатором постов соцсетей (берёт URL'ы из social_media)
+  // + blog_last_post + about. Каждый сигнал = пара bool + summary, чтобы
+  // оператор мог отфильтровать «Да/Нет» в Excel и сразу прочитать что
+  // именно произошло без открытия отдельной колонки с сырым постом.
+  //
+  // Геогра́фия — особенная: вместо bool это список городов где у компании
+  // есть заведения (для HoReCa: «Москва, СПб, Казань»). summary при этом
+  // может содержать пояснение («штаб в Москве, 4 точки в Питере»).
+  event_opening?: boolean;
+  event_opening_summary?: string;
+  event_redesign?: boolean;
+  event_redesign_summary?: string;
+  event_renovation?: boolean;
+  event_renovation_summary?: string;
+  event_geo?: string[];
+  event_geo_summary?: string;
 }
