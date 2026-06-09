@@ -71,16 +71,40 @@ export async function requireClientAuth(
   const admin = supabaseAdmin;
   const instantly = supabaseInstantly;
 
-  const { data: profile } = await withApiTiming(
-    'client.auth.profile',
-    () =>
-      admin
-        .from('profiles')
-        .select('role, is_demo')
-        .eq('id', user.id)
-        .single(),
-    timingMeta,
-  );
+  // profiles (main-postgres) и client_instantly_access (instantly-postgres)
+  // зависят ТОЛЬКО от user.id и независимы друг от друга — тянем их параллельно.
+  // Это убирает один последовательный кросс-VPS round-trip (139→144) на КАЖДОМ
+  // запросе к /api/client/*: было getUser → profiles → accessRows (3 подряд),
+  // стало getUser → (profiles ‖ accessRows) (2). Оба withApiTiming-спана
+  // сохранены, поэтому замеры до/после продолжают работать.
+  //
+  // Поведение идентично прежнему. Единственное отличие: при Forbidden-роли или
+  // заблокированной demo-записи мы теперь успеваем прочитать accessRows «вхолостую»
+  // (раньше short-circuit'ились до него). Это редкие пути, лишнее чтение дешёвое,
+  // а возвращаемый результат тот же.
+  const [profileRes, rowsRes] = await Promise.all([
+    withApiTiming(
+      'client.auth.profile',
+      () =>
+        admin
+          .from('profiles')
+          .select('role, is_demo')
+          .eq('id', user.id)
+          .single(),
+      timingMeta,
+    ),
+    withApiTiming(
+      'client.auth.accessRows',
+      () =>
+        instantly
+          .from('client_instantly_access')
+          .select('resource_type, resource_id, instantly_account_id')
+          .eq('client_user_id', user.id),
+      timingMeta,
+    ),
+  ]);
+
+  const profile = profileRes.data;
 
   const role = profile?.role ?? null;
   if (role !== 'client' && role !== 'admin') {
@@ -101,15 +125,7 @@ export async function requireClientAuth(
     return { error: demoReadonlyError() };
   }
 
-  const { data: rows } = await withApiTiming(
-    'client.auth.accessRows',
-    () =>
-      instantly
-        .from('client_instantly_access')
-        .select('resource_type, resource_id, instantly_account_id')
-        .eq('client_user_id', user.id),
-    timingMeta,
-  );
+  const rows = rowsRes.data;
 
   return {
     auth: {
