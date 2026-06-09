@@ -132,16 +132,28 @@ export async function middleware(request: NextRequest) {
     if (user) {
       const raw = request.cookies.get(ROLE_COOKIE)?.value ?? ''
       const cached = raw ? decodeRoleCache(raw, user.id) : null
-      const cachedLocale = normalizeLocale(request.cookies.get(LOCALE_COOKIE)?.value)
+      const rawLocaleCookie = request.cookies.get(LOCALE_COOKIE)?.value
+      const cachedLocale = normalizeLocale(rawLocaleCookie)
       userLocale = cachedLocale
       if (cached) {
         userRole = cached
-        const { data: localeProfile } = await supabase
-          .from('profiles')
-          .select('locale')
-          .eq('id', user.id)
-          .single()
-        userLocale = normalizeLocale(localeProfile?.locale)
+        // На cache-HIT по роли локаль берём из уже прочитанной куки, если она
+        // есть, и НЕ ходим в БД. И GET, и PUT /api/user/locale переписывают
+        // LOCALE_COOKIE на актуальное значение из profiles, а клиентский layout
+        // дёргает GET /api/user/locale при каждом монтировании — поэтому кука
+        // всегда синхронна с profiles.locale. Это убирает лишний кросс-VPS
+        // round-trip к profiles на КАЖДОЙ навигации. Если куки локали нет
+        // (первый заход / чистка кук) — падаем в БД, чтобы не потерять локаль.
+        if (rawLocaleCookie) {
+          userLocale = cachedLocale
+        } else {
+          const { data: localeProfile } = await supabase
+            .from('profiles')
+            .select('locale')
+            .eq('id', user.id)
+            .single()
+          userLocale = normalizeLocale(localeProfile?.locale)
+        }
       } else {
         const { data: profile } = await supabase
           .from('profiles')
