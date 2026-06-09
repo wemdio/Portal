@@ -6,6 +6,7 @@ import { logAudit, logError } from '@/lib/loggerServer';
 import { isAdmin } from '@/lib/roles';
 import type { UserRole } from '@/types';
 import { type TariffType, type BillingPeriod, SETUP_DAYS, calcBillingAmount, BILLING_PERIOD_MONTHS } from '@/lib/tariffs';
+import { ensurePendingInvoiceForTariff } from '@/lib/billing';
 
 export const dynamic = 'force-dynamic';
 
@@ -205,6 +206,20 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       { userId: user.id },
     );
 
+    // Auto-create a YooKassa invoice so admins see it in /invoices immediately
+    // and the client gets a ready-to-pay link in their portal — instead of the
+    // old lazy-on-click path. Idempotent: if the activate request is re-sent
+    // (admin re-saves the form), the helper reuses the existing pending invoice.
+    let invoiceAuto: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null } | null = null;
+    if (billingMode === 'autopayment') {
+      const ensured = await ensurePendingInvoiceForTariff({ userId: targetUserId, reason: 'admin_activate' });
+      invoiceAuto = {
+        invoice_id: ensured.invoiceId,
+        payment_url: ensured.yookassaUrl,
+        yookassa_error: ensured.yookassaError,
+      };
+    }
+
     return NextResponse.json({
       ok: true,
       action: 'activate',
@@ -215,6 +230,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       payment_locked: paymentLocked,
       billing_period: period,
       billing_amount: amount,
+      invoice: invoiceAuto,
     });
   }
 
@@ -281,6 +297,19 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       { userId: user.id },
     );
 
+    // Same auto-invoice logic as activate. Important during extend because the
+    // admin's intent is "client needs to pay for the next period now" — we
+    // don't want them to also remember to open the invoices page.
+    let invoiceAutoExt: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null } | null = null;
+    if (billingMode === 'autopayment') {
+      const ensured = await ensurePendingInvoiceForTariff({ userId: targetUserId, reason: 'admin_extend' });
+      invoiceAutoExt = {
+        invoice_id: ensured.invoiceId,
+        payment_url: ensured.yookassaUrl,
+        yookassa_error: ensured.yookassaError,
+      };
+    }
+
     return NextResponse.json({
       ok: true,
       action: 'extend',
@@ -290,6 +319,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       paid_until: billingMode ? null : newPaidUntil.toISOString(),
       billing_mode: billingMode,
       payment_locked: paymentLocked,
+      invoice: invoiceAutoExt,
     });
   }
 
