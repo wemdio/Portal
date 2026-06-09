@@ -138,6 +138,10 @@ export default function UsersPage() {
   const [allCampaigns, setAllCampaigns] = useState<{ id: string; name: string; status: number }[]>([]);
   const [allCampaignsLoading, setAllCampaignsLoading] = useState(false);
   const [campaignSearch, setCampaignSearch] = useState('');
+  // Debounced copy of campaignSearch — without this every typed character would
+  // re-filter ~200 campaigns and re-render every other modal field (the IIFE
+  // below sits inside the parent <form>, so any sibling re-render triggers it).
+  const [debouncedCampaignSearch, setDebouncedCampaignSearch] = useState('');
 
   const [tariffType, setTariffType] = useState<TariffType>('standard');
   const [customLimits, setCustomLimits] = useState<Omit<TariffData, 'tariff_type'>>({ ...TARIFF_DEFAULTS.pro });
@@ -304,6 +308,37 @@ export default function UsersPage() {
   useEffect(() => {
     if (modalRole === 'client') void fetchAllCampaigns();
   }, [modalRole, fetchAllCampaigns]);
+
+  // Debounce campaign-search input. Typing in this field used to re-render the
+  // entire modal on every keystroke because the IIFE below recomputes selected
+  // / unselected / filtered arrays inline. 150ms feels instant but coalesces
+  // bursts of typing into a single recompute.
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedCampaignSearch(campaignSearch), 150);
+    return () => window.clearTimeout(t);
+  }, [campaignSearch]);
+
+  // O(1) lookup set for "is this campaign selected" checks. Used to be a linear
+  // .includes() called twice per row (×N rows × every render of the modal),
+  // which is what made every keystroke or checkbox toggle feel laggy.
+  const selectedCampaignSet = useMemo(() => new Set(clientCampaigns), [clientCampaigns]);
+
+  // Sort-then-filter pipeline memoised against the three inputs it actually
+  // depends on. Without this it ran inside a JSX IIFE — recomputing on every
+  // single state change in the modal, including unrelated fields (tariff,
+  // limits, role chips). That's why typing in *any* input felt sluggish.
+  const visibleCampaigns = useMemo(() => {
+    const q = debouncedCampaignSearch.toLowerCase().trim();
+    const selected: typeof allCampaigns = [];
+    const unselected: typeof allCampaigns = [];
+    for (const c of allCampaigns) {
+      if (selectedCampaignSet.has(c.id)) selected.push(c);
+      else unselected.push(c);
+    }
+    const merged = selected.concat(unselected);
+    if (!q) return merged;
+    return merged.filter((c) => c.name.toLowerCase().includes(q));
+  }, [allCampaigns, selectedCampaignSet, debouncedCampaignSearch]);
 
   async function openActionModal(user: UserProfile, origin: { x: number; y: number }) {
     setActionModalLoadingUserId(user.id);
@@ -1478,17 +1513,11 @@ export default function UsersPage() {
                     <div className="max-h-56 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
                       {allCampaignsLoading ? (
                         <div className="px-3 py-4 text-center text-xs text-gray-400">Загрузка кампаний...</div>
-                      ) : (() => {
-                        const q = campaignSearch.toLowerCase();
-                        const selected = allCampaigns.filter((c) => clientCampaigns.includes(c.id));
-                        const unselected = allCampaigns.filter((c) => !clientCampaigns.includes(c.id));
-                        const sorted = [...selected, ...unselected];
-                        const filtered = q ? sorted.filter((c) => c.name.toLowerCase().includes(q)) : sorted;
-                        if (filtered.length === 0) {
-                          return <div className="px-3 py-4 text-center text-xs text-gray-400">Кампании не найдены</div>;
-                        }
-                        return filtered.map((c) => {
-                          const checked = clientCampaigns.includes(c.id);
+                      ) : visibleCampaigns.length === 0 ? (
+                        <div className="px-3 py-4 text-center text-xs text-gray-400">Кампании не найдены</div>
+                      ) : (
+                        visibleCampaigns.map((c) => {
+                          const checked = selectedCampaignSet.has(c.id);
                           return (
                             <label
                               key={c.id}
@@ -1517,8 +1546,8 @@ export default function UsersPage() {
                               </div>
                             </label>
                           );
-                        });
-                      })()}
+                        })
+                      )}
                     </div>
                     <p className="text-xs text-gray-400">Lead-списки определяются автоматически из назначенных кампаний</p>
                   </div>
