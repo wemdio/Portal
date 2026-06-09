@@ -42,20 +42,24 @@ export async function GET(req: NextRequest) {
   const size = listParam(sp, 'size');
   const country = listParam(sp, 'country');
   const name = (sp.get('name') ?? '').trim();
-  const limit = Math.min(1000, Math.max(1, Number(sp.get('limit') ?? '200')));
+  // Up to 100k per page so file exports pull large chunks in few round-trips.
+  const limit = Math.min(100_000, Math.max(1, Number(sp.get('limit') ?? '100')));
   const offset = Math.max(0, Number(sp.get('offset') ?? '0'));
 
-  let query = supabase.from('pdl_companies').select('*', { count: 'exact' });
+  // No COUNT(*) here — it's slow over 13M rows. The "≈ N" counter uses the
+  // instant planner estimate (/api/company-base/count); export loops until a
+  // page returns fewer than `limit` rows.
+  let query = supabase.from('pdl_companies').select('*');
   if (country.length) query = query.in('country', country);
   if (industry.length) query = query.in('industry', industry);
   if (size.length) query = query.in('size', size);
   if (name) query = query.ilike('name', `%${name.replace(/[%_]/g, '')}%`);
   query = query.order('name', { ascending: true }).range(offset, offset + limit - 1);
 
-  const { data, error, count } = await query;
+  const { data, error } = await query;
   if (error) {
     await logError('company_base.search.failed', error, { industry, size, country, name }, { userId: user.id });
     return jsonError(error.message, 500, { request_id: requestId });
   }
-  return NextResponse.json({ items: data ?? [], count: count ?? 0, limit, offset });
+  return NextResponse.json({ items: data ?? [], limit, offset });
 }
