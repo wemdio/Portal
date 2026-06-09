@@ -2,8 +2,6 @@
 
 import Link from 'next/link';
 import type { Route } from 'next';
-import { useEffect, useState } from 'react';
-import { clientApiFetch } from '@/lib/clientFetcher';
 import {
   CLIENT_NAV_AUTO_PIPELINE_SETUP,
   CLIENT_NAV_MANUAL_SCORING,
@@ -16,6 +14,7 @@ import {
   type ClientNavItem,
   type ClientNavMode,
 } from '@/lib/clientNav';
+import { useClientPortalContext } from '@/lib/clientPortalContext';
 import type { Locale } from '@/lib/i18n';
 
 export interface ClientNavListProps {
@@ -83,61 +82,12 @@ function NavItemRow({
 export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }: ClientNavListProps) {
   const groups = filterClientNavGroupsForMode(CLIENT_NAV_GROUPS, mode);
 
-  // BYO-почты (пилот): подгружаем флаг видимости. У обычных клиентов он выключен —
-  // пункт просто не появляется.
-  const [byoEnabled, setByoEnabled] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const data = await clientApiFetch<{ enabled?: boolean }>('/mailboxes/enabled');
-        if (!cancelled) setByoEnabled(data.enabled === true);
-      } catch {
-        /* тихо скрываем пункт при любой ошибке */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Бейдж непрочитанных сообщений поддержки. Клиент не получает push, поэтому
-  // ответ менеджера он раньше просто не замечал — поллим лёгкий count-эндпоинт
-  // (он считает те же notifications, что гасит открытие треда) и подсвечиваем
-  // пункт «Поддержка». 45 c — достаточно отзывчиво, не нагружает БД.
-  const [supportUnread, setSupportUnread] = useState(0);
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const data = await clientApiFetch<{ unread?: number }>('/support/unread');
-        if (!cancelled) {
-          setSupportUnread(typeof data.unread === 'number' ? data.unread : 0);
-        }
-      } catch {
-        /* бейдж не критичен — при ошибке просто не подсвечиваем */
-      }
-    };
-    void poll();
-    const timer = setInterval(() => void poll(), 45_000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, []);
-
-  // Клиент открыл «Поддержку» → сервер пометил тред прочитанным на GET
-  // /support/thread. Оптимистично обнуляем счётчик прямо при смене activeId
-  // (React-паттерн «правка state при смене пропа во время рендера» — без
-  // эффекта и каскадного рендера), чтобы значок исчез сразу при прочтении, а не
-  // мигал старым числом до следующего поллинга при возврате на другую страницу.
-  const [prevActiveId, setPrevActiveId] = useState(activeId);
-  if (activeId !== prevActiveId) {
-    setPrevActiveId(activeId);
-    if (activeId === CLIENT_NAV_SUPPORT.id && supportUnread !== 0) {
-      setSupportUnread(0);
-    }
-  }
+  // Бейдж непрочитанных сообщений поддержки и флаг BYO-почт приходят из layout
+  // через ClientPortalProvider: layout поллит /support/unread ОДНИМ таймером и
+  // грузит /mailboxes/enabled один раз, вместо дублирования в каждом из двух
+  // инстансов навигации (десктоп-сайдбар + мобильный drawer). Оптимистичное
+  // обнуление счётчика при открытии «Поддержки» тоже живёт в layout.
+  const { supportUnread, mailboxesEnabled } = useClientPortalContext();
 
   // Пока клиент находится на странице поддержки, бейдж не показываем вовсе:
   // он по определению читает тред (а новые ответы видны прямо в нём).
@@ -160,7 +110,7 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
       />
 
       {/* BYO-почты (пилот): виден только пользователям из allowlist'а BYO_MAILBOX_PILOT_USER_IDS. */}
-      {byoEnabled && (
+      {mailboxesEnabled && (
         <NavItemRow
           item={CLIENT_NAV_MAILBOXES}
           active={activeId === CLIENT_NAV_MAILBOXES.id}

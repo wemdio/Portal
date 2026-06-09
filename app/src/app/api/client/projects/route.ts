@@ -50,10 +50,22 @@ export async function GET(req: NextRequest) {
 
   const projectIds = rows.map((p) => p.id);
 
-  const tasksRes = await supabaseAdmin
-    .from('tasks')
-    .select('project_id, status')
-    .in('project_id', projectIds);
+  // tasks (main-postgres) и client_forwarded_leads (instantly-postgres) зависят
+  // только от projectIds и независимы — запускаем оба запроса параллельно,
+  // экономя один последовательный кросс-VPS round-trip на загрузке проектов.
+  const [tasksRes, leadsRes] = await Promise.all([
+    supabaseAdmin
+      .from('tasks')
+      .select('project_id, status')
+      .in('project_id', projectIds),
+    supabaseInstantly
+      ? supabaseInstantly
+          .from('client_forwarded_leads')
+          .select('project_id')
+          .eq('client_user_id', userId)
+          .in('project_id', projectIds)
+      : Promise.resolve(null),
+  ]);
 
   const tasksByProject = new Map<string, { active: number; done: number; total: number }>();
   for (const id of projectIds) {
@@ -71,18 +83,10 @@ export async function GET(req: NextRequest) {
   }
 
   const leadsByProject = new Map<string, number>(projectIds.map((id) => [id, 0]));
-  if (supabaseInstantly) {
-    const leadsRes = await supabaseInstantly
-      .from('client_forwarded_leads')
-      .select('project_id')
-      .eq('client_user_id', userId)
-      .in('project_id', projectIds);
-
-    if (!leadsRes.error) {
-      for (const l of (leadsRes.data ?? []) as LeadProjectRow[]) {
-        if (!l.project_id) continue;
-        leadsByProject.set(l.project_id, (leadsByProject.get(l.project_id) ?? 0) + 1);
-      }
+  if (leadsRes && !leadsRes.error) {
+    for (const l of (leadsRes.data ?? []) as LeadProjectRow[]) {
+      if (!l.project_id) continue;
+      leadsByProject.set(l.project_id, (leadsByProject.get(l.project_id) ?? 0) + 1);
     }
   }
 

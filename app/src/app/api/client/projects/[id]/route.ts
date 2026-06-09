@@ -55,11 +55,23 @@ export async function GET(
     return jsonError('Проект не найден или доступ запрещён', 404);
   }
 
-  const tasksRes = await supabaseAdmin
-    .from('tasks')
-    .select('id, title, status, deadline')
-    .eq('project_id', projectId)
-    .order('created_at', { ascending: false });
+  // Проект уже найден и доступ проверен выше. tasks (main-postgres) и счётчик
+  // лидов (instantly-postgres) независимы — параллелим. Счётчик лидов берём
+  // через count+head:true, чтобы не тащить строки ради .length.
+  const [tasksRes, leadsRes] = await Promise.all([
+    supabaseAdmin
+      .from('tasks')
+      .select('id, title, status, deadline')
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: false }),
+    supabaseInstantly
+      ? supabaseInstantly
+          .from('client_forwarded_leads')
+          .select('id', { count: 'exact', head: true })
+          .eq('client_user_id', userId)
+          .eq('project_id', projectId)
+      : Promise.resolve(null),
+  ]);
 
   const tasks = (tasksRes.data ?? []) as TaskRow[];
 
@@ -81,18 +93,7 @@ export async function GET(
       deadline: t.deadline,
     }));
 
-  let leadsCount = 0;
-  if (supabaseInstantly) {
-    const leadsRes = await supabaseInstantly
-      .from('client_forwarded_leads')
-      .select('id')
-      .eq('client_user_id', userId)
-      .eq('project_id', projectId);
-
-    if (!leadsRes.error) {
-      leadsCount = (leadsRes.data ?? []).length;
-    }
-  }
+  const leadsCount = leadsRes && !leadsRes.error ? (leadsRes.count ?? 0) : 0;
 
   return NextResponse.json({
     project: {
