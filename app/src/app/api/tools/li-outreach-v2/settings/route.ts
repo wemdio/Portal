@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
+import {
+  buildMissingVarsMessage,
+  validatePromptOverrides,
+} from '@/lib/liOutreach/promptVarValidation';
 
 export const dynamic = 'force-dynamic';
 
@@ -52,6 +56,20 @@ export async function PUT(req: NextRequest) {
       if (key.endsWith('_limit')) row[key] = Math.max(0, Number(value) || 0);
       else if (key === 'legal_accepted') row[key] = value === true;
       else row[key] = String(value ?? '');
+    }
+
+    // Reject the save if any prompt override is missing a required Jinja2
+    // variable. Otherwise the worker would render a broken prompt later and
+    // the user would only notice when leads start receiving weird messages —
+    // catching it at save time is the cheapest place to surface it. The
+    // helper skips empty strings (those mean "use the upstream default").
+    const promptChecks = validatePromptOverrides({
+      prompt_follow_up_agent: row.prompt_follow_up_agent,
+      prompt_qualify_lead:    row.prompt_qualify_lead,
+      prompt_search_keywords: row.prompt_search_keywords,
+    });
+    if (promptChecks.length > 0) {
+      return jsonError(buildMissingVarsMessage(promptChecks), 400);
     }
 
     const { data, error } = await auth.supabase
