@@ -1,0 +1,561 @@
+import 'server-only';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { logAudit, logError } from '@/lib/loggerServer';
+import {
+  buildDefaultReceipt,
+  cancelYookassaInvoice,
+  chargeRecurringPayment,
+  createYookassaInvoice,
+  extractInvoiceUrl,
+  isYookassaConfigured,
+} from '@/lib/yookassa';
+import {
+  BILLING_PERIOD_MONTHS,
+  TARIFF_MONTHLY_PRICE,
+  calcBillingAmount,
+  type BillingPeriod,
+  type ClientTariffRow,
+  type TariffType,
+} from '@/lib/tariffs';
+
+/**
+ * Billing domain: invoice lifecycle for subscriptions in autopayment mode.
+ *
+ * This module is the single source of truth for "ensure this client has a
+ * payable invoice" and "charge their saved card for the next month". Replaces
+ * the older lazy-create-on-click path that lived in /api/client/payment and
+ * duplicated price tables, and unifies admin/cron/client-initiated flows.
+ *
+ * Three exports:
+ *   - ensurePendingInvoiceForTariff: idempotent helper used by admin/client paths
+ *   - mapYookassaErrorRu:            short ru text for UI, used in two webhooks
+ *   - chargeMonthlyRenewal:          cron path that records the invoice AND charges
+ *
+ * Idempotency strategy: we treat an `invoices` row with status='pending' as the
+ * authoritative "in-flight" record. YooKassa invoices live ~30 days (see
+ * getDefaultYookassaInvoiceExpiresAt — 30d minus a 15-min buffer), so if our
+ * row was created within that window AND has yookassa_payment_url, the customer
+ * can still pay it. Older rows are auto-recreated.
+ */
+
+const YK_INVOICE_VALIDITY_MS = 30 * 24 * 60 * 60 * 1000;
+
+export type EnsureInvoiceReason =
+  | 'admin_activate'
+  | 'admin_extend'
+  | 'client_self'
+  | 'cron_renew';
+
+export interface EnsureInvoiceResult {
+  /** Our DB invoice row id, present whenever insert succeeded. */
+  invoiceId: string | null;
+  /** YK payment URL for the customer to click. Null if YK call failed. */
+  yookassaUrl: string | null;
+  /** When we re-used an existing pending invoice instead of creating one. */
+  reused: boolean;
+  /** Human-readable error string for the API caller, if anything failed. */
+  yookassaError: string | null;
+}
+
+interface EnsureInvoiceParams {
+  userId: string;
+  reason: EnsureInvoiceReason;
+}
+
+/**
+ * YooKassa cancellation_details.reason → short Russian text suitable for
+ * displaying directly to the client. Codes not in the table fall through to
+ * a generic "try again or another card" message.
+ *
+ * Used for both client-side payment failures (webhook payment.canceled) and
+ * cron recurring-charge failures (chargeMonthlyRenewal). The raw YK response
+ * is always also logged via logError for engineering visibility.
+ */
+export function mapYookassaErrorRu(reason: string | null | undefined): string {
+  switch (reason) {
+    case 'insufficient_funds':
+      return 'Недостаточно средств на карте.';
+    case 'expired_card':
+    case 'card_expired':
+      return 'Срок действия карты истёк.';
+    case 'issuer_unavailable':
+    case 'call_issuer':
+      return 'Банк отклонил платёж. Свяжитесь с банком.';
+    case '3d_secure_failed':
+      return 'Не прошла проверка 3-D Secure.';
+    case 'payment_method_restricted':
+    case 'general_decline':
+      return 'Платёж отклонён банком.';
+    case 'fraud_suspected':
+      return 'Платёж заблокирован системой безопасности.';
+    case 'country_forbidden':
+      return 'Платежи из вашей страны запрещены.';
+    case 'payment_method_limit_exceeded':
+      return 'Превышен лимит платежей по карте.';
+    case 'permission_revoked':
+      return 'Сохранённая карта отвязана. Привяжите карту заново через «Оплатить подписку».';
+    default:
+      return 'Не удалось списать. Попробуйте снова или другой картой.';
+  }
+}
+
+/* ─── Helpers ─── */
+
+const TARIFF_LABELS_RU: Record<TariffType, string> = {
+  standard: 'Стандарт',
+  pro: 'Про',
+  custom: 'Индивидуальный',
+};
+
+function resolveCompanyName(profile: { full_name?: string | null; email?: string | null } | null, userId: string): string {
+  return profile?.full_name?.trim() || profile?.email?.trim() || userId;
+}
+
+async function lookupClientProfile(userId: string): Promise<{ email: string | null; full_name: string | null } | null> {
+  if (!supabaseAdmin) return null;
+  const { data } = await supabaseAdmin
+    .from('profiles')
+    .select('email, full_name')
+    .eq('id', userId)
+    .maybeSingle();
+  return data ?? null;
+}
+
+/**
+ * Choose the customer email used for the 54-FZ receipt. Prefer the linked
+ * client's profile email; fall back to YOOKASSA_FALLBACK_RECEIPT_EMAIL env var.
+ * Returns null when neither is available — the caller decides whether to abort.
+ */
+function pickReceiptEmail(profile: { email: string | null } | null): string | null {
+  const email = profile?.email?.trim();
+  if (email) return email;
+  return process.env.YOOKASSA_FALLBACK_RECEIPT_EMAIL?.trim() || null;
+}
+
+/**
+ * Resolve the amount to charge for the current period of this tariff.
+ *
+ * Single source of truth: client_tariffs.billing_amount (set when admin chose
+ * a period in the activate/extend dialog). For backwards-compat with older
+ * subscriptions whose billing_amount/billing_period weren't recorded, we
+ * recompute from TARIFF_MONTHLY_PRICE (defaulting to "month" period) or
+ * return null for custom tariffs without explicit amount.
+ */
+function resolveBillingAmount(tariff: Pick<ClientTariffRow, 'tariff_type' | 'billing_period' | 'billing_amount'>): number | null {
+  if (tariff.billing_amount && tariff.billing_amount > 0) {
+    return Number(tariff.billing_amount);
+  }
+  if (tariff.tariff_type === 'custom') return null;
+  const period = (tariff.billing_period as BillingPeriod | null) ?? 'month';
+  return calcBillingAmount(tariff.tariff_type, period);
+}
+
+/**
+ * Build the human-readable description that ends up on the YooKassa invoice
+ * and (via the cart line item) on the customer's receipt.
+ */
+function buildDescription(
+  tariffType: TariffType,
+  period: BillingPeriod | null,
+  companyName: string,
+  reason: EnsureInvoiceReason,
+): string {
+  const tariffLabel = TARIFF_LABELS_RU[tariffType] ?? tariffType;
+  const periodLabel = period === 'year' ? 'год' : period === 'half_year' ? 'полгода' : 'месяц';
+  const verb = reason === 'admin_extend' || reason === 'cron_renew' ? 'Продление подписки' : 'Подписка';
+  return `${verb} ${tariffLabel} (${periodLabel}) — ${companyName}`;
+}
+
+function isPendingInvoiceStillValid(row: { created_at: string; yookassa_payment_url: string | null }, now = new Date()): boolean {
+  if (!row.yookassa_payment_url) return false;
+  const created = new Date(row.created_at);
+  if (Number.isNaN(created.getTime())) return false;
+  return now.getTime() - created.getTime() < YK_INVOICE_VALIDITY_MS;
+}
+
+/* ─── ensurePendingInvoiceForTariff ─── */
+
+/**
+ * Idempotently ensure the client has a pending invoice with a valid YooKassa
+ * payment URL.
+ *
+ * Behaviour:
+ *   1. Loads the client_tariffs row; rejects if billing_mode isn't 'autopayment'.
+ *   2. Looks up the most recent pending invoice for this client. If it has a
+ *      yookassa_payment_url and was created less than ~30 days ago, returns it
+ *      verbatim (reused=true).
+ *   3. Otherwise inserts a fresh invoices row, then calls YooKassa to create
+ *      the invoice with save_payment_method=true so the chosen card can be
+ *      reused for monthly auto-renewal. The YooKassa payment URL is saved on
+ *      our row.
+ *
+ * Errors at the YK call don't undo the invoice insert — the row stays in DB
+ * with status='pending' and yookassa_payment_url=null so the admin can see
+ * "needs YK retry" in /invoices and either re-trigger from there or call this
+ * helper again (it'll then go straight into the create branch with a new
+ * idempotency key derived from invoice id + retry suffix).
+ */
+export async function ensurePendingInvoiceForTariff(
+  params: EnsureInvoiceParams,
+): Promise<EnsureInvoiceResult> {
+  const { userId, reason } = params;
+
+  if (!supabaseAdmin) {
+    return {
+      invoiceId: null,
+      yookassaUrl: null,
+      reused: false,
+      yookassaError: 'Server misconfigured (supabaseAdmin unavailable)',
+    };
+  }
+
+  const { data: tariff, error: tariffErr } = await supabaseAdmin
+    .from('client_tariffs')
+    .select('id, user_id, tariff_type, billing_mode, billing_period, billing_amount')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (tariffErr) {
+    await logError('billing.ensure.tariff_fetch.failed', tariffErr, { userId, reason });
+    return { invoiceId: null, yookassaUrl: null, reused: false, yookassaError: 'Не удалось загрузить подписку' };
+  }
+  if (!tariff) {
+    return { invoiceId: null, yookassaUrl: null, reused: false, yookassaError: 'Подписка не найдена' };
+  }
+  if (tariff.billing_mode !== 'autopayment') {
+    return {
+      invoiceId: null,
+      yookassaUrl: null,
+      reused: false,
+      yookassaError: 'Автосоздание счёта доступно только для подписок с автоплатежом',
+    };
+  }
+
+  const amount = resolveBillingAmount(tariff as ClientTariffRow);
+  if (!amount || amount <= 0) {
+    return {
+      invoiceId: null,
+      yookassaUrl: null,
+      reused: false,
+      yookassaError: 'Не задана сумма подписки (billing_amount). Установите её в админке.',
+    };
+  }
+
+  // 1. Try to reuse an existing pending invoice.
+  const { data: existing } = await supabaseAdmin
+    .from('invoices')
+    .select('id, yookassa_payment_url, yookassa_payment_id, created_at, amount')
+    .eq('client_user_id', userId)
+    .eq('status', 'pending')
+    .is('archived_at', null)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (existing && isPendingInvoiceStillValid(existing)) {
+    return {
+      invoiceId: existing.id,
+      yookassaUrl: existing.yookassa_payment_url,
+      reused: true,
+      yookassaError: null,
+    };
+  }
+
+  // 2. Need a new invoice. Look up profile for receipt + naming.
+  const profile = await lookupClientProfile(userId);
+  const companyName = resolveCompanyName(profile, userId);
+  const description = buildDescription(
+    tariff.tariff_type as TariffType,
+    tariff.billing_period as BillingPeriod | null,
+    companyName,
+    reason,
+  );
+
+  // Insert the row first so admins see "пытаемся выставить" even if YK fails.
+  const { data: newInvoice, error: insertErr } = await supabaseAdmin
+    .from('invoices')
+    .insert({
+      company_name: companyName,
+      client_user_id: userId,
+      amount,
+      currency: 'RUB',
+      description,
+      created_by: null,
+      status: 'pending',
+      metadata: { source: reason },
+    })
+    .select('id, created_at')
+    .single();
+
+  if (insertErr || !newInvoice) {
+    await logError('billing.ensure.invoice_insert.failed', insertErr, { userId, reason });
+    return { invoiceId: null, yookassaUrl: null, reused: false, yookassaError: 'Не удалось создать счёт' };
+  }
+
+  // 3. Talk to YooKassa.
+  if (!isYookassaConfigured()) {
+    return {
+      invoiceId: newInvoice.id,
+      yookassaUrl: null,
+      reused: false,
+      yookassaError: 'YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY не настроены',
+    };
+  }
+
+  const receiptEmail = pickReceiptEmail(profile);
+  if (!receiptEmail) {
+    await logError('billing.ensure.no_receipt_email', null, { userId, invoice_id: newInvoice.id });
+    return {
+      invoiceId: newInvoice.id,
+      yookassaUrl: null,
+      reused: false,
+      yookassaError:
+        'Не удалось определить email для чека (54-ФЗ). Задайте email клиента или YOOKASSA_FALLBACK_RECEIPT_EMAIL.',
+    };
+  }
+
+  try {
+    const yk = await createYookassaInvoice({
+      amount,
+      currency: 'RUB',
+      description,
+      invoiceId: newInvoice.id,
+      companyName,
+      idempotencyKey: newInvoice.id,
+      savePaymentMethod: true,
+      receipt: buildDefaultReceipt({
+        customerEmail: receiptEmail,
+        description,
+        amount,
+        currency: 'RUB',
+      }),
+    });
+    const ykUrl = extractInvoiceUrl(yk);
+
+    await supabaseAdmin
+      .from('invoices')
+      .update({ yookassa_payment_id: yk.id, yookassa_payment_url: ykUrl })
+      .eq('id', newInvoice.id);
+
+    await logAudit(
+      'billing.invoice.auto_created',
+      `Pending invoice ${newInvoice.id} created for ${companyName} (${reason})`,
+      { user_id: userId, invoice_id: newInvoice.id, reason, amount },
+      {},
+    );
+
+    return { invoiceId: newInvoice.id, yookassaUrl: ykUrl, reused: false, yookassaError: null };
+  } catch (ykErr) {
+    const msg = ykErr instanceof Error ? ykErr.message : String(ykErr);
+    await logError('billing.ensure.yk_create.failed', ykErr, { userId, invoice_id: newInvoice.id, reason });
+    return { invoiceId: newInvoice.id, yookassaUrl: null, reused: false, yookassaError: `Ошибка платёжной системы: ${msg}` };
+  }
+}
+
+/* ─── chargeMonthlyRenewal ─── */
+
+export interface MonthlyRenewalResult {
+  invoiceId: string | null;
+  success: boolean;
+  errorRu: string | null;
+}
+
+interface RenewalTariffRow {
+  id: string;
+  user_id: string;
+  tariff_type: TariffType;
+  paid_until: string | null;
+  billing_period: BillingPeriod | null;
+  billing_amount: number | null;
+  yookassa_payment_method_id: string | null;
+}
+
+/**
+ * Cron path: record a new invoice in DB then charge the client's saved card.
+ *
+ * Used by /api/cron/auto-renew. Replaces the inline chargeRecurringPayment
+ * call that left no audit trail in /invoices.
+ *
+ * Sequence:
+ *   1. INSERT invoices (pending, amount=resolved). yookassa_payment_url stays
+ *      null because the cron flow charges directly via Payment API, not via
+ *      the customer-facing Invoice URL.
+ *   2. POST /payments with payment_method_id (idempotency = autorenew-{id}-{YYYY-MM}).
+ *   3a. On succeeded: invoices→paid, yookassa_payment_id=payment.id; bump
+ *       client_tariffs.paid_until by one month (independent of billing_period
+ *       because the cron always renews monthly; admin sets the longer period
+ *       only at activate/extend time).
+ *   3b. On YK error / non-succeeded status: keep invoice pending, write
+ *       last_renewal_error via mapYookassaErrorRu. Next cron run retries with
+ *       the same idempotency key (same calendar month) so YooKassa won't
+ *       double-charge.
+ */
+export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<MonthlyRenewalResult> {
+  if (!supabaseAdmin) {
+    return { invoiceId: null, success: false, errorRu: 'Сервер не сконфигурирован' };
+  }
+  if (!row.yookassa_payment_method_id) {
+    return { invoiceId: null, success: false, errorRu: 'Карта не привязана' };
+  }
+  if (!isYookassaConfigured()) {
+    return { invoiceId: null, success: false, errorRu: 'YooKassa не настроена' };
+  }
+
+  const amount = resolveBillingAmount(row);
+  if (!amount || amount <= 0) {
+    return { invoiceId: null, success: false, errorRu: 'Сумма подписки не задана' };
+  }
+
+  const now = new Date();
+  const billingMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const idempotencyKey = `autorenew-${row.id}-${billingMonth}`;
+
+  const profile = await lookupClientProfile(row.user_id);
+  const companyName = resolveCompanyName(profile, row.user_id);
+  const description = buildDescription(row.tariff_type, row.billing_period, companyName, 'cron_renew');
+
+  const receiptEmail = pickReceiptEmail(profile);
+  if (!receiptEmail) {
+    const errMsg = 'Не задан email для чека (54-ФЗ).';
+    await logError('billing.renewal.no_receipt_email', null, { user_id: row.user_id });
+    await supabaseAdmin
+      .from('client_tariffs')
+      .update({
+        last_renewal_error: errMsg,
+        last_renewal_attempt_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      })
+      .eq('id', row.id);
+    return { invoiceId: null, success: false, errorRu: errMsg };
+  }
+
+  // 1. Audit invoice row. yookassa_payment_url stays null — cron charges directly.
+  const { data: invoiceRow, error: insertErr } = await supabaseAdmin
+    .from('invoices')
+    .insert({
+      company_name: companyName,
+      client_user_id: row.user_id,
+      amount,
+      currency: 'RUB',
+      description,
+      created_by: null,
+      status: 'pending',
+      metadata: { source: 'cron_renew', billing_month: billingMonth, tariff_id: row.id },
+    })
+    .select('id')
+    .single();
+
+  if (insertErr || !invoiceRow) {
+    await logError('billing.renewal.invoice_insert.failed', insertErr, { user_id: row.user_id });
+    return { invoiceId: null, success: false, errorRu: 'Не удалось зафиксировать счёт' };
+  }
+
+  // 2. Charge the saved card.
+  let paymentSucceeded = false;
+  let paymentId: string | null = null;
+  let yookassaErrRu: string | null = null;
+  let cancellationReason: string | null = null;
+
+  try {
+    const payment = await chargeRecurringPayment({
+      amount,
+      currency: 'RUB',
+      description,
+      paymentMethodId: row.yookassa_payment_method_id,
+      idempotencyKey,
+      receipt: buildDefaultReceipt({
+        customerEmail: receiptEmail,
+        description,
+        amount,
+        currency: 'RUB',
+      }),
+    });
+
+    paymentId = payment.id;
+
+    if (payment.status === 'succeeded') {
+      paymentSucceeded = true;
+    } else {
+      // YK accepted the request but the payment did not succeed (canceled / pending).
+      const paymentWithDetails = payment as {
+        cancellation_details?: { reason?: string | null } | null;
+      };
+      cancellationReason = paymentWithDetails.cancellation_details?.reason ?? null;
+      yookassaErrRu = cancellationReason
+        ? mapYookassaErrorRu(cancellationReason)
+        : `Платёж ${payment.status}.`;
+    }
+  } catch (err) {
+    // YK refused outright (HTTP error). Map the raw response if possible —
+    // chargeRecurringPayment surfaces JSON.stringify(err) in the message.
+    const msg = err instanceof Error ? err.message : String(err);
+    const reasonMatch = msg.match(/"description":"([^"]+)"/);
+    yookassaErrRu = reasonMatch ? mapYookassaErrorRu(reasonMatch[1]) : mapYookassaErrorRu(null);
+    await logError('billing.renewal.yk_charge.failed', err, { user_id: row.user_id, invoice_id: invoiceRow.id });
+  }
+
+  // 3a. Success: mark invoice paid, extend the subscription.
+  if (paymentSucceeded) {
+    const newPaidUntil = new Date(row.paid_until ?? now);
+    newPaidUntil.setMonth(newPaidUntil.getMonth() + 1);
+
+    await supabaseAdmin
+      .from('invoices')
+      .update({
+        status: 'paid',
+        paid_at: now.toISOString(),
+        yookassa_payment_id: paymentId,
+      })
+      .eq('id', invoiceRow.id);
+
+    await supabaseAdmin
+      .from('client_tariffs')
+      .update({
+        paid_at: now.toISOString(),
+        paid_until: newPaidUntil.toISOString(),
+        payment_locked: false,
+        last_renewal_error: null,
+        last_renewal_attempt_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      })
+      .eq('id', row.id);
+
+    await logAudit(
+      'billing.renewal.success',
+      `Auto-renewed subscription for user ${row.user_id}`,
+      { user_id: row.user_id, invoice_id: invoiceRow.id, payment_id: paymentId, new_paid_until: newPaidUntil.toISOString() },
+      {},
+    );
+
+    return { invoiceId: invoiceRow.id, success: true, errorRu: null };
+  }
+
+  // 3b. Failure: keep invoice pending, surface short error to client UI.
+  const errMsg = yookassaErrRu ?? mapYookassaErrorRu(null);
+  await supabaseAdmin
+    .from('client_tariffs')
+    .update({
+      last_renewal_error: errMsg,
+      last_renewal_attempt_at: now.toISOString(),
+      updated_at: now.toISOString(),
+    })
+    .eq('id', row.id);
+
+  return { invoiceId: invoiceRow.id, success: false, errorRu: errMsg };
+}
+
+/* ─── exports for tests ─── */
+
+// Re-export internal helpers so tests can pin behaviour without depending on
+// the whole orchestrator. Not part of the public contract.
+export const __internal = {
+  resolveBillingAmount,
+  isPendingInvoiceStillValid,
+  buildDescription,
+  pickReceiptEmail,
+  TARIFF_LABELS_RU,
+  YK_INVOICE_VALIDITY_MS,
+  TARIFF_MONTHLY_PRICE,
+  BILLING_PERIOD_MONTHS,
+  cancelYookassaInvoice, // surfaced for /api/invoices/[id] integration; not used here
+};

@@ -80,6 +80,8 @@ export type ClientTariffRow = {
   auto_renew?: boolean;
   last_renewal_error?: string | null;
   last_renewal_attempt_at?: string | null;
+  /** Последняя ошибка клиентской попытки оплаты (webhook payment.canceled). */
+  last_payment_error?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -225,7 +227,10 @@ export type ClientTariffUsage = Record<keyof TariffLimits, LimitUsage>;
 export type ClientAutopayFields = {
   auto_renew: boolean;
   payment_method_saved: boolean;
+  /** Ошибка последнего cron-списания с сохранённой карты. */
   last_renewal_error: string | null;
+  /** Ошибка последней попытки клиента оплатить (из webhook payment.canceled). */
+  last_payment_error: string | null;
 };
 
 export type ClientTariffUsageSummary = SubscriptionStatus &
@@ -429,6 +434,7 @@ export async function getClientTariffUsage(userId: string): Promise<ClientTariff
     auto_renew: row?.auto_renew === true,
     payment_method_saved: paymentMethodSaved,
     last_renewal_error: row?.last_renewal_error ?? null,
+    last_payment_error: row?.last_payment_error ?? null,
     period_start: periodStart,
     usage: {
       max_contacts: usageBucket(limits.max_contacts, contacts),

@@ -796,6 +796,7 @@ export const DEMO_TARIFF_RESPONSE = {
   auto_renew: false,
   payment_method_saved: false,
   last_renewal_error: null,
+  last_payment_error: null,
   period_start: '2026-05-01',
   usage: {
     max_contacts: bucket(10000, 3630),
