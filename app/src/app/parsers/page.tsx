@@ -9,10 +9,9 @@ import { YandexMapsParserView } from '@/components/parsers/YandexMapsParserView'
 import { CryptoPaymentParserView } from '@/components/parsers/CryptoPaymentParserView';
 import { YandexDirectParserView } from '@/components/parsers/YandexDirectParserView';
 import { AtsParserView } from '@/components/parsers/AtsParserView';
-import { AdzunaParserView } from '@/components/parsers/AdzunaParserView';
 import { EuUsCompanyBaseView } from '@/components/parsers/EuUsCompanyBaseView';
 
-type Tab = 'hh' | 'ats' | 'adzuna' | 'eu-us-base' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto';
+type Tab = 'hh' | 'ats' | 'eu-us-base' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto';
 
 export default function ParsersPage() {
   const [activeTab, setActiveTab] = useState<Tab>('hh');
@@ -44,15 +43,6 @@ export default function ParsersPage() {
             className="whitespace-nowrap py-4 px-1 border-b-2 border-transparent font-medium text-sm text-gray-300 cursor-not-allowed"
           >
             EU/US · Tech-компании
-            <span className="ml-1.5 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-normal text-amber-700 border border-amber-200 align-middle">в тестировании</span>
-          </button>
-          <button
-            type="button"
-            disabled
-            title="В тестировании — временно недоступно"
-            className="whitespace-nowrap py-4 px-1 border-b-2 border-transparent font-medium text-sm text-gray-300 cursor-not-allowed"
-          >
-            EU/US · Весь рынок
             <span className="ml-1.5 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-normal text-amber-700 border border-amber-200 align-middle">в тестировании</span>
           </button>
           <button
@@ -128,8 +118,6 @@ export default function ParsersPage() {
         ? <HHParserView />
         : activeTab === 'ats'
         ? <AtsParserView />
-        : activeTab === 'adzuna'
-        ? <AdzunaParserView />
         : activeTab === 'eu-us-base'
         ? <EuUsCompanyBaseView />
         : activeTab === 'hh-archive'
