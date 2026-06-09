@@ -18,7 +18,8 @@ import {
 } from '@/lib/i18n';
 import { ChevronDown } from 'lucide-react';
 import { GlobalTextTranslator, LanguageLoadingOverlay } from '@/components/GlobalTextTranslator';
-import { resolveActiveNavId, type ClientNavMode } from '@/lib/clientNav';
+import { resolveActiveNavId, CLIENT_NAV_SUPPORT, type ClientNavMode } from '@/lib/clientNav';
+import { clientApiFetch } from '@/lib/clientFetcher';
 import { ClientSidebar } from '@/components/client/ClientSidebar';
 import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
 import { DemoBanner } from '@/components/client/DemoBanner';
@@ -45,6 +46,14 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement | null>(null);
+
+  // Бейдж непрочитанных сообщений поддержки и флаг BYO-почт раньше жили внутри
+  // ClientNavList, который монтируется ДВАЖДЫ (десктоп-сайдбар + мобильный
+  // drawer) → два независимых таймера /support/unread и два запроса
+  // /mailboxes/enabled на каждую навигацию. Поднимаем их в layout (один поллер,
+  // один источник правды) и раздаём в навигацию через ClientPortalProvider.
+  const [supportUnread, setSupportUnread] = useState(0);
+  const [mailboxesEnabled, setMailboxesEnabled] = useState(false);
 
   useEffect(() => {
     if (!langOpen) return;
@@ -104,6 +113,43 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     document.title = getPortalPageSectionTitle(pathname, locale);
   }, [locale, pathname]);
 
+  // BYO-почты (пилот): грузим флаг видимости один раз за сессию.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await clientApiFetch<{ enabled?: boolean }>('/mailboxes/enabled');
+        if (!cancelled) setMailboxesEnabled(data.enabled === true);
+      } catch {
+        /* тихо скрываем пункт при любой ошибке */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Поллинг непрочитанных сообщений поддержки (один таймер на весь портал).
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const data = await clientApiFetch<{ unread?: number }>('/support/unread');
+        if (!cancelled) {
+          setSupportUnread(typeof data.unread === 'number' ? data.unread : 0);
+        }
+      } catch {
+        /* бейдж не критичен — при ошибке просто не подсвечиваем */
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 45_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
   const persistLocale = async (nextLocale: Locale) => {
     setLocale(nextLocale);
     document.documentElement.lang = nextLocale;
@@ -121,7 +167,23 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   };
 
   const activeId = useMemo(() => resolveActiveNavId(pathname), [pathname]);
-  const portalContextValue = useMemo(() => ({ portalMode: navMode }), [navMode]);
+
+  // Клиент открыл «Поддержку» → сервер пометил тред прочитанным (GET
+  // /support/thread). Обнуляем счётчик сразу при смене раздела (React-паттерн
+  // «правка state при смене пропа во время рендера»), чтобы бейдж не мигнул
+  // старым числом при возврате на другую страницу до следующего поллинга.
+  const [prevActiveId, setPrevActiveId] = useState(activeId);
+  if (activeId !== prevActiveId) {
+    setPrevActiveId(activeId);
+    if (activeId === CLIENT_NAV_SUPPORT.id && supportUnread !== 0) {
+      setSupportUnread(0);
+    }
+  }
+
+  const portalContextValue = useMemo(
+    () => ({ portalMode: navMode, supportUnread, mailboxesEnabled }),
+    [navMode, supportUnread, mailboxesEnabled],
+  );
 
   const currentLocaleDesc = LOCALE_DESCRIPTORS[locale];
 

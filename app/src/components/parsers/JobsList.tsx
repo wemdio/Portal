@@ -1,6 +1,6 @@
 'use client';
 
-import type { ParserJob, AtsParserJob, AdzunaParserJob, PartitionProgressDetail } from '@/types';
+import type { ParserJob, AtsParserJob, PartitionProgressDetail } from '@/types';
 import { isStoppedByUser, JobStatus } from './JobStatus';
 import { ChevronRight, RefreshCw, Clock } from 'lucide-react';
 
@@ -11,7 +11,6 @@ const STAGE_LABELS: Record<string, string> = {
   fetching_employers: 'Подгружаем работодателей',
   // ATS parser stages
   loading_companies: 'Загружаем компании',
-  fetching: 'Опрашиваем Adzuna',
   scanning: 'Сканируем вакансии',
   enriching: 'Определяем домены',
   saving: 'Сохраняем в базу',
@@ -20,7 +19,7 @@ const STAGE_LABELS: Record<string, string> = {
   cancelled: 'Остановлено',
 };
 
-function resolveStageLabel(job: ParserJob | AtsParserJob | AdzunaParserJob) {
+function resolveStageLabel(job: ParserJob | AtsParserJob) {
   if (job.progress_stage === 'partitioning') {
     const detail = getPartitionDetail(job);
     if (detail) {
@@ -47,7 +46,7 @@ function resolveStageLabel(job: ParserJob | AtsParserJob | AdzunaParserJob) {
   return 'В процессе';
 }
 
-function getPartitionDetail(job: ParserJob | AtsParserJob | AdzunaParserJob): PartitionProgressDetail | null {
+function getPartitionDetail(job: ParserJob | AtsParserJob): PartitionProgressDetail | null {
   if (!job.progress_detail) return null;
   const d = job.progress_detail;
   if (typeof d.total_subqueries !== 'number' || d.total_subqueries <= 1) return null;
@@ -55,7 +54,7 @@ function getPartitionDetail(job: ParserJob | AtsParserJob | AdzunaParserJob): Pa
 }
 
 type Props = {
-  jobs: Array<ParserJob | AtsParserJob | AdzunaParserJob>;
+  jobs: Array<ParserJob | AtsParserJob>;
   activeJobId: string | null;
   onSelect: (jobId: string) => void;
   onRefresh: () => void;
@@ -67,7 +66,7 @@ type Props = {
   clientMode?: boolean;
   /** Client retry: re-run a failed job's search. When set, a «Повторить» button
    *  shows on failed rows in clientMode. */
-  onRetry?: (job: ParserJob | AtsParserJob | AdzunaParserJob) => void;
+  onRetry?: (job: ParserJob | AtsParserJob) => void;
 };
 
 const MAX_JOBS = 20;

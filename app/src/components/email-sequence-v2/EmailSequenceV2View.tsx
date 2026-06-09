@@ -88,7 +88,14 @@ function statusLabel(s: EmailSequenceV2RunRow['status']): string {
   }
 }
 
-function statusClasses(s: EmailSequenceV2RunRow['status']): string {
+function statusClasses(s: EmailSequenceV2RunRow['status'], clientMode = false): string {
+  if (clientMode) {
+    // Editorial: neutral pill (no candy-coloured fills), semantic text colour
+    // only where it carries meaning. Border via divider token.
+    if (s === 'failed') return 'text-[var(--cp-red)] border-[var(--cp-divider-strong)]';
+    if (s === 'completed') return 'text-[var(--cp-green)] border-[var(--cp-divider-strong)]';
+    return 'text-[var(--cp-paper-mute)] border-[var(--cp-divider-strong)]';
+  }
   switch (s) {
     case 'extracting_values':
     case 'generating_letters':
@@ -106,13 +113,13 @@ function statusClasses(s: EmailSequenceV2RunRow['status']): string {
   }
 }
 
-function Section({ title, subtitle, children, right }: { title: string; subtitle?: string; children: React.ReactNode; right?: React.ReactNode }) {
+function Section({ title, subtitle, children, right, clientMode }: { title: string; subtitle?: string; children: React.ReactNode; right?: React.ReactNode; clientMode?: boolean }) {
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-6">
+    <div className={clientMode ? 'neu-card p-6' : 'rounded-2xl border border-gray-200 bg-white p-6'}>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
-          {subtitle && <p className="text-sm text-gray-500 mt-1">{subtitle}</p>}
+          <h2 className={clientMode ? 'text-base font-semibold m-0' : 'text-lg font-semibold text-gray-900'} style={clientMode ? { color: 'var(--cp-paper)' } : undefined}>{title}</h2>
+          {subtitle && <p className={clientMode ? 'mt-1 text-xs' : 'text-sm text-gray-500 mt-1'} style={clientMode ? { color: 'var(--cp-paper-mute)' } : undefined}>{subtitle}</p>}
         </div>
         {right}
       </div>
@@ -121,7 +128,30 @@ function Section({ title, subtitle, children, right }: { title: string; subtitle
   );
 }
 
-function StageBadge({ index, label, active, done }: { index: number; label: string; active: boolean; done: boolean }) {
+function StageBadge({ index, label, active, done, clientMode }: { index: number; label: string; active: boolean; done: boolean; clientMode?: boolean }) {
+  if (clientMode) {
+    return (
+      <div
+        className="inline-flex items-center gap-2 rounded-md px-3 py-1 text-xs font-medium"
+        style={{
+          background: done ? 'var(--cp-surface-active)' : active ? 'var(--cp-surface-rest)' : 'transparent',
+          border: '1px solid var(--cp-divider)',
+          color: done || active ? 'var(--cp-paper)' : 'var(--cp-paper-faint)',
+        }}
+      >
+        <span
+          className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold"
+          style={{
+            background: done ? 'var(--cp-paper)' : 'var(--cp-surface-active)',
+            color: done ? 'var(--cp-ink)' : active ? 'var(--cp-paper)' : 'var(--cp-paper-faint)',
+          }}
+        >
+          {done ? '✓' : index}
+        </span>
+        {label}
+      </div>
+    );
+  }
   const tone = done
     ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
     : active
@@ -144,6 +174,7 @@ function LetterCard({
   onDelete,
   onInsertAfter,
   isLast,
+  clientMode,
 }: {
   letter: EmailSequenceV2LetterRow;
   busy: Busy;
@@ -151,6 +182,7 @@ function LetterCard({
   onDelete: (id: string) => Promise<void>;
   onInsertAfter: (afterIndex: number) => void;
   isLast: boolean;
+  clientMode?: boolean;
 }) {
   // Сбрасываем локальное состояние формы, когда меняется содержимое письма
   // на сервере (например, после Save или регенерации цепочки). Сравниваем
@@ -171,16 +203,28 @@ function LetterCard({
   const isSaving = busyEquals(busy, { type: 'letter', action: 'save', id: letter.id });
   const isDeleting = busyEquals(busy, { type: 'letter', action: 'delete', id: letter.id });
 
+  const dashedBtn = clientMode
+    ? 'ds-btn-ghost inline-flex items-center text-xs disabled:opacity-40'
+    : 'inline-flex items-center rounded-lg border border-dashed border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50';
+
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-5">
+    <div className={clientMode ? 'neu-card p-5' : 'rounded-2xl border border-gray-200 bg-white p-5'}>
       <div className="flex items-center justify-between gap-3 mb-3">
         <div className="flex items-center gap-2">
-          <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-gray-900 text-white text-xs font-bold">
+          <span
+            className={clientMode
+              ? 'inline-flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold'
+              : 'inline-flex h-7 w-7 items-center justify-center rounded-full bg-gray-900 text-white text-xs font-bold'}
+            style={clientMode ? { background: 'var(--cp-paper)', color: 'var(--cp-ink)' } : undefined}
+          >
             {letter.letter_index}
           </span>
-          <div className="text-sm font-semibold text-gray-900">Письмо {letter.letter_index}</div>
+          <div className={clientMode ? 'text-sm font-semibold' : 'text-sm font-semibold text-gray-900'} style={clientMode ? { color: 'var(--cp-paper)' } : undefined}>Письмо {letter.letter_index}</div>
           {letter.is_user_added && (
-            <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700">
+            <span
+              className={clientMode ? 'inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-semibold' : 'inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700'}
+              style={clientMode ? { background: 'var(--cp-surface-elev)', border: '1px solid var(--cp-divider)', color: 'var(--cp-paper-mute)' } : undefined}
+            >
               добавлено вручную
             </span>
           )}
@@ -189,7 +233,7 @@ function LetterCard({
           <button
             type="button"
             onClick={() => navigator.clipboard.writeText(`${subject ? `Тема: ${subject}\n\n` : ''}${body}`)}
-            className="inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+            className={clientMode ? 'ds-btn-ghost inline-flex items-center text-xs' : 'inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50'}
           >
             Копировать
           </button>
@@ -197,14 +241,15 @@ function LetterCard({
             type="button"
             onClick={() => onDelete(letter.id)}
             disabled={busy != null}
-            className="inline-flex items-center rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+            className={clientMode ? 'ds-btn-ghost inline-flex items-center text-xs disabled:opacity-40' : 'inline-flex items-center rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50'}
+            style={clientMode ? { color: 'var(--cp-red)' } : undefined}
           >
             {isDeleting ? 'Удаление…' : 'Удалить'}
           </button>
         </div>
       </div>
       <label className="block">
-        <div className="text-xs font-medium text-gray-600 mb-1">Тема</div>
+        <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-xs font-medium text-gray-600 mb-1'}>Тема</div>
         <input
           value={subject}
           onChange={(e) => {
@@ -212,11 +257,11 @@ function LetterCard({
             setDirty(true);
           }}
           placeholder="Тема письма"
-          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+          className={clientMode ? 'ds-input w-full' : 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
         />
       </label>
       <label className="mt-3 block">
-        <div className="text-xs font-medium text-gray-600 mb-1">Тело письма</div>
+        <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-xs font-medium text-gray-600 mb-1'}>Тело письма</div>
         <textarea
           value={body}
           onChange={(e) => {
@@ -224,19 +269,19 @@ function LetterCard({
             setDirty(true);
           }}
           rows={Math.min(20, Math.max(6, body.split('\n').length + 1))}
-          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono leading-relaxed focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+          className={clientMode ? 'ds-input ds-mono w-full leading-relaxed' : 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono leading-relaxed focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
         />
       </label>
       <div className="mt-3 flex items-center justify-between gap-3">
-        <div className="text-xs text-gray-500">
-          Обновлено: {formatDate(letter.updated_at)}
+        <div className="text-xs" style={clientMode ? { color: 'var(--cp-paper-faint)' } : undefined}>
+          <span className={clientMode ? '' : 'text-gray-500'}>Обновлено: {formatDate(letter.updated_at)}</span>
         </div>
         <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={() => onInsertAfter(letter.letter_index)}
             disabled={busy != null}
-            className="inline-flex items-center rounded-lg border border-dashed border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            className={dashedBtn}
             title="Добавить новое письмо после этого"
           >
             + после
@@ -246,7 +291,7 @@ function LetterCard({
               type="button"
               onClick={() => onInsertAfter(letter.letter_index)}
               disabled={busy != null}
-              className="inline-flex items-center rounded-lg border border-dashed border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              className={dashedBtn}
             >
               + добавить в конец
             </button>
@@ -255,7 +300,7 @@ function LetterCard({
             type="button"
             onClick={() => onSave(letter.id, subject, body)}
             disabled={!dirty || busy != null}
-            className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+            className={clientMode ? 'ds-btn-primary inline-flex items-center disabled:opacity-40' : 'inline-flex items-center rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50'}
           >
             {isSaving ? 'Сохранение…' : dirty ? 'Сохранить' : 'Сохранено'}
           </button>
@@ -691,23 +736,23 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
     <div className="space-y-6">
       <div>
         <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-bold text-gray-900">Цепочки писем 2.0</h1>
+          <h1 className={clientMode ? 'text-2xl font-bold m-0' : 'text-2xl font-bold text-gray-900'} style={clientMode ? { color: 'var(--cp-paper)' } : undefined}>Цепочки писем 2.0</h1>
         </div>
-        <p className="text-sm text-gray-500 mt-1">
+        <p className={clientMode ? 'mt-1 text-sm' : 'text-sm text-gray-500 mt-1'} style={clientMode ? { color: 'var(--cp-paper-mute)' } : undefined}>
           Загрузите бриф → получите ценности → опишите сегмент и правки → сгенерируйте цепочку и доредактируйте письма.
         </p>
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <StageBadge index={1} label="Бриф → Ценности" active={!stage1Done} done={stage1Done} />
-        <span className="text-gray-300">→</span>
-        <StageBadge index={2} label="Сегмент + правки" active={stage1Done && !stage2Done} done={stage2Done} />
-        <span className="text-gray-300">→</span>
-        <StageBadge index={3} label="Генерация цепочки" active={stage1Done && stage2Done && !stage3Done} done={stage3Done} />
+        <StageBadge index={1} label="Бриф → Ценности" active={!stage1Done} done={stage1Done} clientMode={clientMode} />
+        <span className={clientMode ? '' : 'text-gray-300'} style={clientMode ? { color: 'var(--cp-paper-faint)' } : undefined}>→</span>
+        <StageBadge index={2} label="Сегмент + правки" active={stage1Done && !stage2Done} done={stage2Done} clientMode={clientMode} />
+        <span className={clientMode ? '' : 'text-gray-300'} style={clientMode ? { color: 'var(--cp-paper-faint)' } : undefined}>→</span>
+        <StageBadge index={3} label="Генерация цепочки" active={stage1Done && stage2Done && !stage3Done} done={stage3Done} clientMode={clientMode} />
       </div>
 
       {clientMode ? (
-        <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+        <div className="rounded-md px-4 py-3 text-sm" style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)', color: 'var(--cp-paper-mute)' }}>
           <ClientTariffUsageInline
             metric="max_chains_per_month"
             spent={stage3Done ? 1 : undefined}
@@ -718,26 +763,32 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
       ) : null}
 
       {error ? (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+        <div
+          className={clientMode ? 'rounded-md px-4 py-3 text-sm' : 'rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700'}
+          style={clientMode ? { border: '1px solid var(--cp-red)', color: 'var(--cp-red)' } : undefined}
+        >
           {error}
         </div>
       ) : null}
       {notice ? (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+        <div
+          className={clientMode ? 'rounded-md px-4 py-3 text-sm' : 'rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800'}
+          style={clientMode ? { border: '1px solid var(--cp-divider-strong)', color: 'var(--cp-green)' } : undefined}
+        >
           {notice}
         </div>
       ) : null}
 
       {/* Top: actions + recent runs */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <div className="xl:col-span-2 rounded-2xl border border-gray-200 bg-white p-6">
+        <div className={clientMode ? 'xl:col-span-2 neu-card p-6' : 'xl:col-span-2 rounded-2xl border border-gray-200 bg-white p-6'}>
           <div className="flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-lg font-semibold text-gray-900">Запуск</h2>
-              <p className="text-sm text-gray-500 mt-1">
+              <h2 className={clientMode ? 'text-base font-semibold m-0' : 'text-lg font-semibold text-gray-900'} style={clientMode ? { color: 'var(--cp-paper)' } : undefined}>Запуск</h2>
+              <p className={clientMode ? 'mt-1 text-sm' : 'text-sm text-gray-500 mt-1'} style={clientMode ? { color: 'var(--cp-paper-mute)' } : undefined}>
                 {run ? (
                   <>
-                    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold mr-2 ${statusClasses(run.status)}`}>
+                    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold mr-2 ${statusClasses(run.status, clientMode)}`}>
                       {statusLabel(run.status)}
                     </span>
                     {run.company_name ?? '—'} · создан {formatDate(run.created_at)}
@@ -751,7 +802,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                   type="button"
                   onClick={deleteRun}
                   disabled={busy != null}
-                  className="inline-flex items-center rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                  className={clientMode ? 'ds-btn-ghost inline-flex items-center text-xs text-[var(--cp-red)] disabled:opacity-40' : 'inline-flex items-center rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50'}
                 >
                   Удалить запуск
                 </button>
@@ -760,7 +811,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                 type="button"
                 onClick={resetForNewRun}
                 disabled={busy != null || !run}
-                className="inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                className={clientMode ? 'ds-btn-ghost inline-flex items-center text-xs disabled:opacity-40' : 'inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50'}
               >
                 Закрыть
               </button>
@@ -768,7 +819,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                 type="button"
                 onClick={createRun}
                 disabled={busy != null}
-                className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                className={clientMode ? 'ds-btn-primary inline-flex items-center disabled:opacity-40' : 'inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50'}
               >
                 {busy === 'creating' ? 'Создание…' : 'Новый запуск'}
               </button>
@@ -776,15 +827,18 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
           </div>
 
           {!run && (
-            <div className="mt-5 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-600">
+            <div
+              className={clientMode ? 'mt-5 rounded-md p-6 text-sm' : 'mt-5 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-600'}
+              style={clientMode ? { border: '1px dashed var(--cp-divider-strong)', color: 'var(--cp-paper-mute)' } : undefined}
+            >
               Нажмите «Новый запуск», чтобы начать. Все данные сохраняются автоматически и доступны в правом списке.
             </div>
           )}
         </div>
 
-        <div className="rounded-2xl border border-gray-200 bg-white p-6 flex flex-col">
-          <h2 className="text-lg font-semibold text-gray-900">Последние запуски</h2>
-          <p className="text-sm text-gray-500 mt-1">Топ-30.</p>
+        <div className={clientMode ? 'neu-card p-6 flex flex-col' : 'rounded-2xl border border-gray-200 bg-white p-6 flex flex-col'}>
+          <h2 className={clientMode ? 'text-base font-semibold m-0' : 'text-lg font-semibold text-gray-900'} style={clientMode ? { color: 'var(--cp-paper)' } : undefined}>Последние запуски</h2>
+          <p className={clientMode ? 'mt-1 text-xs' : 'text-sm text-gray-500 mt-1'} style={clientMode ? { color: 'var(--cp-paper-mute)' } : undefined}>Топ-30.</p>
           <div className="mt-4 space-y-2 max-h-[320px] overflow-y-auto pr-1">
             {runs.length ? (
               runs.map((r) => (
@@ -792,21 +846,32 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                   key={r.id}
                   type="button"
                   onClick={() => loadRun(r.id).catch((e) => setError(e instanceof Error ? e.message : 'Ошибка'))}
-                  className={`w-full text-left rounded-xl border px-3 py-2 text-sm transition ${
-                    run?.id === r.id ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-white hover:bg-gray-50'
-                  }`}
+                  className={clientMode
+                    ? 'w-full text-left rounded-md border px-3 py-2 text-sm transition'
+                    : `w-full text-left rounded-xl border px-3 py-2 text-sm transition ${
+                        run?.id === r.id ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-white hover:bg-gray-50'
+                      }`}
+                  style={clientMode
+                    ? run?.id === r.id
+                      ? { background: 'var(--cp-surface-active)', borderColor: 'var(--cp-paper-faint)' }
+                      : { background: 'var(--cp-surface-rest)', borderColor: 'var(--cp-divider)' }
+                    : undefined}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <div className="font-medium text-gray-900 truncate">{r.company_name ?? r.id.slice(0, 8)}</div>
-                    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold shrink-0 ${statusClasses(r.status)}`}>
+                    <div className={clientMode ? 'font-medium truncate' : 'font-medium text-gray-900 truncate'} style={clientMode ? { color: 'var(--cp-paper)' } : undefined}>{r.company_name ?? r.id.slice(0, 8)}</div>
+                    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold shrink-0 ${statusClasses(r.status, clientMode)}`}>
                       {statusLabel(r.status)}
                     </span>
                   </div>
-                  <div className="mt-1 text-xs text-gray-500 truncate">{formatDate(r.created_at)}</div>
+                  <div className="mt-1 text-xs truncate" style={clientMode ? { color: 'var(--cp-paper-faint)' } : undefined}>
+                    <span className={clientMode ? '' : 'text-gray-500'}>{formatDate(r.created_at)}</span>
+                  </div>
                 </button>
               ))
             ) : (
-              <div className="text-sm text-gray-500">Пока пусто.</div>
+              <div className="text-sm" style={clientMode ? { color: 'var(--cp-paper-faint)' } : undefined}>
+                <span className={clientMode ? '' : 'text-gray-500'}>Пока пусто.</span>
+              </div>
             )}
           </div>
         </div>
@@ -816,17 +881,18 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
         <>
           {/* Stage 1 */}
           <Section
+            clientMode={clientMode}
             title="Этап 1. Бриф → Ценности продукта"
             subtitle="Загрузите PDF/DOCX-бриф (или вставьте текст). AI извлечёт УТП, преимущества, акции, социальные доказательства."
             right={
               <div className="flex items-end gap-3">
                 <label className="block">
-                  <div className="text-xs font-medium text-gray-600 mb-1">Модель ценностей</div>
+                  <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-xs font-medium text-gray-600 mb-1'}>Модель ценностей</div>
                   <select
                     value={valuesModel}
                     onChange={(e) => setValuesModel(e.target.value)}
                     disabled={busy != null}
-                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                    className={clientMode ? 'ds-input' : 'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
                   >
                     {VALUES_MODEL_OPTIONS.map((o) => (
                       <option key={o.value} value={o.value}>{o.label}</option>
@@ -838,22 +904,24 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
           >
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <div className="space-y-3">
-                <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4">
-                  <div className="text-sm font-medium text-gray-900 mb-2">Бриф</div>
+                <div className={clientMode ? 'rounded-md p-4' : 'rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4'} style={clientMode ? { border: '1px solid var(--cp-divider)', background: 'var(--cp-ink)' } : undefined}>
+                  <div className={clientMode ? 'text-sm font-medium mb-2' : 'text-sm font-medium text-gray-900 mb-2'} style={clientMode ? { color: 'var(--cp-paper)' } : undefined}>Бриф</div>
                   {/* Three-way input mode: 'saved' (auto-loaded from
                       /client/brief), 'file' (PDF/DOCX upload), 'text'
                       (paste). Default = 'saved' when saved brief is
                       available, else 'file'. */}
-                  <div className="mb-3 flex gap-1 rounded-lg bg-gray-100 p-1 text-xs">
+                  <div className={clientMode ? 'mb-3 flex gap-1 rounded-md p-0.5 text-xs' : 'mb-3 flex gap-1 rounded-lg bg-gray-100 p-1 text-xs'} style={clientMode ? { background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)' } : undefined}>
                     {savedBriefAvailable && (
                       <button
                         type="button"
                         onClick={() => setBriefInputMode('saved')}
-                        className={`flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
-                          briefInputMode === 'saved'
-                            ? 'bg-white text-gray-900 shadow-sm'
-                            : 'text-gray-600 hover:text-gray-900'
-                        }`}
+                        className={clientMode
+                          ? `flex-1 rounded px-3 py-1.5 font-medium transition-colors ${briefInputMode === 'saved' ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)]' : 'text-[var(--cp-paper-mute)]'}`
+                          : `flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
+                              briefInputMode === 'saved'
+                                ? 'bg-white text-gray-900 shadow-sm'
+                                : 'text-gray-600 hover:text-gray-900'
+                            }`}
                       >
                         Сохранённый бриф
                       </button>
@@ -861,22 +929,26 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                     <button
                       type="button"
                       onClick={() => setBriefInputMode('file')}
-                      className={`flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
-                        briefInputMode === 'file'
-                          ? 'bg-white text-gray-900 shadow-sm'
-                          : 'text-gray-600 hover:text-gray-900'
-                      }`}
+                      className={clientMode
+                        ? `flex-1 rounded px-3 py-1.5 font-medium transition-colors ${briefInputMode === 'file' ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)]' : 'text-[var(--cp-paper-mute)]'}`
+                        : `flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
+                            briefInputMode === 'file'
+                              ? 'bg-white text-gray-900 shadow-sm'
+                              : 'text-gray-600 hover:text-gray-900'
+                          }`}
                     >
                       Файл
                     </button>
                     <button
                       type="button"
                       onClick={() => setBriefInputMode('text')}
-                      className={`flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
-                        briefInputMode === 'text'
-                          ? 'bg-white text-gray-900 shadow-sm'
-                          : 'text-gray-600 hover:text-gray-900'
-                      }`}
+                      className={clientMode
+                        ? `flex-1 rounded px-3 py-1.5 font-medium transition-colors ${briefInputMode === 'text' ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)]' : 'text-[var(--cp-paper-mute)]'}`
+                        : `flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
+                            briefInputMode === 'text'
+                              ? 'bg-white text-gray-900 shadow-sm'
+                              : 'text-gray-600 hover:text-gray-900'
+                          }`}
                     >
                       Текст
                     </button>
@@ -893,7 +965,8 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                         value={savedBriefText}
                         readOnly
                         rows={8}
-                        className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700"
+                        className={clientMode ? 'ds-input w-full' : 'w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700'}
+                        style={clientMode ? { color: 'var(--cp-paper-mute)' } : undefined}
                       />
                     </div>
                   )}
@@ -905,7 +978,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                         type="file"
                         accept=".pdf,.docx,.txt"
                         onChange={(e) => setBriefFile(e.target.files?.[0] ?? null)}
-                        className="block w-full text-sm text-gray-700 file:mr-3 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-blue-700"
+                        className={clientMode ? 'block w-full text-sm text-[var(--cp-paper-mute)] file:mr-3 file:rounded-md file:border-0 file:bg-[var(--cp-paper)] file:px-3 file:py-2 file:text-sm file:font-semibold file:text-[var(--cp-ink)]' : 'block w-full text-sm text-gray-700 file:mr-3 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-blue-700'}
                       />
                       {briefFile && (
                         <div className="mt-2 text-xs text-gray-600">
@@ -926,7 +999,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                       onChange={(e) => setBriefText(e.target.value)}
                       rows={8}
                       placeholder="Вставьте текст брифа сюда"
-                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                      className={clientMode ? 'ds-input w-full' : 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
                     />
                   )}
 
@@ -940,7 +1013,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                         (briefInputMode === 'text' && !briefText.trim()) ||
                         (briefInputMode === 'saved' && !savedBriefText.trim())
                       }
-                      className="inline-flex items-center rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                      className={clientMode ? 'ds-btn-primary inline-flex items-center disabled:opacity-40' : 'inline-flex items-center rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50'}
                     >
                       {busy === 'extracting-values' ? 'Извлечение…' : 'Отправить → выделить ценности'}
                     </button>
@@ -949,10 +1022,10 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
               </div>
 
               <div className="space-y-3">
-                <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 max-h-[420px] overflow-auto">
+                <div className={clientMode ? 'rounded-md p-4 max-h-[420px] overflow-auto' : 'rounded-xl border border-gray-200 bg-gray-50 p-4 max-h-[420px] overflow-auto'} style={clientMode ? { border: '1px solid var(--cp-divider)', background: 'var(--cp-ink)' } : undefined}>
                   <div className="flex items-center justify-between">
-                    <div className="text-sm font-medium text-gray-900">
-                      Ценности {run.company_name ? <span className="text-gray-500">({run.company_name})</span> : null}
+                    <div className={clientMode ? 'text-sm font-medium' : 'text-sm font-medium text-gray-900'} style={clientMode ? { color: 'var(--cp-paper)' } : undefined}>
+                      Ценности {run.company_name ? <span className={clientMode ? '' : 'text-gray-500'} style={clientMode ? { color: 'var(--cp-paper-faint)' } : undefined}>({run.company_name})</span> : null}
                     </div>
                     <div className="flex items-center gap-2">
                       {run.values_text && (
@@ -961,7 +1034,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                             type="button"
                             onClick={downloadValuesDocx}
                             disabled={busy != null}
-                            className="inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                            className={clientMode ? 'ds-btn-ghost inline-flex items-center text-xs disabled:opacity-40' : 'inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50'}
                           >
                             {busy === 'export-docx' ? 'Готовим…' : 'Скачать DOCX'}
                           </button>
@@ -969,7 +1042,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                             type="button"
                             onClick={downloadValuesPdf}
                             disabled={busy != null}
-                            className="inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                            className={clientMode ? 'ds-btn-ghost inline-flex items-center text-xs disabled:opacity-40' : 'inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50'}
                           >
                             Скачать PDF
                           </button>
@@ -977,7 +1050,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                       )}
                     </div>
                   </div>
-                  <pre className="mt-3 whitespace-pre-wrap text-sm text-gray-800 font-mono leading-relaxed">
+                  <pre className={clientMode ? 'mt-3 whitespace-pre-wrap text-sm ds-mono leading-relaxed' : 'mt-3 whitespace-pre-wrap text-sm text-gray-800 font-mono leading-relaxed'} style={clientMode ? { color: 'var(--cp-paper-mute)' } : undefined}>
                     {run.values_text ?? '— ещё не сгенерировано —'}
                   </pre>
                 </div>
@@ -987,38 +1060,39 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
 
           {/* Stage 2 */}
           <Section
+            clientMode={clientMode}
             title="Этап 2. Сегмент базы и правки заказчика"
             subtitle="Опишите гипотезу, по которой собрана база, и любые правки/уточнения от заказчика. Опционально — операторы персонализации."
           >
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <label className="block">
-                <div className="text-sm font-medium text-gray-700 mb-1">Сегмент базы (по гипотезе)*</div>
+                <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-sm font-medium text-gray-700 mb-1'}>Сегмент базы (по гипотезе)*</div>
                 <textarea
                   value={segmentText}
                   onChange={(e) => setSegmentText(e.target.value)}
                   rows={8}
                   placeholder={'Например: Сборщик рекламных конструкций, Макетчик наружной рекламы, Дизайнер-конструктор, Оператор 3D-печати. Регионы: РФ, СФО, Забайкальский край…'}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                  className={clientMode ? 'ds-input w-full' : 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
                 />
               </label>
               <label className="block">
-                <div className="text-sm font-medium text-gray-700 mb-1">Правки от заказчика</div>
+                <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-sm font-medium text-gray-700 mb-1'}>Правки от заказчика</div>
                 <textarea
                   value={customerEdits}
                   onChange={(e) => setCustomerEdits(e.target.value)}
                   rows={8}
                   placeholder={'Триггеры для ЛПР, страхи которые нужно закрыть, специальные предложения, цены…'}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                  className={clientMode ? 'ds-input w-full' : 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
                 />
               </label>
               <label className="lg:col-span-2 block">
-                <div className="text-sm font-medium text-gray-700 mb-1">Операторы для персонализации (опционально)</div>
+                <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-sm font-medium text-gray-700 mb-1'}>Операторы для персонализации (опционально)</div>
                 <textarea
                   value={personalizationOps}
                   onChange={(e) => setPersonalizationOps(e.target.value)}
                   rows={5}
                   placeholder={'Например:\n- {{companyName}}\n- {{firstName}}\n- {{Personalization}}\n- {% if last_email_opened %}…{% else %}…{% endif %}'}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                  className={clientMode ? 'ds-input ds-mono w-full' : 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
                 />
               </label>
             </div>
@@ -1027,7 +1101,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                 type="button"
                 onClick={saveStage2}
                 disabled={busy != null || !segmentText.trim()}
-                className="inline-flex items-center rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50 disabled:opacity-50"
+                className={clientMode ? 'ds-btn-primary inline-flex items-center disabled:opacity-40' : 'inline-flex items-center rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50 disabled:opacity-50'}
               >
                 {busy === 'saving-stage-2' ? 'Сохранение…' : 'Сохранить этап 2'}
               </button>
@@ -1036,17 +1110,18 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
 
           {/* Stage 3 */}
           <Section
+            clientMode={clientMode}
             title="Этап 3. Генерация и редактор цепочки"
             subtitle="Модель сгенерирует 4–6 писем по брифу, ценностям, сегменту и регламенту. Письма можно править, удалять и добавлять свои."
             right={
               <div className="flex items-end gap-3">
                 <label className="block">
-                  <div className="text-xs font-medium text-gray-600 mb-1">Язык цепочки</div>
+                  <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-xs font-medium text-gray-600 mb-1'}>Язык цепочки</div>
                   <select
                     value={outputLanguage}
                     onChange={(e) => changeLanguage(e.target.value as EmailSequenceV2OutputLanguage)}
                     disabled={busy != null}
-                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400 disabled:opacity-50"
+                    className={clientMode ? 'ds-input disabled:opacity-40' : 'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400 disabled:opacity-50'}
                   >
                     {LANGUAGE_OPTIONS.map((o) => (
                       <option key={o.value} value={o.value}>{o.label}</option>
@@ -1054,12 +1129,12 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                   </select>
                 </label>
                 <label className="block">
-                  <div className="text-xs font-medium text-gray-600 mb-1">Модель писем</div>
+                  <div className={clientMode ? 'ds-eyebrow mb-1' : 'text-xs font-medium text-gray-600 mb-1'}>Модель писем</div>
                   <select
                     value={writerModel}
                     onChange={(e) => setWriterModel(e.target.value)}
                     disabled={busy != null}
-                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                    className={clientMode ? 'ds-input' : 'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400'}
                   >
                     {WRITER_MODEL_OPTIONS.map((o) => (
                       <option key={o.value} value={o.value}>{o.label}</option>
@@ -1070,7 +1145,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                   type="button"
                   onClick={generateLetters}
                   disabled={busy != null || !run.values_text || !segmentText.trim()}
-                  className="inline-flex items-center rounded-xl bg-gray-900 px-4 py-2 text-sm font-semibold text-white hover:bg-gray-800 disabled:opacity-50"
+                  className={clientMode ? 'ds-btn-primary inline-flex items-center disabled:opacity-40' : 'inline-flex items-center rounded-xl bg-gray-900 px-4 py-2 text-sm font-semibold text-white hover:bg-gray-800 disabled:opacity-50'}
                 >
                   {busy === 'generating-letters' ? 'Генерация…' : letters.length ? 'Перегенерировать цепочку' : 'Сгенерировать цепочку'}
                 </button>
@@ -1078,12 +1153,18 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
             }
           >
             {busy === 'generating-letters' && (
-              <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 mb-4">
+              <div
+                className={clientMode ? 'rounded-md px-4 py-3 text-sm mb-4' : 'rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 mb-4'}
+                style={clientMode ? { background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)', color: 'var(--cp-paper-mute)' } : undefined}
+              >
                 Модель пишет цепочку. Это занимает 2–4 минуты — не закрывайте вкладку.
               </div>
             )}
             {filteredLetters.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-600">
+              <div
+                className={clientMode ? 'rounded-md p-6 text-sm' : 'rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-600'}
+                style={clientMode ? { border: '1px dashed var(--cp-divider-strong)', color: 'var(--cp-paper-mute)' } : undefined}
+              >
                 Цепочка ещё не сгенерирована. Заполните этапы 1 и 2, затем нажмите «Сгенерировать цепочку».
               </div>
             ) : (
@@ -1097,6 +1178,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                     onDelete={deleteLetter}
                     onInsertAfter={insertLetterAfter}
                     isLast={idx === filteredLetters.length - 1}
+                    clientMode={clientMode}
                   />
                 ))}
                 <div className="flex items-center justify-end">
