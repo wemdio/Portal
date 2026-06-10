@@ -27,6 +27,10 @@ jest.mock('@/lib/enrich/extractors/pricingLlmExtractor', () => ({
   }),
 }));
 
+jest.mock('@/lib/enrich/extractors/integrationsLlmExtractor', () => ({
+  llmExtractIntegrations: jest.fn().mockResolvedValue(['amoCRM', 'Slack']),
+}));
+
 import { processSignalsForUrl } from '@/lib/enrich/websiteSignalProcessor';
 import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websiteParser';
 
@@ -414,6 +418,22 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
       expect(result.pricing_model).toBe('sales-led');
       expect(result.pricing_min).toEqual({ value: 50000, currency: 'RUB' });
       expect(result.free_trial).toBe(true);
+    }
+  });
+
+  it('integrations: empty merge → fills from LLM', async () => {
+    mockUrlResponses({
+      // нет script-следов и нет распознаваемой integration-секции →
+      // signatures=[] и extractIntegrations=[] → merge пуст → llmExtractIntegrations (мок).
+      'example.com/integrations': '<div class="info">Мы дружим со многими сервисами для вашего удобства каждый день.</div>',
+      'example.com': '<a href="/integrations">Интеграции</a>',
+    });
+
+    const result = await processSignalsForUrl('example.com', { extractors: ['integrations'] });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.integrations).toEqual(['amoCRM', 'Slack']);
     }
   });
 

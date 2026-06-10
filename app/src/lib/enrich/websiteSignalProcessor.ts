@@ -21,6 +21,7 @@ import { llmExtractPricing } from '@/lib/enrich/extractors/pricingLlmExtractor';
 import { extractHiring, findExternalCareerLinks } from '@/lib/enrich/extractors/hiringExtractor';
 import { llmExtractHiring } from '@/lib/enrich/extractors/careersLlmExtractor';
 import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtractor';
+import { llmExtractIntegrations } from '@/lib/enrich/extractors/integrationsLlmExtractor';
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
 import { extractSocialMedia } from '@/lib/enrich/extractors/socialMediaExtractor';
@@ -498,7 +499,14 @@ export async function processSignalsForUrl(
       seenInt.add(key);
       merged.push(name);
     }
-    out.integrations = merged.slice(0, 20);
+    // LLM-добор по полному тексту /integrations, когда ни следов скриптов, ни
+    // распознанной секции не нашлось. См. integrationsLlmExtractor.
+    let finalIntegrations = merged.slice(0, 20);
+    if (finalIntegrations.length === 0 && !signal?.aborted) {
+      const llm = await llmExtractIntegrations(subpageHtml.integrations ?? main.html, main.html);
+      if (llm.length > 0) finalIntegrations = llm.slice(0, 20);
+    }
+    out.integrations = finalIntegrations;
   }
   if (extractors.includes('founded_year')) {
     out.founded_year = subpageHtml.about ? extractFoundedYear(subpageHtml.about) : undefined;
@@ -636,12 +644,11 @@ export async function processSignalsForUrl(
   }
 
   // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.
-  type LlmField = 'founded_year' | 'team_size' | 'case_industries' | 'integrations';
+  type LlmField = 'founded_year' | 'team_size' | 'case_industries';
   const llmNeeded = new Set<LlmField>();
   if (extractors.includes('founded_year') && !out.founded_year) llmNeeded.add('founded_year');
   if (extractors.includes('team_size') && !out.team_size) llmNeeded.add('team_size');
   if (extractors.includes('case_industries') && (!out.case_industries || out.case_industries.length === 0)) llmNeeded.add('case_industries');
-  if (extractors.includes('integrations') && (!out.integrations || out.integrations.length === 0)) llmNeeded.add('integrations');
 
   if (llmNeeded.size > 0 && !signal?.aborted) {
     try {
@@ -649,7 +656,6 @@ export async function processSignalsForUrl(
       if (llmResult.founded_year && llmNeeded.has('founded_year')) out.founded_year = llmResult.founded_year;
       if (llmResult.team_size && llmNeeded.has('team_size')) out.team_size = llmResult.team_size;
       if (llmResult.case_industries && llmResult.case_industries.length > 0 && llmNeeded.has('case_industries')) out.case_industries = llmResult.case_industries;
-      if (llmResult.integrations && llmResult.integrations.length > 0 && llmNeeded.has('integrations')) out.integrations = llmResult.integrations;
     } catch {
       // LLM fallback is best-effort — never break the pipeline.
     }
