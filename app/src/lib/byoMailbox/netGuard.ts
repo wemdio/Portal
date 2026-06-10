@@ -12,7 +12,12 @@ import { promises as dns } from 'dns';
  * публичные адреса и стандартные SMTP-порты.
  */
 
-const ALLOWED_PORTS = new Set([25, 465, 587, 2525]);
+// ТОЛЬКО submission-порты (465 implicit TLS / 587 STARTTLS / 2525 alt).
+// Порт 25 (MX-relay) НЕ разрешаем намеренно: исходящие на 25 к произвольным серверам —
+// это паттерн, за который Spamhaus вносит IP в списки (был инцидент с email-валидацией
+// с нашего сервера). Отправка с подключённых ящиков всегда идёт на submission-порт
+// провайдера (465/587), порт 25 для этого не нужен.
+const ALLOWED_PORTS = new Set([465, 587, 2525]);
 
 function isPrivateV4(ip: string): boolean {
   const parts = ip.split('.').map((n) => Number(n));
