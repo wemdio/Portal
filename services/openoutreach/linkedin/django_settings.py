@@ -31,6 +31,8 @@ INSTALLED_APPS = [
     "crm.apps.CrmConfig",
     "chat.apps.ChatConfig",
     "linkedin",
+    # Portal-native fork (см. UPSTREAM.md): models на li2_* tables.
+    "li2.apps.Li2Config",
 ]
 
 MIDDLEWARE = [
