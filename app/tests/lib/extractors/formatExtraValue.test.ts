@@ -13,7 +13,7 @@ describe('formatExtraValue — DASH and tristate booleans', () => {
       'enterprise_logos', 'free_trial',
       'cases_count', 'vacancies_count', 'team_size', 'founded_year',
       'pricing_model', 'blog_last_post', 'stack', 'profile',
-      'pricing_min', 'hiring_roles',
+      'pricing_min', 'hiring_roles', 'client_segment',
     ];
     for (const key of keys) {
       expect(formatExtraValue(key, undefined)).toBe('–');
@@ -90,5 +90,12 @@ describe('formatExtraValue — DASH and tristate booleans', () => {
   it('passes through non-empty strings for text fields', () => {
     expect(formatExtraValue('blog_last_post', '15 мая 2025: Запуск платформы')).toBe('15 мая 2025: Запуск платформы');
     expect(formatExtraValue('stack', 'Яндекс.Метрика, GTM')).toBe('Яндекс.Метрика, GTM');
+  });
+
+  it('renders client_segment as plain string; empty/whitespace → DASH', () => {
+    expect(formatExtraValue('client_segment', 'стоматологии')).toBe('стоматологии');
+    expect(formatExtraValue('client_segment', 'B2B-стройка')).toBe('B2B-стройка');
+    expect(formatExtraValue('client_segment', '   ')).toBe('–');
+    expect(formatExtraValue('client_segment', '')).toBe('–');
   });
 });

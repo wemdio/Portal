@@ -93,6 +93,7 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
     case 'blog_last_post':
     case 'stack':
     case 'profile':
+    case 'client_segment':
       return typeof value === 'string' && value.trim().length > 0
         ? value
         : EMPTY_CELL_DASH;
