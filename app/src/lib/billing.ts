@@ -107,6 +107,12 @@ const TARIFF_LABELS_RU: Record<TariffType, string> = {
   custom: 'Индивидуальный',
 };
 
+/** Single, universal payment description shown on YooKassa form, fiscal
+ *  receipt and admin /invoices view. Kept intentionally short — operators
+ *  reported the previous "Подписка X (период) — Company Y" was noisy and
+ *  the tariff/period info is already visible in the surrounding columns. */
+const INVOICE_DESCRIPTION = 'Подписка на Portal';
+
 function resolveCompanyName(profile: { full_name?: string | null; email?: string | null } | null, userId: string): string {
   return profile?.full_name?.trim() || profile?.email?.trim() || userId;
 }
@@ -151,19 +157,19 @@ function resolveBillingAmount(tariff: Pick<ClientTariffRow, 'tariff_type' | 'bil
 }
 
 /**
- * Build the human-readable description that ends up on the YooKassa invoice
- * and (via the cart line item) on the customer's receipt.
+ * Description shown on the YooKassa invoice / payment form and on the 54-FZ
+ * fiscal receipt. Universal "Подписка на Portal" for every reason
+ * (admin_activate / admin_extend / client_self / cron_renew) — the previous
+ * format leaked tariff + company name into the description, which operators
+ * disliked.
  */
 function buildDescription(
-  tariffType: TariffType,
-  period: BillingPeriod | null,
-  companyName: string,
-  reason: EnsureInvoiceReason,
+  _tariffType: TariffType,
+  _period: BillingPeriod | null,
+  _companyName: string,
+  _reason: EnsureInvoiceReason,
 ): string {
-  const tariffLabel = TARIFF_LABELS_RU[tariffType] ?? tariffType;
-  const periodLabel = period === 'year' ? 'год' : period === 'half_year' ? 'полгода' : 'месяц';
-  const verb = reason === 'admin_extend' || reason === 'cron_renew' ? 'Продление подписки' : 'Подписка';
-  return `${verb} ${tariffLabel} (${periodLabel}) — ${companyName}`;
+  return INVOICE_DESCRIPTION;
 }
 
 function isPendingInvoiceStillValid(row: { created_at: string; yookassa_payment_url: string | null }, now = new Date()): boolean {

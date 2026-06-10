@@ -154,6 +154,54 @@ const UserRow = memo(function UserRow({
 });
 
 /**
+ * Compose the success message after activate / extend, tagging the autopayment
+ * branch with the actual YooKassa-invoice-creation outcome instead of a flat
+ * "клиент оплатит в своём ЛК". Three sub-cases for autopayment:
+ *
+ *   1. YK invoice created and has payment_url → "Счёт автоматически создан в ЮКассе."
+ *   2. Invoice row exists but YK call failed (yookassa_error present)       →
+ *      include the raw error so the admin can act ("Откройте /invoices ...").
+ *   3. The whole helper returned null (e.g. server misconfigured)           →
+ *      generic "оплатит в своём ЛК".
+ *
+ * For invoice/manual modes we never auto-create a YK invoice, so the message
+ * stays the same as before.
+ */
+function activateSuccessMessage(
+  billingMode: 'invoice' | 'autopayment' | null,
+  invoice: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null } | null,
+): string {
+  if (billingMode === 'invoice') return 'Активировано. Зайдите в Счета и выставьте счёт клиенту.';
+  if (billingMode === 'autopayment') {
+    if (invoice?.payment_url) {
+      return 'Активировано. Счёт автоматически создан в ЮКассе — клиент увидит ссылку в своём ЛК.';
+    }
+    if (invoice?.invoice_id && invoice?.yookassa_error) {
+      return `Активировано. Счёт записан, но ЮКасса не приняла его: ${invoice.yookassa_error}. Откройте /invoices и нажмите «ЮКасса» вручную.`;
+    }
+    return 'Активировано. Клиент оплатит в своём ЛК.';
+  }
+  return 'Оплата отмечена, настройка ЛК начата';
+}
+
+function extendSuccessMessage(
+  billingMode: 'invoice' | 'autopayment' | null,
+  invoice: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null } | null,
+): string {
+  if (billingMode === 'invoice') return 'Подписка продлена. Выставьте новый счёт клиенту.';
+  if (billingMode === 'autopayment') {
+    if (invoice?.payment_url) {
+      return 'Подписка продлена. Новый счёт автоматически создан в ЮКассе.';
+    }
+    if (invoice?.invoice_id && invoice?.yookassa_error) {
+      return `Подписка продлена. Счёт записан, но ЮКасса не приняла его: ${invoice.yookassa_error}. Откройте /invoices и нажмите «ЮКасса» вручную.`;
+    }
+    return 'Подписка продлена. Клиент оплатит в своём ЛК.';
+  }
+  return 'Подписка продлена';
+}
+
+/**
  * Subscription panel inside the user action modal. Holds the activation /
  * extend form state LOCALLY — so typing in the «Сумма за период» input or
  * clicking through the billing-mode chips no longer triggers a re-render of
@@ -237,6 +285,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
         ok: true; paid_until?: string; setup_until?: string;
         billing_mode?: string; payment_locked?: boolean;
         billing_period?: string; billing_amount?: number;
+        invoice?: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null } | null;
       }>(`/api/admin/users/${userId}/tariff`, {
         method: 'PUT',
         body: JSON.stringify({
@@ -255,11 +304,12 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
         billing_period: (res.billing_period as 'month' | 'half_year' | 'year' | null) ?? null,
         billing_amount: res.billing_amount ?? null,
       });
-      onSuccessMessage(
-        bm === 'invoice' ? 'Активировано. Зайдите в Счета и выставьте счёт клиенту.' :
-        bm === 'autopayment' ? 'Активировано. Клиент оплатит в своём ЛК.' :
-        'Оплата отмечена, настройка ЛК начата'
-      );
+      // Autopayment path also tries to auto-create a YooKassa invoice on the
+      // server (see ensurePendingInvoiceForTariff). Surface the result here so
+      // the admin sees WHY the YK call failed (env not set, missing receipt
+      // email, YK API rejected, etc) instead of silently landing on /invoices
+      // with an unpaid row and a manual "ЮКасса" button to retry.
+      onSuccessMessage(activateSuccessMessage(bm, res.invoice ?? null));
     } catch (err: unknown) {
       onError(getErrorMessage(err));
     } finally {
@@ -332,6 +382,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
         ok: true; paid_until?: string;
         billing_mode?: string; payment_locked?: boolean;
         billing_period?: string; billing_amount?: number; tariff_type?: string;
+        invoice?: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null } | null;
       }>(`/api/admin/users/${userId}/tariff`, {
         method: 'PUT',
         body: JSON.stringify({
@@ -350,11 +401,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
         billing_amount: res.billing_amount ?? null,
       });
       setShowExtendForm(false);
-      onSuccessMessage(
-        bm === 'invoice' ? 'Подписка продлена. Выставьте новый счёт клиенту.' :
-        bm === 'autopayment' ? 'Подписка продлена. Клиент оплатит в своём ЛК.' :
-        'Подписка продлена'
-      );
+      onSuccessMessage(extendSuccessMessage(bm, res.invoice ?? null));
     } catch (err: unknown) {
       onError(getErrorMessage(err));
     } finally {
