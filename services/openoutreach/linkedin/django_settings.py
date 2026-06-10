@@ -62,12 +62,30 @@ TEMPLATES = [
     },
 ]
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": str(ROOT_DIR / "data" / "db.sqlite3"),
+# Portal-native fork: Postgres вместо SQLite (см. UPSTREAM.md).
+# Подключение к Portal'овской Supabase через DATABASE_URL. Если переменная не
+# задана — fallback на SQLite, чтобы не ломать локальные pytest'ы upstream'a,
+# которые ожидают writable SQLite (в нашем CI они тоже работают на in-memory).
+if os.environ.get("DATABASE_URL"):
+    import dj_database_url
+
+    DATABASES = {
+        "default": dj_database_url.config(
+            default=os.environ["DATABASE_URL"],
+            conn_max_age=600,
+            # Supabase self-hosted в портал-VPC: без TLS внутри сети.
+            # Supabase managed (если когда-то понадобится для test/staging) —
+            # тогда `sslmode=require` явно в URL'е.
+            ssl_require=False,
+        ),
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": str(ROOT_DIR / "data" / "db.sqlite3"),
+        }
+    }
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
