@@ -8,9 +8,9 @@ import {
   EXTRACTOR_TO_SUBPAGES,
   SubpageKind,
 } from '@/lib/enrich/extractors/types';
-import { extractCustomers, filterCustomerCandidates } from '@/lib/enrich/extractors/customersExtractor';
+import { extractCustomers } from '@/lib/enrich/extractors/customersExtractor';
 import { nameListLooksReal } from '@/lib/enrich/extractors/nameQuality';
-import { llmExtractCustomers } from '@/lib/enrich/extractors/llmCustomersExtractor';
+import { extractClientSegment } from '@/lib/enrich/extractors/clientSegmentExtractor';
 import { extractCasesCount } from '@/lib/enrich/extractors/casesCountExtractor';
 import { extractCaseIndustries } from '@/lib/enrich/extractors/caseIndustriesExtractor';
 import { detectEnterpriseLogos, detectEnterpriseInHtml } from '@/lib/enrich/extractors/enterpriseLogosDetector';
@@ -333,38 +333,15 @@ export async function processSignalsForUrl(
 
   // Cases-related extractors (share /cases HTML, fallback to main)
   const casesHtml = subpageHtml.cases ?? null;
-  if (extractors.includes('customers')) {
-    out.customers = extractCustomers(casesHtml ?? '');
-    if (out.customers.length === 0) out.customers = extractCustomers(main.html);
-    // Trust gate: a thin or junk-heavy heuristic result is dropped so the
-    // LLM fallback below produces clean company names instead.
-    if (!nameListLooksReal(out.customers)) out.customers = [];
-    // Specialized LLM fallback for «Клиенты» (см. llmCustomersExtractor.ts).
-    // Триггер: heuristic дал < 3 имён ИЛИ ничего — heuristic покрывает
-    // только структурированные logo wall'ы с правильными class-нэймами,
-    // а для российского b2b большинство сайтов используют другие классы /
-    // вообще без класс-нэймов. LLM получает structured input (alt-атрибуты
-    // logo wall'ов + текст разделов под client-headings) и выдаёт чистый
-    // список. Поднимает покрытие с ~2% до 80%+ на российском b2b-сегменте
-    // (см. промежуточные результаты.txt от 04.06 — повод для этой работы).
-    if (out.customers.length < 3) {
-      const llmCustomers = await llmExtractCustomers(main.html, casesHtml);
-      if (llmCustomers.length > 0) {
-        // Merge: keep existing heuristic hits at the front (они уже прошли
-        // junk-filter и nameListLooksReal), добавляем уникальные от LLM.
-        const merged: string[] = [...out.customers];
-        const seen = new Set(out.customers.map((c) => c.toLowerCase()));
-        for (const c of llmCustomers) {
-          const key = c.toLowerCase();
-          if (seen.has(key)) continue;
-          seen.add(key);
-          merged.push(c);
-        }
-        // Финальный прогон через filterCustomerCandidates — еще одна линия
-        // защиты от мусора (LLM может пропустить «card img», edge-кейсы).
-        out.customers = filterCustomerCandidates(merged).slice(0, 30);
-      }
-    }
+  // «Клиенты» теперь = сегмент ЦА (кого обслуживает компания), не список брендов.
+  // Источник только LLM (см. clientSegmentExtractor) — старый эвристический
+  // извлекатель списка брендов удалён, он давал плохой результат.
+  if (extractors.includes('client_segment')) {
+    out.client_segment = await extractClientSegment(
+      main.html,
+      subpageHtml.about ?? null,
+      casesHtml,
+    );
   }
   if (extractors.includes('cases_count')) {
     out.cases_count = extractCasesCount(casesHtml ?? '');
@@ -621,13 +598,10 @@ export async function processSignalsForUrl(
   }
 
   // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.
-  type LlmField = 'pricing_model' | 'pricing_min' | 'customers' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'cases_count' | 'integrations' | 'hiring_roles';
+  type LlmField = 'pricing_model' | 'pricing_min' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'cases_count' | 'integrations' | 'hiring_roles';
   const llmNeeded = new Set<LlmField>();
   if (extractors.includes('pricing_model') && (out.pricing_model === 'unknown' || !out.pricing_model)) llmNeeded.add('pricing_model');
   if (extractors.includes('pricing_min') && !out.pricing_min) llmNeeded.add('pricing_min');
-  // customers вынесены в специализированный llmExtractCustomers выше —
-  // там structured input и шире окно контекста, общий extractor не догоняет
-  // (см. блок «if (extractors.includes('customers'))»).
   if (extractors.includes('founded_year') && !out.founded_year) llmNeeded.add('founded_year');
   if (extractors.includes('team_size') && !out.team_size) llmNeeded.add('team_size');
   // free_trial: ask the LLM whenever the heuristic didn't confirm (undefined).
@@ -648,7 +622,6 @@ export async function processSignalsForUrl(
       const llmResult = await llmExtractFields(main.html, subpageHtml, llmNeeded);
       if (llmResult.pricing_model && llmNeeded.has('pricing_model')) out.pricing_model = llmResult.pricing_model;
       if (llmResult.pricing_min && llmNeeded.has('pricing_min')) out.pricing_min = llmResult.pricing_min;
-      if (llmResult.customers && llmResult.customers.length > 0 && llmNeeded.has('customers')) out.customers = llmResult.customers;
       if (llmResult.founded_year && llmNeeded.has('founded_year')) out.founded_year = llmResult.founded_year;
       if (llmResult.team_size && llmNeeded.has('team_size')) out.team_size = llmResult.team_size;
       // Tri-state merge: heuristic only sets true. Now accept either side of
