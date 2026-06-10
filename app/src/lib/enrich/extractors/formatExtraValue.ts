@@ -104,7 +104,17 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
         }
       }
       return EMPTY_CELL_DASH;
-    case 'hiring_roles':
+    case 'hiring_roles': {
+      // Two shapes since the 09.06 industrial-segment rewrite:
+      //   - NEW: string[] of top-5 concrete profession names extracted from
+      //     vacancy titles ("Лифтёры, Монтажники, Диспетчеры"). The applier
+      //     stores them in result_text under hiring_roles for backward-compat
+      //     with the existing column key in the spreadsheet.
+      //   - LEGACY: object {marketing/engineering/sales/design/product} of
+      //     booleans, from runs before the rewrite. Render with the old RU
+      //     labels so historical xlsx exports stay stable.
+      const items = nonEmptyStrings(value);
+      if (items.length > 0) return items.join(', ');
       if (typeof value === 'object' && value !== null) {
         const r = value as { marketing?: boolean; engineering?: boolean; sales?: boolean; design?: boolean; product?: boolean };
         const parts: string[] = [];
@@ -116,6 +126,7 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
         return parts.length > 0 ? parts.join(', ') : EMPTY_CELL_DASH;
       }
       return EMPTY_CELL_DASH;
+    }
     default:
       return EMPTY_CELL_DASH;
   }

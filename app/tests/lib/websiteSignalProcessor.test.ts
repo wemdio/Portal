@@ -426,8 +426,13 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
       expect(result.pricing_model).toBe('self-serve');
       expect(result.pricing_min).toEqual({ value: 990, currency: 'RUB' });
       expect(result.vacancies_count).toBe(2);
-      expect(result.hiring_roles?.engineering).toBe(true);
-      expect(result.hiring_roles?.marketing).toBe(true);
+      // hiring_roles is now a string[] of top-N concrete profession names
+      // (since the 09.06 industrial-segment rewrite). The /careers fixture has
+      // "Frontend Developer" and "Marketer" — both should land in the list.
+      expect(Array.isArray(result.hiring_roles)).toBe(true);
+      const professions = (result.hiring_roles as string[]).join(' ').toLowerCase();
+      expect(professions).toContain('frontend developer');
+      expect(professions).toContain('marketer');
       expect(result.integrations).toEqual(expect.arrayContaining(['Slack', 'Telegram']));
       expect(result.founded_year).toBe(2018);
       expect(result.team_size).toBe(1);

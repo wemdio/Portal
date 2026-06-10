@@ -452,13 +452,10 @@ export async function processSignalsForUrl(
 
     if (extractors.includes('vacancies_count')) out.vacancies_count = hiring.vacancies_count;
     if (extractors.includes('hiring_roles')) {
-      out.hiring_roles = {
-        marketing: hiring.has_marketing,
-        engineering: hiring.has_engineering,
-        sales: hiring.has_sales,
-        design: hiring.has_design,
-        product: hiring.has_product,
-      };
+      // New shape: array of top-5 concrete profession names. See
+      // HiringResult docstring for the rationale behind dropping the old
+      // 5-bool-categories representation.
+      out.hiring_roles = hiring.professions;
     }
   }
 
@@ -640,7 +637,11 @@ export async function processSignalsForUrl(
   if (extractors.includes('case_industries') && (!out.case_industries || out.case_industries.length === 0)) llmNeeded.add('case_industries');
   if (extractors.includes('cases_count') && !out.cases_count) llmNeeded.add('cases_count');
   if (extractors.includes('integrations') && (!out.integrations || out.integrations.length === 0)) llmNeeded.add('integrations');
-  if (extractors.includes('hiring_roles') && out.hiring_roles && !out.hiring_roles.marketing && !out.hiring_roles.engineering && !out.hiring_roles.sales && !out.hiring_roles.design && !out.hiring_roles.product) llmNeeded.add('hiring_roles');
+  // hiring_roles is now a string[] of professions (see HiringResult). Ask
+  // the LLM for help when the heuristic returned an empty list — usually
+  // means the careers page used a layout / class names we don't recognise,
+  // or the company has no /careers and the LLM has to read /about for hints.
+  if (extractors.includes('hiring_roles') && (!Array.isArray(out.hiring_roles) || out.hiring_roles.length === 0)) llmNeeded.add('hiring_roles');
 
   if (llmNeeded.size > 0 && !signal?.aborted) {
     try {
@@ -661,7 +662,7 @@ export async function processSignalsForUrl(
       if (llmResult.case_industries && llmResult.case_industries.length > 0 && llmNeeded.has('case_industries')) out.case_industries = llmResult.case_industries;
       if (typeof llmResult.cases_count === 'number' && llmResult.cases_count > 0 && llmNeeded.has('cases_count')) out.cases_count = llmResult.cases_count;
       if (llmResult.integrations && llmResult.integrations.length > 0 && llmNeeded.has('integrations')) out.integrations = llmResult.integrations;
-      if (llmResult.hiring_roles && llmNeeded.has('hiring_roles')) out.hiring_roles = llmResult.hiring_roles;
+      if (Array.isArray(llmResult.hiring_roles) && llmResult.hiring_roles.length > 0 && llmNeeded.has('hiring_roles')) out.hiring_roles = llmResult.hiring_roles;
     } catch {
       // LLM fallback is best-effort — never break the pipeline.
     }

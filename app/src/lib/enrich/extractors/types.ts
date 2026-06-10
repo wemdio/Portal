@@ -320,7 +320,11 @@ export interface PriceValue {
   currency: Currency;
 }
 
-export interface HiringRoles {
+// Legacy 5-category shape — kept ONLY so formatExtraValue can recognise old
+// result_text payloads from before the 09.06 industrial-segment rewrite and
+// render them as the old comma-joined RU labels. New extractor runs produce
+// string[] (top-5 concrete profession names) — see HiringResult.professions.
+export interface LegacyHiringRoles {
   marketing: boolean;
   engineering: boolean;
   sales: boolean;
@@ -345,7 +349,15 @@ export interface ExtractedData {
   free_trial?: boolean;
 
   vacancies_count?: number;
-  hiring_roles?: HiringRoles;
+  /**
+   * Top-up to 5 concrete profession names extracted from vacancy titles
+   * ("Лифтёры, Монтажники, Диспетчеры" for МОСЛИФТ; "Разработчики,
+   * Продактмены" for SaaS). Replaces the legacy 5-bool-categories shape
+   * (LegacyHiringRoles) which couldn't represent blue-collar / HoReCa /
+   * construction segments. formatExtraValue handles both shapes for
+   * backward-compat with stored result_text from earlier jobs.
+   */
+  hiring_roles?: string[] | LegacyHiringRoles;
 
   integrations?: string[];
   founded_year?: number;
