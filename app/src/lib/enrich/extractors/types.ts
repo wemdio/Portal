@@ -31,7 +31,8 @@ export const ALL_SUBPAGE_KINDS: SubpageKind[] = [
 export type ExtractorKey =
   | 'stack'
   | 'profile'
-  | 'customers'
+  | 'customers'        // legacy: не предлагается в UI, остаётся для рендера старых result_text
+  | 'client_segment'   // наполняет столбец «Клиенты» сегментом ЦА (заменил список брендов)
   | 'cases_count'
   | 'case_industries'
   | 'enterprise_logos'
@@ -67,7 +68,7 @@ export type ExtractorKey =
 export const ALL_EXTRACTOR_KEYS: ExtractorKey[] = [
   'stack',
   'profile',
-  'customers',
+  'client_segment',
   'cases_count',
   'case_industries',
   'enterprise_logos',
@@ -96,6 +97,7 @@ export const EXTRACTOR_TO_SUBPAGES: Record<ExtractorKey, SubpageKind[]> = {
   stack: [],
   profile: [],
   customers: ['cases'],
+  client_segment: ['cases', 'about'],
   cases_count: ['cases'],
   case_industries: ['cases'],
   enterprise_logos: ['cases'],
@@ -161,6 +163,7 @@ export const EXTRACTOR_LABELS: Record<ExtractorKey, string> = {
   stack: 'Стек',
   profile: 'Профиль',
   customers: 'Клиенты',
+  client_segment: 'Клиенты',
   cases_count: 'Кол-во кейсов',
   case_industries: 'Отрасли в кейсах',
   enterprise_logos: 'Enterprise-логотипы',
@@ -215,7 +218,7 @@ export const BUILTIN_PRESETS: Readonly<Record<SignalPresetId, SignalPreset>> = {
     extractors: [
       'stack',
       'profile',
-      'customers',
+      'client_segment',
       'case_industries',
       'pricing_model',
       'hiring_roles',
@@ -229,7 +232,7 @@ export const BUILTIN_PRESETS: Readonly<Record<SignalPresetId, SignalPreset>> = {
     extractors: [
       'stack',
       'profile',
-      'customers',
+      'client_segment',
       'cases_count',
       'case_industries',
       'enterprise_logos',
@@ -278,7 +281,7 @@ export const EXTRACTOR_GROUPS: ExtractorGroup[] = [
     id: 'customers',
     title: 'Клиенты и кейсы',
     description: 'Подгружает /cases, /clients, /portfolio.',
-    extractors: ['customers', 'cases_count', 'case_industries', 'enterprise_logos'],
+    extractors: ['client_segment', 'cases_count', 'case_industries', 'enterprise_logos'],
   },
   {
     id: 'pricing',
@@ -340,7 +343,10 @@ export interface ExtractedData {
   method?: 'http' | 'playwright';
 
   customers?: string[];
-  cases_count?: number;
+  /** Сегмент клиентов компании («стоматологии», «B2B-стройка») — наполнение столбца «Клиенты». */
+  client_segment?: string;
+  /** Точное число (23) ИЛИ строка-оценка «N+» (20+) от LLM-счётчика. */
+  cases_count?: number | string;
   case_industries?: string[];
   enterprise_logos?: boolean;
 
@@ -348,7 +354,8 @@ export interface ExtractedData {
   pricing_min?: PriceValue;
   free_trial?: boolean;
 
-  vacancies_count?: number;
+  /** Точное число (12) ИЛИ строка-оценка «N+» (10+) от LLM-счётчика вакансий. */
+  vacancies_count?: number | string;
   /**
    * Top-up to 5 concrete profession names extracted from vacancy titles
    * ("Лифтёры, Монтажники, Диспетчеры" for МОСЛИФТ; "Разработчики,

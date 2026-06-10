@@ -7,6 +7,18 @@ jest.mock('@/lib/enrich/websiteParser', () => ({
   fetchHtmlWithPlaywright: jest.fn(),
 }));
 
+jest.mock('@/lib/enrich/extractors/clientSegmentExtractor', () => ({
+  extractClientSegment: jest.fn().mockResolvedValue('тест-сегмент'),
+}));
+
+jest.mock('@/lib/enrich/extractors/casesCountLlmExtractor', () => ({
+  llmCountCases: jest.fn().mockResolvedValue('5+'),
+}));
+
+jest.mock('@/lib/enrich/extractors/careersLlmExtractor', () => ({
+  llmExtractHiring: jest.fn().mockResolvedValue({ vacancies: '7+', professions: ['Грузчики'] }),
+}));
+
 import { processSignalsForUrl } from '@/lib/enrich/websiteSignalProcessor';
 import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websiteParser';
 
@@ -279,7 +291,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
     expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(1);
     expect('stack' in result).toBe(true);
     if ('stack' in result) {
-      expect(result.customers).toBeUndefined();
+      expect(result.client_segment).toBeUndefined();
       expect(result.pricing_model).toBeUndefined();
     }
   });
@@ -302,62 +314,92 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
   // few seconds. The default 5s ceiling tripped intermittently before this
   // event-detector work; bumping to 15s removes the flake without hiding a
   // real hang.
-  it('with extractors=["customers"] — discovers /cases and fetches main + /cases only', async () => {
+  it('with extractors=["client_segment"] — discovers /cases + /about, fetches main + both', async () => {
     mockUrlResponses({
       'example.com/cases': '<section class="clients"><img alt="Сбербанк" /></section>',
-      'example.com': '<html><body><a href="/cases">Кейсы</a><a href="/pricing">Цены</a></body></html>',
+      'example.com/about': '<p>О компании</p>',
+      'example.com': '<html><body><a href="/cases">Кейсы</a><a href="/about">О нас</a><a href="/pricing">Цены</a></body></html>',
     });
 
-    const result = await processSignalsForUrl('example.com', { extractors: ['customers'] });
+    const result = await processSignalsForUrl('example.com', { extractors: ['client_segment'] });
 
-    expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(2);
     const fetchedUrls = fetchHtmlWithRetryMock.mock.calls.map((c) => c[0] as string);
     expect(fetchedUrls.some((u) => u.includes('/cases'))).toBe(true);
+    expect(fetchedUrls.some((u) => u.includes('/about'))).toBe(true);
     expect(fetchedUrls.some((u) => u.includes('/pricing'))).toBe(false);
-
     if ('stack' in result) {
-      expect(result.customers).toEqual(['Сбербанк']);
+      expect(result.client_segment).toBe('тест-сегмент');
       expect(result.pricing_model).toBeUndefined();
     }
-  }, 15000);
+  });
 
-  it('with extractors=["customers","cases_count"] — fetches /cases only ONCE (deduplication)', async () => {
+  it('with extractors=["client_segment","cases_count"] — fetches /cases only ONCE', async () => {
     mockUrlResponses({
       'example.com/cases': `
         <section class="clients"><img alt="Газпром" /></section>
         <article class="case-card">x</article>
         <article class="case-card">y</article>
       `,
-      'example.com': '<a href="/cases">Cases</a>',
+      'example.com/about': '<p>О компании</p>',
+      'example.com': '<a href="/cases">Cases</a><a href="/about">About</a>',
     });
 
     const result = await processSignalsForUrl('example.com', {
-      extractors: ['customers', 'cases_count'],
+      extractors: ['client_segment', 'cases_count'],
     });
 
-    expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(2);
-    const casesFetches = fetchHtmlWithRetryMock.mock.calls.filter(
-      (c) => (c[0] as string).includes('/cases'),
-    );
+    const casesFetches = fetchHtmlWithRetryMock.mock.calls.filter((c) => (c[0] as string).includes('/cases'));
     expect(casesFetches).toHaveLength(1);
-
     if ('stack' in result) {
-      expect(result.customers).toEqual(['Газпром']);
+      expect(result.client_segment).toBe('тест-сегмент');
       expect(result.cases_count).toBe(2);
     }
-  }, 15000);
+  });
 
-  it('subpage 404 does not fail main result — graceful degradation', async () => {
-    fetchHtmlWithRetryMock.mockImplementation(async (url: string) => {
-      if (url.includes('/cases')) return { html: '', status: 404 };
-      return { html: '<a href="/cases">Cases</a>', status: 200 };
+  it('cases_count: heuristic 0 → uses LLM estimate', async () => {
+    mockUrlResponses({
+      // class="projects" не матчит CASE_SELECTOR, числа в тексте нет →
+      // extractCasesCount = 0 → зовётся llmCountCases (мок → "5+").
+      'example.com/cases': '<div class="projects">Делали проекты для разных компаний и брендов.</div>',
+      'example.com': '<a href="/cases">Кейсы</a>',
     });
 
-    const result = await processSignalsForUrl('example.com', { extractors: ['stack', 'customers'] });
+    const result = await processSignalsForUrl('example.com', { extractors: ['cases_count'] });
 
     expect('stack' in result).toBe(true);
     if ('stack' in result) {
-      expect(result.customers).toEqual([]);
+      expect(result.cases_count).toBe('5+');
+    }
+  });
+
+  it('vacancies_count/hiring_roles: heuristic 0 → uses LLM', async () => {
+    mockUrlResponses({
+      // class="hiring-block" не матчит VACANCY_SELECTOR, числа нет →
+      // extractHiring даёт 0/[] → зовётся llmExtractHiring (мок).
+      'example.com/careers': '<div class="hiring-block">Ищем сотрудников в команду на разные роли, подробности по запросу.</div>',
+      'example.com': '<a href="/careers">Вакансии</a>',
+    });
+
+    const result = await processSignalsForUrl('example.com', { extractors: ['vacancies_count', 'hiring_roles'] });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.vacancies_count).toBe('7+');
+      expect(result.hiring_roles).toEqual(['Грузчики']);
+    }
+  });
+
+  it('subpage 404 does not fail main result — graceful degradation', async () => {
+    fetchHtmlWithRetryMock.mockImplementation(async (url: string) => {
+      if (url.includes('/cases') || url.includes('/about')) return { html: '', status: 404 };
+      return { html: '<a href="/cases">Cases</a><a href="/about">About</a>', status: 200 };
+    });
+
+    const result = await processSignalsForUrl('example.com', { extractors: ['stack', 'client_segment'] });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.client_segment).toBe('тест-сегмент');
     }
   });
 
@@ -373,23 +415,19 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
           status: 200,
         };
       }
-      return { html: '<a href="/pricing">P</a><a href="/cases">C</a>', status: 200 };
+      return { html: '<a href="/pricing">P</a><a href="/cases">C</a><a href="/about">A</a>', status: 200 };
     });
 
     const result = await processSignalsForUrl('example.com', {
-      extractors: ['customers', 'pricing_model'],
+      extractors: ['client_segment', 'pricing_model'],
     });
 
     expect('stack' in result).toBe(true);
     if ('stack' in result) {
-      expect(result.customers).toEqual([]);
+      expect(result.client_segment).toBe('тест-сегмент');
       expect(result.pricing_model).toBe('self-serve');
     }
-    // 15s ceiling — the real LLM fallback (Requesty) may take several seconds
-    // when the .env API key is set in CI. The previous 5s default frequently
-    // tripped on this test even before the fetch-fallback work (timing varied
-    // from 3-5s). 15s leaves a comfortable buffer without hiding real hangs.
-  }, 15000);
+  });
 
   it('full extractor set — populates all expected optional fields', async () => {
     mockUrlResponses({
@@ -411,7 +449,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
 
     const result = await processSignalsForUrl('example.com', {
       extractors: [
-        'stack', 'profile', 'customers', 'cases_count', 'enterprise_logos',
+        'stack', 'profile', 'client_segment', 'cases_count', 'enterprise_logos',
         'pricing_model', 'pricing_min', 'free_trial',
         'vacancies_count', 'hiring_roles',
         'integrations', 'founded_year', 'team_size', 'blog_last_post',
@@ -420,7 +458,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
 
     expect('stack' in result).toBe(true);
     if ('stack' in result) {
-      expect(result.customers).toEqual(['Тинькофф']);
+      expect(result.client_segment).toBe('тест-сегмент');
       expect(result.cases_count).toBe(1);
       expect(result.enterprise_logos).toBe(true);
       expect(result.pricing_model).toBe('self-serve');

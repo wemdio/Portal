@@ -337,6 +337,17 @@ function sanitizeExtractorList(keys: unknown): ExtractorKey[] {
 }
 
 /**
+ * Legacy-переименование: старый ключ `customers` (список брендов) заменён на
+ * `client_segment` (сегмент ЦА) под тем же столбцом «Клиенты». Мапим его в
+ * сохранённых пресетах/последнем выборе из localStorage, чтобы выбор не пропал.
+ */
+function migrateLegacyExtractorKeys(keys: unknown): ExtractorKey[] {
+  if (!Array.isArray(keys)) return [];
+  const mapped = keys.map((k) => (k === 'customers' ? 'client_segment' : k));
+  return sanitizeExtractorList(mapped);
+}
+
+/**
  * Compute the list of "extra" extractors (everything beyond stack+profile).
  * These map 1:1 to extra spreadsheet columns to the right of "Профиль".
  */
@@ -7505,19 +7516,23 @@ export function DatabaseSpreadsheet() {
     if (typeof window === 'undefined') return;
     try {
       const presetsRaw = window.localStorage.getItem(SIGNAL_PRESETS_STORAGE_KEY);
-      const customPresets = presetsRaw
+      const customPresetsRaw = presetsRaw
         ? (JSON.parse(presetsRaw) as Array<{ id: string; name: string; extractors: ExtractorKey[] }>)
         : [];
+      const customPresets = (Array.isArray(customPresetsRaw) ? customPresetsRaw : []).map((p) => ({
+        ...p,
+        extractors: migrateLegacyExtractorKeys(p.extractors),
+      }));
       const lastRaw = window.localStorage.getItem(SIGNAL_LAST_SELECTION_STORAGE_KEY);
       const lastSelection = lastRaw
         ? (JSON.parse(lastRaw) as { extractors: ExtractorKey[]; presetId: string | null })
         : null;
       setSignalEnrichment((prev) => ({
         ...prev,
-        customPresets: Array.isArray(customPresets) ? customPresets : [],
+        customPresets,
         selectedExtractors:
           lastSelection?.extractors && Array.isArray(lastSelection.extractors)
-            ? sanitizeExtractorList(lastSelection.extractors)
+            ? migrateLegacyExtractorKeys(lastSelection.extractors)
             : prev.selectedExtractors,
         presetId: lastSelection?.presetId ?? prev.presetId,
       }));

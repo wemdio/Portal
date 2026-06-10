@@ -70,7 +70,15 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
       if (value === false) return 'Нет';
       return EMPTY_CELL_DASH;
     case 'cases_count':
+      // number — точное; строка «N+» — оценка LLM; 0/пусто → DASH.
+      if (typeof value === 'number') return value > 0 ? String(value) : EMPTY_CELL_DASH;
+      if (typeof value === 'string') return value.trim().length > 0 ? value.trim() : EMPTY_CELL_DASH;
+      return EMPTY_CELL_DASH;
     case 'vacancies_count':
+      // number — точное; строка «N+» — оценка LLM; 0/пусто → DASH.
+      if (typeof value === 'number') return value > 0 ? String(value) : EMPTY_CELL_DASH;
+      if (typeof value === 'string') return value.trim().length > 0 ? value.trim() : EMPTY_CELL_DASH;
+      return EMPTY_CELL_DASH;
     case 'team_size':
       // 0 = "we didn't find any" → DASH, not "0". A real published "у нас 0
       // открытых вакансий" is rare and not worth distinguishing.
@@ -93,6 +101,7 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
     case 'blog_last_post':
     case 'stack':
     case 'profile':
+    case 'client_segment':
       return typeof value === 'string' && value.trim().length > 0
         ? value
         : EMPTY_CELL_DASH;

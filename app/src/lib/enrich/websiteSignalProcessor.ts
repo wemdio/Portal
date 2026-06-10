@@ -8,15 +8,17 @@ import {
   EXTRACTOR_TO_SUBPAGES,
   SubpageKind,
 } from '@/lib/enrich/extractors/types';
-import { extractCustomers, filterCustomerCandidates } from '@/lib/enrich/extractors/customersExtractor';
+import { extractCustomers } from '@/lib/enrich/extractors/customersExtractor';
 import { nameListLooksReal } from '@/lib/enrich/extractors/nameQuality';
-import { llmExtractCustomers } from '@/lib/enrich/extractors/llmCustomersExtractor';
+import { extractClientSegment } from '@/lib/enrich/extractors/clientSegmentExtractor';
 import { extractCasesCount } from '@/lib/enrich/extractors/casesCountExtractor';
 import { extractCaseIndustries } from '@/lib/enrich/extractors/caseIndustriesExtractor';
+import { llmCountCases } from '@/lib/enrich/extractors/casesCountLlmExtractor';
 import { detectEnterpriseLogos, detectEnterpriseInHtml } from '@/lib/enrich/extractors/enterpriseLogosDetector';
 import { extractPricingModel } from '@/lib/enrich/extractors/pricingModelExtractor';
 import { extractPricingDetails } from '@/lib/enrich/extractors/pricingDetailExtractor';
 import { extractHiring, findExternalCareerLinks } from '@/lib/enrich/extractors/hiringExtractor';
+import { llmExtractHiring } from '@/lib/enrich/extractors/careersLlmExtractor';
 import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtractor';
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
@@ -333,42 +335,28 @@ export async function processSignalsForUrl(
 
   // Cases-related extractors (share /cases HTML, fallback to main)
   const casesHtml = subpageHtml.cases ?? null;
-  if (extractors.includes('customers')) {
-    out.customers = extractCustomers(casesHtml ?? '');
-    if (out.customers.length === 0) out.customers = extractCustomers(main.html);
-    // Trust gate: a thin or junk-heavy heuristic result is dropped so the
-    // LLM fallback below produces clean company names instead.
-    if (!nameListLooksReal(out.customers)) out.customers = [];
-    // Specialized LLM fallback for «Клиенты» (см. llmCustomersExtractor.ts).
-    // Триггер: heuristic дал < 3 имён ИЛИ ничего — heuristic покрывает
-    // только структурированные logo wall'ы с правильными class-нэймами,
-    // а для российского b2b большинство сайтов используют другие классы /
-    // вообще без класс-нэймов. LLM получает structured input (alt-атрибуты
-    // logo wall'ов + текст разделов под client-headings) и выдаёт чистый
-    // список. Поднимает покрытие с ~2% до 80%+ на российском b2b-сегменте
-    // (см. промежуточные результаты.txt от 04.06 — повод для этой работы).
-    if (out.customers.length < 3) {
-      const llmCustomers = await llmExtractCustomers(main.html, casesHtml);
-      if (llmCustomers.length > 0) {
-        // Merge: keep existing heuristic hits at the front (они уже прошли
-        // junk-filter и nameListLooksReal), добавляем уникальные от LLM.
-        const merged: string[] = [...out.customers];
-        const seen = new Set(out.customers.map((c) => c.toLowerCase()));
-        for (const c of llmCustomers) {
-          const key = c.toLowerCase();
-          if (seen.has(key)) continue;
-          seen.add(key);
-          merged.push(c);
-        }
-        // Финальный прогон через filterCustomerCandidates — еще одна линия
-        // защиты от мусора (LLM может пропустить «card img», edge-кейсы).
-        out.customers = filterCustomerCandidates(merged).slice(0, 30);
-      }
-    }
+  // «Клиенты» теперь = сегмент ЦА (кого обслуживает компания), не список брендов.
+  // Источник только LLM (см. clientSegmentExtractor) — старый эвристический
+  // извлекатель списка брендов удалён, он давал плохой результат.
+  if (extractors.includes('client_segment')) {
+    out.client_segment = await extractClientSegment(
+      main.html,
+      subpageHtml.about ?? null,
+      casesHtml,
+    );
   }
   if (extractors.includes('cases_count')) {
-    out.cases_count = extractCasesCount(casesHtml ?? '');
-    if (out.cases_count === 0 && !casesHtml) out.cases_count = extractCasesCount(main.html);
+    // Точный счёт по карточкам/числу — бесплатно. Если 0, кейсы всё же могут
+    // быть в нестандартной вёрстке → спец. LLM по полному тексту /cases даёт
+    // число или оценку «N+» (см. casesCountLlmExtractor). Так ячейка не пустеет
+    // при наличии кейсов (раньше расходилось с «Отрасли в кейсах»).
+    let casesCount: number | string = extractCasesCount(casesHtml ?? '');
+    if (casesCount === 0 && !casesHtml) casesCount = extractCasesCount(main.html);
+    if (casesCount === 0 && !signal?.aborted) {
+      const llm = await llmCountCases(casesHtml ?? main.html, main.html);
+      if (llm !== null) casesCount = llm;
+    }
+    out.cases_count = casesCount;
   }
   if (extractors.includes('case_industries')) {
     out.case_industries = extractCaseIndustries(casesHtml ?? '');
@@ -450,13 +438,21 @@ export async function processSignalsForUrl(
       }
     }
 
-    if (extractors.includes('vacancies_count')) out.vacancies_count = hiring.vacancies_count;
-    if (extractors.includes('hiring_roles')) {
-      // New shape: array of top-5 concrete profession names. See
-      // HiringResult docstring for the rationale behind dropping the old
-      // 5-bool-categories representation.
-      out.hiring_roles = hiring.professions;
+    // LLM-добор по полному тексту /careers, когда эвристика не нашла вакансии
+    // и/или профессии (нестандартная вёрстка, напр. moslift.ru/jobs/). Один
+    // вызов закрывает оба столбца. См. careersLlmExtractor.
+    let vacancies: number | string = hiring.vacancies_count;
+    let professions = hiring.professions;
+    if ((vacancies === 0 || professions.length === 0) && !signal?.aborted) {
+      const llm = await llmExtractHiring(careersHtml ?? main.html, main.html);
+      if (llm) {
+        if (vacancies === 0 && llm.vacancies !== null) vacancies = llm.vacancies;
+        if (professions.length === 0 && llm.professions.length > 0) professions = llm.professions;
+      }
     }
+
+    if (extractors.includes('vacancies_count')) out.vacancies_count = vacancies;
+    if (extractors.includes('hiring_roles')) out.hiring_roles = professions;
   }
 
   // Single-extractor subpages (with main page fallback)
@@ -621,13 +617,10 @@ export async function processSignalsForUrl(
   }
 
   // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.
-  type LlmField = 'pricing_model' | 'pricing_min' | 'customers' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'cases_count' | 'integrations' | 'hiring_roles';
+  type LlmField = 'pricing_model' | 'pricing_min' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'integrations';
   const llmNeeded = new Set<LlmField>();
   if (extractors.includes('pricing_model') && (out.pricing_model === 'unknown' || !out.pricing_model)) llmNeeded.add('pricing_model');
   if (extractors.includes('pricing_min') && !out.pricing_min) llmNeeded.add('pricing_min');
-  // customers вынесены в специализированный llmExtractCustomers выше —
-  // там structured input и шире окно контекста, общий extractor не догоняет
-  // (см. блок «if (extractors.includes('customers'))»).
   if (extractors.includes('founded_year') && !out.founded_year) llmNeeded.add('founded_year');
   if (extractors.includes('team_size') && !out.team_size) llmNeeded.add('team_size');
   // free_trial: ask the LLM whenever the heuristic didn't confirm (undefined).
@@ -635,20 +628,13 @@ export async function processSignalsForUrl(
   // of the misleading DASH when the LLM is confident there's no trial.
   if (extractors.includes('free_trial') && out.free_trial === undefined) llmNeeded.add('free_trial');
   if (extractors.includes('case_industries') && (!out.case_industries || out.case_industries.length === 0)) llmNeeded.add('case_industries');
-  if (extractors.includes('cases_count') && !out.cases_count) llmNeeded.add('cases_count');
   if (extractors.includes('integrations') && (!out.integrations || out.integrations.length === 0)) llmNeeded.add('integrations');
-  // hiring_roles is now a string[] of professions (see HiringResult). Ask
-  // the LLM for help when the heuristic returned an empty list — usually
-  // means the careers page used a layout / class names we don't recognise,
-  // or the company has no /careers and the LLM has to read /about for hints.
-  if (extractors.includes('hiring_roles') && (!Array.isArray(out.hiring_roles) || out.hiring_roles.length === 0)) llmNeeded.add('hiring_roles');
 
   if (llmNeeded.size > 0 && !signal?.aborted) {
     try {
       const llmResult = await llmExtractFields(main.html, subpageHtml, llmNeeded);
       if (llmResult.pricing_model && llmNeeded.has('pricing_model')) out.pricing_model = llmResult.pricing_model;
       if (llmResult.pricing_min && llmNeeded.has('pricing_min')) out.pricing_min = llmResult.pricing_min;
-      if (llmResult.customers && llmResult.customers.length > 0 && llmNeeded.has('customers')) out.customers = llmResult.customers;
       if (llmResult.founded_year && llmNeeded.has('founded_year')) out.founded_year = llmResult.founded_year;
       if (llmResult.team_size && llmNeeded.has('team_size')) out.team_size = llmResult.team_size;
       // Tri-state merge: heuristic only sets true. Now accept either side of
@@ -660,9 +646,7 @@ export async function processSignalsForUrl(
         else if (llmResult.free_trial === false) out.free_trial = false;
       }
       if (llmResult.case_industries && llmResult.case_industries.length > 0 && llmNeeded.has('case_industries')) out.case_industries = llmResult.case_industries;
-      if (typeof llmResult.cases_count === 'number' && llmResult.cases_count > 0 && llmNeeded.has('cases_count')) out.cases_count = llmResult.cases_count;
       if (llmResult.integrations && llmResult.integrations.length > 0 && llmNeeded.has('integrations')) out.integrations = llmResult.integrations;
-      if (Array.isArray(llmResult.hiring_roles) && llmResult.hiring_roles.length > 0 && llmNeeded.has('hiring_roles')) out.hiring_roles = llmResult.hiring_roles;
     } catch {
       // LLM fallback is best-effort — never break the pipeline.
     }
