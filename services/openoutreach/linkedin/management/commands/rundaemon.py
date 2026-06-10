@@ -1,94 +1,64 @@
+"""
+Portal-native rundaemon: запускает multi-tenant async main loop.
+
+Заменяет upstream single-tenant flow (onboarding wizard → SiteConfig.load →
+single browser session). Никакого interactive onboarding нет — credentials
+прилетают per-user из li2_settings, daemon стартует независимо от того, есть
+ли хоть один активный аккаунт (просто будет сидеть в poll loop пока кто-то
+не нажмёт «Старт» в UI).
+
+migrate перед запуском — для upstream'овских apps (auth, contenttypes, sites,
+linkedin, crm, chat). На li2_*-таблицы НЕ влияет (managed=False, схема
+держится Portal'овской миграцией). На пустой БД (тесты, dev) — создаёт всё
+нужное; в проде — no-op (всё уже мигрировано).
+"""
+from __future__ import annotations
+
 import logging
-import sys
 
 from django.core.management import call_command
 from django.core.management.base import BaseCommand
 
-logger = logging.getLogger(__name__)
-
 
 class Command(BaseCommand):
-    help = "Run the OpenOutreach daemon (onboard, validate, start task queue)."
+    help = 'Run the Portal-native OpenOutreach daemon (multi-tenant async main loop).'
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--skip-migrate',
+            action='store_true',
+            help='Skip the migrate step (useful for tests or in containers, где migrate уже прошёл).',
+        )
 
     def handle(self, *args, **options):
-        self._configure_logging(verbose=options["verbosity"] >= 2)
-        self._ensure_db()
-        self._ensure_onboarded()
-        session = self._create_session()
-        self._ensure_newsletter(session)
+        self._configure_logging(verbose=options['verbosity'] >= 2)
 
-        from linkedin.daemon import run_daemon
-        run_daemon(session)
+        if not options['skip_migrate']:
+            try:
+                call_command('migrate', '--no-input')
+            except Exception as e:
+                # Если migrate упал из-за уже существующих таблиц или
+                # отсутствия миграций — это окей для li2_*-only режима.
+                # Логируем, продолжаем.
+                self.stderr.write(self.style.WARNING(
+                    f'migrate skipped/failed: {e}. Continuing (this is OK if только li2_* нужен).',
+                ))
 
-    # -- Steps ---------------------------------------------------------------
+        from linkedin.portal_daemon.main_loop import run_forever
+        run_forever()
 
-    def _configure_logging(self, verbose: bool = False):
-        from linkedin.logging import configure_logging, print_banner
-
-        level = logging.DEBUG if verbose else logging.INFO
-        configure_logging(level=level)
-        print_banner()
-
-    def _ensure_db(self):
-        call_command("migrate", "--no-input")
-
-        from linkedin.management.setup_crm import setup_crm
-        setup_crm()
-
-    def _ensure_onboarded(self):
-        from linkedin.onboarding import apply, collect_from_wizard, missing_keys
-
-        if not missing_keys():
-            return
-
-        if sys.stdin.isatty():
-            apply(collect_from_wizard())
-        else:
-            missing = missing_keys()
-            self.stderr.write(
-                f"Onboarding incomplete and no TTY available.\n"
-                f"Missing: {', '.join(sorted(missing))}\n"
-                f"Run with an interactive terminal to complete onboarding."
+    def _configure_logging(self, verbose: bool = False) -> None:
+        # Используем upstream'овский configure_logging если есть, иначе basic.
+        try:
+            from linkedin.logging import configure_logging, print_banner
+            level = logging.DEBUG if verbose else logging.INFO
+            configure_logging(level=level)
+            try:
+                print_banner()
+            except Exception:
+                pass
+        except ImportError:
+            logging.basicConfig(
+                level=logging.DEBUG if verbose else logging.INFO,
+                format='%(asctime)s %(levelname)s %(name)s: %(message)s',
             )
-            sys.exit(1)
-
-    def _create_session(self):
-        from linkedin.browser.registry import get_first_active_profile, get_or_create_session
-        from linkedin.models import SiteConfig
-
-        if not SiteConfig.load().llm_api_key:
-            logger.error("LLM_API_KEY is required. Set it in Site Configuration (Django Admin).")
-            sys.exit(1)
-
-        profile = get_first_active_profile()
-        if profile is None:
-            logger.error("No active LinkedIn profiles found.")
-            sys.exit(1)
-
-        session = get_or_create_session(profile)
-
-        if not session.campaigns:
-            logger.error("No campaigns found for this user.")
-            sys.exit(1)
-        campaign = next(
-            (c for c in session.campaigns if not c.is_freemium), None,
-        ) or session.campaigns[0]
-        session.campaign = campaign
-
-        return session
-
-    def _ensure_newsletter(self, session):
-        if session.linkedin_profile.newsletter_processed:
-            return
-
-        from linkedin.api.newsletter import ensure_newsletter_subscription
-        from linkedin.setup.gdpr import apply_gdpr_newsletter_override
-        from linkedin_cli.url_utils import public_id_to_url
-
-        profile = session.self_profile
-        country_code = profile.get("country_code")
-        apply_gdpr_newsletter_override(session, country_code)
-        linkedin_url = public_id_to_url(profile["public_identifier"])
-        ensure_newsletter_subscription(session, linkedin_url=linkedin_url)
-        session.linkedin_profile.newsletter_processed = True
-        session.linkedin_profile.save(update_fields=["newsletter_processed"])

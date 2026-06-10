@@ -1,11 +1,8 @@
 # linkedin/urls.py
-from django.conf import settings
-from django.conf.urls.static import static
-from django.contrib import admin
-from django.urls import path
+#
+# Portal-native fork: Django Admin отключён (Portal UI достаточен).
+# Этот процесс вообще не сервит HTTP — `manage.py rundaemon` крутит async
+# main loop. urls.py остаётся файлом только потому, что Django требует
+# ROOT_URLCONF для bootstrap'a; реальных endpoint'ов нет.
 
-urlpatterns = [
-    path("admin/", admin.site.urls),
-]
-
-urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+urlpatterns: list = []
