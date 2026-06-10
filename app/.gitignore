@@ -44,3 +44,6 @@ next-env.d.ts
 # testing
 coverage
 .nyc_output
+
+# generated client reports (scripts/client-custom-report.mjs)
+/reports/
