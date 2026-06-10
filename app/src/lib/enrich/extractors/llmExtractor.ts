@@ -30,7 +30,7 @@ export interface LlmFields {
   case_industries?: string[];
   cases_count?: number;
   integrations?: string[];
-  hiring_roles?: { marketing: boolean; engineering: boolean; sales: boolean; design: boolean; product: boolean };
+  hiring_roles?: string[];
 }
 
 const SYSTEM_PROMPT = `Ты — структурированный экстрактор данных с веб-сайтов. Тебе даётся текст страницы. Извлеки ТОЛЬКО то, что явно указано на странице. Не додумывай.
@@ -46,7 +46,7 @@ const SYSTEM_PROMPT = `Ты — структурированный экстра�
   "case_industries": ["отрасль1", "отрасль2"] или [],
   "cases_count": число или null,
   "integrations": ["сервис1", "сервис2"] или [],
-  "hiring_roles": {"marketing": bool, "engineering": bool, "sales": bool, "design": bool, "product": bool} или null
+  "hiring_roles": ["профессия1", "профессия2", ...] (до 5) или []
 }
 
 Правила для pricing_model:
@@ -65,7 +65,7 @@ const SYSTEM_PROMPT = `Ты — структурированный экстра�
 Правила для team_size: размер команды. Только если явно указан.
 Правила для free_trial: возвращай true, если у компании есть ЛЮБОЙ способ бесплатно попробовать её услуги или продукт — пробный период подписки, бесплатный тариф/план, бесплатная демо-версия, бесплатная консультация / аудит / диагностика / разбор, первый бесплатный урок / занятие / встреча / стратегсессия, пилотный или тестовый проект. Это касается и SaaS, и агентств/консалтинга: «бесплатный аудит проекта» или «первая консультация бесплатно» = true. Если компания берёт деньги за всё с первого шага — false. Если непонятно — null.
 Правила для case_industries: отрасли из кейсов/портфолио. Выбирай из списка: Ритейл и e-commerce, Финансы и банки, Промышленность, Медицина и фарма, Образование, Логистика и транспорт, HoReCa, Госсектор, Телеком, Строительство и недвижимость, Энергетика, Сельское хозяйство и АПК, Автомобильный, IT и SaaS, Маркетинг и реклама.
-Правила для hiring_roles: есть ли вакансии в marketing (маркетинг/SMM/SEO/контент), engineering (разработка/DevOps/QA), sales (продажи/аккаунты/BDR), design (дизайн/UX/UI/графика), product (продакт-менеджер/PO/владелец продукта).`;
+Правила для hiring_roles: список до 5 КОНКРЕТНЫХ профессий, которых компания нанимает (из текста вакансий / careers / about). Имена существительные во множественном числе, на русском, по 1-3 слова. Примеры: «Разработчики», «Продактмены», «Лифтёры», «Электромонтажники», «Бариста», «Менеджеры по продажам», «Слесари», «Диспетчеры», «Главный бухгалтер». НЕ возвращай общие категории типа «engineering / sales» — нужны живые названия профессий, чтобы их можно было вставить в outreach-письмо («вижу, что вы нанимаете монтажников и слесарей»). Если вакансий не нашёл — пустой список [].`;
 
 export async function llmExtractFields(
   mainHtml: string,
@@ -180,15 +180,14 @@ export async function llmExtractFields(
         .slice(0, 20);
     }
 
-    if (needed.has('hiring_roles') && typeof parsed.hiring_roles === 'object' && parsed.hiring_roles !== null) {
-      const hr = parsed.hiring_roles as Record<string, unknown>;
-      result.hiring_roles = {
-        marketing: hr.marketing === true,
-        engineering: hr.engineering === true,
-        sales: hr.sales === true,
-        design: hr.design === true,
-        product: hr.product === true,
-      };
+    // hiring_roles is now a string[] of profession names. See HiringResult
+    // for the rationale. Reject legacy object shape (from old prompt cache).
+    if (needed.has('hiring_roles') && Array.isArray(parsed.hiring_roles)) {
+      const cleaned = parsed.hiring_roles
+        .filter((p): p is string => typeof p === 'string' && p.trim().length >= 3 && p.trim().length <= 60)
+        .map((p) => p.trim())
+        .slice(0, 5);
+      if (cleaned.length > 0) result.hiring_roles = cleaned;
     }
 
     return result;

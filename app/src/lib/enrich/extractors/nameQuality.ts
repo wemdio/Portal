@@ -62,6 +62,24 @@ const NAV_EXACT = new Set<string>([
   'clients', 'our clients', 'customers', 'our customers', 'partners', 'trusted by',
   // CTA / legal boilerplate that appears after client logos
   'send', 'отправить', 'подробнее', 'узнать больше', 'все клиенты', 'all clients',
+  // ─── Industrial-sector noise (МОСЛИФТ, БГЭМ, КАСКАД-ЭНЕРГО feedback 09.06)
+  //
+  // Contact-form buttons that sit RIGHT NEXT to logos in modal popups on the
+  // promka sites — they leak into customers when the form is inside a class
+  // we treat as a client container.
+  'закрыть', 'отмена', 'прикрепить файл', 'прикрепить', 'отправить файл',
+  'выбрать файл', 'выберите файл', 'обзор', 'browse', 'cancel', 'close',
+  // Carousel/slider navigation labels — Tilda/Bitrix sites carry these as
+  // alt text on the prev/next buttons, which then count as a "logo" in the
+  // logo wall.
+  'previous slide', 'next slide', 'previous', 'next', 'предыдущий', 'следующий',
+  'предыдущий слайд', 'следующий слайд',
+  // Section headings observed leaking into customers on industrial sites
+  // — they sit inside a `<div class="news">` container that other selectors
+  // ALSO match as a customers wall.
+  'актуальные новости', 'последние новости', 'вниманию акционеров',
+  'для акционеров', 'для инвесторов', 'для прессы', 'архив новостей',
+  'все события', 'наши достижения', 'события компании',
 ]);
 
 export function isNavOrCtaText(s: string): boolean {
@@ -323,6 +341,10 @@ const UI_FRAGMENT_PATTERNS: RegExp[] = [
   // "<colour-or-state> <single-word>" without contextual noun:
   // "white logo", "black icon" — CSS variants of generic icons.
   /^(?:white|black|gray|grey|dark|light|colored|color|new|old|big|small|main|alt)\s+(?:logo|icon|img|image|button|btn|arrow|chevron|line|dot|circle|square|bar)$/i,
+  // RU/EN slide/page numbering: "Слайд 3", "Slide 12", "Страница 2".
+  // Industrial sites lean on plain Tilda carousels where these are alt-texts
+  // on the dots and arrows.
+  /^(?:слайд|slide|страница|page|пункт|item|шаг|step)\s+\d{1,3}$/i,
 ];
 
 /**
