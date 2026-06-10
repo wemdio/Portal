@@ -60,8 +60,15 @@ pytest -k test_name                     # один тест
   - `account_worker.py` — per-account event loop, ephemeral Chromium
   - `browser_session.py` — Playwright context + Postgres storage_state
   - `executor.py` — task.type → handler с working_hours check
-  - `handlers.py` — **STUB'ы** на момент 2026-06-10. Real Voyager/LLM impl —
-    следующая итерация (см. inline TODO-комменты в файле).
+  - `handlers.py` — реальные действия:
+    - `handle_connect`: login → discover seed URLs → create Lead+Deal →
+      send_invite → flip Deal state
+    - `handle_check_pending`: scrape sent-invitations page → flip
+      accepted Deals на `connected`
+    - `handle_follow_up`: LLM-generated short DM → send → record ChatMessage
+  - `li_actions.py` — Playwright primitives (login, discover, invite,
+    message, list-pending) с fallback'ами на A/B варианты UI
+  - `llm.py` — thin OpenRouter httpx-клиент, render_prompt помощник
   - `scheduler.py` — minimal Poisson slot planner для поддержания queue
   - `recovery.py` — reset_stale_tasks (running 5+ min без heartbeat → pending)
   - `working_hours.py` — per-(account × campaign) check с tz_offset
@@ -87,19 +94,55 @@ pytest -k test_name                     # один тест
 - Schema migration (Portal Supabase)
 - Portal API surface (start/stop/leads/captcha-resume)
 - li2 Django app с моделями
-- portal_daemon scaffolding: main_loop, AccountWorker, browser_session,
-  executor, scheduler, recovery, working_hours, exceptions
+- portal_daemon: main_loop + AccountWorker + browser_session + executor +
+  scheduler (с PortalSettings limits) + recovery + working_hours + exceptions
+- **Реальные handler'ы**: login flow, discover seed URLs, send_invite
+  (Connect button с fallbacks), check_pending (sent-invitations scrape),
+  follow_up (LLM via OpenRouter)
 - Dockerfile + docker-compose.prod.yml + ресурсы
-- VNC stack (xvfb + x11vnc + noVNC через upstream Dockerfile)
+- VNC stack (xvfb + x11vnc + noVNC) внутри контейнера на порту 6080
+- CI/CD: semaphore.yml билдит portal-openoutreach, scheduled-deploy.yml
+  рестартит сервис
 
-⏳ **TODO (отдельный spec):**
-- Реальные handler'ы (`portal_daemon/handlers.py`): связь с
-  `linkedin/api/voyager`, `linkedin/agents/qualify_lead`,
-  `linkedin/agents/follow_up_agent`. Сейчас stub'ы.
-- nginx config для `/openoutreach-vnc/` с basic-auth
+⏳ **TODO (после deploy + smoke на dogfood-аккаунте):**
+- **nginx-proxy на хосте** для `/openoutreach-vnc/` → 127.0.0.1:6080 с
+  basic-auth (см. секцию "VNC access" ниже)
+- **PortalSettings**: пользователь должен зайти в UI и заполнить email/
+  password/proxy_url + поставить `legal_accepted=true`
 - Telegram-alert на `status='disconnected'`/`needs_captcha`
 - Integration tests с testcontainers Postgres
-- Реальный smoke test на dogfood-аккаунте
+- Полировка LinkedIn-селекторов после первого реального прогона (UI
+  меняется, fallback цепочки нужно подстраивать по факту)
+
+## VNC access (для прохождения CAPTCHA)
+
+Контейнер expose'ит noVNC на 6080 внутри сети `portal-network`. Чтобы
+оператор мог открыть VNC из браузера, нужно добавить nginx-проксю на
+хосте `139.60.162.12`. Снippет в `/etc/nginx/sites-available/polza-portal`:
+
+```nginx
+# Inside the polza-portal.ru server block:
+location /openoutreach-vnc/ {
+    # basic-auth: створяй .htpasswd через htpasswd -cb /etc/nginx/.openoutreach-vnc <user> <pw>
+    auth_basic "OpenOutreach VNC";
+    auth_basic_user_file /etc/nginx/.openoutreach-vnc;
+
+    # noVNC внутри контейнера сидит на :6080. portal-openoutreach в
+    # portal-network → доступен по docker bridge IP, но проще
+    # publish:127.0.0.1:6080:6080 в docker-compose.prod.yml (добавь
+    # `ports: ['127.0.0.1:6080:6080']` к openoutreach сервису).
+    proxy_pass http://127.0.0.1:6080/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 86400;
+}
+```
+
+`sudo systemctl reload nginx`. Затем `https://polza-portal.ru/openoutreach-vnc/`
+→ basic-auth → noVNC web client с remote-desktop'ом контейнера.
 
 ## Connecting to local dev
 

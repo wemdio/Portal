@@ -22,16 +22,17 @@ from uuid import UUID
 from asgiref.sync import sync_to_async
 from django.db import close_old_connections
 
-from li2.models import Campaign, Task
+from li2.models import Campaign, PortalSettings, Task
 
 logger = logging.getLogger('li2.scheduler')
 
-# Сколько task'ов планировать на 24h окно для одной (account × campaign × type)
-# пары. Реальные числа берутся из PortalSettings.{connect,follow_up}_daily_limit
-# когда дойдём до real impl; пока — sane defaults для smoke-test.
-DEFAULT_TASKS_PER_TYPE_PER_DAY = {
-    'connect': 5,
-    'follow_up': 3,
+# Per-type defaults на случай отсутствующих PortalSettings (новый юзер,
+# settings ещё не сохранён). check_pending не зависит от лимитов LinkedIn'а —
+# это read-only check, всегда фикс. connect/follow_up — реальные ratе-
+# limited операции, должны идти из PortalSettings.
+FALLBACK_TASKS_PER_DAY = {
+    'connect': 10,
+    'follow_up': 15,
     'check_pending': 8,
 }
 
@@ -72,25 +73,41 @@ def _campaigns_for_account(user_id: UUID) -> list[Campaign]:
     return list(Campaign.objects.filter(user_id=user_id, status='running'))
 
 
+@sync_to_async
+def _per_type_limits(user_id: UUID) -> dict[str, int]:
+    """Берём дневные лимиты из PortalSettings (UI-сторона), fallback на defaults."""
+    s = PortalSettings.objects.filter(user_id=user_id).first()
+    if not s:
+        return dict(FALLBACK_TASKS_PER_DAY)
+    return {
+        'connect': max(1, int(s.connect_daily_limit or FALLBACK_TASKS_PER_DAY['connect'])),
+        'follow_up': max(1, int(s.follow_up_daily_limit or FALLBACK_TASKS_PER_DAY['follow_up'])),
+        'check_pending': FALLBACK_TASKS_PER_DAY['check_pending'],
+    }
+
+
 async def reconcile(*, account_id: UUID, user_id: UUID) -> None:
     """
     Если у running-кампании пусто в pending — наполняем queue Poisson'ом.
 
     Идемпотентно: запускается на каждой итерации AccountWorker'а; ничего не
-    делает, если в queue уже что-то есть.
+    делает, если в queue уже что-то есть для данного task_type.
+
+    N (сколько task'ов) берётся из PortalSettings.{connect,follow_up}_daily_limit.
     """
     campaigns = await _campaigns_for_account(user_id)
     if not campaigns:
         return
 
+    limits = await _per_type_limits(user_id)
     now = datetime.now(timezone.utc)
     rows: list[dict] = []
     for camp in campaigns:
-        for task_type, default_n in DEFAULT_TASKS_PER_TYPE_PER_DAY.items():
+        for task_type, n_per_day in limits.items():
             existing = await _pending_count(account_id, camp.id, task_type)
             if existing > 0:
                 continue
-            slot_times = _poisson_slot_times(now, default_n)
+            slot_times = _poisson_slot_times(now, n_per_day)
             for t in slot_times:
                 rows.append({
                     'user_id': user_id,
