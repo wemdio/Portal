@@ -78,4 +78,39 @@ describe('extractTeamSize', () => {
   it('extracts the lower bound from a LinkedIn-style "Company size: 10—50"', () => {
     expect(extractTeamSize(`<p>Размер компании: 50—200</p>`)).toBe(50);
   });
+
+  // Industrial-sector phrasings (МОСЛИФТ / КАСКАД-ЭНЕРГО feedback 09.06).
+  // Promka sites lean on "штат / численность работников / коллектив насчитывает"
+  // instead of "team / специалисты" — the LinkedIn-shaped patterns didn't fire.
+  it('extracts team_size from "штат компании / штат составляет / штат насчитывает"', () => {
+    expect(extractTeamSize(`<p>Штат компании: 250 человек</p>`)).toBe(250);
+    expect(extractTeamSize(`<p>Штат компании 180</p>`)).toBe(180);
+    expect(extractTeamSize(`<p>Штат составляет более 100 работников</p>`)).toBe(100);
+    expect(extractTeamSize(`<p>Штат насчитывает 75 сотрудников</p>`)).toBe(75);
+  });
+
+  it('extracts team_size from "численность работников / сотрудников / персонала: N"', () => {
+    expect(extractTeamSize(`<p>Численность работников: 320</p>`)).toBe(320);
+    expect(extractTeamSize(`<p>Численность сотрудников более 150</p>`)).toBe(150);
+    expect(extractTeamSize(`<p>Численность персонала — 90</p>`)).toBe(90);
+  });
+
+  it('extracts team_size from "коллектив насчитывает / включает / объединяет N"', () => {
+    expect(extractTeamSize(`<p>Коллектив насчитывает свыше 200 человек</p>`)).toBe(200);
+    expect(extractTeamSize(`<p>Коллектив компании объединяет 65 специалистов</p>`)).toBe(65);
+    expect(extractTeamSize(`<p>Коллектив состоит из 40 экспертов</p>`)).toBe(40);
+  });
+
+  it('extracts team_size from "около N специалистов / сотрудников / человек"', () => {
+    expect(extractTeamSize(`<p>Около 120 специалистов работают в компании</p>`)).toBe(120);
+    expect(extractTeamSize(`<p>Около 80 сотрудников</p>`)).toBe(80);
+  });
+
+  it('extracts team_size from blue-collar professions (промка фидбэк 09.06)', () => {
+    // МОСЛИФТ-style: компания пишет "300 рабочих" а не "300 сотрудников"
+    expect(extractTeamSize(`<p>В штате 300 рабочих</p>`)).toBe(300);
+    expect(extractTeamSize(`<p>50 монтажников и слесарей</p>`)).toBe(50);
+    expect(extractTeamSize(`<p>Свыше 100 электриков</p>`)).toBe(100);
+    expect(extractTeamSize(`<p>Более 200 человек работают на предприятии</p>`)).toBe(200);
+  });
 });
