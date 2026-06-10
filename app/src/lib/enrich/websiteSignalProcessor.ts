@@ -13,6 +13,7 @@ import { nameListLooksReal } from '@/lib/enrich/extractors/nameQuality';
 import { extractClientSegment } from '@/lib/enrich/extractors/clientSegmentExtractor';
 import { extractCasesCount } from '@/lib/enrich/extractors/casesCountExtractor';
 import { extractCaseIndustries } from '@/lib/enrich/extractors/caseIndustriesExtractor';
+import { llmCountCases } from '@/lib/enrich/extractors/casesCountLlmExtractor';
 import { detectEnterpriseLogos, detectEnterpriseInHtml } from '@/lib/enrich/extractors/enterpriseLogosDetector';
 import { extractPricingModel } from '@/lib/enrich/extractors/pricingModelExtractor';
 import { extractPricingDetails } from '@/lib/enrich/extractors/pricingDetailExtractor';
@@ -344,8 +345,17 @@ export async function processSignalsForUrl(
     );
   }
   if (extractors.includes('cases_count')) {
-    out.cases_count = extractCasesCount(casesHtml ?? '');
-    if (out.cases_count === 0 && !casesHtml) out.cases_count = extractCasesCount(main.html);
+    // Точный счёт по карточкам/числу — бесплатно. Если 0, кейсы всё же могут
+    // быть в нестандартной вёрстке → спец. LLM по полному тексту /cases даёт
+    // число или оценку «N+» (см. casesCountLlmExtractor). Так ячейка не пустеет
+    // при наличии кейсов (раньше расходилось с «Отрасли в кейсах»).
+    let casesCount: number | string = extractCasesCount(casesHtml ?? '');
+    if (casesCount === 0 && !casesHtml) casesCount = extractCasesCount(main.html);
+    if (casesCount === 0 && !signal?.aborted) {
+      const llm = await llmCountCases(casesHtml ?? main.html, main.html);
+      if (llm !== null) casesCount = llm;
+    }
+    out.cases_count = casesCount;
   }
   if (extractors.includes('case_industries')) {
     out.case_industries = extractCaseIndustries(casesHtml ?? '');
@@ -598,7 +608,7 @@ export async function processSignalsForUrl(
   }
 
   // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.
-  type LlmField = 'pricing_model' | 'pricing_min' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'cases_count' | 'integrations' | 'hiring_roles';
+  type LlmField = 'pricing_model' | 'pricing_min' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'integrations' | 'hiring_roles';
   const llmNeeded = new Set<LlmField>();
   if (extractors.includes('pricing_model') && (out.pricing_model === 'unknown' || !out.pricing_model)) llmNeeded.add('pricing_model');
   if (extractors.includes('pricing_min') && !out.pricing_min) llmNeeded.add('pricing_min');
@@ -609,7 +619,6 @@ export async function processSignalsForUrl(
   // of the misleading DASH when the LLM is confident there's no trial.
   if (extractors.includes('free_trial') && out.free_trial === undefined) llmNeeded.add('free_trial');
   if (extractors.includes('case_industries') && (!out.case_industries || out.case_industries.length === 0)) llmNeeded.add('case_industries');
-  if (extractors.includes('cases_count') && !out.cases_count) llmNeeded.add('cases_count');
   if (extractors.includes('integrations') && (!out.integrations || out.integrations.length === 0)) llmNeeded.add('integrations');
   // hiring_roles is now a string[] of professions (see HiringResult). Ask
   // the LLM for help when the heuristic returned an empty list — usually
@@ -633,7 +642,6 @@ export async function processSignalsForUrl(
         else if (llmResult.free_trial === false) out.free_trial = false;
       }
       if (llmResult.case_industries && llmResult.case_industries.length > 0 && llmNeeded.has('case_industries')) out.case_industries = llmResult.case_industries;
-      if (typeof llmResult.cases_count === 'number' && llmResult.cases_count > 0 && llmNeeded.has('cases_count')) out.cases_count = llmResult.cases_count;
       if (llmResult.integrations && llmResult.integrations.length > 0 && llmNeeded.has('integrations')) out.integrations = llmResult.integrations;
       if (Array.isArray(llmResult.hiring_roles) && llmResult.hiring_roles.length > 0 && llmNeeded.has('hiring_roles')) out.hiring_roles = llmResult.hiring_roles;
     } catch {

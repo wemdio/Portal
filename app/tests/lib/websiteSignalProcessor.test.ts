@@ -11,6 +11,10 @@ jest.mock('@/lib/enrich/extractors/clientSegmentExtractor', () => ({
   extractClientSegment: jest.fn().mockResolvedValue('тест-сегмент'),
 }));
 
+jest.mock('@/lib/enrich/extractors/casesCountLlmExtractor', () => ({
+  llmCountCases: jest.fn().mockResolvedValue('5+'),
+}));
+
 import { processSignalsForUrl } from '@/lib/enrich/websiteSignalProcessor';
 import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websiteParser';
 
@@ -345,6 +349,22 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
     if ('stack' in result) {
       expect(result.client_segment).toBe('тест-сегмент');
       expect(result.cases_count).toBe(2);
+    }
+  });
+
+  it('cases_count: heuristic 0 → uses LLM estimate', async () => {
+    mockUrlResponses({
+      // class="projects" не матчит CASE_SELECTOR, числа в тексте нет →
+      // extractCasesCount = 0 → зовётся llmCountCases (мок → "5+").
+      'example.com/cases': '<div class="projects">Делали проекты для разных компаний и брендов.</div>',
+      'example.com': '<a href="/cases">Кейсы</a>',
+    });
+
+    const result = await processSignalsForUrl('example.com', { extractors: ['cases_count'] });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.cases_count).toBe('5+');
     }
   });
 
