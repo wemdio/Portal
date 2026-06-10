@@ -156,27 +156,23 @@ describe('__internal.isPendingInvoiceStillValid', () => {
 });
 
 describe('__internal.buildDescription', () => {
-  it('uses "Подписка" verb for activate / client_self / others', () => {
+  // Universal description "Подписка на Portal" replaced the old per-reason
+  // / per-tariff string. The tests below pin that contract: tariff, period,
+  // company name and reason are all intentionally ignored — the only thing
+  // that matters is that what the customer sees on the YooKassa form is
+  // stable, short, and brand-consistent.
+  it('returns "Подписка на Portal" regardless of inputs', () => {
     expect(__internal.buildDescription('standard', 'month', 'ООО Ромашка', 'admin_activate')).toBe(
-      'Подписка Стандарт (месяц) — ООО Ромашка',
+      'Подписка на Portal',
     );
     expect(__internal.buildDescription('pro', 'year', 'Acme', 'client_self')).toBe(
-      'Подписка Про (год) — Acme',
+      'Подписка на Portal',
     );
-  });
-
-  it('switches to "Продление подписки" for admin_extend and cron_renew', () => {
-    expect(__internal.buildDescription('standard', 'month', 'ООО', 'admin_extend')).toBe(
-      'Продление подписки Стандарт (месяц) — ООО',
+    expect(__internal.buildDescription('custom', 'half_year', 'Anything', 'cron_renew')).toBe(
+      'Подписка на Portal',
     );
-    expect(__internal.buildDescription('pro', 'half_year', 'Acme', 'cron_renew')).toBe(
-      'Продление подписки Про (полгода) — Acme',
-    );
-  });
-
-  it('defaults to "месяц" when period is null', () => {
-    expect(__internal.buildDescription('standard', null, 'X', 'admin_activate')).toBe(
-      'Подписка Стандарт (месяц) — X',
+    expect(__internal.buildDescription('standard', null, '', 'admin_extend')).toBe(
+      'Подписка на Portal',
     );
   });
 });

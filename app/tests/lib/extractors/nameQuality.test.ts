@@ -102,6 +102,13 @@ const FEATURE_BENEFITS = [
 // Photo / avatar filenames seen on testimonial blocks. Lowercase "<short-name> <status>".
 const PHOTO_FILENAMES = ['mikh fresh2', 'kate fin', 'olya new', 'sasha old', 'misha big'];
 
+// Industrial-sector noise (feedback 09.06): contact-form buttons, carousel
+// nav labels, news-section headings — all leak into Клиенты on Tilda/Bitrix
+// sites for МОСЛИФТ / БГЭМ / КАСКАД-ЭНЕРГО style промка clients.
+const FORM_BUTTONS = ['Закрыть', 'Отмена', 'Прикрепить файл', 'Прикрепить', 'Отправить файл', 'Выбрать файл', 'Browse', 'Cancel', 'Close'];
+const CAROUSEL_NAV = ['Previous slide', 'Next slide', 'Previous', 'Next', 'Предыдущий слайд', 'Следующий слайд', 'Слайд 3', 'Slide 12', 'Страница 2'];
+const NEWS_HEADINGS = ['Актуальные новости', 'Последние новости', 'Вниманию акционеров', 'Для акционеров', 'Для инвесторов', 'Все события', 'Архив новостей', 'События компании'];
+
 // CSS-class fragments leaked into alt attributes, generic UI words, and
 // "X / Y" category labels — all observed in the spreadsheet noise rows.
 const UI_FRAGMENTS = [
@@ -211,6 +218,22 @@ describe('nameQuality predicates', () => {
     for (const p of PHOTO_FILENAMES) expect(isPhotoFilename(p)).toBe(true);
   });
 
+  it('flags industrial-sector contact-form buttons ("Закрыть"/"Отмена"/"Прикрепить файл")', () => {
+    for (const b of FORM_BUTTONS) expect(isNavOrCtaText(b)).toBe(true);
+  });
+
+  it('flags carousel navigation labels ("Previous slide" / "Слайд 3")', () => {
+    for (const n of CAROUSEL_NAV) {
+      // Either NAV_EXACT (exact-match labels) or UI_FRAGMENT (numbered patterns)
+      const ok = isNavOrCtaText(n) || isUiFragment(n);
+      expect(ok).toBe(true);
+    }
+  });
+
+  it('flags news-section headings on industrial sites ("Актуальные новости" / "Вниманию акционеров")', () => {
+    for (const h of NEWS_HEADINGS) expect(isNavOrCtaText(h)).toBe(true);
+  });
+
   it('does NOT flag lowercase real brand names ("amocrm", "salesforce", "slack") as photo filenames', () => {
     // Critical: a single-word lowercase brand must not trip the photo filter.
     const realLowercaseBrands = ['amocrm', 'salesforce', 'slack', 'stripe', 'shopify', 'mindbox', 'roistat'];
@@ -253,6 +276,7 @@ describe('nameQuality predicates', () => {
       ...INDUSTRIES, ...PERSON_NAMES, ...HEX_TOKEN_JUNK,
       ...PLACES, ...ADDRESSES, ...FEATURE_PHRASES, ...UI_FRAGMENTS,
       ...RANKING_PREFIXES, ...TABLE_HEADERS, ...FEATURE_BENEFITS, ...PHOTO_FILENAMES,
+      ...FORM_BUTTONS, ...CAROUSEL_NAV, ...NEWS_HEADINGS,
     ]) {
       expect(isPlausibleName(junk)).toBe(false);
     }

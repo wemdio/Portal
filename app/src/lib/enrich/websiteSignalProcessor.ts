@@ -21,6 +21,8 @@ import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtract
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
 import { extractSocialMedia } from '@/lib/enrich/extractors/socialMediaExtractor';
+import { extractSocialPosts } from '@/lib/enrich/extractors/socialPostsExtractor';
+import { detectEventSignals } from '@/lib/enrich/extractors/eventDetector';
 import {
   discoverBlogOrSocialUrls,
   extractBlogLastPost,
@@ -28,6 +30,20 @@ import {
   findLatestPostUrl,
 } from '@/lib/enrich/extractors/blogActivityExtractor';
 import { llmExtractFields } from '@/lib/enrich/extractors/llmExtractor';
+
+// Convenience predicate — any of the 4 event-signal pairs requested. Used to
+// gate the LLM event-detector (it costs ~$0.01/URL and must not run for
+// presets that didn't enable any event_* column).
+const EVENT_KEYS = new Set<ExtractorKey>([
+  'event_opening', 'event_opening_summary',
+  'event_redesign', 'event_redesign_summary',
+  'event_renovation', 'event_renovation_summary',
+  'event_geo', 'event_geo_summary',
+]);
+
+function anyEventRequested(extractors: ExtractorKey[]): boolean {
+  return extractors.some((k) => EVENT_KEYS.has(k));
+}
 
 const DEFAULT_TIMEOUT_MS = 12_000;
 const PLAYWRIGHT_TIMEOUT_MS = 18_000;
@@ -436,13 +452,10 @@ export async function processSignalsForUrl(
 
     if (extractors.includes('vacancies_count')) out.vacancies_count = hiring.vacancies_count;
     if (extractors.includes('hiring_roles')) {
-      out.hiring_roles = {
-        marketing: hiring.has_marketing,
-        engineering: hiring.has_engineering,
-        sales: hiring.has_sales,
-        design: hiring.has_design,
-        product: hiring.has_product,
-      };
+      // New shape: array of top-5 concrete profession names. See
+      // HiringResult docstring for the rationale behind dropping the old
+      // 5-bool-categories representation.
+      out.hiring_roles = hiring.professions;
     }
   }
 
@@ -542,6 +555,71 @@ export async function processSignalsForUrl(
     out.blog_last_post = post;
   }
 
+  // ─── Event signals (HoReCa-style) ────────────────────────────────────────
+  //
+  // Pipeline:
+  //   1. Ensure we have a list of social-media URLs (reuse the one we already
+  //      computed if social_media was in the extractors set, otherwise compute
+  //      it locally without persisting — events need the URLs, the operator
+  //      didn't ask for the column).
+  //   2. Fetch last ~10 posts from each supported social network in parallel
+  //      via extractSocialPosts.
+  //   3. Call detectEventSignals with posts + blog_last_post (if available)
+  //      + about-page text (if available). It returns the 4 event-signal
+  //      booleans + paired summaries.
+  //   4. Copy result fields into out{}. detectEventSignals already drops
+  //      summaries for false signals, so the cell rendering stays clean.
+  //
+  // Guard: skip the entire block when no event_* key was requested — the
+  // LLM call costs money and must not fire on basic/outreach presets.
+  if (anyEventRequested(extractors) && !signal?.aborted) {
+    const socialUrlsForEvents =
+      out.social_media
+      ?? extractSocialMedia([
+        main.html,
+        subpageHtml.about ?? '',
+      ].join('\n'));
+
+    const posts = socialUrlsForEvents.length > 0
+      ? await extractSocialPosts(socialUrlsForEvents, {
+          timeout: subpageTimeout,
+          maxPostsPerNetwork: 10,
+          signal,
+        })
+      : [];
+
+    // Cheap inline tag-strip — eventDetector caps the total context at 12 KB,
+    // so we just collapse tags & whitespace and slice. No need for cheerio here.
+    // Cheap inline tag-strip — eventDetector caps the total context at 12 KB,
+    // so we just collapse tags & whitespace and slice. No need for cheerio here.
+    const aboutText = subpageHtml.about
+      ? subpageHtml.about
+          .replace(/<(script|style|noscript|template)[\s\S]*?<\/\1>/gi, ' ')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 4000)
+      : undefined;
+
+    const events = await detectEventSignals({
+      socialPosts: posts,
+      blogText: out.blog_last_post,
+      aboutText,
+    });
+
+    // Only assign fields the user actually requested — keeps the JSON in
+    // result_text minimal and avoids accidentally writing columns the
+    // operator didn't enable.
+    if (extractors.includes('event_opening')) out.event_opening = events.event_opening;
+    if (extractors.includes('event_opening_summary')) out.event_opening_summary = events.event_opening_summary;
+    if (extractors.includes('event_redesign')) out.event_redesign = events.event_redesign;
+    if (extractors.includes('event_redesign_summary')) out.event_redesign_summary = events.event_redesign_summary;
+    if (extractors.includes('event_renovation')) out.event_renovation = events.event_renovation;
+    if (extractors.includes('event_renovation_summary')) out.event_renovation_summary = events.event_renovation_summary;
+    if (extractors.includes('event_geo')) out.event_geo = events.event_geo;
+    if (extractors.includes('event_geo_summary')) out.event_geo_summary = events.event_geo_summary;
+  }
+
   // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.
   type LlmField = 'pricing_model' | 'pricing_min' | 'customers' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'cases_count' | 'integrations' | 'hiring_roles';
   const llmNeeded = new Set<LlmField>();
@@ -559,7 +637,11 @@ export async function processSignalsForUrl(
   if (extractors.includes('case_industries') && (!out.case_industries || out.case_industries.length === 0)) llmNeeded.add('case_industries');
   if (extractors.includes('cases_count') && !out.cases_count) llmNeeded.add('cases_count');
   if (extractors.includes('integrations') && (!out.integrations || out.integrations.length === 0)) llmNeeded.add('integrations');
-  if (extractors.includes('hiring_roles') && out.hiring_roles && !out.hiring_roles.marketing && !out.hiring_roles.engineering && !out.hiring_roles.sales && !out.hiring_roles.design && !out.hiring_roles.product) llmNeeded.add('hiring_roles');
+  // hiring_roles is now a string[] of professions (see HiringResult). Ask
+  // the LLM for help when the heuristic returned an empty list — usually
+  // means the careers page used a layout / class names we don't recognise,
+  // or the company has no /careers and the LLM has to read /about for hints.
+  if (extractors.includes('hiring_roles') && (!Array.isArray(out.hiring_roles) || out.hiring_roles.length === 0)) llmNeeded.add('hiring_roles');
 
   if (llmNeeded.size > 0 && !signal?.aborted) {
     try {
@@ -580,7 +662,7 @@ export async function processSignalsForUrl(
       if (llmResult.case_industries && llmResult.case_industries.length > 0 && llmNeeded.has('case_industries')) out.case_industries = llmResult.case_industries;
       if (typeof llmResult.cases_count === 'number' && llmResult.cases_count > 0 && llmNeeded.has('cases_count')) out.cases_count = llmResult.cases_count;
       if (llmResult.integrations && llmResult.integrations.length > 0 && llmNeeded.has('integrations')) out.integrations = llmResult.integrations;
-      if (llmResult.hiring_roles && llmNeeded.has('hiring_roles')) out.hiring_roles = llmResult.hiring_roles;
+      if (Array.isArray(llmResult.hiring_roles) && llmResult.hiring_roles.length > 0 && llmNeeded.has('hiring_roles')) out.hiring_roles = llmResult.hiring_roles;
     } catch {
       // LLM fallback is best-effort — never break the pipeline.
     }
