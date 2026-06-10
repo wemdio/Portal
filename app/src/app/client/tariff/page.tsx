@@ -55,6 +55,8 @@ type TariffResponse = {
   auto_renew: boolean;
   payment_method_saved: boolean;
   last_renewal_error: string | null;
+  /** Mapped russian text from the last failed YooKassa payment attempt. */
+  last_payment_error: string | null;
   usage: Record<LimitKey, LimitUsage>;
 };
 
@@ -504,8 +506,20 @@ export default function ClientTariffPage() {
                         ) : (
                           <Zap className="h-4 w-4" aria-hidden />
                         )}
-                        {paying ? 'Создаём счёт…' : 'Оплатить подписку'}
+                        {paying ? 'Открываем счёт…' : 'Оплатить подписку'}
                       </button>
+                    )}
+                    {/* Last-attempt error from YooKassa webhook (payment.canceled).
+                        Helps Olga understand WHY her previous click didn't work
+                        without us hiding behind a generic "try again". Cleared
+                        on the next successful payment. */}
+                    {data.last_payment_error && !payError && (
+                      <p
+                        className="ds-mono text-xs text-right max-w-[18rem]"
+                        style={{ color: 'var(--cp-red)' }}
+                      >
+                        Прошлая попытка: {data.last_payment_error}
+                      </p>
                     )}
                     {payError && (
                       <p className="ds-mono text-xs" style={{ color: 'var(--cp-red)' }}>
@@ -603,27 +617,44 @@ export default function ClientTariffPage() {
                   </p>
                 )}
 
-                {(data.payment_method_saved || data.auto_renew) && (
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setUnlinkOpen(true);
-                        setUnlinkError(null);
-                      }}
-                      className="ds-btn-secondary inline-flex items-center justify-center gap-2 px-4 py-2 text-sm w-full sm:w-auto"
-                    >
-                      <Unlink className="h-4 w-4" aria-hidden />
-                      Отключить автопродление
-                    </button>
-                    <p
-                      className="text-xs flex-1"
-                      style={{ color: 'var(--cp-paper-faint)' }}
-                    >
-                      Списания прекратятся. Текущий период сохраняется.
-                    </p>
-                  </div>
-                )}
+                {/* «Отвязать карту» — explicit, always-visible action required
+                    by YooKassa support's compliance protocol for autopayments:
+                    the user must be able to remove the saved card by
+                    themselves at any time. The button is rendered in BOTH
+                    states (card present / card absent) so the entry point
+                    never disappears — without this, the disabled state would
+                    be invisible to the user, and we'd also need real card
+                    data to screenshot the flow for YK's подключение review.
+                    When no card is saved yet, the button is disabled with a
+                    quiet "появится после оплаты" caption next to it. */}
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUnlinkOpen(true);
+                      setUnlinkError(null);
+                    }}
+                    disabled={!data.payment_method_saved}
+                    aria-disabled={!data.payment_method_saved}
+                    title={
+                      data.payment_method_saved
+                        ? 'Удалить сохранённую карту из вашего личного кабинета'
+                        : 'Кнопка станет активной после первой оплаты, когда карта будет сохранена'
+                    }
+                    className="ds-btn-secondary inline-flex items-center justify-center gap-2 px-4 py-2 text-sm w-full sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Unlink className="h-4 w-4" aria-hidden />
+                    Отвязать карту
+                  </button>
+                  <p
+                    className="text-xs flex-1"
+                    style={{ color: 'var(--cp-paper-faint)' }}
+                  >
+                    {data.payment_method_saved
+                      ? 'Карта удалится из нашей системы, автопродление отключится. Оплаченный период сохраняется.'
+                      : 'Карта появится здесь после первой оплаты — там же будет возможность отвязать её одной кнопкой.'}
+                  </p>
+                </div>
               </div>
             </section>
           )}
@@ -709,18 +740,17 @@ export default function ClientTariffPage() {
                 className="text-base font-semibold m-0"
                 style={{ color: 'var(--cp-paper)' }}
               >
-                Отключить автопродление?
+                Отвязать карту?
               </h2>
               <p
                 className="text-xs mt-2 leading-relaxed"
                 style={{ color: 'var(--cp-paper-mute)' }}
               >
-                Мы перестанем автоматически продлевать подписку и уберём сохранённый способ оплаты из настроек этого
-                кабинета. Оплаченный доступ до{' '}
+                Сохранённая карта будет удалена из нашей системы. Автопродление отключится. Оплаченный доступ до{' '}
                 <span style={{ color: 'var(--cp-paper)' }}>
                   {data ? formatDate(data.paid_until) : '—'}
                 </span>{' '}
-                сохраняется.
+                сохраняется — продолжать пользоваться можно до этой даты.
               </p>
               {unlinkError && (
                 <p
@@ -749,7 +779,7 @@ export default function ClientTariffPage() {
                 disabled={unlinking}
                 className="ds-btn-primary flex-1 px-4 py-2 text-sm disabled:opacity-60"
               >
-                {unlinking ? 'Сохраняем…' : 'Отключить'}
+                {unlinking ? 'Отвязываем…' : 'Отвязать карту'}
               </button>
             </div>
           </div>

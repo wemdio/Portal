@@ -271,6 +271,13 @@ export interface YookassaPaymentMethod {
   title?: string;
 }
 
+export interface YookassaCancellationDetails {
+  /** "yandex_checkout" | "payment_network" | "merchant" — who cancelled it */
+  party: string;
+  /** Machine code — fed into mapYookassaErrorRu for client-facing messages */
+  reason: string;
+}
+
 export interface YookassaPayment {
   id: string;
   status: 'pending' | 'waiting_for_capture' | 'succeeded' | 'canceled';
@@ -283,6 +290,8 @@ export interface YookassaPayment {
   invoice_details?: { invoice_id: string } | null;
   /** Present when save_payment_method=true was used — contains the saved method id */
   payment_method?: YookassaPaymentMethod | null;
+  /** Populated when status='canceled' — gives the reason code/party. */
+  cancellation_details?: YookassaCancellationDetails | null;
 }
 
 export interface ChargeRecurringParams {

@@ -295,6 +295,13 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
     expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(1);
   });
 
+  // Note on the 15s timeout (this test + the two below): the customers block
+  // calls llmExtractCustomers as a fallback when heuristic returned < 3 names
+  // (the test fixture only has 1, "Сбербанк"). With OPENROUTER_*_API_KEY set
+  // in the local .env, this hits the real Requesty endpoint and can take a
+  // few seconds. The default 5s ceiling tripped intermittently before this
+  // event-detector work; bumping to 15s removes the flake without hiding a
+  // real hang.
   it('with extractors=["customers"] — discovers /cases and fetches main + /cases only', async () => {
     mockUrlResponses({
       'example.com/cases': '<section class="clients"><img alt="Сбербанк" /></section>',
@@ -312,7 +319,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
       expect(result.customers).toEqual(['Сбербанк']);
       expect(result.pricing_model).toBeUndefined();
     }
-  });
+  }, 15000);
 
   it('with extractors=["customers","cases_count"] — fetches /cases only ONCE (deduplication)', async () => {
     mockUrlResponses({
@@ -338,7 +345,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
       expect(result.customers).toEqual(['Газпром']);
       expect(result.cases_count).toBe(2);
     }
-  });
+  }, 15000);
 
   it('subpage 404 does not fail main result — graceful degradation', async () => {
     fetchHtmlWithRetryMock.mockImplementation(async (url: string) => {
@@ -419,14 +426,19 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
       expect(result.pricing_model).toBe('self-serve');
       expect(result.pricing_min).toEqual({ value: 990, currency: 'RUB' });
       expect(result.vacancies_count).toBe(2);
-      expect(result.hiring_roles?.engineering).toBe(true);
-      expect(result.hiring_roles?.marketing).toBe(true);
+      // hiring_roles is now a string[] of top-N concrete profession names
+      // (since the 09.06 industrial-segment rewrite). The /careers fixture has
+      // "Frontend Developer" and "Marketer" — both should land in the list.
+      expect(Array.isArray(result.hiring_roles)).toBe(true);
+      const professions = (result.hiring_roles as string[]).join(' ').toLowerCase();
+      expect(professions).toContain('frontend developer');
+      expect(professions).toContain('marketer');
       expect(result.integrations).toEqual(expect.arrayContaining(['Slack', 'Telegram']));
       expect(result.founded_year).toBe(2018);
       expect(result.team_size).toBe(1);
       expect(result.blog_last_post).toBe('Latest product news — We shipped a new integration.');
     }
-  });
+  }, 15000);
 
   it('integrations — detects martech from the main-page script footprint and merges with showcased logos', async () => {
     mockUrlResponses({

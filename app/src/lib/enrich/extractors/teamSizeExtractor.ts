@@ -24,7 +24,12 @@ const MICRODATA_EMPLOYEES_RE =
 const MICRODATA_EMPLOYEES_TEXT_RE =
   /itemprop\s*=\s*["']numberOfEmployees["'][^>]*>\s*(\d+)/i;
 
-const MAX_TEAM = 200;
+// Bumped from 200 → 5000 after the 09.06 промка feedback: МОСЛИФТ /
+// КАСКАД-ЭНЕРГО / ЭНКОМ КСМ have 300-1000 рабочих each, and the old cap
+// silently dropped every claim above 200 to a returned 0. 5000 still
+// catches malformed numbers ("в нашей команде 99999 человек") without
+// chopping legit industrial teams.
+const MAX_TEAM = 5000;
 // `[class*="team"] img[alt]` matches anything with "team" anywhere in a class
 // name — testimonial blocks ("their-team-says"), navigation, footer widgets.
 // Above this many matches we stop trusting the count and ask the LLM.
@@ -32,19 +37,38 @@ const DOM_TRUST_LIMIT = 80;
 
 // Headline phrasings — pick the FIRST plausible number, since a page usually
 // announces its team size in just one place (hero / footer / about).
+// NB: JS `\w` is ASCII-only and `\b` doesn't fire between Cyrillic and EOS.
+// All RU patterns use [а-яё]* for declension endings instead of \w+, and
+// avoid trailing \b — the leading anchors (digit + space + stem) are already
+// specific enough to prevent false positives.
 const TEXT_PATTERNS: RegExp[] = [
-  // "более 50 сотрудников", "свыше 30 специалистов"
-  /(?:более|свыше|более\s+чем|свыше\s+чем)\s+(\d+)\s*(?:\+\s*)?(?:сотрудник|специалист|человек|эксперт|профессионал|программист|разработчик|инженер|консультант|member|employee|people|expert)/i,
+  // "более 50 сотрудников", "свыше 30 специалистов" — расширил `сотрудник` на
+  // blue-collar профессии (рабочий/монтажник/слесарь и т.д.) после фидбэка
+  // 09.06: МОСЛИФТ/КАСКАД-ЭНЕРГО team_size=0% потому что они пишут «300
+  // рабочих» а не «300 сотрудников».
+  /(?:более|свыше|более\s+чем|свыше\s+чем)\s+(\d+)\s*(?:\+\s*)?(?:сотрудник|работник|специалист|человек|эксперт|профессионал|программист|разработчик|инженер|консультант|монтажник|слесар|механик|электрик|сварщик|машинист|рабочи|строител|техник|оператор|member|employee|people|expert|worker)/i,
   // "50+ сотрудников", "30 специалистов"
-  /(\d+)\s*\+?\s*(?:сотрудник|специалист|человек|эксперт|профессионал|программист|разработчик|инженер|консультант|member|employee|people|expert)\b/i,
+  /(\d+)\s*\+?\s*(?:сотрудник|работник|специалист|человек|эксперт|профессионал|программист|разработчик|инженер|консультант|монтажник|слесар|механик|электрик|сварщик|машинист|рабочи|строител|техник|оператор|member|employee|people|expert|worker)/i,
   // "команда из 25 человек", "team of 40"
-  /(?:команда|штат|коллектив|team)\s+(?:из\s+|of\s+)?(?:более\s+|свыше\s+|over\s+)?(\d+)/i,
+  /(?:команда|штат[а-яё]*|коллектив|team)\s+(?:из\s+|of\s+)?(?:более\s+|свыше\s+|over\s+)?(\d+)/i,
   // "в нашей команде 12 человек"
   /в\s+(?:нашей\s+)?команде\s+(?:уже\s+)?(?:более\s+)?(\d+)/i,
   // "наша команда — 80 человек"
   /наша\s+команда\s*[—:\-–]\s*(?:более\s+)?(\d+)/i,
-  // "штатная численность: N"
-  /штатн\w+\s+численност\w+\s*[—:\-–]\s*(\d+)/i,
+  // "штатная численность: N" / "штат компании: N" / "штат составляет N".
+  // [а-яё]* covers «штатная/штатной» and «численности/численностью» tails.
+  /штатн[а-яё]*\s+численност[а-яё]*\s*[—:\-–]?\s*(\d+)/i,
+  /штат[а-яё]*\s+компании\s*[—:\-–]?\s*(\d+)/i,
+  /штат[а-яё]*\s+(?:составляет|насчитывает|превышает)\s+(?:более\s+|свыше\s+)?(\d+)/i,
+  // "численность работников: N" / "численность сотрудников 200" / "численности
+  // персонала: 250" — three declined forms covered by [а-яё]*.
+  /численност[а-яё]*\s+(?:работник|сотрудник|персонал)[а-яё]*\s*[—:\-–]?\s*(?:более\s+|свыше\s+)?(\d+)/i,
+  // "коллектив насчитывает N", "коллектив компании объединяет N"
+  /коллектив\s+(?:компании\s+)?(?:насчитывает|включает|объединяет|объединил|состоит\s+из)\s+(?:более\s+|свыше\s+)?(\d+)/i,
+  // "около N специалистов", "около N сотрудников", "около N человек"
+  /около\s+(\d+)\s+(?:сотрудник|специалист|человек|работник)/i,
+  // "более N человек работают/трудятся в компании"
+  /(?:более|свыше)\s+(\d+)\s+(?:человек|сотрудник[а-яё]*|работник[а-яё]*)\s+(?:работа|труд)/i,
   // "We are a team of 15"
   /we\s+are\s+a\s+team\s+of\s+(\d+)/i,
   // "company size: 10-50" — pick the lower bound (conservative)

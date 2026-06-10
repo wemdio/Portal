@@ -1,0 +1,36 @@
+playwright>=1.59
+playwright-stealth
+pydantic
+pydantic-ai-slim[openai,anthropic,google,groq,mistral,cohere,bedrock]
+# pydantic-ai 1.96 imports `from griffe import ...`, but griffe 2.x split into an
+# empty `griffelib` meta-package and reorganized symbols. Pin until upstream fixes.
+griffe>=1,<2
+jsonpath-ng
+pandas
+jinja2
+termcolor
+Django>=5.2,<7.0
+tendo
+pyyaml
+fastembed
+scikit-learn
+huggingface_hub
+# Upstream-наследие. Удалены из требований:
+# - openoutreach (git+https://github.com/eracle/openoutreach-cli.git@main):
+#     импортируется только в linkedin/onboarding.py:collect_from_wizard, это
+#     interactive TTY-wizard для self-host setup'а. В Docker / portal_daemon
+#     не вызывается. Импорт lazy (внутри функции) — модуль грузится без него.
+# - linkedin-agent-cli (git+https://github.com/eracle/linkedin-cli.git@main):
+#     нигде в коде не импортируется. Висел как unused upstream-зависимость.
+# Docker сборка падала на git fetch обоих репо: GitHub теперь требует auth
+# для unauthenticated clone (terminal prompts disabled). Возвращать —
+# только если onboarding wizard понадобится в проде (вряд ли) и тогда
+# через BuildKit secrets с PAT или зеркало во внутреннем git.
+
+# Portal-native fork: Postgres backend через DATABASE_URL (см. django_settings.py).
+dj-database-url>=2.1.0
+psycopg[binary]>=3.1.0
+asgiref>=3.7.0
+# Portal-native fork: thin HTTP client для OpenRouter LLM-вызовов из daemon'a.
+# Не используем openai SDK / pydantic-ai чтобы не тянуть upstream'овский pin.
+httpx>=0.27.0
