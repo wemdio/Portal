@@ -18,6 +18,7 @@ import { detectEnterpriseLogos, detectEnterpriseInHtml } from '@/lib/enrich/extr
 import { extractPricingModel } from '@/lib/enrich/extractors/pricingModelExtractor';
 import { extractPricingDetails } from '@/lib/enrich/extractors/pricingDetailExtractor';
 import { extractHiring, findExternalCareerLinks } from '@/lib/enrich/extractors/hiringExtractor';
+import { llmExtractHiring } from '@/lib/enrich/extractors/careersLlmExtractor';
 import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtractor';
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
@@ -437,13 +438,21 @@ export async function processSignalsForUrl(
       }
     }
 
-    if (extractors.includes('vacancies_count')) out.vacancies_count = hiring.vacancies_count;
-    if (extractors.includes('hiring_roles')) {
-      // New shape: array of top-5 concrete profession names. See
-      // HiringResult docstring for the rationale behind dropping the old
-      // 5-bool-categories representation.
-      out.hiring_roles = hiring.professions;
+    // LLM-добор по полному тексту /careers, когда эвристика не нашла вакансии
+    // и/или профессии (нестандартная вёрстка, напр. moslift.ru/jobs/). Один
+    // вызов закрывает оба столбца. См. careersLlmExtractor.
+    let vacancies: number | string = hiring.vacancies_count;
+    let professions = hiring.professions;
+    if ((vacancies === 0 || professions.length === 0) && !signal?.aborted) {
+      const llm = await llmExtractHiring(careersHtml ?? main.html, main.html);
+      if (llm) {
+        if (vacancies === 0 && llm.vacancies !== null) vacancies = llm.vacancies;
+        if (professions.length === 0 && llm.professions.length > 0) professions = llm.professions;
+      }
     }
+
+    if (extractors.includes('vacancies_count')) out.vacancies_count = vacancies;
+    if (extractors.includes('hiring_roles')) out.hiring_roles = professions;
   }
 
   // Single-extractor subpages (with main page fallback)
@@ -608,7 +617,7 @@ export async function processSignalsForUrl(
   }
 
   // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.
-  type LlmField = 'pricing_model' | 'pricing_min' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'integrations' | 'hiring_roles';
+  type LlmField = 'pricing_model' | 'pricing_min' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'integrations';
   const llmNeeded = new Set<LlmField>();
   if (extractors.includes('pricing_model') && (out.pricing_model === 'unknown' || !out.pricing_model)) llmNeeded.add('pricing_model');
   if (extractors.includes('pricing_min') && !out.pricing_min) llmNeeded.add('pricing_min');
@@ -620,11 +629,6 @@ export async function processSignalsForUrl(
   if (extractors.includes('free_trial') && out.free_trial === undefined) llmNeeded.add('free_trial');
   if (extractors.includes('case_industries') && (!out.case_industries || out.case_industries.length === 0)) llmNeeded.add('case_industries');
   if (extractors.includes('integrations') && (!out.integrations || out.integrations.length === 0)) llmNeeded.add('integrations');
-  // hiring_roles is now a string[] of professions (see HiringResult). Ask
-  // the LLM for help when the heuristic returned an empty list — usually
-  // means the careers page used a layout / class names we don't recognise,
-  // or the company has no /careers and the LLM has to read /about for hints.
-  if (extractors.includes('hiring_roles') && (!Array.isArray(out.hiring_roles) || out.hiring_roles.length === 0)) llmNeeded.add('hiring_roles');
 
   if (llmNeeded.size > 0 && !signal?.aborted) {
     try {
@@ -643,7 +647,6 @@ export async function processSignalsForUrl(
       }
       if (llmResult.case_industries && llmResult.case_industries.length > 0 && llmNeeded.has('case_industries')) out.case_industries = llmResult.case_industries;
       if (llmResult.integrations && llmResult.integrations.length > 0 && llmNeeded.has('integrations')) out.integrations = llmResult.integrations;
-      if (Array.isArray(llmResult.hiring_roles) && llmResult.hiring_roles.length > 0 && llmNeeded.has('hiring_roles')) out.hiring_roles = llmResult.hiring_roles;
     } catch {
       // LLM fallback is best-effort — never break the pipeline.
     }

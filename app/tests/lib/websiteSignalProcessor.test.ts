@@ -15,6 +15,10 @@ jest.mock('@/lib/enrich/extractors/casesCountLlmExtractor', () => ({
   llmCountCases: jest.fn().mockResolvedValue('5+'),
 }));
 
+jest.mock('@/lib/enrich/extractors/careersLlmExtractor', () => ({
+  llmExtractHiring: jest.fn().mockResolvedValue({ vacancies: '7+', professions: ['Грузчики'] }),
+}));
+
 import { processSignalsForUrl } from '@/lib/enrich/websiteSignalProcessor';
 import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websiteParser';
 
@@ -365,6 +369,23 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
     expect('stack' in result).toBe(true);
     if ('stack' in result) {
       expect(result.cases_count).toBe('5+');
+    }
+  });
+
+  it('vacancies_count/hiring_roles: heuristic 0 → uses LLM', async () => {
+    mockUrlResponses({
+      // class="hiring-block" не матчит VACANCY_SELECTOR, числа нет →
+      // extractHiring даёт 0/[] → зовётся llmExtractHiring (мок).
+      'example.com/careers': '<div class="hiring-block">Ищем сотрудников в команду на разные роли, подробности по запросу.</div>',
+      'example.com': '<a href="/careers">Вакансии</a>',
+    });
+
+    const result = await processSignalsForUrl('example.com', { extractors: ['vacancies_count', 'hiring_roles'] });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.vacancies_count).toBe('7+');
+      expect(result.hiring_roles).toEqual(['Грузчики']);
     }
   });
 
