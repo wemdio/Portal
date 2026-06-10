@@ -354,7 +354,8 @@ export interface ExtractedData {
   pricing_min?: PriceValue;
   free_trial?: boolean;
 
-  vacancies_count?: number;
+  /** Точное число (12) ИЛИ строка-оценка «N+» (10+) от LLM-счётчика вакансий. */
+  vacancies_count?: number | string;
   /**
    * Top-up to 5 concrete profession names extracted from vacancy titles
    * ("Лифтёры, Монтажники, Диспетчеры" for МОСЛИФТ; "Разработчики,
