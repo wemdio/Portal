@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import type { Route } from 'next';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole, UserProfile } from '@/types';
 import { ALL_ROLES, ROLE_LABELS, isAdmin } from '@/lib/roles';
@@ -74,6 +74,84 @@ function getErrorMessage(err: unknown): string {
   }
   return 'Неизвестная ошибка';
 }
+
+/**
+ * One row of the users table. Extracted + React.memo'd so that typing in the
+ * action modal (which lives in the same parent component) does not re-render
+ * 50+ rows on every keystroke. memo's default shallow compare is enough here
+ * because parent passes `user` from a stable sortedUsers reference,
+ * `signedUrl` as a primitive string (or undefined), `actionLoading` as a
+ * boolean, and `onOpenAction` is wrapped in useCallback below.
+ */
+const UserRow = memo(function UserRow({
+  user,
+  signedUrl,
+  actionLoading,
+  onOpenAction,
+}: {
+  user: UserProfile;
+  signedUrl: string | null | undefined;
+  actionLoading: boolean;
+  onOpenAction: (user: UserProfile, origin: { x: number; y: number }) => void;
+}) {
+  const roleBadgeClass =
+    user.role === 'admin' ? 'bg-purple-100 text-purple-800' :
+    user.role === 'manager' ? 'bg-blue-100 text-blue-800' :
+    user.role === 'director' ? 'bg-indigo-100 text-indigo-800' :
+    user.role === 'technician' ? 'bg-green-100 text-green-800' :
+    user.role === 'sales' ? 'bg-yellow-100 text-yellow-800' :
+    user.role === 'marketer' ? 'bg-pink-100 text-pink-800' :
+    'bg-gray-100 text-gray-800';
+
+  return (
+    <tr className="hover:bg-gray-50">
+      <td className="pl-10 pr-6 py-4 whitespace-nowrap text-left">
+        <div className="flex items-center">
+          <div className="w-10 flex justify-center flex-shrink-0">
+            <UserAvatar user={user} signedUrl={signedUrl} />
+          </div>
+          <div className="ml-4">
+            <p className="text-sm font-medium text-gray-900">
+              {user.full_name || 'Без имени'}
+            </p>
+          </div>
+        </div>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap text-center">
+        <p className="text-sm text-gray-600">{user.email || '—'}</p>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap text-center">
+        <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium ${roleBadgeClass}`}>
+          {user.role ? ROLE_LABELS[user.role] : 'Нет роли'}
+        </span>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap text-center">
+        <button
+          type="button"
+          onClick={(e) => {
+            const target = e.currentTarget as HTMLElement;
+            const rect = target.getBoundingClientRect();
+            const origin = {
+              x: rect.left + rect.width / 2,
+              y: rect.top + rect.height / 2,
+            };
+            onOpenAction(user, origin);
+          }}
+          disabled={actionLoading}
+          className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors inline-flex items-center justify-center disabled:opacity-70"
+          title="Действия"
+          aria-label="Открыть действия"
+        >
+          {actionLoading ? (
+            <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-600" aria-hidden />
+          ) : (
+            <MoreVertical className="h-5 w-5" />
+          )}
+        </button>
+      </td>
+    </tr>
+  );
+});
 
 function UserAvatar({ user, signedUrl }: { user: UserProfile; signedUrl?: string | null }) {
   const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
@@ -340,7 +418,11 @@ export default function UsersPage() {
     return merged.filter((c) => c.name.toLowerCase().includes(q));
   }, [allCampaigns, selectedCampaignSet, debouncedCampaignSearch]);
 
-  async function openActionModal(user: UserProfile, origin: { x: number; y: number }) {
+  // Wrapped in useCallback so its identity is stable across re-renders — the
+  // memoised <UserRow> below receives it as a prop and would otherwise be
+  // re-rendered for every keystroke / chip toggle in the action modal. All
+  // setters are stable; apiFetch / fetchAllCampaigns are themselves useCallback.
+  const openActionModal = useCallback(async (user: UserProfile, origin: { x: number; y: number }) => {
     setActionModalLoadingUserId(user.id);
     setError('');
     setCampaignSearch('');
@@ -448,7 +530,7 @@ export default function UsersPage() {
       setActionModalLoadingUserId(null);
       setTimeout(() => setModalFlyIn(true), 20);
     }
-  }
+  }, [apiFetch, fetchAllCampaigns]);
 
   useEffect(() => {
     if (users.length === 0) return;
@@ -614,11 +696,19 @@ export default function UsersPage() {
     }
   }
 
-  const filteredUsers = users.filter(user =>
-    user.email?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    user.full_name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (user.role && ROLE_LABELS[user.role]?.toLowerCase().includes(searchQuery.toLowerCase()))
-  );
+  // Memoised so that sortedUsers below sees a stable filteredUsers reference
+  // when nothing about (users, searchQuery) actually changed. Without this
+  // wrap, every parent re-render — including those triggered by typing in
+  // the action modal — produced a new array, defeating sortedUsers' useMemo
+  // and re-rendering the entire users table.
+  const filteredUsers = useMemo(() => {
+    const q = searchQuery.toLowerCase();
+    return users.filter((user) =>
+      user.email?.toLowerCase().includes(q) ||
+      user.full_name?.toLowerCase().includes(q) ||
+      (user.role && ROLE_LABELS[user.role]?.toLowerCase().includes(q))
+    );
+  }, [users, searchQuery]);
 
   const sortedUsers = useMemo(() => {
     const list = [...filteredUsers];
@@ -743,60 +833,13 @@ export default function UsersPage() {
             </thead>
             <tbody className="divide-y divide-gray-200">
               {sortedUsers.map((user) => (
-                <tr key={user.id} className="hover:bg-gray-50">
-                  <td className="pl-10 pr-6 py-4 whitespace-nowrap text-left">
-                    <div className="flex items-center">
-                      <div className="w-10 flex justify-center flex-shrink-0">
-                        <UserAvatar user={user} signedUrl={avatarSignedUrls[user.id]} />
-                      </div>
-                      <div className="ml-4">
-                        <p className="text-sm font-medium text-gray-900">
-                          {user.full_name || 'Без имени'}
-                        </p>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-center">
-                    <p className="text-sm text-gray-600">{user.email || '—'}</p>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-center">
-                    <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium ${
-                        user.role === 'admin' ? 'bg-purple-100 text-purple-800' :
-                        user.role === 'manager' ? 'bg-blue-100 text-blue-800' :
-                        user.role === 'director' ? 'bg-indigo-100 text-indigo-800' :
-                        user.role === 'technician' ? 'bg-green-100 text-green-800' :
-                        user.role === 'sales' ? 'bg-yellow-100 text-yellow-800' :
-                        user.role === 'marketer' ? 'bg-pink-100 text-pink-800' :
-                        'bg-gray-100 text-gray-800'
-                      }`}>
-                      {user.role ? ROLE_LABELS[user.role] : 'Нет роли'}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-center">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        const target = e.currentTarget as HTMLElement;
-                        const rect = target.getBoundingClientRect();
-                        const origin = {
-                          x: rect.left + rect.width / 2,
-                          y: rect.top + rect.height / 2,
-                        };
-                        void openActionModal(user, origin);
-                      }}
-                      disabled={actionModalLoadingUserId === user.id}
-                      className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors inline-flex items-center justify-center disabled:opacity-70"
-                      title="Действия"
-                      aria-label="Открыть действия"
-                    >
-                      {actionModalLoadingUserId === user.id ? (
-                        <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-600" aria-hidden />
-                      ) : (
-                        <MoreVertical className="h-5 w-5" />
-                      )}
-                    </button>
-                  </td>
-                </tr>
+                <UserRow
+                  key={user.id}
+                  user={user}
+                  signedUrl={avatarSignedUrls[user.id]}
+                  actionLoading={actionModalLoadingUserId === user.id}
+                  onOpenAction={openActionModal}
+                />
               ))}
               {filteredUsers.length === 0 && (
                 <tr>
