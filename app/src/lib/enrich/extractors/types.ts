@@ -192,7 +192,7 @@ export const EXTRACTOR_LABELS: Record<ExtractorKey, string> = {
  * Built-in presets the user sees as quick-start buttons. Custom user presets
  * are persisted to localStorage on top of these.
  */
-export type SignalPresetId = 'basic' | 'outreach' | 'audit' | 'horeca';
+export type SignalPresetId = 'basic' | 'outreach' | 'audit' | 'all';
 
 export interface SignalPreset {
   id: SignalPresetId;
@@ -244,31 +244,15 @@ export const BUILTIN_PRESETS: Readonly<Record<SignalPresetId, SignalPreset>> = {
       'social_media',
     ],
   },
-  // HoReCa-фокус: набор сигналов придуман под B2B-аутрич спецам, продающим
-  // в HoReCa (рестораны / гостиницы / кофейни). Помимо общих сигналов сюда
-  // включены 4 event-signal'а из соцсетей: открытие, ребрендинг, ремонт,
-  // география. LLM-анализатор постов запускается только когда в наборе есть
-  // хотя бы один event_*, поэтому базовые пресеты остаются дешёвыми.
-  horeca: {
-    id: 'horeca',
-    name: 'HoReCa',
-    description: 'Сигналы для аутрича в HoReCa: открытия / ребрендинг / ремонт / география + найм + соцсети.',
-    extractors: [
-      'stack',
-      'profile',
-      'vacancies_count',
-      'hiring_roles',
-      'social_media',
-      'blog_last_post',
-      'event_opening',
-      'event_opening_summary',
-      'event_redesign',
-      'event_redesign_summary',
-      'event_renovation',
-      'event_renovation_summary',
-      'event_geo',
-      'event_geo_summary',
-    ],
+  // Полный набор: все доступные сигналы разом. Удобно когда оператор хочет
+  // максимум данных без выборки чекбоксов вручную. ВКЛЮЧАЕТ event-signal'ы
+  // (4 + 4 summary), поэтому LLM-анализатор постов сработает на каждом URL —
+  // это самый дорогой preset по deltaT и LLM-стоимости (~$0.012/URL extra).
+  all: {
+    id: 'all',
+    name: 'Все',
+    description: 'Все доступные сигналы — включая события из соцсетей (открытия / ребрендинг / ремонт / география). Самый полный, но и самый дорогой (LLM на каждом URL).',
+    extractors: [...ALL_EXTRACTOR_KEYS],
   },
 };
 
