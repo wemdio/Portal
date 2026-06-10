@@ -617,33 +617,44 @@ export default function ClientTariffPage() {
                   </p>
                 )}
 
-                {/* «Отвязать карту» — explicit, separate action required by
-                    YooKassa support's compliance protocol for autopayments:
+                {/* «Отвязать карту» — explicit, always-visible action required
+                    by YooKassa support's compliance protocol for autopayments:
                     the user must be able to remove the saved card by
-                    themselves at any time. Single click removes the saved
-                    payment_method_id from our DB and disables auto-renewal.
-                    Paid period remains valid; only future auto-charges stop. */}
-                {(data.payment_method_saved || data.auto_renew) && (
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setUnlinkOpen(true);
-                        setUnlinkError(null);
-                      }}
-                      className="ds-btn-secondary inline-flex items-center justify-center gap-2 px-4 py-2 text-sm w-full sm:w-auto"
-                    >
-                      <Unlink className="h-4 w-4" aria-hidden />
-                      Отвязать карту
-                    </button>
-                    <p
-                      className="text-xs flex-1"
-                      style={{ color: 'var(--cp-paper-faint)' }}
-                    >
-                      Карта удалится из нашей системы, автопродление отключится. Оплаченный период сохраняется.
-                    </p>
-                  </div>
-                )}
+                    themselves at any time. The button is rendered in BOTH
+                    states (card present / card absent) so the entry point
+                    never disappears — without this, the disabled state would
+                    be invisible to the user, and we'd also need real card
+                    data to screenshot the flow for YK's подключение review.
+                    When no card is saved yet, the button is disabled with a
+                    quiet "появится после оплаты" caption next to it. */}
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUnlinkOpen(true);
+                      setUnlinkError(null);
+                    }}
+                    disabled={!data.payment_method_saved}
+                    aria-disabled={!data.payment_method_saved}
+                    title={
+                      data.payment_method_saved
+                        ? 'Удалить сохранённую карту из вашего личного кабинета'
+                        : 'Кнопка станет активной после первой оплаты, когда карта будет сохранена'
+                    }
+                    className="ds-btn-secondary inline-flex items-center justify-center gap-2 px-4 py-2 text-sm w-full sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Unlink className="h-4 w-4" aria-hidden />
+                    Отвязать карту
+                  </button>
+                  <p
+                    className="text-xs flex-1"
+                    style={{ color: 'var(--cp-paper-faint)' }}
+                  >
+                    {data.payment_method_saved
+                      ? 'Карта удалится из нашей системы, автопродление отключится. Оплаченный период сохраняется.'
+                      : 'Карта появится здесь после первой оплаты — там же будет возможность отвязать её одной кнопкой.'}
+                  </p>
+                </div>
               </div>
             </section>
           )}
