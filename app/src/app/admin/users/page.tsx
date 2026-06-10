@@ -40,6 +40,11 @@ const TARIFF_DEFAULTS: Record<'standard' | 'pro', Omit<TariffData, 'tariff_type'
 };
 const TARIFF_LABELS: Record<TariffType, string> = { standard: 'Стандарт', pro: 'Про', custom: 'Custom' };
 
+// Клиентская пагинация списка кампаний в action-модалке. В DOM держим только
+// 10 строк за раз — у клиентов бывает 200+ кампаний, и рендер всех чекбоксов
+// заметно лагает при каждом keystroke / toggle (см. также useMemo ниже).
+const CAMPAIGNS_PER_PAGE = 10;
+
 // Mirror lib/tariffs.ts (which is server-only). Keep in sync with that file.
 const TARIFF_MONTHLY_PRICE: Record<'standard' | 'pro', number> = { standard: 40_000, pro: 80_000 };
 const BILLING_PERIOD_MONTHS: Record<'month' | 'half_year' | 'year', number> = { month: 1, half_year: 6, year: 12 };
@@ -722,10 +727,14 @@ export default function UsersPage() {
   const [allCampaigns, setAllCampaigns] = useState<{ id: string; name: string; status: number }[]>([]);
   const [allCampaignsLoading, setAllCampaignsLoading] = useState(false);
   const [campaignSearch, setCampaignSearch] = useState('');
-  // Debounced copy of campaignSearch — without this every typed character would
-  // re-filter ~200 campaigns and re-render every other modal field (the IIFE
-  // below sits inside the parent <form>, so any sibling re-render triggers it).
-  const [debouncedCampaignSearch, setDebouncedCampaignSearch] = useState('');
+  // Что реально применено к фильтру. Обновляется только при сабмите формы
+  // поиска (клик по «Найти» или Enter в инпуте), не на каждое нажатие — иначе
+  // re-фильтр ~200 кампаний на каждом keystroke лагает (плюс юзер сам этого
+  // попросил: ввёл → нажал → увидел результаты).
+  const [appliedCampaignSearch, setAppliedCampaignSearch] = useState('');
+  // Текущая страница в пагинации кампаний. Сбрасывается на 1 при открытии
+  // модалки и при сабмите нового поискового запроса.
+  const [campaignPage, setCampaignPage] = useState(1);
 
   const [tariffType, setTariffType] = useState<TariffType>('standard');
   const [customLimits, setCustomLimits] = useState<Omit<TariffData, 'tariff_type'>>({ ...TARIFF_DEFAULTS.pro });
@@ -891,13 +900,12 @@ export default function UsersPage() {
     if (modalRole === 'client') void fetchAllCampaigns();
   }, [modalRole, fetchAllCampaigns]);
 
-  // Debounce campaign-search input. Typing in this field used to re-render the
-  // entire modal on every keystroke because the IIFE below recomputes selected
-  // / unselected / filtered arrays inline. 150ms feels instant but coalesces
-  // bursts of typing into a single recompute.
-  useEffect(() => {
-    const t = window.setTimeout(() => setDebouncedCampaignSearch(campaignSearch), 150);
-    return () => window.clearTimeout(t);
+  // Применяем введённый запрос к фильтру: по клику «Найти» или Enter в инпуте.
+  // Параллельно сбрасываем страницу на 1, потому что после нового запроса
+  // текущая может оказаться вне диапазона.
+  const applyCampaignSearch = useCallback(() => {
+    setAppliedCampaignSearch(campaignSearch.trim());
+    setCampaignPage(1);
   }, [campaignSearch]);
 
   // O(1) lookup set for "is this campaign selected" checks. Used to be a linear
@@ -910,7 +918,7 @@ export default function UsersPage() {
   // single state change in the modal, including unrelated fields (tariff,
   // limits, role chips). That's why typing in *any* input felt sluggish.
   const visibleCampaigns = useMemo(() => {
-    const q = debouncedCampaignSearch.toLowerCase().trim();
+    const q = appliedCampaignSearch.toLowerCase();
     const selected: typeof allCampaigns = [];
     const unselected: typeof allCampaigns = [];
     for (const c of allCampaigns) {
@@ -920,7 +928,24 @@ export default function UsersPage() {
     const merged = selected.concat(unselected);
     if (!q) return merged;
     return merged.filter((c) => c.name.toLowerCase().includes(q));
-  }, [allCampaigns, selectedCampaignSet, debouncedCampaignSearch]);
+  }, [allCampaigns, selectedCampaignSet, appliedCampaignSearch]);
+
+  // Клиентская пагинация: режем visibleCampaigns на страницы по
+  // CAMPAIGNS_PER_PAGE. effectivePage клампится в [1, pageCount] на случай,
+  // если поиск ужал результаты до меньшего числа страниц, чем текущая
+  // (например, юзер на странице 5, ввёл запрос → осталось 12 кампаний → 2
+  // страницы → показываем 2-ю вместо пустой 5-й).
+  const { pagedCampaigns, pageCount, effectivePage } = useMemo(() => {
+    const total = visibleCampaigns.length;
+    const pages = Math.max(1, Math.ceil(total / CAMPAIGNS_PER_PAGE));
+    const page = Math.min(Math.max(1, campaignPage), pages);
+    const start = (page - 1) * CAMPAIGNS_PER_PAGE;
+    return {
+      pagedCampaigns: visibleCampaigns.slice(start, start + CAMPAIGNS_PER_PAGE),
+      pageCount: pages,
+      effectivePage: page,
+    };
+  }, [visibleCampaigns, campaignPage]);
 
   // Wrapped in useCallback so its identity is stable across re-renders — the
   // memoised <UserRow> below receives it as a prop and would otherwise be
@@ -930,6 +955,8 @@ export default function UsersPage() {
     setActionModalLoadingUserId(user.id);
     setError('');
     setCampaignSearch('');
+    setAppliedCampaignSearch('');
+    setCampaignPage(1);
     try {
       const isClient = user.role === 'client';
       // Per-call catch so one failing endpoint does not blow away state derived
@@ -1729,20 +1756,38 @@ export default function UsersPage() {
                         <span className="text-xs text-blue-600 font-medium">{clientCampaigns.length} выбрано</span>
                       )}
                     </div>
-                    <input
-                      type="text"
-                      value={campaignSearch}
-                      onChange={(e) => setCampaignSearch(e.target.value)}
-                      placeholder="Поиск кампании..."
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={campaignSearch}
+                        onChange={(e) => setCampaignSearch(e.target.value)}
+                        onKeyDown={(e) => {
+                          // Enter в инпуте не должен сабмитить родительскую
+                          // <form> модалки — иначе у нас уйдёт сохранение всего
+                          // пользователя вместо применения поиска.
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            applyCampaignSearch();
+                          }
+                        }}
+                        placeholder="Поиск кампании..."
+                        className="flex-1 min-w-0 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={applyCampaignSearch}
+                        className="shrink-0 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 transition-colors"
+                      >
+                        Найти
+                      </button>
+                    </div>
                     <div className="max-h-56 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
                       {allCampaignsLoading ? (
                         <div className="px-3 py-4 text-center text-xs text-gray-400">Загрузка кампаний...</div>
-                      ) : visibleCampaigns.length === 0 ? (
+                      ) : pagedCampaigns.length === 0 ? (
                         <div className="px-3 py-4 text-center text-xs text-gray-400">Кампании не найдены</div>
                       ) : (
-                        visibleCampaigns.map((c) => {
+                        pagedCampaigns.map((c) => {
                           const checked = selectedCampaignSet.has(c.id);
                           return (
                             <label
@@ -1775,6 +1820,29 @@ export default function UsersPage() {
                         })
                       )}
                     </div>
+                    {!allCampaignsLoading && pageCount > 1 && (
+                      <div className="flex items-center justify-between gap-2 px-1">
+                        <button
+                          type="button"
+                          onClick={() => setCampaignPage((p) => Math.max(1, p - 1))}
+                          disabled={effectivePage <= 1}
+                          className="px-2.5 py-1 border border-gray-300 rounded-md text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          ← Назад
+                        </button>
+                        <span className="text-xs text-gray-500">
+                          Стр. {effectivePage} / {pageCount} · всего {visibleCampaigns.length}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setCampaignPage((p) => Math.min(pageCount, p + 1))}
+                          disabled={effectivePage >= pageCount}
+                          className="px-2.5 py-1 border border-gray-300 rounded-md text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Вперёд →
+                        </button>
+                      </div>
+                    )}
                     <p className="text-xs text-gray-400">Lead-списки определяются автоматически из назначенных кампаний</p>
                   </div>
                 )}
