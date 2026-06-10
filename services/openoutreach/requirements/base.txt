@@ -15,8 +15,17 @@ pyyaml
 fastembed
 scikit-learn
 huggingface_hub
-openoutreach @ git+https://github.com/eracle/openoutreach-cli.git@main
-linkedin-agent-cli @ git+https://github.com/eracle/linkedin-cli.git@main
+# Upstream-наследие. Удалены из требований:
+# - openoutreach (git+https://github.com/eracle/openoutreach-cli.git@main):
+#     импортируется только в linkedin/onboarding.py:collect_from_wizard, это
+#     interactive TTY-wizard для self-host setup'а. В Docker / portal_daemon
+#     не вызывается. Импорт lazy (внутри функции) — модуль грузится без него.
+# - linkedin-agent-cli (git+https://github.com/eracle/linkedin-cli.git@main):
+#     нигде в коде не импортируется. Висел как unused upstream-зависимость.
+# Docker сборка падала на git fetch обоих репо: GitHub теперь требует auth
+# для unauthenticated clone (terminal prompts disabled). Возвращать —
+# только если onboarding wizard понадобится в проде (вряд ли) и тогда
+# через BuildKit secrets с PAT или зеркало во внутреннем git.
 
 # Portal-native fork: Postgres backend через DATABASE_URL (см. django_settings.py).
 dj-database-url>=2.1.0
