@@ -16,6 +16,11 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./.env:/app/host.env
+    # 10.06.2026 (Claude): SSR-запросы контейнера к https://polza-portal.ru ловили
+    # спорадический DNS EAI_AGAIN -> 500 (auth profile / support-unread).
+    # Резолвим хост локально через host-gateway, как у health-check ниже.
+    extra_hosts:
+      - "polza-portal.ru:host-gateway"
     group_add:
       - "${DOCKER_GID:-999}"
     environment:
@@ -652,6 +657,9 @@ services:
   yandexmaps:
     image: ${DOCKER_USERNAME}/portal-yandexmaps:prod
     container_name: portal-yandexmaps
+    # 10.06.2026 (Claude): chromium-потомки скрапера не собираются (reaping) ->
+    # сотни zombie за день (сегодня 342). init: true = tini в роли PID 1.
+    init: true
     environment:
       - YANDEXMAPS_CONCURRENCY=4
     healthcheck:
