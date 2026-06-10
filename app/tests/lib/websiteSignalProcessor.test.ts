@@ -19,6 +19,14 @@ jest.mock('@/lib/enrich/extractors/careersLlmExtractor', () => ({
   llmExtractHiring: jest.fn().mockResolvedValue({ vacancies: '7+', professions: ['Грузчики'] }),
 }));
 
+jest.mock('@/lib/enrich/extractors/pricingLlmExtractor', () => ({
+  llmExtractPricing: jest.fn().mockResolvedValue({
+    pricing_model: 'sales-led',
+    pricing_min: { value: 50000, currency: 'RUB' },
+    free_trial: true,
+  }),
+}));
+
 import { processSignalsForUrl } from '@/lib/enrich/websiteSignalProcessor';
 import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websiteParser';
 
@@ -386,6 +394,26 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
     if ('stack' in result) {
       expect(result.vacancies_count).toBe('7+');
       expect(result.hiring_roles).toEqual(['Грузчики']);
+    }
+  });
+
+  it('pricing: heuristic blank → fills model/min/free_trial from LLM', async () => {
+    mockUrlResponses({
+      // нет цен/кнопок/тарифов/маркеров → extractPricingModel=unknown,
+      // extractPricingDetails={} → зовётся llmExtractPricing (мок).
+      'example.com/pricing': '<div class="info">Наши услуги помогают бизнесу расти и развиваться каждый день уверенно.</div>',
+      'example.com': '<a href="/pricing">Цены</a>',
+    });
+
+    const result = await processSignalsForUrl('example.com', {
+      extractors: ['pricing_model', 'pricing_min', 'free_trial'],
+    });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.pricing_model).toBe('sales-led');
+      expect(result.pricing_min).toEqual({ value: 50000, currency: 'RUB' });
+      expect(result.free_trial).toBe(true);
     }
   });
 

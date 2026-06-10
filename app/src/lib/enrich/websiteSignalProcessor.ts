@@ -17,6 +17,7 @@ import { llmCountCases } from '@/lib/enrich/extractors/casesCountLlmExtractor';
 import { detectEnterpriseLogos, detectEnterpriseInHtml } from '@/lib/enrich/extractors/enterpriseLogosDetector';
 import { extractPricingModel } from '@/lib/enrich/extractors/pricingModelExtractor';
 import { extractPricingDetails } from '@/lib/enrich/extractors/pricingDetailExtractor';
+import { llmExtractPricing } from '@/lib/enrich/extractors/pricingLlmExtractor';
 import { extractHiring, findExternalCareerLinks } from '@/lib/enrich/extractors/hiringExtractor';
 import { llmExtractHiring } from '@/lib/enrich/extractors/careersLlmExtractor';
 import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtractor';
@@ -411,6 +412,24 @@ export async function processSignalsForUrl(
     }
   }
 
+  // LLM-добор по полному тексту /pricing, когда эвристика не определила модель,
+  // не нашла цену и/или не подтвердила free trial. Один вызов закрывает три
+  // столбца. См. pricingLlmExtractor.
+  {
+    const needModel = extractors.includes('pricing_model') && (out.pricing_model === 'unknown' || !out.pricing_model);
+    const needMin = extractors.includes('pricing_min') && !out.pricing_min;
+    const needTrial = extractors.includes('free_trial') && out.free_trial === undefined;
+    if ((needModel || needMin || needTrial) && !signal?.aborted) {
+      const llm = await llmExtractPricing(pricingHtml ?? main.html, main.html);
+      if (llm) {
+        if (needModel && llm.pricing_model) out.pricing_model = llm.pricing_model;
+        if (needMin && llm.pricing_min) out.pricing_min = llm.pricing_min;
+        // free_trial: принимаем true И false, чтобы «Нет» попадал в ячейку.
+        if (needTrial && llm.free_trial !== null) out.free_trial = llm.free_trial;
+      }
+    }
+  }
+
   // Careers-related extractors (share /careers HTML, fallback to main,
   // and as a last resort follow an external hh.ru / career.habr link).
   const careersHtml = subpageHtml.careers ?? null;
@@ -617,34 +636,18 @@ export async function processSignalsForUrl(
   }
 
   // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.
-  type LlmField = 'pricing_model' | 'pricing_min' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'integrations';
+  type LlmField = 'founded_year' | 'team_size' | 'case_industries' | 'integrations';
   const llmNeeded = new Set<LlmField>();
-  if (extractors.includes('pricing_model') && (out.pricing_model === 'unknown' || !out.pricing_model)) llmNeeded.add('pricing_model');
-  if (extractors.includes('pricing_min') && !out.pricing_min) llmNeeded.add('pricing_min');
   if (extractors.includes('founded_year') && !out.founded_year) llmNeeded.add('founded_year');
   if (extractors.includes('team_size') && !out.team_size) llmNeeded.add('team_size');
-  // free_trial: ask the LLM whenever the heuristic didn't confirm (undefined).
-  // It may return true OR false; we accept both so the user sees "Нет" instead
-  // of the misleading DASH when the LLM is confident there's no trial.
-  if (extractors.includes('free_trial') && out.free_trial === undefined) llmNeeded.add('free_trial');
   if (extractors.includes('case_industries') && (!out.case_industries || out.case_industries.length === 0)) llmNeeded.add('case_industries');
   if (extractors.includes('integrations') && (!out.integrations || out.integrations.length === 0)) llmNeeded.add('integrations');
 
   if (llmNeeded.size > 0 && !signal?.aborted) {
     try {
       const llmResult = await llmExtractFields(main.html, subpageHtml, llmNeeded);
-      if (llmResult.pricing_model && llmNeeded.has('pricing_model')) out.pricing_model = llmResult.pricing_model;
-      if (llmResult.pricing_min && llmNeeded.has('pricing_min')) out.pricing_min = llmResult.pricing_min;
       if (llmResult.founded_year && llmNeeded.has('founded_year')) out.founded_year = llmResult.founded_year;
       if (llmResult.team_size && llmNeeded.has('team_size')) out.team_size = llmResult.team_size;
-      // Tri-state merge: heuristic only sets true. Now accept either side of
-      // the LLM's verdict so "Нет" (confident no) lands in the cell when the
-      // model spotted a Contact-Sales-only page. Heuristic-true is preserved
-      // (we don't downgrade Да → Нет just because LLM disagrees).
-      if (llmNeeded.has('free_trial') && out.free_trial !== true) {
-        if (llmResult.free_trial === true) out.free_trial = true;
-        else if (llmResult.free_trial === false) out.free_trial = false;
-      }
       if (llmResult.case_industries && llmResult.case_industries.length > 0 && llmNeeded.has('case_industries')) out.case_industries = llmResult.case_industries;
       if (llmResult.integrations && llmResult.integrations.length > 0 && llmNeeded.has('integrations')) out.integrations = llmResult.integrations;
     } catch {
