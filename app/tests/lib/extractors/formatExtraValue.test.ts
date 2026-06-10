@@ -52,6 +52,14 @@ describe('formatExtraValue — DASH and tristate booleans', () => {
     expect(formatExtraValue('team_size', 80)).toBe('80');
   });
 
+  it('renders cases_count estimate string «N+» as-is; empty → DASH', () => {
+    expect(formatExtraValue('cases_count', '20+')).toBe('20+');
+    expect(formatExtraValue('cases_count', '  15+  ')).toBe('15+');
+    expect(formatExtraValue('cases_count', '')).toBe('–');
+    expect(formatExtraValue('cases_count', 23)).toBe('23');
+    expect(formatExtraValue('cases_count', 0)).toBe('–');
+  });
+
   it('renders implausible founded_year as DASH (out of 1800-2100)', () => {
     expect(formatExtraValue('founded_year', 1750)).toBe('–');
     expect(formatExtraValue('founded_year', 9999)).toBe('–');

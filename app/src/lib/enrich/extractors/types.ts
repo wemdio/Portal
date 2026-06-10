@@ -345,7 +345,8 @@ export interface ExtractedData {
   customers?: string[];
   /** Сегмент клиентов компании («стоматологии», «B2B-стройка») — наполнение столбца «Клиенты». */
   client_segment?: string;
-  cases_count?: number;
+  /** Точное число (23) ИЛИ строка-оценка «N+» (20+) от LLM-счётчика. */
+  cases_count?: number | string;
   case_industries?: string[];
   enterprise_logos?: boolean;
 
