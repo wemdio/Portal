@@ -219,7 +219,7 @@ function CampaignsPageContent() {
       if (trimmed) params.set('q', trimmed);
       else params.delete('q');
       const qs = params.toString();
-      router.replace(`/client${qs ? `?${qs}` : ''}`);
+      router.replace(qs ? `/client?${qs}` : '/client');
     }, 300);
     return () => clearTimeout(t);
   }, [searchInput, query, searchParams, router]);
@@ -230,7 +230,7 @@ function CampaignsPageContent() {
       if (next === 'all') params.delete('status');
       else params.set('status', next);
       const qs = params.toString();
-      router.replace(`/client${qs ? `?${qs}` : ''}`);
+      router.replace(qs ? `/client?${qs}` : '/client');
     },
     [router, searchParams],
   );
@@ -240,7 +240,7 @@ function CampaignsPageContent() {
     const params = new URLSearchParams(searchParams);
     params.delete('q');
     const qs = params.toString();
-    router.replace(`/client${qs ? `?${qs}` : ''}`);
+    router.replace(qs ? `/client?${qs}` : '/client');
   }, [router, searchParams]);
 
   const clearAll = useCallback(() => {

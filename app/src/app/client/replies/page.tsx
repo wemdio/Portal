@@ -460,7 +460,7 @@ function RepliesPageContent() {
       if (trimmed) params.set('q', trimmed);
       else params.delete('q');
       const qs = params.toString();
-      router.replace(`/client/replies${qs ? `?${qs}` : ''}`);
+      router.replace(qs ? `/client/replies?${qs}` : '/client/replies');
     }, 300);
     return () => clearTimeout(t);
   }, [searchInput, query, searchParams, router]);
@@ -478,7 +478,7 @@ function RepliesPageContent() {
       if (next === 'all') params.delete('status');
       else params.set('status', next);
       const qs = params.toString();
-      router.replace(`/client/replies${qs ? `?${qs}` : ''}`);
+      router.replace(qs ? `/client/replies?${qs}` : '/client/replies');
     },
     [router, searchParams],
   );
@@ -488,7 +488,7 @@ function RepliesPageContent() {
     const params = new URLSearchParams(searchParams);
     params.delete('q');
     const qs = params.toString();
-    router.replace(`/client/replies${qs ? `?${qs}` : ''}`);
+    router.replace(qs ? `/client/replies?${qs}` : '/client/replies');
   }, [router, searchParams]);
 
   const clearAll = useCallback(() => {
