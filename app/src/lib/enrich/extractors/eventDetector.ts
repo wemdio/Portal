@@ -1,5 +1,5 @@
 /**
- * LLM-based event detector for HoReCa-style outreach signals.
+ * LLM-based event detector for outreach signals across any niche.
  *
  * Зачем нужен ОТДЕЛЬНЫЙ детектор (не общий llmExtractor):
  *   1. Источник данных другой — посты из соцсетей + блог, не HTML страниц.

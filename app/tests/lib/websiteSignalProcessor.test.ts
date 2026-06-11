@@ -708,4 +708,13 @@ describe('processSignalsForUrl — social media discovery', () => {
     expect(extractSocialPostsMock).toHaveBeenCalledWith(['https://t.me/realco'], expect.anything());
     expect('event_opening' in result && result.event_opening).toBe(true);
   });
+
+  it('does not error the row when Playwright throws; falls through to Serper', async () => {
+    const bare = `<html><body><p>none</p></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html: bare, status: 200 });
+    fetchHtmlWithPlaywrightMock.mockRejectedValue(new Error('browser launch failed'));
+    findCompanySocialsMock.mockResolvedValue(['https://t.me/from_serper']);
+    const result = await processSignalsForUrl('example.com', { extractors: ['social_media'] });
+    expect('social_media' in result && result.social_media).toEqual(['https://t.me/from_serper']);
+  });
 });

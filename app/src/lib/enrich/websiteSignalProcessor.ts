@@ -538,11 +538,16 @@ export async function processSignalsForUrl(
     ]);
     if (socialUrls.length === 0 && socialDeepEnabled() && !signal?.aborted) {
       if (main.method === 'http') {
-        const rendered = await fetchHtmlWithPlaywright(normalized, {
-          timeout: PLAYWRIGHT_TIMEOUT_MS,
-          signal,
-        });
-        if (rendered) socialUrls = extractSocialMedia(rendered);
+        try {
+          const rendered = await fetchHtmlWithPlaywright(normalized, {
+            timeout: PLAYWRIGHT_TIMEOUT_MS,
+            signal,
+          });
+          if (rendered) socialUrls = extractSocialMedia(rendered);
+        } catch {
+          // Playwright-рендер — best-effort добор соцсетей: сбой настройки
+          // браузера не должен ронять строку, просто идём дальше (Serper).
+        }
       }
       if (socialUrls.length === 0 && !signal?.aborted) {
         let host = '';
@@ -599,7 +604,7 @@ export async function processSignalsForUrl(
     out.blog_last_post = post;
   }
 
-  // ─── Event signals (HoReCa-style) ────────────────────────────────────────
+  // ─── Event signals (niche-agnostic) ──────────────────────────────────────
   //
   // Pipeline:
   //   1. Ensure we have a list of social-media URLs (reuse the one we already
@@ -626,8 +631,6 @@ export async function processSignalsForUrl(
         })
       : [];
 
-    // Cheap inline tag-strip — eventDetector caps the total context at 12 KB,
-    // so we just collapse tags & whitespace and slice. No need for cheerio here.
     // Cheap inline tag-strip — eventDetector caps the total context at 12 KB,
     // so we just collapse tags & whitespace and slice. No need for cheerio here.
     const aboutText = subpageHtml.about
