@@ -85,6 +85,7 @@ describe('client nav IA', () => {
       '/client/projects',
       '/client/replies',
       '/client/leads',
+      '/client/blocklist',
       '/client/bases',
       '/client/reports',
       '/client/tariff',
@@ -160,6 +161,7 @@ describe('client nav IA', () => {
       'campaigns',
       'replies',
       'leads',
+      'blocklist',
       'reports',
       'tariff',
     ]);

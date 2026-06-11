@@ -161,6 +161,14 @@ const monitoringGroup: ClientNavGroup = {
       descriptionEn: 'Conversations marked as leads',
     },
     {
+      id: 'blocklist',
+      label: 'Чёрный список',
+      labelEn: 'Blocklist',
+      href: '/client/blocklist',
+      description: 'Контакты, которым портал больше не отправит письма',
+      descriptionEn: 'Contacts the portal will never email again',
+    },
+    {
       id: 'reports',
       label: 'Отчёты',
       labelEn: 'Reports',
@@ -236,6 +244,10 @@ const AUTO_MODE_VISIBLE_ITEM_IDS: ReadonlySet<string> = new Set([
   'campaigns',
   'replies',
   'leads',
+  // Чёрный список в auto-режиме важнее, чем в manual: пайплайн каждый день
+  // догружает лидов без участия клиента, и блок — единственный способ
+  // гарантировать «этому контакту больше не пишем».
+  'blocklist',
   'reports',
 ]);
 
