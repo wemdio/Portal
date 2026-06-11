@@ -114,11 +114,11 @@ const SOCIAL_PATTERNS: SocialPattern[] = [
     match: /^https?:\/\/(?:www\.|mobile\.)?(?:twitter|x)\.com\/([A-Za-z0-9_]{1,15})\/?(?:\?.*)?$/i,
     requireHandle: true,
   },
-  // LinkedIn: /company/<handle> ИЛИ /in/<handle> ИЛИ /school/<handle>
-  // company-страница приоритетнее личной — но это решает порядок паттернов.
+  // LinkedIn: только /company /school /showcase. Личные /in/ — это люди, не
+  // соцсеть компании; для outreach это шум, поэтому /in/ исключён.
   {
     family: 'linkedin',
-    match: /^https?:\/\/(?:www\.|[a-z]{2}\.)?linkedin\.com\/(?:company|school|in|showcase)\/([A-Za-z0-9\-_.%]+)\/?(?:\?.*)?$/i,
+    match: /^https?:\/\/(?:www\.|[a-z]{2}\.)?linkedin\.com\/(?:company|school|showcase)\/([A-Za-z0-9\-_.%]+)\/?(?:\?.*)?$/i,
     requireHandle: true,
   },
   // YouTube: youtube.com/@handle, /c/handle, /channel/UC..., /user/...
@@ -232,6 +232,11 @@ const SHARE_INTENT_PATTERNS: RegExp[] = [
   /\/share\.html?\b/i,
 ];
 
+// Потолки на одну компанию: ≤2 аккаунта на сеть и ≤8 всего — отсекает «пакеты»
+// чужих/дублирующих ссылок (встроенные виджеты, агрегаторы).
+const MAX_PER_FAMILY = 2;
+const MAX_TOTAL = 8;
+
 function isShareIntent(url: string): boolean {
   return SHARE_INTENT_PATTERNS.some((re) => re.test(url));
 }
@@ -289,46 +294,33 @@ function classifyUrl(url: string): { family: SocialFamily; normalized: string } 
     const m = normalized.match(pat.match);
     if (!m) continue;
     if (pat.requireHandle && (!m[1] || m[1].length === 0)) continue;
+    // Telegram-боты (@…bot) — не канал компании, выкидываем.
+    if (pat.family === 'telegram' && /bot$/i.test(m[1] ?? '')) return null;
     return { family: pat.family, normalized };
   }
   return null;
 }
 
 /**
- * Найти все ссылки на соцсети в HTML. Возвращает массив нормализованных
- * URL'ов в детерминированном порядке (по семейству в порядке SOCIAL_PATTERNS;
- * внутри семейства — в порядке появления в HTML). Дедуп — по нормализованной
- * форме.
+ * Классифицировать произвольный список URL'ов в очищенный, упорядоченный и
+ * ограниченный список соцсетей компании. Дедуп по нормализованной форме,
+ * потолки MAX_PER_FAMILY / MAX_TOTAL, порядок — по SOCIAL_PATTERNS. Боты,
+ * личные LinkedIn /in/, share/intent уже отсеяны в classifyUrl. Используется
+ * и HTML-извлекателем, и поиском каналов через Serper (DRY).
  */
-export function extractSocialMedia(html: string): string[] {
-  if (!html) return [];
-  const $ = cheerio.load(html);
-  // Шаринг-блоки часто живут в footer'е/sidebar'е и оттуда же берутся
-  // настоящие ссылки. Не вырезаем целые блоки — только идём по всем <a>
-  // и фильтруем по isShareIntent / по match.
-  $('script, style, noscript, template').remove();
-
-  // family → массив нормализованных URL'ов в порядке встречаемости.
+export function filterSocialUrls(rawUrls: string[]): string[] {
   const byFamily = new Map<SocialFamily, string[]>();
   const seen = new Set<string>();
-
-  $('a').each((_, a) => {
-    const href = ($(a).attr('href') ?? '').trim();
-    if (!href) return;
-    // Игнорируем mailto:, tel:, javascript:, относительные пути и
-    // якорные ссылки — соцсеть должна быть абсолютным URL'ом.
-    if (!/^https?:\/\//i.test(href)) return;
-    const classified = classifyUrl(href);
-    if (!classified) return;
-    if (seen.has(classified.normalized)) return;
-    seen.add(classified.normalized);
-    const arr = byFamily.get(classified.family) ?? [];
-    arr.push(classified.normalized);
-    byFamily.set(classified.family, arr);
-  });
-
-  // Сохраним детерминированный порядок: пробегаем по SOCIAL_PATTERNS и
-  // собираем семейства в этом порядке.
+  for (const raw of rawUrls) {
+    const c = classifyUrl(raw);
+    if (!c) continue;
+    if (seen.has(c.normalized)) continue;
+    seen.add(c.normalized);
+    const arr = byFamily.get(c.family) ?? [];
+    if (arr.length >= MAX_PER_FAMILY) continue;
+    arr.push(c.normalized);
+    byFamily.set(c.family, arr);
+  }
   const out: string[] = [];
   const written = new Set<SocialFamily>();
   for (const pat of SOCIAL_PATTERNS) {
@@ -337,5 +329,35 @@ export function extractSocialMedia(html: string): string[] {
     const arr = byFamily.get(pat.family);
     if (arr) out.push(...arr);
   }
-  return out;
+  return out.slice(0, MAX_TOTAL);
+}
+
+/**
+ * Найти ссылки на соцсети в HTML. Сначала ищем в «фирменных» зонах
+ * (footer/header/nav + контейнеры/ссылки с social/contact в class/id) — там
+ * живут соцсети компании. Если там пусто — обходим всю страницу. Это отсекает
+ * чужие соцсети из тела статей/встроенных виджетов (кейс Хабра), не ломая
+ * обычные сайты с иконками в подвале.
+ */
+export function extractSocialMedia(html: string): string[] {
+  if (!html) return [];
+  const $ = cheerio.load(html);
+  $('script, style, noscript, template').remove();
+
+  const hrefs = (sel: string): string[] => {
+    const out: string[] = [];
+    $(sel).each((_, a) => {
+      const href = ($(a).attr('href') ?? '').trim();
+      if (/^https?:\/\//i.test(href)) out.push(href);
+    });
+    return out;
+  };
+
+  const REGION =
+    'footer a, header a, nav a, [class*="social"] a, [id*="social"] a, ' +
+    '[class*="contact"] a, [id*="contact"] a, a[class*="social"], a[id*="social"]';
+
+  let urls = filterSocialUrls(hrefs(REGION));
+  if (urls.length === 0) urls = filterSocialUrls(hrefs('a'));
+  return urls;
 }

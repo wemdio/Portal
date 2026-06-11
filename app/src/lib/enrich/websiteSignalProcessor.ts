@@ -24,7 +24,9 @@ import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtract
 import { llmExtractIntegrations } from '@/lib/enrich/extractors/integrationsLlmExtractor';
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
-import { extractSocialMedia } from '@/lib/enrich/extractors/socialMediaExtractor';
+import { extractSocialMedia, filterSocialUrls } from '@/lib/enrich/extractors/socialMediaExtractor';
+import { findCompanySocials } from '@/lib/enrich/extractors/socialCompanyFinder';
+import { deriveCompanyName } from '@/lib/enrich/extractors/deriveCompanyName';
 import { extractSocialPosts } from '@/lib/enrich/extractors/socialPostsExtractor';
 import { detectEventSignals } from '@/lib/enrich/extractors/eventDetector';
 import {
@@ -47,6 +49,13 @@ const EVENT_KEYS = new Set<ExtractorKey>([
 
 function anyEventRequested(extractors: ExtractorKey[]): boolean {
   return extractors.some((k) => EVENT_KEYS.has(k));
+}
+
+// Глубокий добор соцсетей (рендер браузером + поиск через Serper) дорогой —
+// читаем флаг на каждом вызове, чтобы прод/тесты могли включить «быстрый
+// режим» SIGNALS_SOCIAL_DEEP=0.
+function socialDeepEnabled(): boolean {
+  return (process.env.SIGNALS_SOCIAL_DEEP ?? '1') !== '0';
 }
 
 const DEFAULT_TIMEOUT_MS = 12_000;
@@ -516,20 +525,37 @@ export async function processSignalsForUrl(
     out.team_size = subpageHtml.about ? extractTeamSize(subpageHtml.about) : 0;
     if (!out.team_size) out.team_size = extractTeamSize(main.html);
   }
-  if (extractors.includes('social_media')) {
-    // Соцсети ищем сразу на main+about и мерджим — у b2b-сайтов на главной
-    // обычно footer с иконками, на about — текстовые ссылки. Дедуп идёт
-    // внутри extractSocialMedia по нормализованному URL.
-    const mainSocials = extractSocialMedia(main.html);
-    const aboutSocials = subpageHtml.about ? extractSocialMedia(subpageHtml.about) : [];
-    const merged: string[] = [];
-    const seen = new Set<string>();
-    for (const url of [...mainSocials, ...aboutSocials]) {
-      if (seen.has(url)) continue;
-      seen.add(url);
-      merged.push(url);
+  // ── Соцсети (общий результат для колонки «Соцсети» и для событий) ──────────
+  // static (main+about) → если пусто и включён deep: рендер браузером → если
+  // всё ещё пусто: поиск офиц. канала через Serper. Все источники проходят один
+  // фильтр (боты/личные/чужие/потолки) в filterSocialUrls.
+  const needSocial = extractors.includes('social_media') || anyEventRequested(extractors);
+  let socialUrls: string[] = [];
+  if (needSocial) {
+    socialUrls = filterSocialUrls([
+      ...extractSocialMedia(main.html),
+      ...(subpageHtml.about ? extractSocialMedia(subpageHtml.about) : []),
+    ]);
+    if (socialUrls.length === 0 && socialDeepEnabled() && !signal?.aborted) {
+      if (main.method === 'http') {
+        try {
+          const rendered = await fetchHtmlWithPlaywright(normalized, {
+            timeout: PLAYWRIGHT_TIMEOUT_MS,
+            signal,
+          });
+          if (rendered) socialUrls = extractSocialMedia(rendered);
+        } catch {
+          // Playwright-рендер — best-effort добор соцсетей: сбой настройки
+          // браузера не должен ронять строку, просто идём дальше (Serper).
+        }
+      }
+      if (socialUrls.length === 0 && !signal?.aborted) {
+        let host = '';
+        try { host = new URL(normalized).hostname; } catch { /* ignore */ }
+        socialUrls = await findCompanySocials(deriveCompanyName(main.html, normalized), host, { signal });
+      }
     }
-    out.social_media = merged;
+    if (extractors.includes('social_media')) out.social_media = socialUrls;
   }
   if (extractors.includes('blog_last_post')) {
     // Two-step crawl: from a blog *listing* we locate the latest post link and
@@ -578,7 +604,7 @@ export async function processSignalsForUrl(
     out.blog_last_post = post;
   }
 
-  // ─── Event signals (HoReCa-style) ────────────────────────────────────────
+  // ─── Event signals (niche-agnostic) ──────────────────────────────────────
   //
   // Pipeline:
   //   1. Ensure we have a list of social-media URLs (reuse the one we already
@@ -596,23 +622,15 @@ export async function processSignalsForUrl(
   // Guard: skip the entire block when no event_* key was requested — the
   // LLM call costs money and must not fire on basic/outreach presets.
   if (anyEventRequested(extractors) && !signal?.aborted) {
-    const socialUrlsForEvents =
-      out.social_media
-      ?? extractSocialMedia([
-        main.html,
-        subpageHtml.about ?? '',
-      ].join('\n'));
-
-    const posts = socialUrlsForEvents.length > 0
-      ? await extractSocialPosts(socialUrlsForEvents, {
+    // socialUrls уже вычислен выше (static → render → Serper), переиспользуем.
+    const posts = socialUrls.length > 0
+      ? await extractSocialPosts(socialUrls, {
           timeout: subpageTimeout,
           maxPostsPerNetwork: 10,
           signal,
         })
       : [];
 
-    // Cheap inline tag-strip — eventDetector caps the total context at 12 KB,
-    // so we just collapse tags & whitespace and slice. No need for cheerio here.
     // Cheap inline tag-strip — eventDetector caps the total context at 12 KB,
     // so we just collapse tags & whitespace and slice. No need for cheerio here.
     const aboutText = subpageHtml.about

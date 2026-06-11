@@ -31,7 +31,6 @@ describe('extractSocialMedia — per-family positive cases', () => {
     ['Twitter', 'https://twitter.com/mycompany'],
     ['X.com', 'https://x.com/mycompany'],
     ['LinkedIn company', 'https://linkedin.com/company/mycompany'],
-    ['LinkedIn personal', 'https://linkedin.com/in/myname'],
     ['YouTube @handle', 'https://youtube.com/@mychannel'],
     ['YouTube /channel/', 'https://youtube.com/channel/UCabcDEFghijklmn'],
     ['VK', 'https://vk.com/mycompany'],
@@ -118,17 +117,13 @@ describe('extractSocialMedia — normalization & dedup', () => {
     expect(extractSocialMedia(html)).toEqual(['https://t.me/mycompany']);
   });
 
-  it('keeps two accounts of the same family if they are different handles', () => {
+  it('keeps two different handles of the same family (capped at 2)', () => {
     const html = wrap([
-      'https://linkedin.com/company/myco',
-      'https://linkedin.com/in/john-ceo',
+      'https://t.me/company_main',
+      'https://t.me/company_news',
     ]);
     const result = extractSocialMedia(html);
-    expect(result).toEqual(expect.arrayContaining([
-      'https://linkedin.com/company/myco',
-      'https://linkedin.com/in/john-ceo',
-    ]));
-    expect(result).toHaveLength(2);
+    expect(result).toEqual(['https://t.me/company_main', 'https://t.me/company_news']);
   });
 
   it('returns families in deterministic order (Telegram → Instagram → YouTube → VK)', () => {
@@ -192,5 +187,38 @@ describe('extractSocialMedia — robustness', () => {
       <a href="https://t.me/realacc">Telegram</a>
     `;
     expect(extractSocialMedia(html)).toEqual(['https://t.me/realacc']);
+  });
+});
+
+describe('extractSocialMedia — filtering & scoping', () => {
+  it('drops Telegram bot accounts (handle ending in "bot")', () => {
+    const html = wrap(['https://t.me/some_bot', 'https://t.me/realchannel']);
+    expect(extractSocialMedia(html)).toEqual(['https://t.me/realchannel']);
+  });
+
+  it('drops personal LinkedIn /in/ profiles, keeps /company/', () => {
+    const html = wrap(['https://linkedin.com/in/john-ceo', 'https://linkedin.com/company/myco']);
+    expect(extractSocialMedia(html)).toEqual(['https://linkedin.com/company/myco']);
+  });
+
+  it('ignores foreign socials inside article body when footer has company socials', () => {
+    const html = `
+      <article>
+        <a href="https://t.me/habr_com">Habr TG</a>
+        <a href="https://vk.com/habr">Habr VK</a>
+      </article>
+      <footer><a href="https://t.me/realcompany">Our TG</a></footer>
+    `;
+    expect(extractSocialMedia(html)).toEqual(['https://t.me/realcompany']);
+  });
+
+  it('falls back to whole-page scan when no regional socials are found', () => {
+    const html = `<main><a href="https://t.me/bodyonly">tg</a></main>`;
+    expect(extractSocialMedia(html)).toEqual(['https://t.me/bodyonly']);
+  });
+
+  it('caps at 2 accounts per family', () => {
+    const html = wrap(['https://t.me/c1', 'https://t.me/c2', 'https://t.me/c3']);
+    expect(extractSocialMedia(html)).toEqual(['https://t.me/c1', 'https://t.me/c2']);
   });
 });

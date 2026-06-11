@@ -31,8 +31,22 @@ jest.mock('@/lib/enrich/extractors/integrationsLlmExtractor', () => ({
   llmExtractIntegrations: jest.fn().mockResolvedValue(['amoCRM', 'Slack']),
 }));
 
+jest.mock('@/lib/enrich/extractors/socialCompanyFinder', () => ({
+  findCompanySocials: jest.fn().mockResolvedValue([]),
+}));
+jest.mock('@/lib/enrich/extractors/socialPostsExtractor', () => ({
+  extractSocialPosts: jest.fn().mockResolvedValue([]),
+}));
+jest.mock('@/lib/enrich/extractors/eventDetector', () => ({
+  detectEventSignals: jest.fn().mockResolvedValue({ event_opening: true, event_opening_summary: 'Новый офис' }),
+}));
+
 import { processSignalsForUrl } from '@/lib/enrich/websiteSignalProcessor';
 import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websiteParser';
+import { findCompanySocials } from '@/lib/enrich/extractors/socialCompanyFinder';
+import { extractSocialPosts } from '@/lib/enrich/extractors/socialPostsExtractor';
+const findCompanySocialsMock = findCompanySocials as jest.MockedFunction<typeof findCompanySocials>;
+const extractSocialPostsMock = extractSocialPosts as jest.MockedFunction<typeof extractSocialPosts>;
 
 const fetchHtmlWithRetryMock = fetchHtmlWithRetry as jest.MockedFunction<typeof fetchHtmlWithRetry>;
 const fetchHtmlWithPlaywrightMock = fetchHtmlWithPlaywright as jest.MockedFunction<typeof fetchHtmlWithPlaywright>;
@@ -629,5 +643,78 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
       expect(result.stack).toBe('');
       expect(result.profile).toBe('');
     }
+  });
+});
+
+describe('processSignalsForUrl — social media discovery', () => {
+  const ORIG_FETCH = global.fetch;
+  beforeEach(() => {
+    fetchHtmlWithRetryMock.mockReset();
+    fetchHtmlWithPlaywrightMock.mockReset();
+    findCompanySocialsMock.mockReset().mockResolvedValue([]);
+    extractSocialPostsMock.mockReset().mockResolvedValue([]);
+    // HEAD-пробы подстраниц (/about) → быстро «нет», без реальной сети.
+    (global.fetch as unknown) = jest.fn().mockResolvedValue({ ok: false });
+    delete process.env.SIGNALS_SOCIAL_DEEP;
+  });
+  afterEach(() => { global.fetch = ORIG_FETCH; delete process.env.SIGNALS_SOCIAL_DEEP; });
+
+  it('reads socials from static footer without deep recall', async () => {
+    const html = `<html><body><footer><a href="https://t.me/realco">tg</a></footer></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html, status: 200 });
+    const result = await processSignalsForUrl('example.com', { extractors: ['social_media'] });
+    expect('social_media' in result && result.social_media).toEqual(['https://t.me/realco']);
+    expect(fetchHtmlWithPlaywrightMock).not.toHaveBeenCalled();
+    expect(findCompanySocialsMock).not.toHaveBeenCalled();
+  });
+
+  it('renders with Playwright when static HTML has no socials', async () => {
+    const bare = `<html><body><p>no socials</p></body></html>`;
+    const rendered = `<html><body><footer><a href="https://vk.com/rendered">vk</a></footer></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html: bare, status: 200 });
+    fetchHtmlWithPlaywrightMock.mockResolvedValue(rendered);
+    const result = await processSignalsForUrl('example.com', { extractors: ['social_media'] });
+    expect('social_media' in result && result.social_media).toEqual(['https://vk.com/rendered']);
+    expect(fetchHtmlWithPlaywrightMock).toHaveBeenCalled();
+    expect(findCompanySocialsMock).not.toHaveBeenCalled();
+  });
+
+  it('falls back to Serper finder when static and Playwright are both empty', async () => {
+    const bare = `<html><body><p>none</p></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html: bare, status: 200 });
+    fetchHtmlWithPlaywrightMock.mockResolvedValue(bare);
+    findCompanySocialsMock.mockResolvedValue(['https://t.me/found_by_search']);
+    const result = await processSignalsForUrl('example.com', { extractors: ['social_media'] });
+    expect('social_media' in result && result.social_media).toEqual(['https://t.me/found_by_search']);
+    expect(findCompanySocialsMock).toHaveBeenCalled();
+  });
+
+  it('SIGNALS_SOCIAL_DEEP=0 disables Playwright + Serper recall', async () => {
+    process.env.SIGNALS_SOCIAL_DEEP = '0';
+    const bare = `<html><body><p>none</p></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html: bare, status: 200 });
+    const result = await processSignalsForUrl('example.com', { extractors: ['social_media'] });
+    expect('social_media' in result && result.social_media).toEqual([]);
+    expect(fetchHtmlWithPlaywrightMock).not.toHaveBeenCalled();
+    expect(findCompanySocialsMock).not.toHaveBeenCalled();
+  });
+
+  it('feeds the resolved social urls into the event pipeline', async () => {
+    const html = `<html><body><footer><a href="https://t.me/realco">tg</a></footer></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html, status: 200 });
+    const result = await processSignalsForUrl('example.com', {
+      extractors: ['social_media', 'event_opening', 'event_opening_summary'],
+    });
+    expect(extractSocialPostsMock).toHaveBeenCalledWith(['https://t.me/realco'], expect.anything());
+    expect('event_opening' in result && result.event_opening).toBe(true);
+  });
+
+  it('does not error the row when Playwright throws; falls through to Serper', async () => {
+    const bare = `<html><body><p>none</p></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html: bare, status: 200 });
+    fetchHtmlWithPlaywrightMock.mockRejectedValue(new Error('browser launch failed'));
+    findCompanySocialsMock.mockResolvedValue(['https://t.me/from_serper']);
+    const result = await processSignalsForUrl('example.com', { extractors: ['social_media'] });
+    expect('social_media' in result && result.social_media).toEqual(['https://t.me/from_serper']);
   });
 });
