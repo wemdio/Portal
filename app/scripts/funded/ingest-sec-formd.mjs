@@ -76,6 +76,22 @@ function yearOf(v) {
   return Number.isFinite(n) && n >= 1800 && n <= 2100 ? n : null;
 }
 
+// Dates in the TSVs are usually ISO (YYYY-MM-DD) but older quarters contain other
+// formats and junk — return a valid ISO date string or null (never garbage that
+// would fail Postgres' date cast).
+function isoDate(v) {
+  const s = String(v ?? '').trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const t = Date.parse(s.replace(/-/g, ' '));
+  if (Number.isFinite(t)) {
+    const d = new Date(t);
+    const y = d.getUTCFullYear();
+    if (y >= 1900 && y <= 2100) return d.toISOString().slice(0, 10);
+  }
+  return null;
+}
+
 function truthy(v) {
   const s = String(v ?? '').trim().toLowerCase();
   return s === 'true' || s === 'y' || s === '1' || s === 'yes';
@@ -189,8 +205,8 @@ function buildFilings(dir) {
       country,
       founded: yearOf(iss.YEAROFINC_VALUE_ENTERED),
       industry: off.INDUSTRYGROUPTYPE ? String(off.INDUSTRYGROUPTYPE).toLowerCase() : null,
-      filingDate: (sub.FILING_DATE || '').slice(0, 10) || null,
-      saleDate: (off.SALE_DATE || '').slice(0, 10) || null,
+      filingDate: isoDate(sub.FILING_DATE),
+      saleDate: isoDate(off.SALE_DATE),
       amountSold: parseDollar(off.TOTALAMOUNTSOLD),
       offeringAmount: parseDollar(off.TOTALOFFERINGAMOUNT),
       lastType,
@@ -293,7 +309,8 @@ async function upsertBatch(client, rows) {
 }
 
 function dbSsl(url) {
-  return /localhost|127\.0\.0\.1/.test(url) ? false : { rejectUnauthorized: false };
+  if (/sslmode=disable/i.test(url) || /localhost|127\.0\.0\.1/.test(url)) return false;
+  return { rejectUnauthorized: false };
 }
 
 function fmtUsd(n) {
@@ -338,7 +355,7 @@ async function main() {
   const client = new pg.Client({ connectionString: DB_URL, ssl: dbSsl(DB_URL) });
   await client.connect();
   try {
-    const CHUNK = 400;
+    const CHUNK = Math.max(50, Number(process.env.INGEST_CHUNK || 400));
     for (let i = 0; i < rows.length; i += CHUNK) {
       await upsertBatch(client, rows.slice(i, i + CHUNK));
       process.stdout.write(`\rUpserted ${Math.min(i + CHUNK, rows.length)}/${rows.length}`);
