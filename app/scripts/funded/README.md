@@ -44,9 +44,25 @@ psql "$DATABASE_URL" -f scripts/funded/enrich-sec-from-pdl.sql
 ## Cadence
 
 - **YC**: daily/weekly cron — `all.json` is regenerated daily; re-running upserts.
-- **SEC Form D**: quarterly (new DERA zip posted shortly after quarter-end). For
-  near-realtime new filings, the EDGAR full-text API (`efts.sec.gov/LATEST/search-index?forms=D`)
-  can be polled daily — not implemented here (quarterly bulk is enough to start).
+- **SEC Form D, bulk**: quarterly (new DERA zip posted shortly after quarter-end).
+  **Re-run with the FULL window** (e.g. `--quarters 2024q1,...,<new quarter>`) — the
+  bulk upsert recomputes each issuer's totals from the quarters it sees, so a
+  partial window would understate totals. The full re-run also corrects any drift
+  accumulated by the daily poller.
+- **SEC Form D, daily poller** (`poll-sec-daily.mjs`): closes the quarterly lag.
+  Polls EDGAR full-text search for new Form D filings (companies must file within
+  15 days of first sale), fetches each filing's `primary_doc.xml`, upserts with
+  newer-wins/additive merge semantics. Idempotent via the `funded_sec_daily_log`
+  table (migration `20260611_0001`) — overlapping windows never double-count.
+  Default window: last 10 days (self-healing if a run is missed).
+
+  **Prod cron (installed on 139):**
+  ```
+  40 6 * * * docker exec -e SEC_USER_AGENT="..." portal node /app/scripts/funded/poll-sec-daily.mjs >> /var/log/funded-sec-poll.log 2>&1
+  ```
+  The script ships inside the portal image (`/app/scripts/funded/`); the container
+  already has `DATABASE_URL`. SEC requires a descriptive User-Agent with a contact
+  email on EVERY request — without it (or with one its WAF dislikes) you get 403.
 
 ## Attribution
 
