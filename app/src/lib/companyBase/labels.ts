@@ -57,6 +57,7 @@ export const EU_US_COUNTRIES: { code: string; label: string }[] = [
   { code: 'portugal', label: 'Португалия' },
   { code: 'canada', label: 'Канада' },
   { code: 'australia', label: 'Австралия' },
+  { code: 'united arab emirates', label: 'ОАЭ' },
 ];
 
 export const EU_US_COUNTRY_CODES = EU_US_COUNTRIES.map((c) => c.code);
