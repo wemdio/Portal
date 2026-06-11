@@ -10,8 +10,9 @@ import { CryptoPaymentParserView } from '@/components/parsers/CryptoPaymentParse
 import { YandexDirectParserView } from '@/components/parsers/YandexDirectParserView';
 import { AtsParserView } from '@/components/parsers/AtsParserView';
 import { EuUsCompanyBaseView } from '@/components/parsers/EuUsCompanyBaseView';
+import { CrunchbaseParserView } from '@/components/parsers/CrunchbaseParserView';
 
-type Tab = 'hh' | 'ats' | 'eu-us-base' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto';
+type Tab = 'hh' | 'ats' | 'crunchbase' | 'eu-us-base' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto';
 
 export default function ParsersPage() {
   const [activeTab, setActiveTab] = useState<Tab>('hh');
@@ -37,13 +38,16 @@ export default function ParsersPage() {
             HH.ru Парсер
           </button>
           <button
-            type="button"
-            disabled
-            title="В тестировании — временно недоступно"
-            className="whitespace-nowrap py-4 px-1 border-b-2 border-transparent font-medium text-sm text-gray-300 cursor-not-allowed"
+            onClick={() => setActiveTab('crunchbase')}
+            className={`
+              whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm
+              ${activeTab === 'crunchbase'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}
+            `}
           >
-            EU/US · Tech-компании
-            <span className="ml-1.5 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-normal text-amber-700 border border-amber-200 align-middle">в тестировании</span>
+            Crunchbase
+            <span className="ml-1.5 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-normal text-emerald-700 border border-emerald-200 align-middle">стартапы · раунды</span>
           </button>
           <button
             onClick={() => setActiveTab('eu-us-base')}
@@ -118,6 +122,8 @@ export default function ParsersPage() {
         ? <HHParserView />
         : activeTab === 'ats'
         ? <AtsParserView />
+        : activeTab === 'crunchbase'
+        ? <CrunchbaseParserView />
         : activeTab === 'eu-us-base'
         ? <EuUsCompanyBaseView />
         : activeTab === 'hh-archive'

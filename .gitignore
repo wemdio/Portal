@@ -171,3 +171,4 @@ app/scripts/analyze-*.mjs
 app/scripts/build-instantly-docx*.mjs
 app/scripts/check-traffic.mjs
 app/scripts/collect-inn*.mjs
+.gstack/

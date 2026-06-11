@@ -27,7 +27,7 @@ Live table of contents. AI updates this every time a new page is created or a pa
 
 _Per-question deep-dives. Format: `YYYY-MM-DD-<topic>.md`._
 
-(empty — first analyses появятся когда начнём задавать вопросы)
+- [analyses/2026-06-05-instantly-top-research-questions.md](./analyses/2026-06-05-instantly-top-research-questions.md) — pass по research brief: copy features, length, CTA, follow-ups, v2 data gaps
 
 ## Campaigns
 

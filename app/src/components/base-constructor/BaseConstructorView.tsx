@@ -813,8 +813,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     && (!needsPrompt || prompt.trim());
 
   return (
-    <div className="min-h-screen bg-gray-50/60 px-4 py-6 sm:px-6 lg:px-8">
-      <div className="max-w-[1000px] mx-auto space-y-6">
+    // clientMode: страница /client/base-constructor сама даёт фон (.client-portal),
+    // ширину (max-w-5xl) и заголовок — свой светлый фон/отступы не дублируем,
+    // иначе контент съезжает относительно шапки. Admin (/tools) — как было.
+    <div className={clientMode ? '' : 'min-h-screen bg-gray-50/60 px-4 py-6 sm:px-6 lg:px-8'}>
+      <div className={clientMode ? 'space-y-6' : 'max-w-[1000px] mx-auto space-y-6'}>
         {/* Header — admin-only. /client/base-constructor wraps this view
             with its own client-friendly h1 «Подготовить базу к запуску»;
             rendering both produced the duplicate-titles anti-pattern the
@@ -833,9 +836,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
         {!isRunning && !isComplete && !isFailed && (
           <>
             {/* File Upload */}
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-                <h2 className="text-base font-bold text-gray-900">1. Загрузите базу</h2>
+            <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden'}>
+              <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)]' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50'}>
+                <h2 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>1. Загрузите базу</h2>
               </div>
               <div className="px-6 py-5">
                 {!fileData ? (
@@ -844,23 +847,29 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     onDragLeave={handleDragLeave}
                     onDrop={handleDrop}
                     className={`flex flex-col items-center justify-center w-full py-10 border-2 border-dashed rounded-xl cursor-pointer transition ${
-                      isDragOver
-                        ? 'border-blue-400 bg-blue-50/60 scale-[1.01]'
-                        : parsing
-                          ? 'border-blue-300 bg-blue-50/50'
-                          : 'border-gray-200 bg-gray-50 hover:bg-gray-100 hover:border-gray-300'
+                      clientMode
+                        ? isDragOver
+                          ? 'border-[var(--cp-paper)] bg-[var(--cp-surface-elev)] scale-[1.01]'
+                          : parsing
+                            ? 'border-[var(--cp-divider-strong)] bg-[var(--cp-surface-elev)]'
+                            : 'border-[var(--cp-divider-strong)] bg-[var(--cp-surface-rest)] hover:bg-[var(--cp-surface-elev)]'
+                        : isDragOver
+                          ? 'border-blue-400 bg-blue-50/60 scale-[1.01]'
+                          : parsing
+                            ? 'border-blue-300 bg-blue-50/50'
+                            : 'border-gray-200 bg-gray-50 hover:bg-gray-100 hover:border-gray-300'
                     }`}
                   >
                     {parsing ? (
                       <div className="text-center">
-                        <Loader2 className="w-8 h-8 text-blue-500 animate-spin mx-auto mb-3" />
-                        <p className="text-sm text-blue-600 font-medium">Разбор файла...</p>
+                        <Loader2 className={`w-8 h-8 animate-spin mx-auto mb-3 ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-blue-500'}`} />
+                        <p className={`text-sm font-medium ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-blue-600'}`}>Разбор файла...</p>
                       </div>
                     ) : (
                       <div className="text-center">
-                        <Upload className="w-8 h-8 text-gray-400 mx-auto mb-3" />
-                        <p className="text-sm font-medium text-gray-600">Перетащите файл или нажмите для выбора</p>
-                        <p className="text-xs text-gray-400 mt-1">CSV, TSV, XLSX, XLS</p>
+                        <Upload className={`w-8 h-8 mx-auto mb-3 ${clientMode ? 'text-[var(--cp-paper-faint)]' : 'text-gray-400'}`} />
+                        <p className={`text-sm font-medium ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-600'}`}>Перетащите файл или нажмите для выбора</p>
+                        <p className={`text-xs mt-1 ${clientMode ? 'text-[var(--cp-paper-faint)]' : 'text-gray-400'}`}>CSV, TSV, XLSX, XLS</p>
                       </div>
                     )}
                     <input
@@ -879,11 +888,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center">
-                          <Check className="w-5 h-5 text-emerald-600" />
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${clientMode ? 'bg-[var(--cp-surface-active)]' : 'bg-emerald-50'}`}>
+                          <Check className={`w-5 h-5 ${clientMode ? 'text-[var(--cp-green)]' : 'text-emerald-600'}`} />
                         </div>
                         <div>
-                          <p className="text-sm font-medium text-gray-900">{fileName}</p>
+                          <p className={`text-sm font-medium ${clientMode ? 'text-[var(--cp-paper)]' : 'text-gray-900'}`}>{fileName}</p>
                           <p className="text-xs text-gray-500">
                             {fileData.length - 1} строк, {fileData[0]?.length || 0} колонок
                             {clientMode ? (
@@ -952,9 +961,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
             {/* Step Constructor */}
             {fileData && (
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-                  <h2 className="text-base font-bold text-gray-900">2. Выберите шаги обработки</h2>
+              <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden'}>
+                <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)] flex items-center justify-between' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between'}>
+                  <h2 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>2. Выберите шаги обработки</h2>
                   {!clientMode && (
                     <div className="flex gap-2">
                       <button
@@ -1012,8 +1021,10 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     return (
                     <div key={cat.key}>
                       <div className="flex items-center gap-2 mb-3">
-                        <span className={`px-2.5 py-0.5 text-xs font-semibold rounded-md border ${cat.color}`}>
-                          {cat.label}
+                        <span className={clientMode
+                          ? 'ds-eyebrow'
+                          : `px-2.5 py-0.5 text-xs font-semibold rounded-md border ${cat.color}`}>
+                          {clientMode ? cat.label.toLowerCase() : cat.label}
                         </span>
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -1047,24 +1058,40 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                                   ? 'Сначала заполните бриф'
                                   : (lockedReason ?? undefined)
                               }
-                              className={`group relative flex items-start gap-3 p-3.5 rounded-xl border-2 text-left transition-all ${
-                                isAlwaysOn
-                                  ? 'border-emerald-200 bg-emerald-50/50 cursor-default'
-                                  : disabledForBrief
-                                  ? 'border-gray-100 bg-gray-50 cursor-not-allowed opacity-60'
-                                  : showAsActive
-                                  ? lockedReason ? 'border-gray-900 bg-gray-100 shadow-sm opacity-80' : 'border-gray-900 bg-gray-50 shadow-sm'
-                                  : 'border-gray-100 bg-white hover:border-gray-300 hover:shadow-sm'
+                              className={`group relative flex items-start gap-3 p-3.5 text-left transition-all ${
+                                clientMode
+                                  ? `rounded-lg border ${
+                                      disabledForBrief
+                                        ? 'border-[var(--cp-divider)] bg-[var(--cp-surface-rest)] cursor-not-allowed opacity-60'
+                                        : showAsActive
+                                        ? 'border-[var(--cp-paper-faint)] bg-[var(--cp-surface-active)]'
+                                        : 'border-[var(--cp-divider)] bg-[var(--cp-surface-rest)] hover:border-[var(--cp-divider-strong)]'
+                                    }`
+                                  : `rounded-xl border-2 ${
+                                      isAlwaysOn
+                                        ? 'border-emerald-200 bg-emerald-50/50 cursor-default'
+                                        : disabledForBrief
+                                        ? 'border-gray-100 bg-gray-50 cursor-not-allowed opacity-60'
+                                        : showAsActive
+                                        ? lockedReason ? 'border-gray-900 bg-gray-100 shadow-sm opacity-80' : 'border-gray-900 bg-gray-50 shadow-sm'
+                                        : 'border-gray-100 bg-white hover:border-gray-300 hover:shadow-sm'
+                                    }`
                               }`}
                             >
                               <div className={`flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center transition ${
-                                isAlwaysOn ? 'bg-emerald-600 text-white' : showAsActive ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-400 group-hover:bg-gray-200 group-hover:text-gray-600'
+                                clientMode
+                                  ? showAsActive ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)]' : 'bg-[var(--cp-surface-elev)] text-[var(--cp-paper-faint)]'
+                                  : isAlwaysOn ? 'bg-emerald-600 text-white' : showAsActive ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-400 group-hover:bg-gray-200 group-hover:text-gray-600'
                               }`}>
                                 <Icon className="w-4.5 h-4.5" />
                               </div>
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-2 flex-wrap">
-                                  <p className={`text-sm font-semibold transition ${showAsActive ? 'text-gray-900' : 'text-gray-700'}`}>
+                                  <p className={`text-sm font-semibold transition ${
+                                    clientMode
+                                      ? showAsActive ? 'text-[var(--cp-paper)]' : 'text-[var(--cp-paper-mute)]'
+                                      : showAsActive ? 'text-gray-900' : 'text-gray-700'
+                                  }`}>
                                     {step.label}
                                   </p>
                                   {isAlwaysOn ? (
@@ -1077,7 +1104,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                                       const badge = COST_BADGES[step.cost];
                                       const CostIcon = badge.icon;
                                       return (
-                                        <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${badge.color}`}>
+                                        <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${
+                                          clientMode ? 'border-[var(--cp-divider-strong)] text-[var(--cp-paper-mute)]' : badge.color
+                                        }`}>
                                           <CostIcon className="w-2.5 h-2.5" />
                                           {badge.label}
                                         </span>
@@ -1085,7 +1114,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                                     })()
                                   )}
                                 </div>
-                                <p className="text-xs text-gray-400 mt-0.5 leading-relaxed">{step.description}</p>
+                                <p className={`text-xs mt-0.5 leading-relaxed ${clientMode ? 'text-[var(--cp-paper-faint)]' : 'text-gray-400'}`}>{step.description}</p>
                                 {clientHint && (
                                   <p className="text-[11px] text-emerald-700 mt-1 flex items-start gap-1">
                                     <Zap className="w-3 h-3 mt-0.5 flex-shrink-0" />
@@ -1126,8 +1155,10 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                                 )}
                               </div>
                               {showAsActive && (
-                                <div className={`absolute top-2 right-2 w-5 h-5 rounded-full ${isAlwaysOn ? 'bg-emerald-600' : 'bg-gray-900'} flex items-center justify-center`}>
-                                  <Check className="w-3 h-3 text-white" />
+                                <div className={`absolute top-2 right-2 w-5 h-5 rounded-full ${
+                                  clientMode ? 'bg-[var(--cp-paper)]' : isAlwaysOn ? 'bg-emerald-600' : 'bg-gray-900'
+                                } flex items-center justify-center`}>
+                                  <Check className={`w-3 h-3 ${clientMode ? 'text-[var(--cp-ink)]' : 'text-white'}`} />
                                 </div>
                               )}
                             </button>
@@ -1140,8 +1171,8 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
                   {/* Selected order */}
                   {selectedSteps.length > 0 && (
-                    <div className="pt-3 border-t border-gray-100">
-                      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Порядок выполнения</p>
+                    <div className={`pt-3 border-t ${clientMode ? 'border-[var(--cp-divider)]' : 'border-gray-100'}`}>
+                      <p className={clientMode ? 'ds-eyebrow mb-2' : 'text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2'}>{clientMode ? 'порядок выполнения' : 'Порядок выполнения'}</p>
                       <div className="flex flex-wrap gap-1.5">
                         {selectedSteps.map((key, idx) => {
                           const step = STEP_MAP.get(key);
@@ -1153,13 +1184,19 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                             <span
                               key={key}
                               title={locked ?? undefined}
-                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg ${
-                                hasWarning ? 'bg-amber-50 text-amber-700 border border-amber-200'
-                                : hasHint ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                                : 'bg-gray-100 text-gray-700'
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium ${
+                                clientMode
+                                  ? 'rounded-md border border-[var(--cp-divider-strong)] bg-[var(--cp-surface-elev)] text-[var(--cp-paper-mute)]'
+                                  : `rounded-lg ${
+                                      hasWarning ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                                      : hasHint ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                                      : 'bg-gray-100 text-gray-700'
+                                    }`
                               }`}
                             >
-                              <span className="w-4 h-4 rounded-full bg-gray-900 text-white text-[10px] font-bold flex items-center justify-center flex-shrink-0">
+                              <span className={`w-4 h-4 rounded-full text-[10px] font-bold flex items-center justify-center flex-shrink-0 ${
+                                clientMode ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)]' : 'bg-gray-900 text-white'
+                              }`}>
                                 {idx + 1}
                               </span>
                               {step.label}
@@ -1208,9 +1245,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
             {/* Column mapping */}
             {fileData && selectedSteps.length > 0 && neededRoles.length > 0 && (
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-                  <h2 className="text-base font-bold text-gray-900">3. Укажите колонки</h2>
+              <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden'}>
+                <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)]' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50'}>
+                  <h2 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>3. Укажите колонки</h2>
                   <p className="text-xs text-gray-500 mt-0.5">Выберите, какая колонка в файле соответствует каждому полю</p>
                 </div>
                 <div className="px-6 py-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -1218,9 +1255,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     const mapped = columnMapping[role.key] || '';
                     return (
                       <div key={role.key}>
-                        <label className="block text-sm font-semibold text-gray-700 mb-1.5">
+                        <label className={clientMode ? 'ds-eyebrow mb-1.5 block' : 'block text-sm font-semibold text-gray-700 mb-1.5'}>
                           {role.label}
-                          {!mapped && <span className="text-red-400 ml-1">*</span>}
+                          {!mapped && <span className={clientMode ? 'text-[var(--cp-red)] ml-1' : 'text-red-400 ml-1'}>*</span>}
                         </label>
                         <select
                           value={mapped}
@@ -1230,9 +1267,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                             else delete next[role.key];
                             return next;
                           })}
-                          className={`w-full px-3 py-2 text-sm border rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white ${
-                            !mapped ? 'border-red-300' : 'border-gray-200'
-                          }`}
+                          className={clientMode
+                            ? `ds-input w-full ${!mapped ? 'border-[var(--cp-red)]' : ''}`
+                            : `w-full px-3 py-2 text-sm border rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white ${
+                                !mapped ? 'border-red-300' : 'border-gray-200'
+                              }`}
                         >
                           <option value="">— Не выбрано —</option>
                           {(fileData[0] || []).map((col, idx) => (
@@ -1240,7 +1279,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                           ))}
                         </select>
                         {mapped && (
-                          <p className="text-[11px] text-emerald-600 mt-1 flex items-center gap-1">
+                          <p className={`text-[11px] mt-1 flex items-center gap-1 ${clientMode ? 'text-[var(--cp-green)]' : 'text-emerald-600'}`}>
                             <Check className="w-3 h-3" /> {mapped}
                           </p>
                         )}
@@ -1261,21 +1300,21 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
             {/* Settings: brief, prompt, email pipeline target options */}
             {fileData && (needsBrief || needsPrompt || showFindEmailsTargetOption || showValidateTargetOption) && (
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-                  <h2 className="text-base font-bold text-gray-900">{neededRoles.length > 0 ? '4' : '3'}. Настройки</h2>
+              <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden'}>
+                <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)]' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50'}>
+                  <h2 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>{neededRoles.length > 0 ? '4' : '3'}. Настройки</h2>
                 </div>
                 <div className="px-6 py-5 space-y-4">
                   {(showFindEmailsTargetOption || showValidateTargetOption) && (
                     <div className="space-y-3 pb-1">
-                      <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
-                        <MailSearch className="w-4 h-4 text-gray-500" />
+                      <h3 className={`text-sm font-semibold flex items-center gap-2 ${clientMode ? 'text-[var(--cp-paper)]' : 'text-gray-700'}`}>
+                        <MailSearch className={`w-4 h-4 ${clientMode ? 'text-[var(--cp-paper-faint)]' : 'text-gray-500'}`} />
                         Email пайплайн
                       </h3>
 
                       {showFindEmailsTargetOption && (
-                        <fieldset className="border border-gray-200 rounded-xl p-4 space-y-2">
-                          <legend className="text-xs font-semibold text-gray-700 px-1">
+                        <fieldset className={clientMode ? 'border border-[var(--cp-divider)] rounded-md p-4 space-y-2' : 'border border-gray-200 rounded-xl p-4 space-y-2'}>
+                          <legend className={clientMode ? 'ds-eyebrow px-1' : 'text-xs font-semibold text-gray-700 px-1'}>
                             Куда писать найденные email
                           </legend>
                           <p className="text-[11px] text-gray-500 mb-2">
@@ -1288,11 +1327,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                               value="separate"
                               checked={findEmailsTarget === 'separate'}
                               onChange={() => setFindEmailsTarget('separate')}
-                              className="mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400"
+                              className={clientMode ? 'mt-0.5 w-4 h-4 accent-[var(--cp-paper)]' : 'mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400'}
                             />
-                            <span className="text-xs text-gray-700 leading-snug">
+                            <span className={clientMode ? 'text-xs text-[var(--cp-paper-mute)] leading-snug' : 'text-xs text-gray-700 leading-snug'}>
                               В отдельную колонку «Найденный Email»
-                              <span className="block text-[11px] text-gray-500 mt-0.5">
+                              <span className={clientMode ? 'block text-[11px] text-[var(--cp-paper-faint)] mt-0.5' : 'block text-[11px] text-gray-500 mt-0.5'}>
                                 Исходные email не трогаются. В итоговом файле колонки сольются в одну с дедупом.
                               </span>
                             </span>
@@ -1304,11 +1343,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                               value="same"
                               checked={findEmailsTarget === 'same'}
                               onChange={() => setFindEmailsTarget('same')}
-                              className="mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400"
+                              className={clientMode ? 'mt-0.5 w-4 h-4 accent-[var(--cp-paper)]' : 'mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400'}
                             />
-                            <span className="text-xs text-gray-700 leading-snug">
+                            <span className={clientMode ? 'text-xs text-[var(--cp-paper-mute)] leading-snug' : 'text-xs text-gray-700 leading-snug'}>
                               Дополнять ту же колонку
-                              <span className="block text-[11px] text-gray-500 mt-0.5">
+                              <span className={clientMode ? 'block text-[11px] text-[var(--cp-paper-faint)] mt-0.5' : 'block text-[11px] text-gray-500 mt-0.5'}>
                                 Найденные email вписываются только в пустые ячейки. Существующие не перезаписываются.
                               </span>
                             </span>
@@ -1317,8 +1356,8 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                       )}
 
                       {showValidateTargetOption && (
-                        <fieldset className="border border-gray-200 rounded-xl p-4 space-y-2">
-                          <legend className="text-xs font-semibold text-gray-700 px-1">
+                        <fieldset className={clientMode ? 'border border-[var(--cp-divider)] rounded-md p-4 space-y-2' : 'border border-gray-200 rounded-xl p-4 space-y-2'}>
+                          <legend className={clientMode ? 'ds-eyebrow px-1' : 'text-xs font-semibold text-gray-700 px-1'}>
                             Что валидировать
                           </legend>
                           <p className="text-[11px] text-gray-500 mb-2">
@@ -1331,11 +1370,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                               value="original"
                               checked={validateTarget === 'original'}
                               onChange={() => setValidateTarget('original')}
-                              className="mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400"
+                              className={clientMode ? 'mt-0.5 w-4 h-4 accent-[var(--cp-paper)]' : 'mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400'}
                             />
-                            <span className="text-xs text-gray-700 leading-snug">
+                            <span className={clientMode ? 'text-xs text-[var(--cp-paper-mute)] leading-snug' : 'text-xs text-gray-700 leading-snug'}>
                               Только исходные
-                              <span className="block text-[11px] text-gray-500 mt-0.5">
+                              <span className={clientMode ? 'block text-[11px] text-[var(--cp-paper-faint)] mt-0.5' : 'block text-[11px] text-gray-500 mt-0.5'}>
                                 Email из загруженного файла. Найденные scrape-результаты не валидируем.
                               </span>
                             </span>
@@ -1347,11 +1386,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                               value="found"
                               checked={validateTarget === 'found'}
                               onChange={() => setValidateTarget('found')}
-                              className="mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400"
+                              className={clientMode ? 'mt-0.5 w-4 h-4 accent-[var(--cp-paper)]' : 'mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400'}
                             />
-                            <span className="text-xs text-gray-700 leading-snug">
+                            <span className={clientMode ? 'text-xs text-[var(--cp-paper-mute)] leading-snug' : 'text-xs text-gray-700 leading-snug'}>
                               Только найденные
-                              <span className="block text-[11px] text-gray-500 mt-0.5">
+                              <span className={clientMode ? 'block text-[11px] text-[var(--cp-paper-faint)] mt-0.5' : 'block text-[11px] text-gray-500 mt-0.5'}>
                                 Email со скрейпа сайтов. Исходные считаем доверенными.
                               </span>
                             </span>
@@ -1363,11 +1402,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                               value="both"
                               checked={validateTarget === 'both'}
                               onChange={() => setValidateTarget('both')}
-                              className="mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400"
+                              className={clientMode ? 'mt-0.5 w-4 h-4 accent-[var(--cp-paper)]' : 'mt-0.5 w-4 h-4 text-violet-600 focus:ring-violet-400'}
                             />
-                            <span className="text-xs text-gray-700 leading-snug">
+                            <span className={clientMode ? 'text-xs text-[var(--cp-paper-mute)] leading-snug' : 'text-xs text-gray-700 leading-snug'}>
                               Обе
-                              <span className="block text-[11px] text-gray-500 mt-0.5">
+                              <span className={clientMode ? 'block text-[11px] text-[var(--cp-paper-faint)] mt-0.5' : 'block text-[11px] text-gray-500 mt-0.5'}>
                                 Каждая колонка валидируется независимо. Невалидные email очищаются, строка вылетает только если все колонки пустые/невалидные.
                               </span>
                             </span>
@@ -1378,10 +1417,10 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   )}
                   {needsBrief && (
                     <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-2">
-                        Бриф для оценки ЦА
+                      <label className={clientMode ? 'ds-eyebrow mb-2 block' : 'block text-sm font-semibold text-gray-700 mb-2'}>
+                        {clientMode ? 'бриф для оценки ЦА' : 'Бриф для оценки ЦА'}
                       </label>
-                      <div className="flex gap-1 p-1 bg-gray-100 rounded-lg mb-3 w-fit">
+                      <div className={clientMode ? 'flex gap-1 p-0.5 rounded-md mb-3 w-fit border border-[var(--cp-divider)] bg-[var(--cp-surface-rest)]' : 'flex gap-1 p-1 bg-gray-100 rounded-lg mb-3 w-fit'}>
                         {clientMode && (
                           <button
                             type="button"
@@ -1389,10 +1428,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                               setBriefInputMode('saved');
                               setBriefFileName('');
                             }}
-                            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
-                              briefInputMode === 'saved'
-                                ? 'bg-white text-gray-900 shadow-sm'
-                                : 'text-gray-500 hover:text-gray-700'
+                            className={`px-3 py-1.5 text-xs font-medium rounded transition-all ${
+                              clientMode
+                                ? briefInputMode === 'saved' ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)]' : 'text-[var(--cp-paper-mute)]'
+                                : briefInputMode === 'saved'
+                                  ? 'bg-white text-gray-900 shadow-sm'
+                                  : 'text-gray-500 hover:text-gray-700'
                             }`}
                           >
                             Сохранённый бриф
@@ -1401,10 +1442,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         <button
                           type="button"
                           onClick={() => setBriefInputMode('pdf')}
-                          className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
-                            briefInputMode === 'pdf'
-                              ? 'bg-white text-gray-900 shadow-sm'
-                              : 'text-gray-500 hover:text-gray-700'
+                          className={`px-3 py-1.5 text-xs font-medium rounded transition-all ${
+                            clientMode
+                              ? briefInputMode === 'pdf' ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)]' : 'text-[var(--cp-paper-mute)]'
+                              : briefInputMode === 'pdf'
+                                ? 'bg-white text-gray-900 shadow-sm'
+                                : 'text-gray-500 hover:text-gray-700'
                           }`}
                         >
                           PDF файл
@@ -1412,10 +1455,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         <button
                           type="button"
                           onClick={() => setBriefInputMode('text')}
-                          className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
-                            briefInputMode === 'text'
-                              ? 'bg-white text-gray-900 shadow-sm'
-                              : 'text-gray-500 hover:text-gray-700'
+                          className={`px-3 py-1.5 text-xs font-medium rounded transition-all ${
+                            clientMode
+                              ? briefInputMode === 'text' ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)]' : 'text-[var(--cp-paper-mute)]'
+                              : briefInputMode === 'text'
+                                ? 'bg-white text-gray-900 shadow-sm'
+                                : 'text-gray-500 hover:text-gray-700'
                           }`}
                         >
                           Текст
@@ -1424,18 +1469,20 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                       {clientMode && briefInputMode === 'saved' ? (
                         <div>
                           {savedBriefLoading ? (
-                            <div className="flex items-center gap-2 px-3 py-3 text-sm border border-gray-200 bg-gray-50 rounded-xl text-gray-500">
+                            <div className={clientMode
+                              ? 'flex items-center gap-2 px-3 py-3 text-sm border border-[var(--cp-divider)] bg-[var(--cp-surface-rest)] rounded-md text-[var(--cp-paper-mute)]'
+                              : 'flex items-center gap-2 px-3 py-3 text-sm border border-gray-200 bg-gray-50 rounded-xl text-gray-500'}>
                               <Loader2 size={14} className="animate-spin" />
                               Загружаем сохранённый бриф…
                             </div>
                           ) : savedBriefAvailable ? (
                             <div className="space-y-2">
-                              <div className="flex items-center gap-2 px-3 py-2.5 text-sm border border-emerald-200 bg-emerald-50 rounded-xl">
-                                <Check size={14} className="text-emerald-600 shrink-0" />
-                                <span className="text-emerald-800">Сохранённый бриф будет использован</span>
+                              <div className={clientMode ? 'flex items-center gap-2 px-3 py-2.5 text-sm border border-[var(--cp-divider-strong)] bg-[var(--cp-surface-rest)] rounded-md' : 'flex items-center gap-2 px-3 py-2.5 text-sm border border-emerald-200 bg-emerald-50 rounded-xl'}>
+                                <Check size={14} className={clientMode ? 'text-[var(--cp-green)] shrink-0' : 'text-emerald-600 shrink-0'} />
+                                <span className={clientMode ? 'text-[var(--cp-paper)]' : 'text-emerald-800'}>Сохранённый бриф будет использован</span>
                                 <a
                                   href="/client/brief"
-                                  className="ml-auto text-xs text-emerald-700 underline hover:text-emerald-900"
+                                  className={clientMode ? 'ml-auto text-xs text-[var(--cp-paper-mute)] underline hover:text-[var(--cp-paper)]' : 'ml-auto text-xs text-emerald-700 underline hover:text-emerald-900'}
                                 >
                                   Открыть и отредактировать
                                 </a>
@@ -1445,7 +1492,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                               </p>
                             </div>
                           ) : (
-                            <div className="flex items-center gap-2 px-3 py-3 text-sm border border-amber-200 bg-amber-50 rounded-xl text-amber-800">
+                            <div className={clientMode
+                              ? 'flex items-center gap-2 px-3 py-3 text-sm border border-[var(--cp-divider-strong)] bg-[var(--cp-surface-rest)] rounded-md text-[var(--cp-amber)]'
+                              : 'flex items-center gap-2 px-3 py-3 text-sm border border-amber-200 bg-amber-50 rounded-xl text-amber-800'}>
                               Бриф ещё не заполнен.{' '}
                               <a href="/client/brief" className="underline hover:text-amber-900">
                                 Заполнить сейчас
@@ -1466,8 +1515,8 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                             onChange={(e) => void handleBriefPdfUpload(e)}
                           />
                           {briefFileName && brief ? (
-                            <div className="flex items-center gap-2 px-3 py-2.5 text-sm border border-emerald-200 bg-emerald-50 rounded-xl">
-                              <Check size={14} className="text-emerald-600 shrink-0" />
+                            <div className={clientMode ? 'flex items-center gap-2 px-3 py-2.5 text-sm border border-[var(--cp-divider-strong)] bg-[var(--cp-surface-rest)] rounded-md' : 'flex items-center gap-2 px-3 py-2.5 text-sm border border-emerald-200 bg-emerald-50 rounded-xl'}>
+                              <Check size={14} className={clientMode ? 'text-[var(--cp-green)] shrink-0' : 'text-emerald-600 shrink-0'} />
                               <span className="text-emerald-800 truncate">{briefFileName}</span>
                               <button
                                 type="button"
@@ -1482,7 +1531,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                               type="button"
                               disabled={briefUploading}
                               onClick={() => briefFileRef.current?.click()}
-                              className="w-full flex items-center justify-center gap-2 px-3 py-3 text-sm border-2 border-dashed border-gray-200 rounded-xl text-gray-500 transition hover:border-gray-400 hover:text-gray-700 disabled:opacity-50"
+                              className={clientMode
+                                ? 'w-full flex items-center justify-center gap-2 px-3 py-3 text-sm border border-dashed border-[var(--cp-divider-strong)] rounded-md text-[var(--cp-paper-mute)] transition hover:border-[var(--cp-paper-faint)] hover:text-[var(--cp-paper)] disabled:opacity-40'
+                                : 'w-full flex items-center justify-center gap-2 px-3 py-3 text-sm border-2 border-dashed border-gray-200 rounded-xl text-gray-500 transition hover:border-gray-400 hover:text-gray-700 disabled:opacity-50'}
                             >
                               {briefUploading ? (
                                 <><Loader2 size={16} className="animate-spin" /> Обработка PDF…</>
@@ -1498,7 +1549,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                           onChange={(e) => setBrief(e.target.value)}
                           rows={4}
                           placeholder="Опишите вашу целевую аудиторию, продукт, идеального клиента..."
-                          className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white resize-none"
+                          className={clientMode ? 'ds-input w-full resize-none' : 'w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white resize-none'}
                         />
                       )}
                       <label className="mt-3 flex items-start gap-2 cursor-pointer select-none">
@@ -1508,9 +1559,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                           onChange={(e) => setKeepAllScored(e.target.checked)}
                           className="mt-0.5 w-4 h-4 rounded border-gray-300 text-violet-600 focus:ring-violet-400"
                         />
-                        <span className="text-xs text-gray-700 leading-snug">
+                        <span className={clientMode ? 'text-xs text-[var(--cp-paper-mute)] leading-snug' : 'text-xs text-gray-700 leading-snug'}>
                           Сохранить все оценённые компании (без фильтра 7+)
-                          <span className="block text-[11px] text-gray-500 mt-0.5">
+                          <span className={clientMode ? 'block text-[11px] text-[var(--cp-paper-faint)] mt-0.5' : 'block text-[11px] text-gray-500 mt-0.5'}>
                             По умолчанию AI оставляет только баллы 7–10. Включите, чтобы получить файл со всеми компаниями и их оценками — сами решите кого взять.
                           </span>
                         </span>
@@ -1519,10 +1570,10 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   )}
                   {needsPrompt && (
                     <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">
-                        Промпт для персонализации
+                      <label className={clientMode ? 'ds-eyebrow mb-1.5 block' : 'block text-sm font-semibold text-gray-700 mb-1.5'}>
+                        {clientMode ? 'промпт для персонализации' : 'Промпт для персонализации'}
                       </label>
-                      <p className="text-xs text-gray-500 mb-2">
+                      <p className={clientMode ? 'text-xs text-[var(--cp-paper-faint)] mb-2' : 'text-xs text-gray-500 mb-2'}>
                         AI будет использовать все данные из каждой строки (название, сайт, описание и т.д.) для генерации.
                       </p>
                       <textarea
@@ -1530,7 +1581,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         onChange={(e) => setPrompt(e.target.value)}
                         rows={3}
                         placeholder="Что AI должен написать? Например: 'Напиши приветствие с упоминанием деятельности компании'"
-                        className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white resize-none"
+                        className={clientMode ? 'ds-input w-full resize-none' : 'w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white resize-none'}
                       />
                     </div>
                   )}
@@ -1545,7 +1596,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                 <button
                   onClick={() => void handleSubmit()}
                   disabled={!canSubmit}
-                  className="w-full py-3 text-sm font-medium rounded-xl bg-gray-900 text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  className={clientMode
+                    ? 'w-full py-3 text-sm font-medium rounded-md bg-[var(--cp-paper)] text-[var(--cp-ink)] transition hover:bg-[var(--cp-paper-mute)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2'
+                    : 'w-full py-3 text-sm font-medium rounded-xl bg-gray-900 text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2'}
                 >
                   {submitting ? (
                     <>
@@ -1570,7 +1623,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     60s+ — финальный совет про F5 если совсем хочется
                     подействовать. */}
                 {submitting && submittingElapsedSec >= 5 && (
-                  <p className="text-xs text-gray-500 leading-relaxed">
+                  <p className={`text-xs leading-relaxed ${clientMode ? 'text-[var(--cp-paper-faint)]' : 'text-gray-500'}`}>
                     {submittingElapsedSec < 30 && (
                       <>Загружаем базу на сервер. На больших файлах (несколько мегабайт) это занимает до минуты — это нормально.</>
                     )}
@@ -1630,17 +1683,19 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
         {/* ═══════════ PROGRESS ═══════════ */}
         {isRunning && activeJob && (
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+          <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden'}>
+            <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)] flex items-center justify-between' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between'}>
               <div>
-                <h2 className="text-base font-bold text-gray-900">Обработка базы</h2>
-                <p className="text-xs text-gray-500 mt-0.5">
+                <h2 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>Обработка базы</h2>
+                <p className={`text-xs mt-0.5 ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
                   {activeJob.file_name || 'Файл'} — {activeJob.initial_row_count} строк
                 </p>
               </div>
               <button
                 onClick={() => void handleCancel()}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-red-50 text-red-600 hover:bg-red-100 transition"
+                className={clientMode
+                  ? 'ds-btn-ghost text-xs text-[var(--cp-red)]'
+                  : 'px-3 py-1.5 text-xs font-medium rounded-lg bg-red-50 text-red-600 hover:bg-red-100 transition'}
               >
                 Отменить
               </button>
@@ -1649,14 +1704,14 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
               {/* Overall progress bar */}
               <div>
                 <div className="flex items-center justify-between text-sm mb-2">
-                  <span className="font-medium text-gray-900">
+                  <span className={`font-medium ${clientMode ? 'text-[var(--cp-paper)]' : 'text-gray-900'}`}>
                     {STEP_MAP.get(activeJob.current_step_key as StepKey)?.label || 'Обработка...'}
                   </span>
-                  <span className="text-gray-500 tabular-nums">{Math.max(0, overallProgress)}%</span>
+                  <span className={`tabular-nums ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>{Math.max(0, overallProgress)}%</span>
                 </div>
-                <div className="w-full bg-gray-100 rounded-full h-2.5">
+                <div className={`w-full rounded-full h-2.5 ${clientMode ? 'bg-[var(--cp-surface-elev)]' : 'bg-gray-100'}`}>
                   <div
-                    className="bg-gray-900 h-2.5 rounded-full transition-all duration-700 ease-out"
+                    className={`h-2.5 rounded-full transition-all duration-700 ease-out ${clientMode ? 'bg-[var(--cp-paper)]' : 'bg-gray-900'}`}
                     style={{ width: `${Math.max(0, overallProgress)}%` }}
                   />
                 </div>
@@ -1676,40 +1731,58 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   return (
                     <div
                       key={stepKey}
-                      className={`flex items-center gap-3 px-4 py-2.5 rounded-xl transition-all ${
-                        isCurrent
-                          ? 'bg-blue-50 border border-blue-200'
-                          : isDone
-                            ? 'bg-emerald-50/50 border border-emerald-100'
-                            : 'bg-gray-50/50 border border-transparent'
+                      className={`flex items-center gap-3 px-4 py-2.5 transition-all ${
+                        clientMode
+                          ? `rounded-md ${
+                              isCurrent
+                                ? 'bg-[var(--cp-surface-active)] border border-[var(--cp-divider-strong)]'
+                                : isDone
+                                  ? 'bg-[var(--cp-surface-rest)] border border-[var(--cp-divider)]'
+                                  : 'border border-transparent'
+                            }`
+                          : `rounded-xl ${
+                              isCurrent
+                                ? 'bg-blue-50 border border-blue-200'
+                                : isDone
+                                  ? 'bg-emerald-50/50 border border-emerald-100'
+                                  : 'bg-gray-50/50 border border-transparent'
+                            }`
                       }`}
                     >
                       <div className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center ${
-                        isDone
-                          ? 'bg-emerald-100 text-emerald-700'
-                          : isCurrent
-                            ? 'bg-blue-500 text-white animate-pulse'
-                            : 'bg-gray-100 text-gray-400'
+                        clientMode
+                          ? isDone
+                            ? 'bg-[var(--cp-surface-elev)] text-[var(--cp-green)]'
+                            : isCurrent
+                              ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)] animate-pulse'
+                              : 'bg-[var(--cp-surface-elev)] text-[var(--cp-paper-faint)]'
+                          : isDone
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : isCurrent
+                              ? 'bg-blue-500 text-white animate-pulse'
+                              : 'bg-gray-100 text-gray-400'
                       }`}>
                         {isDone ? <Check className="w-4 h-4" /> : <Icon className="w-4 h-4" />}
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className={`text-sm font-medium ${
-                          isDone ? 'text-emerald-700' : isCurrent ? 'text-blue-700' : 'text-gray-400'
+                          clientMode
+                            ? isDone ? 'text-[var(--cp-paper-mute)]' : isCurrent ? 'text-[var(--cp-paper)]' : 'text-[var(--cp-paper-faint)]'
+                            : isDone ? 'text-emerald-700' : isCurrent ? 'text-blue-700' : 'text-gray-400'
                         }`}>
                           {step.label}
                         </p>
                       </div>
                       {isCurrent && activeJob.current_step_progress > 0 && (
-                        <span className="text-xs font-medium text-blue-600 tabular-nums">
+                        <span className={`text-xs font-medium tabular-nums ${clientMode ? 'text-[var(--cp-paper)]' : 'text-blue-600'}`}>
                           {activeJob.current_step_progress}%
                         </span>
                       )}
                       {isDone && (
-                        <Check className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                        <Check className={`w-4 h-4 flex-shrink-0 ${clientMode ? 'text-[var(--cp-green)]' : 'text-emerald-500'}`} />
                       )}
                       {isPending && (
-                        <span className="text-xs text-gray-300">ожидание</span>
+                        <span className={`text-xs ${clientMode ? 'text-[var(--cp-paper-faint)]' : 'text-gray-300'}`}>ожидание</span>
                       )}
                     </div>
                   );
@@ -1721,15 +1794,17 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
         {/* ═══════════ FAILED ═══════════ */}
         {isFailed && activeJob && (
-          <div className="bg-white rounded-2xl border border-red-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-red-100 bg-red-50/50">
-              <h2 className="text-base font-bold text-red-700">Ошибка</h2>
+          <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-red-200 shadow-sm overflow-hidden'}>
+            <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)]' : 'px-6 py-4 border-b border-red-100 bg-red-50/50'}>
+              <h2 className={`text-base ${clientMode ? 'font-semibold m-0 text-[var(--cp-red)]' : 'font-bold text-red-700'}`}>Ошибка</h2>
             </div>
             <div className="px-6 py-5 space-y-3">
-              <p className="text-sm text-red-600">{activeJob.error_message || 'Неизвестная ошибка'}</p>
+              <p className={`text-sm ${clientMode ? 'text-[var(--cp-red)]' : 'text-red-600'}`}>{activeJob.error_message || 'Неизвестная ошибка'}</p>
               <button
                 onClick={resetForm}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 transition inline-flex items-center gap-2"
+                className={clientMode
+                  ? 'ds-btn-secondary inline-flex items-center gap-2'
+                  : 'px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 transition inline-flex items-center gap-2'}
               >
                 <RotateCcw className="w-3.5 h-3.5" />
                 Попробовать снова
@@ -1745,12 +1820,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                 secondary metrics inline). Admin (/tools/our-bases): legacy 4-card
                 grid preserved verbatim. */}
             {clientMode ? (
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-2">
+              <div className="neu-card p-5 space-y-2">
                 <div className="flex items-baseline flex-wrap gap-x-2">
-                  <span className="ds-mono tabular-nums text-3xl font-semibold text-gray-900">
+                  <span className="ds-mono tabular-nums text-3xl font-semibold text-[var(--cp-paper)]">
                     {activeJob.result_stats?.total_rows ?? 0}
                   </span>
-                  <span className="text-sm text-gray-500">
+                  <span className="text-sm text-[var(--cp-paper-mute)]">
                     строк из {activeJob.initial_row_count} обработано
                     {' '}
                     (<ClientTariffUsageInline
@@ -1761,21 +1836,21 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     />)
                   </span>
                 </div>
-                <p className="text-sm text-gray-500">
-                  <span className="ds-mono tabular-nums font-semibold text-emerald-600">
+                <p className="text-sm text-[var(--cp-paper-mute)]">
+                  <span className="ds-mono tabular-nums font-semibold text-[var(--cp-green)]">
                     {activeJob.result_stats?.emails_found ?? 0}
                   </span>
                   {' email найдено'}
                   {(activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
                     <>
                       {' · средний ЦА '}
-                      <span className="ds-mono tabular-nums font-semibold text-gray-900">
+                      <span className="ds-mono tabular-nums font-semibold text-[var(--cp-paper)]">
                         {activeJob.result_stats?.avg_ta_score ?? 0}
                       </span>
                     </>
                   )}
                   {' · '}
-                  <span className="ds-mono tabular-nums font-semibold text-gray-900">
+                  <span className="ds-mono tabular-nums font-semibold text-[var(--cp-paper)]">
                     {activeJob.result_stats?.columns ?? 0}
                   </span>
                   {' колонок'}
@@ -1818,30 +1893,30 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
             {/* TA scoring telemetry — отдельным блоком, чтобы пользователь видел
                 что AI оценил, какие средние, и сколько отфильтровалось */}
             {typeof activeJob.result_stats?.ta_scoring_pre_filter_rows === 'number' && (
-              <div className="bg-blue-50 rounded-2xl border border-blue-200 p-5">
-                <p className="text-sm font-semibold text-blue-900 mb-2">Оценка ЦА — детали</p>
+              <div className={clientMode ? 'neu-card p-5' : 'bg-blue-50 rounded-2xl border border-blue-200 p-5'}>
+                <p className={`text-sm font-semibold mb-2 ${clientMode ? 'text-[var(--cp-paper)]' : 'text-blue-900'}`}>Оценка ЦА — детали</p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm">
                   <div>
-                    <p className="text-xs text-blue-700">AI оценил</p>
-                    <p className="font-bold text-blue-900">
+                    <p className={clientMode ? 'text-xs text-[var(--cp-paper-faint)]' : 'text-xs text-blue-700'}>AI оценил</p>
+                    <p className={clientMode ? 'font-bold text-[var(--cp-paper)]' : 'font-bold text-blue-900'}>
                       {activeJob.result_stats.ta_scoring_pre_filter_rows} компаний
                     </p>
                   </div>
                   <div>
-                    <p className="text-xs text-blue-700">Средний балл (до фильтра)</p>
-                    <p className="font-bold text-blue-900">
+                    <p className={clientMode ? 'text-xs text-[var(--cp-paper-faint)]' : 'text-xs text-blue-700'}>Средний балл (до фильтра)</p>
+                    <p className={clientMode ? 'font-bold text-[var(--cp-paper)]' : 'font-bold text-blue-900'}>
                       {activeJob.result_stats.ta_scoring_pre_filter_avg ?? 0}
                     </p>
                   </div>
                   <div>
-                    <p className="text-xs text-blue-700">Отфильтровано (ниже 7)</p>
-                    <p className="font-bold text-blue-900">
+                    <p className={clientMode ? 'text-xs text-[var(--cp-paper-faint)]' : 'text-xs text-blue-700'}>Отфильтровано (ниже 7)</p>
+                    <p className={clientMode ? 'font-bold text-[var(--cp-paper)]' : 'font-bold text-blue-900'}>
                       {activeJob.result_stats.ta_scoring_filtered_out ?? 0}
                     </p>
                   </div>
                 </div>
                 {activeJob.result_stats.total_rows === 0 && (activeJob.result_stats.ta_scoring_filtered_out ?? 0) > 0 && (
-                  <p className="mt-3 text-xs text-blue-800">
+                  <p className={clientMode ? 'mt-3 text-xs text-[var(--cp-paper-mute)]' : 'mt-3 text-xs text-blue-800'}>
                     Все компании AI оценил ниже 7 — это значит, что либо бриф не подходит к базе,
                     либо описаний компаний (шаг «Обогатить описаниями») мало для уверенной оценки.
                     Можно перезапустить с галкой «Сохранить все оценённые», чтобы получить файл со всеми
@@ -1856,7 +1931,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
               <button
                 onClick={downloadCSV}
                 disabled={!jobData}
-                className="px-4 py-2.5 text-sm font-medium rounded-xl bg-gray-900 text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300 inline-flex items-center gap-2"
+                className={clientMode
+                  ? 'ds-btn-primary inline-flex items-center gap-2 px-4 disabled:opacity-40'
+                  : 'px-4 py-2.5 text-sm font-medium rounded-xl bg-gray-900 text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300 inline-flex items-center gap-2'}
               >
                 <Download className="w-4 h-4" />
                 Скачать CSV
@@ -1873,7 +1950,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
               )}
               <button
                 onClick={resetForm}
-                className="px-4 py-2.5 text-sm font-medium rounded-xl bg-white text-gray-700 border border-gray-200 transition hover:bg-gray-50 inline-flex items-center gap-2"
+                className={clientMode
+                  ? 'ds-btn-secondary inline-flex items-center gap-2'
+                  : 'px-4 py-2.5 text-sm font-medium rounded-xl bg-white text-gray-700 border border-gray-200 transition hover:bg-gray-50 inline-flex items-center gap-2'}
               >
                 <RotateCcw className="w-4 h-4" />
                 Новая обработка
@@ -1882,14 +1961,14 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
             {/* Preview table */}
             {jobData && jobData.length > 1 && (
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-                  <h3 className="text-base font-bold text-gray-900">
-                    Результат <span className="text-gray-400 font-normal text-sm">(первые 20 строк)</span>
+              <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden'}>
+                <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)]' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50'}>
+                  <h3 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>
+                    Результат <span className={clientMode ? 'text-[var(--cp-paper-faint)] font-normal text-sm' : 'text-gray-400 font-normal text-sm'}>(первые 20 строк)</span>
                   </h3>
                 </div>
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-100 text-sm">
+                <div className={clientMode ? 'overflow-auto max-h-[420px]' : 'overflow-x-auto'}>
+                  <table className={clientMode ? 'min-w-full divide-y divide-gray-100 cp-dense-table' : 'min-w-full divide-y divide-gray-100 text-sm'}>
                     <thead className="bg-gray-50/50">
                       <tr>
                         {jobData[0].map((h, i) => (
@@ -1919,15 +1998,17 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
         {/* ═══════════ HISTORY ═══════════ */}
         {!isRunning && history.length > 0 && (
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-              <h3 className="text-base font-bold text-gray-900">История</h3>
+          <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden'}>
+            <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)]' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50'}>
+              <h3 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>История</h3>
             </div>
             <div className="divide-y divide-gray-50">
               {history.map((j) => (
                 <div
                   key={j.id}
-                  className="px-6 py-3 flex items-center justify-between cursor-pointer hover:bg-gray-50/50 transition"
+                  className={clientMode
+                    ? 'px-6 py-3 flex items-center justify-between cursor-pointer hover:bg-[var(--cp-surface-elev)] transition'
+                    : 'px-6 py-3 flex items-center justify-between cursor-pointer hover:bg-gray-50/50 transition'}
                   onClick={() => {
                     setActiveJob(j);
                     if (j.status === 'completed') loadJobData(j.id);
@@ -1935,10 +2016,10 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                 >
                   <div className="flex items-center gap-3">
                     <div>
-                      <span className="text-sm font-medium text-gray-900">
+                      <span className={`text-sm font-medium ${clientMode ? 'text-[var(--cp-paper)]' : 'text-gray-900'}`}>
                         {j.file_name || 'Без имени'}
                       </span>
-                      <span className="text-xs text-gray-400 ml-2">{formatDate(j.created_at)}</span>
+                      <span className={`text-xs ml-2 ${clientMode ? 'text-[var(--cp-paper-faint)]' : 'text-gray-400'}`}>{formatDate(j.created_at)}</span>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -1947,13 +2028,23 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     </span>
                     <span
                       className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                        j.status === 'completed'
-                          ? 'bg-emerald-50 text-emerald-700'
-                          : j.status === 'failed'
-                            ? 'bg-red-50 text-red-700'
-                            : j.status === 'cancelled'
-                              ? 'bg-gray-100 text-gray-500'
-                              : 'bg-amber-50 text-amber-700'
+                        clientMode
+                          ? `border border-[var(--cp-divider-strong)] ${
+                              j.status === 'completed'
+                                ? 'text-[var(--cp-green)]'
+                                : j.status === 'failed'
+                                  ? 'text-[var(--cp-red)]'
+                                  : j.status === 'cancelled'
+                                    ? 'text-[var(--cp-paper-faint)]'
+                                    : 'text-[var(--cp-amber)]'
+                            }`
+                          : j.status === 'completed'
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : j.status === 'failed'
+                              ? 'bg-red-50 text-red-700'
+                              : j.status === 'cancelled'
+                                ? 'bg-gray-100 text-gray-500'
+                                : 'bg-amber-50 text-amber-700'
                       }`}
                     >
                       {j.status === 'completed'
