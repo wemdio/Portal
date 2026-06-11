@@ -35,6 +35,7 @@ import type {
 import { activateCampaign, createCampaign, createLeads, updateCampaign } from '@/lib/instantly/client';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
+import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
 import { hasUsableCampaignSequences } from './campaignSequences';
 import {
   countClientContacts,
@@ -85,6 +86,11 @@ export interface RunClientLaunchResult {
   uploaded_rows: number;
   accepted_rows: number;
   skipped_rows: number;
+  /**
+   * Сколько лидов отрезано по чёрному списку клиента ДО загрузки в Instantly.
+   * Входит в skipped_rows; отдельное поле — чтобы UI мог объяснить причину.
+   */
+  blocked_rows: number;
 }
 
 export class ClientLaunchError extends Error {
@@ -128,6 +134,13 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
 
   const preset = presetRow as ClientCampaignPreset | null;
 
+  // 1b. Чёрный список клиента: отрезаем заблокированные адреса ДО всего
+  //     остального — они не должны ни съедать тарифный лимит контактов,
+  //     ни попадать в Instantly. Ошибка загрузки списка — это стоп: лучше
+  //     не запустить кампанию, чем написать заблокированному контакту.
+  const blockedSet = await getBlockedEmailSet(supabaseInstantly, userId);
+  const { kept: allowedLeads, blockedCount } = filterBlockedLeads(leads, blockedSet);
+
   // 2. Валидация sequence + mapping (через существующую функцию). Для
   //    auto-pipeline mapping не нужен — передаём фиктивный с email-ключом,
   //    т.к. leads уже валидные. Валидация смотрит на mapping.email только
@@ -139,7 +152,7 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
     preset,
     sequence,
     mapping: validationMapping,
-    rowCount: leads.length,
+    rowCount: allowedLeads.length,
     scheduleOverride,
   });
 
@@ -147,8 +160,13 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
     throw new ClientLaunchError(validation.error, 400);
   }
 
-  if (leads.length === 0) {
-    throw new ClientLaunchError('Нет валидных лидов для отправки', 400);
+  if (allowedLeads.length === 0) {
+    throw new ClientLaunchError(
+      blockedCount > 0
+        ? `Все ${blockedCount.toLocaleString('ru-RU')} лидов из загрузки находятся в вашем чёрном списке — отправлять некому.`
+        : 'Нет валидных лидов для отправки',
+      400,
+    );
   }
 
   // 2b. Если клиент явно выбрал подмножество ящиков из пула пресета,
@@ -197,12 +215,12 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
   const limits = resolveEffectiveLimits(tariffRow);
   const periodStart = getBillingPeriodStart(tariffRow);
   const usedContacts = await countClientContacts(userId, periodStart);
-  if (usedContacts + leads.length > limits.max_contacts) {
+  if (usedContacts + allowedLeads.length > limits.max_contacts) {
     const remaining = Math.max(0, limits.max_contacts - usedContacts);
     throw new ClientLaunchError(
       `Лимит контактов: ${limits.max_contacts.toLocaleString('ru-RU')} / мес. ` +
         `Использовано: ${usedContacts.toLocaleString('ru-RU')}. ` +
-        `Попытка добавить: ${leads.length.toLocaleString('ru-RU')}. ` +
+        `Попытка добавить: ${allowedLeads.length.toLocaleString('ru-RU')}. ` +
         `Осталось: ${remaining.toLocaleString('ru-RU')}.`,
       400,
     );
@@ -277,7 +295,7 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
     //    и текущая кампания останется пустой). skip_if_in_campaign — да,
     //    дедуп внутри новой кампании безвреден.
     const leadResult = await createLeads(
-      leads,
+      allowedLeads,
       { campaign_id: instantlyCampaignId, skip_if_in_campaign: true },
       instantlyRequestOptions,
     );
@@ -286,9 +304,11 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
       (leadResult as { uploaded?: number; created?: number; total_uploaded?: number }).uploaded ??
         (leadResult as { created?: number }).created ??
         (leadResult as { total_uploaded?: number }).total_uploaded ??
-        leads.length,
+        allowedLeads.length,
     );
-    const skipped = leads.length - accepted;
+    // В «пропущенные» входят и отсев Instantly, и срез по чёрному списку —
+    // blocked_rows отдаём отдельно, чтобы UI мог объяснить причину.
+    const skipped = Math.max(0, allowedLeads.length - accepted) + blockedCount;
 
     // 7. Активируем кампанию + обновляем каталог.
     const activatedCampaign = await activateCampaign(instantlyCampaignId, instantlyRequestOptions);
@@ -312,7 +332,7 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
       .update({
         status: 'active',
         accepted_rows: accepted,
-        skipped_rows: skipped < 0 ? 0 : skipped,
+        skipped_rows: skipped,
       })
       .eq('id', launchId);
 
@@ -323,6 +343,7 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
         instantlyCampaignId,
         accepted,
         skipped,
+        blocked: blockedCount,
         totalLeads: leads.length,
         steps: sequence.steps.length,
       },
@@ -336,7 +357,8 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
       status: 'active',
       uploaded_rows: uploadedRows,
       accepted_rows: accepted,
-      skipped_rows: skipped < 0 ? 0 : skipped,
+      skipped_rows: skipped,
+      blocked_rows: blockedCount,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Не удалось запустить кампанию';

@@ -149,7 +149,9 @@ async function main() {
   const client = new pg.Client({ connectionString: DB_URL, ssl: dbSsl(DB_URL) });
   await client.connect();
   try {
-    const CHUNK = 500;
+    // Poolers (Supavisor) can drop very large extended-protocol messages — keep
+    // chunks modest and overridable: INGEST_CHUNK=100 for flaky links.
+    const CHUNK = Math.max(50, Number(process.env.INGEST_CHUNK || 500));
     for (let i = 0; i < rows.length; i += CHUNK) {
       await upsertBatch(client, rows.slice(i, i + CHUNK));
       process.stdout.write(`\rUpserted ${Math.min(i + CHUNK, rows.length)}/${rows.length}`);
@@ -163,9 +165,10 @@ async function main() {
 }
 
 function dbSsl(url) {
-  // Local/compose Postgres usually needs no SSL; managed ones do. Mirror the
-  // permissive setting used by the other ingest scripts.
-  return /localhost|127\.0\.0\.1/.test(url) ? false : { rejectUnauthorized: false };
+  // Honor explicit sslmode=disable (self-hosted main-postgres); local needs no
+  // SSL; managed ones (Supabase cloud) get permissive SSL.
+  if (/sslmode=disable/i.test(url) || /localhost|127\.0\.0\.1/.test(url)) return false;
+  return { rejectUnauthorized: false };
 }
 
 main().catch((e) => {

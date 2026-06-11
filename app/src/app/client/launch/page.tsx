@@ -60,6 +60,8 @@ interface LaunchResult {
   uploaded_rows: number;
   accepted_rows: number;
   skipped_rows: number;
+  /** Сколько из skipped_rows отрезано по чёрному списку клиента. */
+  blocked_rows?: number;
 }
 
 /**
@@ -738,6 +740,8 @@ export default function ClientLaunchPage() {
           >
             {result.accepted_rows.toLocaleString('ru-RU')} лидов загружено
             {result.skipped_rows > 0 && ` · пропущено ${result.skipped_rows.toLocaleString('ru-RU')}`}
+            {(result.blocked_rows ?? 0) > 0 &&
+              ` (из них ${(result.blocked_rows ?? 0).toLocaleString('ru-RU')} — чёрный список)`}
             <span className="block mt-1">
               <ClientTariffUsageInline
                 metric="max_contacts"

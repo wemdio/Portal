@@ -19,6 +19,7 @@
 import { logAudit, logError } from '@/lib/loggerServer';
 import { createLeads } from '@/lib/instantly/client';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
+import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import type { ClientCampaignPreset } from './types';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
@@ -81,6 +82,22 @@ export async function appendLeadsToClientCampaign(
     throw new ClientLaunchError('Пресет клиента не настроен', 400);
   }
 
+  // 1b. Чёрный список клиента — как в runClientLaunch: заблокированные адреса
+  //     не попадают в Instantly и не съедают тарифный лимит. Особенно важно
+  //     здесь: авто-пайплайн каждый день подкладывает новых лидов без участия
+  //     клиента, и без фильтра негативный контакт получал бы письма снова.
+  const blockedSet = await getBlockedEmailSet(supabaseInstantly, userId);
+  const { kept: allowedLeads, blockedCount } = filterBlockedLeads(leads, blockedSet);
+  if (allowedLeads.length === 0) {
+    await logAudit(
+      'client.appendLeads.all_blocked',
+      'All leads in batch are on the client blocklist',
+      { campaignId, contextLabel, blocked: blockedCount },
+      logMeta,
+    );
+    return { accepted: 0, skipped: blockedCount };
+  }
+
   // 2. Tariff / status — те же проверки, что в полном runClientLaunch.
   const tariffRow = await getClientTariffRow(userId);
   const clientStatus = getClientStatus(tariffRow);
@@ -102,7 +119,8 @@ export async function appendLeadsToClientCampaign(
   // должен прокинуть в Instantly столько лидов, сколько вмещается; остальное
   // помечается skipped в seen_employers с reason=tariff_exhausted (это знает
   // оркестратор, не мы).
-  const leadsToSend = leads.length <= remaining ? leads : leads.slice(0, remaining);
+  const leadsToSend =
+    allowedLeads.length <= remaining ? allowedLeads : allowedLeads.slice(0, remaining);
   if (leadsToSend.length === 0) {
     throw new ClientLaunchError('Лимит контактов исчерпан', 400);
   }
@@ -123,16 +141,24 @@ export async function appendLeadsToClientCampaign(
         (leadResult as { total_uploaded?: number }).total_uploaded ??
         leadsToSend.length,
     );
-    const skipped = leadsToSend.length - accepted;
+    // В skipped входят и отсев Instantly, и срез по чёрному списку.
+    const skipped = Math.max(0, leadsToSend.length - accepted) + blockedCount;
 
     await logAudit(
       'client.appendLeads.success',
       'Appended leads to existing campaign',
-      { campaignId, contextLabel, accepted, skipped, requested: leadsToSend.length },
+      {
+        campaignId,
+        contextLabel,
+        accepted,
+        skipped,
+        blocked: blockedCount,
+        requested: leadsToSend.length,
+      },
       logMeta,
     );
 
-    return { accepted, skipped: skipped < 0 ? 0 : skipped };
+    return { accepted, skipped };
   } catch (err) {
     await logError('client.appendLeads.failed', err, { campaignId }, logMeta);
     if (err instanceof ClientLaunchError) throw err;
