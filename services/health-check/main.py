@@ -1,7 +1,7 @@
 """
 Health-check & daily report bot for polza-portal.ru.
 
-Health check (every 5 min):
+Health check (every 15 min):
   - Site availability (polza-portal.ru)
   - Database connectivity + connection count
   - All proxies (HH + Search)
@@ -58,7 +58,7 @@ HTTP_TIMEOUT = int(os.environ.get("HEALTH_HTTP_TIMEOUT_SEC", "15"))
 SERVER_IP = os.environ.get("HEALTH_SERVER_IP", "139.60.162.12")
 HEALTH_RETRY_ATTEMPTS = max(1, int(os.environ.get("HEALTH_RETRY_ATTEMPTS", "3")))
 HEALTH_RETRY_DELAY_SEC = max(0.0, float(os.environ.get("HEALTH_RETRY_DELAY_SEC", "1.0")))
-HEALTH_INTERVAL_SEC = int(os.environ.get("HEALTH_INTERVAL_SEC", "120"))
+HEALTH_INTERVAL_SEC = int(os.environ.get("HEALTH_INTERVAL_SEC", "900"))
 # Proxies are checked on their own slower cadence (default 5 min) so a flaky
 # test target can't spam the chat, and so we don't hammer the proxy pool every
 # health cycle. The main cycle (site/DB) still runs every HEALTH_INTERVAL_SEC.
@@ -826,7 +826,7 @@ async def check_stuck_jobs() -> list[str]:
     return problems
 
 
-# ── Health check (every 5 min) ──────────────────────────────────────────────
+# ── Health check (every 15 min) ─────────────────────────────────────────────
 
 HEALTH_CHECK_TIMEOUT_SEC = max(60, HEALTH_INTERVAL_SEC - 10)
 
