@@ -1488,7 +1488,15 @@ export function DatabaseSpreadsheet() {
     };
   }, [selection]);
 
+  // Виртуализация (а значит и scrollMetrics) нужна только для больших таблиц.
+  // Для маленьких/средних таблиц scrollMetrics никто не читает (virtualRange их
+  // игнорирует), поэтому НЕ трогаем state на скролле — иначе каждый кадр
+  // прокрутки впустую перерисовывает весь компонент. Ref обновляется в рендере
+  // там, где вычисляется isLargeTable.
+  const isLargeTableRef = useRef(false);
+
   const updateScrollMetrics = useCallback(() => {
+    if (!isLargeTableRef.current) return;
     const wrapper = tableWrapperRef.current;
     if (!wrapper) return;
     const next = { scrollTop: wrapper.scrollTop, height: wrapper.clientHeight };
@@ -3447,6 +3455,9 @@ export function DatabaseSpreadsheet() {
   }, [activeTab, visibleRowIndices]);
 
   const isLargeTable = allRowIndices.length > VIRTUALIZATION_THRESHOLD;
+  // Сообщаем scroll-обработчику, нужно ли обновлять scrollMetrics
+  // (см. updateScrollMetrics): для не-виртуализированных таблиц — нет.
+  isLargeTableRef.current = isLargeTable;
   const shouldVirtualize = isLargeTable && !forceWrapLarge;
   const effectiveWrapCells = shouldVirtualize ? false : wrapCells;
   const wrapLabel = isLargeTable
