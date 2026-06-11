@@ -30,6 +30,10 @@ export async function GET(req: NextRequest) {
     await logError('funded.facets.failed', error, undefined, { userId: userData.user.id });
     return jsonError(error.message, 500);
   }
-  cache = { at: Date.now(), data };
+  // Don't cache an empty catalog (pre-ingest) — otherwise the filter chips stay
+  // hidden for up to an hour after the first data load.
+  const d = data as Record<string, unknown[]> | null;
+  const hasAny = !!d && ['sources', 'countries', 'industries', 'stages'].some((k) => Array.isArray(d[k]) && d[k].length > 0);
+  if (hasAny) cache = { at: Date.now(), data };
   return NextResponse.json(data);
 }

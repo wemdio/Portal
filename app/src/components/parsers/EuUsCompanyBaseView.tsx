@@ -8,7 +8,6 @@ import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/p
 import {
   type PdlCompanyRow,
   SIZE_BUCKETS,
-  EU_US_COUNTRIES,
   industryLabelRu,
   sizeLabelRu,
   countryLabelRu,
@@ -64,6 +63,7 @@ export function EuUsCompanyBaseView() {
   const [country, setCountry] = useState<string[]>(['united states']);
   const [name, setName] = useState('');
   const [industrySearch, setIndustrySearch] = useState('');
+  const [countrySearch, setCountrySearch] = useState('');
 
   const [exportAll, setExportAll] = useState(false);
   const [exportN, setExportN] = useState('5000');
@@ -147,7 +147,18 @@ export function EuUsCompanyBaseView() {
     return list.filter((f) => !q || industryLabelRu(f.value).toLowerCase().includes(q) || f.value.includes(q)).slice(0, 250);
   }, [facets, industrySearch]);
 
-  const presentCountryCodes = useMemo(() => new Set((facets?.countries ?? []).map((c) => c.value)), [facets]);
+  // Country chips come straight from the live facets (every loaded country),
+  // sorted by company count. Default shows the top ~40; the search box reaches
+  // the long tail. Already-selected countries are always pinned visible.
+  const countryOptions = useMemo(() => {
+    const list = facets?.countries ?? [];
+    const q = countrySearch.trim().toLowerCase();
+    const matched = q ? list.filter((c) => countryLabelRu(c.value).toLowerCase().includes(q) || c.value.includes(q)) : list;
+    const limited = matched.slice(0, q ? 120 : 40);
+    const shown = new Set(limited.map((c) => c.value));
+    const pinned = list.filter((c) => country.includes(c.value) && !shown.has(c.value));
+    return [...pinned, ...limited];
+  }, [facets, countrySearch, country]);
 
   // File export: server streams a single CSV, or a ZIP split into 100k-row CSVs
   // for large sets. Download goes straight to disk (no browser-memory buffering).
@@ -229,11 +240,12 @@ export function EuUsCompanyBaseView() {
         ) : (
           <div className="mt-5 space-y-5">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Страны</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Страны {country.length ? <span className="text-gray-400 font-normal">— выбрано: {country.length}</span> : null}</label>
+              <input value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} placeholder="искать страну…" className="w-full md:w-1/2 rounded-lg border border-gray-300 px-3 py-2 text-sm mb-2 focus:outline-none focus:ring-1 focus:ring-green-400" />
               <div className="flex flex-wrap gap-2">
-                {EU_US_COUNTRIES.filter((c) => presentCountryCodes.has(c.code)).map((c) => {
-                  const on = country.includes(c.code);
-                  return <button key={c.code} type="button" onClick={() => toggle(country, setCountry, c.code)} className={`rounded-full px-3 py-1.5 text-sm font-medium border ${on ? 'bg-green-600 text-white border-green-600' : 'bg-white text-gray-600 border-gray-300 hover:border-green-400'}`}>{c.label}</button>;
+                {countryOptions.map((c) => {
+                  const on = country.includes(c.value);
+                  return <button key={c.value} type="button" onClick={() => toggle(country, setCountry, c.value)} title={`${c.count.toLocaleString('ru-RU')} компаний`} className={`rounded-full px-3 py-1.5 text-sm font-medium border ${on ? 'bg-green-600 text-white border-green-600' : 'bg-white text-gray-600 border-gray-300 hover:border-green-400'}`}>{countryLabelRu(c.value)}</button>;
                 })}
               </div>
             </div>
