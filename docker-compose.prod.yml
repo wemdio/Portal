@@ -722,8 +722,8 @@ services:
       - PROXY_URLS=${PROXY_URLS}
       - S3_ENDPOINT=${S3_ENDPOINT}
       - S3_BUCKET=${S3_BUCKET}
-      - HEALTH_DISK_TOTAL_GB=${HEALTH_DISK_TOTAL_GB:-20}
-      - HEALTH_DISK_WARN_GB=${HEALTH_DISK_WARN_GB:-18}
+      - HEALTH_DISK_TOTAL_GB=${HEALTH_DISK_TOTAL_GB:-50}
+      - HEALTH_DISK_WARN_GB=${HEALTH_DISK_WARN_GB:-45}
     # Резолв публичного хоста в IP хоста, чтобы проверять именно https://polza-portal.ru с того же сервера
     extra_hosts:
       - "polza-portal.ru:host-gateway"

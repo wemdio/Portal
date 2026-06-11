@@ -101,8 +101,8 @@ _FAIL_COUNT: dict[str, int] = {}
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 
-DISK_TOTAL_GB = float(os.environ.get("HEALTH_DISK_TOTAL_GB", "20"))
-DISK_WARN_GB = float(os.environ.get("HEALTH_DISK_WARN_GB", "18"))
+DISK_TOTAL_GB = float(os.environ.get("HEALTH_DISK_TOTAL_GB", "50"))
+DISK_WARN_GB = float(os.environ.get("HEALTH_DISK_WARN_GB", "45"))
 
 PROXY_URLS: list[str] = []
 
