@@ -61,7 +61,7 @@
     "@tiptap/starter-kit": "^3.20.0",
     "@types/file-saver": "^2.0.7",
     "@types/papaparse": "^5.5.2",
-    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "@whiskeysockets/baileys": "^7.0.0-rc12",
     "archiver": "^7.0.1",
     "cheerio": "^1.2.0",
     "clsx": "^2.1.1",
