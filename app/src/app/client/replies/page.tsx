@@ -95,6 +95,9 @@ function LeadDetail({
   const [isLead, setIsLead] = useState(Boolean(lead.is_lead));
   const [markingLead, setMarkingLead] = useState(false);
   const [markLeadError, setMarkLeadError] = useState('');
+  const [isBlocked, setIsBlocked] = useState(false);
+  const [blocking, setBlocking] = useState(false);
+  const [blockError, setBlockError] = useState('');
   const canComment = lead.source !== 'reply';
   const canReplyByEmail = Boolean(lead.campaign_id && lead.email_id);
 
@@ -166,6 +169,24 @@ function LeadDetail({
       setMarkLeadError(err instanceof Error ? err.message : 'Не удалось пометить как лид');
     } finally {
       setMarkingLead(false);
+    }
+  };
+
+  const handleBlock = async () => {
+    if (!lead.lead_email || isBlocked || blocking) return;
+    setBlocking(true);
+    setBlockError('');
+    try {
+      await clientApiFetch('/blocklist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: lead.lead_email, source: 'reply' }),
+      });
+      setIsBlocked(true);
+    } catch (err) {
+      setBlockError(err instanceof Error ? err.message : 'Не удалось добавить в чёрный список');
+    } finally {
+      setBlocking(false);
     }
   };
 
@@ -250,6 +271,38 @@ function LeadDetail({
             {markLeadError && (
               <p className="text-xs mt-2" style={{ color: 'var(--cp-red)' }}>
                 {markLeadError}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Чёрный список: негативный ответ → блокируем контакт, и все будущие
+            запуски кампаний отфильтруют его до загрузки в Instantly. */}
+        {lead.lead_email && (
+          <div className="neu-sm mt-5 p-4">
+            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold mb-1" style={{ color: 'var(--cp-text)' }}>
+                  Не писать этому контакту
+                </p>
+                <p className="text-xs leading-relaxed" style={{ color: 'var(--cp-text-m)' }}>
+                  Если в ответе негатив или просьба больше не писать — добавьте адрес в чёрный
+                  список. В новые кампании он не попадёт. Список можно посмотреть и изменить на
+                  странице «Чёрный список».
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleBlock()}
+                disabled={isBlocked || blocking}
+                className="neu-btn shrink-0 px-4 py-2 text-xs font-semibold disabled:opacity-60"
+              >
+                {isBlocked ? 'В чёрном списке' : blocking ? 'Блокируем...' : 'В чёрный список'}
+              </button>
+            </div>
+            {blockError && (
+              <p className="text-xs mt-2" style={{ color: 'var(--cp-red)' }}>
+                {blockError}
               </p>
             )}
           </div>

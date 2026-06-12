@@ -36,8 +36,12 @@ export function sizeLabelRu(size: string | null | undefined): string {
   return `${size} сотр.`;
 }
 
-// EU/US country allowlist (lowercased, matching the dataset's values) + RU labels.
-export const EU_US_COUNTRIES: { code: string; label: string }[] = [
+// Country → RU label map. The dataset holds the whole world; this just gives
+// nice Russian names to the common ones. Anything unmapped falls back to a
+// title-cased version of the raw English value. The actual list of selectable
+// countries comes from the live facets (all loaded countries), not from here.
+export const COUNTRY_LABELS: { code: string; label: string }[] = [
+  // EU / US / core English-speaking
   { code: 'united states', label: 'США' },
   { code: 'united kingdom', label: 'Великобритания' },
   { code: 'germany', label: 'Германия' },
@@ -57,10 +61,49 @@ export const EU_US_COUNTRIES: { code: string; label: string }[] = [
   { code: 'portugal', label: 'Португалия' },
   { code: 'canada', label: 'Канада' },
   { code: 'australia', label: 'Австралия' },
+  { code: 'new zealand', label: 'Новая Зеландия' },
+  // Rest of world (majors)
+  { code: 'united arab emirates', label: 'ОАЭ' },
+  { code: 'brazil', label: 'Бразилия' },
+  { code: 'india', label: 'Индия' },
+  { code: 'china', label: 'Китай' },
+  { code: 'turkey', label: 'Турция' },
+  { code: 'mexico', label: 'Мексика' },
+  { code: 'south africa', label: 'ЮАР' },
+  { code: 'argentina', label: 'Аргентина' },
+  { code: 'japan', label: 'Япония' },
+  { code: 'singapore', label: 'Сингапур' },
+  { code: 'israel', label: 'Израиль' },
+  { code: 'pakistan', label: 'Пакистан' },
+  { code: 'nigeria', label: 'Нигерия' },
+  { code: 'peru', label: 'Перу' },
+  { code: 'malaysia', label: 'Малайзия' },
+  { code: 'czechia', label: 'Чехия' },
+  { code: 'czech republic', label: 'Чехия' },
+  { code: 'egypt', label: 'Египет' },
+  { code: 'philippines', label: 'Филиппины' },
+  { code: 'romania', label: 'Румыния' },
+  { code: 'bangladesh', label: 'Бангладеш' },
+  { code: 'hungary', label: 'Венгрия' },
+  { code: 'iran', label: 'Иран' },
+  { code: 'indonesia', label: 'Индонезия' },
+  { code: 'saudi arabia', label: 'Саудовская Аравия' },
+  { code: 'colombia', label: 'Колумбия' },
+  { code: 'chile', label: 'Чили' },
+  { code: 'thailand', label: 'Таиланд' },
+  { code: 'vietnam', label: 'Вьетнам' },
+  { code: 'ukraine', label: 'Украина' },
+  { code: 'greece', label: 'Греция' },
+  { code: 'south korea', label: 'Южная Корея' },
+  { code: 'hong kong', label: 'Гонконг' },
+  { code: 'taiwan', label: 'Тайвань' },
+  { code: 'russia', label: 'Россия' },
+  { code: 'morocco', label: 'Марокко' },
+  { code: 'kenya', label: 'Кения' },
+  { code: 'ecuador', label: 'Эквадор' },
 ];
 
-export const EU_US_COUNTRY_CODES = EU_US_COUNTRIES.map((c) => c.code);
-const COUNTRY_LABEL = new Map(EU_US_COUNTRIES.map((c) => [c.code, c.label]));
+const COUNTRY_LABEL = new Map(COUNTRY_LABELS.map((c) => [c.code, c.label]));
 export function countryLabelRu(code: string | null | undefined): string {
   if (!code) return '';
   return COUNTRY_LABEL.get(code) ?? code.replace(/\b\w/g, (m) => m.toUpperCase());
