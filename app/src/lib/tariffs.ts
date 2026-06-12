@@ -78,6 +78,8 @@ export type ClientTariffRow = {
   billing_amount: number | null;
   yookassa_payment_method_id?: string | null;
   auto_renew?: boolean;
+  /** TRUE = подписка завязана на тестовый магазин YooKassa. Сохранённая карта и cron auto-renew используют тестовые креды. */
+  is_test_shop?: boolean;
   last_renewal_error?: string | null;
   last_renewal_attempt_at?: string | null;
   /** Последняя ошибка клиентской попытки оплаты (webhook payment.canceled). */
