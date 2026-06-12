@@ -14,7 +14,7 @@ Portal — внутренний инструмент студии: Next.js app +
 ## Когда работаешь с Instantly-датасетом (analytics, AI-агент по outreach данным)
 
 **Сразу читай [`wiki/CLAUDE.md`](./wiki/CLAUDE.md)** — там полный контекст:
-- структура `instantly_dataset` (23 таблицы + 6 lookup + 6 views, 1.7M писем, 167K лидов)
+- структура `instantly_dataset` (23 таблицы + 6 lookup + 6 views, 2.1M+ писем (растёт еженощно), 167K лидов)
 - паттерн `wiki/` для накопления знаний (Karpathy LLM-wiki)
 - **обязательный self-improving eval loop**: каждая сессия логируется в `query_log`, раз в неделю ревьюим и улучшаем датасет/wiki (YC-style)
 
