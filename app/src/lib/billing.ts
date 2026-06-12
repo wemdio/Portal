@@ -60,6 +60,9 @@ export interface EnsureInvoiceResult {
 interface EnsureInvoiceParams {
   userId: string;
   reason: EnsureInvoiceReason;
+  /** Когда true — счёт выставляется через YOOKASSA_TEST_SHOP_ID/SECRET_KEY и
+   *  client_tariffs/invoices помечаются is_test_shop=true. */
+  isTestShop?: boolean;
 }
 
 /**
@@ -204,7 +207,7 @@ function isPendingInvoiceStillValid(row: { created_at: string; yookassa_payment_
 export async function ensurePendingInvoiceForTariff(
   params: EnsureInvoiceParams,
 ): Promise<EnsureInvoiceResult> {
-  const { userId, reason } = params;
+  const { userId, reason, isTestShop = false } = params;
 
   if (!supabaseAdmin) {
     return {
@@ -247,10 +250,12 @@ export async function ensurePendingInvoiceForTariff(
     };
   }
 
-  // 1. Try to reuse an existing pending invoice.
+  // 1. Try to reuse an existing pending invoice. If the most recent pending
+  //    was created against the OTHER shop, archive + cancel it and fall
+  //    through to create a fresh one on the requested shop.
   const { data: existing } = await supabaseAdmin
     .from('invoices')
-    .select('id, yookassa_payment_url, yookassa_payment_id, created_at, amount')
+    .select('id, yookassa_payment_url, yookassa_payment_id, created_at, amount, is_test_shop')
     .eq('client_user_id', userId)
     .eq('status', 'pending')
     .is('archived_at', null)
@@ -258,7 +263,26 @@ export async function ensurePendingInvoiceForTariff(
     .limit(1)
     .maybeSingle();
 
-  if (existing && isPendingInvoiceStillValid(existing)) {
+  if (existing && existing.is_test_shop !== isTestShop) {
+    // Shop switch — kill the stale pending so the client doesn't see two
+    // conflicting "pay now" links.
+    if (existing.yookassa_payment_id) {
+      try {
+        await cancelYookassaInvoice(existing.yookassa_payment_id, existing.is_test_shop);
+      } catch (cancelErr) {
+        await logError('billing.ensure.cancel_old_on_shop_switch.failed', cancelErr, {
+          userId,
+          invoice_id: existing.id,
+          old_is_test_shop: existing.is_test_shop,
+          new_is_test_shop: isTestShop,
+        });
+      }
+    }
+    await supabaseAdmin
+      .from('invoices')
+      .update({ archived_at: new Date().toISOString(), status: 'cancelled' })
+      .eq('id', existing.id);
+  } else if (existing && isPendingInvoiceStillValid(existing)) {
     return {
       invoiceId: existing.id,
       yookassaUrl: existing.yookassa_payment_url,
@@ -288,6 +312,7 @@ export async function ensurePendingInvoiceForTariff(
       description,
       created_by: null,
       status: 'pending',
+      is_test_shop: isTestShop,
       metadata: { source: reason },
     })
     .select('id, created_at')
@@ -299,12 +324,14 @@ export async function ensurePendingInvoiceForTariff(
   }
 
   // 3. Talk to YooKassa.
-  if (!isYookassaConfigured()) {
+  if (!isYookassaConfigured(isTestShop)) {
     return {
       invoiceId: newInvoice.id,
       yookassaUrl: null,
       reused: false,
-      yookassaError: 'YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY не настроены',
+      yookassaError: isTestShop
+        ? 'YOOKASSA_TEST_SHOP_ID / YOOKASSA_TEST_SECRET_KEY не настроены'
+        : 'YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY не настроены',
     };
   }
 
@@ -321,21 +348,24 @@ export async function ensurePendingInvoiceForTariff(
   }
 
   try {
-    const yk = await createYookassaInvoice({
-      amount,
-      currency: 'RUB',
-      description,
-      invoiceId: newInvoice.id,
-      companyName,
-      idempotencyKey: newInvoice.id,
-      savePaymentMethod: true,
-      receipt: buildDefaultReceipt({
-        customerEmail: receiptEmail,
-        description,
+    const yk = await createYookassaInvoice(
+      {
         amount,
         currency: 'RUB',
-      }),
-    });
+        description,
+        invoiceId: newInvoice.id,
+        companyName,
+        idempotencyKey: newInvoice.id,
+        savePaymentMethod: true,
+        receipt: buildDefaultReceipt({
+          customerEmail: receiptEmail,
+          description,
+          amount,
+          currency: 'RUB',
+        }),
+      },
+      isTestShop,
+    );
     const ykUrl = extractInvoiceUrl(yk);
 
     await supabaseAdmin
@@ -343,17 +373,27 @@ export async function ensurePendingInvoiceForTariff(
       .update({ yookassa_payment_id: yk.id, yookassa_payment_url: ykUrl })
       .eq('id', newInvoice.id);
 
+    // Mirror the flag onto client_tariffs ONLY after YK accepted the create —
+    // otherwise a half-failed shop switch (test toggle flipped but YK call
+    // crashed) would leave client_tariffs.is_test_shop pointing at one shop
+    // while yookassa_payment_method_id (saved later by webhook) lives on the
+    // other, so cron would charge with the wrong credentials.
+    await supabaseAdmin
+      .from('client_tariffs')
+      .update({ is_test_shop: isTestShop, updated_at: new Date().toISOString() })
+      .eq('user_id', userId);
+
     await logAudit(
       'billing.invoice.auto_created',
-      `Pending invoice ${newInvoice.id} created for ${companyName} (${reason})`,
-      { user_id: userId, invoice_id: newInvoice.id, reason, amount },
+      `Pending invoice ${newInvoice.id} created for ${companyName} (${reason}${isTestShop ? ', test shop' : ''})`,
+      { user_id: userId, invoice_id: newInvoice.id, reason, amount, is_test_shop: isTestShop },
       {},
     );
 
     return { invoiceId: newInvoice.id, yookassaUrl: ykUrl, reused: false, yookassaError: null };
   } catch (ykErr) {
     const msg = ykErr instanceof Error ? ykErr.message : String(ykErr);
-    await logError('billing.ensure.yk_create.failed', ykErr, { userId, invoice_id: newInvoice.id, reason });
+    await logError('billing.ensure.yk_create.failed', ykErr, { userId, invoice_id: newInvoice.id, reason, is_test_shop: isTestShop });
     return { invoiceId: newInvoice.id, yookassaUrl: null, reused: false, yookassaError: `Ошибка платёжной системы: ${msg}` };
   }
 }
@@ -374,6 +414,9 @@ interface RenewalTariffRow {
   billing_period: BillingPeriod | null;
   billing_amount: number | null;
   yookassa_payment_method_id: string | null;
+  /** Какой магазин YK обслуживает эту подписку. Saved card живёт в том магазине,
+   *  где её привязали — cron должен бить теми же кредами. */
+  is_test_shop: boolean;
 }
 
 /**
@@ -403,8 +446,8 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
   if (!row.yookassa_payment_method_id) {
     return { invoiceId: null, success: false, errorRu: 'Карта не привязана' };
   }
-  if (!isYookassaConfigured()) {
-    return { invoiceId: null, success: false, errorRu: 'YooKassa не настроена' };
+  if (!isYookassaConfigured(row.is_test_shop)) {
+    return { invoiceId: null, success: false, errorRu: row.is_test_shop ? 'Тестовый магазин YooKassa не настроен' : 'YooKassa не настроена' };
   }
 
   const amount = resolveBillingAmount(row);
@@ -446,6 +489,7 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
       description,
       created_by: null,
       status: 'pending',
+      is_test_shop: row.is_test_shop,
       metadata: { source: 'cron_renew', billing_month: billingMonth, tariff_id: row.id },
     })
     .select('id')
@@ -463,26 +507,28 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
   let cancellationReason: string | null = null;
 
   try {
-    const payment = await chargeRecurringPayment({
-      amount,
-      currency: 'RUB',
-      description,
-      paymentMethodId: row.yookassa_payment_method_id,
-      idempotencyKey,
-      receipt: buildDefaultReceipt({
-        customerEmail: receiptEmail,
-        description,
+    const payment = await chargeRecurringPayment(
+      {
         amount,
         currency: 'RUB',
-      }),
-    });
+        description,
+        paymentMethodId: row.yookassa_payment_method_id,
+        idempotencyKey,
+        receipt: buildDefaultReceipt({
+          customerEmail: receiptEmail,
+          description,
+          amount,
+          currency: 'RUB',
+        }),
+      },
+      row.is_test_shop,
+    );
 
     paymentId = payment.id;
 
     if (payment.status === 'succeeded') {
       paymentSucceeded = true;
     } else {
-      // YK accepted the request but the payment did not succeed (canceled / pending).
       const paymentWithDetails = payment as {
         cancellation_details?: { reason?: string | null } | null;
       };
@@ -492,12 +538,10 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
         : `Платёж ${payment.status}.`;
     }
   } catch (err) {
-    // YK refused outright (HTTP error). Map the raw response if possible —
-    // chargeRecurringPayment surfaces JSON.stringify(err) in the message.
     const msg = err instanceof Error ? err.message : String(err);
     const reasonMatch = msg.match(/"description":"([^"]+)"/);
     yookassaErrRu = reasonMatch ? mapYookassaErrorRu(reasonMatch[1]) : mapYookassaErrorRu(null);
-    await logError('billing.renewal.yk_charge.failed', err, { user_id: row.user_id, invoice_id: invoiceRow.id });
+    await logError('billing.renewal.yk_charge.failed', err, { user_id: row.user_id, invoice_id: invoiceRow.id, is_test_shop: row.is_test_shop });
   }
 
   // 3a. Success: mark invoice paid, extend the subscription.
@@ -529,7 +573,7 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
     await logAudit(
       'billing.renewal.success',
       `Auto-renewed subscription for user ${row.user_id}`,
-      { user_id: row.user_id, invoice_id: invoiceRow.id, payment_id: paymentId, new_paid_until: newPaidUntil.toISOString() },
+      { user_id: row.user_id, invoice_id: invoiceRow.id, payment_id: paymentId, new_paid_until: newPaidUntil.toISOString(), is_test_shop: row.is_test_shop },
       {},
     );
 

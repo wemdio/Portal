@@ -158,6 +158,7 @@ export async function POST(req: NextRequest) {
     description?: string;
     client_user_id?: string;
     vat_code?: number;
+    is_test_shop?: boolean;
   };
   try {
     body = await req.json();
@@ -169,6 +170,8 @@ export async function POST(req: NextRequest) {
   const amount = Number(body.amount);
   if (!Number.isFinite(amount) || amount <= 0) return jsonError('amount must be positive', 400);
 
+  const isTestShop = body.is_test_shop === true;
+
   const { data: invoice, error: insertError } = await supabaseAdmin
     .from('invoices')
     .insert({
@@ -179,6 +182,7 @@ export async function POST(req: NextRequest) {
       client_user_id: body.client_user_id ?? null,
       created_by: user.id,
       status: 'pending',
+      is_test_shop: isTestShop,
     })
     .select()
     .single();
@@ -191,8 +195,10 @@ export async function POST(req: NextRequest) {
   // Create YooKassa payment if configured
   let yookassaError: string | null = null;
 
-  if (!isYookassaConfigured()) {
-    yookassaError = 'YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY не настроены';
+  if (!isYookassaConfigured(isTestShop)) {
+    yookassaError = isTestShop
+      ? 'YOOKASSA_TEST_SHOP_ID / YOOKASSA_TEST_SECRET_KEY не настроены'
+      : 'YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY не настроены';
   } else {
     // 54-FZ receipt requires a customer email (or phone). Prefer the linked
     // client's profile email; fall back to YOOKASSA_FALLBACK_RECEIPT_EMAIL
@@ -217,21 +223,24 @@ export async function POST(req: NextRequest) {
       try {
         const description = invoice.description ?? `Счёт для ${invoice.company_name}`;
         const vatCode = (body.vat_code as YookassaVatCode | undefined) ?? 1;
-        const ykInvoice = await createYookassaInvoice({
-          amount,
-          currency: invoice.currency,
-          description,
-          invoiceId: invoice.id,
-          companyName: invoice.company_name,
-          idempotencyKey: invoice.id,
-          receipt: buildDefaultReceipt({
-            customerEmail,
-            description,
+        const ykInvoice = await createYookassaInvoice(
+          {
             amount,
             currency: invoice.currency,
-            vatCode,
-          }),
-        });
+            description,
+            invoiceId: invoice.id,
+            companyName: invoice.company_name,
+            idempotencyKey: invoice.id,
+            receipt: buildDefaultReceipt({
+              customerEmail,
+              description,
+              amount,
+              currency: invoice.currency,
+              vatCode,
+            }),
+          },
+          isTestShop,
+        );
 
         const ykUrl = extractInvoiceUrl(ykInvoice);
 
@@ -247,7 +256,7 @@ export async function POST(req: NextRequest) {
         invoice.yookassa_payment_url = ykUrl;
       } catch (ykErr) {
         yookassaError = ykErr instanceof Error ? ykErr.message : String(ykErr);
-        await logError('invoices.yookassa.create.failed', ykErr, { invoice_id: invoice.id });
+        await logError('invoices.yookassa.create.failed', ykErr, { invoice_id: invoice.id, is_test_shop: isTestShop });
       }
     }
   }
@@ -255,7 +264,7 @@ export async function POST(req: NextRequest) {
   await logAudit(
     'invoices.created',
     `Invoice created for ${invoice.company_name} — ${amount} ${invoice.currency}`,
-    { invoice_id: invoice.id, company_name: invoice.company_name, amount },
+    { invoice_id: invoice.id, company_name: invoice.company_name, amount, is_test_shop: isTestShop },
     { userId: user.id },
   );
 

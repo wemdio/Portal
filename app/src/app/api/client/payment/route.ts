@@ -43,7 +43,11 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Этот режим не поддерживает оплату из ЛК' }, { status: 400 });
   }
 
-  const ensured = await ensurePendingInvoiceForTariff({ userId, reason: 'client_self' });
+  const ensured = await ensurePendingInvoiceForTariff({
+    userId,
+    reason: 'client_self',
+    isTestShop: tariff.is_test_shop === true,
+  });
 
   if (!ensured.yookassaUrl) {
     const message = ensured.yookassaError ?? 'Не удалось получить ссылку на оплату';
