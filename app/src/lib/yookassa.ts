@@ -2,15 +2,37 @@ import 'server-only';
 
 const YOOKASSA_API = 'https://api.yookassa.ru/v3';
 
-const shopId = process.env.YOOKASSA_SHOP_ID;
-const secretKey = process.env.YOOKASSA_SECRET_KEY;
 const DEFAULT_INVOICE_VALIDITY_DAYS = 30;
 const INVOICE_EXPIRES_AT_SAFETY_BUFFER_MS = 15 * 60 * 1000;
 
-function basicAuth(): string {
+/**
+ * Resolve the YooKassa credentials for a given shop. Read lazily on every call
+ * so tests (and dev hot-reload) see env mutations, and so the production and
+ * test shops can be configured independently without restarting the server.
+ *
+ * The "test" shop is for QA — admins flip a toggle in /admin/users or the
+ * /invoices CreateModal. Production webhooks land on the same endpoint; we
+ * disambiguate by the UUID payment_id, not by shop.
+ */
+function getYookassaCreds(isTestShop: boolean): { shopId: string; secretKey: string } {
+  if (isTestShop) {
+    const shopId = process.env.YOOKASSA_TEST_SHOP_ID;
+    const secretKey = process.env.YOOKASSA_TEST_SECRET_KEY;
+    if (!shopId || !secretKey) {
+      throw new Error('YOOKASSA_TEST_SHOP_ID / YOOKASSA_TEST_SECRET_KEY are not configured');
+    }
+    return { shopId, secretKey };
+  }
+  const shopId = process.env.YOOKASSA_SHOP_ID;
+  const secretKey = process.env.YOOKASSA_SECRET_KEY;
   if (!shopId || !secretKey) {
     throw new Error('YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY are not configured');
   }
+  return { shopId, secretKey };
+}
+
+function basicAuth(isTestShop: boolean): string {
+  const { shopId, secretKey } = getYookassaCreds(isTestShop);
   return 'Basic ' + Buffer.from(`${shopId}:${secretKey}`).toString('base64');
 }
 
@@ -204,11 +226,12 @@ function buildInvoiceBody(params: CreateInvoiceParams, expiresAt: string) {
 async function postYookassaInvoice(
   body: ReturnType<typeof buildInvoiceBody>,
   idempotencyKey: string,
+  isTestShop: boolean,
 ): Promise<{ invoice?: YookassaInvoice; error?: YookassaErrorResponse; response: Response }> {
   const res = await fetch(`${YOOKASSA_API}/invoices`, {
     method: 'POST',
     headers: {
-      Authorization: basicAuth(),
+      Authorization: basicAuth(isTestShop),
       'Content-Type': 'application/json',
       'Idempotence-Key': idempotencyKey,
     },
@@ -228,9 +251,12 @@ async function postYookassaInvoice(
   };
 }
 
-export async function createYookassaInvoice(params: CreateInvoiceParams): Promise<YookassaInvoice> {
+export async function createYookassaInvoice(
+  params: CreateInvoiceParams,
+  isTestShop: boolean = false,
+): Promise<YookassaInvoice> {
   const expiresAt = params.expiresAt ?? getDefaultYookassaInvoiceExpiresAt();
-  const result = await postYookassaInvoice(buildInvoiceBody(params, expiresAt), params.idempotencyKey);
+  const result = await postYookassaInvoice(buildInvoiceBody(params, expiresAt), params.idempotencyKey, isTestShop);
 
   if (result.invoice) return result.invoice;
 
@@ -240,6 +266,7 @@ export async function createYookassaInvoice(params: CreateInvoiceParams): Promis
     const retry = await postYookassaInvoice(
       buildInvoiceBody(params, retryExpiresAt),
       `${params.idempotencyKey}-expires-retry`,
+      isTestShop,
     );
 
     if (retry.invoice) return retry.invoice;
@@ -249,9 +276,9 @@ export async function createYookassaInvoice(params: CreateInvoiceParams): Promis
   throw new Error(`YooKassa error ${result.response.status}: ${JSON.stringify(result.error ?? {})}`);
 }
 
-export async function getYookassaInvoice(ykInvoiceId: string): Promise<YookassaInvoice> {
+export async function getYookassaInvoice(ykInvoiceId: string, isTestShop: boolean = false): Promise<YookassaInvoice> {
   const res = await fetch(`${YOOKASSA_API}/invoices/${ykInvoiceId}`, {
-    headers: { Authorization: basicAuth() },
+    headers: { Authorization: basicAuth(isTestShop) },
   });
 
   if (!res.ok) {
@@ -354,7 +381,10 @@ export function buildDefaultReceipt(params: {
  * Uses POST /v3/payments with payment_method_id (recurring payment).
  * Requires autopayments to be enabled on the YooKassa merchant account.
  */
-export async function chargeRecurringPayment(params: ChargeRecurringParams): Promise<YookassaPayment> {
+export async function chargeRecurringPayment(
+  params: ChargeRecurringParams,
+  isTestShop: boolean = false,
+): Promise<YookassaPayment> {
   const body = {
     amount: {
       value: params.amount.toFixed(2),
@@ -371,7 +401,7 @@ export async function chargeRecurringPayment(params: ChargeRecurringParams): Pro
   const res = await fetch(`${YOOKASSA_API}/payments`, {
     method: 'POST',
     headers: {
-      Authorization: basicAuth(),
+      Authorization: basicAuth(isTestShop),
       'Content-Type': 'application/json',
       'Idempotence-Key': params.idempotencyKey,
     },
@@ -400,11 +430,11 @@ export function parseYookassaWebhookBody(rawBody: string): {
 }
 
 /** Cancel a pending YooKassa invoice so the customer can no longer pay it */
-export async function cancelYookassaInvoice(ykInvoiceId: string): Promise<void> {
+export async function cancelYookassaInvoice(ykInvoiceId: string, isTestShop: boolean = false): Promise<void> {
   const res = await fetch(`${YOOKASSA_API}/invoices/${ykInvoiceId}/cancel`, {
     method: 'POST',
     headers: {
-      Authorization: basicAuth(),
+      Authorization: basicAuth(isTestShop),
       'Content-Type': 'application/json',
       'Idempotence-Key': `cancel-${ykInvoiceId}`,
     },
@@ -416,6 +446,9 @@ export async function cancelYookassaInvoice(ykInvoiceId: string): Promise<void> 
   }
 }
 
-export function isYookassaConfigured(): boolean {
-  return Boolean(shopId && secretKey);
+export function isYookassaConfigured(isTestShop: boolean = false): boolean {
+  if (isTestShop) {
+    return Boolean(process.env.YOOKASSA_TEST_SHOP_ID && process.env.YOOKASSA_TEST_SECRET_KEY);
+  }
+  return Boolean(process.env.YOOKASSA_SHOP_ID && process.env.YOOKASSA_SECRET_KEY);
 }
