@@ -7,8 +7,46 @@ jest.mock('@/lib/enrich/websiteParser', () => ({
   fetchHtmlWithPlaywright: jest.fn(),
 }));
 
+jest.mock('@/lib/enrich/extractors/clientSegmentExtractor', () => ({
+  extractClientSegment: jest.fn().mockResolvedValue('тест-сегмент'),
+}));
+
+jest.mock('@/lib/enrich/extractors/casesCountLlmExtractor', () => ({
+  llmCountCases: jest.fn().mockResolvedValue('5+'),
+}));
+
+jest.mock('@/lib/enrich/extractors/careersLlmExtractor', () => ({
+  llmExtractHiring: jest.fn().mockResolvedValue({ vacancies: '7+', professions: ['Грузчики'] }),
+}));
+
+jest.mock('@/lib/enrich/extractors/pricingLlmExtractor', () => ({
+  llmExtractPricing: jest.fn().mockResolvedValue({
+    pricing_model: 'sales-led',
+    pricing_min: { value: 50000, currency: 'RUB' },
+    free_trial: true,
+  }),
+}));
+
+jest.mock('@/lib/enrich/extractors/integrationsLlmExtractor', () => ({
+  llmExtractIntegrations: jest.fn().mockResolvedValue(['amoCRM', 'Slack']),
+}));
+
+jest.mock('@/lib/enrich/extractors/socialCompanyFinder', () => ({
+  findCompanySocials: jest.fn().mockResolvedValue([]),
+}));
+jest.mock('@/lib/enrich/extractors/socialPostsExtractor', () => ({
+  extractSocialPosts: jest.fn().mockResolvedValue([]),
+}));
+jest.mock('@/lib/enrich/extractors/eventDetector', () => ({
+  detectEventSignals: jest.fn().mockResolvedValue({ event_opening: true, event_opening_summary: 'Новый офис' }),
+}));
+
 import { processSignalsForUrl } from '@/lib/enrich/websiteSignalProcessor';
 import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websiteParser';
+import { findCompanySocials } from '@/lib/enrich/extractors/socialCompanyFinder';
+import { extractSocialPosts } from '@/lib/enrich/extractors/socialPostsExtractor';
+const findCompanySocialsMock = findCompanySocials as jest.MockedFunction<typeof findCompanySocials>;
+const extractSocialPostsMock = extractSocialPosts as jest.MockedFunction<typeof extractSocialPosts>;
 
 const fetchHtmlWithRetryMock = fetchHtmlWithRetry as jest.MockedFunction<typeof fetchHtmlWithRetry>;
 const fetchHtmlWithPlaywrightMock = fetchHtmlWithPlaywright as jest.MockedFunction<typeof fetchHtmlWithPlaywright>;
@@ -279,7 +317,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
     expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(1);
     expect('stack' in result).toBe(true);
     if ('stack' in result) {
-      expect(result.customers).toBeUndefined();
+      expect(result.client_segment).toBeUndefined();
       expect(result.pricing_model).toBeUndefined();
     }
   });
@@ -302,62 +340,128 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
   // few seconds. The default 5s ceiling tripped intermittently before this
   // event-detector work; bumping to 15s removes the flake without hiding a
   // real hang.
-  it('with extractors=["customers"] — discovers /cases and fetches main + /cases only', async () => {
+  it('with extractors=["client_segment"] — discovers /cases + /about, fetches main + both', async () => {
     mockUrlResponses({
       'example.com/cases': '<section class="clients"><img alt="Сбербанк" /></section>',
-      'example.com': '<html><body><a href="/cases">Кейсы</a><a href="/pricing">Цены</a></body></html>',
+      'example.com/about': '<p>О компании</p>',
+      'example.com': '<html><body><a href="/cases">Кейсы</a><a href="/about">О нас</a><a href="/pricing">Цены</a></body></html>',
     });
 
-    const result = await processSignalsForUrl('example.com', { extractors: ['customers'] });
+    const result = await processSignalsForUrl('example.com', { extractors: ['client_segment'] });
 
-    expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(2);
     const fetchedUrls = fetchHtmlWithRetryMock.mock.calls.map((c) => c[0] as string);
     expect(fetchedUrls.some((u) => u.includes('/cases'))).toBe(true);
+    expect(fetchedUrls.some((u) => u.includes('/about'))).toBe(true);
     expect(fetchedUrls.some((u) => u.includes('/pricing'))).toBe(false);
-
     if ('stack' in result) {
-      expect(result.customers).toEqual(['Сбербанк']);
+      expect(result.client_segment).toBe('тест-сегмент');
       expect(result.pricing_model).toBeUndefined();
     }
-  }, 15000);
+  });
 
-  it('with extractors=["customers","cases_count"] — fetches /cases only ONCE (deduplication)', async () => {
+  it('with extractors=["client_segment","cases_count"] — fetches /cases only ONCE', async () => {
     mockUrlResponses({
       'example.com/cases': `
         <section class="clients"><img alt="Газпром" /></section>
         <article class="case-card">x</article>
         <article class="case-card">y</article>
       `,
-      'example.com': '<a href="/cases">Cases</a>',
+      'example.com/about': '<p>О компании</p>',
+      'example.com': '<a href="/cases">Cases</a><a href="/about">About</a>',
     });
 
     const result = await processSignalsForUrl('example.com', {
-      extractors: ['customers', 'cases_count'],
+      extractors: ['client_segment', 'cases_count'],
     });
 
-    expect(fetchHtmlWithRetryMock).toHaveBeenCalledTimes(2);
-    const casesFetches = fetchHtmlWithRetryMock.mock.calls.filter(
-      (c) => (c[0] as string).includes('/cases'),
-    );
+    const casesFetches = fetchHtmlWithRetryMock.mock.calls.filter((c) => (c[0] as string).includes('/cases'));
     expect(casesFetches).toHaveLength(1);
-
     if ('stack' in result) {
-      expect(result.customers).toEqual(['Газпром']);
+      expect(result.client_segment).toBe('тест-сегмент');
       expect(result.cases_count).toBe(2);
     }
-  }, 15000);
+  });
 
-  it('subpage 404 does not fail main result — graceful degradation', async () => {
-    fetchHtmlWithRetryMock.mockImplementation(async (url: string) => {
-      if (url.includes('/cases')) return { html: '', status: 404 };
-      return { html: '<a href="/cases">Cases</a>', status: 200 };
+  it('cases_count: heuristic 0 → uses LLM estimate', async () => {
+    mockUrlResponses({
+      // class="projects" не матчит CASE_SELECTOR, числа в тексте нет →
+      // extractCasesCount = 0 → зовётся llmCountCases (мок → "5+").
+      'example.com/cases': '<div class="projects">Делали проекты для разных компаний и брендов.</div>',
+      'example.com': '<a href="/cases">Кейсы</a>',
     });
 
-    const result = await processSignalsForUrl('example.com', { extractors: ['stack', 'customers'] });
+    const result = await processSignalsForUrl('example.com', { extractors: ['cases_count'] });
 
     expect('stack' in result).toBe(true);
     if ('stack' in result) {
-      expect(result.customers).toEqual([]);
+      expect(result.cases_count).toBe('5+');
+    }
+  });
+
+  it('vacancies_count/hiring_roles: heuristic 0 → uses LLM', async () => {
+    mockUrlResponses({
+      // class="hiring-block" не матчит VACANCY_SELECTOR, числа нет →
+      // extractHiring даёт 0/[] → зовётся llmExtractHiring (мок).
+      'example.com/careers': '<div class="hiring-block">Ищем сотрудников в команду на разные роли, подробности по запросу.</div>',
+      'example.com': '<a href="/careers">Вакансии</a>',
+    });
+
+    const result = await processSignalsForUrl('example.com', { extractors: ['vacancies_count', 'hiring_roles'] });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.vacancies_count).toBe('7+');
+      expect(result.hiring_roles).toEqual(['Грузчики']);
+    }
+  });
+
+  it('pricing: heuristic blank → fills model/min/free_trial from LLM', async () => {
+    mockUrlResponses({
+      // нет цен/кнопок/тарифов/маркеров → extractPricingModel=unknown,
+      // extractPricingDetails={} → зовётся llmExtractPricing (мок).
+      'example.com/pricing': '<div class="info">Наши услуги помогают бизнесу расти и развиваться каждый день уверенно.</div>',
+      'example.com': '<a href="/pricing">Цены</a>',
+    });
+
+    const result = await processSignalsForUrl('example.com', {
+      extractors: ['pricing_model', 'pricing_min', 'free_trial'],
+    });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.pricing_model).toBe('sales-led');
+      expect(result.pricing_min).toEqual({ value: 50000, currency: 'RUB' });
+      expect(result.free_trial).toBe(true);
+    }
+  });
+
+  it('integrations: empty merge → fills from LLM', async () => {
+    mockUrlResponses({
+      // нет script-следов и нет распознаваемой integration-секции →
+      // signatures=[] и extractIntegrations=[] → merge пуст → llmExtractIntegrations (мок).
+      'example.com/integrations': '<div class="info">Мы дружим со многими сервисами для вашего удобства каждый день.</div>',
+      'example.com': '<a href="/integrations">Интеграции</a>',
+    });
+
+    const result = await processSignalsForUrl('example.com', { extractors: ['integrations'] });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.integrations).toEqual(['amoCRM', 'Slack']);
+    }
+  });
+
+  it('subpage 404 does not fail main result — graceful degradation', async () => {
+    fetchHtmlWithRetryMock.mockImplementation(async (url: string) => {
+      if (url.includes('/cases') || url.includes('/about')) return { html: '', status: 404 };
+      return { html: '<a href="/cases">Cases</a><a href="/about">About</a>', status: 200 };
+    });
+
+    const result = await processSignalsForUrl('example.com', { extractors: ['stack', 'client_segment'] });
+
+    expect('stack' in result).toBe(true);
+    if ('stack' in result) {
+      expect(result.client_segment).toBe('тест-сегмент');
     }
   });
 
@@ -373,23 +477,19 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
           status: 200,
         };
       }
-      return { html: '<a href="/pricing">P</a><a href="/cases">C</a>', status: 200 };
+      return { html: '<a href="/pricing">P</a><a href="/cases">C</a><a href="/about">A</a>', status: 200 };
     });
 
     const result = await processSignalsForUrl('example.com', {
-      extractors: ['customers', 'pricing_model'],
+      extractors: ['client_segment', 'pricing_model'],
     });
 
     expect('stack' in result).toBe(true);
     if ('stack' in result) {
-      expect(result.customers).toEqual([]);
+      expect(result.client_segment).toBe('тест-сегмент');
       expect(result.pricing_model).toBe('self-serve');
     }
-    // 15s ceiling — the real LLM fallback (Requesty) may take several seconds
-    // when the .env API key is set in CI. The previous 5s default frequently
-    // tripped on this test even before the fetch-fallback work (timing varied
-    // from 3-5s). 15s leaves a comfortable buffer without hiding real hangs.
-  }, 15000);
+  });
 
   it('full extractor set — populates all expected optional fields', async () => {
     mockUrlResponses({
@@ -411,7 +511,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
 
     const result = await processSignalsForUrl('example.com', {
       extractors: [
-        'stack', 'profile', 'customers', 'cases_count', 'enterprise_logos',
+        'stack', 'profile', 'client_segment', 'cases_count', 'enterprise_logos',
         'pricing_model', 'pricing_min', 'free_trial',
         'vacancies_count', 'hiring_roles',
         'integrations', 'founded_year', 'team_size', 'blog_last_post',
@@ -420,7 +520,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
 
     expect('stack' in result).toBe(true);
     if ('stack' in result) {
-      expect(result.customers).toEqual(['Тинькофф']);
+      expect(result.client_segment).toBe('тест-сегмент');
       expect(result.cases_count).toBe(1);
       expect(result.enterprise_logos).toBe(true);
       expect(result.pricing_model).toBe('self-serve');
@@ -543,5 +643,78 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
       expect(result.stack).toBe('');
       expect(result.profile).toBe('');
     }
+  });
+});
+
+describe('processSignalsForUrl — social media discovery', () => {
+  const ORIG_FETCH = global.fetch;
+  beforeEach(() => {
+    fetchHtmlWithRetryMock.mockReset();
+    fetchHtmlWithPlaywrightMock.mockReset();
+    findCompanySocialsMock.mockReset().mockResolvedValue([]);
+    extractSocialPostsMock.mockReset().mockResolvedValue([]);
+    // HEAD-пробы подстраниц (/about) → быстро «нет», без реальной сети.
+    (global.fetch as unknown) = jest.fn().mockResolvedValue({ ok: false });
+    delete process.env.SIGNALS_SOCIAL_DEEP;
+  });
+  afterEach(() => { global.fetch = ORIG_FETCH; delete process.env.SIGNALS_SOCIAL_DEEP; });
+
+  it('reads socials from static footer without deep recall', async () => {
+    const html = `<html><body><footer><a href="https://t.me/realco">tg</a></footer></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html, status: 200 });
+    const result = await processSignalsForUrl('example.com', { extractors: ['social_media'] });
+    expect('social_media' in result && result.social_media).toEqual(['https://t.me/realco']);
+    expect(fetchHtmlWithPlaywrightMock).not.toHaveBeenCalled();
+    expect(findCompanySocialsMock).not.toHaveBeenCalled();
+  });
+
+  it('renders with Playwright when static HTML has no socials', async () => {
+    const bare = `<html><body><p>no socials</p></body></html>`;
+    const rendered = `<html><body><footer><a href="https://vk.com/rendered">vk</a></footer></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html: bare, status: 200 });
+    fetchHtmlWithPlaywrightMock.mockResolvedValue(rendered);
+    const result = await processSignalsForUrl('example.com', { extractors: ['social_media'] });
+    expect('social_media' in result && result.social_media).toEqual(['https://vk.com/rendered']);
+    expect(fetchHtmlWithPlaywrightMock).toHaveBeenCalled();
+    expect(findCompanySocialsMock).not.toHaveBeenCalled();
+  });
+
+  it('falls back to Serper finder when static and Playwright are both empty', async () => {
+    const bare = `<html><body><p>none</p></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html: bare, status: 200 });
+    fetchHtmlWithPlaywrightMock.mockResolvedValue(bare);
+    findCompanySocialsMock.mockResolvedValue(['https://t.me/found_by_search']);
+    const result = await processSignalsForUrl('example.com', { extractors: ['social_media'] });
+    expect('social_media' in result && result.social_media).toEqual(['https://t.me/found_by_search']);
+    expect(findCompanySocialsMock).toHaveBeenCalled();
+  });
+
+  it('SIGNALS_SOCIAL_DEEP=0 disables Playwright + Serper recall', async () => {
+    process.env.SIGNALS_SOCIAL_DEEP = '0';
+    const bare = `<html><body><p>none</p></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html: bare, status: 200 });
+    const result = await processSignalsForUrl('example.com', { extractors: ['social_media'] });
+    expect('social_media' in result && result.social_media).toEqual([]);
+    expect(fetchHtmlWithPlaywrightMock).not.toHaveBeenCalled();
+    expect(findCompanySocialsMock).not.toHaveBeenCalled();
+  });
+
+  it('feeds the resolved social urls into the event pipeline', async () => {
+    const html = `<html><body><footer><a href="https://t.me/realco">tg</a></footer></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html, status: 200 });
+    const result = await processSignalsForUrl('example.com', {
+      extractors: ['social_media', 'event_opening', 'event_opening_summary'],
+    });
+    expect(extractSocialPostsMock).toHaveBeenCalledWith(['https://t.me/realco'], expect.anything());
+    expect('event_opening' in result && result.event_opening).toBe(true);
+  });
+
+  it('does not error the row when Playwright throws; falls through to Serper', async () => {
+    const bare = `<html><body><p>none</p></body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html: bare, status: 200 });
+    fetchHtmlWithPlaywrightMock.mockRejectedValue(new Error('browser launch failed'));
+    findCompanySocialsMock.mockResolvedValue(['https://t.me/from_serper']);
+    const result = await processSignalsForUrl('example.com', { extractors: ['social_media'] });
+    expect('social_media' in result && result.social_media).toEqual(['https://t.me/from_serper']);
   });
 });

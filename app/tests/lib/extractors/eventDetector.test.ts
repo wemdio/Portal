@@ -223,4 +223,40 @@ describe('detectEventSignals — parsing', () => {
     expect(userMsg).toContain('[О КОМПАНИИ]');
     expect(userMsg).toContain('Основана в 2018');
   });
+
+  it('uses a niche-agnostic system prompt (no HoReCa lock-in)', async () => {
+    setApiKey('test-key');
+    const fetchSpy = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: JSON.stringify({ event_opening: false, event_redesign: false, event_renovation: false, event_geo: [] }) } }],
+      }),
+    }));
+    global.fetch = fetchSpy as unknown as typeof fetch;
+
+    await detectEventSignals({ socialPosts: SAMPLE_POSTS });
+
+    const body = JSON.parse((fetchSpy.mock.calls[0] as unknown as [string, { body: string }])[1].body) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const sys = body.messages.find((m) => m.role === 'system')!.content.toLowerCase();
+    expect(sys).toContain('любой ниши');
+    expect(sys).not.toContain('horeca');
+  });
+
+  it('detects a non-HoReCa opening (new office)', async () => {
+    setApiKey('test-key');
+    mockLlmResponse({
+      event_opening: true,
+      event_opening_summary: 'Открыли новый офис разработки в Новосибирске.',
+      event_redesign: false,
+      event_renovation: false,
+      event_geo: ['Новосибирск'],
+    });
+    const result = await detectEventSignals({
+      socialPosts: [{ network: 'telegram', url: 'https://t.me/s/itco', text: 'Открыли новый офис разработки в Новосибирске! Теперь наша команда из 30 разработчиков работает в новом пространстве на Красном проспекте.', date: '2026-06-01' }],
+    });
+    expect(result.event_opening).toBe(true);
+    expect(result.event_geo).toEqual(['Новосибирск']);
+  });
 });

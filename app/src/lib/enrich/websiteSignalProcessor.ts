@@ -8,19 +8,25 @@ import {
   EXTRACTOR_TO_SUBPAGES,
   SubpageKind,
 } from '@/lib/enrich/extractors/types';
-import { extractCustomers, filterCustomerCandidates } from '@/lib/enrich/extractors/customersExtractor';
+import { extractCustomers } from '@/lib/enrich/extractors/customersExtractor';
 import { nameListLooksReal } from '@/lib/enrich/extractors/nameQuality';
-import { llmExtractCustomers } from '@/lib/enrich/extractors/llmCustomersExtractor';
+import { extractClientSegment } from '@/lib/enrich/extractors/clientSegmentExtractor';
 import { extractCasesCount } from '@/lib/enrich/extractors/casesCountExtractor';
 import { extractCaseIndustries } from '@/lib/enrich/extractors/caseIndustriesExtractor';
+import { llmCountCases } from '@/lib/enrich/extractors/casesCountLlmExtractor';
 import { detectEnterpriseLogos, detectEnterpriseInHtml } from '@/lib/enrich/extractors/enterpriseLogosDetector';
 import { extractPricingModel } from '@/lib/enrich/extractors/pricingModelExtractor';
 import { extractPricingDetails } from '@/lib/enrich/extractors/pricingDetailExtractor';
+import { llmExtractPricing } from '@/lib/enrich/extractors/pricingLlmExtractor';
 import { extractHiring, findExternalCareerLinks } from '@/lib/enrich/extractors/hiringExtractor';
+import { llmExtractHiring } from '@/lib/enrich/extractors/careersLlmExtractor';
 import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtractor';
+import { llmExtractIntegrations } from '@/lib/enrich/extractors/integrationsLlmExtractor';
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
-import { extractSocialMedia } from '@/lib/enrich/extractors/socialMediaExtractor';
+import { extractSocialMedia, filterSocialUrls } from '@/lib/enrich/extractors/socialMediaExtractor';
+import { findCompanySocials } from '@/lib/enrich/extractors/socialCompanyFinder';
+import { deriveCompanyName } from '@/lib/enrich/extractors/deriveCompanyName';
 import { extractSocialPosts } from '@/lib/enrich/extractors/socialPostsExtractor';
 import { detectEventSignals } from '@/lib/enrich/extractors/eventDetector';
 import {
@@ -43,6 +49,13 @@ const EVENT_KEYS = new Set<ExtractorKey>([
 
 function anyEventRequested(extractors: ExtractorKey[]): boolean {
   return extractors.some((k) => EVENT_KEYS.has(k));
+}
+
+// Глубокий добор соцсетей (рендер браузером + поиск через Serper) дорогой —
+// читаем флаг на каждом вызове, чтобы прод/тесты могли включить «быстрый
+// режим» SIGNALS_SOCIAL_DEEP=0.
+function socialDeepEnabled(): boolean {
+  return (process.env.SIGNALS_SOCIAL_DEEP ?? '1') !== '0';
 }
 
 const DEFAULT_TIMEOUT_MS = 12_000;
@@ -333,42 +346,28 @@ export async function processSignalsForUrl(
 
   // Cases-related extractors (share /cases HTML, fallback to main)
   const casesHtml = subpageHtml.cases ?? null;
-  if (extractors.includes('customers')) {
-    out.customers = extractCustomers(casesHtml ?? '');
-    if (out.customers.length === 0) out.customers = extractCustomers(main.html);
-    // Trust gate: a thin or junk-heavy heuristic result is dropped so the
-    // LLM fallback below produces clean company names instead.
-    if (!nameListLooksReal(out.customers)) out.customers = [];
-    // Specialized LLM fallback for «Клиенты» (см. llmCustomersExtractor.ts).
-    // Триггер: heuristic дал < 3 имён ИЛИ ничего — heuristic покрывает
-    // только структурированные logo wall'ы с правильными class-нэймами,
-    // а для российского b2b большинство сайтов используют другие классы /
-    // вообще без класс-нэймов. LLM получает structured input (alt-атрибуты
-    // logo wall'ов + текст разделов под client-headings) и выдаёт чистый
-    // список. Поднимает покрытие с ~2% до 80%+ на российском b2b-сегменте
-    // (см. промежуточные результаты.txt от 04.06 — повод для этой работы).
-    if (out.customers.length < 3) {
-      const llmCustomers = await llmExtractCustomers(main.html, casesHtml);
-      if (llmCustomers.length > 0) {
-        // Merge: keep existing heuristic hits at the front (они уже прошли
-        // junk-filter и nameListLooksReal), добавляем уникальные от LLM.
-        const merged: string[] = [...out.customers];
-        const seen = new Set(out.customers.map((c) => c.toLowerCase()));
-        for (const c of llmCustomers) {
-          const key = c.toLowerCase();
-          if (seen.has(key)) continue;
-          seen.add(key);
-          merged.push(c);
-        }
-        // Финальный прогон через filterCustomerCandidates — еще одна линия
-        // защиты от мусора (LLM может пропустить «card img», edge-кейсы).
-        out.customers = filterCustomerCandidates(merged).slice(0, 30);
-      }
-    }
+  // «Клиенты» теперь = сегмент ЦА (кого обслуживает компания), не список брендов.
+  // Источник только LLM (см. clientSegmentExtractor) — старый эвристический
+  // извлекатель списка брендов удалён, он давал плохой результат.
+  if (extractors.includes('client_segment')) {
+    out.client_segment = await extractClientSegment(
+      main.html,
+      subpageHtml.about ?? null,
+      casesHtml,
+    );
   }
   if (extractors.includes('cases_count')) {
-    out.cases_count = extractCasesCount(casesHtml ?? '');
-    if (out.cases_count === 0 && !casesHtml) out.cases_count = extractCasesCount(main.html);
+    // Точный счёт по карточкам/числу — бесплатно. Если 0, кейсы всё же могут
+    // быть в нестандартной вёрстке → спец. LLM по полному тексту /cases даёт
+    // число или оценку «N+» (см. casesCountLlmExtractor). Так ячейка не пустеет
+    // при наличии кейсов (раньше расходилось с «Отрасли в кейсах»).
+    let casesCount: number | string = extractCasesCount(casesHtml ?? '');
+    if (casesCount === 0 && !casesHtml) casesCount = extractCasesCount(main.html);
+    if (casesCount === 0 && !signal?.aborted) {
+      const llm = await llmCountCases(casesHtml ?? main.html, main.html);
+      if (llm !== null) casesCount = llm;
+    }
+    out.cases_count = casesCount;
   }
   if (extractors.includes('case_industries')) {
     out.case_industries = extractCaseIndustries(casesHtml ?? '');
@@ -423,6 +422,24 @@ export async function processSignalsForUrl(
     }
   }
 
+  // LLM-добор по полному тексту /pricing, когда эвристика не определила модель,
+  // не нашла цену и/или не подтвердила free trial. Один вызов закрывает три
+  // столбца. См. pricingLlmExtractor.
+  {
+    const needModel = extractors.includes('pricing_model') && (out.pricing_model === 'unknown' || !out.pricing_model);
+    const needMin = extractors.includes('pricing_min') && !out.pricing_min;
+    const needTrial = extractors.includes('free_trial') && out.free_trial === undefined;
+    if ((needModel || needMin || needTrial) && !signal?.aborted) {
+      const llm = await llmExtractPricing(pricingHtml ?? main.html, main.html);
+      if (llm) {
+        if (needModel && llm.pricing_model) out.pricing_model = llm.pricing_model;
+        if (needMin && llm.pricing_min) out.pricing_min = llm.pricing_min;
+        // free_trial: принимаем true И false, чтобы «Нет» попадал в ячейку.
+        if (needTrial && llm.free_trial !== null) out.free_trial = llm.free_trial;
+      }
+    }
+  }
+
   // Careers-related extractors (share /careers HTML, fallback to main,
   // and as a last resort follow an external hh.ru / career.habr link).
   const careersHtml = subpageHtml.careers ?? null;
@@ -450,13 +467,21 @@ export async function processSignalsForUrl(
       }
     }
 
-    if (extractors.includes('vacancies_count')) out.vacancies_count = hiring.vacancies_count;
-    if (extractors.includes('hiring_roles')) {
-      // New shape: array of top-5 concrete profession names. See
-      // HiringResult docstring for the rationale behind dropping the old
-      // 5-bool-categories representation.
-      out.hiring_roles = hiring.professions;
+    // LLM-добор по полному тексту /careers, когда эвристика не нашла вакансии
+    // и/или профессии (нестандартная вёрстка, напр. moslift.ru/jobs/). Один
+    // вызов закрывает оба столбца. См. careersLlmExtractor.
+    let vacancies: number | string = hiring.vacancies_count;
+    let professions = hiring.professions;
+    if ((vacancies === 0 || professions.length === 0) && !signal?.aborted) {
+      const llm = await llmExtractHiring(careersHtml ?? main.html, main.html);
+      if (llm) {
+        if (vacancies === 0 && llm.vacancies !== null) vacancies = llm.vacancies;
+        if (professions.length === 0 && llm.professions.length > 0) professions = llm.professions;
+      }
     }
+
+    if (extractors.includes('vacancies_count')) out.vacancies_count = vacancies;
+    if (extractors.includes('hiring_roles')) out.hiring_roles = professions;
   }
 
   // Single-extractor subpages (with main page fallback)
@@ -483,7 +508,14 @@ export async function processSignalsForUrl(
       seenInt.add(key);
       merged.push(name);
     }
-    out.integrations = merged.slice(0, 20);
+    // LLM-добор по полному тексту /integrations, когда ни следов скриптов, ни
+    // распознанной секции не нашлось. См. integrationsLlmExtractor.
+    let finalIntegrations = merged.slice(0, 20);
+    if (finalIntegrations.length === 0 && !signal?.aborted) {
+      const llm = await llmExtractIntegrations(subpageHtml.integrations ?? main.html, main.html);
+      if (llm.length > 0) finalIntegrations = llm.slice(0, 20);
+    }
+    out.integrations = finalIntegrations;
   }
   if (extractors.includes('founded_year')) {
     out.founded_year = subpageHtml.about ? extractFoundedYear(subpageHtml.about) : undefined;
@@ -493,20 +525,37 @@ export async function processSignalsForUrl(
     out.team_size = subpageHtml.about ? extractTeamSize(subpageHtml.about) : 0;
     if (!out.team_size) out.team_size = extractTeamSize(main.html);
   }
-  if (extractors.includes('social_media')) {
-    // Соцсети ищем сразу на main+about и мерджим — у b2b-сайтов на главной
-    // обычно footer с иконками, на about — текстовые ссылки. Дедуп идёт
-    // внутри extractSocialMedia по нормализованному URL.
-    const mainSocials = extractSocialMedia(main.html);
-    const aboutSocials = subpageHtml.about ? extractSocialMedia(subpageHtml.about) : [];
-    const merged: string[] = [];
-    const seen = new Set<string>();
-    for (const url of [...mainSocials, ...aboutSocials]) {
-      if (seen.has(url)) continue;
-      seen.add(url);
-      merged.push(url);
+  // ── Соцсети (общий результат для колонки «Соцсети» и для событий) ──────────
+  // static (main+about) → если пусто и включён deep: рендер браузером → если
+  // всё ещё пусто: поиск офиц. канала через Serper. Все источники проходят один
+  // фильтр (боты/личные/чужие/потолки) в filterSocialUrls.
+  const needSocial = extractors.includes('social_media') || anyEventRequested(extractors);
+  let socialUrls: string[] = [];
+  if (needSocial) {
+    socialUrls = filterSocialUrls([
+      ...extractSocialMedia(main.html),
+      ...(subpageHtml.about ? extractSocialMedia(subpageHtml.about) : []),
+    ]);
+    if (socialUrls.length === 0 && socialDeepEnabled() && !signal?.aborted) {
+      if (main.method === 'http') {
+        try {
+          const rendered = await fetchHtmlWithPlaywright(normalized, {
+            timeout: PLAYWRIGHT_TIMEOUT_MS,
+            signal,
+          });
+          if (rendered) socialUrls = extractSocialMedia(rendered);
+        } catch {
+          // Playwright-рендер — best-effort добор соцсетей: сбой настройки
+          // браузера не должен ронять строку, просто идём дальше (Serper).
+        }
+      }
+      if (socialUrls.length === 0 && !signal?.aborted) {
+        let host = '';
+        try { host = new URL(normalized).hostname; } catch { /* ignore */ }
+        socialUrls = await findCompanySocials(deriveCompanyName(main.html, normalized), host, { signal });
+      }
     }
-    out.social_media = merged;
+    if (extractors.includes('social_media')) out.social_media = socialUrls;
   }
   if (extractors.includes('blog_last_post')) {
     // Two-step crawl: from a blog *listing* we locate the latest post link and
@@ -555,7 +604,7 @@ export async function processSignalsForUrl(
     out.blog_last_post = post;
   }
 
-  // ─── Event signals (HoReCa-style) ────────────────────────────────────────
+  // ─── Event signals (niche-agnostic) ──────────────────────────────────────
   //
   // Pipeline:
   //   1. Ensure we have a list of social-media URLs (reuse the one we already
@@ -573,23 +622,15 @@ export async function processSignalsForUrl(
   // Guard: skip the entire block when no event_* key was requested — the
   // LLM call costs money and must not fire on basic/outreach presets.
   if (anyEventRequested(extractors) && !signal?.aborted) {
-    const socialUrlsForEvents =
-      out.social_media
-      ?? extractSocialMedia([
-        main.html,
-        subpageHtml.about ?? '',
-      ].join('\n'));
-
-    const posts = socialUrlsForEvents.length > 0
-      ? await extractSocialPosts(socialUrlsForEvents, {
+    // socialUrls уже вычислен выше (static → render → Serper), переиспользуем.
+    const posts = socialUrls.length > 0
+      ? await extractSocialPosts(socialUrls, {
           timeout: subpageTimeout,
           maxPostsPerNetwork: 10,
           signal,
         })
       : [];
 
-    // Cheap inline tag-strip — eventDetector caps the total context at 12 KB,
-    // so we just collapse tags & whitespace and slice. No need for cheerio here.
     // Cheap inline tag-strip — eventDetector caps the total context at 12 KB,
     // so we just collapse tags & whitespace and slice. No need for cheerio here.
     const aboutText = subpageHtml.about
@@ -621,48 +662,18 @@ export async function processSignalsForUrl(
   }
 
   // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.
-  type LlmField = 'pricing_model' | 'pricing_min' | 'customers' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'cases_count' | 'integrations' | 'hiring_roles';
+  type LlmField = 'founded_year' | 'team_size' | 'case_industries';
   const llmNeeded = new Set<LlmField>();
-  if (extractors.includes('pricing_model') && (out.pricing_model === 'unknown' || !out.pricing_model)) llmNeeded.add('pricing_model');
-  if (extractors.includes('pricing_min') && !out.pricing_min) llmNeeded.add('pricing_min');
-  // customers вынесены в специализированный llmExtractCustomers выше —
-  // там structured input и шире окно контекста, общий extractor не догоняет
-  // (см. блок «if (extractors.includes('customers'))»).
   if (extractors.includes('founded_year') && !out.founded_year) llmNeeded.add('founded_year');
   if (extractors.includes('team_size') && !out.team_size) llmNeeded.add('team_size');
-  // free_trial: ask the LLM whenever the heuristic didn't confirm (undefined).
-  // It may return true OR false; we accept both so the user sees "Нет" instead
-  // of the misleading DASH when the LLM is confident there's no trial.
-  if (extractors.includes('free_trial') && out.free_trial === undefined) llmNeeded.add('free_trial');
   if (extractors.includes('case_industries') && (!out.case_industries || out.case_industries.length === 0)) llmNeeded.add('case_industries');
-  if (extractors.includes('cases_count') && !out.cases_count) llmNeeded.add('cases_count');
-  if (extractors.includes('integrations') && (!out.integrations || out.integrations.length === 0)) llmNeeded.add('integrations');
-  // hiring_roles is now a string[] of professions (see HiringResult). Ask
-  // the LLM for help when the heuristic returned an empty list — usually
-  // means the careers page used a layout / class names we don't recognise,
-  // or the company has no /careers and the LLM has to read /about for hints.
-  if (extractors.includes('hiring_roles') && (!Array.isArray(out.hiring_roles) || out.hiring_roles.length === 0)) llmNeeded.add('hiring_roles');
 
   if (llmNeeded.size > 0 && !signal?.aborted) {
     try {
       const llmResult = await llmExtractFields(main.html, subpageHtml, llmNeeded);
-      if (llmResult.pricing_model && llmNeeded.has('pricing_model')) out.pricing_model = llmResult.pricing_model;
-      if (llmResult.pricing_min && llmNeeded.has('pricing_min')) out.pricing_min = llmResult.pricing_min;
-      if (llmResult.customers && llmResult.customers.length > 0 && llmNeeded.has('customers')) out.customers = llmResult.customers;
       if (llmResult.founded_year && llmNeeded.has('founded_year')) out.founded_year = llmResult.founded_year;
       if (llmResult.team_size && llmNeeded.has('team_size')) out.team_size = llmResult.team_size;
-      // Tri-state merge: heuristic only sets true. Now accept either side of
-      // the LLM's verdict so "Нет" (confident no) lands in the cell when the
-      // model spotted a Contact-Sales-only page. Heuristic-true is preserved
-      // (we don't downgrade Да → Нет just because LLM disagrees).
-      if (llmNeeded.has('free_trial') && out.free_trial !== true) {
-        if (llmResult.free_trial === true) out.free_trial = true;
-        else if (llmResult.free_trial === false) out.free_trial = false;
-      }
       if (llmResult.case_industries && llmResult.case_industries.length > 0 && llmNeeded.has('case_industries')) out.case_industries = llmResult.case_industries;
-      if (typeof llmResult.cases_count === 'number' && llmResult.cases_count > 0 && llmNeeded.has('cases_count')) out.cases_count = llmResult.cases_count;
-      if (llmResult.integrations && llmResult.integrations.length > 0 && llmNeeded.has('integrations')) out.integrations = llmResult.integrations;
-      if (Array.isArray(llmResult.hiring_roles) && llmResult.hiring_roles.length > 0 && llmNeeded.has('hiring_roles')) out.hiring_roles = llmResult.hiring_roles;
     } catch {
       // LLM fallback is best-effort — never break the pipeline.
     }

@@ -1,6 +1,6 @@
 'use client';
 
-import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
@@ -334,6 +334,17 @@ function sanitizeExtractorList(keys: unknown): ExtractorKey[] {
   }
   // Preserve canonical order from ALL_EXTRACTOR_KEYS.
   return ALL_EXTRACTOR_KEYS.filter((k) => valid.has(k));
+}
+
+/**
+ * Legacy-переименование: старый ключ `customers` (список брендов) заменён на
+ * `client_segment` (сегмент ЦА) под тем же столбцом «Клиенты». Мапим его в
+ * сохранённых пресетах/последнем выборе из localStorage, чтобы выбор не пропал.
+ */
+function migrateLegacyExtractorKeys(keys: unknown): ExtractorKey[] {
+  if (!Array.isArray(keys)) return [];
+  const mapped = keys.map((k) => (k === 'customers' ? 'client_segment' : k));
+  return sanitizeExtractorList(mapped);
 }
 
 /**
@@ -952,6 +963,138 @@ const getRowEmail = (row: string[], emailColumns: number[]) => {
   return null;
 };
 
+/**
+ * Стабильная обёртка над колбэком: идентичность не меняется между рендерами
+ * (важно для React.memo на ячейках), но внутри всегда вызывается последняя
+ * версия fn — поведение хендлеров не меняется. Запись ref'а вынесена в effect
+ * (а не во время рендера) — каноничный pattern, безопасный под concurrent-
+ * rendering. Колбэк дергается из пользовательских событий (после коммита), к
+ * этому моменту ref уже актуален.
+ */
+function useStableCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const ref = useRef(fn);
+  useEffect(() => {
+    ref.current = fn;
+  });
+  return useCallback((...args: A) => ref.current(...args), []);
+}
+
+interface SpreadsheetCellProps {
+  rowIndex: number;
+  colIndex: number;
+  value: string;
+  isEditing: boolean;
+  cellMatchesSearch: boolean;
+  cellBackground: string;
+  width: number;
+  effectiveWrapCells: boolean;
+  isLargeTable: boolean;
+  onCellMouseDown: (rowIndex: number, colIndex: number, event: MouseEvent<HTMLTableCellElement>) => void;
+  onCellDoubleClick: (rowIndex: number, colIndex: number) => void;
+  onCellMouseOver: (rowIndex: number, colIndex: number) => void;
+  onCellContextMenu: (rowIndex: number, colIndex: number, event: MouseEvent<HTMLTableCellElement>) => void;
+  onValueChange: (rowIndex: number, colIndex: number, value: string) => void;
+  onCellFocus: (rowIndex: number, colIndex: number) => void;
+  onCellKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  onCellPaste: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
+  onExitEdit: () => void;
+}
+
+/**
+ * Одна ячейка таблицы, мемоизированная: перерисовывается только когда меняются
+ * её собственные props (значение, выделение, режим редактирования). Это убирает
+ * главный источник лагов — раньше любое изменение (набор символа, выделение,
+ * скролл) перерисовывало ВСЕ ячейки разом. Хендлеры приходят стабильными
+ * колбэками (useStableCallback), чтобы memo реально срабатывал. JSX и классы —
+ * 1:1 как в исходном инлайн-рендере, поведение не меняется.
+ */
+const SpreadsheetCell = memo(function SpreadsheetCell({
+  rowIndex,
+  colIndex,
+  value,
+  isEditing,
+  cellMatchesSearch,
+  cellBackground,
+  width,
+  effectiveWrapCells,
+  isLargeTable,
+  onCellMouseDown,
+  onCellDoubleClick,
+  onCellMouseOver,
+  onCellContextMenu,
+  onValueChange,
+  onCellFocus,
+  onCellKeyDown,
+  onCellPaste,
+  onExitEdit,
+}: SpreadsheetCellProps) {
+  return (
+    <td
+      onMouseDown={(event) => onCellMouseDown(rowIndex, colIndex, event)}
+      onDoubleClick={() => onCellDoubleClick(rowIndex, colIndex)}
+      onMouseOver={() => onCellMouseOver(rowIndex, colIndex)}
+      onContextMenu={(event) => onCellContextMenu(rowIndex, colIndex, event)}
+      style={{ width, minWidth: width, maxWidth: width }}
+      className={`border-b border-r border-gray-200 p-0 align-top overflow-hidden ${cellBackground}`}
+    >
+      {isEditing ? (
+        <textarea
+          value={value}
+          onChange={(event) => {
+            onValueChange(rowIndex, colIndex, event.target.value);
+            if (!isLargeTable) {
+              event.target.style.height = 'auto';
+              event.target.style.height = `${event.target.scrollHeight}px`;
+            }
+          }}
+          onFocus={(e) => {
+            onCellFocus(rowIndex, colIndex);
+            if (!isLargeTable) {
+              e.target.style.height = 'auto';
+              e.target.style.height = `${e.target.scrollHeight}px`;
+            }
+          }}
+          onBlur={() => {
+            onExitEdit();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              onExitEdit();
+              return;
+            }
+            onCellKeyDown(event);
+          }}
+          onPaste={onCellPaste}
+          rows={1}
+          wrap={effectiveWrapCells ? 'soft' : 'off'}
+          autoFocus
+          suppressHydrationWarning
+          spellCheck={false}
+          data-gramm="false"
+          data-gramm_editor="false"
+          data-enable-grammarly="false"
+          data-lt-active="false"
+          className={`w-full bg-transparent px-1 py-px text-[11px] text-gray-900 outline-none resize-none min-h-[18px] leading-tight ring-2 ring-blue-500 ring-inset z-10 relative ${
+            effectiveWrapCells
+              ? 'whitespace-pre-wrap break-words overflow-hidden'
+              : 'whitespace-nowrap overflow-x-auto overflow-y-hidden no-scrollbar'
+          }`}
+        />
+      ) : (
+        <div
+          className={`w-full h-full min-h-[18px] px-1 py-px text-[11px] text-gray-900 leading-tight ${
+            effectiveWrapCells ? 'whitespace-pre-wrap break-words' : 'truncate'
+          } ${cellMatchesSearch ? 'ring-1 ring-amber-300 ring-inset' : ''}`}
+          title={!effectiveWrapCells ? value : undefined}
+        >
+          {value}
+        </div>
+      )}
+    </td>
+  );
+});
+
 export function DatabaseSpreadsheet() {
   const searchParams = useSearchParams();
   const importId = searchParams.get('import');
@@ -1477,7 +1620,15 @@ export function DatabaseSpreadsheet() {
     };
   }, [selection]);
 
+  // Виртуализация (а значит и scrollMetrics) нужна только для больших таблиц.
+  // Для маленьких/средних таблиц scrollMetrics никто не читает (virtualRange их
+  // игнорирует), поэтому НЕ трогаем state на скролле — иначе каждый кадр
+  // прокрутки впустую перерисовывает весь компонент. Ref обновляется в рендере
+  // там, где вычисляется isLargeTable.
+  const isLargeTableRef = useRef(false);
+
   const updateScrollMetrics = useCallback(() => {
+    if (!isLargeTableRef.current) return;
     const wrapper = tableWrapperRef.current;
     if (!wrapper) return;
     const next = { scrollTop: wrapper.scrollTop, height: wrapper.clientHeight };
@@ -3436,6 +3587,9 @@ export function DatabaseSpreadsheet() {
   }, [activeTab, visibleRowIndices]);
 
   const isLargeTable = allRowIndices.length > VIRTUALIZATION_THRESHOLD;
+  // Сообщаем scroll-обработчику, нужно ли обновлять scrollMetrics
+  // (см. updateScrollMetrics): для не-виртуализированных таблиц — нет.
+  isLargeTableRef.current = isLargeTable;
   const shouldVirtualize = isLargeTable && !forceWrapLarge;
   const effectiveWrapCells = shouldVirtualize ? false : wrapCells;
   const wrapLabel = isLargeTable
@@ -7505,19 +7659,23 @@ export function DatabaseSpreadsheet() {
     if (typeof window === 'undefined') return;
     try {
       const presetsRaw = window.localStorage.getItem(SIGNAL_PRESETS_STORAGE_KEY);
-      const customPresets = presetsRaw
+      const customPresetsRaw = presetsRaw
         ? (JSON.parse(presetsRaw) as Array<{ id: string; name: string; extractors: ExtractorKey[] }>)
         : [];
+      const customPresets = (Array.isArray(customPresetsRaw) ? customPresetsRaw : []).map((p) => ({
+        ...p,
+        extractors: migrateLegacyExtractorKeys(p.extractors),
+      }));
       const lastRaw = window.localStorage.getItem(SIGNAL_LAST_SELECTION_STORAGE_KEY);
       const lastSelection = lastRaw
         ? (JSON.parse(lastRaw) as { extractors: ExtractorKey[]; presetId: string | null })
         : null;
       setSignalEnrichment((prev) => ({
         ...prev,
-        customPresets: Array.isArray(customPresets) ? customPresets : [],
+        customPresets,
         selectedExtractors:
           lastSelection?.extractors && Array.isArray(lastSelection.extractors)
-            ? sanitizeExtractorList(lastSelection.extractors)
+            ? migrateLegacyExtractorKeys(lastSelection.extractors)
             : prev.selectedExtractors,
         presetId: lastSelection?.presetId ?? prev.presetId,
       }));
@@ -8510,6 +8668,55 @@ export function DatabaseSpreadsheet() {
     }
     return map;
   }, [reviewMarks]);
+
+  // Контекст-меню ячейки: логика 1:1 перенесена из инлайн-onContextMenu, чтобы
+  // её можно было отдать в мемоизированную ячейку стабильным колбэком.
+  const handleCellContextMenu = (
+    rowIndex: number,
+    colIndex: number,
+    event: MouseEvent<HTMLTableCellElement>,
+  ) => {
+    const isSelected =
+      rowIndex >= normalizedSelection.startRow &&
+      rowIndex <= normalizedSelection.endRow &&
+      colIndex >= normalizedSelection.startCol &&
+      colIndex <= normalizedSelection.endCol;
+    const isRowSelected =
+      selectionMode === 'row' &&
+      rowIndex >= normalizedSelection.startRow &&
+      rowIndex <= normalizedSelection.endRow;
+    const isColSelected =
+      selectionMode === 'col' &&
+      colIndex >= normalizedSelection.startCol &&
+      colIndex <= normalizedSelection.endCol;
+    if (!isSelected && !isRowSelected && !isColSelected) {
+      setSelection({ startRow: rowIndex, startCol: colIndex, endRow: rowIndex, endCol: colIndex });
+      setActiveCell({ row: rowIndex, col: colIndex });
+      openContextMenu(event, 'cell');
+      return;
+    }
+    if (isRowSelected) {
+      openContextMenu(event, 'row');
+      return;
+    }
+    if (isColSelected) {
+      openContextMenu(event, 'col');
+      return;
+    }
+    openContextMenu(event, 'cell');
+  };
+
+  // Стабильные колбэки для мемоизированных ячеек (SpreadsheetCell). Поведение
+  // не меняется — вызываются те же хендлеры через ref.
+  const sCellMouseDown = useStableCallback(handleCellMouseDown);
+  const sCellDoubleClick = useStableCallback(handleCellDoubleClick);
+  const sCellMouseOver = useStableCallback(handleCellMouseOver);
+  const sCellContextMenu = useStableCallback(handleCellContextMenu);
+  const sValueChange = useStableCallback(handleValueChange);
+  const sCellFocus = useStableCallback(handleCellFocus);
+  const sCellKeyDown = useStableCallback(handleKeyDown);
+  const sCellPaste = useStableCallback(handlePaste);
+  const sExitEdit = useStableCallback(() => setEditingCell(null));
 
   useEffect(() => {
     if (!hasRework || !activeReviewReq) { setReviewMarks([]); return; }
@@ -9766,114 +9973,27 @@ export function DatabaseSpreadsheet() {
                               : rowMarkColor ? '' : 'bg-white';
 
                         return (
-                          <td
+                          <SpreadsheetCell
                             key={`cell-${rowIndex}-${colIndex}`}
-                            onMouseDown={(event) => handleCellMouseDown(rowIndex, colIndex, event)}
-                            onDoubleClick={() => handleCellDoubleClick(rowIndex, colIndex)}
-                            onMouseOver={() => handleCellMouseOver(rowIndex, colIndex)}
-                            onContextMenu={(event) => {
-                              const isRowSelected =
-                                selectionMode === 'row' &&
-                                rowIndex >= normalizedSelection.startRow &&
-                                rowIndex <= normalizedSelection.endRow;
-                              const isColSelected =
-                                selectionMode === 'col' &&
-                                colIndex >= normalizedSelection.startCol &&
-                                colIndex <= normalizedSelection.endCol;
-
-                              if (!isSelected && !isRowSelected && !isColSelected) {
-                                setSelection({
-                                  startRow: rowIndex,
-                                  startCol: colIndex,
-                                  endRow: rowIndex,
-                                  endCol: colIndex,
-                                });
-                                setActiveCell({ row: rowIndex, col: colIndex });
-                                openContextMenu(event, 'cell');
-                                return;
-                              }
-
-                              if (isRowSelected) {
-                                openContextMenu(event, 'row');
-                                return;
-                              }
-
-                              if (isColSelected) {
-                                openContextMenu(event, 'col');
-                                return;
-                              }
-
-                              openContextMenu(event, 'cell');
-                            }}
-                            style={{
-                              width: getColumnWidth(colIndex),
-                              minWidth: getColumnWidth(colIndex),
-                              maxWidth: getColumnWidth(colIndex),
-                            }}
-                            className={`border-b border-r border-gray-200 p-0 align-top overflow-hidden ${cellBackground}`}
-                          >
-                            {isEditing ? (
-                              <textarea
-                                value={value}
-                                onChange={(event) => {
-                                  handleValueChange(rowIndex, colIndex, event.target.value);
-                                  if (!isLargeTable) {
-                                    event.target.style.height = 'auto';
-                                    event.target.style.height = `${event.target.scrollHeight}px`;
-                                  }
-                                }}
-                                onFocus={(e) => {
-                                  handleCellFocus(rowIndex, colIndex);
-                                  if (!isLargeTable) {
-                                    e.target.style.height = 'auto';
-                                    e.target.style.height = `${e.target.scrollHeight}px`;
-                                  }
-                                }}
-                                onBlur={() => {
-                                  // Потеря фокуса (клик по другой ячейке/вне сетки) =
-                                  // выход из edit-mode. Значение уже в state через
-                                  // handleValueChange — ничего дополнительно
-                                  // сохранять не нужно.
-                                  setEditingCell(null);
-                                }}
-                                onKeyDown={(event) => {
-                                  // Escape — выйти из edit без явного reverta
-                                  // (значение уже записано через handleValueChange;
-                                  // если надо откатить — Ctrl+Z).
-                                  if (event.key === 'Escape') {
-                                    event.preventDefault();
-                                    setEditingCell(null);
-                                    return;
-                                  }
-                                  handleKeyDown(event);
-                                }}
-                                onPaste={handlePaste}
-                                rows={1}
-                              wrap={effectiveWrapCells ? 'soft' : 'off'}
-                                autoFocus
-                                suppressHydrationWarning
-                                spellCheck={false}
-                                data-gramm="false"
-                                data-gramm_editor="false"
-                                data-enable-grammarly="false"
-                                data-lt-active="false"
-                              className={`w-full bg-transparent px-1 py-px text-[11px] text-gray-900 outline-none resize-none min-h-[18px] leading-tight ring-2 ring-blue-500 ring-inset z-10 relative ${
-                                effectiveWrapCells
-                                  ? 'whitespace-pre-wrap break-words overflow-hidden'
-                                  : 'whitespace-nowrap overflow-x-auto overflow-y-hidden no-scrollbar'
-                              }`}
-                              />
-                            ) : (
-                              <div
-                                className={`w-full h-full min-h-[18px] px-1 py-px text-[11px] text-gray-900 leading-tight ${
-                                  effectiveWrapCells ? 'whitespace-pre-wrap break-words' : 'truncate'
-                                } ${cellMatchesSearch ? 'ring-1 ring-amber-300 ring-inset' : ''}`}
-                                title={!effectiveWrapCells ? value : undefined}
-                              >
-                                {value}
-                              </div>
-                            )}
-                          </td>
+                            rowIndex={rowIndex}
+                            colIndex={colIndex}
+                            value={value}
+                            isEditing={isEditing}
+                            cellMatchesSearch={cellMatchesSearch}
+                            cellBackground={cellBackground}
+                            width={getColumnWidth(colIndex)}
+                            effectiveWrapCells={effectiveWrapCells}
+                            isLargeTable={isLargeTable}
+                            onCellMouseDown={sCellMouseDown}
+                            onCellDoubleClick={sCellDoubleClick}
+                            onCellMouseOver={sCellMouseOver}
+                            onCellContextMenu={sCellContextMenu}
+                            onValueChange={sValueChange}
+                            onCellFocus={sCellFocus}
+                            onCellKeyDown={sCellKeyDown}
+                            onCellPaste={sCellPaste}
+                            onExitEdit={sExitEdit}
+                          />
                         );
                       })}
                       <td className="border-b border-gray-200 bg-gray-50" />

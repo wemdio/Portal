@@ -13,7 +13,7 @@ describe('formatExtraValue — DASH and tristate booleans', () => {
       'enterprise_logos', 'free_trial',
       'cases_count', 'vacancies_count', 'team_size', 'founded_year',
       'pricing_model', 'blog_last_post', 'stack', 'profile',
-      'pricing_min', 'hiring_roles',
+      'pricing_min', 'hiring_roles', 'client_segment',
     ];
     for (const key of keys) {
       expect(formatExtraValue(key, undefined)).toBe('–');
@@ -50,6 +50,21 @@ describe('formatExtraValue — DASH and tristate booleans', () => {
     expect(formatExtraValue('cases_count', 23)).toBe('23');
     expect(formatExtraValue('vacancies_count', 4)).toBe('4');
     expect(formatExtraValue('team_size', 80)).toBe('80');
+  });
+
+  it('renders cases_count estimate string «N+» as-is; empty → DASH', () => {
+    expect(formatExtraValue('cases_count', '20+')).toBe('20+');
+    expect(formatExtraValue('cases_count', '  15+  ')).toBe('15+');
+    expect(formatExtraValue('cases_count', '')).toBe('–');
+    expect(formatExtraValue('cases_count', 23)).toBe('23');
+    expect(formatExtraValue('cases_count', 0)).toBe('–');
+  });
+
+  it('renders vacancies_count estimate string «N+» as-is; empty → DASH', () => {
+    expect(formatExtraValue('vacancies_count', '10+')).toBe('10+');
+    expect(formatExtraValue('vacancies_count', 4)).toBe('4');
+    expect(formatExtraValue('vacancies_count', 0)).toBe('–');
+    expect(formatExtraValue('vacancies_count', '')).toBe('–');
   });
 
   it('renders implausible founded_year as DASH (out of 1800-2100)', () => {
@@ -90,5 +105,12 @@ describe('formatExtraValue — DASH and tristate booleans', () => {
   it('passes through non-empty strings for text fields', () => {
     expect(formatExtraValue('blog_last_post', '15 мая 2025: Запуск платформы')).toBe('15 мая 2025: Запуск платформы');
     expect(formatExtraValue('stack', 'Яндекс.Метрика, GTM')).toBe('Яндекс.Метрика, GTM');
+  });
+
+  it('renders client_segment as plain string; empty/whitespace → DASH', () => {
+    expect(formatExtraValue('client_segment', 'стоматологии')).toBe('стоматологии');
+    expect(formatExtraValue('client_segment', 'B2B-стройка')).toBe('B2B-стройка');
+    expect(formatExtraValue('client_segment', '   ')).toBe('–');
+    expect(formatExtraValue('client_segment', '')).toBe('–');
   });
 });

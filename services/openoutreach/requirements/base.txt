@@ -15,17 +15,22 @@ pyyaml
 fastembed
 scikit-learn
 huggingface_hub
-# Upstream-наследие. Удалены из требований:
-# - openoutreach (git+https://github.com/eracle/openoutreach-cli.git@main):
-#     импортируется только в linkedin/onboarding.py:collect_from_wizard, это
-#     interactive TTY-wizard для self-host setup'а. В Docker / portal_daemon
-#     не вызывается. Импорт lazy (внутри функции) — модуль грузится без него.
-# - linkedin-agent-cli (git+https://github.com/eracle/linkedin-cli.git@main):
-#     нигде в коде не импортируется. Висел как unused upstream-зависимость.
-# Docker сборка падала на git fetch обоих репо: GitHub теперь требует auth
-# для unauthenticated clone (terminal prompts disabled). Возвращать —
-# только если onboarding wizard понадобится в проде (вряд ли) и тогда
-# через BuildKit secrets с PAT или зеркало во внутреннем git.
+# linkedin_cli — Django-free LinkedIn-библиотека (Voyager client, browser/auth,
+# actions, enums). ВНИМАНИЕ: имя pip-дистрибутива — `linkedin-agent-cli`, а имя
+# ИМПОРТА — `linkedin_cli` (дефис→подчёркивание + дроп "agent"). Импортируется на
+# top-level в crm/models/deal.py, crm/models/lead.py, миграции crm/0004 и всех
+# portal_daemon-тасках → грузится при django.setup(). Без него любой manage.py
+# падает с ModuleNotFoundError: No module named 'linkedin_cli'. Репо публичный,
+# clone без auth (git ls-remote → ok), git есть в build-стейдже Dockerfile.
+linkedin-agent-cli @ git+https://github.com/eracle/linkedin-cli.git@main
+
+# openoutreach (git+https://github.com/eracle/openoutreach-cli.git@main) — НЕ
+# возвращаем: репо upstream'ом удалён (GitHub → "Repository not found"; git в
+# неинтерактивном build просит креды → "could not read Username" — это и валило
+# сборку, а НЕ linkedin-cli выше). Модуль `openoutreach` нужен только lazy-import
+# внутри linkedin/onboarding.py:collect_from_wizard (interactive self-host wizard),
+# daemon/Docker его не вызывают. Понадобится wizard — вендорить prompts/wizard
+# локально или зеркалить во внутренний git.
 
 # Portal-native fork: Postgres backend через DATABASE_URL (см. django_settings.py).
 dj-database-url>=2.1.0
