@@ -273,6 +273,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
   const [activateCustomAmount, setActivateCustomAmount] = useState('');
   const [activating, setActivating] = useState(false);
   const [showExtendForm, setShowExtendForm] = useState(false);
+  const [useTestShop, setUseTestShop] = useState(false);
 
   const handleActivate = useCallback(async () => {
     if (tariffType === 'custom') {
@@ -299,6 +300,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
           tariff_type: tariffType,
           billing_period: activatePeriod,
           billing_amount: customAmt,
+          is_test_shop: bm === 'autopayment' ? useTestShop : false,
         }),
       });
       onActivateResult({
@@ -320,7 +322,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
     } finally {
       setActivating(false);
     }
-  }, [activateBillingMode, activatePeriod, activateCustomAmount, tariffType, userId, apiFetch, onActivateResult, onSuccessMessage, onError]);
+  }, [activateBillingMode, activatePeriod, activateCustomAmount, tariffType, userId, apiFetch, onActivateResult, onSuccessMessage, onError, useTestShop]);
 
   const handleFinishSetup = useCallback(async () => {
     setActivating(true);
@@ -396,6 +398,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
           tariff_type: tariffType,
           billing_period: activatePeriod,
           billing_amount: customAmt,
+          is_test_shop: bm === 'autopayment' ? useTestShop : false,
         }),
       });
       onExtendResult({
@@ -412,7 +415,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
     } finally {
       setActivating(false);
     }
-  }, [activateBillingMode, activatePeriod, activateCustomAmount, tariffType, userId, apiFetch, onExtendResult, onSuccessMessage, onError]);
+  }, [activateBillingMode, activatePeriod, activateCustomAmount, tariffType, userId, apiFetch, onExtendResult, onSuccessMessage, onError, useTestShop]);
 
   return (
     <div className="mt-4 pt-3 border-t border-gray-100">
@@ -513,6 +516,35 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
                 </button>
               ))}
             </div>
+            {activateBillingMode === 'autopayment' && (
+              <div className="min-[520px]:col-span-2">
+                <p className="mb-1.5 text-[11px] font-medium text-gray-700">Магазин YooKassa</p>
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setUseTestShop(false)}
+                    className={`flex-1 px-2 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                      !useTestShop
+                        ? 'bg-gray-900 text-white border-gray-900'
+                        : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'
+                    }`}
+                  >
+                    Боевой
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUseTestShop(true)}
+                    className={`flex-1 px-2 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                      useTestShop
+                        ? 'bg-yellow-500 text-white border-yellow-500'
+                        : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'
+                    }`}
+                  >
+                    🧪 Тестовый
+                  </button>
+                </div>
+              </div>
+            )}
             <button
               type="button"
               disabled={activating}
@@ -559,6 +591,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
             onClick={() => {
               setActivatePeriod('month');
               setActivateCustomAmount('');
+              setUseTestShop(false);
               setShowExtendForm(true);
             }}
             className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 shadow-sm transition-colors hover:border-indigo-300 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
@@ -646,6 +679,35 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
               </button>
             ))}
           </div>
+          {activateBillingMode === 'autopayment' && (
+            <div className="mt-2">
+              <p className="mb-1.5 text-[11px] font-medium text-gray-700">Магазин YooKassa</p>
+              <div className="flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setUseTestShop(false)}
+                  className={`flex-1 px-2 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                    !useTestShop
+                      ? 'bg-gray-900 text-white border-gray-900'
+                      : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'
+                  }`}
+                >
+                  Боевой
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUseTestShop(true)}
+                  className={`flex-1 px-2 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                    useTestShop
+                      ? 'bg-yellow-500 text-white border-yellow-500'
+                      : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'
+                  }`}
+                >
+                  🧪 Тестовый
+                </button>
+              </div>
+            </div>
+          )}
           <button
             type="button"
             disabled={activating}
