@@ -89,13 +89,14 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
   // Archive (soft-delete) + cancel in YooKassa if pending
   if (body.archive) {
+    const isTestShop = existing.is_test_shop === true;
     // Cancel in YooKassa if the invoice is still pending there
-    if (existing.yookassa_payment_id && existing.status === 'pending' && isYookassaConfigured()) {
+    if (existing.yookassa_payment_id && existing.status === 'pending' && isYookassaConfigured(isTestShop)) {
       try {
-        await cancelYookassaInvoice(existing.yookassa_payment_id);
+        await cancelYookassaInvoice(existing.yookassa_payment_id, isTestShop);
       } catch (ykErr) {
         // Log but don't block archiving — YK invoice may already be cancelled/expired
-        await logError('invoices.archive.yk_cancel.failed', ykErr, { id, yk_id: existing.yookassa_payment_id });
+        await logError('invoices.archive.yk_cancel.failed', ykErr, { id, yk_id: existing.yookassa_payment_id, is_test_shop: isTestShop });
       }
     }
 
@@ -109,14 +110,20 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       return jsonError('Failed to archive invoice', 500);
     }
 
-    await logAudit('invoices.archived', `Invoice ${id} archived and YK cancelled`, { id }, { userId: user.id });
+    await logAudit('invoices.archived', `Invoice ${id} archived and YK cancelled`, { id, is_test_shop: isTestShop }, { userId: user.id });
     return NextResponse.json({ ok: true });
   }
 
   // Create or recover YooKassa invoice / payment URL
   if (body.create_yookassa_payment) {
-    if (!isYookassaConfigured()) {
-      return jsonError('YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY не настроены', 503);
+    const isTestShop = existing.is_test_shop === true;
+    if (!isYookassaConfigured(isTestShop)) {
+      return jsonError(
+        isTestShop
+          ? 'YOOKASSA_TEST_SHOP_ID / YOOKASSA_TEST_SECRET_KEY не настроены'
+          : 'YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY не настроены',
+        503,
+      );
     }
     try {
       if (existing.yookassa_payment_url) {
@@ -126,12 +133,12 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
       if (existing.yookassa_payment_id && !existing.yookassa_payment_url) {
         // Invoice exists in YK but URL wasn't saved — fetch it
-        const ykInvoice = await getYookassaInvoice(existing.yookassa_payment_id);
+        const ykInvoice = await getYookassaInvoice(existing.yookassa_payment_id, isTestShop);
         const ykUrl = extractInvoiceUrl(ykInvoice);
         if (ykUrl) {
           await supabaseAdmin.from('invoices').update({ yookassa_payment_url: ykUrl }).eq('id', id);
         }
-        await logAudit('invoices.yk_url_recovered', `YK URL recovered for ${id}`, { id }, { userId: user.id });
+        await logAudit('invoices.yk_url_recovered', `YK URL recovered for ${id}`, { id, is_test_shop: isTestShop }, { userId: user.id });
         const { data: recovered } = await supabaseAdmin.from('invoices').select('*').eq('id', id).single();
         return NextResponse.json({ invoice: recovered });
       }
@@ -157,20 +164,23 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
       const description = existing.description ?? `Счёт для ${existing.company_name}`;
       const amountNum = Number(existing.amount);
-      const ykInvoice = await createYookassaInvoice({
-        amount: amountNum,
-        currency: existing.currency,
-        description,
-        invoiceId: existing.id,
-        companyName: existing.company_name,
-        idempotencyKey: existing.id,
-        receipt: buildDefaultReceipt({
-          customerEmail,
-          description,
+      const ykInvoice = await createYookassaInvoice(
+        {
           amount: amountNum,
           currency: existing.currency,
-        }),
-      });
+          description,
+          invoiceId: existing.id,
+          companyName: existing.company_name,
+          idempotencyKey: existing.id,
+          receipt: buildDefaultReceipt({
+            customerEmail,
+            description,
+            amount: amountNum,
+            currency: existing.currency,
+          }),
+        },
+        isTestShop,
+      );
 
       const { error: ykUpdateErr } = await supabaseAdmin
         .from('invoices')
@@ -185,20 +195,21 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
         return jsonError('Invoice created in YK but failed to save', 500);
       }
 
-      await logAudit('invoices.yk_invoice_created', `YK invoice created for ${id}`, { id, yk_id: ykInvoice.id }, { userId: user.id });
+      await logAudit('invoices.yk_invoice_created', `YK invoice created for ${id}`, { id, yk_id: ykInvoice.id, is_test_shop: isTestShop }, { userId: user.id });
       const { data: updatedAfterYk } = await supabaseAdmin.from('invoices').select('*').eq('id', id).single();
       return NextResponse.json({ invoice: updatedAfterYk });
     } catch (ykErr) {
       const msg = ykErr instanceof Error ? ykErr.message : String(ykErr);
-      await logError('invoices.patch.yk_create.failed', ykErr, { id });
+      await logError('invoices.patch.yk_create.failed', ykErr, { id, is_test_shop: isTestShop });
       return NextResponse.json({ error: `ЮКасса: ${msg}` }, { status: 502 });
     }
   }
 
   // Sync status from YooKassa invoice
   if (body.sync_yookassa && existing.yookassa_payment_id) {
+    const isTestShop = existing.is_test_shop === true;
     try {
-      const ykInvoice = await getYookassaInvoice(existing.yookassa_payment_id);
+      const ykInvoice = await getYookassaInvoice(existing.yookassa_payment_id, isTestShop);
       const newStatus =
         ykInvoice.status === 'succeeded' ? 'paid' :
         ykInvoice.status === 'canceled' ? 'cancelled' :
@@ -215,7 +226,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
         .eq('id', id);
 
       if (syncErr) {
-        await logError('invoices.patch.sync.failed', syncErr, { id });
+        await logError('invoices.patch.sync.failed', syncErr, { id, is_test_shop: isTestShop });
         return jsonError('Failed to sync status', 500);
       }
 
@@ -267,7 +278,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       const { data: updated } = await supabaseAdmin.from('invoices').select('*').eq('id', id).single();
       return NextResponse.json({ invoice: updated });
     } catch (ykErr) {
-      await logError('invoices.yookassa.sync.failed', ykErr, { id });
+      await logError('invoices.yookassa.sync.failed', ykErr, { id, is_test_shop: isTestShop });
       return jsonError('Failed to fetch YooKassa status', 502);
     }
   }

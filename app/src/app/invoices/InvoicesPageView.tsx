@@ -24,6 +24,7 @@ interface Invoice {
   status: InvoiceStatus;
   yookassa_payment_id: string | null;
   yookassa_payment_url: string | null;
+  is_test_shop: boolean;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -189,6 +190,7 @@ function CreateModal({ onClose, onCreated }: CreateModalProps) {
   const [amount, setAmount] = useState('');
   const [currency, setCurrency] = useState('RUB');
   const [description, setDescription] = useState('');
+  const [useTestShop, setUseTestShop] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -278,6 +280,7 @@ function CreateModal({ onClose, onCreated }: CreateModalProps) {
           description: description.trim() || undefined,
           client_user_id: clientUserId ?? undefined,
           vat_code: 1,
+          is_test_shop: useTestShop,
         }),
       });
       const data = await res.json();
@@ -289,7 +292,7 @@ function CreateModal({ onClose, onCreated }: CreateModalProps) {
     } finally {
       setLoading(false);
     }
-  }, [companyName, clientUserId, amount, currency, description, onCreated, onClose]);
+  }, [companyName, clientUserId, amount, currency, description, useTestShop, onCreated, onClose]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-4">
@@ -418,6 +421,34 @@ function CreateModal({ onClose, onCreated }: CreateModalProps) {
               placeholder="Услуги по контент-маркетингу за май 2026"
               className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-800 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-400 transition"
             />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-zinc-600 mb-1">Магазин YooKassa</label>
+            <div className="flex gap-1.5">
+              <button
+                type="button"
+                onClick={() => setUseTestShop(false)}
+                className={`flex-1 rounded-lg border px-3 py-2 text-xs font-medium transition ${
+                  !useTestShop
+                    ? 'bg-zinc-900 text-white border-zinc-900'
+                    : 'border-zinc-200 text-zinc-600 bg-white hover:bg-zinc-50'
+                }`}
+              >
+                Боевой
+              </button>
+              <button
+                type="button"
+                onClick={() => setUseTestShop(true)}
+                className={`flex-1 rounded-lg border px-3 py-2 text-xs font-medium transition ${
+                  useTestShop
+                    ? 'bg-yellow-500 text-white border-yellow-500'
+                    : 'border-zinc-200 text-zinc-600 bg-white hover:bg-zinc-50'
+                }`}
+              >
+                🧪 Тестовый
+              </button>
+            </div>
           </div>
 
           {error && (
@@ -865,9 +896,19 @@ export default function InvoicesPageView() {
                       <span className="font-semibold text-zinc-800 whitespace-nowrap">{fmtMoney(inv.amount, inv.currency)}</span>
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${STATUS_COLORS[inv.status]}`}>
-                        {STATUS_LABEL[inv.status]}
-                      </span>
+                      <div className="inline-flex items-center gap-1">
+                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${STATUS_COLORS[inv.status]}`}>
+                          {STATUS_LABEL[inv.status]}
+                        </span>
+                        {inv.is_test_shop && (
+                          <span
+                            className="inline-flex items-center rounded-full bg-yellow-100 px-1.5 py-0.5 text-[10px] font-medium text-yellow-700"
+                            title="Счёт создан в тестовом магазине YooKassa"
+                          >
+                            🧪 Тест
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-center text-xs text-zinc-500 whitespace-nowrap">{fmtDate(inv.created_at)}</td>
                     <td className="px-4 py-3 text-center">

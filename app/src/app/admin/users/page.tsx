@@ -174,12 +174,13 @@ const UserRow = memo(function UserRow({
  */
 function activateSuccessMessage(
   billingMode: 'invoice' | 'autopayment' | null,
-  invoice: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null } | null,
+  invoice: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null; is_test_shop?: boolean } | null,
 ): string {
   if (billingMode === 'invoice') return 'Активировано. Зайдите в Счета и выставьте счёт клиенту.';
   if (billingMode === 'autopayment') {
     if (invoice?.payment_url) {
-      return 'Активировано. Счёт автоматически создан в ЮКассе — клиент увидит ссылку в своём ЛК.';
+      const shopSuffix = invoice.is_test_shop ? ' (тестовый магазин)' : '';
+      return `Активировано. Счёт автоматически создан в ЮКассе${shopSuffix} — клиент увидит ссылку в своём ЛК.`;
     }
     if (invoice?.invoice_id && invoice?.yookassa_error) {
       return `Активировано. Счёт записан, но ЮКасса не приняла его: ${invoice.yookassa_error}. Откройте /invoices и нажмите «ЮКасса» вручную.`;
@@ -191,12 +192,13 @@ function activateSuccessMessage(
 
 function extendSuccessMessage(
   billingMode: 'invoice' | 'autopayment' | null,
-  invoice: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null } | null,
+  invoice: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null; is_test_shop?: boolean } | null,
 ): string {
   if (billingMode === 'invoice') return 'Подписка продлена. Выставьте новый счёт клиенту.';
   if (billingMode === 'autopayment') {
     if (invoice?.payment_url) {
-      return 'Подписка продлена. Новый счёт автоматически создан в ЮКассе.';
+      const shopSuffix = invoice.is_test_shop ? ' (тестовый магазин)' : '';
+      return `Подписка продлена. Новый счёт автоматически создан в ЮКассе${shopSuffix}.`;
     }
     if (invoice?.invoice_id && invoice?.yookassa_error) {
       return `Подписка продлена. Счёт записан, но ЮКасса не приняла его: ${invoice.yookassa_error}. Откройте /invoices и нажмите «ЮКасса» вручную.`;
@@ -273,6 +275,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
   const [activateCustomAmount, setActivateCustomAmount] = useState('');
   const [activating, setActivating] = useState(false);
   const [showExtendForm, setShowExtendForm] = useState(false);
+  const [useTestShop, setUseTestShop] = useState(false);
 
   const handleActivate = useCallback(async () => {
     if (tariffType === 'custom') {
@@ -299,6 +302,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
           tariff_type: tariffType,
           billing_period: activatePeriod,
           billing_amount: customAmt,
+          is_test_shop: bm === 'autopayment' ? useTestShop : false,
         }),
       });
       onActivateResult({
@@ -320,7 +324,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
     } finally {
       setActivating(false);
     }
-  }, [activateBillingMode, activatePeriod, activateCustomAmount, tariffType, userId, apiFetch, onActivateResult, onSuccessMessage, onError]);
+  }, [activateBillingMode, activatePeriod, activateCustomAmount, tariffType, userId, apiFetch, onActivateResult, onSuccessMessage, onError, useTestShop]);
 
   const handleFinishSetup = useCallback(async () => {
     setActivating(true);
@@ -396,6 +400,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
           tariff_type: tariffType,
           billing_period: activatePeriod,
           billing_amount: customAmt,
+          is_test_shop: bm === 'autopayment' ? useTestShop : false,
         }),
       });
       onExtendResult({
@@ -412,7 +417,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
     } finally {
       setActivating(false);
     }
-  }, [activateBillingMode, activatePeriod, activateCustomAmount, tariffType, userId, apiFetch, onExtendResult, onSuccessMessage, onError]);
+  }, [activateBillingMode, activatePeriod, activateCustomAmount, tariffType, userId, apiFetch, onExtendResult, onSuccessMessage, onError, useTestShop]);
 
   return (
     <div className="mt-4 pt-3 border-t border-gray-100">
@@ -513,6 +518,35 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
                 </button>
               ))}
             </div>
+            {activateBillingMode === 'autopayment' && (
+              <div className="min-[520px]:col-span-2">
+                <p className="mb-1.5 text-[11px] font-medium text-gray-700">Магазин YooKassa</p>
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setUseTestShop(false)}
+                    className={`flex-1 px-2 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                      !useTestShop
+                        ? 'bg-gray-900 text-white border-gray-900'
+                        : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'
+                    }`}
+                  >
+                    Боевой
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUseTestShop(true)}
+                    className={`flex-1 px-2 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                      useTestShop
+                        ? 'bg-yellow-500 text-white border-yellow-500'
+                        : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'
+                    }`}
+                  >
+                    🧪 Тестовый
+                  </button>
+                </div>
+              </div>
+            )}
             <button
               type="button"
               disabled={activating}
@@ -559,6 +593,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
             onClick={() => {
               setActivatePeriod('month');
               setActivateCustomAmount('');
+              setUseTestShop(false);
               setShowExtendForm(true);
             }}
             className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 shadow-sm transition-colors hover:border-indigo-300 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
@@ -646,6 +681,35 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
               </button>
             ))}
           </div>
+          {activateBillingMode === 'autopayment' && (
+            <div className="mt-2">
+              <p className="mb-1.5 text-[11px] font-medium text-gray-700">Магазин YooKassa</p>
+              <div className="flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setUseTestShop(false)}
+                  className={`flex-1 px-2 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                    !useTestShop
+                      ? 'bg-gray-900 text-white border-gray-900'
+                      : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'
+                  }`}
+                >
+                  Боевой
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUseTestShop(true)}
+                  className={`flex-1 px-2 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                    useTestShop
+                      ? 'bg-yellow-500 text-white border-yellow-500'
+                      : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'
+                  }`}
+                >
+                  🧪 Тестовый
+                </button>
+              </div>
+            </div>
+          )}
           <button
             type="button"
             disabled={activating}

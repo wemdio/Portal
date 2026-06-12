@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
 
   const { data: due, error: fetchErr } = await supabaseAdmin
     .from('client_tariffs')
-    .select('id, user_id, tariff_type, paid_until, yookassa_payment_method_id, billing_mode, billing_period, billing_amount')
+    .select('id, user_id, tariff_type, paid_until, yookassa_payment_method_id, billing_mode, billing_period, billing_amount, is_test_shop')
     .eq('auto_renew', true)
     .eq('is_active', true)
     .eq('billing_mode', 'autopayment')
@@ -66,6 +66,7 @@ export async function GET(req: NextRequest) {
       billing_period: row.billing_period as BillingPeriod | null,
       billing_amount: row.billing_amount,
       yookassa_payment_method_id: row.yookassa_payment_method_id,
+      is_test_shop: row.is_test_shop === true,
     });
 
     results.push({

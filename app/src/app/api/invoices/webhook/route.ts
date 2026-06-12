@@ -20,6 +20,13 @@ export const dynamic = 'force-dynamic';
  *  77.75.156.35, 77.75.154.128/25, 2a02:5180::/32).
  * We verify by re-fetching the payment from the YooKassa API.
  *
+ * Multi-shop note: both the production and test YooKassa shops are configured
+ * to POST to this same endpoint. We disambiguate by the UUID `payment_id` —
+ * unique across shops in practice — and never touch the YK API from inside
+ * the webhook handler, so no shop-specific credentials are needed here. The
+ * test shop's webhook URL must be configured separately in the YooKassa test
+ * cabinet, pointing to this same path.
+ *
  * Important distinction: YooKassa sends events about Payment objects, not
  * Invoice objects. One YK Invoice (our `invoices` row) can spawn multiple
  * Payment attempts — e.g. the client tries one card, it fails, they retry
