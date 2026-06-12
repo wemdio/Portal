@@ -174,12 +174,13 @@ const UserRow = memo(function UserRow({
  */
 function activateSuccessMessage(
   billingMode: 'invoice' | 'autopayment' | null,
-  invoice: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null } | null,
+  invoice: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null; is_test_shop?: boolean } | null,
 ): string {
   if (billingMode === 'invoice') return 'Активировано. Зайдите в Счета и выставьте счёт клиенту.';
   if (billingMode === 'autopayment') {
     if (invoice?.payment_url) {
-      return 'Активировано. Счёт автоматически создан в ЮКассе — клиент увидит ссылку в своём ЛК.';
+      const shopSuffix = invoice.is_test_shop ? ' (тестовый магазин)' : '';
+      return `Активировано. Счёт автоматически создан в ЮКассе${shopSuffix} — клиент увидит ссылку в своём ЛК.`;
     }
     if (invoice?.invoice_id && invoice?.yookassa_error) {
       return `Активировано. Счёт записан, но ЮКасса не приняла его: ${invoice.yookassa_error}. Откройте /invoices и нажмите «ЮКасса» вручную.`;
@@ -191,12 +192,13 @@ function activateSuccessMessage(
 
 function extendSuccessMessage(
   billingMode: 'invoice' | 'autopayment' | null,
-  invoice: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null } | null,
+  invoice: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null; is_test_shop?: boolean } | null,
 ): string {
   if (billingMode === 'invoice') return 'Подписка продлена. Выставьте новый счёт клиенту.';
   if (billingMode === 'autopayment') {
     if (invoice?.payment_url) {
-      return 'Подписка продлена. Новый счёт автоматически создан в ЮКассе.';
+      const shopSuffix = invoice.is_test_shop ? ' (тестовый магазин)' : '';
+      return `Подписка продлена. Новый счёт автоматически создан в ЮКассе${shopSuffix}.`;
     }
     if (invoice?.invoice_id && invoice?.yookassa_error) {
       return `Подписка продлена. Счёт записан, но ЮКасса не приняла его: ${invoice.yookassa_error}. Откройте /invoices и нажмите «ЮКасса» вручную.`;
