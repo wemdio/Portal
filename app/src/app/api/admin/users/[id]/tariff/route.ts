@@ -71,6 +71,8 @@ type TariffBody = {
   billing_mode?: 'invoice' | 'autopayment' | null;
   billing_period?: string;
   billing_amount?: number | null;
+  /** Создать счёт в тестовом магазине YooKassa (только при autopayment). */
+  is_test_shop?: boolean;
 };
 
 /** Normalises body.billing_period/billing_amount, returning [period, amount] or null on invalid. */
@@ -210,13 +212,15 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     // and the client gets a ready-to-pay link in their portal — instead of the
     // old lazy-on-click path. Idempotent: if the activate request is re-sent
     // (admin re-saves the form), the helper reuses the existing pending invoice.
-    let invoiceAuto: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null } | null = null;
+    let invoiceAuto: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null; is_test_shop: boolean } | null = null;
     if (billingMode === 'autopayment') {
-      const ensured = await ensurePendingInvoiceForTariff({ userId: targetUserId, reason: 'admin_activate' });
+      const isTestShop = body.is_test_shop === true;
+      const ensured = await ensurePendingInvoiceForTariff({ userId: targetUserId, reason: 'admin_activate', isTestShop });
       invoiceAuto = {
         invoice_id: ensured.invoiceId,
         payment_url: ensured.yookassaUrl,
         yookassa_error: ensured.yookassaError,
+        is_test_shop: isTestShop,
       };
     }
 
@@ -300,13 +304,15 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     // Same auto-invoice logic as activate. Important during extend because the
     // admin's intent is "client needs to pay for the next period now" — we
     // don't want them to also remember to open the invoices page.
-    let invoiceAutoExt: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null } | null = null;
+    let invoiceAutoExt: { invoice_id: string | null; payment_url: string | null; yookassa_error: string | null; is_test_shop: boolean } | null = null;
     if (billingMode === 'autopayment') {
-      const ensured = await ensurePendingInvoiceForTariff({ userId: targetUserId, reason: 'admin_extend' });
+      const isTestShop = body.is_test_shop === true;
+      const ensured = await ensurePendingInvoiceForTariff({ userId: targetUserId, reason: 'admin_extend', isTestShop });
       invoiceAutoExt = {
         invoice_id: ensured.invoiceId,
         payment_url: ensured.yookassaUrl,
         yookassa_error: ensured.yookassaError,
+        is_test_shop: isTestShop,
       };
     }
 
