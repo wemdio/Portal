@@ -896,9 +896,19 @@ export default function InvoicesPageView() {
                       <span className="font-semibold text-zinc-800 whitespace-nowrap">{fmtMoney(inv.amount, inv.currency)}</span>
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${STATUS_COLORS[inv.status]}`}>
-                        {STATUS_LABEL[inv.status]}
-                      </span>
+                      <div className="inline-flex items-center gap-1">
+                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${STATUS_COLORS[inv.status]}`}>
+                          {STATUS_LABEL[inv.status]}
+                        </span>
+                        {inv.is_test_shop && (
+                          <span
+                            className="inline-flex items-center rounded-full bg-yellow-100 px-1.5 py-0.5 text-[10px] font-medium text-yellow-700"
+                            title="Счёт создан в тестовом магазине YooKassa"
+                          >
+                            🧪 Тест
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-center text-xs text-zinc-500 whitespace-nowrap">{fmtDate(inv.created_at)}</td>
                     <td className="px-4 py-3 text-center">
