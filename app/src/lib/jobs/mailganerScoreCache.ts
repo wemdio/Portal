@@ -117,6 +117,35 @@ export async function getOrFetchScore(
 }
 
 /**
+ * Батч-lookup кэша для уже нормализованных доменов. Один SELECT на чанк
+ * вместо запроса на каждый домен — при drain'е файлов в миллионы доменов
+ * одиночные lookup'ы давали ~половину всех транзакций main-БД.
+ *
+ * Возвращает Map domain → результат только для найденных в кэше; промахи
+ * докручиваются обычным getOrFetchScore (он же пишет в кэш).
+ */
+export async function getCachedScores(domains: string[]): Promise<Map<string, FetchScoreResult>> {
+  const out = new Map<string, FetchScoreResult>();
+  if (!supabaseAdmin || domains.length === 0) return out;
+  const CHUNK = 100; // домены уходят в URL фильтра in() — держим запрос компактным
+  for (let i = 0; i < domains.length; i += CHUNK) {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from('mailganer_domain_scores')
+        .select('domain, score, spf, rating, raw')
+        .in('domain', domains.slice(i, i + CHUNK));
+      if (error || !data) continue;
+      for (const row of data as CachedRow[]) {
+        out.set(row.domain, { score: row.score, spf: row.spf, raw: row.raw, ok: true });
+      }
+    } catch {
+      // чанк упал — его домены просто пойдут одиночным путём
+    }
+  }
+  return out;
+}
+
+/**
  * Нормализация домена: lowercase + без www. Используется как PK в кэше.
  * Гарантирует что 'WWW.ya.ru', 'ya.ru', 'YA.RU' будут одной записью.
  */

@@ -27,7 +27,7 @@ import 'server-only';
 import readline from 'node:readline';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getMainS3ObjectStream } from '@/lib/mainS3Server';
-import { getOrFetchScore, normalizeDomain, emptyCacheStats } from './mailganerScoreCache';
+import { getOrFetchScore, getCachedScores, normalizeDomain, emptyCacheStats } from './mailganerScoreCache';
 
 interface ScoreEndpointConfig {
   url: string;
@@ -52,6 +52,8 @@ interface LargeScoreJob {
 const PARSE_BATCH = 5_000;
 /** Доменов за один drain-тик (скорятся с concurrency воркеров). */
 const DRAIN_BATCH = 300;
+/** Id за один батч-UPDATE статусов (id уходят в URL PostgREST-фильтра). */
+const MARK_CHUNK = 150;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -225,12 +227,16 @@ async function drainJobBatch(
   let active = 0;
   let cursor = 0;
 
-  const markRow = async (id: number, status: 'scored' | 'cached' | 'error'): Promise<void> => {
-    await supabaseAdmin!
-      .from('large_score_domains')
-      .update({ status, scored_at: nowIso() })
-      .eq('id', id);
-  };
+  // Кэш-lookup всей пачки одним батчем; промахи добираются getOrFetchScore.
+  const cached = await getCachedScores(
+    rows.map((r) => normalizeDomain(r.domain)).filter((d): d is string => d !== null),
+  );
+
+  // Статусы копим в памяти и пишем пачкой после прогона. UPDATE на каждую
+  // строку давал ~70% транзакций всей БД на больших файлах. Если воркер
+  // умрёт до записи — строки останутся pending и переобработаются (no-op
+  // по кэшу), это штатный resume-путь движка.
+  const marks: Record<'scored' | 'error', number[]> = { scored: [], error: [] };
 
   async function worker(): Promise<void> {
     while (true) {
@@ -239,13 +245,15 @@ async function drainJobBatch(
       const r = rows[i];
       const domain = normalizeDomain(r.domain);
       if (!domain) {
-        await markRow(r.id, 'error');
+        marks.error.push(r.id);
         continue;
       }
       try {
-        const res = await getOrFetchScore(domain, endpoint, 'background', stats);
+        const pre = cached.get(domain);
+        if (pre) stats.hits += 1;
+        const res = pre ?? (await getOrFetchScore(domain, endpoint, 'background', stats));
         if (!res.ok) {
-          await markRow(r.id, 'error');
+          marks.error.push(r.id);
           continue;
         }
         scored++;
@@ -259,14 +267,26 @@ async function drainJobBatch(
             .eq('domain', domain)
             .is('company_name', null);
         }
-        await markRow(r.id, 'scored');
+        marks.scored.push(r.id);
       } catch {
-        await markRow(r.id, 'error');
+        marks.error.push(r.id);
       }
     }
   }
 
   await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, worker));
+
+  // Один UPDATE на статус (чанками — id уходят в URL фильтра).
+  const markedAt = nowIso();
+  for (const status of ['scored', 'error'] as const) {
+    const ids = marks[status];
+    for (let i = 0; i < ids.length; i += MARK_CHUNK) {
+      await supabaseAdmin
+        .from('large_score_domains')
+        .update({ status, scored_at: markedAt })
+        .in('id', ids.slice(i, i + MARK_CHUNK));
+    }
+  }
 
   await supabaseAdmin
     .from('large_score_jobs')

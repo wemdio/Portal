@@ -144,10 +144,13 @@ jobs:
             cd /home/Portal/prod/
             echo "${{ secrets.DOCKER_PASSWORD }}" | sudo docker login --username ${{ secrets.DOCKER_USERNAME }} --password-stdin
             sudo docker compose version
-            sudo docker compose -p portal -f docker-compose.prod.yml pull portal worker-baseconstructor worker-li-outreach worker-enrich worker-enrich-2 worker-enrich-3 instantly-sync-bot portal-backup health-check
+            sudo docker compose -p portal -f docker-compose.prod.yml pull portal worker-eng-hiring worker-baseconstructor worker-li-outreach worker-enrich worker-enrich-2 worker-enrich-3 instantly-sync-bot portal-backup health-check
             sudo docker ps -a --filter "label=com.docker.compose.service=portal" -q | xargs -r sudo docker rm -f
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps instantly-sync-bot portal-backup
+            # ENG hiring parser runs in its own worker so shipping or smoke-testing
+            # it never requires recreating portal-worker-hh (HH parser).
+            sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-eng-hiring
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps worker-baseconstructor
             # worker-li-outreach needs to be in the redeploy loop the same way
             # worker-baseconstructor is: its image is built and pushed above,
