@@ -24,7 +24,9 @@ Task handlers — реальные действия в LinkedIn.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -45,7 +47,7 @@ from li2.models import (
 )
 
 from . import li_actions
-from .exceptions import NoSettingsError
+from .exceptions import AuthenticationError, CaptchaDetected, NoSettingsError
 from .llm import LLMError, complete as llm_complete, render_prompt
 
 logger = logging.getLogger('li2.handlers')
@@ -188,6 +190,183 @@ async def _ensure_logged_in(ctx: BrowserContext, user_id: uuid.UUID) -> None:
     await _log(user_id, None, 'info', 'LinkedIn login successful')
 
 
+# ─────────────── discovery (People-search + LLM-квалификация) ───────────────
+
+N_SEARCH_KEYWORDS = 6           # сколько поисковых запросов генерим LLM'ом
+DISCOVERY_SEARCH_RESULTS = 10   # сколько профилей тянем из одного поиска
+DISCOVERY_QUALIFY_MAX = 6       # сколько профилей квалифицируем за один заход
+
+
+def _parse_keywords(text: str, limit: int) -> list[str]:
+    """Pure: вывод LLM (по запросу на строку, возможно с буллетами/нумерацией) → list."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in (text or '').splitlines():
+        # срезаем только списочные маркеры в начале: "1. ", "2) ", "- ", "* ", "• "
+        s = re.sub(r'^\s*(?:[-*•]|\d+[.)])\s*', '', line).strip().strip('"').strip("'").strip()
+        if not s or len(s) > 80:
+            continue
+        key = s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_qualify_verdict(text: str) -> tuple[bool, str]:
+    """Pure: вывод LLM ('YES/NO' + причина) → (qualified, reason)."""
+    lines = [ln.strip() for ln in (text or '').splitlines() if ln.strip()]
+    if not lines:
+        return False, 'empty LLM response'
+    head = lines[0].upper()
+    qualified = head.startswith('YES') or head.startswith('ДА')
+    reason = (lines[1] if len(lines) > 1 else lines[0])[:500]
+    return qualified, reason
+
+
+@sync_to_async
+def _discovery_state(campaign_id: uuid.UUID) -> dict:
+    """Читаем кэш дискавери (keywords + cursor) из qualifiers[0]['_discovery']."""
+    c = Campaign.objects.filter(id=campaign_id).only('qualifiers').first()
+    if not c or not isinstance(c.qualifiers, list) or not c.qualifiers:
+        return {}
+    q0 = c.qualifiers[0] if isinstance(c.qualifiers[0], dict) else {}
+    d = q0.get('_discovery')
+    return d if isinstance(d, dict) else {}
+
+
+@sync_to_async
+def _save_discovery_state(campaign_id: uuid.UUID, state: dict) -> None:
+    """Пишем кэш дискавери в qualifiers[0]['_discovery'] (демон-сторона, serial per account)."""
+    c = Campaign.objects.filter(id=campaign_id).first()
+    if not c:
+        return
+    qual = c.qualifiers if isinstance(c.qualifiers, list) and c.qualifiers else [{}]
+    if not isinstance(qual[0], dict):
+        qual[0] = {}
+    qual[0]['_discovery'] = state
+    Campaign.objects.filter(id=campaign_id).update(
+        qualifiers=qual, updated_at=datetime.now(timezone.utc),
+    )
+    close_old_connections()
+
+
+@sync_to_async
+def _create_disqualified_lead(user_id, campaign_id, info: dict, reason: str) -> None:
+    """Маркер-Lead для отсеянного профиля — чтобы не квалифицировать его повторно."""
+    Lead.objects.create(
+        user_id=user_id, campaign_id=campaign_id,
+        profile_url=info.get('profile_url') or '',
+        public_identifier=info.get('public_identifier'),
+        name=info.get('name', ''), first_name=info.get('first_name'),
+        last_name=info.get('last_name'), position=info.get('position'),
+        state='failed', disqualified=True, qualification_reason=reason[:500],
+        meta={k: v for k, v in info.items() if v is not None},
+    )
+    close_old_connections()
+
+
+async def _get_keywords(campaign_id: uuid.UUID, qual: dict) -> list[str]:
+    """Кэш keywords или LLM-генерация по search_keywords-промпту (qual['search_keywords_prompt'])."""
+    state = await _discovery_state(campaign_id)
+    cached = state.get('keywords')
+    if isinstance(cached, list) and cached:
+        return cached
+
+    template = (qual.get('search_keywords_prompt') or '').strip()
+    if not template:
+        return []
+    system = render_prompt(
+        template,
+        product_docs=qual.get('product_description', ''),
+        campaign_objective=qual.get('campaign_objective', ''),
+        n_keywords=N_SEARCH_KEYWORDS,
+    )
+    try:
+        out = await llm_complete(
+            system=system,
+            user=f'Сгенерируй {N_SEARCH_KEYWORDS} поисковых запросов для LinkedIn People, по одному в строке.',
+            max_tokens=300, temperature=0.5,
+        )
+    except LLMError as e:
+        logger.warning('Keyword generation failed: %s', e)
+        return []
+    kws = _parse_keywords(out, N_SEARCH_KEYWORDS)
+    if kws:
+        await _save_discovery_state(campaign_id, {'keywords': kws, 'cursor': 0})
+    return kws
+
+
+async def _qualify_profile(qual: dict, info: dict) -> tuple[bool, str]:
+    """LLM-квалификация по qualify_lead-промпту (qual['prompt']). Нет промпта → qualified (seed-trust)."""
+    template = (qual.get('prompt') or '').strip()
+    if not template:
+        return True, 'no qualify prompt (treated as seed-trust)'
+    profile_text = ', '.join(
+        p for p in (info.get('name'), info.get('position'), info.get('company')) if p
+    ) or 'unknown'
+    system = render_prompt(
+        template,
+        product_docs=qual.get('product_description', ''),
+        campaign_objective=qual.get('campaign_objective', ''),
+        profile_text=profile_text,
+    )
+    try:
+        out = await llm_complete(
+            system=system,
+            user='Ответь строго: первая строка — YES или NO (подходит ли профиль под кампанию), вторая — короткая причина.',
+            max_tokens=120, temperature=0.2,
+        )
+    except LLMError as e:
+        return False, f'qualify LLM failed: {e}'
+    return _parse_qualify_verdict(out)
+
+
+async def _discover_batch(task: Task, ctx: BrowserContext) -> int:
+    """
+    Один заход дискавери (вызывается, когда qualified-пул пуст): следующий
+    keyword → People-search → для каждого нового профиля discover+qualify →
+    создаём qualified Lead+Deal либо disqualified-маркер. Возвращает число
+    новых qualified лидов. Ошибки ловит caller (кроме CAPTCHA/Auth).
+    """
+    qual = await _campaign_qualifiers(task.campaign_id)
+    keywords = await _get_keywords(task.campaign_id, qual)
+    if not keywords:
+        return 0
+
+    state = await _discovery_state(task.campaign_id)
+    cursor = int(state.get('cursor', 0)) % len(keywords)
+    keyword = keywords[cursor]
+    await _save_discovery_state(task.campaign_id, {'keywords': keywords, 'cursor': cursor + 1})
+
+    urls = await li_actions.search_people(ctx, keyword, max_results=DISCOVERY_SEARCH_RESULTS)
+    await _log(task.user_id, task.campaign_id, 'info',
+               f'Дискавери: «{keyword}» → {len(urls)} профилей')
+
+    qualified = checked = 0
+    for url in urls:
+        if checked >= DISCOVERY_QUALIFY_MAX:
+            break
+        if await _lead_for_url(task.user_id, task.campaign_id, url) is not None:
+            continue
+        info = await li_actions.discover_profile(ctx, url)
+        if info is None:
+            continue
+        checked += 1
+        ok, reason = await _qualify_profile(qual, info)
+        if ok:
+            await _create_lead_and_deal(task.user_id, task.campaign_id, info)
+            qualified += 1
+        else:
+            await _create_disqualified_lead(task.user_id, task.campaign_id, info, reason)
+    await _log(task.user_id, task.campaign_id, 'info',
+               f'Дискавери: квалифицировано {qualified} из {checked} (keyword «{keyword}»)')
+    return qualified
+
+
 # ─────────────── handle_connect ───────────────
 
 
@@ -237,11 +416,25 @@ async def handle_connect(task: Task, campaign: Campaign, ctx: BrowserContext) ->
         # Все seed'ы уже discovered → берём из qualified pool
         pair = await _next_qualified_deal(task.user_id, task.campaign_id)
         if pair is None:
-            await _log(
-                task.user_id, task.campaign_id, 'info',
-                'No qualified leads to connect with (queue empty)',
-            )
-            return
+            # Пул пуст → дискавери (People-search + LLM-квалификация). Изолированно:
+            # любая ошибка дискавери НЕ валит connect-таск и не трогает рабочий
+            # seed-флоу; CAPTCHA/Auth обязаны пробрасываться наверх.
+            try:
+                added = await _discover_batch(task, ctx)
+            except (CaptchaDetected, AuthenticationError):
+                raise
+            except Exception as e:
+                added = 0
+                logger.exception('Discovery batch failed')
+                await _log(task.user_id, task.campaign_id, 'warning', f'Дискавери упала: {e}')
+            if added:
+                pair = await _next_qualified_deal(task.user_id, task.campaign_id)
+            if pair is None:
+                await _log(
+                    task.user_id, task.campaign_id, 'info',
+                    'Нет лидов для инвайта (пул пуст, дискавери ничего не дала)',
+                )
+                return
         target_deal, target_lead = pair
         target_url = target_lead.profile_url
 
@@ -366,26 +559,67 @@ async def handle_check_pending(task: Task, campaign: Campaign, ctx: BrowserConte
 # ─────────────── handle_follow_up ───────────────
 
 
-@sync_to_async
-def _connected_needing_followup(user_id: uuid.UUID, campaign_id: uuid.UUID) -> tuple[Deal, Lead] | None:
-    """
-    Deal(state='connected') у которого мы ещё не слали outbound, или слали
-    больше 3 дней назад.
-    """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=3)
-    deals = list(Deal.objects.filter(
-        user_id=user_id, campaign_id=campaign_id, state='connected',
-    ).order_by('updated_at')[:50])
+# После стольких НАШИХ сообщений лиду перестаём авто-писать — диалог уходит
+# оператору (страховка от бесконечной переписки/спама).
+MAX_AUTO_MESSAGES_PER_LEAD = 5
 
-    for deal in deals:
-        last_outbound = ChatMessage.objects.filter(
-            user_id=user_id, lead_id=deal.lead_id, direction='outbound',
-        ).order_by('-sent_at').first()
-        if last_outbound is None or last_outbound.sent_at < cutoff:
-            lead = Lead.objects.filter(id=deal.lead_id).first()
-            if lead:
-                return deal, lead
-    return None
+
+@sync_to_async
+def _pick_connected_deal(user_id: uuid.UUID, campaign_id: uuid.UUID) -> tuple[Deal, Lead] | None:
+    """
+    Round-robin: самый давно не трогавшийся connected-Deal (по updated_at).
+    Один follow_up task обрабатывает один диалог — читает тред и решает, слать ли.
+    """
+    deal = (
+        Deal.objects
+        .filter(user_id=user_id, campaign_id=campaign_id, state='connected')
+        .order_by('updated_at')
+        .first()
+    )
+    if not deal:
+        return None
+    lead = Lead.objects.filter(id=deal.lead_id).first()
+    if not lead:
+        return None
+    return deal, lead
+
+
+@sync_to_async
+def _record_inbound(user_id, campaign_id, lead_id, content, external_id) -> bool:
+    """Записываем входящее с дедупом по external_id (partial-unique). True — новая строка."""
+    _, created = ChatMessage.objects.get_or_create(
+        external_id=external_id,
+        defaults={
+            'user_id': user_id, 'campaign_id': campaign_id, 'lead_id': lead_id,
+            'direction': 'inbound', 'content': content,
+        },
+    )
+    close_old_connections()
+    return created
+
+
+@sync_to_async
+def _our_outbound_count(user_id, lead_id) -> int:
+    return ChatMessage.objects.filter(
+        user_id=user_id, lead_id=lead_id, direction='outbound',
+    ).count()
+
+
+def _format_recent_messages(thread: list[dict], limit: int = 12) -> str:
+    """Pure: тред → строки 'Me:'/'Lead:' (последние limit) для контекста LLM."""
+    tag = {'inbound': 'Lead', 'outbound': 'Me', 'unknown': '?'}
+    return '\n'.join(
+        f"{tag.get(m.get('direction'), '?')}: {m.get('text', '')}"
+        for m in thread[-limit:]
+    )
+
+
+def _inbound_external_id(lead_id: uuid.UUID, urn: str | None, text: str) -> str:
+    """urn сообщения LinkedIn если есть, иначе стабильный (НЕ hash()) id по тексту."""
+    if urn:
+        return urn
+    digest = hashlib.sha1(text.encode('utf-8')).hexdigest()[:16]
+    return f'{lead_id}:in:{digest}'
 
 
 @sync_to_async
@@ -397,61 +631,137 @@ def _record_message(user_id, campaign_id, lead_id, direction, content) -> None:
     close_old_connections()
 
 
-_FOLLOWUP_SYSTEM_PROMPT = '''You are an SDR writing a short, friendly LinkedIn DM follow-up.
+# Фолбэк-промпт демона (если в qualifiers нет follow_up_prompt — обычно его
+# кладёт Portal /start). Jinja2 {{ }}, совпадает с Portal-дефолтом
+# (v2DefaultPrompts.ts). Генерит ПЛОСКИЙ DM — opener (если переписки нет) или
+# контекстный ответ на последнюю реплику лида (демон шлёт вывод LLM как есть,
+# без парсинга action-протокола).
+_FOLLOWUP_SYSTEM_PROMPT = '''Ты ведёшь переписку в LinkedIn с контактом, который принял запрос на связь.
 
-Constraints:
-- 2-3 sentences MAX. No greetings like "Hope you're well".
-- No hard sell. One concrete next-step ask (15-min call, share a doc, opinion).
-- Use first name only. Sign off with sender's first name.
-- Do NOT include "Hi {name}" — that's already in the chat thread.
+## Наш продукт / услуга
+{{ product_docs }}
 
-Campaign goal: {campaign_objective}
-Product: {product_description}
-Target market: {target_market}
+## Цель кампании
+{{ campaign_objective }}
 
-Reply ONLY with the message text, no quotes, no preamble.'''
+## Кого мы ищем
+{{ target_market }}
+
+## Контакт
+Имя: {{ lead_name }}
+Должность: {{ lead_position }}
+Компания: {{ lead_company }}
+
+## Переписка (последние сообщения; «Me» — это ты, «Lead» — контакт)
+{{ recent_messages }}
+
+Как писать (метод «Mom Test»):
+- Если переписки ещё нет — короткий тёплый первый месседж: не продавай, задай один вопрос о том, как человек сейчас решает задачу из нашей области.
+- Если есть входящее от контакта — ответь контекстно на его последнюю реплику, в его тоне и на его языке.
+- 1–3 коротких предложения. Без «Здравствуйте, надеюсь, у вас всё хорошо». Не используй имя в обращении и не подписывайся. Без жёсткого питча и плейсхолдеров [Имя].
+- Если контакт явно отказался или не заинтересован — вежливо поблагодари и заверши, не дави.
+- Определи язык по контакту; если не уверен — пиши по-русски.
+
+Ответь ТОЛЬКО текстом сообщения — без кавычек, без преамбулы, без подписи.'''
 
 
 async def handle_follow_up(task: Task, campaign: Campaign, ctx: BrowserContext) -> None:
     """
-    Пик connected Deal без свежего outbound → LLM-генерация → отправка.
+    Conversation loop по ОДНОМУ connected-диалогу (round-robin по updated_at):
+
+    1. читаем тред → записываем новые входящие (дедуп по external_id)
+    2. решаем: opener (переписки нет) / контекстный ответ (последняя реплика —
+       от лида) / ждём (последнее слово за нами)
+    3. cap MAX_AUTO_MESSAGES_PER_LEAD — дальше диалог уходит оператору
+
+    deal.updated_at бампается в любом исходе, чтобы round-robin двигался дальше.
     """
     await _ensure_logged_in(ctx, task.user_id)
 
-    pair = await _connected_needing_followup(task.user_id, task.campaign_id)
+    pair = await _pick_connected_deal(task.user_id, task.campaign_id)
     if pair is None:
-        await _log(task.user_id, task.campaign_id, 'info', 'No connected deals need follow-up')
+        await _log(task.user_id, task.campaign_id, 'info', 'No connected deals to process')
         return
     deal, lead = pair
 
-    qual = await _campaign_qualifiers(task.campaign_id)
+    if not lead.profile_url:
+        await _mark_deal(deal.id)  # bump updated_at — round-robin двигается дальше
+        await _log(task.user_id, task.campaign_id, 'warning',
+                   f'Lead {lead.name} has no profile_url, skip')
+        return
 
-    # Кастомный follow_up prompt из li2_settings (если есть) или дефолт
+    # 1. Читаем тред — пишем новые входящие.
+    thread = await li_actions.read_thread(ctx, lead.profile_url, lead.public_identifier)
+    new_inbound = 0
+    for m in thread:
+        if m['direction'] != 'inbound':
+            continue
+        ext = _inbound_external_id(deal.lead_id, m['external_id'], m['text'])
+        if await _record_inbound(task.user_id, task.campaign_id, deal.lead_id, m['text'], ext):
+            new_inbound += 1
+    if new_inbound:
+        await _mark_lead(lead.id, last_activity_at=datetime.now(timezone.utc))
+        await _log(task.user_id, task.campaign_id, 'info',
+                   f'{new_inbound} новых ответ(ов) от {lead.name or lead.public_identifier}',
+                   lead_id=str(lead.id))
+
+    # 2. Cap авто-сообщений — дальше оператор ведёт сам.
+    our_count = await _our_outbound_count(task.user_id, deal.lead_id)
+    if our_count >= MAX_AUTO_MESSAGES_PER_LEAD:
+        await _mark_deal(deal.id)
+        await _log(task.user_id, task.campaign_id, 'info',
+                   f'Лимит авто-сообщений достигнут для {lead.name or lead.public_identifier} — оставляю оператору',
+                   lead_id=str(lead.id))
+        return
+
+    # 3. Решаем намерение.
+    last = thread[-1] if thread else None
+    if not thread:
+        intent = 'opener'
+    elif last and last['direction'] == 'inbound':
+        intent = 'reply'
+    else:
+        intent = 'wait'  # последнее слово за нами — ждём ответа лида
+
+    if intent == 'wait':
+        await _mark_deal(deal.id)
+        return
+
+    # 4. Генерим сообщение с контекстом треда.
+    qual = await _campaign_qualifiers(task.campaign_id)
     template = (qual.get('follow_up_prompt') or _FOLLOWUP_SYSTEM_PROMPT).strip()
+    profile_summary = ', '.join(p for p in (lead.name, lead.position, lead.company) if p) or 'unknown'
+    recent = _format_recent_messages(thread)
 
     system = render_prompt(
         template,
+        product_docs=qual.get('product_description', ''),
+        product_description=qual.get('product_description', ''),  # alias для старых шаблонов
         campaign_objective=qual.get('campaign_objective', ''),
-        product_description=qual.get('product_description', ''),
         target_market=qual.get('target_market', ''),
+        lead_name=lead.name or lead.first_name or '',
+        lead_position=lead.position or '',
+        lead_company=lead.company or '',
+        recent_messages=recent,
+        # Передаём и редкие переменные старых/кастомных шаблонов, чтобы {{ }} не утёк.
+        self_name=qual.get('self_name', ''),
+        profile_summary=profile_summary,
+        chat_summary='',
+        contact_email='',
+        today=datetime.now(timezone.utc).date().isoformat(),
+        days_since_last_outgoing=None,
+        unanswered_outgoing=None,
     )
-
     user_msg = (
-        f'Write the follow-up DM to {lead.name or "the lead"}.\n'
-        f'Their position: {lead.position or "unknown"}\n'
-        f'Their company: {lead.company or "unknown"}'
+        'Напиши первое сообщение контакту.' if intent == 'opener'
+        else 'Ответь на последнюю реплику контакта.'
     )
 
     try:
         message = await llm_complete(system=system, user=user_msg, max_tokens=400, temperature=0.7)
     except LLMError as e:
+        await _mark_deal(deal.id)
         await _log(task.user_id, task.campaign_id, 'error', f'LLM failed: {e}')
-        return
-
-    # Send
-    if not lead.profile_url:
-        await _log(task.user_id, task.campaign_id, 'warning',
-                   f'Lead {lead.name} has no profile_url, skip')
         return
 
     ok = await li_actions.send_message(ctx, lead.profile_url, message)
@@ -460,11 +770,10 @@ async def handle_follow_up(task: Task, campaign: Campaign, ctx: BrowserContext) 
         await _mark_deal(deal.id, updated_at=datetime.now(timezone.utc))
         await _log(
             task.user_id, task.campaign_id, 'info',
-            f'Follow-up sent to {lead.name or lead.public_identifier}',
+            f'{"Opener" if intent == "opener" else "Ответ"} отправлен: {lead.name or lead.public_identifier}',
             lead_id=str(lead.id), message_preview=message[:120],
         )
     else:
-        await _log(
-            task.user_id, task.campaign_id, 'warning',
-            f'Follow-up send failed for {lead.name or lead.public_identifier}',
-        )
+        await _mark_deal(deal.id)
+        await _log(task.user_id, task.campaign_id, 'warning',
+                   f'Не удалось отправить сообщение: {lead.name or lead.public_identifier}')

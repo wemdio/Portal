@@ -31,6 +31,17 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       .eq('user_id', auth.user.id);
     if (cErr) return jsonError(cErr.message, 500);
 
+    // Отменяем ещё не выполненные (pending) задачи этой кампании, чтобы воркер
+    // (если у юзера есть вторая running-кампания на том же аккаунте) не
+    // продолжал слать инвайты/follow-up за остановленную. Демон дополнительно
+    // страхует это в executor (проверка campaign.status перед действием).
+    await auth.supabase
+      .from('li2_tasks')
+      .update({ status: 'cancelled' })
+      .eq('campaign_id', id)
+      .eq('user_id', auth.user.id)
+      .eq('status', 'pending');
+
     // Other running campaigns у того же юзера? Если есть — daemon продолжает,
     // если нет — гасим аккаунт целиком, чтобы daemon снял Worker и освободил
     // browser-семафор для других пользователей.

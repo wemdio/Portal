@@ -36,3 +36,14 @@ class NoSettingsError(Exception):
     Не флипаем 'disconnected' (нечем переподключаться); просто пишем error в
     PortalLog и спим.
     """
+
+
+class ProxyConfigError(Exception):
+    """
+    proxy_url в li2_settings задан, но не парсится в валидный Playwright
+    proxy (битый формат, либо socks5+auth, который Chromium не поддерживает).
+
+    Запускать браузер БЕЗ прокси в этом случае нельзя — LinkedIn-трафик уйдёт
+    с реального/датацентрового IP → бан. Daemon флипает status='disconnected'
+    с actionable-сообщением; оператор чинит proxy_url в UI и переподключает.
+    """

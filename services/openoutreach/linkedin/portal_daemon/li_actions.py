@@ -17,6 +17,7 @@ import logging
 import random
 import re
 from typing import TypedDict
+from urllib.parse import quote
 
 from playwright.async_api import BrowserContext, Page, TimeoutError as PWTimeout
 
@@ -384,6 +385,136 @@ async def send_message(ctx: BrowserContext, profile_url: str, message: str) -> b
         await page.close()
 
 
+# ─────────────── Read conversation thread ───────────────
+
+
+class ThreadMessage(TypedDict):
+    direction: str           # 'inbound' | 'outbound' | 'unknown'
+    text: str
+    external_id: str | None  # LinkedIn messagingMessage urn, если удалось вытащить
+
+
+# Extract в один проход по DOM (надёжнее цепочки locator-вызовов). LinkedIn
+# группирует сообщения по отправителю в .msg-s-message-group; внутри —
+# .msg-s-event-listitem с телом в .msg-s-event-listitem__body и (иногда)
+# data-event-urn. Селекторы текущего UI; нужна донастройка на живом аккаунте.
+_THREAD_EXTRACT_JS = """
+() => {
+  const out = [];
+  const groups = document.querySelectorAll('.msg-s-message-group');
+  if (groups.length) {
+    groups.forEach(g => {
+      const a = g.querySelector('a.msg-s-message-group__profile-link, a[href*="/in/"]');
+      const senderHref = a ? a.getAttribute('href') : null;
+      const bodies = g.querySelectorAll('.msg-s-event-listitem__body, p.msg-s-message-group__message');
+      const items = g.querySelectorAll('.msg-s-event-listitem');
+      bodies.forEach((b, i) => {
+        const li = items[i];
+        out.push({
+          senderHref,
+          text: (b.innerText || b.textContent || '').trim(),
+          urn: li ? (li.getAttribute('data-event-urn') || null) : null,
+        });
+      });
+    });
+  } else {
+    document.querySelectorAll('.msg-s-event-listitem').forEach(li => {
+      const a = li.querySelector('a[href*="/in/"]');
+      const b = li.querySelector('.msg-s-event-listitem__body');
+      out.push({
+        senderHref: a ? a.getAttribute('href') : null,
+        text: b ? (b.innerText || b.textContent || '').trim() : '',
+        urn: li.getAttribute('data-event-urn') || null,
+      });
+    });
+  }
+  return out.filter(m => m.text);
+}
+"""
+
+
+async def read_thread(
+    ctx: BrowserContext, profile_url: str, lead_public_identifier: str | None,
+) -> list[ThreadMessage]:
+    """
+    Открывает переписку с лидом (через ту же кнопку Message, что send_message) и
+    возвращает сообщения треда в хронологическом порядке.
+
+    Направление определяем по ссылке отправителя: если ведёт на профиль лида
+    (`/in/<public_identifier>`) → inbound, иначе → outbound (наше). Если ссылку
+    отправителя достать не удалось → 'unknown' (caller такие не записывает, но
+    может показать в контексте LLM).
+
+    Возвращает [] если кнопки Message нет (не 1st-degree) или тред не загрузился.
+    """
+    page = await ctx.new_page()
+    try:
+        await page.goto(profile_url, wait_until='domcontentloaded', timeout=30000)
+        await _pause(2, 4)
+        await _detect_blockers(page)
+
+        msg_btn = page.locator('button[aria-label^="Message"], a[aria-label^="Message"]').first
+        if await msg_btn.count() == 0:
+            logger.info('read_thread: no Message button (not connected?): %s', profile_url)
+            return []
+        await msg_btn.click(timeout=10000)
+        await _pause(1.5, 3)
+
+        list_sel = (
+            'div[role="dialog"] .msg-s-message-list-content, '
+            '.msg-s-message-list-content, .msg-s-message-list'
+        )
+        try:
+            await page.locator(list_sel).first.wait_for(state='visible', timeout=10000)
+        except PWTimeout:
+            logger.warning('read_thread: message list did not render: %s', profile_url)
+            return []
+
+        # Подгружаем историю — скроллим контейнер вверх несколько раз.
+        for _ in range(4):
+            await page.evaluate(
+                "() => { const el = document.querySelector('.msg-s-message-list-content')"
+                " || document.querySelector('.msg-s-message-list'); if (el && el.parentElement)"
+                " el.parentElement.scrollTop = 0; }"
+            )
+            await _pause(0.6, 1.2)
+
+        raw = await page.evaluate(_THREAD_EXTRACT_JS)
+        await _detect_blockers(page)
+
+        pid = (lead_public_identifier or '').strip().lower()
+        messages: list[ThreadMessage] = []
+        for m in raw:
+            text = (m.get('text') or '').strip()
+            if not text:
+                continue
+            href = (m.get('senderHref') or '').lower()
+            if pid and pid in href:
+                direction = 'inbound'
+            elif href:
+                direction = 'outbound'
+            else:
+                direction = 'unknown'
+            messages.append({
+                'direction': direction,
+                'text': text,
+                'external_id': m.get('urn') or None,
+            })
+
+        logger.info(
+            'read_thread: %d messages (%d inbound) for %s',
+            len(messages), sum(1 for x in messages if x['direction'] == 'inbound'), profile_url,
+        )
+        return messages
+    except (CaptchaDetected, AuthenticationError):
+        raise
+    except Exception as e:
+        logger.warning('read_thread failed for %s: %s', profile_url, e)
+        return []
+    finally:
+        await page.close()
+
+
 # ─────────────── Check pending ───────────────
 
 
@@ -421,5 +552,60 @@ async def list_my_sent_invitations(ctx: BrowserContext) -> list[str]:
                 public_ids.add(m.group(1))
         logger.info('Found %d pending invitations', len(public_ids))
         return sorted(public_ids)
+    finally:
+        await page.close()
+
+
+# ─────────────── People search (discovery) ───────────────
+
+
+async def search_people(ctx: BrowserContext, query: str, max_results: int = 10) -> list[str]:
+    """
+    People-search по ключевику → канонические profile URL'ы результатов.
+
+    Открывает /search/results/people/?keywords=<query>, скроллит, собирает
+    ссылки на профили (`a[href*="/in/"]` в карточках результатов), дедупит,
+    возвращает до max_results штук в виде https://www.linkedin.com/in/<id>/.
+
+    Селекторы публичного search-UI — будут ломаться при A/B, нужна донастройка
+    на живом аккаунте. На ошибке возвращает [] (не валит discovery-таск).
+    """
+    page = await ctx.new_page()
+    try:
+        url = f'https://www.linkedin.com/search/results/people/?keywords={quote(query)}'
+        await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        await _pause(2, 4)
+        await _detect_blockers(page)
+
+        # Подгружаем результаты (lazy-load).
+        for _ in range(4):
+            await page.evaluate('window.scrollBy(0, document.body.scrollHeight)')
+            await _pause(0.8, 1.6)
+
+        hrefs = await page.locator('a[href*="/in/"]').evaluate_all(
+            'els => els.map(e => e.getAttribute("href"))'
+        )
+        seen: set[str] = set()
+        urls: list[str] = []
+        for href in hrefs:
+            if not href:
+                continue
+            m = re.search(r'/in/([^/?#]+)', href)
+            if not m:
+                continue
+            pid = m.group(1)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            urls.append(f'https://www.linkedin.com/in/{pid}/')
+            if len(urls) >= max_results:
+                break
+        logger.info('search_people("%s"): %d profiles', query, len(urls))
+        return urls
+    except (CaptchaDetected, AuthenticationError):
+        raise
+    except Exception as e:
+        logger.warning('search_people failed for "%s": %s', query, e)
+        return []
     finally:
         await page.close()

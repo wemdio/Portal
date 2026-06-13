@@ -64,6 +64,17 @@ async def execute_task(task: Task, ctx: BrowserContext) -> None:
                     completed_at=datetime.now(timezone.utc))
         return
 
+    # Кампанию могли остановить (или поставить на паузу) уже ПОСЛЕ того, как
+    # планировщик создал task. executor — последний рубеж: не выполняем
+    # действий в LinkedIn для не-running кампании, отменяем оставшийся task.
+    # (stop/route.ts чистит pending проактивно, но при второй running-кампании
+    # того же аккаунта таск остановленной мог проскочить в очередь воркера.)
+    if campaign.status != 'running':
+        await _mark(task.id, status='cancelled', completed_at=datetime.now(timezone.utc))
+        logger.info('Task %s cancelled — campaign %s status=%s (not running)',
+                    task.id, campaign.id, campaign.status)
+        return
+
     # Working-hours check ДО mark'a running. Если за окном — перепланируем.
     now_utc = datetime.now(timezone.utc)
     if not is_within(campaign.working_hours, campaign.timezone_offset, now_utc):
