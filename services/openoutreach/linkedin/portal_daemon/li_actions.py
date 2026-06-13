@@ -17,6 +17,7 @@ import logging
 import random
 import re
 from typing import TypedDict
+from urllib.parse import quote
 
 from playwright.async_api import BrowserContext, Page, TimeoutError as PWTimeout
 
@@ -551,5 +552,60 @@ async def list_my_sent_invitations(ctx: BrowserContext) -> list[str]:
                 public_ids.add(m.group(1))
         logger.info('Found %d pending invitations', len(public_ids))
         return sorted(public_ids)
+    finally:
+        await page.close()
+
+
+# ─────────────── People search (discovery) ───────────────
+
+
+async def search_people(ctx: BrowserContext, query: str, max_results: int = 10) -> list[str]:
+    """
+    People-search по ключевику → канонические profile URL'ы результатов.
+
+    Открывает /search/results/people/?keywords=<query>, скроллит, собирает
+    ссылки на профили (`a[href*="/in/"]` в карточках результатов), дедупит,
+    возвращает до max_results штук в виде https://www.linkedin.com/in/<id>/.
+
+    Селекторы публичного search-UI — будут ломаться при A/B, нужна донастройка
+    на живом аккаунте. На ошибке возвращает [] (не валит discovery-таск).
+    """
+    page = await ctx.new_page()
+    try:
+        url = f'https://www.linkedin.com/search/results/people/?keywords={quote(query)}'
+        await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        await _pause(2, 4)
+        await _detect_blockers(page)
+
+        # Подгружаем результаты (lazy-load).
+        for _ in range(4):
+            await page.evaluate('window.scrollBy(0, document.body.scrollHeight)')
+            await _pause(0.8, 1.6)
+
+        hrefs = await page.locator('a[href*="/in/"]').evaluate_all(
+            'els => els.map(e => e.getAttribute("href"))'
+        )
+        seen: set[str] = set()
+        urls: list[str] = []
+        for href in hrefs:
+            if not href:
+                continue
+            m = re.search(r'/in/([^/?#]+)', href)
+            if not m:
+                continue
+            pid = m.group(1)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            urls.append(f'https://www.linkedin.com/in/{pid}/')
+            if len(urls) >= max_results:
+                break
+        logger.info('search_people("%s"): %d profiles', query, len(urls))
+        return urls
+    except (CaptchaDetected, AuthenticationError):
+        raise
+    except Exception as e:
+        logger.warning('search_people failed for "%s": %s', query, e)
+        return []
     finally:
         await page.close()

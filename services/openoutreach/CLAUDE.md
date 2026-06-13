@@ -182,15 +182,25 @@ pytest -k test_name                     # один тест
 - Юнит-тесты (pure): _format_recent_messages, _inbound_external_id. DOM-скрейп и
   DB-склейка — на dogfood.
 
-Ещё открыто (требуют живого LinkedIn / изучения upstream): **дискавери** только по
-seed-URL (People-search/keyword-генерация не подключены, upstream linkedin/pipeline/
-на linkedin_*); **Deal→completed по outcome** (диалог пишется/ведётся, но авто-
-закрытия сделки по исходу нет — outcome-детект отложен); **LLM/ML квалификация**
-(Lead сразу qualified, qualify_lead промпт не читается); **UI**: поле ответа
-оператора в переписке (тред read-only — оператор пока не может вписать ручной
-ответ); **Telegram-алерты** (плумбинг демон→Portal API→TG, инфра
-app/src/lib/instantly/leadTelegramAlerts.ts); **CAPTCHA keep-alive**
-(docs/captcha-vnc-plan.md).
+## Дискавери + LLM-квалификация 2026-06-12 (НАПИСАНО, не проверено на живом LinkedIn)
+
+Вложено в handle_connect (без нового task type/миграции), изолированно — включается
+ТОЛЬКО когда qualified-пул пуст (seed'ы кончились), в try/except, рабочий seed-флоу не
+трогает; CAPTCHA/Auth пробрасываются.
+- `li_actions.search_people(query)` — DOM-скрейп /search/results/people (⚠️ селекторы —
+  донастройка на живом).
+- `_discover_batch`: LLM-генерация поисковых запросов (промпт `search_keywords`, был
+  мёртвым → живой; кэш в qualifiers[0]['_discovery'] + cursor) → People-search по
+  следующему keyword → discover_profile → LLM-квалификация (промпт `qualify_lead`, тоже
+  был мёртвым → живой; YES/NO+причина) → qualified Lead+Deal либо disqualified-маркер.
+- Pure-тесты: _parse_keywords, _parse_qualify_verdict.
+
+Ещё открыто (требует живого LinkedIn): **Deal→completed по outcome** (диалог ведётся, но
+авто-закрытия сделки по исходу «не интересно» нет); **ML** (GPR/BALD из upstream
+linkedin/ml — опционально, LLM-квалификации для MVP хватает); **UI**: поле ответа
+оператора в переписке (тред read-only); **Telegram-алерты** (плумбинг демон→Portal API→TG,
+инфра app/src/lib/instantly/leadTelegramAlerts.ts); **CAPTCHA keep-alive**
+(docs/captcha-vnc-plan.md — делать на живом checkpoint).
 
 ## Dogfood / устойчивость к редеплою 2026-06-12
 

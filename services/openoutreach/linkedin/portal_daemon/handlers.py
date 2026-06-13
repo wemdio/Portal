@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -46,7 +47,7 @@ from li2.models import (
 )
 
 from . import li_actions
-from .exceptions import NoSettingsError
+from .exceptions import AuthenticationError, CaptchaDetected, NoSettingsError
 from .llm import LLMError, complete as llm_complete, render_prompt
 
 logger = logging.getLogger('li2.handlers')
@@ -189,6 +190,183 @@ async def _ensure_logged_in(ctx: BrowserContext, user_id: uuid.UUID) -> None:
     await _log(user_id, None, 'info', 'LinkedIn login successful')
 
 
+# ─────────────── discovery (People-search + LLM-квалификация) ───────────────
+
+N_SEARCH_KEYWORDS = 6           # сколько поисковых запросов генерим LLM'ом
+DISCOVERY_SEARCH_RESULTS = 10   # сколько профилей тянем из одного поиска
+DISCOVERY_QUALIFY_MAX = 6       # сколько профилей квалифицируем за один заход
+
+
+def _parse_keywords(text: str, limit: int) -> list[str]:
+    """Pure: вывод LLM (по запросу на строку, возможно с буллетами/нумерацией) → list."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in (text or '').splitlines():
+        # срезаем только списочные маркеры в начале: "1. ", "2) ", "- ", "* ", "• "
+        s = re.sub(r'^\s*(?:[-*•]|\d+[.)])\s*', '', line).strip().strip('"').strip("'").strip()
+        if not s or len(s) > 80:
+            continue
+        key = s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_qualify_verdict(text: str) -> tuple[bool, str]:
+    """Pure: вывод LLM ('YES/NO' + причина) → (qualified, reason)."""
+    lines = [ln.strip() for ln in (text or '').splitlines() if ln.strip()]
+    if not lines:
+        return False, 'empty LLM response'
+    head = lines[0].upper()
+    qualified = head.startswith('YES') or head.startswith('ДА')
+    reason = (lines[1] if len(lines) > 1 else lines[0])[:500]
+    return qualified, reason
+
+
+@sync_to_async
+def _discovery_state(campaign_id: uuid.UUID) -> dict:
+    """Читаем кэш дискавери (keywords + cursor) из qualifiers[0]['_discovery']."""
+    c = Campaign.objects.filter(id=campaign_id).only('qualifiers').first()
+    if not c or not isinstance(c.qualifiers, list) or not c.qualifiers:
+        return {}
+    q0 = c.qualifiers[0] if isinstance(c.qualifiers[0], dict) else {}
+    d = q0.get('_discovery')
+    return d if isinstance(d, dict) else {}
+
+
+@sync_to_async
+def _save_discovery_state(campaign_id: uuid.UUID, state: dict) -> None:
+    """Пишем кэш дискавери в qualifiers[0]['_discovery'] (демон-сторона, serial per account)."""
+    c = Campaign.objects.filter(id=campaign_id).first()
+    if not c:
+        return
+    qual = c.qualifiers if isinstance(c.qualifiers, list) and c.qualifiers else [{}]
+    if not isinstance(qual[0], dict):
+        qual[0] = {}
+    qual[0]['_discovery'] = state
+    Campaign.objects.filter(id=campaign_id).update(
+        qualifiers=qual, updated_at=datetime.now(timezone.utc),
+    )
+    close_old_connections()
+
+
+@sync_to_async
+def _create_disqualified_lead(user_id, campaign_id, info: dict, reason: str) -> None:
+    """Маркер-Lead для отсеянного профиля — чтобы не квалифицировать его повторно."""
+    Lead.objects.create(
+        user_id=user_id, campaign_id=campaign_id,
+        profile_url=info.get('profile_url') or '',
+        public_identifier=info.get('public_identifier'),
+        name=info.get('name', ''), first_name=info.get('first_name'),
+        last_name=info.get('last_name'), position=info.get('position'),
+        state='failed', disqualified=True, qualification_reason=reason[:500],
+        meta={k: v for k, v in info.items() if v is not None},
+    )
+    close_old_connections()
+
+
+async def _get_keywords(campaign_id: uuid.UUID, qual: dict) -> list[str]:
+    """Кэш keywords или LLM-генерация по search_keywords-промпту (qual['search_keywords_prompt'])."""
+    state = await _discovery_state(campaign_id)
+    cached = state.get('keywords')
+    if isinstance(cached, list) and cached:
+        return cached
+
+    template = (qual.get('search_keywords_prompt') or '').strip()
+    if not template:
+        return []
+    system = render_prompt(
+        template,
+        product_docs=qual.get('product_description', ''),
+        campaign_objective=qual.get('campaign_objective', ''),
+        n_keywords=N_SEARCH_KEYWORDS,
+    )
+    try:
+        out = await llm_complete(
+            system=system,
+            user=f'Сгенерируй {N_SEARCH_KEYWORDS} поисковых запросов для LinkedIn People, по одному в строке.',
+            max_tokens=300, temperature=0.5,
+        )
+    except LLMError as e:
+        logger.warning('Keyword generation failed: %s', e)
+        return []
+    kws = _parse_keywords(out, N_SEARCH_KEYWORDS)
+    if kws:
+        await _save_discovery_state(campaign_id, {'keywords': kws, 'cursor': 0})
+    return kws
+
+
+async def _qualify_profile(qual: dict, info: dict) -> tuple[bool, str]:
+    """LLM-квалификация по qualify_lead-промпту (qual['prompt']). Нет промпта → qualified (seed-trust)."""
+    template = (qual.get('prompt') or '').strip()
+    if not template:
+        return True, 'no qualify prompt (treated as seed-trust)'
+    profile_text = ', '.join(
+        p for p in (info.get('name'), info.get('position'), info.get('company')) if p
+    ) or 'unknown'
+    system = render_prompt(
+        template,
+        product_docs=qual.get('product_description', ''),
+        campaign_objective=qual.get('campaign_objective', ''),
+        profile_text=profile_text,
+    )
+    try:
+        out = await llm_complete(
+            system=system,
+            user='Ответь строго: первая строка — YES или NO (подходит ли профиль под кампанию), вторая — короткая причина.',
+            max_tokens=120, temperature=0.2,
+        )
+    except LLMError as e:
+        return False, f'qualify LLM failed: {e}'
+    return _parse_qualify_verdict(out)
+
+
+async def _discover_batch(task: Task, ctx: BrowserContext) -> int:
+    """
+    Один заход дискавери (вызывается, когда qualified-пул пуст): следующий
+    keyword → People-search → для каждого нового профиля discover+qualify →
+    создаём qualified Lead+Deal либо disqualified-маркер. Возвращает число
+    новых qualified лидов. Ошибки ловит caller (кроме CAPTCHA/Auth).
+    """
+    qual = await _campaign_qualifiers(task.campaign_id)
+    keywords = await _get_keywords(task.campaign_id, qual)
+    if not keywords:
+        return 0
+
+    state = await _discovery_state(task.campaign_id)
+    cursor = int(state.get('cursor', 0)) % len(keywords)
+    keyword = keywords[cursor]
+    await _save_discovery_state(task.campaign_id, {'keywords': keywords, 'cursor': cursor + 1})
+
+    urls = await li_actions.search_people(ctx, keyword, max_results=DISCOVERY_SEARCH_RESULTS)
+    await _log(task.user_id, task.campaign_id, 'info',
+               f'Дискавери: «{keyword}» → {len(urls)} профилей')
+
+    qualified = checked = 0
+    for url in urls:
+        if checked >= DISCOVERY_QUALIFY_MAX:
+            break
+        if await _lead_for_url(task.user_id, task.campaign_id, url) is not None:
+            continue
+        info = await li_actions.discover_profile(ctx, url)
+        if info is None:
+            continue
+        checked += 1
+        ok, reason = await _qualify_profile(qual, info)
+        if ok:
+            await _create_lead_and_deal(task.user_id, task.campaign_id, info)
+            qualified += 1
+        else:
+            await _create_disqualified_lead(task.user_id, task.campaign_id, info, reason)
+    await _log(task.user_id, task.campaign_id, 'info',
+               f'Дискавери: квалифицировано {qualified} из {checked} (keyword «{keyword}»)')
+    return qualified
+
+
 # ─────────────── handle_connect ───────────────
 
 
@@ -238,11 +416,25 @@ async def handle_connect(task: Task, campaign: Campaign, ctx: BrowserContext) ->
         # Все seed'ы уже discovered → берём из qualified pool
         pair = await _next_qualified_deal(task.user_id, task.campaign_id)
         if pair is None:
-            await _log(
-                task.user_id, task.campaign_id, 'info',
-                'No qualified leads to connect with (queue empty)',
-            )
-            return
+            # Пул пуст → дискавери (People-search + LLM-квалификация). Изолированно:
+            # любая ошибка дискавери НЕ валит connect-таск и не трогает рабочий
+            # seed-флоу; CAPTCHA/Auth обязаны пробрасываться наверх.
+            try:
+                added = await _discover_batch(task, ctx)
+            except (CaptchaDetected, AuthenticationError):
+                raise
+            except Exception as e:
+                added = 0
+                logger.exception('Discovery batch failed')
+                await _log(task.user_id, task.campaign_id, 'warning', f'Дискавери упала: {e}')
+            if added:
+                pair = await _next_qualified_deal(task.user_id, task.campaign_id)
+            if pair is None:
+                await _log(
+                    task.user_id, task.campaign_id, 'info',
+                    'Нет лидов для инвайта (пул пуст, дискавери ничего не дала)',
+                )
+                return
         target_deal, target_lead = pair
         target_url = target_lead.profile_url
 
