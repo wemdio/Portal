@@ -33,6 +33,14 @@ logger = logging.getLogger('li2.browser')
 # Инстанс stateless — переиспользуем на все сессии.
 _STEALTH = Stealth()
 
+# Единый fingerprint для всех Chromium-контекстов (демон + seed-команда): сессия,
+# засеянная вручную, должна выглядеть так же, как ходит демон.
+DESKTOP_UA = (
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+)
+DESKTOP_VIEWPORT = {'width': 1366, 'height': 768}
+
 # Playwright proxy поддерживает схемы http/https/socks4/socks5. Chromium НЕ
 # умеет авторизацию (user/pass) для socks4/socks5 — только для http(s).
 _PLAYWRIGHT_PROXY_SCHEMES = ('http', 'https', 'socks4', 'socks5')
@@ -179,11 +187,8 @@ async def browser_session(account_id: UUID, user_id: UUID) -> AsyncIterator[Brow
     async with async_playwright() as p:
         browser = await p.chromium.launch(**launch_kwargs)
         ctx_kwargs: dict = {
-            'viewport': {'width': 1366, 'height': 768},
-            'user_agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                '(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
-            ),
+            'viewport': DESKTOP_VIEWPORT,
+            'user_agent': DESKTOP_UA,
         }
         if storage_state:
             ctx_kwargs['storage_state'] = storage_state

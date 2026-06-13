@@ -192,6 +192,21 @@ seed-URL (People-search/keyword-генерация не подключены, up
 app/src/lib/instantly/leadTelegramAlerts.ts); **CAPTCHA keep-alive**
 (docs/captcha-vnc-plan.md).
 
+## Dogfood / устойчивость к редеплою 2026-06-12
+
+- **Весь state в Postgres (144), контейнер stateless** → инструмент переживает
+  редеплои: после пересоздания демон перечитывает li2_accounts + storage_state из
+  li2_browser_sessions и продолжает. Засеянная сессия живёт в БД, переживает ночной
+  деплой.
+- **Graceful-stop в деплое**: `.semaphore/scheduled-deploy.yml` перед force-rm делает
+  `docker stop -t 120 portal-openoutreach` — SIGTERM даёт демону доделать in-flight
+  task и сохранить storage_state (раньше SIGKILL мимо grace терял свежие cookies).
+- **Пред-засев сессии (обход checkpoint первого входа)**: `manage.py seed_li2_session
+  --user-id <uuid>` — ручной логин в headed-браузере ЧЕРЕЗ прокси демона → пишет
+  storage_state в li2_browser_sessions. Демон стартует залогиненным с того же IP.
+  Запускать локально (реальный дисплей), DATABASE_URL → прод-Supabase. Аккаунт
+  (li2_accounts) должен уже существовать — создаётся при первом старте кампании в UI.
+
 ## VNC access (для прохождения CAPTCHA)
 
 Контейнер expose'ит noVNC на 6080 внутри сети `portal-network`. Чтобы
