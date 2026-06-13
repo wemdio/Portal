@@ -74,12 +74,13 @@ describe('findMissingVars', () => {
   it('returns missing vars in the order they were declared as required', () => {
     // Order is part of the contract — the UI error string lists them in the
     // same order as declared, so users can match against the allowlist.
-    // self_name / today both appear multiple times in the default, so use
-    // replaceAll instead of replace to wipe every occurrence.
+    // Required order is product_docs, campaign_objective, target_market,
+    // lead_name, lead_position, lead_company — drop two and expect them back
+    // in that declared order.
     const broken = V2_DEFAULT_PROMPT_FOLLOW_UP_AGENT
-      .replaceAll('{{ self_name }}', 'я')
-      .replaceAll('{{ today }}', 'сегодня');
-    expect(findMissingVars('follow_up_agent', broken)).toEqual(['self_name', 'today']);
+      .replaceAll('{{ lead_name }}', 'имя')
+      .replaceAll('{{ lead_company }}', 'компания');
+    expect(findMissingVars('follow_up_agent', broken)).toEqual(['lead_name', 'lead_company']);
   });
 
   it('returns an empty array when every required var is present', () => {
@@ -116,19 +117,19 @@ describe('validatePromptOverrides', () => {
   });
 
   it('returns one entry per broken prompt, with only the missing vars', () => {
-    const broken = V2_DEFAULT_PROMPT_FOLLOW_UP_AGENT.replaceAll('{{ self_name }}', '');
+    const broken = V2_DEFAULT_PROMPT_FOLLOW_UP_AGENT.replaceAll('{{ lead_name }}', '');
     const checks = validatePromptOverrides({
       prompt_follow_up_agent: broken,
       prompt_qualify_lead: V2_DEFAULT_PROMPT_QUALIFY_LEAD,
       prompt_search_keywords: V2_DEFAULT_PROMPT_SEARCH_KEYWORDS,
     });
     expect(checks).toHaveLength(1);
-    expect(checks[0]).toEqual({ promptKey: 'follow_up_agent', missing: ['self_name'] });
+    expect(checks[0]).toEqual({ promptKey: 'follow_up_agent', missing: ['lead_name'] });
   });
 
   it('reports multiple offenders in deterministic order', () => {
     const checks = validatePromptOverrides({
-      prompt_follow_up_agent: V2_DEFAULT_PROMPT_FOLLOW_UP_AGENT.replaceAll('{{ today }}', ''),
+      prompt_follow_up_agent: V2_DEFAULT_PROMPT_FOLLOW_UP_AGENT.replaceAll('{{ lead_name }}', ''),
       prompt_qualify_lead: V2_DEFAULT_PROMPT_QUALIFY_LEAD.replaceAll('{{ profile_text }}', ''),
       prompt_search_keywords: V2_DEFAULT_PROMPT_SEARCH_KEYWORDS,
     });
@@ -166,10 +167,10 @@ describe('buildMissingVarsMessage', () => {
 describe('integration sanity', () => {
   it('end-to-end: broken save produces a ready-to-show ru message', () => {
     const checks = validatePromptOverrides({
-      prompt_follow_up_agent: V2_DEFAULT_PROMPT_FOLLOW_UP_AGENT.replaceAll('{{ self_name }}', ''),
+      prompt_follow_up_agent: V2_DEFAULT_PROMPT_FOLLOW_UP_AGENT.replaceAll('{{ lead_name }}', ''),
     });
     const message = buildMissingVarsMessage(checks);
-    expect(message).toContain('{{ self_name }}');
+    expect(message).toContain('{{ lead_name }}');
     expect(message).toContain('«Follow-up agent (диалог)»');
     expect(message).toContain('попробуйте снова');
   });

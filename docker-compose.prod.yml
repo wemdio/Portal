@@ -1105,6 +1105,15 @@ services:
       - LI2_DAEMON_POLL_INTERVAL_SEC=${LI2_DAEMON_POLL_INTERVAL_SEC:-5}
       - LI2_MAX_CONCURRENT_BROWSERS=${LI2_MAX_CONCURRENT_BROWSERS:-3}
       - ENABLE_VNC=true
+      # headless по умолчанию. Для прохождения CAPTCHA через VNC оператор
+      # ставит LI2_BROWSER_HEADLESS=false в .env — Chromium рисует на Xvfb :99
+      # (его шарит x11vnc). ВНИМАНИЕ: keep-alive паузы на checkpoint пока нет —
+      # см. docs/captcha-vnc-plan.md.
+      - LI2_BROWSER_HEADLESS=${LI2_BROWSER_HEADLESS:-true}
+    # noVNC слушает :6080 внутри контейнера. Публикуем ТОЛЬКО на 127.0.0.1 —
+    # наружу проксирует nginx с basic-auth (см. docs/captcha-vnc-plan.md).
+    ports:
+      - "127.0.0.1:6080:6080"
     labels:
       - autoheal=true
     healthcheck:

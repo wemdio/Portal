@@ -8,6 +8,8 @@ import { filterAllowedIds, getResourceInstantlyAccountId, type ClientAccessRow }
 import { listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
+import { cached } from '@/lib/clientCache';
+import { withDeadline } from '@/lib/withDeadline';
 import { logError } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
@@ -15,6 +17,17 @@ export const dynamic = 'force-dynamic';
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 const REPLIES_PER_CAMPAIGN = 100;
+
+// Каждая кампания тянется ОТДЕЛЬНЫМ live-вызовом в Instantly. У клиента с
+// большим числом кампаний это раньше вешало всю страницу «Ответы»: один
+// медленный/залипший вызов держал Promise.allSettled до 90 c, и запрос
+// упирался в таймаут прокси → вечная «Загрузка». Две защиты:
+//   1. Дедлайн на кампанию — отвалившаяся кампания не блокирует остальные,
+//      ответ возвращается с тем, что успело прийти (partial вместо зависания).
+//   2. Кэш на кампанию (stale-while-revalidate) — повторные/общие загрузки
+//      мгновенные и резко снижают число обращений к Instantly (а значит и 429).
+const REPLIES_CAMPAIGN_DEADLINE_MS = 12_000;
+const REPLIES_CAMPAIGN_TTL_MS = 120_000;
 
 type LeadSource = 'reply';
 
@@ -118,52 +131,62 @@ async function readReplyItems(
   search?: string,
 ): Promise<{ items: LeadListItem[]; failures: number }> {
   const settled = await Promise.allSettled(
-    campaignIds.map(async (campaignId) => {
-      const data = await listEmails({
-        campaign_id: campaignId,
-        // См. комментарий в /campaigns/[id]/replies/route.ts: правильный
-        // параметр — `email_type`, не `ue_type`.
-        email_type: 'received',
-        limit: REPLIES_PER_CAMPAIGN,
-        search,
-      }, {
-        accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
-      });
+    campaignIds.map((campaignId) => {
+      const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
+      // Кэш на (аккаунт, кампания, поиск). Данные ответов не зависят от того,
+      // какой именно клиент смотрит — это полученные письма кампании, поэтому
+      // ключ без userId (доступ уже проверен фильтром allowedCampaignIds).
+      const cacheKey = `replies:${accountId}:${campaignId}:${search ?? ''}`;
+      return cached(
+        cacheKey,
+        () =>
+          withDeadline(campaignId, REPLIES_CAMPAIGN_DEADLINE_MS, async () => {
+            const data = await listEmails({
+              campaign_id: campaignId,
+              // См. комментарий в /campaigns/[id]/replies/route.ts: правильный
+              // параметр — `email_type`, не `ue_type`.
+              email_type: 'received',
+              limit: REPLIES_PER_CAMPAIGN,
+              search,
+            }, { accountId });
 
-      return (data.items ?? []).map((email) => {
-        const reply = mapInstantlyEmailToReply(email);
-        const timestamp = reply.timestamp;
-        const createdAt = timestamp ?? new Date(0).toISOString();
+            return (data.items ?? []).map((email) => {
+              const reply = mapInstantlyEmailToReply(email);
+              const timestamp = reply.timestamp;
+              const createdAt = timestamp ?? new Date(0).toISOString();
 
-        return {
-          id: `reply:${campaignId}:${reply.id}`,
-          source: 'reply' as const,
-          qualification_id: null,
-          campaign_id: campaignId,
-          campaign_name: campaignNames.get(campaignId) ?? null,
-          lead_email: reply.from_email ?? '',
-          lead_name: reply.from_name,
-          company_name: null,
-          phone: null,
-          website: null,
-          linkedin_url: null,
-          reply_subject: reply.subject,
-          reply_body: reply.body_text,
-          last_outbound_preview: null,
-          reply_timestamp: timestamp,
-          status: reply.is_unread ? 'unread' : 'reply',
-          ai_reason: reply.ai_interest_value == null
-            ? null
-            : `Interest: ${reply.ai_interest_value}`,
-          created_at: createdAt,
-          client_lead_comments: [],
-          email_id: reply.id,
-          lead_id: reply.lead_id,
-          thread_id: reply.thread_id,
-          is_unread: reply.is_unread,
-          ai_interest_value: reply.ai_interest_value,
-        } satisfies LeadListItem;
-      });
+              return {
+                id: `reply:${campaignId}:${reply.id}`,
+                source: 'reply' as const,
+                qualification_id: null,
+                campaign_id: campaignId,
+                campaign_name: campaignNames.get(campaignId) ?? null,
+                lead_email: reply.from_email ?? '',
+                lead_name: reply.from_name,
+                company_name: null,
+                phone: null,
+                website: null,
+                linkedin_url: null,
+                reply_subject: reply.subject,
+                reply_body: reply.body_text,
+                last_outbound_preview: null,
+                reply_timestamp: timestamp,
+                status: reply.is_unread ? 'unread' : 'reply',
+                ai_reason: reply.ai_interest_value == null
+                  ? null
+                  : `Interest: ${reply.ai_interest_value}`,
+                created_at: createdAt,
+                client_lead_comments: [],
+                email_id: reply.id,
+                lead_id: reply.lead_id,
+                thread_id: reply.thread_id,
+                is_unread: reply.is_unread,
+                ai_interest_value: reply.ai_interest_value,
+              } satisfies LeadListItem;
+            });
+          }),
+        REPLIES_CAMPAIGN_TTL_MS,
+      );
     }),
   );
 
@@ -173,7 +196,11 @@ async function readReplyItems(
   for (let i = 0; i < settled.length; i += 1) {
     const result = settled[i];
     if (result.status === 'fulfilled') {
-      items.push(...result.value);
+      // КЛОНИРУЕМ: result.value может быть массивом, лежащим в кэше, а ниже
+      // applyLeadMarks/enrichFromSyncedLeads мутируют поля item'ов под
+      // конкретного юзера (is_lead, lead_name…). Без копии эти мутации утекли
+      // бы в кэш и к другим клиентам той же кампании.
+      items.push(...result.value.map((it) => ({ ...it })));
       continue;
     }
 
