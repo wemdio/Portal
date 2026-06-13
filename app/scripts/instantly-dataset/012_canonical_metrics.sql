@@ -70,11 +70,13 @@ WITH sends AS (
     AND timestamp_email BETWEEN '2025-07-01' AND now() + interval '1 day'
   GROUP BY 1
 ), reps AS (
+  -- канонический исход: LLM-метки (reply_outcome_labels) ∪ Instantly i_status,
+  -- см. v_reply_outcomes (013). positive = interested|referral.
   SELECT campaign_id,
-         count(*)                            AS repliers,
-         count(*) FILTER (WHERE labeled)     AS labeled_repliers,
-         count(*) FILTER (WHERE interested)  AS interested_repliers
-  FROM v_reply_facts
+         count(*)                                       AS repliers,
+         count(*) FILTER (WHERE label_source IS NOT NULL) AS labeled_repliers,
+         count(*) FILTER (WHERE positive)               AS interested_repliers
+  FROM v_reply_outcomes
   GROUP BY 1
 ), snap AS (
   SELECT DISTINCT ON (o.campaign_id)
