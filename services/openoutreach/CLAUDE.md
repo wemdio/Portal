@@ -114,6 +114,84 @@ pytest -k test_name                     # один тест
 - Полировка LinkedIn-селекторов после первого реального прогона (UI
   меняется, fallback цепочки нужно подстраивать по факту)
 
+## Fixes 2026-06-12 (блокеры запуска)
+
+Аудит 12.06 нашёл 4 блокера; 3 закрыты и проверены (pytest + jest), 1 частично:
+
+- ✅ **#1 working_hours**: колонка БД `text[]`, а модель была `JSONField` →
+  TypeError на чтении ЛЮБОЙ кампании (демон не исполнял ни одной задачи).
+  Фикс: `li2/models.py` → `ArrayField(TextField)`, без DDL на проде.
+- ✅ **#3 рендер промптов**: Portal слал Jinja2-шаблон `{{ var }}`, демон рендерил
+  наивным `{var}` → плейсхолдеры текли в LLM. Фикс: `llm.render_prompt` → Jinja2
+  (sandboxed, missing→''); Portal-дефолт follow_up переписан с action-протокола
+  (который демон не парсит) на плоский DM; `promptVarValidation` синхронизирован.
+- ✅ **#4 proxy_url**: битый прод-формат `socks5://ip:port:user:pass` уходил в
+  Playwright как есть. Фикс: `browser_session.parse_proxy_url` + `ProxyConfigError`
+  (socks5+auth Chromium не умеет → явный фейл, не тихий запуск с реального IP).
+  ⚠️ Прод-прокси socks5+auth работать НЕ будет — нужен HTTP residential-прокси.
+- 🟡 **#2 CAPTCHA/VNC**: сделан флаг `LI2_BROWSER_HEADLESS` + публикация порта 6080.
+  Keep-alive пауза на checkpoint + nginx — НЕ сделаны, см. `docs/captcha-vnc-plan.md`
+  (делать на dogfood с живым браузером).
+- ✅ **stealth** (снижает частоту checkpoint): `playwright-stealth` подключён в
+  `browser_session.py` (`_STEALTH.apply_stealth_async(ctx)`). Проверено:
+  `navigator.webdriver` headless=true→false. Пакет уже был в base.txt, теперь применяется.
+
+## Backend-фиксы 2026-06-12 (контрол-баги, без живого LinkedIn, юнит-тесты)
+
+- ✅ **Stop отменяет задачи**: stop/route.ts шлёт `li2_tasks status='cancelled'` для
+  pending-задач кампании; executor.py дополнительно НЕ выполняет задачу, если
+  `campaign.status != 'running'` (отменяет её) — двойная страховка.
+- ✅ **Weekly-лимит инвайтов**: scheduler учитывает connect-задачи за 7д против
+  `connect_weekly_limit`; **жёсткий дневной лимит** — учёт созданных за 24ч
+  (быстрый дренаж очереди больше не даёт второй батч в день). Чистая логика в
+  `_slots_to_create` (10 юнит-тестов).
+- ✅ **runtime_status/stats кампании**: демон (`scheduler._refresh_campaign_runtime`)
+  каждую итерацию пишет `li2_campaigns.runtime_status='running'` + stats
+  (leads/invited/connected из Deal-состояний) — карточка в UI больше не висит
+  «queued_for_openoutreach».
+- ✅ **follow-up не долбит вслепую**: `_connected_needing_followup` шлёт РОВНО ОДИН
+  opener на connected-лида (было — повтор каждые 3 дня бесконечно). Многошаговый
+  follow-up вернётся вместе с чтением входящих.
+
+## Операторский UX 2026-06-12 (статус аккаунта в UI)
+
+- ✅ GET `/api/tools/li-outreach-v2/accounts` — отдаёт li2_accounts (раньше GET-ручки
+  не было, статусы были невидимы). UI (page.tsx): чип статуса аккаунта в хедере +
+  баннер на needs_captcha/disconnected с кнопкой «Возобновить» (POST resume-from-captcha)
+  + поллинг статуса каждые 15с. Теперь оператор видит, что аккаунт встал, и резюмит
+  из UI (раньше — только curl). Проверено: tsc --noEmit чисто по всему app.
+
+## Чтение входящих + conversation-loop 2026-06-12 (НАПИСАНО, не проверено на живом LinkedIn)
+
+`handle_follow_up` переписан в полноценный диалоговый цикл (без нового task type —
+вложено в follow_up, без миграции):
+- `li_actions.read_thread(ctx, profile_url, public_identifier)` — открывает оверлей
+  переписки (та же кнопка Message, что send_message), скрейпит сообщения одним
+  page.evaluate, направление по ссылке отправителя vs public_identifier лида.
+  ⚠️ Селекторы (.msg-s-message-group и т.д.) — текущего UI, нужна донастройка на
+  живом аккаунте.
+- handler: round-robin connected-Deal (по updated_at) → read_thread → пишет новые
+  inbound в li2_messages с дедупом по external_id (urn или стабильный sha1, НЕ
+  hash()) → решает: opener (переписки нет) / контекстный ответ (последняя реплика
+  от лида) / wait (последнее слово за нами). Cap MAX_AUTO_MESSAGES_PER_LEAD=5 →
+  дальше оператору. Outbound пишем только при отправке (скрейп — только inbound,
+  чтобы не дублить).
+- Промпт follow_up стал conversational: `{{ recent_messages }}` (тред Me/Lead) +
+  режим opener/ответ. Синхронизировано: daemon _FOLLOWUP_SYSTEM_PROMPT,
+  v2DefaultPrompts.ts, promptVarValidation (req var recent_messages добавлен).
+- Юнит-тесты (pure): _format_recent_messages, _inbound_external_id. DOM-скрейп и
+  DB-склейка — на dogfood.
+
+Ещё открыто (требуют живого LinkedIn / изучения upstream): **дискавери** только по
+seed-URL (People-search/keyword-генерация не подключены, upstream linkedin/pipeline/
+на linkedin_*); **Deal→completed по outcome** (диалог пишется/ведётся, но авто-
+закрытия сделки по исходу нет — outcome-детект отложен); **LLM/ML квалификация**
+(Lead сразу qualified, qualify_lead промпт не читается); **UI**: поле ответа
+оператора в переписке (тред read-only — оператор пока не может вписать ручной
+ответ); **Telegram-алерты** (плумбинг демон→Portal API→TG, инфра
+app/src/lib/instantly/leadTelegramAlerts.ts); **CAPTCHA keep-alive**
+(docs/captcha-vnc-plan.md).
+
 ## VNC access (для прохождения CAPTCHA)
 
 Контейнер expose'ит noVNC на 6080 внутри сети `portal-network`. Чтобы

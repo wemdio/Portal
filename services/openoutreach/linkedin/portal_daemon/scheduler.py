@@ -22,9 +22,15 @@ from uuid import UUID
 from asgiref.sync import sync_to_async
 from django.db import close_old_connections
 
-from li2.models import Campaign, PortalSettings, Task
+from li2.models import Campaign, Deal, PortalSettings, Task
 
 logger = logging.getLogger('li2.scheduler')
+
+# Статусы task'ов, которые отражают «запланированное или сделанное действие» —
+# считаем их против дневного/недельного лимита. failed/cancelled не считаем
+# (действие не состоялось).
+_COUNTED_STATUSES = ('pending', 'running', 'completed')
+FALLBACK_CONNECT_WEEKLY_LIMIT = 100
 
 # Per-type defaults на случай отсутствующих PortalSettings (новый юзер,
 # settings ещё не сохранён). check_pending не зависит от лимитов LinkedIn'а —
@@ -51,12 +57,71 @@ def _poisson_slot_times(now: datetime, n: int, horizon_hours: int = 24) -> list[
     return [now + timedelta(seconds=int(f * horizon_sec)) for f in fractions]
 
 
+def _slots_to_create(n_per_day: int, daily_used: int, weekly_remaining: int | None = None) -> int:
+    """
+    Pure: сколько task'ов создать в этот reconcile, чтобы НЕ превысить лимиты.
+
+    n_per_day        — суточный лимит (размер дневного батча).
+    daily_used       — сколько task'ов этого типа уже создано за последние 24ч
+                       (pending+running+completed). Жёсткий дневной потолок:
+                       не даёт быстрому дренажу очереди вызвать второй батч в
+                       тот же день.
+    weekly_remaining — для connect: остаток недельного лимита инвайтов
+                       (weekly_limit − создано за 7д). None для типов без
+                       недельного лимита.
+    """
+    remaining = n_per_day - daily_used
+    if weekly_remaining is not None:
+        remaining = min(remaining, weekly_remaining)
+    return max(0, remaining)
+
+
 @sync_to_async
 def _pending_count(account_id: UUID, campaign_id: UUID, task_type: str) -> int:
     return Task.objects.filter(
         account_id=account_id, campaign_id=campaign_id,
         type=task_type, status='pending',
     ).count()
+
+
+@sync_to_async
+def _created_since(account_id: UUID, campaign_id: UUID, task_type: str, since: datetime) -> int:
+    """Сколько task'ов этого типа создано с момента `since` (для лимитов)."""
+    return Task.objects.filter(
+        account_id=account_id, campaign_id=campaign_id, type=task_type,
+        status__in=_COUNTED_STATUSES, created_at__gte=since,
+    ).count()
+
+
+@sync_to_async
+def _connect_weekly_limit(user_id: UUID) -> int:
+    s = PortalSettings.objects.filter(user_id=user_id).first()
+    if not s:
+        return FALLBACK_CONNECT_WEEKLY_LIMIT
+    return max(1, int(s.connect_weekly_limit or FALLBACK_CONNECT_WEEKLY_LIMIT))
+
+
+@sync_to_async
+def _refresh_campaign_runtime(campaign_id: UUID) -> None:
+    """
+    Демон-сторона li2_campaigns.runtime_status/stats: UI (page.tsx) показывает
+    campaign.runtime_status, а раньше демон его НИКОГДА не обновлял — карточка
+    вечно висела 'queued_for_openoutreach'. Считаем прогресс из Deal-состояний.
+    """
+    deals = Deal.objects.filter(campaign_id=campaign_id)
+    total = deals.count()
+    invited = deals.filter(state__in=['pending', 'connected', 'completed']).count()
+    connected = deals.filter(state__in=['connected', 'completed']).count()
+    now = datetime.now(timezone.utc)
+    Campaign.objects.filter(id=campaign_id).update(
+        runtime_status='running',
+        stats={
+            'leads': total, 'invited': invited, 'connected': connected,
+            'updated_at': now.isoformat(),
+        },
+        last_sync_at=now,
+    )
+    close_old_connections()
 
 
 @sync_to_async
@@ -100,14 +165,34 @@ async def reconcile(*, account_id: UUID, user_id: UUID) -> None:
         return
 
     limits = await _per_type_limits(user_id)
+    weekly_connect_limit = await _connect_weekly_limit(user_id)
     now = datetime.now(timezone.utc)
+    day_ago = now - timedelta(hours=24)
+    week_ago = now - timedelta(days=7)
     rows: list[dict] = []
     for camp in campaigns:
         for task_type, n_per_day in limits.items():
             existing = await _pending_count(account_id, camp.id, task_type)
             if existing > 0:
                 continue
-            slot_times = _poisson_slot_times(now, n_per_day)
+
+            # Жёсткий дневной лимит: учитываем уже созданные за 24ч, а не только
+            # размер очереди — иначе быстрый дренаж даёт лишний батч в тот же день.
+            daily_used = await _created_since(account_id, camp.id, task_type, day_ago)
+            weekly_remaining = None
+            if task_type == 'connect':
+                weekly_used = await _created_since(account_id, camp.id, task_type, week_ago)
+                weekly_remaining = weekly_connect_limit - weekly_used
+
+            n = _slots_to_create(n_per_day, daily_used, weekly_remaining)
+            if n <= 0:
+                logger.info(
+                    'Reconcile: %s лимит исчерпан для campaign=%s (daily_used=%d, weekly_rem=%s), skip',
+                    task_type, camp.id, daily_used, weekly_remaining,
+                )
+                continue
+
+            slot_times = _poisson_slot_times(now, n)
             for t in slot_times:
                 rows.append({
                     'user_id': user_id,
@@ -118,6 +203,9 @@ async def reconcile(*, account_id: UUID, user_id: UUID) -> None:
                     'scheduled_at': t,
                     'payload': {'campaign_id': str(camp.id)},
                 })
+
+        # Обновляем runtime_status/stats кампании (UI читает их) — каждую итерацию.
+        await _refresh_campaign_runtime(camp.id)
 
     if rows:
         n = await _create_tasks(rows)

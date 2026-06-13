@@ -17,7 +17,12 @@ from django.db import close_old_connections
 from li2.models import Account, PortalLog, Task
 
 from .browser_session import browser_session
-from .exceptions import AuthenticationError, CaptchaDetected, NoSettingsError
+from .exceptions import (
+    AuthenticationError,
+    CaptchaDetected,
+    NoSettingsError,
+    ProxyConfigError,
+)
 from .executor import execute_task
 from .recovery import reset_stale_tasks
 from .scheduler import reconcile
@@ -125,6 +130,16 @@ class AccountWorker:
                     await sync_to_async(PortalLog.error)(
                         user_id=self.user_id,
                         message=f'LinkedIn auth disconnected: {e}',
+                    )
+                    return
+
+                except ProxyConfigError as e:
+                    logger.error('ProxyConfig: account=%s: %s', self.account_id, e)
+                    await self._flag('disconnected', f'Битый прокси: {e}')
+                    await sync_to_async(PortalLog.error)(
+                        user_id=self.user_id,
+                        message=f'Прокси настроен неверно: {e} '
+                                'Исправьте proxy_url в /tools/li-outreach-v2 и переподключите.',
                     )
                     return
 
