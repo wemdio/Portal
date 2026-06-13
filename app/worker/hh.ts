@@ -3,6 +3,7 @@ import { runHHArchiveJob } from '@/lib/parsers/hhArchive/runner';
 import { runYandexDirectJob } from '@/lib/parsers/yandexDirect/runner';
 import { runAtsParserJob } from '@/lib/parsers/atsRunner';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
+import { claimParserJob, recoverRunningParserJobs } from './parserJobs';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const MAX_CONCURRENCY = 3;
@@ -25,13 +26,7 @@ let atsJobActive = false;
 
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
-  const { data: hhJobs, error: hhErr } = await db
-    .from('parser_jobs')
-    .update({ status: 'pending' })
-    .eq('status', 'running')
-    .select('id');
-  if (hhErr) log('warn', 'Startup recovery: parser_jobs update failed', hhErr);
-  else if (hhJobs?.length) log('info', `Startup recovery: reset ${hhJobs.length} parser_jobs to pending`);
+  await recoverRunningParserJobs(log, ['hh_vacancies', 'ats_companies'], 'HH/ATS parser_jobs');
 
   // Yandex Direct processing-задачи без heartbeat — сбрасываем в pending.
   const ydCutoff = new Date(Date.now() - 30 * 60_000).toISOString();
@@ -59,28 +54,7 @@ async function startupRecovery(): Promise<void> {
 }
 
 async function claimHHJob(): Promise<string | null> {
-  const db = requireSupabaseAdmin(log);
-
-  const { data: pending } = await db
-    .from('parser_jobs')
-    .select('id')
-    .eq('status', 'pending')
-    .eq('parser_type', 'hh_vacancies')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (!pending) return null;
-
-  const { data: claimed } = await db
-    .from('parser_jobs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
-    .eq('id', pending.id)
-    .eq('status', 'pending')
-    .select('id')
-    .maybeSingle();
-
-  return claimed?.id ?? null;
+  return claimParserJob(log, 'hh_vacancies');
 }
 
 /**
@@ -140,26 +114,7 @@ async function claimYandexDirectJob(): Promise<string | null> {
  */
 async function claimAtsJob(): Promise<string | null> {
   if (atsJobActive) return null;
-  const db = requireSupabaseAdmin(log);
-
-  const { data: pending } = await db
-    .from('parser_jobs')
-    .select('id')
-    .eq('status', 'pending')
-    .eq('parser_type', 'ats_companies')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  if (!pending) return null;
-
-  const { data: claimed } = await db
-    .from('parser_jobs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
-    .eq('id', pending.id)
-    .eq('status', 'pending')
-    .select('id')
-    .maybeSingle();
-  return claimed?.id ?? null;
+  return claimParserJob(log, 'ats_companies');
 }
 
 async function pollOnce(): Promise<boolean> {

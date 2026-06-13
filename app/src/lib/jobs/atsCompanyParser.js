@@ -1,4 +1,4 @@
-// ATS (Greenhouse / Lever / Ashby) company-lead parser.
+// ATS company-lead parser.
 //
 // Same idea as adzunaCompanyParser / the HH fleet scripts: turn job postings
 // into company leads, where an open role is the buying signal. The difference:
@@ -21,7 +21,7 @@ const MARKETING_RE =
 const B2B_SALES_RE =
   /\b(b2b|business development|account executive|sales development|business development representative|sales manager|sales lead|sales executive|enterprise sales|partnerships?|channel sales|commercial manager|revenue manager|sdr|bdr)\b/i;
 
-const SUPPORTED_ATS = ['greenhouse', 'lever', 'ashby'];
+const SUPPORTED_ATS = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee'];
 
 const CSV_HEADERS = [
   'company',
@@ -40,6 +40,10 @@ const CSV_HEADERS = [
 
 function normalizeWhitespace(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function joinLocationParts(parts) {
+  return uniq(parts).join(', ');
 }
 
 function uniq(values) {
@@ -80,10 +84,13 @@ function careersUrl(ats, slug) {
   if (ats === 'greenhouse') return `https://job-boards.greenhouse.io/${slug}`;
   if (ats === 'lever') return `https://jobs.lever.co/${slug}`;
   if (ats === 'ashby') return `https://jobs.ashbyhq.com/${slug}`;
+  if (ats === 'workable') return `https://apply.workable.com/${slug}`;
+  if (ats === 'bamboohr') return `https://${slug}.bamboohr.com/careers`;
+  if (ats === 'recruitee') return `https://${slug}.recruitee.com`;
   return '';
 }
 
-const ATS_BASE_HOSTS = ['greenhouse.io', 'lever.co', 'ashbyhq.com'];
+const ATS_BASE_HOSTS = ['greenhouse.io', 'lever.co', 'ashbyhq.com', 'workable.com', 'bamboohr.com', 'recruitee.com'];
 // Multi-level public suffixes we care about, so registrableDomain keeps 3 labels.
 const TWO_LEVEL_TLDS = new Set([
   'co.uk', 'com.au', 'co.jp', 'com.br', 'co.nz', 'com.sg', 'co.in', 'com.mx', 'co.za',
@@ -124,11 +131,17 @@ function postingsUrl(ats, slug) {
   if (ats === 'greenhouse') return `https://boards-api.greenhouse.io/v1/boards/${safe}/jobs`;
   if (ats === 'lever') return `https://api.lever.co/v0/postings/${safe}?mode=json`;
   if (ats === 'ashby') return `https://api.ashbyhq.com/posting-api/job-board/${safe}`;
+  if (ats === 'workable') return `https://apply.workable.com/api/v1/widget/accounts/${safe}`;
+  if (ats === 'bamboohr') return `https://${slug}.bamboohr.com/careers/list`;
+  if (ats === 'recruitee') return `https://${slug}.recruitee.com/api/offers`;
   throw new Error(`Unsupported ATS: ${ats}`);
 }
 
 function extractJobs(ats, payload) {
   if (ats === 'lever') return Array.isArray(payload) ? payload : [];
+  if (ats === 'workable') return Array.isArray(payload?.jobs) ? payload.jobs : [];
+  if (ats === 'bamboohr') return Array.isArray(payload?.result) ? payload.result : [];
+  if (ats === 'recruitee') return Array.isArray(payload?.offers) ? payload.offers : [];
   return Array.isArray(payload?.jobs) ? payload.jobs : [];
 }
 
@@ -194,10 +207,68 @@ function normalizeAshbyJob(job, { slug, companyName } = {}) {
   });
 }
 
+function normalizeWorkableJob(job, { slug, companyName } = {}) {
+  const firstLocation = Array.isArray(job?.locations) ? job.locations[0] : null;
+  const location = firstLocation
+    ? joinLocationParts([firstLocation.city, firstLocation.region, firstLocation.country])
+    : joinLocationParts([job?.city, job?.state, job?.country]);
+  const shortcode = normalizeWhitespace(job?.shortcode);
+  return baseJob({
+    ats: 'workable',
+    slug,
+    company: companyName,
+    title: job?.title,
+    location,
+    country: firstLocation?.country || job?.country,
+    url: job?.url || job?.shortlink || job?.application_url || (slug && shortcode ? `https://apply.workable.com/${slug}/j/${shortcode}` : ''),
+    posted_at: job?.published_on || job?.created_at,
+  });
+}
+
+function normalizeBamboohrJob(job, { slug, companyName } = {}) {
+  const location = job?.location || {};
+  const atsLocation = job?.atsLocation || {};
+  const country = location.addressCountry || location.country || atsLocation.country;
+  return baseJob({
+    ats: 'bamboohr',
+    slug,
+    company: companyName,
+    title: job?.jobOpeningName,
+    location: joinLocationParts([
+      location.city || atsLocation.city,
+      location.state || atsLocation.state || atsLocation.province,
+      country,
+    ]),
+    country,
+    url: job?.jobOpeningShareUrl || (slug && job?.id ? `https://${slug}.bamboohr.com/careers/${job.id}` : ''),
+    posted_at: job?.datePosted,
+  });
+}
+
+function normalizeRecruiteeJob(job, { slug, companyName } = {}) {
+  const jobURL =
+    job?.careers_url ||
+    (job?.careers_apply_url ? String(job.careers_apply_url).replace(/\/c\/new\/?$/, '') : '') ||
+    (slug && job?.slug ? `https://${slug}.recruitee.com/o/${job.slug}` : '');
+  return baseJob({
+    ats: 'recruitee',
+    slug,
+    company: job?.company_name || companyName,
+    title: job?.title,
+    location: job?.location || joinLocationParts([job?.city, job?.state_name || job?.state, job?.country]),
+    country: job?.country,
+    url: jobURL,
+    posted_at: job?.published_at || job?.created_at,
+  });
+}
+
 function normalizeJob(ats, job, ctx = {}) {
   if (ats === 'greenhouse') return normalizeGreenhouseJob(job, ctx);
   if (ats === 'lever') return normalizeLeverJob(job, ctx);
   if (ats === 'ashby') return normalizeAshbyJob(job, ctx);
+  if (ats === 'workable') return normalizeWorkableJob(job, ctx);
+  if (ats === 'bamboohr') return normalizeBamboohrJob(job, ctx);
+  if (ats === 'recruitee') return normalizeRecruiteeJob(job, ctx);
   return null;
 }
 
@@ -314,9 +385,12 @@ module.exports = {
   exportCompanyLeadsToCsv,
   extractJobs,
   normalizeAshbyJob,
+  normalizeBamboohrJob,
   normalizeGreenhouseJob,
   normalizeJob,
   normalizeLeverJob,
+  normalizeRecruiteeJob,
+  normalizeWorkableJob,
   parseCompanyCsv,
   pickDomainFromSuggestions,
   postingsUrl,

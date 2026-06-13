@@ -1,6 +1,6 @@
 'use client';
 
-import type { ParserJob, AtsParserJob, PartitionProgressDetail } from '@/types';
+import type { ParserJob, AtsParserJob, EngHiringParserJob, PartitionProgressDetail } from '@/types';
 import { isStoppedByUser, JobStatus } from './JobStatus';
 import { ChevronRight, RefreshCw, Clock } from 'lucide-react';
 
@@ -13,13 +13,18 @@ const STAGE_LABELS: Record<string, string> = {
   loading_companies: 'Загружаем компании',
   scanning: 'Сканируем вакансии',
   enriching: 'Определяем домены',
+  enriching_details: 'Подгружаем описания вакансий',
+  refreshing_cache: 'Обновляем кэш ATS',
+  filtering_cache: 'Фильтруем вакансии',
   saving: 'Сохраняем в базу',
   completed: 'Завершено',
   failed: 'Ошибка',
   cancelled: 'Остановлено',
 };
 
-function resolveStageLabel(job: ParserJob | AtsParserJob) {
+type ParserListJob = ParserJob | AtsParserJob | EngHiringParserJob;
+
+function resolveStageLabel(job: ParserListJob) {
   if (job.progress_stage === 'partitioning') {
     const detail = getPartitionDetail(job);
     if (detail) {
@@ -46,15 +51,22 @@ function resolveStageLabel(job: ParserJob | AtsParserJob) {
   return 'В процессе';
 }
 
-function getPartitionDetail(job: ParserJob | AtsParserJob): PartitionProgressDetail | null {
+function getPartitionDetail(job: ParserListJob): PartitionProgressDetail | null {
   if (!job.progress_detail) return null;
   const d = job.progress_detail;
-  if (typeof d.total_subqueries !== 'number' || d.total_subqueries <= 1) return null;
-  return d;
+  if (
+    typeof d !== 'object' ||
+    typeof d.total_subqueries !== 'number' ||
+    d.total_subqueries <= 1 ||
+    typeof d.completed_subqueries !== 'number'
+  ) {
+    return null;
+  }
+  return d as PartitionProgressDetail;
 }
 
 type Props = {
-  jobs: Array<ParserJob | AtsParserJob>;
+  jobs: ParserListJob[];
   activeJobId: string | null;
   onSelect: (jobId: string) => void;
   onRefresh: () => void;
@@ -66,7 +78,7 @@ type Props = {
   clientMode?: boolean;
   /** Client retry: re-run a failed job's search. When set, a «Повторить» button
    *  shows on failed rows in clientMode. */
-  onRetry?: (job: ParserJob | AtsParserJob) => void;
+  onRetry?: (job: ParserListJob) => void;
 };
 
 const MAX_JOBS = 20;

@@ -4,8 +4,6 @@
 // ats_companies. Company-token lists come live from the open-source
 // kalil0321/ats-scrapers dataset (MIT).
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import {
   postingsUrl,
@@ -14,17 +12,14 @@ import {
   parseCompanyCsv,
   buildCompanyLeads,
   domainFromJobUrls,
-  pickDomainFromSuggestions,
   type AtsNormalizedJob,
 } from '@/lib/jobs/atsCompanyParser';
 import { buildRolesRegex, buildCountryRegex } from '@/lib/parsers/atsFilters';
+import { resolveCompanyDomainByName } from '@/lib/parsers/companyDomainResolver';
 import type { AtsSearchConfig } from '@/types';
-
-const execFileP = promisify(execFile);
 
 const TOKENS_BASE =
   'https://raw.githubusercontent.com/kalil0321/ats-scrapers/main/ats-companies';
-const CLEARBIT_SUGGEST = 'https://autocomplete.clearbit.com/v1/companies/suggest';
 const UA = 'PortalAtsParser/1.0 (+https://wemd.io)';
 const REQUEST_TIMEOUT_MS = 15_000;
 const SUPPORTED = ['greenhouse', 'lever', 'ashby'];
@@ -60,26 +55,6 @@ async function fetchText(url: string): Promise<string> {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.text();
-}
-
-// Clearbit's WAF blocks node/undici by TLS fingerprint but lets curl through.
-async function clearbitDomain(name: string): Promise<string> {
-  const url = `${CLEARBIT_SUGGEST}?query=${encodeURIComponent(name)}`;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const { stdout } = await execFileP(
-        'curl',
-        ['-sS', '--max-time', '15', '-H', 'Accept: application/json', url],
-        { timeout: 20_000, maxBuffer: 1024 * 1024 },
-      );
-      const domain = pickDomainFromSuggestions(name, JSON.parse(stdout));
-      if (domain) return domain;
-    } catch {
-      /* transient curl/parse failure — retry once */
-    }
-    if (attempt === 0) await sleep(400);
-  }
-  return '';
 }
 
 export async function runAtsParserJob(jobId: string): Promise<void> {
@@ -175,7 +150,7 @@ export async function runAtsParserJob(jobId: string): Promise<void> {
       const lead = leads[i];
       lead.domain = domainFromJobUrls(lead.job_urls);
       if (!lead.domain && enrich) {
-        lead.domain = await clearbitDomain(lead.company);
+        lead.domain = await resolveCompanyDomainByName(lead.company);
         await sleep(ENRICH_DELAY_MS);
       }
       if ((i + 1) % 20 === 0 || i === leads.length - 1) {
