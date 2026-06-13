@@ -47,6 +47,12 @@ export function normalizeJob(
   job: unknown,
   ctx?: { slug?: string; companyName?: string },
 ): AtsNormalizedJob | null;
+export function normalizeGreenhouseJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
+export function normalizeLeverJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
+export function normalizeAshbyJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
+export function normalizeWorkableJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
+export function normalizeBamboohrJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
+export function normalizeRecruiteeJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
 export function parseCompanyCsv(text: string): AtsCompanyToken[];
 export function buildCompanyLeads(jobs: AtsNormalizedJob[]): AtsLead[];
 export function domainFromJobUrls(jobUrls: string[]): string;

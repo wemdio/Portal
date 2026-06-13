@@ -27,6 +27,7 @@ Live table of contents. AI updates this every time a new page is created or a pa
 
 _Per-question deep-dives. Format: `YYYY-MM-DD-<topic>.md`._
 
+- [analyses/2026-06-11-dataset-objectivity-audit.md](./analyses/2026-06-11-dataset-objectivity-audit.md) — аудит перед фичей campaign-insights: sent-горизонт ~90 дней, зомби-кампании, дубли автоответов 20%, метки исходов 30–38%, гейты честной фичи, приоритетные фиксы
 - [analyses/2026-06-05-instantly-top-research-questions.md](./analyses/2026-06-05-instantly-top-research-questions.md) — pass по research brief: copy features, length, CTA, follow-ups, v2 data gaps
 
 ## Campaigns
