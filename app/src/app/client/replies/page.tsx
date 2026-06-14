@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useState, useEffect, useCallback, useRef, Suspense } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -549,24 +549,50 @@ function RepliesPageContent() {
     router.replace('/client/replies');
   }, [router]);
 
+  // Монотонный счётчик загрузок: если за время ретраев пользователь сменил
+  // фильтр/страницу (стартовал новый load), устаревший ответ не должен
+  // перетереть свежие данные.
+  const loadSeq = useRef(0);
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError('');
-    try {
-      const params = new URLSearchParams();
-      params.set('limit', String(LIMIT));
-      params.set('offset', String(offset));
-      if (status !== 'all') params.set('status', status);
-      if (query) params.set('search', query);
-      const data = await clientApiFetch<LeadsResponse>(
-        `/replies?${params.toString()}`,
-      );
-      setLeads(data.items);
-      setTotal(data.total);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка загрузки');
-    } finally {
-      setLoading(false);
+
+    const params = new URLSearchParams();
+    params.set('limit', String(LIMIT));
+    params.set('offset', String(offset));
+    if (status !== 'all') params.set('status', status);
+    if (query) params.set('search', query);
+    const path = `/replies?${params.toString()}`;
+
+    // «Ответы» тянутся живьём из Instantly по каждой кампании. Под общим
+    // рейтлимитом воркспейса медленный вызов упирается в серверный дедлайн, и
+    // если так упали ВСЕ кампании — роут отдаёт 502. Это транзиентно: повтор
+    // обычно проходит (а уже успевшие кампании отдаются из серверного кэша, так
+    // что ретрай почти не добавляет нагрузки). Поэтому НЕ показываем ошибку на
+    // первом сбое — прозрачно повторяем, оставляя «Загрузка…», и ругаемся
+    // только если не вышло за несколько попыток.
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      try {
+        const data = await clientApiFetch<LeadsResponse>(path);
+        if (seq !== loadSeq.current) return; // нас уже сменил более свежий load
+        setLeads(data.items);
+        setTotal(data.total);
+        setError('');
+        setLoading(false);
+        return;
+      } catch (err) {
+        if (seq !== loadSeq.current) return;
+        if (attempt === MAX_ATTEMPTS) {
+          setError(err instanceof Error ? err.message : 'Ошибка загрузки');
+          setLoading(false);
+          return;
+        }
+        // Бэкофф перед повтором — даём рейтлимиту/медленному вызову прийти в себя.
+        await new Promise((r) => setTimeout(r, 2000 * attempt));
+      }
     }
   }, [offset, status, query]);
 

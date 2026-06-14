@@ -1,6 +1,7 @@
 /** @jest-environment node */
 
 import {
+  dedupeEngHiringVacanciesByCompany,
   dedupeEngHiringVacancies,
   dedupeEngHiringRowsBySourceJobId,
   mergeEngHiringVacancyDetail,
@@ -83,6 +84,38 @@ describe('engHiring parser normalizer', () => {
       salary_to: 160000,
       salary_currency: 'USD',
       country_code: 'us',
+    });
+  });
+
+  it('extracts labelled annual salaries instead of incidental HTML numbers', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'greenhouse',
+      {
+        id: 6011715004,
+        title: 'Partnership Manager, Field',
+        company_name: 'Edmentum',
+        location: { name: 'United States' },
+        absolute_url: 'https://job-boards.greenhouse.io/edmentum/jobs/6011715004',
+        updated_at: '2026-06-13T17:50:07Z',
+        content: `
+          <div class="content-intro">
+            <p><strong>WHO WE ARE</strong></p>
+            <p>Edmentum is a dynamic educator and student-focused company dedicated to tech-enabled learning solutions.</p>
+          </div>
+          <h3>Who You Are</h3>
+          <ul><li>You bring 4-6 years of experience in sales or customer-facing roles.</li></ul>
+          <p>Total OTE ~$200K</p>
+          <div class="pay-range"><span>$95,000</span><span>&mdash;</span><span>$105,000 USD</span></div>
+        `,
+      },
+      { slug: 'edmentum', companyName: 'Edmentum' },
+    );
+
+    expect(vacancy).toMatchObject({
+      salary_from: 95000,
+      salary_to: 105000,
+      salary_currency: 'USD',
+      company_description: expect.stringContaining('Edmentum is a dynamic educator'),
     });
   });
 
@@ -342,6 +375,42 @@ describe('engHiring cache filtering', () => {
     }, config)).toBe(true);
   });
 
+  it('keeps b2b manager searches focused on sales titles instead of description-only noise', () => {
+    const config: EngHiringSearchConfig = {
+      text: 'b2b manager',
+      sources: ['greenhouse'],
+      countries: ['us'],
+      posted_within_days: 30,
+      now: '2026-06-11T00:00:00.000Z',
+    };
+
+    expect(matchesEngHiringVacancy({
+      ...base,
+      vacancy_title: 'Sales Development Representative',
+      vacancy_description: 'Own B2B outbound pipeline.',
+    }, config)).toBe(true);
+    expect(matchesEngHiringVacancy({
+      ...base,
+      vacancy_title: 'Senior Director, Partnerships',
+      vacancy_description: 'Own strategic partnerships with enterprise accounts.',
+    }, config)).toBe(true);
+    expect(matchesEngHiringVacancy({
+      ...base,
+      vacancy_title: 'Prescribing Nurse Practitioner or Physician Assistant',
+      vacancy_description: 'Partners with business development and revenue teams.',
+    }, config)).toBe(false);
+    expect(matchesEngHiringVacancy({
+      ...base,
+      vacancy_title: 'Senior Revenue Manager',
+      vacancy_description: 'Works with B2B sales leadership on reporting.',
+    }, config)).toBe(false);
+    expect(matchesEngHiringVacancy({
+      ...base,
+      vacancy_title: 'Sr. Field Marketing Event Manager',
+      vacancy_description: 'Supports B2B go-to-market events.',
+    }, config)).toBe(false);
+  });
+
   it('deduplicates vacancies by source and source_job_id', () => {
     const rows = dedupeEngHiringVacancies([
       base,
@@ -364,5 +433,43 @@ describe('engHiring cache filtering', () => {
       { source: 'workable', source_job_id: 'dup', vacancy_title: 'First' },
       { source: 'workable', source_job_id: 'unique', vacancy_title: 'Unique' },
     ]);
+  });
+
+  it('deduplicates result rows to the best sales vacancy per company', () => {
+    const rows = dedupeEngHiringVacanciesByCompany([
+      {
+        ...base,
+        source_job_id: 'job-revenue',
+        vacancy_title: 'Senior Revenue Manager',
+        vacancy_description: 'Works with B2B sales reporting.',
+        salary_from: null,
+        salary_to: null,
+      },
+      {
+        ...base,
+        source_job_id: 'job-ae',
+        vacancy_title: 'Enterprise Account Executive',
+        vacancy_description: 'Own enterprise B2B sales pipeline.',
+        salary_from: 120000,
+        salary_to: 180000,
+      },
+      {
+        ...base,
+        source_job_id: 'job-other',
+        company_name: 'OtherCo',
+        source_company_slug: 'otherco',
+        vacancy_title: 'Business Development Manager',
+      },
+    ], { text: 'b2b manager' });
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      company_name: 'Acme',
+      vacancy_title: 'Enterprise Account Executive',
+    });
+    expect(rows[1]).toMatchObject({
+      company_name: 'OtherCo',
+      vacancy_title: 'Business Development Manager',
+    });
   });
 });

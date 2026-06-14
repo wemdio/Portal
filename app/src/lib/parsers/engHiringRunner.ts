@@ -2,6 +2,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { extractJobs, parseCompanyCsv, postingsUrl } from '@/lib/jobs/atsCompanyParser';
 import {
   ENG_HIRING_SOURCES,
+  dedupeEngHiringVacanciesByCompany,
   dedupeEngHiringVacancies,
   dedupeEngHiringRowsBySourceJobId,
   mergeEngHiringVacancyDetail,
@@ -278,6 +279,7 @@ function rowNeedsDetail(row: CacheRow): boolean {
 async function updateCacheDetail(db: Db, row: CacheRow): Promise<void> {
   const patch = {
     company_site_url: row.company_site_url,
+    company_description: row.company_description,
     vacancy_description: row.vacancy_description,
     salary_from: row.salary_from,
     salary_to: row.salary_to,
@@ -424,7 +426,10 @@ async function loadMatchingCacheRows(db: Db, config: EngHiringSearchConfig): Pro
     if (rows.length < 1000) break;
   }
 
-  return dedupeEngHiringVacancies(out).map((row) => row as CacheRow);
+  const uniqueRows = dedupeEngHiringVacancies(out).map((row) => row as CacheRow);
+  return config.dedupe_companies === false
+    ? uniqueRows
+    : dedupeEngHiringVacanciesByCompany(uniqueRows, config);
 }
 
 async function enrichSelectedRows(

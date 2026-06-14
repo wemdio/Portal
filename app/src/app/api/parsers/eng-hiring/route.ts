@@ -72,6 +72,7 @@ function sanitizeConfig(raw: Partial<EngHiringSearchConfig>): EngHiringSearchCon
     cache_max_age_hours: cacheMaxAgeHours,
     refresh_cache: raw.refresh_cache !== false,
     enrich: raw.enrich !== false,
+    dedupe_companies: raw.dedupe_companies !== false,
   };
 }
 
