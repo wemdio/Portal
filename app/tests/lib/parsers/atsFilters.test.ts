@@ -20,6 +20,14 @@ describe('atsFilters — role keywords', () => {
     expect(re.test('C++ Developer')).toBe(true);
   });
 
+  it('expands b2b searches into common sales titles without matching generic managers', () => {
+    const re = buildRolesRegex('b2b manager');
+    expect(re.test('Enterprise Account Executive')).toBe(true);
+    expect(re.test('Business Development Manager')).toBe(true);
+    expect(re.test('Sales Manager')).toBe(true);
+    expect(re.test('Engineering Manager')).toBe(false);
+  });
+
   it('empty input matches anything (no role filter)', () => {
     expect(buildRolesRegex('').test('Anything')).toBe(true);
     expect(buildRolesRegex('   ').test('Whatever')).toBe(true);

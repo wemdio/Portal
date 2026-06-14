@@ -3,6 +3,7 @@ import { extractJobs, parseCompanyCsv, postingsUrl } from '@/lib/jobs/atsCompany
 import {
   ENG_HIRING_SOURCES,
   dedupeEngHiringVacancies,
+  dedupeEngHiringRowsBySourceJobId,
   mergeEngHiringVacancyDetail,
   matchesEngHiringVacancy,
   normalizeAtsJobToEngVacancy,
@@ -179,9 +180,10 @@ function toResultRow(jobId: string, v: CacheRow) {
 
 async function upsertCacheBatch(db: Db, rows: ReturnType<typeof toCacheRow>[]) {
   if (rows.length === 0) return;
+  const uniqueRows = dedupeEngHiringRowsBySourceJobId(rows);
   const { error } = await db
     .from('eng_hiring_cache')
-    .upsert(rows, { onConflict: 'source,source_job_id' });
+    .upsert(uniqueRows, { onConflict: 'source,source_job_id' });
   if (error) throw new Error(`cache upsert failed: ${error.message}`);
 }
 

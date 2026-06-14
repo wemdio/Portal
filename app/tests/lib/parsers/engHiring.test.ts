@@ -2,6 +2,7 @@
 
 import {
   dedupeEngHiringVacancies,
+  dedupeEngHiringRowsBySourceJobId,
   mergeEngHiringVacancyDetail,
   matchesEngHiringVacancy,
   normalizeAtsJobToEngVacancy,
@@ -82,6 +83,32 @@ describe('engHiring parser normalizer', () => {
       salary_to: 160000,
       salary_currency: 'USD',
       country_code: 'us',
+    });
+  });
+
+  it('ignores Ashby compensation numbers that cannot fit database integer salary columns', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'ashby',
+      {
+        id: 'ash-overflow',
+        title: 'B2B Sales Manager',
+        location: 'New York, NY',
+        address: { postalAddress: { addressCountry: 'United States' } },
+        publishedAt: '2026-06-03T08:00:00.000Z',
+        jobUrl: 'https://jobs.ashbyhq.com/acme/ash-overflow',
+        compensation: {
+          minValue: '1704543826218730000',
+          maxValue: '1704543826218730000',
+          currencyCode: 'USD',
+        },
+      },
+      { slug: 'acme', companyName: 'Acme Ltd' },
+    );
+
+    expect(vacancy).toMatchObject({
+      salary_from: null,
+      salary_to: null,
+      salary_currency: null,
     });
   });
 
@@ -324,5 +351,18 @@ describe('engHiring cache filtering', () => {
 
     expect(rows).toHaveLength(2);
     expect(rows.map((row) => row.source_job_id)).toEqual(['job-1', 'job-2']);
+  });
+
+  it('deduplicates cache upsert batches by source and source_job_id', () => {
+    const rows = dedupeEngHiringRowsBySourceJobId([
+      { source: 'workable' as const, source_job_id: 'dup', vacancy_title: 'First' },
+      { source: 'workable' as const, source_job_id: 'dup', vacancy_title: 'Second' },
+      { source: 'workable' as const, source_job_id: 'unique', vacancy_title: 'Unique' },
+    ]);
+
+    expect(rows).toEqual([
+      { source: 'workable', source_job_id: 'dup', vacancy_title: 'First' },
+      { source: 'workable', source_job_id: 'unique', vacancy_title: 'Unique' },
+    ]);
   });
 });
