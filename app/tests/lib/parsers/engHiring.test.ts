@@ -5,9 +5,26 @@ import {
   mergeEngHiringVacancyDetail,
   matchesEngHiringVacancy,
   normalizeAtsJobToEngVacancy,
+  resolveEngHiringCompaniesLimit,
   type EngHiringSearchConfig,
   type EngHiringVacancy,
 } from '@/lib/parsers/engHiring';
+
+describe('engHiring coverage limits', () => {
+  it('keeps the default scan bounded for normal runs', () => {
+    expect(resolveEngHiringCompaniesLimit(undefined, { defaultLimit: 1000, maxCoverageLimit: 25000 })).toBe(1000);
+    expect(resolveEngHiringCompaniesLimit('1500', { defaultLimit: 1000, maxCoverageLimit: 25000 })).toBe(1500);
+  });
+
+  it('treats 0 or negative values as maximum known-board coverage', () => {
+    expect(resolveEngHiringCompaniesLimit(0, { defaultLimit: 1000, maxCoverageLimit: 25000 })).toBe(25000);
+    expect(resolveEngHiringCompaniesLimit(-1, { defaultLimit: 1000, maxCoverageLimit: 25000 })).toBe(25000);
+  });
+
+  it('caps explicit huge values at the maximum coverage safety limit', () => {
+    expect(resolveEngHiringCompaniesLimit(999999, { defaultLimit: 1000, maxCoverageLimit: 25000 })).toBe(25000);
+  });
+});
 
 describe('engHiring parser normalizer', () => {
   it('normalizes Greenhouse jobs into HH-like vacancy rows', () => {
