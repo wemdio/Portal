@@ -44,12 +44,17 @@ class Command(BaseCommand):
     def handle(self, *args, **opts):
         user_id = opts['user_id']
 
-        account = Account.objects.filter(user_id=user_id).first()
-        if account is None:
-            raise CommandError(
-                f'Нет li2_accounts для user_id={user_id}. Сначала создай и запусти '
-                'кампанию в UI (это создаёт строку аккаунта), потом засевай сессию.'
-            )
+        # Upsert строки аккаунта: засев можно делать ДО первого старта кампании
+        # (status='stopped' — демон её не трогает, пока кампания не запущена).
+        # /start позже сделает upsert по user_id и переведёт в 'running'.
+        account, created = Account.objects.get_or_create(
+            user_id=user_id,
+            defaults={'status': 'stopped', 'runtime_status': 'idle'},
+        )
+        if created:
+            self.stdout.write(self.style.NOTICE(
+                f'Создал строку li2_accounts для user_id={user_id} (status=stopped).'
+            ))
 
         raw_proxy = opts['proxy']
         if raw_proxy is None:
