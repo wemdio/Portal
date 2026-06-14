@@ -6,6 +6,7 @@ import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { filterAllowedIds, getResourceInstantlyAccountId, type ClientAccessRow } from '@/lib/clientAccess';
 import { listEmails } from '@/lib/instantly/client';
+import { InstantlyApiError } from '@/lib/instantly/errors';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
 import { cached } from '@/lib/clientCache';
@@ -141,14 +142,30 @@ async function readReplyItems(
         cacheKey,
         () =>
           withDeadline(campaignId, REPLIES_CAMPAIGN_DEADLINE_MS, async () => {
-            const data = await listEmails({
-              campaign_id: campaignId,
-              // См. комментарий в /campaigns/[id]/replies/route.ts: правильный
-              // параметр — `email_type`, не `ue_type`.
-              email_type: 'received',
-              limit: REPLIES_PER_CAMPAIGN,
-              search,
-            }, { accountId });
+            let data: Awaited<ReturnType<typeof listEmails>>;
+            try {
+              data = await listEmails({
+                campaign_id: campaignId,
+                // См. комментарий в /campaigns/[id]/replies/route.ts: правильный
+                // параметр — `email_type`, не `ue_type`.
+                email_type: 'received',
+                limit: REPLIES_PER_CAMPAIGN,
+                search,
+              }, { accountId });
+            } catch (err) {
+              // Кампания удалена в Instantly (404 Campaign not found), но осталась
+              // в доступах клиента — у неё ноль ответов. Возвращаем пусто, а НЕ
+              // роняем кампанию в failures: иначе клиент, у которого все старые
+              // кампании удалены (как cheesemall — 2 кампании, обе 404), видит
+              // «Не удалось загрузить ответы» вместо пустого инбокса. Пустой
+              // результат ещё и кэшируется → перестаём дёргать мёртвую кампанию
+              // каждую загрузку. Реальные ошибки (5xx, сеть, дедлайн) пробрасываем
+              // — они должны считаться сбоем.
+              if (err instanceof InstantlyApiError && err.status === 404) {
+                return [] as LeadListItem[];
+              }
+              throw err;
+            }
 
             return (data.items ?? []).map((email) => {
               const reply = mapInstantlyEmailToReply(email);

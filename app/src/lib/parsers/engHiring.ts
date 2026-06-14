@@ -8,12 +8,27 @@ import { ATS_COUNTRIES, buildCountryRegex, buildRolesRegex } from '@/lib/parsers
 export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee';
 
 export const ENG_HIRING_SOURCES: EngHiringSource[] = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee'];
+export const DEFAULT_ENG_HIRING_COMPANIES_LIMIT = 1000;
+export const DEFAULT_ENG_HIRING_MAX_COVERAGE_LIMIT = 25000;
+
+export function resolveEngHiringCompaniesLimit(
+  value: unknown,
+  options: { defaultLimit?: number; maxCoverageLimit?: number } = {},
+): number {
+  const defaultLimit = Math.max(1, Math.trunc(options.defaultLimit ?? DEFAULT_ENG_HIRING_COMPANIES_LIMIT));
+  const maxCoverageLimit = Math.max(defaultLimit, Math.trunc(options.maxCoverageLimit ?? DEFAULT_ENG_HIRING_MAX_COVERAGE_LIMIT));
+  const parsed = Number(value ?? defaultLimit);
+  if (!Number.isFinite(parsed)) return defaultLimit;
+  if (parsed <= 0) return maxCoverageLimit;
+  return Math.min(maxCoverageLimit, Math.max(1, Math.trunc(parsed)));
+}
 
 export interface EngHiringSearchConfig {
   text?: string;
   sources?: EngHiringSource[];
   countries?: string[];
   posted_within_days?: number;
+  /** 0 means maximum known-board coverage, capped by the server safety limit. */
   companies_limit?: number;
   max_results?: number;
   cache_max_age_hours?: number;

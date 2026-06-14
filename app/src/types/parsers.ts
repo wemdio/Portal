@@ -218,7 +218,7 @@ export interface EngHiringSearchConfig {
   countries?: string[];
   /** Keep only postings newer than this many days (0/undefined = any). */
   posted_within_days?: number;
-  /** Companies scanned per source (0 = max server-side cap). */
+  /** Companies scanned per source (0 = maximum known-board coverage, capped server-side). */
   companies_limit?: number;
   /** Result cap after filtering. */
   max_results?: number;
