@@ -1,5 +1,6 @@
 import {
   careersUrl,
+  companyDedupKey,
   domainFromJobUrls,
   normalizeJob,
 } from '@/lib/jobs/atsCompanyParser';
@@ -34,6 +35,8 @@ export interface EngHiringSearchConfig {
   cache_max_age_hours?: number;
   refresh_cache?: boolean;
   enrich?: boolean;
+  /** Default true: output one best matching vacancy row per company. */
+  dedupe_companies?: boolean;
   now?: string;
 }
 
@@ -90,6 +93,14 @@ const COUNTRY_NAME_BY_CODE: Record<string, string> = {
 };
 
 const MAX_DB_INTEGER = 2_147_483_647;
+const MIN_ANNUAL_SALARY = 20_000;
+const MAX_ANNUAL_SALARY = 2_000_000;
+
+const B2B_TITLE_STRONG_RE =
+  /\b(account executive|account manager|business development(?: representative| manager| director| lead)?|sales development(?: representative| manager| lead)?|sales representative|sales manager|sales director|sales executive|sales lead|enterprise sales|commercial account|commercial relationship manager|channel sales|partnerships? manager|partnerships? director|partnership sales|partner manager|(?:manager|director|vp|head|lead),?\s+(?:of\s+)?partnerships?|\bsdr\b|\bbdr\b|go[-\s]?to[-\s]?market|\bgtm\b)\b/i;
+
+const B2B_TITLE_EXCLUDE_RE =
+  /\b(psychiatrist|nurse|physician|clinical|therapist|engineer|engineering|developer|designer|product manager|program manager|project manager|field marketing|marketing event|content|community|people|hr|recruit|talent acquisition|finance|accounting|legal|operations|data scientist|security|customer support|technical support|teacher|warehouse|manufacturing|tax|audit|compliance|analyst|scrum master|assistant|administrator)\b/i;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -123,6 +134,13 @@ function numberValue(value: unknown): number | null {
   return rounded;
 }
 
+function salaryNumberValue(value: unknown): number | null {
+  const rounded = numberValue(value);
+  if (rounded == null) return null;
+  if (rounded < MIN_ANNUAL_SALARY || rounded > MAX_ANNUAL_SALARY) return null;
+  return rounded;
+}
+
 function cleanHtml(value: unknown): string {
   return String(value ?? '')
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -150,14 +168,17 @@ function cleanPlainText(value: unknown): string {
 
 function firstNumber(record: Record<string, unknown>, keys: string[]): number | null {
   for (const key of keys) {
-    const value = numberValue(record[key]);
+    const value = salaryNumberValue(record[key]);
     if (value != null) return value;
   }
   return null;
 }
 
 function parseSalaryString(value: string): { from: number | null; to: number | null; currency: string | null } {
-  const text = value.trim();
+  const text = value
+    .replace(/&mdash;|&ndash;|â€”|â€“|—|–/g, ' - ')
+    .replace(/\bto\b/gi, ' - ')
+    .trim();
   if (!text) return { from: null, to: null, currency: null };
   const currency =
     /\bUSD\b|\$/.test(text) ? 'USD'
@@ -170,10 +191,18 @@ function parseSalaryString(value: string): { from: number | null; to: number | n
       if (!Number.isFinite(base)) return null;
       return Math.round(base * (m[2] ? 1000 : 1));
     })
-    .filter((n): n is number => n != null && n > 0 && n <= MAX_DB_INTEGER);
+    .filter((n): n is number => n != null && n >= MIN_ANNUAL_SALARY && n <= MAX_ANNUAL_SALARY);
   if (nums.length === 0) return { from: null, to: null, currency: null };
   if (nums.length === 1) return { from: nums[0], to: null, currency };
-  return { from: Math.min(nums[0], nums[1]), to: Math.max(nums[0], nums[1]), currency };
+  const pairs = nums.slice(0, -1).map((from, index) => {
+    const to = nums[index + 1];
+    const low = Math.min(from, to);
+    const high = Math.max(from, to);
+    return { low, high, spread: high - low, index };
+  });
+  pairs.sort((a, b) => a.spread - b.spread || a.index - b.index);
+  const best = pairs[0];
+  return { from: best.low, to: best.high, currency };
 }
 
 function extractNestedString(record: Record<string, unknown>, path: string[]): string {
@@ -216,6 +245,54 @@ function extractDescription(raw: unknown): string | null {
     if (text) return text;
   }
   return null;
+}
+
+function compactText(value: string, maxLength = 420): string {
+  const text = value.replace(/\s+/g, ' ').trim();
+  if (text.length <= maxLength) return text;
+  const clipped = text.slice(0, maxLength);
+  const sentenceEnd = Math.max(clipped.lastIndexOf('. '), clipped.lastIndexOf('! '), clipped.lastIndexOf('? '));
+  return `${clipped.slice(0, sentenceEnd > 120 ? sentenceEnd + 1 : maxLength).trim()}...`;
+}
+
+function stripCompanyIntroHeading(text: string, companyName?: string): string {
+  const escapedCompany = String(companyName ?? '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const companyHeading = escapedCompany ? `about\\s+${escapedCompany}` : "about\\s+[a-z0-9& .\\-']+";
+  return text
+    .replace(new RegExp(`^(?:${companyHeading}|who we are|about us|company overview)\\s*[:\\-]?\\s*`, 'i'), '')
+    .trim();
+}
+
+function extractCompanyIntroFromDescription(description: string | null, companyName?: string): string | null {
+  if (!description) return null;
+  const withoutHeading = stripCompanyIntroHeading(description, companyName);
+  const boundary = withoutHeading.search(
+    /\b(role overview|what you(?:'|')?ll do|about the job|about the team|the role|responsibilities|key responsibilities|who you are|requirements|qualifications|benefits|compensation)\b/i,
+  );
+  const intro = boundary >= 80 ? withoutHeading.slice(0, boundary) : withoutHeading;
+  const compact = compactText(stripCompanyIntroHeading(intro, companyName));
+  return compact.length >= 40 ? compact : null;
+}
+
+function extractCompanyDescription(raw: unknown, vacancyDescription: string | null, companyName?: string): string | null {
+  const record = asRecord(raw);
+  if (record) {
+    const candidates = [
+      record.company_description,
+      record.companyDescription,
+      record.company_summary,
+      record.companySummary,
+      extractNestedString(record, ['company', 'description']),
+      extractNestedString(record, ['organization', 'description']),
+      extractNestedString(record, ['department', 'description']),
+    ];
+    for (const candidate of candidates) {
+      const text = compactText(cleanPlainText(candidate));
+      if (text.length >= 40) return text;
+    }
+  }
+
+  return extractCompanyIntroFromDescription(vacancyDescription, companyName);
 }
 
 function extractSalaryFromDescription(description: string | null): { from: number | null; to: number | null; currency: string | null } {
@@ -334,6 +411,17 @@ export function inferCountryCode(location?: string | null, country?: string | nu
   return null;
 }
 
+function isB2BRoleSearch(text?: string | null): boolean {
+  return /\bb2b\b/i.test(text ?? '');
+}
+
+export function isHighIntentB2BSalesTitle(title: string): boolean {
+  const cleanTitle = cleanPlainText(title);
+  if (!B2B_TITLE_STRONG_RE.test(cleanTitle)) return false;
+  if (B2B_TITLE_EXCLUDE_RE.test(cleanTitle)) return false;
+  return true;
+}
+
 export function normalizeAtsJobToEngVacancy(
   source: EngHiringSource,
   raw: unknown,
@@ -348,6 +436,7 @@ export function normalizeAtsJobToEngVacancy(
   const domain = domainFromJobUrls([normalized.url]);
   const countryCode = inferCountryCode(normalized.location, normalized.country);
   const description = extractDescription(raw);
+  const companyDescription = extractCompanyDescription(raw, description, normalized.company);
   const salary = extractSalary(raw);
 
   return {
@@ -356,7 +445,7 @@ export function normalizeAtsJobToEngVacancy(
     source_job_id: sourceJobId,
     company_name: normalized.company,
     company_site_url: domain ? `https://${domain}` : null,
-    company_description: null,
+    company_description: companyDescription,
     vacancy_title: normalized.title,
     vacancy_description: description,
     vacancy_url: normalized.url,
@@ -375,12 +464,14 @@ export function normalizeAtsJobToEngVacancy(
 
 export function mergeEngHiringVacancyDetail(vacancy: EngHiringVacancy, detailRaw: unknown): EngHiringVacancy {
   const description = extractDescription(detailRaw);
+  const companyDescription = extractCompanyDescription(detailRaw, description, vacancy.company_name);
   const salary = extractSalary(detailRaw);
   const domain = domainFromJobUrls([vacancy.vacancy_url, firstString(asRecord(detailRaw) ?? {}, ['absolute_url', 'hostedUrl', 'jobUrl'])]);
 
   return {
     ...vacancy,
     company_site_url: vacancy.company_site_url ?? (domain ? `https://${domain}` : null),
+    company_description: vacancy.company_description ?? companyDescription,
     vacancy_description: vacancy.vacancy_description ?? description,
     salary_from: vacancy.salary_from ?? salary.from,
     salary_to: vacancy.salary_to ?? salary.to,
@@ -393,9 +484,13 @@ export function matchesEngHiringVacancy(vacancy: EngHiringVacancy, config: EngHi
   const sources = config.sources?.length ? config.sources : ENG_HIRING_SOURCES;
   if (!sources.includes(vacancy.source)) return false;
 
-  const roleRegex = buildRolesRegex(config.text);
-  const roleHaystack = `${vacancy.vacancy_title} ${vacancy.vacancy_description ?? ''}`;
-  if (!roleRegex.test(roleHaystack)) return false;
+  if (isB2BRoleSearch(config.text)) {
+    if (!isHighIntentB2BSalesTitle(vacancy.vacancy_title)) return false;
+  } else {
+    const roleRegex = buildRolesRegex(config.text);
+    const roleHaystack = `${vacancy.vacancy_title} ${vacancy.vacancy_description ?? ''}`;
+    if (!roleRegex.test(roleHaystack)) return false;
+  }
 
   if (config.countries?.length) {
     const wanted = new Set(config.countries.map((c) => c.toLowerCase()));
@@ -417,6 +512,58 @@ export function matchesEngHiringVacancy(vacancy: EngHiringVacancy, config: EngHi
   }
 
   return true;
+}
+
+function parsedTime(value: string | null | undefined): number {
+  if (!value) return 0;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function scoreEngHiringVacancy(vacancy: EngHiringVacancy, config: Pick<EngHiringSearchConfig, 'text'> = {}): number {
+  let score = 0;
+  const title = vacancy.vacancy_title;
+  if (isB2BRoleSearch(config.text)) {
+    if (isHighIntentB2BSalesTitle(title)) score += 1000;
+  } else {
+    const roleRegex = buildRolesRegex(config.text);
+    if (roleRegex.test(title)) score += 500;
+    if (vacancy.vacancy_description && roleRegex.test(vacancy.vacancy_description)) score += 100;
+  }
+  if (vacancy.salary_from != null || vacancy.salary_to != null) score += 40;
+  if (vacancy.salary_from != null && vacancy.salary_to != null) score += 10;
+  if (vacancy.company_site_url) score += 20;
+  if (vacancy.company_description) score += 15;
+  if (vacancy.vacancy_description) score += 10;
+  score += Math.min(9, Math.floor(parsedTime(vacancy.published_at) / 100_000_000_000));
+  return score;
+}
+
+function engHiringCompanyKey(vacancy: EngHiringVacancy): string {
+  const companyKey = companyDedupKey(vacancy.company_name);
+  if (companyKey) return companyKey;
+  const slugKey = `${vacancy.source}:${vacancy.source_company_slug}`.toLowerCase();
+  return slugKey || `${vacancy.source}:${vacancy.source_job_id}`.toLowerCase();
+}
+
+export function dedupeEngHiringVacanciesByCompany<T extends EngHiringVacancy>(
+  vacancies: T[],
+  config: Pick<EngHiringSearchConfig, 'text'> = {},
+): T[] {
+  const byCompany = new Map<string, T>();
+  for (const vacancy of vacancies) {
+    const key = engHiringCompanyKey(vacancy);
+    const existing = byCompany.get(key);
+    if (!existing || scoreEngHiringVacancy(vacancy, config) > scoreEngHiringVacancy(existing, config)) {
+      byCompany.set(key, vacancy);
+    }
+  }
+
+  return [...byCompany.values()].sort((a, b) => {
+    const scoreDelta = scoreEngHiringVacancy(b, config) - scoreEngHiringVacancy(a, config);
+    if (scoreDelta !== 0) return scoreDelta;
+    return parsedTime(b.published_at) - parsedTime(a.published_at);
+  });
 }
 
 export function dedupeEngHiringVacancies(vacancies: EngHiringVacancy[]): EngHiringVacancy[] {

@@ -230,6 +230,14 @@ describe('atsCompanyParser — domain helpers', () => {
     expect(domain).toBe('replit.com');
     expect(pickDomainFromSuggestions('Whatever', [])).toBe('');
   });
+
+  it('does not fall back to a non-exact Clearbit suggestion', () => {
+    const domain = pickDomainFromSuggestions('Engine', [
+      { name: 'Engineers Edge', domain: 'engineersedge.com' },
+    ]);
+
+    expect(domain).toBe('');
+  });
 });
 
 describe('atsCompanyParser — CSV parsing & export', () => {
