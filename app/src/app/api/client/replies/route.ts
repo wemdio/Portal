@@ -27,7 +27,11 @@ const REPLIES_PER_CAMPAIGN = 100;
 //      ответ возвращается с тем, что успело прийти (partial вместо зависания).
 //   2. Кэш на кампанию (stale-while-revalidate) — повторные/общие загрузки
 //      мгновенные и резко снижают число обращений к Instantly (а значит и 429).
-const REPLIES_CAMPAIGN_DEADLINE_MS = 12_000;
+// Дедлайн 15с (не 12): под рейтлимитом вызов делает 429→backoff 4с→429→backoff
+// 8с→успех ≈ на 13-14с. С 12с он не успевал и падал в DeadlineError (→ 502 у
+// клиента с малым числом кампаний, все упали разом). 15с даёт ему дойти, но всё
+// ещё далеко от прокси-таймаута. Клиент вдобавок прозрачно ретраит (см. page.tsx).
+const REPLIES_CAMPAIGN_DEADLINE_MS = 15_000;
 const REPLIES_CAMPAIGN_TTL_MS = 120_000;
 
 type LeadSource = 'reply';

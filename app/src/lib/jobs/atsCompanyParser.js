@@ -348,12 +348,13 @@ function buildCompanyLeads(jobs) {
 }
 
 // Picks the best domain from Clearbit autocomplete suggestions: prefer an exact
-// name match (after suffix/punctuation normalization), else the top suggestion.
+// name match (after suffix/punctuation normalization). A non-exact top
+// suggestion is too risky for lead export quality.
 function pickDomainFromSuggestions(name, suggestions) {
   if (!Array.isArray(suggestions) || suggestions.length === 0) return '';
   const key = companyDedupKey(name);
   const exact = suggestions.find((s) => companyDedupKey(s?.name || '') === key);
-  return normalizeWhitespace((exact || suggestions[0])?.domain);
+  return normalizeWhitespace(exact?.domain);
 }
 
 function escapeCsv(value) {

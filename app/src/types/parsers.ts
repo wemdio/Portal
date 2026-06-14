@@ -228,6 +228,8 @@ export interface EngHiringSearchConfig {
   refresh_cache?: boolean;
   /** Resolve missing company domains by company name. */
   enrich?: boolean;
+  /** Default true: output one best matching vacancy row per company. */
+  dedupe_companies?: boolean;
 }
 
 export interface EngHiringParserJob {
