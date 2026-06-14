@@ -2,6 +2,7 @@
 
 import {
   dedupeEngHiringVacancies,
+  dedupeEngHiringRowsBySourceJobId,
   mergeEngHiringVacancyDetail,
   matchesEngHiringVacancy,
   normalizeAtsJobToEngVacancy,
@@ -350,5 +351,18 @@ describe('engHiring cache filtering', () => {
 
     expect(rows).toHaveLength(2);
     expect(rows.map((row) => row.source_job_id)).toEqual(['job-1', 'job-2']);
+  });
+
+  it('deduplicates cache upsert batches by source and source_job_id', () => {
+    const rows = dedupeEngHiringRowsBySourceJobId([
+      { source: 'workable' as const, source_job_id: 'dup', vacancy_title: 'First' },
+      { source: 'workable' as const, source_job_id: 'dup', vacancy_title: 'Second' },
+      { source: 'workable' as const, source_job_id: 'unique', vacancy_title: 'Unique' },
+    ]);
+
+    expect(rows).toEqual([
+      { source: 'workable', source_job_id: 'dup', vacancy_title: 'First' },
+      { source: 'workable', source_job_id: 'unique', vacancy_title: 'Unique' },
+    ]);
   });
 });

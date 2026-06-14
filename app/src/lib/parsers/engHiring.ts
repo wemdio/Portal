@@ -420,13 +420,17 @@ export function matchesEngHiringVacancy(vacancy: EngHiringVacancy, config: EngHi
 }
 
 export function dedupeEngHiringVacancies(vacancies: EngHiringVacancy[]): EngHiringVacancy[] {
+  return dedupeEngHiringRowsBySourceJobId(vacancies);
+}
+
+export function dedupeEngHiringRowsBySourceJobId<T extends { source: EngHiringSource; source_job_id: string }>(rows: T[]): T[] {
   const seen = new Set<string>();
-  const out: EngHiringVacancy[] = [];
-  for (const vacancy of vacancies) {
-    const key = `${vacancy.source}:${vacancy.source_job_id || vacancy.vacancy_url}`.toLowerCase();
+  const out: T[] = [];
+  for (const row of rows) {
+    const key = `${row.source}:${row.source_job_id}`.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(vacancy);
+    out.push(row);
   }
   return out;
 }
