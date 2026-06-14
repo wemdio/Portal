@@ -89,6 +89,8 @@ const COUNTRY_NAME_BY_CODE: Record<string, string> = {
   remote: 'Remote',
 };
 
+const MAX_DB_INTEGER = 2_147_483_647;
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -110,12 +112,15 @@ function firstString(record: Record<string, unknown>, keys: string[]): string {
 }
 
 function numberValue(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value);
-  if (typeof value !== 'string') return null;
-  const cleaned = value.replace(/[^\d.]/g, '');
-  if (!cleaned) return null;
-  const parsed = Number(cleaned);
-  return Number.isFinite(parsed) ? Math.round(parsed) : null;
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string'
+      ? Number(value.replace(/[^\d.]/g, ''))
+      : NaN;
+  if (!Number.isFinite(parsed)) return null;
+  const rounded = Math.round(parsed);
+  if (rounded <= 0 || rounded > MAX_DB_INTEGER) return null;
+  return rounded;
 }
 
 function cleanHtml(value: unknown): string {
@@ -165,8 +170,8 @@ function parseSalaryString(value: string): { from: number | null; to: number | n
       if (!Number.isFinite(base)) return null;
       return Math.round(base * (m[2] ? 1000 : 1));
     })
-    .filter((n): n is number => n != null && n > 0);
-  if (nums.length === 0) return { from: null, to: null, currency };
+    .filter((n): n is number => n != null && n > 0 && n <= MAX_DB_INTEGER);
+  if (nums.length === 0) return { from: null, to: null, currency: null };
   if (nums.length === 1) return { from: nums[0], to: null, currency };
   return { from: Math.min(nums[0], nums[1]), to: Math.max(nums[0], nums[1]), currency };
 }
@@ -262,13 +267,13 @@ function extractSalary(raw: unknown): { from: number | null; to: number | null; 
     const from = firstNumber(c, ['min_value', 'minValue', 'minimum', 'min', 'from', 'salary_min', 'low']);
     const to = firstNumber(c, ['max_value', 'maxValue', 'maximum', 'max', 'to', 'salary_max', 'high']);
     const currency = firstString(c, ['currency', 'currency_code', 'currencyCode']).toUpperCase() || null;
-    if (from != null || to != null || currency) return { from, to, currency };
+    if (from != null || to != null) return { from, to, currency };
   }
 
   const directFrom = firstNumber(record, ['salary_min', 'salaryMin', 'min_salary', 'minSalary']);
   const directTo = firstNumber(record, ['salary_max', 'salaryMax', 'max_salary', 'maxSalary']);
   const directCurrency = firstString(record, ['salary_currency', 'salaryCurrency', 'currency']).toUpperCase() || null;
-  if (directFrom != null || directTo != null || directCurrency) {
+  if (directFrom != null || directTo != null) {
     return { from: directFrom, to: directTo, currency: directCurrency };
   }
 

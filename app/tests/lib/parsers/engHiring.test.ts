@@ -85,6 +85,32 @@ describe('engHiring parser normalizer', () => {
     });
   });
 
+  it('ignores Ashby compensation numbers that cannot fit database integer salary columns', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'ashby',
+      {
+        id: 'ash-overflow',
+        title: 'B2B Sales Manager',
+        location: 'New York, NY',
+        address: { postalAddress: { addressCountry: 'United States' } },
+        publishedAt: '2026-06-03T08:00:00.000Z',
+        jobUrl: 'https://jobs.ashbyhq.com/acme/ash-overflow',
+        compensation: {
+          minValue: '1704543826218730000',
+          maxValue: '1704543826218730000',
+          currencyCode: 'USD',
+        },
+      },
+      { slug: 'acme', companyName: 'Acme Ltd' },
+    );
+
+    expect(vacancy).toMatchObject({
+      salary_from: null,
+      salary_to: null,
+      salary_currency: null,
+    });
+  });
+
   it('merges Greenhouse detail payloads into normalized vacancies', () => {
     const vacancy = normalizeAtsJobToEngVacancy(
       'greenhouse',
