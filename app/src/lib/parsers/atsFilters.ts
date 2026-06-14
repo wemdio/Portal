@@ -49,6 +49,24 @@ export const ATS_RECENCY_OPTIONS: AtsRecencyOption[] = [
 
 export const ATS_COUNTRY_CODES = ATS_COUNTRIES.map((c) => c.code);
 
+const B2B_ROLE_EXPANSION = [
+  'b2b',
+  'business development',
+  'account executive',
+  'sales development',
+  'business development representative',
+  'sales manager',
+  'sales lead',
+  'sales executive',
+  'enterprise sales',
+  'partnerships?',
+  'channel sales',
+  'commercial manager',
+  'revenue manager',
+  'sdr',
+  'bdr',
+];
+
 /** Compile a RegExp matching a job location against selected country codes (null = no geo filter). */
 export function buildCountryRegex(codes?: string[] | null): RegExp | null {
   if (!codes || codes.length === 0) return null;
@@ -65,7 +83,10 @@ export function buildRolesRegex(roles?: string | null): RegExp {
     .split(/[,;\n]+/)
     .map((s) => s.trim())
     .filter(Boolean)
-    .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    .flatMap((s) => {
+      const escaped = s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return /\bb2b\b/i.test(s) ? [escaped, ...B2B_ROLE_EXPANSION] : [escaped];
+    });
   if (parts.length === 0) return /.*/;
   return new RegExp(parts.join('|'), 'i');
 }
