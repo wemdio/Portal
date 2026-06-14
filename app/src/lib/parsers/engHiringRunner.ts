@@ -6,6 +6,7 @@ import {
   mergeEngHiringVacancyDetail,
   matchesEngHiringVacancy,
   normalizeAtsJobToEngVacancy,
+  resolveEngHiringCompaniesLimit,
   type EngHiringSearchConfig,
   type EngHiringSource,
   type EngHiringVacancy,
@@ -18,7 +19,7 @@ const UA = 'PortalEngHiringParser/1.0 (+https://wemd.io)';
 const REQUEST_TIMEOUT_MS = 15_000;
 const LEVER_REQUEST_TIMEOUT_MS = Math.max(3_000, Number(process.env.ENG_HIRING_LEVER_TIMEOUT_MS ?? '8000'));
 const DEFAULT_COMPANIES_LIMIT = 1000;
-const MAX_COMPANIES_LIMIT = Math.max(1000, Number(process.env.ENG_HIRING_MAX_COMPANIES_LIMIT ?? '5000'));
+const MAX_COMPANIES_LIMIT = Math.max(1000, Number(process.env.ENG_HIRING_MAX_COMPANIES_LIMIT ?? '25000'));
 const MAX_CACHE_SCAN_ROWS = Math.max(1000, Number(process.env.ENG_HIRING_MAX_CACHE_SCAN_ROWS ?? '50000'));
 const MAX_RESULTS = Math.max(1000, Number(process.env.ENG_HIRING_MAX_RESULTS ?? '20000'));
 const DEFAULT_CACHE_MAX_AGE_HOURS = 12;
@@ -68,10 +69,10 @@ function sourcesFromConfig(config: EngHiringSearchConfig): EngHiringSource[] {
 }
 
 function clampCompaniesLimit(value: unknown): number {
-  const n = Number(value ?? DEFAULT_COMPANIES_LIMIT);
-  if (!Number.isFinite(n)) return DEFAULT_COMPANIES_LIMIT;
-  if (n <= 0) return MAX_COMPANIES_LIMIT;
-  return Math.min(MAX_COMPANIES_LIMIT, Math.max(1, Math.trunc(n)));
+  return resolveEngHiringCompaniesLimit(value, {
+    defaultLimit: DEFAULT_COMPANIES_LIMIT,
+    maxCoverageLimit: MAX_COMPANIES_LIMIT,
+  });
 }
 
 function clampMaxResults(value: unknown): number {

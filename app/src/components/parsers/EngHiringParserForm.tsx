@@ -29,12 +29,25 @@ export function EngHiringParserForm({ onStart, busy }: Props) {
   const [cacheAge, setCacheAge] = useState('12');
   const [refreshCache, setRefreshCache] = useState(true);
   const [enrich, setEnrich] = useState(true);
+  const [maximumCoverage, setMaximumCoverage] = useState(false);
 
   const toggleSource = (source: EngHiringSource) =>
     setSources((prev) => (prev.includes(source) ? prev.filter((s) => s !== source) : [...prev, source]));
 
   const toggleCountry = (code: string) =>
     setCountries((prev) => (prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]));
+
+  const toggleMaximumCoverage = (checked: boolean) => {
+    setMaximumCoverage(checked);
+    if (checked) {
+      setCompaniesLimit('0');
+      setMaxResults('20000');
+      setCacheAge('1');
+      setRefreshCache(true);
+    } else {
+      setCompaniesLimit((prev) => (prev === '0' ? '1000' : prev));
+    }
+  };
 
   const config: EngHiringSearchConfig = useMemo(() => {
     const companies = Number(companiesLimit);
@@ -45,13 +58,13 @@ export function EngHiringParserForm({ onStart, busy }: Props) {
       sources,
       countries: countries.length ? countries : undefined,
       posted_within_days: days,
-      companies_limit: Number.isFinite(companies) ? Math.max(0, Math.trunc(companies)) : 1000,
+      companies_limit: maximumCoverage ? 0 : Number.isFinite(companies) ? Math.max(0, Math.trunc(companies)) : 1000,
       max_results: Number.isFinite(results) ? Math.max(1, Math.trunc(results)) : 5000,
       cache_max_age_hours: Number.isFinite(age) ? Math.max(1, Math.trunc(age)) : 12,
       refresh_cache: refreshCache,
       enrich,
     };
-  }, [roles, sources, countries, days, companiesLimit, maxResults, cacheAge, refreshCache, enrich]);
+  }, [roles, sources, countries, days, companiesLimit, maxResults, cacheAge, refreshCache, enrich, maximumCoverage]);
 
   const canStart = Boolean(roles.trim()) && sources.length > 0;
   const submit = () => {
@@ -164,16 +177,37 @@ export function EngHiringParserForm({ onStart, busy }: Props) {
         </div>
       </div>
 
+      <label className="mt-5 flex cursor-pointer items-start gap-3 rounded-lg bg-blue-50 px-3 py-3 text-sm text-blue-950">
+        <input
+          type="checkbox"
+          checked={maximumCoverage}
+          onChange={(e) => toggleMaximumCoverage(e.target.checked)}
+          className="mt-0.5 h-4 w-4 rounded border-blue-300 text-blue-600 focus:ring-blue-400"
+        />
+        <span>
+          <span className="block font-medium">Максимальное покрытие</span>
+          <span className="block text-blue-800">
+            Все известные boards по выбранным источникам, до 20 000 результатов, свежий кэш 1 час.
+          </span>
+        </span>
+      </label>
+
       <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-3">
         <label className="block">
           <span className="mb-1 block text-sm font-medium text-gray-700">Компаний на источник</span>
-          <input
-            value={companiesLimit}
-            onChange={(e) => setCompaniesLimit(e.target.value.replace(/\D/g, ''))}
-            inputMode="numeric"
-            placeholder="1000"
-            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
-          />
+          {maximumCoverage ? (
+            <div className="w-full rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-800">
+              Все известные
+            </div>
+          ) : (
+            <input
+              value={companiesLimit}
+              onChange={(e) => setCompaniesLimit(e.target.value.replace(/\D/g, ''))}
+              inputMode="numeric"
+              placeholder="1000"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+            />
+          )}
         </label>
         <label className="block">
           <span className="mb-1 block text-sm font-medium text-gray-700">Макс. результатов</span>
