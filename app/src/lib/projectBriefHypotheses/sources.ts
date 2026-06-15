@@ -8,6 +8,8 @@
 
 import type { ExportBaseCatalogItem, ExportBaseCategory } from './exportBaseCatalog';
 
+export type HypothesesAudience = 'internal' | 'client';
+
 /**
  * Названия источников, которые ОБЯЗАТЕЛЬНО должны фигурировать в промпте.
  * Используется тестом `projectBriefSourcesPrompt.test.ts` чтобы при правках
@@ -40,6 +42,12 @@ export const LEAD_SOURCES = [
 - Список компаний по фильтру: ключевое слово в названии вакансии, регион, отрасль, размер компании.
 - Сигналы найма (рост команды, открытие новых направлений, нехватка определённой роли).
 Когда применять: когда у клиента ЦА — компании, которые активно нанимают (значит, есть бюджет, рост, потребность в смежных услугах). Хорошо комбинируется с обогащением контактами через сайт.
+Пример фильтра: "Крупные SaaS-компании из Москвы и Санкт-Петербурга, которые нанимают B2B-маркетологов или sales-менеджеров за последние 30 дней."`,
+    clientBody: `Сбор компаний по публичным вакансиям работодателей. Что можно использовать:
+- Список компаний по фильтру: ключевое слово в названии вакансии, регион, отрасль, дата публикации.
+- Признаки активного найма: рост команды, открытие новых направлений, нехватка определённой роли.
+Когда применять: когда ЦА — компании, которые активно нанимают, а значит могут расти, иметь бюджет и потребность в смежных услугах. Хорошо комбинируется с обогащением контактами через сайт.
+Как описывать клиенту: через поиск вакансий HH или ссылку на страницу поиска вакансий, не через раздел «Компании». В HH-гипотезах не указывай ССЧ и не указывай выручку — HH-парсер их не отдаёт; не предлагай их как последующую фильтрацию.
 Пример фильтра: "Крупные SaaS-компании из Москвы и Санкт-Петербурга, которые нанимают B2B-маркетологов или sales-менеджеров за последние 30 дней."`,
   },
   {
@@ -92,12 +100,15 @@ export type LeadSourceId = (typeof LEAD_SOURCES)[number]['id'];
 
 /**
  * Источники, скрытые от клиентов в /client/brief генерации гипотез.
- * «Сигналы» работают через /tools/databases и не доступны клиентам.
+ * Эти источники остаются в агентском knowledge-блоке, но не доступны клиенту
+ * как самостоятельные SaaS-сценарии.
  */
-export const CLIENT_EXCLUDED_SOURCE_IDS: readonly LeadSourceId[] = ['signals'] as const;
+export const CLIENT_EXCLUDED_SOURCE_IDS: readonly LeadSourceId[] = ['crypto_payments', 'signals'] as const;
 
 interface RenderLeadSourcesOptions {
   exclude?: readonly LeadSourceId[];
+  audience?: HypothesesAudience;
+  heading?: string;
 }
 
 /**
@@ -107,12 +118,18 @@ interface RenderLeadSourcesOptions {
 export function renderLeadSourcesKnowledge(opts: RenderLeadSourcesOptions = {}): string {
   const excludeSet = new Set<LeadSourceId>(opts.exclude ?? []);
   const visible = LEAD_SOURCES.filter((s) => !excludeSet.has(s.id));
+  const audience = opts.audience ?? 'internal';
 
   const sections = visible
-    .map((source, idx) => `## ${idx + 1}. ${source.name}\n${source.body}`)
+    .map((source, idx) => {
+      const name = audience === 'client' && 'clientName' in source ? source.clientName : source.name;
+      const body = audience === 'client' && 'clientBody' in source ? source.clientBody : source.body;
+      return `## ${idx + 1}. ${name}\n${body}`;
+    })
     .join('\n\n');
 
-  return `# Источники сбора B2B-баз, доступные нашему агентству\n\n${sections}\n`;
+  const heading = opts.heading ?? '# Источники сбора B2B-баз, доступные нашему агентству';
+  return `${heading}\n\n${sections}\n`;
 }
 
 /** Полный knowledge-блок (внутреннее использование, ничего не исключено). */
@@ -216,8 +233,6 @@ export function selectRelevantCatalog(
 
 const MAX_BRIEF_CHARS = 8000;
 
-export type HypothesesAudience = 'internal' | 'client';
-
 export interface BuildHypothesesPromptInput {
   briefText: string;
   catalog: ExportBaseCatalogItem[];
@@ -237,27 +252,49 @@ export function buildHypothesesPrompt({
   audience = 'internal',
 }: BuildHypothesesPromptInput): HypothesesPrompt {
   const safeBrief = (briefText ?? '').slice(0, MAX_BRIEF_CHARS);
+  const isClientAudience = audience === 'client';
+  const excludedSourceIds = isClientAudience ? CLIENT_EXCLUDED_SOURCE_IDS : [];
 
   const catalogBlock = catalog
     .map((item) => `- [${item.category}] ${item.name} — ${item.url}`)
     .join('\n');
 
-  const knowledge = audience === 'client'
-    ? renderLeadSourcesKnowledge({ exclude: CLIENT_EXCLUDED_SOURCE_IDS })
+  const knowledge = isClientAudience
+    ? renderLeadSourcesKnowledge({
+      exclude: excludedSourceIds,
+      audience: 'client',
+      heading: '# Источники сбора B2B-баз для клиентского SaaS-плана',
+    })
     : LEAD_SOURCES_KNOWLEDGE;
-  const visibleSourcesCount = LEAD_SOURCES.length - (audience === 'client' ? CLIENT_EXCLUDED_SOURCE_IDS.length : 0);
+  const visibleSourcesCount = LEAD_SOURCES.filter((s) => !excludedSourceIds.includes(s.id)).length;
+  const sourcePolicy = isClientAudience
+    ? 'Опирайся на перечень ниже как на проверенные агентством способы. Можно добавлять внешние открытые источники, если они конкретны, релевантны брифу и клиент может понятно использовать вне портала. Не выдумывай чужие SaaS-сервисы и не предлагай методы, которые клиент не может сам запустить в клиентском портале или понятно использовать вне портала.'
+    : 'Используй ТОЛЬКО источники из перечня ниже — не выдумывай чужие сервисы, не предлагай LinkedIn Sales Navigator или Apollo, если их нет в списке.';
+  const executionPolicy = isClientAudience
+    ? 'Каждая гипотеза — самостоятельный план для клиента: конкретный, исполнимый в клиентском портале или через понятный внешний источник, а не общий вариант "найдите всех в IT". Не обещай ручное выполнение со стороны Polza.'
+    : 'Каждая гипотеза должна быть конкретной и пригодной для запуска нашим специалистом, а не общей "найдите всех в IT".';
+  const fieldLabel = isClientAudience ? 'Критерии сбора / как собрать базу' : 'Конкретные фильтры/запросы';
+  const fieldValueHint = isClientAudience
+    ? '<сегмент, критерии отбора, регионы, запросы и понятные шаги сбора>'
+    : '<что именно ввести/настроить>';
+  const sourceHint = isClientAudience
+    ? `<название одного из ${visibleSourcesCount} источников выше, конкретная страница из export-base или внешний открытый источник>`
+    : `<название одного из ${visibleSourcesCount} источников выше или конкретная страница из export-base>`;
+  const generationInstruction = isClientAudience
+    ? 'Сгенерируй 5–10 гипотез по сбору базы по этому брифу. Опирайся на источники из системного промпта, готовые категории каталога export-base.ru и релевантные внешние открытые источники. Каждая гипотеза должна вытекать из брифа или из разумного смежного сегмента, а не добивать количество фантазией. Для гипотез с источником HH запрещено упоминать ССЧ, выручку, оборот и размер бизнеса ни как фильтр, ни как следующий шаг.'
+    : 'Сгенерируй 5–10 гипотез по сбору базы по этому брифу. Используй только источники из системного промпта. Учитывай готовые категории каталога export-base.ru — они часто экономят время по сравнению с парсингом.';
 
-  const system = `Ты — старший лид-ресечер B2B-агентства Polza. На основе клиентского брифа подбираешь 5–10 гипотез по сбору базы потенциальных клиентов. Используй ТОЛЬКО источники из перечня ниже — не выдумывай чужие сервисы, не предлагай LinkedIn Sales Navigator или Apollo, если их нет в списке.
+  const system = `Ты — старший лид-ресечер B2B-агентства Polza. На основе клиентского брифа подбираешь 5–10 гипотез по сбору базы потенциальных клиентов. ${sourcePolicy}
 
-Каждая гипотеза должна быть конкретной и пригодной для запуска нашим специалистом, а не общей "найдите всех в IT".
+${executionPolicy}
 
 ${knowledge}
 
 ФОРМАТ ОТВЕТА — markdown без преамбулы и без заключения. Минимум 5 гипотез, идеально 7–8. Структура КАЖДОЙ гипотезы РОВНО такая, без отклонений:
 
 ### Гипотеза N: <короткое название>
-- Источник: <название одного из ${visibleSourcesCount} источников выше или конкретная страница из export-base>
-- Конкретные фильтры/запросы: <что именно ввести/настроить>
+- Источник: ${sourceHint}
+- ${fieldLabel}: ${fieldValueHint}
 - Почему подходит брифу: <1–2 предложения связи с ЦА из брифа>
 - Ожидаемый объём: <грубая оценка количества компаний>
 - Риски/нюансы: <опционально, если есть>
@@ -265,9 +302,9 @@ ${knowledge}
 ЖЁСТКИЕ ПРАВИЛА ФОРМАТИРОВАНИЯ (нарушение = ответ непригоден):
 1. Заголовок гипотезы — ТОЛЬКО \`### Гипотеза N: …\`. Без \`##\`, без \`**Гипотеза N**\`, без нумерации списком.
 2. ЗАПРЕЩЕНЫ вложенные буллеты. Каждое поле — РОВНО одна строка вида \`- Лейбл: значение\`. Если у тебя несколько фильтров (ОКВЭД, регион, выручка) — пиши их одной строкой через \`;\`.
-   Правильно:    \`- Конкретные фильтры/запросы: ОКВЭД 46 (опт. торговля); регион Москва; выручка 50–500 млн ₽\`
-   Неправильно:  \`- Конкретные фильтры/запросы:\n  - ОКВЭД: 46\n  - Регион: Москва\`
-3. Не выдумывай новые лейблы (\`ОКВЭД:\`, \`Регион:\`) как отдельные буллеты — это значения внутри \`Конкретные фильтры/запросы\`.
+   Правильно:    \`- ${fieldLabel}: ОКВЭД 46 (опт. торговля); регион Москва; выручка 50–500 млн ₽\`
+   Неправильно:  \`- ${fieldLabel}:\n  - ОКВЭД: 46\n  - Регион: Москва\`
+3. Не выдумывай новые лейблы (\`ОКВЭД:\`, \`Регион:\`) как отдельные буллеты — это значения внутри \`${fieldLabel}\`.
 4. Не пиши общих рассуждений вне гипотез. Не дублируй гипотезы.
 5. Если бриф крайне неполный — укажи это в первой гипотезе и предложи уточняющие вопросы заказчику, но всё равно выдай минимум 5 гипотез на разумных допущениях.`;
 
@@ -279,7 +316,7 @@ ${safeBrief}
 РЕЛЕВАНТНЫЕ ГОТОВЫЕ БАЗЫ ИЗ КАТАЛОГА export-base.ru (можно ссылаться напрямую):
 ${catalogBlock}
 
-Сгенерируй 5–10 гипотез по сбору базы по этому брифу. Используй только источники из системного промпта. Учитывай готовые категории каталога export-base.ru — они часто экономят время по сравнению с парсингом.`;
+${generationInstruction}`;
 
   return { system, user };
 }

@@ -236,6 +236,7 @@ fi
 containers=(
   "portal-worker"
   "portal-worker-hh"
+  "portal-worker-eng-hiring"
   "portal-worker-search"
   "portal-worker-enrich"
   "portal-worker-yandexmaps"

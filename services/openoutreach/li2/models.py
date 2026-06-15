@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import uuid
 
+from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.utils import timezone
 
@@ -117,7 +118,10 @@ class Campaign(models.Model):
     target_market = models.TextField(default='')
     campaign_objective = models.TextField(default='')
     seed_profile_urls = models.TextField(default='')
-    working_hours = models.JSONField(default=list)  # ['09:00-18:00', ...]
+    # БД-колонка — Postgres text[] (миграция 20260608_0001), НЕ jsonb. psycopg
+    # отдаёт её как list[str]; ArrayField матчит это напрямую. JSONField здесь
+    # ронял чтение любой кампании (json.loads на python-list → TypeError).
+    working_hours = ArrayField(models.TextField(), default=list)  # ['09:00-18:00', ...]
     timezone_offset = models.IntegerField(default=0)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='draft')
     runtime_status = models.TextField(default='not_started')

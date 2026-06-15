@@ -206,4 +206,72 @@ export interface AtsCompanyRow {
   created_at: string;
 }
 
+// ── ENG hiring parser (first-party ATS vacancies) ──
+
+export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee';
+
+export interface EngHiringSearchConfig {
+  /** Role keywords, comma-separated. Matched against vacancy title. */
+  text: string;
+  sources: EngHiringSource[];
+  /** Country codes from lib/parsers/atsFilters (empty/undefined = any country). */
+  countries?: string[];
+  /** Keep only postings newer than this many days (0/undefined = any). */
+  posted_within_days?: number;
+  /** Companies scanned per source (0 = maximum known-board coverage, capped server-side). */
+  companies_limit?: number;
+  /** Result cap after filtering. */
+  max_results?: number;
+  /** Reuse cache if it is fresh enough. */
+  cache_max_age_hours?: number;
+  /** Refresh first-party ATS cache before filtering. */
+  refresh_cache?: boolean;
+  /** Resolve missing company domains by company name. */
+  enrich?: boolean;
+  /** Default true: output one best matching vacancy row per company. */
+  dedupe_companies?: boolean;
+}
+
+export interface EngHiringParserJob {
+  id: string;
+  user_id: string;
+  parser_type: 'eng_hiring';
+  status: ParserJobStatus;
+  config: EngHiringSearchConfig;
+  total_found?: number | null;
+  total_parsed?: number | null;
+  progress_percent?: number | null;
+  progress_stage?: string | null;
+  progress_detail?: PartitionProgressDetail | Record<string, unknown> | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+}
+
+export interface EngHiringVacancyRow {
+  id: string;
+  job_id: string;
+  cache_id?: string | null;
+  source: EngHiringSource;
+  source_company_slug: string;
+  source_job_id: string;
+  company_name: string;
+  company_site_url?: string | null;
+  company_description?: string | null;
+  vacancy_title: string;
+  vacancy_description?: string | null;
+  vacancy_url: string;
+  careers_url?: string | null;
+  location?: string | null;
+  city?: string | null;
+  country?: string | null;
+  country_code?: string | null;
+  salary_from?: number | null;
+  salary_to?: number | null;
+  salary_currency?: string | null;
+  published_at?: string | null;
+  created_at: string;
+}
+
 

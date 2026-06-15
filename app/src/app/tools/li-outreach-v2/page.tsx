@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Bot, MessageSquareText, Play, RefreshCw, RotateCcw, Save, Square, Trash2 } from 'lucide-react';
+import { AlertTriangle, Bot, MessageSquareText, Play, RefreshCw, RotateCcw, Save, Square, Trash2 } from 'lucide-react';
 import { authFetchJson } from '@/lib/authFetch';
 import { V2_DEFAULT_PROMPTS, type V2PromptKey } from '@/lib/liOutreach/v2DefaultPrompts';
 
@@ -69,6 +69,22 @@ type LogRow = {
   level: 'info' | 'warning' | 'error';
   message: string;
   created_at: string;
+};
+
+type Account = {
+  id: string;
+  status: 'stopped' | 'running' | 'needs_captcha' | 'disconnected';
+  runtime_status: string;
+  last_error: string | null;
+  last_heartbeat_at: string | null;
+  updated_at: string;
+};
+
+const ACCOUNT_STATUS_LABEL: Record<Account['status'], string> = {
+  stopped: 'Остановлен',
+  running: 'Работает',
+  needs_captcha: 'Нужна CAPTCHA',
+  disconnected: 'Отключён',
 };
 
 const API = '/api/tools/li-outreach-v2';
@@ -141,6 +157,8 @@ export default function LiOutreachV2Page() {
   const [saving, setSaving] = useState(false);
   const [busyCampaignId, setBusyCampaignId] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [account, setAccount] = useState<Account | null>(null);
+  const [resuming, setResuming] = useState(false);
 
   const selectedCampaign = useMemo(
     () => campaigns.find((c) => c.id === selectedCampaignId) ?? campaigns[0] ?? null,
@@ -201,19 +219,43 @@ export default function LiOutreachV2Page() {
     setMessages(data.messages);
   }, [activeLeadId]);
 
+  const loadAccount = useCallback(async () => {
+    const data = await api<{ account: Account | null }>('/accounts');
+    setAccount(data.account);
+  }, []);
+
   const refreshAll = useCallback(async () => {
     setError('');
     try {
-      await Promise.all([loadSettings(), loadCampaigns()]);
+      await Promise.all([loadSettings(), loadCampaigns(), loadAccount()]);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Ошибка загрузки');
     }
-  }, [loadCampaigns, loadSettings]);
+  }, [loadAccount, loadCampaigns, loadSettings]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => { void refreshAll(); }, 0);
     return () => window.clearTimeout(timeout);
   }, [refreshAll]);
+  // Поллим статус аккаунта — чтобы needs_captcha/disconnected всплывали без
+  // ручного «Обновить» (оператор должен быстро узнать, что аккаунт встал).
+  useEffect(() => {
+    const interval = window.setInterval(() => { void loadAccount(); }, 15000);
+    return () => window.clearInterval(interval);
+  }, [loadAccount]);
+
+  async function resumeFromCaptcha() {
+    setResuming(true);
+    setError('');
+    try {
+      await api('/accounts/resume-from-captcha', { method: 'POST', json: {} });
+      await loadAccount();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка возобновления');
+    } finally {
+      setResuming(false);
+    }
+  }
   useEffect(() => {
     const timeout = window.setTimeout(() => { void loadLeads(); void loadLogs(); }, 0);
     return () => window.clearTimeout(timeout);
@@ -351,7 +393,24 @@ export default function LiOutreachV2Page() {
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">LinkedIn Outreach 2.0</h1>
-            <p className="text-sm text-gray-500">OpenOutreach runtime в Portal</p>
+            <p className="flex items-center gap-2 text-sm text-gray-500">
+              OpenOutreach runtime в Portal
+              {account && (
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
+                    account.status === 'running'
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : account.status === 'needs_captcha'
+                        ? 'bg-amber-100 text-amber-700'
+                        : account.status === 'disconnected'
+                          ? 'bg-red-100 text-red-700'
+                          : 'bg-gray-100 text-gray-600'
+                  }`}
+                >
+                  Аккаунт: {ACCOUNT_STATUS_LABEL[account.status]}
+                </span>
+              )}
+            </p>
           </div>
           <button
             onClick={() => void refreshAll()}
@@ -363,6 +422,49 @@ export default function LiOutreachV2Page() {
         </header>
 
         {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+
+        {account && (account.status === 'needs_captcha' || account.status === 'disconnected') && (
+          <div
+            className={`rounded-lg border px-4 py-3 text-sm ${
+              account.status === 'needs_captcha'
+                ? 'border-amber-300 bg-amber-50'
+                : 'border-red-300 bg-red-50'
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <AlertTriangle
+                className={`mt-0.5 h-4 w-4 shrink-0 ${account.status === 'needs_captcha' ? 'text-amber-600' : 'text-red-600'}`}
+              />
+              <div className="flex-1">
+                {account.status === 'needs_captcha' ? (
+                  <>
+                    <div className="font-medium text-amber-800">Аккаунт остановлен — нужно пройти CAPTCHA</div>
+                    <div className="mt-0.5 text-amber-700">
+                      Откройте VNC (<code>/openoutreach-vnc/</code>), пройдите проверку LinkedIn вручную, затем нажмите «Возобновить».
+                      {account.last_error ? <span className="text-amber-600"> ({account.last_error})</span> : null}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="font-medium text-red-800">LinkedIn отключён</div>
+                    <div className="mt-0.5 text-red-700">
+                      {account.last_error || 'Ошибка авторизации.'} Проверьте логин/пароль/прокси в «Настройках» и перезапустите кампанию.
+                    </div>
+                  </>
+                )}
+              </div>
+              {account.status === 'needs_captcha' && (
+                <button
+                  onClick={() => void resumeFromCaptcha()}
+                  disabled={resuming}
+                  className="shrink-0 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+                >
+                  {resuming ? 'Возобновляю…' : 'Возобновить'}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         <div className="grid gap-3 md:grid-cols-4">
           <Stat label="Кампании" value={campaigns.length} />
@@ -402,7 +504,7 @@ export default function LiOutreachV2Page() {
                     className="mt-1 w-full resize-y rounded-lg border border-gray-200 px-3 py-2 text-sm font-mono outline-none focus:border-emerald-400"
                   />
                   <span className="mt-1 block text-[11px] text-gray-500">
-                    По одной ссылке на строку. Это стартовые «семена» — от этих профилей агент будет искать похожих (1-degree, «people also viewed»). Пусто = чисто по target_market.
+                    По одной ссылке на строку. Демон шлёт запрос на связь каждому из этих профилей. ⚠️ Обязательно: без ссылок кампания не отправит ни одного инвайта (автопоиск по target_market пока не подключён).
                   </span>
                 </label>
                 <div className="grid grid-cols-[1fr_120px] gap-3">

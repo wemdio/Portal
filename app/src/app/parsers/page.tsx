@@ -9,10 +9,11 @@ import { YandexMapsParserView } from '@/components/parsers/YandexMapsParserView'
 import { CryptoPaymentParserView } from '@/components/parsers/CryptoPaymentParserView';
 import { YandexDirectParserView } from '@/components/parsers/YandexDirectParserView';
 import { AtsParserView } from '@/components/parsers/AtsParserView';
+import { EngHiringParserView } from '@/components/parsers/EngHiringParserView';
 import { EuUsCompanyBaseView } from '@/components/parsers/EuUsCompanyBaseView';
 import { CrunchbaseParserView } from '@/components/parsers/CrunchbaseParserView';
 
-type Tab = 'hh' | 'ats' | 'crunchbase' | 'eu-us-base' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto';
+type Tab = 'hh' | 'eng-hiring' | 'ats' | 'crunchbase' | 'eu-us-base' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto';
 
 export default function ParsersPage() {
   const [activeTab, setActiveTab] = useState<Tab>('hh');
@@ -36,6 +37,18 @@ export default function ParsersPage() {
             `}
           >
             HH.ru Парсер
+          </button>
+          <button
+            onClick={() => setActiveTab('eng-hiring')}
+            className={`
+              whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm
+              ${activeTab === 'eng-hiring'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}
+            `}
+          >
+            ENG вакансии
+            <span className="ml-1.5 rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-normal text-blue-700 align-middle">6 ATS sources</span>
           </button>
           <button
             onClick={() => setActiveTab('crunchbase')}
@@ -120,6 +133,8 @@ export default function ParsersPage() {
 
       {activeTab === 'hh'
         ? <HHParserView />
+        : activeTab === 'eng-hiring'
+        ? <EngHiringParserView />
         : activeTab === 'ats'
         ? <AtsParserView />
         : activeTab === 'crunchbase'

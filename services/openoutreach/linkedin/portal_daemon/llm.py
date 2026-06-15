@@ -15,8 +15,20 @@ import logging
 import os
 
 import httpx
+from jinja2.sandbox import SandboxedEnvironment
 
 logger = logging.getLogger('li2.llm')
+
+# Промпты в li2_settings — Jinja2-шаблоны ({{ var }} / {% if %}), их формат
+# задан и валидируется на Portal-стороне (app/src/lib/liOutreach/
+# v2DefaultPrompts.ts + promptVarValidation.ts). Sandboxed-окружение блокирует
+# доступ к небезопасным атрибутам, даже если оператор вставит вредный шаблон.
+_JINJA_ENV = SandboxedEnvironment(
+    autoescape=False,
+    trim_blocks=True,
+    lstrip_blocks=True,
+    keep_trailing_newline=True,
+)
 
 API_KEY = (os.environ.get('OPENROUTER_LI_OUTREACH_API_KEY') or '').strip()
 API_BASE = os.environ.get('LI2_LLM_API_BASE', 'https://router.requesty.ai/v1').rstrip('/')
@@ -89,12 +101,20 @@ async def complete(
 
 def render_prompt(template: str, **kwargs) -> str:
     """
-    Минимальная подстановка `{var}` в строку. Не использует jinja2 — наши
-    промпты в li2_settings уже отрендерены человеком, нам только нужно
-    подставить runtime-переменные (lead name, headline, etc.).
-    Безопасно для пользовательских строк (нет execution).
+    Рендерим Jinja2-шаблон промпта runtime-переменными (lead name, product,
+    objective, ...). Отсутствующие переменные → пустая строка (Jinja2 Undefined),
+    а НЕ литеральный `{{ var }}` — критично, чтобы в сообщение леду никогда не
+    утёк сырой плейсхолдер.
+
+    На сломанном шаблоне (синтаксис Jinja) не валимся — логируем и возвращаем
+    исходный текст с грубой подстановкой, чтобы не уронить весь follow-up task.
     """
-    out = template
-    for k, v in kwargs.items():
-        out = out.replace('{' + k + '}', str(v) if v is not None else '')
-    return out
+    try:
+        return _JINJA_ENV.from_string(template).render(**kwargs).strip()
+    except Exception:
+        logger.exception('render_prompt: Jinja2 render failed, falling back to naive substitution')
+        out = template
+        for k, v in kwargs.items():
+            val = str(v) if v is not None else ''
+            out = out.replace('{{ ' + k + ' }}', val).replace('{' + k + '}', val)
+        return out.strip()

@@ -4,11 +4,16 @@ import {
   buildCompanyLeads,
   domainFromJobUrls,
   exportCompanyLeadsToCsv,
+  extractJobs,
   normalizeAshbyJob,
+  normalizeBamboohrJob,
   normalizeGreenhouseJob,
   normalizeLeverJob,
+  normalizeRecruiteeJob,
+  normalizeWorkableJob,
   parseCompanyCsv,
   pickDomainFromSuggestions,
+  postingsUrl,
   roleTagsForTitle,
 } from '../../../src/lib/jobs/atsCompanyParser';
 
@@ -79,6 +84,101 @@ describe('atsCompanyParser — normalizers', () => {
     });
   });
 
+  it('normalizes a Workable job from widget API payloads', () => {
+    const job = normalizeWorkableJob(
+      {
+        title: 'Senior Account Executive',
+        shortcode: 'ED7ABE3F68',
+        department: 'Account Management',
+        url: 'https://apply.workable.com/j/ED7ABE3F68',
+        application_url: 'https://apply.workable.com/j/ED7ABE3F68/apply',
+        published_on: '2026-05-21',
+        locations: [
+          {
+            city: 'New York',
+            region: 'NY',
+            country: 'United States',
+            countryCode: 'US',
+          },
+        ],
+      },
+      { slug: '1000heads', companyName: '1000heads' },
+    );
+
+    expect(job).toMatchObject({
+      ats: 'workable',
+      slug: '1000heads',
+      company: '1000heads',
+      title: 'Senior Account Executive',
+      location: 'New York, NY, United States',
+      country: 'United States',
+      url: 'https://apply.workable.com/j/ED7ABE3F68',
+      roles: ['b2b_sales'],
+    });
+    expect(job.posted_at).toBe(new Date('2026-05-21').toISOString());
+  });
+
+  it('normalizes a BambooHR job from list payloads', () => {
+    const job = normalizeBamboohrJob(
+      {
+        id: '52',
+        jobOpeningName: 'Enterprise Sales Manager',
+        departmentLabel: 'Sales',
+        employmentStatusLabel: 'Full-Time',
+        location: { city: 'Austin', state: 'TX', addressCountry: 'United States' },
+      },
+      { slug: 'acme', companyName: 'Acme Inc' },
+    );
+
+    expect(job).toMatchObject({
+      ats: 'bamboohr',
+      slug: 'acme',
+      company: 'Acme Inc',
+      title: 'Enterprise Sales Manager',
+      location: 'Austin, TX, United States',
+      country: 'United States',
+      url: 'https://acme.bamboohr.com/careers/52',
+      roles: ['b2b_sales'],
+    });
+  });
+
+  it('normalizes a Recruitee job from offers payloads', () => {
+    const job = normalizeRecruiteeJob(
+      {
+        id: 137,
+        title: 'Customer Success Consultant',
+        company_name: '12Build',
+        department: 'Customer Success',
+        careers_url: 'https://12build.recruitee.com/o/customer-success-consultant',
+        published_at: '2026-06-05 13:30:25 UTC',
+        location: 'Nijverdal, Overijssel, Nederland',
+        country: 'Netherlands',
+      },
+      { slug: '12build', companyName: '12Build' },
+    );
+
+    expect(job).toMatchObject({
+      ats: 'recruitee',
+      slug: '12build',
+      company: '12Build',
+      title: 'Customer Success Consultant',
+      location: 'Nijverdal, Overijssel, Nederland',
+      country: 'Netherlands',
+      url: 'https://12build.recruitee.com/o/customer-success-consultant',
+    });
+    expect(job.posted_at).toBe(new Date('2026-06-05 13:30:25 UTC').toISOString());
+  });
+
+  it('builds public endpoints and extracts jobs for the added ATS sources', () => {
+    expect(postingsUrl('workable', '1000heads')).toBe('https://apply.workable.com/api/v1/widget/accounts/1000heads');
+    expect(postingsUrl('bamboohr', '10web')).toBe('https://10web.bamboohr.com/careers/list');
+    expect(postingsUrl('recruitee', '12build')).toBe('https://12build.recruitee.com/api/offers');
+
+    expect(extractJobs('workable', { jobs: [{ title: 'AE' }] })).toEqual([{ title: 'AE' }]);
+    expect(extractJobs('bamboohr', { result: [{ jobOpeningName: 'AE' }] })).toEqual([{ jobOpeningName: 'AE' }]);
+    expect(extractJobs('recruitee', { offers: [{ title: 'AE' }] })).toEqual([{ title: 'AE' }]);
+  });
+
   it('tags only marketing / b2b-sales titles', () => {
     expect(roleTagsForTitle('Backend Engineer')).toEqual([]);
     expect(roleTagsForTitle('Demand Generation Manager')).toEqual(['marketing']);
@@ -129,6 +229,14 @@ describe('atsCompanyParser — domain helpers', () => {
     ]);
     expect(domain).toBe('replit.com');
     expect(pickDomainFromSuggestions('Whatever', [])).toBe('');
+  });
+
+  it('does not fall back to a non-exact Clearbit suggestion', () => {
+    const domain = pickDomainFromSuggestions('Engine', [
+      { name: 'Engineers Edge', domain: 'engineersedge.com' },
+    ]);
+
+    expect(domain).toBe('');
   });
 });
 

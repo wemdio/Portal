@@ -25,15 +25,18 @@ import type { V2PromptKey } from '@/lib/liOutreach/v2DefaultPrompts';
  * adding new mandatory placeholders to v2DefaultPrompts.ts.
  */
 export const REQUIRED_VARS_BY_PROMPT: Record<V2PromptKey, readonly string[]> = {
+  // Must match the variables the daemon supplies to follow_up_agent
+  // (handlers.handle_follow_up). The daemon renders missing vars to empty, but
+  // requiring these stops an operator from silently deleting a substitution
+  // point the message depends on.
   follow_up_agent: [
-    'self_name',
     'product_docs',
     'campaign_objective',
-    'profile_summary',
-    'chat_summary',
-    'today',
+    'target_market',
+    'lead_name',
+    'lead_position',
+    'lead_company',
     'recent_messages',
-    'contact_email',
   ],
   qualify_lead: ['product_docs', 'campaign_objective', 'profile_text'],
   search_keywords: ['product_docs', 'campaign_objective', 'n_keywords'],
