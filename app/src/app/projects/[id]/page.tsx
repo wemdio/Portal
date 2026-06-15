@@ -11,6 +11,7 @@ import { useUser } from '@/lib/UserProvider';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
+import { InstantlyInsightsSection } from '@/components/projects/InstantlyInsightsSection';
 import { SERVICE_OPTIONS } from '@/lib/projectServices';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
@@ -1152,6 +1153,9 @@ export default function ProjectPage() {
               )}
             </div>
           </SectionCard>
+
+          {/* Honest campaign-insights over the analytics dataset (no AI at render) */}
+          <InstantlyInsightsSection projectId={project.id} />
         </div>
       )}
 

@@ -19,6 +19,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { extractPublicIdentifier } from '@/lib/liOutreach/leadHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -123,14 +124,27 @@ export async function POST(req: NextRequest) {
         if (!name) { skipped.push(`Строка ${i + 1}: пустое имя`); continue; }
         if (!inviteText) { skipped.push(`Строка ${i + 1}: пустой текст инвайта`); continue; }
 
+        // The "LinkedIn ID" column is in practice the profile URL. If no explicit
+        // profile_url / public_identifier column was provided, derive them from
+        // the name when it's a LinkedIn URL — otherwise the runner can't resolve
+        // the member and every invite fails "No provider_id and no
+        // public_identifier" (prod 2026-06: "Surge Персонализация" imported 500
+        // leads with the URL in `name`, public_identifier empty → 0 invites sent).
+        let profileUrl = val(profileUrlIdx) || null;
+        let publicId = val(publicIdIdx) || null;
+        if (!publicId && /linkedin\.com\/in\//i.test(name)) {
+          publicId = extractPublicIdentifier(name);
+          if (!profileUrl) profileUrl = name;
+        }
+
         leadsToInsert.push({
           user_id: auth.user.id,
           // lead_list_id проставим ниже, после создания списка
           name,
           position: val(positionIdx) || null,
           company: val(companyIdx) || null,
-          profile_url: val(profileUrlIdx) || null,
-          public_identifier: val(publicIdIdx) || null,
+          profile_url: profileUrl,
+          public_identifier: publicId,
           invite_text: inviteText,
           status: 'new',
         });
