@@ -1,4 +1,5 @@
 import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websiteParser';
+import { logInfo } from '@/lib/loggerServer';
 import { normalizeUrl, extractNormalizedUrls } from '@/lib/enrich/urlUtils';
 import { detectSignals, determineProfile, formatStack, integrationsFromSignals } from '@/lib/enrich/signalDetector';
 import { discoverSubpaths, FALLBACK_PATHS } from '@/lib/enrich/subpathDiscovery';
@@ -630,6 +631,21 @@ export async function processSignalsForUrl(
           signal,
         })
       : [];
+
+    // Логируем bridge между «нашли соцсети» и «есть из чего детектить».
+    // Если socialUrls пуст — события для этого URL заведомо будут прочерками
+    // (нет источника). Если соцсети есть, но posts=0 — fetch'и постов
+    // упали (приватный канал, IG-неподдерживаемый, JS-only, бан, тимаут).
+    await logInfo('events.pipeline.input', 'События: входные данные пайплайна', {
+      url: normalized,
+      social_urls_found: socialUrls.length,
+      social_urls_sample: socialUrls.slice(0, 5),
+      posts_fetched: posts.length,
+      posts_by_network: posts.reduce<Record<string, number>>((acc, p) => {
+        acc[p.network] = (acc[p.network] ?? 0) + 1;
+        return acc;
+      }, {}),
+    });
 
     // Cheap inline tag-strip — eventDetector caps the total context at 12 KB,
     // so we just collapse tags & whitespace and slice. No need for cheerio here.
