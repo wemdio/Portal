@@ -17,8 +17,13 @@
 
 import 'server-only';
 import type { SocialPost } from './socialPostsExtractor';
+import { logInfo, logError } from '@/lib/loggerServer';
 
-const MODEL = 'anthropic/claude-sonnet-4-5-20250514';
+// Sonnet 4.6 — последняя версия на Requesty (Anthropic provider, $3/$15 per MTok,
+// 1M контекст). Дата-суффикс не нужен: алиас без даты резолвится в актуальный
+// снэпшот. Старый ID `anthropic/claude-sonnet-4-5-20250514` стал 404 после
+// депрекации майского снэпшота.
+const MODEL = 'anthropic/claude-sonnet-4-6';
 const TIMEOUT_MS = 30_000;
 // Bound on text we send to the LLM. 10 posts × ~500 chars + blog + about ≈
 // 8KB. We cap at 12KB so weird outliers can't blow up the token bill.
@@ -106,15 +111,22 @@ function buildUserPrompt(input: DetectEventsInput): string {
 }
 
 /**
- * Сколько РЕАЛЬНОГО контента у нас на входе. Возвращает «нечего
- * анализировать» когда total < 100 — за такой контекст LLM выдаст шум,
- * а 100 chars это уже минимум 1-2 полноценных поста или короткое /about.
+ * Сколько РЕАЛЬНОГО контента у нас на входе. Логика:
+ *   - хотя бы один пост → этого достаточно: extractor уже отрезает посты
+ *     < 10 chars (см. socialPostsExtractor:141), так что любой
+ *     дошедший до сюда пост — реальная фраза, а не emoji-шум.
+ *   - постов нет → требуем minimum 30 chars blog+about, иначе LLM
+ *     получает почти пустой контекст и выдаёт шум.
+ *
+ * Раньше был общий потолок 100 chars (включая blog/about); из-за этого
+ * выпадали реальные кейсы, где Telegram-канал бросает только короткое
+ * объявление вроде «Открыли в Казани!» — это валидный сигнал, а не шум.
  */
 function hasEnoughContent(input: DetectEventsInput): boolean {
-  const postsLen = input.socialPosts.reduce((s, p) => s + p.text.length, 0);
+  if (input.socialPosts.length > 0) return true;
   const blogLen = input.blogText?.length ?? 0;
   const aboutLen = input.aboutText?.length ?? 0;
-  return postsLen + blogLen + aboutLen >= 100;
+  return blogLen + aboutLen >= 30;
 }
 
 function cleanSummary(s: unknown): string | undefined {
@@ -154,12 +166,32 @@ function cleanCities(s: unknown): string[] {
 export async function detectEventSignals(
   input: DetectEventsInput,
 ): Promise<EventSignalsResult> {
+  const postsLen = input.socialPosts.reduce((s, p) => s + p.text.length, 0);
+  const blogLen = input.blogText?.length ?? 0;
+  const aboutLen = input.aboutText?.length ?? 0;
+  const inputStats = {
+    posts_count: input.socialPosts.length,
+    posts_chars: postsLen,
+    blog_chars: blogLen,
+    about_chars: aboutLen,
+    networks: Array.from(new Set(input.socialPosts.map((p) => p.network))),
+  };
+
   const apiKey = getApiKey();
-  if (!apiKey) return {};
-  if (!hasEnoughContent(input)) return {};
+  if (!apiKey) {
+    await logInfo('events.detect.skip.no_api_key', 'OPENROUTER_SIGNALS_API_KEY / OPENROUTER_BRIEF_API_KEY не настроен в env', inputStats);
+    return {};
+  }
+  if (!hasEnoughContent(input)) {
+    await logInfo('events.detect.skip.not_enough_content', `Слишком мало текста на входе (< 100 chars): posts=${postsLen}, blog=${blogLen}, about=${aboutLen}`, inputStats);
+    return {};
+  }
 
   const userPrompt = buildUserPrompt(input);
-  if (userPrompt.length < 50) return {};
+  if (userPrompt.length < 50) {
+    await logInfo('events.detect.skip.prompt_too_short', `Промпт после сборки < 50 chars: ${userPrompt.length}`, { ...inputStats, prompt_chars: userPrompt.length });
+    return {};
+  }
 
   try {
     const controller = new AbortController();
@@ -188,11 +220,26 @@ export async function detectEventSignals(
 
     clearTimeout(timer);
 
-    if (!res.ok) return {};
+    if (!res.ok) {
+      // Читаем тело для диагностики (модель устарела / неверный ключ / rate limit / etc).
+      // Body cap 500 chars — лог не должен раздувать вёб-репорт.
+      let body = '';
+      try { body = (await res.text()).slice(0, 500); } catch { /* ignore */ }
+      await logError('events.detect.llm_http_error', new Error(`Requesty HTTP ${res.status}`), {
+        ...inputStats,
+        status: res.status,
+        body,
+        model: MODEL,
+      });
+      return {};
+    }
 
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const content = data?.choices?.[0]?.message?.content?.trim();
-    if (!content) return {};
+    if (!content) {
+      await logError('events.detect.llm_empty_response', new Error('LLM вернул пустой content'), inputStats);
+      return {};
+    }
 
     const parsed = JSON.parse(content) as Record<string, unknown>;
     const out: EventSignalsResult = {};
@@ -228,8 +275,18 @@ export async function detectEventSignals(
       if (s) out.event_geo_summary = s;
     }
 
+    await logInfo('events.detect.ok', 'LLM-детектор отработал', {
+      ...inputStats,
+      event_opening: out.event_opening,
+      event_redesign: out.event_redesign,
+      event_renovation: out.event_renovation,
+      event_geo_cities: out.event_geo?.length ?? 0,
+    });
     return out;
-  } catch {
+  } catch (err) {
+    // catch ловит JSON.parse fail И abort (timeout) И network errors.
+    // Без лога мы не отличим «модель вернула невалидный JSON» от «таймаут 30 сек».
+    await logError('events.detect.exception', err, inputStats);
     return {};
   }
 }

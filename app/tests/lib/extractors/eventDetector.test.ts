@@ -58,6 +58,9 @@ const SAMPLE_POSTS: SocialPost[] = [
 describe('detectEventSignals — guards', () => {
   it('returns {} when no API key is configured', async () => {
     setApiKey(null);
+    // logInfo шлёт в Supabase application_logs — без мока fetch пойдёт
+    // в реальную сеть и тест отвалится по таймауту.
+    global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({}) })) as unknown as typeof fetch;
     const result = await detectEventSignals({ socialPosts: SAMPLE_POSTS });
     expect(result).toEqual({});
   });
@@ -67,8 +70,13 @@ describe('detectEventSignals — guards', () => {
     mockLlmResponse({ event_opening: true });
     const result = await detectEventSignals({ socialPosts: [], blogText: 'hi', aboutText: '' });
     expect(result).toEqual({});
-    // LLM should never even be called for tiny content
-    expect(global.fetch).not.toHaveBeenCalled();
+    // LLM (router.requesty.ai) should never be called for tiny content.
+    // logInfo internally posts to Supabase application_logs — отфильтровываем
+    // те вызовы и проверяем ИМЕННО LLM-endpoint.
+    const llmCalls = (global.fetch as jest.Mock).mock.calls.filter(
+      ([url]) => typeof url === 'string' && url.includes('router.requesty.ai'),
+    );
+    expect(llmCalls).toHaveLength(0);
   });
 
   it('returns {} on LLM HTTP error (best-effort, never throws)', async () => {
