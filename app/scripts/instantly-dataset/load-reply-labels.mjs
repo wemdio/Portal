@@ -19,7 +19,7 @@ const MODEL = 'claude-fable-5';
 
 (async () => {
   await db.connect();
-  const files = readdirSync(DIR).filter(f => /^out-\d+\.json$/.test(f)).sort();
+  const files = readdirSync(DIR).filter(f => /^out-\d+[a-z]?\.json$/.test(f)).sort();
   let total = 0, inserted = 0, bad = 0;
   for (const f of files) {
     let arr;
