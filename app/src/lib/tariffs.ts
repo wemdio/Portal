@@ -80,6 +80,8 @@ export type ClientTariffRow = {
   auto_renew?: boolean;
   /** TRUE = подписка завязана на тестовый магазин YooKassa. Сохранённая карта и cron auto-renew используют тестовые креды. */
   is_test_shop?: boolean;
+  /** QA only: when set, autopayment paid_until is extended by N minutes instead of 1 month. NULL on production-grade subscriptions. */
+  test_period_minutes?: number | null;
   last_renewal_error?: string | null;
   last_renewal_attempt_at?: string | null;
   /** Последняя ошибка клиентской попытки оплаты (webhook payment.canceled). */
@@ -112,7 +114,7 @@ export async function applyInvoicePaidToTariff(
 
   const { data: tariff } = await supabaseAdmin
     .from('client_tariffs')
-    .select('id, billing_mode, payment_locked, paid_at, setup_until, paid_until')
+    .select('id, billing_mode, payment_locked, paid_at, setup_until, paid_until, test_period_minutes')
     .eq('user_id', clientUserId)
     .maybeSingle();
 
@@ -121,19 +123,28 @@ export async function applyInvoicePaidToTariff(
   const now = new Date().toISOString();
   const tariffUpdate: Record<string, unknown> = {};
 
+  // QA test mode short-circuits the standard "+1 month" — the whole point is
+  // to exercise the renewal loop in minutes against the real YK shop.
+  const testMinutes = tariff.test_period_minutes;
+  const extendPaidUntil = (base: Date): Date => {
+    const next = new Date(base);
+    if (testMinutes && testMinutes > 0) {
+      next.setMinutes(next.getMinutes() + testMinutes);
+    } else {
+      next.setMonth(next.getMonth() + 1);
+    }
+    return next;
+  };
+
   if (!tariff.paid_at) {
-    // First payment: paid_until = setup_until + 1 month (or now + 1 month).
+    // First payment: paid_until = setup_until + period (or now + period).
     tariffUpdate.paid_at = now;
     const base = tariff.setup_until ? new Date(tariff.setup_until) : new Date();
-    const paidUntil = new Date(base);
-    paidUntil.setMonth(paidUntil.getMonth() + 1);
-    tariffUpdate.paid_until = paidUntil.toISOString();
+    tariffUpdate.paid_until = extendPaidUntil(base).toISOString();
   } else {
-    // Renewal: extend paid_until by 1 month from the current paid_until.
+    // Renewal: extend paid_until by 1 period from the current paid_until.
     const base = tariff.paid_until ? new Date(tariff.paid_until) : new Date();
-    const paidUntil = new Date(base);
-    paidUntil.setMonth(paidUntil.getMonth() + 1);
-    tariffUpdate.paid_until = paidUntil.toISOString();
+    tariffUpdate.paid_until = extendPaidUntil(base).toISOString();
     tariffUpdate.paid_at = now;
   }
 

@@ -138,21 +138,35 @@ export async function POST(req: NextRequest) {
   // The customer can retry the same invoice URL with another card. We only
   // touch client_tariffs.last_payment_error so the LK page can display the
   // mapped russian reason.
+  //
+  // Special case `permission_revoked`: the customer (or their bank) revoked
+  // our right to charge the saved card directly in YooKassa. The saved
+  // payment_method_id is dead on YK's side, so we mirror that locally —
+  // null the id and switch off auto_renew so cron stops retrying.
   if (payment.status === 'canceled') {
     const reason = payment.cancellation_details?.reason ?? null;
     const ruText = mapYookassaErrorRu(reason);
+    const revoked = reason === 'permission_revoked';
 
     if (invoice.client_user_id) {
+      const update: Record<string, unknown> = {
+        last_payment_error: ruText,
+        updated_at: new Date().toISOString(),
+      };
+      if (revoked) {
+        update.yookassa_payment_method_id = null;
+        update.auto_renew = false;
+      }
       await supabaseAdmin
         .from('client_tariffs')
-        .update({ last_payment_error: ruText, updated_at: new Date().toISOString() })
+        .update(update)
         .eq('user_id', invoice.client_user_id);
     }
 
     await logAudit(
       'invoices.webhook.payment_canceled',
-      `Payment ${payment.id} for invoice ${invoice.id} canceled (reason: ${reason ?? 'unknown'})`,
-      { invoice_id: invoice.id, payment_id: payment.id, reason, party: payment.cancellation_details?.party ?? null },
+      `Payment ${payment.id} for invoice ${invoice.id} canceled (reason: ${reason ?? 'unknown'}${revoked ? ', saved card unlinked' : ''})`,
+      { invoice_id: invoice.id, payment_id: payment.id, reason, party: payment.cancellation_details?.party ?? null, unlinked: revoked },
       {},
     );
 
