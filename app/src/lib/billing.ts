@@ -417,6 +417,8 @@ interface RenewalTariffRow {
   /** Какой магазин YK обслуживает эту подписку. Saved card живёт в том магазине,
    *  где её привязали — cron должен бить теми же кредами. */
   is_test_shop: boolean;
+  /** QA only: when set, cron extends paid_until by N minutes instead of 1 month. */
+  test_period_minutes: number | null;
 }
 
 /**
@@ -549,12 +551,17 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
     // Normal renewal — extend from the existing paid_until so we don't lose
     // already-paid days. Retry after a failure — paid_until is in the past
     // (we set it to NOW in the failure branch below) so extend from NOW,
-    // i.e. the client gets a full month from the charge date.
+    // i.e. the client gets a full period from the charge date.
     const base = row.paid_until && new Date(row.paid_until) > now
       ? new Date(row.paid_until)
       : now;
     const newPaidUntil = new Date(base);
-    newPaidUntil.setMonth(newPaidUntil.getMonth() + 1);
+    if (row.test_period_minutes && row.test_period_minutes > 0) {
+      // QA test mode — short period for autopayment loop testing.
+      newPaidUntil.setMinutes(newPaidUntil.getMinutes() + row.test_period_minutes);
+    } else {
+      newPaidUntil.setMonth(newPaidUntil.getMonth() + 1);
+    }
 
     await supabaseAdmin
       .from('invoices')
