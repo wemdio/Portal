@@ -276,19 +276,33 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
   const [activating, setActivating] = useState(false);
   const [showExtendForm, setShowExtendForm] = useState(false);
   const [useTestShop, setUseTestShop] = useState(false);
+  // QA test mode — replaces month/half_year/year with a minutes-based period.
+  // Used to exercise the full autopayment + cron renewal loop against the
+  // real YK shop in minutes instead of waiting a real month.
+  const [useTestPeriod, setUseTestPeriod] = useState(false);
+  const [testMinutes, setTestMinutes] = useState('10');
 
   const handleActivate = useCallback(async () => {
-    if (tariffType === 'custom') {
+    // Test mode + Custom both require a manual amount input.
+    const needsManualAmount = useTestPeriod || tariffType === 'custom';
+    if (needsManualAmount) {
       const n = Number(activateCustomAmount.replace(',', '.'));
       if (!Number.isFinite(n) || n <= 0) {
-        onError('Укажите сумму за период для тарифа Custom');
+        onError(useTestPeriod ? 'Укажите сумму для тест-периода' : 'Укажите сумму за период для тарифа Custom');
+        return;
+      }
+    }
+    if (useTestPeriod) {
+      const m = Number(testMinutes);
+      if (!Number.isFinite(m) || m <= 0) {
+        onError('Укажите количество минут для тест-периода');
         return;
       }
     }
     setActivating(true);
     try {
       const bm = activateBillingMode === 'manual' ? null : activateBillingMode;
-      const customAmt = tariffType === 'custom' ? Number(activateCustomAmount.replace(',', '.')) : undefined;
+      const customAmt = needsManualAmount ? Number(activateCustomAmount.replace(',', '.')) : undefined;
       const res = await apiFetch<{
         ok: true; paid_until?: string; setup_until?: string;
         billing_mode?: string; payment_locked?: boolean;
@@ -300,9 +314,10 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
           action: 'activate',
           billing_mode: bm,
           tariff_type: tariffType,
-          billing_period: activatePeriod,
+          billing_period: useTestPeriod ? undefined : activatePeriod,
           billing_amount: customAmt,
           is_test_shop: bm === 'autopayment' ? useTestShop : false,
+          test_minutes: useTestPeriod ? Math.floor(Number(testMinutes)) : undefined,
         }),
       });
       onActivateResult({
@@ -324,7 +339,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
     } finally {
       setActivating(false);
     }
-  }, [activateBillingMode, activatePeriod, activateCustomAmount, tariffType, userId, apiFetch, onActivateResult, onSuccessMessage, onError, useTestShop]);
+  }, [activateBillingMode, activatePeriod, activateCustomAmount, tariffType, userId, apiFetch, onActivateResult, onSuccessMessage, onError, useTestShop, useTestPeriod, testMinutes]);
 
   const handleFinishSetup = useCallback(async () => {
     setActivating(true);
@@ -473,22 +488,63 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
                     <button
                       key={p}
                       type="button"
-                      onClick={() => setActivatePeriod(p)}
+                      onClick={() => { setUseTestPeriod(false); setActivatePeriod(p); }}
                       className={`flex-1 px-2 py-2 text-[11px] font-medium rounded-lg border transition-colors ${
-                        activatePeriod === p
+                        !useTestPeriod && activatePeriod === p
                           ? 'bg-emerald-600 text-white border-emerald-600'
                           : 'border-gray-200 text-gray-700 hover:bg-gray-50 bg-white'
                       }`}
                     >
                       <div>{BILLING_PERIOD_LABELS[p]}</div>
-                      <div className={`mt-0.5 text-[10px] tabular-nums ${activatePeriod === p ? 'text-emerald-50' : 'text-gray-500'}`}>
+                      <div className={`mt-0.5 text-[10px] tabular-nums ${!useTestPeriod && activatePeriod === p ? 'text-emerald-50' : 'text-gray-500'}`}>
                         {tariffType === 'custom' ? 'индивид.' : formatRub(amt)}
                       </div>
                     </button>
                   );
                 })}
+                {/* 4-я кнопка — QA test mode. Заменяет период в минутах
+                    и требует ручную сумму. Используется для прогона
+                    автоплатёж + cron-renewal цикла за минуты, без ожидания месяца. */}
+                <button
+                  type="button"
+                  onClick={() => setUseTestPeriod(true)}
+                  className={`flex-1 px-2 py-2 text-[11px] font-medium rounded-lg border transition-colors ${
+                    useTestPeriod
+                      ? 'bg-yellow-500 text-white border-yellow-500'
+                      : 'border-gray-200 text-gray-700 hover:bg-gray-50 bg-white'
+                  }`}
+                >
+                  <div>🧪 Тест</div>
+                  <div className={`mt-0.5 text-[10px] ${useTestPeriod ? 'text-yellow-50' : 'text-gray-500'}`}>QA</div>
+                </button>
               </div>
-              {tariffType === 'custom' && (
+              {useTestPeriod && (
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] font-medium text-gray-700 mb-1">Длительность (минут)</label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={testMinutes}
+                      onChange={(e) => setTestMinutes(e.target.value)}
+                      placeholder="10"
+                      className="w-full px-2.5 py-1.5 text-xs border border-yellow-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-gray-700 mb-1">Сумма (₽)</label>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={activateCustomAmount}
+                      onChange={(e) => setActivateCustomAmount(e.target.value)}
+                      placeholder="10"
+                      className="w-full px-2.5 py-1.5 text-xs border border-yellow-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                </div>
+              )}
+              {!useTestPeriod && tariffType === 'custom' && (
                 <div className="mt-2">
                   <label className="block text-[11px] font-medium text-gray-700 mb-1">Сумма за период (₽)</label>
                   <input

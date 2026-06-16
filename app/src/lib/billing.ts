@@ -417,6 +417,8 @@ interface RenewalTariffRow {
   /** Какой магазин YK обслуживает эту подписку. Saved card живёт в том магазине,
    *  где её привязали — cron должен бить теми же кредами. */
   is_test_shop: boolean;
+  /** QA only: when set, cron extends paid_until by N minutes instead of 1 month. */
+  test_period_minutes: number | null;
 }
 
 /**
@@ -546,8 +548,20 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
 
   // 3a. Success: mark invoice paid, extend the subscription.
   if (paymentSucceeded) {
-    const newPaidUntil = new Date(row.paid_until ?? now);
-    newPaidUntil.setMonth(newPaidUntil.getMonth() + 1);
+    // Normal renewal — extend from the existing paid_until so we don't lose
+    // already-paid days. Retry after a failure — paid_until is in the past
+    // (we set it to NOW in the failure branch below) so extend from NOW,
+    // i.e. the client gets a full period from the charge date.
+    const base = row.paid_until && new Date(row.paid_until) > now
+      ? new Date(row.paid_until)
+      : now;
+    const newPaidUntil = new Date(base);
+    if (row.test_period_minutes && row.test_period_minutes > 0) {
+      // QA test mode — short period for autopayment loop testing.
+      newPaidUntil.setMinutes(newPaidUntil.getMinutes() + row.test_period_minutes);
+    } else {
+      newPaidUntil.setMonth(newPaidUntil.getMonth() + 1);
+    }
 
     await supabaseAdmin
       .from('invoices')
@@ -580,11 +594,15 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
     return { invoiceId: invoiceRow.id, success: true, errorRu: null };
   }
 
-  // 3b. Failure: keep invoice pending, surface short error to client UI.
+  // 3b. Failure: keep invoice pending, expire access immediately, surface
+  // the error to client UI. Setting paid_until=NOW closes the portal right
+  // away (getClientStatus → 'expired'); the next cron run will retry the
+  // charge as long as paid_until is still ≤ NOW+24h (it is, by definition).
   const errMsg = yookassaErrRu ?? mapYookassaErrorRu(null);
   await supabaseAdmin
     .from('client_tariffs')
     .update({
+      paid_until: now.toISOString(),
       last_renewal_error: errMsg,
       last_renewal_attempt_at: now.toISOString(),
       updated_at: now.toISOString(),
