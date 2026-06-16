@@ -4300,6 +4300,11 @@ export function DatabaseSpreadsheet() {
       if (pendingUpdates.size === 0) return;
       const updates = new Map(pendingUpdates);
       pendingUpdates.clear();
+      // startTransition: см. signals polling — те же причины. Website
+      // enrichment может крутиться часами и каждые ~1с шлёт setTabs.
+      // Без transition'a юзер не может нормально пользоваться таблицей
+      // во время прогона.
+      startTransition(() => {
       setTabs((prev) =>
         prev.map((tab) => {
           if (tab.id !== tabId) return tab;
@@ -4335,6 +4340,7 @@ export function DatabaseSpreadsheet() {
           return { ...tab, data: nextData };
         }),
       );
+      });
     };
 
     const scheduleFlush = () => {
@@ -5016,24 +5022,28 @@ export function DatabaseSpreadsheet() {
       if (pendingUpdates.size === 0) return;
       const updates = new Map(pendingUpdates);
       pendingUpdates.clear();
-      setTabs((prev) =>
-        prev.map((tab) => {
-          if (tab.id !== tabId) return tab;
-          const nextData = [...tab.data];
-          updates.forEach((update, rowIndex) => {
-            const existingRow = nextData[rowIndex];
-            if (!existingRow) return;
-            const newRow = [...existingRow];
-            while (newRow.length <= reasonColIndex) {
-              newRow.push('');
-            }
-            newRow[scoreColIndex] = update.score;
-            newRow[reasonColIndex] = update.reason;
-            nextData[rowIndex] = newRow;
-          });
-          return { ...tab, data: nextData };
-        }),
-      );
+      // startTransition: brief scoring polling — те же причины что у signal
+      // polling. Low-priority background update.
+      startTransition(() => {
+        setTabs((prev) =>
+          prev.map((tab) => {
+            if (tab.id !== tabId) return tab;
+            const nextData = [...tab.data];
+            updates.forEach((update, rowIndex) => {
+              const existingRow = nextData[rowIndex];
+              if (!existingRow) return;
+              const newRow = [...existingRow];
+              while (newRow.length <= reasonColIndex) {
+                newRow.push('');
+              }
+              newRow[scoreColIndex] = update.score;
+              newRow[reasonColIndex] = update.reason;
+              nextData[rowIndex] = newRow;
+            });
+            return { ...tab, data: nextData };
+          }),
+        );
+      });
     };
 
     try {
@@ -6222,18 +6232,22 @@ export function DatabaseSpreadsheet() {
         if (pendingUpdates.size === 0) return;
         const batch = new Map(pendingUpdates);
         pendingUpdates.clear();
-        setTabs((prev) => prev.map((tab) => {
-          if (tab.id !== activeTabId) return tab;
-          const data = tab.data.map((row, ri) => {
-            const value = batch.get(ri);
-            if (value === undefined) return row;
-            const nextRow = [...row];
-            while (nextRow.length <= emailColIndex) nextRow.push('');
-            nextRow[emailColIndex] = value;
-            return nextRow;
-          });
-          return { ...tab, data };
-        }));
+        // startTransition + sparse-update: low-priority + не клонируем
+        // unchanged rows (читай комментарий в signal polling выше).
+        startTransition(() => {
+          setTabs((prev) => prev.map((tab) => {
+            if (tab.id !== activeTabId) return tab;
+            const nextData = tab.data.slice();
+            batch.forEach((value, ri) => {
+              if (ri < 0 || ri >= nextData.length) return;
+              const nextRow = [...nextData[ri]];
+              while (nextRow.length <= emailColIndex) nextRow.push('');
+              nextRow[emailColIndex] = value;
+              nextData[ri] = nextRow;
+            });
+            return { ...tab, data: nextData };
+          }));
+        });
       };
 
       const scheduleFlush = () => {
@@ -6466,18 +6480,21 @@ export function DatabaseSpreadsheet() {
         if (pendingUpdates.size === 0) return;
         const batch = new Map(pendingUpdates);
         pendingUpdates.clear();
-        setTabs((prev) => prev.map((tab) => {
-          if (tab.id !== activeTabId) return tab;
-          const data = tab.data.map((row, ri) => {
-            const value = batch.get(ri);
-            if (value === undefined) return row;
-            const nextRow = [...row];
-            while (nextRow.length <= newColIndex) nextRow.push('');
-            nextRow[newColIndex] = value;
-            return nextRow;
-          });
-          return { ...tab, data };
-        }));
+        // startTransition + sparse-update: low-priority polling update.
+        startTransition(() => {
+          setTabs((prev) => prev.map((tab) => {
+            if (tab.id !== activeTabId) return tab;
+            const nextData = tab.data.slice();
+            batch.forEach((value, ri) => {
+              if (ri < 0 || ri >= nextData.length) return;
+              const nextRow = [...nextData[ri]];
+              while (nextRow.length <= newColIndex) nextRow.push('');
+              nextRow[newColIndex] = value;
+              nextData[ri] = nextRow;
+            });
+            return { ...tab, data: nextData };
+          }));
+        });
       };
 
       const scheduleFlush = () => {
@@ -7723,55 +7740,63 @@ export function DatabaseSpreadsheet() {
           const maxColIdx = extraCols && extraCols.length > 0
             ? Math.max(profileColIndex, ...extraCols.map((c) => c.colIndex))
             : profileColIndex;
-          setTabs((prev) =>
-            prev.map((tab) => {
-              if (tab.id !== tabId) return tab;
-              // Sparse-обновление: раньше клонировали ВСЕ строки tab.data,
-              // даже те которые не меняются в этом батче. Для 1000-строчной
-              // вкладки это 1000 alloc'ов array'ев каждые 2 сек polling'a
-              // (SIGNAL_POLL_INTERVAL_MS=2000). Теперь клонируем верхний
-              // массив (cheap) и точечно подменяем только реально
-              // изменяемые строки — остальные оставляем по reference.
-              // Бонус: React shallow-сравнивает строки и пропускает
-              // re-render для unchanged rows.
-              const nextData = tab.data.slice();
-              for (const result of data.results) {
-                const ri = result.row_index;
-                if (ri < 1 || ri >= nextData.length) continue;
-                const newRow = [...nextData[ri]];
-                while (newRow.length <= maxColIdx) newRow.push('');
-                if (result.status === 'completed') {
-                  const parsed = parseSignalResultText(result.result_text);
-                  if (parsed) {
-                    newRow[stackColIndex] = parsed.stack;
-                    newRow[profileColIndex] = parsed.profile;
-                  }
-                  // Render extra extractor columns from the same JSON payload.
-                  if (extraCols && extraCols.length > 0 && result.result_text) {
-                    let raw: Record<string, unknown> | null = null;
-                    try {
-                      raw = JSON.parse(result.result_text) as Record<string, unknown>;
-                    } catch {
-                      raw = null;
+          // startTransition: signal polling шлёт setTabs каждые 2 сек
+          // во время сигнал-job'a. Без transition'a каждый такой апдейт
+          // RE-RENDER'ит весь 13к-строчный компонент с приоритетом
+          // user-input, и юзеру не дают кликать пока render не закончится.
+          // С transition'ом React помечает этот апдейт как low-priority —
+          // клики и скроллы юзера ПРЕЕМПТЯТ poll-апдейт.
+          startTransition(() => {
+            setTabs((prev) =>
+              prev.map((tab) => {
+                if (tab.id !== tabId) return tab;
+                // Sparse-обновление: раньше клонировали ВСЕ строки tab.data,
+                // даже те которые не меняются в этом батче. Для 1000-строчной
+                // вкладки это 1000 alloc'ов array'ев каждые 2 сек polling'a
+                // (SIGNAL_POLL_INTERVAL_MS=2000). Теперь клонируем верхний
+                // массив (cheap) и точечно подменяем только реально
+                // изменяемые строки — остальные оставляем по reference.
+                // Бонус: React shallow-сравнивает строки и пропускает
+                // re-render для unchanged rows.
+                const nextData = tab.data.slice();
+                for (const result of data.results) {
+                  const ri = result.row_index;
+                  if (ri < 1 || ri >= nextData.length) continue;
+                  const newRow = [...nextData[ri]];
+                  while (newRow.length <= maxColIdx) newRow.push('');
+                  if (result.status === 'completed') {
+                    const parsed = parseSignalResultText(result.result_text);
+                    if (parsed) {
+                      newRow[stackColIndex] = parsed.stack;
+                      newRow[profileColIndex] = parsed.profile;
                     }
-                    if (raw) {
-                      for (const extra of extraCols) {
-                        newRow[extra.colIndex] = formatExtraValue(extra.key, raw[extra.key]);
+                    // Render extra extractor columns from the same JSON payload.
+                    if (extraCols && extraCols.length > 0 && result.result_text) {
+                      let raw: Record<string, unknown> | null = null;
+                      try {
+                        raw = JSON.parse(result.result_text) as Record<string, unknown>;
+                      } catch {
+                        raw = null;
+                      }
+                      if (raw) {
+                        for (const extra of extraCols) {
+                          newRow[extra.colIndex] = formatExtraValue(extra.key, raw[extra.key]);
+                        }
                       }
                     }
+                  } else if (result.status === 'failed' || result.status === 'skipped') {
+                    newRow[stackColIndex] = SIGNAL_ERROR_MARKER;
+                    newRow[profileColIndex] = result.last_error ?? 'Ошибка';
+                    errorCount += 1;
+                    // Leave extra columns blank on failure rather than spam the
+                    // marker across N cells per row.
                   }
-                } else if (result.status === 'failed' || result.status === 'skipped') {
-                  newRow[stackColIndex] = SIGNAL_ERROR_MARKER;
-                  newRow[profileColIndex] = result.last_error ?? 'Ошибка';
-                  errorCount += 1;
-                  // Leave extra columns blank on failure rather than spam the
-                  // marker across N cells per row.
+                  nextData[ri] = newRow;
                 }
-                nextData[ri] = newRow;
-              }
-              return { ...tab, data: nextData };
-            }),
-          );
+                return { ...tab, data: nextData };
+              }),
+            );
+          });
           lastProgressTime = Date.now();
         }
 
