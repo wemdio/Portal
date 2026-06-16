@@ -440,8 +440,18 @@ const PERSONALIZATION_PRESETS = [
 При определении боли учитывай контекст из брифа компании-отправителя (приложен ниже) - боль должна быть релевантна тому, что мы можем решить.`,
   },
 ] as const;
-const ENRICHMENT_PROGRESS_INTERVAL_MS = 200;
-const ENRICHMENT_UPDATE_FLUSH_MS = 250;
+// ENRICHMENT_PROGRESS_INTERVAL_MS используется как POLL-интервал в email
+// scraping (раз в N мс делается GET /results) И как throttle для
+// прогресс-бара в website enrichment. Раньше было 200мс = 5 раз в секунду
+// шёл setTabs во время прогона job'a. Каждый setTabs ре-рендерил весь
+// 13к-строчный компонент. Сейчас 1500мс — UX-wise неощутимо (прогресс-бар
+// и заполнение ячеек идут плавно), а работы main thread'у в 7.5 раз меньше.
+const ENRICHMENT_PROGRESS_INTERVAL_MS = 1500;
+// FLUSH_MS — таймер дебаунса перед setTabs внутри одного poll-цикла
+// (если пришла пачка results, ждём столько мс и батчим в один setTabs).
+// 250мс → 1000мс: за секунду больше успеем собрать в один батч,
+// меньше setTabs, плавнее.
+const ENRICHMENT_UPDATE_FLUSH_MS = 1000;
 const ENRICHMENT_UPDATE_BATCH = 20;
 const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
 const ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 10;
@@ -450,8 +460,11 @@ const EMAIL_SCRAPING_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 const EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS = 15 * 60 * 1000;
 const EMAIL_SCRAPING_MAX_BACKOFF_MS = 30_000;
 const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
-const BRIEF_SCORING_POLL_INTERVAL_MS = 1000;
-const BRIEF_SCORING_MAX_POLL_DELAY_MS = 5000;
+// BRIEF_SCORING: было 1000 (раз в сек). Поднимаем до 3000 — каждый poll
+// дёргает GET /results, парсит JSON и setTabs'ит. Раз в 3 сек хватает
+// для плавного UX, а нагрузка на main thread в 3 раза меньше.
+const BRIEF_SCORING_POLL_INTERVAL_MS = 3000;
+const BRIEF_SCORING_MAX_POLL_DELAY_MS = 10000;
 const BRIEF_SCORING_MAX_CONSECUTIVE_FAILURES = 10;
 const BRIEF_SCORING_ENQUEUE_CHUNK_SIZE = 50;
 const BRIEF_SCORING_MAX_FIELDS_PER_ROW = 20;
@@ -7585,8 +7598,12 @@ export function DatabaseSpreadsheet() {
     }
   };
 
-  const SIGNAL_POLL_INTERVAL_MS = 2000;
-  const SIGNAL_POLL_MAX_BACKOFF_MS = 15_000;
+  // SIGNAL_POLL: было 2000 (раз в 2 сек). Поднимаем до 5000 — signal job
+  // обычно длится 30-60 мин; раз в 5 сек обновлять прогресс хватает.
+  // ВЫИГРЫШ: 2.5x меньше setTabs во время прогона, меньше re-render'ов
+  // 13к-строчного компонента, юзер может работать с таблицей параллельно.
+  const SIGNAL_POLL_INTERVAL_MS = 5000;
+  const SIGNAL_POLL_MAX_BACKOFF_MS = 20_000;
   const SIGNAL_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 
   const openSignalModal = async () => {
