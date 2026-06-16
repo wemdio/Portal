@@ -68,6 +68,14 @@ switch (kind) {
   case 'baseconstructor':
     run('./baseConstructor');
     break;
+  case 'byosend':
+  case 'byo-send':
+    run('./byoSend');
+    break;
+  case 'byoreplies':
+  case 'byo-replies':
+    run('./byoReplies');
+    break;
   case 'saleschatlogger':
     run('./salesChatLogger');
     break;
