@@ -137,3 +137,38 @@ export async function sendTestOAuthGmail(cfg: GmailOAuthConfig, to: string): Pro
     transport.close();
   }
 }
+
+// ─── Реальная отправка письма кампании (произвольные тема/текст) ───────────────
+
+export interface OutgoingMessage {
+  from: string; // "Имя <email>" или просто email
+  to: string;
+  subject: string;
+  text: string;
+}
+
+/** Отправка по паролю приложения (SMTP). */
+export async function sendMailViaSmtp(cfg: SmtpConfig, msg: OutgoingMessage): Promise<SmtpResult> {
+  const transport = buildTransport(cfg);
+  try {
+    await transport.sendMail({ from: msg.from, to: msg.to, subject: msg.subject, text: msg.text });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: toMessage(e) };
+  } finally {
+    transport.close();
+  }
+}
+
+/** Отправка через Gmail OAuth2 (XOAUTH2). */
+export async function sendMailViaOAuthGmail(cfg: GmailOAuthConfig, msg: OutgoingMessage): Promise<SmtpResult> {
+  const transport = buildOAuthTransport(cfg);
+  try {
+    await transport.sendMail({ from: msg.from, to: msg.to, subject: msg.subject, text: msg.text });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: toMessage(e) };
+  } finally {
+    transport.close();
+  }
+}
