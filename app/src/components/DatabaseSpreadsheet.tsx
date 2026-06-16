@@ -1265,13 +1265,10 @@ export function DatabaseSpreadsheet() {
       columnWidths,
       savedAt: Date.now(),
     };
-    try {
-      window.localStorage.setItem(storageKey, JSON.stringify(payload));
-    } catch {
-      /* quota exceeded — acceptable for very large datasets */
-    }
+    const totalRowsForLs = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
+    writeLocalStorageBest(storageKey, payload, totalRowsForLs > LARGE_DATASET_ROW_THRESHOLD);
     if (userId) {
-      const totalRows = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
+      const totalRows = totalRowsForLs;
       const isLargeDataset = totalRows > LARGE_DATASET_ROW_THRESHOLD;
       firstPendingSaveAtRef.current = null;
       // Единый путь сохранения — queueRemoteStateSave → backgroundSave
@@ -1284,6 +1281,25 @@ export function DatabaseSpreadsheet() {
       queueRemoteStateSave(userId, payload, isLargeDataset);
     }
   };
+
+  /**
+   * Сериализуем и пишем state в localStorage. Для больших баз пропускаем —
+   * 30МБ JSON всё равно упрётся в quota localStorage (~5МБ) и упадёт в
+   * catch, но JSON.stringify СИНХРОННО блокирует main thread на секунды,
+   * это и создаёт лаг при импорте/добавлении вкладок. Малые базы пишем
+   * как раньше — для устойчивости на unload.
+   */
+  const writeLocalStorageBest = useCallback(
+    (storageKeySnapshot: string, payload: PersistedSpreadsheetState, isLargeDataset: boolean) => {
+      if (isLargeDataset) return;
+      try {
+        window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
+      } catch {
+        /* quota exceeded — acceptable for very large datasets */
+      }
+    },
+    [],
+  );
 
   const queueRemoteStateSave = useCallback(
     (userIdSnapshot: string, payload: PersistedSpreadsheetState, isLargeDataset: boolean) => {
@@ -8983,11 +8999,10 @@ export function DatabaseSpreadsheet() {
     const isLargeDataset = totalRows > LARGE_DATASET_ROW_THRESHOLD;
     const delay = isLargeDataset ? STORAGE_SAVE_DELAY_LARGE : STORAGE_SAVE_DELAY;
 
-    try {
-      window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
-    } catch {
-      /* quota exceeded — acceptable for very large datasets */
-    }
+    // Пропуск синхронного JSON.stringify+localStorage.setItem для больших
+    // баз (см. writeLocalStorageBest). 30МБ stringify на main thread — это
+    // 5-15 сек заморозки UI на каждый ре-рендер с tabs.
+    writeLocalStorageBest(storageKeySnapshot, payload, isLargeDataset);
 
     // Потолок дебаунса: cleanup ниже сбрасывает таймер на каждый ре-рендер
     // (правка ячейки / клик вкладки / ресайз колонки). При активной работе
@@ -9019,7 +9034,7 @@ export function DatabaseSpreadsheet() {
       // уходил). Пусть начатое сохранение допишется; saveGeneration внутри
       // backgroundSave сам отсечёт устаревший проход, если стартует новый.
     };
-  }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId, queueRemoteStateSave]);
+  }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId, queueRemoteStateSave, writeLocalStorageBest]);
 
   useEffect(() => {
     const handleBeforeUnload = () => {
