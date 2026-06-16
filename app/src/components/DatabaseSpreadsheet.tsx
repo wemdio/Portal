@@ -2286,9 +2286,14 @@ export function DatabaseSpreadsheet() {
     if (!activeTab) return;
     const nextNumber = tabCounter + 1;
     setTabCounter(nextNumber);
+    // Старое поведение копировало размер активной вкладки (включая ВСЕ
+    // пустые строки): для активной в 32k строк × 40 колонок создавалось
+    // 1.28M пустых ячеек → React commit + autosave gzip'ом → UI висит на
+    // десятки секунд. Новая вкладка стартует с DEFAULT_ROWS (20). Ширину
+    // колонок сохраняем — чтобы юзер не удивлялся переходу 40 → 10.
     const newTab = createSheet(
       `Вкладка ${nextNumber}`,
-      activeTab.data.length,
+      DEFAULT_ROWS,
       activeTab.data[0]?.length ?? DEFAULT_COLS,
     );
     setTabs((prev) => [...prev, newTab]);
