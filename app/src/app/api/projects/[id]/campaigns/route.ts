@@ -7,28 +7,38 @@ export const dynamic = 'force-dynamic';
 type ActivePeriod = {
   id: string;
   period_start: string | null;
+  created_at: string | null;
 };
 
 async function getActivePeriod(projectId: string): Promise<ActivePeriod | null> {
   if (!supabaseAdmin) return null;
   const { data } = await supabaseAdmin
     .from('project_periods')
-    .select('id, period_start')
+    .select('id, period_start, created_at')
     .eq('project_id', projectId)
     .eq('status', 'active')
     .maybeSingle();
   return (data as ActivePeriod | null) ?? null;
 }
 
+/**
+ * Граница периода для baseline = момент ОТКРЫТИЯ периода (`created_at`,
+ * нажатие кнопки «Новый период»), а не введённая `period_start`/дедлайн.
+ * Кампания, созданная до открытия периода, считается «старой»: при ручном
+ * добавлении ей ставится baseline = текущий счётчик (в новый период попадёт
+ * только дельта, без задвоения с прошлым периодом). Кампания, созданная после
+ * открытия, — целиком новая (baseline 0). См. campaignStartsInsidePeriod в
+ * instantlyCampaignCatalog.ts (автоматчеры используют ту же границу).
+ */
 function campaignStartsInsidePeriod(
   campaign: { timestamp_created?: string | null },
   period: ActivePeriod,
 ): boolean {
-  if (!period.period_start) return true;
+  if (!period.created_at) return true;
   const campaignMs = Date.parse(campaign.timestamp_created ?? '');
-  const periodMs = Date.parse(period.period_start);
-  if (!Number.isFinite(campaignMs) || !Number.isFinite(periodMs)) return false;
-  return campaignMs >= periodMs;
+  const boundaryMs = Date.parse(period.created_at);
+  if (!Number.isFinite(campaignMs) || !Number.isFinite(boundaryMs)) return false;
+  return campaignMs >= boundaryMs;
 }
 
 async function getCampaignBaseline(campaignId: string, activePeriod: ActivePeriod): Promise<number> {
