@@ -504,7 +504,7 @@ export default function LiOutreachV2Page() {
                     className="mt-1 w-full resize-y rounded-lg border border-gray-200 px-3 py-2 text-sm font-mono outline-none focus:border-emerald-400"
                   />
                   <span className="mt-1 block text-[11px] text-gray-500">
-                    По одной ссылке на строку. Демон шлёт запрос на связь каждому из этих профилей. ⚠️ Обязательно: без ссылок кампания не отправит ни одного инвайта (автопоиск по target_market пока не подключён).
+                    По одной ссылке на строку — стартовые профили для инвайтов. Можно оставить пустым: тогда включится автопоиск по ключевым словам (генерятся из продукта и цели промптом «Search keywords»), агент сам найдёт похожих ЛПР и отквалифицирует их перед инвайтом.
                   </span>
                 </label>
                 <div className="grid grid-cols-[1fr_120px] gap-3">
@@ -707,7 +707,7 @@ export default function LiOutreachV2Page() {
                 </div>
                 <PromptEditor
                   label="Follow-up agent (system prompt диалога)"
-                  hint="Главный промпт агента, ведущего LinkedIn-переписку. Решает send_message / wait / mark_completed."
+                  hint="Промпт переписки: генерит следующее сообщение — первый opener или контекстный ответ на реплику контакта (плоский DM, демон шлёт как есть)."
                   value={settings.prompt_follow_up_agent}
                   onChange={(v) => setSettings({ ...settings, prompt_follow_up_agent: v })}
                   onReset={() => resetPromptToDefault('follow_up_agent')}
