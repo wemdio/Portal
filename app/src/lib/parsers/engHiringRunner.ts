@@ -47,6 +47,14 @@ type RefreshSourceStats = {
   cachedVacancies: number;
 };
 
+type CacheRunRow = {
+  id: string;
+  next_company_index?: number | null;
+  scanned_companies?: number | null;
+  cached_vacancies?: number | null;
+  total_companies?: number | null;
+};
+
 class EngHiringCancelledError extends Error {}
 
 type DetailRequest = {
@@ -82,6 +90,22 @@ function clampMaxResults(value: unknown): number {
   if (!Number.isFinite(n)) return 5000;
   if (n <= 0) return MAX_RESULTS;
   return Math.min(MAX_RESULTS, Math.max(1, Math.trunc(n)));
+}
+
+function cachePublishedCutoff(config: EngHiringSearchConfig): string | null {
+  const days = Number(config.posted_within_days ?? 0);
+  if (!Number.isFinite(days) || days <= 0) return null;
+  const now = config.now ? new Date(config.now) : new Date();
+  if (Number.isNaN(now.getTime())) return null;
+  return new Date(now.getTime() - Math.trunc(days) * 86_400_000).toISOString();
+}
+
+function cacheCountryCodes(config: EngHiringSearchConfig): string[] {
+  const countries = Array.isArray(config.countries)
+    ? config.countries.map((code) => String(code).toLowerCase().trim()).filter(Boolean)
+    : [];
+  if (countries.length === 0 || countries.includes('remote')) return [];
+  return Array.from(new Set(countries));
 }
 
 async function fetchJson(url: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
@@ -204,6 +228,69 @@ async function sourceNeedsRefresh(db: Db, source: EngHiringSource, limit: number
   return !data;
 }
 
+function toNonNegativeInt(value: unknown): number {
+  const n = Number(value ?? 0);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.trunc(n);
+}
+
+async function findResumableCacheRun(db: Db, source: EngHiringSource, limit: number): Promise<CacheRunRow | null> {
+  const { data, error } = await db
+    .from('eng_hiring_cache_runs')
+    .select('id,next_company_index,scanned_companies,cached_vacancies,total_companies')
+    .eq('source', source)
+    .eq('companies_limit', limit)
+    .eq('status', 'running')
+    .order('started_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`cache run resume check failed: ${error.message}`);
+  return (data as CacheRunRow | null) ?? null;
+}
+
+async function createCacheRun(db: Db, source: EngHiringSource, limit: number): Promise<CacheRunRow> {
+  const { data, error } = await db
+    .from('eng_hiring_cache_runs')
+    .insert({
+      source,
+      companies_limit: limit,
+      status: 'running',
+      next_company_index: 0,
+      total_companies: 0,
+      scanned_companies: 0,
+      cached_vacancies: 0,
+      started_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .select('id,next_company_index,scanned_companies,cached_vacancies,total_companies')
+    .single();
+  if (error) throw new Error(`cache run create failed: ${error.message}`);
+  return data as CacheRunRow;
+}
+
+async function updateCacheRunProgress(
+  db: Db,
+  runId: string,
+  patch: Partial<{
+    next_company_index: number;
+    scanned_companies: number;
+    cached_vacancies: number;
+    total_companies: number;
+    status: 'running' | 'completed' | 'failed';
+    completed_at: string | null;
+    error_message: string | null;
+  }>,
+): Promise<void> {
+  const { error } = await db
+    .from('eng_hiring_cache_runs')
+    .update({
+      ...patch,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', runId);
+  if (error) throw new Error(`cache run progress update failed: ${error.message}`);
+}
+
 function buildAtsDetailRequest(row: CacheRow): DetailRequest | null {
   const slug = encodeURIComponent(row.source_company_slug);
   const jobId = encodeURIComponent(row.source_job_id);
@@ -227,15 +314,25 @@ async function refreshSourceCache(
   db: Db,
   source: EngHiringSource,
   limit: number,
+  run: CacheRunRow,
   ensureNotCancelled: () => Promise<void>,
   onProgress: (done: number, total: number, source: EngHiringSource) => Promise<void>,
 ): Promise<RefreshSourceStats> {
   const csv = await fetchText(`${TOKENS_BASE}/${source}.csv`);
   const tokens = parseCompanyCsv(csv).slice(0, limit);
+  const startIndex = Math.min(toNonNegativeInt(run.next_company_index), tokens.length);
   const batch: ReturnType<typeof toCacheRow>[] = [];
-  let cachedVacancies = 0;
+  let cachedVacancies = toNonNegativeInt(run.cached_vacancies);
 
-  for (let i = 0; i < tokens.length; i += 1) {
+  await updateCacheRunProgress(db, run.id, {
+    next_company_index: startIndex,
+    scanned_companies: startIndex,
+    cached_vacancies: cachedVacancies,
+    total_companies: tokens.length,
+    error_message: null,
+  });
+
+  for (let i = startIndex; i < tokens.length; i += 1) {
     const token = tokens[i];
     try {
       const payload = await fetchJson(
@@ -259,6 +356,13 @@ async function refreshSourceCache(
       await upsertCacheBatch(db, batch.splice(0, batch.length));
     }
     if ((i + 1) % 25 === 0 || i === tokens.length - 1) {
+      await updateCacheRunProgress(db, run.id, {
+        next_company_index: i + 1,
+        scanned_companies: i + 1,
+        cached_vacancies: cachedVacancies,
+        total_companies: tokens.length,
+        error_message: null,
+      });
       await ensureNotCancelled();
       await onProgress(i + 1, tokens.length, source);
     }
@@ -268,6 +372,14 @@ async function refreshSourceCache(
   if (batch.length) {
     await upsertCacheBatch(db, batch);
   }
+
+  await updateCacheRunProgress(db, run.id, {
+    next_company_index: tokens.length,
+    scanned_companies: tokens.length,
+    cached_vacancies: cachedVacancies,
+    total_companies: tokens.length,
+    error_message: null,
+  });
 
   return { scannedCompanies: tokens.length, cachedVacancies };
 }
@@ -353,24 +465,14 @@ async function ensureCache(
     await ensureNotCancelled();
     const needs = await sourceNeedsRefresh(db, source, limit, maxAgeHours);
     if (!needs) continue;
-    const { data: runRow, error: runErr } = await db
-      .from('eng_hiring_cache_runs')
-      .insert({
-        source,
-        companies_limit: limit,
-        status: 'running',
-        started_at: new Date().toISOString(),
-      })
-      .select('id')
-      .single();
-    if (runErr) throw new Error(`cache run create failed: ${runErr.message}`);
+    const runRow = await findResumableCacheRun(db, source, limit) ?? await createCacheRun(db, source, limit);
 
     await setProgress({
       progress_stage: 'refreshing_cache',
       progress_detail: { source, source_index: i + 1, total_sources: sources.length },
     });
     try {
-      const stats = await refreshSourceCache(db, source, limit, ensureNotCancelled, async (done, total, currentSource) => {
+      const stats = await refreshSourceCache(db, source, limit, runRow, ensureNotCancelled, async (done, total, currentSource) => {
         const sourceProgress = total ? done / total : 1;
         const percent = Math.round(((i + sourceProgress) / sources.length) * 55);
         await setProgress({
@@ -378,24 +480,24 @@ async function ensureCache(
           progress_detail: { source: currentSource, scanned_companies: done, total_companies: total },
         });
       });
-      await db
-        .from('eng_hiring_cache_runs')
-        .update({
-          status: 'completed',
-          scanned_companies: stats.scannedCompanies,
-          cached_vacancies: stats.cachedVacancies,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', runRow.id);
+      await updateCacheRunProgress(db, runRow.id, {
+        status: 'completed',
+        next_company_index: stats.scannedCompanies,
+        scanned_companies: stats.scannedCompanies,
+        cached_vacancies: stats.cachedVacancies,
+        completed_at: new Date().toISOString(),
+        error_message: null,
+      });
     } catch (err) {
-      await db
-        .from('eng_hiring_cache_runs')
-        .update({
-          status: 'failed',
-          completed_at: new Date().toISOString(),
-          error_message: err instanceof Error ? err.message : 'Unknown error',
-        })
-        .eq('id', runRow.id);
+      if (err instanceof EngHiringCancelledError) {
+        await updateCacheRunProgress(db, runRow.id, { error_message: null });
+        throw err;
+      }
+      await updateCacheRunProgress(db, runRow.id, {
+        status: 'failed',
+        completed_at: new Date().toISOString(),
+        error_message: err instanceof Error ? err.message : 'Unknown error',
+      });
       throw err;
     }
   }
@@ -404,14 +506,19 @@ async function ensureCache(
 async function loadMatchingCacheRows(db: Db, config: EngHiringSearchConfig): Promise<CacheRow[]> {
   const sources = sourcesFromConfig(config);
   const maxResults = clampMaxResults(config.max_results);
+  const countryCodes = cacheCountryCodes(config);
+  const publishedCutoff = cachePublishedCutoff(config);
   const out: CacheRow[] = [];
   let offset = 0;
 
   while (offset < MAX_CACHE_SCAN_ROWS && out.length < maxResults) {
-    const { data, error } = await db
+    let query = db
       .from('eng_hiring_cache')
       .select('*')
-      .in('source', sources)
+      .in('source', sources);
+    if (countryCodes.length) query = query.in('country_code', countryCodes);
+    if (publishedCutoff) query = query.gte('published_at', publishedCutoff);
+    const { data, error } = await query
       .order('published_at', { ascending: false })
       .range(offset, offset + 999);
     if (error) throw new Error(`cache select failed: ${error.message}`);
