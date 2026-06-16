@@ -764,7 +764,10 @@ export default function UsersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  
+  // Вкладка-фильтр по типу профиля. 'client' — только клиенты (их трудно
+  // выцепить из общей массы сотрудников), 'staff' — все внутренние роли.
+  const [roleFilter, setRoleFilter] = useState<'all' | 'client' | 'staff'>('all');
+
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newUser, setNewUser] = useState({ email: '', password: '', role: 'technician' as UserRole, full_name: '' });
@@ -1348,12 +1351,22 @@ export default function UsersPage() {
   // and re-rendering the entire users table.
   const filteredUsers = useMemo(() => {
     const q = searchQuery.toLowerCase();
-    return users.filter((user) =>
-      user.email?.toLowerCase().includes(q) ||
-      user.full_name?.toLowerCase().includes(q) ||
-      (user.role && ROLE_LABELS[user.role]?.toLowerCase().includes(q))
-    );
-  }, [users, searchQuery]);
+    return users.filter((user) => {
+      if (roleFilter === 'client' && user.role !== 'client') return false;
+      if (roleFilter === 'staff' && user.role === 'client') return false;
+      return (
+        user.email?.toLowerCase().includes(q) ||
+        user.full_name?.toLowerCase().includes(q) ||
+        (user.role && ROLE_LABELS[user.role]?.toLowerCase().includes(q))
+      );
+    });
+  }, [users, searchQuery, roleFilter]);
+
+  // Счётчики для вкладок — по всей базе, независимо от поиска и активной
+  // вкладки. Каждый пользователь либо клиент, либо нет, так что всего =
+  // clientCount + staffCount.
+  const clientCount = useMemo(() => users.filter((u) => u.role === 'client').length, [users]);
+  const staffCount = users.length - clientCount;
 
   const sortedUsers = useMemo(() => {
     const list = [...filteredUsers];
@@ -1412,6 +1425,34 @@ export default function UsersPage() {
           </button>
         </div>
       )}
+
+      <div className="mb-4 inline-flex w-full gap-1 overflow-x-auto rounded-xl border border-gray-200 bg-gray-50 p-1 sm:w-fit">
+        {([
+          { key: 'all' as const, label: 'Все', count: users.length },
+          { key: 'client' as const, label: 'Клиенты', count: clientCount },
+          { key: 'staff' as const, label: 'Сотрудники', count: staffCount },
+        ]).map(({ key, label, count }) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setRoleFilter(key)}
+            className={`inline-flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 py-1.5 text-sm font-medium transition-colors sm:flex-none ${
+              roleFilter === key
+                ? 'bg-white text-gray-900 shadow-sm'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            {label}
+            <span
+              className={`inline-flex min-w-[1.25rem] justify-center rounded-full px-1.5 py-0.5 text-[11px] font-semibold tabular-nums ${
+                roleFilter === key ? 'bg-blue-100 text-blue-700' : 'bg-gray-200 text-gray-600'
+              }`}
+            >
+              {count}
+            </span>
+          </button>
+        ))}
+      </div>
 
       <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center">
         <div className="relative flex-1">
