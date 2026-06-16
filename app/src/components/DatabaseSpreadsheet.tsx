@@ -2606,16 +2606,46 @@ export function DatabaseSpreadsheet() {
     setSelectionMode('cell');
   };
 
-  const applyNormalizationToData = () => {
+  const applyNormalizationToData = async () => {
     if (!activeTab) return;
+    const tabId = activeTab.id;
     const changed = activeTab.data.length;
     setUndoSnapshot(`Нормализация (${changed} строк)`);
-    updateActiveSheet((sheet) => {
-      const nextData = sheet.data.map((row) =>
-        row.map((cell) => normalizeText(cell, normalizeOptions)),
-      );
-      return { ...sheet, data: nextData };
-    });
+
+    // normalizeText гоняет EMOJI_REGEX.replace на каждой ячейке. Для
+    // 32k строк × 40 колонок = 1.28M вызовов регекспа — синхронно это
+    // 5-30 сек заморозки UI. Стрим чанками по 500 строк, между ними
+    // yield'имся в браузер. Маленькие базы (<= 500) — один commit как
+    // раньше, без лишнего overhead'а.
+    const CHUNK_ROWS = 500;
+    if (changed <= CHUNK_ROWS) {
+      updateActiveSheet((sheet) => ({
+        ...sheet,
+        data: sheet.data.map((row) =>
+          row.map((cell) => normalizeText(cell, normalizeOptions)),
+        ),
+      }));
+      setLastAction({ message: `Нормализация применена к ${changed} строкам`, time: Date.now() });
+      return;
+    }
+
+    for (let start = 0; start < changed; start += CHUNK_ROWS) {
+      const end = Math.min(start + CHUNK_ROWS, changed);
+      setTabs((prev) => prev.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        // Sparse-обновление: клонируем только верхний массив (cheap),
+        // и точечно нормализуем только этот чанк строк. Остальные
+        // строки сохраняют references — React пропустит reconciliation.
+        const nextData = tab.data.slice();
+        for (let r = start; r < end; r += 1) {
+          nextData[r] = tab.data[r].map((cell) => normalizeText(cell, normalizeOptions));
+        }
+        return { ...tab, data: nextData };
+      }));
+      if (end < changed) {
+        await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+      }
+    }
     setLastAction({ message: `Нормализация применена к ${changed} строкам`, time: Date.now() });
   };
 
@@ -2895,17 +2925,41 @@ export function DatabaseSpreadsheet() {
     [filterEntries, getNormalizedCell, searchOnlyMatches, searchTerms],
   );
 
+  // Кеш результатов buildFilterOptions по колонке. Раньше каждый клик
+  // на иконку фильтра гонял полный скан колонки (до 1000+ строк) +
+  // localeCompare сортировку, синхронно в event handler'е. На повторных
+  // открытиях одной и той же колонки (типичный кейс — юзер ходит по
+  // меню туда-сюда) это была чистая повторная работа.
+  // Инвалидируем кеш когда activeTab.data меняется (reference equality —
+  // setTabs возвращает новый array). После моего sparse-обновления в
+  // signal polling unchanged rows сохраняют references, но data выше
+  // всё равно новая reference на каждый setState. Это нормально — на
+  // редактирование ячейки кеш сбрасывается и следующий клик пересчитает.
+  const filterOptionsCacheRef = useRef<{
+    data: string[][] | null;
+    perCol: Map<number, ReturnType<typeof buildFilterOptions>>;
+  }>({ data: null, perCol: new Map() });
+
   const openFilterMenu = (event: MouseEvent, colIndex: number) => {
     event.preventDefault();
     event.stopPropagation();
     if (!activeTab) return;
-    const { options, overflow } = buildFilterOptions(activeTab.data, colIndex);
+    const cache = filterOptionsCacheRef.current;
+    if (cache.data !== activeTab.data) {
+      cache.data = activeTab.data;
+      cache.perCol.clear();
+    }
+    let cached = cache.perCol.get(colIndex);
+    if (!cached) {
+      cached = buildFilterOptions(activeTab.data, colIndex);
+      cache.perCol.set(colIndex, cached);
+    }
     setFilterMenu({
       col: colIndex,
       x: event.clientX,
       y: event.clientY,
-      options,
-      overflow,
+      options: cached.options,
+      overflow: cached.overflow,
       search: '',
     });
     setContextMenu(null);
@@ -3474,7 +3528,15 @@ export function DatabaseSpreadsheet() {
   }, [headerLabels, websiteEnrichment.sourceCol]);
 
   const enrichmentColumnStats = useMemo(() => {
-    if (!activeTab) return [];
+    // Дорогой O(N*M) подсчёт filled/missing по всем колонкам — нужен ТОЛЬКО
+    // когда модалка обогащения открыта (показывает оператору какие колонки
+    // уже заполнены). Когда модалка закрыта — пересчитывать бессмысленно,
+    // а зависимость от activeTab/headerLabels раньше дёргала эту работу
+    // на КАЖДЫЙ cell edit во всей таблице.
+    // Плюс снижен rowLimit с 5001 до 500 — для оценки fill-rate такого
+    // сэмпла достаточно, точные числа в модалке не нужны (юзер просто
+    // выбирает колонку, ему важна примерная заполненность).
+    if (!activeTab || !websiteEnrichment.isOpen) return [];
     const headerRow = activeTab.data[0] ?? [];
     const stats = Array.from({ length: colCount }, (_, col) => {
       const headerValue = String(headerRow[col] ?? '').trim();
@@ -3490,7 +3552,7 @@ export function DatabaseSpreadsheet() {
       };
     });
 
-    const rowLimit = Math.min(activeTab.data.length, 5001);
+    const rowLimit = Math.min(activeTab.data.length, 501);
     for (let rowIndex = 1; rowIndex < rowLimit; rowIndex += 1) {
       const row = activeTab.data[rowIndex];
       const sourceValue = String(row?.[websiteEnrichment.sourceCol] ?? '').trim();
@@ -3503,7 +3565,7 @@ export function DatabaseSpreadsheet() {
     }
 
     return stats;
-  }, [activeTab, colCount, headerLabels, enrichmentHeaderLabel, websiteEnrichment.sourceCol]);
+  }, [activeTab, colCount, headerLabels, enrichmentHeaderLabel, websiteEnrichment.sourceCol, websiteEnrichment.isOpen]);
 
   const enrichmentOptions = useMemo(() => {
     if (enrichmentColumnStats.length === 0) return [];
@@ -3673,11 +3735,21 @@ export function DatabaseSpreadsheet() {
     ? allRowIndices.slice(virtualRange.start, virtualRange.end + 1)
     : allRowIndices;
 
-  const allVisibleSelected =
-    visibleRowIndices.length > 0 &&
-    visibleRowIndices.every((index) => selectedRows.has(index));
-  const someVisibleSelected =
-    visibleRowIndices.some((index) => selectedRows.has(index)) && !allVisibleSelected;
+  // Раньше .every()/.some() гонялись на каждый ре-рендер компонента
+  // (любое изменение state — клик, скролл, taby). Для 1000 видимых строк
+  // это два полных O(N) прохода по visibleRowIndices с Set.has lookup'ами.
+  // Сам по себе Set.has O(1) и быстрый, но в сумме с сотнями ре-рендеров
+  // — заметная нагрузка. Мемоизуем по реальным зависимостям:
+  // visibleRowIndices (меняется при фильтрах/data change) и selectedRows
+  // (меняется при выделении строк). На прочие state changes — return same.
+  const allVisibleSelected = useMemo(
+    () => visibleRowIndices.length > 0 && visibleRowIndices.every((index) => selectedRows.has(index)),
+    [visibleRowIndices, selectedRows],
+  );
+  const someVisibleSelected = useMemo(
+    () => visibleRowIndices.some((index) => selectedRows.has(index)) && !allVisibleSelected,
+    [visibleRowIndices, selectedRows, allVisibleSelected],
+  );
 
   const requestConfirm = (title: string, message: string, onConfirm: () => void, label = 'Удалить') => {
     confirmActionRef.current = onConfirm;
@@ -7613,16 +7685,25 @@ export function DatabaseSpreadsheet() {
           setTabs((prev) =>
             prev.map((tab) => {
               if (tab.id !== tabId) return tab;
-              const nextData = tab.data.map((row) => [...row]);
+              // Sparse-обновление: раньше клонировали ВСЕ строки tab.data,
+              // даже те которые не меняются в этом батче. Для 1000-строчной
+              // вкладки это 1000 alloc'ов array'ев каждые 2 сек polling'a
+              // (SIGNAL_POLL_INTERVAL_MS=2000). Теперь клонируем верхний
+              // массив (cheap) и точечно подменяем только реально
+              // изменяемые строки — остальные оставляем по reference.
+              // Бонус: React shallow-сравнивает строки и пропускает
+              // re-render для unchanged rows.
+              const nextData = tab.data.slice();
               for (const result of data.results) {
                 const ri = result.row_index;
                 if (ri < 1 || ri >= nextData.length) continue;
-                while (nextData[ri].length <= maxColIdx) nextData[ri].push('');
+                const newRow = [...nextData[ri]];
+                while (newRow.length <= maxColIdx) newRow.push('');
                 if (result.status === 'completed') {
                   const parsed = parseSignalResultText(result.result_text);
                   if (parsed) {
-                    nextData[ri][stackColIndex] = parsed.stack;
-                    nextData[ri][profileColIndex] = parsed.profile;
+                    newRow[stackColIndex] = parsed.stack;
+                    newRow[profileColIndex] = parsed.profile;
                   }
                   // Render extra extractor columns from the same JSON payload.
                   if (extraCols && extraCols.length > 0 && result.result_text) {
@@ -7634,17 +7715,18 @@ export function DatabaseSpreadsheet() {
                     }
                     if (raw) {
                       for (const extra of extraCols) {
-                        nextData[ri][extra.colIndex] = formatExtraValue(extra.key, raw[extra.key]);
+                        newRow[extra.colIndex] = formatExtraValue(extra.key, raw[extra.key]);
                       }
                     }
                   }
                 } else if (result.status === 'failed' || result.status === 'skipped') {
-                  nextData[ri][stackColIndex] = SIGNAL_ERROR_MARKER;
-                  nextData[ri][profileColIndex] = result.last_error ?? 'Ошибка';
+                  newRow[stackColIndex] = SIGNAL_ERROR_MARKER;
+                  newRow[profileColIndex] = result.last_error ?? 'Ошибка';
                   errorCount += 1;
                   // Leave extra columns blank on failure rather than spam the
                   // marker across N cells per row.
                 }
+                nextData[ri] = newRow;
               }
               return { ...tab, data: nextData };
             }),
@@ -9035,13 +9117,26 @@ export function DatabaseSpreadsheet() {
     };
   }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId, queueRemoteStateSave, writeLocalStorageBest]);
 
+  // Раньше useEffect был без deps array — подписка на 'beforeunload' и
+  // отписка дёргались на КАЖДЫЙ ре-рендер (а ре-рендеров в этом компоненте
+  // сотни в минуту при активной работе). addEventListener/removeEventListener
+  // — DOM-операции, и хоть и не страшно дорогие сами по себе, в сумме
+  // ощутимо стопорили event loop при каждом клике/правке.
+  // Теперь подписываемся ОДИН раз на mount, а доступ к актуальному flushSave
+  // (он замыкает все state'ы — tabs, activeTabId, etc.) идёт через ref —
+  // ref.current синхронно обновляется на каждый render (это дешёвая
+  // присваивание), сам listener стабилен.
+  const flushSaveRef = useRef(flushSave);
+  useEffect(() => {
+    flushSaveRef.current = flushSave;
+  });
   useEffect(() => {
     const handleBeforeUnload = () => {
-      flushSave();
+      flushSaveRef.current();
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  });
+  }, []);
 
   useEffect(() => {
     if (!isHydrated || !activeTab || websiteEnrichment.isGenerating) return;
