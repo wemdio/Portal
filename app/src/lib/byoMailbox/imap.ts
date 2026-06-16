@@ -4,6 +4,7 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { unsealMailboxSecret } from './credentials';
 import { getAccessTokenFromRefresh } from './googleOAuth';
+import { getYandexAccessTokenFromRefresh } from './yandexOAuth';
 
 /**
  * Чтение новых писем (ответов) по IMAP с подключённого ящика клиента.
@@ -44,6 +45,7 @@ export interface FetchResult {
 
 function imapTarget(mb: ReplyMailboxRow): { host: string; port: number } | null {
   if (mb.auth_type === 'oauth_google') return { host: 'imap.gmail.com', port: 993 };
+  if (mb.auth_type === 'oauth_yandex') return { host: 'imap.yandex.ru', port: 993 };
   if (mb.imap_host) return { host: mb.imap_host, port: mb.imap_port || 993 };
   return null;
 }
@@ -57,6 +59,10 @@ export async function fetchNewReplies(mb: ReplyMailboxRow): Promise<FetchResult 
   if (mb.auth_type === 'oauth_google') {
     if (!secret.oauthRefreshToken) return null;
     const accessToken = await getAccessTokenFromRefresh(secret.oauthRefreshToken);
+    auth = { user: mb.email, accessToken };
+  } else if (mb.auth_type === 'oauth_yandex') {
+    if (!secret.oauthRefreshToken) return null;
+    const accessToken = await getYandexAccessTokenFromRefresh(secret.oauthRefreshToken);
     auth = { user: mb.email, accessToken };
   } else {
     const pass = secret.imapPassword || secret.smtpPassword;

@@ -2,7 +2,8 @@ import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { unsealMailboxSecret } from './credentials';
-import { sendMailViaSmtp, sendMailViaOAuthGmail, type SmtpResult } from './smtp';
+import { sendMailViaSmtp, sendMailViaOAuthGmail, sendMailViaOAuthToken, type SmtpResult } from './smtp';
+import { getYandexAccessTokenFromRefresh } from './yandexOAuth';
 
 /**
  * Движок отправки BYO-кампаний: берёт письма из очереди client_byo_messages
@@ -56,6 +57,14 @@ export async function sendViaMailbox(
     if (!secret.oauthRefreshToken) return { ok: false, error: 'no_oauth_refresh_token' };
     return sendMailViaOAuthGmail(
       { email: mb.email, refreshToken: secret.oauthRefreshToken },
+      { from, to: msg.to, subject: msg.subject, text: msg.text },
+    );
+  }
+  if (mb.auth_type === 'oauth_yandex') {
+    if (!secret.oauthRefreshToken) return { ok: false, error: 'no_oauth_refresh_token' };
+    const accessToken = await getYandexAccessTokenFromRefresh(secret.oauthRefreshToken);
+    return sendMailViaOAuthToken(
+      { host: 'smtp.yandex.ru', port: 465, secure: true, user: mb.email, accessToken },
       { from, to: msg.to, subject: msg.subject, text: msg.text },
     );
   }
