@@ -2599,7 +2599,7 @@ export function DatabaseSpreadsheet() {
     setLastAction({ message: `Нормализация применена к ${changed} строкам`, time: Date.now() });
   };
 
-  const applyRowsToNewTab = useCallback((nextRows: string[][], filename?: string) => {
+  const applyRowsToNewTab = useCallback(async (nextRows: string[][], filename?: string) => {
     const normalized = normalizeRows(trimTrailingEmptyRows(nextRows));
     const fallbackName = `Вкладка ${tabCounter + 1}`;
     const baseName = filename ? getBaseFilename(filename) : '';
@@ -2609,15 +2609,41 @@ export function DatabaseSpreadsheet() {
     }
     const colCount = normalized[0]?.length ?? DEFAULT_COLS;
     const data = normalized.length > 0 ? normalized : [Array.from({ length: colCount }, () => '')];
-    const newTab: Sheet = {
-      id: createId(),
-      name: tabName,
-      data,
-    };
+    const newTabId = createId();
+
+    // Размер базы определяет стратегию: маленькие сетим одним commit'ом,
+    // большие стримим батчами по CHUNK_ROWS, чтобы React не блокировал
+    // main thread на reconciliation 30k строк за раз. Между батчами
+    // отдаём контроль браузеру через setTimeout(0) — UI отзывчив всё
+    // время импорта, юзер видит как вкладка наполняется.
+    const CHUNK_ROWS = 1000;
+    if (data.length <= CHUNK_ROWS) {
+      const newTab: Sheet = { id: newTabId, name: tabName, data };
+      startTransition(() => {
+        setTabs((prev) => [...prev, newTab]);
+        setActiveTabId(newTabId);
+      });
+      return;
+    }
+
+    const firstChunk = data.slice(0, CHUNK_ROWS);
+    const firstTab: Sheet = { id: newTabId, name: tabName, data: firstChunk };
     startTransition(() => {
-      setTabs((prev) => [...prev, newTab]);
-      setActiveTabId(newTab.id);
+      setTabs((prev) => [...prev, firstTab]);
+      setActiveTabId(newTabId);
     });
+
+    for (let i = CHUNK_ROWS; i < data.length; i += CHUNK_ROWS) {
+      // Yield to browser: один тик event loop'а позволяет React commit'нуть
+      // предыдущий батч + браузеру обработать ввод/скролл/paint.
+      await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+      const chunk = data.slice(i, i + CHUNK_ROWS);
+      startTransition(() => {
+        setTabs((prev) => prev.map((t) => (
+          t.id === newTabId ? { ...t, data: [...t.data, ...chunk] } : t
+        )));
+      });
+    }
   }, [tabCounter]);
 
   useEffect(() => {
