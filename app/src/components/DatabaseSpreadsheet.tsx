@@ -9394,8 +9394,610 @@ export function DatabaseSpreadsheet() {
   const toolbarMonochromeButtonCompactClass =
     'inline-flex items-center gap-1 rounded border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-900 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400';
 
+  // ─── Toolbar memoization ──────────────────────────────────────────────
+  // Архитектурная правка: тулбар (≈400 строк JSX, 25+ кнопок) на КАЖДЫЙ
+  // ре-рендер компонента полностью пересчитывает свой VDOM. Открытие
+  // модалки, signal-polling, печать в ячейке, скролл — всё триггерит
+  // повторное создание ~200 VDOM-узлов тулбара. С useMemo'ом мы создаём
+  // их ОДИН раз и пересчитываем только когда меняются реально
+  // отображаемые в тулбаре значения (счётчики прогресса, флаги
+  // isProcessing активных job'ов, наличие activeTab и т.п.).
+  //
+  // Проблема stale closure'ов: useMemo с пустыми deps закэширует JSX, в
+  // котором замкнуты СТАРЫЕ handler'ы. Эти handler'ы при клике увидят
+  // устаревший state. Решение — паттерн ref-dispatcher: ref всегда
+  // указывает на свежие handler'ы, а dispatcher'ы (стабильные обёртки)
+  // диспатчат через ref. Клик идёт через dispatcher → ref → актуальный
+  // handler с актуальным state.
+  const toolbarHandlersRef = useRef({
+    confirmRemoveSelectedRows,
+    confirmClearSelection,
+    copyEntireTable,
+    handleExportCsv,
+    handleExportXlsx,
+    openPersonalizationModal,
+    openWebsiteEnrichmentModal,
+    handleStopEmailScraping,
+    openEmailScrapingModal,
+    handleStopEmailValidation,
+    openEmailValidationModal,
+    openSiteAvailabilityModal,
+    closeTrafficCheckModal,
+    openTrafficCheckModal,
+    handleStopBriefScoring,
+    openBriefScoringModal,
+    openNameCleanupModal,
+    closeDadataModal,
+    openDadataModal,
+    openSignalModal,
+    closeFnsModal,
+    openFnsModal,
+    closeInnLookupModal,
+    openInnLookupModal,
+    handleCleanInvisibleWhitespace,
+    handleStopWebsiteEnrichment,
+    openReviewSubmitModal: () =>
+      setReviewSubmit({ isOpen: true, comment: '', projectId: '', submitting: false }),
+    triggerImport: () => importInputRef.current?.click(),
+    pushToInstantly: async () => {
+      const hdrs = activeTab?.data[0] ?? [];
+      const initialMapping = hdrs.map((h) => autoDetectInstantlyField(String(h ?? '')));
+      setInstantlyPush({
+        isOpen: true,
+        campaignId: '',
+        leadListId: '',
+        pushing: false,
+        result: '',
+        loadingLists: true,
+        columnMapping: initialMapping,
+        mappingStep: false,
+      });
+      setInstantlyCampaigns([]);
+      setInstantlyLeadLists([]);
+      setInstantlyCampaignSearch('');
+      setInstantlyCreateMode(false);
+      setInstantlyNewName('');
+      try {
+        const token =
+          (await (await import('@/lib/supabaseClient')).supabase.auth.getSession()).data.session?.access_token ?? '';
+        const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+        const errors: string[] = [];
+        const [cRes, lRes] = await Promise.all([
+          fetch('/api/instantly/campaigns?limit=500', { headers }),
+          fetch('/api/instantly/lead-lists?limit=all', { headers }),
+        ]);
+        if (cRes.ok) {
+          const cd = await cRes.json();
+          const raw = (cd.items ?? cd.data ?? (Array.isArray(cd) ? cd : [])) as Array<{
+            id: string;
+            name: string;
+            timestamp_created?: string;
+          }>;
+          const sorted = raw
+            .map((c) => ({ id: c.id, name: c.name, ts: c.timestamp_created ?? '' }))
+            .sort((a, b) => (b.ts > a.ts ? 1 : b.ts < a.ts ? -1 : 0));
+          setInstantlyCampaigns(sorted);
+        } else {
+          const errBody = await cRes.json().catch(() => ({ error: cRes.statusText }));
+          errors.push(`Кампании: ${errBody?.error ?? cRes.statusText}`);
+        }
+        if (lRes.ok) {
+          const ld = await lRes.json();
+          setInstantlyLeadLists(
+            (ld.items ?? ld.data ?? (Array.isArray(ld) ? ld : [])).map(
+              (l: { id: string; name: string }) => ({ id: l.id, name: l.name }),
+            ),
+          );
+        } else {
+          const errBody = await lRes.json().catch(() => ({ error: lRes.statusText }));
+          errors.push(`Lead-списки: ${errBody?.error ?? lRes.statusText}`);
+        }
+        if (errors.length) {
+          setInstantlyPush((s) => ({ ...s, result: `Ошибка загрузки: ${errors.join('; ')}` }));
+        }
+      } catch (err) {
+        setInstantlyPush((s) => ({
+          ...s,
+          result: `Ошибка: ${err instanceof Error ? err.message : 'не удалось загрузить данные'}`,
+        }));
+      } finally {
+        setInstantlyPush((s) => ({ ...s, loadingLists: false }));
+      }
+    },
+  });
+  // Обновляем ref на КАЖДЫЙ render — handlers замыкают актуальные
+  // state/props, dispatcher'ы (созданные ОДИН раз ниже) при клике
+  // вызывают актуальную версию.
+  toolbarHandlersRef.current = {
+    confirmRemoveSelectedRows,
+    confirmClearSelection,
+    copyEntireTable,
+    handleExportCsv,
+    handleExportXlsx,
+    openPersonalizationModal,
+    openWebsiteEnrichmentModal,
+    handleStopEmailScraping,
+    openEmailScrapingModal,
+    handleStopEmailValidation,
+    openEmailValidationModal,
+    openSiteAvailabilityModal,
+    closeTrafficCheckModal,
+    openTrafficCheckModal,
+    handleStopBriefScoring,
+    openBriefScoringModal,
+    openNameCleanupModal,
+    closeDadataModal,
+    openDadataModal,
+    openSignalModal,
+    closeFnsModal,
+    openFnsModal,
+    closeInnLookupModal,
+    openInnLookupModal,
+    handleCleanInvisibleWhitespace,
+    handleStopWebsiteEnrichment,
+    openReviewSubmitModal: toolbarHandlersRef.current.openReviewSubmitModal,
+    triggerImport: toolbarHandlersRef.current.triggerImport,
+    pushToInstantly: toolbarHandlersRef.current.pushToInstantly,
+  };
+
+  // Stable dispatchers — созданы ОДИН раз, никогда не меняют reference.
+  // useMemo сохраняет их между ре-рендерами.
+  const td = useMemo(
+    () => ({
+      confirmRemoveSelectedRows: () => toolbarHandlersRef.current.confirmRemoveSelectedRows(),
+      confirmClearSelection: () => toolbarHandlersRef.current.confirmClearSelection(),
+      copyEntireTable: () => void toolbarHandlersRef.current.copyEntireTable(),
+      handleExportCsv: () => toolbarHandlersRef.current.handleExportCsv(),
+      handleExportXlsx: () => toolbarHandlersRef.current.handleExportXlsx(),
+      openPersonalizationModal: () => toolbarHandlersRef.current.openPersonalizationModal(),
+      openWebsiteEnrichmentModal: () => toolbarHandlersRef.current.openWebsiteEnrichmentModal(),
+      handleStopEmailScraping: () => void toolbarHandlersRef.current.handleStopEmailScraping(),
+      openEmailScrapingModal: () => toolbarHandlersRef.current.openEmailScrapingModal(),
+      handleStopEmailValidation: () => void toolbarHandlersRef.current.handleStopEmailValidation(),
+      openEmailValidationModal: () => toolbarHandlersRef.current.openEmailValidationModal(),
+      openSiteAvailabilityModal: () => toolbarHandlersRef.current.openSiteAvailabilityModal(),
+      closeTrafficCheckModal: () => toolbarHandlersRef.current.closeTrafficCheckModal(),
+      openTrafficCheckModal: () => toolbarHandlersRef.current.openTrafficCheckModal(),
+      handleStopBriefScoring: () => void toolbarHandlersRef.current.handleStopBriefScoring(),
+      openBriefScoringModal: () => toolbarHandlersRef.current.openBriefScoringModal(),
+      openNameCleanupModal: () => toolbarHandlersRef.current.openNameCleanupModal(),
+      closeDadataModal: () => toolbarHandlersRef.current.closeDadataModal(),
+      openDadataModal: () => toolbarHandlersRef.current.openDadataModal(),
+      openSignalModal: () => toolbarHandlersRef.current.openSignalModal(),
+      closeFnsModal: () => toolbarHandlersRef.current.closeFnsModal(),
+      openFnsModal: () => toolbarHandlersRef.current.openFnsModal(),
+      closeInnLookupModal: () => toolbarHandlersRef.current.closeInnLookupModal(),
+      openInnLookupModal: () => toolbarHandlersRef.current.openInnLookupModal(),
+      handleCleanInvisibleWhitespace: () => toolbarHandlersRef.current.handleCleanInvisibleWhitespace(),
+      handleStopWebsiteEnrichment: () => toolbarHandlersRef.current.handleStopWebsiteEnrichment(),
+      openReviewSubmitModal: () => toolbarHandlersRef.current.openReviewSubmitModal(),
+      triggerImport: () => toolbarHandlersRef.current.triggerImport(),
+      pushToInstantly: () => void toolbarHandlersRef.current.pushToInstantly(),
+    }),
+    [],
+  );
+
+  // Производные boolean'ы для disabled-флагов кнопок — primitives дают
+  // useMemo'у нормальное cache invalidation (Object.is на ссылках для
+  // activeTab был бы false-positive на каждый sparse setTabs).
+  const hasActiveTab = Boolean(activeTab);
+  const canShowReviewSubmit =
+    (!activeReviewReq || reworkStatuses.has(activeReviewReq.status)) && hasActiveTab && rowCount > 0;
+  const showReviewBadge = Boolean(activeReviewReq);
+
+  // Мемоизированный toolbar JSX. Зависит ТОЛЬКО от реально отображаемых
+  // в нём значений. Когда юзер кликает «открыть модалку», setSignalEnrichment
+  // не меняет ни одной из этих переменных → useMemo возвращает старую
+  // ссылку → React пропускает diff целого поддерева. Click handler идёт
+  // через td.* → ref → актуальный handler.
+  const toolbarJsx = useMemo(
+    () => (
+      <div className="flex flex-wrap items-center gap-1.5 pb-1 flex-shrink-0">
+        <Link
+          href="/tools"
+          className="inline-flex items-center gap-1 rounded-md bg-black px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-gray-800"
+        >
+          <span aria-hidden>←</span>
+          <span>К инструментам</span>
+        </Link>
+        <span className="text-xs font-semibold text-gray-500 mr-1">Базы</span>
+
+        {selectedRows.size > 0 && (
+          <button
+            type="button"
+            onClick={td.confirmRemoveSelectedRows}
+            className={toolbarMonochromeButtonCompactClass}
+          >
+            Удалить ({selectedRows.size})
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={td.confirmClearSelection}
+          disabled={!hasActiveTab || rowCount === 0 || colCount === 0}
+          className="inline-flex items-center rounded border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
+        >
+          Очистить
+        </button>
+
+        <button
+          type="button"
+          onClick={td.triggerImport}
+          className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-gray-50"
+        >
+          ↑ Импорт
+        </button>
+
+        <div className="flex items-center rounded bg-gray-100 p-0.5">
+          <span className="px-1.5 py-1 text-[11px] text-gray-400">↓</span>
+          <button
+            type="button"
+            onClick={td.handleExportCsv}
+            className="rounded px-1.5 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-white hover:text-gray-900"
+          >
+            CSV
+          </button>
+          <button
+            type="button"
+            onClick={td.handleExportXlsx}
+            className="rounded px-1.5 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-white hover:text-gray-900"
+          >
+            Excel
+          </button>
+        </div>
+
+        <button
+          type="button"
+          onClick={td.copyEntireTable}
+          disabled={!hasActiveTab || rowCount === 0}
+          className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
+          title="Копировать всю таблицу в буфер обмена"
+        >
+          📋 Копировать
+        </button>
+        {copyNotice && (
+          <span
+            className={`inline-flex items-center rounded border px-2 py-1 text-[10px] font-medium ${
+              copyNotice.tone === 'success'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                : 'border-red-200 bg-red-50 text-red-700'
+            }`}
+          >
+            {copyNotice.message}
+          </span>
+        )}
+
+        <div className="h-4 w-px bg-gray-200 mx-0.5" />
+
+        <button
+          type="button"
+          onClick={td.openPersonalizationModal}
+          disabled={colCount === 0}
+          className={toolbarMonochromeButtonClass}
+        >
+          Персонализация
+        </button>
+
+        <button
+          type="button"
+          onClick={td.openWebsiteEnrichmentModal}
+          disabled={colCount === 0}
+          className={toolbarMonochromeButtonClass}
+        >
+          Обогатить
+        </button>
+
+        {emailScraping.isGenerating ? (
+          <button
+            type="button"
+            onClick={td.handleStopEmailScraping}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            Почты... {emailScraping.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={td.openEmailScrapingModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Найти почты
+          </button>
+        )}
+
+        {emailValidation.isValidating ? (
+          <button
+            type="button"
+            onClick={td.handleStopEmailValidation}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            Валидация... {emailValidation.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={td.openEmailValidationModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Валидация почт
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={td.openSiteAvailabilityModal}
+          disabled={colCount === 0}
+          className={toolbarMonochromeButtonClass}
+        >
+          Проверка сайтов
+        </button>
+
+        {trafficCheck.isChecking ? (
+          <button
+            type="button"
+            onClick={td.closeTrafficCheckModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            Трафик: {trafficCheck.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={td.openTrafficCheckModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Трафик сайтов
+          </button>
+        )}
+
+        {briefScoring.isScoring ? (
+          <button
+            type="button"
+            onClick={td.handleStopBriefScoring}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            Оценка ЦА: {briefScoring.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={td.openBriefScoringModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Оценка ЦА
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={td.openNameCleanupModal}
+          disabled={colCount === 0}
+          className={toolbarMonochromeButtonClass}
+        >
+          Чистка названий
+        </button>
+
+        {dadataEnrichment.isProcessing ? (
+          <button
+            type="button"
+            onClick={td.closeDadataModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            DaData... {dadataEnrichment.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={td.openDadataModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            DaData
+          </button>
+        )}
+
+        {signalEnrichment.isProcessing ? (
+          <button
+            type="button"
+            onClick={td.openSignalModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-indigo-700"
+            title="Открыть окно прогресса. Анализ продолжается в фоне."
+          >
+            Сигналы {signalEnrichment.progress}%
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={td.openSignalModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Сигналы
+          </button>
+        )}
+
+        {fnsEnrichment.isProcessing ? (
+          <button
+            type="button"
+            onClick={td.closeFnsModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            ФНС... {fnsEnrichment.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={td.openFnsModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Доходы ФНС
+          </button>
+        )}
+
+        {innLookup.isProcessing ? (
+          <button
+            type="button"
+            onClick={td.closeInnLookupModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            ИНН... {innLookup.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={td.openInnLookupModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Найти ИНН
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={td.handleCleanInvisibleWhitespace}
+          disabled={colCount === 0}
+          className={toolbarMonochromeButtonClass}
+          title="Очистка невидимых символов и проблемных пробелов для экспорта в Instantly"
+        >
+          Whitespace Fix
+        </button>
+
+        <div className="h-4 w-px bg-gray-200 mx-0.5" />
+
+        {showReviewBadge && activeReviewReq && (() => {
+          const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
+            submitted: { label: 'На проверке', cls: 'border-gray-300 bg-gray-50 text-gray-600' },
+            needs_rework: { label: 'На доработке', cls: 'border-orange-300 bg-orange-50 text-orange-700' },
+            review_approved: { label: 'Одобрено', cls: 'border-green-300 bg-green-50 text-green-700' },
+            sent_to_client: { label: 'У клиента', cls: 'border-blue-300 bg-blue-50 text-blue-700' },
+            client_approved: { label: 'Клиент согласовал', cls: 'border-green-300 bg-green-50 text-green-700' },
+            client_requested_changes: { label: 'Клиент: правки', cls: 'border-red-300 bg-red-50 text-red-700' },
+          };
+          const badge = STATUS_BADGE[activeReviewReq.status];
+          return badge ? (
+            <span className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium ${badge.cls}`}>
+              {badge.label}
+              {activeReviewReq.reviewer_comment && reworkStatuses.has(activeReviewReq.status) && (
+                <span
+                  className="cursor-help underline decoration-dotted"
+                  title={activeReviewReq.reviewer_comment}
+                >
+                  💬
+                </span>
+              )}
+            </span>
+          ) : null;
+        })()}
+
+        {canShowReviewSubmit && (
+          <button
+            type="button"
+            onClick={td.openReviewSubmitModal}
+            disabled={!hasActiveTab || rowCount === 0}
+            className="inline-flex items-center gap-1 rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {activeReviewReq ? '↻ Переотправить' : '✓ На проверку'}
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={td.pushToInstantly}
+          disabled={!hasActiveTab || rowCount === 0}
+          className="inline-flex items-center gap-1 rounded border border-blue-300 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 transition hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Push to Instantly
+        </button>
+
+        {importStatus.status !== 'idle' && (
+          <>
+            <div className="h-4 w-px bg-gray-200 mx-0.5" />
+            <span className="text-[10px] text-gray-500">{formatProgressLabel(importStatus)} {importStatus.progress}%</span>
+          </>
+        )}
+        {websiteEnrichment.isGenerating && (
+          <>
+            <div className="h-4 w-px bg-gray-200 mx-0.5" />
+            <span className="text-[10px] text-gray-500">
+              Обогащение: {websiteEnrichment.currentRow}/{websiteEnrichment.totalRows}
+            </span>
+            {websiteEnrichment.retryCount > 0 && (
+              <span className="text-[10px] text-amber-600">
+                Ретраи: {websiteEnrichment.retryCount}
+              </span>
+            )}
+            <div className="h-1 w-20 overflow-hidden rounded-full bg-gray-200">
+              <div
+                className="h-full bg-blue-600 transition-all duration-300 ease-out"
+                style={{ width: `${websiteEnrichment.progress}%` }}
+              />
+            </div>
+            <button
+              type="button"
+              onClick={td.handleStopWebsiteEnrichment}
+              className="rounded border border-gray-300 bg-white px-1.5 py-0.5 text-[10px] font-medium text-gray-900 transition hover:bg-gray-100"
+            >
+              Стоп
+            </button>
+          </>
+        )}
+      </div>
+    ),
+    [
+      td,
+      selectedRows.size,
+      hasActiveTab,
+      rowCount,
+      colCount,
+      copyNotice,
+      emailScraping.isGenerating,
+      emailScraping.progress,
+      emailValidation.isValidating,
+      emailValidation.progress,
+      trafficCheck.isChecking,
+      trafficCheck.progress,
+      briefScoring.isScoring,
+      briefScoring.progress,
+      dadataEnrichment.isProcessing,
+      dadataEnrichment.progress,
+      signalEnrichment.isProcessing,
+      signalEnrichment.progress,
+      fnsEnrichment.isProcessing,
+      fnsEnrichment.progress,
+      innLookup.isProcessing,
+      innLookup.progress,
+      websiteEnrichment.isGenerating,
+      websiteEnrichment.progress,
+      websiteEnrichment.currentRow,
+      websiteEnrichment.totalRows,
+      websiteEnrichment.retryCount,
+      importStatus.status,
+      importStatus.progress,
+      activeReviewReq,
+      reworkStatuses,
+      showReviewBadge,
+      canShowReviewSubmit,
+      toolbarMonochromeButtonClass,
+      toolbarMonochromeButtonCompactClass,
+    ],
+  );
+
   return (
     <div className="flex-1 min-h-0 space-y-0.5 flex flex-col">
+      {toolbarJsx}
+      {/* Старый inline toolbar JSX (≈400 строк, 25+ кнопок) заменён на
+          memoized {toolbarJsx} выше. Замыкания/handler'ы протекают через
+          stable dispatcher'ы (td.*), которые диспатчат на актуальные
+          функции через ref — никаких stale closure'ов. См. блок useMemo
+          с toolbarHandlersRef. */}
+      {false && (
       <div className="flex flex-wrap items-center gap-1.5 pb-1 flex-shrink-0">
         <Link
           href="/tools"
@@ -9796,6 +10398,7 @@ export function DatabaseSpreadsheet() {
           </>
         )}
       </div>
+      )}
 
       <div className="flex items-center gap-1.5 bg-white rounded border border-gray-200 px-1.5 py-1 flex-shrink-0">
         <div className="relative flex-1 max-w-xs">
