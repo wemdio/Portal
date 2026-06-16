@@ -113,7 +113,17 @@ const SOURCE_LABELS: Record<string, string> = {
 
 function parseBudget(raw: string | null | undefined): number {
   if (!raw) return 0;
-  const cleaned = raw.toString().replace(/\s/g, '').replace(/[^0-9.,]/g, '').replace(',', '.');
+  // Сначала вырезаем примечания в скобках: "159000 (84000)" → "159000".
+  // Иначе пробел и скобки срезались ниже и ДВА числа склеивались в одно
+  // (159000 + 84000 → 15 900 084 000 ₽). Один такой проект раздувал выручку
+  // месяца до десятков миллиардов.
+  const withoutNotes = raw.toString().replace(/\([^)]*\)/g, ' ');
+  // Берём только первую числовую группу. Внутри числа допускаются пробелы как
+  // разделители тысяч ("159 000") и десятичная запятая/точка, но несколько
+  // отдельных чисел через пробел больше не склеиваются.
+  const match = withoutNotes.match(/\d[\d\s.,]*\d|\d/);
+  if (!match) return 0;
+  const cleaned = match[0].replace(/\s/g, '').replace(',', '.');
   return parseFloat(cleaned) || 0;
 }
 
