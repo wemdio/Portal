@@ -205,6 +205,9 @@ export default function ClientMailboxesPage() {
         <p className="mt-1 text-sm text-zinc-400">
           Подключите свои почтовые ящики, чтобы кампании уходили с ваших адресов и доменов.
         </p>
+        <a href="/client/byo-campaigns" className="mt-2 inline-block text-sm text-zinc-300 underline">
+          Перейти к рассылке →
+        </a>
       </header>
 
       {/* Деливерабилити-предупреждение — это не опция, а защита от выжигания почты */}

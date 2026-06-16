@@ -46,3 +46,36 @@ export async function datasetQuery<T = Record<string, unknown>>(
   const res = await p.query(text, params);
   return res.rows as T[];
 }
+
+/**
+ * Keep mv_subject_ab_within_campaign reasonably fresh WITHOUT a prod cron, so
+ * the whole feature ships via merge+redeploy (the prod sync.mjs copy is updated
+ * by a manual script, not CI). Called fire-and-forget from the insights route.
+ *
+ * The atomic claim — UPDATE ... WHERE refreshed_at < cutoff RETURNING — lets
+ * exactly ONE concurrent request win the right to refresh (pool-safe; no
+ * session advisory locks). REFRESH ... CONCURRENTLY can't run in a txn and
+ * doesn't block reads. We don't await it: prod runs `next start` (a persistent
+ * Node server), so the detached refresh completes after the response is sent.
+ */
+let refreshInFlight = false;
+export async function refreshAbIfStale(maxAgeHours = 20): Promise<void> {
+  const p = getPool();
+  if (!p || refreshInFlight) return;
+  try {
+    const claim = await p.query(
+      `UPDATE insights_mv_state SET refreshed_at = now()
+       WHERE name = 'mv_subject_ab_within_campaign'
+         AND refreshed_at < now() - ($1 || ' hours')::interval
+       RETURNING 1`,
+      [String(maxAgeHours)],
+    );
+    if (claim.rowCount === 0) return; // fresh, or another request already claimed it
+    refreshInFlight = true;
+    p.query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_subject_ab_within_campaign')
+      .catch((e: Error) => console.error('[instantlyDataset] mv refresh failed:', e.message))
+      .finally(() => { refreshInFlight = false; });
+  } catch (e) {
+    console.error('[instantlyDataset] refresh claim failed:', (e as Error).message);
+  }
+}

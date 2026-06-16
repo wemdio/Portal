@@ -94,7 +94,7 @@ const COUNTRY_NAME_BY_CODE: Record<string, string> = {
 
 const MAX_DB_INTEGER = 2_147_483_647;
 const MIN_ANNUAL_SALARY = 20_000;
-const MAX_ANNUAL_SALARY = 2_000_000;
+const MAX_ANNUAL_SALARY = 500_000;
 
 const B2B_TITLE_STRONG_RE =
   /\b(account executive|account manager|business development(?: representative| manager| director| lead)?|sales development(?: representative| manager| lead)?|sales representative|sales manager|sales director|sales executive|sales lead|enterprise sales|commercial account|commercial relationship manager|channel sales|partnerships? manager|partnerships? director|partnership sales|partner manager|(?:manager|director|vp|head|lead),?\s+(?:of\s+)?partnerships?|\bsdr\b|\bbdr\b|go[-\s]?to[-\s]?market|\bgtm\b)\b/i;
