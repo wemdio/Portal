@@ -143,12 +143,28 @@ export async function POST(
   const nextNumber = periods.length + (periods.length === 0 ? 2 : 1);
   const previousEnd = dayBefore(periodStart);
 
+  // Старт нового периода = граница: предыдущий период закрывается датой
+  // `dayBefore(periodStart)`. Если новый старт раньше старта предыдущего
+  // периода, у того получится period_end < period_start (отрицательный
+  // диапазон) — именно так «сломался» Лайфтранс (Period 2 ввели на 05-13,
+  // тогда как Period 1 стартовал 05-18, и его конец вычислился как 05-12).
+  // Гард ловит только реальную дату-предшественника; если у проекта нет
+  // ни launch/payment/created — валидации нет (старое поведение).
+  const priorStart =
+    periods.length === 0
+      ? dateOnly(currentProject.launch_date) ??
+        dateOnly(currentProject.payment_date) ??
+        dateOnly(currentProject.created_at)
+      : previousActive?.period_start ?? null;
+  if (priorStart && periodStart <= priorStart) {
+    return jsonError(
+      `Старт нового периода (${periodStart}) должен быть позже старта предыдущего (${priorStart})`,
+      400,
+    );
+  }
+
   if (periods.length === 0) {
-    const firstStart =
-      dateOnly(currentProject.launch_date) ??
-      dateOnly(currentProject.payment_date) ??
-      dateOnly(currentProject.created_at) ??
-      periodStart;
+    const firstStart = priorStart ?? periodStart;
     const { data: firstPeriod, error: firstErr } = await supabaseAdmin
       .from('project_periods')
       .insert({

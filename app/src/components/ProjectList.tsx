@@ -2728,8 +2728,8 @@ export function ProjectList() {
                       <div key={camp.campaign_id} className="flex items-center justify-between gap-2 rounded-lg border border-zinc-100 px-2.5 py-1.5 text-xs">
                         <div className="flex items-center gap-1.5 min-w-0">
                           <span className="truncate text-zinc-700">{camp.campaign_name}</span>
-                          <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-medium ${camp.match_source === 'auto' ? 'bg-blue-50 text-blue-500' : 'bg-violet-50 text-violet-500'}`}>
-                            {camp.match_source === 'auto' ? 'авто' : 'вручную'}
+                          <span title={camp.match_source} className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-medium ${camp.match_source?.startsWith('auto') ? 'bg-blue-50 text-blue-500' : 'bg-violet-50 text-violet-500'}`}>
+                            {camp.match_source?.startsWith('auto') ? 'авто' : 'вручную'}
                           </span>
                         </div>
                         {canEdit && (

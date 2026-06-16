@@ -47,6 +47,7 @@ describe('autoMatchCampaignsToProjects period links', () => {
             status: 'closed',
             period_start: '2026-04-01',
             period_end: '2026-04-30',
+            created_at: '2026-04-01T00:00:00Z',
           },
           {
             id: 'period-2',
@@ -54,6 +55,8 @@ describe('autoMatchCampaignsToProjects period links', () => {
             status: 'active',
             period_start: '2026-05-01',
             period_end: null,
+            // Кнопку «Новый период» нажали 2026-05-01 — это граница привязки.
+            created_at: '2026-05-01T00:00:00Z',
           },
         ],
       },
@@ -111,6 +114,36 @@ describe('autoMatchCampaignsToProjects period links', () => {
     );
   });
 
+  it('does NOT attach a campaign created before the period was opened (button-press boundary)', async () => {
+    // Период открыт 2026-05-01 (created_at). Кампания создана 2026-04-15 —
+    // ДО открытия, поэтому это «старая» кампания и привязываться к активному
+    // периоду не должна, даже если её имя матчится с клиентом. Бэкдейтинг
+    // period_start тут роли не играет.
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        instantly_campaign_catalog: [
+          {
+            id: 'campaign-old',
+            name: 'Acme legacy outreach',
+            timestamp_created: '2026-04-15T10:00:00Z',
+            new_leads_contacted_count: 500,
+          },
+        ],
+        project_instantly_campaigns: [],
+        project_period_instantly_campaigns: [],
+        project_instantly_campaigns_denylist: [],
+      },
+    });
+
+    const { autoMatchCampaignsToProjects } = await import('@/lib/tools/instantlyCampaignCatalog');
+
+    const result = await autoMatchCampaignsToProjects();
+
+    expect(result.matched).toBe(0);
+    expect(mockInstantlyDb!.getRows('project_period_instantly_campaigns')).toHaveLength(0);
+    expect(mockInstantlyDb!.getRows('project_instantly_campaigns')).toHaveLength(0);
+  });
+
   it('writes AI auto matches to the active period instead of the legacy project link', async () => {
     process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY = 'test-key';
     process.env.INSTANTLY_AI_MATCH_THROTTLE_MS = '0';
@@ -148,6 +181,7 @@ describe('autoMatchCampaignsToProjects period links', () => {
             status: 'active',
             period_start: '2026-05-01',
             period_end: null,
+            created_at: '2026-05-01T00:00:00Z',
           },
         ],
       },

@@ -504,7 +504,8 @@ function tokenizeClient(s: string): Set<string> {
 interface ActiveProjectPeriod {
   id: string;
   project_id: string;
-  period_start: string | null;
+  /** Момент нажатия кнопки «Новый период». Это и есть граница привязки. */
+  created_at: string | null;
 }
 
 interface MatchableCampaign {
@@ -514,12 +515,23 @@ interface MatchableCampaign {
   new_leads_contacted_count?: number | null;
 }
 
+/**
+ * Принадлежит ли кампания активному периоду.
+ *
+ * Граница — МОМЕНТ ОТКРЫТИЯ периода (`period.created_at`, т.е. нажатие кнопки
+ * «Новый период»), а НЕ введённая вручную `period_start`/дедлайн. Как только
+ * специалист открыл новый период, к нему привязываются только кампании,
+ * созданные ПОСЛЕ этого момента; всё, что было раньше, остаётся в прошлом
+ * периоде. Так бэкдейтинг `period_start` (кейс Лайфтранса: старт ввели на
+ * 05-13, а период открыли 06-10) больше не затягивает старые кампании в новый
+ * период и не задваивает контакты.
+ */
 function campaignStartsInsidePeriod(campaign: MatchableCampaign, period: ActiveProjectPeriod): boolean {
-  if (!period.period_start) return true;
+  if (!period.created_at) return true;
   const campaignMs = Date.parse(campaign.timestamp_created ?? '');
-  const periodMs = Date.parse(period.period_start);
-  if (!Number.isFinite(campaignMs) || !Number.isFinite(periodMs)) return false;
-  return campaignMs >= periodMs;
+  const boundaryMs = Date.parse(period.created_at);
+  if (!Number.isFinite(campaignMs) || !Number.isFinite(boundaryMs)) return false;
+  return campaignMs >= boundaryMs;
 }
 
 async function loadActiveProjectPeriods(
@@ -530,7 +542,7 @@ async function loadActiveProjectPeriods(
 
   const { data } = await supabaseMain
     .from('project_periods')
-    .select('id, project_id, period_start')
+    .select('id, project_id, created_at')
     .in('project_id', projectIds)
     .eq('status', 'active');
 

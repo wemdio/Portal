@@ -131,4 +131,22 @@ describe('POST /api/projects/[id]/periods', () => {
       }),
     );
   });
+
+  it('rejects a period_start earlier than the preceding period start (no backwards range)', async () => {
+    const { POST } = await import('@/app/api/projects/[id]/periods/route');
+
+    // launch_date = 2026-03-27 → Period 1 стартовал бы 03-27. Старт 03-20
+    // раньше — у Period 1 получился бы period_end < period_start. Отклоняем.
+    const res = await POST(
+      makePeriodReq({ period_start: '2026-03-20', contacts_obligation: '12000' }),
+      { params: Promise.resolve({ id: 'project-1' }) },
+    );
+
+    expect(res.status).toBe(400);
+    // Ничего не записали: ни периодов, ни сброса проекта.
+    expect(mockMainDb!.getRows('project_periods')).toHaveLength(0);
+    expect(mockMainDb!.getRows('projects')[0]).toEqual(
+      expect.objectContaining({ contacts_done: '182' }),
+    );
+  });
 });
