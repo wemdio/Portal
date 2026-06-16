@@ -145,6 +145,28 @@ describe('engHiring parser normalizer', () => {
     });
   });
 
+  it('ignores unrealistic annual salary values from noisy ATS compensation fields', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'greenhouse',
+      {
+        id: 6011715005,
+        title: 'B2B Sales Manager',
+        company_name: 'Acme',
+        location: { name: 'United States' },
+        absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/6011715005',
+        updated_at: '2026-06-13T17:50:07Z',
+        salary: { min_value: 628164, max_value: 628164, currency: 'USD' },
+      },
+      { slug: 'acme', companyName: 'Acme' },
+    );
+
+    expect(vacancy).toMatchObject({
+      salary_from: null,
+      salary_to: null,
+      salary_currency: null,
+    });
+  });
+
   it('merges Greenhouse detail payloads into normalized vacancies', () => {
     const vacancy = normalizeAtsJobToEngVacancy(
       'greenhouse',

@@ -1075,8 +1075,8 @@ export default function ProjectPage() {
                     <li key={c.campaign_id} className="flex items-center justify-between gap-2 rounded-lg border border-gray-100 px-3 py-2 text-sm">
                       <div className="flex items-center gap-2 min-w-0">
                         <span className="truncate text-gray-900">{c.campaign_name}</span>
-                        <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${c.match_source === 'auto' ? 'bg-blue-50 text-blue-600' : 'bg-violet-50 text-violet-600'}`}>
-                          {c.match_source === 'auto' ? 'авто' : 'вручную'}
+                        <span title={c.match_source} className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${c.match_source?.startsWith('auto') ? 'bg-blue-50 text-blue-600' : 'bg-violet-50 text-violet-600'}`}>
+                          {c.match_source?.startsWith('auto') ? 'авто' : 'вручную'}
                         </span>
                       </div>
                       {canEdit && (
