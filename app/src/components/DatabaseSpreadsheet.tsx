@@ -1250,38 +1250,6 @@ export function DatabaseSpreadsheet() {
     top: number; left: number;
   } | null>(null);
 
-  const flushSave = () => {
-    if (saveTimeoutRef.current) {
-      clearTimeout(saveTimeoutRef.current);
-      saveTimeoutRef.current = null;
-    }
-    if (!storageKey || !isHydrated || tabs.length === 0) return;
-    const safeActiveTabId = resolveActiveTabId(tabs, activeTabId);
-    const payload: PersistedSpreadsheetState = {
-      version: STORAGE_VERSION,
-      tabs,
-      activeTabId: safeActiveTabId,
-      tabCounter: deriveTabCounter(tabs, tabCounter),
-      columnWidths,
-      savedAt: Date.now(),
-    };
-    const totalRowsForLs = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
-    writeLocalStorageBest(storageKey, payload, totalRowsForLs > LARGE_DATASET_ROW_THRESHOLD);
-    if (userId) {
-      const totalRows = totalRowsForLs;
-      const isLargeDataset = totalRows > LARGE_DATASET_ROW_THRESHOLD;
-      firstPendingSaveAtRef.current = null;
-      // Единый путь сохранения — queueRemoteStateSave → backgroundSave
-      // (chunked + gzip в state_compressed). Раньше для малых баз тут был
-      // ещё keepalive-fetch несжатым jsonb в колонку state — он создавал
-      // рассинхрон state / state_compressed (чтение приоритизирует
-      // compressed, и keepalive-запись «терялась»). Убран. На unload
-      // несохранённое прикрывает потолок дебаунса MAX_SAVE_WAIT + копия
-      // в localStorage.
-      queueRemoteStateSave(userId, payload, isLargeDataset);
-    }
-  };
-
   /**
    * Сериализуем и пишем state в localStorage. Для больших баз пропускаем —
    * 30МБ JSON всё равно упрётся в quota localStorage (~5МБ) и упадёт в
@@ -1300,6 +1268,37 @@ export function DatabaseSpreadsheet() {
     },
     [],
   );
+
+  const flushSave = () => {
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+    if (!storageKey || !isHydrated || tabs.length === 0) return;
+    const safeActiveTabId = resolveActiveTabId(tabs, activeTabId);
+    const payload: PersistedSpreadsheetState = {
+      version: STORAGE_VERSION,
+      tabs,
+      activeTabId: safeActiveTabId,
+      tabCounter: deriveTabCounter(tabs, tabCounter),
+      columnWidths,
+      savedAt: Date.now(),
+    };
+    const totalRowsForLs = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
+    const isLargeDatasetLs = totalRowsForLs > LARGE_DATASET_ROW_THRESHOLD;
+    writeLocalStorageBest(storageKey, payload, isLargeDatasetLs);
+    if (userId) {
+      firstPendingSaveAtRef.current = null;
+      // Единый путь сохранения — queueRemoteStateSave → backgroundSave
+      // (chunked + gzip в state_compressed). Раньше для малых баз тут был
+      // ещё keepalive-fetch несжатым jsonb в колонку state — он создавал
+      // рассинхрон state / state_compressed (чтение приоритизирует
+      // compressed, и keepalive-запись «терялась»). Убран. На unload
+      // несохранённое прикрывает потолок дебаунса MAX_SAVE_WAIT + копия
+      // в localStorage.
+      queueRemoteStateSave(userId, payload, isLargeDatasetLs);
+    }
+  };
 
   const queueRemoteStateSave = useCallback(
     (userIdSnapshot: string, payload: PersistedSpreadsheetState, isLargeDataset: boolean) => {
