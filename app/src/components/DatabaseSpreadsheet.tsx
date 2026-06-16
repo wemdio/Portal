@@ -515,7 +515,13 @@ const STORAGE_KEY_PREFIX = 'portal:database-spreadsheet';
 const STORAGE_VERSION = 1;
 const STORAGE_SAVE_DELAY = 2500;
 const STORAGE_SAVE_DELAY_LARGE = 10_000;
-const LARGE_DATASET_ROW_THRESHOLD = 10_000;
+// Порог снижен с 10_000 до 500: для крупных баз JSON.stringify(payload) на
+// main thread занимает 0.5-15 секунд — главный источник лагов «вкладка
+// зависает при клике на любую кнопку». 500 строк × средний размер ячейки
+// после ETL/сигналов (200-500 байт) = 1-5 МБ JSON ≈ 100-500мс stringify.
+// Выше этого — пропускаем localStorage целиком, полагаемся на backgroundSave
+// в state_compressed (он chunked + async + gzip).
+const LARGE_DATASET_ROW_THRESHOLD = 500;
 // Потолок дебаунса. Cleanup автосейв-эффекта сбрасывает таймер на КАЖДОЕ
 // изменение (правка ячейки, клик вкладки, ресайз колонки). При активной
 // работе с большой базой 10-секундное окно не закрывалось никогда — база
@@ -1256,20 +1262,46 @@ export function DatabaseSpreadsheet() {
    * catch, но JSON.stringify СИНХРОННО блокирует main thread на секунды,
    * это и создаёт лаг при импорте/добавлении вкладок. Малые базы пишем
    * как раньше — для устойчивости на unload.
+   *
+   * options.immediate: true означает «синхронно прямо сейчас, не откладывая».
+   * Нужен ТОЛЬКО для beforeunload-handler'a, потому что setTimeout не
+   * успеет выполниться до закрытия вкладки. Все остальные вызовы
+   * (обычный save useEffect, manual flushSave после действий) идут через
+   * setTimeout(0) — UI получает paint раньше чем main thread занят
+   * stringify'ом, клик возвращается мгновенно. Stringify всё равно
+   * заблокирует main thread когда таймер сработает (если база большая),
+   * но это уже после того как пользователь увидел реакцию на клик.
    */
   const writeLocalStorageBest = useCallback(
-    (storageKeySnapshot: string, payload: PersistedSpreadsheetState, isLargeDataset: boolean) => {
+    (
+      storageKeySnapshot: string,
+      payload: PersistedSpreadsheetState,
+      isLargeDataset: boolean,
+      options?: { immediate?: boolean },
+    ) => {
       if (isLargeDataset) return;
-      try {
-        window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
-      } catch {
-        /* quota exceeded — acceptable for very large datasets */
+      const work = () => {
+        try {
+          window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
+        } catch {
+          /* quota exceeded — acceptable for very large datasets */
+        }
+      };
+      if (options?.immediate) {
+        work();
+      } else {
+        setTimeout(work, 0);
       }
     },
     [],
   );
 
-  const flushSave = () => {
+  // immediate=true означает «синхронно прямо сейчас, не откладывая через
+  // setTimeout». Нужно ТОЛЬКО при beforeunload (вкладка закрывается, таймер
+  // не успеет сработать). Все остальные ручные flushSave'ы (после правок,
+  // переименований вкладок и т.п.) идут с дефолтным defer'ом — клик
+  // возвращается мгновенно, stringify выполняется в следующем тике.
+  const flushSave = (immediate = false) => {
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
@@ -1286,7 +1318,7 @@ export function DatabaseSpreadsheet() {
     };
     const totalRowsForLs = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
     const isLargeDatasetLs = totalRowsForLs > LARGE_DATASET_ROW_THRESHOLD;
-    writeLocalStorageBest(storageKey, payload, isLargeDatasetLs);
+    writeLocalStorageBest(storageKey, payload, isLargeDatasetLs, { immediate });
     if (userId) {
       firstPendingSaveAtRef.current = null;
       // Единый путь сохранения — queueRemoteStateSave → backgroundSave
@@ -9132,7 +9164,11 @@ export function DatabaseSpreadsheet() {
   });
   useEffect(() => {
     const handleBeforeUnload = () => {
-      flushSaveRef.current();
+      // immediate=true: вкладка закрывается, setTimeout не успеет
+      // сработать. Здесь нам ОК заблокировать main thread на пару секунд —
+      // юзер всё равно уходит, а локальная копия должна успеть лечь до
+      // выгрузки.
+      flushSaveRef.current(true);
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
