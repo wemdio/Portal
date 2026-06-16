@@ -22,6 +22,16 @@ interface CampaignStat {
   total: number;
 }
 
+interface Reply {
+  id: string;
+  from_email: string | null;
+  from_name: string | null;
+  subject: string | null;
+  body: string | null;
+  matched_to_email: string | null;
+  received_at: string | null;
+}
+
 function parseRecipients(text: string): { email: string; name?: string }[] {
   const out: { email: string; name?: string }[] = [];
   for (const line of text.split(/\r?\n/)) {
@@ -46,6 +56,7 @@ export default function ByoCampaignsPage() {
   const [err, setErr] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const [stats, setStats] = useState<CampaignStat[]>([]);
+  const [replies, setReplies] = useState<Reply[]>([]);
 
   async function authHeaders(): Promise<Record<string, string> | null> {
     const { data: { session } } = await supabase.auth.getSession();
@@ -73,10 +84,20 @@ export default function ByoCampaignsPage() {
     setStats(data.campaigns || []);
   }, []);
 
+  const loadReplies = useCallback(async () => {
+    const h = await authHeaders();
+    if (!h) return;
+    const res = await fetch('/api/client/byo-replies', { headers: h });
+    if (!res.ok) return;
+    const data = (await res.json()) as { replies: Reply[] };
+    setReplies(data.replies || []);
+  }, []);
+
   useEffect(() => {
     void loadMailboxes();
     void loadStats();
-  }, [loadMailboxes, loadStats]);
+    void loadReplies();
+  }, [loadMailboxes, loadStats, loadReplies]);
 
   const recipients = parseRecipients(recipientsText);
 
@@ -196,6 +217,35 @@ export default function ByoCampaignsPage() {
                 <span className="text-amber-400">в очереди {s.pending}</span> ·{' '}
                 <span className="text-red-400">ошибок {s.failed}</span>
               </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <h2 className="mt-8 mb-3 text-sm font-semibold text-zinc-300">Ответы</h2>
+      {replies.length === 0 ? (
+        <p className="text-sm text-zinc-500">
+          Пока нет ответов. Они появятся здесь после того, как получатели ответят (проверяем почту раз в минуту).
+        </p>
+      ) : (
+        <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800">
+          {replies.map((r) => (
+            <li key={r.id} className="px-4 py-3 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate font-medium">{r.from_name || r.from_email || 'без адреса'}</span>
+                {r.received_at && (
+                  <span className="shrink-0 text-xs text-zinc-500">
+                    {new Date(r.received_at).toLocaleString('ru-RU')}
+                  </span>
+                )}
+              </div>
+              {r.subject && <div className="mt-0.5 text-xs text-zinc-400">{r.subject}</div>}
+              {r.body && (
+                <div className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs text-zinc-500">{r.body}</div>
+              )}
+              {r.matched_to_email && (
+                <div className="mt-1 text-[11px] text-emerald-400/80">↳ ответ на нашу кампанию</div>
+              )}
             </li>
           ))}
         </ul>

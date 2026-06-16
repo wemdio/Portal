@@ -118,3 +118,21 @@ export async function getGoogleUserEmail(accessToken: string): Promise<string> {
   if (!res.ok || !json.email) throw new Error('Failed to read Google account email');
   return json.email.trim().toLowerCase();
 }
+
+/** Свежий access-token из refresh-токена (для IMAP XOAUTH2 при чтении ответов Gmail). */
+export async function getAccessTokenFromRefresh(refreshToken: string): Promise<string> {
+  const { clientId, clientSecret } = getGoogleClientCreds();
+  const res = await fetch(TOKEN_ENDPOINT, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    }),
+  });
+  const json = (await res.json().catch(() => ({}))) as { access_token?: string; error?: string };
+  if (!res.ok || !json.access_token) throw new Error(json.error || `token refresh failed (${res.status})`);
+  return json.access_token;
+}

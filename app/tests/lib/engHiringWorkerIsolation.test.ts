@@ -59,4 +59,15 @@ describe('ENG hiring worker isolation', () => {
     expect(scheduledDeploy).toContain('portal-worker-eng-hiring');
     expect(drainWorker).toContain('portal-worker-eng-hiring');
   });
+
+  it('indexes ENG hiring cache for source, country, and recency filtering', () => {
+    const migrationDir = path.join(repoRoot, 'supabase', 'migrations');
+    const migrations = fs.readdirSync(migrationDir)
+      .filter((name) => name.endsWith('.sql'))
+      .map((name) => readRepoFile(path.join('supabase', 'migrations', name)).replace(/\s+/g, ' '))
+      .join('\n');
+
+    expect(migrations).toContain('idx_eng_hiring_cache_source_country_published');
+    expect(migrations).toContain('on public.eng_hiring_cache(source, country_code, published_at desc)');
+  });
 });
