@@ -1189,13 +1189,6 @@ export function DatabaseSpreadsheet() {
     progress: 0,
   });
   const [isHydrated, setIsHydrated] = useState(false);
-  // Готова ли таблица к взаимодействию. isHydrated помечает, что данные
-  // приехали и попали в state, но дальше React монтирует виртуализатор и
-  // десятки useEffect/useMemo прокатываются по новым tabs — у юзера в это
-  // время main thread занят, ничего не нажимается. Чтобы юзер не пытался
-  // тыкать в наполовину готовый интерфейс, показываем оверлей-спиннер
-  // поверх таблицы, пока не отработают 2 кадра rAF после монтирования.
-  const [isTableReady, setIsTableReady] = useState(false);
   // true, если из БД не удалось прочитать состояние (таймаут/ошибка) и
   // локальной копии нет. В этом случае НЕЛЬЗЯ показывать пустую вкладку —
   // иначе автосохранение затрёт реально существующий в БД большой state.
@@ -1272,6 +1265,14 @@ export function DatabaseSpreadsheet() {
    * заблокирует main thread когда таймер сработает (если база большая),
    * но это уже после того как пользователь увидел реакцию на клик.
    */
+  // Coalescing-ref: при сигнальном polling'е setTabs стрельбит каждые 2 сек,
+  // save useEffect ре-фаярится, и без отмены предыдущего setTimeout'а в
+  // очереди копятся 10+ stringify-задач (каждая по 100-500мс). Когда main
+  // thread освобождается, они выполняются последовательно и блокируют его
+  // на несколько секунд. Сохраняем только ПОСЛЕДНИЙ payload — старые
+  // отменяются.
+  const localStorageWriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const writeLocalStorageBest = useCallback(
     (
       storageKeySnapshot: string,
@@ -1281,6 +1282,7 @@ export function DatabaseSpreadsheet() {
     ) => {
       if (isLargeDataset) return;
       const work = () => {
+        localStorageWriteTimerRef.current = null;
         try {
           window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
         } catch {
@@ -1288,9 +1290,16 @@ export function DatabaseSpreadsheet() {
         }
       };
       if (options?.immediate) {
+        if (localStorageWriteTimerRef.current) {
+          clearTimeout(localStorageWriteTimerRef.current);
+          localStorageWriteTimerRef.current = null;
+        }
         work();
       } else {
-        setTimeout(work, 0);
+        if (localStorageWriteTimerRef.current) {
+          clearTimeout(localStorageWriteTimerRef.current);
+        }
+        localStorageWriteTimerRef.current = setTimeout(work, 0);
       }
     },
     [],
@@ -8919,7 +8928,6 @@ export function DatabaseSpreadsheet() {
     let isMounted = true;
     hydratedStateRef.current = '__pending__';
     setIsHydrated(false);
-    setIsTableReady(false);
     setLoadFailed(false);
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
@@ -9050,33 +9058,6 @@ export function DatabaseSpreadsheet() {
       isMounted = false;
     };
   }, [storageKey, userId, queueRemoteStateSave]);
-
-  // После того как isHydrated стал true, React коммитит огромный mount
-  // таблицы (виртуализатор, все колонки, ячейки в кадре). Между коммитом
-  // и реальным paint'ом проходит ещё некоторое время, а каскад useEffect'ов
-  // (autosave, server-detect и т.п.) добавляет работы main thread'у. Если
-  // в это время убрать спиннер, юзер видит «вроде готово» и пытается
-  // листать/тыкать — UI не отзывается. Поэтому держим оверлей до момента,
-  // пока браузер не прокликает два кадра после коммита: первый rAF
-  // фиксирует, что commit прошёл, второй — что browser реально нарисовал
-  // таблицу. Дальше отпускаем.
-  useEffect(() => {
-    if (!isHydrated) return;
-    let cancelled = false;
-    let rafId2 = 0;
-    const rafId1 = requestAnimationFrame(() => {
-      if (cancelled) return;
-      rafId2 = requestAnimationFrame(() => {
-        if (cancelled) return;
-        setIsTableReady(true);
-      });
-    });
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(rafId1);
-      if (rafId2) cancelAnimationFrame(rafId2);
-    };
-  }, [isHydrated]);
 
   useEffect(() => {
     if (tabs.length === 0) return;
@@ -10243,18 +10224,16 @@ export function DatabaseSpreadsheet() {
             </table>
             ) : null}
           </div>
-          {!loadFailed && (!isHydrated || !isTableReady) && (
+          {!loadFailed && !isHydrated && (
             <div
               className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-white/95 px-6 py-14 text-center text-gray-500"
               aria-live="polite"
               role="status"
             >
               <div className="mx-auto mb-3 h-8 w-8 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
-              <div className="text-sm font-medium text-gray-700">
-                {!isHydrated ? 'Загружаем вашу базу…' : 'Готовим к отображению…'}
-              </div>
+              <div className="text-sm font-medium text-gray-700">Загружаем вашу базу…</div>
               <div className="mt-1 max-w-md text-xs text-gray-500">
-                Большая база может загружаться до 1–2 минут. Пожалуйста, не закрывайте вкладку и не нажимайте на интерфейс, пока идёт загрузка.
+                Большая база может загружаться до 1–2 минут. Не закрывайте вкладку.
               </div>
             </div>
           )}
