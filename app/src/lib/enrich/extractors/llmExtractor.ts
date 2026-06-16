@@ -2,7 +2,9 @@ import 'server-only';
 import * as cheerio from 'cheerio';
 import { PricingModel, Currency, PriceValue, ExtractedData } from './types';
 
-const MODEL = 'anthropic/claude-sonnet-4-5-20250514';
+// Sonnet 4.6 — последняя версия на Requesty. Снэпшот claude-sonnet-4-5-20250514
+// депрекейтнут и отдаёт 404 (см. eventDetector.ts: тот же фикс там).
+const MODEL = 'anthropic/claude-sonnet-4-6';
 const MAX_TEXT_CHARS = 3000;
 const TIMEOUT_MS = 30_000;
 
