@@ -440,8 +440,18 @@ const PERSONALIZATION_PRESETS = [
 При определении боли учитывай контекст из брифа компании-отправителя (приложен ниже) - боль должна быть релевантна тому, что мы можем решить.`,
   },
 ] as const;
-const ENRICHMENT_PROGRESS_INTERVAL_MS = 200;
-const ENRICHMENT_UPDATE_FLUSH_MS = 250;
+// ENRICHMENT_PROGRESS_INTERVAL_MS используется как POLL-интервал в email
+// scraping (раз в N мс делается GET /results) И как throttle для
+// прогресс-бара в website enrichment. Раньше было 200мс = 5 раз в секунду
+// шёл setTabs во время прогона job'a. Каждый setTabs ре-рендерил весь
+// 13к-строчный компонент. Сейчас 1500мс — UX-wise неощутимо (прогресс-бар
+// и заполнение ячеек идут плавно), а работы main thread'у в 7.5 раз меньше.
+const ENRICHMENT_PROGRESS_INTERVAL_MS = 1500;
+// FLUSH_MS — таймер дебаунса перед setTabs внутри одного poll-цикла
+// (если пришла пачка results, ждём столько мс и батчим в один setTabs).
+// 250мс → 1000мс: за секунду больше успеем собрать в один батч,
+// меньше setTabs, плавнее.
+const ENRICHMENT_UPDATE_FLUSH_MS = 1000;
 const ENRICHMENT_UPDATE_BATCH = 20;
 const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
 const ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 10;
@@ -450,8 +460,11 @@ const EMAIL_SCRAPING_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 const EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS = 15 * 60 * 1000;
 const EMAIL_SCRAPING_MAX_BACKOFF_MS = 30_000;
 const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
-const BRIEF_SCORING_POLL_INTERVAL_MS = 1000;
-const BRIEF_SCORING_MAX_POLL_DELAY_MS = 5000;
+// BRIEF_SCORING: было 1000 (раз в сек). Поднимаем до 3000 — каждый poll
+// дёргает GET /results, парсит JSON и setTabs'ит. Раз в 3 сек хватает
+// для плавного UX, а нагрузка на main thread в 3 раза меньше.
+const BRIEF_SCORING_POLL_INTERVAL_MS = 3000;
+const BRIEF_SCORING_MAX_POLL_DELAY_MS = 10000;
 const BRIEF_SCORING_MAX_CONSECUTIVE_FAILURES = 10;
 const BRIEF_SCORING_ENQUEUE_CHUNK_SIZE = 50;
 const BRIEF_SCORING_MAX_FIELDS_PER_ROW = 20;
@@ -515,7 +528,13 @@ const STORAGE_KEY_PREFIX = 'portal:database-spreadsheet';
 const STORAGE_VERSION = 1;
 const STORAGE_SAVE_DELAY = 2500;
 const STORAGE_SAVE_DELAY_LARGE = 10_000;
-const LARGE_DATASET_ROW_THRESHOLD = 10_000;
+// Порог снижен с 10_000 до 500: для крупных баз JSON.stringify(payload) на
+// main thread занимает 0.5-15 секунд — главный источник лагов «вкладка
+// зависает при клике на любую кнопку». 500 строк × средний размер ячейки
+// после ETL/сигналов (200-500 байт) = 1-5 МБ JSON ≈ 100-500мс stringify.
+// Выше этого — пропускаем localStorage целиком, полагаемся на backgroundSave
+// в state_compressed (он chunked + async + gzip).
+const LARGE_DATASET_ROW_THRESHOLD = 500;
 // Потолок дебаунса. Cleanup автосейв-эффекта сбрасывает таймер на КАЖДОЕ
 // изменение (правка ячейки, клик вкладки, ресайз колонки). При активной
 // работе с большой базой 10-секундное окно не закрывалось никогда — база
@@ -1183,13 +1202,6 @@ export function DatabaseSpreadsheet() {
     progress: 0,
   });
   const [isHydrated, setIsHydrated] = useState(false);
-  // Готова ли таблица к взаимодействию. isHydrated помечает, что данные
-  // приехали и попали в state, но дальше React монтирует виртуализатор и
-  // десятки useEffect/useMemo прокатываются по новым tabs — у юзера в это
-  // время main thread занят, ничего не нажимается. Чтобы юзер не пытался
-  // тыкать в наполовину готовый интерфейс, показываем оверлей-спиннер
-  // поверх таблицы, пока не отработают 2 кадра rAF после монтирования.
-  const [isTableReady, setIsTableReady] = useState(false);
   // true, если из БД не удалось прочитать состояние (таймаут/ошибка) и
   // локальной копии нет. В этом случае НЕЛЬЗЯ показывать пустую вкладку —
   // иначе автосохранение затрёт реально существующий в БД большой state.
@@ -1250,7 +1262,68 @@ export function DatabaseSpreadsheet() {
     top: number; left: number;
   } | null>(null);
 
-  const flushSave = () => {
+  /**
+   * Сериализуем и пишем state в localStorage. Для больших баз пропускаем —
+   * 30МБ JSON всё равно упрётся в quota localStorage (~5МБ) и упадёт в
+   * catch, но JSON.stringify СИНХРОННО блокирует main thread на секунды,
+   * это и создаёт лаг при импорте/добавлении вкладок. Малые базы пишем
+   * как раньше — для устойчивости на unload.
+   *
+   * options.immediate: true означает «синхронно прямо сейчас, не откладывая».
+   * Нужен ТОЛЬКО для beforeunload-handler'a, потому что setTimeout не
+   * успеет выполниться до закрытия вкладки. Все остальные вызовы
+   * (обычный save useEffect, manual flushSave после действий) идут через
+   * setTimeout(0) — UI получает paint раньше чем main thread занят
+   * stringify'ом, клик возвращается мгновенно. Stringify всё равно
+   * заблокирует main thread когда таймер сработает (если база большая),
+   * но это уже после того как пользователь увидел реакцию на клик.
+   */
+  // Coalescing-ref: при сигнальном polling'е setTabs стрельбит каждые 2 сек,
+  // save useEffect ре-фаярится, и без отмены предыдущего setTimeout'а в
+  // очереди копятся 10+ stringify-задач (каждая по 100-500мс). Когда main
+  // thread освобождается, они выполняются последовательно и блокируют его
+  // на несколько секунд. Сохраняем только ПОСЛЕДНИЙ payload — старые
+  // отменяются.
+  const localStorageWriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const writeLocalStorageBest = useCallback(
+    (
+      storageKeySnapshot: string,
+      payload: PersistedSpreadsheetState,
+      isLargeDataset: boolean,
+      options?: { immediate?: boolean },
+    ) => {
+      if (isLargeDataset) return;
+      const work = () => {
+        localStorageWriteTimerRef.current = null;
+        try {
+          window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
+        } catch {
+          /* quota exceeded — acceptable for very large datasets */
+        }
+      };
+      if (options?.immediate) {
+        if (localStorageWriteTimerRef.current) {
+          clearTimeout(localStorageWriteTimerRef.current);
+          localStorageWriteTimerRef.current = null;
+        }
+        work();
+      } else {
+        if (localStorageWriteTimerRef.current) {
+          clearTimeout(localStorageWriteTimerRef.current);
+        }
+        localStorageWriteTimerRef.current = setTimeout(work, 0);
+      }
+    },
+    [],
+  );
+
+  // immediate=true означает «синхронно прямо сейчас, не откладывая через
+  // setTimeout». Нужно ТОЛЬКО при beforeunload (вкладка закрывается, таймер
+  // не успеет сработать). Все остальные ручные flushSave'ы (после правок,
+  // переименований вкладок и т.п.) идут с дефолтным defer'ом — клик
+  // возвращается мгновенно, stringify выполняется в следующем тике.
+  const flushSave = (immediate = false) => {
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
@@ -1265,14 +1338,10 @@ export function DatabaseSpreadsheet() {
       columnWidths,
       savedAt: Date.now(),
     };
-    try {
-      window.localStorage.setItem(storageKey, JSON.stringify(payload));
-    } catch {
-      /* quota exceeded — acceptable for very large datasets */
-    }
+    const totalRowsForLs = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
+    const isLargeDatasetLs = totalRowsForLs > LARGE_DATASET_ROW_THRESHOLD;
+    writeLocalStorageBest(storageKey, payload, isLargeDatasetLs, { immediate });
     if (userId) {
-      const totalRows = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
-      const isLargeDataset = totalRows > LARGE_DATASET_ROW_THRESHOLD;
       firstPendingSaveAtRef.current = null;
       // Единый путь сохранения — queueRemoteStateSave → backgroundSave
       // (chunked + gzip в state_compressed). Раньше для малых баз тут был
@@ -1281,7 +1350,7 @@ export function DatabaseSpreadsheet() {
       // compressed, и keepalive-запись «терялась»). Убран. На unload
       // несохранённое прикрывает потолок дебаунса MAX_SAVE_WAIT + копия
       // в localStorage.
-      queueRemoteStateSave(userId, payload, isLargeDataset);
+      queueRemoteStateSave(userId, payload, isLargeDatasetLs);
     }
   };
 
@@ -2286,9 +2355,14 @@ export function DatabaseSpreadsheet() {
     if (!activeTab) return;
     const nextNumber = tabCounter + 1;
     setTabCounter(nextNumber);
+    // Старое поведение копировало размер активной вкладки (включая ВСЕ
+    // пустые строки): для активной в 32k строк × 40 колонок создавалось
+    // 1.28M пустых ячеек → React commit + autosave gzip'ом → UI висит на
+    // десятки секунд. Новая вкладка стартует с DEFAULT_ROWS (20). Ширину
+    // колонок сохраняем — чтобы юзер не удивлялся переходу 40 → 10.
     const newTab = createSheet(
       `Вкладка ${nextNumber}`,
-      activeTab.data.length,
+      DEFAULT_ROWS,
       activeTab.data[0]?.length ?? DEFAULT_COLS,
     );
     setTabs((prev) => [...prev, newTab]);
@@ -2586,20 +2660,50 @@ export function DatabaseSpreadsheet() {
     setSelectionMode('cell');
   };
 
-  const applyNormalizationToData = () => {
+  const applyNormalizationToData = async () => {
     if (!activeTab) return;
+    const tabId = activeTab.id;
     const changed = activeTab.data.length;
     setUndoSnapshot(`Нормализация (${changed} строк)`);
-    updateActiveSheet((sheet) => {
-      const nextData = sheet.data.map((row) =>
-        row.map((cell) => normalizeText(cell, normalizeOptions)),
-      );
-      return { ...sheet, data: nextData };
-    });
+
+    // normalizeText гоняет EMOJI_REGEX.replace на каждой ячейке. Для
+    // 32k строк × 40 колонок = 1.28M вызовов регекспа — синхронно это
+    // 5-30 сек заморозки UI. Стрим чанками по 500 строк, между ними
+    // yield'имся в браузер. Маленькие базы (<= 500) — один commit как
+    // раньше, без лишнего overhead'а.
+    const CHUNK_ROWS = 500;
+    if (changed <= CHUNK_ROWS) {
+      updateActiveSheet((sheet) => ({
+        ...sheet,
+        data: sheet.data.map((row) =>
+          row.map((cell) => normalizeText(cell, normalizeOptions)),
+        ),
+      }));
+      setLastAction({ message: `Нормализация применена к ${changed} строкам`, time: Date.now() });
+      return;
+    }
+
+    for (let start = 0; start < changed; start += CHUNK_ROWS) {
+      const end = Math.min(start + CHUNK_ROWS, changed);
+      setTabs((prev) => prev.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        // Sparse-обновление: клонируем только верхний массив (cheap),
+        // и точечно нормализуем только этот чанк строк. Остальные
+        // строки сохраняют references — React пропустит reconciliation.
+        const nextData = tab.data.slice();
+        for (let r = start; r < end; r += 1) {
+          nextData[r] = tab.data[r].map((cell) => normalizeText(cell, normalizeOptions));
+        }
+        return { ...tab, data: nextData };
+      }));
+      if (end < changed) {
+        await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+      }
+    }
     setLastAction({ message: `Нормализация применена к ${changed} строкам`, time: Date.now() });
   };
 
-  const applyRowsToNewTab = useCallback((nextRows: string[][], filename?: string) => {
+  const applyRowsToNewTab = useCallback(async (nextRows: string[][], filename?: string) => {
     const normalized = normalizeRows(trimTrailingEmptyRows(nextRows));
     const fallbackName = `Вкладка ${tabCounter + 1}`;
     const baseName = filename ? getBaseFilename(filename) : '';
@@ -2609,15 +2713,41 @@ export function DatabaseSpreadsheet() {
     }
     const colCount = normalized[0]?.length ?? DEFAULT_COLS;
     const data = normalized.length > 0 ? normalized : [Array.from({ length: colCount }, () => '')];
-    const newTab: Sheet = {
-      id: createId(),
-      name: tabName,
-      data,
-    };
+    const newTabId = createId();
+
+    // Размер базы определяет стратегию: маленькие сетим одним commit'ом,
+    // большие стримим батчами по CHUNK_ROWS, чтобы React не блокировал
+    // main thread на reconciliation 30k строк за раз. Между батчами
+    // отдаём контроль браузеру через setTimeout(0) — UI отзывчив всё
+    // время импорта, юзер видит как вкладка наполняется.
+    const CHUNK_ROWS = 1000;
+    if (data.length <= CHUNK_ROWS) {
+      const newTab: Sheet = { id: newTabId, name: tabName, data };
+      startTransition(() => {
+        setTabs((prev) => [...prev, newTab]);
+        setActiveTabId(newTabId);
+      });
+      return;
+    }
+
+    const firstChunk = data.slice(0, CHUNK_ROWS);
+    const firstTab: Sheet = { id: newTabId, name: tabName, data: firstChunk };
     startTransition(() => {
-      setTabs((prev) => [...prev, newTab]);
-      setActiveTabId(newTab.id);
+      setTabs((prev) => [...prev, firstTab]);
+      setActiveTabId(newTabId);
     });
+
+    for (let i = CHUNK_ROWS; i < data.length; i += CHUNK_ROWS) {
+      // Yield to browser: один тик event loop'а позволяет React commit'нуть
+      // предыдущий батч + браузеру обработать ввод/скролл/paint.
+      await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+      const chunk = data.slice(i, i + CHUNK_ROWS);
+      startTransition(() => {
+        setTabs((prev) => prev.map((t) => (
+          t.id === newTabId ? { ...t, data: [...t.data, ...chunk] } : t
+        )));
+      });
+    }
   }, [tabCounter]);
 
   useEffect(() => {
@@ -2849,17 +2979,41 @@ export function DatabaseSpreadsheet() {
     [filterEntries, getNormalizedCell, searchOnlyMatches, searchTerms],
   );
 
+  // Кеш результатов buildFilterOptions по колонке. Раньше каждый клик
+  // на иконку фильтра гонял полный скан колонки (до 1000+ строк) +
+  // localeCompare сортировку, синхронно в event handler'е. На повторных
+  // открытиях одной и той же колонки (типичный кейс — юзер ходит по
+  // меню туда-сюда) это была чистая повторная работа.
+  // Инвалидируем кеш когда activeTab.data меняется (reference equality —
+  // setTabs возвращает новый array). После моего sparse-обновления в
+  // signal polling unchanged rows сохраняют references, но data выше
+  // всё равно новая reference на каждый setState. Это нормально — на
+  // редактирование ячейки кеш сбрасывается и следующий клик пересчитает.
+  const filterOptionsCacheRef = useRef<{
+    data: string[][] | null;
+    perCol: Map<number, ReturnType<typeof buildFilterOptions>>;
+  }>({ data: null, perCol: new Map() });
+
   const openFilterMenu = (event: MouseEvent, colIndex: number) => {
     event.preventDefault();
     event.stopPropagation();
     if (!activeTab) return;
-    const { options, overflow } = buildFilterOptions(activeTab.data, colIndex);
+    const cache = filterOptionsCacheRef.current;
+    if (cache.data !== activeTab.data) {
+      cache.data = activeTab.data;
+      cache.perCol.clear();
+    }
+    let cached = cache.perCol.get(colIndex);
+    if (!cached) {
+      cached = buildFilterOptions(activeTab.data, colIndex);
+      cache.perCol.set(colIndex, cached);
+    }
     setFilterMenu({
       col: colIndex,
       x: event.clientX,
       y: event.clientY,
-      options,
-      overflow,
+      options: cached.options,
+      overflow: cached.overflow,
       search: '',
     });
     setContextMenu(null);
@@ -3428,7 +3582,15 @@ export function DatabaseSpreadsheet() {
   }, [headerLabels, websiteEnrichment.sourceCol]);
 
   const enrichmentColumnStats = useMemo(() => {
-    if (!activeTab) return [];
+    // Дорогой O(N*M) подсчёт filled/missing по всем колонкам — нужен ТОЛЬКО
+    // когда модалка обогащения открыта (показывает оператору какие колонки
+    // уже заполнены). Когда модалка закрыта — пересчитывать бессмысленно,
+    // а зависимость от activeTab/headerLabels раньше дёргала эту работу
+    // на КАЖДЫЙ cell edit во всей таблице.
+    // Плюс снижен rowLimit с 5001 до 500 — для оценки fill-rate такого
+    // сэмпла достаточно, точные числа в модалке не нужны (юзер просто
+    // выбирает колонку, ему важна примерная заполненность).
+    if (!activeTab || !websiteEnrichment.isOpen) return [];
     const headerRow = activeTab.data[0] ?? [];
     const stats = Array.from({ length: colCount }, (_, col) => {
       const headerValue = String(headerRow[col] ?? '').trim();
@@ -3444,7 +3606,7 @@ export function DatabaseSpreadsheet() {
       };
     });
 
-    const rowLimit = Math.min(activeTab.data.length, 5001);
+    const rowLimit = Math.min(activeTab.data.length, 501);
     for (let rowIndex = 1; rowIndex < rowLimit; rowIndex += 1) {
       const row = activeTab.data[rowIndex];
       const sourceValue = String(row?.[websiteEnrichment.sourceCol] ?? '').trim();
@@ -3457,7 +3619,7 @@ export function DatabaseSpreadsheet() {
     }
 
     return stats;
-  }, [activeTab, colCount, headerLabels, enrichmentHeaderLabel, websiteEnrichment.sourceCol]);
+  }, [activeTab, colCount, headerLabels, enrichmentHeaderLabel, websiteEnrichment.sourceCol, websiteEnrichment.isOpen]);
 
   const enrichmentOptions = useMemo(() => {
     if (enrichmentColumnStats.length === 0) return [];
@@ -3627,11 +3789,21 @@ export function DatabaseSpreadsheet() {
     ? allRowIndices.slice(virtualRange.start, virtualRange.end + 1)
     : allRowIndices;
 
-  const allVisibleSelected =
-    visibleRowIndices.length > 0 &&
-    visibleRowIndices.every((index) => selectedRows.has(index));
-  const someVisibleSelected =
-    visibleRowIndices.some((index) => selectedRows.has(index)) && !allVisibleSelected;
+  // Раньше .every()/.some() гонялись на каждый ре-рендер компонента
+  // (любое изменение state — клик, скролл, taby). Для 1000 видимых строк
+  // это два полных O(N) прохода по visibleRowIndices с Set.has lookup'ами.
+  // Сам по себе Set.has O(1) и быстрый, но в сумме с сотнями ре-рендеров
+  // — заметная нагрузка. Мемоизуем по реальным зависимостям:
+  // visibleRowIndices (меняется при фильтрах/data change) и selectedRows
+  // (меняется при выделении строк). На прочие state changes — return same.
+  const allVisibleSelected = useMemo(
+    () => visibleRowIndices.length > 0 && visibleRowIndices.every((index) => selectedRows.has(index)),
+    [visibleRowIndices, selectedRows],
+  );
+  const someVisibleSelected = useMemo(
+    () => visibleRowIndices.some((index) => selectedRows.has(index)) && !allVisibleSelected,
+    [visibleRowIndices, selectedRows, allVisibleSelected],
+  );
 
   const requestConfirm = (title: string, message: string, onConfirm: () => void, label = 'Удалить') => {
     confirmActionRef.current = onConfirm;
@@ -4141,6 +4313,11 @@ export function DatabaseSpreadsheet() {
       if (pendingUpdates.size === 0) return;
       const updates = new Map(pendingUpdates);
       pendingUpdates.clear();
+      // startTransition: см. signals polling — те же причины. Website
+      // enrichment может крутиться часами и каждые ~1с шлёт setTabs.
+      // Без transition'a юзер не может нормально пользоваться таблицей
+      // во время прогона.
+      startTransition(() => {
       setTabs((prev) =>
         prev.map((tab) => {
           if (tab.id !== tabId) return tab;
@@ -4176,6 +4353,7 @@ export function DatabaseSpreadsheet() {
           return { ...tab, data: nextData };
         }),
       );
+      });
     };
 
     const scheduleFlush = () => {
@@ -4857,24 +5035,28 @@ export function DatabaseSpreadsheet() {
       if (pendingUpdates.size === 0) return;
       const updates = new Map(pendingUpdates);
       pendingUpdates.clear();
-      setTabs((prev) =>
-        prev.map((tab) => {
-          if (tab.id !== tabId) return tab;
-          const nextData = [...tab.data];
-          updates.forEach((update, rowIndex) => {
-            const existingRow = nextData[rowIndex];
-            if (!existingRow) return;
-            const newRow = [...existingRow];
-            while (newRow.length <= reasonColIndex) {
-              newRow.push('');
-            }
-            newRow[scoreColIndex] = update.score;
-            newRow[reasonColIndex] = update.reason;
-            nextData[rowIndex] = newRow;
-          });
-          return { ...tab, data: nextData };
-        }),
-      );
+      // startTransition: brief scoring polling — те же причины что у signal
+      // polling. Low-priority background update.
+      startTransition(() => {
+        setTabs((prev) =>
+          prev.map((tab) => {
+            if (tab.id !== tabId) return tab;
+            const nextData = [...tab.data];
+            updates.forEach((update, rowIndex) => {
+              const existingRow = nextData[rowIndex];
+              if (!existingRow) return;
+              const newRow = [...existingRow];
+              while (newRow.length <= reasonColIndex) {
+                newRow.push('');
+              }
+              newRow[scoreColIndex] = update.score;
+              newRow[reasonColIndex] = update.reason;
+              nextData[rowIndex] = newRow;
+            });
+            return { ...tab, data: nextData };
+          }),
+        );
+      });
     };
 
     try {
@@ -6063,18 +6245,22 @@ export function DatabaseSpreadsheet() {
         if (pendingUpdates.size === 0) return;
         const batch = new Map(pendingUpdates);
         pendingUpdates.clear();
-        setTabs((prev) => prev.map((tab) => {
-          if (tab.id !== activeTabId) return tab;
-          const data = tab.data.map((row, ri) => {
-            const value = batch.get(ri);
-            if (value === undefined) return row;
-            const nextRow = [...row];
-            while (nextRow.length <= emailColIndex) nextRow.push('');
-            nextRow[emailColIndex] = value;
-            return nextRow;
-          });
-          return { ...tab, data };
-        }));
+        // startTransition + sparse-update: low-priority + не клонируем
+        // unchanged rows (читай комментарий в signal polling выше).
+        startTransition(() => {
+          setTabs((prev) => prev.map((tab) => {
+            if (tab.id !== activeTabId) return tab;
+            const nextData = tab.data.slice();
+            batch.forEach((value, ri) => {
+              if (ri < 0 || ri >= nextData.length) return;
+              const nextRow = [...nextData[ri]];
+              while (nextRow.length <= emailColIndex) nextRow.push('');
+              nextRow[emailColIndex] = value;
+              nextData[ri] = nextRow;
+            });
+            return { ...tab, data: nextData };
+          }));
+        });
       };
 
       const scheduleFlush = () => {
@@ -6307,18 +6493,21 @@ export function DatabaseSpreadsheet() {
         if (pendingUpdates.size === 0) return;
         const batch = new Map(pendingUpdates);
         pendingUpdates.clear();
-        setTabs((prev) => prev.map((tab) => {
-          if (tab.id !== activeTabId) return tab;
-          const data = tab.data.map((row, ri) => {
-            const value = batch.get(ri);
-            if (value === undefined) return row;
-            const nextRow = [...row];
-            while (nextRow.length <= newColIndex) nextRow.push('');
-            nextRow[newColIndex] = value;
-            return nextRow;
-          });
-          return { ...tab, data };
-        }));
+        // startTransition + sparse-update: low-priority polling update.
+        startTransition(() => {
+          setTabs((prev) => prev.map((tab) => {
+            if (tab.id !== activeTabId) return tab;
+            const nextData = tab.data.slice();
+            batch.forEach((value, ri) => {
+              if (ri < 0 || ri >= nextData.length) return;
+              const nextRow = [...nextData[ri]];
+              while (nextRow.length <= newColIndex) nextRow.push('');
+              nextRow[newColIndex] = value;
+              nextData[ri] = nextRow;
+            });
+            return { ...tab, data: nextData };
+          }));
+        });
       };
 
       const scheduleFlush = () => {
@@ -7409,8 +7598,12 @@ export function DatabaseSpreadsheet() {
     }
   };
 
-  const SIGNAL_POLL_INTERVAL_MS = 2000;
-  const SIGNAL_POLL_MAX_BACKOFF_MS = 15_000;
+  // SIGNAL_POLL: было 2000 (раз в 2 сек). Поднимаем до 5000 — signal job
+  // обычно длится 30-60 мин; раз в 5 сек обновлять прогресс хватает.
+  // ВЫИГРЫШ: 2.5x меньше setTabs во время прогона, меньше re-render'ов
+  // 13к-строчного компонента, юзер может работать с таблицей параллельно.
+  const SIGNAL_POLL_INTERVAL_MS = 5000;
+  const SIGNAL_POLL_MAX_BACKOFF_MS = 20_000;
   const SIGNAL_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 
   const openSignalModal = async () => {
@@ -7564,45 +7757,63 @@ export function DatabaseSpreadsheet() {
           const maxColIdx = extraCols && extraCols.length > 0
             ? Math.max(profileColIndex, ...extraCols.map((c) => c.colIndex))
             : profileColIndex;
-          setTabs((prev) =>
-            prev.map((tab) => {
-              if (tab.id !== tabId) return tab;
-              const nextData = tab.data.map((row) => [...row]);
-              for (const result of data.results) {
-                const ri = result.row_index;
-                if (ri < 1 || ri >= nextData.length) continue;
-                while (nextData[ri].length <= maxColIdx) nextData[ri].push('');
-                if (result.status === 'completed') {
-                  const parsed = parseSignalResultText(result.result_text);
-                  if (parsed) {
-                    nextData[ri][stackColIndex] = parsed.stack;
-                    nextData[ri][profileColIndex] = parsed.profile;
-                  }
-                  // Render extra extractor columns from the same JSON payload.
-                  if (extraCols && extraCols.length > 0 && result.result_text) {
-                    let raw: Record<string, unknown> | null = null;
-                    try {
-                      raw = JSON.parse(result.result_text) as Record<string, unknown>;
-                    } catch {
-                      raw = null;
+          // startTransition: signal polling шлёт setTabs каждые 2 сек
+          // во время сигнал-job'a. Без transition'a каждый такой апдейт
+          // RE-RENDER'ит весь 13к-строчный компонент с приоритетом
+          // user-input, и юзеру не дают кликать пока render не закончится.
+          // С transition'ом React помечает этот апдейт как low-priority —
+          // клики и скроллы юзера ПРЕЕМПТЯТ poll-апдейт.
+          startTransition(() => {
+            setTabs((prev) =>
+              prev.map((tab) => {
+                if (tab.id !== tabId) return tab;
+                // Sparse-обновление: раньше клонировали ВСЕ строки tab.data,
+                // даже те которые не меняются в этом батче. Для 1000-строчной
+                // вкладки это 1000 alloc'ов array'ев каждые 2 сек polling'a
+                // (SIGNAL_POLL_INTERVAL_MS=2000). Теперь клонируем верхний
+                // массив (cheap) и точечно подменяем только реально
+                // изменяемые строки — остальные оставляем по reference.
+                // Бонус: React shallow-сравнивает строки и пропускает
+                // re-render для unchanged rows.
+                const nextData = tab.data.slice();
+                for (const result of data.results) {
+                  const ri = result.row_index;
+                  if (ri < 1 || ri >= nextData.length) continue;
+                  const newRow = [...nextData[ri]];
+                  while (newRow.length <= maxColIdx) newRow.push('');
+                  if (result.status === 'completed') {
+                    const parsed = parseSignalResultText(result.result_text);
+                    if (parsed) {
+                      newRow[stackColIndex] = parsed.stack;
+                      newRow[profileColIndex] = parsed.profile;
                     }
-                    if (raw) {
-                      for (const extra of extraCols) {
-                        nextData[ri][extra.colIndex] = formatExtraValue(extra.key, raw[extra.key]);
+                    // Render extra extractor columns from the same JSON payload.
+                    if (extraCols && extraCols.length > 0 && result.result_text) {
+                      let raw: Record<string, unknown> | null = null;
+                      try {
+                        raw = JSON.parse(result.result_text) as Record<string, unknown>;
+                      } catch {
+                        raw = null;
+                      }
+                      if (raw) {
+                        for (const extra of extraCols) {
+                          newRow[extra.colIndex] = formatExtraValue(extra.key, raw[extra.key]);
+                        }
                       }
                     }
+                  } else if (result.status === 'failed' || result.status === 'skipped') {
+                    newRow[stackColIndex] = SIGNAL_ERROR_MARKER;
+                    newRow[profileColIndex] = result.last_error ?? 'Ошибка';
+                    errorCount += 1;
+                    // Leave extra columns blank on failure rather than spam the
+                    // marker across N cells per row.
                   }
-                } else if (result.status === 'failed' || result.status === 'skipped') {
-                  nextData[ri][stackColIndex] = SIGNAL_ERROR_MARKER;
-                  nextData[ri][profileColIndex] = result.last_error ?? 'Ошибка';
-                  errorCount += 1;
-                  // Leave extra columns blank on failure rather than spam the
-                  // marker across N cells per row.
+                  nextData[ri] = newRow;
                 }
-              }
-              return { ...tab, data: nextData };
-            }),
-          );
+                return { ...tab, data: nextData };
+              }),
+            );
+          });
           lastProgressTime = Date.now();
         }
 
@@ -8759,7 +8970,6 @@ export function DatabaseSpreadsheet() {
     let isMounted = true;
     hydratedStateRef.current = '__pending__';
     setIsHydrated(false);
-    setIsTableReady(false);
     setLoadFailed(false);
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
@@ -8891,33 +9101,6 @@ export function DatabaseSpreadsheet() {
     };
   }, [storageKey, userId, queueRemoteStateSave]);
 
-  // После того как isHydrated стал true, React коммитит огромный mount
-  // таблицы (виртуализатор, все колонки, ячейки в кадре). Между коммитом
-  // и реальным paint'ом проходит ещё некоторое время, а каскад useEffect'ов
-  // (autosave, server-detect и т.п.) добавляет работы main thread'у. Если
-  // в это время убрать спиннер, юзер видит «вроде готово» и пытается
-  // листать/тыкать — UI не отзывается. Поэтому держим оверлей до момента,
-  // пока браузер не прокликает два кадра после коммита: первый rAF
-  // фиксирует, что commit прошёл, второй — что browser реально нарисовал
-  // таблицу. Дальше отпускаем.
-  useEffect(() => {
-    if (!isHydrated) return;
-    let cancelled = false;
-    let rafId2 = 0;
-    const rafId1 = requestAnimationFrame(() => {
-      if (cancelled) return;
-      rafId2 = requestAnimationFrame(() => {
-        if (cancelled) return;
-        setIsTableReady(true);
-      });
-    });
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(rafId1);
-      if (rafId2) cancelAnimationFrame(rafId2);
-    };
-  }, [isHydrated]);
-
   useEffect(() => {
     if (tabs.length === 0) return;
     if (tabs.some((tab) => tab.id === activeTabId)) return;
@@ -8952,11 +9135,10 @@ export function DatabaseSpreadsheet() {
     const isLargeDataset = totalRows > LARGE_DATASET_ROW_THRESHOLD;
     const delay = isLargeDataset ? STORAGE_SAVE_DELAY_LARGE : STORAGE_SAVE_DELAY;
 
-    try {
-      window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
-    } catch {
-      /* quota exceeded — acceptable for very large datasets */
-    }
+    // Пропуск синхронного JSON.stringify+localStorage.setItem для больших
+    // баз (см. writeLocalStorageBest). 30МБ stringify на main thread — это
+    // 5-15 сек заморозки UI на каждый ре-рендер с tabs.
+    writeLocalStorageBest(storageKeySnapshot, payload, isLargeDataset);
 
     // Потолок дебаунса: cleanup ниже сбрасывает таймер на каждый ре-рендер
     // (правка ячейки / клик вкладки / ресайз колонки). При активной работе
@@ -8988,15 +9170,32 @@ export function DatabaseSpreadsheet() {
       // уходил). Пусть начатое сохранение допишется; saveGeneration внутри
       // backgroundSave сам отсечёт устаревший проход, если стартует новый.
     };
-  }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId, queueRemoteStateSave]);
+  }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId, queueRemoteStateSave, writeLocalStorageBest]);
 
+  // Раньше useEffect был без deps array — подписка на 'beforeunload' и
+  // отписка дёргались на КАЖДЫЙ ре-рендер (а ре-рендеров в этом компоненте
+  // сотни в минуту при активной работе). addEventListener/removeEventListener
+  // — DOM-операции, и хоть и не страшно дорогие сами по себе, в сумме
+  // ощутимо стопорили event loop при каждом клике/правке.
+  // Теперь подписываемся ОДИН раз на mount, а доступ к актуальному flushSave
+  // (он замыкает все state'ы — tabs, activeTabId, etc.) идёт через ref —
+  // ref.current синхронно обновляется на каждый render (это дешёвая
+  // присваивание), сам listener стабилен.
+  const flushSaveRef = useRef(flushSave);
+  useEffect(() => {
+    flushSaveRef.current = flushSave;
+  });
   useEffect(() => {
     const handleBeforeUnload = () => {
-      flushSave();
+      // immediate=true: вкладка закрывается, setTimeout не успеет
+      // сработать. Здесь нам ОК заблокировать main thread на пару секунд —
+      // юзер всё равно уходит, а локальная копия должна успеть лечь до
+      // выгрузки.
+      flushSaveRef.current(true);
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  });
+  }, []);
 
   useEffect(() => {
     if (!isHydrated || !activeTab || websiteEnrichment.isGenerating) return;
@@ -10067,18 +10266,16 @@ export function DatabaseSpreadsheet() {
             </table>
             ) : null}
           </div>
-          {!loadFailed && (!isHydrated || !isTableReady) && (
+          {!loadFailed && !isHydrated && (
             <div
               className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-white/95 px-6 py-14 text-center text-gray-500"
               aria-live="polite"
               role="status"
             >
               <div className="mx-auto mb-3 h-8 w-8 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
-              <div className="text-sm font-medium text-gray-700">
-                {!isHydrated ? 'Загружаем вашу базу…' : 'Готовим к отображению…'}
-              </div>
+              <div className="text-sm font-medium text-gray-700">Загружаем вашу базу…</div>
               <div className="mt-1 max-w-md text-xs text-gray-500">
-                Большая база может загружаться до 1–2 минут. Пожалуйста, не закрывайте вкладку и не нажимайте на интерфейс, пока идёт загрузка.
+                Большая база может загружаться до 1–2 минут. Не закрывайте вкладку.
               </div>
             </div>
           )}
