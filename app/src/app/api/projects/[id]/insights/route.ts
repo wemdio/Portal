@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { buildProjectInsights } from '@/lib/instantly/projectInsights';
-import { isDatasetConfigured } from '@/lib/instantlyDataset';
+import { isDatasetConfigured, refreshAbIfStale } from '@/lib/instantlyDataset';
 
 export const dynamic = 'force-dynamic';
 
@@ -55,6 +55,9 @@ export async function GET(
   if (campaignIds.length === 0) {
     return NextResponse.json({ insights: null, reason: 'no_campaigns' });
   }
+
+  // keep the A/B materialized view fresh without a prod cron (fire-and-forget)
+  void refreshAbIfStale();
 
   try {
     const insights = await buildProjectInsights(campaignIds);
