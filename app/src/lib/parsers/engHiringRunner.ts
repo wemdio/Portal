@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { extractJobs, parseCompanyCsv, postingsUrl } from '@/lib/jobs/atsCompanyParser';
+import { extractJobs, parseCompanyCsv, postingsUrl, type AtsCompanyToken } from '@/lib/jobs/atsCompanyParser';
 import {
   ENG_HIRING_SOURCES,
   dedupeEngHiringVacanciesByCompany,
@@ -18,6 +18,13 @@ import { domainToSiteUrl, resolveCompanyDomainByName } from '@/lib/parsers/compa
 
 const TOKENS_BASE = 'https://raw.githubusercontent.com/kalil0321/ats-scrapers/main/ats-companies';
 const UA = 'PortalEngHiringParser/1.0 (+https://wemd.io)';
+
+function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
 const REQUEST_TIMEOUT_MS = 15_000;
 const LEVER_REQUEST_TIMEOUT_MS = Math.max(3_000, Number(process.env.ENG_HIRING_LEVER_TIMEOUT_MS ?? '8000'));
 const DEFAULT_COMPANIES_LIMIT = 1000;
@@ -26,6 +33,8 @@ const MAX_CACHE_SCAN_ROWS = Math.max(1000, Number(process.env.ENG_HIRING_MAX_CAC
 const MAX_RESULTS = Math.max(1000, Number(process.env.ENG_HIRING_MAX_RESULTS ?? '20000'));
 const DEFAULT_CACHE_MAX_AGE_HOURS = 12;
 const SCAN_DELAY_MS = Math.max(0, Number(process.env.ENG_HIRING_SCAN_DELAY_MS ?? '80'));
+const SCAN_CONCURRENCY = clampInteger(process.env.ENG_HIRING_SCAN_CONCURRENCY, 12, 1, 50);
+const CACHE_PROGRESS_INTERVAL = clampInteger(process.env.ENG_HIRING_CACHE_PROGRESS_INTERVAL, 25, 1, 1000);
 const ENRICH_DELAY_MS = Math.max(0, Number(process.env.ENG_HIRING_ENRICH_DELAY_MS ?? '200'));
 const ENRICH_LIMIT = Math.max(0, Number(process.env.ENG_HIRING_ENRICH_LIMIT ?? '300'));
 const DETAIL_ENRICH_DELAY_MS = Math.max(0, Number(process.env.ENG_HIRING_DETAIL_DELAY_MS ?? '120'));
@@ -148,6 +157,27 @@ function toCacheRow(v: EngHiringVacancy) {
     cache_fetched_at: now,
     updated_at: now,
   };
+}
+
+async function fetchSourceCacheRows(source: EngHiringSource, token: AtsCompanyToken): Promise<ReturnType<typeof toCacheRow>[]> {
+  try {
+    const payload = await fetchJson(
+      postingsUrl(source, token.slug),
+      source === 'lever' ? LEVER_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+    );
+    const rows: ReturnType<typeof toCacheRow>[] = [];
+    for (const raw of extractJobs(source, payload)) {
+      const vacancy = normalizeAtsJobToEngVacancy(source, raw, {
+        slug: token.slug,
+        companyName: token.name,
+      });
+      if (vacancy) rows.push(toCacheRow(vacancy));
+    }
+    return rows;
+  } catch {
+    /* board moved, private, empty, or rate-limited: skip */
+    return [];
+  }
 }
 
 function cacheRowToVacancy(row: Record<string, unknown>): CacheRow {
@@ -323,6 +353,7 @@ async function refreshSourceCache(
   const startIndex = Math.min(toNonNegativeInt(run.next_company_index), tokens.length);
   const batch: ReturnType<typeof toCacheRow>[] = [];
   let cachedVacancies = toNonNegativeInt(run.cached_vacancies);
+  let lastCheckpoint = startIndex;
 
   await updateCacheRunProgress(db, run.id, {
     next_company_index: startIndex,
@@ -332,41 +363,34 @@ async function refreshSourceCache(
     error_message: null,
   });
 
-  for (let i = startIndex; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    try {
-      const payload = await fetchJson(
-        postingsUrl(source, token.slug),
-        source === 'lever' ? LEVER_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
-      );
-      for (const raw of extractJobs(source, payload)) {
-        const vacancy = normalizeAtsJobToEngVacancy(source, raw, {
-          slug: token.slug,
-          companyName: token.name,
-        });
-        if (!vacancy) continue;
-        batch.push(toCacheRow(vacancy));
-        cachedVacancies += 1;
-      }
-    } catch {
-      /* board moved, private, empty, or rate-limited: skip */
+  for (let i = startIndex; i < tokens.length; i += SCAN_CONCURRENCY) {
+    await ensureNotCancelled();
+    const chunk = tokens.slice(i, Math.min(i + SCAN_CONCURRENCY, tokens.length));
+    const chunkRows = await Promise.all(chunk.map((token) => fetchSourceCacheRows(source, token)));
+    for (const rows of chunkRows) {
+      batch.push(...rows);
+      cachedVacancies += rows.length;
     }
 
-    if (batch.length >= CACHE_BATCH_SIZE) {
+    const done = i + chunk.length;
+    const shouldCheckpoint = done - lastCheckpoint >= CACHE_PROGRESS_INTERVAL || done >= tokens.length;
+    if (batch.length >= CACHE_BATCH_SIZE || shouldCheckpoint) {
       await upsertCacheBatch(db, batch.splice(0, batch.length));
     }
-    if ((i + 1) % 25 === 0 || i === tokens.length - 1) {
+
+    if (shouldCheckpoint) {
       await updateCacheRunProgress(db, run.id, {
-        next_company_index: i + 1,
-        scanned_companies: i + 1,
+        next_company_index: done,
+        scanned_companies: done,
         cached_vacancies: cachedVacancies,
         total_companies: tokens.length,
         error_message: null,
       });
+      lastCheckpoint = done;
       await ensureNotCancelled();
-      await onProgress(i + 1, tokens.length, source);
+      await onProgress(done, tokens.length, source);
     }
-    await sleep(SCAN_DELAY_MS);
+    if (SCAN_DELAY_MS > 0 && done < tokens.length) await sleep(SCAN_DELAY_MS);
   }
 
   if (batch.length) {

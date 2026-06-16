@@ -224,9 +224,10 @@ function makeDb(initialState: MockDbState) {
 
 async function loadRunner() {
   jest.resetModules();
-  process.env.ENG_HIRING_SCAN_DELAY_MS = '0';
-  process.env.ENG_HIRING_DETAIL_LIMIT = '0';
-  process.env.ENG_HIRING_ENRICH_LIMIT = '0';
+  process.env.ENG_HIRING_SCAN_DELAY_MS ??= '0';
+  process.env.ENG_HIRING_DETAIL_LIMIT ??= '0';
+  process.env.ENG_HIRING_ENRICH_LIMIT ??= '0';
+  process.env.ENG_HIRING_SCAN_CONCURRENCY ??= '1';
   const admin = await import('@/lib/supabaseAdmin');
   const atsHttp = await import('@/lib/parsers/atsHttp');
   const runner = await import('@/lib/parsers/engHiringRunner');
@@ -241,6 +242,10 @@ async function loadRunner() {
 describe('runEngHiringParserJob cache-run resume', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    delete process.env.ENG_HIRING_SCAN_CONCURRENCY;
+    delete process.env.ENG_HIRING_SCAN_DELAY_MS;
+    delete process.env.ENG_HIRING_DETAIL_LIMIT;
+    delete process.env.ENG_HIRING_ENRICH_LIMIT;
   });
 
   it('resumes an unfinished source cache run from next_company_index', async () => {
@@ -346,7 +351,49 @@ describe('runEngHiringParserJob cache-run resume', () => {
         }),
       }),
     ]));
+    expect(db.state.eng_hiring_cache).toHaveLength(25);
     expect(db.state.parser_jobs.find((row) => row.id === 'job-1')?.status).toBe('pending');
+  });
+
+  it('refreshes ATS boards with bounded parallelism instead of one-by-one requests', async () => {
+    process.env.ENG_HIRING_SCAN_CONCURRENCY = '3';
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: {
+          text: 'b2b manager',
+          sources: ['greenhouse'],
+          countries: ['us'],
+          companies_limit: 6,
+          refresh_cache: true,
+          enrich: false,
+          max_results: 20,
+        },
+      }],
+      eng_hiring_cache_runs: [],
+      eng_hiring_cache: [],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+    fetchTextWithFallback.mockResolvedValue(makeCompanyCsv(6));
+
+    let active = 0;
+    let maxActive = 0;
+    fetchJsonWithFallback.mockImplementation(async (url: string) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+      const slug = url.match(/boards\/([^/]+)\/jobs/)?.[1] ?? 'unknown';
+      return makeGreenhouseJob(slug, 1);
+    });
+
+    await runEngHiringParserJob('job-1');
+
+    expect(maxActive).toBeGreaterThanOrEqual(3);
+    expect(fetchJsonWithFallback).toHaveBeenCalledTimes(6);
   });
 
   it('pushes country and recency filters into the cache query before text matching', async () => {
