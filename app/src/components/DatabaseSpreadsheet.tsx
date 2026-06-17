@@ -1296,10 +1296,26 @@ export function DatabaseSpreadsheet() {
     (
       storageKeySnapshot: string,
       payload: PersistedSpreadsheetState,
-      isLargeDataset: boolean,
+      _isLargeDataset: boolean,
       options?: { immediate?: boolean },
     ) => {
-      if (isLargeDataset) return;
+      // Раньше для больших баз сразу выходили (return), что лишало
+      // средние/большие датасеты страховой копии в localStorage —
+      // Сергей правильно отметил: при reload/crash во время импорта
+      // юзер мог потерять весь прогресс если remote save ещё не
+      // успел улететь. Возвращаем запись для всех размеров, но через
+      // deferred+coalescing path:
+      //   - setTimeout(0) переносит синхронный JSON.stringify ПОСЛЕ
+      //     завершения текущего click handler'a — UI получает paint
+      //     и реакция кнопки мгновенная;
+      //   - clearTimeout отменяет предыдущий запланированный stringify
+      //     при следующем setTabs (при активном polling'е или печати),
+      //     так что выполняется ТОЛЬКО последний (latest payload),
+      //     никогда не накапливается очередь;
+      //   - quota exceeded молча проглатывается catch'ем (для базы
+      //     >5МБ всё равно ничего не сделать без gzip / IndexedDB).
+      // _isLargeDataset больше не используется внутри функции, но
+      // остаётся в сигнатуре чтобы не ломать вызовы.
       const work = () => {
         localStorageWriteTimerRef.current = null;
         try {
