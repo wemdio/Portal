@@ -172,3 +172,49 @@ export async function sendMailViaOAuthGmail(cfg: GmailOAuthConfig, msg: Outgoing
     transport.close();
   }
 }
+
+// ─── Универсальная XOAUTH2-отправка по готовому access-токену (Яндекс и пр.) ──
+
+export interface OAuthTokenSmtpConfig {
+  host: string;
+  port: number;
+  secure: boolean;
+  user: string;
+  accessToken: string;
+}
+
+function buildOAuthTokenTransport(cfg: OAuthTokenSmtpConfig) {
+  return nodemailer.createTransport({
+    host: cfg.host,
+    port: cfg.port,
+    secure: cfg.secure,
+    auth: { type: 'OAuth2', user: cfg.user, accessToken: cfg.accessToken },
+    connectionTimeout: 15_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 20_000,
+  });
+}
+
+export async function verifyOAuthTokenSmtp(cfg: OAuthTokenSmtpConfig): Promise<SmtpResult> {
+  const transport = buildOAuthTokenTransport(cfg);
+  try {
+    await transport.verify();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: toMessage(e) };
+  } finally {
+    transport.close();
+  }
+}
+
+export async function sendMailViaOAuthToken(cfg: OAuthTokenSmtpConfig, msg: OutgoingMessage): Promise<SmtpResult> {
+  const transport = buildOAuthTokenTransport(cfg);
+  try {
+    await transport.sendMail({ from: msg.from, to: msg.to, subject: msg.subject, text: msg.text });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: toMessage(e) };
+  } finally {
+    transport.close();
+  }
+}

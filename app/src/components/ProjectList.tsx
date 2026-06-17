@@ -14,6 +14,7 @@ import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } fro
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 import { AlertTriangle, Clock } from 'lucide-react';
 import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
+import { InstantlyInsightsSection } from '@/components/projects/InstantlyInsightsSection';
 import { SERVICE_OPTIONS } from '@/lib/projectServices';
 
 /**
@@ -2800,6 +2801,11 @@ export function ProjectList() {
                     )}
                   </div>
                 )}
+              </section>
+
+              {/* Honest campaign-insights over the analytics dataset (no AI at render) */}
+              <section>
+                <InstantlyInsightsSection projectId={selectedProject.id} />
               </section>
 
               {/* Client brief PDF + AI lead-source hypotheses */}
