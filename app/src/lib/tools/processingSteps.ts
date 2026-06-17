@@ -207,6 +207,29 @@ export interface StepFindEmailsOptions {
   onCheckpoint?: CheckpointFn;
 }
 
+// Хосты, которые НЕ имеет смысла скрейпить: job-борды/агрегаторы с антиботом.
+// Это не сайт компании — описаний/почт там не достать (отдаёт «Произошла
+// ошибка…cookie»), только мусор + трата времени. «Обогатить» и «Найти email»
+// пропускают такие строки. Жёсткий пол на случай, если hh.ru всё же просочился
+// в колонку «сайт» (старый файл, чужой источник, проигнорированное warning).
+const NON_SCRAPEABLE_HOSTS: readonly string[] = [
+  'hh.ru', 'headhunter.ru',
+  'superjob.ru', 'rabota.ru', 'zarplata.ru', 'trudvsem.ru', 'gorodrabot.ru',
+];
+
+function hostOf(raw: string): string {
+  let v = (raw ?? '').trim().toLowerCase();
+  if (!v) return '';
+  if (!/^https?:\/\//.test(v)) v = `https://${v}`;
+  try { return new URL(v).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
+export function isNonScrapeableHost(raw: string): boolean {
+  const host = hostOf(raw);
+  if (!host) return false;
+  return NON_SCRAPEABLE_HOSTS.some((d) => host === d || host.endsWith(`.${d}`));
+}
+
 export async function stepFindEmails(
   data: string[][],
   onProgress: ProgressFn,
@@ -250,7 +273,7 @@ export async function stepFindEmails(
   // Для 'separate' это значит «не перезатираем найденный ранее scrape-результат».
   const toProcess = body
     .map((row, i) => ({ row, i, url: getPreferredSiteUrl(row, siteColumnIndexes) }))
-    .filter((r) => r.url && !extractEmail(r.row[targetIdx] || ''));
+    .filter((r) => r.url && !extractEmail(r.row[targetIdx] || '') && !isNonScrapeableHost(r.url));
 
   if (toProcess.length === 0) { await onProgress(100); return [header, ...body]; }
 
@@ -429,7 +452,7 @@ export async function stepEnrich(
 
   const toProcess = newBody
     .map((row, i) => ({ row, i, url: (row[siteIdx] || '').trim() }))
-    .filter((r) => r.url && !(r.row[targetDescIdx] || '').trim());
+    .filter((r) => r.url && !(r.row[targetDescIdx] || '').trim() && !isNonScrapeableHost(r.url));
 
   if (toProcess.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 

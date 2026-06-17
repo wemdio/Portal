@@ -7,9 +7,29 @@
  * silently emptying the client's base (real case: reelscut, 94 rows → 0).
  * The guard now throws a clear error instead, leaving the input untouched.
  */
-import { looksLikeSite, stepSiteCheck } from '@/lib/tools/processingSteps';
+import { looksLikeSite, stepSiteCheck, isNonScrapeableHost } from '@/lib/tools/processingSteps';
 
 const noop = async () => {};
+
+describe('isNonScrapeableHost (never scrape hh.ru / job boards)', () => {
+  it('blocks hh.ru and job boards (incl. subdomains, protocol, www, paths)', () => {
+    for (const u of [
+      'hh.ru', 'https://hh.ru/vacancy/123', 'spb.hh.ru', 'https://www.hh.ru/employer/9',
+      'headhunter.ru', 'superjob.ru', 'rabota.ru', 'https://zarplata.ru/x', 'trudvsem.ru',
+    ]) {
+      expect(isNonScrapeableHost(u)).toBe(true);
+    }
+  });
+
+  it('does NOT block real company sites or look-alike domains', () => {
+    for (const u of [
+      'company.com', 'https://betaonline.ru', 'evil-hh.ru', 'myhh.ru',
+      'mycompany.com/hh.ru', '', 'not a url',
+    ]) {
+      expect(isNonScrapeableHost(u)).toBe(false);
+    }
+  });
+});
 
 describe('looksLikeSite', () => {
   it('recognizes real domains / urls (incl. .рф, paths, protocol, case)', () => {
