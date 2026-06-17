@@ -207,6 +207,29 @@ export interface StepFindEmailsOptions {
   onCheckpoint?: CheckpointFn;
 }
 
+// Хосты, которые НЕ имеет смысла скрейпить: job-борды/агрегаторы с антиботом.
+// Это не сайт компании — описаний/почт там не достать (отдаёт «Произошла
+// ошибка…cookie»), только мусор + трата времени. «Обогатить» и «Найти email»
+// пропускают такие строки. Жёсткий пол на случай, если hh.ru всё же просочился
+// в колонку «сайт» (старый файл, чужой источник, проигнорированное warning).
+const NON_SCRAPEABLE_HOSTS: readonly string[] = [
+  'hh.ru', 'headhunter.ru',
+  'superjob.ru', 'rabota.ru', 'zarplata.ru', 'trudvsem.ru', 'gorodrabot.ru',
+];
+
+function hostOf(raw: string): string {
+  let v = (raw ?? '').trim().toLowerCase();
+  if (!v) return '';
+  if (!/^https?:\/\//.test(v)) v = `https://${v}`;
+  try { return new URL(v).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
+export function isNonScrapeableHost(raw: string): boolean {
+  const host = hostOf(raw);
+  if (!host) return false;
+  return NON_SCRAPEABLE_HOSTS.some((d) => host === d || host.endsWith(`.${d}`));
+}
+
 export async function stepFindEmails(
   data: string[][],
   onProgress: ProgressFn,
@@ -250,7 +273,7 @@ export async function stepFindEmails(
   // Для 'separate' это значит «не перезатираем найденный ранее scrape-результат».
   const toProcess = body
     .map((row, i) => ({ row, i, url: getPreferredSiteUrl(row, siteColumnIndexes) }))
-    .filter((r) => r.url && !extractEmail(r.row[targetIdx] || ''));
+    .filter((r) => r.url && !extractEmail(r.row[targetIdx] || '') && !isNonScrapeableHost(r.url));
 
   if (toProcess.length === 0) { await onProgress(100); return [header, ...body]; }
 
@@ -348,6 +371,23 @@ async function checkSite(url: string): Promise<boolean> {
   finally { clearTimeout(timeout); }
 }
 
+// Эвристика «похоже на сайт»: непустое значение без '@' (т.е. не email) с доменом
+// вида name.tld (точка + 2+ буквы, в т.ч. кириллических — .рф). Лояльная: любой
+// реальный домен проходит, а email / название / пустышка — нет.
+export function looksLikeSite(raw: string): boolean {
+  const v = (raw ?? '').trim();
+  if (!v || v.includes('@')) return false;
+  return /\.[a-zа-яё]{2,}(?:[/?:#]|$)/.test(v.toLowerCase());
+}
+
+// Защита от «тихого убийства базы»: если в колонке «сайт» почти нет значений,
+// похожих на сайт (например, туда по ошибке сопоставили email или название) —
+// check_sites удалил бы ВСЕ строки (каждое «не-сайт» не открывается → строка
+// «мёртвая»). Вместо пустого результата падаем с понятной ошибкой, а входные
+// данные остаются нетронутыми (клиент правит маппинг и перезапускает).
+const SITE_GUARD_MIN_ROWS = 5;             // не судим по слишком мелкой выборке
+const SITE_GUARD_MIN_SITE_FRACTION = 0.2;  // <20% похожих на сайт ⇒ колонка не та
+
 export async function stepSiteCheck(
   data: string[][],
   onProgress: ProgressFn,
@@ -360,6 +400,19 @@ export async function stepSiteCheck(
 
   const keep: boolean[] = new Array(body.length).fill(true);
   const toCheck = body.map((row, i) => ({ url: (row[siteIdx] || '').trim(), i })).filter((r) => r.url);
+
+  // Гард: колонка «сайт» не похожа на сайты ⇒ не вычищаем всю базу молча.
+  if (toCheck.length >= SITE_GUARD_MIN_ROWS) {
+    const siteLike = toCheck.reduce((n, r) => (looksLikeSite(r.url) ? n + 1 : n), 0);
+    if (siteLike / toCheck.length < SITE_GUARD_MIN_SITE_FRACTION) {
+      throw new Error(
+        `«Проверка сайтов»: колонка «сайт» не похожа на сайты ` +
+          `(только ${siteLike} из ${toCheck.length} значений выглядят как сайт). ` +
+          `Похоже, в эту колонку попали не сайты — например, email или название компании. ` +
+          `Проверьте сопоставление колонок и запустите заново; база не тронута.`,
+      );
+    }
+  }
 
   for (let batch = 0; batch < toCheck.length; batch += SITE_CHECK_BATCH) {
     if (isCancelled && await isCancelled()) throw new Error('Отменено');
@@ -399,7 +452,7 @@ export async function stepEnrich(
 
   const toProcess = newBody
     .map((row, i) => ({ row, i, url: (row[siteIdx] || '').trim() }))
-    .filter((r) => r.url && !(r.row[targetDescIdx] || '').trim());
+    .filter((r) => r.url && !(r.row[targetDescIdx] || '').trim() && !isNonScrapeableHost(r.url));
 
   if (toProcess.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 
