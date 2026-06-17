@@ -19,15 +19,22 @@ import 'server-only';
 import type { SocialPost } from './socialPostsExtractor';
 import { logInfo, logError } from '@/lib/loggerServer';
 
-// Sonnet 4.6 — последняя версия на Requesty (Anthropic provider, $3/$15 per MTok,
-// 1M контекст). Дата-суффикс не нужен: алиас без даты резолвится в актуальный
-// снэпшот. Старый ID `anthropic/claude-sonnet-4-5-20250514` стал 404 после
-// депрекации майского снэпшота.
-const MODEL = 'anthropic/claude-sonnet-4-6';
+// gpt-4o-mini — $0.15 input / $0.60 output per MTok. На стороне Requesty
+// эта же модель работает в integrationsLlmExtractor / pricingLlmExtractor /
+// careersLlmExtractor (см. .env OPENROUTER_*_API_KEY). Для бинарной
+// классификации событий из коротких постов хватает с большим запасом:
+// gpt-4o-mini нативно поддерживает response_format=json_object (никакого
+// markdown wrapping'a), хорошо работает с русским текстом.
+// Эволюция стоимости: Sonnet 4.6 ($10/1000) → Haiku 4.5 ($2/1000) →
+// gpt-4o-mini ($0.30/1000). 30x экономия от исходной.
+const MODEL = 'openai/gpt-4o-mini';
 const TIMEOUT_MS = 30_000;
-// Bound on text we send to the LLM. 10 posts × ~500 chars + blog + about ≈
-// 8KB. We cap at 12KB so weird outliers can't blow up the token bill.
-const MAX_INPUT_CHARS = 12_000;
+// Bound on text we send to LLM. Снижено до 6k: 10 постов × 500 chars =
+// 5k + краткий about/blog. Outliers с гигантским /about подрезались и
+// раньше. Дальше резать без потери качества нельзя.
+const MAX_INPUT_CHARS = 6_000;
+// Output cap. JSON со всеми 4 событиями + summaries ≈ 350-400. 500 с запасом.
+const MAX_OUTPUT_TOKENS = 500;
 const MAX_SUMMARY_CHARS = 400;
 
 function getApiKey(): string {
@@ -213,7 +220,7 @@ export async function detectEventSignals(
           { role: 'user', content: userPrompt },
         ],
         temperature: 0,
-        max_tokens: 700,
+        max_tokens: MAX_OUTPUT_TOKENS,
         response_format: { type: 'json_object' },
       }),
     });
@@ -235,11 +242,22 @@ export async function detectEventSignals(
     }
 
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const content = data?.choices?.[0]?.message?.content?.trim();
-    if (!content) {
+    const rawContent = data?.choices?.[0]?.message?.content?.trim();
+    if (!rawContent) {
       await logError('events.detect.llm_empty_response', new Error('LLM вернул пустой content'), inputStats);
       return {};
     }
+
+    // Sonnet 4.6 (через Requesty) часто игнорирует response_format:json_object
+    // и оборачивает JSON в markdown code fence: ```json\n{...}\n``` или
+    // просто ```\n{...}\n```. JSON.parse падает на первом символе `.
+    // Снимаем обёртку: ищем первый `{` и последний `}` в строке, парсим
+    // только содержимое между ними. На голом JSON это no-op.
+    const firstBrace = rawContent.indexOf('{');
+    const lastBrace = rawContent.lastIndexOf('}');
+    const content = firstBrace >= 0 && lastBrace > firstBrace
+      ? rawContent.slice(firstBrace, lastBrace + 1)
+      : rawContent;
 
     const parsed = JSON.parse(content) as Record<string, unknown>;
     const out: EventSignalsResult = {};
