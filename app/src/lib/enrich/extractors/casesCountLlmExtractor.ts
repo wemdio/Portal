@@ -1,5 +1,6 @@
 import 'server-only';
 import * as cheerio from 'cheerio';
+import { SIGNALS_LLM_MODEL } from './signalsModel';
 
 /**
  * LLM-счётчик кейсов для столбца «Кол-во кейсов». Вызывается, когда эвристика
@@ -11,7 +12,7 @@ import * as cheerio from 'cheerio';
  * Никогда не throw'ит.
  */
 
-const MODEL = (process.env.OPENROUTER_CASES_COUNT_MODEL ?? 'openai/gpt-4o-mini').trim();
+// Модель централизована в signalsModel.ts (env: OPENROUTER_SIGNALS_MODEL).
 const TIMEOUT_MS = Number(process.env.LLM_CASES_COUNT_TIMEOUT_MS ?? '30000');
 const MAX_TEXT_CHARS = 12000;
 const MAX_COUNT = 100000;
@@ -67,7 +68,7 @@ export async function llmCountCases(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MODEL,
+        model: SIGNALS_LLM_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: message },

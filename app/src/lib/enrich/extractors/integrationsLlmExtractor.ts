@@ -1,5 +1,6 @@
 import 'server-only';
 import * as cheerio from 'cheerio';
+import { SIGNALS_LLM_MODEL } from './signalsModel';
 
 /**
  * LLM-добор для столбца «Интеграции». Вызывается, когда итоговый список пуст
@@ -8,7 +9,7 @@ import * as cheerio from 'cheerio';
  * сторонних сервисов, упомянутых как интеграции. Никогда не throw'ит.
  */
 
-const MODEL = (process.env.OPENROUTER_INTEGRATIONS_MODEL ?? 'openai/gpt-4o-mini').trim();
+// Модель централизована в signalsModel.ts (env: OPENROUTER_SIGNALS_MODEL).
 const TIMEOUT_MS = Number(process.env.LLM_INTEGRATIONS_TIMEOUT_MS ?? '30000');
 const MAX_TEXT_CHARS = 12000;
 const MAX_INTEGRATIONS = 20;
@@ -72,7 +73,7 @@ export async function llmExtractIntegrations(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MODEL,
+        model: SIGNALS_LLM_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: message },
