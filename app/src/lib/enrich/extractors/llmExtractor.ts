@@ -2,9 +2,12 @@ import 'server-only';
 import * as cheerio from 'cheerio';
 import { PricingModel, Currency, PriceValue, ExtractedData } from './types';
 
-// Sonnet 4.6 — последняя версия на Requesty. Снэпшот claude-sonnet-4-5-20250514
-// депрекейтнут и отдаёт 404 (см. eventDetector.ts: тот же фикс там).
-const MODEL = 'anthropic/claude-sonnet-4-6';
+// gpt-4o-mini — $0.15 / $0.60 per MTok = ~20x дешевле Sonnet. Задача
+// fallback-экстрактора (когда регексп не нашёл founded_year/team_size/
+// case_industries в HTML) — точечная extraction со страницы. gpt-4o-mini
+// справляется с тем же качеством. Для override можно поднять MODEL через
+// env var OPENROUTER_FALLBACK_MODEL.
+const MODEL = (process.env.OPENROUTER_FALLBACK_MODEL ?? 'openai/gpt-4o-mini').trim();
 const MAX_TEXT_CHARS = 3000;
 const TIMEOUT_MS = 30_000;
 
