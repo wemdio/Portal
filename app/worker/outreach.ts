@@ -22,7 +22,7 @@ import { collectRawLeads as collectBugorRaw } from '@/lib/bugorOutreach/collectL
 import { enrichRawLeads as enrichBugorRaw } from '@/lib/bugorOutreach/enrichLeads';
 import { findEmailsForLeads } from '@/lib/bugorOutreach/findEmails';
 import { validateLeadEmails } from '@/lib/bugorOutreach/validateEmails';
-import { syncInstantlyCampaignAnalytics } from '@/lib/tools/instantlyCampaignCatalog';
+import { syncInstantlyCampaignAnalytics, syncActualReplyCounts } from '@/lib/tools/instantlyCampaignCatalog';
 import { syncProjectContactsFromInstantly } from '@/lib/projectContactsSync';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
@@ -608,6 +608,14 @@ async function analyticsSyncScheduler(): Promise<void> {
       log('info', 'analytics-sync: syncing Instantly campaign analytics to DB...');
       const { rows } = await syncInstantlyCampaignAnalytics();
       log('info', `analytics-sync: done, ${rows} campaign(s) updated`);
+      // Точный счётчик ответов из /emails (throttled, gated раз в сутки на
+      // кампанию). analytics reply_count недосчитывает многопереписочные кампании.
+      try {
+        const { updated } = await syncActualReplyCounts();
+        if (updated > 0) log('info', `actual-reply-sync: recounted ${updated} campaign(s) from /emails`);
+      } catch (e) {
+        log('warn', 'actual-reply-sync: failed', e);
+      }
     } catch (err) {
       log('warn', 'analytics-sync: failed', err);
     }
