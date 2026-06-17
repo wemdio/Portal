@@ -1,13 +1,9 @@
 import 'server-only';
 import * as cheerio from 'cheerio';
 import { PricingModel, Currency, PriceValue, ExtractedData } from './types';
+import { SIGNALS_LLM_MODEL } from './signalsModel';
 
-// gpt-4o-mini — $0.15 / $0.60 per MTok = ~20x дешевле Sonnet. Задача
-// fallback-экстрактора (когда регексп не нашёл founded_year/team_size/
-// case_industries в HTML) — точечная extraction со страницы. gpt-4o-mini
-// справляется с тем же качеством. Для override можно поднять MODEL через
-// env var OPENROUTER_FALLBACK_MODEL.
-const MODEL = (process.env.OPENROUTER_FALLBACK_MODEL ?? 'openai/gpt-4o-mini').trim();
+// Модель централизована в signalsModel.ts (env: OPENROUTER_SIGNALS_MODEL).
 const MAX_TEXT_CHARS = 3000;
 const TIMEOUT_MS = 30_000;
 
@@ -109,7 +105,7 @@ export async function llmExtractFields(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MODEL,
+        model: SIGNALS_LLM_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: `Извлеки следующие поля: ${neededList}\n\nТекст страницы:\n${combinedText}` },

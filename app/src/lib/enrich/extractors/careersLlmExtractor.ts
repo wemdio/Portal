@@ -1,5 +1,6 @@
 import 'server-only';
 import * as cheerio from 'cheerio';
+import { SIGNALS_LLM_MODEL } from './signalsModel';
 
 /**
  * LLM-добор для столбцов «Открытых вакансий» + «Кого нанимают». Вызывается,
@@ -9,7 +10,7 @@ import * as cheerio from 'cheerio';
  * Никогда не throw'ит.
  */
 
-const MODEL = (process.env.OPENROUTER_CAREERS_MODEL ?? 'openai/gpt-4o-mini').trim();
+// Модель централизована в signalsModel.ts (env: OPENROUTER_SIGNALS_MODEL).
 const TIMEOUT_MS = Number(process.env.LLM_CAREERS_TIMEOUT_MS ?? '30000');
 const MAX_TEXT_CHARS = 12000;
 const MAX_COUNT = 500;
@@ -82,7 +83,7 @@ export async function llmExtractHiring(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MODEL,
+        model: SIGNALS_LLM_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: message },
