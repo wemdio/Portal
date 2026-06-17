@@ -19,15 +19,21 @@ import 'server-only';
 import type { SocialPost } from './socialPostsExtractor';
 import { logInfo, logError } from '@/lib/loggerServer';
 
-// Sonnet 4.6 — последняя версия на Requesty (Anthropic provider, $3/$15 per MTok,
-// 1M контекст). Дата-суффикс не нужен: алиас без даты резолвится в актуальный
-// снэпшот. Старый ID `anthropic/claude-sonnet-4-5-20250514` стал 404 после
-// депрекации майского снэпшота.
-const MODEL = 'anthropic/claude-sonnet-4-6';
+// Haiku 4.5 — $1/$5 per MTok (3x дешевле Sonnet 4.6). Задача детектора —
+// бинарная классификация (Да/Нет на 4 события) + краткие 1-2 предл.
+// выжимки. Это классическая extraction задача, где Haiku 4.5 справляется
+// с тем же качеством что Sonnet (нет сложного reasoning'a, нет multi-step
+// логики). Sonnet был overkill — ~$10/1000 строк vs ~$2 у Haiku.
+const MODEL = 'anthropic/claude-haiku-4-5';
 const TIMEOUT_MS = 30_000;
-// Bound on text we send to the LLM. 10 posts × ~500 chars + blog + about ≈
-// 8KB. We cap at 12KB so weird outliers can't blow up the token bill.
-const MAX_INPUT_CHARS = 12_000;
+// Bound on text we send to the LLM. Снижено с 12k до 8k: на практике
+// 10 постов × ~500 chars + blog + about почти всегда укладывается в 8k.
+// Чудовищные outliers с длинным /about обрезались и раньше — теперь
+// просто отрезаем раньше, экономим input-токены.
+const MAX_INPUT_CHARS = 8_000;
+// Output cap снижен с 700 до 500. JSON со всеми 4 событиями + summary
+// + цитата гео ≈ 350-400 tokens. 500 с запасом.
+const MAX_OUTPUT_TOKENS = 500;
 const MAX_SUMMARY_CHARS = 400;
 
 function getApiKey(): string {
@@ -213,7 +219,7 @@ export async function detectEventSignals(
           { role: 'user', content: userPrompt },
         ],
         temperature: 0,
-        max_tokens: 700,
+        max_tokens: MAX_OUTPUT_TOKENS,
         response_format: { type: 'json_object' },
       }),
     });
