@@ -261,7 +261,14 @@ export function VacancyResults({
       : (hasItems ? `${shownFrom}–${shownTo} из ${count}` : `0 из ${count}`)
     : '';
   const limitLabel = !clientMode && statsReady && limit ? ` · по ${limit}` : '';
-  const actionsDisabled = actionsBusy || (count === 0 && items.length === 0);
+  const jobRunning = jobStatus === 'running';
+  // While the parse is still running the table holds only PARTIAL results, so
+  // disable every data-extraction action (CSV / Excel / copy / «В базу») — nobody
+  // should export a half-finished base. Re-enables itself once the job is done.
+  const actionsDisabled = actionsBusy || jobRunning || (count === 0 && items.length === 0);
+  const exportDisabledHint = jobRunning
+    ? 'Парсинг ещё идёт — выгрузка станет доступна после завершения'
+    : undefined;
   const addToDbDisabled = actionsDisabled || !onAddToDatabase || Boolean(addToDatabaseDisabled);
   const jobControlsDisabled = jobActionBusy || !jobId;
   const searchUrl = buildSearchUrl(searchConfig);
@@ -358,7 +365,7 @@ export function VacancyResults({
               onClick={onAddToDatabase}
               disabled={addToDbDisabled}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
-              title="Откроет “Базы” и добавит результаты новой вкладкой"
+              title={exportDisabledHint ?? 'Откроет “Базы” и добавит результаты новой вкладкой'}
               aria-busy={isDatabaseBusy}
             >
               {isDatabaseBusy ? (
@@ -373,6 +380,7 @@ export function VacancyResults({
               type="button"
               onClick={onExportCsv}
               disabled={actionsDisabled}
+              title={exportDisabledHint}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
               aria-busy={isCsvBusy}
             >
@@ -387,6 +395,7 @@ export function VacancyResults({
               type="button"
               onClick={onExportExcel}
               disabled={actionsDisabled}
+              title={exportDisabledHint}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
               aria-busy={isExcelBusy}
             >
@@ -401,6 +410,7 @@ export function VacancyResults({
               type="button"
               onClick={onCopy}
               disabled={actionsDisabled}
+              title={exportDisabledHint}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
               aria-busy={isCopyBusy}
             >
