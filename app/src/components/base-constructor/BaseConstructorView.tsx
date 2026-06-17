@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, type DragEvent } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type DragEvent } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
@@ -14,6 +14,7 @@ import {
   estimateProcessingMinutes,
   formatProcessingTimeBand,
 } from '@/lib/tools/baseConstructorEta';
+import { getMappingContentWarnings } from '@/lib/tools/columnMappingWarnings';
 import {
   Eraser, CopyMinus, MailMinus, Sparkles, MailSearch, MailCheck,
   Globe, FileText, Target, PenLine, Upload, Play, X, Check,
@@ -608,6 +609,17 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   const columnWarnings = fileData ? getColumnWarnings(selectedSteps, fileData[0] || [], columnMapping) : new Map();
   const stepHints = fileData ? getStepHints(selectedSteps, fileData[0] || []) : new Map();
+  // Предупреждения по СОДЕРЖИМОМУ сопоставленных колонок (сайт=email/hh-ссылки,
+  // компания=сайт и т.п.) — ловим неправильный маппинг ДО долгого прогона.
+  // Семплируем по первым строкам внутри функции, поэтому memo по fileData+mapping.
+  const mappingContentWarnings = useMemo(
+    () =>
+      fileData && fileData.length > 1
+        ? getMappingContentWarnings(fileData[0] || [], fileData.slice(1), columnMapping)
+        : [],
+    [fileData, columnMapping],
+  );
+  const contentWarnByRole = new Map(mappingContentWarnings.map((w) => [w.role as string, w]));
 
   /* ─── Brief PDF upload ─── */
 
@@ -1253,6 +1265,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                 <div className="px-6 py-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {neededRoles.map((role) => {
                     const mapped = columnMapping[role.key] || '';
+                    const contentWarn = contentWarnByRole.get(role.key);
                     return (
                       <div key={role.key}>
                         <label className={clientMode ? 'ds-eyebrow mb-1.5 block' : 'block text-sm font-semibold text-gray-700 mb-1.5'}>
@@ -1281,6 +1294,17 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         {mapped && (
                           <p className={`text-[11px] mt-1 flex items-center gap-1 ${clientMode ? 'text-[var(--cp-green)]' : 'text-emerald-600'}`}>
                             <Check className="w-3 h-3" /> {mapped}
+                          </p>
+                        )}
+                        {contentWarn && (
+                          <p className={`text-[11px] mt-1 flex items-start gap-1 ${clientMode ? 'text-amber-400' : 'text-amber-600'}`}>
+                            <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
+                            <span>
+                              {contentWarn.message}
+                              {contentWarn.sample.length > 0 && (
+                                <span className="opacity-70"> Напр.: {contentWarn.sample.join(', ')}</span>
+                              )}
+                            </span>
                           </p>
                         )}
                       </div>
