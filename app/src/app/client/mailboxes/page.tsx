@@ -121,7 +121,7 @@ export default function ClientMailboxesPage() {
     }
   }, [fetchMailboxes]);
 
-  async function connectGoogle() {
+  async function connectOAuth(provider: 'google' | 'yandex') {
     setFormError(null);
     setOkMsg(null);
     try {
@@ -130,7 +130,7 @@ export default function ClientMailboxesPage() {
         setFormError('Не авторизованы');
         return;
       }
-      const res = await fetch('/api/client/mailboxes/oauth/google/start', { headers });
+      const res = await fetch(`/api/client/mailboxes/oauth/${provider}/start`, { headers });
       const data = (await res.json().catch(() => ({}))) as { url?: string; error?: string };
       if (!res.ok || !data.url) {
         setFormError(data.error || `Не удалось начать OAuth (${res.status})`);
@@ -218,19 +218,28 @@ export default function ClientMailboxesPage() {
         но быстро улетят в спам и могут быть заблокированы.
       </div>
 
-      {/* Gmail / Workspace — подключение в один клик через OAuth */}
+      {/* Подключение в один клик через OAuth (без пароля приложения) */}
       <div className="mb-6 rounded-lg border border-zinc-800 p-4">
-        <h2 className="mb-1 text-sm font-semibold text-zinc-300">Gmail / Google Workspace — в один клик</h2>
+        <h2 className="mb-1 text-sm font-semibold text-zinc-300">Подключить в один клик</h2>
         <p className="mb-3 text-xs text-zinc-500">
-          Без пароля приложения: войдёте на странице Google и подтвердите доступ. Рекомендуемый способ для Gmail/Workspace.
+          Без пароля приложения: войдёте на странице провайдера и подтвердите доступ. Рекомендуемый способ.
         </p>
-        <button
-          type="button"
-          onClick={connectGoogle}
-          className="rounded-md border border-zinc-600 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-100 hover:border-zinc-400"
-        >
-          Подключить через Google
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => connectOAuth('yandex')}
+            className="rounded-md border border-zinc-600 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-100 hover:border-zinc-400"
+          >
+            Подключить Яндекс
+          </button>
+          <button
+            type="button"
+            onClick={() => connectOAuth('google')}
+            className="rounded-md border border-zinc-600 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-100 hover:border-zinc-400"
+          >
+            Подключить Gmail
+          </button>
+        </div>
       </div>
 
       {/* Подключение по паролю приложения / произвольный SMTP */}
