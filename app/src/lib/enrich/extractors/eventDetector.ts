@@ -235,11 +235,22 @@ export async function detectEventSignals(
     }
 
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const content = data?.choices?.[0]?.message?.content?.trim();
-    if (!content) {
+    const rawContent = data?.choices?.[0]?.message?.content?.trim();
+    if (!rawContent) {
       await logError('events.detect.llm_empty_response', new Error('LLM вернул пустой content'), inputStats);
       return {};
     }
+
+    // Sonnet 4.6 (через Requesty) часто игнорирует response_format:json_object
+    // и оборачивает JSON в markdown code fence: ```json\n{...}\n``` или
+    // просто ```\n{...}\n```. JSON.parse падает на первом символе `.
+    // Снимаем обёртку: ищем первый `{` и последний `}` в строке, парсим
+    // только содержимое между ними. На голом JSON это no-op.
+    const firstBrace = rawContent.indexOf('{');
+    const lastBrace = rawContent.lastIndexOf('}');
+    const content = firstBrace >= 0 && lastBrace > firstBrace
+      ? rawContent.slice(firstBrace, lastBrace + 1)
+      : rawContent;
 
     const parsed = JSON.parse(content) as Record<string, unknown>;
     const out: EventSignalsResult = {};
