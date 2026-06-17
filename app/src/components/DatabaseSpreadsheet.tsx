@@ -26,6 +26,8 @@ import {
 } from '@/lib/enrich/extractors/types';
 import { formatExtraValue } from '@/lib/enrich/extractors/formatExtraValue';
 import SignalEnrichmentModal from '@/components/SignalEnrichmentModal';
+import { useUser } from '@/lib/UserProvider';
+import { isAdmin } from '@/lib/roles';
 
 type Sheet = {
   id: string;
@@ -1125,6 +1127,9 @@ export function DatabaseSpreadsheet() {
   const importId = searchParams.get('import');
   const constructorJobId = searchParams.get('constructorJobId');
   const importHandledRef = useRef<string | null>(null);
+
+  const { userRole } = useUser();
+  const isAdminUser = isAdmin(userRole);
 
   const [tabs, setTabs] = useState<Sheet[]>(() => [createSheet('Вкладка 1')]);
   const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0].id);
@@ -9827,8 +9832,9 @@ export function DatabaseSpreadsheet() {
           <button
             type="button"
             onClick={td.openSignalModal}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-indigo-700"
-            title="Открыть окно прогресса. Анализ продолжается в фоне."
+            disabled={!isAdminUser}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-400"
+            title={isAdminUser ? 'Открыть окно прогресса. Анализ продолжается в фоне.' : 'Доступно только администраторам'}
           >
             Сигналы {signalEnrichment.progress}%
           </button>
@@ -9836,7 +9842,8 @@ export function DatabaseSpreadsheet() {
           <button
             type="button"
             onClick={td.openSignalModal}
-            disabled={colCount === 0}
+            disabled={!isAdminUser || colCount === 0}
+            title={!isAdminUser ? 'Доступно только администраторам' : undefined}
             className={toolbarMonochromeButtonClass}
           >
             Сигналы
