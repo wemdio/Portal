@@ -1,6 +1,7 @@
 import 'server-only';
 import * as cheerio from 'cheerio';
 import type { PricingModel, PriceValue, Currency } from './types';
+import { SIGNALS_LLM_MODEL } from './signalsModel';
 
 /**
  * LLM-добор для столбцов «Модель продаж» / «Мин. цена» / «Free trial».
@@ -9,7 +10,7 @@ import type { PricingModel, PriceValue, Currency } from './types';
  * вызовом возвращает все три поля (любое может быть null). Никогда не throw'ит.
  */
 
-const MODEL = (process.env.OPENROUTER_PRICING_MODEL ?? 'openai/gpt-4o-mini').trim();
+// Модель централизована в signalsModel.ts (env: OPENROUTER_SIGNALS_MODEL).
 const TIMEOUT_MS = Number(process.env.LLM_PRICING_TIMEOUT_MS ?? '30000');
 const MAX_TEXT_CHARS = 12000;
 const MAX_PRICE = 100_000_000;
@@ -80,7 +81,7 @@ export async function llmExtractPricing(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MODEL,
+        model: SIGNALS_LLM_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: message },

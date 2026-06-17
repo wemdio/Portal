@@ -1,5 +1,6 @@
 import 'server-only';
 import * as cheerio from 'cheerio';
+import { SIGNALS_LLM_MODEL } from './signalsModel';
 
 /**
  * LLM-источник столбца «Клиенты»: вместо списка брендов возвращает короткий
@@ -13,7 +14,7 @@ import * as cheerio from 'cheerio';
  * Никогда не throw'ит: нет ключа / 429 / timeout / кривой JSON → ''.
  */
 
-const MODEL = (process.env.OPENROUTER_CLIENT_SEGMENT_MODEL ?? 'openai/gpt-4o-mini').trim();
+// Модель централизована в signalsModel.ts (env: OPENROUTER_SIGNALS_MODEL).
 const TIMEOUT_MS = Number(process.env.LLM_CLIENT_SEGMENT_TIMEOUT_MS ?? '30000');
 const MAX_TEXT_CHARS = 6000;
 const MAX_ALT_CANDIDATES = 120;
@@ -132,7 +133,7 @@ export async function extractClientSegment(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MODEL,
+        model: SIGNALS_LLM_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: message },

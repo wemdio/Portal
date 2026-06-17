@@ -18,16 +18,11 @@
 import 'server-only';
 import type { SocialPost } from './socialPostsExtractor';
 import { logInfo, logError } from '@/lib/loggerServer';
+import { SIGNALS_LLM_MODEL } from './signalsModel';
 
-// gpt-4o-mini — $0.15 input / $0.60 output per MTok. На стороне Requesty
-// эта же модель работает в integrationsLlmExtractor / pricingLlmExtractor /
-// careersLlmExtractor (см. .env OPENROUTER_*_API_KEY). Для бинарной
-// классификации событий из коротких постов хватает с большим запасом:
-// gpt-4o-mini нативно поддерживает response_format=json_object (никакого
-// markdown wrapping'a), хорошо работает с русским текстом.
-// Эволюция стоимости: Sonnet 4.6 ($10/1000) → Haiku 4.5 ($2/1000) →
-// gpt-4o-mini ($0.30/1000). 30x экономия от исходной.
-const MODEL = 'openai/gpt-4o-mini';
+// Модель централизована в signalsModel.ts — одна env-переменная
+// `OPENROUTER_SIGNALS_MODEL` управляет всеми 7 LLM-экстракторами
+// в пайплайне сигналов. Дефолт — gpt-4o-mini.
 const TIMEOUT_MS = 30_000;
 // Bound on text we send to LLM. Снижено до 6k: 10 постов × 500 chars =
 // 5k + краткий about/blog. Outliers с гигантским /about подрезались и
@@ -214,7 +209,7 @@ export async function detectEventSignals(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MODEL,
+        model: SIGNALS_LLM_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: userPrompt },
@@ -236,7 +231,7 @@ export async function detectEventSignals(
         ...inputStats,
         status: res.status,
         body,
-        model: MODEL,
+        model: SIGNALS_LLM_MODEL,
       });
       return {};
     }

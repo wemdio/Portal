@@ -1,10 +1,9 @@
 import 'server-only';
 import * as cheerio from 'cheerio';
 import { PricingModel, Currency, PriceValue, ExtractedData } from './types';
+import { SIGNALS_LLM_MODEL } from './signalsModel';
 
-// Sonnet 4.6 — последняя версия на Requesty. Снэпшот claude-sonnet-4-5-20250514
-// депрекейтнут и отдаёт 404 (см. eventDetector.ts: тот же фикс там).
-const MODEL = 'anthropic/claude-sonnet-4-6';
+// Модель централизована в signalsModel.ts (env: OPENROUTER_SIGNALS_MODEL).
 const MAX_TEXT_CHARS = 3000;
 const TIMEOUT_MS = 30_000;
 
@@ -106,7 +105,7 @@ export async function llmExtractFields(
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MODEL,
+        model: SIGNALS_LLM_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: `Извлеки следующие поля: ${neededList}\n\nТекст страницы:\n${combinedText}` },
