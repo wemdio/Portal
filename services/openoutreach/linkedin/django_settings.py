@@ -28,6 +28,11 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    # Требуется для ArrayField (li2.Campaign.working_hours → text[]). Без него
+    # Django system check postgres.E005 валит ЛЮБУЮ manage.py-команду на
+    # postgres-бэкенде (rundaemon → migrate → crash-loop). Проверка гейтится на
+    # postgres, поэтому на SQLite в pytest не воспроизводится.
+    "django.contrib.postgres",
     "crm.apps.CrmConfig",
     "chat.apps.ChatConfig",
     "linkedin",

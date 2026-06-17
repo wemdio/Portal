@@ -37,6 +37,14 @@ const PROJECT_CONTACTS_SYNC_HOUR_UTC = Number(process.env.PROJECT_CONTACTS_SYNC_
 const WORKER_ID = `outreach-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 
+// Per-pipeline ops pause switches. When set to 'true', that pipeline's daily
+// collect, SMTP retry scheduler, poll-loop SMTP validation, and Instantly
+// upload (including the catch-up uploader) are all skipped. The co-located
+// project-contacts-sync and analytics-sync keep running regardless — that is
+// the whole point of gating per-pipeline instead of stopping the container.
+const BUGOR_OUTREACH_PAUSED = process.env.BUGOR_OUTREACH_PAUSED === 'true';
+const NASH_OUTREACH_PAUSED = process.env.NASH_OUTREACH_PAUSED === 'true';
+
 async function uploadBugorPendingLeads(): Promise<number> {
   const db = requireSupabaseAdmin(log);
   if (!db) return 0;
@@ -110,39 +118,47 @@ async function uploadNashPendingLeads(): Promise<number> {
 async function pollOnce(): Promise<boolean> {
   const db = requireSupabaseAdmin(log);
 
-  try {
-    const bugorCount = await runBugorSmtpValidation();
-    if (bugorCount > 0) {
-      log('info', `Bugor SMTP processed ${bugorCount} lead(s)`);
-      return true;
+  if (!BUGOR_OUTREACH_PAUSED) {
+    try {
+      const bugorCount = await runBugorSmtpValidation();
+      if (bugorCount > 0) {
+        log('info', `Bugor SMTP processed ${bugorCount} lead(s)`);
+        return true;
+      }
+    } catch (err) {
+      log('error', 'Bugor SMTP error', err);
     }
-  } catch (err) {
-    log('error', 'Bugor SMTP error', err);
   }
 
-  try {
-    const nashCount = await runNashSmtpValidation();
-    if (nashCount > 0) {
-      log('info', `Nash SMTP processed ${nashCount} lead(s)`);
-      return true;
+  if (!NASH_OUTREACH_PAUSED) {
+    try {
+      const nashCount = await runNashSmtpValidation();
+      if (nashCount > 0) {
+        log('info', `Nash SMTP processed ${nashCount} lead(s)`);
+        return true;
+      }
+    } catch (err) {
+      log('error', 'Nash SMTP error', err);
     }
-  } catch (err) {
-    log('error', 'Nash SMTP error', err);
   }
 
   // Catch-up: upload valid/catch_all leads that weren't uploaded in a previous run
-  try {
-    const bugorUploaded = await uploadBugorPendingLeads();
-    if (bugorUploaded > 0) return true;
-  } catch (err) {
-    log('error', 'Bugor catch-up upload error', err);
+  if (!BUGOR_OUTREACH_PAUSED) {
+    try {
+      const bugorUploaded = await uploadBugorPendingLeads();
+      if (bugorUploaded > 0) return true;
+    } catch (err) {
+      log('error', 'Bugor catch-up upload error', err);
+    }
   }
 
-  try {
-    const nashUploaded = await uploadNashPendingLeads();
-    if (nashUploaded > 0) return true;
-  } catch (err) {
-    log('error', 'Nash catch-up upload error', err);
+  if (!NASH_OUTREACH_PAUSED) {
+    try {
+      const nashUploaded = await uploadNashPendingLeads();
+      if (nashUploaded > 0) return true;
+    } catch (err) {
+      log('error', 'Nash catch-up upload error', err);
+    }
   }
 
   return false;
@@ -612,10 +628,19 @@ async function main(): Promise<void> {
     return v;
   };
 
-  void bugorCollectScheduler();
-  void nashCollectScheduler();
-  void bugorRetryScheduler();
-  void nashRetryScheduler();
+  if (BUGOR_OUTREACH_PAUSED) {
+    log('warn', 'Bugor outreach PAUSED (BUGOR_OUTREACH_PAUSED=true): collect, retry, SMTP and Instantly upload disabled');
+  } else {
+    void bugorCollectScheduler();
+    void bugorRetryScheduler();
+  }
+  if (NASH_OUTREACH_PAUSED) {
+    log('warn', 'Nash outreach PAUSED (NASH_OUTREACH_PAUSED=true): collect, retry, SMTP and Instantly upload disabled');
+  } else {
+    void nashCollectScheduler();
+    void nashRetryScheduler();
+  }
+  // Unrelated background syncs — always run regardless of the pause switches.
   void projectContactsSyncScheduler();
   void analyticsSyncScheduler();
 
