@@ -37,8 +37,8 @@ jest.mock('@/lib/enrich/extractors/socialCompanyFinder', () => ({
 jest.mock('@/lib/enrich/extractors/socialPostsExtractor', () => ({
   extractSocialPosts: jest.fn().mockResolvedValue([]),
 }));
-jest.mock('@/lib/enrich/extractors/eventDetector', () => ({
-  detectEventSignals: jest.fn().mockResolvedValue({ event_opening: true, event_opening_summary: 'Новый офис' }),
+jest.mock('@/lib/enrich/extractors/socialLatestNewsDetector', () => ({
+  pickLatestNews: jest.fn().mockResolvedValue({ social_latest_news: '2026-06-01 [https://t.me/realco] — Открыли новый офис в Москве' }),
 }));
 
 import { processSignalsForUrl } from '@/lib/enrich/websiteSignalProcessor';
@@ -699,14 +699,14 @@ describe('processSignalsForUrl — social media discovery', () => {
     expect(findCompanySocialsMock).not.toHaveBeenCalled();
   });
 
-  it('feeds the resolved social urls into the event pipeline', async () => {
+  it('feeds the resolved social urls into the latest-news pipeline', async () => {
     const html = `<html><body><footer><a href="https://t.me/realco">tg</a></footer></body></html>`;
     fetchHtmlWithRetryMock.mockResolvedValue({ html, status: 200 });
     const result = await processSignalsForUrl('example.com', {
-      extractors: ['social_media', 'event_opening', 'event_opening_summary'],
+      extractors: ['social_media', 'social_latest_news'],
     });
     expect(extractSocialPostsMock).toHaveBeenCalledWith(['https://t.me/realco'], expect.anything());
-    expect('event_opening' in result && result.event_opening).toBe(true);
+    expect('social_latest_news' in result && typeof result.social_latest_news === 'string').toBe(true);
   });
 
   it('does not error the row when Playwright throws; falls through to Serper', async () => {
