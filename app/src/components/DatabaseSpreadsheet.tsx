@@ -500,7 +500,13 @@ const getEmailProvider = (email: string): string => {
   if (!domain) return '';
   return EMAIL_PROVIDER_MAP[domain] ?? domain;
 };
-const VIRTUALIZATION_THRESHOLD = 1500;
+// КРИТИЧНО: порог снижен с 1500 до 200. У юзера с 1000-строчной базой
+// виртуализация была ВЫКЛЮЧЕНА (1000 < 1500), и React держал в DOM
+// ~40 000 ячеек (1000 строк × 40 колонок). Браузер не справлялся даже
+// с горизонтальным скроллом — лагала вся страница. С порогом 200 база
+// 200+ строк автоматически виртуализируется (рендерим только видимые
+// ~50 строк + overscan), DOM содержит максимум ~2000-3000 ячеек.
+const VIRTUALIZATION_THRESHOLD = 200;
 const VIRTUAL_ROW_HEIGHT = 22;
 const VIRTUAL_OVERSCAN = 10;
 const GROUP_SUMMARY_PAGE_SIZE = 200;
