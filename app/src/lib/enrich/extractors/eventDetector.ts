@@ -19,20 +19,21 @@ import 'server-only';
 import type { SocialPost } from './socialPostsExtractor';
 import { logInfo, logError } from '@/lib/loggerServer';
 
-// Haiku 4.5 — $1/$5 per MTok (3x дешевле Sonnet 4.6). Задача детектора —
-// бинарная классификация (Да/Нет на 4 события) + краткие 1-2 предл.
-// выжимки. Это классическая extraction задача, где Haiku 4.5 справляется
-// с тем же качеством что Sonnet (нет сложного reasoning'a, нет multi-step
-// логики). Sonnet был overkill — ~$10/1000 строк vs ~$2 у Haiku.
-const MODEL = 'anthropic/claude-haiku-4-5';
+// gpt-4o-mini — $0.15 input / $0.60 output per MTok. На стороне Requesty
+// эта же модель работает в integrationsLlmExtractor / pricingLlmExtractor /
+// careersLlmExtractor (см. .env OPENROUTER_*_API_KEY). Для бинарной
+// классификации событий из коротких постов хватает с большим запасом:
+// gpt-4o-mini нативно поддерживает response_format=json_object (никакого
+// markdown wrapping'a), хорошо работает с русским текстом.
+// Эволюция стоимости: Sonnet 4.6 ($10/1000) → Haiku 4.5 ($2/1000) →
+// gpt-4o-mini ($0.30/1000). 30x экономия от исходной.
+const MODEL = 'openai/gpt-4o-mini';
 const TIMEOUT_MS = 30_000;
-// Bound on text we send to the LLM. Снижено с 12k до 8k: на практике
-// 10 постов × ~500 chars + blog + about почти всегда укладывается в 8k.
-// Чудовищные outliers с длинным /about обрезались и раньше — теперь
-// просто отрезаем раньше, экономим input-токены.
-const MAX_INPUT_CHARS = 8_000;
-// Output cap снижен с 700 до 500. JSON со всеми 4 событиями + summary
-// + цитата гео ≈ 350-400 tokens. 500 с запасом.
+// Bound on text we send to LLM. Снижено до 6k: 10 постов × 500 chars =
+// 5k + краткий about/blog. Outliers с гигантским /about подрезались и
+// раньше. Дальше резать без потери качества нельзя.
+const MAX_INPUT_CHARS = 6_000;
+// Output cap. JSON со всеми 4 событиями + summaries ≈ 350-400. 500 с запасом.
 const MAX_OUTPUT_TOKENS = 500;
 const MAX_SUMMARY_CHARS = 400;
 
