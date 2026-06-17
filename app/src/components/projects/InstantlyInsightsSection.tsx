@@ -29,7 +29,6 @@ type Insights = {
 };
 
 const pct = (x: number | null, d = 1) => (x == null ? '—' : `${(x * 100).toFixed(d)}%`);
-const ciLabel = (ci: Ci) => (ci ? ` [${pct(ci[0])}–${pct(ci[1])}]` : '');
 
 function Sparkline({ values, className }: { values: number[]; className?: string }) {
   const max = Math.max(...values, 1);
@@ -110,43 +109,51 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wide text-gray-400">
-                  <th className="pb-2 font-medium">Кампания</th>
-                  <th className="pb-2 font-medium text-right">Отправок</th>
-                  <th className="pb-2 font-medium text-right">Reply rate</th>
-                  <th className="pb-2 font-medium text-right">Lead rate</th>
-                  <th className="pb-2 font-medium text-right">Bounce</th>
+                <tr className="text-[11px] uppercase tracking-wide text-gray-400">
+                  <th className="pb-2 pr-4 text-left font-medium">Кампания</th>
+                  <th className="pb-2 px-4 text-right font-medium whitespace-nowrap">Отправок</th>
+                  <th className="pb-2 px-4 text-right font-medium whitespace-nowrap">Reply&nbsp;rate</th>
+                  <th className="pb-2 px-4 text-right font-medium whitespace-nowrap">
+                    Lead&nbsp;rate <span className="text-emerald-500" title="выше — лучше">↑</span>
+                  </th>
+                  <th className="pb-2 pl-4 text-right font-medium whitespace-nowrap">
+                    Bounce <span className="text-amber-500" title="ниже — лучше">↓</span>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {data.campaigns.map((c) => (
-                  <tr key={c.campaignId} className="text-gray-700">
-                    <td className="py-2 pr-3">
-                      <span className="text-gray-900">{c.name}</span>
-                      {c.status && <span className="ml-1.5 text-[10px] text-gray-400">{c.status}</span>}
+                  <tr key={c.campaignId} className="align-top text-gray-700">
+                    <td className="py-2.5 pr-4 max-w-[240px]">
+                      <div className="truncate text-gray-900" title={c.name}>{c.name}</div>
+                      {c.status && <div className="text-[10px] text-gray-400">{c.status}</div>}
                     </td>
-                    <td className="py-2 text-right tabular-nums">
+                    <td className="py-2.5 px-4 text-right tabular-nums whitespace-nowrap">
                       {c.universe === 'email' ? c.sentRetained.toLocaleString('ru-RU') : <span className="text-gray-300" title="история отправок стёрта ретеншеном">—</span>}
                     </td>
-                    <td className="py-2 text-right tabular-nums">
+                    <td className="py-2.5 px-4 text-right tabular-nums whitespace-nowrap">
                       {c.replyRate != null ? (
-                        <span>{pct(c.replyRate)}<span className="text-[10px] text-gray-400">{ciLabel(c.replyRateCi)}</span></span>
+                        <>
+                          <div>{pct(c.replyRate)}</div>
+                          {c.replyRateCi && <div className="text-[10px] text-gray-400">{pct(c.replyRateCi[0])}–{pct(c.replyRateCi[1])}</div>}
+                        </>
                       ) : (
                         <span className="text-gray-300" title={`нужно ≥200 отправок (есть ${c.sentRetained})`}>мало данных</span>
                       )}
                     </td>
-                    <td className="py-2 text-right tabular-nums">
+                    <td className="py-2.5 px-4 text-right tabular-nums whitespace-nowrap">
                       {c.leadRate != null ? (
-                        <span className={c.leadRate >= 0.1 ? 'text-emerald-600 font-medium' : ''}>
-                          {pct(c.leadRate)}<span className="text-[10px] text-gray-400 font-normal">{ciLabel(c.leadRateCi)}</span>
-                        </span>
+                        <>
+                          <div className={c.leadRate >= 0.1 ? 'font-semibold text-emerald-600' : ''}>{pct(c.leadRate, 0)}</div>
+                          {c.leadRateCi && <div className="text-[10px] font-normal text-gray-400">{pct(c.leadRateCi[0], 0)}–{pct(c.leadRateCi[1], 0)}</div>}
+                        </>
                       ) : (
                         <span className="text-gray-300" title={`нужно ≥20 размеченных (есть ${c.labeled})`}>мало данных</span>
                       )}
                     </td>
-                    <td className="py-2 text-right tabular-nums">
+                    <td className="py-2.5 pl-4 text-right tabular-nums whitespace-nowrap">
                       {c.bounceRate != null ? (
-                        <span className={c.bounceRate > 0.05 ? 'text-amber-600 font-medium' : ''}>{pct(c.bounceRate)}</span>
+                        <span className={c.bounceRate > 0.05 ? 'font-semibold text-amber-600' : ''}>{pct(c.bounceRate)}</span>
                       ) : '—'}
                     </td>
                   </tr>
@@ -182,9 +189,12 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
             <p key={i} className="text-xs text-gray-400">{n}</p>
           ))}
 
-          <p className="text-[10px] text-gray-300">
-            Доли с 95% доверительным интервалом. «Мало данных» = ниже порога достоверности (отказ, не ноль).
-            Грейды: A — причинный, B — корреляционный.
+          <p className="text-[10px] leading-relaxed text-gray-400">
+            <span className="font-medium text-emerald-600">Lead rate</span> зелёным — высокий = хорошо ·{' '}
+            <span className="font-medium text-amber-600">Bounce</span> оранжевым — выше&nbsp;5% = проблема списка/доставляемости.
+            <br />
+            Под каждой долей — её 95% доверительный интервал. «Мало данных» = ниже порога достоверности (честный отказ, не ноль).
+            Находки: грейд <span className="font-medium">A</span> — причинный (A/B внутри кампании), <span className="font-medium">B</span> — корреляционный.
           </p>
         </div>
       )}
