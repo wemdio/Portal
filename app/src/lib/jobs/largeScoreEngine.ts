@@ -226,6 +226,7 @@ async function drainJobBatch(
   let scored = 0;
   let active = 0;
   let cursor = 0;
+  let rateLimited = false;
 
   // Кэш-lookup всей пачки одним батчем; промахи добираются getOrFetchScore.
   const cached = await getCachedScores(
@@ -253,6 +254,13 @@ async function drainJobBatch(
         if (pre) stats.hits += 1;
         const res = pre ?? (await getOrFetchScore(domain, endpoint, 'background', stats));
         if (!res.ok) {
+          if (res.error === 'rate_limited') {
+            // Лимит Mailganer исчерпан — домен НЕ помечаем (останется pending),
+            // движок добьёт его следующим тиком, когда бюджет пополнится. Так
+            // большой файл сливается медленно, но ПОЛНОСТЬЮ, не теряя домены.
+            rateLimited = true;
+            return;
+          }
           marks.error.push(r.id);
           continue;
         }
@@ -275,6 +283,10 @@ async function drainJobBatch(
   }
 
   await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, worker));
+
+  if (rateLimited) {
+    log(`large-score: Mailganer daily limit reached — ${marks.scored.length} scored this tick, остальные остаются pending (добьём по мере пополнения бюджета)`);
+  }
 
   // Один UPDATE на статус (чанками — id уходят в URL фильтра).
   const markedAt = nowIso();

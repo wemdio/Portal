@@ -22,6 +22,9 @@
  * клиента другой формат, добавим в config поле auth_header_format.
  */
 
+import { isMailganerEndpointUrl } from './mailganerScoringThrottle';
+import { acquireMailganerScoreToken } from './mailganerScoringRateLimit';
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 const RETRY_ATTEMPTS = 2;
 const RETRY_BASE_DELAY_MS = 1500;
@@ -91,6 +94,16 @@ export async function fetchScoreForDomain(input: FetchScoreInput): Promise<Fetch
   const { url, apiKey, domain } = input;
   const authScheme = (input.authScheme ?? 'Bearer').trim();
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  // Жёсткий распределённый лимит к Mailganer (≤20k/сутки, равномерно). Только
+  // для mailganer-эндпоинта; на исчерпании бюджета домен пропускаем (ok:false),
+  // фоновые скореры возьмут его в следующий тик. См. mailganerScoringRateLimit.
+  if (isMailganerEndpointUrl(url)) {
+    const allowed = await acquireMailganerScoreToken();
+    if (!allowed) {
+      return { score: null, spf: null, raw: null, ok: false, error: 'rate_limited' };
+    }
+  }
 
   let lastError = '';
 
