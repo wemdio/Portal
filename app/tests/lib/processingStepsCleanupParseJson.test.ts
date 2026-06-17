@@ -166,6 +166,28 @@ describe('parseCleanupResponseJson', () => {
     expect(result!.get(2)).toBe('Microsoft');
   });
 
+  it('salvages a TRUNCATED response (prod bug 17.06 — model hit token limit mid-array)', () => {
+    // Реальный обрыв из выгрузки клиента: {"cleaned":[...]} оборвался на полпути,
+    // JSON невалидный. Должны восстановить ПОЛНОСТЬЮ закрытые элементы до точки
+    // обрыва, а не потерять весь батч (раньше → text-fallback писал сырой блоб).
+    const content =
+      '{"cleaned":[{"idx":0,"name":"Completo"},{"idx":1,"name":"Betaonline"},{"idx":2,"name":"Roistat"},{"idx0,"';
+    const result = parseCleanupResponseJson(content);
+    expect(result).not.toBeNull();
+    expect(result!.get(1)).toBe('Completo');
+    expect(result!.get(2)).toBe('Betaonline');
+    expect(result!.get(3)).toBe('Roistat');
+    expect(result!.size).toBe(3); // оборванный 4-й элемент не попал
+  });
+
+  it('truncation salvage unescapes names and skips the half-written tail item', () => {
+    const content = '{"cleaned":[{"idx":0,"name":"Tinkoff \\"Pro\\""},{"idx":1,"name":"Acme'; // обрыв на 2-м
+    const result = parseCleanupResponseJson(content);
+    expect(result!.get(1)).toBe('Tinkoff "Pro"');
+    expect(result!.has(2)).toBe(false); // без закрывающей кавычки — не взят
+    expect(result!.size).toBe(1);
+  });
+
   it('user bug regression: even if AI returned repeated idx values, last wins (no leak)', () => {
     // Предыдущий баг был про positional fallback в text-mode. В JSON-mode
     // если AI повторил один idx — последний перетирает предыдущие, и в map

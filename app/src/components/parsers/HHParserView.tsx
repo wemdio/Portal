@@ -31,13 +31,17 @@ class ApiError extends Error {
   }
 }
 
+// Колонки заточены под «Конструктор базы»: «сайт» = НАСТОЯЩИЙ сайт компании
+// (его скрейпят шаги «Обогатить описаниями» и «Найти email»), «компания» =
+// название компании (его чистит «Очистить названия»). Ссылки на hh.ru — на
+// вакансию (url) и на работодателя (company_url) — в выгрузку НЕ кладём: раньше
+// колонка «сайт» получала ссылку на вакансию hh.ru, конструктор скрейпил hh.ru
+// (антибот «Произошла ошибка…»), и описания/почты выходили пустыми/мусорными.
 const exportHeader = [
   'vacancy_id',
   'name',
-  'url',
-  'company_name',
-  'company_url',
-  'company_site_url',
+  'компания',
+  'сайт',
   'company_description',
   'area',
   'salary_from',
@@ -76,10 +80,8 @@ function exportRow(v: HHVacancyRow) {
   return [
     v.vacancy_id,
     v.name,
-    v.url,
-    v.company_name,
-    v.company_url ?? '',
-    v.company_site_url ?? '',
+    v.company_name,            // → «компания» (название для «Очистить названия»)
+    v.company_site_url ?? '',  // → «сайт» (только настоящий сайт компании, без hh.ru)
     v.company_description ?? '',
     v.area,
     v.salary_from ?? '',
