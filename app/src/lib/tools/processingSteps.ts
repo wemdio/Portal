@@ -348,6 +348,23 @@ async function checkSite(url: string): Promise<boolean> {
   finally { clearTimeout(timeout); }
 }
 
+// Эвристика «похоже на сайт»: непустое значение без '@' (т.е. не email) с доменом
+// вида name.tld (точка + 2+ буквы, в т.ч. кириллических — .рф). Лояльная: любой
+// реальный домен проходит, а email / название / пустышка — нет.
+export function looksLikeSite(raw: string): boolean {
+  const v = (raw ?? '').trim();
+  if (!v || v.includes('@')) return false;
+  return /\.[a-zа-яё]{2,}(?:[/?:#]|$)/.test(v.toLowerCase());
+}
+
+// Защита от «тихого убийства базы»: если в колонке «сайт» почти нет значений,
+// похожих на сайт (например, туда по ошибке сопоставили email или название) —
+// check_sites удалил бы ВСЕ строки (каждое «не-сайт» не открывается → строка
+// «мёртвая»). Вместо пустого результата падаем с понятной ошибкой, а входные
+// данные остаются нетронутыми (клиент правит маппинг и перезапускает).
+const SITE_GUARD_MIN_ROWS = 5;             // не судим по слишком мелкой выборке
+const SITE_GUARD_MIN_SITE_FRACTION = 0.2;  // <20% похожих на сайт ⇒ колонка не та
+
 export async function stepSiteCheck(
   data: string[][],
   onProgress: ProgressFn,
@@ -360,6 +377,19 @@ export async function stepSiteCheck(
 
   const keep: boolean[] = new Array(body.length).fill(true);
   const toCheck = body.map((row, i) => ({ url: (row[siteIdx] || '').trim(), i })).filter((r) => r.url);
+
+  // Гард: колонка «сайт» не похожа на сайты ⇒ не вычищаем всю базу молча.
+  if (toCheck.length >= SITE_GUARD_MIN_ROWS) {
+    const siteLike = toCheck.reduce((n, r) => (looksLikeSite(r.url) ? n + 1 : n), 0);
+    if (siteLike / toCheck.length < SITE_GUARD_MIN_SITE_FRACTION) {
+      throw new Error(
+        `«Проверка сайтов»: колонка «сайт» не похожа на сайты ` +
+          `(только ${siteLike} из ${toCheck.length} значений выглядят как сайт). ` +
+          `Похоже, в эту колонку попали не сайты — например, email или название компании. ` +
+          `Проверьте сопоставление колонок и запустите заново; база не тронута.`,
+      );
+    }
+  }
 
   for (let batch = 0; batch < toCheck.length; batch += SITE_CHECK_BATCH) {
     if (isCancelled && await isCancelled()) throw new Error('Отменено');
