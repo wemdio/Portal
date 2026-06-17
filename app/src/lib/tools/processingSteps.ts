@@ -55,7 +55,12 @@ const ENRICH_CONCURRENCY = 5;
 const ENRICH_PER_SITE_TIMEOUT_MS = 60_000;
 const SITE_CHECK_BATCH = 50;
 const TA_BATCH = 10;
-const CLEANUP_BATCH = 100;
+// 50, не 100: на батче в 100 компаний модель `policy/cleanup` упиралась в лимит
+// выходных токенов и ОБРЫВАЛА JSON на полпути (~55 из 100) → невалидный JSON →
+// парсер падал, а text-fallback писал сырой блоб в ячейку. Меньший батч с
+// запасом влезает в ответ. parseCleanupResponseJson дополнительно умеет
+// доставать элементы из оборванного ответа (truncation salvage).
+const CLEANUP_BATCH = 50;
 const PERSONALIZATION_BATCH = 5;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY = 1500;
@@ -654,25 +659,47 @@ export function parseCleanupResponseJson(
     }
   }
 
-  if (!parsed || typeof parsed !== 'object') return null;
-  const cleaned = (parsed as { cleaned?: unknown }).cleaned;
-  if (!Array.isArray(cleaned)) return null;
+  const cleaned =
+    parsed && typeof parsed === 'object'
+      ? (parsed as { cleaned?: unknown }).cleaned
+      : null;
 
-  // idx в JSON — 0-based (натурально для разработчика), а в map ключи 1-based
-  // (так лукапит существующий stepNameCleanup: cleanedMap.get(i + 1)).
-  // Транслируем idx → idx+1 при записи.
-  const result = new Map<number, string>();
-  for (const item of cleaned) {
-    if (!item || typeof item !== 'object') continue;
-    const { idx, name } = item as { idx?: unknown; name?: unknown };
-    if (typeof idx !== 'number' || !Number.isInteger(idx) || idx < 0) continue;
-    if (typeof name !== 'string') continue;
-    const trimmed = name.trim();
-    if (!trimmed) continue;
-    const stripped = stripNumberPrefix(trimmed);
-    if (stripped) result.set(idx + 1, stripped);
+  if (Array.isArray(cleaned)) {
+    // idx в JSON — 0-based (натурально для разработчика), а в map ключи 1-based
+    // (так лукапит существующий stepNameCleanup: cleanedMap.get(i + 1)).
+    // Транслируем idx → idx+1 при записи.
+    const result = new Map<number, string>();
+    for (const item of cleaned) {
+      if (!item || typeof item !== 'object') continue;
+      const { idx, name } = item as { idx?: unknown; name?: unknown };
+      if (typeof idx !== 'number' || !Number.isInteger(idx) || idx < 0) continue;
+      if (typeof name !== 'string') continue;
+      const trimmed = name.trim();
+      if (!trimmed) continue;
+      const stripped = stripNumberPrefix(trimmed);
+      if (stripped) result.set(idx + 1, stripped);
+    }
+    if (result.size > 0) return result;
   }
-  return result.size > 0 ? result : null;
+
+  // 4) Truncation salvage. Модель часто ОБРЫВАЕТ ответ на полпути (упирается в
+  //    лимит выходных токенов на батче), валидного JSON нет вовсе, и шаги 1-3
+  //    дают null. Достаём по отдельности все ПОЛНОСТЬЮ закрытые пары
+  //    "idx":N,"name":"...", восстанавливая префикс до точки обрыва. Без этого
+  //    весь батч терялся, а text-fallback писал сырой JSON-блоб в ячейку
+  //    «компания» (баг, видимый в выгрузке клиента 17.06).
+  const salvaged = new Map<number, string>();
+  const ITEM_RE = /"idx"\s*:\s*(\d+)\s*,\s*"name"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = ITEM_RE.exec(content)) !== null) {
+    const idx = Number(m[1]);
+    if (!Number.isInteger(idx) || idx < 0) continue;
+    let name = m[2];
+    try { name = JSON.parse(`"${name}"`) as string; } catch { /* оставляем сырой */ }
+    const stripped = stripNumberPrefix(name.trim());
+    if (stripped) salvaged.set(idx + 1, stripped);
+  }
+  return salvaged.size > 0 ? salvaged : null;
 }
 
 /**
@@ -718,7 +745,11 @@ export function parseCleanupResponse(
   );
   const positional = new Map<number, string>();
   for (let j = 0; j < cleanLines.length && j < expectedCount; j += 1) {
-    if (cleanLines[j]) positional.set(j + 1, cleanLines[j]);
+    const line = cleanLines[j];
+    // Защита от порчи данных: строки, похожие на JSON ({…}/[…]) или аномально
+    // длинные (>120) — это почти наверняка сырой ответ модели, а не название
+    // компании. Раньше такой блоб целиком писался в ячейку «компания».
+    if (line && line.length <= 120 && !/^[[{]/.test(line)) positional.set(j + 1, line);
   }
   return positional;
 }
