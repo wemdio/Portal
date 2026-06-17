@@ -4,7 +4,7 @@ import 'server-only';
  * Единая модель для ВСЕХ LLM-вызовов в пайплайне сигналов.
  *
  * Используется в:
- *   - eventDetector (Открытие/Ребрендинг/Ремонт/География)
+ *   - socialLatestNewsDetector (Последняя новость из соц сетей)
  *   - llmExtractor (fallback по founded_year/team_size/case_industries)
  *   - careersLlmExtractor (Кого нанимают)
  *   - casesCountLlmExtractor (Кол-во кейсов)

@@ -37,35 +37,16 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
       const items = nonEmptyStrings(value);
       return items.length > 0 ? items.join(', ') : EMPTY_CELL_DASH;
     }
-    case 'social_media':
-    case 'event_geo': {
-      // Списки строк рендерятся одинаково — через запятую. social_media это
-      // нормализованные URL'ы найденных соцсетей; event_geo — список городов
-      // ("Москва, Санкт-Петербург, Казань") где у HoReCa-компании есть точки.
+    case 'social_media': {
+      // Нормализованные URL'ы соцсетей через запятую.
       const items = nonEmptyStrings(value);
       return items.length > 0 ? items.join(', ') : EMPTY_CELL_DASH;
     }
-    case 'event_opening_summary':
-    case 'event_redesign_summary':
-    case 'event_renovation_summary':
-    case 'event_geo_summary':
-      // Каждая summary-колонка — короткая LLM-выжимка (1-2 предложения).
-      // Если парная сигнал-колонка вернулась "Нет"/DASH, summary тоже DASH —
-      // нет смысла показывать выжимку события, которого не было.
-      return typeof value === 'string' && value.trim().length > 0
-        ? value
-        : EMPTY_CELL_DASH;
     case 'enterprise_logos':
     case 'free_trial':
-    case 'event_opening':
-    case 'event_redesign':
-    case 'event_renovation':
       // Tri-state booleans (see ExtractedData): true → "Да", false → "Нет",
       // undefined → DASH. Distinguishes "we checked, no enterprise/trial" from
-      // "we couldn't tell" (sparse data, fetch failure). Event signals follow
-      // the same contract — Да when LLM found an opening / rebrand / renovation
-      // post, Нет when LLM saw the posts but found no such signal, DASH when
-      // we had nothing to analyze (no social posts + no blog).
+      // "we couldn't tell" (sparse data, fetch failure).
       if (value === true) return 'Да';
       if (value === false) return 'Нет';
       return EMPTY_CELL_DASH;
@@ -99,6 +80,7 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
       return modelLabels[value] ?? value;
     }
     case 'blog_last_post':
+    case 'social_latest_news':
     case 'stack':
     case 'profile':
     case 'client_segment':
