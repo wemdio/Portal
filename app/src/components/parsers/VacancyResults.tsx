@@ -531,7 +531,7 @@ export function VacancyResults({
                     </a>
                   </td>
                   <td className={`text-gray-700 ${clientMode ? 'px-3 py-1.5 text-xs' : 'px-4 py-3 text-sm'}`}>
-                    {v.company_site_url || v.company_url ? (
+                    {v.company_site_url || (!clientMode && v.company_url) ? (
                       <div className="inline-flex items-center gap-2 max-w-full">
                         <span className={clientMode ? 'truncate max-w-[150px]' : ''} title={v.company_name}>{v.company_name}</span>
                         <a
@@ -541,9 +541,10 @@ export function VacancyResults({
                           className="shrink-0 text-xs text-blue-600 hover:underline"
                           title={v.company_site_url ? 'Открыть сайт компании' : 'Открыть страницу компании на hh.ru'}
                         >
-                          {/* Client: label honestly — «сайт» only for a real site;
-                              the HH employer page (fallback) is labelled «hh.ru». */}
-                          {clientMode && !v.company_site_url ? 'hh.ru' : 'сайт'}
+                          {/* Real company site → «сайт». In CLIENT view we never link to
+                              hh.ru at all (see the condition above); the hh.ru
+                              employer-page fallback is admin-only, labelled «hh.ru». */}
+                          {v.company_site_url ? 'сайт' : 'hh.ru'}
                         </a>
                       </div>
                     ) : (
