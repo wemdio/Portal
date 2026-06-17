@@ -15,6 +15,16 @@ import {
 const admin = supabaseAdmin!;
 const validStepKeys = new Set<string>(AVAILABLE_STEPS.map((s) => s.key));
 
+/**
+ * Сколько одновременно «в очереди» (pending + processing) задач разрешено
+ * одному юзеру. Раньше было 1 (exists-check ниже отбивал любую вторую) —
+ * коллеги попросили возможность накидывать несколько баз пока одна
+ * обрабатывается. Параллельная обработка ограничена воркером
+ * (BASE_CONSTRUCTOR_CONCURRENCY в app/worker/baseConstructor.ts, дефолт 2),
+ * лишние стоят в pending до освобождения слота.
+ */
+const MAX_ACTIVE_JOBS_PER_USER = 5;
+
 async function getUser(req: NextRequest) {
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return null;
@@ -97,16 +107,19 @@ export async function POST(req: NextRequest) {
       }
       const finalSteps = guard.selectedSteps;
 
-      const { data: existing } = await admin
+      const { count: activeCount } = await admin
         .from('base_constructor_jobs')
-        .select('id')
+        .select('id', { count: 'exact', head: true })
         .eq('user_id', user.id)
-        .in('status', ['pending', 'processing'])
-        .limit(1)
-        .single();
+        .in('status', ['pending', 'processing']);
 
-      if (existing) {
-        return NextResponse.json({ error: 'У вас уже есть активная задача' }, { status: 409 });
+      if ((activeCount ?? 0) >= MAX_ACTIVE_JOBS_PER_USER) {
+        return NextResponse.json(
+          {
+            error: `Максимум в очереди ${MAX_ACTIVE_JOBS_PER_USER} баз, дождитесь завершения других задач`,
+          },
+          { status: 409 },
+        );
       }
 
       const { data: job, error } = await admin

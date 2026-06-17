@@ -24,6 +24,18 @@ import type { LucideIcon } from 'lucide-react';
 
 const ALWAYS_ON_SET = new Set<StepKey>(ALWAYS_ON_STEPS_FOR_CLIENT as readonly StepKey[]);
 
+/**
+ * Сколько активных задач (pending + processing) у юзера разрешено одновременно.
+ * Дублирует MAX_ACTIVE_JOBS_PER_USER в app/src/app/api/tools/base-constructor/route.ts —
+ * UI блокирует кнопку «Запустить» при достижении лимита, бэк защищает от обхода через прямой POST.
+ * Если меняешь — меняй в обоих местах.
+ */
+const MAX_ACTIVE_JOBS = 5;
+
+function isActiveJobStatus(status: string): boolean {
+  return status === 'pending' || status === 'processing';
+}
+
 /* ═══════════════════════════════════════════
    TYPES
    ═══════════════════════════════════════════ */
@@ -361,16 +373,38 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   const loadHistory = useCallback(async () => {
     const res = await authFetch('/api/tools/base-constructor');
-    if (!res.ok) return;
+    if (!res.ok) return null;
     const { jobs } = await res.json();
     setHistory(jobs || []);
-    const running = (jobs || []).find(
-      (j: ConstructorJob) => ['pending', 'processing'].includes(j.status),
-    );
-    if (running) setActiveJob(running);
+    return (jobs ?? []) as ConstructorJob[];
   }, []);
 
-  useEffect(() => { loadHistory(); }, [loadHistory]);
+  // Initial mount: подтянуть историю и, если есть незавершённая задача,
+  // открыть её на экране прогресса (юзер вернулся на страницу пока
+  // что-то ещё считается). Этот авто-jump только при первом монтировании —
+  // после этого юзер свободно ходит между формой и job'ами через кнопку
+  // «Поставить ещё базу» и клики по истории.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const jobs = await loadHistory();
+      if (cancelled || !jobs) return;
+      const running = jobs.find((j) => isActiveJobStatus(j.status));
+      if (running) setActiveJob(running);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Пока в истории есть хоть одна активная задача (pending/processing) —
+  // поллим историю раз в 5 сек, чтобы статусы в списке (и счётчик активных
+  // для лимита) были живые, даже когда юзер не открыт ни на одной из них.
+  const anyJobActive = history.some((j) => isActiveJobStatus(j.status));
+  useEffect(() => {
+    if (!anyJobActive) return;
+    const id = setInterval(() => { void loadHistory(); }, 5000);
+    return () => clearInterval(id);
+  }, [anyJobActive, loadHistory]);
 
   /* ─── Client mode: auto-include always-on steps when a file is uploaded ─── */
 
@@ -696,6 +730,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
       const json = await res.json();
       if (!res.ok) { setError(json.error || 'Ошибка'); return; }
       setActiveJob(json.job);
+      // Сразу подтянуть свежую историю — чтобы счётчик активных задач
+      // (для блокировки кнопки при 5+) и список «В очереди / В работе»
+      // учитывали только что созданную запись, а не ждали ближайший
+      // тик 5-секундного поллинга.
+      void loadHistory();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка сети');
     } finally {
@@ -769,6 +808,14 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const isComplete = activeJob?.status === 'completed';
   const isFailed = activeJob?.status === 'failed';
 
+  // Сколько у юзера активных задач (pending + processing) в очереди.
+  // Используется для блокировки сабмита при лимите MAX_ACTIVE_JOBS.
+  // history обновляется и при первичной загрузке, и сразу после успешного
+  // submit (см. handleSubmit), и в фоне раз в 5 сек пока что-то крутится —
+  // значит число живое.
+  const activeJobsCount = history.filter((j) => isActiveJobStatus(j.status)).length;
+  const atActiveLimit = activeJobsCount >= MAX_ACTIVE_JOBS;
+
   const overallProgress = activeJob && activeJob.total_steps > 0
     ? Math.round(((activeJob.current_step - 1 + activeJob.current_step_progress / 100) / activeJob.total_steps) * 100)
     : 0;
@@ -810,7 +857,8 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const canSubmit = fileData && selectedSteps.length > 0 && !submitting
     && unmappedRoles.length === 0
     && (!needsBrief || brief.trim())
-    && (!needsPrompt || prompt.trim());
+    && (!needsPrompt || prompt.trim())
+    && !atActiveLimit;
 
   return (
     // clientMode: страница /client/base-constructor сама даёт фон (.client-portal),
@@ -1593,6 +1641,18 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
             {fileData && selectedSteps.length > 0 && (
               <div className="space-y-3">
                 {error && <p className="text-sm text-red-600">{error}</p>}
+                {atActiveLimit && !error && (
+                  <div
+                    className={clientMode
+                      ? 'flex items-start gap-2 p-3 border border-[var(--cp-amber)] rounded-md text-xs text-[var(--cp-paper)]'
+                      : 'flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900'}
+                  >
+                    <AlertTriangle className={clientMode ? 'w-4 h-4 mt-0.5 flex-shrink-0 text-[var(--cp-amber)]' : 'w-4 h-4 mt-0.5 flex-shrink-0 text-amber-600'} />
+                    <span>
+                      Максимум в очереди {MAX_ACTIVE_JOBS} баз, дождитесь завершения других задач.
+                    </span>
+                  </div>
+                )}
                 <button
                   onClick={() => void handleSubmit()}
                   disabled={!canSubmit}
@@ -1691,14 +1751,31 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   {activeJob.file_name || 'Файл'} — {activeJob.initial_row_count} строк
                 </p>
               </div>
-              <button
-                onClick={() => void handleCancel()}
-                className={clientMode
-                  ? 'ds-btn-ghost text-xs text-[var(--cp-red)]'
-                  : 'px-3 py-1.5 text-xs font-medium rounded-lg bg-red-50 text-red-600 hover:bg-red-100 transition'}
-              >
-                Отменить
-              </button>
+              <div className="flex items-center gap-2">
+                {/* «Поставить ещё базу» — выход из карточки прогресса
+                    в форму загрузки. Текущий job продолжает крутиться
+                    в фоне, виден в истории ниже. Если у юзера уже
+                    {MAX_ACTIVE_JOBS} активных задач — кнопка показывается,
+                    но на форме будет дисейблнутый submit с подсказкой. */}
+                <button
+                  onClick={() => { resetForm(); }}
+                  className={clientMode
+                    ? 'ds-btn-ghost text-xs inline-flex items-center gap-1'
+                    : 'px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 transition inline-flex items-center gap-1'}
+                  title="Поставить ещё одну базу в очередь — текущая продолжит обрабатываться"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  Поставить ещё базу
+                </button>
+                <button
+                  onClick={() => void handleCancel()}
+                  className={clientMode
+                    ? 'ds-btn-ghost text-xs text-[var(--cp-red)]'
+                    : 'px-3 py-1.5 text-xs font-medium rounded-lg bg-red-50 text-red-600 hover:bg-red-100 transition'}
+                >
+                  Отменить
+                </button>
+              </div>
             </div>
             <div className="px-6 py-5 space-y-5">
               {/* Overall progress bar */}
@@ -1997,10 +2074,20 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
         )}
 
         {/* ═══════════ HISTORY ═══════════ */}
-        {!isRunning && history.length > 0 && (
+        {/* Раньше история пряталась пока есть активная задача (`!isRunning`) —
+            теперь юзеры могут держать в очереди до {MAX_ACTIVE_JOBS} баз и им
+            нужно видеть весь список (включая «В очереди» и «В работе»),
+            чтобы понимать, сколько свободных слотов осталось и какие
+            файлы уже сданы. */}
+        {history.length > 0 && (
           <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden'}>
-            <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)]' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50'}>
+            <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)] flex items-center justify-between' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between'}>
               <h3 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>История</h3>
+              {anyJobActive && (
+                <span className={`text-xs ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
+                  Активных: {activeJobsCount} / {MAX_ACTIVE_JOBS}
+                </span>
+              )}
             </div>
             <div className="divide-y divide-gray-50">
               {history.map((j) => (
@@ -2053,7 +2140,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                           ? 'Ошибка'
                           : j.status === 'cancelled'
                             ? 'Отменена'
-                            : 'В работе'}
+                            : j.status === 'pending'
+                              ? 'В очереди'
+                              : 'В работе'}
                     </span>
                   </div>
                 </div>
