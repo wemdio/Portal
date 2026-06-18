@@ -964,7 +964,7 @@ describe('Client Portal — empty new-user state', () => {
     // unread: a conversation with ANY unread inbound shows up (OR-aggregate).
     mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
     res = await GET(makeReq('http://x/api/client/replies?status=unread'));
-    body = (await (res as Response).json()) as { items: unknown[]; total: number };
+    body = (await (res as Response).json()) as { items: Array<{ email_id?: string; message_count?: number }>; total: number };
     expect(body.total).toBe(1);
 
     // needs_reply = ПРОЧИТАНО, но без ответа. Тут письма непрочитаны (не открывали)
@@ -972,13 +972,13 @@ describe('Client Portal — empty new-user state', () => {
     // совпадала с красным бейджом.
     mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
     res = await GET(makeReq('http://x/api/client/replies?status=needs_reply'));
-    body = (await (res as Response).json()) as { items: unknown[]; total: number };
+    body = (await (res as Response).json()) as { items: Array<{ email_id?: string; message_count?: number }>; total: number };
     expect(body.total).toBe(0);
 
     // answered: nothing answered (empty client_email_replies) → empty.
     mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
     res = await GET(makeReq('http://x/api/client/replies?status=answered'));
-    body = (await (res as Response).json()) as { items: unknown[]; total: number };
+    body = (await (res as Response).json()) as { items: Array<{ email_id?: string; message_count?: number }>; total: number };
     expect(body.total).toBe(0);
   });
 
