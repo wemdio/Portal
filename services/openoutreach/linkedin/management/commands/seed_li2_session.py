@@ -56,14 +56,17 @@ class Command(BaseCommand):
                 f'Создал строку li2_accounts для user_id={user_id} (status=stopped).'
             ))
 
+        s = PortalSettings.objects.filter(user_id=user_id).first()
         raw_proxy = opts['proxy']
         if raw_proxy is None:
-            s = PortalSettings.objects.filter(user_id=user_id).first()
             raw_proxy = (s.proxy_url if s else '') or ''
         try:
             proxy = parse_proxy_url(raw_proxy)
         except Exception as e:
             raise CommandError(f'Битый proxy_url: {e}')
+
+        li_email = (s.linkedin_email if s else '') or ''
+        li_password = (s.linkedin_password if s else '') or ''
 
         if proxy is None:
             self.stderr.write(self.style.WARNING(
@@ -73,13 +76,14 @@ class Command(BaseCommand):
             ))
 
         where = f'через прокси {proxy["server"]}' if proxy else 'БЕЗ прокси'
+        how = ('Подставляю логин/пароль автоматически — реши капчу/2FA, если будет. '
+               if (li_email and li_password) else 'Залогинься вручную. ')
         self.stdout.write(self.style.NOTICE(
-            f'Открываю headed Chromium {where}. Залогинься в LinkedIn вручную '
-            '(реши капчу/2FA). Жду появления /feed/…'
+            f'Открываю headed Chromium {where}. {how}Жду появления /feed/…'
         ))
 
         try:
-            state = asyncio.run(self._capture(proxy, opts['timeout']))
+            state = asyncio.run(self._capture(proxy, opts['timeout'], li_email, li_password))
         except TimeoutError:
             raise CommandError('Не дождался логина (timeout). Увеличь --timeout и попробуй снова.')
 
@@ -93,7 +97,8 @@ class Command(BaseCommand):
             f'{n_cookies} cookies). Демон подхватит её на ближайшем поллинге.'
         ))
 
-    async def _capture(self, proxy: dict | None, timeout: int) -> dict:
+    async def _capture(self, proxy: dict | None, timeout: int,
+                       email: str = '', password: str = '') -> dict:
         from playwright.async_api import async_playwright
 
         launch_kwargs: dict = {
@@ -110,6 +115,25 @@ class Command(BaseCommand):
             await _STEALTH.apply_stealth_async(ctx)
             page = await ctx.new_page()
             await page.goto('https://www.linkedin.com/login', wait_until='domcontentloaded')
+
+            # Авто-подставляем креды (оператору остаётся капча/2FA, если будет).
+            # LinkedIn /login: поля type=email/password с React-id'шками, причём
+            # их по две (видимая форма + скрытый дубль) — целимся в ВИДИМУЮ.
+            if email and password:
+                try:
+                    await page.wait_for_timeout(4000)  # дать /login догрузиться через прокси
+                    email_loc = page.locator('input[type="email"]:visible').first
+                    pass_loc = page.locator('input[type="password"]:visible').first
+                    await email_loc.wait_for(state='visible', timeout=25000)
+                    await email_loc.fill(email)
+                    await pass_loc.fill(password)
+                    # Enter в поле пароля надёжнее клика по кнопке (id/структура
+                    # кнопки «Sign in» нестабильна между вариантами LinkedIn-UI).
+                    await pass_loc.press('Enter')
+                    await page.wait_for_timeout(3000)
+                    self.stdout.write('autofill OK: видимые email/password → Enter')
+                except Exception as e:
+                    self.stdout.write(f'autofill error: {str(e)[:200]} — введи руками в VNC')
 
             waited = 0
             while waited < timeout:
