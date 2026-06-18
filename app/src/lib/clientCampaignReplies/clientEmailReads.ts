@@ -47,3 +47,37 @@ export async function recordEmailUnread(clientUserId: string, emailId: string): 
     .eq('client_user_id', clientUserId)
     .eq('email_id', emailId);
 }
+
+// ── Отметка «отвечено» (client_email_replies, миграция 20260618_0002) ────────
+// Клиент отправил ответ на это письмо. Список показывает бейдж «Отвечено», иначе
+// из списка не видно, на что уже ответили (приходилось открывать каждую строку).
+
+/** Какие из переданных email_id клиент уже ответил. */
+export async function getRepliedEmailIds(
+  clientUserId: string,
+  emailIds: string[],
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (!supabaseInstantly || emailIds.length === 0) return out;
+  const CHUNK = 200;
+  for (let i = 0; i < emailIds.length; i += CHUNK) {
+    const { data } = await supabaseInstantly
+      .from('client_email_replies')
+      .select('email_id')
+      .eq('client_user_id', clientUserId)
+      .in('email_id', emailIds.slice(i, i + CHUNK));
+    for (const row of (data ?? []) as Array<{ email_id: string }>) out.add(row.email_id);
+  }
+  return out;
+}
+
+/** Зафиксировать, что клиент ответил на письмо (идемпотентно). */
+export async function recordEmailReplied(clientUserId: string, emailId: string): Promise<void> {
+  if (!supabaseInstantly || !emailId) return;
+  await supabaseInstantly
+    .from('client_email_replies')
+    .upsert(
+      { client_user_id: clientUserId, email_id: emailId, replied_at: new Date().toISOString() },
+      { onConflict: 'client_user_id,email_id' },
+    );
+}

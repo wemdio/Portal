@@ -8,7 +8,7 @@ import { filterAllowedIds, getResourceInstantlyAccountId, type ClientAccessRow }
 import { listEmails } from '@/lib/instantly/client';
 import { InstantlyApiError } from '@/lib/instantly/errors';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
-import { getReadEmailIds } from '@/lib/clientCampaignReplies/clientEmailReads';
+import { getReadEmailIds, getRepliedEmailIds } from '@/lib/clientCampaignReplies/clientEmailReads';
 import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
 import { cached } from '@/lib/clientCache';
 import { withDeadline } from '@/lib/withDeadline';
@@ -66,6 +66,7 @@ type LeadListItem = {
   ai_interest_value?: number | null;
   is_lead?: boolean;
   lead_entry_id?: string | null;
+  is_answered?: boolean;
 };
 
 type SyncedLeadRow = {
@@ -134,15 +135,16 @@ async function readReplyItems(
   campaignIds: string[],
   campaignNames: Map<string, string>,
   accessRows: ClientAccessRow[],
-  search?: string,
 ): Promise<{ items: LeadListItem[]; failures: number }> {
   const settled = await Promise.allSettled(
     campaignIds.map((campaignId) => {
       const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
-      // Кэш на (аккаунт, кампания, поиск). Данные ответов не зависят от того,
-      // какой именно клиент смотрит — это полученные письма кампании, поэтому
-      // ключ без userId (доступ уже проверен фильтром allowedCampaignIds).
-      const cacheKey = `replies:${accountId}:${campaignId}:${search ?? ''}`;
+      // Кэш на (аккаунт, кампания) — БЕЗ поискового терма. Поиск Instantly ищет
+      // ТОЛЬКО по email-адресу (проверено на живых данных: по теме и по имени
+      // отправителя НЕ ищет), поэтому поиск делаем у себя по подтянутым полям
+      // (см. matchesSearch в GET). Плюс один кэш на кампанию обслуживает и
+      // список, и любой поиск → меньше обращений к Instantly.
+      const cacheKey = `replies:${accountId}:${campaignId}`;
       return cached(
         cacheKey,
         () =>
@@ -155,7 +157,6 @@ async function readReplyItems(
                 // параметр — `email_type`, не `ue_type`.
                 email_type: 'received',
                 limit: REPLIES_PER_CAMPAIGN,
-                search,
               }, { accountId });
             } catch (err) {
               // Кампания удалена в Instantly (404 Campaign not found), но осталась
@@ -251,6 +252,27 @@ async function applyReadMarks(userId: string, items: LeadListItem[]) {
   }
 }
 
+/** Проставляет is_answered: клиент отправлял ответ на это письмо (client_email_replies). */
+async function applyRepliedMarks(userId: string, items: LeadListItem[]) {
+  const emailIds = [...new Set(items.map((i) => i.email_id).filter((x): x is string => Boolean(x)))];
+  const repliedSet = await getRepliedEmailIds(userId, emailIds);
+  for (const item of items) {
+    item.is_answered = item.email_id ? repliedSet.has(item.email_id) : false;
+  }
+}
+
+/**
+ * Локальный поиск по подтянутым ответам: email лида, имя отправителя, тема и
+ * текст ответа (нечувствительно к регистру). Нужен потому, что серверный поиск
+ * Instantly ищет ТОЛЬКО по email-адресу (проверено на живых данных) — по теме и
+ * имени отправителя не находит.
+ */
+function matchesSearch(item: LeadListItem, term: string): boolean {
+  const t = term.toLowerCase();
+  return [item.lead_email, item.lead_name, item.reply_subject, item.reply_body]
+    .some((f) => typeof f === 'string' && f.toLowerCase().includes(t));
+}
+
 async function applyLeadMarks(userId: string, items: LeadListItem[]) {
   if (!supabaseInstantly || items.length === 0) return;
 
@@ -327,8 +349,8 @@ export async function GET(req: NextRequest) {
   // Status filter is whitelisted so a malformed query never leaks the
   // unfiltered set under the wrong label. 'all' = passthrough.
   const rawStatus = url.searchParams.get('status');
-  const statusFilter: 'all' | 'unread' | 'leads' =
-    rawStatus === 'unread' || rawStatus === 'leads' ? rawStatus : 'all';
+  const statusFilter: 'all' | 'unread' | 'leads' | 'answered' =
+    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered' ? rawStatus : 'all';
 
   const allowedCampaignIds = filterAllowedIds([], accessRows, 'campaign');
 
@@ -337,7 +359,6 @@ export async function GET(req: NextRequest) {
     allowedCampaignIds,
     campaignNames,
     accessRows,
-    search,
   );
 
   if (
@@ -359,11 +380,19 @@ export async function GET(req: NextRequest) {
   // of item count.
   await applyLeadMarks(userId, merged);
 
+  // «Отвечено» — клиент отправлял ответ на это письмо (client_email_replies).
+  await applyRepliedMarks(userId, merged);
+
+  // Поиск делаем у СЕБЯ (Instantly ищет только по email): email/имя/тема/текст.
+  const searched = search ? merged.filter((i) => matchesSearch(i, search)) : merged;
+
   const filtered = statusFilter === 'unread'
-    ? merged.filter((i) => i.is_unread === true)
+    ? searched.filter((i) => i.is_unread === true)
     : statusFilter === 'leads'
-      ? merged.filter((i) => i.is_lead === true)
-      : merged;
+      ? searched.filter((i) => i.is_lead === true)
+      : statusFilter === 'answered'
+        ? searched.filter((i) => i.is_answered === true)
+        : searched;
 
   const total = filtered.length;
   const items = filtered.slice(offset, offset + limit);

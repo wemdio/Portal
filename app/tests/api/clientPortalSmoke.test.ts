@@ -878,6 +878,51 @@ describe('Client Portal — empty new-user state', () => {
     });
   });
 
+  it('GET /replies?search filters locally by subject and sender name (Instantly search is email-only)', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValue({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    const items = [
+      {
+        id: 'email-a', campaign_id: ALLOWED_CAMPAIGN, thread_id: 'ta', lead: 'la',
+        subject: 'Pricing question', body: { text: 'how much' },
+        from_address_email: 'alpha@example.com',
+        from_address_json: [{ address: 'alpha@example.com', name: 'Alpha' }],
+        timestamp_email: '2026-05-19T10:00:00.000Z', ue_type: 2,
+      },
+      {
+        id: 'email-b', campaign_id: ALLOWED_CAMPAIGN, thread_id: 'tb', lead: 'lb',
+        subject: 'Unrelated', body: { text: 'no thanks' },
+        from_address_email: 'beta@example.com',
+        from_address_json: [{ address: 'beta@example.com', name: 'Beta' }],
+        timestamp_email: '2026-05-19T09:00:00.000Z', ue_type: 2,
+      },
+    ];
+    const { GET } = await import('@/app/api/client/replies/route');
+
+    // by SUBJECT word — Instantly's own search would miss this; our local filter catches it.
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    let res = await GET(makeReq('http://x/api/client/replies?search=Pricing'));
+    expect((res as Response).status).toBe(200);
+    let body = (await (res as Response).json()) as { items: Array<{ email_id?: string }>; total: number };
+    expect(body.total).toBe(1);
+    expect(body.items[0]?.email_id).toBe('email-a');
+    // Search is NOT forwarded to Instantly (it only matches email) — we filter our side.
+    const lastCall = mockListEmails.mock.calls[mockListEmails.mock.calls.length - 1][0];
+    expect(lastCall).not.toHaveProperty('search');
+
+    // by SENDER NAME.
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    res = await GET(makeReq('http://x/api/client/replies?search=Beta'));
+    body = (await (res as Response).json()) as { items: Array<{ email_id?: string }>; total: number };
+    expect(body.total).toBe(1);
+    expect(body.items[0]?.email_id).toBe('email-b');
+  });
+
   it('GET /bases returns campaigns: [] when no campaigns granted', async () => {
     const { GET } = await import('@/app/api/client/bases/route');
     const res = await GET(makeReq('http://x/api/client/bases'));
@@ -1434,6 +1479,11 @@ describe('Client Portal — RBAC isolation across clients', () => {
       // text — plain-text fallback. Для 'Hi' переносов нет → html === 'Hi'.
       body: { html: 'Hi', text: 'Hi' },
     }), { accountId: 'main' });
+    // Ответ фиксируется персонально: «отвечено» (бейдж в списке) + «прочитано» (статус).
+    expect(dbState.upsertCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: 'client_email_replies', payload: expect.objectContaining({ client_user_id: AUTH_USER_ID, email_id: 'e1' }) }),
+      expect.objectContaining({ table: 'client_email_reads', payload: expect.objectContaining({ client_user_id: AUTH_USER_ID, email_id: 'e1' }) }),
+    ]));
   });
 
   it('reply does not double-prefix an existing Re: subject', async () => {
