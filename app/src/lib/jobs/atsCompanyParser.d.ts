@@ -19,6 +19,7 @@ export interface AtsNormalizedJob {
   url: string;
   posted_at: string;
   roles: string[];
+  careers_url?: string;
 }
 
 export interface AtsLead {
@@ -39,13 +40,13 @@ export interface AtsLead {
 export const SUPPORTED_ATS: string[];
 export const CSV_HEADERS: string[];
 
-export function postingsUrl(ats: string, slug: string): string;
-export function careersUrl(ats: string, slug: string): string;
+export function postingsUrl(ats: string, slug: string, sourceUrl?: string): string;
+export function careersUrl(ats: string, slug: string, sourceUrl?: string): string;
 export function extractJobs(ats: string, payload: unknown): unknown[];
 export function normalizeJob(
   ats: string,
   job: unknown,
-  ctx?: { slug?: string; companyName?: string },
+  ctx?: { slug?: string; companyName?: string; sourceUrl?: string },
 ): AtsNormalizedJob | null;
 export function normalizeGreenhouseJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
 export function normalizeLeverJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
@@ -53,6 +54,8 @@ export function normalizeAshbyJob(job: unknown, ctx?: { slug?: string; companyNa
 export function normalizeWorkableJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
 export function normalizeBamboohrJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
 export function normalizeRecruiteeJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
+export function normalizeBreezyJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
+export function normalizeWorkdayJob(job: unknown, ctx?: { slug?: string; companyName?: string; sourceUrl?: string }): AtsNormalizedJob | null;
 export function parseCompanyCsv(text: string): AtsCompanyToken[];
 export function buildCompanyLeads(jobs: AtsNormalizedJob[]): AtsLead[];
 export function domainFromJobUrls(jobUrls: string[]): string;

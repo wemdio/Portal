@@ -7,6 +7,7 @@ import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
 import { validateReplyInput } from '@/lib/clientCampaignReplies/validate';
 import { textToReplyHtml } from '@/lib/clientCampaignReplies/bodyHtml';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { recordEmailReplied, recordEmailRead } from '@/lib/clientCampaignReplies/clientEmailReads';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -83,6 +84,15 @@ export async function POST(
       },
       instantlyRequestOptions,
     );
+
+    // Фиксируем «отвечено» (бейдж «Отвечено» в списке) + «прочитано» (ответил =
+    // прочитал) персонально для клиента. Best-effort — не валим отправку.
+    try {
+      await recordEmailReplied(userId, emailId);
+      await recordEmailRead(userId, emailId);
+    } catch (err) {
+      await logError('client.campaign.replies.reply.record_failed', err, { campaignId, emailId, userId });
+    }
 
     void logAudit('client.campaign.replies.reply.sent', 'Client replied via Instantly', {
       campaignId,

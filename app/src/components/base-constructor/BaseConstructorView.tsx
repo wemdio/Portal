@@ -367,7 +367,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const [error, setError] = useState('');
 
   const [activeJob, setActiveJob] = useState<ConstructorJob | null>(null);
-  const [jobData, setJobData] = useState<string[][] | null>(null);
+  // Full result blob, cached lazily for the admin "Открыть в базах" flow. Keyed by
+  // job id so a job switch during an in-flight fetch can't hand back another job's rows.
+  const fullDataCacheRef = useRef<{ id: string; rows: string[][] } | null>(null);
+  const [previewData, setPreviewData] = useState<string[][] | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [loadingFull, setLoadingFull] = useState(false);
   const [history, setHistory] = useState<ConstructorJob[]>([]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -495,7 +500,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
       if (['completed', 'failed', 'cancelled'].includes(job.status)) {
         if (pollRef.current) clearInterval(pollRef.current);
         loadHistory();
-        if (job.status === 'completed') loadJobData(job.id);
+        if (job.status === 'completed') loadJobPreview(job.id);
       }
     }
 
@@ -563,11 +568,29 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   /* ─── Load job result data ─── */
 
-  async function loadJobData(jobId: string) {
-    const res = await authFetch(`/api/tools/base-constructor/${jobId}/data`);
+  // Preview = first ~20 rows only. The result blob can be tens of MB, so we never
+  // pull the whole thing just to render the preview table or enable download.
+  async function loadJobPreview(jobId: string) {
+    fullDataCacheRef.current = null;
+    setPreviewData(null);
+    const res = await authFetch(`/api/tools/base-constructor/${jobId}/data?preview=21`);
     if (!res.ok) return;
     const { data } = await res.json();
-    setJobData(data || null);
+    setPreviewData(data || null);
+  }
+
+  // Full result, fetched lazily — only the admin "Открыть в базах" flow needs all rows.
+  async function ensureFullData(jobId: string): Promise<string[][] | null> {
+    // Cache is keyed by job id — never return another job's rows if the user
+    // switched jobs while a previous full fetch was still in flight.
+    const cached = fullDataCacheRef.current;
+    if (cached && cached.id === jobId) return cached.rows;
+    const res = await authFetch(`/api/tools/base-constructor/${jobId}/data`);
+    if (!res.ok) return null;
+    const { data } = await res.json();
+    const rows = (data as string[][]) || null;
+    if (rows) fullDataCacheRef.current = { id: jobId, rows };
+    return rows;
   }
 
   /* ─── File handling ─── */
@@ -786,26 +809,35 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   /* ─── Download CSV ─── */
 
-  function downloadCSV() {
-    if (!jobData) return;
-    const csv = jobData.map((row) => row.map((c) => `"${(c || '').replace(/"/g, '""')}"`).join(',')).join('\n');
-    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `constructor_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  async function downloadCSV() {
+    if (!activeJob || activeJob.status !== 'completed' || downloading) return;
+    setDownloading(true);
+    try {
+      // CSV is built server-side and streamed as a file \u2014 the browser no longer
+      // fetches/parses the full (up to tens of MB) result blob just to download.
+      const res = await authFetch(`/api/tools/base-constructor/${activeJob.id}/download`);
+      if (!res.ok) { setError('\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u0430\u0447\u0430\u0442\u044C \u0444\u0430\u0439\u043B'); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `constructor_${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError('\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u0430\u0447\u0430\u0442\u044C \u0444\u0430\u0439\u043B');
+    } finally {
+      setDownloading(false);
+    }
   }
 
   /* ─── Load to spreadsheet ─── */
 
-  function loadToSpreadsheet() {
-    if (!jobData) return;
+  function loadToSpreadsheet(rows: string[][]) {
     try {
       const { id } = writePendingDbImport({
         title: `Конструктор ${new Date().toLocaleDateString('ru-RU')}`,
-        rows: jobData,
+        rows,
       });
       window.open(buildDatabasesImportUrl(id), '_blank');
     } catch (err) {
@@ -818,11 +850,26 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     }
   }
 
+  // Admin-only: fetches the full result on demand (it isn't loaded for preview),
+  // then hands it to the spreadsheet importer.
+  async function handleOpenInDatabases() {
+    if (!activeJob || activeJob.status !== 'completed' || loadingFull) return;
+    setLoadingFull(true);
+    try {
+      const rows = await ensureFullData(activeJob.id);
+      if (!rows) { setError('Не удалось загрузить данные'); return; }
+      loadToSpreadsheet(rows);
+    } finally {
+      setLoadingFull(false);
+    }
+  }
+
   /* ─── Reset ─── */
 
   function resetForm() {
     setActiveJob(null);
-    setJobData(null);
+    fullDataCacheRef.current = null;
+    setPreviewData(null);
     setFileData(null);
     setFileName('');
     setSelectedSteps([]);
@@ -2052,22 +2099,26 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
             <div className="flex items-center gap-3 flex-wrap">
               <button
                 onClick={downloadCSV}
-                disabled={!jobData}
+                disabled={downloading}
                 className={clientMode
                   ? 'ds-btn-primary inline-flex items-center gap-2 px-4 disabled:opacity-40'
                   : 'px-4 py-2.5 text-sm font-medium rounded-xl bg-gray-900 text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300 inline-flex items-center gap-2'}
               >
-                <Download className="w-4 h-4" />
-                Скачать CSV
+                {downloading ? (
+                  <span className="w-4 h-4 rounded-full border-2 border-white/40 border-t-transparent animate-spin" />
+                ) : (
+                  <Download className="w-4 h-4" />
+                )}
+                {downloading ? 'Готовим файл…' : 'Скачать CSV'}
               </button>
               {!clientMode && (
                 <button
-                  onClick={loadToSpreadsheet}
-                  disabled={!jobData}
+                  onClick={handleOpenInDatabases}
+                  disabled={loadingFull}
                   className="px-4 py-2.5 text-sm font-medium rounded-xl bg-blue-600 text-white shadow-sm transition hover:bg-blue-700 disabled:bg-gray-300 inline-flex items-center gap-2"
                 >
                   <ArrowRight className="w-4 h-4" />
-                  Открыть в базах
+                  {loadingFull ? 'Загрузка…' : 'Открыть в базах'}
                 </button>
               )}
               <button
@@ -2082,7 +2133,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
             </div>
 
             {/* Preview table */}
-            {jobData && jobData.length > 1 && (
+            {previewData && previewData.length > 1 && (
               <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden'}>
                 <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)]' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50'}>
                   <h3 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>
@@ -2093,7 +2144,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   <table className={clientMode ? 'min-w-full divide-y divide-gray-100 cp-dense-table' : 'min-w-full divide-y divide-gray-100 text-sm'}>
                     <thead className="bg-gray-50/50">
                       <tr>
-                        {jobData[0].map((h, i) => (
+                        {previewData[0].map((h, i) => (
                           <th key={i} className="px-3 py-2 text-left font-semibold text-gray-500 whitespace-nowrap">
                             {h}
                           </th>
@@ -2101,7 +2152,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-50">
-                      {jobData.slice(1, 21).map((row, rIdx) => (
+                      {previewData.slice(1, 21).map((row, rIdx) => (
                         <tr key={rIdx} className="hover:bg-gray-50/50">
                           {row.map((cell, cIdx) => (
                             <td key={cIdx} className="px-3 py-2 text-gray-600 max-w-[200px] truncate" title={cell}>
@@ -2143,7 +2194,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     : 'px-6 py-3 flex items-center justify-between cursor-pointer hover:bg-gray-50/50 transition'}
                   onClick={() => {
                     setActiveJob(j);
-                    if (j.status === 'completed') loadJobData(j.id);
+                    if (j.status === 'completed') loadJobPreview(j.id);
                   }}
                 >
                   <div className="flex items-center gap-3">

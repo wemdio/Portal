@@ -8,6 +8,7 @@ import { filterAllowedIds, getResourceInstantlyAccountId, type ClientAccessRow }
 import { listEmails } from '@/lib/instantly/client';
 import { InstantlyApiError } from '@/lib/instantly/errors';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
+import { getReadEmailIds, getRepliedEmailIds } from '@/lib/clientCampaignReplies/clientEmailReads';
 import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
 import { cached } from '@/lib/clientCache';
 import { withDeadline } from '@/lib/withDeadline';
@@ -65,6 +66,8 @@ type LeadListItem = {
   ai_interest_value?: number | null;
   is_lead?: boolean;
   lead_entry_id?: string | null;
+  is_answered?: boolean;
+  message_count?: number;
 };
 
 type SyncedLeadRow = {
@@ -88,11 +91,15 @@ function itemTimestamp(item: LeadListItem): number {
 }
 
 function dedupeKey(item: LeadListItem): string {
+  // У каждого живого ответа есть уникальный email_id — дедупим по нему. Иначе два
+  // РАЗНЫХ письма с одинаковым timestamp_email (автоответ+ответ, batch-доставка)
+  // схлопнулись бы по ключу campaign:email:timestamp → терялось письмо и занижался
+  // message_count. Timestamp-ключ остаётся фоллбэком, когда email_id нет.
+  if (item.email_id) return `email:${item.email_id}`;
   const email = item.lead_email.trim().toLowerCase();
   if (item.campaign_id && email && item.reply_timestamp) {
     return `reply:${item.campaign_id}:${email}:${item.reply_timestamp}`;
   }
-  if (item.email_id) return `email:${item.email_id}`;
   return `${item.source}:${item.id}`;
 }
 
@@ -109,6 +116,47 @@ function mergeAndSortItems(items: LeadListItem[]): LeadListItem[] {
 
   unique.sort((a, b) => itemTimestamp(b) - itemTimestamp(a));
   return unique;
+}
+
+function conversationKey(item: LeadListItem): string {
+  if (item.thread_id) return `thread:${item.thread_id}`;
+  return `lead:${item.campaign_id}:${item.lead_email.trim().toLowerCase()}`;
+}
+
+/**
+ * Схлопывает per-email строки в ПЕРЕПИСКИ: одна строка на тред/лид. items уже
+ * отсортированы свежими-первыми, поэтому первый встреченный в группе = последнее
+ * входящее (representative). Статус переписки берётся ПО НЕМУ
+ * (is_unread/is_answered последнего входящего) — «разобрал ли я ТЕКУЩЕЕ
+ * сообщение лида».
+ *
+ * Почему по последнему, а НЕ агрегат OR/AND по всему треду: пометка
+ * прочтения/ответа в портале привязана именно к этому письму (открыли/ответили
+ * на representative), а старые письма треда отдельно прочитанными не
+ * помечаются. Агрегат OR(непрочитано)/AND(отвечено) держал бы переписку в
+ * «Непрочитано»/«Требует ответа» навсегда — открытие/ответ не могли бы её
+ * погасить (см. ревью 18.06). При открытии клиент и так видит весь тред.
+ *
+ * is_lead — OR по треду (помечен лидом хоть один → вся переписка лид).
+ * message_count — число входящих в треде (в пределах подтянутого окна).
+ */
+function groupByConversation(items: LeadListItem[]): LeadListItem[] {
+  const byKey = new Map<string, LeadListItem>();
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const key = conversationKey(item);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    const rep = byKey.get(key);
+    if (!rep) byKey.set(key, item);
+    else if (item.is_lead) rep.is_lead = true;
+  }
+  const out: LeadListItem[] = [];
+  for (const [key, rep] of byKey) {
+    rep.message_count = counts.get(key) ?? 1;
+    out.push(rep);
+  }
+  out.sort((a, b) => itemTimestamp(b) - itemTimestamp(a));
+  return out;
 }
 
 async function readCampaignNames(campaignIds: string[]): Promise<Map<string, string>> {
@@ -133,15 +181,16 @@ async function readReplyItems(
   campaignIds: string[],
   campaignNames: Map<string, string>,
   accessRows: ClientAccessRow[],
-  search?: string,
 ): Promise<{ items: LeadListItem[]; failures: number }> {
   const settled = await Promise.allSettled(
     campaignIds.map((campaignId) => {
       const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
-      // Кэш на (аккаунт, кампания, поиск). Данные ответов не зависят от того,
-      // какой именно клиент смотрит — это полученные письма кампании, поэтому
-      // ключ без userId (доступ уже проверен фильтром allowedCampaignIds).
-      const cacheKey = `replies:${accountId}:${campaignId}:${search ?? ''}`;
+      // Кэш на (аккаунт, кампания) — БЕЗ поискового терма. Поиск Instantly ищет
+      // ТОЛЬКО по email-адресу (проверено на живых данных: по теме и по имени
+      // отправителя НЕ ищет), поэтому поиск делаем у себя по подтянутым полям
+      // (см. matchesSearch в GET). Плюс один кэш на кампанию обслуживает и
+      // список, и любой поиск → меньше обращений к Instantly.
+      const cacheKey = `replies:${accountId}:${campaignId}`;
       return cached(
         cacheKey,
         () =>
@@ -154,7 +203,6 @@ async function readReplyItems(
                 // параметр — `email_type`, не `ue_type`.
                 email_type: 'received',
                 limit: REPLIES_PER_CAMPAIGN,
-                search,
               }, { accountId });
             } catch (err) {
               // Кампания удалена в Instantly (404 Campaign not found), но осталась
@@ -234,6 +282,43 @@ async function readReplyItems(
   return { items, failures };
 }
 
+/**
+ * Проставляет is_unread из НАШЕЙ персональной прочитанности (client_email_reads),
+ * а не из общего флага Instantly: письмо «непрочитано», если этот клиент не
+ * открывал его в портале. Должна выполняться ДО applyLeadMarks (лид считается
+ * обработанным и перетирает is_unread=false).
+ */
+async function applyReadMarks(userId: string, items: LeadListItem[]) {
+  const emailIds = [...new Set(items.map((i) => i.email_id).filter((x): x is string => Boolean(x)))];
+  const readSet = await getReadEmailIds(userId, emailIds);
+  for (const item of items) {
+    const read = item.email_id ? readSet.has(item.email_id) : false;
+    item.is_unread = !read;
+    item.status = read ? 'reply' : 'unread';
+  }
+}
+
+/** Проставляет is_answered: клиент отправлял ответ на это письмо (client_email_replies). */
+async function applyRepliedMarks(userId: string, items: LeadListItem[]) {
+  const emailIds = [...new Set(items.map((i) => i.email_id).filter((x): x is string => Boolean(x)))];
+  const repliedSet = await getRepliedEmailIds(userId, emailIds);
+  for (const item of items) {
+    item.is_answered = item.email_id ? repliedSet.has(item.email_id) : false;
+  }
+}
+
+/**
+ * Локальный поиск по подтянутым ответам: email лида, имя отправителя, тема и
+ * текст ответа (нечувствительно к регистру). Нужен потому, что серверный поиск
+ * Instantly ищет ТОЛЬКО по email-адресу (проверено на живых данных) — по теме и
+ * имени отправителя не находит.
+ */
+function matchesSearch(item: LeadListItem, term: string): boolean {
+  const t = term.toLowerCase();
+  return [item.lead_email, item.lead_name, item.reply_subject, item.reply_body]
+    .some((f) => typeof f === 'string' && f.toLowerCase().includes(t));
+}
+
 async function applyLeadMarks(userId: string, items: LeadListItem[]) {
   if (!supabaseInstantly || items.length === 0) return;
 
@@ -310,8 +395,10 @@ export async function GET(req: NextRequest) {
   // Status filter is whitelisted so a malformed query never leaks the
   // unfiltered set under the wrong label. 'all' = passthrough.
   const rawStatus = url.searchParams.get('status');
-  const statusFilter: 'all' | 'unread' | 'leads' =
-    rawStatus === 'unread' || rawStatus === 'leads' ? rawStatus : 'all';
+  const statusFilter: 'all' | 'unread' | 'leads' | 'answered' | 'needs_reply' =
+    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered' || rawStatus === 'needs_reply'
+      ? rawStatus
+      : 'all';
 
   const allowedCampaignIds = filterAllowedIds([], accessRows, 'campaign');
 
@@ -320,7 +407,6 @@ export async function GET(req: NextRequest) {
     allowedCampaignIds,
     campaignNames,
     accessRows,
-    search,
   );
 
   if (
@@ -332,24 +418,60 @@ export async function GET(req: NextRequest) {
 
   const merged = mergeAndSortItems(replyItems);
 
+  // Персональная прочитанность (наша таблица) — ДО applyLeadMarks, т.к. лид
+  // всегда обработан и перетирает is_unread.
+  await applyReadMarks(userId, merged);
+
   // applyLeadMarks must run BEFORE filter+slice so is_lead is populated
   // across the full set — otherwise filter=leads would only find leads
   // already in the visible page window. Cost is one DB query regardless
   // of item count.
   await applyLeadMarks(userId, merged);
 
+  // «Отвечено» — клиент отправлял ответ на это письмо (client_email_replies).
+  await applyRepliedMarks(userId, merged);
+
+  // Поиск делаем у СЕБЯ (Instantly ищет только по email): email/имя/тема/текст.
+  // При поиске обогащаем ВЕСЬ набор ДО фильтра: у входящего без from_name имя
+  // лида лежит в client_campaign_leads, и без раннего обогащения поиск по имени
+  // его бы не нашёл (enrich заполняет lead_name только когда оно пустое).
+  if (search) await enrichFromSyncedLeads(userId, merged);
+
+  // Поиск — по ВСЕМ письмам треда (email/имя/тема/текст ЛЮБОГО сообщения), затем
+  // схлопываем уцелевшие треды в переписки. Иначе совпадение в старом письме
+  // треда терялось бы, т.к. в группе остаётся только последнее. (Серверный поиск
+  // Instantly ищет лишь по email — поэтому фильтруем у себя.)
+  const preMatched = search
+    ? (() => {
+        const hitKeys = new Set(
+          merged.filter((i) => matchesSearch(i, search)).map((i) => conversationKey(i)),
+        );
+        return merged.filter((i) => hitKeys.has(conversationKey(i)));
+      })()
+    : merged;
+
+  // Одна строка на ПЕРЕПИСКУ (тред/лид); статус агрегируется по всем входящим.
+  const searched = groupByConversation(preMatched);
+
   const filtered = statusFilter === 'unread'
-    ? merged.filter((i) => i.is_unread === true)
-    : statusFilter === 'leads'
-      ? merged.filter((i) => i.is_lead === true)
-      : merged;
+    ? searched.filter((i) => i.is_unread === true)
+    : statusFilter === 'answered'
+      // Отвечено = ответили, не лид и не помечено снова непрочитанным (после
+      // «В непрочитанные» строка уходит только в «Непрочитано» — как у needs_reply).
+      ? searched.filter((i) => i.is_answered === true && i.is_lead !== true && i.is_unread !== true)
+      : statusFilter === 'needs_reply'
+        // Требует ответа = прочитано, но не отвечено и не лид. Непрочитанные — в
+        // «Непрочитано»: так содержимое вкладки совпадает с красным бейджом.
+        ? searched.filter((i) => i.is_answered !== true && i.is_lead !== true && i.is_unread !== true)
+        : statusFilter === 'leads'
+          ? searched.filter((i) => i.is_lead === true)
+          : searched;
 
   const total = filtered.length;
   const items = filtered.slice(offset, offset + limit);
 
-  // Synced-lead enrichment stays after slice — only the visible page pays
-  // the cost of name/website joins.
-  await enrichFromSyncedLeads(userId, items);
+  // Без поиска обогащаем только видимую страницу — только она платит за join.
+  if (!search) await enrichFromSyncedLeads(userId, items);
 
   return NextResponse.json({
     items,
