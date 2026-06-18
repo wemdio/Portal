@@ -22,6 +22,43 @@ const STORAGE_KEY = 'portal-ai-chat-history-v1';
 /** Сколько последних сообщений (без GREETING) восстанавливаем при заходе. */
 const MAX_STORED = 20;
 
+/** Сохранённый размер виджета. Якорится через bottom-5 right-5, поэтому при
+ *  CSS-ресайзе правый-нижний угол не двигается — виджет растёт влево и вверх. */
+const SIZE_STORAGE_KEY = 'portal-ai-chat-size-v1';
+const DEFAULT_WIDTH = 380;
+const DEFAULT_HEIGHT = 560;
+const MIN_WIDTH = 320;
+const MIN_HEIGHT = 360;
+
+interface WidgetSize { width: number; height: number }
+
+function loadSize(): WidgetSize {
+  if (typeof window === 'undefined') return { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
+  try {
+    const raw = window.localStorage.getItem(SIZE_STORAGE_KEY);
+    if (!raw) return { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
+    const parsed = JSON.parse(raw);
+    const w = Number(parsed?.width);
+    const h = Number(parsed?.height);
+    if (!Number.isFinite(w) || !Number.isFinite(h)) return { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
+    return {
+      width: Math.max(MIN_WIDTH, w),
+      height: Math.max(MIN_HEIGHT, h),
+    };
+  } catch {
+    return { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
+  }
+}
+
+function saveSize(size: WidgetSize): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(SIZE_STORAGE_KEY, JSON.stringify(size));
+  } catch {
+    // Игнорируем переполнение квоты — для размера это не критично.
+  }
+}
+
 function loadHistory(): ChatMessage[] {
   if (typeof window === 'undefined') return [];
   try {
@@ -91,9 +128,53 @@ export function ToolsAssistant() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [size, setSize] = useState<WidgetSize>({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
   const hydratedRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const resizeStateRef = useRef<{ startX: number; startY: number; startW: number; startH: number } | null>(null);
+
+  // Восстанавливаем размер виджета один раз после mount.
+  useEffect(() => {
+    setSize(loadSize());
+  }, []);
+
+  const onResizeMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    resizeStateRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startW: size.width,
+      startH: size.height,
+    };
+    const onMove = (ev: MouseEvent) => {
+      const s = resizeStateRef.current;
+      if (!s) return;
+      // Якорь — правый нижний угол. Тянем левый верхний наружу (вверх/влево),
+      // увеличиваем width/height. dx > 0 при движении влево.
+      const dx = s.startX - ev.clientX;
+      const dy = s.startY - ev.clientY;
+      const maxW = Math.max(MIN_WIDTH, window.innerWidth - 40);
+      const maxH = Math.max(MIN_HEIGHT, window.innerHeight - 40);
+      const width = Math.min(maxW, Math.max(MIN_WIDTH, s.startW + dx));
+      const height = Math.min(maxH, Math.max(MIN_HEIGHT, s.startH + dy));
+      setSize({ width, height });
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      if (resizeStateRef.current) {
+        // Сохраняем последний размер.
+        setSize((current) => {
+          saveSize(current);
+          return current;
+        });
+      }
+      resizeStateRef.current = null;
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [size.width, size.height]);
 
   // Восстанавливаем историю из localStorage один раз, после mount, чтобы
   // SSR-разметка совпала с первым клиентским рендером (GREETING-only).
@@ -176,7 +257,24 @@ export function ToolsAssistant() {
       )}
 
       {open && (
-        <div className="fixed bottom-5 right-5 z-50 flex h-[560px] max-h-[calc(100vh-2.5rem)] w-[380px] max-w-[calc(100vw-2.5rem)] flex-col rounded-2xl border border-zinc-200 bg-white shadow-2xl">
+        <div
+          className="fixed bottom-5 right-5 z-50 flex max-h-[calc(100vh-2.5rem)] max-w-[calc(100vw-2.5rem)] flex-col rounded-2xl border border-zinc-200 bg-white shadow-2xl"
+          style={{ width: `${size.width}px`, height: `${size.height}px` }}
+        >
+          {/* Ручка ресайза в левом верхнем углу. Якорь панели — правый нижний,
+              поэтому увеличение width/height даёт рост вверх-влево, как пользователь
+              ожидает. */}
+          <div
+            onMouseDown={onResizeMouseDown}
+            className="absolute -left-1 -top-1 z-10 h-4 w-4 cursor-nwse-resize"
+            style={{
+              backgroundImage:
+                'linear-gradient(135deg, transparent 40%, rgb(161 161 170) 40%, rgb(161 161 170) 50%, transparent 50%, transparent 60%, rgb(161 161 170) 60%, rgb(161 161 170) 70%, transparent 70%)',
+              borderRadius: '4px',
+            }}
+            title="Потяните, чтобы изменить размер"
+            aria-label="Изменить размер виджета"
+          />
           <div className="flex items-center justify-between gap-2 border-b border-zinc-200 px-4 py-3">
             <div className="flex items-center gap-2">
               <div className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-blue-100 text-blue-600">
