@@ -166,7 +166,8 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
     const positive = num(r.positive);
     const lifetimeSent = r.lifetime_sent == null ? null : Number(r.lifetime_sent);
     const bounced = r.bounced_count == null ? null : Number(r.bounced_count);
-    const universe: CampaignMetric['universe'] = sent > 0 ? 'email' : lifetimeSent ? 'snapshot_only' : 'none';
+    // 'snapshot_only' когда есть строка снапшота (даже lifetime_sent=0) — как v_campaign_health (по существованию строки, не по значению).
+    const universe: CampaignMetric['universe'] = sent > 0 ? 'email' : lifetimeSent != null ? 'snapshot_only' : 'none';
 
     const rr = sent >= MIN_SENT_FOR_RATE ? wilson(repliers, sent) : null;
     const lr = labeled >= MIN_LABELED_FOR_LEAD ? wilson(positive, labeled) : null;
@@ -256,11 +257,13 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
       `
       WITH camp_ue3 AS (SELECT DISTINCT campaign_id FROM raw_emails WHERE ue_type=3 AND campaign_id = ANY($1)),
       rf AS (
+        -- ВАЖНО: first_reply_at считаем по ПОЛНОМУ окну (как v_reply_facts), не за 40 дней —
+        -- иначе min() съезжает на поздний follow-up и старый лид кажется свежим (BUG 2).
         SELECT campaign_id, lead_id, min(timestamp_email) first_reply_at,
                bool_or(i_status=1 OR ai_interest_value=1) inst_int
         FROM raw_emails
         WHERE ue_type=2 AND lead_id IS NOT NULL AND campaign_id = ANY($1)
-          AND timestamp_email > now() - interval '40 days'
+          AND timestamp_email BETWEEN '2025-07-01' AND now() + interval '1 day'
         GROUP BY 1,2
       ),
       ours AS (SELECT campaign_id, lead_id, min(timestamp_email) our_at FROM raw_emails WHERE ue_type=3 AND campaign_id = ANY($1) GROUP BY 1,2)
@@ -273,7 +276,9 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
       JOIN raw_campaigns rc ON rc.id = rf.campaign_id
       LEFT JOIN reply_outcome_labels l ON l.campaign_id = rf.campaign_id AND l.lead_id = rf.lead_id
       LEFT JOIN ours u ON u.campaign_id = rf.campaign_id AND u.lead_id = rf.lead_id
-      WHERE (l.label IN ('interested','referral') OR rf.inst_int)
+      -- positive: LLM-first (как v_reply_outcomes), Instantly только когда LLM-метки нет —
+      -- иначе гоним автоответы/«не тот человек», которые LLM уже отбраковал (BUG 1).
+      WHERE COALESCE(l.label IN ('interested','referral'), rf.inst_int, false)
         AND (u.our_at IS NULL OR u.our_at < rf.first_reply_at)
         AND rf.first_reply_at > now() - interval '30 days'
       ORDER BY rf.first_reply_at DESC
