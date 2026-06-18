@@ -7,9 +7,11 @@ import {
   extractJobs,
   normalizeAshbyJob,
   normalizeBamboohrJob,
+  normalizeBreezyJob,
   normalizeGreenhouseJob,
   normalizeLeverJob,
   normalizeRecruiteeJob,
+  normalizeWorkdayJob,
   normalizeWorkableJob,
   parseCompanyCsv,
   pickDomainFromSuggestions,
@@ -169,14 +171,82 @@ describe('atsCompanyParser — normalizers', () => {
     expect(job.posted_at).toBe(new Date('2026-06-05 13:30:25 UTC').toISOString());
   });
 
+  it('normalizes a Breezy job from public JSON payloads', () => {
+    const job = normalizeBreezyJob(
+      {
+        id: 'e63605aeb81c',
+        friendly_id: 'e63605aeb81c-enterprise-account-executive',
+        name: 'Enterprise Account Executive',
+        url: 'https://acme.breezy.hr/p/e63605aeb81c-enterprise-account-executive',
+        published_date: '2026-06-04T23:24:11.988Z',
+        location: {
+          country: { name: 'United States', id: 'US' },
+          state: { id: 'CA', name: 'California' },
+          city: 'San Francisco',
+          is_remote: false,
+          name: 'San Francisco, CA',
+        },
+        salary: '$120k - $180k',
+        company: { name: 'Acme' },
+      },
+      { slug: 'acme', companyName: 'Acme fallback' },
+    );
+
+    expect(job).toMatchObject({
+      ats: 'breezy',
+      slug: 'acme',
+      company: 'Acme',
+      title: 'Enterprise Account Executive',
+      location: 'San Francisco, CA, United States',
+      country: 'United States',
+      url: 'https://acme.breezy.hr/p/e63605aeb81c-enterprise-account-executive',
+      roles: ['b2b_sales'],
+    });
+    expect(job.posted_at).toBe(new Date('2026-06-04T23:24:11.988Z').toISOString());
+  });
+
+  it('normalizes a Workday job from CXS search payloads', () => {
+    const job = normalizeWorkdayJob(
+      {
+        title: 'Partner SDR',
+        externalPath: '/job/Australia-Queensland---Remote/Partner-SDR_R2576',
+        locationsText: 'Australia-Queensland - Remote',
+        postedOn: 'Posted Today',
+        bulletFields: ['R2576'],
+      },
+      {
+        slug: '8x8inc/8x8_external_careers',
+        companyName: '8x8',
+        sourceUrl: 'https://8x8inc.wd5.myworkdayjobs.com/8x8_external_careers',
+      },
+    );
+
+    expect(job).toMatchObject({
+      ats: 'workday',
+      slug: '8x8inc/8x8_external_careers',
+      company: '8x8',
+      title: 'Partner SDR',
+      location: 'Australia-Queensland - Remote',
+      country: '',
+      url: 'https://8x8inc.wd5.myworkdayjobs.com/8x8_external_careers/job/Australia-Queensland---Remote/Partner-SDR_R2576',
+      roles: ['b2b_sales'],
+    });
+    expect(job.posted_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
   it('builds public endpoints and extracts jobs for the added ATS sources', () => {
     expect(postingsUrl('workable', '1000heads')).toBe('https://apply.workable.com/api/v1/widget/accounts/1000heads');
     expect(postingsUrl('bamboohr', '10web')).toBe('https://10web.bamboohr.com/careers/list');
     expect(postingsUrl('recruitee', '12build')).toBe('https://12build.recruitee.com/api/offers');
+    expect(postingsUrl('breezy', '1001')).toBe('https://1001.breezy.hr/json');
+    expect(postingsUrl('workday', '8x8inc/8x8_external_careers', 'https://8x8inc.wd5.myworkdayjobs.com/8x8_external_careers'))
+      .toBe('https://8x8inc.wd5.myworkdayjobs.com/wday/cxs/8x8inc/8x8_external_careers/jobs');
 
     expect(extractJobs('workable', { jobs: [{ title: 'AE' }] })).toEqual([{ title: 'AE' }]);
     expect(extractJobs('bamboohr', { result: [{ jobOpeningName: 'AE' }] })).toEqual([{ jobOpeningName: 'AE' }]);
     expect(extractJobs('recruitee', { offers: [{ title: 'AE' }] })).toEqual([{ title: 'AE' }]);
+    expect(extractJobs('breezy', [{ name: 'AE' }])).toEqual([{ name: 'AE' }]);
+    expect(extractJobs('workday', { jobPostings: [{ title: 'AE' }] })).toEqual([{ title: 'AE' }]);
   });
 
   it('tags only marketing / b2b-sales titles', () => {
@@ -247,6 +317,7 @@ describe('atsCompanyParser — CSV parsing & export', () => {
         'name,slug,url',
         'Acme, Inc,acmeinc,https://job-boards.greenhouse.io/acmeinc',
         'Stripe,stripe,https://job-boards.greenhouse.io/stripe',
+        '8x8,8x8inc/8x8_external_careers,https://8x8inc.wd5.myworkdayjobs.com/8x8_external_careers',
         'LegacyCo,https://jobs.lever.co/legacyco',
       ].join('\n'),
     );
@@ -254,6 +325,7 @@ describe('atsCompanyParser — CSV parsing & export', () => {
     expect(rows).toEqual([
       { name: 'Acme, Inc', slug: 'acmeinc', url: 'https://job-boards.greenhouse.io/acmeinc' },
       { name: 'Stripe', slug: 'stripe', url: 'https://job-boards.greenhouse.io/stripe' },
+      { name: '8x8', slug: '8x8inc/8x8_external_careers', url: 'https://8x8inc.wd5.myworkdayjobs.com/8x8_external_careers' },
       { name: 'LegacyCo', slug: 'legacyco', url: 'https://jobs.lever.co/legacyco' },
     ]);
   });

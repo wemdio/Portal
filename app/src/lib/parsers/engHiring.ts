@@ -6,9 +6,9 @@ import {
 } from '@/lib/jobs/atsCompanyParser';
 import { ATS_COUNTRIES, buildCountryRegex, buildRolesRegex } from '@/lib/parsers/atsFilters';
 
-export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee';
+export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee' | 'breezy' | 'workday';
 
-export const ENG_HIRING_SOURCES: EngHiringSource[] = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee'];
+export const ENG_HIRING_SOURCES: EngHiringSource[] = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday'];
 export const DEFAULT_ENG_HIRING_COMPANIES_LIMIT = 1000;
 export const DEFAULT_ENG_HIRING_MAX_COVERAGE_LIMIT = 25000;
 
@@ -76,6 +76,7 @@ type NormalizedAtsJob = {
 type NormalizeContext = {
   slug?: string;
   companyName?: string;
+  sourceUrl?: string;
 };
 
 const COUNTRY_NAME_BY_CODE: Record<string, string> = {
@@ -97,7 +98,7 @@ const MIN_ANNUAL_SALARY = 20_000;
 const MAX_ANNUAL_SALARY = 500_000;
 
 const B2B_TITLE_STRONG_RE =
-  /\b(account executive|account manager|business development(?: representative| manager| director| lead)?|sales development(?: representative| manager| lead)?|sales representative|sales manager|sales director|sales executive|sales lead|enterprise sales|commercial account|commercial relationship manager|channel sales|partnerships? manager|partnerships? director|partnership sales|partner manager|(?:manager|director|vp|head|lead),?\s+(?:of\s+)?partnerships?|\bsdr\b|\bbdr\b|go[-\s]?to[-\s]?market|\bgtm\b)\b/i;
+  /\b(account executive|\bae\b|account manager|account director|business development(?: representative| manager| director| lead)?|sales development(?: representative| manager| lead)?|revenue development(?: representative| manager| lead)?|sales representative|sales consultant|sales manager|sales director|sales executive|sales lead|enterprise sales|commercial account|commercial account executive|commercial account director|commercial relationship manager|client partner|channel sales|partnerships? manager|partnerships? director|partnership sales|partner sales|partner manager|(?:manager|director|vp|head|lead),?\s+(?:of\s+)?partnerships?|\bsdr\b|\bbdr\b|\brdr\b|go[-\s]?to[-\s]?market|\bgtm\b)\b/i;
 
 const B2B_TITLE_EXCLUDE_RE =
   /\b(psychiatrist|nurse|physician|clinical|therapist|engineer|engineering|developer|designer|product manager|program manager|project manager|field marketing|marketing event|content|community|people|hr|recruit|talent acquisition|finance|accounting|legal|operations|data scientist|security|customer support|technical support|teacher|warehouse|manufacturing|tax|audit|compliance|analyst|scrum master|assistant|administrator)\b/i;

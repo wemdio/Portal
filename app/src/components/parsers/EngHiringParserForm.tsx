@@ -17,6 +17,8 @@ const SOURCE_OPTIONS: { key: EngHiringSource; label: string }[] = [
   { key: 'workable', label: 'Workable' },
   { key: 'bamboohr', label: 'BambooHR' },
   { key: 'recruitee', label: 'Recruitee' },
+  { key: 'breezy', label: 'Breezy' },
+  { key: 'workday', label: 'Workday' },
 ];
 
 export function EngHiringParserForm({ onStart, busy }: Props) {
