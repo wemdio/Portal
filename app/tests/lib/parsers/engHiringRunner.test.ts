@@ -396,6 +396,66 @@ describe('runEngHiringParserJob cache-run resume', () => {
     expect(fetchJsonWithFallback).toHaveBeenCalledTimes(6);
   });
 
+  it('refreshes Workday boards through the public CXS POST endpoint', async () => {
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: {
+          text: 'commercial account director',
+          sources: ['workday'],
+          countries: ['gb'],
+          companies_limit: 1,
+          refresh_cache: true,
+          enrich: false,
+          max_results: 20,
+        },
+      }],
+      eng_hiring_cache_runs: [],
+      eng_hiring_cache: [],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+    fetchTextWithFallback.mockResolvedValue([
+      'name,slug,url',
+      'Acme,acme/acme_external,https://acme.wd5.myworkdayjobs.com/acme_external',
+    ].join('\n'));
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        total: 1,
+        jobPostings: [{
+          title: 'Commercial Account Director',
+          externalPath: '/job/UK-London-Office/Commercial-Account-Director_R2414',
+          locationsText: 'UK-London Office',
+          postedOn: 'Posted Today',
+          bulletFields: ['R2414'],
+        }],
+      }),
+    } as Response);
+
+    await runEngHiringParserJob('job-1');
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/acme_external/jobs',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"limit":100'),
+      }),
+    );
+    expect(db.state.eng_hiring_cache).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: 'workday',
+        source_company_slug: 'acme/acme_external',
+        vacancy_title: 'Commercial Account Director',
+        country_code: 'gb',
+      }),
+    ]));
+    fetchSpy.mockRestore();
+  });
+
   it('pushes country and recency filters into the cache query before text matching', async () => {
     const { runEngHiringParserJob, supabaseAdmin } = await loadRunner();
     const db = makeDb({

@@ -5,6 +5,7 @@ import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
+import { getReadEmailIds } from '@/lib/clientCampaignReplies/clientEmailReads';
 import type { ClientRepliesPage } from '@/lib/clientCampaignReplies/types';
 import { logError } from '@/lib/loggerServer';
 
@@ -26,7 +27,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
   if (result.auth.isDemo) return serveClientDemo(req);
-  const { accessRows } = result.auth;
+  const { accessRows, userId } = result.auth;
 
   const { id: campaignId } = await ctx.params;
   if (!isResourceAllowed(campaignId, accessRows, 'campaign')) {
@@ -57,6 +58,12 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     });
 
     const items = (data.items ?? []).map(mapInstantlyEmailToReply);
+    // «NEW»-бейдж берём из НАШЕЙ персональной прочитанности (client_email_reads),
+    // а не из общего флага Instantly: портал больше не вызывает markThreadAsRead,
+    // поэтому is_unread из Instantly здесь иначе залипал бы навсегда (как и в
+    // мигрированном /api/client/replies).
+    const readSet = await getReadEmailIds(userId, items.map((i) => i.id));
+    for (const it of items) it.is_unread = !readSet.has(it.id);
     const payload: ClientRepliesPage = {
       items,
       next_starting_after: data.next_starting_after ?? null,

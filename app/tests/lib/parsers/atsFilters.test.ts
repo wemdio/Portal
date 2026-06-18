@@ -25,6 +25,10 @@ describe('atsFilters — role keywords', () => {
     expect(re.test('Enterprise Account Executive')).toBe(true);
     expect(re.test('Business Development Manager')).toBe(true);
     expect(re.test('Sales Manager')).toBe(true);
+    expect(re.test('AE, Mid-Market')).toBe(true);
+    expect(re.test('Commercial Account Director')).toBe(true);
+    expect(re.test('Revenue Development Representative')).toBe(true);
+    expect(re.test('Client Partner, Enterprise')).toBe(true);
     expect(re.test('Engineering Manager')).toBe(false);
   });
 
@@ -57,6 +61,21 @@ describe('atsFilters — countries', () => {
     // Canadian province codes are not US states
     expect(re.test('Toronto, ON')).toBe(false);
     expect(re.test('Berlin, Germany')).toBe(false);
+  });
+
+  it('matches full state, province, country-code, and Workday-style locations across supported markets', () => {
+    expect(buildCountryRegex(['us'])!.test('Los Angeles, California')).toBe(true);
+    expect(buildCountryRegex(['us'])!.test('US-Remote')).toBe(true);
+    expect(buildCountryRegex(['ca'])!.test('Vancouver, British Columbia')).toBe(true);
+    expect(buildCountryRegex(['ca'])!.test('CA-Ontario-Toronto')).toBe(true);
+    expect(buildCountryRegex(['gb'])!.test('UK-London Office')).toBe(true);
+    expect(buildCountryRegex(['de'])!.test('DE-Berlin')).toBe(true);
+    expect(buildCountryRegex(['fr'])!.test('FR-Paris')).toBe(true);
+    expect(buildCountryRegex(['nl'])!.test('NL-Amsterdam')).toBe(true);
+    expect(buildCountryRegex(['ie'])!.test('IE-Dublin')).toBe(true);
+    expect(buildCountryRegex(['es'])!.test('ES-Madrid')).toBe(true);
+    expect(buildCountryRegex(['au'])!.test('Sydney, New South Wales')).toBe(true);
+    expect(buildCountryRegex(['sg'])!.test('SG-Singapore')).toBe(true);
   });
 
   it('remote matches remote postings', () => {

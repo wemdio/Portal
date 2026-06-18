@@ -39,6 +39,8 @@ const ENRICH_DELAY_MS = Math.max(0, Number(process.env.ENG_HIRING_ENRICH_DELAY_M
 const ENRICH_LIMIT = Math.max(0, Number(process.env.ENG_HIRING_ENRICH_LIMIT ?? '300'));
 const DETAIL_ENRICH_DELAY_MS = Math.max(0, Number(process.env.ENG_HIRING_DETAIL_DELAY_MS ?? '120'));
 const DETAIL_ENRICH_LIMIT = Math.max(0, Number(process.env.ENG_HIRING_DETAIL_LIMIT ?? '500'));
+const WORKDAY_PAGE_SIZE = 100;
+const WORKDAY_MAX_POSTINGS_PER_COMPANY = clampInteger(process.env.ENG_HIRING_WORKDAY_MAX_POSTINGS_PER_COMPANY, 200, 50, 1000);
 const CACHE_BATCH_SIZE = 250;
 const RESULT_BATCH_SIZE = 500;
 
@@ -131,6 +133,40 @@ async function fetchText(url: string): Promise<string> {
   });
 }
 
+async function fetchWorkdayPayloads(url: string): Promise<unknown[]> {
+  const payloads: unknown[] = [];
+  let offset = 0;
+  let total = WORKDAY_PAGE_SIZE;
+
+  while (offset < total && offset < WORKDAY_MAX_POSTINGS_PER_COMPANY) {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': UA,
+      },
+      body: JSON.stringify({
+        appliedFacets: {},
+        limit: WORKDAY_PAGE_SIZE,
+        offset,
+        searchText: '',
+      }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json() as Record<string, unknown>;
+    payloads.push(payload);
+    const count = Array.isArray(payload.jobPostings) ? payload.jobPostings.length : 0;
+    const rawTotal = Number(payload.total);
+    total = Number.isFinite(rawTotal) && rawTotal >= 0 ? rawTotal : offset + count;
+    if (count === 0) break;
+    offset += count;
+  }
+
+  return payloads;
+}
+
 function toCacheRow(v: EngHiringVacancy) {
   const now = new Date().toISOString();
   return {
@@ -161,17 +197,22 @@ function toCacheRow(v: EngHiringVacancy) {
 
 async function fetchSourceCacheRows(source: EngHiringSource, token: AtsCompanyToken): Promise<ReturnType<typeof toCacheRow>[]> {
   try {
-    const payload = await fetchJson(
-      postingsUrl(source, token.slug),
-      source === 'lever' ? LEVER_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
-    );
+    const payloads = source === 'workday'
+      ? await fetchWorkdayPayloads(postingsUrl(source, token.slug, token.url))
+      : [await fetchJson(
+        postingsUrl(source, token.slug, token.url),
+        source === 'lever' ? LEVER_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+      )];
     const rows: ReturnType<typeof toCacheRow>[] = [];
-    for (const raw of extractJobs(source, payload)) {
-      const vacancy = normalizeAtsJobToEngVacancy(source, raw, {
-        slug: token.slug,
-        companyName: token.name,
-      });
-      if (vacancy) rows.push(toCacheRow(vacancy));
+    for (const payload of payloads) {
+      for (const raw of extractJobs(source, payload)) {
+        const vacancy = normalizeAtsJobToEngVacancy(source, raw, {
+          slug: token.slug,
+          companyName: token.name,
+          sourceUrl: token.url,
+        });
+        if (vacancy) rows.push(toCacheRow(vacancy));
+      }
     }
     return rows;
   } catch {

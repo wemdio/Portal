@@ -10,6 +10,15 @@ export interface AtsCountry {
   match: string;
 }
 
+const TOKEN_START = String.raw`(?:^|[\s,;()/\-])`;
+const TOKEN_END = String.raw`(?=$|[\s,;()/\-])`;
+const locationToken = (value: string) => `${TOKEN_START}(?:${value})${TOKEN_END}`;
+
+const US_STATE_CODES = String.raw`(?:al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy)`;
+const US_STATE_NAMES = String.raw`(?:alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia)`;
+const CA_PROVINCES = String.raw`(?:alberta|british columbia|manitoba|new brunswick|newfoundland and labrador|nova scotia|ontario|prince edward island|quebec|saskatchewan|yukon|northwest territories|nunavut|ab|bc|mb|nb|nl|ns|nt|nu|on|pe|qc|sk|yt)`;
+const AU_STATES = String.raw`(?:new south wales|queensland|south australia|tasmania|victoria|western australia|australian capital territory|northern territory|nsw|qld|sa|tas|vic|wa|act|nt)`;
+
 // Country matching is best-effort: Ashby returns a structured country, Greenhouse
 // usually includes it in the location string, Lever often omits it.
 export const ATS_COUNTRIES: AtsCountry[] = [
@@ -32,6 +41,37 @@ export const ATS_COUNTRIES: AtsCountry[] = [
   { code: 'sg', label: 'Сингапур', match: 'singapore' },
   { code: 'remote', label: 'Remote', match: 'remote|anywhere|distributed' },
 ];
+
+const COUNTRY_MATCH_OVERRIDES: Record<string, string> = {
+  us: [
+    'united states(?: of america)?',
+    locationToken(String.raw`u\.?s\.?a?\.?`),
+    `,\\s*${US_STATE_CODES}\\b`,
+    `\\b${US_STATE_NAMES}\\b`,
+  ].join('|'),
+  gb: [
+    'united kingdom',
+    locationToken(String.raw`u\.?k\.?|gb|gbr`),
+    'england|scotland|wales|northern ireland|london|manchester|birmingham|edinburgh',
+  ].join('|'),
+  ca: [
+    'canada',
+    String.raw`\bCA[-/](?:${CA_PROVINCES})\b`,
+    `\\b${CA_PROVINCES}\\b`,
+    'toronto|vancouver|montreal|montrÃ©al|ottawa|calgary',
+  ].join('|'),
+  de: ['germany|deutschland', locationToken('de|deu'), 'berlin|munich|mÃ¼nchen|hamburg|frankfurt|cologne|kÃ¶ln'].join('|'),
+  fr: ['france', locationToken('fr|fra'), 'paris|lyon|marseille|toulouse'].join('|'),
+  nl: ['netherlands|holland|nederland', locationToken('nl|nld'), 'amsterdam|rotterdam|utrecht|eindhoven'].join('|'),
+  ie: ['ireland', locationToken('ie|irl'), 'dublin|cork|galway|limerick'].join('|'),
+  es: ['spain|espaÃ±a', locationToken('es|esp'), 'madrid|barcelona|valencia|seville|sevilla'].join('|'),
+  au: ['australia', locationToken('au|aus'), `\\b${AU_STATES}\\b`, 'sydney|melbourne|brisbane|perth|adelaide|canberra'].join('|'),
+  sg: ['singapore', locationToken('sg|sgp')].join('|'),
+};
+
+for (const country of ATS_COUNTRIES) {
+  country.match = COUNTRY_MATCH_OVERRIDES[country.code] ?? country.match;
+}
 
 const COUNTRY_BY_CODE = new Map<string, AtsCountry>(ATS_COUNTRIES.map((c) => [c.code, c]));
 
@@ -69,6 +109,25 @@ const B2B_ROLE_EXPANSION = [
   'bdr',
 ];
 
+const B2B_ROLE_EXPANSION_EXTRA = [
+  '\\bae\\b',
+  'account director',
+  'account manager',
+  'revenue development',
+  'revenue development representative',
+  'sales representative',
+  'sales consultant',
+  'commercial account',
+  'commercial account director',
+  'commercial account executive',
+  'client partner',
+  'partner sales',
+  'partner manager',
+  'rdr',
+  'go[-\\s]?to[-\\s]?market',
+  'gtm',
+];
+
 /** Compile a RegExp matching a job location against selected country codes (null = no geo filter). */
 export function buildCountryRegex(codes?: string[] | null): RegExp | null {
   if (!codes || codes.length === 0) return null;
@@ -87,7 +146,7 @@ export function buildRolesRegex(roles?: string | null): RegExp {
     .filter(Boolean)
     .flatMap((s) => {
       const escaped = s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      return /\bb2b\b/i.test(s) ? [escaped, ...B2B_ROLE_EXPANSION] : [escaped];
+      return /\bb2b\b/i.test(s) ? [escaped, ...B2B_ROLE_EXPANSION, ...B2B_ROLE_EXPANSION_EXTRA] : [escaped];
     });
   if (parts.length === 0) return /.*/;
   return new RegExp(parts.join('|'), 'i');

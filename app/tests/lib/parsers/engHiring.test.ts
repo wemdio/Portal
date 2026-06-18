@@ -340,6 +340,69 @@ Own B2B client communications and revenue expansion for enterprise accounts.
       country_code: 'us',
     });
   });
+
+  it('normalizes Breezy vacancies with dates, locations, and salary text', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'breezy',
+      {
+        id: 'e63605aeb81c',
+        name: 'Enterprise Account Executive',
+        url: 'https://acme.breezy.hr/p/e63605aeb81c-enterprise-account-executive',
+        published_date: '2026-06-04T23:24:11.988Z',
+        location: {
+          country: { name: 'United States', id: 'US' },
+          state: { id: 'CA', name: 'California' },
+          city: 'San Francisco',
+          name: 'San Francisco, CA',
+        },
+        salary: '$120k - $180k',
+        company: { name: 'Acme' },
+      },
+      { slug: 'acme', companyName: 'Acme fallback' },
+    );
+
+    expect(vacancy).toMatchObject({
+      source: 'breezy',
+      source_company_slug: 'acme',
+      source_job_id: 'e63605aeb81c',
+      company_name: 'Acme',
+      vacancy_title: 'Enterprise Account Executive',
+      country_code: 'us',
+      salary_from: 120000,
+      salary_to: 180000,
+      salary_currency: 'USD',
+    });
+  });
+
+  it('normalizes Workday vacancies from CXS job postings', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'workday',
+      {
+        title: 'Commercial Account Director',
+        externalPath: '/job/UK-London-Office/Commercial-Account-Director_R2414',
+        locationsText: 'UK-London Office',
+        postedOn: 'Posted 2 Days Ago',
+        bulletFields: ['R2414'],
+      },
+      {
+        slug: 'acme/acme_external',
+        companyName: 'Acme',
+        sourceUrl: 'https://acme.wd5.myworkdayjobs.com/acme_external',
+      },
+    );
+
+    expect(vacancy).toMatchObject({
+      source: 'workday',
+      source_company_slug: 'acme/acme_external',
+      source_job_id: 'Commercial-Account-Director_R2414',
+      company_name: 'Acme',
+      vacancy_title: 'Commercial Account Director',
+      vacancy_url: 'https://acme.wd5.myworkdayjobs.com/acme_external/job/UK-London-Office/Commercial-Account-Director_R2414',
+      careers_url: 'https://acme.wd5.myworkdayjobs.com/acme_external',
+      country_code: 'gb',
+    });
+    expect(vacancy?.published_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
 });
 
 describe('engHiring cache filtering', () => {
@@ -415,6 +478,21 @@ describe('engHiring cache filtering', () => {
       ...base,
       vacancy_title: 'Senior Director, Partnerships',
       vacancy_description: 'Own strategic partnerships with enterprise accounts.',
+    }, config)).toBe(true);
+    expect(matchesEngHiringVacancy({
+      ...base,
+      vacancy_title: 'Commercial Account Director',
+      vacancy_description: 'Own B2B expansion across enterprise customers.',
+    }, config)).toBe(true);
+    expect(matchesEngHiringVacancy({
+      ...base,
+      vacancy_title: 'Revenue Development Representative',
+      vacancy_description: 'Create outbound pipeline for sales teams.',
+    }, config)).toBe(true);
+    expect(matchesEngHiringVacancy({
+      ...base,
+      vacancy_title: 'Client Partner, Enterprise',
+      vacancy_description: 'Own strategic B2B relationships.',
     }, config)).toBe(true);
     expect(matchesEngHiringVacancy({
       ...base,
