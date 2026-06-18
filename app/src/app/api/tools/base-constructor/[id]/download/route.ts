@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
-import { rowsToCsv } from '@/lib/tools/rowsToCsv';
+import { rowsToCsvFile } from '@/lib/tools/rowsToCsv';
 
 const admin = supabaseAdmin!;
 
@@ -42,8 +42,9 @@ export async function GET(
       if (job.user_id !== user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
       const rows = Array.isArray(job.data) ? (job.data as unknown[][]) : [];
-      // Prepend BOM so Excel opens UTF-8 correctly (matches the old client blob).
-      const csv = '﻿' + rowsToCsv(rows);
+      // rowsToCsvFile prepends a UTF-8 BOM so Excel opens it correctly (matches
+      // the old client blob); the BOM is covered by rowsToCsv.test.ts.
+      const csv = rowsToCsvFile(rows);
       const filename = `constructor_${new Date().toISOString().slice(0, 10)}.csv`;
 
       return new NextResponse(csv, {

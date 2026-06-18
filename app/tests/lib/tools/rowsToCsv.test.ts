@@ -1,4 +1,4 @@
-import { rowsToCsv } from '@/lib/tools/rowsToCsv';
+import { rowsToCsv, rowsToCsvFile } from '@/lib/tools/rowsToCsv';
 
 describe('rowsToCsv', () => {
   it('quotes every cell and joins with comma / newline', () => {
@@ -17,6 +17,12 @@ describe('rowsToCsv', () => {
     expect(rowsToCsv([['a,b', 'c\nd']])).toBe('"a,b","c\nd"');
   });
 
+  it('coerces non-string cells via String() — locks the intended behavior', () => {
+    // In practice cells are string[][], but lock the coercion so it can't silently
+    // change: legacy (c||'') blanked 0/false; String(c??'') preserves them.
+    expect(rowsToCsv([[0, false, 'x']])).toBe('"0","false","x"');
+  });
+
   it('matches the legacy client-side build byte-for-byte', () => {
     // Old code: jobData.map(row => row.map(c => `"${(c||'').replace(/"/g,'""')}"`).join(',')).join('\n')
     const rows = [
@@ -28,5 +34,22 @@ describe('rowsToCsv', () => {
       .map((row) => row.map((c) => `"${(c || '').replace(/"/g, '""')}"`).join(','))
       .join('\n');
     expect(rowsToCsv(rows)).toBe(legacy);
+  });
+});
+
+describe('rowsToCsvFile', () => {
+  it('prepends a UTF-8 BOM (U+FEFF) so Excel detects UTF-8', () => {
+    const out = rowsToCsvFile([['a', 'b']]);
+    expect(out.charCodeAt(0)).toBe(0xfeff);
+    expect(out).toBe('﻿"a","b"');
+  });
+
+  it('is exactly BOM + rowsToCsv body', () => {
+    const rows = [['компания', 'сайт'], ['Ромашка', 'r.ru']];
+    expect(rowsToCsvFile(rows)).toBe('﻿' + rowsToCsv(rows));
+  });
+
+  it('still emits the BOM for an empty result', () => {
+    expect(rowsToCsvFile([])).toBe('﻿');
   });
 });

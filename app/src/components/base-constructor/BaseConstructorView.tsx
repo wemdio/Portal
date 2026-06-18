@@ -352,7 +352,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const [error, setError] = useState('');
 
   const [activeJob, setActiveJob] = useState<ConstructorJob | null>(null);
-  const [jobData, setJobData] = useState<string[][] | null>(null);
+  // Full result blob, cached lazily for the admin "Открыть в базах" flow. Keyed by
+  // job id so a job switch during an in-flight fetch can't hand back another job's rows.
+  const fullDataCacheRef = useRef<{ id: string; rows: string[][] } | null>(null);
   const [previewData, setPreviewData] = useState<string[][] | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [loadingFull, setLoadingFull] = useState(false);
@@ -516,7 +518,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   // Preview = first ~20 rows only. The result blob can be tens of MB, so we never
   // pull the whole thing just to render the preview table or enable download.
   async function loadJobPreview(jobId: string) {
-    setJobData(null);
+    fullDataCacheRef.current = null;
     setPreviewData(null);
     const res = await authFetch(`/api/tools/base-constructor/${jobId}/data?preview=21`);
     if (!res.ok) return;
@@ -526,12 +528,15 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   // Full result, fetched lazily — only the admin "Открыть в базах" flow needs all rows.
   async function ensureFullData(jobId: string): Promise<string[][] | null> {
-    if (jobData) return jobData;
+    // Cache is keyed by job id — never return another job's rows if the user
+    // switched jobs while a previous full fetch was still in flight.
+    const cached = fullDataCacheRef.current;
+    if (cached && cached.id === jobId) return cached.rows;
     const res = await authFetch(`/api/tools/base-constructor/${jobId}/data`);
     if (!res.ok) return null;
     const { data } = await res.json();
     const rows = (data as string[][]) || null;
-    setJobData(rows);
+    if (rows) fullDataCacheRef.current = { id: jobId, rows };
     return rows;
   }
 
@@ -805,7 +810,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   function resetForm() {
     setActiveJob(null);
-    setJobData(null);
+    fullDataCacheRef.current = null;
     setPreviewData(null);
     setFileData(null);
     setFileName('');

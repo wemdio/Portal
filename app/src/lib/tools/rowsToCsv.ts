@@ -12,3 +12,12 @@ export function rowsToCsv(rows: ReadonlyArray<ReadonlyArray<unknown>>): string {
     .map((row) => row.map((cell) => `"${String(cell ?? '').replace(/"/g, '""')}"`).join(','))
     .join('\n');
 }
+
+/**
+ * CSV ready to be written as a downloadable file: a UTF-8 BOM (so Excel detects
+ * UTF-8) followed by the rowsToCsv body. Kept here — not inlined in the download
+ * route — so the BOM is covered by tests (rowsToCsv.test.ts).
+ */
+export function rowsToCsvFile(rows: ReadonlyArray<ReadonlyArray<unknown>>): string {
+  return '﻿' + rowsToCsv(rows);
+}
