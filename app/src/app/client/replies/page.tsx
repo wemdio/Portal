@@ -507,9 +507,9 @@ function LeadCard({
           {statusLabel}
         </span>
         {(lead.message_count ?? 0) > 1 && (
-          <span className="text-[10px] font-semibold shrink-0" style={{ color: 'var(--cp-paper-faint)' }} title="Писем в переписке">
+          <span className="text-[10px] font-semibold shrink-0" style={{ color: 'var(--cp-paper-faint)' }} title="Ответов лида в переписке">
             <span className="ds-mono tabular-nums">{lead.message_count}</span>{' '}
-            {plural(lead.message_count ?? 0, 'письмо', 'письма', 'писем')}
+            {plural(lead.message_count ?? 0, 'ответ лида', 'ответа лида', 'ответов лида')}
           </span>
         )}
         <p className="text-xs truncate min-w-0" style={{ color: 'var(--cp-paper-mute)' }}>
@@ -795,9 +795,15 @@ function RepliesPageContent() {
             <p className="text-sm font-bold mb-1" style={{ color: 'var(--cp-paper)' }}>
               {status === 'unread'
                 ? 'Нет непрочитанных ответов'
-                : status === 'leads'
-                  ? 'В этой выборке нет помеченных лидов'
-                  : `Ничего не найдено по запросу «${query}»`}
+                : status === 'needs_reply'
+                  ? 'Нет переписок, требующих ответа'
+                  : status === 'answered'
+                    ? 'Нет отвеченных переписок'
+                    : status === 'leads'
+                      ? 'В этой выборке нет помеченных лидов'
+                      : query
+                        ? `Ничего не найдено по запросу «${query}»`
+                        : 'Ничего не найдено'}
             </p>
             <p className="text-xs mb-4" style={{ color: 'var(--cp-paper-mute)' }}>
               Попробуйте изменить фильтр или сбросить поиск.

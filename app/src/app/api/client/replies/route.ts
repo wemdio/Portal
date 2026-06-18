@@ -91,11 +91,15 @@ function itemTimestamp(item: LeadListItem): number {
 }
 
 function dedupeKey(item: LeadListItem): string {
+  // У каждого живого ответа есть уникальный email_id — дедупим по нему. Иначе два
+  // РАЗНЫХ письма с одинаковым timestamp_email (автоответ+ответ, batch-доставка)
+  // схлопнулись бы по ключу campaign:email:timestamp → терялось письмо и занижался
+  // message_count. Timestamp-ключ остаётся фоллбэком, когда email_id нет.
+  if (item.email_id) return `email:${item.email_id}`;
   const email = item.lead_email.trim().toLowerCase();
   if (item.campaign_id && email && item.reply_timestamp) {
     return `reply:${item.campaign_id}:${email}:${item.reply_timestamp}`;
   }
-  if (item.email_id) return `email:${item.email_id}`;
   return `${item.source}:${item.id}`;
 }
 
@@ -122,9 +126,15 @@ function conversationKey(item: LeadListItem): string {
 /**
  * Схлопывает per-email строки в ПЕРЕПИСКИ: одна строка на тред/лид. items уже
  * отсортированы свежими-первыми, поэтому первый встреченный в группе = последнее
- * входящее (representative); его is_unread/is_answered и задают статус переписки
- * («ответил ли я на ТЕКУЩИЙ вопрос лида»). message_count — число входящих в
- * треде; is_lead — если хоть одно письмо треда помечено лидом.
+ * входящее (representative) — его subject/body/timestamp идут в превью.
+ *
+ * Статус переписки агрегируется по ВСЕМ входящим треда (а не только по
+ * последнему), чтобы старый неотвеченный/непрочитанный вопрос лида не прятался
+ * за более свежим прочитанным/отвеченным письмом:
+ *   - is_unread  = есть ХОТЬ ОДНО непрочитанное входящее (OR);
+ *   - is_answered = ответили на ВСЕ входящие (AND);
+ *   - is_lead    = хоть одно письмо треда помечено лидом (OR).
+ * message_count — число входящих в треде (в пределах подтянутого окна).
  */
 function groupByConversation(items: LeadListItem[]): LeadListItem[] {
   const byKey = new Map<string, LeadListItem>();
@@ -133,8 +143,13 @@ function groupByConversation(items: LeadListItem[]): LeadListItem[] {
     const key = conversationKey(item);
     counts.set(key, (counts.get(key) ?? 0) + 1);
     const rep = byKey.get(key);
-    if (!rep) byKey.set(key, item);
-    else if (item.is_lead) rep.is_lead = true;
+    if (!rep) {
+      byKey.set(key, item);
+    } else {
+      if (item.is_lead) rep.is_lead = true;
+      if (item.is_unread) rep.is_unread = true;
+      if (item.is_answered !== true) rep.is_answered = false;
+    }
   }
   const out: LeadListItem[] = [];
   for (const [key, rep] of byKey) {
@@ -423,19 +438,31 @@ export async function GET(req: NextRequest) {
   // его бы не нашёл (enrich заполняет lead_name только когда оно пустое).
   if (search) await enrichFromSyncedLeads(userId, merged);
 
-  // Одна строка на ПЕРЕПИСКУ (тред/лид), а не на каждое входящее письмо: статус
-  // берём по ПОСЛЕДНЕМУ входящему — это и есть «ответил ли я на текущий вопрос».
-  const conversations = groupByConversation(merged);
+  // Поиск — по ВСЕМ письмам треда (email/имя/тема/текст ЛЮБОГО сообщения), затем
+  // схлопываем уцелевшие треды в переписки. Иначе совпадение в старом письме
+  // треда терялось бы, т.к. в группе остаётся только последнее. (Серверный поиск
+  // Instantly ищет лишь по email — поэтому фильтруем у себя.)
+  const preMatched = search
+    ? (() => {
+        const hitKeys = new Set(
+          merged.filter((i) => matchesSearch(i, search)).map((i) => conversationKey(i)),
+        );
+        return merged.filter((i) => hitKeys.has(conversationKey(i)));
+      })()
+    : merged;
 
-  const searched = search ? conversations.filter((i) => matchesSearch(i, search)) : conversations;
+  // Одна строка на ПЕРЕПИСКУ (тред/лид); статус агрегируется по всем входящим.
+  const searched = groupByConversation(preMatched);
 
   const filtered = statusFilter === 'unread'
     ? searched.filter((i) => i.is_unread === true)
     : statusFilter === 'answered'
-      ? searched.filter((i) => i.is_answered === true)
+      // Отвечено = ответили на все входящие и это не лид (лиды — в своей вкладке).
+      ? searched.filter((i) => i.is_answered === true && i.is_lead !== true)
       : statusFilter === 'needs_reply'
-        // Требует ответа = на последний вопрос лида ещё не отвечено (и это не лид).
-        ? searched.filter((i) => i.is_answered !== true && i.is_lead !== true)
+        // Требует ответа = прочитано, но не отвечено и не лид. Непрочитанные — в
+        // «Непрочитано»: так содержимое вкладки совпадает с красным бейджом.
+        ? searched.filter((i) => i.is_answered !== true && i.is_lead !== true && i.is_unread !== true)
         : statusFilter === 'leads'
           ? searched.filter((i) => i.is_lead === true)
           : searched;

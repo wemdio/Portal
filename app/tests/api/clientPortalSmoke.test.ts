@@ -961,17 +961,57 @@ describe('Client Portal — empty new-user state', () => {
     expect(body.items[0]?.email_id).toBe('email-new');
     expect(body.items[0]?.message_count).toBe(2);
 
-    // needs_reply: unanswered, non-lead conversation appears.
+    // unread: a conversation with ANY unread inbound shows up (OR-aggregate).
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    res = await GET(makeReq('http://x/api/client/replies?status=unread'));
+    body = (await (res as Response).json()) as { items: unknown[]; total: number };
+    expect(body.total).toBe(1);
+
+    // needs_reply = ПРОЧИТАНО, но без ответа. Тут письма непрочитаны (не открывали)
+    // → исключены из «Требует ответа» (они в «Непрочитано»), чтобы вкладка
+    // совпадала с красным бейджом.
     mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
     res = await GET(makeReq('http://x/api/client/replies?status=needs_reply'));
     body = (await (res as Response).json()) as { items: unknown[]; total: number };
-    expect(body.total).toBe(1);
+    expect(body.total).toBe(0);
 
     // answered: nothing answered (empty client_email_replies) → empty.
     mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
     res = await GET(makeReq('http://x/api/client/replies?status=answered'));
     body = (await (res as Response).json()) as { items: unknown[]; total: number };
     expect(body.total).toBe(0);
+  });
+
+  it('GET /replies does not collapse two distinct emails sharing a timestamp (dedupe by email_id)', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValue({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    const ts = '2026-05-19T10:00:00.000Z';
+    const items = [
+      {
+        id: 'dup-1', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't9', lead: 'l9',
+        subject: 'A', body: { text: 'a' }, from_address_email: 'x@y.com',
+        from_address_json: [{ address: 'x@y.com', name: 'X' }], timestamp_email: ts, ue_type: 2,
+      },
+      {
+        id: 'dup-2', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't9', lead: 'l9',
+        subject: 'B', body: { text: 'b' }, from_address_email: 'x@y.com',
+        from_address_json: [{ address: 'x@y.com', name: 'X' }], timestamp_email: ts, ue_type: 2,
+      },
+    ];
+    const { GET } = await import('@/app/api/client/replies/route');
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    const res = await GET(makeReq('http://x/api/client/replies'));
+    expect((res as Response).status).toBe(200);
+    const body = (await (res as Response).json()) as {
+      items: Array<{ message_count?: number }>; total: number;
+    };
+    expect(body.total).toBe(1); // one conversation
+    expect(body.items[0]?.message_count).toBe(2); // both same-timestamp emails counted
   });
 
   it('GET /bases returns campaigns: [] when no campaigns granted', async () => {
