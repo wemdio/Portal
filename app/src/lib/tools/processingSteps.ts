@@ -55,7 +55,12 @@ const ENRICH_CONCURRENCY = 5;
 const ENRICH_PER_SITE_TIMEOUT_MS = 60_000;
 const SITE_CHECK_BATCH = 50;
 const TA_BATCH = 10;
-const CLEANUP_BATCH = 100;
+// 50, не 100: на батче в 100 компаний модель `policy/cleanup` упиралась в лимит
+// выходных токенов и ОБРЫВАЛА JSON на полпути (~55 из 100) → невалидный JSON →
+// парсер падал, а text-fallback писал сырой блоб в ячейку. Меньший батч с
+// запасом влезает в ответ. parseCleanupResponseJson дополнительно умеет
+// доставать элементы из оборванного ответа (truncation salvage).
+const CLEANUP_BATCH = 50;
 const PERSONALIZATION_BATCH = 5;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY = 1500;
@@ -202,6 +207,29 @@ export interface StepFindEmailsOptions {
   onCheckpoint?: CheckpointFn;
 }
 
+// Хосты, которые НЕ имеет смысла скрейпить: job-борды/агрегаторы с антиботом.
+// Это не сайт компании — описаний/почт там не достать (отдаёт «Произошла
+// ошибка…cookie»), только мусор + трата времени. «Обогатить» и «Найти email»
+// пропускают такие строки. Жёсткий пол на случай, если hh.ru всё же просочился
+// в колонку «сайт» (старый файл, чужой источник, проигнорированное warning).
+const NON_SCRAPEABLE_HOSTS: readonly string[] = [
+  'hh.ru', 'headhunter.ru',
+  'superjob.ru', 'rabota.ru', 'zarplata.ru', 'trudvsem.ru', 'gorodrabot.ru',
+];
+
+function hostOf(raw: string): string {
+  let v = (raw ?? '').trim().toLowerCase();
+  if (!v) return '';
+  if (!/^https?:\/\//.test(v)) v = `https://${v}`;
+  try { return new URL(v).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
+export function isNonScrapeableHost(raw: string): boolean {
+  const host = hostOf(raw);
+  if (!host) return false;
+  return NON_SCRAPEABLE_HOSTS.some((d) => host === d || host.endsWith(`.${d}`));
+}
+
 export async function stepFindEmails(
   data: string[][],
   onProgress: ProgressFn,
@@ -245,7 +273,7 @@ export async function stepFindEmails(
   // Для 'separate' это значит «не перезатираем найденный ранее scrape-результат».
   const toProcess = body
     .map((row, i) => ({ row, i, url: getPreferredSiteUrl(row, siteColumnIndexes) }))
-    .filter((r) => r.url && !extractEmail(r.row[targetIdx] || ''));
+    .filter((r) => r.url && !extractEmail(r.row[targetIdx] || '') && !isNonScrapeableHost(r.url));
 
   if (toProcess.length === 0) { await onProgress(100); return [header, ...body]; }
 
@@ -343,6 +371,23 @@ async function checkSite(url: string): Promise<boolean> {
   finally { clearTimeout(timeout); }
 }
 
+// Эвристика «похоже на сайт»: непустое значение без '@' (т.е. не email) с доменом
+// вида name.tld (точка + 2+ буквы, в т.ч. кириллических — .рф). Лояльная: любой
+// реальный домен проходит, а email / название / пустышка — нет.
+export function looksLikeSite(raw: string): boolean {
+  const v = (raw ?? '').trim();
+  if (!v || v.includes('@')) return false;
+  return /\.[a-zа-яё]{2,}(?:[/?:#]|$)/.test(v.toLowerCase());
+}
+
+// Защита от «тихого убийства базы»: если в колонке «сайт» почти нет значений,
+// похожих на сайт (например, туда по ошибке сопоставили email или название) —
+// check_sites удалил бы ВСЕ строки (каждое «не-сайт» не открывается → строка
+// «мёртвая»). Вместо пустого результата падаем с понятной ошибкой, а входные
+// данные остаются нетронутыми (клиент правит маппинг и перезапускает).
+const SITE_GUARD_MIN_ROWS = 5;             // не судим по слишком мелкой выборке
+const SITE_GUARD_MIN_SITE_FRACTION = 0.2;  // <20% похожих на сайт ⇒ колонка не та
+
 export async function stepSiteCheck(
   data: string[][],
   onProgress: ProgressFn,
@@ -355,6 +400,19 @@ export async function stepSiteCheck(
 
   const keep: boolean[] = new Array(body.length).fill(true);
   const toCheck = body.map((row, i) => ({ url: (row[siteIdx] || '').trim(), i })).filter((r) => r.url);
+
+  // Гард: колонка «сайт» не похожа на сайты ⇒ не вычищаем всю базу молча.
+  if (toCheck.length >= SITE_GUARD_MIN_ROWS) {
+    const siteLike = toCheck.reduce((n, r) => (looksLikeSite(r.url) ? n + 1 : n), 0);
+    if (siteLike / toCheck.length < SITE_GUARD_MIN_SITE_FRACTION) {
+      throw new Error(
+        `«Проверка сайтов»: колонка «сайт» не похожа на сайты ` +
+          `(только ${siteLike} из ${toCheck.length} значений выглядят как сайт). ` +
+          `Похоже, в эту колонку попали не сайты — например, email или название компании. ` +
+          `Проверьте сопоставление колонок и запустите заново; база не тронута.`,
+      );
+    }
+  }
 
   for (let batch = 0; batch < toCheck.length; batch += SITE_CHECK_BATCH) {
     if (isCancelled && await isCancelled()) throw new Error('Отменено');
@@ -394,7 +452,7 @@ export async function stepEnrich(
 
   const toProcess = newBody
     .map((row, i) => ({ row, i, url: (row[siteIdx] || '').trim() }))
-    .filter((r) => r.url && !(r.row[targetDescIdx] || '').trim());
+    .filter((r) => r.url && !(r.row[targetDescIdx] || '').trim() && !isNonScrapeableHost(r.url));
 
   if (toProcess.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 
@@ -654,25 +712,47 @@ export function parseCleanupResponseJson(
     }
   }
 
-  if (!parsed || typeof parsed !== 'object') return null;
-  const cleaned = (parsed as { cleaned?: unknown }).cleaned;
-  if (!Array.isArray(cleaned)) return null;
+  const cleaned =
+    parsed && typeof parsed === 'object'
+      ? (parsed as { cleaned?: unknown }).cleaned
+      : null;
 
-  // idx в JSON — 0-based (натурально для разработчика), а в map ключи 1-based
-  // (так лукапит существующий stepNameCleanup: cleanedMap.get(i + 1)).
-  // Транслируем idx → idx+1 при записи.
-  const result = new Map<number, string>();
-  for (const item of cleaned) {
-    if (!item || typeof item !== 'object') continue;
-    const { idx, name } = item as { idx?: unknown; name?: unknown };
-    if (typeof idx !== 'number' || !Number.isInteger(idx) || idx < 0) continue;
-    if (typeof name !== 'string') continue;
-    const trimmed = name.trim();
-    if (!trimmed) continue;
-    const stripped = stripNumberPrefix(trimmed);
-    if (stripped) result.set(idx + 1, stripped);
+  if (Array.isArray(cleaned)) {
+    // idx в JSON — 0-based (натурально для разработчика), а в map ключи 1-based
+    // (так лукапит существующий stepNameCleanup: cleanedMap.get(i + 1)).
+    // Транслируем idx → idx+1 при записи.
+    const result = new Map<number, string>();
+    for (const item of cleaned) {
+      if (!item || typeof item !== 'object') continue;
+      const { idx, name } = item as { idx?: unknown; name?: unknown };
+      if (typeof idx !== 'number' || !Number.isInteger(idx) || idx < 0) continue;
+      if (typeof name !== 'string') continue;
+      const trimmed = name.trim();
+      if (!trimmed) continue;
+      const stripped = stripNumberPrefix(trimmed);
+      if (stripped) result.set(idx + 1, stripped);
+    }
+    if (result.size > 0) return result;
   }
-  return result.size > 0 ? result : null;
+
+  // 4) Truncation salvage. Модель часто ОБРЫВАЕТ ответ на полпути (упирается в
+  //    лимит выходных токенов на батче), валидного JSON нет вовсе, и шаги 1-3
+  //    дают null. Достаём по отдельности все ПОЛНОСТЬЮ закрытые пары
+  //    "idx":N,"name":"...", восстанавливая префикс до точки обрыва. Без этого
+  //    весь батч терялся, а text-fallback писал сырой JSON-блоб в ячейку
+  //    «компания» (баг, видимый в выгрузке клиента 17.06).
+  const salvaged = new Map<number, string>();
+  const ITEM_RE = /"idx"\s*:\s*(\d+)\s*,\s*"name"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = ITEM_RE.exec(content)) !== null) {
+    const idx = Number(m[1]);
+    if (!Number.isInteger(idx) || idx < 0) continue;
+    let name = m[2];
+    try { name = JSON.parse(`"${name}"`) as string; } catch { /* оставляем сырой */ }
+    const stripped = stripNumberPrefix(name.trim());
+    if (stripped) salvaged.set(idx + 1, stripped);
+  }
+  return salvaged.size > 0 ? salvaged : null;
 }
 
 /**
@@ -718,7 +798,11 @@ export function parseCleanupResponse(
   );
   const positional = new Map<number, string>();
   for (let j = 0; j < cleanLines.length && j < expectedCount; j += 1) {
-    if (cleanLines[j]) positional.set(j + 1, cleanLines[j]);
+    const line = cleanLines[j];
+    // Защита от порчи данных: строки, похожие на JSON ({…}/[…]) или аномально
+    // длинные (>120) — это почти наверняка сырой ответ модели, а не название
+    // компании. Раньше такой блоб целиком писался в ячейку «компания».
+    if (line && line.length <= 120 && !/^[[{]/.test(line)) positional.set(j + 1, line);
   }
   return positional;
 }

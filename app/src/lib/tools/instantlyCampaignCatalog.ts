@@ -8,7 +8,7 @@ import {
   listInstantlyAccounts,
   getInstantlyAccountApiKey,
 } from '@/lib/instantly/accounts';
-import { getCampaignAnalytics } from '@/lib/instantly/client';
+import { getCampaignAnalytics, listEmails } from '@/lib/instantly/client';
 import {
   iterateInstantlyCampaignPages,
   type InstantlyCampaignItem,
@@ -305,6 +305,111 @@ export async function syncInstantlyCampaignAnalytics(): Promise<{ rows: number }
   return { rows };
 }
 
+// ── Точный счётчик ответов из /emails ──────────────────────────────────────
+const ACTUAL_REPLY_STALE_MS = 20 * 60 * 60 * 1000; // ~раз в сутки на кампанию
+const ACTUAL_REPLY_MAX_PER_RUN = 6; // спред нагрузки на /emails по часовым прогонам
+const ACTUAL_REPLY_THROTTLE_MS = 10_000; // пауза между /emails-вызовами (общий workspace-лимит ~10 RPM, квалификатор берёт ~2/мин)
+const ACTUAL_REPLY_MAX_PAGES = 30; // потолок страниц на кампанию (≤3000 входящих)
+
+function delayMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Уникальных ответивших лидов по кампании из /emails (received), с паузами. */
+async function countUniqueRepliers(campaignId: string, accountId: string): Promise<number> {
+  const leads = new Set<string>();
+  let after: string | undefined;
+  for (let page = 0; page < ACTUAL_REPLY_MAX_PAGES; page++) {
+    const res = await listEmails(
+      { campaign_id: campaignId, email_type: 'received', limit: 100, starting_after: after },
+      { accountId },
+    );
+    const items = res.items ?? [];
+    for (const e of items) {
+      const lead = (e as { lead?: unknown }).lead;
+      if (typeof lead === 'string' && lead) leads.add(lead.toLowerCase());
+    }
+    after = res.next_starting_after || undefined;
+    if (!after || items.length === 0) break;
+    await delayMs(ACTUAL_REPLY_THROTTLE_MS);
+  }
+  return leads.size;
+}
+
+/**
+ * Пересчитывает РЕАЛЬНЫХ уникальных ответивших по КЛИЕНТСКИМ кампаниям из
+ * /emails → catalog.actual_reply_count. Зачем: analytics reply_count
+ * недосчитывает (многопереписочные кампании, см. аудит 17.06); /emails —
+ * единственный полный источник, но rate-limited (общий workspace-лимит с
+ * квалификатором). Поэтому: только кампании из client_instantly_access, не чаще
+ * раза в сутки на кампанию (ACTUAL_REPLY_STALE_MS), максимум
+ * ACTUAL_REPLY_MAX_PER_RUN за прогон (спред по часам), с паузами между всеми
+ * /emails-вызовами. Вызывается из часового analytics-планировщика outreach-воркера.
+ */
+export async function syncActualReplyCounts(): Promise<{ updated: number }> {
+  if (!supabaseAdmin) return { updated: 0 };
+
+  // 1. Клиентские кампании (что клиенты видят в отчётах) + их Instantly-аккаунт.
+  const { data: access, error: accessErr } = await supabaseAdmin
+    .from('client_instantly_access')
+    .select('resource_id, instantly_account_id')
+    .eq('resource_type', 'campaign');
+  if (accessErr || !access?.length) return { updated: 0 };
+
+  const accountByCampaign = new Map<string, string>();
+  for (const r of access as Array<{ resource_id: string; instantly_account_id: string | null }>) {
+    if (r.resource_id && !accountByCampaign.has(r.resource_id)) {
+      accountByCampaign.set(r.resource_id, r.instantly_account_id || 'main');
+    }
+  }
+  const campaignIds = [...accountByCampaign.keys()];
+  if (campaignIds.length === 0) return { updated: 0 };
+
+  // 2. Кого пересчитывать: actual_reply_synced_at протух (>порога) или NULL,
+  //    самые старые/непосчитанные первыми, максимум N за прогон.
+  const { data: catRows } = await supabaseAdmin
+    .from('instantly_campaign_catalog')
+    .select('id, actual_reply_synced_at')
+    .in('id', campaignIds);
+  const syncedAtById = new Map<string, string | null>();
+  for (const r of (catRows ?? []) as Array<{ id: string; actual_reply_synced_at: string | null }>) {
+    syncedAtById.set(r.id, r.actual_reply_synced_at);
+  }
+  const cutoff = Date.now() - ACTUAL_REPLY_STALE_MS;
+  const due = campaignIds
+    .filter((id) => {
+      const t = syncedAtById.get(id);
+      return !t || Date.parse(t) < cutoff;
+    })
+    .sort((a, b) => {
+      const ta = syncedAtById.get(a) ? Date.parse(syncedAtById.get(a) as string) : 0;
+      const tb = syncedAtById.get(b) ? Date.parse(syncedAtById.get(b) as string) : 0;
+      return ta - tb;
+    })
+    .slice(0, ACTUAL_REPLY_MAX_PER_RUN);
+
+  let updated = 0;
+  for (const campaignId of due) {
+    const accountId = accountByCampaign.get(campaignId) as string;
+    try {
+      const uniqueRepliers = await countUniqueRepliers(campaignId, accountId);
+      const { error } = await supabaseAdmin
+        .from('instantly_campaign_catalog')
+        .update({
+          actual_reply_count: uniqueRepliers,
+          actual_reply_synced_at: new Date().toISOString(),
+        })
+        .eq('id', campaignId);
+      if (!error) updated++;
+    } catch (err) {
+      console.error(`[actual-reply-sync] campaign ${campaignId} (acct ${accountId}) failed`, err);
+    }
+    await delayMs(ACTUAL_REPLY_THROTTLE_MS); // пауза между кампаниями тоже
+  }
+  console.log(`[actual-reply-sync] due=${due.length} updated=${updated}`);
+  return { updated };
+}
+
 /**
  * Читает аналитику кампаний из БД для клиентского портала.
  * Возвращает только кампании из переданного набора ID (allowed set).
@@ -317,6 +422,8 @@ export interface CampaignDbRow {
   emails_sent_count: number | null;
   open_count: number | null;
   reply_count: number | null;
+  /** Точный счётчик ответов из /emails (уник. ответившие). Точнее reply_count. */
+  actual_reply_count: number | null;
   new_leads_contacted_count: number | null;
   bounced_count: number | null;
   unsubscribed_count: number | null;
@@ -335,7 +442,7 @@ export async function readCampaignAnalyticsFromDb(allowedIds: string[]): Promise
   const { data, error } = await supabaseAdmin
     .from('instantly_campaign_catalog')
     .select(
-      'id,name,status,emails_sent_count,open_count,reply_count,new_leads_contacted_count,bounced_count,unsubscribed_count,leads_count,analytics_synced_at',
+      'id,name,status,emails_sent_count,open_count,reply_count,actual_reply_count,new_leads_contacted_count,bounced_count,unsubscribed_count,leads_count,analytics_synced_at',
     )
     .in('id', allowedIds);
 
@@ -398,7 +505,9 @@ export function buildClientReport(rows: CampaignDbRow[]): ClientReportResult {
     const contacts = n(c.new_leads_contacted_count);
     const sent = n(c.emails_sent_count);
     const opened = n(c.open_count);
-    const replies = n(c.reply_count);
+    // actual_reply_count (реальные уник. ответившие из /emails) точнее, чем
+    // analytics reply_count — используем его при наличии, иначе фоллбэк.
+    const replies = c.actual_reply_count != null ? n(c.actual_reply_count) : n(c.reply_count);
     const leads = n(c.leads_count);
     const bounced = n(c.bounced_count);
 
