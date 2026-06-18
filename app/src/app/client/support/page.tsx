@@ -113,6 +113,41 @@ export default function ClientSupportPage() {
     };
   }, [thread?.id]);
 
+  // Фоновый опрос открытого треда. Realtime на проде сейчас недоступен
+  // (восстанавливается отдельной задачей), поэтому пока тред открыт и вкладка
+  // видима — подтягиваем новые сообщения каждые ~10с. Тихий (не трогает
+  // error/loading), а GET заодно помечает уведомления прочитанными → бейдж
+  // гаснет. Когда realtime починят, подписка выше сделает это мгновенно, а опрос
+  // останется необязательным backstop'ом.
+  const pollThread = useCallback(async () => {
+    try {
+      const data = await clientApiFetch<ThreadResponse>('/support/thread');
+      setThread(data.thread);
+      setMessages((prev) => {
+        const next = data.messages;
+        const unchanged =
+          prev.length === next.length &&
+          prev[prev.length - 1]?.id === next[next.length - 1]?.id;
+        return unchanged ? prev : next;
+      });
+    } catch {
+      /* фоновый опрос — ошибку не показываем */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!thread?.id) return undefined;
+    const tick = () => {
+      if (document.visibilityState === 'visible') void pollThread();
+    };
+    const timer = setInterval(tick, 10_000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', tick);
+    };
+  }, [thread?.id, pollThread]);
+
   // Auto-scroll to the latest message.
   useEffect(() => {
     listEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
