@@ -4,6 +4,7 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getOrCreateThread, appendMessageWithCache } from '@/lib/clientSupport/threadStore';
 import { notifyManagersOfClientMessage } from '@/lib/clientSupport/notify';
+import { sendSupportTelegramAlert } from '@/lib/clientSupport/telegramAlert';
 import { validateMessageBody } from '@/lib/clientSupport/types';
 import { logError } from '@/lib/loggerServer';
 
@@ -72,6 +73,15 @@ export async function POST(req: NextRequest) {
       clientUserId: userId,
       clientDisplayName,
       body: validation.body,
+    });
+
+    // Real-time Telegram nudge to the operator (the bell icon is only polled, so
+    // managers miss messages when the portal isn't open). Fire-and-forget: it
+    // never throws, and a TG outage must not fail the client's send.
+    void sendSupportTelegramAlert({
+      clientDisplayName,
+      body: validation.body,
+      threadId: thread.id,
     });
 
     return NextResponse.json({ message, thread_id: thread.id });
