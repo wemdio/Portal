@@ -70,12 +70,16 @@ export type CampaignMetric = {
 
 export type Finding = { grade: 'A' | 'B'; campaign: string; text: string };
 
+export type DroppedLead = { email: string; bucket: 'interested' | 'referral'; ageDays: number; campaign: string };
+
 export type ProjectInsights = {
   generatedAt: string;
   campaigns: CampaignMetric[];
   totals: { repliers: number; positive: number; labeled: number; labelCoverage: number | null };
   weekly: { week: string; sent: number; replies: number }[];
   findings: Finding[];
+  // A) брошенные горячие лиды (positive-ответ без нашего ответа), живое окно 30 дней
+  droppedLeads: { interested: number; referral: number; items: DroppedLead[] };
   notes: string[];
 };
 
@@ -92,7 +96,7 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
   const empty: ProjectInsights = {
     generatedAt: new Date().toISOString(),
     campaigns: [], totals: { repliers: 0, positive: 0, labeled: 0, labelCoverage: null },
-    weekly: [], findings: [], notes: [],
+    weekly: [], findings: [], droppedLeads: { interested: 0, referral: 0, items: [] }, notes: [],
   };
   if (ids.length === 0) return empty;
 
@@ -234,7 +238,45 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
     console.error('[projectInsights] A/B query skipped:', (e as Error).message);
   }
 
-  // 4) totals + notes
+  // 4) dropped hot leads (A) — positive replies (interested|referral) we never answered,
+  // live 30-day window, only in campaigns where we DO reply from Instantly (camp_ue3).
+  const dropped: { interested: number; referral: number; items: DroppedLead[] } = { interested: 0, referral: 0, items: [] };
+  try {
+    const rows = await datasetQuery<{ email: string; bucket: 'interested' | 'referral'; age_days: string; campaign: string }>(
+      `
+      WITH camp_ue3 AS (SELECT DISTINCT campaign_id FROM raw_emails WHERE ue_type=3 AND campaign_id = ANY($1)),
+      rf AS (
+        SELECT campaign_id, lead_id, min(timestamp_email) first_reply_at,
+               bool_or(i_status=1 OR ai_interest_value=1) inst_int
+        FROM raw_emails
+        WHERE ue_type=2 AND lead_id IS NOT NULL AND campaign_id = ANY($1)
+          AND timestamp_email > now() - interval '40 days'
+        GROUP BY 1,2
+      ),
+      ours AS (SELECT campaign_id, lead_id, min(timestamp_email) our_at FROM raw_emails WHERE ue_type=3 AND campaign_id = ANY($1) GROUP BY 1,2)
+      SELECT rf.lead_id AS email,
+             CASE WHEN l.label='referral' THEN 'referral' ELSE 'interested' END AS bucket,
+             round(extract(epoch FROM (now()-rf.first_reply_at))/86400)::int::text AS age_days,
+             left(rc.name, 60) AS campaign
+      FROM rf
+      JOIN camp_ue3 c ON c.campaign_id = rf.campaign_id
+      JOIN raw_campaigns rc ON rc.id = rf.campaign_id
+      LEFT JOIN reply_outcome_labels l ON l.campaign_id = rf.campaign_id AND l.lead_id = rf.lead_id
+      LEFT JOIN ours u ON u.campaign_id = rf.campaign_id AND u.lead_id = rf.lead_id
+      WHERE (l.label IN ('interested','referral') OR rf.inst_int)
+        AND (u.our_at IS NULL OR u.our_at < rf.first_reply_at)
+        AND rf.first_reply_at > now() - interval '30 days'
+      ORDER BY rf.first_reply_at DESC
+      `,
+      [ids],
+    );
+    for (const r of rows) { if (r.bucket === 'referral') dropped.referral++; else dropped.interested++; }
+    dropped.items = rows.slice(0, 25).map((r) => ({ email: r.email, bucket: r.bucket, ageDays: Number(r.age_days), campaign: r.campaign }));
+  } catch (e) {
+    console.error('[projectInsights] dropped-leads query skipped:', (e as Error).message);
+  }
+
+  // 5) totals + notes
   const totals = campaigns.reduce(
     (acc, c) => ({ repliers: acc.repliers + c.repliers, positive: acc.positive + c.positive, labeled: acc.labeled + c.labeled }),
     { repliers: 0, positive: 0, labeled: 0 },
@@ -250,6 +292,7 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
     totals: { ...totals, labelCoverage: totals.repliers > 0 ? totals.labeled / totals.repliers : null },
     weekly,
     findings,
+    droppedLeads: dropped,
     notes,
   };
 }
