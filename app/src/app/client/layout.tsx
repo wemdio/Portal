@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { Menu } from 'lucide-react';
@@ -129,26 +129,39 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     };
   }, []);
 
-  // Поллинг непрочитанных сообщений поддержки (один таймер на весь портал).
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const data = await clientApiFetch<{ unread?: number }>('/support/unread');
-        if (!cancelled) {
-          setSupportUnread(typeof data.unread === 'number' ? data.unread : 0);
-        }
-      } catch {
-        /* бейдж не критичен — при ошибке просто не подсвечиваем */
-      }
-    };
-    void poll();
-    const timer = setInterval(() => void poll(), 45_000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+  // Непрочитанные сообщения поддержки. Источник правды — серверный COUNT
+  // (/support/unread). Авторитетный refetch (а не инкремент) держит счётчик
+  // верным между вкладками и при пропущенных/дублированных событиях.
+  const pollSupportUnread = useCallback(async () => {
+    try {
+      const data = await clientApiFetch<{ unread?: number }>('/support/unread');
+      setSupportUnread(typeof data.unread === 'number' ? data.unread : 0);
+    } catch {
+      /* бейдж не критичен — при ошибке просто не подсвечиваем */
+    }
   }, []);
+
+  // Поллинг непрочитанных сообщений поддержки (один таймер на весь портал).
+  // Supabase Realtime на проде сейчас недоступен (восстанавливается отдельной
+  // задачей), поэтому это основной механизм «почти мгновенного» бейджа:
+  // короткий интервал + немедленный refetch при возврате на вкладку/в окно
+  // (focus + visibilitychange). Когда realtime починят — сюда вернётся подписка
+  // на public.notifications, а интервал можно будет увеличить.
+  useEffect(() => {
+    void pollSupportUnread();
+    const timer = setInterval(() => void pollSupportUnread(), 12_000);
+    const onFocus = () => void pollSupportUnread();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void pollSupportUnread();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [pollSupportUnread]);
 
   const persistLocale = async (nextLocale: Locale) => {
     setLocale(nextLocale);
