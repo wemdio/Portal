@@ -126,14 +126,18 @@ function conversationKey(item: LeadListItem): string {
 /**
  * Схлопывает per-email строки в ПЕРЕПИСКИ: одна строка на тред/лид. items уже
  * отсортированы свежими-первыми, поэтому первый встреченный в группе = последнее
- * входящее (representative) — его subject/body/timestamp идут в превью.
+ * входящее (representative). Статус переписки берётся ПО НЕМУ
+ * (is_unread/is_answered последнего входящего) — «разобрал ли я ТЕКУЩЕЕ
+ * сообщение лида».
  *
- * Статус переписки агрегируется по ВСЕМ входящим треда (а не только по
- * последнему), чтобы старый неотвеченный/непрочитанный вопрос лида не прятался
- * за более свежим прочитанным/отвеченным письмом:
- *   - is_unread  = есть ХОТЬ ОДНО непрочитанное входящее (OR);
- *   - is_answered = ответили на ВСЕ входящие (AND);
- *   - is_lead    = хоть одно письмо треда помечено лидом (OR).
+ * Почему по последнему, а НЕ агрегат OR/AND по всему треду: пометка
+ * прочтения/ответа в портале привязана именно к этому письму (открыли/ответили
+ * на representative), а старые письма треда отдельно прочитанными не
+ * помечаются. Агрегат OR(непрочитано)/AND(отвечено) держал бы переписку в
+ * «Непрочитано»/«Требует ответа» навсегда — открытие/ответ не могли бы её
+ * погасить (см. ревью 18.06). При открытии клиент и так видит весь тред.
+ *
+ * is_lead — OR по треду (помечен лидом хоть один → вся переписка лид).
  * message_count — число входящих в треде (в пределах подтянутого окна).
  */
 function groupByConversation(items: LeadListItem[]): LeadListItem[] {
@@ -143,13 +147,8 @@ function groupByConversation(items: LeadListItem[]): LeadListItem[] {
     const key = conversationKey(item);
     counts.set(key, (counts.get(key) ?? 0) + 1);
     const rep = byKey.get(key);
-    if (!rep) {
-      byKey.set(key, item);
-    } else {
-      if (item.is_lead) rep.is_lead = true;
-      if (item.is_unread) rep.is_unread = true;
-      if (item.is_answered !== true) rep.is_answered = false;
-    }
+    if (!rep) byKey.set(key, item);
+    else if (item.is_lead) rep.is_lead = true;
   }
   const out: LeadListItem[] = [];
   for (const [key, rep] of byKey) {
@@ -457,8 +456,9 @@ export async function GET(req: NextRequest) {
   const filtered = statusFilter === 'unread'
     ? searched.filter((i) => i.is_unread === true)
     : statusFilter === 'answered'
-      // Отвечено = ответили на все входящие и это не лид (лиды — в своей вкладке).
-      ? searched.filter((i) => i.is_answered === true && i.is_lead !== true)
+      // Отвечено = ответили, не лид и не помечено снова непрочитанным (после
+      // «В непрочитанные» строка уходит только в «Непрочитано» — как у needs_reply).
+      ? searched.filter((i) => i.is_answered === true && i.is_lead !== true && i.is_unread !== true)
       : statusFilter === 'needs_reply'
         // Требует ответа = прочитано, но не отвечено и не лид. Непрочитанные — в
         // «Непрочитано»: так содержимое вкладки совпадает с красным бейджом.
