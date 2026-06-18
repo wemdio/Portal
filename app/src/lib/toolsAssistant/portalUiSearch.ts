@@ -25,11 +25,30 @@ const INDEX_TTL_MS = 60_000;
 const MAX_FILE_BYTES = 2_000_000;
 const MAX_RESULTS = 5;
 const MAX_LABELS_PER_RESULT = 8;
-const MIN_TOKEN_LEN = 3;
+/** 2 — чтобы не отрезать короткие названия сервисов («хх», «тг», «вк», «hh»).
+ *  Шум от двухбуквенных стоп-слов отсекается списком STOP_TOKENS ниже. */
+const MIN_TOKEN_LEN = 2;
 /** Префикс для match-логики: «валидатор» и «валидация» совпадают по префиксу
  *  «валид» (5 символов). Без этого пользовательский запрос про «валидатор»
  *  не находит кнопку «Валидация почт» в исходниках. */
 const STEM_PREFIX_LEN = 5;
+
+/** Кириллические сокращения названий сервисов → их латинский эквивалент,
+ *  который реально встречается в коде. Без этого «можно с хх?» не находит
+ *  «HH.ru парсер», потому что в исходниках везде «hh» латиницей. */
+const SERVICE_ALIASES: Record<string, string> = {
+  'хх': 'hh',
+  'хабр': 'habr',
+  'тг': 'telegram',
+  'вк': 'vk',
+  'ютуб': 'youtube',
+  'ютюб': 'youtube',
+  'линк': 'linkedin',
+  'линкедин': 'linkedin',
+  'инстант': 'instantly',
+  'инст': 'instantly',
+  'крипт': 'crypto',
+};
 
 interface ToolEntry {
   /** Технический id (toolId или nav id) — нужен только для дебага. */
@@ -236,27 +255,43 @@ function getIndex(): ToolEntry[] {
   return cached.entries;
 }
 
-/** Достаём из вопроса значимые токены: убираем стоп-слова и короткие. */
+/** Достаём из вопроса значимые токены: убираем стоп-слова и слишком короткие.
+ *  Если токен — известный кириллический алиас сервиса, дополнительно
+ *  добавляем латинский эквивалент (его реально ищем в исходниках). */
 function tokenize(query: string): string[] {
   const STOP = new Set([
+    // Стандартные стоп-слова
     'где', 'как', 'это', 'там', 'или', 'для', 'что', 'кто', 'мне', 'нам', 'надо',
-    'мочь', 'могу', 'буду', 'будет', 'есть', 'был', 'была', 'было', 'был',
+    'мочь', 'могу', 'буду', 'будет', 'есть', 'был', 'была', 'было',
     'найти', 'найду', 'найдёт', 'находится', 'лежит', 'лежать', 'попасть',
     'пользоваться', 'использовать', 'открыть', 'тут', 'портал', 'сайт',
     'инструмент', 'кнопка', 'вкладка', 'функция', 'раздел',
-    'который', 'которая', 'который', 'один', 'просто', 'только',
+    'который', 'которая', 'один', 'просто', 'только',
+    // Двух-буквенные служебные слова — без них в TOKEN_LEN=2 пройдёт шум
+    'ну', 'до', 'бы', 'же', 'ли', 'на', 'по', 'из', 'от', 'за', 'со', 'об', 'во',
+    'ты', 'мы', 'вы', 'он', 'мне', 'нам', 'нет', 'да',
+    'из', 'но', 'их', 'ей', 'ее', 'её', 'их', 'ну', 'уж',
+    'где', 'кто',
+    // Английские
     'where', 'how', 'what', 'who', 'is', 'are', 'was', 'were', 'the', 'a', 'an',
     'find', 'open', 'use', 'tool', 'button', 'tab', 'section', 'in', 'on', 'at',
+    'to', 'of', 'by', 'or', 'be', 'do', 'it', 'as', 'we', 'you', 'he', 'she',
   ]);
-  return Array.from(
-    new Set(
-      query
-        .toLowerCase()
-        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-        .split(/\s+/)
-        .filter((t) => t.length >= MIN_TOKEN_LEN && !STOP.has(t)),
-    ),
-  );
+
+  const raw = query
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length >= MIN_TOKEN_LEN && !STOP.has(t));
+
+  const expanded: string[] = [];
+  for (const t of raw) {
+    expanded.push(t);
+    const alias = SERVICE_ALIASES[t];
+    if (alias) expanded.push(alias);
+  }
+
+  return Array.from(new Set(expanded));
 }
 
 export interface SearchHit {
@@ -331,4 +366,63 @@ export function searchPortalUi(query: string): SearchHit[] {
   // он съедал /board (там «задача» только во внутренних кнопках), хотя
   // доска — это второй валидный способ управления задачами.
   return hits.slice(0, MAX_RESULTS);
+}
+
+/**
+ * Простой substring-поиск без стемминга и алиасов. Используется как
+ * tool-функция для модели: она сама формулирует query (целое слово, аббревиатуру,
+ * англ/русск вариант) и зовёт несколько раз при необходимости.
+ *
+ * Совпадение считается, если **любой токен** из запроса (split по пробелам,
+ * нижний регистр) присутствует как substring в title или в одном из labels
+ * инструмента. Сортировка: сначала по числу токенов-совпадений в title,
+ * потом — по числу токенов в body.
+ */
+export function searchPortalSubstring(query: string, limit = 6): SearchHit[] {
+  const tokens = query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 1);
+  if (tokens.length === 0) return [];
+
+  const idx = getIndex();
+  const hits: SearchHit[] = [];
+
+  for (const entry of idx) {
+    const matched: string[] = [];
+    let titleTokenHits = 0;
+    let bodyTokenHits = 0;
+
+    for (const label of entry.titleLabels) {
+      const lower = label.toLowerCase();
+      const hit = tokens.some((t) => lower.includes(t));
+      if (hit) {
+        matched.push(label);
+        titleTokenHits += tokens.filter((t) => lower.includes(t)).length;
+      }
+    }
+    for (const label of entry.bodyLabels) {
+      if (matched.length >= MAX_LABELS_PER_RESULT) break;
+      const lower = label.toLowerCase();
+      const hit = tokens.some((t) => lower.includes(t));
+      if (hit) {
+        matched.push(label);
+        bodyTokenHits += tokens.filter((t) => lower.includes(t)).length;
+      }
+    }
+
+    if (matched.length === 0) continue;
+
+    hits.push({
+      toolId: entry.id,
+      title: entry.title,
+      href: entry.href,
+      matchedLabels: matched.slice(0, MAX_LABELS_PER_RESULT),
+      score: titleTokenHits * 5 + bodyTokenHits,
+    });
+  }
+
+  hits.sort((a, b) => b.score - a.score);
+  return hits.slice(0, limit);
 }

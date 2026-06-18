@@ -476,10 +476,26 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
     async function poll() {
       if (!activeJob) return;
-      const res = await authFetch(`/api/tools/base-constructor/${activeJob.id}`);
+      // Запоминаем id на момент старта запроса. Пока ответ едет (≈0.5s),
+      // юзер мог нажать «Поставить ещё базу» (activeJob → null) или
+      // кликнуть другой job в истории (activeJob → другой id). Если так —
+      // ответ от устаревшего poll'a нельзя коммитить, иначе экран мигнёт
+      // в форму и тут же откатится обратно на прогресс старой базы
+      // (баг 2026-06-18: «на 5 раз получается загрузить исходный файл»).
+      const jobIdAtStart = activeJob.id;
+      const res = await authFetch(`/api/tools/base-constructor/${jobIdAtStart}`);
       if (!res.ok) return;
       const { job } = await res.json();
-      setActiveJob(job);
+      // Stale-guard: коммитим свежие данные ТОЛЬКО если юзер всё ещё на
+      // той же задаче. Функциональный setState видит current на момент
+      // выполнения, а не на момент старта poll'a.
+      let committed = false;
+      setActiveJob((current) => {
+        if (!current || current.id !== jobIdAtStart) return current;
+        committed = true;
+        return job;
+      });
+      if (!committed) return;
 
       if (['completed', 'failed', 'cancelled'].includes(job.status)) {
         if (pollRef.current) clearInterval(pollRef.current);
