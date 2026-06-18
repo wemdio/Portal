@@ -384,6 +384,10 @@ export async function GET(req: NextRequest) {
   await applyRepliedMarks(userId, merged);
 
   // Поиск делаем у СЕБЯ (Instantly ищет только по email): email/имя/тема/текст.
+  // При поиске обогащаем ВЕСЬ набор ДО фильтра: у входящего без from_name имя
+  // лида лежит в client_campaign_leads, и без раннего обогащения поиск по имени
+  // его бы не нашёл (enrich заполняет lead_name только когда оно пустое).
+  if (search) await enrichFromSyncedLeads(userId, merged);
   const searched = search ? merged.filter((i) => matchesSearch(i, search)) : merged;
 
   const filtered = statusFilter === 'unread'
@@ -397,9 +401,8 @@ export async function GET(req: NextRequest) {
   const total = filtered.length;
   const items = filtered.slice(offset, offset + limit);
 
-  // Synced-lead enrichment stays after slice — only the visible page pays
-  // the cost of name/website joins.
-  await enrichFromSyncedLeads(userId, items);
+  // Без поиска обогащаем только видимую страницу — только она платит за join.
+  if (!search) await enrichFromSyncedLeads(userId, items);
 
   return NextResponse.json({
     items,
