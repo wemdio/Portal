@@ -2,8 +2,9 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
-import { getEmail, markThreadAsRead } from '@/lib/instantly/client';
+import { getEmail } from '@/lib/instantly/client';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
+import { recordEmailRead } from '@/lib/clientCampaignReplies/clientEmailReads';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
@@ -74,15 +75,15 @@ export async function POST(
     const leadEmail = reply.from_email?.trim();
     if (!leadEmail) return jsonError('У ответа нет email лида', 400);
 
+    // Пометка «лид» = ответ обработан → отмечаем ЭТО письмо прочитанным для
+    // клиента в нашей таблице (не трогаем тред в Instantly). См. clientEmailReads.
     const markRead = async () => {
-      if (!original.thread_id) return;
       try {
-        await markThreadAsRead(original.thread_id, instantlyRequestOptions);
+        await recordEmailRead(userId, emailId);
       } catch (err) {
-        await logError('client.replies.mark_lead.mark_read_failed', err, {
+        await logError('client.replies.mark_lead.record_read_failed', err, {
           campaignId,
           emailId,
-          threadId: original.thread_id,
           userId,
         });
       }

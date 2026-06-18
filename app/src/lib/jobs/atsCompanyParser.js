@@ -19,9 +19,9 @@ const MARKETING_RE =
   /\b(marketing|marketer|growth|demand generation|lead generation|performance|digital marketing|product marketing|brand|content|seo|sem|ppc|paid social|crm|lifecycle|field marketing|go[-\s]?to[-\s]?market|gtm)\b/i;
 
 const B2B_SALES_RE =
-  /\b(b2b|business development|account executive|sales development|business development representative|sales manager|sales lead|sales executive|enterprise sales|partnerships?|channel sales|commercial manager|revenue manager|sdr|bdr)\b/i;
+  /\b(b2b|business development|account executive|\bae\b|account director|account manager|sales development|revenue development|business development representative|revenue development representative|sales manager|sales representative|sales consultant|sales lead|sales executive|enterprise sales|commercial account|commercial account director|commercial account executive|partnerships?|channel sales|partner sales|partner manager|commercial manager|client partner|sdr|bdr|rdr|go[-\s]?to[-\s]?market|gtm)\b/i;
 
-const SUPPORTED_ATS = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee'];
+const SUPPORTED_ATS = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday'];
 
 const CSV_HEADERS = [
   'company',
@@ -79,7 +79,18 @@ function toIso(value) {
   return Number.isNaN(date.getTime()) ? normalizeWhitespace(value) : date.toISOString();
 }
 
-function careersUrl(ats, slug) {
+function normalizeWorkdayCareersUrl(sourceUrl) {
+  try {
+    const parsed = new URL(sourceUrl);
+    if (!parsed.hostname.toLowerCase().endsWith('.myworkdayjobs.com')) return '';
+    const pathname = parsed.pathname.replace(/\/+$/, '');
+    return `${parsed.origin}${pathname}`;
+  } catch {
+    return '';
+  }
+}
+
+function careersUrl(ats, slug, sourceUrl = '') {
   if (!slug) return '';
   if (ats === 'greenhouse') return `https://job-boards.greenhouse.io/${slug}`;
   if (ats === 'lever') return `https://jobs.lever.co/${slug}`;
@@ -87,10 +98,17 @@ function careersUrl(ats, slug) {
   if (ats === 'workable') return `https://apply.workable.com/${slug}`;
   if (ats === 'bamboohr') return `https://${slug}.bamboohr.com/careers`;
   if (ats === 'recruitee') return `https://${slug}.recruitee.com`;
+  if (ats === 'breezy') return `https://${slug}.breezy.hr`;
+  if (ats === 'workday') {
+    const sourceCareersUrl = normalizeWorkdayCareersUrl(sourceUrl);
+    if (sourceCareersUrl) return sourceCareersUrl;
+    const [tenant, site] = String(slug).split('/');
+    return tenant && site ? `https://${tenant}.myworkdayjobs.com/${site}` : '';
+  }
   return '';
 }
 
-const ATS_BASE_HOSTS = ['greenhouse.io', 'lever.co', 'ashbyhq.com', 'workable.com', 'bamboohr.com', 'recruitee.com'];
+const ATS_BASE_HOSTS = ['greenhouse.io', 'lever.co', 'ashbyhq.com', 'workable.com', 'bamboohr.com', 'recruitee.com', 'breezy.hr', 'myworkdayjobs.com'];
 // Multi-level public suffixes we care about, so registrableDomain keeps 3 labels.
 const TWO_LEVEL_TLDS = new Set([
   'co.uk', 'com.au', 'co.jp', 'com.br', 'co.nz', 'com.sg', 'co.in', 'com.mx', 'co.za',
@@ -126,7 +144,20 @@ function domainFromJobUrls(jobUrls) {
   return '';
 }
 
-function postingsUrl(ats, slug) {
+function workdayParts(slug, sourceUrl = '') {
+  try {
+    const parsed = new URL(sourceUrl);
+    const tenant = parsed.hostname.split('.')[0];
+    const site = parsed.pathname.split('/').filter(Boolean).pop();
+    if (tenant && site) return { host: parsed.hostname, tenant, site };
+  } catch {
+    /* fall through to slug parsing */
+  }
+  const [tenant, site] = String(slug).split('/');
+  return { host: tenant ? `${tenant}.myworkdayjobs.com` : '', tenant, site };
+}
+
+function postingsUrl(ats, slug, sourceUrl = '') {
   const safe = encodeURIComponent(slug);
   if (ats === 'greenhouse') return `https://boards-api.greenhouse.io/v1/boards/${safe}/jobs`;
   if (ats === 'lever') return `https://api.lever.co/v0/postings/${safe}?mode=json`;
@@ -134,18 +165,27 @@ function postingsUrl(ats, slug) {
   if (ats === 'workable') return `https://apply.workable.com/api/v1/widget/accounts/${safe}`;
   if (ats === 'bamboohr') return `https://${slug}.bamboohr.com/careers/list`;
   if (ats === 'recruitee') return `https://${slug}.recruitee.com/api/offers`;
+  if (ats === 'breezy') return `https://${slug}.breezy.hr/json`;
+  if (ats === 'workday') {
+    const parts = workdayParts(slug, sourceUrl);
+    if (parts.host && parts.tenant && parts.site) {
+      return `https://${parts.host}/wday/cxs/${parts.tenant}/${parts.site}/jobs`;
+    }
+  }
   throw new Error(`Unsupported ATS: ${ats}`);
 }
 
 function extractJobs(ats, payload) {
   if (ats === 'lever') return Array.isArray(payload) ? payload : [];
+  if (ats === 'breezy') return Array.isArray(payload) ? payload : [];
+  if (ats === 'workday') return Array.isArray(payload?.jobPostings) ? payload.jobPostings : [];
   if (ats === 'workable') return Array.isArray(payload?.jobs) ? payload.jobs : [];
   if (ats === 'bamboohr') return Array.isArray(payload?.result) ? payload.result : [];
   if (ats === 'recruitee') return Array.isArray(payload?.offers) ? payload.offers : [];
   return Array.isArray(payload?.jobs) ? payload.jobs : [];
 }
 
-function baseJob({ ats, slug, company, title, location, country, url, posted_at }) {
+function baseJob({ ats, slug, company, title, location, country, url, posted_at, careers_url }) {
   const cleanCompany = normalizeCompanyName(company);
   const cleanTitle = normalizeWhitespace(title);
   if (!cleanCompany || !cleanTitle) return null;
@@ -161,6 +201,7 @@ function baseJob({ ats, slug, company, title, location, country, url, posted_at 
     url: normalizeWhitespace(url),
     posted_at: toIso(posted_at),
     roles: roleTagsForTitle(cleanTitle),
+    ...(careers_url ? { careers_url: normalizeWhitespace(careers_url) } : {}),
   };
 }
 
@@ -262,6 +303,74 @@ function normalizeRecruiteeJob(job, { slug, companyName } = {}) {
   });
 }
 
+function normalizeBreezyJob(job, { slug, companyName } = {}) {
+  const location = job?.location || {};
+  const country = location?.country?.name || location?.country || '';
+  const state = location?.state?.id || location?.state?.name || location?.state || '';
+  const locationName = location?.name || joinLocationParts([location?.city, state]);
+  return baseJob({
+    ats: 'breezy',
+    slug,
+    company: job?.company?.name || companyName,
+    title: job?.name,
+    location: joinLocationParts([locationName, country]),
+    country,
+    url: job?.url || (slug && job?.friendly_id ? `https://${slug}.breezy.hr/p/${job.friendly_id}` : ''),
+    posted_at: job?.published_date || job?.publishedDate || job?.created_at,
+  });
+}
+
+function workdayPostedAt(value) {
+  const raw = normalizeWhitespace(value).toLowerCase();
+  if (!raw) return '';
+  const now = new Date();
+  if (/today/.test(raw)) return now.toISOString();
+  if (/yesterday/.test(raw)) {
+    now.setUTCDate(now.getUTCDate() - 1);
+    return now.toISOString();
+  }
+  const hours = raw.match(/(\d+)\s+hours?\s+ago/);
+  if (hours) {
+    now.setUTCHours(now.getUTCHours() - Number(hours[1]));
+    return now.toISOString();
+  }
+  const days = raw.match(/(\d+)\+?\s+days?\s+ago/);
+  if (days) {
+    const plus = raw.includes(`${days[1]}+`);
+    now.setUTCDate(now.getUTCDate() - Number(days[1]) - (plus ? 1 : 0));
+    return now.toISOString();
+  }
+  return toIso(value);
+}
+
+function workdayPublicJobUrl(sourceUrl, externalPath) {
+  if (!externalPath) return '';
+  try {
+    const parsed = new URL(sourceUrl);
+    const basePath = parsed.pathname.replace(/\/+$/, '');
+    parsed.pathname = `${basePath}${String(externalPath).startsWith('/') ? externalPath : `/${externalPath}`}`;
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function normalizeWorkdayJob(job, { slug, companyName, sourceUrl } = {}) {
+  return baseJob({
+    ats: 'workday',
+    slug,
+    company: companyName,
+    title: job?.title,
+    location: job?.locationsText || job?.location || '',
+    country: '',
+    url: workdayPublicJobUrl(sourceUrl, job?.externalPath),
+    posted_at: workdayPostedAt(job?.postedOn || job?.startDate || job?.posted_on),
+    careers_url: careersUrl('workday', slug, sourceUrl),
+  });
+}
+
 function normalizeJob(ats, job, ctx = {}) {
   if (ats === 'greenhouse') return normalizeGreenhouseJob(job, ctx);
   if (ats === 'lever') return normalizeLeverJob(job, ctx);
@@ -269,6 +378,8 @@ function normalizeJob(ats, job, ctx = {}) {
   if (ats === 'workable') return normalizeWorkableJob(job, ctx);
   if (ats === 'bamboohr') return normalizeBamboohrJob(job, ctx);
   if (ats === 'recruitee') return normalizeRecruiteeJob(job, ctx);
+  if (ats === 'breezy') return normalizeBreezyJob(job, ctx);
+  if (ats === 'workday') return normalizeWorkdayJob(job, ctx);
   return null;
 }
 
@@ -292,7 +403,7 @@ function parseCompanyCsv(text) {
     let slug;
     let name;
     const tail = parts[parts.length - 1]?.trim() ?? '';
-    if (parts.length >= 2 && /^[a-z0-9][a-z0-9._-]*$/.test(tail)) {
+    if (parts.length >= 2 && /^[a-z0-9][a-z0-9._/-]*$/.test(tail)) {
       slug = tail;
       name = normalizeWhitespace(parts.slice(0, -1).join(','));
     } else {
@@ -324,7 +435,7 @@ function buildCompanyLeads(jobs) {
         job_count: 0,
         job_titles: [],
         job_urls: [],
-        careers_url: careersUrl(job.ats, job.slug),
+        careers_url: job.careers_url || careersUrl(job.ats, job.slug),
         latest_posted_at: '',
       };
 
@@ -387,10 +498,12 @@ module.exports = {
   extractJobs,
   normalizeAshbyJob,
   normalizeBamboohrJob,
+  normalizeBreezyJob,
   normalizeGreenhouseJob,
   normalizeJob,
   normalizeLeverJob,
   normalizeRecruiteeJob,
+  normalizeWorkdayJob,
   normalizeWorkableJob,
   parseCompanyCsv,
   pickDomainFromSuggestions,

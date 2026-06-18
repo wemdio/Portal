@@ -20,6 +20,13 @@ import { resolveRegions, type YDRegion } from './regions';
 /** Пауза между запросами к XMLStock (мс). */
 const REQUEST_DELAY_MS = Number(process.env.YANDEX_DIRECT_REQUEST_DELAY_MS ?? '600');
 
+/**
+ * Сколько уникальных текстов ошибок храним в `errors_sample`. Лонг-тейл редких
+ * сообщений отбрасываем — обычно все ошибки укладываются в 1–3 типа,
+ * 20 хватает для диагностики любых аномальных прогонов.
+ */
+const MAX_ERROR_GROUPS = 20;
+
 interface YDJobRow {
   id: string;
   user_id: string;
@@ -32,6 +39,46 @@ interface YDJobRow {
   keywords: string[];
   regions: string[];
   status: string;
+}
+
+interface YDErrorGroup {
+  message: string;
+  count: number;
+  first_keyword: string;
+  first_region: string;
+  last_seen_at: string;
+}
+
+function normalizeErrorMessage(msg: string): string {
+  return msg.trim().replace(/\s+/g, ' ').slice(0, 300) || '(пустое сообщение)';
+}
+
+function recordError(
+  groups: Map<string, YDErrorGroup>,
+  rawMessage: string,
+  keyword: string,
+  regionName: string,
+): void {
+  const message = normalizeErrorMessage(rawMessage);
+  const existing = groups.get(message);
+  const nowIso = new Date().toISOString();
+  if (existing) {
+    existing.count += 1;
+    existing.last_seen_at = nowIso;
+    return;
+  }
+  if (groups.size >= MAX_ERROR_GROUPS) return;
+  groups.set(message, {
+    message,
+    count: 1,
+    first_keyword: keyword,
+    first_region: regionName,
+    last_seen_at: nowIso,
+  });
+}
+
+function errorsToJson(groups: Map<string, YDErrorGroup>): YDErrorGroup[] {
+  return Array.from(groups.values()).sort((a, b) => b.count - a.count);
 }
 
 async function isCancelled(db: SupabaseClient, jobId: string): Promise<boolean> {
@@ -70,7 +117,10 @@ export async function runYandexDirectJob(db: SupabaseClient, jobId: string): Pro
     started_at: new Date().toISOString(),
     errors_count: 0,
     error_message: null,
+    errors_sample: [],
   });
+
+  const errorGroups = new Map<string, YDErrorGroup>();
 
   try {
     // ── XMLStock creds ───────────────────────────────────────────────────────
@@ -166,9 +216,11 @@ export async function runYandexDirectJob(db: SupabaseClient, jobId: string): Pro
           }
         } catch (e) {
           errorsCount += 1;
+          const message = (e as Error).message;
+          recordError(errorGroups, message, keyword, region.name);
           console.error(
             `[yandex-direct][${jobId}] '${keyword}' / ${region.name}:`,
-            (e as Error).message,
+            message,
           );
         }
 
@@ -179,6 +231,7 @@ export async function runYandexDirectJob(db: SupabaseClient, jobId: string): Pro
             found_advertisers: foundAdvertisers,
             saved_total: savedTotal,
             errors_count: errorsCount,
+            errors_sample: errorsToJson(errorGroups),
           });
         }
 
@@ -193,6 +246,7 @@ export async function runYandexDirectJob(db: SupabaseClient, jobId: string): Pro
       found_advertisers: foundAdvertisers,
       saved_total: savedTotal,
       errors_count: errorsCount,
+      errors_sample: errorsToJson(errorGroups),
     });
     console.log(
       `[yandex-direct][${jobId}] completed: saved ${savedTotal} уник. доменов (${errorsCount} ошибок)`,
@@ -204,6 +258,7 @@ export async function runYandexDirectJob(db: SupabaseClient, jobId: string): Pro
       status: 'failed',
       completed_at: new Date().toISOString(),
       error_message: message.slice(0, 500),
+      errors_sample: errorsToJson(errorGroups),
     });
   }
 }

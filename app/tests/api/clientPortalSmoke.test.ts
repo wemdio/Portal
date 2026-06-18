@@ -878,6 +878,142 @@ describe('Client Portal — empty new-user state', () => {
     });
   });
 
+  it('GET /replies?search filters locally by subject and sender name (Instantly search is email-only)', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValue({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    const items = [
+      {
+        id: 'email-a', campaign_id: ALLOWED_CAMPAIGN, thread_id: 'ta', lead: 'la',
+        subject: 'Pricing question', body: { text: 'how much' },
+        from_address_email: 'alpha@example.com',
+        from_address_json: [{ address: 'alpha@example.com', name: 'Alpha' }],
+        timestamp_email: '2026-05-19T10:00:00.000Z', ue_type: 2,
+      },
+      {
+        id: 'email-b', campaign_id: ALLOWED_CAMPAIGN, thread_id: 'tb', lead: 'lb',
+        subject: 'Unrelated', body: { text: 'no thanks' },
+        from_address_email: 'beta@example.com',
+        from_address_json: [{ address: 'beta@example.com', name: 'Beta' }],
+        timestamp_email: '2026-05-19T09:00:00.000Z', ue_type: 2,
+      },
+    ];
+    const { GET } = await import('@/app/api/client/replies/route');
+
+    // by SUBJECT word — Instantly's own search would miss this; our local filter catches it.
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    let res = await GET(makeReq('http://x/api/client/replies?search=Pricing'));
+    expect((res as Response).status).toBe(200);
+    let body = (await (res as Response).json()) as { items: Array<{ email_id?: string }>; total: number };
+    expect(body.total).toBe(1);
+    expect(body.items[0]?.email_id).toBe('email-a');
+    // Search is NOT forwarded to Instantly (it only matches email) — we filter our side.
+    const lastCall = mockListEmails.mock.calls[mockListEmails.mock.calls.length - 1][0];
+    expect(lastCall).not.toHaveProperty('search');
+
+    // by SENDER NAME.
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    res = await GET(makeReq('http://x/api/client/replies?search=Beta'));
+    body = (await (res as Response).json()) as { items: Array<{ email_id?: string }>; total: number };
+    expect(body.total).toBe(1);
+    expect(body.items[0]?.email_id).toBe('email-b');
+  });
+
+  it('GET /replies groups a multi-message thread into one conversation row + needs_reply filter', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValue({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    // Two inbound emails in the SAME thread (lead asked, then a follow-up).
+    const items = [
+      {
+        id: 'email-new', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't1', lead: 'l1',
+        subject: 'Re: Re: вопрос', body: { text: 'и ещё уточнение' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-20T10:00:00.000Z', ue_type: 2,
+      },
+      {
+        id: 'email-old', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't1', lead: 'l1',
+        subject: 'вопрос', body: { text: 'первый вопрос' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-19T10:00:00.000Z', ue_type: 2,
+      },
+    ];
+    const { GET } = await import('@/app/api/client/replies/route');
+
+    // Two inbound in one thread collapse to ONE conversation row; representative = latest.
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    let res = await GET(makeReq('http://x/api/client/replies'));
+    expect((res as Response).status).toBe(200);
+    let body = (await (res as Response).json()) as {
+      items: Array<{ email_id?: string; message_count?: number }>; total: number;
+    };
+    expect(body.total).toBe(1);
+    expect(body.items[0]?.email_id).toBe('email-new');
+    expect(body.items[0]?.message_count).toBe(2);
+
+    // unread: a conversation with ANY unread inbound shows up (OR-aggregate).
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    res = await GET(makeReq('http://x/api/client/replies?status=unread'));
+    body = (await (res as Response).json()) as { items: Array<{ email_id?: string; message_count?: number }>; total: number };
+    expect(body.total).toBe(1);
+
+    // needs_reply = ПРОЧИТАНО, но без ответа. Тут письма непрочитаны (не открывали)
+    // → исключены из «Требует ответа» (они в «Непрочитано»), чтобы вкладка
+    // совпадала с красным бейджом.
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    res = await GET(makeReq('http://x/api/client/replies?status=needs_reply'));
+    body = (await (res as Response).json()) as { items: Array<{ email_id?: string; message_count?: number }>; total: number };
+    expect(body.total).toBe(0);
+
+    // answered: nothing answered (empty client_email_replies) → empty.
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    res = await GET(makeReq('http://x/api/client/replies?status=answered'));
+    body = (await (res as Response).json()) as { items: Array<{ email_id?: string; message_count?: number }>; total: number };
+    expect(body.total).toBe(0);
+  });
+
+  it('GET /replies does not collapse two distinct emails sharing a timestamp (dedupe by email_id)', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValue({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    const ts = '2026-05-19T10:00:00.000Z';
+    const items = [
+      {
+        id: 'dup-1', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't9', lead: 'l9',
+        subject: 'A', body: { text: 'a' }, from_address_email: 'x@y.com',
+        from_address_json: [{ address: 'x@y.com', name: 'X' }], timestamp_email: ts, ue_type: 2,
+      },
+      {
+        id: 'dup-2', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't9', lead: 'l9',
+        subject: 'B', body: { text: 'b' }, from_address_email: 'x@y.com',
+        from_address_json: [{ address: 'x@y.com', name: 'X' }], timestamp_email: ts, ue_type: 2,
+      },
+    ];
+    const { GET } = await import('@/app/api/client/replies/route');
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    const res = await GET(makeReq('http://x/api/client/replies'));
+    expect((res as Response).status).toBe(200);
+    const body = (await (res as Response).json()) as {
+      items: Array<{ message_count?: number }>; total: number;
+    };
+    expect(body.total).toBe(1); // one conversation
+    expect(body.items[0]?.message_count).toBe(2); // both same-timestamp emails counted
+  });
+
   it('GET /bases returns campaigns: [] when no campaigns granted', async () => {
     const { GET } = await import('@/app/api/client/bases/route');
     const res = await GET(makeReq('http://x/api/client/bases'));
@@ -1327,10 +1463,18 @@ describe('Client Portal — RBAC isolation across clients', () => {
     );
 
     expect((res as Response).status).toBe(200);
-    expect(mockMarkThreadAsRead).toHaveBeenCalledWith('t1', { accountId: 'main' });
+    // Прочитанность ведём ПОШТУЧНО для клиента (client_email_reads), тред в
+    // Instantly НЕ трогаем — иначе гасли бы соседние ответы лида.
+    expect(mockMarkThreadAsRead).not.toHaveBeenCalled();
+    expect(dbState.upsertCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'client_email_reads',
+        payload: expect.objectContaining({ client_user_id: AUTH_USER_ID, email_id: 'e1' }),
+      }),
+    ]));
   });
 
-  it('GET /campaigns/[id]/replies/[emailId]/thread still returns the thread if marking read fails', async () => {
+  it('GET /campaigns/[id]/replies/[emailId]/thread still returns the thread if read-recording fails', async () => {
     mockGetEmail.mockResolvedValueOnce({
       id: 'e1',
       campaign_id: ALLOWED_CAMPAIGN,
@@ -1342,8 +1486,6 @@ describe('Client Portal — RBAC isolation across clients', () => {
       timestamp_email: '2026-05-19T10:00:00.000Z',
       ue_type: 2,
     });
-    mockMarkThreadAsRead.mockRejectedValueOnce(new Error('Instantly read marker failed'));
-
     const { GET } = await import('@/app/api/client/campaigns/[id]/replies/[emailId]/thread/route');
     const res = await GET(
       makeReq(`http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}/replies/e1/thread`),
@@ -1351,8 +1493,10 @@ describe('Client Portal — RBAC isolation across clients', () => {
     );
     const body = await (res as Response).json();
 
+    // Запись прочитанности — best-effort (try/catch в роуте): тред возвращается
+    // в любом случае, общий флаг Instantly не трогается.
     expect((res as Response).status).toBe(200);
-    expect(mockMarkThreadAsRead).toHaveBeenCalledWith('t1', { accountId: 'main' });
+    expect(mockMarkThreadAsRead).not.toHaveBeenCalled();
     expect(body.messages).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'e1', direction: 'inbound' }),
     ]));
@@ -1426,6 +1570,11 @@ describe('Client Portal — RBAC isolation across clients', () => {
       // text — plain-text fallback. Для 'Hi' переносов нет → html === 'Hi'.
       body: { html: 'Hi', text: 'Hi' },
     }), { accountId: 'main' });
+    // Ответ фиксируется персонально: «отвечено» (бейдж в списке) + «прочитано» (статус).
+    expect(dbState.upsertCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: 'client_email_replies', payload: expect.objectContaining({ client_user_id: AUTH_USER_ID, email_id: 'e1' }) }),
+      expect.objectContaining({ table: 'client_email_reads', payload: expect.objectContaining({ client_user_id: AUTH_USER_ID, email_id: 'e1' }) }),
+    ]));
   });
 
   it('reply does not double-prefix an existing Re: subject', async () => {
@@ -1521,7 +1670,14 @@ describe('Client Portal — RBAC isolation across clients', () => {
     );
 
     expect((res as Response).status).toBe(201);
-    expect(mockMarkThreadAsRead).toHaveBeenCalledWith('t1', { accountId: 'main' });
+    // mark-lead помечает письмо прочитанным ПОШТУЧНО (наша таблица), не тред Instantly.
+    expect(mockMarkThreadAsRead).not.toHaveBeenCalled();
+    expect(dbState.upsertCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'client_email_reads',
+        payload: expect.objectContaining({ client_user_id: AUTH_USER_ID, email_id: 'e1' }),
+      }),
+    ]));
     expect(dbState.insertCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({
         table: 'client_forwarded_leads',

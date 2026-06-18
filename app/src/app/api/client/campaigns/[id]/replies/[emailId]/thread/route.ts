@@ -3,8 +3,9 @@ import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
-import { getEmail, listEmails, markThreadAsRead } from '@/lib/instantly/client';
+import { getEmail, listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToThreadMessage } from '@/lib/clientCampaignReplies/mapEmail';
+import { recordEmailRead } from '@/lib/clientCampaignReplies/clientEmailReads';
 import type { ClientReplyThread } from '@/lib/clientCampaignReplies/types';
 import { logError } from '@/lib/loggerServer';
 
@@ -25,7 +26,7 @@ export async function GET(
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
   if (result.auth.isDemo) return serveClientDemo(req);
-  const { accessRows } = result.auth;
+  const { userId, accessRows } = result.auth;
 
   const { id: campaignId, emailId } = await ctx.params;
   if (!isResourceAllowed(campaignId, accessRows, 'campaign')) {
@@ -60,16 +61,17 @@ export async function GET(
       return ta - tb;
     });
 
-    if (threadId) {
-      try {
-        await markThreadAsRead(threadId, instantlyRequestOptions);
-      } catch (err) {
-        await logError('client.campaign.replies.thread.mark_read_failed', err, {
-          campaignId,
-          emailId,
-          threadId,
-        });
-      }
+    // Помечаем прочитанным ТОЛЬКО это письмо и ТОЛЬКО для этого клиента (наша
+    // таблица), а НЕ весь тред в Instantly — иначе соседние ответы лида гасли бы
+    // «непрочитано» без ведома клиента. См. clientEmailReads.
+    try {
+      await recordEmailRead(userId, emailId);
+    } catch (err) {
+      await logError('client.campaign.replies.thread.record_read_failed', err, {
+        campaignId,
+        emailId,
+        userId,
+      });
     }
 
     const payload: ClientReplyThread = {

@@ -70,4 +70,18 @@ describe('ENG hiring worker isolation', () => {
     expect(migrations).toContain('idx_eng_hiring_cache_source_country_published');
     expect(migrations).toContain('on public.eng_hiring_cache(source, country_code, published_at desc)');
   });
+
+  it('allows newly supported ENG hiring ATS sources in database constraints', () => {
+    const migrationDir = path.join(repoRoot, 'supabase', 'migrations');
+    const migrations = fs.readdirSync(migrationDir)
+      .filter((name) => name.endsWith('.sql'))
+      .map((name) => readRepoFile(path.join('supabase', 'migrations', name)).replace(/\s+/g, ' '))
+      .join('\n');
+
+    expect(migrations).toContain("'breezy'");
+    expect(migrations).toContain("'workday'");
+    expect(migrations).toContain('eng_hiring_cache_source_check');
+    expect(migrations).toContain('eng_hiring_cache_runs_source_check');
+    expect(migrations).toContain('eng_hiring_vacancies_source_check');
+  });
 });

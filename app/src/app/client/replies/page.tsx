@@ -8,11 +8,13 @@ import { Send, MessageSquare, RefreshCw, Search, X } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ExpandedThread } from '@/components/client-replies/ExpandedThread';
 
-type StatusFilter = 'all' | 'unread' | 'leads';
+type StatusFilter = 'all' | 'unread' | 'needs_reply' | 'answered' | 'leads';
 
 const STATUS_LABEL: Record<StatusFilter, string> = {
   all: 'Все',
   unread: 'Непрочитано',
+  needs_reply: 'Требует ответа',
+  answered: 'Отвечено',
   leads: 'Лиды',
 };
 
@@ -52,6 +54,8 @@ type ForwardedLead = {
   ai_interest_value?: number | null;
   is_lead?: boolean;
   lead_entry_id?: string | null;
+  is_answered?: boolean;
+  message_count?: number;
 };
 
 type LeadsResponse = {
@@ -81,10 +85,12 @@ function LeadDetail({
   lead,
   onBack,
   onMarkedLead,
+  onMarkedUnread,
 }: {
   lead: ForwardedLead;
   onBack: () => void;
   onMarkedLead?: () => void;
+  onMarkedUnread?: () => void;
 }) {
   const [comments, setComments] = useState<LeadComment[]>([]);
   const [loadingComments, setLoadingComments] = useState(true);
@@ -98,6 +104,7 @@ function LeadDetail({
   const [isBlocked, setIsBlocked] = useState(false);
   const [blocking, setBlocking] = useState(false);
   const [blockError, setBlockError] = useState('');
+  const [markingUnread, setMarkingUnread] = useState(false);
   const canComment = lead.source !== 'reply';
   const canReplyByEmail = Boolean(lead.campaign_id && lead.email_id);
 
@@ -172,6 +179,25 @@ function LeadDetail({
     }
   };
 
+  // Вернуть письмо в «непрочитанные» (персональная прочитанность у нас, не в
+  // Instantly). Открытие переписки помечает прочитанным — эта кнопка отменяет.
+  const handleMarkUnread = async () => {
+    if (!lead.campaign_id || !lead.email_id || markingUnread) return;
+    setMarkingUnread(true);
+    try {
+      await clientApiFetch(`/campaigns/${lead.campaign_id}/replies/${lead.email_id}/read`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ read: false }),
+      });
+      onMarkedUnread?.();
+    } catch {
+      // статус прочтения не критичен — молча игнорируем сбой
+    } finally {
+      setMarkingUnread(false);
+    }
+  };
+
   const handleBlock = async () => {
     if (!lead.lead_email || isBlocked || blocking) return;
     setBlocking(true);
@@ -212,12 +238,26 @@ function LeadDetail({
               </p>
             )}
           </div>
-          <span
-            className="neu-pill px-3 py-1.5 text-[11px] font-bold shrink-0"
-            style={{ color: 'var(--cp-accent)' }}
-          >
-            {formatDate(lead.reply_timestamp ?? lead.created_at)}
-          </span>
+          <div className="flex flex-col items-end gap-2 shrink-0">
+            <span
+              className="neu-pill px-3 py-1.5 text-[11px] font-bold"
+              style={{ color: 'var(--cp-accent)' }}
+            >
+              {formatDate(lead.reply_timestamp ?? lead.created_at)}
+            </span>
+            {canReplyByEmail && (
+              <button
+                type="button"
+                onClick={() => void handleMarkUnread()}
+                disabled={markingUnread}
+                title="Вернуть письмо в «непрочитанные»"
+                className="neu-pill px-3 py-1.5 text-[11px] font-semibold disabled:opacity-60"
+                style={{ color: 'var(--cp-text-m)' }}
+              >
+                {markingUnread ? 'Сохраняем…' : '⟲ В непрочитанные'}
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
@@ -416,18 +456,29 @@ function LeadCard({
 }) {
   const commentCount = lead.client_lead_comments?.[0]?.count ?? 0;
 
-  // One status per row, hierarchy: lead > unread > read.
+  // One status per row (conversation), hierarchy: lead > unread > answered > needs-reply.
+  // needs-reply = прочитано, но на последний вопрос лида ещё не ответили.
   const statusColor = lead.is_lead
     ? 'var(--cp-green)'
     : lead.is_unread
       ? 'var(--cp-amber)'
-      : 'var(--cp-paper-faint)';
+      : lead.is_answered
+        ? 'var(--cp-accent)'
+        : 'var(--cp-red)';
   const statusTextColor = lead.is_lead
     ? 'var(--cp-green)'
     : lead.is_unread
       ? 'var(--cp-amber)'
-      : 'var(--cp-paper-mute)';
-  const statusLabel = lead.is_lead ? 'Лид' : lead.is_unread ? 'Непрочитано' : 'Ответ';
+      : lead.is_answered
+        ? 'var(--cp-accent)'
+        : 'var(--cp-red)';
+  const statusLabel = lead.is_lead
+    ? 'Лид'
+    : lead.is_unread
+      ? 'Непрочитано'
+      : lead.is_answered
+        ? 'Отвечено'
+        : 'Требует ответа';
 
   return (
     <button
@@ -455,6 +506,12 @@ function LeadCard({
           <span aria-hidden className="ds-status-dot" style={{ background: statusColor }} />
           {statusLabel}
         </span>
+        {(lead.message_count ?? 0) > 1 && (
+          <span className="text-[10px] font-semibold shrink-0" style={{ color: 'var(--cp-paper-faint)' }} title="Ответов лида в переписке">
+            <span className="ds-mono tabular-nums">{lead.message_count}</span>{' '}
+            {plural(lead.message_count ?? 0, 'ответ лида', 'ответа лида', 'ответов лида')}
+          </span>
+        )}
         <p className="text-xs truncate min-w-0" style={{ color: 'var(--cp-paper-mute)' }}>
           {lead.lead_email}
           {lead.campaign_name && <span style={{ color: 'var(--cp-paper-faint)' }}> · {lead.campaign_name}</span>}
@@ -490,7 +547,9 @@ function RepliesPageContent() {
   // wrong label.
   const rawStatus = searchParams.get('status');
   const status: StatusFilter =
-    rawStatus === 'unread' || rawStatus === 'leads' ? rawStatus : 'all';
+    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered' || rawStatus === 'needs_reply'
+      ? rawStatus
+      : 'all';
   const query = searchParams.get('q') ?? '';
 
   const [leads, setLeads] = useState<ForwardedLead[]>([]);
@@ -616,6 +675,14 @@ function RepliesPageContent() {
               ? { ...lead, is_lead: true, is_unread: false, status: 'lead' }
               : lead));
           }}
+          onMarkedUnread={() => {
+            setLeads((prev) => prev.map((l) => (
+              l.id === selectedLead.id
+                ? { ...l, is_unread: true, status: 'unread' }
+                : l
+            )));
+            setSelectedLead(null);
+          }}
         />
       </div>
     );
@@ -645,7 +712,7 @@ function RepliesPageContent() {
           role="tablist"
           aria-label="Фильтр ответов"
         >
-          {(['all', 'unread', 'leads'] as const).map((s) => {
+          {(['all', 'unread', 'needs_reply', 'answered', 'leads'] as const).map((s) => {
             const active = status === s;
             return (
               <button
@@ -684,7 +751,7 @@ function RepliesPageContent() {
             type="search"
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="Поиск по email или имени"
+            placeholder="Поиск по email, имени, теме или тексту"
             className="neu-inset w-full rounded-md pl-9 pr-9 py-1.5 text-xs focus:outline-none"
             style={{ color: 'var(--cp-paper)' }}
             aria-label="Поиск по ответам"
@@ -728,9 +795,15 @@ function RepliesPageContent() {
             <p className="text-sm font-bold mb-1" style={{ color: 'var(--cp-paper)' }}>
               {status === 'unread'
                 ? 'Нет непрочитанных ответов'
-                : status === 'leads'
-                  ? 'В этой выборке нет помеченных лидов'
-                  : `Ничего не найдено по запросу «${query}»`}
+                : status === 'needs_reply'
+                  ? 'Нет переписок, требующих ответа'
+                  : status === 'answered'
+                    ? 'Нет отвеченных переписок'
+                    : status === 'leads'
+                      ? 'В этой выборке нет помеченных лидов'
+                      : query
+                        ? `Ничего не найдено по запросу «${query}»`
+                        : 'Ничего не найдено'}
             </p>
             <p className="text-xs mb-4" style={{ color: 'var(--cp-paper-mute)' }}>
               Попробуйте изменить фильтр или сбросить поиск.
