@@ -4,7 +4,7 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import { navItems, type NavItem } from '@/lib/navigation';
 import { TOOLS_CONFIG, TOOL_GROUPS, ALL_TOOL_IDS } from '@/lib/toolsRegistry';
 import { ROLE_LABELS } from '@/lib/roles';
-import { searchPortalUi, type SearchHit } from '@/lib/toolsAssistant/portalUiSearch';
+import { searchPortalSubstring, type SearchHit } from '@/lib/toolsAssistant/portalUiSearch';
 import type { UserRole } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -18,6 +18,11 @@ const TIMEOUT_MS = 30_000;
  *  только что, без раздувания токенов. */
 const MAX_HISTORY = 5;
 const MAX_MESSAGE_CHARS = 2_000;
+/** Сколько раз модель может позвать tool `search_portal` за один ответ.
+ *  Хватает, чтобы переформулировать запрос 2-3 раза (например, сначала
+ *  «hh парсер», потом «hh.ru», потом «headhunter») если первый не дал нужного.
+ *  4 — потолок, дальше принудительно отвечаем без tool. */
+const MAX_TOOL_HOPS = 4;
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -93,32 +98,8 @@ function buildToolsCatalog(): string {
   return lines.join('\n');
 }
 
-function buildSearchSection(hits: SearchHit[]): string {
-  if (hits.length === 0) {
-    return 'КОНТЕКСТНЫЙ ПОИСК (real-time, по исходникам инструментов):\n- По вопросу пользователя в исходниках портала ничего конкретного не нашлось. Это значит, что либо такой функции в портале нет, либо вопрос слишком общий. Спокойно задай уточняющий вопрос («Уточните, пожалуйста, что вы имеете в виду — …?»), не выдумывай инструмент.';
-  }
-  const lines: string[] = [];
-  lines.push('КОНТЕКСТНЫЙ ПОИСК (real-time, по исходникам инструментов).');
-  lines.push('Я прогнал вопрос пользователя (с учётом последних сообщений) по реальным исходникам портала. Вот инструменты, в которых нашлись совпадения, отсортированные по релевантности:');
-  for (const hit of hits) {
-    const labels = hit.matchedLabels.map((l) => `«${l}»`).join(', ');
-    lines.push(`  • ${hit.title} — https://polza-portal.ru${hit.href}. Совпавшие элементы: ${labels}.`);
-  }
-  lines.push('');
-  lines.push('КАК С ЭТИМ РАБОТАТЬ (важно, не делай механически):');
-  lines.push('1) Сначала **внимательно прочитай вопрос пользователя**. Что он на самом деле хочет — задачи команды? задачи в инструменте? настройку чего-то конкретного? функцию по названию? Постарайся понять смысл, не цепляйся за случайные совпадения слов.');
-  lines.push('2) Сопоставь смысл вопроса с инструментами из списка выше. Смотри на «Совпавшие элементы» — они подсказывают, **почему** инструмент попал в выдачу. Если совпадение случайное (слово «задача» в админских логах, когда речь про «задачи команды»), смело **отбрасывай** этот вариант.');
-  lines.push('3) Если после оценки остался **один явно подходящий инструмент** — отвечай по нему развёрнуто (раздел, блок, ссылка, что там внутри). Не вываливай весь список «для надёжности».');
-  lines.push('4) Если осталось **2-3 равноправных кандидата** и из вопроса непонятно, какой именно нужен — задай ОДИН короткий человеческий уточняющий вопрос. Не списком из 5 пунктов, а коротко: «Уточните: вам нужно X для команды или X внутри Y?». Когда пользователь уточнит — отвечай по сути.');
-  lines.push('5) Если **вообще непонятно, о чём вопрос** (тема слишком общая, или ни один инструмент не подходит по смыслу), задай уточняющий вопрос про сам предмет: «Уточните, что вы имеете в виду — X, Y или что-то ещё?». Не выдумывай ответ.');
-  lines.push('6) Если пользователь говорит «этот инструмент / эта кнопка / расскажи подробнее» — он ссылается на **предыдущее сообщение в диалоге**. Перечитай 1-2 свои реплики назад и отвечай по той теме, а не выбирай новый инструмент из списка выше.');
-  lines.push('Поиск идёт по реальному коду, поэтому он надёжнее общего каталога ниже. Если совпавший лейбл — это название кнопки, упоминай её дословно.');
-  return lines.join('\n');
-}
-
-function buildSystemPrompt(role: UserRole | null, searchHits: SearchHit[]): string {
+function buildSystemPrompt(role: UserRole | null): string {
   const catalog = buildToolsCatalog();
-  const searchSection = buildSearchSection(searchHits);
   const roleLabel = role ? ROLE_LABELS[role] : 'неизвестна';
   const roleLine = role
     ? `Текущий пользователь, с которым ты говоришь: роль «${roleLabel}» (id роли: ${role}).`
@@ -136,7 +117,37 @@ function buildSystemPrompt(role: UserRole | null, searchHits: SearchHit[]): stri
 
 ${roleLine}
 
-${searchSection}
+ИНСТРУМЕНТ ПОИСКА (используй активно):
+- У тебя есть функция search_portal(query) — она ищет по реальным исходникам портала и возвращает инструменты с совпавшими названиями и UI-лейблами. Это твой ЕДИНСТВЕННЫЙ источник правды о портале.
+- Алгоритм для любого вопроса вида «где X», «как X», «есть ли X», «как пользоваться X»:
+  1) Прочитай вопрос пользователя и предыдущие сообщения. Сформулируй ключевую тему (1-3 слова: «hh парсер», «расшифровка видео», «обогащение базы»).
+  2) Вызови search_portal с этими словами. Можно русский, английский, аббревиатуры — ищется substring.
+  3) Если первый поиск не дал нужного — переформулируй и вызови ЕЩЁ РАЗ (другие синонимы, английский эквивалент, по-другому сократи). Не сдавайся после одной попытки.
+  4) Когда у тебя есть результат — отвечай по сути. Если результат пустой даже после 2-3 попыток, спокойно скажи «не нашёл такого, уточните, пожалуйста, что вы имеете в виду».
+
+КОГДА ПОЛЬЗОВАТЕЛЬ ПРИНОСИТ ОШИБКУ:
+- Признаки: в сообщении есть текст ошибки, стек, фраза «не работает», «выскочило», «ругается», «ошибка X», «сломалось», скриншот с красным сообщением.
+- Что делать:
+  1) Сначала объясни простыми словами, что эта ошибка значит. Без жаргона: вместо «null pointer exception» — «программа попыталась взять данные, которых нет». Вместо «401» — «сессия истекла или у вас нет прав на это действие».
+  2) Прикинь, чья это проблема:
+     • Пользовательская (неправильно заполнено поле, не выбран файл, нет интернета, истекла сессия, нет прав на действие) — дай 1-3 шага что попробовать: перезайти, обновить страницу, проверить заполнение, обратиться к админу за доступом.
+     • Технический баг (страница падает, кнопка не нажимается, бесконечная загрузка, странное сообщение от системы, стек-трейс) — попроси описать его в Telegram-чат «Поломка» (это канал техкоманды для багов). Шаблон: «Похоже на технический баг. Напишите про него в Telegram-чат «Поломка» — это канал техкоманды. В сообщении укажите: что вы делали (какой инструмент, какая кнопка), какой текст ошибки видели, желательно скриншот. Они разберутся и поправят.»
+  3) Если непонятно к какой категории относится — задай ОДИН уточняющий вопрос: «Уточните, что именно вы пытались сделать перед ошибкой?» — и по ответу решай.
+- НЕ выдумывай причину ошибки. Если не знаешь — честно скажи «не уверен, в чём дело, но это похоже на баг — опишите его в Telegram-чат «Поломка» с описанием и скриншотом».
+- НЕ предлагай править код / лезть в настройки / писать что-то в консоли — это не задача обычного спеца.
+
+ЖЁСТКИЕ ПРАВИЛА:
+- ОПИРАЙСЯ ТОЛЬКО НА то, что вернул search_portal. Если в результате нет инструмента X — его НЕТ. Не подсовывай «похожий» инструмент из своих знаний модели.
+- НЕ путай разные сервисы со схожими буквами. Конкретно:
+  • HH.ru / hh / хх / HeadHunter — это сайт ВАКАНСИЙ (hh.ru). НЕ ТО ЖЕ САМОЕ, что Habr / Хабр / habr.com (IT-сообщество и Habr Career).
+  • Если пользователь пишет «hh» / «хх» / «HH» — он имеет в виду HH.ru / HeadHunter. Никогда не подменяй это на Habr Career.
+  • Если в результатах search_portal есть «HH.ru парсер» — отвечай про него, а не про Habr Career.
+  • То же правило для других похожих пар: vk ≠ vc, tg ≠ ig, и т.п. Не подменяй сервис в ответе.
+- НЕ ПЕРЕКЛЮЧАЙ ТЕМУ между своими ответами без явной просьбы пользователя. Если на «где найти X» ты только что ответил про инструмент Y, и пользователь спросил «как им пользоваться» — отвечай про инструмент Y. Перечитай свой предыдущий ответ. Не уходи в другой инструмент.
+- Если пользователь говорит «этот инструмент / эта кнопка / расскажи подробнее» — он ссылается на твой ПОСЛЕДНИЙ ответ. Используй ту же тему в новом search_portal.
+- Если найдено несколько одинаково подходящих кандидатов — задай ОДИН короткий человеческий уточняющий вопрос, не вываливай список из 5 пунктов.
+
+КАТАЛОГ ИНСТРУМЕНТОВ (короткий справочник, для общей навигации; конкретные кнопки ищи через search_portal):
 
 ВАЖНОЕ ПРАВИЛО ДОСТУПА (читай внимательно, gpt-4o-mini часто ошибается тут):
 - В каталоге ниже у каждого раздела верхнего меню стоит пометка «доступ: …» со списком ролей через запятую.
@@ -176,8 +187,6 @@ ${searchSection}
 - Не выдумывай инструменты или функции, которых нет в каталоге ниже. Если не знаешь — честно скажи, что точно подсказать не можешь, и предложи спросить у руководителя.
 - Отвечай на том языке, на котором задан вопрос (по умолчанию русский).
 - Пиши обычным текстом. Не используй markdown: никаких **жирных**, [ссылок](url), таблиц, заголовков с #. Ссылку пиши как обычный URL прямо в строке: https://polza-portal.ru/tools/xxx — портал сам сделает её кликабельной. Для списка шагов используй обычную нумерацию «1) ... 2) ...» или короткие абзацы.
-
-Каталог разделов и инструментов на портале:
 
 ${catalog}`;
 }
@@ -235,53 +244,116 @@ export async function POST(req: NextRequest) {
     return jsonError('Last message must be from user', 400);
   }
 
-  // Реал-тайм поиск по исходникам инструментов. Берём ВСЕ user-сообщения
-  // из текущего окна (MAX_HISTORY = 5 последних сообщений, см. константу
-  // выше) и склеиваем в один query. Без этого фразы вида «а как этим
-  // пользоваться?» теряют тему из предыдущих сообщений и поиск возвращает
-  // общий шум вместо конкретной кнопки.
-  const recentUserText = messages
-    .filter((m) => m.role === 'user')
-    .map((m) => m.content)
-    .join(' ');
-  const searchHits = searchPortalUi(recentUserText);
-
-  const payload = {
-    model: MODEL,
-    temperature: 0.3,
-    max_tokens: 800,
-    messages: [
-      { role: 'system' as const, content: buildSystemPrompt(userRole, searchHits) },
-      ...messages,
-    ],
-  };
-
-  let res: Response;
-  try {
-    res = await fetch(REQUESTY_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+  // Tool loop: модель сама зовёт search_portal сколько надо. Возвращаем
+  // финальный текстовый ответ (когда модель перестала просить tool calls).
+  const tools = [
+    {
+      type: 'function' as const,
+      function: {
+        name: 'search_portal',
+        description:
+          'Поиск инструмента/кнопки/раздела в портале по ключевым словам. Возвращает топ совпадений из реальных исходников: для каждого инструмента — название, ссылка и какие UI-лейблы совпали с запросом. Используй для любого вопроса вида «где X / как X / есть ли X». Можешь вызывать несколько раз с разными формулировками (русский / английский / синонимы), если первый поиск не дал нужного.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description:
+                'Ключевые слова через пробел. Например: «hh парсер», «расшифровка видео telegram», «обогащение базы», «sales chat analyzer». 1-4 слова.',
+            },
+          },
+          required: ['query'],
+        },
       },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return jsonError(`Сеть до Requesty не дошла: ${msg}`, 502);
+    },
+  ];
+
+  const convMessages: Array<Record<string, unknown>> = [
+    { role: 'system', content: buildSystemPrompt(userRole) },
+    ...messages,
+  ];
+
+  for (let hop = 0; hop <= MAX_TOOL_HOPS; hop++) {
+    // На последнем hop запрещаем tools — заставляем модель ответить текстом.
+    const allowTools = hop < MAX_TOOL_HOPS;
+    const payload: Record<string, unknown> = {
+      model: MODEL,
+      temperature: 0.3,
+      max_tokens: 800,
+      messages: convMessages,
+    };
+    if (allowTools) {
+      payload.tools = tools;
+      payload.tool_choice = 'auto';
+    }
+
+    let res: Response;
+    try {
+      res = await fetch(REQUESTY_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonError(`Сеть до Requesty не дошла: ${msg}`, 502);
+    }
+
+    if (!res.ok) {
+      const text = await res.text();
+      return jsonError(`Requesty error ${res.status}: ${text.slice(0, 300)}`, 502);
+    }
+
+    const data = (await res.json()) as {
+      choices?: Array<{
+        finish_reason?: string;
+        message?: {
+          content?: string | null;
+          tool_calls?: Array<{
+            id: string;
+            type: string;
+            function: { name: string; arguments: string };
+          }>;
+        };
+      }>;
+    };
+    const choice = data.choices?.[0];
+    const message = choice?.message;
+    if (!message) return jsonError('Пустой ответ от модели', 502);
+
+    const toolCalls = message.tool_calls ?? [];
+    if (toolCalls.length === 0) {
+      // Модель закончила — возвращаем текстовый ответ.
+      const reply = (message.content ?? '').trim();
+      if (!reply) return jsonError('Пустой ответ от модели', 502);
+      return NextResponse.json({ reply });
+    }
+
+    // Кормим в conversation и выполняем каждый tool_call.
+    convMessages.push(message as unknown as Record<string, unknown>);
+    for (const call of toolCalls) {
+      let toolResult: SearchHit[] = [];
+      if (call.function?.name === 'search_portal') {
+        try {
+          const args = JSON.parse(call.function.arguments) as { query?: string };
+          if (typeof args.query === 'string' && args.query.trim()) {
+            toolResult = searchPortalSubstring(args.query.trim());
+          }
+        } catch {
+          // мусорные args — отдадим модели пустой результат, она поймёт.
+        }
+      }
+      convMessages.push({
+        role: 'tool',
+        tool_call_id: call.id,
+        content: JSON.stringify(toolResult),
+      });
+    }
   }
 
-  if (!res.ok) {
-    const text = await res.text();
-    return jsonError(`Requesty error ${res.status}: ${text.slice(0, 300)}`, 502);
-  }
-
-  const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const reply = data.choices?.[0]?.message?.content?.trim();
-  if (!reply) return jsonError('Пустой ответ от модели', 502);
-
-  return NextResponse.json({ reply });
+  return jsonError('Модель не смогла сформировать ответ за разрешённое число шагов поиска', 502);
 }
