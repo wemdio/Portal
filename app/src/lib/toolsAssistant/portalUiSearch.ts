@@ -2,6 +2,7 @@ import 'server-only';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { TOOLS_CONFIG, ALL_TOOL_IDS, type ToolId } from '@/lib/toolsRegistry';
+import { navItems } from '@/lib/navigation';
 
 /**
  * Real-time поиск по интерфейсу инструментов портала. На каждый запрос
@@ -22,7 +23,7 @@ import { TOOLS_CONFIG, ALL_TOOL_IDS, type ToolId } from '@/lib/toolsRegistry';
 const SRC_ROOT = path.join(process.cwd(), 'src');
 const INDEX_TTL_MS = 60_000;
 const MAX_FILE_BYTES = 2_000_000;
-const MAX_RESULTS = 3;
+const MAX_RESULTS = 5;
 const MAX_LABELS_PER_RESULT = 8;
 const MIN_TOKEN_LEN = 3;
 /** Префикс для match-логики: «валидатор» и «валидация» совпадают по префиксу
@@ -31,11 +32,20 @@ const MIN_TOKEN_LEN = 3;
 const STEM_PREFIX_LEN = 5;
 
 interface ToolEntry {
-  toolId: ToolId;
+  /** Технический id (toolId или nav id) — нужен только для дебага. */
+  id: string;
+  /** Что показывать пользователю в ответе. */
   title: string;
   href: string;
-  labels: string[];
+  /** Тексты из самого названия инструмента/раздела. Совпадение с ними весит
+   *  больше, потому что пользователь обычно ищет именно по названию. */
+  titleLabels: string[];
+  /** Тексты с внутренней страницы инструмента (кнопки, лейблы). */
+  bodyLabels: string[];
 }
+
+const TITLE_WEIGHT = 3;
+const BODY_WEIGHT = 1;
 
 interface IndexState {
   ts: number;
@@ -73,7 +83,10 @@ function resolveImport(importPath: string, fromFile: string): string | null {
   return null;
 }
 
-const IMPORT_RE = /import\s+(?:[\w*{}\s,]+\s+from\s+)?['"]([^'"]+)['"]/g;
+/** Покрывает `import ...from '...'` и re-exports `export {default} from '...'`.
+ *  Без re-export ветки страницы вида app/board/page.tsx (`export {default}
+ *  from '@/app/tasks/page'`) теряют всю внутрянку. */
+const IMPORT_RE = /(?:import|export)\s+(?:[\w*{}\s,]+\s+from\s+)?['"]([^'"]+)['"]/g;
 const STRING_LITERAL_RE = /['"`]([^'"`\n]{2,120})['"`]/g;
 const JSX_TEXT_RE = />([^<>{}\n]{2,120})</g;
 
@@ -124,55 +137,93 @@ function collectLabels(source: string): string[] {
   return Array.from(seen);
 }
 
-const HREF_TO_PAGE_FILE: Record<string, string> = {
-  '/parsers': 'app/parsers/page.tsx',
-  '/instantly': 'app/instantly/page.tsx',
-};
-
 function resolvePageFile(href: string): string | null {
-  if (href in HREF_TO_PAGE_FILE) return path.join(SRC_ROOT, HREF_TO_PAGE_FILE[href]);
-  const m = href.match(/^\/tools\/([\w-]+)$/);
-  if (m) return path.join(SRC_ROOT, 'app', 'tools', m[1], 'page.tsx');
+  // /tools/<slug> → app/tools/<slug>/page.tsx
+  const toolsMatch = href.match(/^\/tools\/([\w-]+)$/);
+  if (toolsMatch) return path.join(SRC_ROOT, 'app', 'tools', toolsMatch[1], 'page.tsx');
+  // /foo или /foo/bar → app/foo[/bar]/page.tsx — покрывает /board, /tasks,
+  // /team, /finance, /parsers, /instantly и т.д. без захардкоженного списка.
+  const navMatch = href.match(/^\/([\w-]+(?:\/[\w-]+)*)$/);
+  if (navMatch) {
+    const candidate = path.join(SRC_ROOT, 'app', navMatch[1], 'page.tsx');
+    if (fileExists(candidate)) return candidate;
+  }
   return null;
 }
 
-function buildEntry(toolId: ToolId): ToolEntry | null {
-  const config = TOOLS_CONFIG[toolId];
-  if (!config) return null;
-  const pageFile = resolvePageFile(config.href);
-  if (!pageFile) return null;
+function collectBodyLabelsFor(pageFile: string): string[] {
+  const bodyLabels = new Set<string>();
   const pageSource = readFileSafe(pageFile);
-  if (!pageSource) return null;
-
-  const labels = new Set<string>();
-  // Title и description тоже считаем за labels — на вопрос
-  // «где конструктор» это даст совпадение даже без чтения page.tsx.
-  labels.add(config.title);
-  if (config.title_en) labels.add(config.title_en);
-  labels.add(config.description);
-  if (config.description_en) labels.add(config.description_en);
-
-  for (const l of collectLabels(pageSource)) labels.add(l);
+  if (!pageSource) return [];
+  for (const l of collectLabels(pageSource)) bodyLabels.add(l);
   for (const imp of collectImports(pageSource)) {
     const resolved = resolveImport(imp, pageFile);
     if (!resolved) continue;
     const subSource = readFileSafe(resolved);
     if (!subSource) continue;
-    for (const l of collectLabels(subSource)) labels.add(l);
+    for (const l of collectLabels(subSource)) bodyLabels.add(l);
+  }
+  return Array.from(bodyLabels);
+}
+
+function buildToolEntry(toolId: ToolId): ToolEntry | null {
+  const config = TOOLS_CONFIG[toolId];
+  if (!config) return null;
+
+  const titleLabels = [config.title];
+  if (config.title_en) titleLabels.push(config.title_en);
+
+  const bodyLabels = new Set<string>();
+  bodyLabels.add(config.description);
+  if (config.description_en) bodyLabels.add(config.description_en);
+
+  const pageFile = resolvePageFile(config.href);
+  if (pageFile) {
+    for (const l of collectBodyLabelsFor(pageFile)) bodyLabels.add(l);
   }
 
   return {
-    toolId,
+    id: toolId,
     title: config.title,
     href: config.href,
-    labels: Array.from(labels),
+    titleLabels,
+    bodyLabels: Array.from(bodyLabels),
+  };
+}
+
+/** Виртуальная запись для пункта верхнего меню (например «Доска» → /board).
+ *  Без этого запрос «куда вынести задачи на доску» не имеет шанса попасть в
+ *  /board — там нет инструмента в реестре, только пункт навигации. */
+function buildNavEntry(item: { id: string; name: string; nameEn: string; href: string }): ToolEntry | null {
+  // Пропускаем разделы, которые уже покрыты как «инструменты», и сервисные
+  // страницы (профиль/тарифы и т.п. без полезного контекста).
+  if (
+    item.href === '/'
+    || item.href.startsWith('/tools')
+    || item.href === '/instantly'
+    || item.href === '/parsers'
+    || item.href === '/profile'
+  ) return null;
+  const titleLabels = [item.name, item.nameEn].filter(Boolean);
+  const pageFile = resolvePageFile(item.href);
+  const bodyLabels = pageFile ? collectBodyLabelsFor(pageFile) : [];
+  return {
+    id: `nav:${item.id}`,
+    title: item.name,
+    href: item.href,
+    titleLabels,
+    bodyLabels,
   };
 }
 
 function rebuildIndex(): ToolEntry[] {
   const entries: ToolEntry[] = [];
   for (const toolId of ALL_TOOL_IDS) {
-    const entry = buildEntry(toolId);
+    const entry = buildToolEntry(toolId);
+    if (entry) entries.push(entry);
+  }
+  for (const item of navItems) {
+    const entry = buildNavEntry(item);
     if (entry) entries.push(entry);
   }
   return entries;
@@ -209,7 +260,7 @@ function tokenize(query: string): string[] {
 }
 
 export interface SearchHit {
-  toolId: ToolId;
+  toolId: string;
   title: string;
   href: string;
   /** Labels из исходников, которые совпали с токенами запроса. */
@@ -218,17 +269,27 @@ export interface SearchHit {
 }
 
 function stem(token: string): string {
-  // Для русских/латинских слов берём префикс — этого достаточно, чтобы
-  // «валидатор», «валидация», «валидировать» сматчились на корень «валид».
-  // Простая эвристика без полного стемминга — лишь бы не потерять очевидные
-  // совпадения.
   return token.length > STEM_PREFIX_LEN ? token.slice(0, STEM_PREFIX_LEN) : token;
+}
+
+function scanLabels(labels: string[], stems: string[], collector: string[], stemHit: Set<string>): void {
+  for (const label of labels) {
+    if (collector.length >= MAX_LABELS_PER_RESULT) return;
+    const lower = label.toLowerCase();
+    const hitStems = stems.filter((s) => lower.includes(s));
+    if (hitStems.length === 0) continue;
+    collector.push(label);
+    for (const s of hitStems) stemHit.add(s);
+  }
 }
 
 /**
  * Ищем в индексе по префиксам токенов запроса (упрощённый стемминг).
- * Скор инструмента — число уникальных токенов из запроса, чей префикс
- * встретился хотя бы в одном из его labels.
+ * Скор: TITLE_WEIGHT × число токенов, совпавших в названии инструмента,
+ * плюс BODY_WEIGHT × число токенов, совпавших во внутренних лейблах.
+ * Совпадение по названию весит больше — это разруливает омонимы вроде
+ * «задачи команды» (раздел «Задачи») vs «задачи парсинга» (вкладка внутри
+ * Парсеров).
  */
 export function searchPortalUi(query: string): SearchHit[] {
   const tokens = tokenize(query);
@@ -239,26 +300,35 @@ export function searchPortalUi(query: string): SearchHit[] {
   const hits: SearchHit[] = [];
 
   for (const entry of idx) {
-    const matched: string[] = [];
-    const stemMatched = new Set<string>();
-    for (const label of entry.labels) {
-      const lower = label.toLowerCase();
-      const hitStems = stems.filter((s) => lower.includes(s));
-      if (hitStems.length === 0) continue;
-      matched.push(label);
-      for (const s of hitStems) stemMatched.add(s);
-      if (matched.length >= MAX_LABELS_PER_RESULT) break;
-    }
-    if (matched.length === 0) continue;
+    const titleMatches: string[] = [];
+    const titleStemHit = new Set<string>();
+    scanLabels(entry.titleLabels, stems, titleMatches, titleStemHit);
+
+    const bodyMatches: string[] = [];
+    const bodyStemHit = new Set<string>();
+    scanLabels(entry.bodyLabels, stems, bodyMatches, bodyStemHit);
+
+    if (titleMatches.length === 0 && bodyMatches.length === 0) continue;
+
+    // Title-матчи показываем первыми — пользователю важнее увидеть «совпало по
+    // названию», а уже потом «совпало по содержимому».
+    const matched = [...titleMatches, ...bodyMatches].slice(0, MAX_LABELS_PER_RESULT);
+    const score = titleStemHit.size * TITLE_WEIGHT + bodyStemHit.size * BODY_WEIGHT;
+
     hits.push({
-      toolId: entry.toolId,
+      toolId: entry.id,
       title: entry.title,
       href: entry.href,
       matchedLabels: matched,
-      score: stemMatched.size,
+      score,
     });
   }
 
   hits.sort((a, b) => b.score - a.score);
+  // Возвращаем топ-N как есть и отдаём модели — она по `matchedLabels`
+  // решит, стоит ли отвечать сразу или предложить выбор пользователю.
+  // Жёсткий dominant-фильтр оказался вредным: при запросе про «задачи»
+  // он съедал /board (там «задача» только во внутренних кнопках), хотя
+  // доска — это второй валидный способ управления задачами.
   return hits.slice(0, MAX_RESULTS);
 }
