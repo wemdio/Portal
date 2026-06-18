@@ -79,7 +79,18 @@ function toIso(value) {
   return Number.isNaN(date.getTime()) ? normalizeWhitespace(value) : date.toISOString();
 }
 
-function careersUrl(ats, slug) {
+function normalizeWorkdayCareersUrl(sourceUrl) {
+  try {
+    const parsed = new URL(sourceUrl);
+    if (!parsed.hostname.toLowerCase().endsWith('.myworkdayjobs.com')) return '';
+    const pathname = parsed.pathname.replace(/\/+$/, '');
+    return `${parsed.origin}${pathname}`;
+  } catch {
+    return '';
+  }
+}
+
+function careersUrl(ats, slug, sourceUrl = '') {
   if (!slug) return '';
   if (ats === 'greenhouse') return `https://job-boards.greenhouse.io/${slug}`;
   if (ats === 'lever') return `https://jobs.lever.co/${slug}`;
@@ -89,6 +100,8 @@ function careersUrl(ats, slug) {
   if (ats === 'recruitee') return `https://${slug}.recruitee.com`;
   if (ats === 'breezy') return `https://${slug}.breezy.hr`;
   if (ats === 'workday') {
+    const sourceCareersUrl = normalizeWorkdayCareersUrl(sourceUrl);
+    if (sourceCareersUrl) return sourceCareersUrl;
     const [tenant, site] = String(slug).split('/');
     return tenant && site ? `https://${tenant}.myworkdayjobs.com/${site}` : '';
   }
@@ -172,7 +185,7 @@ function extractJobs(ats, payload) {
   return Array.isArray(payload?.jobs) ? payload.jobs : [];
 }
 
-function baseJob({ ats, slug, company, title, location, country, url, posted_at }) {
+function baseJob({ ats, slug, company, title, location, country, url, posted_at, careers_url }) {
   const cleanCompany = normalizeCompanyName(company);
   const cleanTitle = normalizeWhitespace(title);
   if (!cleanCompany || !cleanTitle) return null;
@@ -188,6 +201,7 @@ function baseJob({ ats, slug, company, title, location, country, url, posted_at 
     url: normalizeWhitespace(url),
     posted_at: toIso(posted_at),
     roles: roleTagsForTitle(cleanTitle),
+    ...(careers_url ? { careers_url: normalizeWhitespace(careers_url) } : {}),
   };
 }
 
@@ -353,6 +367,7 @@ function normalizeWorkdayJob(job, { slug, companyName, sourceUrl } = {}) {
     country: '',
     url: workdayPublicJobUrl(sourceUrl, job?.externalPath),
     posted_at: workdayPostedAt(job?.postedOn || job?.startDate || job?.posted_on),
+    careers_url: careersUrl('workday', slug, sourceUrl),
   });
 }
 
@@ -420,7 +435,7 @@ function buildCompanyLeads(jobs) {
         job_count: 0,
         job_titles: [],
         job_urls: [],
-        careers_url: careersUrl(job.ats, job.slug),
+        careers_url: job.careers_url || careersUrl(job.ats, job.slug),
         latest_posted_at: '',
       };
 

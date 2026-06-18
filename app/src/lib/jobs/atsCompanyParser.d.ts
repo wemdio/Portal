@@ -19,6 +19,7 @@ export interface AtsNormalizedJob {
   url: string;
   posted_at: string;
   roles: string[];
+  careers_url?: string;
 }
 
 export interface AtsLead {
@@ -40,7 +41,7 @@ export const SUPPORTED_ATS: string[];
 export const CSV_HEADERS: string[];
 
 export function postingsUrl(ats: string, slug: string, sourceUrl?: string): string;
-export function careersUrl(ats: string, slug: string): string;
+export function careersUrl(ats: string, slug: string, sourceUrl?: string): string;
 export function extractJobs(ats: string, payload: unknown): unknown[];
 export function normalizeJob(
   ats: string,

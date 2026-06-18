@@ -450,7 +450,7 @@ export function normalizeAtsJobToEngVacancy(
     vacancy_title: normalized.title,
     vacancy_description: description,
     vacancy_url: normalized.url,
-    careers_url: normalized.slug ? careersUrl(source, normalized.slug) : null,
+    careers_url: normalized.slug ? careersUrl(source, normalized.slug, ctx.sourceUrl) : null,
     location: normalized.location || null,
     city: parseCity(normalized.location || null),
     country: normalized.country || (countryCode ? COUNTRY_NAME_BY_CODE[countryCode] ?? null : null),

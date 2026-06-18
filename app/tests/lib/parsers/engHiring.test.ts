@@ -398,6 +398,7 @@ Own B2B client communications and revenue expansion for enterprise accounts.
       company_name: 'Acme',
       vacancy_title: 'Commercial Account Director',
       vacancy_url: 'https://acme.wd5.myworkdayjobs.com/acme_external/job/UK-London-Office/Commercial-Account-Director_R2414',
+      careers_url: 'https://acme.wd5.myworkdayjobs.com/acme_external',
       country_code: 'gb',
     });
     expect(vacancy?.published_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);

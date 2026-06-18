@@ -2,6 +2,7 @@
 
 import {
   buildCompanyLeads,
+  careersUrl,
   domainFromJobUrls,
   exportCompanyLeadsToCsv,
   extractJobs,
@@ -241,6 +242,8 @@ describe('atsCompanyParser — normalizers', () => {
     expect(postingsUrl('breezy', '1001')).toBe('https://1001.breezy.hr/json');
     expect(postingsUrl('workday', '8x8inc/8x8_external_careers', 'https://8x8inc.wd5.myworkdayjobs.com/8x8_external_careers'))
       .toBe('https://8x8inc.wd5.myworkdayjobs.com/wday/cxs/8x8inc/8x8_external_careers/jobs');
+    expect(careersUrl('workday', '8x8inc/8x8_external_careers', 'https://8x8inc.wd5.myworkdayjobs.com/8x8_external_careers'))
+      .toBe('https://8x8inc.wd5.myworkdayjobs.com/8x8_external_careers');
 
     expect(extractJobs('workable', { jobs: [{ title: 'AE' }] })).toEqual([{ title: 'AE' }]);
     expect(extractJobs('bamboohr', { result: [{ jobOpeningName: 'AE' }] })).toEqual([{ jobOpeningName: 'AE' }]);
@@ -281,6 +284,32 @@ describe('atsCompanyParser — aggregation', () => {
     });
     expect(leads[0].cities).toEqual(['London', 'Remote']);
     expect(leads[0].latest_posted_at).toBe('2026-05-03T10:00:00.000Z');
+  });
+
+  it('preserves Workday source careers URLs with cluster hostnames', () => {
+    const jobs = [
+      normalizeWorkdayJob(
+        {
+          title: 'Commercial Account Director',
+          externalPath: '/job/UK-London-Office/Commercial-Account-Director_R2414',
+          locationsText: 'UK-London Office',
+          postedOn: 'Posted Today',
+        },
+        {
+          slug: 'acme/acme_external',
+          companyName: 'Acme',
+          sourceUrl: 'https://acme.wd5.myworkdayjobs.com/acme_external',
+        },
+      ),
+    ];
+
+    const leads = buildCompanyLeads(jobs);
+    expect(leads).toHaveLength(1);
+    expect(leads[0]).toMatchObject({
+      ats: 'workday',
+      slug: 'acme/acme_external',
+      careers_url: 'https://acme.wd5.myworkdayjobs.com/acme_external',
+    });
   });
 });
 
