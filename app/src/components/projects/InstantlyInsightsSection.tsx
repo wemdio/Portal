@@ -20,6 +20,8 @@ type CampaignMetric = {
 };
 type Finding = { grade: 'A' | 'B'; campaign: string; text: string };
 type DroppedLead = { email: string; bucket: 'interested' | 'referral'; ageDays: number; campaign: string };
+type SegmentRoiRow = { segment: string; sent: number; ratePerSent: number; ciLow: number; ciHigh: number };
+type SegmentRoi = { recommendation: string; best: { segment: string; rate: number }; worst: { segment: string; rate: number }; all: SegmentRoiRow[] };
 type Insights = {
   generatedAt: string;
   campaigns: CampaignMetric[];
@@ -27,6 +29,7 @@ type Insights = {
   weekly: { week: string; sent: number; replies: number }[];
   findings: Finding[];
   droppedLeads: { interested: number; referral: number; items: DroppedLead[] };
+  segmentRoi: SegmentRoi | null;
   notes: string[];
 };
 
@@ -215,6 +218,25 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
                   </span>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* I) within-client segment ROI — where to source the next list */}
+          {data.segmentRoi && (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3">
+              <p className="text-sm font-semibold text-emerald-800">🎯 Куда собирать следующий список</p>
+              <p className="mt-0.5 text-xs text-emerald-700">{data.segmentRoi.recommendation}</p>
+              <ul className="mt-2 space-y-1">
+                {data.segmentRoi.all.map((s, i) => (
+                  <li key={i} className="flex items-center justify-between gap-2 text-xs">
+                    <span className="truncate text-gray-700">{s.segment}</span>
+                    <span className="shrink-0 tabular-nums text-gray-500">
+                      {pct(s.ratePerSent)}<span className="ml-1 text-[10px] text-gray-400">[{pct(s.ciLow)}–{pct(s.ciHigh)}]</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1.5 text-[10px] text-emerald-500/80">лидов на отправку по вашим прошлым спискам · корреляция, не A/B · не переносится на других клиентов</p>
             </div>
           )}
 
