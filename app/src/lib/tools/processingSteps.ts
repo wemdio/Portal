@@ -17,6 +17,7 @@ import {
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
 import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator';
+import { isSupportEmail } from './supportEmails';
 
 export type ProgressFn = (progress: number) => Promise<void>;
 export type CancelCheckFn = () => Promise<boolean>;
@@ -348,6 +349,56 @@ export async function stepSplitEmails(
 
   await onProgress(100);
   return [header, ...result];
+}
+
+/* ═══════════════════════════════════════════
+   STEP: Remove support / role-based emails
+   ═══════════════════════════════════════════ */
+
+/**
+ * Drops rows whose only email is a generic «support» mailbox (support@, info@,
+ * sales@, zakaz@ …) — these aren't a specific decision-maker and hurt outreach.
+ *
+ * Checks BOTH the original email column (alias-based) AND the FOUND_EMAIL_COL
+ * that `find_emails` (target='separate') writes — otherwise emails scraped from
+ * the site (the usual source of these support@ rows) would slip through. Role
+ * addresses are stripped from each cell; a row is removed only when it HAD
+ * email(s) and none survive (so a mixed «support@x, ivan@x» cell keeps ivan@).
+ * Rows without any email are left untouched.
+ */
+export async function stepRemoveSupportEmails(
+  data: string[][],
+  onProgress: ProgressFn,
+): Promise<string[][]> {
+  if (data.length < 2) { await onProgress(100); return data; }
+  const header = data[0];
+  const emailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
+  const foundIdx = header.findIndex((h) => h.trim() === FOUND_EMAIL_COL);
+  const cols = [emailIdx, foundIdx].filter((i) => i >= 0);
+  if (cols.length === 0) { await onProgress(100); return data; }
+
+  await onProgress(40);
+  const out: string[][] = [header];
+  for (const row of data.slice(1)) {
+    let hadEmail = false;
+    let hasPersonal = false;
+    const newRow = [...row];
+    for (const ci of cols) {
+      const cell = (row[ci] || '').trim();
+      if (!cell) continue;
+      const emails = cell.match(EMAIL_SPLIT_REGEX);
+      if (!emails || emails.length === 0) continue;
+      hadEmail = true;
+      const kept = emails.filter((e) => !isSupportEmail(e));
+      if (kept.length > 0) hasPersonal = true;
+      newRow[ci] = kept.join(', ');
+    }
+    // Выкидываем строку, только если в ней БЫЛИ email и ВСЕ они ролевые.
+    if (hadEmail && !hasPersonal) continue;
+    out.push(newRow);
+  }
+  await onProgress(100);
+  return out;
 }
 
 /* ═══════════════════════════════════════════
@@ -1132,6 +1183,7 @@ export type StepKey =
   | 'clean_names'
   | 'find_emails'
   | 'split_emails'
+  | 'remove_support_emails'
   | 'validate_emails'
   | 'check_sites'
   | 'enrich_descriptions'
@@ -1222,6 +1274,17 @@ export const AVAILABLE_STEPS: StepDefinition[] = [
     priority: 45,
     requiresColumns: [['email', 'e-mail', 'почта', 'mail']],
     recommendedAfter: ['find_emails'],
+  },
+  {
+    key: 'remove_support_emails',
+    label: 'Убрать почты поддержки',
+    description: 'Удаляет строки с ролевыми адресами (support@, info@, sales@, zakaz@ и т.п.)',
+    icon: 'mail-x',
+    category: 'clean',
+    cost: 'free',
+    priority: 47,
+    requiresColumns: [['email', 'e-mail', 'почта', 'mail']],
+    recommendedAfter: ['split_emails'],
   },
   {
     key: 'dedup_email',

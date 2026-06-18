@@ -16,7 +16,7 @@ import {
 } from '@/lib/tools/baseConstructorEta';
 import { getMappingContentWarnings } from '@/lib/tools/columnMappingWarnings';
 import {
-  Eraser, CopyMinus, MailMinus, Sparkles, MailSearch, MailCheck,
+  Eraser, CopyMinus, MailMinus, MailX, Sparkles, MailSearch, MailCheck,
   Globe, FileText, Target, PenLine, Upload, Play, X, Check,
   Download, ArrowRight, Loader2, ChevronDown, ChevronUp, RotateCcw,
   AlertTriangle, Zap, CircleDollarSign, Brain, Split, FileUp, Lock,
@@ -31,7 +31,7 @@ const ALWAYS_ON_SET = new Set<StepKey>(ALWAYS_ON_STEPS_FOR_CLIENT as readonly St
 
 type StepKey =
   | 'remove_empty' | 'dedup_full' | 'dedup_email' | 'clean_names'
-  | 'find_emails' | 'split_emails' | 'validate_emails' | 'check_sites'
+  | 'find_emails' | 'split_emails' | 'remove_support_emails' | 'validate_emails' | 'check_sites'
   | 'enrich_descriptions' | 'ta_scoring' | 'personalization';
 
 type CostTier = 'free' | 'cheap' | 'api' | 'ai';
@@ -94,6 +94,7 @@ const STEPS: StepDef[] = [
   { key: 'check_sites', label: 'Проверить сайты', description: 'Удаляет строки с мертвыми сайтами', icon: Globe, category: 'enrich', cost: 'cheap', priority: 30, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']] },
   { key: 'find_emails', label: 'Найти Email', description: 'Ищет все email по сайту компании', icon: MailSearch, category: 'enrich', cost: 'cheap', priority: 40, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']], producesColumns: ['email'], recommendedAfter: ['check_sites'] },
   { key: 'split_emails', label: 'Разделить почты', description: 'Каждый email — отдельная строка', icon: Split, category: 'clean', cost: 'free', priority: 45, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['find_emails'] },
+  { key: 'remove_support_emails', label: 'Убрать почты поддержки', description: 'Удаляет строки с ролевыми адресами (support@, info@, zakaz@…)', icon: MailX, category: 'clean', cost: 'free', priority: 47, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails'] },
   { key: 'dedup_email', label: 'Дедуп по Email', description: 'Одна строка на уникальный email', icon: MailMinus, category: 'clean', cost: 'free', priority: 50, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails'], autoAdds: ['split_emails'] },
   { key: 'validate_emails', label: 'Валидация Email', description: 'SMTP-проверка, удаляет невалидные и одноразовые', icon: MailCheck, category: 'enrich', cost: 'api', priority: 55, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails', 'dedup_email'], autoAdds: ['split_emails'] },
   { key: 'clean_names', label: 'Очистить названия', description: 'AI убирает мусор из названий (ООО, LLC...)', icon: Sparkles, category: 'clean', cost: 'ai', priority: 60, requiresColumns: [['компания', 'company', 'name', 'название']] },
