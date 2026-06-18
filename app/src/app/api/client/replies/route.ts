@@ -67,6 +67,7 @@ type LeadListItem = {
   is_lead?: boolean;
   lead_entry_id?: string | null;
   is_answered?: boolean;
+  message_count?: number;
 };
 
 type SyncedLeadRow = {
@@ -111,6 +112,37 @@ function mergeAndSortItems(items: LeadListItem[]): LeadListItem[] {
 
   unique.sort((a, b) => itemTimestamp(b) - itemTimestamp(a));
   return unique;
+}
+
+function conversationKey(item: LeadListItem): string {
+  if (item.thread_id) return `thread:${item.thread_id}`;
+  return `lead:${item.campaign_id}:${item.lead_email.trim().toLowerCase()}`;
+}
+
+/**
+ * Схлопывает per-email строки в ПЕРЕПИСКИ: одна строка на тред/лид. items уже
+ * отсортированы свежими-первыми, поэтому первый встреченный в группе = последнее
+ * входящее (representative); его is_unread/is_answered и задают статус переписки
+ * («ответил ли я на ТЕКУЩИЙ вопрос лида»). message_count — число входящих в
+ * треде; is_lead — если хоть одно письмо треда помечено лидом.
+ */
+function groupByConversation(items: LeadListItem[]): LeadListItem[] {
+  const byKey = new Map<string, LeadListItem>();
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const key = conversationKey(item);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    const rep = byKey.get(key);
+    if (!rep) byKey.set(key, item);
+    else if (item.is_lead) rep.is_lead = true;
+  }
+  const out: LeadListItem[] = [];
+  for (const [key, rep] of byKey) {
+    rep.message_count = counts.get(key) ?? 1;
+    out.push(rep);
+  }
+  out.sort((a, b) => itemTimestamp(b) - itemTimestamp(a));
+  return out;
 }
 
 async function readCampaignNames(campaignIds: string[]): Promise<Map<string, string>> {
@@ -349,8 +381,10 @@ export async function GET(req: NextRequest) {
   // Status filter is whitelisted so a malformed query never leaks the
   // unfiltered set under the wrong label. 'all' = passthrough.
   const rawStatus = url.searchParams.get('status');
-  const statusFilter: 'all' | 'unread' | 'leads' | 'answered' =
-    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered' ? rawStatus : 'all';
+  const statusFilter: 'all' | 'unread' | 'leads' | 'answered' | 'needs_reply' =
+    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered' || rawStatus === 'needs_reply'
+      ? rawStatus
+      : 'all';
 
   const allowedCampaignIds = filterAllowedIds([], accessRows, 'campaign');
 
@@ -388,15 +422,23 @@ export async function GET(req: NextRequest) {
   // лида лежит в client_campaign_leads, и без раннего обогащения поиск по имени
   // его бы не нашёл (enrich заполняет lead_name только когда оно пустое).
   if (search) await enrichFromSyncedLeads(userId, merged);
-  const searched = search ? merged.filter((i) => matchesSearch(i, search)) : merged;
+
+  // Одна строка на ПЕРЕПИСКУ (тред/лид), а не на каждое входящее письмо: статус
+  // берём по ПОСЛЕДНЕМУ входящему — это и есть «ответил ли я на текущий вопрос».
+  const conversations = groupByConversation(merged);
+
+  const searched = search ? conversations.filter((i) => matchesSearch(i, search)) : conversations;
 
   const filtered = statusFilter === 'unread'
     ? searched.filter((i) => i.is_unread === true)
-    : statusFilter === 'leads'
-      ? searched.filter((i) => i.is_lead === true)
-      : statusFilter === 'answered'
-        ? searched.filter((i) => i.is_answered === true)
-        : searched;
+    : statusFilter === 'answered'
+      ? searched.filter((i) => i.is_answered === true)
+      : statusFilter === 'needs_reply'
+        // Требует ответа = на последний вопрос лида ещё не отвечено (и это не лид).
+        ? searched.filter((i) => i.is_answered !== true && i.is_lead !== true)
+        : statusFilter === 'leads'
+          ? searched.filter((i) => i.is_lead === true)
+          : searched;
 
   const total = filtered.length;
   const items = filtered.slice(offset, offset + limit);

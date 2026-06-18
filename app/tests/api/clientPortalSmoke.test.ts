@@ -923,6 +923,57 @@ describe('Client Portal — empty new-user state', () => {
     expect(body.items[0]?.email_id).toBe('email-b');
   });
 
+  it('GET /replies groups a multi-message thread into one conversation row + needs_reply filter', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValue({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    // Two inbound emails in the SAME thread (lead asked, then a follow-up).
+    const items = [
+      {
+        id: 'email-new', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't1', lead: 'l1',
+        subject: 'Re: Re: вопрос', body: { text: 'и ещё уточнение' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-20T10:00:00.000Z', ue_type: 2,
+      },
+      {
+        id: 'email-old', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't1', lead: 'l1',
+        subject: 'вопрос', body: { text: 'первый вопрос' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-19T10:00:00.000Z', ue_type: 2,
+      },
+    ];
+    const { GET } = await import('@/app/api/client/replies/route');
+
+    // Two inbound in one thread collapse to ONE conversation row; representative = latest.
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    let res = await GET(makeReq('http://x/api/client/replies'));
+    expect((res as Response).status).toBe(200);
+    let body = (await (res as Response).json()) as {
+      items: Array<{ email_id?: string; message_count?: number }>; total: number;
+    };
+    expect(body.total).toBe(1);
+    expect(body.items[0]?.email_id).toBe('email-new');
+    expect(body.items[0]?.message_count).toBe(2);
+
+    // needs_reply: unanswered, non-lead conversation appears.
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    res = await GET(makeReq('http://x/api/client/replies?status=needs_reply'));
+    body = (await (res as Response).json()) as { items: unknown[]; total: number };
+    expect(body.total).toBe(1);
+
+    // answered: nothing answered (empty client_email_replies) → empty.
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    res = await GET(makeReq('http://x/api/client/replies?status=answered'));
+    body = (await (res as Response).json()) as { items: unknown[]; total: number };
+    expect(body.total).toBe(0);
+  });
+
   it('GET /bases returns campaigns: [] when no campaigns granted', async () => {
     const { GET } = await import('@/app/api/client/bases/route');
     const res = await GET(makeReq('http://x/api/client/bases'));

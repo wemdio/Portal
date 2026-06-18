@@ -8,11 +8,12 @@ import { Send, MessageSquare, RefreshCw, Search, X } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ExpandedThread } from '@/components/client-replies/ExpandedThread';
 
-type StatusFilter = 'all' | 'unread' | 'answered' | 'leads';
+type StatusFilter = 'all' | 'unread' | 'needs_reply' | 'answered' | 'leads';
 
 const STATUS_LABEL: Record<StatusFilter, string> = {
   all: 'Все',
   unread: 'Непрочитано',
+  needs_reply: 'Требует ответа',
   answered: 'Отвечено',
   leads: 'Лиды',
 };
@@ -54,6 +55,7 @@ type ForwardedLead = {
   is_lead?: boolean;
   lead_entry_id?: string | null;
   is_answered?: boolean;
+  message_count?: number;
 };
 
 type LeadsResponse = {
@@ -454,28 +456,29 @@ function LeadCard({
 }) {
   const commentCount = lead.client_lead_comments?.[0]?.count ?? 0;
 
-  // One status per row, hierarchy: lead > unread > answered > read.
+  // One status per row (conversation), hierarchy: lead > unread > answered > needs-reply.
+  // needs-reply = прочитано, но на последний вопрос лида ещё не ответили.
   const statusColor = lead.is_lead
     ? 'var(--cp-green)'
     : lead.is_unread
       ? 'var(--cp-amber)'
       : lead.is_answered
         ? 'var(--cp-accent)'
-        : 'var(--cp-paper-faint)';
+        : 'var(--cp-red)';
   const statusTextColor = lead.is_lead
     ? 'var(--cp-green)'
     : lead.is_unread
       ? 'var(--cp-amber)'
       : lead.is_answered
         ? 'var(--cp-accent)'
-        : 'var(--cp-paper-mute)';
+        : 'var(--cp-red)';
   const statusLabel = lead.is_lead
     ? 'Лид'
     : lead.is_unread
       ? 'Непрочитано'
       : lead.is_answered
         ? 'Отвечено'
-        : 'Ответ';
+        : 'Требует ответа';
 
   return (
     <button
@@ -503,6 +506,12 @@ function LeadCard({
           <span aria-hidden className="ds-status-dot" style={{ background: statusColor }} />
           {statusLabel}
         </span>
+        {(lead.message_count ?? 0) > 1 && (
+          <span className="text-[10px] font-semibold shrink-0" style={{ color: 'var(--cp-paper-faint)' }} title="Писем в переписке">
+            <span className="ds-mono tabular-nums">{lead.message_count}</span>{' '}
+            {plural(lead.message_count ?? 0, 'письмо', 'письма', 'писем')}
+          </span>
+        )}
         <p className="text-xs truncate min-w-0" style={{ color: 'var(--cp-paper-mute)' }}>
           {lead.lead_email}
           {lead.campaign_name && <span style={{ color: 'var(--cp-paper-faint)' }}> · {lead.campaign_name}</span>}
@@ -538,7 +547,9 @@ function RepliesPageContent() {
   // wrong label.
   const rawStatus = searchParams.get('status');
   const status: StatusFilter =
-    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered' ? rawStatus : 'all';
+    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered' || rawStatus === 'needs_reply'
+      ? rawStatus
+      : 'all';
   const query = searchParams.get('q') ?? '';
 
   const [leads, setLeads] = useState<ForwardedLead[]>([]);
@@ -701,7 +712,7 @@ function RepliesPageContent() {
           role="tablist"
           aria-label="Фильтр ответов"
         >
-          {(['all', 'unread', 'answered', 'leads'] as const).map((s) => {
+          {(['all', 'unread', 'needs_reply', 'answered', 'leads'] as const).map((s) => {
             const active = status === s;
             return (
               <button
