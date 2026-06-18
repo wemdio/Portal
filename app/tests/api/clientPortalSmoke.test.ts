@@ -1327,10 +1327,18 @@ describe('Client Portal — RBAC isolation across clients', () => {
     );
 
     expect((res as Response).status).toBe(200);
-    expect(mockMarkThreadAsRead).toHaveBeenCalledWith('t1', { accountId: 'main' });
+    // Прочитанность ведём ПОШТУЧНО для клиента (client_email_reads), тред в
+    // Instantly НЕ трогаем — иначе гасли бы соседние ответы лида.
+    expect(mockMarkThreadAsRead).not.toHaveBeenCalled();
+    expect(dbState.upsertCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'client_email_reads',
+        payload: expect.objectContaining({ client_user_id: AUTH_USER_ID, email_id: 'e1' }),
+      }),
+    ]));
   });
 
-  it('GET /campaigns/[id]/replies/[emailId]/thread still returns the thread if marking read fails', async () => {
+  it('GET /campaigns/[id]/replies/[emailId]/thread still returns the thread if read-recording fails', async () => {
     mockGetEmail.mockResolvedValueOnce({
       id: 'e1',
       campaign_id: ALLOWED_CAMPAIGN,
@@ -1342,8 +1350,6 @@ describe('Client Portal — RBAC isolation across clients', () => {
       timestamp_email: '2026-05-19T10:00:00.000Z',
       ue_type: 2,
     });
-    mockMarkThreadAsRead.mockRejectedValueOnce(new Error('Instantly read marker failed'));
-
     const { GET } = await import('@/app/api/client/campaigns/[id]/replies/[emailId]/thread/route');
     const res = await GET(
       makeReq(`http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}/replies/e1/thread`),
@@ -1351,8 +1357,10 @@ describe('Client Portal — RBAC isolation across clients', () => {
     );
     const body = await (res as Response).json();
 
+    // Запись прочитанности — best-effort (try/catch в роуте): тред возвращается
+    // в любом случае, общий флаг Instantly не трогается.
     expect((res as Response).status).toBe(200);
-    expect(mockMarkThreadAsRead).toHaveBeenCalledWith('t1', { accountId: 'main' });
+    expect(mockMarkThreadAsRead).not.toHaveBeenCalled();
     expect(body.messages).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'e1', direction: 'inbound' }),
     ]));
@@ -1521,7 +1529,14 @@ describe('Client Portal — RBAC isolation across clients', () => {
     );
 
     expect((res as Response).status).toBe(201);
-    expect(mockMarkThreadAsRead).toHaveBeenCalledWith('t1', { accountId: 'main' });
+    // mark-lead помечает письмо прочитанным ПОШТУЧНО (наша таблица), не тред Instantly.
+    expect(mockMarkThreadAsRead).not.toHaveBeenCalled();
+    expect(dbState.upsertCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'client_email_reads',
+        payload: expect.objectContaining({ client_user_id: AUTH_USER_ID, email_id: 'e1' }),
+      }),
+    ]));
     expect(dbState.insertCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({
         table: 'client_forwarded_leads',

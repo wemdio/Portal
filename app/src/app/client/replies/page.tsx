@@ -81,10 +81,12 @@ function LeadDetail({
   lead,
   onBack,
   onMarkedLead,
+  onMarkedUnread,
 }: {
   lead: ForwardedLead;
   onBack: () => void;
   onMarkedLead?: () => void;
+  onMarkedUnread?: () => void;
 }) {
   const [comments, setComments] = useState<LeadComment[]>([]);
   const [loadingComments, setLoadingComments] = useState(true);
@@ -98,6 +100,7 @@ function LeadDetail({
   const [isBlocked, setIsBlocked] = useState(false);
   const [blocking, setBlocking] = useState(false);
   const [blockError, setBlockError] = useState('');
+  const [markingUnread, setMarkingUnread] = useState(false);
   const canComment = lead.source !== 'reply';
   const canReplyByEmail = Boolean(lead.campaign_id && lead.email_id);
 
@@ -172,6 +175,25 @@ function LeadDetail({
     }
   };
 
+  // Вернуть письмо в «непрочитанные» (персональная прочитанность у нас, не в
+  // Instantly). Открытие переписки помечает прочитанным — эта кнопка отменяет.
+  const handleMarkUnread = async () => {
+    if (!lead.campaign_id || !lead.email_id || markingUnread) return;
+    setMarkingUnread(true);
+    try {
+      await clientApiFetch(`/campaigns/${lead.campaign_id}/replies/${lead.email_id}/read`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ read: false }),
+      });
+      onMarkedUnread?.();
+    } catch {
+      // статус прочтения не критичен — молча игнорируем сбой
+    } finally {
+      setMarkingUnread(false);
+    }
+  };
+
   const handleBlock = async () => {
     if (!lead.lead_email || isBlocked || blocking) return;
     setBlocking(true);
@@ -212,12 +234,26 @@ function LeadDetail({
               </p>
             )}
           </div>
-          <span
-            className="neu-pill px-3 py-1.5 text-[11px] font-bold shrink-0"
-            style={{ color: 'var(--cp-accent)' }}
-          >
-            {formatDate(lead.reply_timestamp ?? lead.created_at)}
-          </span>
+          <div className="flex flex-col items-end gap-2 shrink-0">
+            <span
+              className="neu-pill px-3 py-1.5 text-[11px] font-bold"
+              style={{ color: 'var(--cp-accent)' }}
+            >
+              {formatDate(lead.reply_timestamp ?? lead.created_at)}
+            </span>
+            {canReplyByEmail && (
+              <button
+                type="button"
+                onClick={() => void handleMarkUnread()}
+                disabled={markingUnread}
+                title="Вернуть письмо в «непрочитанные»"
+                className="neu-pill px-3 py-1.5 text-[11px] font-semibold disabled:opacity-60"
+                style={{ color: 'var(--cp-text-m)' }}
+              >
+                {markingUnread ? 'Сохраняем…' : '⟲ В непрочитанные'}
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
@@ -615,6 +651,14 @@ function RepliesPageContent() {
             setSelectedLead((lead) => (lead
               ? { ...lead, is_lead: true, is_unread: false, status: 'lead' }
               : lead));
+          }}
+          onMarkedUnread={() => {
+            setLeads((prev) => prev.map((l) => (
+              l.id === selectedLead.id
+                ? { ...l, is_unread: true, status: 'unread' }
+                : l
+            )));
+            setSelectedLead(null);
           }}
         />
       </div>

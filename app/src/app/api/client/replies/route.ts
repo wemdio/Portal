@@ -8,6 +8,7 @@ import { filterAllowedIds, getResourceInstantlyAccountId, type ClientAccessRow }
 import { listEmails } from '@/lib/instantly/client';
 import { InstantlyApiError } from '@/lib/instantly/errors';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
+import { getReadEmailIds } from '@/lib/clientCampaignReplies/clientEmailReads';
 import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
 import { cached } from '@/lib/clientCache';
 import { withDeadline } from '@/lib/withDeadline';
@@ -234,6 +235,22 @@ async function readReplyItems(
   return { items, failures };
 }
 
+/**
+ * Проставляет is_unread из НАШЕЙ персональной прочитанности (client_email_reads),
+ * а не из общего флага Instantly: письмо «непрочитано», если этот клиент не
+ * открывал его в портале. Должна выполняться ДО applyLeadMarks (лид считается
+ * обработанным и перетирает is_unread=false).
+ */
+async function applyReadMarks(userId: string, items: LeadListItem[]) {
+  const emailIds = [...new Set(items.map((i) => i.email_id).filter((x): x is string => Boolean(x)))];
+  const readSet = await getReadEmailIds(userId, emailIds);
+  for (const item of items) {
+    const read = item.email_id ? readSet.has(item.email_id) : false;
+    item.is_unread = !read;
+    item.status = read ? 'reply' : 'unread';
+  }
+}
+
 async function applyLeadMarks(userId: string, items: LeadListItem[]) {
   if (!supabaseInstantly || items.length === 0) return;
 
@@ -331,6 +348,10 @@ export async function GET(req: NextRequest) {
   }
 
   const merged = mergeAndSortItems(replyItems);
+
+  // Персональная прочитанность (наша таблица) — ДО applyLeadMarks, т.к. лид
+  // всегда обработан и перетирает is_unread.
+  await applyReadMarks(userId, merged);
 
   // applyLeadMarks must run BEFORE filter+slice so is_lead is populated
   // across the full set — otherwise filter=leads would only find leads
