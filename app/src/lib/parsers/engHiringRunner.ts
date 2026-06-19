@@ -41,6 +41,7 @@ const DETAIL_ENRICH_DELAY_MS = Math.max(0, Number(process.env.ENG_HIRING_DETAIL_
 const DETAIL_ENRICH_LIMIT = Math.max(0, Number(process.env.ENG_HIRING_DETAIL_LIMIT ?? '500'));
 const WORKDAY_PAGE_SIZE = 100;
 const WORKDAY_MAX_POSTINGS_PER_COMPANY = clampInteger(process.env.ENG_HIRING_WORKDAY_MAX_POSTINGS_PER_COMPANY, 200, 50, 1000);
+const WORKDAY_SEARCH_TEXTS = ['', 'sales', 'account', 'business development', 'partnership', 'revenue'];
 const CACHE_BATCH_SIZE = 250;
 const RESULT_BATCH_SIZE = 500;
 
@@ -56,6 +57,13 @@ type CacheRow = EngHiringVacancy & {
 type RefreshSourceStats = {
   scannedCompanies: number;
   cachedVacancies: number;
+};
+
+type SourceDiagnostics = {
+  refreshed: boolean;
+  scanned_companies: number;
+  cached_vacancies: number;
+  matched_rows: number;
 };
 
 type CacheRunRow = {
@@ -135,33 +143,36 @@ async function fetchText(url: string): Promise<string> {
 
 async function fetchWorkdayPayloads(url: string): Promise<unknown[]> {
   const payloads: unknown[] = [];
-  let offset = 0;
-  let total = WORKDAY_PAGE_SIZE;
 
-  while (offset < total && offset < WORKDAY_MAX_POSTINGS_PER_COMPANY) {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        'User-Agent': UA,
-      },
-      body: JSON.stringify({
-        appliedFacets: {},
-        limit: WORKDAY_PAGE_SIZE,
-        offset,
-        searchText: '',
-      }),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const payload = await response.json() as Record<string, unknown>;
-    payloads.push(payload);
-    const count = Array.isArray(payload.jobPostings) ? payload.jobPostings.length : 0;
-    const rawTotal = Number(payload.total);
-    total = Number.isFinite(rawTotal) && rawTotal >= 0 ? rawTotal : offset + count;
-    if (count === 0) break;
-    offset += count;
+  for (const searchText of WORKDAY_SEARCH_TEXTS) {
+    let offset = 0;
+    let total = WORKDAY_PAGE_SIZE;
+
+    while (offset < total && offset < WORKDAY_MAX_POSTINGS_PER_COMPANY) {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'User-Agent': UA,
+        },
+        body: JSON.stringify({
+          appliedFacets: {},
+          limit: WORKDAY_PAGE_SIZE,
+          offset,
+          searchText,
+        }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json() as Record<string, unknown>;
+      payloads.push(payload);
+      const count = Array.isArray(payload.jobPostings) ? payload.jobPostings.length : 0;
+      const rawTotal = Number(payload.total);
+      total = Number.isFinite(rawTotal) && rawTotal >= 0 ? rawTotal : offset + count;
+      if (count === 0) break;
+      offset += count;
+    }
   }
 
   return payloads;
@@ -519,9 +530,19 @@ async function ensureCache(
   config: EngHiringSearchConfig,
   ensureNotCancelled: () => Promise<void>,
   setProgress: (patch: Record<string, unknown>) => Promise<void>,
-): Promise<void> {
-  if (config.refresh_cache === false) return;
+): Promise<Record<EngHiringSource, SourceDiagnostics>> {
   const sources = sourcesFromConfig(config);
+  const diagnostics = Object.fromEntries(sources.map((source) => [
+    source,
+    {
+      refreshed: false,
+      scanned_companies: 0,
+      cached_vacancies: 0,
+      matched_rows: 0,
+    },
+  ])) as Record<EngHiringSource, SourceDiagnostics>;
+  if (config.refresh_cache === false) return diagnostics;
+
   const limit = clampCompaniesLimit(config.companies_limit);
   const maxAgeHours = Math.max(1, Number(config.cache_max_age_hours ?? DEFAULT_CACHE_MAX_AGE_HOURS));
 
@@ -545,6 +566,12 @@ async function ensureCache(
           progress_detail: { source: currentSource, scanned_companies: done, total_companies: total },
         });
       });
+      diagnostics[source] = {
+        ...diagnostics[source],
+        refreshed: true,
+        scanned_companies: stats.scannedCompanies,
+        cached_vacancies: stats.cachedVacancies,
+      };
       await updateCacheRunProgress(db, runRow.id, {
         status: 'completed',
         next_company_index: stats.scannedCompanies,
@@ -566,6 +593,8 @@ async function ensureCache(
       throw err;
     }
   }
+
+  return diagnostics;
 }
 
 async function loadMatchingCacheRows(db: Db, config: EngHiringSearchConfig): Promise<CacheRow[]> {
@@ -582,7 +611,7 @@ async function loadMatchingCacheRows(db: Db, config: EngHiringSearchConfig): Pro
       .select('*')
       .in('source', sources);
     if (countryCodes.length) query = query.in('country_code', countryCodes);
-    if (publishedCutoff) query = query.gte('published_at', publishedCutoff);
+    if (publishedCutoff && config.include_unknown_dates !== true) query = query.gte('published_at', publishedCutoff);
     const { data, error } = await query
       .order('published_at', { ascending: false })
       .range(offset, offset + 999);
@@ -660,6 +689,26 @@ async function saveResults(db: Db, jobId: string, rows: CacheRow[], setProgress:
   }
 }
 
+function attachMatchedDiagnostics(
+  diagnostics: Record<EngHiringSource, SourceDiagnostics>,
+  rows: CacheRow[],
+): Record<EngHiringSource, SourceDiagnostics> {
+  const out = { ...diagnostics };
+  for (const row of rows) {
+    out[row.source] ??= {
+      refreshed: false,
+      scanned_companies: 0,
+      cached_vacancies: 0,
+      matched_rows: 0,
+    };
+    out[row.source] = {
+      ...out[row.source],
+      matched_rows: out[row.source].matched_rows + 1,
+    };
+  }
+  return out;
+}
+
 export async function runEngHiringParserJob(jobId: string): Promise<void> {
   const db = supabaseAdmin;
   if (!db) {
@@ -696,11 +745,12 @@ export async function runEngHiringParserJob(jobId: string): Promise<void> {
       total_parsed: 0,
     });
 
-    await ensureCache(db, config, ensureNotCancelled, setProgress);
+    let sourceDiagnostics = await ensureCache(db, config, ensureNotCancelled, setProgress);
 
     await ensureNotCancelled();
     await setProgress({ progress_stage: 'filtering_cache', progress_percent: 60, progress_detail: null });
     const matched = await loadMatchingCacheRows(db, config);
+    sourceDiagnostics = attachMatchedDiagnostics(sourceDiagnostics, matched);
     await setProgress({ total_found: matched.length, total_parsed: 0, progress_percent: 65 });
 
     await setProgress({ progress_stage: 'enriching_details', progress_percent: 65 });
@@ -717,7 +767,10 @@ export async function runEngHiringParserJob(jobId: string): Promise<void> {
       status: 'completed',
       progress_stage: 'completed',
       progress_percent: 100,
-      progress_detail: null,
+      progress_detail: {
+        source_stats: sourceDiagnostics,
+        include_unknown_dates: config.include_unknown_dates === true,
+      },
       total_found: matched.length,
       total_parsed: matched.length,
       completed_at: new Date().toISOString(),

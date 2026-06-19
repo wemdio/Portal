@@ -65,6 +65,25 @@ function getPartitionDetail(job: ParserListJob): PartitionProgressDetail | null 
   return d as PartitionProgressDetail;
 }
 
+function getSourceStatsSummary(job: ParserListJob): string | null {
+  const detail = job.progress_detail;
+  if (!detail || typeof detail !== 'object' || !('source_stats' in detail)) return null;
+  const stats = (detail as Record<string, unknown>).source_stats;
+  if (!stats || typeof stats !== 'object' || Array.isArray(stats)) return null;
+
+  const parts = Object.entries(stats as Record<string, Record<string, unknown>>)
+    .map(([source, value]) => {
+      const matched = Number(value.matched_rows ?? 0);
+      const cached = Number(value.cached_vacancies ?? 0);
+      const scanned = Number(value.scanned_companies ?? 0);
+      if (!matched && !cached && !scanned) return '';
+      return `${source}: найдено ${matched} / в кэше ${cached}`;
+    })
+    .filter(Boolean);
+
+  return parts.length ? parts.join(' · ') : null;
+}
+
 type Props = {
   jobs: ParserListJob[];
   activeJobId: string | null;
@@ -166,6 +185,7 @@ export function JobsList({
             const stageLabel = resolveStageLabel(job);
             const partDetail = getPartitionDetail(job);
             const isPartitioning = job.status === 'running' && partDetail != null;
+            const sourceStatsSummary = getSourceStatsSummary(job);
             return (
               <div
                 key={job.id}
@@ -247,6 +267,11 @@ export function JobsList({
                           </span>
                         ) : null}
                       </div>
+                      {sourceStatsSummary ? (
+                        <div className="mt-1 truncate text-xs text-gray-400" title={sourceStatsSummary}>
+                          {sourceStatsSummary}
+                        </div>
+                      ) : null}
                     </div>
                     {clientMode && onRetry && job.status === 'failed' ? (
                       <button

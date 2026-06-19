@@ -444,6 +444,27 @@ describe('engHiring cache filtering', () => {
     expect(matchesEngHiringVacancy({ ...base, published_at: '2026-04-01T00:00:00.000Z' }, config)).toBe(false);
   });
 
+  it('keeps unknown-date vacancies out of recency searches unless explicitly allowed', () => {
+    const unknownDate = {
+      ...base,
+      source: 'bamboohr' as const,
+      source_company_slug: 'acme',
+      source_job_id: 'job-no-date',
+      vacancy_title: 'Account Executive',
+      published_at: null,
+    };
+    const config: EngHiringSearchConfig = {
+      text: 'account executive',
+      sources: ['bamboohr'],
+      countries: ['us'],
+      posted_within_days: 30,
+      now: '2026-06-11T00:00:00.000Z',
+    };
+
+    expect(matchesEngHiringVacancy(unknownDate, config)).toBe(false);
+    expect(matchesEngHiringVacancy(unknownDate, { ...config, include_unknown_dates: true })).toBe(true);
+  });
+
   it('matches role keywords in vacancy descriptions after detail enrichment', () => {
     const config: EngHiringSearchConfig = {
       text: 'enterprise sales',
