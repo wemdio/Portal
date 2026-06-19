@@ -396,7 +396,7 @@ describe('runEngHiringParserJob cache-run resume', () => {
     expect(fetchJsonWithFallback).toHaveBeenCalledTimes(6);
   });
 
-  it('refreshes Workday boards through the public CXS POST endpoint', async () => {
+  it('refreshes Workday boards with targeted CXS searchText queries and dedupes overlaps', async () => {
     const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback } = await loadRunner();
     const db = makeDb({
       parser_jobs: [{
@@ -421,29 +421,61 @@ describe('runEngHiringParserJob cache-run resume', () => {
       'name,slug,url',
       'Acme,acme/acme_external,https://acme.wd5.myworkdayjobs.com/acme_external',
     ].join('\n'));
-    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        total: 1,
-        jobPostings: [{
+    const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String((init as RequestInit).body ?? '{}')) as { searchText?: string };
+      const jobsBySearch: Record<string, unknown[]> = {
+        '': [{
+          title: 'Product Manager',
+          externalPath: '/job/US-Remote/Product-Manager_R0001',
+          locationsText: 'US Remote',
+          postedOn: 'Posted Today',
+          bulletFields: ['R0001'],
+        }],
+        sales: [{
+          title: 'Sales Development Representative',
+          externalPath: '/job/US-Texas-Remote/Sales-Development-Representative_R1000',
+          locationsText: 'US Texas Remote',
+          postedOn: 'Posted Today',
+          bulletFields: ['R1000'],
+        }],
+        account: [{
           title: 'Commercial Account Director',
           externalPath: '/job/UK-London-Office/Commercial-Account-Director_R2414',
           locationsText: 'UK-London Office',
           postedOn: 'Posted Today',
           bulletFields: ['R2414'],
         }],
-      }),
-    } as Response);
+        'business development': [{
+          title: 'Commercial Account Director',
+          externalPath: '/job/UK-London-Office/Commercial-Account-Director_R2414',
+          locationsText: 'UK-London Office',
+          postedOn: 'Posted Today',
+          bulletFields: ['R2414'],
+        }],
+      };
+      const jobPostings = jobsBySearch[body.searchText ?? ''] ?? [];
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          total: jobPostings.length,
+          jobPostings,
+        }),
+      } as Response;
+    });
 
     await runEngHiringParserJob('job-1');
 
+    const bodies = fetchSpy.mock.calls.map(([, init]) => JSON.parse(String((init as RequestInit).body)));
+    expect(bodies.map((body) => body.searchText)).toEqual(expect.arrayContaining([
+      '',
+      'sales',
+      'account',
+      'business development',
+    ]));
     expect(fetchSpy).toHaveBeenCalledWith(
       'https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/acme_external/jobs',
-      expect.objectContaining({
-        method: 'POST',
-        body: expect.stringContaining('"limit":100'),
-      }),
+      expect.objectContaining({ method: 'POST' }),
     );
     expect(db.state.eng_hiring_cache).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -453,6 +485,7 @@ describe('runEngHiringParserJob cache-run resume', () => {
         country_code: 'gb',
       }),
     ]));
+    expect(db.state.eng_hiring_cache.filter((row) => row.source_job_id === 'Commercial-Account-Director_R2414')).toHaveLength(1);
     fetchSpy.mockRestore();
   });
 
@@ -486,5 +519,65 @@ describe('runEngHiringParserJob cache-run resume', () => {
       { kind: 'in', col: 'country_code', value: ['us'] },
       { kind: 'gte', col: 'published_at', value: '2026-05-17T00:00:00.000Z' },
     ]));
+  });
+
+  it('stores source diagnostics in the completed parser job progress detail', async () => {
+    const { runEngHiringParserJob, supabaseAdmin } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: {
+          text: 'b2b manager',
+          sources: ['greenhouse'],
+          countries: ['us'],
+          posted_within_days: 30,
+          now: '2026-06-16T00:00:00.000Z',
+          refresh_cache: false,
+          enrich: false,
+          max_results: 20,
+        },
+      }],
+      eng_hiring_cache: [{
+        id: 'cache-1',
+        source: 'greenhouse',
+        source_company_slug: 'acme',
+        source_job_id: 'job-1',
+        company_name: 'Acme',
+        company_site_url: 'https://acme.com',
+        company_description: null,
+        vacancy_title: 'Sales Development Representative',
+        vacancy_description: null,
+        vacancy_url: 'https://acme.com/jobs/1',
+        careers_url: 'https://job-boards.greenhouse.io/acme',
+        location: 'United States',
+        city: null,
+        country: 'United States',
+        country_code: 'us',
+        salary_from: null,
+        salary_to: null,
+        salary_currency: null,
+        published_at: '2026-06-15T00:00:00.000Z',
+        raw: {},
+      }],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+
+    await runEngHiringParserJob('job-1');
+
+    const completedUpdate = db.operations.find((op) =>
+      op.table === 'parser_jobs' &&
+      op.type === 'update' &&
+      (op.data as Row).status === 'completed');
+    expect(completedUpdate?.data).toEqual(expect.objectContaining({
+      progress_detail: expect.objectContaining({
+        source_stats: expect.objectContaining({
+          greenhouse: expect.objectContaining({
+            matched_rows: 1,
+          }),
+        }),
+      }),
+    }));
   });
 });

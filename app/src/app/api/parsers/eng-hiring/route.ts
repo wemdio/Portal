@@ -73,6 +73,7 @@ function sanitizeConfig(raw: Partial<EngHiringSearchConfig>): EngHiringSearchCon
     refresh_cache: raw.refresh_cache !== false,
     enrich: raw.enrich !== false,
     dedupe_companies: raw.dedupe_companies !== false,
+    include_unknown_dates: raw.include_unknown_dates === true,
   };
 }
 
