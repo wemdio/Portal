@@ -17,7 +17,8 @@ const THREAD_FETCH_LIMIT = 100;
  * GET /api/client/campaigns/[id]/replies/[emailId]/thread
  *
  * Returns the full conversation thread for a given lead reply, sorted
- * chronologically. Inbound (lead) and outbound (our) messages are both included.
+ * newest-first (most recent message on top, like Instantly's unibox). Inbound
+ * (lead) and outbound (our) messages are both included.
  */
 export async function GET(
   req: NextRequest,
@@ -55,10 +56,13 @@ export async function GET(
       }
     }
 
+    // Свежие сверху (tb - ta) — как в юнибоксе Instantly: последний шаг переписки
+    // наверху, прокручиваешь вниз к началу диалога. Так верх ленты совпадает с
+    // закреплённым блоком «ответ лида» в /replies (тоже последний шаг).
     const messages = candidates.map(mapInstantlyEmailToThreadMessage).sort((a, b) => {
       const ta = a.timestamp ? Date.parse(a.timestamp) : 0;
       const tb = b.timestamp ? Date.parse(b.timestamp) : 0;
-      return ta - tb;
+      return tb - ta;
     });
 
     // Помечаем прочитанным ТОЛЬКО это письмо и ТОЛЬКО для этого клиента (наша
