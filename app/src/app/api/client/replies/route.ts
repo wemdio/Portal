@@ -8,7 +8,7 @@ import { filterAllowedIds, getResourceInstantlyAccountId, type ClientAccessRow }
 import { listEmails } from '@/lib/instantly/client';
 import { InstantlyApiError } from '@/lib/instantly/errors';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
-import { getReadEmailIds, getRepliedEmailIds } from '@/lib/clientCampaignReplies/clientEmailReads';
+import { getReadEmailIds, getRepliedEmailIds, getAnsweredLeadKeys } from '@/lib/clientCampaignReplies/clientEmailReads';
 import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
 import { cached } from '@/lib/clientCache';
 import { withDeadline } from '@/lib/withDeadline';
@@ -321,12 +321,35 @@ async function applyReadMarks(userId: string, items: LeadListItem[]) {
   }
 }
 
-/** Проставляет is_answered: клиент отправлял ответ на это письмо (client_email_replies). */
+/**
+ * Проставляет is_answered. «Отвечено» — свойство ПЕРЕПИСКИ (лида), а не письма:
+ * считаем по (campaign, lead_email) из client_email_replies (как applyLeadMarks
+ * для is_lead), чтобы на объёмной кампании старое отвеченное письмо не выпадало
+ * из top-100-окна и не сбрасывало «Отвечено». Фолбэк по email_id — для легаси-
+ * строк без ключей переписки (бэкофилл писал только email_id; они в окне).
+ */
 async function applyRepliedMarks(userId: string, items: LeadListItem[]) {
+  const leads = [...new Map(
+    items
+      .filter((i) => i.campaign_id && i.lead_email)
+      .map((i): [string, { campaignId: string; leadEmail: string }] => {
+        const leadEmail = i.lead_email.toLowerCase();
+        return [`${i.campaign_id}:${leadEmail}`, { campaignId: i.campaign_id, leadEmail }];
+      }),
+  ).values()];
+  const answeredLeads = await getAnsweredLeadKeys(userId, leads);
+
   const emailIds = [...new Set(items.map((i) => i.email_id).filter((x): x is string => Boolean(x)))];
   const repliedSet = await getRepliedEmailIds(userId, emailIds);
+
   for (const item of items) {
-    item.is_answered = item.email_id ? repliedSet.has(item.email_id) : false;
+    const leadKey = item.campaign_id && item.lead_email
+      ? `${item.campaign_id}:${item.lead_email.toLowerCase()}`
+      : null;
+    item.is_answered = Boolean(
+      (leadKey && answeredLeads.has(leadKey))
+      || (item.email_id && repliedSet.has(item.email_id)),
+    );
   }
 }
 

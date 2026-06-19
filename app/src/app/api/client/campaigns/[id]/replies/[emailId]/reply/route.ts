@@ -88,7 +88,9 @@ export async function POST(
     // Фиксируем «отвечено» (бейдж «Отвечено» в списке) + «прочитано» (ответил =
     // прочитал) персонально для клиента. Best-effort — не валим отправку.
     try {
-      await recordEmailReplied(userId, emailId);
+      // Пишем ключи переписки (campaign + lead), чтобы «Отвечено» считалось по
+      // лиду и не слетало на объёмной кампании. См. applyRepliedMarks.
+      await recordEmailReplied(userId, emailId, { campaignId, leadEmail: original.lead });
       await recordEmailRead(userId, emailId);
     } catch (err) {
       await logError('client.campaign.replies.reply.record_failed', err, { campaignId, emailId, userId });

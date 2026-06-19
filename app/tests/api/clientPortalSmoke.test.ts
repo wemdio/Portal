@@ -1076,6 +1076,56 @@ describe('Client Portal — empty new-user state', () => {
 
   });
 
+  it('GET /replies keeps a conversation answered via the (campaign, lead) key even if the replied email is out of the fetch window', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValue({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    // Only the lead's LATEST inbound is in the fetched top-100 window; the older
+    // email we actually replied to has scrolled out and is NOT returned here.
+    const items = [
+      {
+        id: 'email-latest', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't1', lead: 'l1',
+        subject: 'Re: ещё вопрос', body: { text: 'и ещё' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-25T10:00:00.000Z', ue_type: 2,
+      },
+    ];
+    // The reply mark is keyed by (campaign, lead_email); its email_id is NOT in window.
+    dbState.rowsByTable['client_email_replies'] = [
+      {
+        client_user_id: AUTH_USER_ID,
+        email_id: 'email-OUT-OF-WINDOW',
+        campaign_id: ALLOWED_CAMPAIGN,
+        lead_email: 'lead@example.com',
+        replied_at: '2026-05-20T12:00:00.000Z',
+      },
+    ];
+    // Representative read so «Отвечено» surfaces (not masked by «Непрочитано»).
+    dbState.rowsByTable['client_email_reads'] = [
+      { client_user_id: AUTH_USER_ID, email_id: 'email-latest', read_at: '2026-05-25T11:00:00.000Z' },
+    ];
+    const { GET } = await import('@/app/api/client/replies/route');
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    const res = await GET(makeReq('http://x/api/client/replies'));
+    const body = (await (res as Response).json()) as {
+      items: Array<{ email_id?: string; is_answered?: boolean }>; total: number;
+    };
+    expect(body.total).toBe(1);
+    expect(body.items[0]?.email_id).toBe('email-latest');
+    expect(body.items[0]?.is_answered).toBe(true); // answered via (campaign, lead), not email_id
+
+    // …and it appears under the «Отвечено» filter (window-robust).
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    const res2 = await GET(makeReq('http://x/api/client/replies?status=answered'));
+    const body2 = (await (res2 as Response).json()) as { total: number };
+    expect(body2.total).toBe(1);
+  });
+
   it('GET /replies does not collapse two distinct emails sharing a timestamp (dedupe by email_id)', async () => {
     authState.accessRows = [
       { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
