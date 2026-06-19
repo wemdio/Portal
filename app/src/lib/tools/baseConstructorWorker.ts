@@ -5,6 +5,7 @@ import {
   stepEmailDedup,
   stepFindEmails,
   stepSplitEmails,
+  stepRemoveSupportEmails,
   stepSiteCheck,
   stepEnrich,
   stepTAScore,
@@ -271,6 +272,7 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       onCheckpoint: cfg.onCheckpoint,
     }),
   split_emails: (data, prog) => stepSplitEmails(data, prog),
+  remove_support_emails: (data, prog) => stepRemoveSupportEmails(data, prog),
   validate_emails: (data, prog, cancel, cfg) =>
     stepValidateEmails(data, prog, cancel, {
       validateTarget: cfg.validate_target ?? 'original',
