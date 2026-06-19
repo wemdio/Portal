@@ -1,12 +1,12 @@
 /**
  * Detects SUPPORT / service / system mailbox addresses (support@, help@, zakaz@,
- * billing@, hr@, noreply@ …) — inboxes that aren't worth cold outreach. Used by
- * the base-constructor «Убрать почты поддержки» step to drop those rows.
+ * billing@, noreply@ …) — inboxes that aren't worth cold outreach. Used by the
+ * base-constructor «Убрать почты поддержки» step to drop those rows.
  *
  * Deliberately CONSERVATIVE: it does NOT flag good general business inboxes the
  * studio wants to keep — info@, sales@, contact@, office@, hello@, mail@,
- * general@, marketing@ … — those are real contact points, not support queues.
- * (Per owner feedback: info@ is a good common box.)
+ * general@, marketing@, hr@, jobs@, vacancy@ … — those are real contact points,
+ * not support queues. (Per owner feedback: info@ and HR inboxes are good.)
  *
  * Pure + dependency-free → safe to import anywhere (client UI, worker, tests).
  */
@@ -24,8 +24,8 @@ const ROLE_LOCALPARTS = new Set<string>([
   'zakaz', 'zakazy', 'zakazat', 'order', 'orders', 'booking', 'reservations', 'dostavka',
   // Finance / billing
   'billing', 'accounting', 'accounts', 'finance', 'buh', 'buhgalteria', 'bukhgalteria',
-  // HR / jobs / recruiting
-  'hr', 'jobs', 'job', 'career', 'careers', 'vacancy', 'vacancies', 'rekrut',
+  // NB: HR/jobs (hr@, jobs@, vacancy@, career@, rekrut@) are intentionally KEPT
+  // per owner — they're useful contact points, not support queues.
 ]);
 
 // Role addresses that aren't a single [a-z]+ token (hyphen/underscore variants).

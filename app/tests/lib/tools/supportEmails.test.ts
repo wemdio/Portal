@@ -11,22 +11,23 @@ import { stepRemoveSupportEmails, FOUND_EMAIL_COL } from '@/lib/tools/processing
 const noop = async () => {};
 
 describe('isSupportEmail / isRoleLocalPart', () => {
-  it('flags support / service / system / orders / finance / HR mailboxes', () => {
+  it('flags support / service / system / orders / finance mailboxes', () => {
     for (const e of [
       'support@x.com', 'help@x.ru', 'helpdesk@x.com', 'service@x.com',
       'podderzhka@x.ru', 'zakaz@x.ru', 'order@x.com', 'dostavka@x.ru',
-      'billing@x.com', 'buh@x.ru', 'hr@x.com', 'jobs@x.com', 'vacancy@x.ru',
+      'billing@x.com', 'buh@x.ru', 'accounts@x.com',
       'noreply@x.com', 'no-reply@x.com', 'abuse@x.com', 'HELP@X.COM',
     ]) {
       expect(isSupportEmail(e)).toBe(true);
     }
   });
 
-  it('KEEPS good general business inboxes (info@, sales@, contact@ …)', () => {
+  it('KEEPS good general inboxes (info@, sales@, contact@) AND HR (hr@, jobs@ …)', () => {
     for (const e of [
       'info@x.ru', 'sales@x.com', 'contact@x.com', 'contacts@x.com',
       'office@x.ru', 'hello@x.com', 'hi@x.com', 'mail@x.ru', 'general@x.com',
       'marketing@x.com', 'reklama@x.ru', 'press@x.com',
+      'hr@x.com', 'jobs@x.com', 'vacancy@x.ru', 'career@x.com', 'rekrut@x.ru',
       'info.msk@x.ru', 'sales2@x.com', // role word NOT in the support set
     ]) {
       expect(isSupportEmail(e)).toBe(false);

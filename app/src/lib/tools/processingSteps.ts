@@ -357,8 +357,9 @@ export async function stepSplitEmails(
 
 /**
  * Drops rows whose only email is a SUPPORT / service mailbox (support@, help@,
- * zakaz@, billing@, hr@ …) — not a decision-maker, hurts outreach. Good general
- * inboxes (info@, sales@, contact@ …) are intentionally KEPT (see supportEmails.ts).
+ * zakaz@, billing@ …) — not a decision-maker, hurts outreach. Good general
+ * inboxes (info@, sales@, contact@, hr@, jobs@ …) are intentionally KEPT
+ * (see supportEmails.ts).
  *
  * Checks BOTH the original email column (alias-based) AND the FOUND_EMAIL_COL
  * that `find_emails` (target='separate') writes — otherwise emails scraped from
