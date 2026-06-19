@@ -65,6 +65,7 @@ export function EngHiringParserForm({ onStart, busy }: Props) {
       cache_max_age_hours: Number.isFinite(age) ? Math.max(1, Math.trunc(age)) : 12,
       refresh_cache: refreshCache,
       enrich,
+      include_unknown_dates: maximumCoverage,
     };
   }, [roles, sources, countries, days, companiesLimit, maxResults, cacheAge, refreshCache, enrich, maximumCoverage]);
 

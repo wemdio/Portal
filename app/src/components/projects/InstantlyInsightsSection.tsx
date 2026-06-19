@@ -19,12 +19,17 @@ type CampaignMetric = {
   labelCoverage: number | null; bounceRate: number | null; lifetimeSent: number | null;
 };
 type Finding = { grade: 'A' | 'B'; campaign: string; text: string };
+type DroppedLead = { email: string; bucket: 'interested' | 'referral'; ageDays: number; campaign: string };
+type SegmentRoiRow = { segment: string; sent: number; ratePerSent: number; ciLow: number; ciHigh: number };
+type SegmentRoi = { recommendation: string; best: { segment: string; rate: number }; worst: { segment: string; rate: number }; all: SegmentRoiRow[] };
 type Insights = {
   generatedAt: string;
   campaigns: CampaignMetric[];
   totals: { repliers: number; positive: number; labeled: number; labelCoverage: number | null };
   weekly: { week: string; sent: number; replies: number }[];
   findings: Finding[];
+  droppedLeads: { interested: number; referral: number; items: DroppedLead[] };
+  segmentRoi: SegmentRoi | null;
   notes: string[];
 };
 
@@ -162,6 +167,38 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
             </table>
           </div>
 
+          {/* A) dropped hot leads — the chase worklist */}
+          {(data.droppedLeads.interested + data.droppedLeads.referral) > 0 && (
+            <div className="rounded-lg border border-rose-200 bg-rose-50/50 p-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-rose-800">
+                  🔥 Брошенные горячие лиды: {data.droppedLeads.interested + data.droppedLeads.referral}
+                </p>
+                <span className="text-[10px] text-rose-400">за 30 дней · перезвонить/ответить</span>
+              </div>
+              <p className="mt-0.5 text-[11px] text-rose-500/90">
+                ответили «интересно» ({data.droppedLeads.interested}) или дали контакт ({data.droppedLeads.referral}) — а мы им так и не ответили.
+              </p>
+              <ul className="mt-2 space-y-1">
+                {data.droppedLeads.items.map((d, i) => (
+                  <li key={i} className="flex items-center justify-between gap-2 text-xs">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-medium ${d.bucket === 'interested' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>
+                        {d.bucket === 'interested' ? 'интерес' : 'контакт'}
+                      </span>
+                      <span className="truncate font-medium text-gray-800">{d.email}</span>
+                      <span className="truncate text-gray-400" title={d.campaign}>· {d.campaign}</span>
+                    </div>
+                    <span className="shrink-0 tabular-nums text-gray-400">{d.ageDays}д назад</span>
+                  </li>
+                ))}
+              </ul>
+              {(data.droppedLeads.interested + data.droppedLeads.referral) > data.droppedLeads.items.length && (
+                <p className="mt-1.5 text-[10px] text-rose-400">…показаны 25 самых свежих из {data.droppedLeads.interested + data.droppedLeads.referral}.</p>
+              )}
+            </div>
+          )}
+
           {/* findings */}
           {data.findings.length > 0 && (
             <div className="space-y-2">
@@ -181,6 +218,25 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
                   </span>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* I) within-client segment ROI — where to source the next list */}
+          {data.segmentRoi && (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3">
+              <p className="text-sm font-semibold text-emerald-800">🎯 Куда собирать следующий список</p>
+              <p className="mt-0.5 text-xs text-emerald-700">{data.segmentRoi.recommendation}</p>
+              <ul className="mt-2 space-y-1">
+                {data.segmentRoi.all.map((s, i) => (
+                  <li key={i} className="flex items-center justify-between gap-2 text-xs">
+                    <span className="truncate text-gray-700">{s.segment}</span>
+                    <span className="shrink-0 tabular-nums text-gray-500">
+                      {pct(s.ratePerSent)}<span className="ml-1 text-[10px] text-gray-400">[{pct(s.ciLow)}–{pct(s.ciHigh)}]</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1.5 text-[10px] text-emerald-500/80">лидов на отправку по вашим прошлым спискам · корреляция, не A/B · не переносится на других клиентов</p>
             </div>
           )}
 

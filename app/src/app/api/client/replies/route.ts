@@ -119,25 +119,39 @@ function mergeAndSortItems(items: LeadListItem[]): LeadListItem[] {
 }
 
 function conversationKey(item: LeadListItem): string {
+  // Группируем по ЛИДУ (одна строка на переписку с лидом), а НЕ по thread_id.
+  // Instantly дробит один диалог на разные thread_id (смена темы, reply-all, тред
+  // в почтовике лида — см. thread route): по thread_id один лид мог бы задвоиться
+  // в списке. По email лида строка одна, и список согласован с детальным тредом
+  // (он тоже берёт ВСЕ письма лида, любой thread_id). campaign_id в ключе — тот
+  // же лид в разных кампаниях остаётся разными строками. thread_id/email_id —
+  // фолбэк, если email лида почему-то пуст.
+  const email = item.lead_email?.trim().toLowerCase();
+  if (email) return `lead:${item.campaign_id}:${email}`;
   if (item.thread_id) return `thread:${item.thread_id}`;
-  return `lead:${item.campaign_id}:${item.lead_email.trim().toLowerCase()}`;
+  return `email:${item.email_id ?? ''}`;
 }
 
 /**
  * Схлопывает per-email строки в ПЕРЕПИСКИ: одна строка на тред/лид. items уже
  * отсортированы свежими-первыми, поэтому первый встреченный в группе = последнее
- * входящее (representative). Статус переписки берётся ПО НЕМУ
- * (is_unread/is_answered последнего входящего) — «разобрал ли я ТЕКУЩЕЕ
- * сообщение лида».
+ * входящее (representative).
  *
- * Почему по последнему, а НЕ агрегат OR/AND по всему треду: пометка
- * прочтения/ответа в портале привязана именно к этому письму (открыли/ответили
- * на representative), а старые письма треда отдельно прочитанными не
- * помечаются. Агрегат OR(непрочитано)/AND(отвечено) держал бы переписку в
- * «Непрочитано»/«Требует ответа» навсегда — открытие/ответ не могли бы её
- * погасить (см. ревью 18.06). При открытии клиент и так видит весь тред.
+ * Статусы агрегируются АСИММЕТРИЧНО:
+ * - is_unread — берётся ПО representative (последнему входящему). Прочтение в
+ *   портале привязано к конкретному письму (открыли/ответили на representative),
+ *   старые письма треда отдельно read не метятся. Если бы is_unread агрегировался
+ *   OR по треду — он залипал бы «Непрочитано» навсегда (старое непрочитанное
+ *   письмо нечем погасить); см. ревью 18.06 / откат ba24c11f. По representative —
+ *   гаснет при прочтении последнего письма.
+ * - is_answered — OR по ВСЕМУ треду (ответили на любое письмо лида → переписка
+ *   отвечена). Безопасно в отличие от is_unread: is_answered МОНОТОНЕН —
+ *   client_email_replies только пополняется (recordEmailReplied), «снять
+ *   отвечено» нечем, застрять в нежелательном статусе нельзя. OR нужен потому,
+ *   что лид часто шлёт закрывающее «спасибо» ПОСЛЕ нашего ответа — по
+ *   representative переписка иначе слетала бы в неотвеченную (commit c86ba0f0).
+ * - is_lead — OR по треду (помечен лидом хоть один → вся переписка лид).
  *
- * is_lead — OR по треду (помечен лидом хоть один → вся переписка лид).
  * message_count — число входящих в треде (в пределах подтянутого окна).
  */
 function groupByConversation(items: LeadListItem[]): LeadListItem[] {
@@ -147,8 +161,17 @@ function groupByConversation(items: LeadListItem[]): LeadListItem[] {
     const key = conversationKey(item);
     counts.set(key, (counts.get(key) ?? 0) + 1);
     const rep = byKey.get(key);
-    if (!rep) byKey.set(key, item);
-    else if (item.is_lead) rep.is_lead = true;
+    if (!rep) {
+      byKey.set(key, item);
+    } else {
+      if (item.is_lead) rep.is_lead = true;
+      // «Отвечено» — свойство всей ПЕРЕПИСКИ (OR по письмам треда): ответили на
+      // любое письмо лида → переписка отвечена. is_answered тут монотонно — в
+      // отличие от is_unread (берём по последнему входящему = representative,
+      // чтобы гаснуть при прочтении). Иначе закрывающее «спасибо» лида после
+      // нашего ответа делало бы representative неотвеченным и статус слетал бы.
+      if (item.is_answered) rep.is_answered = true;
+    }
   }
   const out: LeadListItem[] = [];
   for (const [key, rep] of byKey) {
@@ -395,8 +418,8 @@ export async function GET(req: NextRequest) {
   // Status filter is whitelisted so a malformed query never leaks the
   // unfiltered set under the wrong label. 'all' = passthrough.
   const rawStatus = url.searchParams.get('status');
-  const statusFilter: 'all' | 'unread' | 'leads' | 'answered' | 'needs_reply' =
-    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered' || rawStatus === 'needs_reply'
+  const statusFilter: 'all' | 'unread' | 'leads' | 'answered' =
+    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered'
       ? rawStatus
       : 'all';
 
@@ -457,15 +480,11 @@ export async function GET(req: NextRequest) {
     ? searched.filter((i) => i.is_unread === true)
     : statusFilter === 'answered'
       // Отвечено = ответили, не лид и не помечено снова непрочитанным (после
-      // «В непрочитанные» строка уходит только в «Непрочитано» — как у needs_reply).
+      // «В непрочитанные» строка уходит только в «Непрочитано»).
       ? searched.filter((i) => i.is_answered === true && i.is_lead !== true && i.is_unread !== true)
-      : statusFilter === 'needs_reply'
-        // Требует ответа = прочитано, но не отвечено и не лид. Непрочитанные — в
-        // «Непрочитано»: так содержимое вкладки совпадает с красным бейджом.
-        ? searched.filter((i) => i.is_answered !== true && i.is_lead !== true && i.is_unread !== true)
-        : statusFilter === 'leads'
-          ? searched.filter((i) => i.is_lead === true)
-          : searched;
+      : statusFilter === 'leads'
+        ? searched.filter((i) => i.is_lead === true)
+        : searched;
 
   const total = filtered.length;
   const items = filtered.slice(offset, offset + limit);

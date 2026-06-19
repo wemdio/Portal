@@ -37,6 +37,8 @@ export interface EngHiringSearchConfig {
   enrich?: boolean;
   /** Default true: output one best matching vacancy row per company. */
   dedupe_companies?: boolean;
+  /** Include open ATS jobs when the source does not expose a posting date. */
+  include_unknown_dates?: boolean;
   now?: string;
 }
 
@@ -504,7 +506,7 @@ export function matchesEngHiringVacancy(vacancy: EngHiringVacancy, config: EngHi
 
   const days = Number(config.posted_within_days ?? 0);
   if (Number.isFinite(days) && days > 0) {
-    if (!vacancy.published_at) return false;
+    if (!vacancy.published_at) return config.include_unknown_dates === true;
     const now = config.now ? new Date(config.now) : new Date();
     const published = new Date(vacancy.published_at);
     if (Number.isNaN(now.getTime()) || Number.isNaN(published.getTime())) return false;

@@ -70,12 +70,26 @@ export type CampaignMetric = {
 
 export type Finding = { grade: 'A' | 'B'; campaign: string; text: string };
 
+export type DroppedLead = { email: string; bucket: 'interested' | 'referral'; ageDays: number; campaign: string };
+
+export type SegmentRoiRow = { segment: string; sent: number; ratePerSent: number; ciLow: number; ciHigh: number };
+export type SegmentRoi = {
+  recommendation: string;
+  best: { segment: string; rate: number };
+  worst: { segment: string; rate: number };
+  all: SegmentRoiRow[];
+};
+
 export type ProjectInsights = {
   generatedAt: string;
   campaigns: CampaignMetric[];
   totals: { repliers: number; positive: number; labeled: number; labelCoverage: number | null };
   weekly: { week: string; sent: number; replies: number }[];
   findings: Finding[];
+  // A) брошенные горячие лиды (positive-ответ без нашего ответа), живое окно 30 дней
+  droppedLeads: { interested: number; referral: number; items: DroppedLead[] };
+  // I) сегмент-ROI внутри клиента (какую нишу собирать дальше); null = гейт не прошёл
+  segmentRoi: SegmentRoi | null;
   notes: string[];
 };
 
@@ -92,7 +106,7 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
   const empty: ProjectInsights = {
     generatedAt: new Date().toISOString(),
     campaigns: [], totals: { repliers: 0, positive: 0, labeled: 0, labelCoverage: null },
-    weekly: [], findings: [], notes: [],
+    weekly: [], findings: [], droppedLeads: { interested: 0, referral: 0, items: [] }, segmentRoi: null, notes: [],
   };
   if (ids.length === 0) return empty;
 
@@ -152,7 +166,8 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
     const positive = num(r.positive);
     const lifetimeSent = r.lifetime_sent == null ? null : Number(r.lifetime_sent);
     const bounced = r.bounced_count == null ? null : Number(r.bounced_count);
-    const universe: CampaignMetric['universe'] = sent > 0 ? 'email' : lifetimeSent ? 'snapshot_only' : 'none';
+    // 'snapshot_only' когда есть строка снапшота (даже lifetime_sent=0) — как v_campaign_health (по существованию строки, не по значению).
+    const universe: CampaignMetric['universe'] = sent > 0 ? 'email' : lifetimeSent != null ? 'snapshot_only' : 'none';
 
     const rr = sent >= MIN_SENT_FOR_RATE ? wilson(repliers, sent) : null;
     const lr = labeled >= MIN_LABELED_FOR_LEAD ? wilson(positive, labeled) : null;
@@ -234,7 +249,113 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
     console.error('[projectInsights] A/B query skipped:', (e as Error).message);
   }
 
-  // 4) totals + notes
+  // 4) dropped hot leads (A) — positive replies (interested|referral) we never answered,
+  // live 30-day window, only in campaigns where we DO reply from Instantly (camp_ue3).
+  const dropped: { interested: number; referral: number; items: DroppedLead[] } = { interested: 0, referral: 0, items: [] };
+  try {
+    const rows = await datasetQuery<{ email: string; bucket: 'interested' | 'referral'; age_days: string; campaign: string }>(
+      `
+      WITH camp_ue3 AS (SELECT DISTINCT campaign_id FROM raw_emails WHERE ue_type=3 AND campaign_id = ANY($1)),
+      rf AS (
+        -- ВАЖНО: first_reply_at считаем по ПОЛНОМУ окну (как v_reply_facts), не за 40 дней —
+        -- иначе min() съезжает на поздний follow-up и старый лид кажется свежим (BUG 2).
+        SELECT campaign_id, lead_id, min(timestamp_email) first_reply_at,
+               bool_or(i_status=1 OR ai_interest_value=1) inst_int
+        FROM raw_emails
+        WHERE ue_type=2 AND lead_id IS NOT NULL AND campaign_id = ANY($1)
+          AND timestamp_email BETWEEN '2025-07-01' AND now() + interval '1 day'
+        GROUP BY 1,2
+      ),
+      ours AS (SELECT campaign_id, lead_id, min(timestamp_email) our_at FROM raw_emails WHERE ue_type=3 AND campaign_id = ANY($1) GROUP BY 1,2)
+      SELECT rf.lead_id AS email,
+             CASE WHEN l.label='referral' THEN 'referral' ELSE 'interested' END AS bucket,
+             round(extract(epoch FROM (now()-rf.first_reply_at))/86400)::int::text AS age_days,
+             left(rc.name, 60) AS campaign
+      FROM rf
+      JOIN camp_ue3 c ON c.campaign_id = rf.campaign_id
+      JOIN raw_campaigns rc ON rc.id = rf.campaign_id
+      LEFT JOIN reply_outcome_labels l ON l.campaign_id = rf.campaign_id AND l.lead_id = rf.lead_id
+      LEFT JOIN ours u ON u.campaign_id = rf.campaign_id AND u.lead_id = rf.lead_id
+      -- positive: LLM-first (как v_reply_outcomes), Instantly только когда LLM-метки нет —
+      -- иначе гоним автоответы/«не тот человек», которые LLM уже отбраковал (BUG 1).
+      WHERE COALESCE(l.label IN ('interested','referral'), rf.inst_int, false)
+        AND (u.our_at IS NULL OR u.our_at < rf.first_reply_at)
+        AND rf.first_reply_at > now() - interval '30 days'
+      ORDER BY rf.first_reply_at DESC
+      `,
+      [ids],
+    );
+    for (const r of rows) { if (r.bucket === 'referral') dropped.referral++; else dropped.interested++; }
+    dropped.items = rows.slice(0, 25).map((r) => ({ email: r.email, bucket: r.bucket, ageDays: Number(r.age_days), campaign: r.campaign }));
+  } catch (e) {
+    console.error('[projectInsights] dropped-leads query skipped:', (e as Error).message);
+  }
+
+  // 4b) within-client segment ROI (I) — which segment converts best for THIS project.
+  // Gate (skeptic): >=2 real segments (exclude other_unclear) each sent>=500 & repliers>=20;
+  // best vs worst Wilson CI on positive/sent must NOT overlap; direction must AGREE on the
+  // deliverability-independent positive/replier metric. Else null (refuse). Never generalize
+  // one client's winner to others — this is THEIR past lists, correlational, not an A/B.
+  let segmentRoi: SegmentRoi | null = null;
+  try {
+    const segRows = await datasetQuery<{ segment: string; sent: string; repliers: string; positive: string }>(
+      `
+      WITH seg AS (
+        SELECT campaign_id, segment FROM dim_campaign_segment
+        WHERE campaign_id = ANY($1) AND segment IS NOT NULL AND segment <> 'other_unclear'
+      ),
+      sends AS (
+        SELECT s.segment, count(*) AS sent
+        FROM raw_emails e JOIN seg s ON s.campaign_id = e.campaign_id
+        WHERE e.ue_type=1 AND e.timestamp_email BETWEEN '2025-07-01' AND now()+interval '1 day'
+        GROUP BY 1
+      ),
+      rf AS (
+        SELECT e.campaign_id, e.lead_id, bool_or(e.i_status=1 OR e.ai_interest_value=1) inst_int
+        FROM raw_emails e
+        WHERE e.ue_type=2 AND e.lead_id IS NOT NULL AND e.campaign_id = ANY($1)
+          AND e.timestamp_email BETWEEN '2025-07-01' AND now()+interval '1 day'
+        GROUP BY 1,2
+      ),
+      outc AS (
+        SELECT s.segment, count(*) AS repliers,
+          count(*) FILTER (WHERE COALESCE(l.label IN ('interested','referral'), rf.inst_int, false)) AS positive
+        FROM rf JOIN seg s ON s.campaign_id = rf.campaign_id
+        LEFT JOIN reply_outcome_labels l ON l.campaign_id = rf.campaign_id AND l.lead_id = rf.lead_id
+        GROUP BY 1
+      )
+      SELECT sn.segment, sn.sent::text, o.repliers::text, o.positive::text
+      FROM sends sn JOIN outc o ON o.segment = sn.segment
+      WHERE sn.sent >= 500 AND o.repliers >= 20
+      `,
+      [ids],
+    );
+    const segs = segRows.map((r) => {
+      const sent = Number(r.sent), repliers = Number(r.repliers), positive = Number(r.positive);
+      const w = wilson(positive, sent);
+      return {
+        segment: r.segment, sent, repliers, positive,
+        ratePerSent: w ? w.p : 0, ciLow: w ? w.low : 0, ciHigh: w ? w.high : 1,
+        ratePerReplier: repliers > 0 ? positive / repliers : 0,
+      };
+    }).sort((a, b) => b.ratePerSent - a.ratePerSent);
+    if (segs.length >= 2) {
+      const best = segs[0], worst = segs[segs.length - 1];
+      // CI non-overlap on per-sent AND same direction on per-replier (strips deliverability)
+      if (best.ciLow > worst.ciHigh && best.ratePerReplier > worst.ratePerReplier) {
+        segmentRoi = {
+          recommendation: `Сегмент «${best.segment}» конвертит лучше «${worst.segment}» — ${(best.ratePerSent * 100).toFixed(1)}% против ${(worst.ratePerSent * 100).toFixed(1)}% лидов на отправку (по вашим прошлым спискам, корреляция — не A/B). Следующий список стоит брать в «${best.segment}».`,
+          best: { segment: best.segment, rate: best.ratePerSent },
+          worst: { segment: worst.segment, rate: worst.ratePerSent },
+          all: segs.map((s) => ({ segment: s.segment, sent: s.sent, ratePerSent: s.ratePerSent, ciLow: s.ciLow, ciHigh: s.ciHigh })),
+        };
+      }
+    }
+  } catch (e) {
+    console.error('[projectInsights] segment-roi skipped:', (e as Error).message);
+  }
+
+  // 5) totals + notes
   const totals = campaigns.reduce(
     (acc, c) => ({ repliers: acc.repliers + c.repliers, positive: acc.positive + c.positive, labeled: acc.labeled + c.labeled }),
     { repliers: 0, positive: 0, labeled: 0 },
@@ -250,6 +371,8 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
     totals: { ...totals, labelCoverage: totals.repliers > 0 ? totals.labeled / totals.repliers : null },
     weekly,
     findings,
+    droppedLeads: dropped,
+    segmentRoi,
     notes,
   };
 }

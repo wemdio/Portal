@@ -923,7 +923,7 @@ describe('Client Portal — empty new-user state', () => {
     expect(body.items[0]?.email_id).toBe('email-b');
   });
 
-  it('GET /replies groups a multi-message thread into one conversation row + needs_reply filter', async () => {
+  it('GET /replies groups a multi-message thread into one conversation row + status filters', async () => {
     authState.accessRows = [
       { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
     ];
@@ -967,19 +967,113 @@ describe('Client Portal — empty new-user state', () => {
     body = (await (res as Response).json()) as { items: Array<{ email_id?: string; message_count?: number }>; total: number };
     expect(body.total).toBe(1);
 
-    // needs_reply = ПРОЧИТАНО, но без ответа. Тут письма непрочитаны (не открывали)
-    // → исключены из «Требует ответа» (они в «Непрочитано»), чтобы вкладка
-    // совпадала с красным бейджом.
+    // needs_reply УБРАН (клиент: «часто ответ и не нужен — надпись раздражает»).
+    // Невалидный status больше не фильтрует → whitelist отдаёт 'all' (вся выборка).
     mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
     res = await GET(makeReq('http://x/api/client/replies?status=needs_reply'));
     body = (await (res as Response).json()) as { items: Array<{ email_id?: string; message_count?: number }>; total: number };
-    expect(body.total).toBe(0);
+    expect(body.total).toBe(1);
 
     // answered: nothing answered (empty client_email_replies) → empty.
     mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
     res = await GET(makeReq('http://x/api/client/replies?status=answered'));
     body = (await (res as Response).json()) as { items: Array<{ email_id?: string; message_count?: number }>; total: number };
     expect(body.total).toBe(0);
+  });
+
+  it('GET /replies marks a conversation answered via thread-level OR (an earlier email was replied, not the representative)', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValue({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    // Same thread: lead asked (email-old), we replied to THAT, then the lead
+    // sent a closing note (email-new). The representative (latest inbound) is
+    // email-new and was NOT replied to; an earlier email was. The conversation
+    // must still count as «Отвечено» (thread-level OR), and — once the latest
+    // note is read — appear under the «Отвечено» filter.
+    const items = [
+      {
+        id: 'email-new', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't1', lead: 'l1',
+        subject: 'Re: спасибо', body: { text: 'спасибо, передала в отдел' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-20T10:00:00.000Z', ue_type: 2,
+      },
+      {
+        id: 'email-old', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't1', lead: 'l1',
+        subject: 'вопрос', body: { text: 'первый вопрос' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-19T10:00:00.000Z', ue_type: 2,
+      },
+    ];
+    // We replied to the OLDER inbound; the client has read the latest note.
+    dbState.rowsByTable['client_email_replies'] = [
+      { client_user_id: AUTH_USER_ID, email_id: 'email-old', replied_at: '2026-05-19T12:00:00.000Z' },
+    ];
+    dbState.rowsByTable['client_email_reads'] = [
+      { client_user_id: AUTH_USER_ID, email_id: 'email-new', read_at: '2026-05-20T11:00:00.000Z' },
+    ];
+    const { GET } = await import('@/app/api/client/replies/route');
+
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    let res = await GET(makeReq('http://x/api/client/replies'));
+    let body = (await (res as Response).json()) as {
+      items: Array<{ email_id?: string; is_answered?: boolean }>; total: number;
+    };
+    expect(body.total).toBe(1);
+    expect(body.items[0]?.email_id).toBe('email-new'); // representative = latest inbound
+    expect(body.items[0]?.is_answered).toBe(true); // …but answered via thread-level OR
+
+    // Appears under «Отвечено» (read representative + thread-level answered).
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    res = await GET(makeReq('http://x/api/client/replies?status=answered'));
+    body = (await (res as Response).json()) as {
+      items: Array<{ email_id?: string }>; total: number;
+    };
+    expect(body.total).toBe(1);
+  });
+
+  it('GET /replies groups a lead split across thread_ids into ONE conversation row (group by lead, not thread)', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValue({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    // Same lead (lead@example.com), but Instantly fragmented the dialog into two
+    // thread_ids (subject change / reply-all). The list must show ONE row for the
+    // lead — consistent with the detail thread, which merges all the lead's emails.
+    const items = [
+      {
+        id: 'em-a', campaign_id: ALLOWED_CAMPAIGN, thread_id: 'tA', lead: 'l1',
+        subject: 'Re: A', body: { text: 'a' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-20T10:00:00.000Z', ue_type: 2,
+      },
+      {
+        id: 'em-b', campaign_id: ALLOWED_CAMPAIGN, thread_id: 'tB', lead: 'l1',
+        subject: 'Re: B', body: { text: 'b' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-19T10:00:00.000Z', ue_type: 2,
+      },
+    ];
+    const { GET } = await import('@/app/api/client/replies/route');
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    const res = await GET(makeReq('http://x/api/client/replies'));
+    const body = (await (res as Response).json()) as {
+      items: Array<{ email_id?: string; message_count?: number }>; total: number;
+    };
+    expect(body.total).toBe(1); // one row for the lead despite two thread_ids
+    expect(body.items[0]?.email_id).toBe('em-a'); // representative = latest inbound
+    expect(body.items[0]?.message_count).toBe(2); // both replies counted
+
   });
 
   it('GET /replies does not collapse two distinct emails sharing a timestamp (dedupe by email_id)', async () => {
@@ -1463,6 +1557,10 @@ describe('Client Portal — RBAC isolation across clients', () => {
     );
 
     expect((res as Response).status).toBe(200);
+    // Свежие сверху (commit 81cfadec): e1 (2026-05-19) раньше sent-1 (2026-05-18).
+    // Гард против случайного отката сортировки треда обратно на возрастание.
+    const body = await (res as Response).json();
+    expect(body.messages.map((m: { id: string }) => m.id)).toEqual(['e1', 'sent-1']);
     // Прочитанность ведём ПОШТУЧНО для клиента (client_email_reads), тред в
     // Instantly НЕ трогаем — иначе гасли бы соседние ответы лида.
     expect(mockMarkThreadAsRead).not.toHaveBeenCalled();

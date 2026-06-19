@@ -230,6 +230,8 @@ export interface EngHiringSearchConfig {
   enrich?: boolean;
   /** Default true: output one best matching vacancy row per company. */
   dedupe_companies?: boolean;
+  /** Include open ATS jobs when the source does not expose a posting date. */
+  include_unknown_dates?: boolean;
 }
 
 export interface EngHiringParserJob {
