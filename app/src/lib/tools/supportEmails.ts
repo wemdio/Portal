@@ -39,8 +39,8 @@ export function isRoleLocalPart(localRaw: string): boolean {
   if (!local) return false;
   if (ROLE_LOCALPARTS.has(local) || ROLE_LOCALPARTS_EXACT.has(local)) return true;
   // A role word immediately followed by a separator or digit: support.team,
-  // info-msk, sales2, zakaz_spb. The lookahead means "saleshouse"/"infomir"
-  // (role word + letters) do NOT match.
+  // help-ru, support2, zakaz_spb. The lookahead means a role word followed by
+  // more LETTERS (e.g. "supportive") does NOT match.
   const m = local.match(/^([a-z]+)(?=[._+\-0-9])/);
   return !!m && ROLE_LOCALPARTS.has(m[1]);
 }
