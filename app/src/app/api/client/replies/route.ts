@@ -119,8 +119,17 @@ function mergeAndSortItems(items: LeadListItem[]): LeadListItem[] {
 }
 
 function conversationKey(item: LeadListItem): string {
+  // Группируем по ЛИДУ (одна строка на переписку с лидом), а НЕ по thread_id.
+  // Instantly дробит один диалог на разные thread_id (смена темы, reply-all, тред
+  // в почтовике лида — см. thread route): по thread_id один лид мог бы задвоиться
+  // в списке. По email лида строка одна, и список согласован с детальным тредом
+  // (он тоже берёт ВСЕ письма лида, любой thread_id). campaign_id в ключе — тот
+  // же лид в разных кампаниях остаётся разными строками. thread_id/email_id —
+  // фолбэк, если email лида почему-то пуст.
+  const email = item.lead_email?.trim().toLowerCase();
+  if (email) return `lead:${item.campaign_id}:${email}`;
   if (item.thread_id) return `thread:${item.thread_id}`;
-  return `lead:${item.campaign_id}:${item.lead_email.trim().toLowerCase()}`;
+  return `email:${item.email_id ?? ''}`;
 }
 
 /**
