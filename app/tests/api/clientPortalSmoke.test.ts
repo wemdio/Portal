@@ -1037,6 +1037,45 @@ describe('Client Portal — empty new-user state', () => {
     expect(body.total).toBe(1);
   });
 
+  it('GET /replies groups a lead split across thread_ids into ONE conversation row (group by lead, not thread)', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValue({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    // Same lead (lead@example.com), but Instantly fragmented the dialog into two
+    // thread_ids (subject change / reply-all). The list must show ONE row for the
+    // lead — consistent with the detail thread, which merges all the lead's emails.
+    const items = [
+      {
+        id: 'em-a', campaign_id: ALLOWED_CAMPAIGN, thread_id: 'tA', lead: 'l1',
+        subject: 'Re: A', body: { text: 'a' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-20T10:00:00.000Z', ue_type: 2,
+      },
+      {
+        id: 'em-b', campaign_id: ALLOWED_CAMPAIGN, thread_id: 'tB', lead: 'l1',
+        subject: 'Re: B', body: { text: 'b' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-19T10:00:00.000Z', ue_type: 2,
+      },
+    ];
+    const { GET } = await import('@/app/api/client/replies/route');
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    const res = await GET(makeReq('http://x/api/client/replies'));
+    const body = (await (res as Response).json()) as {
+      items: Array<{ email_id?: string; message_count?: number }>; total: number;
+    };
+    expect(body.total).toBe(1); // one row for the lead despite two thread_ids
+    expect(body.items[0]?.email_id).toBe('em-a'); // representative = latest inbound
+    expect(body.items[0]?.message_count).toBe(2); // both replies counted
+
+  });
+
   it('GET /replies does not collapse two distinct emails sharing a timestamp (dedupe by email_id)', async () => {
     authState.accessRows = [
       { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },

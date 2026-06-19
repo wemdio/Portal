@@ -7,6 +7,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Send, MessageSquare, RefreshCw, Search, X } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ExpandedThread } from '@/components/client-replies/ExpandedThread';
+import type { ThreadMessage } from '@/lib/clientCampaignReplies/types';
 
 type StatusFilter = 'all' | 'unread' | 'answered' | 'leads';
 
@@ -235,6 +236,21 @@ function LeadDetail({
   };
 
   const statusBadge = leadStatusBadge(lead);
+  // Фолбэк для ExpandedThread: последний ответ лида из уже загруженных данных
+  // списка. Показывается, ТОЛЬКО если живой /thread не загрузился (раньше тут был
+  // отдельный закреплённый блок «ответ лида», но с новым порядком треда он
+  // дублировал верхний пузырь ленты).
+  const fallbackThread: ThreadMessage[] = lead.email_id
+    ? [{
+        id: lead.email_id,
+        direction: 'inbound',
+        timestamp: lead.reply_timestamp ?? lead.created_at ?? null,
+        subject: lead.reply_subject ?? null,
+        from_email: lead.lead_email ?? null,
+        from_name: lead.lead_name ?? null,
+        body_text: lead.reply_body ?? null,
+      }]
+    : [];
 
   return (
     <div>
@@ -292,25 +308,25 @@ function LeadDetail({
           {lead.campaign_name && <InfoRow label="Кампания" value={lead.campaign_name} />}
         </div>
 
-        {lead.last_outbound_preview && (
-          <div className="mb-4">
+        {/* Переписка — единой лентой (новые сверху, как в Instantly), сразу под
+            шапкой. Раньше тут были закреплённые «наше последнее письмо» + «ответ
+            лида», но с новым порядком треда они дублировали верхние письма ленты,
+            поэтому убраны. Полный текст последнего ответа — верхний пузырь треда;
+            если /thread не загрузился, ExpandedThread покажет его из fallbackThread. */}
+        {canReplyByEmail && (
+          <div className="mb-2">
             <p className="ds-eyebrow mb-2">
-              02<span aria-hidden> → </span>наше последнее письмо
+              02<span aria-hidden> → </span>переписка
             </p>
-            <div className="neu-inset rounded-xl p-4 sm:p-5 text-sm whitespace-pre-wrap max-h-48 overflow-y-auto" style={{ color: 'var(--cp-paper-mute)' }}>
-              {lead.last_outbound_preview}
-            </div>
+            <ExpandedThread
+              campaignId={lead.campaign_id}
+              emailId={lead.email_id!}
+              onReplied={onReplied}
+              fallbackMessages={fallbackThread}
+              className="space-y-3"
+            />
           </div>
         )}
-
-        <div className="mb-2">
-          <p className="ds-eyebrow mb-2">
-            {lead.last_outbound_preview ? '03' : '02'}<span aria-hidden> → </span>ответ лида{lead.reply_subject ? `: ${lead.reply_subject}` : ''}
-          </p>
-          <div className="neu-inset rounded-xl p-4 sm:p-5 text-sm whitespace-pre-wrap max-h-64 overflow-y-auto" style={{ color: 'var(--cp-paper)' }}>
-            {lead.reply_body ?? '(пусто)'}
-          </div>
-        </div>
 
         {canReplyByEmail && (
           <div className="neu-sm mt-5 p-4">
@@ -372,19 +388,12 @@ function LeadDetail({
           </div>
         )}
 
-        {canReplyByEmail && (
-          <ExpandedThread
-            campaignId={lead.campaign_id}
-            emailId={lead.email_id!}
-            onReplied={onReplied}
-          />
-        )}
       </div>
 
       {canComment && (
         <div className="neu-card p-5 sm:p-8">
           <p className="ds-eyebrow mb-5">
-            04<span aria-hidden> → </span>комментарии
+            03<span aria-hidden> → </span>комментарии
           </p>
 
           {loadingComments ? (
