@@ -373,6 +373,12 @@ export interface ExpandedThreadProps {
    */
   onAfterAction?: () => void;
   /**
+   * Optional callback fired ONLY after a reply (not a forward) is successfully
+   * sent. `/client/replies` uses it to optimistically flip the conversation to
+   * «Отвечено» in the list without waiting for a full reload.
+   */
+  onReplied?: () => void;
+  /**
    * Override the wrapper className. Default: `mt-5 space-y-3` — standalone
    * block (used on `/client/replies` and `/client/leads`). The campaign-
    * Replies tab passes `mt-3 pl-7 space-y-3` because the component nests
@@ -385,6 +391,7 @@ export function ExpandedThread({
   campaignId,
   emailId,
   onAfterAction,
+  onReplied,
   className,
 }: ExpandedThreadProps) {
   const [thread, setThread] = useState<ThreadMessage[] | null>(null);
@@ -496,6 +503,7 @@ export function ExpandedThread({
             setActionMode(null);
             void loadThread();
             onAfterAction?.();
+            onReplied?.();
           }}
         />
       )}
