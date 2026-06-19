@@ -1774,11 +1774,11 @@ export default function TasksPage() {
               type="button"
               onClick={() => setActiveTab('tasks')}
               className={`${isTma ? 'flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition' : 'flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition'} ${
-                activeTab === 'tasks' ? 'bg-lime-300 text-gray-900' : 'text-gray-500 hover:text-gray-700'
+                activeTab === 'tasks' ? 'bg-emerald-700 text-white' : 'text-gray-500 hover:text-gray-700'
               }`}
             >
               Задачи
-              <span className={`text-xs ${activeTab === 'tasks' ? 'text-gray-600' : 'text-gray-400'}`}>
+              <span className={`text-xs ${activeTab === 'tasks' ? 'text-white/80' : 'text-gray-400'}`}>
                 {regularTasks.length}
               </span>
             </button>
@@ -1786,11 +1786,11 @@ export default function TasksPage() {
               type="button"
               onClick={() => setActiveTab('hypotheses')}
               className={`${isTma ? 'flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition' : 'flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition'} ${
-                activeTab === 'hypotheses' ? 'bg-lime-300 text-gray-900' : 'text-gray-500 hover:text-gray-700'
+                activeTab === 'hypotheses' ? 'bg-emerald-700 text-white' : 'text-gray-500 hover:text-gray-700'
               }`}
             >
               Задачи по гипотезам
-              <span className={`text-xs ${activeTab === 'hypotheses' ? 'text-gray-600' : 'text-gray-400'}`}>
+              <span className={`text-xs ${activeTab === 'hypotheses' ? 'text-white/80' : 'text-gray-400'}`}>
                 {hypothesisTasks.length}
               </span>
             </button>

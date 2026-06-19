@@ -390,9 +390,9 @@ export default function ProjectsAnalyticsPage() {
 
         {/* Overdue projects */}
         <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-          <div className="border-b border-gray-200 bg-red-50/50 px-6 py-4">
-            <h2 className="text-lg font-semibold text-gray-900">Просроченные проекты</h2>
-            <p className="text-sm text-gray-500">Дедлайн уже прошёл, но проект не завершён</p>
+          <div className="border-b border-red-200 bg-red-100/80 px-6 py-4">
+            <h2 className="text-lg font-semibold text-red-900">Просроченные проекты</h2>
+            <p className="text-sm text-red-700/80">Дедлайн уже прошёл, но проект не завершён</p>
           </div>
           <div className="divide-y divide-gray-100">
             {overdueProjects.map((project) => {

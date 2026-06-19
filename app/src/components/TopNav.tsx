@@ -7,6 +7,7 @@ import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
 import { useUser } from '@/lib/UserProvider';
 import { getRoleLabel, isAdmin, isTechnician, canAccessBillingCalendar } from '@/lib/roles';
 import { commonDictionary, dict } from '@/lib/i18n';
+import { ThemeToggle } from './ThemeToggle';
 
 export function TopNav() {
   const pathname = usePathname();
@@ -79,6 +80,7 @@ export function TopNav() {
         </nav>
 
         <div className="flex items-center gap-2 flex-shrink-0">
+          <ThemeToggle />
           <Link
             href={'/notifications' as Route}
             prefetch={false}

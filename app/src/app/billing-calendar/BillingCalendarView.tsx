@@ -896,7 +896,7 @@ export default function BillingCalendarView() {
                 <div
                   key={day}
                   className={`min-h-[56px] sm:min-h-[80px] border-b border-r border-gray-200 p-1 sm:p-1.5 transition-colors
-                    ${isToday ? 'bg-blue-50/40' : isWeekend ? 'bg-gray-50/40' : 'hover:bg-gray-50/50'}
+                    ${isToday ? 'bg-blue-50/40' : isWeekend ? 'bg-red-100' : 'hover:bg-gray-50/50'}
                     ${isTechnician(userRole) ? 'cursor-pointer' : ''}
                   `}
                   onClick={() => {

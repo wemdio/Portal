@@ -379,12 +379,22 @@ export function searchPortalUi(query: string): SearchHit[] {
  * потом — по числу токенов в body.
  */
 export function searchPortalSubstring(query: string, limit = 6): SearchHit[] {
-  const tokens = query
+  const rawTokens = query
     .toLowerCase()
     .split(/\s+/)
     .map((t) => t.trim())
     .filter((t) => t.length >= 1);
-  if (tokens.length === 0) return [];
+  if (rawTokens.length === 0) return [];
+  // Помимо самого слова добавляем 5-символьный префикс. Это позволяет
+  // «валидатор» сматчиться с «валидация почт» (общий корень «валид») и
+  // «расшифровка» — с «расшифровать» / «расшифровщик». Без этого модели
+  // приходится угадывать точную форму слова, и одна неудачная попытка
+  // приводит к «не нашёл».
+  const tokens: string[] = [];
+  for (const t of rawTokens) {
+    tokens.push(t);
+    if (t.length > 5) tokens.push(t.slice(0, 5));
+  }
 
   const idx = getIndex();
   const hits: SearchHit[] = [];

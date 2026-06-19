@@ -115,7 +115,7 @@ export function LayoutShell({
     <PortalDocumentTitle />
     <PortalLoadingProvider>
     <div
-      className={shellClassName}
+      className={`${shellClassName} portal-shell`}
       style={{
         minHeight: 'var(--app-viewport-height, 100vh)',
         ...(!isTma ? { height: 'var(--app-viewport-height, 100vh)' } : {}),
