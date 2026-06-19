@@ -97,8 +97,10 @@ export async function serveClientDemo(req: NextRequest): Promise<NextResponse> {
       const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
       // Mirror real /replies API: whitelist status, pass search through.
       const rawStatus = req.nextUrl.searchParams.get('status');
-      const status: 'all' | 'unread' | 'leads' =
-        rawStatus === 'unread' || rawStatus === 'leads' ? rawStatus : 'all';
+      const status: 'all' | 'unread' | 'leads' | 'answered' =
+        rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered'
+          ? rawStatus
+          : 'all';
       const search = req.nextUrl.searchParams.get('search')?.trim() || undefined;
       return json(getDemoRepliesResponse(limit, offset, status, search));
     }

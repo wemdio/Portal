@@ -166,6 +166,8 @@ interface DemoReply {
   is_lead: boolean;
   /** Whether this reply still demands attention (amber dot in the list). */
   is_unread?: boolean;
+  /** Whether we (the client) have already replied to this lead — «Отвечено» badge. */
+  is_answered?: boolean;
 }
 
 /**
@@ -251,6 +253,7 @@ const DEMO_REPLIES: DemoReply[] = [
     body: 'Спасибо за предложение! Сейчас не актуально — у нас уже идёт внедрение 1С:WMS, заканчиваем до конца года. Возможно, через 12 месяцев вернёмся к разговору, если будут вопросы по второму складу.\n\nСергей Кузьмин',
     timestamp: '2026-05-18T16:20:00.000Z',
     is_lead: false,
+    is_answered: true,
   },
   {
     id: 'demo-reply-7',
@@ -262,6 +265,7 @@ const DEMO_REPLIES: DemoReply[] = [
     body: 'Здравствуйте! Передам ваше письмо коллегам — у нас этим направлением занимается другой отдел (склад и логистика отдельно от закупок). Если будут вопросы — свяжемся.',
     timestamp: '2026-05-17T11:00:00.000Z',
     is_lead: false,
+    is_answered: true,
   },
   {
     id: 'demo-reply-8',
@@ -364,7 +368,7 @@ export function getDemoThread(campaignId: string, emailId: string) {
 export function getDemoRepliesResponse(
   limit: number,
   offset: number,
-  status: 'all' | 'unread' | 'leads' = 'all',
+  status: 'all' | 'unread' | 'leads' | 'answered' = 'all',
   search?: string,
 ) {
   // Sort by recency (matches real backend behaviour).
@@ -376,6 +380,9 @@ export function getDemoRepliesResponse(
     items = items.filter((r) => r.is_unread === true);
   } else if (status === 'leads') {
     items = items.filter((r) => r.is_lead === true);
+  } else if (status === 'answered') {
+    // Зеркалит реальный фильтр /replies: отвечено И не лид И не непрочитано.
+    items = items.filter((r) => r.is_answered === true && !r.is_lead && r.is_unread !== true);
   }
 
   // Local case-insensitive search across subject / from / preview — mirrors
@@ -414,6 +421,7 @@ export function getDemoRepliesResponse(
     lead_id: null,
     thread_id: null,
     is_unread: reply.is_unread === true,
+    is_answered: reply.is_answered === true,
     ai_interest_value: null,
     is_lead: reply.is_lead,
     lead_entry_id: reply.is_lead ? `demo-lead-${reply.id.split('-').pop()}` : null,
