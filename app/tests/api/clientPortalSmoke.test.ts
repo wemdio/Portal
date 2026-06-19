@@ -923,7 +923,7 @@ describe('Client Portal — empty new-user state', () => {
     expect(body.items[0]?.email_id).toBe('email-b');
   });
 
-  it('GET /replies groups a multi-message thread into one conversation row + needs_reply filter', async () => {
+  it('GET /replies groups a multi-message thread into one conversation row + status filters', async () => {
     authState.accessRows = [
       { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
     ];
@@ -967,13 +967,12 @@ describe('Client Portal — empty new-user state', () => {
     body = (await (res as Response).json()) as { items: Array<{ email_id?: string; message_count?: number }>; total: number };
     expect(body.total).toBe(1);
 
-    // needs_reply = ПРОЧИТАНО, но без ответа. Тут письма непрочитаны (не открывали)
-    // → исключены из «Требует ответа» (они в «Непрочитано»), чтобы вкладка
-    // совпадала с красным бейджом.
+    // needs_reply УБРАН (клиент: «часто ответ и не нужен — надпись раздражает»).
+    // Невалидный status больше не фильтрует → whitelist отдаёт 'all' (вся выборка).
     mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
     res = await GET(makeReq('http://x/api/client/replies?status=needs_reply'));
     body = (await (res as Response).json()) as { items: Array<{ email_id?: string; message_count?: number }>; total: number };
-    expect(body.total).toBe(0);
+    expect(body.total).toBe(1);
 
     // answered: nothing answered (empty client_email_replies) → empty.
     mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });

@@ -134,7 +134,7 @@ function conversationKey(item: LeadListItem): string {
  * прочтения/ответа в портале привязана именно к этому письму (открыли/ответили
  * на representative), а старые письма треда отдельно прочитанными не
  * помечаются. Агрегат OR(непрочитано)/AND(отвечено) держал бы переписку в
- * «Непрочитано»/«Требует ответа» навсегда — открытие/ответ не могли бы её
+ * «Непрочитано» навсегда (а «Отвечено» недостижимо) — открытие/ответ не могли бы её
  * погасить (см. ревью 18.06). При открытии клиент и так видит весь тред.
  *
  * is_lead — OR по треду (помечен лидом хоть один → вся переписка лид).
@@ -395,8 +395,8 @@ export async function GET(req: NextRequest) {
   // Status filter is whitelisted so a malformed query never leaks the
   // unfiltered set under the wrong label. 'all' = passthrough.
   const rawStatus = url.searchParams.get('status');
-  const statusFilter: 'all' | 'unread' | 'leads' | 'answered' | 'needs_reply' =
-    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered' || rawStatus === 'needs_reply'
+  const statusFilter: 'all' | 'unread' | 'leads' | 'answered' =
+    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered'
       ? rawStatus
       : 'all';
 
@@ -457,15 +457,11 @@ export async function GET(req: NextRequest) {
     ? searched.filter((i) => i.is_unread === true)
     : statusFilter === 'answered'
       // Отвечено = ответили, не лид и не помечено снова непрочитанным (после
-      // «В непрочитанные» строка уходит только в «Непрочитано» — как у needs_reply).
+      // «В непрочитанные» строка уходит только в «Непрочитано»).
       ? searched.filter((i) => i.is_answered === true && i.is_lead !== true && i.is_unread !== true)
-      : statusFilter === 'needs_reply'
-        // Требует ответа = прочитано, но не отвечено и не лид. Непрочитанные — в
-        // «Непрочитано»: так содержимое вкладки совпадает с красным бейджом.
-        ? searched.filter((i) => i.is_answered !== true && i.is_lead !== true && i.is_unread !== true)
-        : statusFilter === 'leads'
-          ? searched.filter((i) => i.is_lead === true)
-          : searched;
+      : statusFilter === 'leads'
+        ? searched.filter((i) => i.is_lead === true)
+        : searched;
 
   const total = filtered.length;
   const items = filtered.slice(offset, offset + limit);

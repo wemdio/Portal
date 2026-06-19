@@ -8,12 +8,11 @@ import { Send, MessageSquare, RefreshCw, Search, X } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ExpandedThread } from '@/components/client-replies/ExpandedThread';
 
-type StatusFilter = 'all' | 'unread' | 'needs_reply' | 'answered' | 'leads';
+type StatusFilter = 'all' | 'unread' | 'answered' | 'leads';
 
 const STATUS_LABEL: Record<StatusFilter, string> = {
   all: 'Все',
   unread: 'Непрочитано',
-  needs_reply: 'Требует ответа',
   answered: 'Отвечено',
   leads: 'Лиды',
 };
@@ -86,11 +85,13 @@ function LeadDetail({
   onBack,
   onMarkedLead,
   onMarkedUnread,
+  onReplied,
 }: {
   lead: ForwardedLead;
   onBack: () => void;
   onMarkedLead?: () => void;
   onMarkedUnread?: () => void;
+  onReplied?: () => void;
 }) {
   const [comments, setComments] = useState<LeadComment[]>([]);
   const [loadingComments, setLoadingComments] = useState(true);
@@ -352,6 +353,7 @@ function LeadDetail({
           <ExpandedThread
             campaignId={lead.campaign_id}
             emailId={lead.email_id!}
+            onReplied={onReplied}
           />
         )}
       </div>
@@ -456,29 +458,30 @@ function LeadCard({
 }) {
   const commentCount = lead.client_lead_comments?.[0]?.count ?? 0;
 
-  // One status per row (conversation), hierarchy: lead > unread > answered > needs-reply.
-  // needs-reply = прочитано, но на последний вопрос лида ещё не ответили.
+  // One status per row (conversation), hierarchy: lead > unread > answered > read.
+  // Прочитанное-без-ответа — нейтральный «Ответ» (раньше был красный «Требует
+  // ответа», но клиент: часто ответ и не нужен — надпись только раздражала).
   const statusColor = lead.is_lead
     ? 'var(--cp-green)'
     : lead.is_unread
       ? 'var(--cp-amber)'
       : lead.is_answered
         ? 'var(--cp-accent)'
-        : 'var(--cp-red)';
+        : 'var(--cp-paper-faint)';
   const statusTextColor = lead.is_lead
     ? 'var(--cp-green)'
     : lead.is_unread
       ? 'var(--cp-amber)'
       : lead.is_answered
         ? 'var(--cp-accent)'
-        : 'var(--cp-red)';
+        : 'var(--cp-paper-mute)';
   const statusLabel = lead.is_lead
     ? 'Лид'
     : lead.is_unread
       ? 'Непрочитано'
       : lead.is_answered
         ? 'Отвечено'
-        : 'Требует ответа';
+        : 'Ответ';
 
   return (
     <button
@@ -547,7 +550,7 @@ function RepliesPageContent() {
   // wrong label.
   const rawStatus = searchParams.get('status');
   const status: StatusFilter =
-    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered' || rawStatus === 'needs_reply'
+    rawStatus === 'unread' || rawStatus === 'leads' || rawStatus === 'answered'
       ? rawStatus
       : 'all';
   const query = searchParams.get('q') ?? '';
@@ -683,6 +686,19 @@ function RepliesPageContent() {
             )));
             setSelectedLead(null);
           }}
+          onReplied={() => {
+            // Ответ отправлен → оптимистично «Отвечено» в списке и в детальной
+            // карточке, не дожидаясь перезагрузки (раньше до reload было «не
+            // понятно, отвечал или нет»).
+            setLeads((prev) => prev.map((l) => (
+              l.id === selectedLead.id
+                ? { ...l, is_answered: true, is_unread: false }
+                : l
+            )));
+            setSelectedLead((lead) => (lead
+              ? { ...lead, is_answered: true, is_unread: false }
+              : lead));
+          }}
         />
       </div>
     );
@@ -712,7 +728,7 @@ function RepliesPageContent() {
           role="tablist"
           aria-label="Фильтр ответов"
         >
-          {(['all', 'unread', 'needs_reply', 'answered', 'leads'] as const).map((s) => {
+          {(['all', 'unread', 'answered', 'leads'] as const).map((s) => {
             const active = status === s;
             return (
               <button
@@ -795,15 +811,13 @@ function RepliesPageContent() {
             <p className="text-sm font-bold mb-1" style={{ color: 'var(--cp-paper)' }}>
               {status === 'unread'
                 ? 'Нет непрочитанных ответов'
-                : status === 'needs_reply'
-                  ? 'Нет переписок, требующих ответа'
-                  : status === 'answered'
-                    ? 'Нет отвеченных переписок'
-                    : status === 'leads'
-                      ? 'В этой выборке нет помеченных лидов'
-                      : query
-                        ? `Ничего не найдено по запросу «${query}»`
-                        : 'Ничего не найдено'}
+                : status === 'answered'
+                  ? 'Нет отвеченных переписок'
+                  : status === 'leads'
+                    ? 'В этой выборке нет помеченных лидов'
+                    : query
+                      ? `Ничего не найдено по запросу «${query}»`
+                      : 'Ничего не найдено'}
             </p>
             <p className="text-xs mb-4" style={{ color: 'var(--cp-paper-mute)' }}>
               Попробуйте изменить фильтр или сбросить поиск.
@@ -853,7 +867,17 @@ function RepliesPageContent() {
               <LeadCard
                 key={lead.id}
                 lead={lead}
-                onClick={() => setSelectedLead(lead)}
+                onClick={() => {
+                  setSelectedLead(lead);
+                  // Открытие переписки помечает её прочитанной на сервере (/thread);
+                  // оптимистично гасим «непрочитано» в списке, чтобы по «назад» не
+                  // висело до перезагрузки.
+                  if (lead.is_unread) {
+                    setLeads((prev) => prev.map((l) => (
+                      l.id === lead.id ? { ...l, is_unread: false } : l
+                    )));
+                  }
+                }}
               />
             ))}
           </div>
