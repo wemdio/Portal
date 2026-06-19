@@ -379,6 +379,13 @@ export interface ExpandedThreadProps {
    */
   onReplied?: () => void;
   /**
+   * Optional fallback messages rendered ONLY if the live /thread fetch fails
+   * (Instantly slow/down). Keeps the detail view from going empty — it still
+   * shows the lead's latest reply, built from already-loaded list data.
+   * /client/replies passes this since it dropped its pinned reply block.
+   */
+  fallbackMessages?: ThreadMessage[];
+  /**
    * Override the wrapper className. Default: `mt-5 space-y-3` — standalone
    * block (used on `/client/replies` and `/client/leads`). The campaign-
    * Replies tab passes `mt-3 pl-7 space-y-3` because the component nests
@@ -392,6 +399,7 @@ export function ExpandedThread({
   emailId,
   onAfterAction,
   onReplied,
+  fallbackMessages,
   className,
 }: ExpandedThreadProps) {
   const [thread, setThread] = useState<ThreadMessage[] | null>(null);
@@ -463,13 +471,21 @@ export function ExpandedThread({
         </div>
       )}
 
-      {thread && thread.length > 0 && (
+      {thread && thread.length > 0 ? (
         <div className="space-y-2">
           {thread.map((msg) => (
             <ThreadMessageCard key={msg.id} msg={msg} />
           ))}
         </div>
-      )}
+      ) : threadError && fallbackMessages && fallbackMessages.length > 0 ? (
+        // Тред не загрузился — показываем хотя бы последний ответ лида из уже
+        // загруженных данных списка, чтобы карточка не осталась без содержимого.
+        <div className="space-y-2">
+          {fallbackMessages.map((msg) => (
+            <ThreadMessageCard key={msg.id} msg={msg} />
+          ))}
+        </div>
+      ) : null}
 
       {!threadLoading && (
         <div className="flex items-center gap-2 pt-1">
