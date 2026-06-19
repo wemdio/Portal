@@ -981,6 +981,62 @@ describe('Client Portal — empty new-user state', () => {
     expect(body.total).toBe(0);
   });
 
+  it('GET /replies marks a conversation answered via thread-level OR (an earlier email was replied, not the representative)', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValue({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    // Same thread: lead asked (email-old), we replied to THAT, then the lead
+    // sent a closing note (email-new). The representative (latest inbound) is
+    // email-new and was NOT replied to; an earlier email was. The conversation
+    // must still count as «Отвечено» (thread-level OR), and — once the latest
+    // note is read — appear under the «Отвечено» filter.
+    const items = [
+      {
+        id: 'email-new', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't1', lead: 'l1',
+        subject: 'Re: спасибо', body: { text: 'спасибо, передала в отдел' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-20T10:00:00.000Z', ue_type: 2,
+      },
+      {
+        id: 'email-old', campaign_id: ALLOWED_CAMPAIGN, thread_id: 't1', lead: 'l1',
+        subject: 'вопрос', body: { text: 'первый вопрос' },
+        from_address_email: 'lead@example.com',
+        from_address_json: [{ address: 'lead@example.com', name: 'Lead' }],
+        timestamp_email: '2026-05-19T10:00:00.000Z', ue_type: 2,
+      },
+    ];
+    // We replied to the OLDER inbound; the client has read the latest note.
+    dbState.rowsByTable['client_email_replies'] = [
+      { client_user_id: AUTH_USER_ID, email_id: 'email-old', replied_at: '2026-05-19T12:00:00.000Z' },
+    ];
+    dbState.rowsByTable['client_email_reads'] = [
+      { client_user_id: AUTH_USER_ID, email_id: 'email-new', read_at: '2026-05-20T11:00:00.000Z' },
+    ];
+    const { GET } = await import('@/app/api/client/replies/route');
+
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    let res = await GET(makeReq('http://x/api/client/replies'));
+    let body = (await (res as Response).json()) as {
+      items: Array<{ email_id?: string; is_answered?: boolean }>; total: number;
+    };
+    expect(body.total).toBe(1);
+    expect(body.items[0]?.email_id).toBe('email-new'); // representative = latest inbound
+    expect(body.items[0]?.is_answered).toBe(true); // …but answered via thread-level OR
+
+    // Appears under «Отвечено» (read representative + thread-level answered).
+    mockListEmails.mockResolvedValueOnce({ items, next_starting_after: null });
+    res = await GET(makeReq('http://x/api/client/replies?status=answered'));
+    body = (await (res as Response).json()) as {
+      items: Array<{ email_id?: string }>; total: number;
+    };
+    expect(body.total).toBe(1);
+  });
+
   it('GET /replies does not collapse two distinct emails sharing a timestamp (dedupe by email_id)', async () => {
     authState.accessRows = [
       { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
