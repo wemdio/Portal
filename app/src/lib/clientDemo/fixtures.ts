@@ -335,16 +335,10 @@ export function getDemoThread(campaignId: string, emailId: string) {
 
   return {
     thread_id: `thread-${reply.id}`,
+    // Свежие сверху — как реальный /thread (сортировка по убыванию, commit
+    // 81cfadec): последний ответ лида первым, наше исходное письмо ниже. Порядок
+    // должен совпадать с продом, иначе демо/сейлз-показ противоречит продукту.
     messages: [
-      {
-        id: `${reply.id}-outbound`,
-        direction: 'outbound' as const,
-        timestamp: outboundTimestamp,
-        subject: outboundSubject,
-        from_email: 'team@demo-agency.example',
-        from_name: 'OutreachOS · Команда',
-        body_text: `Здравствуйте!\n\n${getDemoOutboundBody(campaignId)}\n\nЕсли тема актуальна — отвечайте на это письмо, обсудим детали.\n\nС уважением,\nКоманда OutreachOS`,
-      },
       {
         id: reply.id,
         direction: 'inbound' as const,
@@ -353,6 +347,15 @@ export function getDemoThread(campaignId: string, emailId: string) {
         from_email: reply.from_email,
         from_name: reply.from_name,
         body_text: reply.body,
+      },
+      {
+        id: `${reply.id}-outbound`,
+        direction: 'outbound' as const,
+        timestamp: outboundTimestamp,
+        subject: outboundSubject,
+        from_email: 'team@demo-agency.example',
+        from_name: 'OutreachOS · Команда',
+        body_text: `Здравствуйте!\n\n${getDemoOutboundBody(campaignId)}\n\nЕсли тема актуальна — отвечайте на это письмо, обсудим детали.\n\nС уважением,\nКоманда OutreachOS`,
       },
     ],
   };
