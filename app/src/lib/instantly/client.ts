@@ -462,6 +462,13 @@ export async function listEmails(
   params?: PaginationParams & {
     campaign_id?: string;
     lead_id?: string;
+    /**
+     * Filter by lead EMAIL. Instantly's working lead filter on GET /emails is
+     * `lead` (the address), NOT `lead_id` — passing an email as `lead_id` is
+     * silently ignored and the API returns the WHOLE campaign's emails (verified
+     * live 2026-06-19). Use this to fetch one lead's full conversation.
+     */
+    lead?: string;
     search?: string;
     /**
      * Per Instantly v2 docs (GET /api/v2/emails), the filter on direction is

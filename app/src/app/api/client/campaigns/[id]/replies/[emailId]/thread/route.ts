@@ -44,15 +44,24 @@ export async function GET(
     }
 
     const threadId = original.thread_id ?? null;
-    const leadId = original.lead ?? null;
+    const leadEmail = original.lead ?? null;
 
+    // Тянем ВСЮ переписку с лидом в этой кампании, фильтруя по `lead` (email) —
+    // это рабочий фильтр Instantly. Раньше передавали `lead_id` с email-значением,
+    // но Instantly его игнорирует и отдаёт письма ВСЕЙ кампании, после чего мы
+    // сужали по thread_id. А Instantly ещё и дробит один диалог на разные
+    // thread_id (смена темы, reply-all, тред в почтовике лида) — фильтр по одному
+    // thread_id терял часть истории, и диалог выглядел «обрезанным». Берём все
+    // письма лида (любой thread_id) = полная история. (Проверено живьём 2026-06-19.)
     let candidates = [original];
-    if (threadId && leadId) {
-      const list = await listEmails({ campaign_id: campaignId, lead_id: leadId, limit: THREAD_FETCH_LIMIT }, instantlyRequestOptions);
-      candidates = (list.items ?? []).filter((e) => e.thread_id === threadId);
-      // Ensure original is in the list (in case API didn't return it).
-      if (!candidates.some((e) => e.id === original.id)) {
-        candidates.unshift(original);
+    if (leadEmail) {
+      const list = await listEmails(
+        { campaign_id: campaignId, lead: leadEmail, limit: THREAD_FETCH_LIMIT },
+        instantlyRequestOptions,
+      );
+      const items = list.items ?? [];
+      if (items.length > 0) {
+        candidates = items.some((e) => e.id === original.id) ? items : [original, ...items];
       }
     }
 
