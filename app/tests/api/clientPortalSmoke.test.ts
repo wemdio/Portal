@@ -1518,6 +1518,10 @@ describe('Client Portal — RBAC isolation across clients', () => {
     );
 
     expect((res as Response).status).toBe(200);
+    // Свежие сверху (commit 81cfadec): e1 (2026-05-19) раньше sent-1 (2026-05-18).
+    // Гард против случайного отката сортировки треда обратно на возрастание.
+    const body = await (res as Response).json();
+    expect(body.messages.map((m: { id: string }) => m.id)).toEqual(['e1', 'sent-1']);
     // Прочитанность ведём ПОШТУЧНО для клиента (client_email_reads), тред в
     // Instantly НЕ трогаем — иначе гасли бы соседние ответы лида.
     expect(mockMarkThreadAsRead).not.toHaveBeenCalled();
