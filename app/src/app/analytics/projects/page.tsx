@@ -330,21 +330,21 @@ export default function ProjectsAnalyticsPage() {
       </div>
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <p className="text-sm text-gray-500">Всего проектов</p>
-          <p className="text-2xl font-semibold text-gray-900">{projects.length}</p>
+        <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-5 shadow-sm">
+          <p className="text-sm text-blue-700">Всего проектов</p>
+          <p className="text-2xl font-semibold text-blue-900">{projects.length}</p>
         </div>
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <p className="text-sm text-gray-500">Активных</p>
-          <p className="text-2xl font-semibold text-gray-900">{activeProjects.length}</p>
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-5 shadow-sm">
+          <p className="text-sm text-emerald-700">Активных</p>
+          <p className="text-2xl font-semibold text-emerald-900">{activeProjects.length}</p>
         </div>
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <p className="text-sm text-gray-500">Продления (30 дней)</p>
-          <p className="text-2xl font-semibold text-amber-600">{renewals.length}</p>
+        <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-5 shadow-sm">
+          <p className="text-sm text-amber-700">Продления (30 дней)</p>
+          <p className="text-2xl font-semibold text-amber-900">{renewals.length}</p>
         </div>
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <p className="text-sm text-gray-500">Просроченных</p>
-          <p className="text-2xl font-semibold text-red-600">{overdueProjects.length}</p>
+        <div className="rounded-xl border border-red-200 bg-red-50/50 p-5 shadow-sm">
+          <p className="text-sm text-red-700">Просроченных</p>
+          <p className="text-2xl font-semibold text-red-900">{overdueProjects.length}</p>
         </div>
       </div>
 

@@ -1097,6 +1097,41 @@ export default function TasksPage() {
     }
   }
 
+  /** Закрыть модалку «Новая задача» и сбросить все поля формы. Используется
+   *  и в кнопке «Отмена», и в backdrop-клике, и в Esc-handler'е. */
+  function closeAddForm() {
+    setShowAddForm(false);
+    setNewTaskColumnId(null);
+    setNewTitle('');
+    setNewProjectId('');
+    setNewSpecialists([]);
+    setNewDescription('');
+    setNewDeadline(getDeadlineDefaultInput());
+    setNewImageUrl('');
+  }
+
+  // Esc → закрывает модалку. Слушатель вешается только пока showAddForm=true.
+  useEffect(() => {
+    if (!showAddForm) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') closeAddForm();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // closeAddForm пересоздаётся каждый рендер, но содержимое стабильное;
+    // зависимости намеренно ограничены showAddForm.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showAddForm]);
+
+  // Блокируем скролл body пока модалка открыта — иначе фон прокручивается
+  // под открытым диалогом и юзер «теряется».
+  useEffect(() => {
+    if (!showAddForm) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = previous; };
+  }, [showAddForm]);
+
   async function handleAddBoard() {
     if (!newBoardName.trim()) return;
     setAddingBoard(true);
@@ -1516,9 +1551,29 @@ export default function TasksPage() {
       </div>
 
       {showAddForm && (
-        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-lg shadow-slate-200/30 space-y-2">
-          <h3 className="text-sm font-semibold text-slate-800">Новая задача</h3>
-          <div className="space-y-2">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="new-task-title"
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm"
+          onClick={closeAddForm}
+        >
+          <div
+            className="my-6 w-full max-w-2xl rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/30"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+              <h3 id="new-task-title" className="text-sm font-semibold text-slate-800">Новая задача</h3>
+              <button
+                type="button"
+                onClick={closeAddForm}
+                aria-label="Закрыть"
+                className="rounded-lg p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="space-y-2 px-4 py-3">
             <div>
               <span className="mb-1 block text-xs font-medium text-slate-500">Проект</span>
               <ProjectCombobox projects={projects} value={newProjectId} onChange={setNewProjectId} locale={locale} />
@@ -1558,7 +1613,7 @@ export default function TasksPage() {
                 placeholderEn="MM/DD/YYYY --:--"
                 className="w-full rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
               />
-              <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
+              <div className="mt-2 rounded-xl border border-slate-200 bg-slate-100/60 p-2.5">
                 <label className="flex items-center gap-2 text-xs text-slate-700">
                   <input
                     type="checkbox"
@@ -1613,7 +1668,7 @@ export default function TasksPage() {
             </div>
             <div>
               <span className="mb-1 block text-xs font-medium text-slate-500">Исполнители</span>
-              <div className="max-h-40 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/60 py-0.5 shadow-sm">
+              <div className="max-h-40 overflow-y-auto rounded-xl border border-slate-200 bg-slate-100/60 py-0.5 shadow-sm">
                 {specialistOptions.map((p) => (
                   <label
                     key={p.id}
@@ -1747,22 +1802,23 @@ export default function TasksPage() {
             </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={addingSaving || !newTitle.trim() || newSpecialists.length === 0}
-              onClick={() => void handleAddTask()}
-              className="rounded-xl bg-slate-800 px-4 py-2 text-sm font-medium text-white shadow-md transition hover:bg-slate-700 disabled:opacity-50"
-            >
-              {addingSaving ? 'Сохранение...' : 'Создать'}
-            </button>
-            <button
-              type="button"
-              onClick={() => { setShowAddForm(false); setNewTaskColumnId(null); setNewTitle(''); setNewProjectId(''); setNewSpecialists([]); setNewDescription(''); setNewDeadline(getDeadlineDefaultInput()); setNewImageUrl(''); }}
-              className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 shadow-sm transition hover:bg-slate-50"
-            >
-              Отмена
-            </button>
+            <div className="flex items-center gap-2 border-t border-slate-100 px-4 py-3">
+              <button
+                type="button"
+                disabled={addingSaving || !newTitle.trim() || newSpecialists.length === 0}
+                onClick={() => void handleAddTask()}
+                className="rounded-xl bg-slate-800 px-4 py-2 text-sm font-medium text-white shadow-md transition hover:bg-slate-700 disabled:opacity-50"
+              >
+                {addingSaving ? 'Сохранение...' : 'Создать'}
+              </button>
+              <button
+                type="button"
+                onClick={closeAddForm}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 shadow-sm transition hover:bg-slate-50"
+              >
+                Отмена
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2611,7 +2667,7 @@ export default function TasksPage() {
                 {isModalInEditMode ? (
                   <>
                     <span className="mb-1.5 block text-xs font-medium text-slate-500">Исполнители</span>
-                    <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/60 py-1.5 shadow-sm">
+                    <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200 bg-slate-100/60 py-1.5 shadow-sm">
                       {specialistOptions.map((p) => (
                         <label
                           key={p.id}

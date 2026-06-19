@@ -2781,6 +2781,28 @@ html[data-portal-theme='dark'] .portal-shell select:focus {
   outline: none;
 }
 
+/* Нативный popup опций <select> в тёмной теме.
+ *
+ * Зачем: на /projects на сам <select> навешан статусный бейдж-стиль
+ * (например `bg-emerald-50/50 text-emerald-700` для «В работе»). Когда
+ * юзер кликает по селекту, браузер показывает нативный popup со
+ * списком всех опций — и наследует bg/color с родителя. На светло-зелёном
+ * фоне светло-зелёный текст почти не виден (фидбек 2026-06-19).
+ *
+ * Принудительно перебиваем фон и цвет КАЖДОГО option на dark surface +
+ * светлый текст — независимо от того, какой бейдж-класс висит на select.
+ * Status-цвет остаётся читаемым только на самом select (на кнопке-триггере),
+ * в popup'е все опции одинаково нейтральные.
+ */
+html[data-portal-theme='dark'] .portal-shell select option {
+  background-color: var(--pd-surface-elev) !important;
+  color: var(--pd-text) !important;
+}
+html[data-portal-theme='dark'] .portal-shell select option:checked,
+html[data-portal-theme='dark'] .portal-shell select option:hover {
+  background-color: var(--pd-surface-active) !important;
+}
+
 /* === BACKDROP BLUR — стеклянные плашки шапки/виджетов === */
 html[data-portal-theme='dark'] .portal-shell .backdrop-blur-md,
 html[data-portal-theme='dark'] .portal-shell .backdrop-blur-sm,
