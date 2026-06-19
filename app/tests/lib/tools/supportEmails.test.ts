@@ -1,8 +1,9 @@
 /**
  * @jest-environment node
  *
- * «Убрать почты поддержки» — role/generic mailbox detection + the pipeline step
- * that drops rows whose only email is a generic inbox (support@, info@, zakaz@…).
+ * «Убрать почты поддержки» — support/service mailbox detection + the pipeline
+ * step that drops rows whose only email is a support inbox (support@, help@,
+ * zakaz@, billing@ …). Good general inboxes (info@, sales@, contact@) are KEPT.
  */
 import { isSupportEmail, isRoleLocalPart } from '@/lib/tools/supportEmails';
 import { stepRemoveSupportEmails, FOUND_EMAIL_COL } from '@/lib/tools/processingSteps';
@@ -10,23 +11,33 @@ import { stepRemoveSupportEmails, FOUND_EMAIL_COL } from '@/lib/tools/processing
 const noop = async () => {};
 
 describe('isSupportEmail / isRoleLocalPart', () => {
-  it('flags generic/role mailboxes (EN + RU translit, case-insensitive)', () => {
+  it('flags support / service / system / orders / finance / HR mailboxes', () => {
     for (const e of [
-      'support@x.com', 'info@x.ru', 'sales@x.com', 'help@x.com', 'zakaz@x.ru',
-      'billing@x.com', 'hr@x.com', 'noreply@x.com', 'no-reply@x.com', 'HR@X.COM',
-      'Support@Mail.ru', 'podderzhka@x.ru', 'reklama@x.ru', 'buh@x.ru',
+      'support@x.com', 'help@x.ru', 'helpdesk@x.com', 'service@x.com',
+      'podderzhka@x.ru', 'zakaz@x.ru', 'order@x.com', 'dostavka@x.ru',
+      'billing@x.com', 'buh@x.ru', 'hr@x.com', 'jobs@x.com', 'vacancy@x.ru',
+      'noreply@x.com', 'no-reply@x.com', 'abuse@x.com', 'HELP@X.COM',
     ]) {
       expect(isSupportEmail(e)).toBe(true);
     }
   });
 
-  it('flags role word + separator/digit, but NOT role word + letters', () => {
+  it('KEEPS good general business inboxes (info@, sales@, contact@ …)', () => {
+    for (const e of [
+      'info@x.ru', 'sales@x.com', 'contact@x.com', 'contacts@x.com',
+      'office@x.ru', 'hello@x.com', 'hi@x.com', 'mail@x.ru', 'general@x.com',
+      'marketing@x.com', 'reklama@x.ru', 'press@x.com',
+      'info.msk@x.ru', 'sales2@x.com', // role word NOT in the support set
+    ]) {
+      expect(isSupportEmail(e)).toBe(false);
+    }
+  });
+
+  it('flags support word + separator/digit, but NOT support word + letters', () => {
     expect(isSupportEmail('support.team@x.com')).toBe(true);
-    expect(isSupportEmail('info-msk@x.ru')).toBe(true);
-    expect(isSupportEmail('sales2@x.com')).toBe(true);
-    expect(isSupportEmail('zakaz_spb@x.ru')).toBe(true);
-    expect(isSupportEmail('saleshouse@x.com')).toBe(false);
-    expect(isSupportEmail('infomir@x.ru')).toBe(false);
+    expect(isSupportEmail('zakaz-spb@x.ru')).toBe(true);
+    expect(isSupportEmail('support2@x.com')).toBe(true);
+    expect(isSupportEmail('billing.dept@x.com')).toBe(true);
     expect(isSupportEmail('supportive@x.com')).toBe(false);
   });
 
@@ -41,24 +52,26 @@ describe('isSupportEmail / isRoleLocalPart', () => {
 
   it('isRoleLocalPart works on the bare local part', () => {
     expect(isRoleLocalPart('SUPPORT')).toBe(true);
+    expect(isRoleLocalPart('info')).toBe(false);
     expect(isRoleLocalPart('ivan')).toBe(false);
   });
 });
 
 describe('stepRemoveSupportEmails', () => {
-  it('drops rows whose only email is role-based; keeps personal + emailless rows', async () => {
+  it('drops support-type rows; KEEPS info@ / personal / emailless rows', async () => {
     const data = [
       ['компания', 'email'],
-      ['A', 'support@x.ru'],
-      ['B', 'ivan@x.ru'],
-      ['C', ''],
-      ['D', 'info@x.ru'],
+      ['A', 'support@x.ru'], // drop
+      ['B', 'ivan@x.ru'],    // keep (personal)
+      ['C', ''],             // keep (no email)
+      ['D', 'zakaz@x.ru'],   // drop
+      ['E', 'info@x.ru'],    // keep (good general box)
     ];
     const out = await stepRemoveSupportEmails(data, noop);
-    expect(out.map((r) => r[0])).toEqual(['компания', 'B', 'C']);
+    expect(out.map((r) => r[0])).toEqual(['компания', 'B', 'C', 'E']);
   });
 
-  it('strips a role email from a mixed cell but keeps the row + the personal one', async () => {
+  it('strips a support email from a mixed cell but keeps the row + the personal one', async () => {
     const out = await stepRemoveSupportEmails(
       [['компания', 'email'], ['A', 'support@x.ru, ivan@x.ru']],
       noop,
@@ -72,7 +85,7 @@ describe('stepRemoveSupportEmails', () => {
       ['компания', 'email', FOUND_EMAIL_COL],
       ['A', '', 'support@x.ru'],          // only a found support@ → drop
       ['B', '', 'ivan@x.ru'],             // found personal → keep
-      ['C', 'boss@x.ru', 'sales@x.ru'],   // personal original + found role → keep, found stripped
+      ['C', 'boss@x.ru', 'support@x.ru'], // personal original + found support → keep, found stripped
     ];
     const out = await stepRemoveSupportEmails(data, noop);
     expect(out.map((r) => r[0])).toEqual(['компания', 'B', 'C']);

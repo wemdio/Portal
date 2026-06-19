@@ -356,8 +356,9 @@ export async function stepSplitEmails(
    ═══════════════════════════════════════════ */
 
 /**
- * Drops rows whose only email is a generic «support» mailbox (support@, info@,
- * sales@, zakaz@ …) — these aren't a specific decision-maker and hurt outreach.
+ * Drops rows whose only email is a SUPPORT / service mailbox (support@, help@,
+ * zakaz@, billing@, hr@ …) — not a decision-maker, hurts outreach. Good general
+ * inboxes (info@, sales@, contact@ …) are intentionally KEPT (see supportEmails.ts).
  *
  * Checks BOTH the original email column (alias-based) AND the FOUND_EMAIL_COL
  * that `find_emails` (target='separate') writes — otherwise emails scraped from
@@ -1278,7 +1279,7 @@ export const AVAILABLE_STEPS: StepDefinition[] = [
   {
     key: 'remove_support_emails',
     label: 'Убрать почты поддержки',
-    description: 'Удаляет строки с ролевыми адресами (support@, info@, sales@, zakaz@ и т.п.)',
+    description: 'Удаляет строки с почтами поддержки (support@, help@, zakaz@, billing@…); info@/sales@ оставляет',
     icon: 'mail-x',
     category: 'clean',
     cost: 'free',

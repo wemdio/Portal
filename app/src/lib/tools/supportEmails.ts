@@ -1,35 +1,36 @@
 /**
- * Detects "role" / generic mailbox addresses (support@, info@, sales@, zakaz@…)
- * as opposed to a specific person's address. Used by the base-constructor
- * «Убрать почты поддержки» step to drop rows whose only email is a generic inbox.
+ * Detects SUPPORT / service / system mailbox addresses (support@, help@, zakaz@,
+ * billing@, hr@, noreply@ …) — inboxes that aren't worth cold outreach. Used by
+ * the base-constructor «Убрать почты поддержки» step to drop those rows.
+ *
+ * Deliberately CONSERVATIVE: it does NOT flag good general business inboxes the
+ * studio wants to keep — info@, sales@, contact@, office@, hello@, mail@,
+ * general@, marketing@ … — those are real contact points, not support queues.
+ * (Per owner feedback: info@ is a good common box.)
  *
  * Pure + dependency-free → safe to import anywhere (client UI, worker, tests).
  */
 
 // Base local-parts (the part before @). The matcher also flags these when
-// followed by a separator or digit — support.team / info-msk / sales2 / zakaz_spb —
-// but NOT when they're merely a prefix of a longer word (saleshouse, infomir,
-// supportive don't match).
+// followed by a separator or digit — support.team / help-ru / zakaz_spb /
+// support2 — but NOT when they're merely a prefix of a longer word (supportive
+// doesn't match). Keep this list narrowly «support / служебное», not «generic».
 const ROLE_LOCALPARTS = new Set<string>([
-  // EN — generic / department / functional inboxes
-  'info', 'support', 'help', 'helpdesk', 'sales', 'contact', 'contacts',
-  'hello', 'hi', 'team', 'office', 'admin', 'administrator', 'mail', 'email',
-  'noreply', 'postmaster', 'webmaster', 'hostmaster', 'abuse', 'billing',
-  'accounts', 'accounting', 'finance', 'marketing', 'press', 'pr', 'media',
-  'hr', 'jobs', 'job', 'career', 'careers', 'vacancy', 'vacancies', 'feedback',
-  'service', 'enquiries', 'enquiry', 'inquiry', 'inquiries', 'general',
-  'partners', 'partnership', 'reception', 'secretary', 'order', 'orders',
-  'shop', 'store', 'booking', 'reservations',
-  // RU (translit) — частые ролевые ящики у русскоязычных компаний
-  'zakaz', 'zakazy', 'zakazat', 'zayavka', 'zayavki', 'reklama', 'buh',
-  'buhgalteria', 'bukhgalteria', 'sekretar', 'priemnaya', 'ofis', 'podderzhka',
-  'pochta', 'sklad', 'opt', 'prodazhi', 'prodaji', 'dostavka', 'magazin',
-  'klient', 'klienty',
+  // Support / customer service
+  'support', 'help', 'helpdesk', 'service', 'podderzhka',
+  // No-reply / system / abuse
+  'noreply', 'postmaster', 'webmaster', 'hostmaster', 'abuse',
+  // Orders / delivery (zakaz@ — explicitly flagged by the owner)
+  'zakaz', 'zakazy', 'zakazat', 'order', 'orders', 'booking', 'reservations', 'dostavka',
+  // Finance / billing
+  'billing', 'accounting', 'accounts', 'finance', 'buh', 'buhgalteria', 'bukhgalteria',
+  // HR / jobs / recruiting
+  'hr', 'jobs', 'job', 'career', 'careers', 'vacancy', 'vacancies', 'rekrut',
 ]);
 
 // Role addresses that aren't a single [a-z]+ token (hyphen/underscore variants).
 const ROLE_LOCALPARTS_EXACT = new Set<string>([
-  'no-reply', 'no_reply', 'do-not-reply', 'donotreply', 'do_not_reply',
+  'no-reply', 'no_reply', 'do-not-reply', 'donotreply', 'do_not_reply', 'mailer-daemon',
 ]);
 
 /** Lower-cased local part → is it a generic/role mailbox? */
