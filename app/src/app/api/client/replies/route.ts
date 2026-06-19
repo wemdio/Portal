@@ -147,8 +147,17 @@ function groupByConversation(items: LeadListItem[]): LeadListItem[] {
     const key = conversationKey(item);
     counts.set(key, (counts.get(key) ?? 0) + 1);
     const rep = byKey.get(key);
-    if (!rep) byKey.set(key, item);
-    else if (item.is_lead) rep.is_lead = true;
+    if (!rep) {
+      byKey.set(key, item);
+    } else {
+      if (item.is_lead) rep.is_lead = true;
+      // «Отвечено» — свойство всей ПЕРЕПИСКИ (OR по письмам треда): ответили на
+      // любое письмо лида → переписка отвечена. is_answered тут монотонно — в
+      // отличие от is_unread (берём по последнему входящему = representative,
+      // чтобы гаснуть при прочтении). Иначе закрывающее «спасибо» лида после
+      // нашего ответа делало бы representative неотвеченным и статус слетал бы.
+      if (item.is_answered) rep.is_answered = true;
+    }
   }
   const out: LeadListItem[] = [];
   for (const [key, rep] of byKey) {
