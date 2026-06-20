@@ -21,7 +21,7 @@ const MARKETING_RE =
 const B2B_SALES_RE =
   /\b(b2b|business development|account executive|\bae\b|account director|account manager|sales development|revenue development|business development representative|revenue development representative|sales manager|sales representative|sales consultant|sales lead|sales executive|enterprise sales|commercial account|commercial account director|commercial account executive|partnerships?|channel sales|partner sales|partner manager|commercial manager|client partner|sdr|bdr|rdr|go[-\s]?to[-\s]?market|gtm)\b/i;
 
-const SUPPORTED_ATS = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday'];
+const SUPPORTED_ATS = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday', 'smartrecruiters'];
 
 const CSV_HEADERS = [
   'company',
@@ -99,6 +99,7 @@ function careersUrl(ats, slug, sourceUrl = '') {
   if (ats === 'bamboohr') return `https://${slug}.bamboohr.com/careers`;
   if (ats === 'recruitee') return `https://${slug}.recruitee.com`;
   if (ats === 'breezy') return `https://${slug}.breezy.hr`;
+  if (ats === 'smartrecruiters') return `https://careers.smartrecruiters.com/${slug}`;
   if (ats === 'workday') {
     const sourceCareersUrl = normalizeWorkdayCareersUrl(sourceUrl);
     if (sourceCareersUrl) return sourceCareersUrl;
@@ -108,7 +109,7 @@ function careersUrl(ats, slug, sourceUrl = '') {
   return '';
 }
 
-const ATS_BASE_HOSTS = ['greenhouse.io', 'lever.co', 'ashbyhq.com', 'workable.com', 'bamboohr.com', 'recruitee.com', 'breezy.hr', 'myworkdayjobs.com'];
+const ATS_BASE_HOSTS = ['greenhouse.io', 'lever.co', 'ashbyhq.com', 'workable.com', 'bamboohr.com', 'recruitee.com', 'breezy.hr', 'myworkdayjobs.com', 'smartrecruiters.com'];
 // Multi-level public suffixes we care about, so registrableDomain keeps 3 labels.
 const TWO_LEVEL_TLDS = new Set([
   'co.uk', 'com.au', 'co.jp', 'com.br', 'co.nz', 'com.sg', 'co.in', 'com.mx', 'co.za',
@@ -166,6 +167,7 @@ function postingsUrl(ats, slug, sourceUrl = '') {
   if (ats === 'bamboohr') return `https://${slug}.bamboohr.com/careers/list`;
   if (ats === 'recruitee') return `https://${slug}.recruitee.com/api/offers`;
   if (ats === 'breezy') return `https://${slug}.breezy.hr/json`;
+  if (ats === 'smartrecruiters') return `https://api.smartrecruiters.com/v1/companies/${safe}/postings`;
   if (ats === 'workday') {
     const parts = workdayParts(slug, sourceUrl);
     if (parts.host && parts.tenant && parts.site) {
@@ -182,6 +184,7 @@ function extractJobs(ats, payload) {
   if (ats === 'workable') return Array.isArray(payload?.jobs) ? payload.jobs : [];
   if (ats === 'bamboohr') return Array.isArray(payload?.result) ? payload.result : [];
   if (ats === 'recruitee') return Array.isArray(payload?.offers) ? payload.offers : [];
+  if (ats === 'smartrecruiters') return Array.isArray(payload?.content) ? payload.content : [];
   return Array.isArray(payload?.jobs) ? payload.jobs : [];
 }
 
@@ -320,6 +323,25 @@ function normalizeBreezyJob(job, { slug, companyName } = {}) {
   });
 }
 
+function normalizeSmartrecruitersJob(job, { slug, companyName } = {}) {
+  const location = job?.location || {};
+  // fullLocation carries the full country name ("Chicago, IL, United States"),
+  // which feeds country inference cleanly; fall back to city/region/country code.
+  const locationText = location.fullLocation || joinLocationParts([location.city, location.region, location.country]);
+  const identifier = job?.company?.identifier || slug;
+  const id = normalizeWhitespace(job?.id);
+  return baseJob({
+    ats: 'smartrecruiters',
+    slug,
+    company: job?.company?.name || companyName,
+    title: job?.name,
+    location: locationText,
+    country: '',
+    url: job?.ref || job?.applyUrl || (identifier && id ? `https://jobs.smartrecruiters.com/${identifier}/${id}` : ''),
+    posted_at: job?.releasedDate || job?.actualPostedDate || job?.createdOn,
+  });
+}
+
 function workdayPostedAt(value) {
   const raw = normalizeWhitespace(value).toLowerCase();
   if (!raw) return '';
@@ -379,6 +401,7 @@ function normalizeJob(ats, job, ctx = {}) {
   if (ats === 'bamboohr') return normalizeBamboohrJob(job, ctx);
   if (ats === 'recruitee') return normalizeRecruiteeJob(job, ctx);
   if (ats === 'breezy') return normalizeBreezyJob(job, ctx);
+  if (ats === 'smartrecruiters') return normalizeSmartrecruitersJob(job, ctx);
   if (ats === 'workday') return normalizeWorkdayJob(job, ctx);
   return null;
 }
@@ -523,6 +546,7 @@ module.exports = {
   normalizeJob,
   normalizeLeverJob,
   normalizeRecruiteeJob,
+  normalizeSmartrecruitersJob,
   normalizeWorkdayJob,
   normalizeWorkableJob,
   parseCompanyCsv,

@@ -395,6 +395,44 @@ Own B2B client communications and revenue expansion for enterprise accounts.
     });
   });
 
+  it('normalizes SmartRecruiters postings and merges jobAd detail descriptions', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'smartrecruiters',
+      {
+        id: '3743990013711741',
+        name: 'Enterprise Account Executive',
+        company: { identifier: 'AbbVie', name: 'AbbVie' },
+        releasedDate: '2026-06-19T19:15:50.666Z',
+        location: { city: 'Chicago', region: 'IL', country: 'us', fullLocation: 'Chicago, IL, United States' },
+      },
+      { slug: 'abbvie', companyName: 'AbbVie' },
+    );
+
+    expect(vacancy).toMatchObject({
+      source: 'smartrecruiters',
+      source_company_slug: 'abbvie',
+      source_job_id: '3743990013711741',
+      company_name: 'AbbVie',
+      vacancy_title: 'Enterprise Account Executive',
+      vacancy_url: 'https://jobs.smartrecruiters.com/AbbVie/3743990013711741',
+      careers_url: 'https://careers.smartrecruiters.com/abbvie',
+      country_code: 'us',
+    });
+
+    const enriched = mergeEngHiringVacancyDetail(vacancy!, {
+      jobAd: {
+        sections: {
+          companyDescription: { title: 'Company', text: '<p>AbbVie is a global biopharmaceutical company focused on innovation.</p>' },
+          jobDescription: { title: 'Job', text: '<p>Own enterprise B2B sales across the US territory.</p>' },
+        },
+      },
+    });
+    expect(enriched).toMatchObject({
+      vacancy_description: expect.stringContaining('Own enterprise B2B sales'),
+      company_description: expect.stringContaining('AbbVie is a global biopharmaceutical'),
+    });
+  });
+
   it('normalizes Workday vacancies from CXS job postings', () => {
     const vacancy = normalizeAtsJobToEngVacancy(
       'workday',

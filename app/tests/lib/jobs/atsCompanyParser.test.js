@@ -13,6 +13,7 @@ import {
   normalizeGreenhouseJob,
   normalizeLeverJob,
   normalizeRecruiteeJob,
+  normalizeSmartrecruitersJob,
   normalizeWorkdayJob,
   normalizeWorkableJob,
   parseCompanyCsv,
@@ -236,7 +237,35 @@ describe('atsCompanyParser — normalizers', () => {
     expect(job.posted_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
+  it('normalizes a SmartRecruiters posting from the public postings API', () => {
+    const job = normalizeSmartrecruitersJob(
+      {
+        id: '3743990013711741',
+        name: 'Enterprise Account Executive',
+        refNumber: 'R00146103',
+        company: { identifier: 'AbbVie', name: 'AbbVie' },
+        releasedDate: '2026-06-19T19:15:50.666Z',
+        location: { city: 'Chicago', region: 'IL', country: 'us', fullLocation: 'Chicago, IL, United States' },
+      },
+      { slug: 'abbvie', companyName: 'AbbVie fallback' },
+    );
+
+    expect(job).toMatchObject({
+      ats: 'smartrecruiters',
+      slug: 'abbvie',
+      company: 'AbbVie',
+      title: 'Enterprise Account Executive',
+      location: 'Chicago, IL, United States',
+      url: 'https://jobs.smartrecruiters.com/AbbVie/3743990013711741',
+      roles: ['b2b_sales'],
+    });
+    expect(job.posted_at).toBe(new Date('2026-06-19T19:15:50.666Z').toISOString());
+  });
+
   it('builds public endpoints and extracts jobs for the added ATS sources', () => {
+    expect(postingsUrl('smartrecruiters', 'abbvie')).toBe('https://api.smartrecruiters.com/v1/companies/abbvie/postings');
+    expect(careersUrl('smartrecruiters', 'abbvie')).toBe('https://careers.smartrecruiters.com/abbvie');
+    expect(extractJobs('smartrecruiters', { content: [{ name: 'AE' }] })).toEqual([{ name: 'AE' }]);
     expect(postingsUrl('workable', '1000heads')).toBe('https://apply.workable.com/api/v1/widget/accounts/1000heads');
     expect(postingsUrl('bamboohr', '10web')).toBe('https://10web.bamboohr.com/careers/list');
     expect(postingsUrl('recruitee', '12build')).toBe('https://12build.recruitee.com/api/offers');

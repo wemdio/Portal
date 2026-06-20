@@ -6,9 +6,9 @@ import {
 } from '@/lib/jobs/atsCompanyParser';
 import { ATS_COUNTRIES, buildCountryRegex, buildRolesRegex } from '@/lib/parsers/atsFilters';
 
-export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee' | 'breezy' | 'workday';
+export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee' | 'breezy' | 'workday' | 'smartrecruiters';
 
-export const ENG_HIRING_SOURCES: EngHiringSource[] = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday'];
+export const ENG_HIRING_SOURCES: EngHiringSource[] = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday', 'smartrecruiters'];
 export const DEFAULT_ENG_HIRING_COMPANIES_LIMIT = 1000;
 export const DEFAULT_ENG_HIRING_MAX_COVERAGE_LIMIT = 25000;
 
@@ -241,6 +241,8 @@ function extractDescription(raw: unknown): string | null {
     extractNestedString(record, ['details', 'description']),
     extractNestedString(record, ['opening', 'description']),
     extractNestedString(record, ['result', 'jobOpening', 'description']),
+    extractNestedString(record, ['jobAd', 'sections', 'jobDescription', 'text']),
+    extractNestedString(record, ['jobAd', 'sections', 'qualifications', 'text']),
   ];
 
   for (const candidate of candidates) {
@@ -288,6 +290,7 @@ function extractCompanyDescription(raw: unknown, vacancyDescription: string | nu
       extractNestedString(record, ['company', 'description']),
       extractNestedString(record, ['organization', 'description']),
       extractNestedString(record, ['department', 'description']),
+      extractNestedString(record, ['jobAd', 'sections', 'companyDescription', 'text']),
     ];
     for (const candidate of candidates) {
       const text = compactText(cleanPlainText(candidate));

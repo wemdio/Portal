@@ -443,6 +443,58 @@ describe('runEngHiringParserJob cache-run resume', () => {
     expect(scannedSlugs.filter((slug) => slug === 'beta')).toHaveLength(1);
   });
 
+  it('refreshes SmartRecruiters boards with targeted q-search pagination', async () => {
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: {
+          text: 'b2b manager',
+          sources: ['smartrecruiters'],
+          countries: ['us'],
+          companies_limit: 1,
+          refresh_cache: true,
+          enrich: false,
+          max_results: 20,
+        },
+      }],
+      eng_hiring_cache_runs: [],
+      eng_hiring_cache: [],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+    fetchTextWithFallback.mockResolvedValue(
+      ['name,slug,url', 'AbbVie,abbvie,https://careers.smartrecruiters.com/abbvie'].join('\n'),
+    );
+    fetchJsonWithFallback.mockImplementation(async (url: string) => {
+      const q = new URL(url).searchParams.get('q') ?? '';
+      const byQ: Record<string, unknown[]> = {
+        '': [{ id: '1', name: 'Product Manager', company: { identifier: 'AbbVie', name: 'AbbVie' }, releasedDate: '2026-06-18T00:00:00.000Z', location: { fullLocation: 'Chicago, IL, United States', country: 'us' } }],
+        sales: [{ id: '2', name: 'Sales Development Representative', company: { identifier: 'AbbVie', name: 'AbbVie' }, releasedDate: '2026-06-18T00:00:00.000Z', location: { fullLocation: 'Austin, TX, United States', country: 'us' } }],
+        account: [{ id: '3', name: 'Enterprise Account Executive', company: { identifier: 'AbbVie', name: 'AbbVie' }, releasedDate: '2026-06-18T00:00:00.000Z', location: { fullLocation: 'New York, NY, United States', country: 'us' } }],
+      };
+      const content = byQ[q] ?? [];
+      return { offset: 0, limit: 100, totalFound: content.length, content };
+    });
+
+    await runEngHiringParserJob('job-1');
+
+    const srCalls = fetchJsonWithFallback.mock.calls.filter(([u]) => String(u).includes('api.smartrecruiters.com'));
+    expect(srCalls.length).toBeGreaterThan(0);
+    expect(srCalls.every(([u]) => String(u).includes('/v1/companies/abbvie/postings'))).toBe(true);
+    const qs = srCalls.map(([u]) => new URL(String(u)).searchParams.get('q') ?? '');
+    expect(qs).toEqual(expect.arrayContaining(['', 'sales', 'account', 'business development']));
+    expect(db.state.eng_hiring_cache).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: 'smartrecruiters',
+        source_job_id: '3',
+        vacancy_title: 'Enterprise Account Executive',
+        country_code: 'us',
+      }),
+    ]));
+  });
+
   it('refreshes Workday boards through the WAF-resilient POST helper and dedupes overlaps', async () => {
     const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
     const db = makeDb({

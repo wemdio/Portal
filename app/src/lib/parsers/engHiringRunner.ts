@@ -48,7 +48,11 @@ const DETAIL_ENRICH_DELAY_MS = Math.max(0, Number(process.env.ENG_HIRING_DETAIL_
 const DETAIL_ENRICH_LIMIT = Math.max(0, Number(process.env.ENG_HIRING_DETAIL_LIMIT ?? '500'));
 const WORKDAY_PAGE_SIZE = 100;
 const WORKDAY_MAX_POSTINGS_PER_COMPANY = clampInteger(process.env.ENG_HIRING_WORKDAY_MAX_POSTINGS_PER_COMPANY, 200, 50, 1000);
-const WORKDAY_SEARCH_TEXTS = ['', 'sales', 'account', 'business development', 'partnership', 'revenue'];
+// Targeted search terms used by ATS that expose a free-text query (Workday CXS,
+// SmartRecruiters), so an empty-query first page does not crowd out sales roles.
+const SALES_SEARCH_TEXTS = ['', 'sales', 'account', 'business development', 'partnership', 'revenue'];
+const SMARTRECRUITERS_PAGE_SIZE = 100;
+const SMARTRECRUITERS_MAX_POSTINGS_PER_COMPANY = clampInteger(process.env.ENG_HIRING_SMARTRECRUITERS_MAX_POSTINGS_PER_COMPANY, 200, 50, 1000);
 const CACHE_BATCH_SIZE = 250;
 const RESULT_BATCH_SIZE = 500;
 
@@ -151,7 +155,7 @@ async function fetchText(url: string): Promise<string> {
 async function fetchWorkdayPayloads(url: string): Promise<unknown[]> {
   const payloads: unknown[] = [];
 
-  for (const searchText of WORKDAY_SEARCH_TEXTS) {
+  for (const searchText of SALES_SEARCH_TEXTS) {
     let offset = 0;
     let total = WORKDAY_PAGE_SIZE;
 
@@ -177,6 +181,29 @@ async function fetchWorkdayPayloads(url: string): Promise<unknown[]> {
       payloads.push(payload);
       const count = Array.isArray(payload.jobPostings) ? payload.jobPostings.length : 0;
       const rawTotal = Number(payload.total);
+      total = Number.isFinite(rawTotal) && rawTotal >= 0 ? rawTotal : offset + count;
+      if (count === 0) break;
+      offset += count;
+    }
+  }
+
+  return payloads;
+}
+
+async function fetchSmartrecruitersPayloads(baseUrl: string): Promise<unknown[]> {
+  const payloads: unknown[] = [];
+
+  for (const searchText of SALES_SEARCH_TEXTS) {
+    let offset = 0;
+    let total = SMARTRECRUITERS_PAGE_SIZE;
+
+    while (offset < total && offset < SMARTRECRUITERS_MAX_POSTINGS_PER_COMPANY) {
+      const params = new URLSearchParams({ limit: String(SMARTRECRUITERS_PAGE_SIZE), offset: String(offset) });
+      if (searchText) params.set('q', searchText);
+      const payload = await fetchJson(`${baseUrl}?${params.toString()}`) as Record<string, unknown>;
+      payloads.push(payload);
+      const count = Array.isArray(payload.content) ? payload.content.length : 0;
+      const rawTotal = Number(payload.totalFound);
       total = Number.isFinite(rawTotal) && rawTotal >= 0 ? rawTotal : offset + count;
       if (count === 0) break;
       offset += count;
@@ -218,10 +245,12 @@ async function fetchSourceCacheRows(source: EngHiringSource, token: AtsCompanyTo
   try {
     const payloads = source === 'workday'
       ? await fetchWorkdayPayloads(postingsUrl(source, token.slug, token.url))
-      : [await fetchJson(
-        postingsUrl(source, token.slug, token.url),
-        source === 'lever' ? LEVER_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
-      )];
+      : source === 'smartrecruiters'
+        ? await fetchSmartrecruitersPayloads(postingsUrl(source, token.slug, token.url))
+        : [await fetchJson(
+          postingsUrl(source, token.slug, token.url),
+          source === 'lever' ? LEVER_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+        )];
     const rows: ReturnType<typeof toCacheRow>[] = [];
     for (const payload of payloads) {
       for (const raw of extractJobs(source, payload)) {
@@ -396,6 +425,9 @@ function buildAtsDetailRequest(row: CacheRow): DetailRequest | null {
   }
   if (row.source === 'bamboohr') {
     return { url: `https://${row.source_company_slug}.bamboohr.com/careers/${jobId}/detail`, format: 'json' };
+  }
+  if (row.source === 'smartrecruiters') {
+    return { url: `https://api.smartrecruiters.com/v1/companies/${slug}/postings/${jobId}`, format: 'json' };
   }
   return null;
 }
