@@ -258,21 +258,17 @@ export function ToolsAssistant() {
 
       {open && (
         <div
-          className="fixed bottom-5 right-5 z-50 flex max-h-[calc(100vh-2.5rem)] max-w-[calc(100vw-2.5rem)] flex-col rounded-2xl border border-zinc-200 bg-white shadow-2xl"
+          className="fixed bottom-5 right-5 z-50 flex max-h-[calc(100vh-2.5rem)] max-w-[calc(100vw-2.5rem)] flex-col rounded-2xl bg-white shadow-2xl"
           style={{ width: `${size.width}px`, height: `${size.height}px` }}
         >
-          {/* Ручка ресайза в левом верхнем углу. Якорь панели — правый нижний,
-              поэтому увеличение width/height даёт рост вверх-влево, как пользователь
-              ожидает. */}
+          {/* Невидимая зона ресайза в левом верхнем углу. Якорь панели —
+              правый нижний, поэтому тяга наружу (вверх+влево) увеличивает
+              виджет. Визуально без кнопки/полосок — при наведении подсвечивается
+              тонкий уголок-индикатор, чтобы было понятно что можно тянуть. */}
           <div
             onMouseDown={onResizeMouseDown}
-            className="absolute -left-1 -top-1 z-10 h-4 w-4 cursor-nwse-resize"
-            style={{
-              backgroundImage:
-                'linear-gradient(135deg, transparent 40%, rgb(161 161 170) 40%, rgb(161 161 170) 50%, transparent 50%, transparent 60%, rgb(161 161 170) 60%, rgb(161 161 170) 70%, transparent 70%)',
-              borderRadius: '4px',
-            }}
-            title="Потяните, чтобы изменить размер"
+            className="tools-assistant__resize-handle absolute -left-1.5 -top-1.5 z-10 h-5 w-5 cursor-nwse-resize"
+            title="Потяните за угол, чтобы изменить размер"
             aria-label="Изменить размер виджета"
           />
           <div className="flex items-center justify-between gap-2 border-b border-zinc-200 px-4 py-3">

@@ -146,10 +146,11 @@ export function JobsList({
         <button
           onClick={onRefresh}
           disabled={busy}
-          className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+          aria-label="Обновить"
+          title="Обновить"
+          className="inline-flex items-center justify-center rounded-lg p-2 text-gray-700 hover:bg-gray-100 disabled:opacity-50"
         >
-          <RefreshCw className={`h-4 w-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
-          Обновить
+          <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
         </button>
       </div>
 

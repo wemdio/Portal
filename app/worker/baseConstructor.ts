@@ -185,11 +185,69 @@ async function pollOnce(): Promise<boolean> {
   return true;
 }
 
+/**
+ * Suppress known undici body-parser assertion that crashes this worker
+ * mid-job during `find_emails` (массовый скрейпинг сайтов через global fetch).
+ *
+ * Симптом (incident 2026-06-19, jobs 561a2018-... и d2786f96-...):
+ *   AssertionError [ERR_ASSERTION]: assert(!this.paused)
+ *     at Parser.finish (node:internal/deps/undici/undici:6157:9)
+ *     at Socket.<anonymous> (node:internal/deps/undici/undici:6491:36)
+ *     at Socket.emit (node:events:531:35)
+ *
+ * Что происходит: undici парсит ответ HTTP, AbortController таймаута дёргает
+ * abort() в момент когда сокет уже эмитит 'end'. Внутренний инвариант
+ * парсера (`!this.paused`) ломается, ассерт-throw летит ИЗ event-handler'a
+ * сокета — `try/catch` вокруг `await fetch(...)` его не ловит, потому что
+ * это не reject промиса, а синхронный uncaught в обработчике события.
+ * Node по умолчанию валит весь процесс. Дальше:
+ *   1. Контейнер падает на ~29% find_emails
+ *   2. Docker restart policy поднимает новый процесс
+ *   3. Через STALE_JOB_MINUTES мин stale-claim резюмит задачу с того же
+ *      чекпоинта, попадаем на тот же URL → тот же ассерт → crash
+ *   4. Infinite loop, base не дописывается никогда.
+ *
+ * Фикс: ловим именно этот ассерт на process-level — воркер пропускает
+ * один битый запрос (его данные мы и так теряем) и продолжает. Любые
+ * другие uncaught/unhandled остаются как были — `process.exit(1)`.
+ *
+ * Долгосрочно: вместе с этим хэндлером в emailScraper.fetchPage добавлен
+ * outer Promise.race timeout — если promise `fetch(...)` после ассерта
+ * не зарезолвится сам (видели в трейсе остановку body-stream'а), он
+ * принудительно вернёт null и слот processInPool освободится.
+ */
+function installUndiciAssertGuard(): void {
+  const isUndiciAssertionError = (err: unknown): boolean => {
+    if (!(err instanceof Error)) return false;
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === 'ERR_ASSERTION' && (err.stack ?? '').includes('undici');
+  };
+  process.on('uncaughtException', (err) => {
+    if (isUndiciAssertionError(err)) {
+      const first = (err.message ?? '').split('\n')[0] ?? '';
+      log('warn', `Suppressed undici parser assertion (uncaught): ${first.trim()}`);
+      return;
+    }
+    log('error', `Uncaught exception: ${err instanceof Error ? err.message : String(err)}`, err);
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (reason) => {
+    if (isUndiciAssertionError(reason)) {
+      const first = ((reason as Error).message ?? '').split('\n')[0] ?? '';
+      log('warn', `Suppressed undici parser assertion (rejection): ${first.trim()}`);
+      return;
+    }
+    log('error', `Unhandled rejection: ${reason instanceof Error ? reason.message : String(reason)}`, reason);
+    process.exit(1);
+  });
+}
+
 async function main(): Promise<void> {
   log(
     'info',
     `Starting BaseConstructor worker (pid=${process.pid}, concurrency=${MAX_CONCURRENCY}, stale=${STALE_JOB_MINUTES}min)`,
   );
+  installUndiciAssertGuard();
   requireSupabaseAdmin(log);
   const shouldStop = setupGracefulShutdown(log);
 

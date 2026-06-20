@@ -434,10 +434,28 @@ async function fetchPage(
   options?: { timeout?: number; signal?: AbortSignal },
 ): Promise<string | null> {
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
+  // Hard outer cap: даже если внутренний fetch() зависнет (видели на проде
+  // 2026-06-19, undici assert(!this.paused) — body-stream после ассерта
+  // может никогда не resolve'иться), эта race гарантирует возврат в
+  // bounded time. Цена — потенциально утёкший in-progress сокет, который
+  // отвалится сам по своему таймауту; зато processInPool слот свободен.
+  // worker'ы Node-process'а параллельно ловят сам ассерт через
+  // installUndiciAssertGuard() в app/worker/baseConstructor.ts.
+  return await Promise.race([
+    fetchPageInner(url, { timeout, signal: options?.signal }),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), timeout + 5_000)),
+  ]);
+}
+
+async function fetchPageInner(
+  url: string,
+  options: { timeout: number; signal?: AbortSignal },
+): Promise<string | null> {
+  const { timeout } = options;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
 
-  const externalSignal = options?.signal;
+  const externalSignal = options.signal;
   const onExternalAbort = () => controller.abort();
   externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
