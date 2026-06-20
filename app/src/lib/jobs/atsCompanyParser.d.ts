@@ -57,6 +57,7 @@ export function normalizeRecruiteeJob(job: unknown, ctx?: { slug?: string; compa
 export function normalizeBreezyJob(job: unknown, ctx?: { slug?: string; companyName?: string }): AtsNormalizedJob | null;
 export function normalizeWorkdayJob(job: unknown, ctx?: { slug?: string; companyName?: string; sourceUrl?: string }): AtsNormalizedJob | null;
 export function parseCompanyCsv(text: string): AtsCompanyToken[];
+export function mergeCompanyTokens(lists: Array<AtsCompanyToken[] | null | undefined>): AtsCompanyToken[];
 export function buildCompanyLeads(jobs: AtsNormalizedJob[]): AtsLead[];
 export function domainFromJobUrls(jobUrls: string[]): string;
 export function pickDomainFromSuggestions(

@@ -62,6 +62,27 @@ describe('engHiring parser normalizer', () => {
     expect(vacancy?.published_at).toBe(new Date('2026-06-01T12:30:00-04:00').toISOString());
   });
 
+  it('infers the US country code from a bare major-city Greenhouse location', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'greenhouse',
+      {
+        id: 778899,
+        title: 'Enterprise Account Executive',
+        company_name: 'Acme',
+        location: { name: 'San Francisco' },
+        absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/778899',
+        updated_at: '2026-06-10T00:00:00.000Z',
+      },
+      { slug: 'acme', companyName: 'Acme' },
+    );
+
+    expect(vacancy).toMatchObject({
+      vacancy_title: 'Enterprise Account Executive',
+      location: 'San Francisco',
+      country_code: 'us',
+    });
+  });
+
   it('extracts Ashby description and salary from list payloads', () => {
     const vacancy = normalizeAtsJobToEngVacancy(
       'ashby',

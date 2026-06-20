@@ -6,6 +6,7 @@ import {
   domainFromJobUrls,
   exportCompanyLeadsToCsv,
   extractJobs,
+  mergeCompanyTokens,
   normalizeAshbyJob,
   normalizeBamboohrJob,
   normalizeBreezyJob,
@@ -356,6 +357,32 @@ describe('atsCompanyParser — CSV parsing & export', () => {
       { name: 'Stripe', slug: 'stripe', url: 'https://job-boards.greenhouse.io/stripe' },
       { name: '8x8', slug: '8x8inc/8x8_external_careers', url: 'https://8x8inc.wd5.myworkdayjobs.com/8x8_external_careers' },
       { name: 'LegacyCo', slug: 'legacyco', url: 'https://jobs.lever.co/legacyco' },
+    ]);
+  });
+
+  it('merges company token lists from several sources, deduping by slug (first wins, order kept)', () => {
+    const primary = [
+      { name: 'Acme', slug: 'acme', url: 'https://job-boards.greenhouse.io/acme' },
+      { name: 'Beta', slug: 'beta', url: 'https://job-boards.greenhouse.io/beta' },
+    ];
+    const extra = [
+      { name: 'Beta Inc', slug: 'Beta', url: 'https://job-boards.greenhouse.io/beta-dup' }, // dup (case-insensitive)
+      { name: 'Gamma', slug: 'gamma', url: 'https://job-boards.greenhouse.io/gamma' },
+      { name: 'No slug', slug: '', url: 'https://job-boards.greenhouse.io/x' }, // skipped
+    ];
+
+    expect(mergeCompanyTokens([primary, extra])).toEqual([
+      { name: 'Acme', slug: 'acme', url: 'https://job-boards.greenhouse.io/acme' },
+      { name: 'Beta', slug: 'beta', url: 'https://job-boards.greenhouse.io/beta' },
+      { name: 'Gamma', slug: 'gamma', url: 'https://job-boards.greenhouse.io/gamma' },
+    ]);
+  });
+
+  it('tolerates missing / empty token lists when merging', () => {
+    expect(mergeCompanyTokens([])).toEqual([]);
+    expect(mergeCompanyTokens([undefined, null, []])).toEqual([]);
+    expect(mergeCompanyTokens([[{ name: 'Solo', slug: 'solo', url: 'u' }], undefined])).toEqual([
+      { name: 'Solo', slug: 'solo', url: 'u' },
     ]);
   });
 

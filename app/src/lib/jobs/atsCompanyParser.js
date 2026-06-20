@@ -416,6 +416,25 @@ function parseCompanyCsv(text) {
   return out;
 }
 
+// Merge per-ATS company-token lists from several sources (e.g. multiple public
+// datasets) into one, deduping by slug case-insensitively. First occurrence wins
+// and order is preserved, so the primary list ranks ahead of supplementary ones.
+// Tokens without a slug are dropped (they can't be fetched). Tolerates
+// null/undefined lists so one failing source doesn't break the merge.
+function mergeCompanyTokens(lists) {
+  const seen = new Set();
+  const out = [];
+  for (const list of lists || []) {
+    for (const token of list || []) {
+      const key = String(token?.slug ?? '').trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(token);
+    }
+  }
+  return out;
+}
+
 function buildCompanyLeads(jobs) {
   const byCompany = new Map();
 
@@ -496,6 +515,7 @@ module.exports = {
   roleTagsForTitle,
   exportCompanyLeadsToCsv,
   extractJobs,
+  mergeCompanyTokens,
   normalizeAshbyJob,
   normalizeBamboohrJob,
   normalizeBreezyJob,

@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { extractJobs, parseCompanyCsv, postingsUrl, type AtsCompanyToken } from '@/lib/jobs/atsCompanyParser';
+import { extractJobs, mergeCompanyTokens, parseCompanyCsv, postingsUrl, type AtsCompanyToken } from '@/lib/jobs/atsCompanyParser';
 import {
   ENG_HIRING_SOURCES,
   dedupeEngHiringVacanciesByCompany,
@@ -17,6 +17,13 @@ import { fetchJsonWithFallback, fetchTextWithFallback } from '@/lib/parsers/atsH
 import { domainToSiteUrl, resolveCompanyDomainByName } from '@/lib/parsers/companyDomainResolver';
 
 const TOKENS_BASE = 'https://raw.githubusercontent.com/kalil0321/ats-scrapers/main/ats-companies';
+// One or more comma-separated bases, each serving `<base>/<source>.csv` in the
+// `name,slug,url` schema. Lists are merged + deduped by slug (primary first), so
+// a larger derived list can be layered on top of the seed without code changes.
+const TOKEN_BASES = (process.env.ENG_HIRING_TOKEN_BASES ?? TOKENS_BASE)
+  .split(',')
+  .map((base) => base.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
 const UA = 'PortalEngHiringParser/1.0 (+https://wemd.io)';
 
 function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
@@ -149,23 +156,24 @@ async function fetchWorkdayPayloads(url: string): Promise<unknown[]> {
     let total = WORKDAY_PAGE_SIZE;
 
     while (offset < total && offset < WORKDAY_MAX_POSTINGS_PER_COMPANY) {
-      const response = await fetch(url, {
+      // Workday's CXS endpoint sits behind a WAF that blocks Node/undici by TLS
+      // fingerprint (same class of block as Clearbit), so route the POST through
+      // the curl-backed fallback instead of a raw fetch — otherwise every board
+      // silently returns 0 (see engHiringRunner Workday WAF regression test).
+      const payload = await fetchJsonWithFallback(url, {
         method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-          'User-Agent': UA,
-        },
         body: JSON.stringify({
           appliedFacets: {},
           limit: WORKDAY_PAGE_SIZE,
           offset,
           searchText,
         }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json() as Record<string, unknown>;
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': UA,
+        },
+        timeoutMs: REQUEST_TIMEOUT_MS,
+      }) as Record<string, unknown>;
       payloads.push(payload);
       const count = Array.isArray(payload.jobPostings) ? payload.jobPostings.length : 0;
       const rawTotal = Number(payload.total);
@@ -400,8 +408,16 @@ async function refreshSourceCache(
   ensureNotCancelled: () => Promise<void>,
   onProgress: (done: number, total: number, source: EngHiringSource) => Promise<void>,
 ): Promise<RefreshSourceStats> {
-  const csv = await fetchText(`${TOKENS_BASE}/${source}.csv`);
-  const tokens = parseCompanyCsv(csv).slice(0, limit);
+  const tokenLists = await Promise.all(
+    TOKEN_BASES.map(async (base) => {
+      try {
+        return parseCompanyCsv(await fetchText(`${base}/${source}.csv`));
+      } catch {
+        return []; // a base may not publish this source's list — skip it
+      }
+    }),
+  );
+  const tokens = mergeCompanyTokens(tokenLists).slice(0, limit);
   const startIndex = Math.min(toNonNegativeInt(run.next_company_index), tokens.length);
   const batch: ReturnType<typeof toCacheRow>[] = [];
   let cachedVacancies = toNonNegativeInt(run.cached_vacancies);

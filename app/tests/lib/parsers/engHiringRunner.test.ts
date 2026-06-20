@@ -246,6 +246,7 @@ describe('runEngHiringParserJob cache-run resume', () => {
     delete process.env.ENG_HIRING_SCAN_DELAY_MS;
     delete process.env.ENG_HIRING_DETAIL_LIMIT;
     delete process.env.ENG_HIRING_ENRICH_LIMIT;
+    delete process.env.ENG_HIRING_TOKEN_BASES;
   });
 
   it('resumes an unfinished source cache run from next_company_index', async () => {
@@ -396,8 +397,54 @@ describe('runEngHiringParserJob cache-run resume', () => {
     expect(fetchJsonWithFallback).toHaveBeenCalledTimes(6);
   });
 
-  it('refreshes Workday boards with targeted CXS searchText queries and dedupes overlaps', async () => {
-    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback } = await loadRunner();
+  it('merges company token lists from multiple bases and scans each board once', async () => {
+    process.env.ENG_HIRING_TOKEN_BASES = 'https://primary.example/tokens, https://extra.example/tokens';
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: {
+          text: 'b2b manager',
+          sources: ['greenhouse'],
+          countries: ['us'],
+          companies_limit: 50,
+          refresh_cache: true,
+          enrich: false,
+          max_results: 20,
+        },
+      }],
+      eng_hiring_cache_runs: [],
+      eng_hiring_cache: [],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+    fetchTextWithFallback.mockImplementation(async (url: string) => {
+      if (url.includes('primary.example')) {
+        return ['name,slug,url', 'Acme,acme,https://x/acme', 'Beta,beta,https://x/beta'].join('\n');
+      }
+      if (url.includes('extra.example')) {
+        return ['name,slug,url', 'Beta dup,beta,https://x/beta-dup', 'Gamma,gamma,https://x/gamma'].join('\n');
+      }
+      return '';
+    });
+    fetchJsonWithFallback.mockImplementation(async (url: string) => {
+      const slug = String(url).match(/boards\/([^/]+)\/jobs/)?.[1] ?? 'unknown';
+      return makeGreenhouseJob(slug, 1);
+    });
+
+    await runEngHiringParserJob('job-1');
+
+    const scannedSlugs = fetchJsonWithFallback.mock.calls
+      .map(([url]) => String(url).match(/boards\/([^/]+)\/jobs/)?.[1])
+      .filter((slug): slug is string => Boolean(slug));
+    // both bases fetched, beta deduped, gamma from the extra base included
+    expect(new Set(scannedSlugs)).toEqual(new Set(['acme', 'beta', 'gamma']));
+    expect(scannedSlugs.filter((slug) => slug === 'beta')).toHaveLength(1);
+  });
+
+  it('refreshes Workday boards through the WAF-resilient POST helper and dedupes overlaps', async () => {
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
     const db = makeDb({
       parser_jobs: [{
         id: 'job-1',
@@ -421,62 +468,56 @@ describe('runEngHiringParserJob cache-run resume', () => {
       'name,slug,url',
       'Acme,acme/acme_external,https://acme.wd5.myworkdayjobs.com/acme_external',
     ].join('\n'));
-    const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
-      const body = JSON.parse(String((init as RequestInit).body ?? '{}')) as { searchText?: string };
-      const jobsBySearch: Record<string, unknown[]> = {
-        '': [{
-          title: 'Product Manager',
-          externalPath: '/job/US-Remote/Product-Manager_R0001',
-          locationsText: 'US Remote',
-          postedOn: 'Posted Today',
-          bulletFields: ['R0001'],
-        }],
-        sales: [{
-          title: 'Sales Development Representative',
-          externalPath: '/job/US-Texas-Remote/Sales-Development-Representative_R1000',
-          locationsText: 'US Texas Remote',
-          postedOn: 'Posted Today',
-          bulletFields: ['R1000'],
-        }],
-        account: [{
-          title: 'Commercial Account Director',
-          externalPath: '/job/UK-London-Office/Commercial-Account-Director_R2414',
-          locationsText: 'UK-London Office',
-          postedOn: 'Posted Today',
-          bulletFields: ['R2414'],
-        }],
-        'business development': [{
-          title: 'Commercial Account Director',
-          externalPath: '/job/UK-London-Office/Commercial-Account-Director_R2414',
-          locationsText: 'UK-London Office',
-          postedOn: 'Posted Today',
-          bulletFields: ['R2414'],
-        }],
-      };
-      const jobPostings = jobsBySearch[body.searchText ?? ''] ?? [];
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          total: jobPostings.length,
-          jobPostings,
-        }),
-      } as Response;
+
+    // Workday CXS is fetched via fetchJsonWithFallback (POST) so it survives the
+    // WAF block on raw fetch — the fallback itself is unit-tested in atsHttp.test.
+    const jobsBySearch: Record<string, unknown[]> = {
+      '': [{
+        title: 'Product Manager',
+        externalPath: '/job/US-Remote/Product-Manager_R0001',
+        locationsText: 'US Remote',
+        postedOn: 'Posted Today',
+        bulletFields: ['R0001'],
+      }],
+      sales: [{
+        title: 'Sales Development Representative',
+        externalPath: '/job/US-Texas-Remote/Sales-Development-Representative_R1000',
+        locationsText: 'US Texas Remote',
+        postedOn: 'Posted Today',
+        bulletFields: ['R1000'],
+      }],
+      account: [{
+        title: 'Commercial Account Director',
+        externalPath: '/job/UK-London-Office/Commercial-Account-Director_R2414',
+        locationsText: 'UK-London Office',
+        postedOn: 'Posted Today',
+        bulletFields: ['R2414'],
+      }],
+      'business development': [{
+        title: 'Commercial Account Director',
+        externalPath: '/job/UK-London-Office/Commercial-Account-Director_R2414',
+        locationsText: 'UK-London Office',
+        postedOn: 'Posted Today',
+        bulletFields: ['R2414'],
+      }],
+    };
+    fetchJsonWithFallback.mockImplementation(async (_url: string, options: { body?: string } = {}) => {
+      const searchText = (JSON.parse(options.body ?? '{}') as { searchText?: string }).searchText ?? '';
+      const jobPostings = jobsBySearch[searchText] ?? [];
+      return { total: jobPostings.length, jobPostings };
     });
 
     await runEngHiringParserJob('job-1');
 
-    const bodies = fetchSpy.mock.calls.map(([, init]) => JSON.parse(String((init as RequestInit).body)));
-    expect(bodies.map((body) => body.searchText)).toEqual(expect.arrayContaining([
-      '',
-      'sales',
-      'account',
-      'business development',
-    ]));
-    expect(fetchSpy).toHaveBeenCalledWith(
-      'https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/acme_external/jobs',
-      expect.objectContaining({ method: 'POST' }),
-    );
+    const workdayCalls = fetchJsonWithFallback.mock.calls.filter(([url]) => String(url).includes('/wday/cxs/'));
+    expect(workdayCalls.length).toBeGreaterThan(0);
+    // every Workday request is a POST routed through the WAF-resilient helper
+    expect(workdayCalls.every(([, options]) => (options as { method?: string })?.method === 'POST')).toBe(true);
+    expect(workdayCalls[0][0]).toBe('https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/acme_external/jobs');
+    const searchTexts = workdayCalls.map(([, options]) =>
+      (JSON.parse((options as { body?: string }).body ?? '{}') as { searchText?: string }).searchText);
+    expect(searchTexts).toEqual(expect.arrayContaining(['', 'sales', 'account', 'business development']));
+
     expect(db.state.eng_hiring_cache).toEqual(expect.arrayContaining([
       expect.objectContaining({
         source: 'workday',
@@ -486,7 +527,6 @@ describe('runEngHiringParserJob cache-run resume', () => {
       }),
     ]));
     expect(db.state.eng_hiring_cache.filter((row) => row.source_job_id === 'Commercial-Account-Director_R2414')).toHaveLength(1);
-    fetchSpy.mockRestore();
   });
 
   it('pushes country and recency filters into the cache query before text matching', async () => {

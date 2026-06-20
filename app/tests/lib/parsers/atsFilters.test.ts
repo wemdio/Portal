@@ -78,6 +78,28 @@ describe('atsFilters — countries', () => {
     expect(buildCountryRegex(['sg'])!.test('SG-Singapore')).toBe(true);
   });
 
+  it('recovers bare major-city US locations that omit the state or country', () => {
+    const re = buildCountryRegex(['us'])!;
+    expect(re.test('San Francisco')).toBe(true);
+    expect(re.test('Seattle')).toBe(true);
+    expect(re.test('Austin')).toBe(true);
+    expect(re.test('Denver')).toBe(true);
+    expect(re.test('Atlanta')).toBe(true);
+    expect(re.test('Brooklyn')).toBe(true);
+    expect(re.test('Chicago, IL')).toBe(true); // still works with a state
+  });
+
+  it('does NOT assign internationally-ambiguous city names to the US (precision over recall)', () => {
+    const us = buildCountryRegex(['us'])!;
+    expect(us.test('London')).toBe(false);
+    expect(us.test('Birmingham')).toBe(false);
+    expect(us.test('Manchester')).toBe(false);
+    expect(us.test('Cambridge')).toBe(false);
+    // a real US state qualifier must still win
+    expect(us.test('Birmingham, AL')).toBe(true);
+    expect(us.test('Cambridge, MA')).toBe(true);
+  });
+
   it('remote matches remote postings', () => {
     const re = buildCountryRegex(['remote']);
     expect(re!.test('Remote — North America')).toBe(true);
