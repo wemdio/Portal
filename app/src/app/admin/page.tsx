@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { Users, FileText, Database, Activity, MessageCircle, Bot, Settings, Globe, Gauge } from 'lucide-react';
+import { Users, FileText, Database, Activity, Settings, Globe, Gauge } from 'lucide-react';
 import { useIsTma } from '@/lib/useIsTma';
 import { useUser } from '@/lib/UserProvider';
 
@@ -67,40 +67,6 @@ export default function AdminPage() {
                 <p className="text-sm text-gray-500">{locale === 'en' ? 'Task execution tree and logs' : 'Дерево выполнения задач и логи'}</p>
               </div>
               <Activity className="h-6 w-6 text-blue-600/80" />
-            </div>
-            <p className="mt-auto text-sm font-medium text-blue-600">{locale === 'en' ? 'Open →' : 'Перейти →'}</p>
-          </div>
-        </Link>
-
-        <Link href="/admin/atmos-analytics" className={cardClass}>
-          <div className="flex h-full flex-col">
-            <div className="mb-4 flex items-start justify-between">
-              <div>
-                <h2 className="text-lg font-semibold text-gray-900">{locale === 'en' ? 'Atmos analytics' : 'Atmos‑аналитика'}</h2>
-                <p className="text-sm text-gray-500">
-                  {locale === 'en'
-                    ? 'Atmos-bot conversation history: filters by chats and specialists, CSV export.'
-                    : 'История переписок из Atmos‑bot: фильтр по чатам и спецам, экспорт в CSV.'}
-                </p>
-              </div>
-              <MessageCircle className="h-6 w-6 text-blue-600/80" />
-            </div>
-            <p className="mt-auto text-sm font-medium text-blue-600">{locale === 'en' ? 'Open →' : 'Перейти →'}</p>
-          </div>
-        </Link>
-
-        <Link href="/admin/bots" className={cardClass}>
-          <div className="flex h-full flex-col">
-            <div className="mb-4 flex items-start justify-between">
-              <div>
-                <h2 className="text-lg font-semibold text-gray-900">Bot Manager</h2>
-                <p className="text-sm text-gray-500">
-                  {locale === 'en'
-                    ? 'Portal bot management: stop, start, and logs.'
-                    : 'Управление ботами портала — остановка, запуск, логи.'}
-                </p>
-              </div>
-              <Bot className="h-6 w-6 text-blue-600/80" />
             </div>
             <p className="mt-auto text-sm font-medium text-blue-600">{locale === 'en' ? 'Open →' : 'Перейти →'}</p>
           </div>
