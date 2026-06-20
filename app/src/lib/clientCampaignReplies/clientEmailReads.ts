@@ -71,13 +71,59 @@ export async function getRepliedEmailIds(
   return out;
 }
 
-/** Зафиксировать, что клиент ответил на письмо (идемпотентно). */
-export async function recordEmailReplied(clientUserId: string, emailId: string): Promise<void> {
+/**
+ * Зафиксировать, что клиент ответил на письмо (идемпотентно). Вместе с email_id
+ * пишем ключи ПЕРЕПИСКИ (campaign_id + lead_email), чтобы «Отвечено» считалось по
+ * лиду и не слетало, когда отвеченное письмо выпадает из top-100-окна кампании
+ * в списке. См. getAnsweredLeadKeys / applyRepliedMarks.
+ */
+export async function recordEmailReplied(
+  clientUserId: string,
+  emailId: string,
+  conv?: { campaignId?: string | null; leadEmail?: string | null },
+): Promise<void> {
   if (!supabaseInstantly || !emailId) return;
   await supabaseInstantly
     .from('client_email_replies')
     .upsert(
-      { client_user_id: clientUserId, email_id: emailId, replied_at: new Date().toISOString() },
+      {
+        client_user_id: clientUserId,
+        email_id: emailId,
+        replied_at: new Date().toISOString(),
+        campaign_id: conv?.campaignId ?? null,
+        lead_email: conv?.leadEmail ? conv.leadEmail.toLowerCase() : null,
+      },
       { onConflict: 'client_user_id,email_id' },
     );
+}
+
+/**
+ * Какие из переданных переписок (campaign + lead_email) клиент уже отвечал —
+ * УСТОЙЧИВО К ОКНУ. Считаем «отвечено» по лиду, а не по email_id: иначе на
+ * объёмной кампании старое отвеченное письмо выпадает из top-100 списка и
+ * «Отвечено» слетает. Ключ результата — `${campaign_id}:${lead_email}` (lower-
+ * case). Аналог того, как applyLeadMarks считает is_lead по client_forwarded_leads.
+ */
+export async function getAnsweredLeadKeys(
+  clientUserId: string,
+  leads: Array<{ campaignId: string; leadEmail: string }>,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (!supabaseInstantly || leads.length === 0) return out;
+  const campaignIds = [...new Set(leads.map((l) => l.campaignId))];
+  const leadEmails = [...new Set(leads.map((l) => l.leadEmail.toLowerCase()))];
+  // PostgREST не умеет составной IN по двум колонкам — берём по пересечению
+  // кампаний и email'ов лидов, точную пару сверяет вызывающий по ключу из ответа.
+  const { data } = await supabaseInstantly
+    .from('client_email_replies')
+    .select('campaign_id, lead_email')
+    .eq('client_user_id', clientUserId)
+    .in('campaign_id', campaignIds)
+    .in('lead_email', leadEmails);
+  for (const row of (data ?? []) as Array<{ campaign_id: string | null; lead_email: string | null }>) {
+    if (row.campaign_id && row.lead_email) {
+      out.add(`${row.campaign_id}:${row.lead_email.toLowerCase()}`);
+    }
+  }
+  return out;
 }

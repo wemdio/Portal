@@ -160,41 +160,29 @@ function LeadDetail({
           {lead.campaign_name && <InfoRow label="Кампания" value={lead.campaign_name} />}
         </dl>
 
-        {/* P2-B: stripped «02 → » and «02/03 → » section numbers. Editorial-
-            Numbering is for multi-step flows; these are content blocks inside
-            a lead view. The conditional jump (02 vs 03 depending on whether
-            outbound preview exists) also broke cross-lead consistency. Bare
-            eyebrows tell the same story without the lie. */}
-        {lead.last_outbound_preview && (
-          <div className="mb-4">
-            <p className="ds-eyebrow mb-2">наше последнее письмо</p>
-            <div
-              className="neu-inset rounded-md p-4 sm:p-5 text-sm whitespace-pre-wrap max-h-48 overflow-y-auto"
-              style={{ color: 'var(--cp-paper-mute)' }}
-            >
-              {lead.last_outbound_preview}
-            </div>
-          </div>
-        )}
-
-        <div className="mb-2">
-          <p className="ds-eyebrow mb-2">
-            ответ лида
-            {lead.reply_subject ? `: ${lead.reply_subject.toLowerCase()}` : ''}
-          </p>
-          <div
-            className="neu-inset rounded-md p-4 sm:p-5 text-sm whitespace-pre-wrap max-h-64 overflow-y-auto"
-            style={{ color: 'var(--cp-paper)' }}
-          >
-            {lead.reply_body ?? '(пусто)'}
-          </div>
-        </div>
-
+        {/* Переписка — единой лентой (новые сверху, как в Instantly). Раньше тут
+            были закреплённые «наше последнее письмо» + «ответ лида», но с новым
+            порядком треда они дублировали его верхние письма (как было на /replies,
+            commit ec4dcc86) — убрано. Если /thread не загрузился, ExpandedThread
+            покажет последний ответ лида из fallbackMessages (карточка не пустеет). */}
         {canReplyByEmail && (
-          <ExpandedThread
-            campaignId={lead.campaign_id}
-            emailId={lead.email_id!}
-          />
+          <div className="mb-2">
+            <p className="ds-eyebrow mb-2">переписка</p>
+            <ExpandedThread
+              campaignId={lead.campaign_id}
+              emailId={lead.email_id!}
+              className="space-y-3"
+              fallbackMessages={lead.email_id ? [{
+                id: lead.email_id,
+                direction: 'inbound',
+                timestamp: lead.reply_timestamp ?? lead.created_at ?? null,
+                subject: lead.reply_subject ?? null,
+                from_email: lead.lead_email ?? null,
+                from_name: lead.lead_name ?? null,
+                body_text: lead.reply_body ?? null,
+              }] : []}
+            />
+          </div>
         )}
       </div>
 

@@ -6,12 +6,15 @@ import {
   domainFromJobUrls,
   exportCompanyLeadsToCsv,
   extractJobs,
+  mergeCompanyTokens,
   normalizeAshbyJob,
   normalizeBamboohrJob,
   normalizeBreezyJob,
   normalizeGreenhouseJob,
   normalizeLeverJob,
   normalizeRecruiteeJob,
+  normalizeSmartrecruitersJob,
+  normalizeTeamtailorJob,
   normalizeWorkdayJob,
   normalizeWorkableJob,
   parseCompanyCsv,
@@ -235,7 +238,85 @@ describe('atsCompanyParser — normalizers', () => {
     expect(job.posted_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
+  it('normalizes a SmartRecruiters posting from the public postings API', () => {
+    const job = normalizeSmartrecruitersJob(
+      {
+        id: '3743990013711741',
+        name: 'Enterprise Account Executive',
+        refNumber: 'R00146103',
+        company: { identifier: 'AbbVie', name: 'AbbVie' },
+        releasedDate: '2026-06-19T19:15:50.666Z',
+        location: { city: 'Chicago', region: 'IL', country: 'us', fullLocation: 'Chicago, IL, United States' },
+      },
+      { slug: 'abbvie', companyName: 'AbbVie fallback' },
+    );
+
+    expect(job).toMatchObject({
+      ats: 'smartrecruiters',
+      slug: 'abbvie',
+      company: 'AbbVie',
+      title: 'Enterprise Account Executive',
+      location: 'Chicago, IL, United States',
+      url: 'https://jobs.smartrecruiters.com/AbbVie/3743990013711741',
+      roles: ['b2b_sales'],
+    });
+    expect(job.posted_at).toBe(new Date('2026-06-19T19:15:50.666Z').toISOString());
+  });
+
+  it('uses the public SmartRecruiters job URL, not the API ref, for the posting link', () => {
+    const job = normalizeSmartrecruitersJob(
+      {
+        id: '744000056465632',
+        name: 'Account Executive',
+        company: { identifier: '1Huddle', name: '1Huddle' },
+        releasedDate: '2026-06-19T00:00:00.000Z',
+        location: { fullLocation: 'Newark, NJ, United States' },
+        // The list payload's `ref` is the API endpoint — must NOT become the public link.
+        ref: 'https://api.smartrecruiters.com/v1/companies/1huddle/postings/744000056465632',
+      },
+      { slug: '1huddle', companyName: '1Huddle' },
+    );
+    expect(job.url).toBe('https://jobs.smartrecruiters.com/1Huddle/744000056465632');
+  });
+
+  it('normalizes a Teamtailor job from the jobs.json JSON-feed item (schema.org location)', () => {
+    const job = normalizeTeamtailorJob(
+      {
+        id: '7793185',
+        title: 'Enterprise Account Executive',
+        url: 'https://acme.teamtailor.com/jobs/7793185-enterprise-account-executive',
+        date_published: '2026-06-04T08:33:05+02:00',
+        content_html: '<p>Own B2B sales.</p>',
+        _jobposting: {
+          title: 'Enterprise Account Executive',
+          datePosted: '2026-06-04T08:33:05+02:00',
+          hiringOrganization: { name: 'Acme' },
+          jobLocation: [{ address: { addressLocality: 'New York', addressRegion: 'NY', addressCountry: 'US' } }],
+        },
+      },
+      { slug: 'acme', companyName: 'Acme fallback' },
+    );
+
+    expect(job).toMatchObject({
+      ats: 'teamtailor',
+      slug: 'acme',
+      company: 'Acme',
+      title: 'Enterprise Account Executive',
+      location: 'New York, NY, US',
+      country: 'US',
+      url: 'https://acme.teamtailor.com/jobs/7793185-enterprise-account-executive',
+      roles: ['b2b_sales'],
+    });
+    expect(job.posted_at).toBe(new Date('2026-06-04T08:33:05+02:00').toISOString());
+  });
+
   it('builds public endpoints and extracts jobs for the added ATS sources', () => {
+    expect(postingsUrl('smartrecruiters', 'abbvie')).toBe('https://api.smartrecruiters.com/v1/companies/abbvie/postings');
+    expect(careersUrl('smartrecruiters', 'abbvie')).toBe('https://careers.smartrecruiters.com/abbvie');
+    expect(extractJobs('smartrecruiters', { content: [{ name: 'AE' }] })).toEqual([{ name: 'AE' }]);
+    expect(postingsUrl('teamtailor', 'acme')).toBe('https://acme.teamtailor.com/jobs.json');
+    expect(careersUrl('teamtailor', 'acme')).toBe('https://acme.teamtailor.com');
+    expect(extractJobs('teamtailor', { items: [{ title: 'AE' }] })).toEqual([{ title: 'AE' }]);
     expect(postingsUrl('workable', '1000heads')).toBe('https://apply.workable.com/api/v1/widget/accounts/1000heads');
     expect(postingsUrl('bamboohr', '10web')).toBe('https://10web.bamboohr.com/careers/list');
     expect(postingsUrl('recruitee', '12build')).toBe('https://12build.recruitee.com/api/offers');
@@ -356,6 +437,32 @@ describe('atsCompanyParser — CSV parsing & export', () => {
       { name: 'Stripe', slug: 'stripe', url: 'https://job-boards.greenhouse.io/stripe' },
       { name: '8x8', slug: '8x8inc/8x8_external_careers', url: 'https://8x8inc.wd5.myworkdayjobs.com/8x8_external_careers' },
       { name: 'LegacyCo', slug: 'legacyco', url: 'https://jobs.lever.co/legacyco' },
+    ]);
+  });
+
+  it('merges company token lists from several sources, deduping by slug (first wins, order kept)', () => {
+    const primary = [
+      { name: 'Acme', slug: 'acme', url: 'https://job-boards.greenhouse.io/acme' },
+      { name: 'Beta', slug: 'beta', url: 'https://job-boards.greenhouse.io/beta' },
+    ];
+    const extra = [
+      { name: 'Beta Inc', slug: 'Beta', url: 'https://job-boards.greenhouse.io/beta-dup' }, // dup (case-insensitive)
+      { name: 'Gamma', slug: 'gamma', url: 'https://job-boards.greenhouse.io/gamma' },
+      { name: 'No slug', slug: '', url: 'https://job-boards.greenhouse.io/x' }, // skipped
+    ];
+
+    expect(mergeCompanyTokens([primary, extra])).toEqual([
+      { name: 'Acme', slug: 'acme', url: 'https://job-boards.greenhouse.io/acme' },
+      { name: 'Beta', slug: 'beta', url: 'https://job-boards.greenhouse.io/beta' },
+      { name: 'Gamma', slug: 'gamma', url: 'https://job-boards.greenhouse.io/gamma' },
+    ]);
+  });
+
+  it('tolerates missing / empty token lists when merging', () => {
+    expect(mergeCompanyTokens([])).toEqual([]);
+    expect(mergeCompanyTokens([undefined, null, []])).toEqual([]);
+    expect(mergeCompanyTokens([[{ name: 'Solo', slug: 'solo', url: 'u' }], undefined])).toEqual([
+      { name: 'Solo', slug: 'solo', url: 'u' },
     ]);
   });
 

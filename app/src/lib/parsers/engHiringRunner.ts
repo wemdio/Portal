@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { extractJobs, parseCompanyCsv, postingsUrl, type AtsCompanyToken } from '@/lib/jobs/atsCompanyParser';
+import { extractJobs, mergeCompanyTokens, parseCompanyCsv, postingsUrl, type AtsCompanyToken } from '@/lib/jobs/atsCompanyParser';
 import {
   ENG_HIRING_SOURCES,
   dedupeEngHiringVacanciesByCompany,
@@ -17,6 +17,13 @@ import { fetchJsonWithFallback, fetchTextWithFallback } from '@/lib/parsers/atsH
 import { domainToSiteUrl, resolveCompanyDomainByName } from '@/lib/parsers/companyDomainResolver';
 
 const TOKENS_BASE = 'https://raw.githubusercontent.com/kalil0321/ats-scrapers/main/ats-companies';
+// One or more comma-separated bases, each serving `<base>/<source>.csv` in the
+// `name,slug,url` schema. Lists are merged + deduped by slug (primary first), so
+// a larger derived list can be layered on top of the seed without code changes.
+const TOKEN_BASES = (process.env.ENG_HIRING_TOKEN_BASES ?? TOKENS_BASE)
+  .split(',')
+  .map((base) => base.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
 const UA = 'PortalEngHiringParser/1.0 (+https://wemd.io)';
 
 function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
@@ -41,7 +48,11 @@ const DETAIL_ENRICH_DELAY_MS = Math.max(0, Number(process.env.ENG_HIRING_DETAIL_
 const DETAIL_ENRICH_LIMIT = Math.max(0, Number(process.env.ENG_HIRING_DETAIL_LIMIT ?? '500'));
 const WORKDAY_PAGE_SIZE = 100;
 const WORKDAY_MAX_POSTINGS_PER_COMPANY = clampInteger(process.env.ENG_HIRING_WORKDAY_MAX_POSTINGS_PER_COMPANY, 200, 50, 1000);
-const WORKDAY_SEARCH_TEXTS = ['', 'sales', 'account', 'business development', 'partnership', 'revenue'];
+// Targeted search terms used by ATS that expose a free-text query (Workday CXS,
+// SmartRecruiters), so an empty-query first page does not crowd out sales roles.
+const SALES_SEARCH_TEXTS = ['', 'sales', 'account', 'business development', 'partnership', 'revenue'];
+const SMARTRECRUITERS_PAGE_SIZE = 100;
+const SMARTRECRUITERS_MAX_POSTINGS_PER_COMPANY = clampInteger(process.env.ENG_HIRING_SMARTRECRUITERS_MAX_POSTINGS_PER_COMPANY, 200, 50, 1000);
 const CACHE_BATCH_SIZE = 250;
 const RESULT_BATCH_SIZE = 500;
 
@@ -144,31 +155,55 @@ async function fetchText(url: string): Promise<string> {
 async function fetchWorkdayPayloads(url: string): Promise<unknown[]> {
   const payloads: unknown[] = [];
 
-  for (const searchText of WORKDAY_SEARCH_TEXTS) {
+  for (const searchText of SALES_SEARCH_TEXTS) {
     let offset = 0;
     let total = WORKDAY_PAGE_SIZE;
 
     while (offset < total && offset < WORKDAY_MAX_POSTINGS_PER_COMPANY) {
-      const response = await fetch(url, {
+      // Workday's CXS endpoint sits behind a WAF that blocks Node/undici by TLS
+      // fingerprint (same class of block as Clearbit), so route the POST through
+      // the curl-backed fallback instead of a raw fetch — otherwise every board
+      // silently returns 0 (see engHiringRunner Workday WAF regression test).
+      const payload = await fetchJsonWithFallback(url, {
         method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-          'User-Agent': UA,
-        },
         body: JSON.stringify({
           appliedFacets: {},
           limit: WORKDAY_PAGE_SIZE,
           offset,
           searchText,
         }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json() as Record<string, unknown>;
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': UA,
+        },
+        timeoutMs: REQUEST_TIMEOUT_MS,
+      }) as Record<string, unknown>;
       payloads.push(payload);
       const count = Array.isArray(payload.jobPostings) ? payload.jobPostings.length : 0;
       const rawTotal = Number(payload.total);
+      total = Number.isFinite(rawTotal) && rawTotal >= 0 ? rawTotal : offset + count;
+      if (count === 0) break;
+      offset += count;
+    }
+  }
+
+  return payloads;
+}
+
+async function fetchSmartrecruitersPayloads(baseUrl: string): Promise<unknown[]> {
+  const payloads: unknown[] = [];
+
+  for (const searchText of SALES_SEARCH_TEXTS) {
+    let offset = 0;
+    let total = SMARTRECRUITERS_PAGE_SIZE;
+
+    while (offset < total && offset < SMARTRECRUITERS_MAX_POSTINGS_PER_COMPANY) {
+      const params = new URLSearchParams({ limit: String(SMARTRECRUITERS_PAGE_SIZE), offset: String(offset) });
+      if (searchText) params.set('q', searchText);
+      const payload = await fetchJson(`${baseUrl}?${params.toString()}`) as Record<string, unknown>;
+      payloads.push(payload);
+      const count = Array.isArray(payload.content) ? payload.content.length : 0;
+      const rawTotal = Number(payload.totalFound);
       total = Number.isFinite(rawTotal) && rawTotal >= 0 ? rawTotal : offset + count;
       if (count === 0) break;
       offset += count;
@@ -210,10 +245,12 @@ async function fetchSourceCacheRows(source: EngHiringSource, token: AtsCompanyTo
   try {
     const payloads = source === 'workday'
       ? await fetchWorkdayPayloads(postingsUrl(source, token.slug, token.url))
-      : [await fetchJson(
-        postingsUrl(source, token.slug, token.url),
-        source === 'lever' ? LEVER_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
-      )];
+      : source === 'smartrecruiters'
+        ? await fetchSmartrecruitersPayloads(postingsUrl(source, token.slug, token.url))
+        : [await fetchJson(
+          postingsUrl(source, token.slug, token.url),
+          source === 'lever' ? LEVER_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+        )];
     const rows: ReturnType<typeof toCacheRow>[] = [];
     for (const payload of payloads) {
       for (const raw of extractJobs(source, payload)) {
@@ -389,6 +426,9 @@ function buildAtsDetailRequest(row: CacheRow): DetailRequest | null {
   if (row.source === 'bamboohr') {
     return { url: `https://${row.source_company_slug}.bamboohr.com/careers/${jobId}/detail`, format: 'json' };
   }
+  if (row.source === 'smartrecruiters') {
+    return { url: `https://api.smartrecruiters.com/v1/companies/${slug}/postings/${jobId}`, format: 'json' };
+  }
   return null;
 }
 
@@ -400,8 +440,16 @@ async function refreshSourceCache(
   ensureNotCancelled: () => Promise<void>,
   onProgress: (done: number, total: number, source: EngHiringSource) => Promise<void>,
 ): Promise<RefreshSourceStats> {
-  const csv = await fetchText(`${TOKENS_BASE}/${source}.csv`);
-  const tokens = parseCompanyCsv(csv).slice(0, limit);
+  const tokenLists = await Promise.all(
+    TOKEN_BASES.map(async (base) => {
+      try {
+        return parseCompanyCsv(await fetchText(`${base}/${source}.csv`));
+      } catch {
+        return []; // a base may not publish this source's list — skip it
+      }
+    }),
+  );
+  const tokens = mergeCompanyTokens(tokenLists).slice(0, limit);
   const startIndex = Math.min(toNonNegativeInt(run.next_company_index), tokens.length);
   const batch: ReturnType<typeof toCacheRow>[] = [];
   let cachedVacancies = toNonNegativeInt(run.cached_vacancies);

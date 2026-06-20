@@ -62,6 +62,27 @@ describe('engHiring parser normalizer', () => {
     expect(vacancy?.published_at).toBe(new Date('2026-06-01T12:30:00-04:00').toISOString());
   });
 
+  it('infers the US country code from a bare major-city Greenhouse location', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'greenhouse',
+      {
+        id: 778899,
+        title: 'Enterprise Account Executive',
+        company_name: 'Acme',
+        location: { name: 'San Francisco' },
+        absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/778899',
+        updated_at: '2026-06-10T00:00:00.000Z',
+      },
+      { slug: 'acme', companyName: 'Acme' },
+    );
+
+    expect(vacancy).toMatchObject({
+      vacancy_title: 'Enterprise Account Executive',
+      location: 'San Francisco',
+      country_code: 'us',
+    });
+  });
+
   it('extracts Ashby description and salary from list payloads', () => {
     const vacancy = normalizeAtsJobToEngVacancy(
       'ashby',
@@ -372,6 +393,75 @@ Own B2B client communications and revenue expansion for enterprise accounts.
       salary_to: 180000,
       salary_currency: 'USD',
     });
+  });
+
+  it('normalizes SmartRecruiters postings and merges jobAd detail descriptions', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'smartrecruiters',
+      {
+        id: '3743990013711741',
+        name: 'Enterprise Account Executive',
+        company: { identifier: 'AbbVie', name: 'AbbVie' },
+        releasedDate: '2026-06-19T19:15:50.666Z',
+        location: { city: 'Chicago', region: 'IL', country: 'us', fullLocation: 'Chicago, IL, United States' },
+      },
+      { slug: 'abbvie', companyName: 'AbbVie' },
+    );
+
+    expect(vacancy).toMatchObject({
+      source: 'smartrecruiters',
+      source_company_slug: 'abbvie',
+      source_job_id: '3743990013711741',
+      company_name: 'AbbVie',
+      vacancy_title: 'Enterprise Account Executive',
+      vacancy_url: 'https://jobs.smartrecruiters.com/AbbVie/3743990013711741',
+      careers_url: 'https://careers.smartrecruiters.com/abbvie',
+      country_code: 'us',
+    });
+
+    const enriched = mergeEngHiringVacancyDetail(vacancy!, {
+      jobAd: {
+        sections: {
+          companyDescription: { title: 'Company', text: '<p>AbbVie is a global biopharmaceutical company focused on innovation.</p>' },
+          jobDescription: { title: 'Job', text: '<p>Own enterprise B2B sales across the US territory.</p>' },
+        },
+      },
+    });
+    expect(enriched).toMatchObject({
+      vacancy_description: expect.stringContaining('Own enterprise B2B sales'),
+      company_description: expect.stringContaining('AbbVie is a global biopharmaceutical'),
+    });
+  });
+
+  it('normalizes a Teamtailor JSON-feed item with schema.org location and inline description', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'teamtailor',
+      {
+        id: '7793185',
+        title: 'Account Executive',
+        url: 'https://acme.teamtailor.com/jobs/7793185-account-executive',
+        date_published: '2026-06-04T08:33:05+02:00',
+        content_html: '<p>Own B2B sales for US enterprise accounts.</p>',
+        _jobposting: {
+          hiringOrganization: { name: 'Acme' },
+          jobLocation: [{ address: { addressLocality: 'Austin', addressRegion: 'TX', addressCountry: 'US' } }],
+        },
+      },
+      { slug: 'acme', companyName: 'Acme' },
+    );
+
+    expect(vacancy).toMatchObject({
+      source: 'teamtailor',
+      source_company_slug: 'acme',
+      source_job_id: '7793185',
+      company_name: 'Acme',
+      vacancy_title: 'Account Executive',
+      vacancy_url: 'https://acme.teamtailor.com/jobs/7793185-account-executive',
+      careers_url: 'https://acme.teamtailor.com',
+      vacancy_description: 'Own B2B sales for US enterprise accounts.',
+      country_code: 'us',
+    });
+    expect(vacancy?.published_at).toBe(new Date('2026-06-04T08:33:05+02:00').toISOString());
   });
 
   it('normalizes Workday vacancies from CXS job postings', () => {
