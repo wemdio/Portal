@@ -7,6 +7,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Send, MessageSquare, RefreshCw, Search, X } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ExpandedThread } from '@/components/client-replies/ExpandedThread';
+import { TelegramConnectCard } from '@/components/client-replies/TelegramConnectCard';
 import type { ThreadMessage } from '@/lib/clientCampaignReplies/types';
 
 type StatusFilter = 'all' | 'unread' | 'answered' | 'leads';
@@ -730,6 +731,8 @@ function RepliesPageContent() {
           Все ответы получателей по вашим кампаниям
         </p>
       </header>
+
+      <TelegramConnectCard />
 
       {/* Filter strip — status toggle + search. Both wired to URL params so
           a filtered view is shareable and browser back walks the filters. */}

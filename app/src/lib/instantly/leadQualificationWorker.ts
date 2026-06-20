@@ -1,7 +1,17 @@
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
-import { qualifyReply, getBodyText, fetchBriefByCampaign } from './leadQualifier';
+import {
+  qualifyReply,
+  getBodyText,
+  fetchBriefByCampaign,
+  isAutoReplyOrUnsubscribe,
+} from './leadQualifier';
 import { sendLeadTelegramAlert, type LeadTelegramSpecialistMention } from './leadTelegramAlerts';
+import {
+  getClientRepliesBotToken,
+  sendClientReplyTelegram,
+  buildClientReplyMessage,
+} from '@/lib/clientReplyBot/bot';
 import * as instantly from './client';
 import type { Email } from './types';
 
@@ -92,16 +102,49 @@ async function getPortalLinkedCampaignIds(): Promise<string[]> {
 }
 
 /**
+ * Campaign IDs a CLIENT launched themselves via the portal (tracked in
+ * client_instantly_access, NOT project_instantly_campaigns), grouped by the
+ * Instantly account that owns them. These never get a project link, so
+ * getPortalLinkedCampaignIds() misses them — yet they are exactly the campaigns
+ * whose replies a self-serve client wants pushed to their Telegram. Grouping by
+ * account lets us fetch each account's replies with the correct API key (clients
+ * live on multiple Instantly accounts, e.g. main + a second workspace).
+ */
+async function getClientCampaignsByAccount(): Promise<Map<string, Set<string>>> {
+  const byAccount = new Map<string, Set<string>>();
+  if (!supabaseAdmin) return byAccount;
+  const { data, error } = await supabaseAdmin
+    .from('client_instantly_access')
+    .select('resource_id, instantly_account_id')
+    .eq('resource_type', 'campaign');
+  if (error) {
+    workerLog('warn', 'Failed to read client_instantly_access', error.message);
+    return byAccount;
+  }
+  for (const row of (data ?? []) as { resource_id?: string | null; instantly_account_id?: string | null }[]) {
+    if (!row.resource_id) continue;
+    const account = row.instantly_account_id || 'main';
+    let set = byAccount.get(account);
+    if (!set) {
+      set = new Set<string>();
+      byAccount.set(account, set);
+    }
+    set.add(row.resource_id);
+  }
+  return byAccount;
+}
+
+/**
  * Resolves a campaign's display name by ID, cached per worker process.
  * Used to label lead alerts with the campaign the reply came from.
  */
-async function resolveCampaignName(campaignId: string): Promise<string | null> {
+async function resolveCampaignName(campaignId: string, accountId?: string): Promise<string | null> {
   if (campaignNameCache.has(campaignId)) {
     return campaignNameCache.get(campaignId) ?? null;
   }
   let name: string | null = null;
   try {
-    const campaign = await instantly.getCampaign(campaignId);
+    const campaign = await instantly.getCampaign(campaignId, { accountId });
     name = campaign?.name?.trim() || null;
   } catch (err) {
     workerLog('warn', `Failed to fetch campaign name for ${campaignId}`, err);
@@ -112,6 +155,7 @@ async function resolveCampaignName(campaignId: string): Promise<string | null> {
 
 async function fetchRecentLinkedReplies(
   campaignIds: Set<string>,
+  accountId?: string,
 ): Promise<Email[]> {
   const maxPages = Math.max(
     1,
@@ -128,7 +172,7 @@ async function fetchRecentLinkedReplies(
       email_type: 'received',
       limit: REPLY_EMAILS_PAGE_SIZE,
       starting_after: startingAfter,
-    });
+    }, { accountId });
     const allEmails = res.items ?? [];
     const linkedReplies = allEmails.filter((e) => {
       const campaignId = e.campaign_id;
@@ -136,7 +180,7 @@ async function fetchRecentLinkedReplies(
     });
     workerLog(
       'info',
-      `Reply page ${page + 1}: ${allEmails.length} replies fetched, ${linkedReplies.length} linked to Portal projects`,
+      `[${accountId ?? 'main'}] Reply page ${page + 1}: ${allEmails.length} fetched, ${linkedReplies.length} linked`,
     );
     replyEmails.push(...linkedReplies);
 
@@ -166,15 +210,56 @@ export async function pollAndQualifyReplies(): Promise<number> {
     return 0;
   }
 
-  // 1. Only qualify campaigns that are tied to a Portal client project.
-  const campaignIds = await getPortalLinkedCampaignIds();
-  workerLog('info', `Portal-linked campaigns: ${campaignIds.length}`);
-  if (campaignIds.length === 0) return 0;
+  // 1. Campaigns we qualify replies for, grouped by the Instantly account that
+  //    owns them (each account has its own API key, so the fetch must be
+  //    per-account):
+  //    (a) admin / "под ключ" — linked to a Portal project (always 'main'), and
+  //    (b) client self-serve — launched by the client via the portal
+  //        (client_instantly_access), which carries the account id. These never
+  //        get a project link, so they must be added explicitly.
+  const projectCampaignIds = await getPortalLinkedCampaignIds();
+  const clientByAccount = await getClientCampaignsByAccount();
 
-  // 2. Fetch recent replies globally, then filter locally by Portal-linked campaign.
-  // This avoids one Instantly API call per historical auto-linked campaign.
-  const campaignIdSet = new Set(campaignIds);
-  const replyEmails = await fetchRecentLinkedReplies(campaignIdSet);
+  const campaignsByAccount = new Map<string, Set<string>>();
+  campaignsByAccount.set('main', new Set<string>(projectCampaignIds));
+  for (const [accountId, ids] of clientByAccount) {
+    let set = campaignsByAccount.get(accountId);
+    if (!set) {
+      set = new Set<string>();
+      campaignsByAccount.set(accountId, set);
+    }
+    for (const id of ids) set.add(id);
+  }
+
+  const clientCampaignCount = [...clientByAccount.values()].reduce((n, s) => n + s.size, 0);
+  const totalCampaigns = [...campaignsByAccount.values()].reduce((n, s) => n + s.size, 0);
+  workerLog(
+    'info',
+    `Qualifiable campaigns: ${projectCampaignIds.length} project-linked + ${clientCampaignCount} client self-serve across ${campaignsByAccount.size} account(s) = ${totalCampaigns} total`,
+  );
+  if (totalCampaigns === 0) return 0;
+
+  // 2. Fetch recent replies PER account (each = own API key + own rate limit).
+  // The fetch is a workspace-global received-emails page-walk filtered locally
+  // by that account's campaign set, so adding campaigns is free and each extra
+  // account adds one page-walk. Tag every reply with its account so the later
+  // per-reply qualification fetches (thread context, lead lookup, campaign name)
+  // use the correct key.
+  const replyEmails: Email[] = [];
+  const accountByEmailId = new Map<string, string>();
+  for (const [accountId, campaignSet] of campaignsByAccount) {
+    if (campaignSet.size === 0) continue;
+    try {
+      const emails = await fetchRecentLinkedReplies(campaignSet, accountId);
+      for (const e of emails) {
+        replyEmails.push(e);
+        if (e.id) accountByEmailId.set(e.id, accountId);
+      }
+    } catch (err) {
+      // A misconfigured/unreachable account must not kill the whole tick.
+      workerLog('warn', `Reply fetch failed for Instantly account "${accountId}"`, err);
+    }
+  }
 
   if (replyEmails.length === 0) {
     workerLog('info', 'No linked reply emails found');
@@ -219,7 +304,7 @@ export async function pollAndQualifyReplies(): Promise<number> {
 
   if (newReplies.length === 0) return 0;
 
-  workerLog('info', `Found ${newReplies.length} new linked reply(s) across ${campaignIds.length} Portal-linked campaign(s)`);
+  workerLog('info', `Found ${newReplies.length} new linked reply(s) across ${totalCampaigns} qualifiable campaign(s)`);
 
   // 4. Qualify each new reply (capped per tick to stay within rate limits)
   const interReplyDelay = Math.max(
@@ -231,7 +316,7 @@ export async function pollAndQualifyReplies(): Promise<number> {
     const reply = newReplies[i];
     if (i > 0) await new Promise((r) => setTimeout(r, interReplyDelay));
     try {
-      await qualifyOneReply(db, reply, apiKey);
+      await qualifyOneReply(db, reply, apiKey, accountByEmailId.get(reply.id ?? '') ?? 'main');
       processed++;
     } catch (err) {
       workerLog('error', `Failed to qualify reply ${reply.id}`, err);
@@ -253,6 +338,7 @@ async function qualifyOneReply(
   db: NonNullable<typeof supabaseAdmin>,
   reply: Email,
   apiKey: string,
+  accountId?: string,
 ): Promise<void> {
   const campaignId = reply.campaign_id;
   const leadEmail =
@@ -271,14 +357,14 @@ async function qualifyOneReply(
     apiKey,
     model: MODEL,
     briefText: cachedBrief,
-  });
+  }, accountId);
 
-  const campaignName = await resolveCampaignName(campaignId);
+  const campaignName = await resolveCampaignName(campaignId, accountId);
 
   let leadName: string | undefined;
   let companyName: string | undefined;
   try {
-    const leads = await instantly.getLeadsByEmail({ email: leadEmail, campaign_id: campaignId });
+    const leads = await instantly.getLeadsByEmail({ email: leadEmail, campaign_id: campaignId }, { accountId });
     const lead = leads?.[0];
     if (lead) {
       leadName =
@@ -366,6 +452,119 @@ async function qualifyOneReply(
       replyText || null,
       result.reason ?? null,
     );
+  }
+
+  // Client-facing notification: DM the reply text to the client who owns this
+  // campaign for any HUMAN reply — everything EXCEPT automated noise
+  // (out-of-office / auto-reply / unsubscribe). Deliberately does NOT filter
+  // short replies: a terse "ок"/"да" can be meaningful in an ongoing thread
+  // (e.g. confirming a call time). Broader than the studio lead gate. Reuses the
+  // qualifier's own auto/OOO rule-check (runs before AI, so noise costs no AI).
+  // `inserted?.id` (new qualification) is the send-once guard. Never throws.
+  const meaningfulForClient = !!replyText && !isAutoReplyOrUnsubscribe(replyText);
+  if (inserted?.id && meaningfulForClient) {
+    await notifyClientOfReply(db, campaignId, {
+      campaignName,
+      leadEmail,
+      leadName: leadName ?? null,
+      companyName: companyName ?? null,
+      replySubject: reply.subject ?? null,
+      replyBody: replyText || null,
+      replyTimestamp: reply.timestamp_email ?? null,
+    });
+  }
+}
+
+/**
+ * Send the reply text straight to the CLIENT's own Telegram, if they connected
+ * the replies bot themselves. Resolution mirrors specialist routing:
+ *   campaign → project_instantly_campaigns/_period (instantly DB)
+ *           → projects.client_user_id (main DB)
+ *           → client_reply_telegram_links (instantly DB, enabled only).
+ * Fully self-contained and swallows all errors — lead qualification must never
+ * fail because a client notification did.
+ */
+async function notifyClientOfReply(
+  instantlyDb: NonNullable<typeof supabaseAdmin>,
+  campaignId: string,
+  data: {
+    campaignName: string | null;
+    leadEmail: string;
+    leadName: string | null;
+    companyName: string | null;
+    replySubject: string | null;
+    replyBody: string | null;
+    replyTimestamp: string | null;
+  },
+): Promise<void> {
+  try {
+    // Bot not configured → feature is dark; skip without touching the DB.
+    if (!getClientRepliesBotToken()) return;
+
+    // Union of owners from BOTH models. Kept independent so a main-DB outage
+    // can't block self-serve delivery (Path 2 is instantly-DB only).
+    const clientUserIds = new Set<string>();
+
+    // Path 1 — admin / "под ключ": campaign → project link → projects.client_user_id (main DB).
+    if (supabaseMain) {
+      try {
+        const { data: legacyLinks } = await instantlyDb
+          .from('project_instantly_campaigns')
+          .select('project_id')
+          .eq('campaign_id', campaignId);
+        const { data: periodLinks } = await instantlyDb
+          .from('project_period_instantly_campaigns')
+          .select('project_id')
+          .eq('campaign_id', campaignId);
+        const projectIds = [...(periodLinks ?? []), ...(legacyLinks ?? [])]
+          .map((l: { project_id: string }) => l.project_id)
+          .filter(Boolean);
+        if (projectIds.length > 0) {
+          const { data: projects } = await supabaseMain
+            .from('projects')
+            .select('client_user_id')
+            .in('id', projectIds)
+            .not('client_user_id', 'is', null);
+          for (const p of (projects ?? []) as { client_user_id: string | null }[]) {
+            if (p.client_user_id) clientUserIds.add(p.client_user_id);
+          }
+        }
+      } catch (err) {
+        workerLog('warn', `notifyClientOfReply project-path failed (campaign ${campaignId})`, err);
+      }
+    }
+
+    // Path 2 — client self-serve: campaign → client_instantly_access.client_user_id
+    // (instantly DB, direct ownership, no project link). Covers portal-launched
+    // client campaigns, which Path 1 can never resolve.
+    const { data: access } = await instantlyDb
+      .from('client_instantly_access')
+      .select('client_user_id')
+      .eq('resource_type', 'campaign')
+      .eq('resource_id', campaignId);
+    for (const a of (access ?? []) as { client_user_id: string | null }[]) {
+      if (a.client_user_id) clientUserIds.add(a.client_user_id);
+    }
+
+    if (clientUserIds.size === 0) return;
+
+    const { data: links } = await instantlyDb
+      .from('client_reply_telegram_links')
+      .select('client_user_id, chat_id')
+      .in('client_user_id', [...clientUserIds])
+      .eq('enabled', true);
+    if (!links?.length) return;
+
+    const html = buildClientReplyMessage(data);
+    for (const link of links as { client_user_id: string; chat_id: number }[]) {
+      const result = await sendClientReplyTelegram(Number(link.chat_id), html);
+      workerLog(
+        'info',
+        `Client reply notify → client ${link.client_user_id} chat ${link.chat_id}: ${result.messageId ? 'sent' : 'no-send'}`,
+      );
+    }
+  } catch (err) {
+    workerLog('warn', `notifyClientOfReply failed (campaign ${campaignId})`, err);
   }
 }
 
