@@ -248,7 +248,7 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
             <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-3">
               <p className="text-sm font-semibold text-indigo-800">✍️ Копи-инсайты по первому письму</p>
               <p className="mt-0.5 text-[10px] text-indigo-500/80">
-                разобрано {data.copyInsights.campaignsAnalyzed} кампаний проекта · сверка с дата-беками по всему датасету
+                разобрано {data.copyInsights.campaignsAnalyzed} кампаний проекта · проценты — бенчмарк по всему датасету, не замер этого проекта
               </p>
               {data.copyInsights.defaults.length > 0 && (
                 <div className="mt-2 space-y-1.5">
@@ -281,7 +281,7 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
                 </div>
               )}
               <p className="mt-1.5 text-[10px] text-indigo-500/80">
-                длина и опенер держатся при контроле на сегмент (дефолт); остальное — кросс-сегментный сигнал для A/B. Причинно только within-campaign A/B.
+                длина держится при контроле на сегмент (дефолт); опенер и остальное — кросс-сегментный сигнал, нестабильный внутри сегмента (гипотеза для A/B). Причинно только within-campaign A/B.
               </p>
             </div>
           )}

@@ -372,7 +372,10 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
       String.raw`
       WITH s AS (
         SELECT campaign_id, regexp_replace(coalesce(body_text,''), '<[^>]+>', ' ', 'g') AS b
-        FROM raw_campaign_steps WHERE step_n=0 AND variant_n=0 AND campaign_id = ANY($1)
+        FROM raw_campaign_steps
+        WHERE step_n=0 AND variant_n=0 AND campaign_id = ANY($1)
+          -- exclude empty / variables-only templates: they'd score as a false "short, no-opener"
+          AND btrim(regexp_replace(regexp_replace(coalesce(body_text,''), '<[^>]+>', ' ', 'g'), '\{\{[^}]*\}\}', ' ', 'g')) <> ''
       )
       SELECT
         sg.segment,
@@ -394,8 +397,11 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
       const moneyConstr = cr.filter((r) => r.money && r.segment === 'construction_realestate').length;
       const defaults: CopyFinding[] = [];
       const hypotheses: CopyFinding[] = [];
-      if (longBody > 0) defaults.push({ affected: longBody, text: `${longBody} из ${N}: первое письмо ≥40 слов${veryLong ? ` (${veryLong} — длиннее 110)` : ''}. Короткие <40 слов дают ~24% лидов против ~18% (+5.6 пп, держится по сегментам). Подрезать первое письмо к <40 слов; эффект подтвердить A/B.` });
-      if (noOpener > 0) defaults.push({ affected: noOpener, text: `${noOpener} из ${N}: нет связки «приветствие + короткий вопрос» в первых 1-2 предложениях. Такой опенер ~23% против ~18% (+5.6 пп). Открывать приветствием и вопросом.` });
+      // DEFAULT: length<40w — held in all 3 largest segments with non-overlapping Wilson CIs (re-verified 2026-06-21).
+      if (longBody > 0) defaults.push({ affected: longBody, text: `${longBody} из ${N}: первое письмо ≥40 слов${veryLong ? ` (${veryLong} — длиннее 110)` : ''}. Короткие <40 слов дают ~22% лидов против ~17% (+5 пп, держится по сегментам). Подрезать первое письмо к <40 слов; эффект подтвердить A/B.` });
+      // HYPOTHESIS (not default): opener lift is carried by the greeting and is segment-dependent —
+      // it dissolves in manufacturing (CIs overlap) and the early question alone doesn't help.
+      if (noOpener > 0) hypotheses.push({ affected: noOpener, text: `${noOpener} из ${N}: слабый опенер — нет связки «приветствие + ранний вопрос» в первых 1-2 предложениях. Приветствие связано с более высоким lead rate (~21% против ~17%, ~+4.5 пп), но в части ниш (напр. manufacturing) разница исчезает, а ранний вопрос сам по себе не помогает. Открывать приветствием; вопрос — проверить A/B.` });
       if (hardCta > 0) hypotheses.push({ affected: hardCta, text: `${hardCta} из ${N}: просьба о звонке/демо уже в ПЕРВОМ письме — в большинстве ниш связана с меньшим lead rate. Перенести встречу в фоллоу-ап, проверить A/B. (Исключение — IT/SaaS, там наоборот.)` });
       if (moneyConstr > 0) hypotheses.push({ affected: moneyConstr, text: `${moneyConstr}: денежный заход (выручка/N млн/руб) в начале первого письма — в недвижимости/стройке связан с заметно меньшим lead rate (~9% против ~21%). A/B: заменить на нейтральный вопрос.` });
       if (defaults.length || hypotheses.length) copyInsights = { campaignsAnalyzed: N, defaults, hypotheses };
