@@ -14,6 +14,7 @@ import {
   normalizeLeverJob,
   normalizeRecruiteeJob,
   normalizeSmartrecruitersJob,
+  normalizeTeamtailorJob,
   normalizeWorkdayJob,
   normalizeWorkableJob,
   parseCompanyCsv,
@@ -262,10 +263,60 @@ describe('atsCompanyParser — normalizers', () => {
     expect(job.posted_at).toBe(new Date('2026-06-19T19:15:50.666Z').toISOString());
   });
 
+  it('uses the public SmartRecruiters job URL, not the API ref, for the posting link', () => {
+    const job = normalizeSmartrecruitersJob(
+      {
+        id: '744000056465632',
+        name: 'Account Executive',
+        company: { identifier: '1Huddle', name: '1Huddle' },
+        releasedDate: '2026-06-19T00:00:00.000Z',
+        location: { fullLocation: 'Newark, NJ, United States' },
+        // The list payload's `ref` is the API endpoint — must NOT become the public link.
+        ref: 'https://api.smartrecruiters.com/v1/companies/1huddle/postings/744000056465632',
+      },
+      { slug: '1huddle', companyName: '1Huddle' },
+    );
+    expect(job.url).toBe('https://jobs.smartrecruiters.com/1Huddle/744000056465632');
+  });
+
+  it('normalizes a Teamtailor job from the jobs.json JSON-feed item (schema.org location)', () => {
+    const job = normalizeTeamtailorJob(
+      {
+        id: '7793185',
+        title: 'Enterprise Account Executive',
+        url: 'https://acme.teamtailor.com/jobs/7793185-enterprise-account-executive',
+        date_published: '2026-06-04T08:33:05+02:00',
+        content_html: '<p>Own B2B sales.</p>',
+        _jobposting: {
+          title: 'Enterprise Account Executive',
+          datePosted: '2026-06-04T08:33:05+02:00',
+          hiringOrganization: { name: 'Acme' },
+          jobLocation: [{ address: { addressLocality: 'New York', addressRegion: 'NY', addressCountry: 'US' } }],
+        },
+      },
+      { slug: 'acme', companyName: 'Acme fallback' },
+    );
+
+    expect(job).toMatchObject({
+      ats: 'teamtailor',
+      slug: 'acme',
+      company: 'Acme',
+      title: 'Enterprise Account Executive',
+      location: 'New York, NY, US',
+      country: 'US',
+      url: 'https://acme.teamtailor.com/jobs/7793185-enterprise-account-executive',
+      roles: ['b2b_sales'],
+    });
+    expect(job.posted_at).toBe(new Date('2026-06-04T08:33:05+02:00').toISOString());
+  });
+
   it('builds public endpoints and extracts jobs for the added ATS sources', () => {
     expect(postingsUrl('smartrecruiters', 'abbvie')).toBe('https://api.smartrecruiters.com/v1/companies/abbvie/postings');
     expect(careersUrl('smartrecruiters', 'abbvie')).toBe('https://careers.smartrecruiters.com/abbvie');
     expect(extractJobs('smartrecruiters', { content: [{ name: 'AE' }] })).toEqual([{ name: 'AE' }]);
+    expect(postingsUrl('teamtailor', 'acme')).toBe('https://acme.teamtailor.com/jobs.json');
+    expect(careersUrl('teamtailor', 'acme')).toBe('https://acme.teamtailor.com');
+    expect(extractJobs('teamtailor', { items: [{ title: 'AE' }] })).toEqual([{ title: 'AE' }]);
     expect(postingsUrl('workable', '1000heads')).toBe('https://apply.workable.com/api/v1/widget/accounts/1000heads');
     expect(postingsUrl('bamboohr', '10web')).toBe('https://10web.bamboohr.com/careers/list');
     expect(postingsUrl('recruitee', '12build')).toBe('https://12build.recruitee.com/api/offers');

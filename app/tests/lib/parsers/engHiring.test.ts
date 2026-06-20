@@ -433,6 +433,37 @@ Own B2B client communications and revenue expansion for enterprise accounts.
     });
   });
 
+  it('normalizes a Teamtailor JSON-feed item with schema.org location and inline description', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'teamtailor',
+      {
+        id: '7793185',
+        title: 'Account Executive',
+        url: 'https://acme.teamtailor.com/jobs/7793185-account-executive',
+        date_published: '2026-06-04T08:33:05+02:00',
+        content_html: '<p>Own B2B sales for US enterprise accounts.</p>',
+        _jobposting: {
+          hiringOrganization: { name: 'Acme' },
+          jobLocation: [{ address: { addressLocality: 'Austin', addressRegion: 'TX', addressCountry: 'US' } }],
+        },
+      },
+      { slug: 'acme', companyName: 'Acme' },
+    );
+
+    expect(vacancy).toMatchObject({
+      source: 'teamtailor',
+      source_company_slug: 'acme',
+      source_job_id: '7793185',
+      company_name: 'Acme',
+      vacancy_title: 'Account Executive',
+      vacancy_url: 'https://acme.teamtailor.com/jobs/7793185-account-executive',
+      careers_url: 'https://acme.teamtailor.com',
+      vacancy_description: 'Own B2B sales for US enterprise accounts.',
+      country_code: 'us',
+    });
+    expect(vacancy?.published_at).toBe(new Date('2026-06-04T08:33:05+02:00').toISOString());
+  });
+
   it('normalizes Workday vacancies from CXS job postings', () => {
     const vacancy = normalizeAtsJobToEngVacancy(
       'workday',
