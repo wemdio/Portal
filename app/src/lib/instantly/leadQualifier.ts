@@ -28,6 +28,7 @@ export async function fetchThreadContext(
   campaignId: string,
   leadEmail: string,
   threadId?: string | null,
+  accountId?: string,
 ): Promise<ThreadContext | null> {
   let allEmails: Email[] = [];
 
@@ -38,7 +39,7 @@ export async function fetchThreadContext(
       campaign_id: campaignId,
       search: leadEmail,
       limit: 100,
-    });
+    }, { accountId });
     allEmails = res.items ?? [];
   } catch {
     // fall through to campaign-wide fetch
@@ -50,7 +51,7 @@ export async function fetchThreadContext(
       const response = await instantly.listEmails({
         campaign_id: campaignId,
         limit: 100,
-      });
+      }, { accountId });
       allEmails = response.items ?? [];
     } catch {
       return null;
@@ -576,12 +577,13 @@ export async function qualifyReply(
   leadEmail: string,
   threadId: string | null | undefined,
   aiOptions: ClassifyOptions,
+  accountId?: string,
 ): Promise<
   QualificationResult & {
     threadContext: ThreadContext | null;
   }
 > {
-  const ctx = await fetchThreadContext(campaignId, leadEmail, threadId);
+  const ctx = await fetchThreadContext(campaignId, leadEmail, threadId, accountId);
   if (!ctx) {
     return {
       isLead: false,

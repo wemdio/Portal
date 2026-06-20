@@ -41,6 +41,8 @@ jest.mock('@/lib/instantly/leadQualifier', () => ({
     if (typeof body === 'string') return body;
     return body.text ?? body.html ?? '';
   },
+  isAutoReplyOrUnsubscribe: () => false,
+  isJunkReply: () => false,
 }));
 
 jest.mock('@/lib/instantly/leadTelegramAlerts', () => ({
@@ -166,6 +168,9 @@ describe('pollAndQualifyReplies', () => {
         email_type: 'received',
         limit: expect.any(Number),
       }),
+      // Replies are now fetched per Instantly account; the project-linked
+      // ('под ключ') universe lives on the 'main' account.
+      expect.objectContaining({ accountId: 'main' }),
     );
     expect(listEmails.mock.calls[0][0]).not.toHaveProperty('campaign_id');
     expect(qualifyReply).toHaveBeenCalledTimes(1);
