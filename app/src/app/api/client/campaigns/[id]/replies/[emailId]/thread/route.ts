@@ -43,6 +43,22 @@ export async function GET(
       return jsonError('Письмо не относится к кампании', 404);
     }
 
+    // Помечаем прочитанным СРАЗУ после проверки доступа — ДО загрузки треда. Если
+    // listEmails ниже упадёт (Instantly затупил → роут отдаст 502), пометка
+    // прочтения всё равно сохранится, иначе открытая переписка «отпрочитывалась» бы
+    // на перезагрузке и расходилась с оптимистичным is_unread=false в UI. Метим
+    // ТОЛЬКО это письмо и ТОЛЬКО для этого клиента (НЕ markThreadAsRead в Instantly,
+    // иначе соседние ответы лида гасли бы без ведома клиента). См. clientEmailReads.
+    try {
+      await recordEmailRead(userId, emailId);
+    } catch (err) {
+      await logError('client.campaign.replies.thread.record_read_failed', err, {
+        campaignId,
+        emailId,
+        userId,
+      });
+    }
+
     const threadId = original.thread_id ?? null;
     const leadEmail = original.lead ?? null;
 
@@ -76,19 +92,6 @@ export async function GET(
       const tb = b.timestamp ? Date.parse(b.timestamp) : 0;
       return tb - ta;
     });
-
-    // Помечаем прочитанным ТОЛЬКО это письмо и ТОЛЬКО для этого клиента (наша
-    // таблица), а НЕ весь тред в Instantly — иначе соседние ответы лида гасли бы
-    // «непрочитано» без ведома клиента. См. clientEmailReads.
-    try {
-      await recordEmailRead(userId, emailId);
-    } catch (err) {
-      await logError('client.campaign.replies.thread.record_read_failed', err, {
-        campaignId,
-        emailId,
-        userId,
-      });
-    }
 
     const payload: ClientReplyThread = {
       thread_id: threadId,

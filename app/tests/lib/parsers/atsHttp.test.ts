@@ -39,4 +39,48 @@ describe('ATS HTTP helper', () => {
 
     await expect(fetchTextWithFallback('https://example.com/slow', { fetchImpl, curlImpl })).resolves.toBe('ok from curl');
   });
+
+  it('sends POST body through fetch when the response is successful', async () => {
+    const curlImpl = jest.fn();
+    const body = JSON.stringify({ appliedFacets: {}, limit: 100, offset: 0, searchText: 'sales' });
+    const fetchImpl = jest.fn().mockResolvedValue({
+      ok: true,
+      text: async () => '{"total":1,"jobPostings":[{"title":"SDR"}]}',
+    });
+
+    await expect(fetchJsonWithFallback('https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/ext/jobs', {
+      method: 'POST',
+      body,
+      headers: { 'Content-Type': 'application/json' },
+      fetchImpl,
+      curlImpl,
+    })).resolves.toEqual({ total: 1, jobPostings: [{ title: 'SDR' }] });
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/ext/jobs',
+      expect.objectContaining({ method: 'POST', body }),
+    );
+    expect(curlImpl).not.toHaveBeenCalled();
+  });
+
+  it('falls back to curl with the POST body when fetch is blocked (Workday WAF)', async () => {
+    const curlImpl = jest.fn().mockResolvedValue('{"total":1,"jobPostings":[{"title":"Account Executive"}]}');
+    const fetchImpl = jest.fn().mockRejectedValue(new Error('fetch failed'));
+    const body = JSON.stringify({ appliedFacets: {}, limit: 100, offset: 0, searchText: 'account' });
+
+    await expect(fetchJsonWithFallback('https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/ext/jobs', {
+      method: 'POST',
+      body,
+      headers: { 'Content-Type': 'application/json' },
+      fetchImpl,
+      curlImpl,
+    })).resolves.toEqual({ total: 1, jobPostings: [{ title: 'Account Executive' }] });
+
+    expect(curlImpl).toHaveBeenCalledWith(
+      'https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/ext/jobs',
+      expect.objectContaining({ Accept: 'application/json', 'Content-Type': 'application/json' }),
+      expect.any(Number),
+      expect.objectContaining({ method: 'POST', body }),
+    );
+  });
 });

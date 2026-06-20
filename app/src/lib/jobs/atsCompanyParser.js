@@ -21,7 +21,7 @@ const MARKETING_RE =
 const B2B_SALES_RE =
   /\b(b2b|business development|account executive|\bae\b|account director|account manager|sales development|revenue development|business development representative|revenue development representative|sales manager|sales representative|sales consultant|sales lead|sales executive|enterprise sales|commercial account|commercial account director|commercial account executive|partnerships?|channel sales|partner sales|partner manager|commercial manager|client partner|sdr|bdr|rdr|go[-\s]?to[-\s]?market|gtm)\b/i;
 
-const SUPPORTED_ATS = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday'];
+const SUPPORTED_ATS = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday', 'smartrecruiters', 'teamtailor'];
 
 const CSV_HEADERS = [
   'company',
@@ -99,6 +99,8 @@ function careersUrl(ats, slug, sourceUrl = '') {
   if (ats === 'bamboohr') return `https://${slug}.bamboohr.com/careers`;
   if (ats === 'recruitee') return `https://${slug}.recruitee.com`;
   if (ats === 'breezy') return `https://${slug}.breezy.hr`;
+  if (ats === 'smartrecruiters') return `https://careers.smartrecruiters.com/${slug}`;
+  if (ats === 'teamtailor') return `https://${slug}.teamtailor.com`;
   if (ats === 'workday') {
     const sourceCareersUrl = normalizeWorkdayCareersUrl(sourceUrl);
     if (sourceCareersUrl) return sourceCareersUrl;
@@ -108,7 +110,7 @@ function careersUrl(ats, slug, sourceUrl = '') {
   return '';
 }
 
-const ATS_BASE_HOSTS = ['greenhouse.io', 'lever.co', 'ashbyhq.com', 'workable.com', 'bamboohr.com', 'recruitee.com', 'breezy.hr', 'myworkdayjobs.com'];
+const ATS_BASE_HOSTS = ['greenhouse.io', 'lever.co', 'ashbyhq.com', 'workable.com', 'bamboohr.com', 'recruitee.com', 'breezy.hr', 'myworkdayjobs.com', 'smartrecruiters.com', 'teamtailor.com'];
 // Multi-level public suffixes we care about, so registrableDomain keeps 3 labels.
 const TWO_LEVEL_TLDS = new Set([
   'co.uk', 'com.au', 'co.jp', 'com.br', 'co.nz', 'com.sg', 'co.in', 'com.mx', 'co.za',
@@ -166,6 +168,8 @@ function postingsUrl(ats, slug, sourceUrl = '') {
   if (ats === 'bamboohr') return `https://${slug}.bamboohr.com/careers/list`;
   if (ats === 'recruitee') return `https://${slug}.recruitee.com/api/offers`;
   if (ats === 'breezy') return `https://${slug}.breezy.hr/json`;
+  if (ats === 'smartrecruiters') return `https://api.smartrecruiters.com/v1/companies/${safe}/postings`;
+  if (ats === 'teamtailor') return `https://${slug}.teamtailor.com/jobs.json`;
   if (ats === 'workday') {
     const parts = workdayParts(slug, sourceUrl);
     if (parts.host && parts.tenant && parts.site) {
@@ -182,6 +186,8 @@ function extractJobs(ats, payload) {
   if (ats === 'workable') return Array.isArray(payload?.jobs) ? payload.jobs : [];
   if (ats === 'bamboohr') return Array.isArray(payload?.result) ? payload.result : [];
   if (ats === 'recruitee') return Array.isArray(payload?.offers) ? payload.offers : [];
+  if (ats === 'smartrecruiters') return Array.isArray(payload?.content) ? payload.content : [];
+  if (ats === 'teamtailor') return Array.isArray(payload?.items) ? payload.items : [];
   return Array.isArray(payload?.jobs) ? payload.jobs : [];
 }
 
@@ -320,6 +326,45 @@ function normalizeBreezyJob(job, { slug, companyName } = {}) {
   });
 }
 
+function normalizeSmartrecruitersJob(job, { slug, companyName } = {}) {
+  const location = job?.location || {};
+  // fullLocation carries the full country name ("Chicago, IL, United States"),
+  // which feeds country inference cleanly; fall back to city/region/country code.
+  const locationText = location.fullLocation || joinLocationParts([location.city, location.region, location.country]);
+  const identifier = job?.company?.identifier || slug;
+  const id = normalizeWhitespace(job?.id);
+  return baseJob({
+    ats: 'smartrecruiters',
+    slug,
+    company: job?.company?.name || companyName,
+    title: job?.name,
+    location: locationText,
+    country: '',
+    // `ref` is the API endpoint, never a public link — prefer the public posting
+    // URL (detail payloads) or construct it from the company identifier + id.
+    url: job?.postingUrl || job?.applyUrl || (identifier && id ? `https://jobs.smartrecruiters.com/${identifier}/${id}` : ''),
+    posted_at: job?.releasedDate || job?.actualPostedDate || job?.createdOn,
+  });
+}
+
+function normalizeTeamtailorJob(job, { slug, companyName } = {}) {
+  // jobs.json items embed a schema.org JobPosting under `_jobposting`, the only
+  // place with structured location (jobLocation[].address.addressCountry).
+  const posting = job?._jobposting || {};
+  const address = (Array.isArray(posting.jobLocation) ? posting.jobLocation[0]?.address : null) || {};
+  const country = address.addressCountry || '';
+  return baseJob({
+    ats: 'teamtailor',
+    slug,
+    company: posting?.hiringOrganization?.name || job?.company?.name || companyName,
+    title: job?.title || posting?.title,
+    location: joinLocationParts([address.addressLocality, address.addressRegion, country]),
+    country,
+    url: job?.url,
+    posted_at: job?.date_published || posting?.datePosted,
+  });
+}
+
 function workdayPostedAt(value) {
   const raw = normalizeWhitespace(value).toLowerCase();
   if (!raw) return '';
@@ -379,6 +424,8 @@ function normalizeJob(ats, job, ctx = {}) {
   if (ats === 'bamboohr') return normalizeBamboohrJob(job, ctx);
   if (ats === 'recruitee') return normalizeRecruiteeJob(job, ctx);
   if (ats === 'breezy') return normalizeBreezyJob(job, ctx);
+  if (ats === 'smartrecruiters') return normalizeSmartrecruitersJob(job, ctx);
+  if (ats === 'teamtailor') return normalizeTeamtailorJob(job, ctx);
   if (ats === 'workday') return normalizeWorkdayJob(job, ctx);
   return null;
 }
@@ -412,6 +459,25 @@ function parseCompanyCsv(text) {
     }
     if (!slug) continue;
     out.push({ name, slug, url });
+  }
+  return out;
+}
+
+// Merge per-ATS company-token lists from several sources (e.g. multiple public
+// datasets) into one, deduping by slug case-insensitively. First occurrence wins
+// and order is preserved, so the primary list ranks ahead of supplementary ones.
+// Tokens without a slug are dropped (they can't be fetched). Tolerates
+// null/undefined lists so one failing source doesn't break the merge.
+function mergeCompanyTokens(lists) {
+  const seen = new Set();
+  const out = [];
+  for (const list of lists || []) {
+    for (const token of list || []) {
+      const key = String(token?.slug ?? '').trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(token);
+    }
   }
   return out;
 }
@@ -496,6 +562,7 @@ module.exports = {
   roleTagsForTitle,
   exportCompanyLeadsToCsv,
   extractJobs,
+  mergeCompanyTokens,
   normalizeAshbyJob,
   normalizeBamboohrJob,
   normalizeBreezyJob,
@@ -503,6 +570,8 @@ module.exports = {
   normalizeJob,
   normalizeLeverJob,
   normalizeRecruiteeJob,
+  normalizeSmartrecruitersJob,
+  normalizeTeamtailorJob,
   normalizeWorkdayJob,
   normalizeWorkableJob,
   parseCompanyCsv,

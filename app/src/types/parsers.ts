@@ -208,7 +208,7 @@ export interface AtsCompanyRow {
 
 // ── ENG hiring parser (first-party ATS vacancies) ──
 
-export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee' | 'breezy' | 'workday';
+export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee' | 'breezy' | 'workday' | 'smartrecruiters' | 'teamtailor';
 
 export interface EngHiringSearchConfig {
   /** Role keywords, comma-separated. Matched against vacancy title. */

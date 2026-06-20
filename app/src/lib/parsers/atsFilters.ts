@@ -16,6 +16,16 @@ const locationToken = (value: string) => `${TOKEN_START}(?:${value})${TOKEN_END}
 
 const US_STATE_CODES = String.raw`(?:al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy)`;
 const US_STATE_NAMES = String.raw`(?:alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia)`;
+// Curated, US-dominant major cities so bare "San Francisco" / "Austin" locations
+// (common on Greenhouse/Lever, which often omit state & country) still resolve to
+// the US. Deliberately EXCLUDES cities with well-known foreign namesakes — london,
+// birmingham, manchester, cambridge, richmond, boston (Lincolnshire UK), portland
+// (Victoria AU / Dorset UK), san jose (Costa Rica), phoenix (Mauritius), durham
+// (England), columbus, washington — because country inference checks US first and
+// a bare-city match would otherwise mis-stamp those non-US postings. They must
+// qualify with a state/country to count: precision over recall.
+const US_MAJOR_CITIES = String.raw`(?:san francisco|los angeles|new york city|nyc|brooklyn|manhattan|silicon valley|bay area|seattle|austin|denver|atlanta|chicago|philadelphia|dallas|houston|san diego|las vegas|miami|minneapolis|pittsburgh|salt lake city|nashville|raleigh|charlotte|tampa|orlando|sacramento|san antonio|indianapolis|kansas city|st\. louis|saint louis|cincinnati|cleveland|detroit|milwaukee)`;
+
 const CA_PROVINCES = String.raw`(?:alberta|british columbia|manitoba|new brunswick|newfoundland and labrador|nova scotia|ontario|prince edward island|quebec|saskatchewan|yukon|northwest territories|nunavut|ab|bc|mb|nb|nl|ns|nt|nu|on|pe|qc|sk|yt)`;
 const AU_STATES = String.raw`(?:new south wales|queensland|south australia|tasmania|victoria|western australia|australian capital territory|northern territory|nsw|qld|sa|tas|vic|wa|act|nt)`;
 
@@ -48,6 +58,7 @@ const COUNTRY_MATCH_OVERRIDES: Record<string, string> = {
     locationToken(String.raw`u\.?s\.?a?\.?`),
     `,\\s*${US_STATE_CODES}\\b`,
     `\\b${US_STATE_NAMES}\\b`,
+    `\\b${US_MAJOR_CITIES}\\b`,
   ].join('|'),
   gb: [
     'united kingdom',
