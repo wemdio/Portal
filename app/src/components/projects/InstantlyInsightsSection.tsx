@@ -22,6 +22,8 @@ type Finding = { grade: 'A' | 'B'; campaign: string; text: string };
 type DroppedLead = { email: string; bucket: 'interested' | 'referral'; ageDays: number; campaign: string };
 type SegmentRoiRow = { segment: string; sent: number; ratePerSent: number; ciLow: number; ciHigh: number };
 type SegmentRoi = { recommendation: string; best: { segment: string; rate: number }; worst: { segment: string; rate: number }; all: SegmentRoiRow[] };
+type CopyFinding = { text: string; affected: number };
+type CopyInsights = { campaignsAnalyzed: number; defaults: CopyFinding[]; hypotheses: CopyFinding[] };
 type Insights = {
   generatedAt: string;
   campaigns: CampaignMetric[];
@@ -30,6 +32,7 @@ type Insights = {
   findings: Finding[];
   droppedLeads: { interested: number; referral: number; items: DroppedLead[] };
   segmentRoi: SegmentRoi | null;
+  copyInsights: CopyInsights | null;
   notes: string[];
 };
 
@@ -237,6 +240,49 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
                 ))}
               </ul>
               <p className="mt-1.5 text-[10px] text-emerald-500/80">лидов на отправку по вашим прошлым спискам · корреляция, не A/B · не переносится на других клиентов</p>
+            </div>
+          )}
+
+          {/* copy insights — data-backed defaults + A/B hypotheses on the first email */}
+          {data.copyInsights && (data.copyInsights.defaults.length > 0 || data.copyInsights.hypotheses.length > 0) && (
+            <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-3">
+              <p className="text-sm font-semibold text-indigo-800">✍️ Копи-инсайты по первому письму</p>
+              <p className="mt-0.5 text-[10px] text-indigo-500/80">
+                разобрано {data.copyInsights.campaignsAnalyzed} кампаний проекта · сверка с дата-беками по всему датасету
+              </p>
+              {data.copyInsights.defaults.length > 0 && (
+                <div className="mt-2 space-y-1.5">
+                  {data.copyInsights.defaults.map((c, i) => (
+                    <div key={i} className="flex gap-2 text-xs">
+                      <span
+                        className="mt-0.5 shrink-0 rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-semibold text-indigo-700"
+                        title="сигнал держится при контроле на сегмент — можно принять по умолчанию"
+                      >
+                        дефолт
+                      </span>
+                      <span className="text-gray-700">{c.text}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {data.copyInsights.hypotheses.length > 0 && (
+                <div className="mt-2 space-y-1.5">
+                  {data.copyInsights.hypotheses.map((c, i) => (
+                    <div key={i} className="flex gap-2 text-xs">
+                      <span
+                        className="mt-0.5 shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700"
+                        title="кросс-сегментный сигнал, внутри сегмента нестабилен — проверять within-campaign A/B"
+                      >
+                        гипотеза · A/B
+                      </span>
+                      <span className="text-gray-700">{c.text}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="mt-1.5 text-[10px] text-indigo-500/80">
+                длина и опенер держатся при контроле на сегмент (дефолт); остальное — кросс-сегментный сигнал для A/B. Причинно только within-campaign A/B.
+              </p>
             </div>
           )}
 

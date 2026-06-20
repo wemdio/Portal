@@ -80,6 +80,9 @@ export type SegmentRoi = {
   all: SegmentRoiRow[];
 };
 
+export type CopyFinding = { text: string; affected: number };
+export type CopyInsights = { campaignsAnalyzed: number; defaults: CopyFinding[]; hypotheses: CopyFinding[] };
+
 export type ProjectInsights = {
   generatedAt: string;
   campaigns: CampaignMetric[];
@@ -90,6 +93,8 @@ export type ProjectInsights = {
   droppedLeads: { interested: number; referral: number; items: DroppedLead[] };
   // I) сегмент-ROI внутри клиента (какую нишу собирать дальше); null = гейт не прошёл
   segmentRoi: SegmentRoi | null;
+  // копи-инсайты: дефолты по данным (длина, опенер) + гипотезы для A/B; null = нет шагов
+  copyInsights: CopyInsights | null;
   notes: string[];
 };
 
@@ -106,7 +111,7 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
   const empty: ProjectInsights = {
     generatedAt: new Date().toISOString(),
     campaigns: [], totals: { repliers: 0, positive: 0, labeled: 0, labelCoverage: null },
-    weekly: [], findings: [], droppedLeads: { interested: 0, referral: 0, items: [] }, segmentRoi: null, notes: [],
+    weekly: [], findings: [], droppedLeads: { interested: 0, referral: 0, items: [] }, segmentRoi: null, copyInsights: null, notes: [],
   };
   if (ids.length === 0) return empty;
 
@@ -355,6 +360,50 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
     console.error('[projectInsights] segment-roi skipped:', (e as Error).message);
   }
 
+  // 4c) copy insights — objective copy checks (audit 2026-06-19): 2 data-backed
+  // defaults (length<40w, greeting+early-question opener) + A/B hypotheses (hard CTA,
+  // money-opener in construction). Detection over step-0 template; never causal.
+  let copyInsights: CopyInsights | null = null;
+  try {
+    const cr = await datasetQuery<{
+      segment: string | null; words: number | null; has_greeting: boolean; early_q: boolean;
+      hard_cta: boolean; money: boolean;
+    }>(
+      String.raw`
+      WITH s AS (
+        SELECT campaign_id, regexp_replace(coalesce(body_text,''), '<[^>]+>', ' ', 'g') AS b
+        FROM raw_campaign_steps WHERE step_n=0 AND variant_n=0 AND campaign_id = ANY($1)
+      )
+      SELECT
+        sg.segment,
+        array_length(regexp_split_to_array(trim(regexp_replace(regexp_replace(s.b, '\{\{[^}]*\}\}', ' ', 'g'), '\s+', ' ', 'g')), ' '), 1) AS words,
+        (s.b ~* '^\s*(здравствуйте|добрый день|добрый вечер|доброе утро|приветствую|привет)') AS has_greeting,
+        (position('?' in left(s.b, 260)) > 0) AS early_q,
+        (s.b ~* 'созвон|15.{0,4}минут|30.{0,4}минут|встреч|zoom|зум|google meet|демонстрац|презентац|на звонке|удобн.{0,10}время') AS hard_cta,
+        (s.b ~* 'выручк|оборот|сэконом|[0-9]+\s?(млн|млрд|тыс)|[0-9]+\s?(рубл|руб|₽)') AS money
+      FROM s LEFT JOIN dim_campaign_segment sg ON sg.campaign_id = s.campaign_id
+      `,
+      [ids],
+    );
+    if (cr.length > 0) {
+      const N = cr.length;
+      const longBody = cr.filter((r) => r.words != null && Number(r.words) >= 40).length;
+      const veryLong = cr.filter((r) => r.words != null && Number(r.words) > 110).length;
+      const noOpener = cr.filter((r) => !(r.has_greeting && r.early_q)).length;
+      const hardCta = cr.filter((r) => r.hard_cta && r.segment !== 'it_software_saas').length;
+      const moneyConstr = cr.filter((r) => r.money && r.segment === 'construction_realestate').length;
+      const defaults: CopyFinding[] = [];
+      const hypotheses: CopyFinding[] = [];
+      if (longBody > 0) defaults.push({ affected: longBody, text: `${longBody} из ${N}: первое письмо ≥40 слов${veryLong ? ` (${veryLong} — длиннее 110)` : ''}. Короткие <40 слов дают ~24% лидов против ~18% (+5.6 пп, держится по сегментам). Подрезать первое письмо к <40 слов; эффект подтвердить A/B.` });
+      if (noOpener > 0) defaults.push({ affected: noOpener, text: `${noOpener} из ${N}: нет связки «приветствие + короткий вопрос» в первых 1-2 предложениях. Такой опенер ~23% против ~18% (+5.6 пп). Открывать приветствием и вопросом.` });
+      if (hardCta > 0) hypotheses.push({ affected: hardCta, text: `${hardCta} из ${N}: просьба о звонке/демо уже в ПЕРВОМ письме — в большинстве ниш связана с меньшим lead rate. Перенести встречу в фоллоу-ап, проверить A/B. (Исключение — IT/SaaS, там наоборот.)` });
+      if (moneyConstr > 0) hypotheses.push({ affected: moneyConstr, text: `${moneyConstr}: денежный заход (выручка/N млн/руб) в начале первого письма — в недвижимости/стройке связан с заметно меньшим lead rate (~9% против ~21%). A/B: заменить на нейтральный вопрос.` });
+      if (defaults.length || hypotheses.length) copyInsights = { campaignsAnalyzed: N, defaults, hypotheses };
+    }
+  } catch (e) {
+    console.error('[projectInsights] copy-insights skipped:', (e as Error).message);
+  }
+
   // 5) totals + notes
   const totals = campaigns.reduce(
     (acc, c) => ({ repliers: acc.repliers + c.repliers, positive: acc.positive + c.positive, labeled: acc.labeled + c.labeled }),
@@ -373,6 +422,7 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
     findings,
     droppedLeads: dropped,
     segmentRoi,
+    copyInsights,
     notes,
   };
 }
