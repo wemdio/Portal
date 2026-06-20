@@ -539,281 +539,269 @@ function TraceCard({ trace }: { trace: TraceGroup }) {
 /*  Real-time active tasks counter                                            */
 /* -------------------------------------------------------------------------- */
 
-type RealtimeSpanPayload = {
-  id: string;
-  parent_span_id: string | null;
-  status: string;
+/* ──────────────────────────────────────────────────────────────────────────
+ *  ActiveJobsBuckets — агрегированная панель «Активные задачи» как у
+ *  health-check бота, только с разделением на колонки спец/клиент и
+ *  блоком ошибок за 24ч (с drill-down).
+ *
+ *  Источник: /api/admin/active-jobs (см. backend), опрашивающий те же
+ *  16 job-таблиц что и services/health-check/main.py:_JOB_TABLES.
+ *  Поллинг каждые 15 сек — нагрузка низкая (один admin endpoint),
+ *  realtime не нужен (счётчики не критичны до секунды).
+ *  ────────────────────────────────────────────────────────────────────── */
+
+type ActiveJobsToolEntry = {
+  table: string;
+  label: string;
+  total: number;
+  breakdown: Record<string, number>;
 };
 
-type ActiveTask = {
+type ActiveJobsFailedItem = {
   id: string;
-  name: string;
-  message: string | null;
-  started_at: string;
-  input: Record<string, unknown>;
   user_id: string | null;
+  user_name: string | null;
+  error_message: string | null;
+  created_at: string;
 };
 
-const TASK_NAME_RU: Record<string, string> = {
-  'tg-outreach.campaign.run': 'TG-рассылка',
-  'database.brief_scoring': 'Скоринг по брифу',
-  'database.email_validation': 'Валидация email-адресов',
-  'database.email_scraping': 'Поиск email-адресов',
-  'database.website_enrichment': 'Обогащение по сайтам',
-  'database.site_availability': 'Проверка доступности сайтов',
-  'yandexmaps.collect_links': 'Яндекс.Карты: сбор ссылок',
-  'yandexmaps.parse_orgs': 'Яндекс.Карты: парсинг организаций',
-  'search.execute': 'Поисковый парсинг',
-  'hh.execute': 'Парсинг HeadHunter',
-  'audio_transcribe.process': 'Расшифровка аудио/видео',
-  'email_sequence.generate_chain': 'Генерация цепочки писем',
-  'email_sequence.analyze_segment': 'Анализ сегмента',
-  'email_sequence.generate_segments': 'Генерация сегментов',
-  'tg-parser.job.run': 'TG Парсер: сбор контактов',
+type ActiveJobsFailedEntry = {
+  table: string;
+  label: string;
+  count: number;
+  items: ActiveJobsFailedItem[];
 };
 
-function resolveTaskDisplayName(task: ActiveTask): string {
-  if (task.message) return task.message;
-  if (TASK_NAME_RU[task.name]) return TASK_NAME_RU[task.name];
-  return task.name;
+type ActiveJobsResponse = {
+  generated_at: string;
+  active: {
+    specialists: ActiveJobsToolEntry[];
+    clients: ActiveJobsToolEntry[];
+  };
+  errors_24h: {
+    specialists: ActiveJobsFailedEntry[];
+    clients: ActiveJobsFailedEntry[];
+  };
+  totals: {
+    active_specialists: number;
+    active_clients: number;
+    errors_specialists: number;
+    errors_clients: number;
+  };
+};
+
+const STATUS_LABEL_RU: Record<string, string> = {
+  pending: 'в очереди',
+  running: 'в работе',
+  processing: 'в работе',
+  planning: 'планируется',
+  parsing: 'парсится',
+};
+
+function formatBreakdown(breakdown: Record<string, number>): string {
+  return Object.entries(breakdown)
+    .sort(([, a], [, b]) => b - a)
+    .map(([status, count]) => `${count} ${STATUS_LABEL_RU[status] ?? status}`)
+    .join(', ');
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Task source resolution                                                    */
-/* -------------------------------------------------------------------------- */
-
-type TaskSource = { label: string; badgeClass: string };
-
-const TOOL_DETAIL_RU: Record<string, string> = {
-  'tg-transcribe': 'TG Расшифровка',
-  'tg-parser': 'TG Парсер',
-  'tg-outreach': 'TG Аутрич',
-  'li-outreach': 'LinkedIn Аутрич',
-  'cis-leads': 'CIS Лиды',
-  'email-sequence': 'Email-цепочки',
-  'audio-transcribe': 'Расшифровка',
-  'habr-career': 'Хабр Карьера',
-  'rdp': 'RDP',
-  'dfyb': 'DFYB',
-  'auto-report': 'Авто-отчёт',
-};
-
-function resolveTaskSource(name: string): TaskSource {
-  if (name.startsWith('tools.')) {
-    const tool = name.split('.')[1] ?? '';
-    const isWebhook = name.includes('.webhook.');
-    const detail = TOOL_DETAIL_RU[tool] ?? tool;
-    return isWebhook
-      ? { label: `Вебхук: ${detail}`, badgeClass: 'bg-violet-100 text-violet-700' }
-      : { label: `API: ${detail}`, badgeClass: 'bg-indigo-100 text-indigo-700' };
+function formatErrorTimestamp(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')} ` +
+      `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  } catch {
+    return iso;
   }
-  if (name.startsWith('tg-outreach.')) return { label: 'Воркер: TG Аутрич', badgeClass: 'bg-green-100 text-green-700' };
-  if (name.startsWith('hh.')) return { label: 'Парсер: HeadHunter', badgeClass: 'bg-orange-100 text-orange-700' };
-  if (name.startsWith('yandexmaps.')) return { label: 'Парсер: Яндекс.Карты', badgeClass: 'bg-orange-100 text-orange-700' };
-  if (name.startsWith('search.')) return { label: 'Парсер: Поисковый', badgeClass: 'bg-orange-100 text-orange-700' };
-  if (name.startsWith('tg-parser.')) return { label: 'Воркер: TG Парсер', badgeClass: 'bg-green-100 text-green-700' };
-  if (name === 'database.brief_scoring') return { label: 'Воркер: Скоринг', badgeClass: 'bg-teal-100 text-teal-700' };
-  if (name === 'database.email_validation') return { label: 'Воркер: Email-валидация', badgeClass: 'bg-teal-100 text-teal-700' };
-  if (name === 'database.email_scraping') return { label: 'Воркер: Email-поиск', badgeClass: 'bg-teal-100 text-teal-700' };
-  if (name === 'database.website_enrichment') return { label: 'Воркер: Обогащение сайтов', badgeClass: 'bg-teal-100 text-teal-700' };
-  if (name === 'database.site_availability') return { label: 'Воркер: Проверка сайтов', badgeClass: 'bg-teal-100 text-teal-700' };
-  if (name.startsWith('audio_transcribe.')) return { label: 'API: Расшифровка', badgeClass: 'bg-indigo-100 text-indigo-700' };
-  if (name.startsWith('email_sequence.')) return { label: 'API: Email-цепочки', badgeClass: 'bg-indigo-100 text-indigo-700' };
-  return { label: name.split('.')[0], badgeClass: 'bg-gray-100 text-gray-600' };
 }
 
-function useActiveTasks() {
-  const [tasks, setTasks] = useState<Map<string, ActiveTask>>(new Map());
-  const [profiles, setProfiles] = useState<Map<string, string>>(new Map());
-  const [initialised, setInitialised] = useState(false);
-  const mountedRef = useRef(true);
-  const fetchedProfileIdsRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    mountedRef.current = true;
-
-    async function fetchProfilesForIds(userIds: string[]) {
-      const toFetch = userIds.filter(id => id && !fetchedProfileIdsRef.current.has(id));
-      if (toFetch.length === 0) return;
-      for (const id of toFetch) fetchedProfileIdsRef.current.add(id);
-      const { data } = await supabase.from('profiles').select('id, full_name').in('id', toFetch);
-      if (!data || !mountedRef.current) return;
-      setProfiles(prev => {
-        const next = new Map(prev);
-        for (const p of data) if (p.full_name) next.set(p.id, p.full_name);
-        return next;
-      });
-    }
-
-    async function fetchInitial() {
-      const { data } = await supabase
-        .from('trace_spans')
-        .select('id, name, message, started_at, input, user_id')
-        .is('parent_span_id', null)
-        .eq('status', 'running')
-        .order('started_at', { ascending: false });
-
-      if (mountedRef.current) {
-        const map = new Map<string, ActiveTask>();
-        const userIds: string[] = [];
-        for (const r of data ?? []) {
-          map.set(r.id, {
-            id: r.id,
-            name: r.name,
-            message: r.message,
-            started_at: r.started_at,
-            input: r.input ?? {},
-            user_id: r.user_id ?? null,
-          });
-          if (r.user_id) userIds.push(r.user_id);
-        }
-        setTasks(map);
-        setInitialised(true);
-        void fetchProfilesForIds(userIds);
-      }
-    }
-    void fetchInitial();
-
-    const channel = supabase
-      .channel('active_tasks_counter')
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'trace_spans' },
-        (payload) => {
-          const row = payload.new as RealtimeSpanPayload & {
-            name?: string; message?: string | null; started_at?: string;
-            input?: Record<string, unknown>; user_id?: string | null;
-          };
-          if (row.parent_span_id !== null) return;
-          if (row.status === 'running') {
-            setTasks((prev) => {
-              const next = new Map(prev);
-              next.set(row.id, {
-                id: row.id,
-                name: row.name ?? row.id,
-                message: row.message ?? null,
-                started_at: row.started_at ?? new Date().toISOString(),
-                input: row.input ?? {},
-                user_id: row.user_id ?? null,
-              });
-              return next;
-            });
-            if (row.user_id) void fetchProfilesForIds([row.user_id]);
-          }
-        },
-      )
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'trace_spans' },
-        (payload) => {
-          const row = payload.new as RealtimeSpanPayload & {
-            name?: string; message?: string | null; started_at?: string;
-            input?: Record<string, unknown>; user_id?: string | null;
-          };
-          if (row.parent_span_id !== null) return;
-          setTasks((prev) => {
-            const next = new Map(prev);
-            if (row.status === 'running') {
-              next.set(row.id, {
-                id: row.id,
-                name: row.name ?? row.id,
-                message: row.message ?? null,
-                started_at: row.started_at ?? new Date().toISOString(),
-                input: row.input ?? {},
-                user_id: row.user_id ?? null,
-              });
-            } else {
-              next.delete(row.id);
-            }
-            return next;
-          });
-          if (row.user_id) void fetchProfilesForIds([row.user_id]);
-        },
-      )
-      .subscribe();
-
-    return () => {
-      mountedRef.current = false;
-      void supabase.removeChannel(channel);
-    };
-  }, []);
-
-  const sorted = useMemo(
-    () => Array.from(tasks.values()).sort((a, b) => b.started_at.localeCompare(a.started_at)),
-    [tasks],
-  );
-
-  return { tasks: sorted, count: tasks.size, initialised, profiles };
-}
-
-function ActiveTasksBadge() {
-  const { tasks, count, initialised, profiles } = useActiveTasks();
-
+function ActiveJobsColumn({
+  title,
+  active,
+  errors,
+  expanded,
+  toggleExpanded,
+  bucketKey,
+}: {
+  title: string;
+  active: ActiveJobsToolEntry[];
+  errors: ActiveJobsFailedEntry[];
+  expanded: Set<string>;
+  toggleExpanded: (key: string) => void;
+  bucketKey: string;
+}) {
+  const totalActive = active.reduce((s, e) => s + e.total, 0);
+  const totalErrors = errors.reduce((s, e) => s + e.count, 0);
   return (
-    <div className="mb-4 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-      <div className="flex items-center gap-3 px-5 py-3.5">
-        <div className="flex items-center gap-2.5">
-          {count > 0 ? (
-            <span className="relative flex h-3 w-3">
+    <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50/50">
+        <div className="flex items-center gap-2">
+          <span className={`relative flex h-2.5 w-2.5 ${totalActive > 0 ? '' : 'opacity-40'}`}>
+            {totalActive > 0 && (
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-              <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500" />
-            </span>
-          ) : (
-            <span className="h-3 w-3 rounded-full bg-gray-300" />
-          )}
-          <span className="text-sm font-medium text-gray-600">Активные задачи</span>
-        </div>
-
-        {!initialised ? (
-          <div className="h-8 w-10 animate-pulse rounded bg-gray-100" />
-        ) : (
-          <span
-            className={`text-2xl font-bold tabular-nums transition-all duration-300 ${
-              count > 0 ? 'text-blue-600' : 'text-gray-400'
-            }`}
-          >
-            {count}
+            )}
+            <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${totalActive > 0 ? 'bg-blue-500' : 'bg-gray-300'}`} />
           </span>
-        )}
+          <h4 className="text-sm font-semibold text-gray-800">{title}</h4>
+        </div>
+        <div className="flex items-center gap-3 text-xs">
+          <span className="text-gray-500">
+            активных: <span className={`font-semibold tabular-nums ${totalActive > 0 ? 'text-blue-600' : 'text-gray-400'}`}>{totalActive}</span>
+          </span>
+          <span className="text-gray-500">
+            ошибок 24ч: <span className={`font-semibold tabular-nums ${totalErrors > 0 ? 'text-red-600' : 'text-gray-400'}`}>{totalErrors}</span>
+          </span>
+        </div>
       </div>
 
-      {initialised && tasks.length > 0 && (
-        <div className="border-t border-gray-100 divide-y divide-gray-100">
-          {tasks.map((task) => {
-            const source = resolveTaskSource(task.name);
-            const userName = task.user_id ? profiles.get(task.user_id) : null;
-            return (
-              <div key={task.id} className="flex items-start gap-3 px-5 py-2.5">
-                <span className="relative flex h-2 w-2 flex-shrink-0 mt-1.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-                </span>
-                <div className="flex-1 min-w-0">
-                  <span className="text-sm font-medium text-gray-800 truncate block">
-                    {resolveTaskDisplayName(task)}
-                  </span>
-                  <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                    <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${source.badgeClass}`}>
-                      {source.label}
+      {/* Активные ───────────────── */}
+      {active.length === 0 ? (
+        <div className="px-4 py-3 text-xs text-gray-400">— нет активных задач —</div>
+      ) : (
+        <ul className="divide-y divide-gray-50">
+          {active.map((entry) => (
+            <li key={entry.table} className="flex items-baseline justify-between px-4 py-2 text-sm">
+              <span className="text-gray-800 font-medium">{entry.label}</span>
+              <span className="text-xs text-gray-500 tabular-nums">
+                {entry.total} <span className="text-gray-400">({formatBreakdown(entry.breakdown)})</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Ошибки 24ч ───────────────── */}
+      {errors.length > 0 && (
+        <div className="border-t border-gray-100">
+          <div className="px-4 py-2 text-[11px] uppercase tracking-wider text-gray-500 font-medium bg-red-50/40">
+            Ошибки за 24ч
+          </div>
+          <ul className="divide-y divide-gray-50">
+            {errors.map((entry) => {
+              const key = `${bucketKey}/${entry.table}`;
+              const isOpen = expanded.has(key);
+              return (
+                <li key={entry.table}>
+                  <button
+                    type="button"
+                    onClick={() => toggleExpanded(key)}
+                    className="w-full flex items-center justify-between px-4 py-2 text-sm hover:bg-gray-50 transition text-left"
+                  >
+                    <span className="text-gray-800 font-medium flex items-center gap-2">
+                      <span className="text-gray-400 text-xs">{isOpen ? '▾' : '▸'}</span>
+                      {entry.label}
                     </span>
-                    {userName && (
-                      <span className="text-[11px] text-gray-400 truncate max-w-[180px]" title={userName}>
-                        {userName}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <span className="text-xs text-gray-400 flex-shrink-0 tabular-nums mt-0.5">
-                  {formatTimestamp(task.started_at)}
-                </span>
-              </div>
-            );
-          })}
+                    <span className="text-xs font-semibold tabular-nums text-red-600">{entry.count}</span>
+                  </button>
+                  {isOpen && (
+                    <div className="px-4 pb-3 space-y-1.5 bg-red-50/30">
+                      {entry.items.map((item) => (
+                        <div key={item.id} className="rounded-md border border-red-100 bg-white px-2.5 py-1.5 text-xs">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-gray-500 tabular-nums">{formatErrorTimestamp(item.created_at)}</span>
+                            {item.user_name && (
+                              <span className="text-gray-400 truncate max-w-[200px]" title={item.user_name}>
+                                {item.user_name}
+                              </span>
+                            )}
+                          </div>
+                          {item.error_message && (
+                            <div className="mt-1 text-red-700 break-words font-mono text-[11px] leading-snug">
+                              {item.error_message}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
         </div>
       )}
     </div>
   );
 }
+
+function ActiveJobsBuckets() {
+  const [data, setData] = useState<ActiveJobsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchData() {
+      try {
+        const res = await authFetch('/api/admin/active-jobs');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as ActiveJobsResponse;
+        if (!cancelled) {
+          setData(json);
+          setError(null);
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    void fetchData();
+    const id = setInterval(() => { void fetchData(); }, 15_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const toggleExpanded = useCallback((key: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  if (loading && !data) {
+    return (
+      <div className="mb-4 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="h-5 w-40 animate-pulse rounded bg-gray-100" />
+      </div>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 shadow-sm">
+        <p className="text-sm font-medium text-red-800">Не удалось загрузить активные задачи</p>
+        <p className="mt-1 text-xs text-red-600 font-mono">{error}</p>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
+  return (
+    <div className="mb-4 grid grid-cols-1 lg:grid-cols-2 gap-3">
+      <ActiveJobsColumn
+        title="Специалисты"
+        bucketKey="specialists"
+        active={data.active.specialists}
+        errors={data.errors_24h.specialists}
+        expanded={expanded}
+        toggleExpanded={toggleExpanded}
+      />
+      <ActiveJobsColumn
+        title="Клиенты"
+        bucketKey="clients"
+        active={data.active.clients}
+        errors={data.errors_24h.clients}
+        expanded={expanded}
+        toggleExpanded={toggleExpanded}
+      />
+    </div>
+  );
+}
+
 
 /* -------------------------------------------------------------------------- */
 /*  Main Panel                                                                */
@@ -963,7 +951,7 @@ export function AdminTracesPanel({
 
   return (
     <div>
-      <ActiveTasksBadge />
+      <ActiveJobsBuckets />
 
       <div className="bg-white p-4 sm:p-7 rounded-xl border border-gray-200 shadow-sm">
         {/* Header */}
