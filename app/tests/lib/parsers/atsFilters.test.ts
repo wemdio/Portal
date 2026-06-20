@@ -95,9 +95,19 @@ describe('atsFilters — countries', () => {
     expect(us.test('Birmingham')).toBe(false);
     expect(us.test('Manchester')).toBe(false);
     expect(us.test('Cambridge')).toBe(false);
-    // a real US state qualifier must still win
+    // cities with well-known foreign namesakes must NOT resolve to the US bare
+    expect(us.test('Boston')).toBe(false); // Boston, Lincolnshire UK
+    expect(us.test('Portland')).toBe(false); // Portland, Victoria AU / Dorset UK
+    expect(us.test('San Jose')).toBe(false); // San José, Costa Rica
+    expect(us.test('Phoenix')).toBe(false); // Phoenix, Mauritius
+    expect(us.test('Durham')).toBe(false); // Durham, England
+    expect(us.test('Columbus')).toBe(false);
+    // a real US state qualifier must still win for all of them
     expect(us.test('Birmingham, AL')).toBe(true);
     expect(us.test('Cambridge, MA')).toBe(true);
+    expect(us.test('Boston, MA')).toBe(true);
+    expect(us.test('Portland, OR')).toBe(true);
+    expect(us.test('Phoenix, AZ')).toBe(true);
   });
 
   it('remote matches remote postings', () => {
