@@ -20,8 +20,9 @@ export async function POST(req: NextRequest) {
   const botToken = getClientRepliesBotToken();
   if (!botToken) return NextResponse.json({ error: 'CLIENT_REPLIES_BOT_TOKEN not configured' }, { status: 500 });
 
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
-  if (!siteUrl) return NextResponse.json({ error: 'NEXT_PUBLIC_SITE_URL not configured' }, { status: 500 });
+  // Prod sets PORTAL_PUBLIC_URL (not NEXT_PUBLIC_SITE_URL) — accept either.
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || process.env.PORTAL_PUBLIC_URL;
+  if (!siteUrl) return NextResponse.json({ error: 'NEXT_PUBLIC_SITE_URL / PORTAL_PUBLIC_URL not configured' }, { status: 500 });
 
   const webhookUrl = `${siteUrl.replace(/\/+$/, '')}/api/telegram/client-replies/webhook`;
 
