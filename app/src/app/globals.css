@@ -472,6 +472,23 @@ html.tma-mobile .tma-card {
   scrollbar-color: #1f2937 #f3f4f6;
 }
 
+/* .dark-scrollbar в тёмной теме — иначе трек оставался светло-серым
+ * (#f3f4f6) на тёмной странице (фидбек 2026-06-20 по нижнему скроллу
+ * в DatabaseSpreadsheet). */
+html[data-portal-theme='dark'] .dark-scrollbar::-webkit-scrollbar-track {
+  background: #16171b;
+}
+html[data-portal-theme='dark'] .dark-scrollbar::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border: 2px solid #16171b;
+}
+html[data-portal-theme='dark'] .dark-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}
+html[data-portal-theme='dark'] .dark-scrollbar {
+  scrollbar-color: #4b5563 #16171b;
+}
+
 /* Remove spin buttons from number inputs */
 input[type=number]::-webkit-inner-spin-button, 
 input[type=number]::-webkit-outer-spin-button { 
@@ -2449,10 +2466,13 @@ html[data-portal-theme='dark'] .portal-shell {
 }
 
 /* === BACKGROUNDS === */
-/* bg-white — основа всех карточек/поверхностей. */
+/* bg-white — основа всех карточек/поверхностей. /95 — лоадер-оверлей
+ * (см. DatabaseSpreadsheet «Загружаем вашу базу…»), без override он
+ * рендерился белым на тёмной странице (фидбек 2026-06-20). */
 html[data-portal-theme='dark'] .portal-shell .bg-white,
 html[data-portal-theme='dark'] .portal-shell .bg-white\/80,
-html[data-portal-theme='dark'] .portal-shell .bg-white\/90 {
+html[data-portal-theme='dark'] .portal-shell .bg-white\/90,
+html[data-portal-theme='dark'] .portal-shell .bg-white\/95 {
   background-color: var(--pd-surface) !important;
 }
 /* tbody.bg-white — тело таблицы (вся «полоса данных») сливается с фоном,
@@ -2508,6 +2528,21 @@ html[data-portal-theme='dark'] .portal-shell .bg-slate-100\/80,
 html[data-portal-theme='dark'] .portal-shell .bg-slate-100\/70,
 html[data-portal-theme='dark'] .portal-shell .bg-slate-100\/60 {
   background-color: var(--pd-surface-elev) !important;
+}
+
+/* Hover-варианты gray/zinc/slate-100 — встречаются на accordion-заголовках
+ * (SignalEnrichmentModal group-header: hover:bg-gray-100/60). Без этого
+ * override hover давал светлый Tailwind-дефолт на тёмном фоне → текст
+ * сливался (фидбек 2026-06-20). */
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-100:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-zinc-100:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-slate-100:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-100\/60:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-100\/70:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-100\/80:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-zinc-100\/60:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-slate-100\/60:hover {
+  background-color: var(--pd-surface-active) !important;
 }
 
 /* gray-200 — divider-полоски, скелетоны. */
@@ -2883,6 +2918,19 @@ html[data-portal-theme='dark'] .portal-shell .bg-amber-100 {
 html[data-portal-theme='dark'] .portal-shell .text-amber-700 {
   color: var(--pd-warning) !important;
 }
+/* Tailwind green/yellow — Tailwind считает их отдельным семейством от
+ * emerald/amber, поэтому правила выше не покрывают bg-green-100 и
+ * bg-yellow-100. Используются для бейджей ролей в /admin/users:
+ * technician = bg-green-100 + text-green-800, sales = bg-yellow-100 +
+ * text-yellow-800. Текст уже подменён в EMERALD/GREEN и AMBER блоках
+ * ниже, но без bg-override бейдж рендерится «светло-цвет на светло-цвет»
+ * и роль не читается (фидбек 2026-06-20 по «Технарь»). */
+html[data-portal-theme='dark'] .portal-shell .bg-green-100 {
+  background-color: rgba(34, 197, 94, 0.18) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-yellow-100 {
+  background-color: rgba(234, 179, 8, 0.20) !important;
+}
 
 /* === МОДАЛКИ (rendered через portal: они НЕ внутри .portal-shell DOM-дерева,
        поэтому селектор привязан к атрибуту html, не к shell). === */
@@ -3033,7 +3081,20 @@ html[data-portal-theme='dark'] .portal-shell .bg-violet-50,
 html[data-portal-theme='dark'] .portal-shell .bg-violet-100,
 html[data-portal-theme='dark'] .portal-shell .bg-purple-50,
 html[data-portal-theme='dark'] .portal-shell .bg-purple-100 {
-  background-color: rgba(167, 139, 250, 0.14) !important;
+  background-color: rgba(167, 139, 250, 0.16) !important;
+}
+/* Альфа-варианты — «карточка чужого юзера» в LinkedIn Outreach
+ * (bg-purple-50/40). Делаем подсветку едва-заметной (0.07) чтобы
+ * карточка отличалась от своих, но не «полыхала» (итерация фидбека
+ * 2026-06-20: при 0.16 было слишком ярко). */
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/40,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/80,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-purple-50:hover {
+  background-color: rgba(167, 139, 250, 0.07) !important;
 }
 html[data-portal-theme='dark'] .portal-shell .bg-violet-500,
 html[data-portal-theme='dark'] .portal-shell .bg-violet-600,
@@ -3094,7 +3155,11 @@ html[data-portal-theme='dark'] .portal-shell .bg-emerald-50\/80 {
 /* Аналогично для bg-amber-50 / bg-green-50 — встречаются в дедлайн-плашках,
    статус-чипах, бейджах. */
 html[data-portal-theme='dark'] .portal-shell .bg-amber-50,
+html[data-portal-theme='dark'] .portal-shell .bg-amber-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-amber-50\/40,
 html[data-portal-theme='dark'] .portal-shell .bg-amber-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-amber-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-amber-50\/70,
 html[data-portal-theme='dark'] .portal-shell .bg-amber-50\/80 {
   background-color: rgba(245, 158, 11, 0.14) !important;
 }
@@ -3256,8 +3321,17 @@ html[data-portal-theme='dark'] .portal-shell .text-amber-700 {
        Tailwind считает indigo отдельным цветом от violet/purple, поэтому
        мои предыдущие правила его не покрывали. === */
 html[data-portal-theme='dark'] .portal-shell .bg-indigo-50,
-html[data-portal-theme='dark'] .portal-shell .bg-indigo-100 {
-  background-color: rgba(99, 102, 241, 0.14) !important;
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-100,
+/* Альфа-варианты — выбранные строки чекбоксов в SignalEnrichmentModal
+ * (bg-indigo-50/60). Без override рендерились блёкло-серым на тёмном
+ * (фидбек 2026-06-20). */
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/40,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/80 {
+  background-color: rgba(99, 102, 241, 0.18) !important;
 }
 html[data-portal-theme='dark'] .portal-shell .bg-indigo-500,
 html[data-portal-theme='dark'] .portal-shell .bg-indigo-600,
