@@ -15,6 +15,21 @@ import {
 const admin = supabaseAdmin!;
 const validStepKeys = new Set<string>(AVAILABLE_STEPS.map((s) => s.key));
 
+/**
+ * Сколько одновременно «активных» (pending + processing) задач разрешено
+ * одному юзеру. Раньше было 1 (exists-check ниже отбивал любую вторую) —
+ * коллеги попросили возможность накидывать несколько баз пока одна
+ * обрабатывается.
+ *
+ * Текущая раскладка (Dmitry, июнь 2026): 2 обрабатываются параллельно +
+ * 4 стоят в очереди = 6 активных. Параллельность задана в воркере
+ * (BASE_CONSTRUCTOR_CONCURRENCY=2 в docker-compose.prod.yml и app/worker/baseConstructor.ts),
+ * этот лимит ограничивает общее число активных (включая ожидающие).
+ */
+const MAX_ACTIVE_JOBS_PER_USER = 6;
+const PARALLEL_PROCESSING = 2;
+const MAX_QUEUE_WAITING = MAX_ACTIVE_JOBS_PER_USER - PARALLEL_PROCESSING;
+
 async function getUser(req: NextRequest) {
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return null;
@@ -97,16 +112,22 @@ export async function POST(req: NextRequest) {
       }
       const finalSteps = guard.selectedSteps;
 
-      const { data: existing } = await admin
+      const { count: activeCount } = await admin
         .from('base_constructor_jobs')
-        .select('id')
+        .select('id', { count: 'exact', head: true })
         .eq('user_id', user.id)
-        .in('status', ['pending', 'processing'])
-        .limit(1)
-        .single();
+        .in('status', ['pending', 'processing']);
 
-      if (existing) {
-        return NextResponse.json({ error: 'У вас уже есть активная задача' }, { status: 409 });
+      if ((activeCount ?? 0) >= MAX_ACTIVE_JOBS_PER_USER) {
+        return NextResponse.json(
+          {
+            error:
+              `Нельзя поставить больше ${MAX_ACTIVE_JOBS_PER_USER} баз одновременно ` +
+              `(${PARALLEL_PROCESSING} обрабатываются + ${MAX_QUEUE_WAITING} в очереди). ` +
+              `Подождите, пока какая-нибудь из предыдущих задач завершится.`,
+          },
+          { status: 409 },
+        );
       }
 
       const { data: job, error } = await admin

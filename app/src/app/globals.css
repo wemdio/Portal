@@ -472,6 +472,23 @@ html.tma-mobile .tma-card {
   scrollbar-color: #1f2937 #f3f4f6;
 }
 
+/* .dark-scrollbar в тёмной теме — иначе трек оставался светло-серым
+ * (#f3f4f6) на тёмной странице (фидбек 2026-06-20 по нижнему скроллу
+ * в DatabaseSpreadsheet). */
+html[data-portal-theme='dark'] .dark-scrollbar::-webkit-scrollbar-track {
+  background: #16171b;
+}
+html[data-portal-theme='dark'] .dark-scrollbar::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border: 2px solid #16171b;
+}
+html[data-portal-theme='dark'] .dark-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}
+html[data-portal-theme='dark'] .dark-scrollbar {
+  scrollbar-color: #4b5563 #16171b;
+}
+
 /* Remove spin buttons from number inputs */
 input[type=number]::-webkit-inner-spin-button, 
 input[type=number]::-webkit-outer-spin-button { 
@@ -2368,4 +2385,1032 @@ body:has(.client-portal) {
 .client-portal .text-emerald-600,
 .client-portal .text-emerald-700 {
   color: var(--cp-green) !important;
+}
+
+/* ============================================================================
+   Portal AI widget — невидимая ручка ресайза в левом верхнем углу.
+   Без визуальной плашки в обычном состоянии; при наведении подсвечивается
+   тонкий L-уголок (top + left линии), чтобы было понятно что можно тянуть.
+   ============================================================================ */
+.tools-assistant__resize-handle {
+  background: transparent;
+  position: absolute;
+}
+.tools-assistant__resize-handle::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  width: 12px;
+  height: 12px;
+  border-top: 2px solid rgb(161 161 170);
+  border-left: 2px solid rgb(161 161 170);
+  border-top-left-radius: 6px;
+  opacity: 0;
+  transition: opacity 140ms ease;
+  pointer-events: none;
+}
+.tools-assistant__resize-handle:hover::before {
+  opacity: 0.85;
+}
+/* В тёмной теме сама линия чуть светлее, чтобы видно было на shadow-2xl фоне. */
+html[data-portal-theme='dark']:has(.portal-shell) .tools-assistant__resize-handle::before {
+  border-color: rgb(212 212 216);
+}
+
+/* ============================================================================
+   PORTAL DARK THEME (для основного контура спецов — НЕ для /client)
+
+   Активируется через html[data-portal-theme='dark'] (ставит ранний скрипт в
+   app/layout.tsx + ThemeToggle компонент). Изоляция от клиентского контура —
+   через селектор .portal-shell (он добавлен в LayoutShell, а /client туда не
+   попадает).
+
+   Палитра: тёплый-нейтральный graphite (не плоский черный), чуть более
+   читаемый для долгой работы по сравнению с absolute-black.
+   ============================================================================ */
+html[data-portal-theme='dark'] {
+  --pd-bg: #0d0e11;
+  --pd-surface: #16171b;
+  --pd-surface-elev: #1e1f24;
+  --pd-surface-active: #2a2b31;
+  /* Основной текст не #fafafa (слишком ярко на чёрном — режет глаза),
+     а спокойнее #d4d4d8 (≈ zinc-300). Контраст всё ещё AA, но без рези. */
+  --pd-text: #d4d4d8;
+  --pd-text-mute: #9d9da4;
+  /* faint — для captions, +1 ещё, метаданных. Был #6c6c72 — еле читаемо на
+     dark-фоне. Подняли до #82828a — теперь видно, но всё ещё приглушённо. */
+  --pd-text-faint: #82828a;
+  --pd-divider: #25262b;
+  --pd-divider-strong: #34353b;
+  --pd-ring: rgba(255, 255, 255, 0.12);
+  --pd-accent: #60a5fa;
+  --pd-accent-soft: #1e3a5f;
+  --pd-danger: #f87171;
+  --pd-success: #34d399;
+  --pd-warning: #fbbf24;
+  color-scheme: dark;
+}
+
+/* Body — общий фон и текст. Только под .portal-shell, чтобы не задеть
+   /client (он сам управляет своей палитрой через .client-portal). */
+html[data-portal-theme='dark'] body:has(.portal-shell) {
+  background: var(--pd-bg);
+  color: var(--pd-text);
+}
+
+/* === Сам shell-контейнер === */
+html[data-portal-theme='dark'] .portal-shell {
+  background: var(--pd-bg);
+  color: var(--pd-text);
+}
+
+/* === BACKGROUNDS === */
+/* bg-white — основа всех карточек/поверхностей. /95 — лоадер-оверлей
+ * (см. DatabaseSpreadsheet «Загружаем вашу базу…»), без override он
+ * рендерился белым на тёмной странице (фидбек 2026-06-20). */
+html[data-portal-theme='dark'] .portal-shell .bg-white,
+html[data-portal-theme='dark'] .portal-shell .bg-white\/80,
+html[data-portal-theme='dark'] .portal-shell .bg-white\/90,
+html[data-portal-theme='dark'] .portal-shell .bg-white\/95 {
+  background-color: var(--pd-surface) !important;
+}
+/* tbody.bg-white — тело таблицы (вся «полоса данных») сливается с фоном,
+   иначе на /team и других страницах получается «серый блок в сером фоне».
+   Строки таблицы хорошо отделяются тонкими divide-y бордерами. */
+html[data-portal-theme='dark'] .portal-shell tbody.bg-white {
+  background-color: transparent !important;
+}
+/* Полупрозрачные white (для backdrop-blur эффектов). */
+html[data-portal-theme='dark'] .portal-shell .bg-white\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-white\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-white\/70 {
+  background-color: rgba(22, 23, 27, 0.7) !important;
+}
+
+/* gray-50 / zinc-50 — на светлой теме «еле заметный фон под группами/секциями»
+   (полу-прозрачный белый поверх белого). В тёмной теме сливаем с основным
+   фоном — иначе получаем «грязный серый блок в сером фоне» (страница /team
+   и подобные). Разделение между секциями всё равно работает через бордеры. */
+html[data-portal-theme='dark'] .portal-shell .bg-gray-50,
+html[data-portal-theme='dark'] .portal-shell .bg-zinc-50,
+html[data-portal-theme='dark'] .portal-shell .bg-slate-50,
+html[data-portal-theme='dark'] .portal-shell .bg-gray-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-gray-50\/40,
+html[data-portal-theme='dark'] .portal-shell .bg-gray-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-gray-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-gray-50\/80,
+html[data-portal-theme='dark'] .portal-shell .bg-zinc-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-zinc-50\/40,
+html[data-portal-theme='dark'] .portal-shell .bg-zinc-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-zinc-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-zinc-50\/80,
+html[data-portal-theme='dark'] .portal-shell .bg-slate-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-slate-50\/40,
+html[data-portal-theme='dark'] .portal-shell .bg-slate-50\/50 {
+  background-color: var(--pd-bg) !important;
+}
+
+/* gray-100 / zinc-100 — hover/active поверхности, чипы.
+   Покрываем и альфа-варианты (используются в pill-тэгах ProjectList). */
+html[data-portal-theme='dark'] .portal-shell .bg-gray-100,
+html[data-portal-theme='dark'] .portal-shell .bg-zinc-100,
+html[data-portal-theme='dark'] .portal-shell .bg-slate-100,
+html[data-portal-theme='dark'] .portal-shell .bg-zinc-100\/80,
+html[data-portal-theme='dark'] .portal-shell .bg-zinc-100\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-zinc-100\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-zinc-100\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-gray-100\/80,
+html[data-portal-theme='dark'] .portal-shell .bg-gray-100\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-gray-100\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-gray-100\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-slate-100\/80,
+html[data-portal-theme='dark'] .portal-shell .bg-slate-100\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-slate-100\/60 {
+  background-color: var(--pd-surface-elev) !important;
+}
+
+/* Hover-варианты gray/zinc/slate-100 — встречаются на accordion-заголовках
+ * (SignalEnrichmentModal group-header: hover:bg-gray-100/60). Без этого
+ * override hover давал светлый Tailwind-дефолт на тёмном фоне → текст
+ * сливался (фидбек 2026-06-20). */
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-100:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-zinc-100:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-slate-100:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-100\/60:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-100\/70:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-100\/80:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-zinc-100\/60:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-slate-100\/60:hover {
+  background-color: var(--pd-surface-active) !important;
+}
+
+/* gray-200 — divider-полоски, скелетоны. */
+html[data-portal-theme='dark'] .portal-shell .bg-gray-200,
+html[data-portal-theme='dark'] .portal-shell .bg-zinc-200,
+html[data-portal-theme='dark'] .portal-shell .bg-slate-200 {
+  background-color: var(--pd-divider-strong) !important;
+}
+
+/* gray-900 / zinc-900 / slate-900 — primary-CTA (button). В тёмной теме
+   инвертируем в paper-белый с тёмным текстом, чтобы primary-action оставался
+   доминирующим. */
+html[data-portal-theme='dark'] .portal-shell button.bg-gray-900,
+html[data-portal-theme='dark'] .portal-shell button.bg-zinc-900,
+html[data-portal-theme='dark'] .portal-shell button.bg-slate-900 {
+  background-color: var(--pd-text) !important;
+  color: var(--pd-bg) !important;
+}
+html[data-portal-theme='dark'] .portal-shell button.bg-gray-900 *,
+html[data-portal-theme='dark'] .portal-shell button.bg-zinc-900 *,
+html[data-portal-theme='dark'] .portal-shell button.bg-slate-900 * {
+  color: var(--pd-bg) !important;
+}
+/* a.bg-zinc-900 — active pill в TopNav (это Link, не button). Делаем
+   тёмно-серой плашкой, не белой — по требованию пользователя. */
+html[data-portal-theme='dark'] .portal-shell a.bg-gray-900,
+html[data-portal-theme='dark'] .portal-shell a.bg-zinc-900,
+html[data-portal-theme='dark'] .portal-shell a.bg-slate-900 {
+  background-color: var(--pd-surface-active) !important;
+  color: var(--pd-text) !important;
+}
+/* gray/zinc-900 как декоративный чип (не кнопка) — остаётся приглушённой
+   поверхностью (без инверса), просто темнее обычной surface. */
+html[data-portal-theme='dark'] .portal-shell span.bg-gray-900,
+html[data-portal-theme='dark'] .portal-shell div.bg-gray-900,
+html[data-portal-theme='dark'] .portal-shell span.bg-zinc-900,
+html[data-portal-theme='dark'] .portal-shell div.bg-zinc-900 {
+  background-color: var(--pd-surface-active) !important;
+}
+
+/* === HOVER BACKGROUNDS === */
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-50:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-zinc-50:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-100:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-zinc-100:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-slate-50:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-slate-100:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-50\/50:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-50\/70:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-gray-50\/80:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-zinc-50\/50:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-zinc-50\/70:hover {
+  background-color: var(--pd-surface-elev) !important;
+}
+
+/* === TEXT COLORS === */
+/* Основной текст — gray-900/800/700 / zinc-* того же диапазона. */
+html[data-portal-theme='dark'] .portal-shell .text-gray-900,
+html[data-portal-theme='dark'] .portal-shell .text-gray-800,
+html[data-portal-theme='dark'] .portal-shell .text-zinc-900,
+html[data-portal-theme='dark'] .portal-shell .text-zinc-800,
+html[data-portal-theme='dark'] .portal-shell .text-slate-900,
+html[data-portal-theme='dark'] .portal-shell .text-slate-800,
+html[data-portal-theme='dark'] .portal-shell .text-black {
+  color: var(--pd-text) !important;
+}
+
+/* Тёмные оттенки 700/800 — в светлой теме это «основной body-текст», в тёмной
+   их инверсия = главный светлый текст. Без отдельной группы они путались с
+   вторичными (500/600) и pill-тэги типа «Аутрич» (text-zinc-700) выглядели
+   приглушённо. */
+html[data-portal-theme='dark'] .portal-shell .text-gray-700,
+html[data-portal-theme='dark'] .portal-shell .text-zinc-700,
+html[data-portal-theme='dark'] .portal-shell .text-slate-700 {
+  color: var(--pd-text) !important;
+}
+
+/* Вторичный текст — 500/600 (мета, описания). */
+html[data-portal-theme='dark'] .portal-shell .text-gray-600,
+html[data-portal-theme='dark'] .portal-shell .text-gray-500,
+html[data-portal-theme='dark'] .portal-shell .text-zinc-600,
+html[data-portal-theme='dark'] .portal-shell .text-zinc-500,
+html[data-portal-theme='dark'] .portal-shell .text-slate-600,
+html[data-portal-theme='dark'] .portal-shell .text-slate-500 {
+  color: var(--pd-text-mute) !important;
+}
+
+/* Третичный текст — gray-400/300, captions. */
+html[data-portal-theme='dark'] .portal-shell .text-gray-400,
+html[data-portal-theme='dark'] .portal-shell .text-gray-300,
+html[data-portal-theme='dark'] .portal-shell .text-zinc-400,
+html[data-portal-theme='dark'] .portal-shell .text-zinc-300,
+html[data-portal-theme='dark'] .portal-shell .text-slate-400,
+html[data-portal-theme='dark'] .portal-shell .text-slate-300 {
+  color: var(--pd-text-faint) !important;
+}
+
+/* white-текст на gray-900-кнопках был инверсирован выше — но если white
+   используется на цветном фоне (синяя/зелёная кнопка), оставляем как есть. */
+
+/* Hover-варианты текста. */
+html[data-portal-theme='dark'] .portal-shell .hover\:text-gray-700:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:text-gray-800:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:text-gray-900:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:text-zinc-700:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:text-zinc-800:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:text-zinc-900:hover {
+  color: var(--pd-text) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .hover\:text-gray-500:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:text-gray-600:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:text-zinc-500:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:text-zinc-600:hover {
+  color: var(--pd-text-mute) !important;
+}
+
+/* === BORDERS === */
+html[data-portal-theme='dark'] .portal-shell .border,
+html[data-portal-theme='dark'] .portal-shell .border-t,
+html[data-portal-theme='dark'] .portal-shell .border-b,
+html[data-portal-theme='dark'] .portal-shell .border-l,
+html[data-portal-theme='dark'] .portal-shell .border-r,
+html[data-portal-theme='dark'] .portal-shell .border-x,
+html[data-portal-theme='dark'] .portal-shell .border-y {
+  border-color: var(--pd-divider) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .border-gray-100,
+html[data-portal-theme='dark'] .portal-shell .border-gray-200,
+html[data-portal-theme='dark'] .portal-shell .border-zinc-100,
+html[data-portal-theme='dark'] .portal-shell .border-zinc-200,
+html[data-portal-theme='dark'] .portal-shell .border-slate-100,
+html[data-portal-theme='dark'] .portal-shell .border-slate-200,
+html[data-portal-theme='dark'] .portal-shell .border-zinc-200\/80 {
+  border-color: var(--pd-divider) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .border-gray-300,
+html[data-portal-theme='dark'] .portal-shell .border-zinc-300,
+html[data-portal-theme='dark'] .portal-shell .border-slate-300 {
+  border-color: var(--pd-divider-strong) !important;
+}
+
+/* === HOVER BORDERS === */
+html[data-portal-theme='dark'] .portal-shell .hover\:border-gray-300:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:border-zinc-300:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:border-gray-200:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:border-zinc-200:hover {
+  border-color: var(--pd-divider-strong) !important;
+}
+
+/* === DIVIDE — tailwind divide-y/divide-x ставит border-bottom на каждый
+       :not(:last-child), а не border-top на :not(:first-child). Покрываем
+       обе формы селектора. На светлой теме divide-gray-50/100 = почти-белые
+       линии; на тёмной без override они светятся как «белые границы между строк». */
+html[data-portal-theme='dark'] .portal-shell .divide-gray-50 > :not(:last-child),
+html[data-portal-theme='dark'] .portal-shell .divide-gray-100 > :not(:last-child),
+html[data-portal-theme='dark'] .portal-shell .divide-gray-200 > :not(:last-child),
+html[data-portal-theme='dark'] .portal-shell .divide-zinc-50 > :not(:last-child),
+html[data-portal-theme='dark'] .portal-shell .divide-zinc-100 > :not(:last-child),
+html[data-portal-theme='dark'] .portal-shell .divide-zinc-200 > :not(:last-child),
+html[data-portal-theme='dark'] .portal-shell .divide-slate-50 > :not(:last-child),
+html[data-portal-theme='dark'] .portal-shell .divide-slate-100 > :not(:last-child),
+html[data-portal-theme='dark'] .portal-shell .divide-slate-200 > :not(:last-child),
+html[data-portal-theme='dark'] .portal-shell .divide-gray-50 > * + *,
+html[data-portal-theme='dark'] .portal-shell .divide-gray-100 > * + *,
+html[data-portal-theme='dark'] .portal-shell .divide-gray-200 > * + *,
+html[data-portal-theme='dark'] .portal-shell .divide-zinc-50 > * + *,
+html[data-portal-theme='dark'] .portal-shell .divide-zinc-100 > * + *,
+html[data-portal-theme='dark'] .portal-shell .divide-zinc-200 > * + *,
+html[data-portal-theme='dark'] .portal-shell .divide-slate-50 > * + *,
+html[data-portal-theme='dark'] .portal-shell .divide-slate-100 > * + *,
+html[data-portal-theme='dark'] .portal-shell .divide-slate-200 > * + * {
+  border-color: var(--pd-divider) !important;
+}
+
+/* Универсальный fallback на случай если Tailwind v4 использует другой
+   селектор (:not(:last-child) и т.п.). Покрываем все строки таблиц,
+   независимо от того какой именно divide-* класс задан на родителе. */
+html[data-portal-theme='dark'] .portal-shell tbody > tr,
+html[data-portal-theme='dark'] .portal-shell thead > tr,
+html[data-portal-theme='dark'] .portal-shell tbody > tr > td,
+html[data-portal-theme='dark'] .portal-shell tbody > tr > th {
+  border-color: var(--pd-divider) !important;
+}
+
+/* Граница между <thead> и <tbody> — divide-y на table применяет border-top
+   к самому tbody (как блоку). Без этого правила граница остаётся «белой». */
+html[data-portal-theme='dark'] .portal-shell table > tbody,
+html[data-portal-theme='dark'] .portal-shell table > thead,
+html[data-portal-theme='dark'] .portal-shell table > tfoot {
+  border-color: var(--pd-divider) !important;
+}
+
+/* === SHADOWS — приглушаем на тёмном фоне (классические shadow-sm/md/lg
+       рисуются rgba(0,0,0,X), что на чёрном просто не видно; делаем
+       инверсные: добавляем тонкий top-border-glow вместо shadow). === */
+html[data-portal-theme='dark'] .portal-shell .shadow-sm,
+html[data-portal-theme='dark'] .portal-shell .shadow,
+html[data-portal-theme='dark'] .portal-shell .shadow-md {
+  --tw-shadow-color: rgba(0, 0, 0, 0.4);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 1px 3px rgba(0, 0, 0, 0.5) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .shadow-lg,
+html[data-portal-theme='dark'] .portal-shell .shadow-xl,
+html[data-portal-theme='dark'] .portal-shell .shadow-2xl {
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 8px 24px rgba(0, 0, 0, 0.55) !important;
+}
+
+/* === RING (focus-кольца) === */
+html[data-portal-theme='dark'] .portal-shell .ring-1,
+html[data-portal-theme='dark'] .portal-shell .ring-2 {
+  --tw-ring-color: var(--pd-ring);
+}
+html[data-portal-theme='dark'] .portal-shell .ring-black\/5,
+html[data-portal-theme='dark'] .portal-shell .ring-black\/10 {
+  --tw-ring-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+/* Аватарки-placeholder (круглый div с bg-zinc-100 и инициалом) и avatar-img
+   (rounded-full + ring) теряются на тёмном. Делаем им заметнее placeholder
+   и ободок. */
+html[data-portal-theme='dark'] .portal-shell .rounded-full.bg-zinc-100,
+html[data-portal-theme='dark'] .portal-shell .rounded-full.bg-gray-100,
+html[data-portal-theme='dark'] .portal-shell .rounded-full.bg-slate-100 {
+  background-color: var(--pd-surface-active) !important;
+  color: var(--pd-text) !important;
+}
+
+/* Hover-строки таблиц: вместо «светлеет» делаем «темнеет» — спокойнее
+   воспринимается на dark UI, как в IBM Watson / Notion dark. Тон чуть
+   глубже общего фона, без яркого контраста. Покрываем и варианты с
+   альфой (zinc-50/50, zinc-100/60 и т.п.) — ProjectList использует
+   именно их. */
+html[data-portal-theme='dark'] .portal-shell tr.hover\:bg-zinc-50:hover,
+html[data-portal-theme='dark'] .portal-shell tr.hover\:bg-gray-50:hover,
+html[data-portal-theme='dark'] .portal-shell tr.hover\:bg-zinc-100:hover,
+html[data-portal-theme='dark'] .portal-shell tr.hover\:bg-gray-100:hover,
+html[data-portal-theme='dark'] .portal-shell tr.hover\:bg-zinc-50\/50:hover,
+html[data-portal-theme='dark'] .portal-shell tr.hover\:bg-zinc-50\/60:hover,
+html[data-portal-theme='dark'] .portal-shell tr.hover\:bg-zinc-50\/80:hover,
+html[data-portal-theme='dark'] .portal-shell tr.hover\:bg-zinc-100\/50:hover,
+html[data-portal-theme='dark'] .portal-shell tr.hover\:bg-zinc-100\/60:hover,
+html[data-portal-theme='dark'] .portal-shell tr.hover\:bg-zinc-100\/80:hover,
+html[data-portal-theme='dark'] .portal-shell tr.hover\:bg-gray-50\/50:hover,
+html[data-portal-theme='dark'] .portal-shell tr.hover\:bg-gray-100\/50:hover {
+  background-color: #07080a !important;
+}
+
+/* === FORM CONTROLS === */
+html[data-portal-theme='dark'] .portal-shell input[type='text'],
+html[data-portal-theme='dark'] .portal-shell input[type='email'],
+html[data-portal-theme='dark'] .portal-shell input[type='password'],
+html[data-portal-theme='dark'] .portal-shell input[type='number'],
+html[data-portal-theme='dark'] .portal-shell input[type='search'],
+html[data-portal-theme='dark'] .portal-shell input[type='tel'],
+html[data-portal-theme='dark'] .portal-shell input[type='url'],
+html[data-portal-theme='dark'] .portal-shell input[type='date'],
+html[data-portal-theme='dark'] .portal-shell textarea,
+html[data-portal-theme='dark'] .portal-shell select {
+  background-color: var(--pd-surface-elev);
+  color: var(--pd-text);
+  border-color: var(--pd-divider-strong);
+}
+html[data-portal-theme='dark'] .portal-shell input::placeholder,
+html[data-portal-theme='dark'] .portal-shell textarea::placeholder {
+  color: var(--pd-text-faint);
+}
+html[data-portal-theme='dark'] .portal-shell input:focus,
+html[data-portal-theme='dark'] .portal-shell textarea:focus,
+html[data-portal-theme='dark'] .portal-shell select:focus {
+  border-color: var(--pd-accent);
+  outline: none;
+}
+
+/* Нативный popup опций <select> в тёмной теме.
+ *
+ * Зачем: на /projects на сам <select> навешан статусный бейдж-стиль
+ * (например `bg-emerald-50/50 text-emerald-700` для «В работе»). Когда
+ * юзер кликает по селекту, браузер показывает нативный popup со
+ * списком всех опций — и наследует bg/color с родителя. На светло-зелёном
+ * фоне светло-зелёный текст почти не виден (фидбек 2026-06-19).
+ *
+ * Принудительно перебиваем фон и цвет КАЖДОГО option на dark surface +
+ * светлый текст — независимо от того, какой бейдж-класс висит на select.
+ * Status-цвет остаётся читаемым только на самом select (на кнопке-триггере),
+ * в popup'е все опции одинаково нейтральные.
+ */
+html[data-portal-theme='dark'] .portal-shell select option {
+  background-color: var(--pd-surface-elev) !important;
+  color: var(--pd-text) !important;
+}
+html[data-portal-theme='dark'] .portal-shell select option:checked,
+html[data-portal-theme='dark'] .portal-shell select option:hover {
+  background-color: var(--pd-surface-active) !important;
+}
+
+/* === BACKDROP BLUR — стеклянные плашки шапки/виджетов === */
+html[data-portal-theme='dark'] .portal-shell .backdrop-blur-md,
+html[data-portal-theme='dark'] .portal-shell .backdrop-blur-sm,
+html[data-portal-theme='dark'] .portal-shell .backdrop-blur {
+  background-color: rgba(22, 23, 27, 0.78) !important;
+}
+
+/* === ЦВЕТНЫЕ ТОНКИЕ ФОНЫ (карточки с категорийным акцентом).
+       Tailwind *-50 на белом — еле заметный pastel. На чёрном они светятся
+       пятнами. Делаем их сильно темнее, под общую палитру, оставляя
+       цветовую идентификацию. === */
+html[data-portal-theme='dark'] .portal-shell .bg-blue-50 {
+  background-color: rgba(96, 165, 250, 0.12) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-emerald-50 {
+  background-color: rgba(52, 211, 153, 0.10) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-violet-50 {
+  background-color: rgba(167, 139, 250, 0.12) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-amber-50 {
+  background-color: rgba(251, 191, 36, 0.10) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-fuchsia-50 {
+  background-color: rgba(232, 121, 249, 0.12) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-red-50 {
+  background-color: rgba(248, 113, 113, 0.12) !important;
+}
+
+/* Hover-варианты цветных тинтов — чуть ярче чтобы был отклик. */
+html[data-portal-theme='dark'] .portal-shell .group-hover\:bg-blue-100,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-blue-50:hover {
+  background-color: rgba(96, 165, 250, 0.22) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .group-hover\:bg-emerald-100 {
+  background-color: rgba(52, 211, 153, 0.20) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .group-hover\:bg-violet-100 {
+  background-color: rgba(167, 139, 250, 0.22) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .group-hover\:bg-amber-100 {
+  background-color: rgba(251, 191, 36, 0.20) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .group-hover\:bg-fuchsia-100 {
+  background-color: rgba(232, 121, 249, 0.22) !important;
+}
+
+/* === HOVER bg-blue-50/60 — встречается на карточках с badge === */
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-blue-50\/60:hover {
+  background-color: rgba(96, 165, 250, 0.15) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .hover\:border-blue-300:hover {
+  border-color: rgba(96, 165, 250, 0.5) !important;
+}
+
+/* === ACCENT TEXT — blue для CTA-ссылок, оставляем ярким для читаемости === */
+html[data-portal-theme='dark'] .portal-shell .text-blue-600,
+html[data-portal-theme='dark'] .portal-shell .text-blue-700 {
+  color: var(--pd-accent) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .group-hover\:text-blue-600,
+html[data-portal-theme='dark'] .portal-shell .group-hover\:text-blue-700,
+html[data-portal-theme='dark'] .portal-shell .hover\:text-blue-700:hover {
+  color: #93c5fd !important;
+}
+
+/* Badge-цвета (emerald-100/amber-100 для bg) — тоже adjust под dark. */
+html[data-portal-theme='dark'] .portal-shell .bg-emerald-100 {
+  background-color: rgba(52, 211, 153, 0.18) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-emerald-700 {
+  color: var(--pd-success) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-amber-100 {
+  background-color: rgba(251, 191, 36, 0.18) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-amber-700 {
+  color: var(--pd-warning) !important;
+}
+/* Tailwind green/yellow — Tailwind считает их отдельным семейством от
+ * emerald/amber, поэтому правила выше не покрывают bg-green-100 и
+ * bg-yellow-100. Используются для бейджей ролей в /admin/users:
+ * technician = bg-green-100 + text-green-800, sales = bg-yellow-100 +
+ * text-yellow-800. Текст уже подменён в EMERALD/GREEN и AMBER блоках
+ * ниже, но без bg-override бейдж рендерится «светло-цвет на светло-цвет»
+ * и роль не читается (фидбек 2026-06-20 по «Технарь»). */
+html[data-portal-theme='dark'] .portal-shell .bg-green-100 {
+  background-color: rgba(34, 197, 94, 0.18) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-yellow-100 {
+  background-color: rgba(234, 179, 8, 0.20) !important;
+}
+
+/* === МОДАЛКИ (rendered через portal: они НЕ внутри .portal-shell DOM-дерева,
+       поэтому селектор привязан к атрибуту html, не к shell). === */
+html[data-portal-theme='dark'] [role='dialog'] {
+  color: var(--pd-text);
+}
+html[data-portal-theme='dark'] [role='dialog'] .bg-white {
+  background-color: var(--pd-surface) !important;
+}
+html[data-portal-theme='dark'] [role='dialog'] .bg-gray-50,
+html[data-portal-theme='dark'] [role='dialog'] .bg-zinc-50 {
+  background-color: var(--pd-surface-elev) !important;
+}
+html[data-portal-theme='dark'] [role='dialog'] .text-gray-900,
+html[data-portal-theme='dark'] [role='dialog'] .text-zinc-900 {
+  color: var(--pd-text) !important;
+}
+html[data-portal-theme='dark'] [role='dialog'] .text-gray-500,
+html[data-portal-theme='dark'] [role='dialog'] .text-gray-600,
+html[data-portal-theme='dark'] [role='dialog'] .text-zinc-500,
+html[data-portal-theme='dark'] [role='dialog'] .text-zinc-600 {
+  color: var(--pd-text-mute) !important;
+}
+html[data-portal-theme='dark'] [role='dialog'] .border-gray-200,
+html[data-portal-theme='dark'] [role='dialog'] .border-zinc-200 {
+  border-color: var(--pd-divider) !important;
+}
+
+/* === Portal AI floating widget (вне portal-shell, fixed-позиционирование) === */
+html[data-portal-theme='dark'] body > div.fixed.bottom-5.right-5 {
+  color: var(--pd-text);
+}
+html[data-portal-theme='dark'] body > div.fixed.bottom-5.right-5 > div {
+  background-color: var(--pd-surface) !important;
+  border-color: var(--pd-divider) !important;
+}
+html[data-portal-theme='dark'] body > div.fixed.bottom-5.right-5 .bg-zinc-100 {
+  background-color: var(--pd-surface-elev) !important;
+  color: var(--pd-text);
+}
+html[data-portal-theme='dark'] body > div.fixed.bottom-5.right-5 textarea {
+  background-color: var(--pd-surface-elev) !important;
+  color: var(--pd-text);
+  border-color: var(--pd-divider-strong) !important;
+}
+
+/* === Selection-цвет в тёмной теме === */
+html[data-portal-theme='dark'] .portal-shell ::selection {
+  background-color: rgba(96, 165, 250, 0.35);
+  color: var(--pd-text);
+}
+
+/* ============================================================================
+   FIXED-OVERLAYS (вне portal-shell DOM-дерева, но относятся к контуру спецов).
+   Селектор :has(.portal-shell) активируется только когда в body есть
+   .portal-shell — то есть НЕ на клиентских страницах (/client), где живёт
+   .client-portal с собственной палитрой.
+   ============================================================================ */
+/* «Загрузка страницы…» — PortalLoadingProvider, fixed-плашка в шапке. */
+html[data-portal-theme='dark']:has(.portal-shell) [role='status'].fixed.bg-white,
+html[data-portal-theme='dark']:has(.portal-shell) [role='status'].fixed .bg-white,
+html[data-portal-theme='dark']:has(.portal-shell) .fixed.bg-white\/95,
+html[data-portal-theme='dark']:has(.portal-shell) .fixed .bg-white\/95,
+html[data-portal-theme='dark']:has(.portal-shell) .fixed.bg-white\/90,
+html[data-portal-theme='dark']:has(.portal-shell) .fixed .bg-white\/90 {
+  background-color: rgba(30, 31, 36, 0.95) !important;
+  border-color: var(--pd-divider) !important;
+  color: var(--pd-text) !important;
+}
+html[data-portal-theme='dark']:has(.portal-shell) [role='status'].fixed .text-zinc-800,
+html[data-portal-theme='dark']:has(.portal-shell) [role='status'].fixed .text-gray-800,
+html[data-portal-theme='dark']:has(.portal-shell) [role='status'].fixed .text-zinc-900,
+html[data-portal-theme='dark']:has(.portal-shell) [role='status'].fixed .text-gray-900 {
+  color: var(--pd-text) !important;
+}
+html[data-portal-theme='dark']:has(.portal-shell) [role='status'].fixed .border-zinc-200\/90,
+html[data-portal-theme='dark']:has(.portal-shell) [role='status'].fixed .border-gray-200\/90 {
+  border-color: var(--pd-divider) !important;
+}
+
+/* Прогресс-бар навигации (тонкая полоска под TopNav при переходе) —
+   обычно body > div.fixed.top-0 с bg-blue-500/white. Приглушаем до accent. */
+html[data-portal-theme='dark']:has(.portal-shell) body > div.fixed.top-0.h-0\.5,
+html[data-portal-theme='dark']:has(.portal-shell) body > div.fixed.top-0[style*='height: 2px'],
+html[data-portal-theme='dark']:has(.portal-shell) body > div.fixed.top-0[style*='height:2px'] {
+  background-color: var(--pd-accent) !important;
+}
+
+/* Тосты / popups вне portal-shell. */
+html[data-portal-theme='dark']:has(.portal-shell) .fixed.bg-white {
+  background-color: var(--pd-surface) !important;
+  color: var(--pd-text) !important;
+}
+
+/* ============================================================================
+   ПРИГЛУШЕНИЕ ЯРКИХ АКЦЕНТОВ под тёмную тему.
+   Tailwind *-500/600/700 рисует full-saturation цвета — на чёрном фоне они
+   «вырви-глаз». Заменяем на desaturated-варианты с прозрачностью + аккуратные
+   акцентные тексты. Цветовая идентичность сохраняется (red = ошибка,
+   violet = primary action, emerald = success), но без насыщенной яркости.
+   ============================================================================ */
+
+/* === RED — алёрты, ошибки, danger === */
+html[data-portal-theme='dark'] .portal-shell .bg-red-50,
+html[data-portal-theme='dark'] .portal-shell .bg-red-100,
+html[data-portal-theme='dark'] .portal-shell .bg-red-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-red-50\/40,
+html[data-portal-theme='dark'] .portal-shell .bg-red-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-red-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-red-50\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-red-50\/80 {
+  background-color: rgba(248, 113, 113, 0.12) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-red-500,
+html[data-portal-theme='dark'] .portal-shell .bg-red-600,
+html[data-portal-theme='dark'] .portal-shell .bg-red-700 {
+  background-color: rgba(220, 38, 38, 0.55) !important;
+}
+html[data-portal-theme='dark'] .portal-shell button.bg-red-500,
+html[data-portal-theme='dark'] .portal-shell button.bg-red-600,
+html[data-portal-theme='dark'] .portal-shell a.bg-red-500,
+html[data-portal-theme='dark'] .portal-shell a.bg-red-600 {
+  background-color: rgba(220, 38, 38, 0.75) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-red-500,
+html[data-portal-theme='dark'] .portal-shell .text-red-600,
+html[data-portal-theme='dark'] .portal-shell .text-red-700,
+html[data-portal-theme='dark'] .portal-shell .text-red-700\/80,
+html[data-portal-theme='dark'] .portal-shell .text-red-800,
+html[data-portal-theme='dark'] .portal-shell .text-red-900 {
+  color: #fca5a5 !important;
+}
+/* Альфа-варианты bg-red-100 (заголовок «Просроченные проекты» использует
+   bg-red-100/80). Без покрытия фон становится насыщенно-красным на dark. */
+html[data-portal-theme='dark'] .portal-shell .bg-red-100\/80,
+html[data-portal-theme='dark'] .portal-shell .bg-red-100\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-red-100\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-red-100\/50 {
+  background-color: rgba(248, 113, 113, 0.12) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .border-red-200,
+html[data-portal-theme='dark'] .portal-shell .border-red-300 {
+  border-color: rgba(248, 113, 113, 0.35) !important;
+}
+
+/* === VIOLET / PURPLE — primary CTA в парсерах === */
+html[data-portal-theme='dark'] .portal-shell .bg-violet-50,
+html[data-portal-theme='dark'] .portal-shell .bg-violet-100,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-100 {
+  background-color: rgba(167, 139, 250, 0.16) !important;
+}
+/* Альфа-варианты — «карточка чужого юзера» в LinkedIn Outreach
+ * (bg-purple-50/40). Делаем подсветку едва-заметной (0.07) чтобы
+ * карточка отличалась от своих, но не «полыхала» (итерация фидбека
+ * 2026-06-20: при 0.16 было слишком ярко). */
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/40,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/80,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-purple-50:hover {
+  background-color: rgba(167, 139, 250, 0.07) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-violet-500,
+html[data-portal-theme='dark'] .portal-shell .bg-violet-600,
+html[data-portal-theme='dark'] .portal-shell .bg-violet-700,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-500,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-600,
+html[data-portal-theme='dark'] .portal-shell .bg-purple-700 {
+  background-color: rgba(124, 58, 237, 0.65) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-violet-600,
+html[data-portal-theme='dark'] .portal-shell .text-violet-700,
+html[data-portal-theme='dark'] .portal-shell .text-violet-800,
+html[data-portal-theme='dark'] .portal-shell .text-purple-600,
+html[data-portal-theme='dark'] .portal-shell .text-purple-700,
+html[data-portal-theme='dark'] .portal-shell .text-purple-800 {
+  color: #c4b5fd !important;
+}
+html[data-portal-theme='dark'] .portal-shell .border-violet-200,
+html[data-portal-theme='dark'] .portal-shell .border-violet-300,
+html[data-portal-theme='dark'] .portal-shell .border-purple-200,
+html[data-portal-theme='dark'] .portal-shell .border-purple-300 {
+  border-color: rgba(167, 139, 250, 0.35) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-violet-700:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-violet-600:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-purple-700:hover {
+  background-color: rgba(124, 58, 237, 0.85) !important;
+}
+
+/* === BLUE — инфо-блоки, ссылки, кнопки === */
+html[data-portal-theme='dark'] .portal-shell .bg-blue-100 {
+  background-color: rgba(96, 165, 250, 0.18) !important;
+}
+/* Альфа-варианты bg-blue-50 (используются как «выделенная строка»
+   текущего месяца в /finance). Более насыщенный синий — чтобы выделение
+   читалось как явное «здесь активная строка», не «грязно-серое пятно». */
+html[data-portal-theme='dark'] .portal-shell .bg-blue-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-blue-50\/40,
+html[data-portal-theme='dark'] .portal-shell .bg-blue-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-blue-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-blue-50\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-blue-50\/80 {
+  background-color: rgba(59, 130, 246, 0.22) !important;
+}
+
+/* Альфа-варианты bg-emerald-50 (выделенная строка в таблице «Недостающие
+   данные» в /finance). На тёмном без override Tailwind рендерит мутно-серую
+   подсветку — не понятно почему строка выделена. */
+html[data-portal-theme='dark'] .portal-shell .bg-emerald-50,
+html[data-portal-theme='dark'] .portal-shell .bg-emerald-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-emerald-50\/40,
+html[data-portal-theme='dark'] .portal-shell .bg-emerald-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-emerald-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-emerald-50\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-emerald-50\/80 {
+  background-color: rgba(16, 185, 129, 0.16) !important;
+}
+/* Аналогично для bg-amber-50 / bg-green-50 — встречаются в дедлайн-плашках,
+   статус-чипах, бейджах. */
+html[data-portal-theme='dark'] .portal-shell .bg-amber-50,
+html[data-portal-theme='dark'] .portal-shell .bg-amber-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-amber-50\/40,
+html[data-portal-theme='dark'] .portal-shell .bg-amber-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-amber-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-amber-50\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-amber-50\/80 {
+  background-color: rgba(245, 158, 11, 0.14) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-green-50,
+html[data-portal-theme='dark'] .portal-shell .bg-green-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-green-50\/80 {
+  background-color: rgba(34, 197, 94, 0.14) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-blue-500,
+html[data-portal-theme='dark'] .portal-shell .bg-blue-600,
+html[data-portal-theme='dark'] .portal-shell .bg-blue-700 {
+  background-color: rgba(37, 99, 235, 0.7) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-blue-700:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-blue-600:hover {
+  background-color: rgba(37, 99, 235, 0.85) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-blue-500 {
+  color: var(--pd-accent) !important;
+}
+/* Тёмные оттенки blue (800/900/950) используются как «dark text on light blue bg»
+   в светлой теме. На тёмной — фон стал полупрозрачным синим, тёмный текст
+   почти не виден. Делаем светлым. */
+html[data-portal-theme='dark'] .portal-shell .text-blue-800,
+html[data-portal-theme='dark'] .portal-shell .text-blue-900,
+html[data-portal-theme='dark'] .portal-shell .text-blue-950 {
+  color: #bfdbfe !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-indigo-900,
+html[data-portal-theme='dark'] .portal-shell .text-indigo-950 {
+  color: #c7d2fe !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-violet-900,
+html[data-portal-theme='dark'] .portal-shell .text-violet-950,
+html[data-portal-theme='dark'] .portal-shell .text-purple-900,
+html[data-portal-theme='dark'] .portal-shell .text-purple-950 {
+  color: #ddd6fe !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-emerald-950,
+html[data-portal-theme='dark'] .portal-shell .text-green-800,
+html[data-portal-theme='dark'] .portal-shell .text-green-900,
+html[data-portal-theme='dark'] .portal-shell .text-green-950 {
+  color: #a7f3d0 !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-amber-950,
+html[data-portal-theme='dark'] .portal-shell .text-yellow-900,
+html[data-portal-theme='dark'] .portal-shell .text-yellow-950 {
+  color: #fde68a !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-rose-900,
+html[data-portal-theme='dark'] .portal-shell .text-rose-950,
+html[data-portal-theme='dark'] .portal-shell .text-red-950 {
+  color: #fecdd3 !important;
+}
+
+/* === EMERALD / GREEN — success-баннеры, чипы === */
+html[data-portal-theme='dark'] .portal-shell .bg-emerald-500,
+html[data-portal-theme='dark'] .portal-shell .bg-emerald-600,
+html[data-portal-theme='dark'] .portal-shell .bg-emerald-700,
+html[data-portal-theme='dark'] .portal-shell .bg-green-500,
+html[data-portal-theme='dark'] .portal-shell .bg-green-600 {
+  background-color: rgba(16, 185, 129, 0.55) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-emerald-500,
+html[data-portal-theme='dark'] .portal-shell .text-emerald-800,
+html[data-portal-theme='dark'] .portal-shell .text-emerald-900,
+html[data-portal-theme='dark'] .portal-shell .text-green-600,
+html[data-portal-theme='dark'] .portal-shell .text-green-700 {
+  color: #6ee7b7 !important;
+}
+html[data-portal-theme='dark'] .portal-shell .border-emerald-200,
+html[data-portal-theme='dark'] .portal-shell .border-emerald-300,
+html[data-portal-theme='dark'] .portal-shell .border-green-200 {
+  border-color: rgba(52, 211, 153, 0.35) !important;
+}
+
+/* === AMBER — warning === */
+html[data-portal-theme='dark'] .portal-shell .bg-amber-500,
+html[data-portal-theme='dark'] .portal-shell .bg-amber-600,
+html[data-portal-theme='dark'] .portal-shell .bg-yellow-500,
+html[data-portal-theme='dark'] .portal-shell .bg-yellow-600 {
+  background-color: rgba(217, 119, 6, 0.6) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-amber-500,
+html[data-portal-theme='dark'] .portal-shell .text-amber-800,
+html[data-portal-theme='dark'] .portal-shell .text-amber-900,
+html[data-portal-theme='dark'] .portal-shell .text-yellow-700,
+html[data-portal-theme='dark'] .portal-shell .text-yellow-800 {
+  color: #fcd34d !important;
+}
+html[data-portal-theme='dark'] .portal-shell .border-amber-200,
+html[data-portal-theme='dark'] .portal-shell .border-amber-300,
+html[data-portal-theme='dark'] .portal-shell .border-yellow-200 {
+  border-color: rgba(251, 191, 36, 0.35) !important;
+}
+
+/* === Pink / fuchsia / sky — реже встречаются, но тоже бывают === */
+html[data-portal-theme='dark'] .portal-shell .bg-pink-500,
+html[data-portal-theme='dark'] .portal-shell .bg-pink-600,
+html[data-portal-theme='dark'] .portal-shell .bg-fuchsia-500,
+html[data-portal-theme='dark'] .portal-shell .bg-fuchsia-600 {
+  background-color: rgba(219, 39, 119, 0.6) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-sky-500,
+html[data-portal-theme='dark'] .portal-shell .bg-sky-600 {
+  background-color: rgba(2, 132, 199, 0.6) !important;
+}
+
+/* Pастельные badge-варианты — стандартный pill-стиль (нейтральный серый),
+   а не голубые/мятные пятна. По требованию пользователя «Колди» в столбце
+   «Формат» = такая же цветовая гамма как у тэгов проекта (нейтральный). */
+html[data-portal-theme='dark'] .portal-shell .bg-sky-50,
+html[data-portal-theme='dark'] .portal-shell .bg-sky-100 {
+  background-color: var(--pd-surface-elev) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-sky-600,
+html[data-portal-theme='dark'] .portal-shell .text-sky-700,
+html[data-portal-theme='dark'] .portal-shell .text-sky-800,
+html[data-portal-theme='dark'] .portal-shell .text-sky-900 {
+  color: var(--pd-text) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-cyan-50,
+html[data-portal-theme='dark'] .portal-shell .bg-cyan-100 {
+  background-color: rgba(34, 211, 238, 0.14) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-cyan-600,
+html[data-portal-theme='dark'] .portal-shell .text-cyan-700,
+html[data-portal-theme='dark'] .portal-shell .text-cyan-800,
+html[data-portal-theme='dark'] .portal-shell .text-cyan-900 {
+  color: #a5f3fc !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-teal-50,
+html[data-portal-theme='dark'] .portal-shell .bg-teal-100 {
+  background-color: rgba(45, 212, 191, 0.14) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-teal-600,
+html[data-portal-theme='dark'] .portal-shell .text-teal-700,
+html[data-portal-theme='dark'] .portal-shell .text-teal-800,
+html[data-portal-theme='dark'] .portal-shell .text-teal-900 {
+  color: #99f6e4 !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-pink-50,
+html[data-portal-theme='dark'] .portal-shell .bg-pink-100 {
+  background-color: rgba(244, 114, 182, 0.14) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-pink-600,
+html[data-portal-theme='dark'] .portal-shell .text-pink-700,
+html[data-portal-theme='dark'] .portal-shell .text-pink-800,
+html[data-portal-theme='dark'] .portal-shell .text-pink-900 {
+  color: #fbcfe8 !important;
+}
+/* Amber-700/800 на bg-amber-50 (дедлайны «сегодня»/«просрочено»). */
+html[data-portal-theme='dark'] .portal-shell .text-amber-600,
+html[data-portal-theme='dark'] .portal-shell .text-amber-700 {
+  color: #fcd34d !important;
+}
+
+/* === INDIGO — встречается как primary CTA в парсерах (bg-indigo-600).
+       Tailwind считает indigo отдельным цветом от violet/purple, поэтому
+       мои предыдущие правила его не покрывали. === */
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-100,
+/* Альфа-варианты — выбранные строки чекбоксов в SignalEnrichmentModal
+ * (bg-indigo-50/60). Без override рендерились блёкло-серым на тёмном
+ * (фидбек 2026-06-20). */
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/40,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/80 {
+  background-color: rgba(99, 102, 241, 0.18) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-500,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-600,
+html[data-portal-theme='dark'] .portal-shell .bg-indigo-700 {
+  background-color: rgba(79, 70, 229, 0.7) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-indigo-700:hover,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-indigo-600:hover {
+  background-color: rgba(79, 70, 229, 0.85) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-indigo-500,
+html[data-portal-theme='dark'] .portal-shell .text-indigo-600,
+html[data-portal-theme='dark'] .portal-shell .text-indigo-700,
+html[data-portal-theme='dark'] .portal-shell .text-indigo-800 {
+  color: #a5b4fc !important;
+}
+html[data-portal-theme='dark'] .portal-shell .border-indigo-200,
+html[data-portal-theme='dark'] .portal-shell .border-indigo-300 {
+  border-color: rgba(99, 102, 241, 0.35) !important;
+}
+
+/* === ROSE — иногда вместо red === */
+html[data-portal-theme='dark'] .portal-shell .bg-rose-50,
+html[data-portal-theme='dark'] .portal-shell .bg-rose-100 {
+  background-color: rgba(251, 113, 133, 0.12) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-rose-500,
+html[data-portal-theme='dark'] .portal-shell .bg-rose-600,
+html[data-portal-theme='dark'] .portal-shell .bg-rose-700 {
+  background-color: rgba(225, 29, 72, 0.6) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .text-rose-500,
+html[data-portal-theme='dark'] .portal-shell .text-rose-600,
+html[data-portal-theme='dark'] .portal-shell .text-rose-700,
+html[data-portal-theme='dark'] .portal-shell .text-rose-800 {
+  color: #fda4af !important;
+}
+
+/* === TEAL / CYAN — иногда в дашбордах === */
+html[data-portal-theme='dark'] .portal-shell .bg-teal-50,
+html[data-portal-theme='dark'] .portal-shell .bg-teal-100 {
+  background-color: rgba(45, 212, 191, 0.12) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-teal-500,
+html[data-portal-theme='dark'] .portal-shell .bg-teal-600 {
+  background-color: rgba(13, 148, 136, 0.6) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .bg-cyan-500,
+html[data-portal-theme='dark'] .portal-shell .bg-cyan-600 {
+  background-color: rgba(8, 145, 178, 0.6) !important;
+}
+
+/* === Прогресс-полоски в истории запусков (bg-red-500/bg-blue-500
+       в узком h-1 элементе). Покрыто общими правилами, но добавляем
+       специфичный override для тонких баров — должны быть менее яркими. === */
+html[data-portal-theme='dark'] .portal-shell .h-1.bg-red-500,
+html[data-portal-theme='dark'] .portal-shell .h-1\.5.bg-red-500,
+html[data-portal-theme='dark'] .portal-shell .h-1.bg-red-600 {
+  background-color: rgba(220, 38, 38, 0.5) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .h-1.bg-blue-500,
+html[data-portal-theme='dark'] .portal-shell .h-1\.5.bg-blue-500,
+html[data-portal-theme='dark'] .portal-shell .h-1.bg-blue-600 {
+  background-color: rgba(37, 99, 235, 0.6) !important;
+}
+
+/* === Ring (focus-кольцо) у цветных компонентов — приглушаем === */
+html[data-portal-theme='dark'] .portal-shell .ring-violet-500,
+html[data-portal-theme='dark'] .portal-shell .ring-violet-600,
+html[data-portal-theme='dark'] .portal-shell .focus\:ring-violet-500:focus,
+html[data-portal-theme='dark'] .portal-shell .focus\:ring-violet-600:focus {
+  --tw-ring-color: rgba(167, 139, 250, 0.4) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .ring-blue-500,
+html[data-portal-theme='dark'] .portal-shell .focus\:ring-blue-500:focus,
+html[data-portal-theme='dark'] .portal-shell .focus\:ring-blue-500\/20:focus {
+  --tw-ring-color: rgba(96, 165, 250, 0.4) !important;
+}
+html[data-portal-theme='dark'] .portal-shell .ring-red-500,
+html[data-portal-theme='dark'] .portal-shell .focus\:ring-red-500:focus {
+  --tw-ring-color: rgba(248, 113, 113, 0.4) !important;
 }

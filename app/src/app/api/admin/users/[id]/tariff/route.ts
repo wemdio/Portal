@@ -73,6 +73,8 @@ type TariffBody = {
   billing_amount?: number | null;
   /** Создать счёт в тестовом магазине YooKassa (только при autopayment). */
   is_test_shop?: boolean;
+  /** QA-only: длительность периода в минутах вместо месяца. Включает test mode для всей подписки. */
+  test_minutes?: number | null;
 };
 
 /** Normalises body.billing_period/billing_amount, returning [period, amount] or null on invalid. */
@@ -152,24 +154,53 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       ? (body.tariff_type as TariffType)
       : 'standard';
 
-    const { period, amount, error: periodErr } = normalisePeriodAndAmount(tariffType, body);
-    if (periodErr) return jsonError(periodErr, 400);
+    // QA test mode — replaces the 3-day setup phase + monthly period with a
+    // short minutes-based period so the autopay cron loop can be exercised in
+    // minutes against the real YK shop. Treats every tariff like 'custom'
+    // (admin must supply billing_amount) so we don't price-distort the test.
+    const testMinutes = body.test_minutes != null && Number.isFinite(Number(body.test_minutes))
+      ? Math.floor(Number(body.test_minutes))
+      : null;
+    const isTestMode = testMinutes != null && testMinutes > 0;
 
-    // paid_until = setup_until + N месяцев (N = период; по умолчанию 1 если период не выбран).
-    const monthsToAdd = period ? BILLING_PERIOD_MONTHS[period] : 1;
-    const paidUntil = new Date(setupUntil);
-    paidUntil.setMonth(paidUntil.getMonth() + monthsToAdd);
+    let period: BillingPeriod | null;
+    let amount: number | null;
+    if (isTestMode) {
+      const manualAmt = Number(body.billing_amount);
+      if (!Number.isFinite(manualAmt) || manualAmt <= 0) {
+        return jsonError('billing_amount required for test mode', 400);
+      }
+      period = null;
+      amount = manualAmt;
+    } else {
+      const norm = normalisePeriodAndAmount(tariffType, body);
+      if (norm.error) return jsonError(norm.error, 400);
+      period = norm.period;
+      amount = norm.amount;
+    }
+
+    // Test mode: no 3-day setup, instant active period of N minutes.
+    // Normal mode: 3-day setup + N months.
+    const effectiveSetupUntil = isTestMode ? now : setupUntil;
+    const paidUntil = new Date(effectiveSetupUntil);
+    if (isTestMode) {
+      paidUntil.setMinutes(paidUntil.getMinutes() + testMinutes);
+    } else {
+      const monthsToAdd = period ? BILLING_PERIOD_MONTHS[period] : 1;
+      paidUntil.setMonth(paidUntil.getMonth() + monthsToAdd);
+    }
 
     const subscriptionFields: Record<string, unknown> = {
       is_active: true,
       tariff_type: tariffType,
       paid_at: billingMode ? null : now.toISOString(),
-      setup_until: setupUntil.toISOString(),
+      setup_until: effectiveSetupUntil.toISOString(),
       paid_until: billingMode ? null : paidUntil.toISOString(),
       billing_mode: billingMode,
       payment_locked: paymentLocked,
       billing_period: period,
       billing_amount: amount,
+      test_period_minutes: isTestMode ? testMinutes : null,
       updated_at: now.toISOString(),
     };
 
@@ -195,15 +226,16 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
 
     await logAudit(
       'admin.tariff.activate',
-      'Client subscription activated',
+      `Client subscription activated${isTestMode ? ` (test mode, ${testMinutes} min)` : ''}`,
       {
         targetUserId,
         tariff_type: tariffType,
         billing_period: period,
         billing_amount: amount,
-        setup_until: setupUntil.toISOString(),
+        setup_until: effectiveSetupUntil.toISOString(),
         billing_mode: billingMode,
         payment_locked: paymentLocked,
+        test_period_minutes: isTestMode ? testMinutes : null,
       },
       { userId: user.id },
     );

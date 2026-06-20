@@ -15,6 +15,14 @@ import { YD_PRESETS, YD_REGIONS } from '@/lib/parsers/yandexDirect/regions';
  *  - ai     — Requesty/Claude генерит ключи по описанию аудитории.
  */
 
+interface YDErrorGroup {
+  message: string;
+  count: number;
+  first_keyword: string;
+  first_region: string;
+  last_seen_at: string;
+}
+
 interface YDJob {
   id: string;
   status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
@@ -30,6 +38,7 @@ interface YDJob {
   saved_total: number;
   errors_count: number;
   error_message: string | null;
+  errors_sample: YDErrorGroup[] | null;
   created_at: string;
 }
 
@@ -51,6 +60,7 @@ export function YandexDirectParserView() {
   const [error, setError] = useState('');
   const [jobs, setJobs] = useState<YDJob[]>([]);
   const [activeJob, setActiveJob] = useState<YDJob | null>(null);
+  const [errorsModalJob, setErrorsModalJob] = useState<YDJob | null>(null);
 
   const keywords = keywordsRaw
     .split(/\r?\n/)
@@ -332,7 +342,18 @@ export function YandexDirectParserView() {
           </div>
           <div className="text-xs text-gray-500 mt-2">
             Найдено реклам: {activeJob.found_advertisers} · Уникальных доменов: {activeJob.saved_total}
-            {activeJob.errors_count > 0 && <> · Ошибок: {activeJob.errors_count}</>}
+            {activeJob.errors_count > 0 && (
+              <>
+                {' · '}
+                <button
+                  type="button"
+                  onClick={() => setErrorsModalJob(activeJob)}
+                  className="text-amber-700 underline hover:text-amber-800"
+                >
+                  Ошибок: {activeJob.errors_count}
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -352,7 +373,18 @@ export function YandexDirectParserView() {
                   <div className="text-xs text-gray-500 mt-0.5">
                     {j.keyword_mode === 'ai' ? 'AI-ключи' : `${j.keywords.length} ключей`}
                     {' · '}{j.saved_total.toLocaleString()} уник. доменов
-                    {j.errors_count > 0 && <> · <span className="text-amber-700">ошибок: {j.errors_count}</span></>}
+                    {j.errors_count > 0 && (
+                      <>
+                        {' · '}
+                        <button
+                          type="button"
+                          onClick={() => setErrorsModalJob(j)}
+                          className="text-amber-700 underline hover:text-amber-800"
+                        >
+                          ошибок: {j.errors_count}
+                        </button>
+                      </>
+                    )}
                   </div>
                   {j.status === 'failed' && j.error_message && (
                     <div className="text-xs text-red-600 mt-0.5">{j.error_message}</div>
@@ -386,8 +418,95 @@ export function YandexDirectParserView() {
           </div>
         </div>
       )}
+
+      {errorsModalJob && (
+        <ErrorsModal
+          job={jobs.find((j) => j.id === errorsModalJob.id) ?? errorsModalJob}
+          onClose={() => setErrorsModalJob(null)}
+        />
+      )}
     </div>
   );
+}
+
+function ErrorsModal({ job, onClose }: { job: YDJob; onClose: () => void }) {
+  const groups = job.errors_sample ?? [];
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col">
+        <div className="flex items-start justify-between gap-3 px-6 pt-5 pb-3 border-b border-gray-100">
+          <div className="min-w-0">
+            <h3 className="text-base font-semibold text-gray-900 truncate">
+              Ошибки парсинга — {job.niche || '(без ниши)'}
+            </h3>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Всего ошибок: {job.errors_count.toLocaleString()} · Уникальных типов: {groups.length}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="shrink-0 inline-flex h-8 w-8 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+            aria-label="Закрыть"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="overflow-y-auto px-6 py-4 space-y-3">
+          {groups.length === 0 ? (
+            <div className="text-sm text-gray-500 text-center py-8">
+              Детали по этим ошибкам недоступны.<br />
+              Скорее всего, задача была запущена до того, как этот функционал появился.<br />
+              Запустите новый прогон — у него детали будут.
+            </div>
+          ) : (
+            groups.map((g, i) => (
+              <div key={i} className="rounded-lg border border-gray-200 p-3">
+                <div className="flex items-start gap-3">
+                  <span className="shrink-0 inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-medium bg-red-50 text-red-700 border border-red-100">
+                    {g.count.toLocaleString()}×
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm text-gray-900 font-mono break-words whitespace-pre-wrap">
+                      {g.message}
+                    </div>
+                    <div className="text-xs text-gray-500 mt-1">
+                      Пример: «{g.first_keyword}» / {g.first_region}
+                      {' · '}последнее: {formatErrorTime(g.last_seen_at)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {groups.length > 0 && (
+          <div className="px-6 py-3 border-t border-gray-100 text-xs text-gray-500">
+            Частые причины: <strong>403 / not enough balance</strong> — закончился баланс
+            или истёк ключ XMLStock; <strong>5xx</strong> — XMLStock временно недоступен.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatErrorTime(iso: string): string {
+  try {
+    return new Intl.DateTimeFormat('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(iso));
+  } catch {
+    return iso;
+  }
 }
 
 function StatusBadge({ status }: { status: YDJob['status'] }) {

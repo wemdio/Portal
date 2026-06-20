@@ -26,6 +26,8 @@ import {
 } from '@/lib/enrich/extractors/types';
 import { formatExtraValue } from '@/lib/enrich/extractors/formatExtraValue';
 import SignalEnrichmentModal from '@/components/SignalEnrichmentModal';
+import { useUser } from '@/lib/UserProvider';
+import { isAdmin } from '@/lib/roles';
 
 type Sheet = {
   id: string;
@@ -500,7 +502,13 @@ const getEmailProvider = (email: string): string => {
   if (!domain) return '';
   return EMAIL_PROVIDER_MAP[domain] ?? domain;
 };
-const VIRTUALIZATION_THRESHOLD = 1500;
+// КРИТИЧНО: порог снижен с 1500 до 200. У юзера с 1000-строчной базой
+// виртуализация была ВЫКЛЮЧЕНА (1000 < 1500), и React держал в DOM
+// ~40 000 ячеек (1000 строк × 40 колонок). Браузер не справлялся даже
+// с горизонтальным скроллом — лагала вся страница. С порогом 200 база
+// 200+ строк автоматически виртуализируется (рендерим только видимые
+// ~50 строк + overscan), DOM содержит максимум ~2000-3000 ячеек.
+const VIRTUALIZATION_THRESHOLD = 200;
 const VIRTUAL_ROW_HEIGHT = 22;
 const VIRTUAL_OVERSCAN = 10;
 const GROUP_SUMMARY_PAGE_SIZE = 200;
@@ -1120,6 +1128,9 @@ export function DatabaseSpreadsheet() {
   const constructorJobId = searchParams.get('constructorJobId');
   const importHandledRef = useRef<string | null>(null);
 
+  const { userRole } = useUser();
+  const isAdminUser = isAdmin(userRole);
+
   const [tabs, setTabs] = useState<Sheet[]>(() => [createSheet('Вкладка 1')]);
   const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0].id);
   const [tabCounter, setTabCounter] = useState(1);
@@ -1290,10 +1301,26 @@ export function DatabaseSpreadsheet() {
     (
       storageKeySnapshot: string,
       payload: PersistedSpreadsheetState,
-      isLargeDataset: boolean,
+      _isLargeDataset: boolean,
       options?: { immediate?: boolean },
     ) => {
-      if (isLargeDataset) return;
+      // Раньше для больших баз сразу выходили (return), что лишало
+      // средние/большие датасеты страховой копии в localStorage —
+      // Сергей правильно отметил: при reload/crash во время импорта
+      // юзер мог потерять весь прогресс если remote save ещё не
+      // успел улететь. Возвращаем запись для всех размеров, но через
+      // deferred+coalescing path:
+      //   - setTimeout(0) переносит синхронный JSON.stringify ПОСЛЕ
+      //     завершения текущего click handler'a — UI получает paint
+      //     и реакция кнопки мгновенная;
+      //   - clearTimeout отменяет предыдущий запланированный stringify
+      //     при следующем setTabs (при активном polling'е или печати),
+      //     так что выполняется ТОЛЬКО последний (latest payload),
+      //     никогда не накапливается очередь;
+      //   - quota exceeded молча проглатывается catch'ем (для базы
+      //     >5МБ всё равно ничего не сделать без gzip / IndexedDB).
+      // _isLargeDataset больше не используется внутри функции, но
+      // остаётся в сигнатуре чтобы не ломать вызовы.
       const work = () => {
         localStorageWriteTimerRef.current = null;
         try {
@@ -9394,8 +9421,204 @@ export function DatabaseSpreadsheet() {
   const toolbarMonochromeButtonCompactClass =
     'inline-flex items-center gap-1 rounded border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-900 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400';
 
-  return (
-    <div className="flex-1 min-h-0 space-y-0.5 flex flex-col">
+  // ─── Toolbar memoization ──────────────────────────────────────────────
+  // Архитектурная правка: тулбар (≈400 строк JSX, 25+ кнопок) на КАЖДЫЙ
+  // ре-рендер компонента полностью пересчитывает свой VDOM. Открытие
+  // модалки, signal-polling, печать в ячейке, скролл — всё триггерит
+  // повторное создание ~200 VDOM-узлов тулбара. С useMemo'ом мы создаём
+  // их ОДИН раз и пересчитываем только когда меняются реально
+  // отображаемые в тулбаре значения (счётчики прогресса, флаги
+  // isProcessing активных job'ов, наличие activeTab и т.п.).
+  //
+  // Проблема stale closure'ов: useMemo с пустыми deps закэширует JSX, в
+  // котором замкнуты СТАРЫЕ handler'ы. Эти handler'ы при клике увидят
+  // устаревший state. Решение — паттерн ref-dispatcher: ref всегда
+  // указывает на свежие handler'ы, а dispatcher'ы (стабильные обёртки)
+  // диспатчат через ref. Клик идёт через dispatcher → ref → актуальный
+  // handler с актуальным state.
+  const toolbarHandlersRef = useRef({
+    confirmRemoveSelectedRows,
+    confirmClearSelection,
+    copyEntireTable,
+    handleExportCsv,
+    handleExportXlsx,
+    openPersonalizationModal,
+    openWebsiteEnrichmentModal,
+    handleStopEmailScraping,
+    openEmailScrapingModal,
+    handleStopEmailValidation,
+    openEmailValidationModal,
+    openSiteAvailabilityModal,
+    closeTrafficCheckModal,
+    openTrafficCheckModal,
+    handleStopBriefScoring,
+    openBriefScoringModal,
+    openNameCleanupModal,
+    closeDadataModal,
+    openDadataModal,
+    openSignalModal,
+    closeFnsModal,
+    openFnsModal,
+    closeInnLookupModal,
+    openInnLookupModal,
+    handleCleanInvisibleWhitespace,
+    handleStopWebsiteEnrichment,
+    openReviewSubmitModal: () =>
+      setReviewSubmit({ isOpen: true, comment: '', projectId: '', submitting: false }),
+    triggerImport: () => importInputRef.current?.click(),
+    pushToInstantly: async () => {
+      const hdrs = activeTab?.data[0] ?? [];
+      const initialMapping = hdrs.map((h) => autoDetectInstantlyField(String(h ?? '')));
+      setInstantlyPush({
+        isOpen: true,
+        campaignId: '',
+        leadListId: '',
+        pushing: false,
+        result: '',
+        loadingLists: true,
+        columnMapping: initialMapping,
+        mappingStep: false,
+      });
+      setInstantlyCampaigns([]);
+      setInstantlyLeadLists([]);
+      setInstantlyCampaignSearch('');
+      setInstantlyCreateMode(false);
+      setInstantlyNewName('');
+      try {
+        const token =
+          (await (await import('@/lib/supabaseClient')).supabase.auth.getSession()).data.session?.access_token ?? '';
+        const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+        const errors: string[] = [];
+        const [cRes, lRes] = await Promise.all([
+          fetch('/api/instantly/campaigns?limit=500', { headers }),
+          fetch('/api/instantly/lead-lists?limit=all', { headers }),
+        ]);
+        if (cRes.ok) {
+          const cd = await cRes.json();
+          const raw = (cd.items ?? cd.data ?? (Array.isArray(cd) ? cd : [])) as Array<{
+            id: string;
+            name: string;
+            timestamp_created?: string;
+          }>;
+          const sorted = raw
+            .map((c) => ({ id: c.id, name: c.name, ts: c.timestamp_created ?? '' }))
+            .sort((a, b) => (b.ts > a.ts ? 1 : b.ts < a.ts ? -1 : 0));
+          setInstantlyCampaigns(sorted);
+        } else {
+          const errBody = await cRes.json().catch(() => ({ error: cRes.statusText }));
+          errors.push(`Кампании: ${errBody?.error ?? cRes.statusText}`);
+        }
+        if (lRes.ok) {
+          const ld = await lRes.json();
+          setInstantlyLeadLists(
+            (ld.items ?? ld.data ?? (Array.isArray(ld) ? ld : [])).map(
+              (l: { id: string; name: string }) => ({ id: l.id, name: l.name }),
+            ),
+          );
+        } else {
+          const errBody = await lRes.json().catch(() => ({ error: lRes.statusText }));
+          errors.push(`Lead-списки: ${errBody?.error ?? lRes.statusText}`);
+        }
+        if (errors.length) {
+          setInstantlyPush((s) => ({ ...s, result: `Ошибка загрузки: ${errors.join('; ')}` }));
+        }
+      } catch (err) {
+        setInstantlyPush((s) => ({
+          ...s,
+          result: `Ошибка: ${err instanceof Error ? err.message : 'не удалось загрузить данные'}`,
+        }));
+      } finally {
+        setInstantlyPush((s) => ({ ...s, loadingLists: false }));
+      }
+    },
+  });
+  // Обновляем ref на КАЖДЫЙ render — handlers замыкают актуальные
+  // state/props, dispatcher'ы (созданные ОДИН раз ниже) при клике
+  // вызывают актуальную версию.
+  toolbarHandlersRef.current = {
+    confirmRemoveSelectedRows,
+    confirmClearSelection,
+    copyEntireTable,
+    handleExportCsv,
+    handleExportXlsx,
+    openPersonalizationModal,
+    openWebsiteEnrichmentModal,
+    handleStopEmailScraping,
+    openEmailScrapingModal,
+    handleStopEmailValidation,
+    openEmailValidationModal,
+    openSiteAvailabilityModal,
+    closeTrafficCheckModal,
+    openTrafficCheckModal,
+    handleStopBriefScoring,
+    openBriefScoringModal,
+    openNameCleanupModal,
+    closeDadataModal,
+    openDadataModal,
+    openSignalModal,
+    closeFnsModal,
+    openFnsModal,
+    closeInnLookupModal,
+    openInnLookupModal,
+    handleCleanInvisibleWhitespace,
+    handleStopWebsiteEnrichment,
+    openReviewSubmitModal: toolbarHandlersRef.current.openReviewSubmitModal,
+    triggerImport: toolbarHandlersRef.current.triggerImport,
+    pushToInstantly: toolbarHandlersRef.current.pushToInstantly,
+  };
+
+  // Stable dispatchers — созданы ОДИН раз, никогда не меняют reference.
+  // useMemo сохраняет их между ре-рендерами.
+  const td = useMemo(
+    () => ({
+      confirmRemoveSelectedRows: () => toolbarHandlersRef.current.confirmRemoveSelectedRows(),
+      confirmClearSelection: () => toolbarHandlersRef.current.confirmClearSelection(),
+      copyEntireTable: () => void toolbarHandlersRef.current.copyEntireTable(),
+      handleExportCsv: () => toolbarHandlersRef.current.handleExportCsv(),
+      handleExportXlsx: () => toolbarHandlersRef.current.handleExportXlsx(),
+      openPersonalizationModal: () => toolbarHandlersRef.current.openPersonalizationModal(),
+      openWebsiteEnrichmentModal: () => toolbarHandlersRef.current.openWebsiteEnrichmentModal(),
+      handleStopEmailScraping: () => void toolbarHandlersRef.current.handleStopEmailScraping(),
+      openEmailScrapingModal: () => toolbarHandlersRef.current.openEmailScrapingModal(),
+      handleStopEmailValidation: () => void toolbarHandlersRef.current.handleStopEmailValidation(),
+      openEmailValidationModal: () => toolbarHandlersRef.current.openEmailValidationModal(),
+      openSiteAvailabilityModal: () => toolbarHandlersRef.current.openSiteAvailabilityModal(),
+      closeTrafficCheckModal: () => toolbarHandlersRef.current.closeTrafficCheckModal(),
+      openTrafficCheckModal: () => toolbarHandlersRef.current.openTrafficCheckModal(),
+      handleStopBriefScoring: () => void toolbarHandlersRef.current.handleStopBriefScoring(),
+      openBriefScoringModal: () => toolbarHandlersRef.current.openBriefScoringModal(),
+      openNameCleanupModal: () => toolbarHandlersRef.current.openNameCleanupModal(),
+      closeDadataModal: () => toolbarHandlersRef.current.closeDadataModal(),
+      openDadataModal: () => toolbarHandlersRef.current.openDadataModal(),
+      openSignalModal: () => toolbarHandlersRef.current.openSignalModal(),
+      closeFnsModal: () => toolbarHandlersRef.current.closeFnsModal(),
+      openFnsModal: () => toolbarHandlersRef.current.openFnsModal(),
+      closeInnLookupModal: () => toolbarHandlersRef.current.closeInnLookupModal(),
+      openInnLookupModal: () => toolbarHandlersRef.current.openInnLookupModal(),
+      handleCleanInvisibleWhitespace: () => toolbarHandlersRef.current.handleCleanInvisibleWhitespace(),
+      handleStopWebsiteEnrichment: () => toolbarHandlersRef.current.handleStopWebsiteEnrichment(),
+      openReviewSubmitModal: () => toolbarHandlersRef.current.openReviewSubmitModal(),
+      triggerImport: () => toolbarHandlersRef.current.triggerImport(),
+      pushToInstantly: () => void toolbarHandlersRef.current.pushToInstantly(),
+    }),
+    [],
+  );
+
+  // Производные boolean'ы для disabled-флагов кнопок — primitives дают
+  // useMemo'у нормальное cache invalidation (Object.is на ссылках для
+  // activeTab был бы false-positive на каждый sparse setTabs).
+  const hasActiveTab = Boolean(activeTab);
+  const canShowReviewSubmit =
+    (!activeReviewReq || reworkStatuses.has(activeReviewReq.status)) && hasActiveTab && rowCount > 0;
+  const showReviewBadge = Boolean(activeReviewReq);
+
+  // Мемоизированный toolbar JSX. Зависит ТОЛЬКО от реально отображаемых
+  // в нём значений. Когда юзер кликает «открыть модалку», setSignalEnrichment
+  // не меняет ни одной из этих переменных → useMemo возвращает старую
+  // ссылку → React пропускает diff целого поддерева. Click handler идёт
+  // через td.* → ref → актуальный handler.
+  const toolbarJsx = useMemo(
+    () => (
       <div className="flex flex-wrap items-center gap-1.5 pb-1 flex-shrink-0">
         <Link
           href="/tools"
@@ -9409,7 +9632,7 @@ export function DatabaseSpreadsheet() {
         {selectedRows.size > 0 && (
           <button
             type="button"
-            onClick={confirmRemoveSelectedRows}
+            onClick={td.confirmRemoveSelectedRows}
             className={toolbarMonochromeButtonCompactClass}
           >
             Удалить ({selectedRows.size})
@@ -9418,8 +9641,8 @@ export function DatabaseSpreadsheet() {
 
         <button
           type="button"
-          onClick={confirmClearSelection}
-          disabled={!activeTab || rowCount === 0 || colCount === 0}
+          onClick={td.confirmClearSelection}
+          disabled={!hasActiveTab || rowCount === 0 || colCount === 0}
           className="inline-flex items-center rounded border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
         >
           Очистить
@@ -9427,7 +9650,7 @@ export function DatabaseSpreadsheet() {
 
         <button
           type="button"
-          onClick={() => importInputRef.current?.click()}
+          onClick={td.triggerImport}
           className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-gray-50"
         >
           ↑ Импорт
@@ -9437,14 +9660,14 @@ export function DatabaseSpreadsheet() {
           <span className="px-1.5 py-1 text-[11px] text-gray-400">↓</span>
           <button
             type="button"
-            onClick={handleExportCsv}
+            onClick={td.handleExportCsv}
             className="rounded px-1.5 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-white hover:text-gray-900"
           >
             CSV
           </button>
           <button
             type="button"
-            onClick={handleExportXlsx}
+            onClick={td.handleExportXlsx}
             className="rounded px-1.5 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-white hover:text-gray-900"
           >
             Excel
@@ -9453,8 +9676,8 @@ export function DatabaseSpreadsheet() {
 
         <button
           type="button"
-          onClick={() => void copyEntireTable()}
-          disabled={!activeTab || rowCount === 0}
+          onClick={td.copyEntireTable}
+          disabled={!hasActiveTab || rowCount === 0}
           className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
           title="Копировать всю таблицу в буфер обмена"
         >
@@ -9476,7 +9699,7 @@ export function DatabaseSpreadsheet() {
 
         <button
           type="button"
-          onClick={openPersonalizationModal}
+          onClick={td.openPersonalizationModal}
           disabled={colCount === 0}
           className={toolbarMonochromeButtonClass}
         >
@@ -9485,7 +9708,7 @@ export function DatabaseSpreadsheet() {
 
         <button
           type="button"
-          onClick={openWebsiteEnrichmentModal}
+          onClick={td.openWebsiteEnrichmentModal}
           disabled={colCount === 0}
           className={toolbarMonochromeButtonClass}
         >
@@ -9495,7 +9718,7 @@ export function DatabaseSpreadsheet() {
         {emailScraping.isGenerating ? (
           <button
             type="button"
-            onClick={() => void handleStopEmailScraping()}
+            onClick={td.handleStopEmailScraping}
             className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
           >
             Почты... {emailScraping.progress}% — Стоп
@@ -9503,7 +9726,7 @@ export function DatabaseSpreadsheet() {
         ) : (
           <button
             type="button"
-            onClick={openEmailScrapingModal}
+            onClick={td.openEmailScrapingModal}
             disabled={colCount === 0}
             className={toolbarMonochromeButtonClass}
           >
@@ -9514,7 +9737,7 @@ export function DatabaseSpreadsheet() {
         {emailValidation.isValidating ? (
           <button
             type="button"
-            onClick={() => void handleStopEmailValidation()}
+            onClick={td.handleStopEmailValidation}
             className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
           >
             Валидация... {emailValidation.progress}% — Стоп
@@ -9522,7 +9745,7 @@ export function DatabaseSpreadsheet() {
         ) : (
           <button
             type="button"
-            onClick={openEmailValidationModal}
+            onClick={td.openEmailValidationModal}
             disabled={colCount === 0}
             className={toolbarMonochromeButtonClass}
           >
@@ -9532,7 +9755,7 @@ export function DatabaseSpreadsheet() {
 
         <button
           type="button"
-          onClick={openSiteAvailabilityModal}
+          onClick={td.openSiteAvailabilityModal}
           disabled={colCount === 0}
           className={toolbarMonochromeButtonClass}
         >
@@ -9542,7 +9765,7 @@ export function DatabaseSpreadsheet() {
         {trafficCheck.isChecking ? (
           <button
             type="button"
-            onClick={closeTrafficCheckModal}
+            onClick={td.closeTrafficCheckModal}
             className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
           >
             Трафик: {trafficCheck.progress}% — Стоп
@@ -9550,7 +9773,7 @@ export function DatabaseSpreadsheet() {
         ) : (
           <button
             type="button"
-            onClick={openTrafficCheckModal}
+            onClick={td.openTrafficCheckModal}
             disabled={colCount === 0}
             className={toolbarMonochromeButtonClass}
           >
@@ -9561,7 +9784,7 @@ export function DatabaseSpreadsheet() {
         {briefScoring.isScoring ? (
           <button
             type="button"
-            onClick={() => void handleStopBriefScoring()}
+            onClick={td.handleStopBriefScoring}
             className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
           >
             Оценка ЦА: {briefScoring.progress}% — Стоп
@@ -9569,7 +9792,7 @@ export function DatabaseSpreadsheet() {
         ) : (
           <button
             type="button"
-            onClick={openBriefScoringModal}
+            onClick={td.openBriefScoringModal}
             disabled={colCount === 0}
             className={toolbarMonochromeButtonClass}
           >
@@ -9579,7 +9802,7 @@ export function DatabaseSpreadsheet() {
 
         <button
           type="button"
-          onClick={openNameCleanupModal}
+          onClick={td.openNameCleanupModal}
           disabled={colCount === 0}
           className={toolbarMonochromeButtonClass}
         >
@@ -9589,7 +9812,7 @@ export function DatabaseSpreadsheet() {
         {dadataEnrichment.isProcessing ? (
           <button
             type="button"
-            onClick={closeDadataModal}
+            onClick={td.closeDadataModal}
             className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
           >
             DaData... {dadataEnrichment.progress}% — Стоп
@@ -9597,7 +9820,7 @@ export function DatabaseSpreadsheet() {
         ) : (
           <button
             type="button"
-            onClick={openDadataModal}
+            onClick={td.openDadataModal}
             disabled={colCount === 0}
             className={toolbarMonochromeButtonClass}
           >
@@ -9608,17 +9831,19 @@ export function DatabaseSpreadsheet() {
         {signalEnrichment.isProcessing ? (
           <button
             type="button"
-            onClick={openSignalModal}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-indigo-700"
-            title="Открыть окно прогресса. Анализ продолжается в фоне."
+            onClick={td.openSignalModal}
+            disabled={!isAdminUser}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-400"
+            title={isAdminUser ? 'Открыть окно прогресса. Анализ продолжается в фоне.' : 'Доступно только администраторам'}
           >
             Сигналы {signalEnrichment.progress}%
           </button>
         ) : (
           <button
             type="button"
-            onClick={openSignalModal}
-            disabled={colCount === 0}
+            onClick={td.openSignalModal}
+            disabled={!isAdminUser || colCount === 0}
+            title={!isAdminUser ? 'Доступно только администраторам' : undefined}
             className={toolbarMonochromeButtonClass}
           >
             Сигналы
@@ -9628,7 +9853,7 @@ export function DatabaseSpreadsheet() {
         {fnsEnrichment.isProcessing ? (
           <button
             type="button"
-            onClick={closeFnsModal}
+            onClick={td.closeFnsModal}
             className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
           >
             ФНС... {fnsEnrichment.progress}% — Стоп
@@ -9636,7 +9861,7 @@ export function DatabaseSpreadsheet() {
         ) : (
           <button
             type="button"
-            onClick={openFnsModal}
+            onClick={td.openFnsModal}
             disabled={colCount === 0}
             className={toolbarMonochromeButtonClass}
           >
@@ -9647,7 +9872,7 @@ export function DatabaseSpreadsheet() {
         {innLookup.isProcessing ? (
           <button
             type="button"
-            onClick={closeInnLookupModal}
+            onClick={td.closeInnLookupModal}
             className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
           >
             ИНН... {innLookup.progress}% — Стоп
@@ -9655,7 +9880,7 @@ export function DatabaseSpreadsheet() {
         ) : (
           <button
             type="button"
-            onClick={openInnLookupModal}
+            onClick={td.openInnLookupModal}
             disabled={colCount === 0}
             className={toolbarMonochromeButtonClass}
           >
@@ -9665,7 +9890,7 @@ export function DatabaseSpreadsheet() {
 
         <button
           type="button"
-          onClick={handleCleanInvisibleWhitespace}
+          onClick={td.handleCleanInvisibleWhitespace}
           disabled={colCount === 0}
           className={toolbarMonochromeButtonClass}
           title="Очистка невидимых символов и проблемных пробелов для экспорта в Instantly"
@@ -9675,7 +9900,7 @@ export function DatabaseSpreadsheet() {
 
         <div className="h-4 w-px bg-gray-200 mx-0.5" />
 
-        {activeReviewReq && (() => {
+        {showReviewBadge && activeReviewReq && (() => {
           const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
             submitted: { label: 'На проверке', cls: 'border-gray-300 bg-gray-50 text-gray-600' },
             needs_rework: { label: 'На доработке', cls: 'border-orange-300 bg-orange-50 text-orange-700' },
@@ -9700,11 +9925,11 @@ export function DatabaseSpreadsheet() {
           ) : null;
         })()}
 
-        {(!activeReviewReq || reworkStatuses.has(activeReviewReq.status)) && (
+        {canShowReviewSubmit && (
           <button
             type="button"
-            onClick={() => setReviewSubmit({ isOpen: true, comment: '', projectId: '', submitting: false })}
-            disabled={!activeTab || rowCount === 0}
+            onClick={td.openReviewSubmitModal}
+            disabled={!hasActiveTab || rowCount === 0}
             className="inline-flex items-center gap-1 rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {activeReviewReq ? '↻ Переотправить' : '✓ На проверку'}
@@ -9713,51 +9938,8 @@ export function DatabaseSpreadsheet() {
 
         <button
           type="button"
-          onClick={async () => {
-            const hdrs = activeTab?.data[0] ?? [];
-            const initialMapping = hdrs.map((h) => autoDetectInstantlyField(String(h ?? '')));
-            setInstantlyPush({ isOpen: true, campaignId: '', leadListId: '', pushing: false, result: '', loadingLists: true, columnMapping: initialMapping, mappingStep: false });
-            setInstantlyCampaigns([]);
-            setInstantlyLeadLists([]);
-            setInstantlyCampaignSearch('');
-            setInstantlyCreateMode(false);
-            setInstantlyNewName('');
-            try {
-              const token = (await (await import('@/lib/supabaseClient')).supabase.auth.getSession()).data.session?.access_token ?? '';
-              const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-              const errors: string[] = [];
-              const [cRes, lRes] = await Promise.all([
-                fetch('/api/instantly/campaigns?limit=500', { headers }),
-                fetch('/api/instantly/lead-lists?limit=all', { headers }),
-              ]);
-              if (cRes.ok) {
-                const cd = await cRes.json();
-                const raw = (cd.items ?? cd.data ?? (Array.isArray(cd) ? cd : [])) as Array<{ id: string; name: string; timestamp_created?: string }>;
-                const sorted = raw
-                  .map((c) => ({ id: c.id, name: c.name, ts: c.timestamp_created ?? '' }))
-                  .sort((a, b) => (b.ts > a.ts ? 1 : b.ts < a.ts ? -1 : 0));
-                setInstantlyCampaigns(sorted);
-              } else {
-                const errBody = await cRes.json().catch(() => ({ error: cRes.statusText }));
-                errors.push(`Кампании: ${errBody?.error ?? cRes.statusText}`);
-              }
-              if (lRes.ok) {
-                const ld = await lRes.json();
-                setInstantlyLeadLists((ld.items ?? ld.data ?? (Array.isArray(ld) ? ld : [])).map((l: { id: string; name: string }) => ({ id: l.id, name: l.name })));
-              } else {
-                const errBody = await lRes.json().catch(() => ({ error: lRes.statusText }));
-                errors.push(`Lead-списки: ${errBody?.error ?? lRes.statusText}`);
-              }
-              if (errors.length) {
-                setInstantlyPush((s) => ({ ...s, result: `Ошибка загрузки: ${errors.join('; ')}` }));
-              }
-            } catch (err) {
-              setInstantlyPush((s) => ({ ...s, result: `Ошибка: ${err instanceof Error ? err.message : 'не удалось загрузить данные'}` }));
-            } finally {
-              setInstantlyPush((s) => ({ ...s, loadingLists: false }));
-            }
-          }}
-          disabled={!activeTab || rowCount === 0}
+          onClick={td.pushToInstantly}
+          disabled={!hasActiveTab || rowCount === 0}
           className="inline-flex items-center gap-1 rounded border border-blue-300 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 transition hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           Push to Instantly
@@ -9788,7 +9970,7 @@ export function DatabaseSpreadsheet() {
             </div>
             <button
               type="button"
-              onClick={handleStopWebsiteEnrichment}
+              onClick={td.handleStopWebsiteEnrichment}
               className="rounded border border-gray-300 bg-white px-1.5 py-0.5 text-[10px] font-medium text-gray-900 transition hover:bg-gray-100"
             >
               Стоп
@@ -9796,6 +9978,54 @@ export function DatabaseSpreadsheet() {
           </>
         )}
       </div>
+    ),
+    [
+      td,
+      selectedRows.size,
+      hasActiveTab,
+      rowCount,
+      colCount,
+      copyNotice,
+      emailScraping.isGenerating,
+      emailScraping.progress,
+      emailValidation.isValidating,
+      emailValidation.progress,
+      trafficCheck.isChecking,
+      trafficCheck.progress,
+      briefScoring.isScoring,
+      briefScoring.progress,
+      dadataEnrichment.isProcessing,
+      dadataEnrichment.progress,
+      signalEnrichment.isProcessing,
+      signalEnrichment.progress,
+      fnsEnrichment.isProcessing,
+      fnsEnrichment.progress,
+      innLookup.isProcessing,
+      innLookup.progress,
+      websiteEnrichment.isGenerating,
+      websiteEnrichment.progress,
+      websiteEnrichment.currentRow,
+      websiteEnrichment.totalRows,
+      websiteEnrichment.retryCount,
+      importStatus.status,
+      importStatus.progress,
+      activeReviewReq,
+      reworkStatuses,
+      showReviewBadge,
+      canShowReviewSubmit,
+      toolbarMonochromeButtonClass,
+      toolbarMonochromeButtonCompactClass,
+    ],
+  );
+
+  return (
+    <div className="flex-1 min-h-0 space-y-0.5 flex flex-col">
+      {toolbarJsx}
+      {/* Старый inline toolbar JSX (≈400 строк, 25+ кнопок) заменён на
+          memoized {toolbarJsx} выше. Замыкания/handler'ы протекают через
+          stable dispatcher'ы (td.*), которые диспатчат на актуальные
+          функции через ref — никаких stale closure'ов. См. блок useMemo
+          с toolbarHandlersRef. */}
 
       <div className="flex items-center gap-1.5 bg-white rounded border border-gray-200 px-1.5 py-1 flex-shrink-0">
         <div className="relative flex-1 max-w-xs">

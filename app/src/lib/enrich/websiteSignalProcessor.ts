@@ -29,7 +29,7 @@ import { extractSocialMedia, filterSocialUrls } from '@/lib/enrich/extractors/so
 import { findCompanySocials } from '@/lib/enrich/extractors/socialCompanyFinder';
 import { deriveCompanyName } from '@/lib/enrich/extractors/deriveCompanyName';
 import { extractSocialPosts } from '@/lib/enrich/extractors/socialPostsExtractor';
-import { detectEventSignals } from '@/lib/enrich/extractors/eventDetector';
+import { pickLatestNews } from '@/lib/enrich/extractors/socialLatestNewsDetector';
 import {
   discoverBlogOrSocialUrls,
   extractBlogLastPost,
@@ -39,17 +39,10 @@ import {
 import { llmExtractFields } from '@/lib/enrich/extractors/llmExtractor';
 
 // Convenience predicate — any of the 4 event-signal pairs requested. Used to
-// gate the LLM event-detector (it costs ~$0.01/URL and must not run for
-// presets that didn't enable any event_* column).
-const EVENT_KEYS = new Set<ExtractorKey>([
-  'event_opening', 'event_opening_summary',
-  'event_redesign', 'event_redesign_summary',
-  'event_renovation', 'event_renovation_summary',
-  'event_geo', 'event_geo_summary',
-]);
-
-function anyEventRequested(extractors: ExtractorKey[]): boolean {
-  return extractors.some((k) => EVENT_KEYS.has(k));
+// gate the LLM social-latest-news detector (it costs ~$0.003/URL and must
+// not run for presets that didn't enable the social_latest_news column).
+function socialLatestNewsRequested(extractors: ExtractorKey[]): boolean {
+  return extractors.includes('social_latest_news');
 }
 
 // Глубокий добор соцсетей (рендер браузером + поиск через Serper) дорогой —
@@ -530,7 +523,7 @@ export async function processSignalsForUrl(
   // static (main+about) → если пусто и включён deep: рендер браузером → если
   // всё ещё пусто: поиск офиц. канала через Serper. Все источники проходят один
   // фильтр (боты/личные/чужие/потолки) в filterSocialUrls.
-  const needSocial = extractors.includes('social_media') || anyEventRequested(extractors);
+  const needSocial = extractors.includes('social_media') || socialLatestNewsRequested(extractors);
   let socialUrls: string[] = [];
   if (needSocial) {
     socialUrls = filterSocialUrls([
@@ -605,25 +598,18 @@ export async function processSignalsForUrl(
     out.blog_last_post = post;
   }
 
-  // ─── Event signals (niche-agnostic) ──────────────────────────────────────
+  // ─── social_latest_news: LLM picks 1 best post out of ~10 recent ────────
   //
   // Pipeline:
-  //   1. Ensure we have a list of social-media URLs (reuse the one we already
-  //      computed if social_media was in the extractors set, otherwise compute
-  //      it locally without persisting — events need the URLs, the operator
-  //      didn't ask for the column).
-  //   2. Fetch last ~10 posts from each supported social network in parallel
-  //      via extractSocialPosts.
-  //   3. Call detectEventSignals with posts + blog_last_post (if available)
-  //      + about-page text (if available). It returns the 4 event-signal
-  //      booleans + paired summaries.
-  //   4. Copy result fields into out{}. detectEventSignals already drops
-  //      summaries for false signals, so the cell rendering stays clean.
+  //   1. socialUrls уже вычислен выше (static → render → Serper).
+  //   2. Тянем последние ~10 постов с каждой поддерживаемой сети параллельно
+  //      через extractSocialPosts.
+  //   3. pickLatestNews отдаёт LLM этот массив, получает {index, reason}
+  //      и формирует готовую ячейку "YYYY-MM-DD [url] — text...".
   //
-  // Guard: skip the entire block when no event_* key was requested — the
-  // LLM call costs money and must not fire on basic/outreach presets.
-  if (anyEventRequested(extractors) && !signal?.aborted) {
-    // socialUrls уже вычислен выше (static → render → Serper), переиспользуем.
+  // Guard: пропускаем весь блок если social_latest_news не запрошен —
+  // LLM-вызов стоит денег и не должен срабатывать на basic/outreach пресетах.
+  if (socialLatestNewsRequested(extractors) && !signal?.aborted) {
     const posts = socialUrls.length > 0
       ? await extractSocialPosts(socialUrls, {
           timeout: subpageTimeout,
@@ -632,11 +618,10 @@ export async function processSignalsForUrl(
         })
       : [];
 
-    // Логируем bridge между «нашли соцсети» и «есть из чего детектить».
-    // Если socialUrls пуст — события для этого URL заведомо будут прочерками
-    // (нет источника). Если соцсети есть, но posts=0 — fetch'и постов
-    // упали (приватный канал, IG-неподдерживаемый, JS-only, бан, тимаут).
-    await logInfo('events.pipeline.input', 'События: входные данные пайплайна', {
+    // Bridge-лог: видим, дошли ли мы от «нашли соцсети» до «есть из чего
+    // выбирать пост». 0 URL → ячейка заведомо DASH; URL есть, но posts=0 —
+    // fetch'и упали (приватный канал, JS-only, бан, таймаут).
+    await logInfo('social_news.pipeline.input', 'Latest news: входные данные', {
       url: normalized,
       social_urls_found: socialUrls.length,
       social_urls_sample: socialUrls.slice(0, 5),
@@ -647,34 +632,8 @@ export async function processSignalsForUrl(
       }, {}),
     });
 
-    // Cheap inline tag-strip — eventDetector caps the total context at 12 KB,
-    // so we just collapse tags & whitespace and slice. No need for cheerio here.
-    const aboutText = subpageHtml.about
-      ? subpageHtml.about
-          .replace(/<(script|style|noscript|template)[\s\S]*?<\/\1>/gi, ' ')
-          .replace(/<[^>]+>/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .slice(0, 4000)
-      : undefined;
-
-    const events = await detectEventSignals({
-      socialPosts: posts,
-      blogText: out.blog_last_post,
-      aboutText,
-    });
-
-    // Only assign fields the user actually requested — keeps the JSON in
-    // result_text minimal and avoids accidentally writing columns the
-    // operator didn't enable.
-    if (extractors.includes('event_opening')) out.event_opening = events.event_opening;
-    if (extractors.includes('event_opening_summary')) out.event_opening_summary = events.event_opening_summary;
-    if (extractors.includes('event_redesign')) out.event_redesign = events.event_redesign;
-    if (extractors.includes('event_redesign_summary')) out.event_redesign_summary = events.event_redesign_summary;
-    if (extractors.includes('event_renovation')) out.event_renovation = events.event_renovation;
-    if (extractors.includes('event_renovation_summary')) out.event_renovation_summary = events.event_renovation_summary;
-    if (extractors.includes('event_geo')) out.event_geo = events.event_geo;
-    if (extractors.includes('event_geo_summary')) out.event_geo_summary = events.event_geo_summary;
+    const news = await pickLatestNews({ socialPosts: posts });
+    if (extractors.includes('social_latest_news')) out.social_latest_news = news.social_latest_news;
   }
 
   // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.

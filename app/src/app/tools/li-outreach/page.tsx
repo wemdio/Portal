@@ -31,6 +31,16 @@ const COOLDOWN_REASON_LABELS: Record<LiAccountCooldownReason, string> = {
   account_restricted: 'аккаунт ограничен LinkedIn',
 };
 
+// Русские лейблы статусов кампании для бейджей в списке. Бэкенд хранит
+// статус в исходном виде (`draft`/`running`/...) — переводим только в UI.
+const CAMPAIGN_STATUS_LABEL_RU: Record<string, string> = {
+  draft: 'черновик',
+  running: 'запущена',
+  paused: 'пауза',
+  completed: 'завершена',
+  failed: 'ошибка',
+};
+
 function isAccountInCooldown(a: Pick<LiAccount, 'cooldown_until'>): boolean {
   if (!a.cooldown_until) return false;
   return new Date(a.cooldown_until).getTime() > Date.now();
@@ -217,6 +227,33 @@ export default function LiOutreachPage() {
   // campaign — every field is rendered read-only and Save/Start are hidden.
   const [campaignFormReadOnly, setCampaignFormReadOnly] = useState(false);
   const [cf, setCf] = useState(DEFAULT_CAMPAIGN_FORM);
+
+  /** Закрывает модалку «Новая кампания» и сбрасывает edit-state. Используется
+   *  из кнопки X, backdrop-клика, Esc-handler'а. Сама форма (`cf`) НЕ
+   *  сбрасывается — её ресет делает openCreateCampaignForm. */
+  const closeCampaignModal = useCallback(() => {
+    setShowCreate(false);
+    setEditingCampaignId(null);
+    setCampaignFormReadOnly(false);
+  }, []);
+
+  // Esc-закрытие пока модалка открыта.
+  useEffect(() => {
+    if (!showCreate) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') closeCampaignModal();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showCreate, closeCampaignModal]);
+
+  // Body-scroll-lock пока модалка открыта.
+  useEffect(() => {
+    if (!showCreate) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = previous; };
+  }, [showCreate]);
 
   // Dashboard data
   const [dashData, setDashData] = useState<DashboardData | null>(null);
@@ -805,13 +842,16 @@ export default function LiOutreachPage() {
         <p className="text-sm text-gray-500">Кампании, AI-персонализация, скрапинг лидов через Unipile.</p>
       </div>
 
-      {/* Tab bar */}
+      {/* Tab bar. Активная вкладка получает усиленную тень + кольцо
+       *  blue-400/30 — нужно чтобы её было видно на тёмной теме
+       *  (без кольца bg-white→pd-surface почти не отличался от pd-bg).
+       *  shadow-md и ring работают в обеих темах. */}
       <div className="flex gap-1 rounded-xl bg-gray-100 p-1">
         {tabs.map((t) => (
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
-            className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${tab === t.key ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+            className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${tab === t.key ? 'bg-white text-gray-900 shadow-md ring-1 ring-blue-400/30' : 'text-gray-500 hover:text-gray-700'}`}
           >
             {t.label}
           </button>
@@ -840,35 +880,42 @@ export default function LiOutreachPage() {
             />
           </div>
 
-          {/* Lead funnel (visual) — выбираемая по кампании */}
-          {dashData && dashFunnel && (
-            <div className="rounded-xl border border-gray-200 bg-white p-5">
-              <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
-                <h3 className="text-sm font-semibold text-gray-900">
-                  Воронка лидов{dashFunnelCampaign ? ` — ${dashFunnelCampaign.name}` : ''}
-                </h3>
-                <select
-                  value={funnelCampaignId}
-                  onChange={(e) => setFunnelCampaignId(e.target.value)}
-                  className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm bg-white max-w-[260px]"
-                >
-                  <option value="">Все кампании</option>
-                  {dashData.campaign_stats.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
+          {/* Lead funnel + 30-day activity — стоят рядом на широких экранах
+           *  (lg+) чтобы не растягивать дашборд вертикально, на мобилке
+           *  пакуются в одну колонку. */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Lead funnel (visual) — выбираемая по кампании */}
+            {dashData && dashFunnel && (
+              <div className="rounded-xl border border-gray-200 bg-white p-5">
+                <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+                  <h3 className="text-sm font-semibold text-gray-900">
+                    Воронка лидов{dashFunnelCampaign ? ` — ${dashFunnelCampaign.name}` : ''}
+                  </h3>
+                  <select
+                    value={funnelCampaignId}
+                    onChange={(e) => setFunnelCampaignId(e.target.value)}
+                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm bg-white max-w-[260px]"
+                  >
+                    <option value="">Все кампании</option>
+                    {dashData.campaign_stats.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <FunnelChart funnel={dashFunnel} />
               </div>
-              <FunnelChart funnel={dashFunnel} />
-            </div>
-          )}
+            )}
 
-          {/* Activity timeline (30 days) */}
-          {dashData && dashData.timeline.length > 0 && (
-            <div className="rounded-xl border border-gray-200 bg-white p-5">
-              <h3 className="text-sm font-semibold text-gray-900 mb-4">Активность за 30 дней</h3>
-              <ActivityTimeline timeline={dashData.timeline} />
-            </div>
-          )}
+            {/* Activity timeline (30 days). flex flex-col + chart с flex-1
+             *  чтобы блок заполнял всю высоту grid-ячейки (равной воронке),
+             *  а не оставлял пустое пространство снизу с надписями посередине. */}
+            {dashData && dashData.timeline.length > 0 && (
+              <div className="rounded-xl border border-gray-200 bg-white p-5 flex flex-col">
+                <h3 className="text-sm font-semibold text-gray-900 mb-4 flex-shrink-0">Активность за 30 дней</h3>
+                <ActivityTimeline timeline={dashData.timeline} />
+              </div>
+            )}
+          </div>
 
           {/* Campaign performance */}
           {dashData && dashData.campaign_stats.length > 0 && (
@@ -920,8 +967,8 @@ export default function LiOutreachPage() {
                         <tr key={cs.id} className="border-b border-gray-50 hover:bg-gray-50/50">
                           <td className="px-3 py-2.5 font-medium text-gray-900 max-w-[200px] truncate">{cs.name}</td>
                           <td className="px-2 py-2.5 text-center">
-                            <span className={`text-xs px-2 py-0.5 rounded-md font-medium ${cs.status === 'running' ? 'bg-green-100 text-green-700' : cs.status === 'draft' ? 'bg-gray-100 text-gray-600' : cs.status === 'paused' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'}`}>
-                              {cs.status === 'running' ? '● Активна' : cs.status === 'draft' ? 'Черновик' : cs.status}
+                            <span className={`text-xs px-2 py-0.5 rounded-md font-medium ${cs.status === 'running' ? 'bg-green-100 text-green-700' : cs.status === 'draft' ? 'bg-gray-100 text-gray-600' : cs.status === 'paused' ? 'bg-amber-100 text-amber-700' : cs.status === 'completed' ? 'bg-cyan-100 text-cyan-700' : 'bg-gray-100 text-gray-600'}`}>
+                              {cs.status === 'running' ? '● Активна' : CAMPAIGN_STATUS_LABEL_RU[cs.status] ?? cs.status}
                             </span>
                           </td>
                           <td className="px-2 py-2.5 text-right tabular-nums text-gray-700">{cs.leads_total}</td>
@@ -1076,13 +1123,31 @@ export default function LiOutreachPage() {
         <div className="space-y-4">
           {/* Create Campaign Panel */}
           {showCreate && (
-            <div className={`rounded-xl border p-4 space-y-4 ${campaignFormReadOnly ? 'border-purple-200 bg-purple-50/40' : 'border-blue-200 bg-blue-50/40'}`}>
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-gray-900">
-                  {campaignFormReadOnly ? 'Просмотр кампании (только чтение)' : editingCampaignId ? 'Редактирование кампании' : 'Новая кампания'}
-                </h2>
-                <button onClick={() => { setShowCreate(false); setEditingCampaignId(null); setCampaignFormReadOnly(false); }} className="text-xs text-gray-500 hover:text-gray-700">{campaignFormReadOnly ? 'Закрыть' : 'Отмена'}</button>
-              </div>
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="li-campaign-modal-title"
+              className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm"
+              onClick={closeCampaignModal}
+            >
+              <div
+                className={`my-6 w-full max-w-4xl rounded-2xl border shadow-2xl shadow-slate-900/30 ${campaignFormReadOnly ? 'border-purple-200 bg-white' : 'border-blue-200 bg-white'}`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                  <h2 id="li-campaign-modal-title" className="text-sm font-semibold text-gray-900">
+                    {campaignFormReadOnly ? 'Просмотр кампании (только чтение)' : editingCampaignId ? 'Редактирование кампании' : 'Новая кампания'}
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={closeCampaignModal}
+                    aria-label={campaignFormReadOnly ? 'Закрыть' : 'Отмена'}
+                    className="rounded-lg p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="space-y-4 px-4 py-4">
               {campaignFormReadOnly && (
                 <div className="rounded-lg bg-purple-100 px-3 py-2 text-xs text-purple-700">
                   Это кампания другого специалиста. Видно, как она настроена (шаги, тексты, промты), но редактировать нельзя.
@@ -1325,6 +1390,8 @@ export default function LiOutreachPage() {
                   {creating ? (editingCampaignId ? 'Сохранение...' : 'Создание...') : (editingCampaignId ? 'Сохранить изменения' : 'Создать кампанию')}
                 </button>
               )}
+                </div>
+              </div>
             </div>
           )}
 
@@ -1344,7 +1411,7 @@ export default function LiOutreachPage() {
                 <div key={c.id} className={`rounded-xl border p-3 text-sm cursor-pointer ${selectedCampaignId === c.id ? 'border-blue-300 bg-blue-50' : isOwn ? 'border-gray-200 hover:bg-gray-50' : 'border-l-4 border-l-purple-400 border-y border-r border-purple-200 bg-purple-50/40 hover:bg-purple-50'}`} onClick={() => setSelectedCampaignId(c.id)}>
                   <div className="flex items-center justify-between gap-2">
                     <div className="font-medium text-gray-900 min-w-0 truncate">{c.name}</div>
-                    <span className={`text-xs px-2 py-0.5 rounded-md shrink-0 ${c.status === 'running' ? 'bg-green-100 text-green-700' : c.status === 'draft' ? 'bg-gray-100 text-gray-600' : 'bg-amber-100 text-amber-700'}`}>{c.status}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded-md shrink-0 ${c.status === 'running' ? 'bg-green-100 text-green-700' : c.status === 'draft' ? 'bg-gray-100 text-gray-600' : c.status === 'completed' ? 'bg-cyan-100 text-cyan-700' : 'bg-amber-100 text-amber-700'}`}>{CAMPAIGN_STATUS_LABEL_RU[c.status] ?? c.status}</span>
                   </div>
                   {!isOwn && (
                     <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-medium text-purple-700" title="Запуск другого специалиста — доступен только для просмотра">
@@ -2527,7 +2594,11 @@ function StatCard({ label, value, total, accent = 'gray' }: { label: string; val
 // ---- Funnel Chart (visual horizontal bars) ---------------------------------
 
 const FUNNEL_STAGES: { key: keyof DashboardFunnel; label: string; color: string }[] = [
-  { key: 'new',             label: 'Новые',                color: '#9ca3af' },
+  // 'new' — entry stage, раньше был #9ca3af (gray-400) для «нейтральности», но
+  // на тёмной теме полоска и цифра внутри сливались с фоном (фидбек 2026-06-20).
+  // Теперь sky-500 — яркий цианово-синий, отличим от #3b82f6 (connected) и
+  // #06b6d4 (completed), читается на обеих темах.
+  { key: 'new',             label: 'Новые',                color: '#0ea5e9' },
   { key: 'invited',         label: 'Приглашены',           color: '#f59e0b' },
   // Side-track: LinkedIn refused the invite as duplicate.
   // Sits right after 'invited' so the operator can compare
@@ -2580,9 +2651,13 @@ function FunnelChart({ funnel }: { funnel: DashboardFunnel }) {
 
 function ActivityTimeline({ timeline }: { timeline: DashboardTimeline[] }) {
   const maxActions = Math.max(...timeline.map((d) => d.actions), 1);
+  // flex flex-col h-full + chart-bar flex-1 — чтобы график растягивался на
+  // всю доступную высоту parent grid-ячейки (равной воронке), а лейблы
+  // дат и легенда оставались внизу. Раньше chart был фикс-h-28, и при
+  // высоком funnel'е снизу зияло пустое пространство.
   return (
-    <div>
-      <div className="flex items-end gap-[3px] h-28">
+    <div className="flex flex-col h-full flex-1">
+      <div className="flex items-end gap-[3px] flex-1 min-h-[7rem]">
         {timeline.map((day) => {
           const h = Math.round((day.actions / maxActions) * 100);
           const hasError = day.errors > 0;
@@ -2601,11 +2676,11 @@ function ActivityTimeline({ timeline }: { timeline: DashboardTimeline[] }) {
           );
         })}
       </div>
-      <div className="flex items-center justify-between mt-1.5 text-[10px] text-gray-400">
+      <div className="flex items-center justify-between mt-1.5 text-[10px] text-gray-400 flex-shrink-0">
         <span>{formatShortDate(timeline[0]?.date)}</span>
         <span>{formatShortDate(timeline[timeline.length - 1]?.date)}</span>
       </div>
-      <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
+      <div className="flex items-center gap-4 mt-2 text-xs text-gray-500 flex-shrink-0">
         <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-blue-400" /> Действия</span>
         <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-400" /> С ошибками</span>
         <span className="ml-auto tabular-nums">{timeline.reduce((s, d) => s + d.actions, 0)} всего за 30 дней</span>

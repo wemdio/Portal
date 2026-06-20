@@ -80,6 +80,10 @@ export interface ToolConfig {
   badgeVariant?: 'amber' | 'emerald';
   accentColor?: 'blue' | 'emerald';
   disabled?: boolean;
+  /** Внутрянка инструмента: какие вкладки, кнопки и шаги есть внутри. Не
+   *  показывается на странице /tools — используется только Portal AI помощником,
+   *  чтобы он мог отвечать на вопросы вида «где кнопка валидации почт». */
+  details?: string;
 }
 
 export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {

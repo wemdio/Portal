@@ -11,6 +11,7 @@ import { UserProvider, useUser } from '@/lib/UserProvider';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 import { PortalDocumentTitle } from '@/components/PortalDocumentTitle';
 import { GlobalTextTranslator, LanguageLoadingOverlay } from '@/components/GlobalTextTranslator';
+import { ToolsAssistant } from '@/components/ToolsAssistant';
 import { dict, commonDictionary, normalizeLocale, type Locale } from '@/lib/i18n';
 
 const MD_BREAKPOINT = 768;
@@ -114,7 +115,7 @@ export function LayoutShell({
     <PortalDocumentTitle />
     <PortalLoadingProvider>
     <div
-      className={shellClassName}
+      className={`${shellClassName} portal-shell`}
       style={{
         minHeight: 'var(--app-viewport-height, 100vh)',
         ...(!isTma ? { height: 'var(--app-viewport-height, 100vh)' } : {}),
@@ -159,6 +160,10 @@ export function LayoutShell({
         </main>
       </div>
     </div>
+    {/* Плавающий помощник по инструментам — только для авторизованного портала.
+        Прячем на чужих/гостевых/служебных страницах, где /api/tools-assistant
+        всё равно вернёт 401. */}
+    {!isTma && !hideNav && pathname !== '/login' && <ToolsAssistant />}
     </PortalLoadingProvider>
     </UserProvider>
     </>

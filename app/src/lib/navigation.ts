@@ -19,7 +19,6 @@ export const NAV_PATH_ALIASES: Record<string, string[]> = {
 };
 
 export const navItems: NavItem[] = [
-  { id: 'guide', name: 'Гайд', nameEn: 'Guide', href: '/guide' },
   { id: 'projects', name: 'Проекты', nameEn: 'Projects', href: '/' },
   { id: 'projects-analytics', name: 'Аналитика проектов', nameEn: 'Project analytics', href: '/analytics/projects' },
   { id: 'tasks', name: 'Задачи', nameEn: 'Tasks', href: '/tasks' },
