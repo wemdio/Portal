@@ -174,7 +174,6 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
           {(data.droppedLeads.interested + data.droppedLeads.referral) > 0 && (
             <div className="overflow-hidden rounded-lg border border-gray-200 bg-gray-50/50">
               <div className="flex items-center gap-2 px-3.5 py-2.5">
-                <span className="text-sm" aria-hidden>🔥</span>
                 <span className="text-[13px] font-semibold text-gray-900">Брошенные горячие лиды</span>
                 <span className="rounded-full bg-red-100 px-1.5 py-0.5 text-[11px] font-semibold leading-none text-red-700">
                   {data.droppedLeads.interested + data.droppedLeads.referral}
@@ -231,8 +230,7 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
           {/* I) within-client segment ROI — where to source the next list */}
           {data.segmentRoi && (
             <div className="overflow-hidden rounded-lg border border-gray-200 bg-gray-50/50">
-              <div className="flex items-center gap-2 px-3.5 py-2.5">
-                <span className="text-sm" aria-hidden>🎯</span>
+              <div className="px-3.5 py-2.5">
                 <span className="text-[13px] font-semibold text-gray-900">Куда собирать следующий список</span>
               </div>
               <div className="border-t border-gray-200 px-3.5 py-2.5">
@@ -257,10 +255,7 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
           {data.copyInsights && (data.copyInsights.defaults.length > 0 || data.copyInsights.hypotheses.length > 0) && (
             <div className="overflow-hidden rounded-lg border border-gray-200 bg-gray-50/50">
               <div className="px-3.5 py-2.5">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm" aria-hidden>✍️</span>
-                  <span className="text-[13px] font-semibold text-gray-900">Копи-инсайты по первому письму</span>
-                </div>
+                <span className="text-[13px] font-semibold text-gray-900">Копи-инсайты по первому письму</span>
                 <p className="mt-1 text-[11px] text-gray-500">
                   разобрано {data.copyInsights.campaignsAnalyzed} кампаний проекта · проценты — бенчмарк по всему датасету, не замер этого проекта
                 </p>
