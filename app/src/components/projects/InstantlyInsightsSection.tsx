@@ -265,9 +265,9 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
                   <div key={`d${i}`} className="flex gap-2 text-xs">
                     <span
                       className="mt-0.5 shrink-0 rounded bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700"
-                      title="сигнал держится при контроле на сегмент — можно принять по умолчанию"
+                      title="Закономерность подтвердилась в разных нишах — можно применять"
                     >
-                      дефолт
+                      правило
                     </span>
                     <span className="text-gray-700">{c.text}</span>
                   </div>
@@ -276,18 +276,18 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
                   <div key={`h${i}`} className="flex gap-2 text-xs">
                     <span
                       className="mt-0.5 shrink-0 rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700"
-                      title="кросс-сегментный сигнал, внутри сегмента нестабилен — проверять within-campaign A/B"
+                      title="Связь есть, но не во всех нишах — сначала проверьте A/B-тестом на своей кампании"
                     >
-                      гипотеза · A/B
+                      гипотеза
                     </span>
                     <span className="text-gray-700">{c.text}</span>
                   </div>
                 ))}
               </div>
-              <div className="border-t border-gray-200 px-3.5 py-2">
-                <p className="text-[11px] leading-relaxed text-gray-500">
-                  длина держится при контроле на сегмент (дефолт); опенер и остальное — кросс-сегментный сигнал, нестабильный внутри сегмента (гипотеза для A/B). Причинно только within-campaign A/B.
-                </p>
+              <div className="space-y-1 border-t border-gray-200 px-3.5 py-2.5 text-[11px] leading-relaxed text-gray-500">
+                <p><span className="font-semibold text-emerald-700">правило</span> — закономерность подтвердилась в разных нишах, можно применять.</p>
+                <p><span className="font-semibold text-amber-700">гипотеза</span> — связь есть, но в одних нишах работает, в других нет. Сначала проверьте на своей кампании: пустите два варианта письма на один список и сравните отклик (это и есть A/B-тест).</p>
+                <p>Проценты — это связи по прошлым письмам, а не гарантия результата.</p>
               </div>
             </div>
           )}
@@ -298,11 +298,12 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
           ))}
 
           <p className="text-[11px] leading-relaxed text-gray-500">
-            <span className="font-medium text-emerald-700">Lead rate</span> зелёным — высокий = хорошо ·{' '}
-            <span className="font-medium text-amber-700">Bounce</span> оранжевым — выше&nbsp;5% = проблема списка/доставляемости.
+            <span className="font-medium text-emerald-700">Lead rate</span> (зелёным) — доля тёплых ответов из всех ответов, выше = лучше ·{' '}
+            <span className="font-medium text-amber-700">Bounce</span> (оранжевым) — недоставленные письма, выше&nbsp;5% = проблема со списком или доставляемостью.
             <br />
-            Под каждой долей — её 95% доверительный интервал. «Мало данных» = ниже порога достоверности (честный отказ, не ноль).
-            Находки: грейд <span className="font-medium">A</span> — причинный (A/B внутри кампании), <span className="font-medium">B</span> — корреляционный.
+            Рядом с долей — диапазон, в котором она реально лежит (чем уже, тем надёжнее цифра). «Мало данных» — выборка слишком мала, чтобы доверять числу, поэтому мы его не показываем.
+            <br />
+            Находки: <span className="font-medium">A</span> — проверено A/B-тестом, можно считать фактом; <span className="font-medium">B</span> — статистическая связь: вероятно, но не доказано.
           </p>
         </div>
       )}

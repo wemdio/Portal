@@ -398,12 +398,12 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
       const defaults: CopyFinding[] = [];
       const hypotheses: CopyFinding[] = [];
       // DEFAULT: length<40w — held in all 3 largest segments with non-overlapping Wilson CIs (re-verified 2026-06-21).
-      if (longBody > 0) defaults.push({ affected: longBody, text: `${longBody} из ${N}: первое письмо ≥40 слов${veryLong ? ` (${veryLong} — длиннее 110)` : ''}. Короткие <40 слов дают ~22% лидов против ~17% (+5 пп, держится по сегментам). Подрезать первое письмо к <40 слов; эффект подтвердить A/B.` });
+      if (longBody > 0) defaults.push({ affected: longBody, text: `Длинное первое письмо у ${longBody} из ${N} кампаний${veryLong ? ` (${veryLong} — совсем длинные, больше 110 слов)` : ''}. По всему датасету короткие письма (до 40 слов) дают больше лидов — около 22% против 17% у длинных. Сократите первое письмо до 40 слов: это работает в разных нишах.` });
       // HYPOTHESIS (not default): opener lift is carried by the greeting and is segment-dependent —
       // it dissolves in manufacturing (CIs overlap) and the early question alone doesn't help.
-      if (noOpener > 0) hypotheses.push({ affected: noOpener, text: `${noOpener} из ${N}: слабый опенер — нет связки «приветствие + ранний вопрос» в первых 1-2 предложениях. Приветствие связано с более высоким lead rate (~21% против ~17%, ~+4.5 пп), но в части ниш (напр. manufacturing) разница исчезает, а ранний вопрос сам по себе не помогает. Открывать приветствием; вопрос — проверить A/B.` });
-      if (hardCta > 0) hypotheses.push({ affected: hardCta, text: `${hardCta} из ${N}: просьба о звонке/демо уже в ПЕРВОМ письме — в большинстве ниш связана с меньшим lead rate. Перенести встречу в фоллоу-ап, проверить A/B. (Исключение — IT/SaaS, там наоборот.)` });
-      if (moneyConstr > 0) hypotheses.push({ affected: moneyConstr, text: `${moneyConstr}: денежный заход (выручка/N млн/руб) в начале первого письма — в недвижимости/стройке связан с заметно меньшим lead rate (~9% против ~21%). A/B: заменить на нейтральный вопрос.` });
+      if (noOpener > 0) hypotheses.push({ affected: noOpener, text: `У ${noOpener} из ${N} кампаний первое письмо не начинается с приветствия и короткого вопроса в первых 1-2 предложениях. Письма с приветствием в среднем дают больше лидов (около 21% против 17%), но не во всех нишах, а один вопрос без приветствия не помогает. Начинайте с приветствия; вопрос в начале — проверьте A/B-тестом.` });
+      if (hardCta > 0) hypotheses.push({ affected: hardCta, text: `${hardCta} из ${N} кампаний просят звонок или демо уже в первом письме. В большинстве ниш это связано с меньшим числом лидов. Попробуйте перенести предложение встречи во 2-3 письмо и сравните A/B-тестом. (Исключение — IT/SaaS: там, наоборот, можно сразу.)` });
+      if (moneyConstr > 0) hypotheses.push({ affected: moneyConstr, text: `${moneyConstr} кампаний начинают первое письмо с денег (выручка, суммы в рублях). В стройке и недвижимости это связано с заметно меньшим числом лидов (около 9% против 21%). Попробуйте заменить на нейтральный вопрос и сравните A/B-тестом.` });
       if (defaults.length || hypotheses.length) copyInsights = { campaignsAnalyzed: N, defaults, hypotheses };
     }
   } catch (e) {
