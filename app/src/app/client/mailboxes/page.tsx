@@ -116,7 +116,7 @@ export default function ClientMailboxesPage() {
       window.history.replaceState({}, '', '/client/mailboxes');
       void fetchMailboxes();
     } else if (oerr) {
-      setFormError('Не удалось подключить через Google: ' + oerr);
+      setFormError('Не удалось подключить ящик: ' + oerr);
       window.history.replaceState({}, '', '/client/mailboxes');
     }
   }, [fetchMailboxes]);
