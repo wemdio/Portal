@@ -19,7 +19,7 @@ type CampaignMetric = {
   labelCoverage: number | null; bounceRate: number | null; lifetimeSent: number | null;
 };
 type Finding = { grade: 'A' | 'B'; campaign: string; text: string };
-type DroppedLead = { email: string; bucket: 'interested' | 'referral'; ageDays: number; campaign: string };
+type DroppedLead = { email: string; ageDays: number; campaign: string };
 type SegmentRoiRow = { segment: string; sent: number; ratePerSent: number; ciLow: number; ciHigh: number };
 type SegmentRoi = { recommendation: string; best: { segment: string; rate: number }; worst: { segment: string; rate: number }; all: SegmentRoiRow[] };
 type CopyFinding = { text: string; affected: number };
@@ -30,7 +30,7 @@ type Insights = {
   totals: { repliers: number; positive: number; labeled: number; labelCoverage: number | null };
   weekly: { week: string; sent: number; replies: number }[];
   findings: Finding[];
-  droppedLeads: { interested: number; referral: number; items: DroppedLead[] };
+  droppedLeads: { count: number; items: DroppedLead[] };
   segmentRoi: SegmentRoi | null;
   copyInsights: CopyInsights | null;
   notes: string[];
@@ -171,26 +171,23 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
           </div>
 
           {/* A) dropped hot leads — the chase worklist */}
-          {(data.droppedLeads.interested + data.droppedLeads.referral) > 0 && (
+          {data.droppedLeads.count > 0 && (
             <div className="overflow-hidden rounded-lg border border-gray-200 bg-gray-50/50">
               <div className="flex items-center gap-2 px-3.5 py-2.5">
                 <span className="text-[13px] font-semibold text-gray-900">Брошенные горячие лиды</span>
                 <span className="rounded-full bg-red-100 px-1.5 py-0.5 text-[11px] font-semibold leading-none text-red-700">
-                  {data.droppedLeads.interested + data.droppedLeads.referral}
+                  {data.droppedLeads.count}
                 </span>
-                <span className="ml-auto text-[11px] text-gray-500">за 30 дней · перезвонить</span>
+                <span className="ml-auto text-[11px] text-gray-500">за 30 дней · ответить</span>
               </div>
               <div className="border-t border-gray-200 px-3.5 py-2.5">
                 <p className="text-xs text-gray-500">
-                  ответили «интересно» ({data.droppedLeads.interested}) или дали контакт ({data.droppedLeads.referral}) — а мы им так и не ответили.
+                  ответили «интересно» — а мы им так и не ответили. Считаются только ответы через Instantly: если вы отвечали из своего ящика, здесь это не видно.
                 </p>
                 <ul className="mt-2 space-y-1.5">
                   {data.droppedLeads.items.map((d, i) => (
                     <li key={i} className="flex items-center justify-between gap-2 text-xs">
                       <div className="flex min-w-0 items-center gap-1.5">
-                        <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-medium ${d.bucket === 'interested' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
-                          {d.bucket === 'interested' ? 'интерес' : 'контакт'}
-                        </span>
                         <span className="truncate font-medium text-gray-800">{d.email}</span>
                         <span className="truncate text-gray-500" title={d.campaign}>· {d.campaign}</span>
                       </div>
@@ -198,8 +195,8 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
                     </li>
                   ))}
                 </ul>
-                {(data.droppedLeads.interested + data.droppedLeads.referral) > data.droppedLeads.items.length && (
-                  <p className="mt-2 text-[11px] text-gray-500">…показаны 25 самых свежих из {data.droppedLeads.interested + data.droppedLeads.referral}.</p>
+                {data.droppedLeads.count > data.droppedLeads.items.length && (
+                  <p className="mt-2 text-[11px] text-gray-500">…показаны 25 самых свежих из {data.droppedLeads.count}.</p>
                 )}
               </div>
             </div>
