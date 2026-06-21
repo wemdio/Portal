@@ -185,6 +185,14 @@ async function fetchWorkdayPayloads(url: string): Promise<unknown[]> {
       if (count === 0) break;
       offset += count;
     }
+
+    // Short-circuit: if the broad ('') query paged through the company's ENTIRE
+    // posting list (reached the end, not stopped by the per-company cap), the
+    // targeted searches can only re-return a subset we already have — skip them.
+    // Saves ~5 requests per small board (the vast majority); big boards with more
+    // postings than the cap still fan out to surface sales roles beyond the broad
+    // pages.
+    if (searchText === '' && offset >= total) break;
   }
 
   return payloads;
@@ -208,6 +216,10 @@ async function fetchSmartrecruitersPayloads(baseUrl: string): Promise<unknown[]>
       if (count === 0) break;
       offset += count;
     }
+
+    // Same short-circuit as Workday: a broad query that returned the whole board
+    // makes the targeted q-searches redundant (see fetchWorkdayPayloads).
+    if (searchText === '' && offset >= total) break;
   }
 
   return payloads;
