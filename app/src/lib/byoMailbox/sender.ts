@@ -54,15 +54,20 @@ export async function sendViaMailbox(
   const secret = unsealMailboxSecret(mb.secret_encrypted);
   const from = fromHeader(mb);
   if (mb.auth_type === 'oauth_google') {
-    if (!secret.oauthRefreshToken) return { ok: false, error: 'no_oauth_refresh_token' };
+    if (!secret.oauthRefreshToken) return { ok: false, error: 'reauth_required' };
     return sendMailViaOAuthGmail(
       { email: mb.email, refreshToken: secret.oauthRefreshToken },
       { from, to: msg.to, subject: msg.subject, text: msg.text },
     );
   }
   if (mb.auth_type === 'oauth_yandex') {
-    if (!secret.oauthRefreshToken) return { ok: false, error: 'no_oauth_refresh_token' };
-    const accessToken = await getYandexAccessTokenFromRefresh(secret.oauthRefreshToken);
+    if (!secret.oauthRefreshToken) return { ok: false, error: 'reauth_required' };
+    let accessToken: string;
+    try {
+      accessToken = await getYandexAccessTokenFromRefresh(secret.oauthRefreshToken);
+    } catch {
+      return { ok: false, error: 'reauth_required' }; // refresh-токен умер → нужна переавторизация
+    }
     return sendMailViaOAuthToken(
       { host: 'smtp.yandex.ru', port: 465, secure: true, user: mb.email, accessToken },
       { from, to: msg.to, subject: msg.subject, text: msg.text },
@@ -138,13 +143,15 @@ export async function processByoSendBatch(opts?: {
       }
     }
 
-    if (!mb || mb.status === 'disabled') {
+    if (!mb) {
       await supabaseAdmin
         .from('client_byo_messages')
         .update({ status: 'failed', error: 'mailbox_unavailable' })
         .eq('id', m.id);
       continue;
     }
+    // Ящик не готов (выключен / требует переподключения) — письмо оставляем в очереди.
+    if (mb.status !== 'verified') continue;
 
     const left = remaining.get(m.mailbox_id) ?? 0;
     if (left <= 0) continue; // дневной лимит исчерпан — оставляем на следующее окно
@@ -160,6 +167,14 @@ export async function processByoSendBatch(opts?: {
       remaining.set(m.mailbox_id, left - 1);
       processed++;
       await sleep(gapMs);
+    } else if (res.error === 'reauth_required') {
+      // Токен доступа умер → помечаем ящик на переподключение; письмо оставляем в очереди.
+      await supabaseAdmin
+        .from('client_mailbox_accounts')
+        .update({ status: 'failed', last_error: 'Токен доступа истёк — переподключите ящик.' })
+        .eq('id', mb.id);
+      remaining.set(m.mailbox_id, 0); // остальные письма этого ящика в этом проходе не трогаем
+      log('warn', `BYO mailbox ${mb.email} requires re-auth — marked for reconnect`);
     } else {
       const status = attempts >= 3 ? 'failed' : 'pending';
       await supabaseAdmin
