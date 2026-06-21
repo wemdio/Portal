@@ -468,14 +468,19 @@ describe('runEngHiringParserJob cache-run resume', () => {
       ['name,slug,url', 'AbbVie,abbvie,https://careers.smartrecruiters.com/abbvie'].join('\n'),
     );
     fetchJsonWithFallback.mockImplementation(async (url: string) => {
-      const q = new URL(url).searchParams.get('q') ?? '';
+      const params = new URL(url).searchParams;
+      const q = params.get('q') ?? '';
+      const offset = Number(params.get('offset') ?? '0');
       const byQ: Record<string, unknown[]> = {
         '': [{ id: '1', name: 'Product Manager', company: { identifier: 'AbbVie', name: 'AbbVie' }, releasedDate: '2026-06-18T00:00:00.000Z', location: { fullLocation: 'Chicago, IL, United States', country: 'us' } }],
         sales: [{ id: '2', name: 'Sales Development Representative', company: { identifier: 'AbbVie', name: 'AbbVie' }, releasedDate: '2026-06-18T00:00:00.000Z', location: { fullLocation: 'Austin, TX, United States', country: 'us' } }],
         account: [{ id: '3', name: 'Enterprise Account Executive', company: { identifier: 'AbbVie', name: 'AbbVie' }, releasedDate: '2026-06-18T00:00:00.000Z', location: { fullLocation: 'New York, NY, United States', country: 'us' } }],
       };
-      const content = byQ[q] ?? [];
-      return { offset: 0, limit: 100, totalFound: content.length, content };
+      const content = offset === 0 ? (byQ[q] ?? []) : [];
+      // broad ('') query advertises more postings than one page, so the targeted
+      // q-searches are NOT short-circuited (big-company fan-out path)
+      const totalFound = q === '' ? 999 : (byQ[q]?.length ?? 0);
+      return { offset, limit: 100, totalFound, content };
     });
 
     await runEngHiringParserJob('job-1');
@@ -493,6 +498,70 @@ describe('runEngHiringParserJob cache-run resume', () => {
         country_code: 'us',
       }),
     ]));
+  });
+
+  it('skips SmartRecruiters targeted q-searches when the broad query returns the whole company', async () => {
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: { text: 'b2b manager', sources: ['smartrecruiters'], countries: ['us'], companies_limit: 1, refresh_cache: true, enrich: false, max_results: 20 },
+      }],
+      eng_hiring_cache_runs: [],
+      eng_hiring_cache: [],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+    fetchTextWithFallback.mockResolvedValue(['name,slug,url', 'AbbVie,abbvie,https://careers.smartrecruiters.com/abbvie'].join('\n'));
+    fetchJsonWithFallback.mockImplementation(async (url: string) => {
+      const params = new URL(url).searchParams;
+      const q = params.get('q') ?? '';
+      const offset = Number(params.get('offset') ?? '0');
+      // broad query returns the company's ENTIRE list (totalFound <= one page)
+      const content = q === '' && offset === 0
+        ? [{ id: '1', name: 'Account Executive', company: { identifier: 'AbbVie', name: 'AbbVie' }, releasedDate: '2026-06-18T00:00:00.000Z', location: { fullLocation: 'Austin, TX, United States', country: 'us' } }]
+        : [];
+      return { offset, limit: 100, totalFound: 1, content };
+    });
+
+    await runEngHiringParserJob('job-1');
+
+    const qs = fetchJsonWithFallback.mock.calls
+      .filter(([u]) => String(u).includes('api.smartrecruiters.com'))
+      .map(([u]) => new URL(String(u)).searchParams.get('q') ?? '');
+    expect(new Set(qs)).toEqual(new Set([''])); // no wasted targeted q-searches
+  });
+
+  it('skips Workday targeted searches when the broad query returns the whole company', async () => {
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: { text: 'b2b manager', sources: ['workday'], countries: ['us'], companies_limit: 1, refresh_cache: true, enrich: false, max_results: 20 },
+      }],
+      eng_hiring_cache_runs: [],
+      eng_hiring_cache: [],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+    fetchTextWithFallback.mockResolvedValue(['name,slug,url', 'Acme,acme/acme_external,https://acme.wd5.myworkdayjobs.com/acme_external'].join('\n'));
+    fetchJsonWithFallback.mockImplementation(async (_url: string, options: { body?: string } = {}) => {
+      const body = JSON.parse(options.body ?? '{}') as { searchText?: string; offset?: number };
+      const offset = Number(body.offset ?? 0);
+      const jobPostings = (body.searchText ?? '') === '' && offset === 0
+        ? [{ title: 'Account Executive', externalPath: '/job/US/Account-Executive_R1', locationsText: 'Austin, TX', postedOn: 'Posted Today', bulletFields: ['R1'] }]
+        : [];
+      return { total: 1, jobPostings };
+    });
+
+    await runEngHiringParserJob('job-1');
+
+    const searchTexts = fetchJsonWithFallback.mock.calls
+      .filter(([u]) => String(u).includes('/wday/cxs/'))
+      .map(([, o]) => (JSON.parse((o as { body?: string }).body ?? '{}') as { searchText?: string }).searchText);
+    expect(new Set(searchTexts)).toEqual(new Set([''])); // broad query was complete → no fan-out
   });
 
   it('refreshes Workday boards through the WAF-resilient POST helper and dedupes overlaps', async () => {
@@ -554,9 +623,14 @@ describe('runEngHiringParserJob cache-run resume', () => {
       }],
     };
     fetchJsonWithFallback.mockImplementation(async (_url: string, options: { body?: string } = {}) => {
-      const searchText = (JSON.parse(options.body ?? '{}') as { searchText?: string }).searchText ?? '';
-      const jobPostings = jobsBySearch[searchText] ?? [];
-      return { total: jobPostings.length, jobPostings };
+      const body = JSON.parse(options.body ?? '{}') as { searchText?: string; offset?: number };
+      const searchText = body.searchText ?? '';
+      const offset = Number(body.offset ?? 0);
+      const jobPostings = offset === 0 ? (jobsBySearch[searchText] ?? []) : [];
+      // broad ('') query advertises more postings than one page, so the targeted
+      // searches are NOT short-circuited (big-company fan-out path)
+      const total = searchText === '' ? 999 : (jobsBySearch[searchText]?.length ?? 0);
+      return { total, jobPostings };
     });
 
     await runEngHiringParserJob('job-1');
