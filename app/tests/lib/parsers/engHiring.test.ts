@@ -8,6 +8,7 @@ import {
   matchesEngHiringVacancy,
   normalizeAtsJobToEngVacancy,
   resolveEngHiringCompaniesLimit,
+  stripUnstorableJsonChars,
   type EngHiringSearchConfig,
   type EngHiringVacancy,
 } from '@/lib/parsers/engHiring';
@@ -682,5 +683,36 @@ describe('engHiring cache filtering', () => {
       company_name: 'OtherCo',
       vacancy_title: 'Business Development Manager',
     });
+  });
+});
+
+describe('stripUnstorableJsonChars', () => {
+  it('strips NUL and lone surrogates that Postgres jsonb rejects, preserving valid text and emoji', () => {
+    const NUL = String.fromCharCode(0);
+    const HIGH = String.fromCharCode(0xd83d); // lone high surrogate
+    const LOW = String.fromCharCode(0xde00); // lone low surrogate
+    const HIGH2 = String.fromCharCode(0xd834); // another lone high surrogate
+    const dirty = {
+      title: `Account${NUL} Executive`,
+      desc: `lead${HIGH}gen`,
+      tail: `rev${LOW}ops`,
+      emoji: 'spark \u{1F4A1} done', // valid surrogate pair — must survive
+      nested: { items: [`a${NUL}b`, `c${HIGH2}d`] },
+      n: 42,
+      ok: null,
+    };
+
+    const clean = stripUnstorableJsonChars(dirty);
+
+    expect(clean.title).toBe('Account Executive');
+    expect(clean.desc).toBe('leadgen');
+    expect(clean.tail).toBe('revops');
+    expect(clean.emoji).toBe('spark \u{1F4A1} done');
+    expect(clean.nested.items).toEqual(['ab', 'cd']);
+    expect(clean.n).toBe(42);
+    expect(clean.ok).toBeNull();
+    // result must serialize without any lone-surrogate / NUL escape jsonb would reject
+    expect(/\\u(d[89ab][0-9a-f]{2})/i.test(JSON.stringify(clean))).toBe(false);
+    expect(JSON.stringify(clean)).not.toContain('\\u0000');
   });
 });
