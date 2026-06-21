@@ -169,6 +169,32 @@ function cleanPlainText(value: unknown): string {
     .trim();
 }
 
+// Postgres jsonb (and text) reject NUL () and lone, unpaired UTF-16
+// surrogates, which scraped ATS payloads occasionally carry (truncated emoji,
+// bad source encodings). Re-serializing such a value emits a  / lone \uD8xx
+// escape that PG refuses with "invalid input syntax for type json". Strip them
+// recursively from every string (keys and values) before persisting the raw blob
+// and extracted fields. Valid surrogate pairs (real emoji) are preserved.
+export function stripUnstorableJsonChars<T>(value: T): T {
+  if (typeof value === 'string') {
+    return value
+      .replace(/\u0000/g, '')
+      .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '')
+      .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '') as unknown as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => stripUnstorableJsonChars(item)) as unknown as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      out[stripUnstorableJsonChars(key)] = stripUnstorableJsonChars(val);
+    }
+    return out as unknown as T;
+  }
+  return value;
+}
+
 function firstNumber(record: Record<string, unknown>, keys: string[]): number | null {
   for (const key of keys) {
     const value = salaryNumberValue(record[key]);

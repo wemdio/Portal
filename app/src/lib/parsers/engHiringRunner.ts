@@ -9,6 +9,7 @@ import {
   matchesEngHiringVacancy,
   normalizeAtsJobToEngVacancy,
   resolveEngHiringCompaniesLimit,
+  stripUnstorableJsonChars,
   type EngHiringSearchConfig,
   type EngHiringSource,
   type EngHiringVacancy,
@@ -227,7 +228,9 @@ async function fetchSmartrecruitersPayloads(baseUrl: string): Promise<unknown[]>
 
 function toCacheRow(v: EngHiringVacancy) {
   const now = new Date().toISOString();
-  return {
+  // Strip NUL / lone surrogates so the jsonb `raw` blob and text columns can't
+  // trip Postgres ("invalid input syntax for type json") on scraped payloads.
+  return stripUnstorableJsonChars({
     source: v.source,
     source_company_slug: v.source_company_slug,
     source_job_id: v.source_job_id,
@@ -250,7 +253,7 @@ function toCacheRow(v: EngHiringVacancy) {
     last_seen_at: now,
     cache_fetched_at: now,
     updated_at: now,
-  };
+  });
 }
 
 async function fetchSourceCacheRows(source: EngHiringSource, token: AtsCompanyToken): Promise<ReturnType<typeof toCacheRow>[]> {
@@ -525,7 +528,7 @@ function rowNeedsDetail(row: CacheRow): boolean {
 }
 
 async function updateCacheDetail(db: Db, row: CacheRow): Promise<void> {
-  const patch = {
+  const patch = stripUnstorableJsonChars({
     company_site_url: row.company_site_url,
     company_description: row.company_description,
     vacancy_description: row.vacancy_description,
@@ -534,7 +537,7 @@ async function updateCacheDetail(db: Db, row: CacheRow): Promise<void> {
     salary_currency: row.salary_currency,
     raw: row.raw ?? {},
     updated_at: new Date().toISOString(),
-  };
+  });
 
   if (row.cache_id || row.id) {
     await db.from('eng_hiring_cache').update(patch).eq('id', row.cache_id ?? row.id);
