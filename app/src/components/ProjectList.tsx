@@ -2420,7 +2420,7 @@ export function ProjectList() {
             className="absolute inset-0 bg-zinc-900/30 backdrop-blur-sm transition-opacity"
             onClick={() => setSelectedProjectId(null)}
           />
-          <div className={isTma ? 'relative w-full h-[100dvh] overflow-y-auto rounded-none bg-white shadow-2xl ring-1 ring-zinc-900/5 flex flex-col' : 'project-modal-compact relative w-full max-w-3xl max-h-[90vh] overflow-y-auto rounded-2xl bg-white shadow-[0_8px_30px_rgb(0,0,0,0.08)] border border-zinc-200/60 flex flex-col'}>
+          <div className={isTma ? 'relative w-full h-[100dvh] overflow-y-auto rounded-none bg-white shadow-2xl ring-1 ring-zinc-900/5 flex flex-col' : 'project-modal-compact relative w-full max-w-5xl max-h-[92vh] overflow-y-auto rounded-2xl bg-white shadow-[0_8px_30px_rgb(0,0,0,0.08)] border border-zinc-200/60 flex flex-col'}>
             <div className={isTma ? 'flex flex-col gap-4 border-b border-zinc-100 px-4 py-4 sticky top-0 bg-white/95 backdrop-blur z-20 transition-all' : 'flex items-start justify-between border-b border-zinc-100 px-4 py-3 sticky top-0 bg-white/95 backdrop-blur z-20 transition-all'}>
               <div className={isTma ? 'flex-1' : 'flex-1 pr-4'}>
                 <div className="flex items-center gap-3 mb-2">
