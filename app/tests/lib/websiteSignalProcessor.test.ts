@@ -7,28 +7,21 @@ jest.mock('@/lib/enrich/websiteParser', () => ({
   fetchHtmlWithPlaywright: jest.fn(),
 }));
 
-jest.mock('@/lib/enrich/extractors/clientSegmentExtractor', () => ({
-  extractClientSegment: jest.fn().mockResolvedValue('тест-сегмент'),
-}));
-
-jest.mock('@/lib/enrich/extractors/casesCountLlmExtractor', () => ({
-  llmCountCases: jest.fn().mockResolvedValue('5+'),
-}));
-
-jest.mock('@/lib/enrich/extractors/careersLlmExtractor', () => ({
-  llmExtractHiring: jest.fn().mockResolvedValue({ vacancies: '7+', professions: ['Грузчики'] }),
-}));
-
-jest.mock('@/lib/enrich/extractors/pricingLlmExtractor', () => ({
-  llmExtractPricing: jest.fn().mockResolvedValue({
+// Все «сайтовые» LLM-доборы теперь идут через ОДИН консолидированный вызов
+// llmExtractFields. Оркестратор применяет из ответа только те поля, что попали
+// в needed-набор (т.е. не закрылись эвристиками), поэтому мок возвращает
+// суперсет — каждый таргетный тест получает своё поле.
+jest.mock('@/lib/enrich/extractors/llmExtractor', () => ({
+  llmExtractFields: jest.fn().mockResolvedValue({
+    client_segment: 'тест-сегмент',
+    cases_count: '5+',
+    vacancies_count: '7+',
+    hiring_roles: ['Грузчики'],
     pricing_model: 'sales-led',
     pricing_min: { value: 50000, currency: 'RUB' },
     free_trial: true,
+    integrations: ['amoCRM', 'Slack'],
   }),
-}));
-
-jest.mock('@/lib/enrich/extractors/integrationsLlmExtractor', () => ({
-  llmExtractIntegrations: jest.fn().mockResolvedValue(['amoCRM', 'Slack']),
 }));
 
 jest.mock('@/lib/enrich/extractors/socialCompanyFinder', () => ({
@@ -385,7 +378,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
   it('cases_count: heuristic 0 → uses LLM estimate', async () => {
     mockUrlResponses({
       // class="projects" не матчит CASE_SELECTOR, числа в тексте нет →
-      // extractCasesCount = 0 → зовётся llmCountCases (мок → "5+").
+      // extractCasesCount = 0 → консолидированный llmExtractFields (мок → cases_count "5+").
       'example.com/cases': '<div class="projects">Делали проекты для разных компаний и брендов.</div>',
       'example.com': '<a href="/cases">Кейсы</a>',
     });
@@ -401,7 +394,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
   it('vacancies_count/hiring_roles: heuristic 0 → uses LLM', async () => {
     mockUrlResponses({
       // class="hiring-block" не матчит VACANCY_SELECTOR, числа нет →
-      // extractHiring даёт 0/[] → зовётся llmExtractHiring (мок).
+      // extractHiring даёт 0/[] → консолидированный llmExtractFields (мок).
       'example.com/careers': '<div class="hiring-block">Ищем сотрудников в команду на разные роли, подробности по запросу.</div>',
       'example.com': '<a href="/careers">Вакансии</a>',
     });
@@ -418,7 +411,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
   it('pricing: heuristic blank → fills model/min/free_trial from LLM', async () => {
     mockUrlResponses({
       // нет цен/кнопок/тарифов/маркеров → extractPricingModel=unknown,
-      // extractPricingDetails={} → зовётся llmExtractPricing (мок).
+      // extractPricingDetails={} → консолидированный llmExtractFields (мок).
       'example.com/pricing': '<div class="info">Наши услуги помогают бизнесу расти и развиваться каждый день уверенно.</div>',
       'example.com': '<a href="/pricing">Цены</a>',
     });
@@ -438,7 +431,7 @@ describe('processSignalsForUrl — deep fetch and per-extractor selection', () =
   it('integrations: empty merge → fills from LLM', async () => {
     mockUrlResponses({
       // нет script-следов и нет распознаваемой integration-секции →
-      // signatures=[] и extractIntegrations=[] → merge пуст → llmExtractIntegrations (мок).
+      // signatures=[] и extractIntegrations=[] → merge пуст → консолидированный llmExtractFields (мок).
       'example.com/integrations': '<div class="info">Мы дружим со многими сервисами для вашего удобства каждый день.</div>',
       'example.com': '<a href="/integrations">Интеграции</a>',
     });
