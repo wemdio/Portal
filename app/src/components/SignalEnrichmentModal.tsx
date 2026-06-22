@@ -35,6 +35,13 @@ export interface SignalEnrichmentModalState {
   presetId: SignalPresetId | string | null;
   customPresets: Array<{ id: string; name: string; extractors: ExtractorKey[] }>;
   cascadeToast: string | null;
+  /**
+   * Чекбокс «после обработки удалить строки с ошибкой загрузки сайта».
+   * Сравнение идёт по маркеру `⚠` в Стеке (см. signalConstants), что покрывает
+   * все типы провала: «Сайт недоступен», «Превышено время ожидания», DNS, SSL и т.п.
+   * Дефолт: false. Запоминается в localStorage между сессиями.
+   */
+  removeUnreachableAfterDone: boolean;
 }
 
 interface Props {
@@ -45,6 +52,7 @@ interface Props {
   onSavePreset: () => void;
   onDeletePreset: (id: string) => void;
   onToggleExtractor: (key: ExtractorKey) => void;
+  onToggleRemoveUnreachable: () => void;
   onClose: () => void;
   onStart: () => void;
   onResume: () => void;
@@ -113,6 +121,7 @@ export default function SignalEnrichmentModal({
   onSavePreset,
   onDeletePreset,
   onToggleExtractor,
+  onToggleRemoveUnreachable,
   onClose,
   onStart,
   onResume,
@@ -433,6 +442,29 @@ export default function SignalEnrichmentModal({
               {state.error}
             </div>
           )}
+
+          {/* Cleanup checkbox — выполнится клиентски после завершения job'a */}
+          <label
+            className={`flex items-start gap-2 rounded-lg border border-gray-200 bg-gray-50/40 px-3 py-2.5 cursor-pointer transition hover:bg-gray-50 ${
+              state.isProcessing ? 'opacity-60 cursor-not-allowed' : ''
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={state.removeUnreachableAfterDone}
+              disabled={state.isProcessing}
+              onChange={onToggleRemoveUnreachable}
+              className="mt-0.5 h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+            />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-gray-900">
+                После обработки удалить строки с ошибкой загрузки сайта
+              </p>
+              <p className="text-[11px] text-gray-500">
+                Сайт недоступен / Превышено время ожидания / DNS-ошибки и т.п. — останутся только сайты, готовые к аналитике.
+              </p>
+            </div>
+          </label>
         </div>
 
         {/* Footer */}
