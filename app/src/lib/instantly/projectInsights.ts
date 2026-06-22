@@ -254,48 +254,58 @@ export async function buildProjectInsights(campaignIds: string[]): Promise<Proje
     console.error('[projectInsights] A/B query skipped:', (e as Error).message);
   }
 
-  // 4) dropped hot leads (A) — leads who replied "interested" and we never answered them,
-  // live 30-day window, only in campaigns where we reply from Instantly (camp_ue3).
-  // Referrals are EXCLUDED: handing over a phone/third-party contact is not a lead in this
-  // workflow (the studio works email-only and routinely ignores those). Blind spot we name in
-  // the UI: replies sent from the client's own mailbox (off Instantly) aren't in the dataset.
+  // 4) dropped hot leads (A) — interested leads whose LATEST reply to us is still unanswered.
+  // "Answered" is scoped to the lead's own conversation THREAD (thread_id), NOT the email globally:
+  // a reply we sent in some unrelated campaign/client must not mark this interest as handled
+  // (cross-client over-exclusion, found & fixed 2026-06-22). Anchor on their LAST inbound, not the
+  // first — so a lead who replied, got an answer, then wrote AGAIN unanswered correctly resurfaces.
+  // Referrals excluded (phone/3rd-party contact ≠ lead here). Blind spot named in the UI: replies
+  // sent from the client's own mailbox (off Instantly) aren't in the dataset.
   const dropped: { count: number; items: DroppedLead[] } = { count: 0, items: [] };
   try {
     const rows = await datasetQuery<{ email: string; age_days: string; campaign: string }>(
       `
       WITH camp_ue3 AS (SELECT DISTINCT campaign_id FROM raw_emails WHERE ue_type=3 AND campaign_id = ANY($1)),
-      rf AS (
-        -- first_reply_at по ПОЛНОМУ окну (как v_reply_facts), не за 30 дней — иначе min() съезжает.
-        SELECT campaign_id, lead_id, min(timestamp_email) first_reply_at,
-               bool_or(i_status=1 OR ai_interest_value=1) inst_int
+      ue2 AS (
+        SELECT campaign_id, lead_id, thread_id, timestamp_email AS reply_at,
+               (i_status=1 OR ai_interest_value=1) AS inst_int_row
         FROM raw_emails
         WHERE ue_type=2 AND lead_id IS NOT NULL AND campaign_id = ANY($1)
           AND timestamp_email BETWEEN '2025-07-01' AND now() + interval '1 day'
-        GROUP BY 1,2
       ),
-      -- «мы ответили» матчим по EMAIL (lead_id = адрес) в ЛЮБОЙ кампании (ловит сабсиквенсы и
-      -- кросс-кампанийные треды) и берём ПОСЛЕДНИЙ наш ответ (max), не первый: если ответили
-      -- этому адресу и до, и после реплая — min ошибочно держал лида в списке (≈30% ложных).
-      ours AS (SELECT lead_id, max(timestamp_email) last_our_at FROM raw_emails WHERE ue_type=3 GROUP BY 1)
+      rf AS (
+        SELECT campaign_id, lead_id, max(reply_at) AS last_reply_at, bool_or(inst_int_row) AS inst_int
+        FROM ue2 GROUP BY 1, 2
+      ),
+      -- наш ПОСЛЕДНИЙ ответ В ТРЕДАХ этого лида (по thread_id их реплаев), не глобально по email.
+      our_in_thread AS (
+        SELECT u.campaign_id, u.lead_id, max(e3.timestamp_email) AS last_our_at
+        FROM ue2 u JOIN raw_emails e3 ON e3.ue_type=3 AND e3.thread_id = u.thread_id
+        GROUP BY 1, 2
+      )
       SELECT rf.lead_id AS email,
-             round(extract(epoch FROM (now()-rf.first_reply_at))/86400)::int::text AS age_days,
-             left(rc.name, 60) AS campaign
+             round(extract(epoch FROM (now()-rf.last_reply_at))/86400)::int::text AS age_days,
+             left(coalesce(rc.name, ''), 60) AS campaign
       FROM rf
       JOIN camp_ue3 c ON c.campaign_id = rf.campaign_id
-      JOIN raw_campaigns rc ON rc.id = rf.campaign_id
+      LEFT JOIN raw_campaigns rc ON rc.id = rf.campaign_id
       LEFT JOIN reply_outcome_labels l ON l.campaign_id = rf.campaign_id AND l.lead_id = rf.lead_id
-      LEFT JOIN ours u ON u.lead_id = rf.lead_id
+      LEFT JOIN our_in_thread o ON o.campaign_id = rf.campaign_id AND o.lead_id = rf.lead_id
       -- ТОЛЬКО interested (referral исключён). LLM-метка первична; Instantly-interest — только
       -- fallback для ещё не размеченных свежих ответов (<1 сут до ночного лейблера).
       WHERE COALESCE(l.label = 'interested', rf.inst_int, false)
-        AND (u.last_our_at IS NULL OR u.last_our_at < rf.first_reply_at)
-        AND rf.first_reply_at > now() - interval '30 days'
-      ORDER BY rf.first_reply_at DESC
+        AND (o.last_our_at IS NULL OR o.last_our_at < rf.last_reply_at)
+        AND rf.last_reply_at > now() - interval '30 days'
+      ORDER BY rf.last_reply_at DESC
       `,
       [ids],
     );
-    dropped.count = rows.length;
-    dropped.items = rows.slice(0, 25).map((r) => ({ email: r.email, ageDays: Number(r.age_days), campaign: r.campaign }));
+    // Дедуп по email: лид, заинтересованный и неотвеченный в 2+ кампаниях, не должен считаться/
+    // показываться дважды. rows уже отсортированы по свежести → берём первое вхождение.
+    const seen = new Set<string>();
+    const uniq = rows.filter((r) => (seen.has(r.email) ? false : (seen.add(r.email), true)));
+    dropped.count = uniq.length;
+    dropped.items = uniq.slice(0, 25).map((r) => ({ email: r.email, ageDays: Number(r.age_days), campaign: r.campaign }));
   } catch (e) {
     console.error('[projectInsights] dropped-leads query skipped:', (e as Error).message);
   }

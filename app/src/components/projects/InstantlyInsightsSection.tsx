@@ -182,7 +182,7 @@ export function InstantlyInsightsSection({ projectId }: { projectId: string }) {
               </div>
               <div className="border-t border-gray-200 px-3.5 py-2.5">
                 <p className="text-xs text-gray-500">
-                  ответили «интересно» — а мы им так и не ответили. Считаются только ответы через Instantly: если вы отвечали из своего ящика, здесь это не видно.
+                  ответили «интересно», и на их последнее письмо мы так и не ответили. Считаются только ответы через Instantly: если вы отвечали из своего ящика, здесь это не видно.
                 </p>
                 <ul className="mt-2 space-y-1.5">
                   {data.droppedLeads.items.map((d, i) => (
