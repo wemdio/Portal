@@ -579,11 +579,15 @@ function CampaignDetailPageContent() {
 
   const sentCount = Number(analytics?.emails_sent_count ?? 0);
   const openCount = Number(analytics?.open_count ?? 0);
-  const replyCount = Number(analytics?.reply_count ?? 0);
+  // «Как в Instantly» (согласовано со списком /client): ответы = уникальные
+  // ответившие, открываемость = на КОНТАКТ (open_count ÷ contacted_count), не на
+  // письмо. reachedCount — контакты (знаменатель открываемости).
+  const replyCount = Number(analytics?.reply_count_unique ?? analytics?.reply_count ?? 0);
   const contactedCount = Number(analytics?.new_leads_contacted_count ?? 0);
+  const reachedCount = Number(analytics?.contacted_count ?? sentCount);
   const bouncedCount = Number(analytics?.bounced_count ?? 0);
   const leadsCount = Number(analytics?.leads_count ?? 0);
-  const openRate = sentCount > 0 ? ((openCount / sentCount) * 100).toFixed(1) : '0';
+  const openRate = reachedCount > 0 ? ((openCount / reachedCount) * 100).toFixed(1) : '0';
   const replyRate = contactedCount > 0 ? ((replyCount / contactedCount) * 100).toFixed(1) : '0';
 
   const sequences: SequenceStep[] = (campaign.sequences ?? []).flatMap((s) => s.steps ?? []);
@@ -880,12 +884,12 @@ function CampaignDetailPageContent() {
               emphasized
             />
             <FunnelRow
-              label="Уникальные открытия"
+              label="Открытия"
               value={openCount}
-              percent={sentCount > 0 ? `${openRate}%` : undefined}
+              percent={reachedCount > 0 ? `${openRate}%` : undefined}
             />
             <FunnelRow
-              label="Уникальные ответы"
+              label="Ответы"
               value={replyCount}
               percent={contactedCount > 0 ? `${replyRate}%` : undefined}
             />
