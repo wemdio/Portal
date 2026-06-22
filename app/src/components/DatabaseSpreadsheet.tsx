@@ -314,11 +314,18 @@ type SignalEnrichmentState = {
   customPresets: Array<{ id: string; name: string; extractors: ExtractorKey[] }>;
   /** Toast message shown when cascade auto-enables a dependency. */
   cascadeToast: string | null;
+  /**
+   * Чекбокс «после обработки удалить строки с ошибкой загрузки сайта».
+   * Сравнение по маркеру `⚠` в Стеке (см. signalConstants). Дефолт: false.
+   * Запоминается в localStorage между сессиями.
+   */
+  removeUnreachableAfterDone: boolean;
 };
 
 const SIGNAL_DEFAULT_EXTRACTORS: ExtractorKey[] = ['stack', 'profile'];
 const SIGNAL_PRESETS_STORAGE_KEY = 'signal-enrichment-presets-v1';
 const SIGNAL_LAST_SELECTION_STORAGE_KEY = 'signal-enrichment-last-selection-v1';
+const SIGNAL_REMOVE_UNREACHABLE_STORAGE_KEY = 'signal-enrichment-remove-unreachable-v1';
 
 /**
  * Whitelist incoming extractor keys (e.g. from localStorage) against the known
@@ -1579,6 +1586,7 @@ export function DatabaseSpreadsheet() {
     presetId: 'basic',
     customPresets: [],
     cascadeToast: null,
+    removeUnreachableAfterDone: false,
   });
   const signalAbortRef = useRef<AbortController | null>(null);
 
@@ -7919,6 +7927,8 @@ export function DatabaseSpreadsheet() {
       const lastSelection = lastRaw
         ? (JSON.parse(lastRaw) as { extractors: ExtractorKey[]; presetId: string | null })
         : null;
+      const removeUnreachableRaw = window.localStorage.getItem(SIGNAL_REMOVE_UNREACHABLE_STORAGE_KEY);
+      const removeUnreachable = removeUnreachableRaw === 'true';
       setSignalEnrichment((prev) => ({
         ...prev,
         customPresets,
@@ -7927,6 +7937,7 @@ export function DatabaseSpreadsheet() {
             ? migrateLegacyExtractorKeys(lastSelection.extractors)
             : prev.selectedExtractors,
         presetId: lastSelection?.presetId ?? prev.presetId,
+        removeUnreachableAfterDone: removeUnreachable,
       }));
     } catch {
       /* corrupt JSON in localStorage — ignore and keep defaults */
@@ -7982,6 +7993,20 @@ export function DatabaseSpreadsheet() {
         presetId: null, // user diverged from preset
         cascadeToast: cascadeMessage,
       };
+    });
+  }, []);
+
+  const toggleRemoveUnreachableAfterDone = useCallback(() => {
+    setSignalEnrichment((prev) => {
+      const next = !prev.removeUnreachableAfterDone;
+      if (typeof window !== 'undefined') {
+        try {
+          window.localStorage.setItem(SIGNAL_REMOVE_UNREACHABLE_STORAGE_KEY, String(next));
+        } catch {
+          /* private mode — ignore */
+        }
+      }
+      return { ...prev, removeUnreachableAfterDone: next };
     });
   }, []);
 
@@ -13229,6 +13254,7 @@ export function DatabaseSpreadsheet() {
           onSavePreset={saveCustomSignalPreset}
           onDeletePreset={deleteCustomSignalPreset}
           onToggleExtractor={toggleSignalExtractor}
+          onToggleRemoveUnreachable={toggleRemoveUnreachableAfterDone}
           onClose={closeSignalModal}
           onStart={() => void handleStartSignalEnrichment()}
           onResume={() => void handleResumeSignalEnrichment()}
