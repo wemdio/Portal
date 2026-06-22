@@ -151,7 +151,10 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
         file_name: `outreachos-${today}`,
         data: grid,
         selected_steps: config.selected_steps,
-        step_config: {},
+        // find_emails пишет прямо в колонку Email (а не в отдельную «Найденный
+        // Email» с последующим merge) — убираем неявную зависимость от порядка
+        // шагов: даже без промежуточных шагов почты сразу в Email.
+        step_config: { find_emails_target: 'same' },
         initial_row_count: grid.length - 1,
         total_steps: config.selected_steps.length,
       })

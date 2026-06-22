@@ -50,7 +50,11 @@ export function gridToLeadPayloads(grid: string[][]): LeadCreatePayload[] {
   if (!grid || grid.length < 2) return [];
   const header = grid[0];
 
-  const emailCols = detectEmailColumns(grid);
+  // Точный матч заголовка email-колонки: findColumnIndex по равенству не цепляет
+  // 'Email Статус'/'Email Провайдер' (их добавляет validate_emails), в отличие от
+  // detectEmailColumns с unanchored-regex. detectEmailColumns — fallback.
+  const primaryEmailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
+  const emailCols = primaryEmailIdx >= 0 ? [primaryEmailIdx] : detectEmailColumns(grid);
   const companyIdx = findColumnIndex(
     header,
     'компания',

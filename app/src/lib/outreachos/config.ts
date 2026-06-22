@@ -10,6 +10,24 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 /** Шаги конструктора баз, которые НИКОГДА не допускаем в OutreachOS-прогон. */
 export const FORBIDDEN_STEPS = ['ta_scoring', 'personalization'] as const;
 
+/**
+ * Канонический порядок шагов (приоритеты из AVAILABLE_STEPS, lib/tools/
+ * processingSteps.ts). КРИТИЧНО: worker-baseconstructor выполняет selected_steps
+ * В ПОРЯДКЕ МАССИВА и сам НЕ сортирует. Поэтому сортируем здесь — иначе случайная
+ * перестановка в конфиге молча ломает прогон (напр. validate_emails раньше
+ * find_emails → валидирует пустую колонку → 0 контактов без ошибки).
+ */
+const STEP_PRIORITY: Record<string, number> = {
+  remove_empty: 10, dedup_full: 20, check_sites: 30, find_emails: 40,
+  split_emails: 45, remove_support_emails: 47, dedup_email: 50,
+  validate_emails: 55, clean_names: 60, enrich_descriptions: 65,
+  ta_scoring: 70, personalization: 80,
+};
+
+function sortByPriority(steps: string[]): string[] {
+  return [...steps].sort((a, b) => (STEP_PRIORITY[a] ?? 999) - (STEP_PRIORITY[b] ?? 999));
+}
+
 export interface OutreachOsConfig {
   id: number;
   enabled: boolean;
@@ -44,8 +62,12 @@ export async function loadOutreachOsConfig(): Promise<OutreachOsConfig | null> {
   if (error || !data) return null;
 
   const row = data as OutreachOsConfig;
-  const cleanedSteps = (row.selected_steps ?? []).filter(
-    (s) => !FORBIDDEN_STEPS.includes(s as (typeof FORBIDDEN_STEPS)[number]),
+  // Вырезаем запрещённые шаги И сортируем по каноническому приоритету (воркер
+  // выполняет в порядке массива и сам не сортирует).
+  const cleanedSteps = sortByPriority(
+    (row.selected_steps ?? []).filter(
+      (s) => !FORBIDDEN_STEPS.includes(s as (typeof FORBIDDEN_STEPS)[number]),
+    ),
   );
   return { ...row, selected_steps: cleanedSteps };
 }

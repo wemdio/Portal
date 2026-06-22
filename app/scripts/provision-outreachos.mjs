@@ -62,7 +62,8 @@ const ICP_INDUSTRIES = [
 
 /**
  * Шаги конструктора баз — чистка/обогащение/валидация БЕЗ ta_scoring (оценка ЦА)
- * и personalization. Порядок не важен (воркер сам сортирует по приоритету).
+ * и personalization. Порядок в массиве не важен: loadOutreachOsConfig сортирует по
+ * каноническому приоритету перед заливкой (worker-baseconstructor сам НЕ сортирует).
  * enrich_descriptions намеренно опущен (описания в Instantly не шлём).
  */
 const SELECTED_STEPS = [
@@ -70,9 +71,16 @@ const SELECTED_STEPS = [
   'remove_support_emails', 'dedup_email', 'validate_emails', 'clean_names',
 ];
 
-/** Лимиты тарифа. Должен резолвиться в статус 'active' (иначе append кидает 403). */
+/**
+ * Лимиты тарифа. is_active=true ОБЯЗАТЕЛЕН: client_tariffs.is_active DEFAULT false,
+ * а getClientStatus при !is_active → 'inactive' → appendLeadsToClientCampaign кидает
+ * 403 на КАЖДЫЙ прогон (ноль контактов). paid_until/setup_until=NULL → 'active'.
+ * max_contacts здесь advisory: реальный потолок — daily_limit в конфиге
+ * (countClientContacts читает client_campaign_launches, куда append-путь не пишет).
+ */
 const TARIFF = {
   tariff_type: 'custom',
+  is_active: true,
   max_contacts: 20000,
   max_rows: 200000,
   max_emails: 16,
