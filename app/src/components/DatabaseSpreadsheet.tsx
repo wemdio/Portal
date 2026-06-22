@@ -16,6 +16,7 @@ import { backgroundSave, cancelBackgroundSave } from '@/lib/databases/background
 import { decompressStateFromBase64 } from '@/lib/databases/stateCompression';
 import { loadStateViaWorker } from '@/lib/databases/backgroundLoad';
 import { SIGNAL_ERROR_MARKER, isStackCellRefillable } from '@/lib/enrich/signalConstants';
+import { removeSignalErrorRows } from '@/lib/spreadsheet/removeSignalErrorRows';
 import { resolveInnLookupColumns } from '@/lib/enrich/innLookupColumns';
 import {
   ALL_EXTRACTOR_KEYS,
@@ -314,11 +315,27 @@ type SignalEnrichmentState = {
   customPresets: Array<{ id: string; name: string; extractors: ExtractorKey[] }>;
   /** Toast message shown when cascade auto-enables a dependency. */
   cascadeToast: string | null;
+  /**
+   * Чекбокс «после обработки удалить строки с ошибкой загрузки сайта».
+   * Сравнение по маркеру `⚠` в Стеке (см. signalConstants). Дефолт: false.
+   * Запоминается в localStorage между сессиями.
+   */
+  removeUnreachableAfterDone: boolean;
 };
 
 const SIGNAL_DEFAULT_EXTRACTORS: ExtractorKey[] = ['stack', 'profile'];
 const SIGNAL_PRESETS_STORAGE_KEY = 'signal-enrichment-presets-v1';
 const SIGNAL_LAST_SELECTION_STORAGE_KEY = 'signal-enrichment-last-selection-v1';
+const SIGNAL_REMOVE_UNREACHABLE_STORAGE_KEY = 'signal-enrichment-remove-unreachable-v1';
+
+/** «1 строка / 2 строки / 5 строк» — для тоста после очистки. */
+function pluralRowsRu(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'строка';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'строки';
+  return 'строк';
+}
 
 /**
  * Whitelist incoming extractor keys (e.g. from localStorage) against the known
@@ -1579,6 +1596,7 @@ export function DatabaseSpreadsheet() {
     presetId: 'basic',
     customPresets: [],
     cascadeToast: null,
+    removeUnreachableAfterDone: false,
   });
   const signalAbortRef = useRef<AbortController | null>(null);
 
@@ -7870,10 +7888,35 @@ export function DatabaseSpreadsheet() {
         await new Promise((r) => setTimeout(r, SIGNAL_POLL_INTERVAL_MS));
       }
 
+      // Берём актуальное значение чекбокса через функциональный setState — чтобы
+      // не таскать removeUnreachableAfterDone через deps useCallback'a (это
+      // привело бы к пересозданию runSignalJobPolling на каждый тогл).
+      let shouldCleanup = false;
+      setSignalEnrichment((prev) => {
+        shouldCleanup = prev.removeUnreachableAfterDone;
+        return prev;
+      });
+
+      let cleanupRemoved = 0;
+      if (shouldCleanup) {
+        setTabs((prev) =>
+          prev.map((tab) => {
+            if (tab.id !== tabId) return tab;
+            const result = removeSignalErrorRows(tab.data, stackColIndex);
+            cleanupRemoved = result.removed;
+            return cleanupRemoved > 0 ? { ...tab, data: result.nextData } : tab;
+          }),
+        );
+      }
+
+      const baseMsg = errorCount > 0
+        ? `Сигналы: ${processedCount - errorCount} обработано, ${errorCount} ошибок`
+        : `Анализ сигналов завершён: ${processedCount} сайтов`;
+      const cleanupSuffix = cleanupRemoved > 0
+        ? `. Удалено ${cleanupRemoved} ${pluralRowsRu(cleanupRemoved)} с ошибками загрузки`
+        : '';
       setLastAction({
-        message: errorCount > 0
-          ? `Сигналы: ${processedCount - errorCount} обработано, ${errorCount} ошибок`
-          : `Анализ сигналов завершён: ${processedCount} сайтов`,
+        message: baseMsg + cleanupSuffix,
         time: Date.now(),
       });
       setSignalEnrichment((prev) => ({
@@ -7919,6 +7962,8 @@ export function DatabaseSpreadsheet() {
       const lastSelection = lastRaw
         ? (JSON.parse(lastRaw) as { extractors: ExtractorKey[]; presetId: string | null })
         : null;
+      const removeUnreachableRaw = window.localStorage.getItem(SIGNAL_REMOVE_UNREACHABLE_STORAGE_KEY);
+      const removeUnreachable = removeUnreachableRaw === 'true';
       setSignalEnrichment((prev) => ({
         ...prev,
         customPresets,
@@ -7927,6 +7972,7 @@ export function DatabaseSpreadsheet() {
             ? migrateLegacyExtractorKeys(lastSelection.extractors)
             : prev.selectedExtractors,
         presetId: lastSelection?.presetId ?? prev.presetId,
+        removeUnreachableAfterDone: removeUnreachable,
       }));
     } catch {
       /* corrupt JSON in localStorage — ignore and keep defaults */
@@ -7982,6 +8028,20 @@ export function DatabaseSpreadsheet() {
         presetId: null, // user diverged from preset
         cascadeToast: cascadeMessage,
       };
+    });
+  }, []);
+
+  const toggleRemoveUnreachableAfterDone = useCallback(() => {
+    setSignalEnrichment((prev) => {
+      const next = !prev.removeUnreachableAfterDone;
+      if (typeof window !== 'undefined') {
+        try {
+          window.localStorage.setItem(SIGNAL_REMOVE_UNREACHABLE_STORAGE_KEY, String(next));
+        } catch {
+          /* private mode — ignore */
+        }
+      }
+      return { ...prev, removeUnreachableAfterDone: next };
     });
   }, []);
 
@@ -13229,6 +13289,7 @@ export function DatabaseSpreadsheet() {
           onSavePreset={saveCustomSignalPreset}
           onDeletePreset={deleteCustomSignalPreset}
           onToggleExtractor={toggleSignalExtractor}
+          onToggleRemoveUnreachable={toggleRemoveUnreachableAfterDone}
           onClose={closeSignalModal}
           onStart={() => void handleStartSignalEnrichment()}
           onResume={() => void handleResumeSignalEnrichment()}
