@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
       if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
       const body = await req.json();
-      const { data, selected_steps, step_config, file_name } = body;
+      const { data, selected_steps, step_config, file_name, free_steps } = body;
 
       if (!Array.isArray(data) || data.length < 2) {
         return NextResponse.json({ error: 'Data must contain header + at least 1 row' }, { status: 400 });
@@ -106,11 +106,31 @@ export async function POST(req: NextRequest) {
         selectedSteps: selected_steps as StepKey[],
         rowCount: data.length - 1,
         maxRows: tariffMaxRows,
+        freeStepSelection: free_steps === true,
       });
       if (!guard.ok) {
         return NextResponse.json({ error: guard.error }, { status: 400 });
       }
       const finalSteps = guard.selectedSteps;
+
+      // Authoritative server-side check of the needsConfig contract. The UI
+      // (canSubmit) already blocks empty brief/prompt, but a crafted/replayed
+      // POST must not slip through: an empty-brief ta_scoring run scores against
+      // nothing and silently drops every row under the threshold (data loss);
+      // empty-prompt personalization produces junk. Applies to all roles.
+      const stepCfg = (step_config ?? {}) as Record<string, unknown>;
+      if (finalSteps.includes('ta_scoring')) {
+        const briefVal = typeof stepCfg.brief === 'string' ? stepCfg.brief.trim() : '';
+        if (!briefVal) {
+          return NextResponse.json({ error: 'Для шага «Оценка ЦА» нужен бриф.' }, { status: 400 });
+        }
+      }
+      if (finalSteps.includes('personalization')) {
+        const promptVal = typeof stepCfg.prompt === 'string' ? stepCfg.prompt.trim() : '';
+        if (!promptVal) {
+          return NextResponse.json({ error: 'Для шага «Персонализация» нужен промпт.' }, { status: 400 });
+        }
+      }
 
       const { count: activeCount } = await admin
         .from('base_constructor_jobs')
