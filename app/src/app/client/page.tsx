@@ -35,7 +35,9 @@ interface CampaignRow {
   emails_sent_count: number | null;
   open_count: number | null;
   reply_count: number | null;
+  reply_count_unique: number | null;
   new_leads_contacted_count: number | null;
+  contacted_count: number | null;
   analytics_synced_at: string | null;
 }
 
@@ -268,22 +270,28 @@ function CampaignsPageContent() {
 
   // Totals reflect the FILTERED set so the summary line tells the truth
   // about what's visible. Pre-filter total surfaced separately if hasFilter.
+  // Метрики «как в Instantly» (на КОНТАКТ): открываемость = открытия ÷ контакты
+  // (не ÷ письма — иначе занижено, на контакт идёт ~3 письма), ответы = уникальные
+  // ответившие (reply_count_unique, как в аналитике Instantly), а не reply_count
+  // (всего событий). Фолбэк на старые поля, пока синк не заполнил новые колонки.
   const totals = filteredCampaigns.reduce<{
     sent: number;
     opened: number;
     replied: number;
     contacted: number;
+    reached: number;
   }>(
     (acc, c) => ({
       sent: acc.sent + Number(c.emails_sent_count ?? 0),
       opened: acc.opened + Number(c.open_count ?? 0),
-      replied: acc.replied + Number(c.reply_count ?? 0),
+      replied: acc.replied + Number(c.reply_count_unique ?? c.reply_count ?? 0),
       contacted: acc.contacted + Number(c.new_leads_contacted_count ?? 0),
+      reached: acc.reached + Number(c.contacted_count ?? c.emails_sent_count ?? 0),
     }),
-    { sent: 0, opened: 0, replied: 0, contacted: 0 },
+    { sent: 0, opened: 0, replied: 0, contacted: 0, reached: 0 },
   );
 
-  const openRate = totals.sent > 0 ? ((totals.opened / totals.sent) * 100).toFixed(1) : '0';
+  const openRate = totals.reached > 0 ? ((totals.opened / totals.reached) * 100).toFixed(1) : '0';
   const replyRate = totals.contacted > 0 ? ((totals.replied / totals.contacted) * 100).toFixed(1) : '0';
 
   const sortedRows = useMemo(
@@ -292,9 +300,11 @@ function CampaignsPageContent() {
         .map((c) => {
           const sent = Number(c.emails_sent_count ?? 0);
           const opened = Number(c.open_count ?? 0);
-          const replied = Number(c.reply_count ?? 0);
+          const replied = Number(c.reply_count_unique ?? c.reply_count ?? 0);
           const contacted = Number(c.new_leads_contacted_count ?? 0);
-          const openRateVal = sent > 0 ? (opened / sent) * 100 : 0;
+          // Открываемость — на КОНТАКТ (contacted_count), не на письмо. См. totals.
+          const reached = Number(c.contacted_count ?? c.emails_sent_count ?? 0);
+          const openRateVal = reached > 0 ? (opened / reached) * 100 : 0;
           const replyRateVal = contacted > 0 ? (replied / contacted) * 100 : 0;
           return { c, sent, opened, replied, openRateVal, replyRateVal };
         })
