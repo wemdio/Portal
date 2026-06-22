@@ -14,6 +14,8 @@ jest.mock('@/lib/parsers/companyDomainResolver', () => ({
   resolveCompanyDomainByName: jest.fn(() => null),
 }));
 
+import { upsertInChunksWithRetry, isTransientDbError } from '@/lib/parsers/engHiringRunner';
+
 type Row = Record<string, unknown>;
 type Filter =
   | { kind: 'eq'; col: string; value: unknown }
@@ -745,5 +747,64 @@ describe('runEngHiringParserJob cache-run resume', () => {
         }),
       }),
     }));
+  });
+});
+
+describe('isTransientDbError', () => {
+  it('flags abort/timeout/connection errors but not data/constraint errors', () => {
+    expect(isTransientDbError('AbortError: This operation was aborted')).toBe(true);
+    expect(isTransientDbError('fetch failed')).toBe(true);
+    expect(isTransientDbError('ECONNRESET')).toBe(true);
+    expect(isTransientDbError('Headers Timeout Error')).toBe(true);
+    expect(isTransientDbError('terminating connection due to administrator command')).toBe(true);
+    expect(isTransientDbError('duplicate key value violates unique constraint')).toBe(false);
+    expect(isTransientDbError('invalid input syntax for type json')).toBe(false);
+    expect(isTransientDbError('')).toBe(false);
+  });
+});
+
+describe('upsertInChunksWithRetry', () => {
+  const rows = (n: number) => Array.from({ length: n }, (_, i) => i);
+
+  it('splits rows into chunks of chunkSize', async () => {
+    const sizes: number[] = [];
+    await upsertInChunksWithRetry(
+      async (chunk) => { sizes.push((chunk as unknown[]).length); return { error: null }; },
+      rows(250),
+      { chunkSize: 100, retries: 3, delayMs: 0 },
+    );
+    expect(sizes).toEqual([100, 100, 50]);
+  });
+
+  it('retries a transient abort error then succeeds (idempotent upsert)', async () => {
+    let calls = 0;
+    const slept: number[] = [];
+    await upsertInChunksWithRetry(
+      async () => { calls += 1; return calls < 3 ? { error: { message: 'AbortError: This operation was aborted' } } : { error: null }; },
+      rows(3),
+      { chunkSize: 10, retries: 3, delayMs: 5, sleep: async (ms) => { slept.push(ms); } },
+    );
+    expect(calls).toBe(3);
+    expect(slept).toEqual([5, 10]); // backoff grows with attempt
+  });
+
+  it('does NOT retry a non-transient (data) error — throws immediately', async () => {
+    let calls = 0;
+    await expect(upsertInChunksWithRetry(
+      async () => { calls += 1; return { error: { message: 'invalid input syntax for type json' } }; },
+      rows(2),
+      { chunkSize: 10, retries: 3, delayMs: 0, sleep: async () => {} },
+    )).rejects.toThrow('cache upsert failed: invalid input syntax for type json');
+    expect(calls).toBe(1);
+  });
+
+  it('throws after exhausting retries on a persistent transient error, with a custom label', async () => {
+    let calls = 0;
+    await expect(upsertInChunksWithRetry(
+      async () => { calls += 1; return { error: { message: 'fetch failed' } }; },
+      rows(1),
+      { chunkSize: 10, retries: 3, delayMs: 0, sleep: async () => {}, label: 'results upsert' },
+    )).rejects.toThrow('results upsert failed: fetch failed');
+    expect(calls).toBe(3);
   });
 });

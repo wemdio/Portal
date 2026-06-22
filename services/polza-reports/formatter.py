@@ -91,6 +91,7 @@ def format_xlsx_report(
     campaigns: list[Campaign],
     include_created: bool = True,
     include_base_left: bool = True,
+    weighted_reply_rate: bool = False,
 ) -> bytes:
     report_date = datetime.now().strftime("%d.%m.%Y")
     header_row = [
@@ -158,7 +159,15 @@ def format_xlsx_report(
     rows.extend(campaign_rows)
 
     avg_open_rate = sum(camp.opened_pct for camp in campaigns) / len(campaigns) if campaigns else 0
-    avg_reply_rate = sum(camp.replied_pct for camp in campaigns) / len(campaigns) if campaigns else 0
+    if weighted_reply_rate:
+        # Взвешенная отвечаемость для итога: все ответы / все связавшиеся (как «Итого»
+        # в Тригге), а не среднее арифметическое процентов по кампаниям. Среднее
+        # искажает результат при кампаниях разного размера и обнуляется кампаниями
+        # с 0 ответов (давало 0.6% вместо реальных 2.4%). Trigga-фикс 2026-06.
+        total_contacts = sum(camp.connected_reached for camp in campaigns)
+        avg_reply_rate = round(sum(replied_totals) / total_contacts * 100, 1) if total_contacts else 0
+    else:
+        avg_reply_rate = sum(camp.replied_pct for camp in campaigns) / len(campaigns) if campaigns else 0
 
     summary_merge_rows: set[int] = set()
 
