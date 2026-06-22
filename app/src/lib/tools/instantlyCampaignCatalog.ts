@@ -493,7 +493,7 @@ export interface ClientReportResult {
  * Используется клиентским порталом (/api/client/reports).
  */
 export function buildClientReport(rows: CampaignDbRow[]): ClientReportResult {
-  const totals = { contacts: 0, sent: 0, opened: 0, replies: 0, leads: 0, bounced: 0 };
+  const totals = { contacts: 0, sent: 0, opened: 0, replies: 0, leads: 0, bounced: 0, reached: 0 };
 
   const currentDate = new Date().toLocaleDateString('ru-RU');
 
@@ -517,7 +517,10 @@ export function buildClientReport(rows: CampaignDbRow[]): ClientReportResult {
     const leads = n(c.leads_count);
     const bounced = n(c.bounced_count);
 
-    const openPct = sent > 0 ? (opened / sent * 100).toFixed(1) : '0.0';
+    // Открываемость «как в Instantly» — на КОНТАКТ (contacted_count), не на письмо.
+    // Согласовано со страницей кампаний / деталью / дашбордом. Фоллбэк на письма.
+    const reached = n(c.contacted_count) > 0 ? n(c.contacted_count) : sent;
+    const openPct = reached > 0 ? (opened / reached * 100).toFixed(1) : '0.0';
     const replyPct = contacts > 0 ? (replies / contacts * 100).toFixed(1) : '0.0';
 
     tableText += `${c.name}\t${contacts}\t${sent}\t${opened}\t${openPct}%\t${replies}\t${replyPct}%\t${leads}\n`;
@@ -530,9 +533,10 @@ export function buildClientReport(rows: CampaignDbRow[]): ClientReportResult {
     totals.replies += replies;
     totals.leads += leads;
     totals.bounced += bounced;
+    totals.reached += reached;
   }
 
-  const totalOpenPct = totals.sent > 0 ? (totals.opened / totals.sent * 100).toFixed(1) : '0.0';
+  const totalOpenPct = totals.reached > 0 ? (totals.opened / totals.reached * 100).toFixed(1) : '0.0';
   const totalReplyPct = totals.contacts > 0 ? (totals.replies / totals.contacts * 100).toFixed(1) : '0.0';
 
   tableText += `\nОбщая статистика:\n`;
