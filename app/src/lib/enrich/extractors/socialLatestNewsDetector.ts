@@ -16,7 +16,7 @@
 import 'server-only';
 import type { SocialPost } from './socialPostsExtractor';
 import { logInfo, logError } from '@/lib/loggerServer';
-import { SIGNALS_LLM_MODEL } from './signalsModel';
+import { SIGNALS_LLM_MODEL, parseLlmUsage } from './signalsModel';
 
 const TIMEOUT_MS = 30_000;
 const MAX_INPUT_CHARS = 6_000;
@@ -36,6 +36,8 @@ export interface LatestNewsResult {
 
 export interface PickLatestNewsInput {
   socialPosts: SocialPost[];
+  /** Сайт-источник — для корреляции лога токенов/стоимости с контактом. */
+  url?: string;
 }
 
 const SYSTEM_PROMPT = `Ты — аналитик новостей компаний для B2B-аутрича. Тебе даются последние посты из соцсетей компании (Telegram / VK / OK / Dzen) с их датами. Выбери ОДИН пост — самую интересную новость О КОМПАНИИ: что с ней произошло, что нового она запустила/открыла/изменила/сделала.
@@ -99,6 +101,7 @@ export async function pickLatestNews(
   }
 
   const userPrompt = buildUserPrompt(posts);
+  const startedAt = Date.now();
 
   try {
     const controller = new AbortController();
@@ -132,7 +135,10 @@ export async function pickLatestNews(
       try { body = (await res.text()).slice(0, 500); } catch { /* ignore */ }
       await logError('social_news.llm_http_error', new Error(`Requesty HTTP ${res.status}`), {
         ...inputStats,
+        call: 'social_latest_news',
+        url: input.url,
         status: res.status,
+        latency_ms: Date.now() - startedAt,
         body,
         model: SIGNALS_LLM_MODEL,
       });
@@ -140,9 +146,25 @@ export async function pickLatestNews(
     }
 
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const usage = parseLlmUsage(data);
+    // Единый usage-лог (call='social_latest_news') — токены/стоимость/латентность
+    // + бизнес-контекст. Имена token-полей без «token» (REDACT_KEYS=/token/i).
+    const emitUsage = (picked: boolean, extra: Record<string, unknown> = {}) =>
+      logInfo('signals.llm.usage', 'LLM social-news', {
+        call: 'social_latest_news',
+        url: input.url,
+        model: SIGNALS_LLM_MODEL,
+        posts_n: posts.length,
+        networks: inputStats.networks,
+        input_chars: userPrompt.length,
+        ...usage,
+        latency_ms: Date.now() - startedAt,
+        picked,
+        ...extra,
+      });
     const rawContent = data?.choices?.[0]?.message?.content?.trim();
     if (!rawContent) {
-      await logError('social_news.llm_empty_response', new Error('LLM вернул пустой content'), inputStats);
+      await emitUsage(false, { reason: 'empty_content' });
       return {};
     }
 
@@ -157,17 +179,12 @@ export async function pickLatestNews(
     const idx = typeof parsed.index === 'number' ? parsed.index : -1;
 
     if (idx < 0 || idx >= posts.length) {
-      await logInfo('social_news.no_pick', 'LLM не выбрал пост', { ...inputStats, idx, reason: typeof parsed.reason === 'string' ? parsed.reason.slice(0, 200) : undefined });
+      await emitUsage(false, { idx, reason: typeof parsed.reason === 'string' ? parsed.reason.slice(0, 200) : undefined });
       return {};
     }
 
     const cell = formatCell(posts[idx]);
-    await logInfo('social_news.ok', 'LLM выбрал пост', {
-      ...inputStats,
-      idx,
-      network: posts[idx].network,
-      date: posts[idx].date,
-    });
+    await emitUsage(true, { idx, network: posts[idx].network, date: posts[idx].date });
     return { social_latest_news: cell };
   } catch (err) {
     await logError('social_news.exception', err, inputStats);
