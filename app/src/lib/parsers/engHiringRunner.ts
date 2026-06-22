@@ -56,6 +56,9 @@ const SMARTRECRUITERS_PAGE_SIZE = 100;
 const SMARTRECRUITERS_MAX_POSTINGS_PER_COMPANY = clampInteger(process.env.ENG_HIRING_SMARTRECRUITERS_MAX_POSTINGS_PER_COMPANY, 200, 50, 1000);
 const CACHE_BATCH_SIZE = 250;
 const RESULT_BATCH_SIZE = 500;
+const CACHE_UPSERT_CHUNK = clampInteger(process.env.ENG_HIRING_CACHE_UPSERT_CHUNK, 100, 10, 500);
+const UPSERT_RETRIES = clampInteger(process.env.ENG_HIRING_UPSERT_RETRIES, 3, 1, 6);
+const UPSERT_RETRY_DELAY_MS = Math.max(0, Number(process.env.ENG_HIRING_UPSERT_RETRY_DELAY_MS ?? '1000'));
 
 type Db = NonNullable<typeof supabaseAdmin>;
 
@@ -337,13 +340,55 @@ function toResultRow(jobId: string, v: CacheRow) {
   };
 }
 
+type UpsertOutcome = { error: { message: string } | null };
+
+// Abort / timeout / dropped-connection errors are worth retrying; data and
+// constraint errors are not (a retry just fails identically and wastes time).
+export function isTransientDbError(message: string): boolean {
+  return /\babort|timed?\s*out|timeout|fetch failed|socket|econnreset|epipe|enetunreach|network|terminat/i.test(message ?? '');
+}
+
+// Upsert rows in bounded chunks, retrying transient failures with backoff. The
+// cache/result upserts use ON CONFLICT, so they are idempotent — safe to retry
+// even when a 120s fetch-timeout abort may have partially applied the write (the
+// admin client conservatively refuses to retry write aborts; this layer can,
+// because re-running the same upsert converges to the same rows). Smaller chunks
+// also keep each request well under the DB fetch timeout when 144 is under load.
+export async function upsertInChunksWithRetry(
+  upsert: (chunk: unknown[]) => Promise<UpsertOutcome>,
+  rows: unknown[],
+  opts: { chunkSize: number; retries: number; delayMs: number; sleep?: (ms: number) => Promise<void>; label?: string },
+): Promise<void> {
+  const wait = opts.sleep ?? sleep;
+  const label = opts.label ?? 'cache upsert';
+  for (let i = 0; i < rows.length; i += opts.chunkSize) {
+    const chunk = rows.slice(i, i + opts.chunkSize);
+    let lastMessage = '';
+    let ok = false;
+    for (let attempt = 1; attempt <= opts.retries; attempt += 1) {
+      const { error } = await upsert(chunk);
+      if (!error) { ok = true; break; }
+      lastMessage = error.message;
+      if (attempt < opts.retries && isTransientDbError(error.message)) {
+        await wait(opts.delayMs * attempt);
+        continue;
+      }
+      break;
+    }
+    if (!ok) throw new Error(`${label} failed: ${lastMessage}`);
+  }
+}
+
 async function upsertCacheBatch(db: Db, rows: ReturnType<typeof toCacheRow>[]) {
   if (rows.length === 0) return;
   const uniqueRows = dedupeEngHiringRowsBySourceJobId(rows);
-  const { error } = await db
-    .from('eng_hiring_cache')
-    .upsert(uniqueRows, { onConflict: 'source,source_job_id' });
-  if (error) throw new Error(`cache upsert failed: ${error.message}`);
+  await upsertInChunksWithRetry(
+    (chunk) => db
+      .from('eng_hiring_cache')
+      .upsert(chunk as ReturnType<typeof toCacheRow>[], { onConflict: 'source,source_job_id' }) as unknown as Promise<UpsertOutcome>,
+    uniqueRows,
+    { chunkSize: CACHE_UPSERT_CHUNK, retries: UPSERT_RETRIES, delayMs: UPSERT_RETRY_DELAY_MS },
+  );
 }
 
 async function sourceNeedsRefresh(db: Db, source: EngHiringSource, limit: number, maxAgeHours: number): Promise<boolean> {
@@ -742,10 +787,13 @@ async function saveResults(db: Db, jobId: string, rows: CacheRow[], setProgress:
   await db.from('eng_hiring_vacancies').delete().eq('job_id', jobId);
   for (let i = 0; i < rows.length; i += RESULT_BATCH_SIZE) {
     const batch = rows.slice(i, i + RESULT_BATCH_SIZE).map((row) => toResultRow(jobId, row));
-    const { error } = await db
-      .from('eng_hiring_vacancies')
-      .upsert(batch, { onConflict: 'job_id,source,source_job_id' });
-    if (error) throw new Error(`results upsert failed: ${error.message}`);
+    await upsertInChunksWithRetry(
+      (chunk) => db
+        .from('eng_hiring_vacancies')
+        .upsert(chunk as ReturnType<typeof toResultRow>[], { onConflict: 'job_id,source,source_job_id' }) as unknown as Promise<UpsertOutcome>,
+      batch,
+      { chunkSize: CACHE_UPSERT_CHUNK, retries: UPSERT_RETRIES, delayMs: UPSERT_RETRY_DELAY_MS, label: 'results upsert' },
+    );
     await setProgress({
       progress_percent: 85 + Math.round((Math.min(i + RESULT_BATCH_SIZE, rows.length) / Math.max(1, rows.length)) * 14),
     });
