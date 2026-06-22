@@ -43,6 +43,12 @@ export type ApplyClientGuardInput = {
   rowCount: number;
   /** If provided, overrides the default CLIENT_ROW_LIMIT. */
   maxRows?: number;
+  /**
+   * When true, the client opted into MANUAL step selection ("режим выбора шагов")
+   * — respect exactly what they chose and do NOT force the always-on steps.
+   * The row limit still applies. Defaults to false (legacy locked behavior).
+   */
+  freeStepSelection?: boolean;
 };
 
 export type ApplyClientGuardResult =
@@ -64,6 +70,12 @@ export function applyClientGuard(
       ok: false,
       error: `Лимит ${limit.toLocaleString('ru-RU')} строк для клиентского доступа. В файле ${input.rowCount.toLocaleString('ru-RU')} строк.`,
     };
+  }
+
+  // Manual selection mode: keep exactly what the client picked (no forced
+  // always-on steps). The row limit above still applies.
+  if (input.freeStepSelection) {
+    return { ok: true, selectedSteps: [...input.selectedSteps] };
   }
 
   const merged = new Set<StepKey>(input.selectedSteps);

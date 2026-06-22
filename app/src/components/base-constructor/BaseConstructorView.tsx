@@ -335,6 +335,10 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const [parseError, setParseError] = useState('');
 
   const [selectedSteps, setSelectedSteps] = useState<StepKey[]>([]);
+  // clientMode only: when ON, the client picks steps manually — the always-on
+  // steps stop being force-added/locked (parity with specialists). Default OFF
+  // keeps the legacy locked pipeline. Server honors this via `free_steps`.
+  const [freeStepMode, setFreeStepMode] = useState(false);
   const [brief, setBrief] = useState('');
   const [keepAllScored, setKeepAllScored] = useState(false);
   const [briefInputMode, setBriefInputMode] = useState<'pdf' | 'text' | 'saved'>(
@@ -419,13 +423,14 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   /* ─── Client mode: auto-include always-on steps when a file is uploaded ─── */
 
   useEffect(() => {
-    if (!clientMode || !fileData) return;
+    // Skip in manual mode — the client controls the selection themselves.
+    if (!clientMode || !fileData || freeStepMode) return;
     setSelectedSteps((prev) => {
       const set = new Set<StepKey>(prev);
       for (const key of ALWAYS_ON_STEPS_FOR_CLIENT) set.add(key as StepKey);
       return sortByPriority([...set]);
     });
-  }, [clientMode, fileData]);
+  }, [clientMode, fileData, freeStepMode]);
 
   /* ─── Client mode: auto-fetch saved brief on mount (used when user picks 'saved' tab) ─── */
 
@@ -650,7 +655,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   }
 
   function toggleStep(key: StepKey) {
-    if (clientMode && ALWAYS_ON_SET.has(key)) return;
+    if (clientMode && !freeStepMode && ALWAYS_ON_SET.has(key)) return;
     setSelectedSteps((prev) => {
       if (prev.includes(key)) {
         const dependents = getStepsThatRequire(key, prev);
@@ -780,6 +785,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
           selected_steps: selectedSteps,
           step_config: stepConfig,
           file_name: fileName,
+          free_steps: clientMode && freeStepMode,
         }),
       });
       const json = await res.json();
@@ -874,6 +880,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     setFileData(null);
     setFileName('');
     setSelectedSteps([]);
+    setFreeStepMode(false);
     setBrief('');
     setPrompt('');
     setError('');
@@ -1107,6 +1114,27 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                       </button>
                     </div>
                   )}
+                  {clientMode && (
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={freeStepMode}
+                      onClick={() => {
+                        setFreeStepMode((v) => !v);
+                        // Clear on BOTH transitions so each mode starts pristine:
+                        //  - entering manual → empty, client builds their own (e.g. one step);
+                        //  - leaving manual  → empty, then the auto-include effect re-adds
+                        //    EXACTLY the always-on steps (effect dep: freeStepMode), so the
+                        //    default pipeline is restored cleanly, not as a superset of leftovers.
+                        setSelectedSteps([]);
+                      }}
+                      className={`neu-pill px-3 py-1 text-xs font-semibold transition-colors shrink-0 ${freeStepMode ? 'active' : ''}`}
+                      style={{ color: freeStepMode ? 'var(--cp-green)' : 'var(--cp-paper-mute)' }}
+                      title="Самостоятельно выбрать, какие шаги выполнить"
+                    >
+                      {freeStepMode ? '✓ Выбираю шаги сам' : 'Выбрать шаги вручную'}
+                    </button>
+                  )}
                 </div>
                 <div className="px-6 py-5 space-y-5">
                   {/*
@@ -1118,7 +1146,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     into a single editorial summary row + render only the
                     AI category (with the 2 interactive cards) below.
                   */}
-                  {clientMode && (
+                  {clientMode && !freeStepMode && (
                     /* Bridge #5: flatten the «автоматически» inner box. The
                        framed wrapper inside an already-bordered outer card
                        was the hairline-on-hairline anti-pattern visible in
@@ -1141,7 +1169,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     </div>
                   )}
                   {CATEGORIES.map((cat) => {
-                    const visibleSteps = clientMode
+                    const visibleSteps = clientMode && !freeStepMode
                       ? STEPS.filter((s) => s.category === cat.key && !ALWAYS_ON_SET.has(s.key))
                       : STEPS.filter((s) => s.category === cat.key);
                     if (visibleSteps.length === 0) return null;
@@ -1158,7 +1186,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         {visibleSteps.map((step) => {
                           const isSelected = selectedSteps.includes(step.key);
                           const lockedReason = isSelected ? isRequiredByOther(step.key) : null;
-                          const isAlwaysOn = clientMode && ALWAYS_ON_SET.has(step.key);
+                          const isAlwaysOn = clientMode && !freeStepMode && ALWAYS_ON_SET.has(step.key);
                           // Client gate: «Оценка ЦА» (ta_scoring) requires a saved
                           // brief. We only block in client mode and only after the
                           // brief check finished (savedBriefAvailable !== null) —
@@ -1329,7 +1357,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                               {step.label}
                               {hasWarning && <AlertTriangle className="w-3 h-3 text-amber-500" />}
                               {hasHint && <Zap className="w-3 h-3 text-blue-500" />}
-                              {locked || (clientMode && ALWAYS_ON_SET.has(key)) ? (
+                              {locked || (clientMode && !freeStepMode && ALWAYS_ON_SET.has(key)) ? (
                                 <span
                                   className="ml-0.5 text-gray-300 cursor-not-allowed inline-flex items-center"
                                   title={locked ?? 'Выполняется автоматически'}

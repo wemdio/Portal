@@ -120,15 +120,26 @@ def parse_trigga_csv(data: bytes) -> list[Campaign]:
         sent_total = sum(_parse_int(row.get("Отправлено")) for row in rows)
         opened_total = sum(_parse_int(row.get("Открыто")) for row in rows)
         replied_total = sum(_parse_int(row.get("Ответы")) for row in rows)
+        # Связавшиеся = адресаты первого письма (шаг 1). Номер шага берём через
+        # _letter_parts, а НЕ startswith("письмо 1"): иначе у цепочек из 10+ писем
+        # «Письмо 10», «Письмо 11»… ошибочно попадают в первый шаг и раздувают
+        # знаменатель отвечаемости.
         first_step_sent = sum(
             _parse_int(row.get("Отправлено"))
             for row in rows
-            if (row.get("Цепочка") or "").strip().lower().startswith("письмо 1")
+            if _letter_parts(row.get("Цепочка") or "")[0] == 1
         )
 
-        connected_reached = first_step_sent or min(sent_total, leads_total)
+        # Фолбэк на sent_total последним в цепочке — чтобы «Связались» (а значит и
+        # знаменатель отвечаемости) не оказался 0, если первый шаг не распознан и
+        # «Лиды» пусты. Иначе ответы показывались бы с 0% отвечаемости.
+        connected_reached = first_step_sent or min(sent_total, leads_total) or sent_total
         opened_pct = round(opened_total / sent_total * 100, 1) if sent_total else 0.0
-        replied_pct = round(replied_total / sent_total * 100, 1) if sent_total else 0.0
+        # Отвечаемость = ответы / связавшихся (как считает «Итого» в Тригге), а не
+        # ответы / отправлено. Иначе итог по всем кампаниям (тоже от связавшихся)
+        # оказывается выше каждой отдельной кампании. Открываемость намеренно
+        # оставлена «на письмо» (opened/sent) — по решению команды (см. фикс 2026-06).
+        replied_pct = round(replied_total / connected_reached * 100, 1) if connected_reached else 0.0
 
         letters = _build_letters(rows)
 

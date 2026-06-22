@@ -177,6 +177,9 @@ async def trigga_report(
         campaigns,
         include_created=include_created,
         include_base_left=include_base_left,
+        # Trigga отвечаемость считаем взвешенно (ответы/связавшиеся), не средним
+        # арифметическим. Coldy-отчёт это не трогает (там % скрейпятся из чужого UI).
+        weighted_reply_rate=True,
     )
 
     return Response(
