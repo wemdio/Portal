@@ -144,17 +144,46 @@ function salaryNumberValue(value: unknown): number | null {
   return rounded;
 }
 
-function cleanHtml(value: unknown): string {
-  return String(value ?? '')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
+function safeFromCodePoint(cp: number): string {
+  // Skip NUL, BOM, out-of-range, and lone surrogates (un-storable / invalid).
+  if (!Number.isFinite(cp) || cp <= 0 || cp === 0xfeff || cp > 0x10ffff) return '';
+  if (cp >= 0xd800 && cp <= 0xdfff) return '';
+  try {
+    return String.fromCodePoint(cp);
+  } catch {
+    return '';
+  }
+}
+
+function decodeHtmlEntitiesOnce(text: string): string {
+  return text
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => safeFromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => safeFromCodePoint(parseInt(dec, 10)))
     .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
+    .replace(/&mdash;/gi, '—')
+    .replace(/&ndash;/gi, '–')
+    .replace(/&hellip;/gi, '…')
+    .replace(/&rsquo;/gi, '’')
+    .replace(/&lsquo;/gi, '‘')
+    .replace(/&rdquo;/gi, '”')
+    .replace(/&ldquo;/gi, '“')
+    .replace(/&trade;/gi, '™')
+    .replace(/&reg;/gi, '®')
+    .replace(/&copy;/gi, '©')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
-    .replace(/&#39;/g, "'")
     .replace(/&quot;/gi, '"')
+    .replace(/&amp;/gi, '&');
+}
+
+function cleanHtml(value: unknown): string {
+  const stripped = String(value ?? '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ');
+  // Decode twice to also resolve one level of double-encoding (e.g. "&amp;#xa0;"
+  // -> "&#xa0;" -> the character). The numeric passes cover &#39; etc. too.
+  return decodeHtmlEntitiesOnce(decodeHtmlEntitiesOnce(stripped))
     .replace(/\s+/g, ' ')
     .trim();
 }
