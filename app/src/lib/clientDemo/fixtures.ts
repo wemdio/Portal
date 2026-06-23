@@ -36,6 +36,8 @@ interface DemoCampaign {
   emails_sent_count: number;
   open_count: number;
   reply_count: number;
+  reply_count_unique: number;
+  contacted_count: number;
   new_leads_contacted_count: number;
   bounced_count: number;
   unsubscribed_count: number;
@@ -53,6 +55,8 @@ export const DEMO_CAMPAIGNS: DemoCampaign[] = [
     emails_sent_count: 1840,
     open_count: 612,
     reply_count: 74,
+    reply_count_unique: 52,
+    contacted_count: 1000,
     new_leads_contacted_count: 920,
     bounced_count: 21,
     unsubscribed_count: 8,
@@ -66,6 +70,8 @@ export const DEMO_CAMPAIGNS: DemoCampaign[] = [
     emails_sent_count: 1120,
     open_count: 388,
     reply_count: 41,
+    reply_count_unique: 29,
+    contacted_count: 620,
     new_leads_contacted_count: 560,
     bounced_count: 12,
     unsubscribed_count: 5,
@@ -79,6 +85,8 @@ export const DEMO_CAMPAIGNS: DemoCampaign[] = [
     emails_sent_count: 760,
     open_count: 240,
     reply_count: 19,
+    reply_count_unique: 13,
+    contacted_count: 410,
     new_leads_contacted_count: 380,
     bounced_count: 9,
     unsubscribed_count: 3,
@@ -92,6 +100,8 @@ export const DEMO_CAMPAIGNS: DemoCampaign[] = [
     emails_sent_count: 2300,
     open_count: 901,
     reply_count: 112,
+    reply_count_unique: 78,
+    contacted_count: 1480,
     new_leads_contacted_count: 1150,
     bounced_count: 28,
     unsubscribed_count: 14,
@@ -124,6 +134,8 @@ function demoCampaignDetail(id: string) {
       emails_sent_count: c.emails_sent_count,
       open_count: c.open_count,
       reply_count: c.reply_count,
+      reply_count_unique: c.reply_count_unique,
+      contacted_count: c.contacted_count,
       new_leads_contacted_count: c.new_leads_contacted_count,
       bounced_count: c.bounced_count,
       unsubscribed_count: c.unsubscribed_count,
@@ -865,15 +877,16 @@ function buildDemoReportResponse(campaigns: DemoCampaign[]) {
     (acc, c) => {
       acc.contacts += c.new_leads_contacted_count;
       acc.sent += c.emails_sent_count;
+      acc.reached += c.contacted_count;
       acc.opened += c.open_count;
       acc.replies += c.reply_count;
       acc.leads += c.leads_count;
       acc.bounced += c.bounced_count;
       return acc;
     },
-    { contacts: 0, sent: 0, opened: 0, replies: 0, leads: 0, bounced: 0 },
+    { contacts: 0, sent: 0, reached: 0, opened: 0, replies: 0, leads: 0, bounced: 0 },
   );
-  const openPct = totals.sent > 0 ? ((totals.opened / totals.sent) * 100).toFixed(1) : '0.0';
+  const openPct = totals.reached > 0 ? ((totals.opened / totals.reached) * 100).toFixed(1) : '0.0';
   const replyPct = totals.contacts > 0 ? ((totals.replies / totals.contacts) * 100).toFixed(1) : '0.0';
   const rows: (string | number)[][] = [
     ['Дата', 'Кампания', 'Контактов', 'Отправлено писем', 'Открытий', '% открытий', 'Ответов', '% ответов', 'Браков'],
@@ -883,7 +896,7 @@ function buildDemoReportResponse(campaigns: DemoCampaign[]) {
       c.new_leads_contacted_count,
       c.emails_sent_count,
       c.open_count,
-      `${((c.open_count / c.emails_sent_count) * 100).toFixed(1)}%`,
+      `${((c.open_count / c.contacted_count) * 100).toFixed(1)}%`,
       c.reply_count,
       `${((c.reply_count / c.new_leads_contacted_count) * 100).toFixed(1)}%`,
       c.bounced_count,
