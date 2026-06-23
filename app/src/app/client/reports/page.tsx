@@ -9,6 +9,20 @@ interface CampaignRow {
   name: string;
   emails_sent_count: number | null;
   reply_count: number | null;
+  reply_count_unique: number | null;
+  reply_count_automatic_unique: number | null;
+}
+
+// «Ответы как в списке Instantly» = уникальные живые + уникальные авто-ответы —
+// как страница кампаний / деталь / дашборд и сам отчёт. Фоллбэк на reply_count,
+// пока синк не заполнил новые колонки. Иначе пикер расходился бы с отчётом.
+function replyTotal(
+  c: Pick<CampaignRow, 'reply_count_unique' | 'reply_count_automatic_unique' | 'reply_count'>,
+): number {
+  if (c.reply_count_unique != null) {
+    return Number(c.reply_count_unique) + Number(c.reply_count_automatic_unique ?? 0);
+  }
+  return Number(c.reply_count ?? 0);
 }
 
 interface ReportSummary {
@@ -161,7 +175,7 @@ export default function ClientReportsPage() {
             <div className="neu-card mb-6 max-h-64 overflow-y-auto">
               {campaigns.map((c, idx) => {
                 const sent = Number(c.emails_sent_count ?? 0);
-                const replied = Number(c.reply_count ?? 0);
+                const replied = replyTotal(c);
                 const checked = selectedIds.has(c.id);
                 return (
                   <label
