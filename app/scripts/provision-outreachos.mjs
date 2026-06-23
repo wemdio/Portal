@@ -92,6 +92,7 @@ const TARIFF = {
 const PIPELINE_CONFIG = {
   id: 1,
   enabled: false,                                  // включить вручную после campaign_id + ящиков
+  measure_only: false,                             // true = замер воронки без заливки (см. футер)
   campaign_id: process.env.OUTREACHOS_CAMPAIGN_ID || null,
   industries: ICP_INDUSTRIES,
   area: '113',                                     // Россия
@@ -245,6 +246,13 @@ async function main() {
 
   console.log('');
   console.log(`✅ ${EXECUTE ? 'Применено' : 'План показан'}. client_user_id = ${userId}`);
+  console.log('');
+  console.log('Замер воронки ДО go-live (без заливки, без записи seen, повторяемо):');
+  console.log('  1. npm run build:workers  (бандл dist/workers/outreachosCron.js)');
+  console.log('  2. UPDATE outreachos_pipeline_config SET enabled=true, measure_only=true WHERE id=1;');
+  console.log('  3. node --env-file=../.env dist/workers/outreachosCron.js  (на проде — есть HH-токен+прокси)');
+  console.log('     → лог печатает MEASURE: parsed=… new=… valid=…; журнал в outreachos_pipeline_runs.');
+  console.log('  4. По valid выставить daily_limit и вернуть measure_only=false.');
   console.log('');
   console.log('Go-live (вручную, когда готовы почты):');
   console.log('  1. Создать ОДНУ кампанию в Instantly, подключить прогретые ящики, активировать.');

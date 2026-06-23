@@ -31,6 +31,11 @@ function sortByPriority(steps: string[]): string[] {
 export interface OutreachOsConfig {
   id: number;
   enabled: boolean;
+  /**
+   * Замер воронки: парс+конструктор+подсчёт valid_contacts БЕЗ заливки в Instantly
+   * и БЕЗ записи seen (неразрушающе, повторяемо). campaign_id не нужен.
+   */
+  measure_only: boolean;
   /** profiles.id аккаунта OutreachOS — он же user_id для base_constructor_jobs. */
   client_user_id: string;
   /** Одна заранее созданная кампания Instantly для ежедневного добора. */
