@@ -848,7 +848,12 @@ Return {"matches": []} if no confident matches.`;
             'X-Title': 'Portal - Campaign Project Matcher (per-client)',
           },
           body: JSON.stringify({
-            model: 'google/gemini-2.0-flash-001',
+            // Requesty-managed policy (same alias as the lead-qualifier worker
+            // that shares this key). Не пинуем конкретную версию модели:
+            // Requesty сам переезжает при депрекейте. Пин на
+            // google/gemini-2.0-flash-001 ломался (Requesty снял поддержку →
+            // мгновенный reject на гейтвее, 0 токенов).
+            model: 'policy/gemini-flash',
             messages: [{ role: 'user', content: prompt }],
             temperature: 0,
             // 1500 обрезало ответ для клиентов с многими кандидатами
