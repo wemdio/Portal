@@ -90,10 +90,7 @@ export async function POST(req: NextRequest) {
 
       if (profile?.role === 'client') {
         tariffUsage = await getClientTariffUsage(user.id);
-        if (tariffUsage.status === 'setup') {
-          return jsonError('Ваш личный кабинет настраивается. Пожалуйста, подождите — мы скоро всё подготовим.', 403);
-        }
-        if (tariffUsage.status !== 'active') {
+        if (tariffUsage.status !== 'active' && tariffUsage.status !== 'setup') {
           return jsonError('Подписка не активна. Оплатите тариф для продолжения работы.', 403);
         }
         if (tariffUsage.usage.max_rows.remaining <= 0) {
