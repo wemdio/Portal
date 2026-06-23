@@ -28,7 +28,7 @@ export const TARIFF_DEFAULTS: Record<'standard' | 'pro', TariffLimits> = {
   },
 };
 
-export const SETUP_DAYS = 3;
+export const SETUP_DAYS = 15;
 
 export type BillingMode = 'invoice' | 'autopayment';
 
