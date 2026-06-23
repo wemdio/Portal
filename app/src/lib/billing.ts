@@ -433,9 +433,9 @@ interface RenewalTariffRow {
  *      the customer-facing Invoice URL.
  *   2. POST /payments with payment_method_id (idempotency = autorenew-{id}-{YYYY-MM}).
  *   3a. On succeeded: invoices→paid, yookassa_payment_id=payment.id; bump
- *       client_tariffs.paid_until by one month (independent of billing_period
- *       because the cron always renews monthly; admin sets the longer period
- *       only at activate/extend time).
+ *       client_tariffs.paid_until by BILLING_PERIOD_MONTHS[billing_period]
+ *       (12-month subscriptions extend by 12 months, not 1) — billing_amount
+ *       уже содержит сумму ЗА ВЕСЬ ПЕРИОД, продление должно совпадать.
  *   3b. On YK error / non-succeeded status: keep invoice pending, write
  *       last_renewal_error via mapYookassaErrorRu. Next cron run retries with
  *       the same idempotency key (same calendar month) so YooKassa won't
@@ -560,7 +560,13 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
       // QA test mode — short period for autopayment loop testing.
       newPaidUntil.setMinutes(newPaidUntil.getMinutes() + row.test_period_minutes);
     } else {
-      newPaidUntil.setMonth(newPaidUntil.getMonth() + 1);
+      // Продлеваем на ТОТ ЖЕ период, что был оплачен (12 мес → +12 мес).
+      // До 23.06.2026 здесь было захардкожено +1 месяц — но billing_amount
+      // содержит сумму ЗА ВЕСЬ ПЕРИОД (например 624k за 12 мес со скидкой),
+      // и продление на 1 мес после списания 624k = клиент платит за год,
+      // получает 30 дней. Legacy-подписки без billing_period — fallback на месяц.
+      const monthsToExtend = BILLING_PERIOD_MONTHS[row.billing_period ?? 'month'] ?? 1;
+      newPaidUntil.setMonth(newPaidUntil.getMonth() + monthsToExtend);
     }
 
     await supabaseAdmin
