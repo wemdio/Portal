@@ -368,6 +368,10 @@ export default function ClientTariffPage() {
         </p>
       )}
 
+      {data && data.status === 'inactive' && !data.paid_at && (
+        <TariffSelectionWidget />
+      )}
+
       {data && (
         <>
           {/* ── 02 → Текущий тариф ───────────────────────────────────── */}
@@ -866,5 +870,95 @@ function LimitRow({
         </p>
       )}
     </div>
+  );
+}
+
+function TariffSelectionWidget() {
+  const [tariff, setTariff] = useState<'standard' | 'pro'>('standard');
+  const [period, setPeriod] = useState<'month' | 'quarter' | 'half_year' | 'year'>('month');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const priceTable: Record<'standard' | 'pro', number> = { standard: 40_000, pro: 80_000 };
+  const periodMonths: Record<'month' | 'quarter' | 'half_year' | 'year', number> = {
+    month: 1, quarter: 3, half_year: 6, year: 12,
+  };
+  const periodLabel: Record<'month' | 'quarter' | 'half_year' | 'year', string> = {
+    month: '1 месяц', quarter: '3 месяца', half_year: '6 месяцев', year: '1 год',
+  };
+  const amount = priceTable[tariff] * periodMonths[period];
+
+  const handlePay = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await clientApiFetch<{ payment_url: string }>('/payment', {
+        method: 'POST',
+        body: JSON.stringify({ tariff_type: tariff, billing_period: period }),
+      });
+      if (res.payment_url) {
+        window.location.href = res.payment_url;
+      } else {
+        setError('Не удалось получить ссылку на оплату');
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <section className="mb-6 rounded-2xl border border-indigo-200 bg-indigo-50/40 p-5">
+      <h2 className="text-base font-semibold text-gray-900 mb-1">Выберите тариф</h2>
+      <p className="text-xs text-gray-600 mb-4">После оплаты — 15 дней прогрев почт, затем активный период.</p>
+
+      <div className="grid sm:grid-cols-2 gap-3 mb-4">
+        <button
+          type="button"
+          onClick={() => setTariff('standard')}
+          className={`text-left rounded-xl border px-4 py-3 transition ${tariff === 'standard' ? 'border-indigo-500 bg-white shadow' : 'border-gray-200 bg-white/60'}`}
+        >
+          <p className="font-semibold text-gray-900">Стандарт</p>
+          <p className="text-xs text-gray-600">40 000 ₽/мес · 10 000 контактов, 16 почт</p>
+        </button>
+        <button
+          type="button"
+          onClick={() => setTariff('pro')}
+          className={`text-left rounded-xl border px-4 py-3 transition ${tariff === 'pro' ? 'border-indigo-500 bg-white shadow' : 'border-gray-200 bg-white/60'}`}
+        >
+          <p className="font-semibold text-gray-900">Про</p>
+          <p className="text-xs text-gray-600">80 000 ₽/мес · 20 000 контактов, 32 почты</p>
+        </button>
+      </div>
+
+      <div className="flex flex-wrap gap-2 mb-4">
+        {(['month', 'quarter', 'half_year', 'year'] as const).map((p) => (
+          <button
+            key={p}
+            type="button"
+            onClick={() => setPeriod(p)}
+            className={`rounded-full border px-3 py-1.5 text-xs font-medium ${period === p ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-gray-200 bg-white text-gray-700'}`}
+          >
+            {periodLabel[p]}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex items-center justify-between border-t border-indigo-100 pt-3">
+        <p className="text-sm text-gray-700">К оплате: <span className="font-semibold text-gray-900">{amount.toLocaleString('ru-RU')} ₽</span></p>
+        <button
+          onClick={handlePay}
+          disabled={loading}
+          className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
+        >
+          {loading ? 'Создаём счёт…' : 'Оплатить через ЮKassa'}
+        </button>
+      </div>
+
+      {error && (
+        <p className="mt-2 text-xs text-red-700">{error}</p>
+      )}
+    </section>
   );
 }

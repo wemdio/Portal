@@ -9892,9 +9892,8 @@ export function DatabaseSpreadsheet() {
           <button
             type="button"
             onClick={td.openSignalModal}
-            disabled={!isAdminUser}
             className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-400"
-            title={isAdminUser ? 'Открыть окно прогресса. Анализ продолжается в фоне.' : 'Доступно только администраторам'}
+            title="Открыть окно прогресса. Анализ продолжается в фоне."
           >
             Сигналы {signalEnrichment.progress}%
           </button>
@@ -9902,8 +9901,7 @@ export function DatabaseSpreadsheet() {
           <button
             type="button"
             onClick={td.openSignalModal}
-            disabled={!isAdminUser || colCount === 0}
-            title={!isAdminUser ? 'Доступно только администраторам' : undefined}
+            disabled={colCount === 0}
             className={toolbarMonochromeButtonClass}
           >
             Сигналы
