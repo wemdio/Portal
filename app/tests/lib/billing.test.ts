@@ -79,16 +79,19 @@ describe('__internal.resolveBillingAmount', () => {
     );
   });
 
-  it('multiplies by period months for half_year', () => {
+  it('applies 10% discount for half_year (40k × 6 × 0.9 = 216 000)', () => {
+    // С 23.06.2026 BILLING_PERIOD_DISCOUNT: 6 мес = −10%, 12 мес = −20%.
+    // resolveBillingAmount fallback'ит на calcBillingAmount, который применяет
+    // скидку.
     expect(__internal.resolveBillingAmount({ ...base, billing_period: 'half_year' })).toBe(
-      __internal.TARIFF_MONTHLY_PRICE.standard * 6,
+      Math.round(__internal.TARIFF_MONTHLY_PRICE.standard * 6 * 0.9),
     );
   });
 
-  it('multiplies by period months for year on pro', () => {
+  it('applies 20% discount for year on pro (65k × 12 × 0.8 = 624 000)', () => {
     expect(
       __internal.resolveBillingAmount({ ...base, tariff_type: 'pro', billing_period: 'year' }),
-    ).toBe(__internal.TARIFF_MONTHLY_PRICE.pro * 12);
+    ).toBe(Math.round(__internal.TARIFF_MONTHLY_PRICE.pro * 12 * 0.8));
   });
 
   it('returns null for custom tariff without explicit billing_amount', () => {
