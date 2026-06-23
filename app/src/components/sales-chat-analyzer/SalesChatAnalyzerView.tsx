@@ -668,9 +668,9 @@ export function SalesChatAnalyzerView() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Анализатор сейлз-переписок</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Анализатор тг-переписок</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Подключите Telegram-аккаунты сейлз-менеджеров — все диалоги выгружаются в базу.
+          Подключите Telegram-аккаунты — все диалоги выгружаются в базу.
           Синхронизация выполняется автоматически каждую ночь в 01:00 МСК.
         </p>
       </div>
