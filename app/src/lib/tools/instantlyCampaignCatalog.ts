@@ -256,6 +256,8 @@ export async function syncInstantlyCampaignAnalytics(): Promise<{ rows: number }
           open_count: typeof a.open_count === 'number' ? a.open_count : null,
           reply_count: typeof a.reply_count === 'number' ? a.reply_count : null,
           reply_count_unique: typeof a.reply_count_unique === 'number' ? a.reply_count_unique : null,
+          reply_count_automatic_unique:
+            typeof a.reply_count_automatic_unique === 'number' ? a.reply_count_automatic_unique : null,
           new_leads_contacted_count:
             typeof a.new_leads_contacted_count === 'number' ? a.new_leads_contacted_count : null,
           contacted_count: typeof a.contacted_count === 'number' ? a.contacted_count : null,
@@ -424,8 +426,10 @@ export interface CampaignDbRow {
   emails_sent_count: number | null;
   open_count: number | null;
   reply_count: number | null;
-  /** Уникальные ответившие из /campaigns/analytics — то, что показывает Instantly. */
+  /** Уникальные живые ответившие из /campaigns/analytics (страница аналитики Instantly). */
   reply_count_unique: number | null;
+  /** Уникальные АВТО-ответы. «Ответы как в списке Instantly» = unique + automatic_unique. */
+  reply_count_automatic_unique: number | null;
   /** Точный счётчик ответов из /emails (уник. ответившие). Точнее reply_count. */
   actual_reply_count: number | null;
   new_leads_contacted_count: number | null;
@@ -448,7 +452,7 @@ export async function readCampaignAnalyticsFromDb(allowedIds: string[]): Promise
   const { data, error } = await supabaseAdmin
     .from('instantly_campaign_catalog')
     .select(
-      'id,name,status,emails_sent_count,open_count,reply_count,reply_count_unique,actual_reply_count,new_leads_contacted_count,contacted_count,bounced_count,unsubscribed_count,leads_count,analytics_synced_at',
+      'id,name,status,emails_sent_count,open_count,reply_count,reply_count_unique,reply_count_automatic_unique,actual_reply_count,new_leads_contacted_count,contacted_count,bounced_count,unsubscribed_count,leads_count,analytics_synced_at',
     )
     .in('id', allowedIds);
 
@@ -511,9 +515,12 @@ export function buildClientReport(rows: CampaignDbRow[]): ClientReportResult {
     const contacts = n(c.new_leads_contacted_count);
     const sent = n(c.emails_sent_count);
     const opened = n(c.open_count);
-    // actual_reply_count (реальные уник. ответившие из /emails) точнее, чем
-    // analytics reply_count — используем его при наличии, иначе фоллбэк.
-    const replies = c.actual_reply_count != null ? n(c.actual_reply_count) : n(c.reply_count);
+    // «Ответы как в списке Instantly» = уникальные живые + уникальные авто-ответы
+    // (так список Instantly считает REPLIED). Согласовано со страницей кампаний /
+    // деталью / дашбордом. Фоллбэк на reply_count, пока синк не заполнил колонки.
+    const replies = c.reply_count_unique != null
+      ? n(c.reply_count_unique) + n(c.reply_count_automatic_unique)
+      : n(c.reply_count);
     const leads = n(c.leads_count);
     const bounced = n(c.bounced_count);
 
