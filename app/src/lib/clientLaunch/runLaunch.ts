@@ -201,7 +201,7 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
   const clientStatus = getClientStatus(tariffRow);
   if (clientStatus === 'setup') {
     throw new ClientLaunchError(
-      'Ваш личный кабинет настраивается. Пожалуйста, подождите — мы скоро всё подготовим.',
+      'Идёт прогрев почт. Запуск кампаний станет доступен после завершения прогрева (15 дней с момента оплаты). До этого вы можете пользоваться остальными инструментами портала.',
       403,
     );
   }
