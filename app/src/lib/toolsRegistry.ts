@@ -33,6 +33,7 @@ export const ALL_TOOL_IDS = [
   'email-sequence',
   'email-sequence-v2',
   'auto-report',
+  'replies-report',
   'polza-reports',
   'audio-transcribe',
   'tg-transcribe',
@@ -45,6 +46,7 @@ export const ALL_TOOL_IDS = [
   'li-outreach',
   'li-outreach-v2',
   'sales-copilot',
+  'sales-hypotheses',
   'knowledge-base',
   'bugor-outreach',
   'nash-outreach',
@@ -190,6 +192,17 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     href: '/tools/auto-report',
     accentColor: 'blue',
   },
+  'replies-report': {
+    id: 'replies-report',
+    title: 'Отчёт по ответам',
+    title_en: 'Replies report',
+    description:
+      'HTML-отчёт по ответам выбранных кампаний Instantly: метрики + читаемые ответы, сгруппированные по кампаниям, с поиском и фильтром.',
+    description_en:
+      'HTML report of replies for selected Instantly campaigns: metrics + readable replies grouped by campaign, with search and filter.',
+    href: '/tools/replies-report',
+    accentColor: 'blue',
+  },
   'polza-reports': {
     id: 'polza-reports',
     title: 'Отчёты по рассылкам (Coldy / Trigga)',
@@ -301,6 +314,18 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     href: '/tools/sales-copilot',
     accentColor: 'blue',
   },
+  'sales-hypotheses': {
+    id: 'sales-hypotheses',
+    title: 'Гипотезы по сайту',
+    title_en: 'Hypotheses from website',
+    description: 'Вставьте сайт компании — AI заполнит бриф и выдаст готовые гипотезы по сбору базы.',
+    description_en: 'Paste a company website — AI fills the brief and returns ready lead-source hypotheses.',
+    href: '/tools/sales-hypotheses',
+    badge: 'Новое',
+    badge_en: 'New',
+    badgeVariant: 'emerald',
+    accentColor: 'emerald',
+  },
   'knowledge-base': {
     id: 'knowledge-base',
     title: 'База знаний',
@@ -376,7 +401,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Аутрич',
     label_en: 'Outreach',
-    toolIds: ['instantly', 'li-outreach', 'li-outreach-v2', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
+    toolIds: ['instantly', 'li-outreach', 'li-outreach-v2', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'sales-hypotheses', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
   },
   {
     label: 'Базы и данные',
@@ -391,7 +416,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Утилиты',
     label_en: 'Utilities',
-    toolIds: ['auto-report', 'polza-reports', 'audio-transcribe', 'tg-transcribe', 'rdp'],
+    toolIds: ['auto-report', 'replies-report', 'polza-reports', 'audio-transcribe', 'tg-transcribe', 'rdp'],
   },
   {
     label: 'AI и знания',

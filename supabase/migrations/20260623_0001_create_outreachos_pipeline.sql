@@ -36,6 +36,11 @@ comment on table public.outreachos_seen_employers is
 create table if not exists public.outreachos_pipeline_config (
   id int primary key default 1 check (id = 1),
   enabled boolean not null default false,
+  -- true: «замер воронки» — парс HH + конструктор баз + подсчёт valid_contacts,
+  -- но БЕЗ заливки в Instantly и БЕЗ записи в seen (неразрушающе, повторяемо).
+  -- campaign_id для measure не нужен. Так меряем суточный приток ICP-компаний и
+  -- выход воронки до go-live, чтобы выставить daily_limit по факту.
+  measure_only boolean not null default false,
   client_user_id uuid not null references public.profiles(id) on delete cascade,
   campaign_id text,                                  -- NULL пока кампания не создана в Instantly
   industries text[] not null default '{}',           -- HH top-level industry id (см. lib/jobs/hhIndustries)

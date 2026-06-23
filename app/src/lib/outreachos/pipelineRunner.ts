@@ -3,13 +3,15 @@
  *
  * Поток (раз в сутки, см. worker/outreachosCron.ts):
  *
- *   1. Загрузить singleton-конфиг. Если выключен / нет campaign_id — выйти.
+ *   1. Загрузить singleton-конфиг. Выключен → выйти. measure_only=false и нет
+ *      campaign_id → выйти. measure_only=true → идём без кампании (замер).
  *   2. HH-парс новых работодателей за window_hours, фильтр ICP = индустрии +
  *      exclude федеральных брендов + maxEmployees (БЕЗ скоринга).
  *   3. Дедуп против outreachos_seen_employers (свой журнал, не Mailganer-стек).
  *   4. Сетка → base_constructor_jobs (чистка/обогащение/валидация БЕЗ
  *      ta_scoring/personalization). Ждём, пока worker-baseconstructor доработает.
- *   5. Готовую сетку → лиды → appendLeadsToClientCampaign в ОДНУ кампанию.
+ *   5. measure_only → журналим parsed/new/valid и ВЫХОДИМ (без заливки, без seen).
+ *      Иначе: готовую сетку → лиды → appendLeadsToClientCampaign в ОДНУ кампанию.
  *   6. Журналируем seen + run.
  *
  * ИЗОЛЯЦИЯ: ни одного импорта из autoPipelineRunner / mailganerScore* /
@@ -74,8 +76,9 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     log('Пайплайн выключен (enabled=false) — пропускаем');
     return empty;
   }
-  if (!config.campaign_id) {
-    log('Не задан campaign_id — кампания Instantly ещё не создана, пропускаем');
+  const measureOnly = config.measure_only === true;
+  if (!measureOnly && !config.campaign_id) {
+    log('Не задан campaign_id (и не measure_only) — кампания не создана, пропускаем');
     return { ...empty, error: 'no_campaign_id' };
   }
   if (config.selected_steps.length === 0) {
@@ -200,6 +203,32 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     const leads = gridToLeadPayloads(finalGrid ?? []);
     log(`Валидных контактов на выходе конструктора: ${leads.length}`);
 
+    // MEASURE-режим: только меряем воронку (parsed→new→valid). НЕ заливаем в
+    // Instantly и НЕ пишем seen — замер неразрушающий и повторяемый, go-live
+    // не «засевается». Ранний выход до append/seen, независимо от числа лидов.
+    if (measureOnly) {
+      await finishRun({
+        status: 'completed',
+        parsed: employers.length,
+        after_icp: employers.length,
+        new_employers: fresh.length,
+        base_job_id: baseJobId,
+        valid_contacts: leads.length,
+        appended: 0,
+        skipped: 0,
+      });
+      log(`MEASURE: parsed=${employers.length} new=${fresh.length} valid=${leads.length} (без заливки, seen не тронут)`);
+      return {
+        runId,
+        status: 'completed',
+        parsed: employers.length,
+        newEmployers: fresh.length,
+        validContacts: leads.length,
+        appended: 0,
+        skipped: 0,
+      };
+    }
+
     if (leads.length === 0) {
       // Скрейп отработал, но почт не нашли — помечаем seen как no_email,
       // чтобы не гонять тех же работодателей завтра.
@@ -225,10 +254,16 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       };
     }
 
-    // 8. Добор в фиксированную кампанию Instantly.
+    // 8. Добор в фиксированную кампанию Instantly. Сюда попадаем только в
+    //    live-режиме (measureOnly=false), а верхний гард гарантирует, что тогда
+    //    campaign_id задан. Захватываем в const, чтобы сузить тип до string.
+    const campaignId = config.campaign_id;
+    if (!campaignId) {
+      throw new Error('campaign_id отсутствует в live-режиме (не должно случаться)');
+    }
     const appendResult = await appendLeadsToClientCampaign({
       userId: config.client_user_id,
-      campaignId: config.campaign_id,
+      campaignId,
       leads,
       contextLabel: 'OutreachOS daily',
     });
