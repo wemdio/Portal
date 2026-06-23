@@ -67,7 +67,7 @@ const LIMITS: Array<{
 }> = [
   {
     key: 'max_contacts',
-    label: 'Контакты Instantly',
+    label: 'Контакты',
     hint: 'Лиды, загруженные в кампании',
   },
   {
