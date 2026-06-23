@@ -957,7 +957,10 @@ const TARIFF_CARDS: TariffCardSpec[] = [
 
 function TariffSelectionWidget() {
   const [tariff, setTariff] = useState<TariffChoice>('pro');
-  const [period, setPeriod] = useState<PeriodKey>('quarter');
+  // Дефолт — 1 месяц (минимальный entry-point). Период «3 мес»/quarter мы
+  // оставили в BillingPeriod (старые подписки могут на нём сидеть), но в UI
+  // саморегистрации не показываем — клиент выбирает 1 / 6 / 12 мес.
+  const [period, setPeriod] = useState<PeriodKey>('month');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1006,7 +1009,7 @@ function TariffSelectionWidget() {
 
       {/* Period selector */}
       <div className="mb-6 inline-flex rounded-lg p-0.5" style={{ background: 'var(--cp-surface-elev)' }}>
-        {(['month', 'quarter', 'half_year', 'year'] as const).map((p) => {
+        {(['month', 'half_year', 'year'] as const).map((p) => {
           const active = period === p;
           const pct = Math.round((1 - PERIOD_DISCOUNT[p]) * 100);
           return (
