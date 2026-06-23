@@ -465,6 +465,50 @@ Own B2B client communications and revenue expansion for enterprise accounts.
     expect(vacancy?.published_at).toBe(new Date('2026-06-04T08:33:05+02:00').toISOString());
   });
 
+  it('does NOT tag a non-US Teamtailor job as US (ISO country must not alias a US state)', () => {
+    const german = normalizeAtsJobToEngVacancy(
+      'teamtailor',
+      {
+        id: 'tt-de',
+        title: 'Key Account Manager',
+        url: 'https://bihr.teamtailor.com/jobs/tt-de',
+        date_published: '2026-06-04T00:00:00.000Z',
+        content_html: '<p>Vertrieb.</p>',
+        _jobposting: {
+          hiringOrganization: { name: 'Bihr' },
+          jobLocation: [{ address: { addressLocality: 'Glinde', addressCountry: 'DE' } }], // DE = Germany, NOT Delaware
+        },
+      },
+      { slug: 'bihr', companyName: 'Bihr' },
+    );
+    expect(german?.country_code).toBe('de');
+    expect(german?.country_code).not.toBe('us');
+  });
+
+  it('decodes numeric and named HTML entities (including double-encoded) in descriptions', () => {
+    const vacancy = normalizeAtsJobToEngVacancy(
+      'greenhouse',
+      {
+        id: 991,
+        title: 'Account Executive',
+        company_name: 'Acme',
+        location: { name: 'Austin, TX' },
+        absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/991',
+        updated_at: '2026-06-10T00:00:00.000Z',
+        content: '<p>Own&#xa0;B2B sales&nbsp;&mdash; grow revenue &amp;nbsp;close deals R&amp;D</p>',
+      },
+      { slug: 'acme', companyName: 'Acme' },
+    );
+    const d = vacancy?.vacancy_description ?? '';
+    expect(d).not.toMatch(/&#x?[0-9a-f]+;/i); // no numeric entities left
+    expect(d).not.toContain('&nbsp;');
+    expect(d).not.toContain('&mdash;');
+    expect(d).not.toContain('&amp;');
+    expect(d).toContain('Own B2B sales');
+    expect(d).toContain('—'); // &mdash; decoded to an em dash
+    expect(d).toContain('R&D'); // genuine ampersand preserved
+  });
+
   it('normalizes Workday vacancies from CXS job postings', () => {
     const vacancy = normalizeAtsJobToEngVacancy(
       'workday',
