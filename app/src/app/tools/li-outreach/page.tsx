@@ -1636,11 +1636,11 @@ export default function LiOutreachPage() {
               <div className="text-xs text-gray-600 space-y-2">
                 <p>
                   Формат CSV: <code className="bg-gray-100 px-1 rounded">LinkedIn ID, Invite</code>
-                  {' '}— первая колонка <b>имя и фамилия</b> лида, вторая — <b>готовый текст инвайта</b> для него.
+                  {' '}— первая колонка <b>ссылка на профиль LinkedIn</b>, вторая — <b>готовый текст инвайта</b>.
                 </p>
                 <pre className="bg-white border border-emerald-200 rounded-lg px-3 py-2 text-[11px] leading-relaxed font-mono text-gray-700 overflow-x-auto">{`LinkedIn ID,Invite
-Ian Parris,"Hi Ian Parris! Видел Installation Technology — крутой кейс. Буду рад знакомству!"
-Norris Koppel,"Norris, здравствуйте! Слежу за Monese, впечатлён фокусом на мультивалютности."`}</pre>
+http://www.linkedin.com/in/ian-parris-95423229,"Hi Ian! IT services at Installation Technology are vital. Happy to connect!"
+http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Слежу за Monese, впечатлён фокусом на мультивалютности."`}</pre>
                 <p>
                   На каждый импорт создаётся <b>новый список лидов</b> с пометкой «персонализированные инвайты».
                   В редакторе кампании для такого списка появится тумблер «Использовать персонализированный инвайт» на шаге&nbsp;1.
@@ -1760,7 +1760,7 @@ Norris Koppel,"Norris, здравствуйте! Слежу за Monese, впе�
                           className="h-4 w-4 rounded border-gray-300 text-blue-600"
                         />
                       </th>
-                      <th className="text-left px-3 py-2 text-xs text-gray-500">Имя</th>
+                      <th className="text-left px-3 py-2 text-xs text-gray-500">Ссылка на пользователя</th>
                       <th className="text-left px-3 py-2 text-xs text-gray-500">Должность</th>
                       <th className="text-left px-3 py-2 text-xs text-gray-500">Компания</th>
                       <th className="text-left px-3 py-2 text-xs text-gray-500">Статус</th>
