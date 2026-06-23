@@ -51,7 +51,7 @@ blocks:
           commands:
             - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
             - docker buildx create --use
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --build-arg NEXT_PUBLIC_RDP_WS_URL=${NEXT_PUBLIC_RDP_WS_URL} --platform linux/amd64 -f Dockerfile .'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --build-arg NEXT_PUBLIC_RDP_WS_URL=${NEXT_PUBLIC_RDP_WS_URL} --build-arg NEXT_PUBLIC_SIGNUP_HOSTS=${NEXT_PUBLIC_SIGNUP_HOSTS} --platform linux/amd64 -f Dockerfile .'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-yandexmaps:prod --platform linux/amd64 -f services/yandexmaps/Dockerfile services/yandexmaps'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-rdp-ws:prod --platform linux/amd64 -f services/rdp-ws/Dockerfile services/rdp-ws'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --platform linux/amd64 -f Dockerfile.worker .'

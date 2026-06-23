@@ -357,9 +357,9 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
   },
   'sales-chat-analyzer': {
     id: 'sales-chat-analyzer',
-    title: 'Анализатор сейлз-переписок',
+    title: 'Анализатор тг-переписок',
     title_en: 'Sales chat analyzer',
-    description: 'Подключение Telegram-аккаунтов сейлз-менеджеров и запись всех их диалогов в базу.',
+    description: 'Подключение Telegram-аккаунтов и запись всех диалогов в базу.',
     description_en: 'Connect sales managers’ Telegram accounts and log all their dialogs.',
     href: '/tools/sales-chat-analyzer',
     accentColor: 'emerald',
