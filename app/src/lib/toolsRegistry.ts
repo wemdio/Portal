@@ -33,6 +33,7 @@ export const ALL_TOOL_IDS = [
   'email-sequence',
   'email-sequence-v2',
   'auto-report',
+  'replies-report',
   'polza-reports',
   'audio-transcribe',
   'tg-transcribe',
@@ -189,6 +190,17 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description_en:
       'Instantly campaign reports: campaign loading, project selection, stats, and email-level details.',
     href: '/tools/auto-report',
+    accentColor: 'blue',
+  },
+  'replies-report': {
+    id: 'replies-report',
+    title: 'Отчёт по ответам',
+    title_en: 'Replies report',
+    description:
+      'HTML-отчёт по ответам выбранных кампаний Instantly: метрики + читаемые ответы, сгруппированные по кампаниям, с поиском и фильтром.',
+    description_en:
+      'HTML report of replies for selected Instantly campaigns: metrics + readable replies grouped by campaign, with search and filter.',
+    href: '/tools/replies-report',
     accentColor: 'blue',
   },
   'polza-reports': {
@@ -404,7 +416,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Утилиты',
     label_en: 'Utilities',
-    toolIds: ['auto-report', 'polza-reports', 'audio-transcribe', 'tg-transcribe', 'rdp'],
+    toolIds: ['auto-report', 'replies-report', 'polza-reports', 'audio-transcribe', 'tg-transcribe', 'rdp'],
   },
   {
     label: 'AI и знания',

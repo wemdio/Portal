@@ -85,6 +85,7 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'email-sequence': Mail,
   'email-sequence-v2': MailPlus,
   'auto-report': FileText,
+  'replies-report': MessageSquareMore,
   'polza-reports': FileSpreadsheet,
   'audio-transcribe': Waves,
   'tg-transcribe': Video,
