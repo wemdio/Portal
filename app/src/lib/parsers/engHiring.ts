@@ -6,7 +6,7 @@ import {
 } from '@/lib/jobs/atsCompanyParser';
 import { ATS_COUNTRIES, buildCountryRegex, buildRolesRegex } from '@/lib/parsers/atsFilters';
 
-export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee' | 'breezy' | 'workday' | 'smartrecruiters' | 'teamtailor' | 'adzuna';
+export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee' | 'breezy' | 'workday' | 'smartrecruiters' | 'teamtailor';
 
 export const ENG_HIRING_SOURCES: EngHiringSource[] = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday', 'smartrecruiters', 'teamtailor'];
 export const DEFAULT_ENG_HIRING_COMPANIES_LIMIT = 1000;
@@ -523,94 +523,6 @@ export function normalizeAtsJobToEngVacancy(
     published_at: normalizeIsoDate(normalized.posted_at),
     raw,
   };
-}
-
-// ── Adzuna aggregator source ───────────────────────────────────────────────
-// Unlike the first-party ATS sources (enumerate company boards), Adzuna is a
-// market-wide job aggregator queried like HH: one search per country/role. It
-// trades first-party fidelity (company is a display name; domain needs the
-// enrichment step) for breadth/volume.
-
-const ADZUNA_CURRENCY_BY_COUNTRY: Record<string, string> = {
-  us: 'USD', gb: 'GBP', ca: 'CAD', au: 'AUD', sg: 'SGD',
-  de: 'EUR', fr: 'EUR', nl: 'EUR', ie: 'EUR', es: 'EUR',
-};
-
-export interface AdzunaSearchUrlOptions {
-  country: string;
-  page: number;
-  appId: string;
-  appKey: string;
-  what?: string;
-  maxDaysOld?: number;
-  resultsPerPage?: number;
-}
-
-/** Build a single Adzuna `/jobs/{country}/search/{page}` request URL. */
-export function buildAdzunaSearchUrl(opts: AdzunaSearchUrlOptions): string {
-  const country = (opts.country || 'us').toLowerCase();
-  const page = Math.max(1, Math.trunc(opts.page || 1));
-  const params = new URLSearchParams({
-    app_id: opts.appId,
-    app_key: opts.appKey,
-    results_per_page: String(Math.min(50, Math.max(1, Math.trunc(opts.resultsPerPage ?? 50)))),
-    'content-type': 'application/json',
-  });
-  const what = (opts.what ?? '').trim();
-  if (what) params.set('what', what);
-  const days = Math.trunc(Number(opts.maxDaysOld ?? 0));
-  if (Number.isFinite(days) && days > 0) params.set('max_days_old', String(days));
-  return `https://api.adzuna.com/v1/api/jobs/${country}/search/${page}?${params.toString()}`;
-}
-
-/** Normalize one Adzuna search result into the shared EngHiringVacancy shape. */
-export function normalizeAdzunaJobToEngVacancy(
-  raw: unknown,
-  opts: { country?: string } = {},
-): EngHiringVacancy | null {
-  const record = asRecord(raw);
-  if (!record) return null;
-
-  const company = asRecord(record.company);
-  const location = asRecord(record.location);
-  const title = stringValue(record.title);
-  const companyName = stringValue(company?.display_name);
-  const url = stringValue(record.redirect_url);
-  const sourceJobId = stringValue(record.id) || extractUrlJobId(url);
-  if (!title || !companyName || !url || !sourceJobId) return null;
-
-  const area = Array.isArray(location?.area) ? location!.area.map((a) => stringValue(a)).filter(Boolean) : [];
-  const locationText = stringValue(location?.display_name) || area.slice().reverse().join(', ');
-  // We query a specific country endpoint, so that country is authoritative.
-  const countryCode = (opts.country ? opts.country.toLowerCase() : '') || inferCountryCode(locationText, area[0] ?? '');
-  const description = extractDescription(record.description);
-  const salaryFrom = salaryNumberValue(record.salary_min);
-  const salaryTo = salaryNumberValue(record.salary_max);
-
-  return stripUnstorableJsonChars({
-    source: 'adzuna',
-    source_company_slug: '',
-    source_job_id: sourceJobId,
-    company_name: companyName,
-    company_site_url: null,
-    company_description: null,
-    vacancy_title: title,
-    vacancy_description: description,
-    vacancy_url: url,
-    careers_url: null,
-    location: locationText || null,
-    city: parseCity(locationText || null),
-    country: countryCode ? COUNTRY_NAME_BY_CODE[countryCode] ?? null : null,
-    country_code: countryCode || null,
-    salary_from: salaryFrom,
-    salary_to: salaryTo,
-    salary_currency:
-      salaryFrom != null || salaryTo != null
-        ? (countryCode ? ADZUNA_CURRENCY_BY_COUNTRY[countryCode] ?? 'USD' : 'USD')
-        : null,
-    published_at: normalizeIsoDate(stringValue(record.created)),
-    raw,
-  });
 }
 
 export function mergeEngHiringVacancyDetail(vacancy: EngHiringVacancy, detailRaw: unknown): EngHiringVacancy {
