@@ -430,8 +430,6 @@ export interface CampaignDbRow {
   reply_count_unique: number | null;
   /** Уникальные АВТО-ответы. «Ответы как в списке Instantly» = unique + automatic_unique. */
   reply_count_automatic_unique: number | null;
-  /** Точный счётчик ответов из /emails (уник. ответившие). Точнее reply_count. */
-  actual_reply_count: number | null;
   new_leads_contacted_count: number | null;
   /** Контакты (знаменатель открываемости «как в Instantly», не письма). */
   contacted_count: number | null;
@@ -452,7 +450,7 @@ export async function readCampaignAnalyticsFromDb(allowedIds: string[]): Promise
   const { data, error } = await supabaseAdmin
     .from('instantly_campaign_catalog')
     .select(
-      'id,name,status,emails_sent_count,open_count,reply_count,reply_count_unique,reply_count_automatic_unique,actual_reply_count,new_leads_contacted_count,contacted_count,bounced_count,unsubscribed_count,leads_count,analytics_synced_at',
+      'id,name,status,emails_sent_count,open_count,reply_count,reply_count_unique,reply_count_automatic_unique,new_leads_contacted_count,contacted_count,bounced_count,unsubscribed_count,leads_count,analytics_synced_at',
     )
     .in('id', allowedIds);
 
