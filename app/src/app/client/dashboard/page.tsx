@@ -49,6 +49,7 @@ interface CampaignRow {
   emails_sent_count: number | null;
   open_count: number | null;
   reply_count: number | null;
+  reply_count_unique: number | null;
   new_leads_contacted_count: number | null;
   analytics_synced_at: string | null;
 }
@@ -239,7 +240,7 @@ export default function ClientDashboardPage() {
     [campaigns],
   );
   const totalReplies = useMemo(
-    () => (campaigns ?? []).reduce((sum, c) => sum + Number(c.reply_count ?? 0), 0),
+    () => (campaigns ?? []).reduce((sum, c) => sum + Number(c.reply_count_unique ?? c.reply_count ?? 0), 0),
     [campaigns],
   );
 
@@ -531,7 +532,7 @@ export default function ClientDashboardPage() {
             <div className="neu-card overflow-hidden">
               {recentCampaigns.map((c, idx) => {
                 const sent = Number(c.emails_sent_count ?? 0);
-                const replied = Number(c.reply_count ?? 0);
+                const replied = Number(c.reply_count_unique ?? c.reply_count ?? 0);
                 const contacted = Number(c.new_leads_contacted_count ?? 0);
                 const replyRate = contacted > 0 ? (replied / contacted) * 100 : 0;
                 const info = statusInfo(c.status);

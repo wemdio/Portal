@@ -329,6 +329,7 @@ export interface CampaignAnalytics {
   open_count?: number;
   open_count_unique?: number;
   reply_count?: number;
+  reply_count_unique?: number;
   bounced_count?: number;
   unsubscribed_count?: number;
   leads_count?: number;

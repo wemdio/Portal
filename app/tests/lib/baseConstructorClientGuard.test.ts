@@ -67,6 +67,30 @@ describe('applyClientGuard', () => {
       });
       expect(result.ok).toBe(true);
     });
+
+    it('manual mode: keeps exactly the selected steps without forcing always-on', () => {
+      const result = applyClientGuard({
+        role: 'client',
+        selectedSteps: ['clean_names'],
+        rowCount: 100,
+        freeStepSelection: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.selectedSteps).toEqual(['clean_names']);
+      expect(result.selectedSteps).not.toContain('find_emails');
+      expect(result.selectedSteps).not.toContain('enrich_descriptions');
+    });
+
+    it('manual mode: still enforces the row limit', () => {
+      const result = applyClientGuard({
+        role: 'client',
+        selectedSteps: ['clean_names'],
+        rowCount: CLIENT_ROW_LIMIT + 1,
+        freeStepSelection: true,
+      });
+      expect(result.ok).toBe(false);
+    });
   });
 
   describe('for non-client roles', () => {

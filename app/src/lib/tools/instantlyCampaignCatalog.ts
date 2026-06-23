@@ -255,8 +255,10 @@ export async function syncInstantlyCampaignAnalytics(): Promise<{ rows: number }
           emails_sent_count: typeof a.emails_sent_count === 'number' ? a.emails_sent_count : null,
           open_count: typeof a.open_count === 'number' ? a.open_count : null,
           reply_count: typeof a.reply_count === 'number' ? a.reply_count : null,
+          reply_count_unique: typeof a.reply_count_unique === 'number' ? a.reply_count_unique : null,
           new_leads_contacted_count:
             typeof a.new_leads_contacted_count === 'number' ? a.new_leads_contacted_count : null,
+          contacted_count: typeof a.contacted_count === 'number' ? a.contacted_count : null,
           bounced_count: typeof a.bounced_count === 'number' ? a.bounced_count : null,
           unsubscribed_count: typeof a.unsubscribed_count === 'number' ? a.unsubscribed_count : null,
           leads_count: typeof a.leads_count === 'number' ? a.leads_count : null,
@@ -422,9 +424,13 @@ export interface CampaignDbRow {
   emails_sent_count: number | null;
   open_count: number | null;
   reply_count: number | null;
+  /** Уникальные ответившие из /campaigns/analytics — то, что показывает Instantly. */
+  reply_count_unique: number | null;
   /** Точный счётчик ответов из /emails (уник. ответившие). Точнее reply_count. */
   actual_reply_count: number | null;
   new_leads_contacted_count: number | null;
+  /** Контакты (знаменатель открываемости «как в Instantly», не письма). */
+  contacted_count: number | null;
   bounced_count: number | null;
   unsubscribed_count: number | null;
   leads_count: number | null;
@@ -442,7 +448,7 @@ export async function readCampaignAnalyticsFromDb(allowedIds: string[]): Promise
   const { data, error } = await supabaseAdmin
     .from('instantly_campaign_catalog')
     .select(
-      'id,name,status,emails_sent_count,open_count,reply_count,actual_reply_count,new_leads_contacted_count,bounced_count,unsubscribed_count,leads_count,analytics_synced_at',
+      'id,name,status,emails_sent_count,open_count,reply_count,reply_count_unique,actual_reply_count,new_leads_contacted_count,contacted_count,bounced_count,unsubscribed_count,leads_count,analytics_synced_at',
     )
     .in('id', allowedIds);
 
