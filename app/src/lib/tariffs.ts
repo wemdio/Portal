@@ -28,11 +28,11 @@ export const TARIFF_DEFAULTS: Record<'standard' | 'pro', TariffLimits> = {
   },
 };
 
-export const SETUP_DAYS = 3;
+export const SETUP_DAYS = 15;
 
 export type BillingMode = 'invoice' | 'autopayment';
 
-export type BillingPeriod = 'month' | 'half_year' | 'year';
+export type BillingPeriod = 'month' | 'quarter' | 'half_year' | 'year';
 
 /**
  * Цены тарифов за месяц для выставления счёта (отличаются от цен автопродления
@@ -46,6 +46,7 @@ export const TARIFF_MONTHLY_PRICE: Record<'standard' | 'pro', number> = {
 /** Множители месяцев для периодов оплаты (без скидок). */
 export const BILLING_PERIOD_MONTHS: Record<BillingPeriod, number> = {
   month: 1,
+  quarter: 3,
   half_year: 6,
   year: 12,
 };

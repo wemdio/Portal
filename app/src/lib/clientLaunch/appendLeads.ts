@@ -101,11 +101,15 @@ export async function appendLeadsToClientCampaign(
   // 2. Tariff / status — те же проверки, что в полном runClientLaunch.
   const tariffRow = await getClientTariffRow(userId);
   const clientStatus = getClientStatus(tariffRow);
+  if (clientStatus === 'setup') {
+    throw new ClientLaunchError(
+      'Идёт прогрев почт. Добавление лидов в кампании станет доступным после завершения прогрева (15 дней с момента оплаты).',
+      403,
+    );
+  }
   if (clientStatus !== 'active') {
     throw new ClientLaunchError(
-      clientStatus === 'setup'
-        ? 'Личный кабинет настраивается — пропускаем прогон'
-        : 'Подписка не активна — пропускаем прогон',
+      'Подписка не активна — пропускаем прогон',
       403,
     );
   }

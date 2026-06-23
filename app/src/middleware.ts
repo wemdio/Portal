@@ -117,7 +117,9 @@ export async function middleware(request: NextRequest) {
     const isPublicPath =
       pathname === '/maintenance' ||
       pathname === '/login' ||
+      pathname === '/signup' ||
       pathname === '/offer' ||
+      pathname.startsWith('/api/signup') ||
       pathname.startsWith('/api/telegram/verify') ||
       pathname.startsWith('/api/telegram/link') ||
       pathname.startsWith('/review/base/')
@@ -196,7 +198,7 @@ export async function middleware(request: NextRequest) {
     // Аккаунт без роли НЕ уводим — пусть остаётся на /login (внутрь портала
     // его всё равно не пустит default-deny ниже). Иначе был бы
     // редирект-цикл /login → / → /login.
-    if (user && userRole && pathname === '/login') {
+    if (user && userRole && (pathname === '/login' || pathname === '/signup')) {
       return NextResponse.redirect(
         new URL(userRole === 'client' ? '/client' : '/', request.url)
       )
