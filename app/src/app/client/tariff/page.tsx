@@ -1128,10 +1128,12 @@ function TariffSelectionWidget() {
         ) : (
           <>
             <p className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
-              Для масштабных задач — пишите менеджеру.
+              Для масштабных задач — пишите менеджеру в Telegram.
             </p>
-            <Link
-              href={'/client/support' as Route}
+            <a
+              href="https://t.me/ROP_PolzaAgency"
+              target="_blank"
+              rel="noopener noreferrer"
               className="inline-flex items-center justify-center rounded-lg px-6 py-2.5 text-sm font-semibold transition"
               style={{
                 background: 'var(--cp-paper)',
@@ -1139,7 +1141,7 @@ function TariffSelectionWidget() {
               }}
             >
               Обсудить задачу
-            </Link>
+            </a>
           </>
         )}
       </div>
