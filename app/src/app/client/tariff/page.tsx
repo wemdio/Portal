@@ -380,58 +380,76 @@ export default function ClientTariffPage() {
               <div>
                 <p className="ds-eyebrow mb-2">02<span aria-hidden> → </span>текущий тариф</p>
                 <div className="flex items-center gap-3 flex-wrap">
-                  <h2
-                    className="text-2xl font-bold m-0"
-                    style={{ color: 'var(--cp-paper)' }}
-                  >
-                    {TARIFF_LABELS[data.tariff_type]}
-                  </h2>
-                  {/* Quieter: dot + colored label, no tag wrapper / uppercase pill. */}
-                  <span
-                    className="inline-flex items-center gap-1.5 text-sm"
-                    style={{ color: statusDot(data.status) }}
-                  >
-                    <span
-                      aria-hidden
-                      className="inline-block h-1.5 w-1.5 rounded-full"
-                      style={{ background: statusDot(data.status) }}
-                    />
-                    {STATUS_LABELS[data.status]}
-                  </span>
+                  {/* Когда клиент только зарегистрировался и status='inactive' (нет
+                      paid_at) — показывать дефолтный tariff_type='standard' было
+                      бы враньём: подписки нет. Пишем «Нет тарифа» в красном. */}
+                  {data.status === 'inactive' && !data.paid_at ? (
+                    <h2
+                      className="text-2xl font-bold m-0"
+                      style={{ color: 'var(--cp-red)' }}
+                    >
+                      Нет тарифа
+                    </h2>
+                  ) : (
+                    <>
+                      <h2
+                        className="text-2xl font-bold m-0"
+                        style={{ color: 'var(--cp-paper)' }}
+                      >
+                        {TARIFF_LABELS[data.tariff_type]}
+                      </h2>
+                      {/* Quieter: dot + colored label, no tag wrapper / uppercase pill. */}
+                      <span
+                        className="inline-flex items-center gap-1.5 text-sm"
+                        style={{ color: statusDot(data.status) }}
+                      >
+                        <span
+                          aria-hidden
+                          className="inline-block h-1.5 w-1.5 rounded-full"
+                          style={{ background: statusDot(data.status) }}
+                        />
+                        {STATUS_LABELS[data.status]}
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
               {/* Distilled: was two rounded-md "tile" boxes — micro-card pattern
                   that fought the ledger aesthetic below. Now: inline editorial
                   run, eyebrow + mono value, with the "осталось N дней" suffix
-                  inline so the user doesn't have to compute the period length. */}
-              <div className="flex flex-col gap-1.5 text-xs sm:text-sm sm:items-end">
-                <div className="flex items-baseline gap-2">
-                  <span className="ds-eyebrow">период с</span>
-                  <span
-                    className="ds-mono font-semibold"
-                    style={{ color: 'var(--cp-paper)' }}
-                  >
-                    {formatDate(data.period_start)}
-                  </span>
-                </div>
-                <div className="flex items-baseline gap-2 flex-wrap">
-                  <span className="ds-eyebrow">оплачен до</span>
-                  <span
-                    className="ds-mono font-semibold"
-                    style={{ color: 'var(--cp-paper)' }}
-                  >
-                    {formatDate(data.paid_until)}
-                  </span>
-                  {daysLeftInPeriod !== null && (
+                  inline so the user doesn't have to compute the period length.
+                  При status='inactive' без paid_at дат ещё нет — скрываем блок,
+                  чтобы не мозолить глаз заглушками «период с DD.MM.YYYY / —». */}
+              {!(data.status === 'inactive' && !data.paid_at) && (
+                <div className="flex flex-col gap-1.5 text-xs sm:text-sm sm:items-end">
+                  <div className="flex items-baseline gap-2">
+                    <span className="ds-eyebrow">период с</span>
                     <span
-                      className="ds-mono text-xs"
-                      style={{ color: 'var(--cp-paper-mute)' }}
+                      className="ds-mono font-semibold"
+                      style={{ color: 'var(--cp-paper)' }}
                     >
-                      ({daysLeftInPeriod} {plural(daysLeftInPeriod, 'день', 'дня', 'дней')})
+                      {formatDate(data.period_start)}
                     </span>
-                  )}
+                  </div>
+                  <div className="flex items-baseline gap-2 flex-wrap">
+                    <span className="ds-eyebrow">оплачен до</span>
+                    <span
+                      className="ds-mono font-semibold"
+                      style={{ color: 'var(--cp-paper)' }}
+                    >
+                      {formatDate(data.paid_until)}
+                    </span>
+                    {daysLeftInPeriod !== null && (
+                      <span
+                        className="ds-mono text-xs"
+                        style={{ color: 'var(--cp-paper-mute)' }}
+                      >
+                        ({daysLeftInPeriod} {plural(daysLeftInPeriod, 'день', 'дня', 'дней')})
+                      </span>
+                    )}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
             {/* The faux "N из M единиц" total has been deleted — see critique
                 2026-05-24: cannot sum контакты + запросы + AI-цепочки as one
