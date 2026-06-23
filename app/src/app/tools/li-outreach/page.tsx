@@ -1633,13 +1633,19 @@ export default function LiOutreachPage() {
                 <h3 className="text-sm font-semibold text-gray-900">Импорт CSV с персонализированными инвайтами</h3>
                 <button onClick={() => setShowImportInvitesModal(false)} className="text-xs text-gray-500 hover:text-gray-700">Закрыть</button>
               </div>
-              <p className="text-xs text-gray-600">
-                Формат CSV: <code className="bg-gray-100 px-1 rounded">LinkedIn ID, Invite</code>
-                {' '}— первая колонка имя/идентификатор лида, вторая — готовый текст инвайта для него.
-                <br />
-                На каждый импорт создаётся <b>новый список лидов</b> с пометкой «персонализированные инвайты».
-                В редакторе кампании для такого списка появится тумблер «Использовать персонализированный инвайт» на шаге&nbsp;1.
-              </p>
+              <div className="text-xs text-gray-600 space-y-2">
+                <p>
+                  Формат CSV: <code className="bg-gray-100 px-1 rounded">LinkedIn ID, Invite</code>
+                  {' '}— первая колонка <b>имя и фамилия</b> лида, вторая — <b>готовый текст инвайта</b> для него.
+                </p>
+                <pre className="bg-white border border-emerald-200 rounded-lg px-3 py-2 text-[11px] leading-relaxed font-mono text-gray-700 overflow-x-auto">{`LinkedIn ID,Invite
+Ian Parris,"Hi Ian Parris! Видел Installation Technology — крутой кейс. Буду рад знакомству!"
+Norris Koppel,"Norris, здравствуйте! Слежу за Monese, впечатлён фокусом на мультивалютности."`}</pre>
+                <p>
+                  На каждый импорт создаётся <b>новый список лидов</b> с пометкой «персонализированные инвайты».
+                  В редакторе кампании для такого списка появится тумблер «Использовать персонализированный инвайт» на шаге&nbsp;1.
+                </p>
+              </div>
               <div className="flex gap-3 items-end flex-wrap">
                 <div>
                   <label className="text-xs text-gray-600 block mb-1">Название списка</label>
