@@ -1,9 +1,16 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
+
+function isSignupHost(host: string): boolean {
+  const hosts = (process.env.NEXT_PUBLIC_SIGNUP_HOSTS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (hosts.length === 0) return false;
+  return hosts.includes(host);
+}
 
 const TELEGRAM_STORAGE_KEYS = {
   token: 'tg_link_token',
@@ -70,6 +77,12 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [signupAllowed, setSignupAllowed] = useState(false);
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setSignupAllowed(isSignupHost(window.location.hostname));
+    }
+  }, []);
 
   // Саморегистрация закрыта намеренно: портал B2B, все аккаунты заводит
   // администратор через /admin/users и сразу назначает роль. Здесь —
@@ -184,6 +197,16 @@ export default function LoginPage() {
         <p className="text-center text-sm text-gray-500">
           Доступ к порталу выдаёт администратор
         </p>
+
+        {signupAllowed && (
+          <p className="mt-2 text-center text-xs text-gray-600">
+            Нет аккаунта?{' '}
+            {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+            <Link href={'/signup' as any} className="font-medium text-indigo-600 hover:underline">
+              Зарегистрироваться
+            </Link>
+          </p>
+        )}
 
         {/* Public link to the platform offer agreement. Always visible
             (auth-walled users see it before they log in), styled as a quiet
