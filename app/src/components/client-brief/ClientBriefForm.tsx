@@ -11,6 +11,7 @@ import {
   SOCIAL_PROOF_LABELS,
   ALLOWED_PRICE_TIERS,
   normalizeBriefFields,
+  compileBriefText,
 } from '@/lib/clientBrief';
 import type {
   ClientBriefFields,
@@ -513,19 +514,30 @@ export function ClientBriefForm({
         setFields(normalizeBriefFields(data.brief.fields));
         setSavedAt(data.brief.updated_at);
       }
-      // A save makes any existing recommendations stale (server flags them too).
-      if (hypothesesText) setHypothesesStale(true);
       void logAudit(`${auditPrefix}.save.success`, 'Brief saved');
 
-      // Auto-trigger hypotheses generation on first save (no existing result, no recent error).
-      if (
-        hypothesesEndpoint &&
-        !hypothesesText &&
-        !hypothesesError &&
-        !autoTriggeredRef.current
-      ) {
-        autoTriggeredRef.current = true;
-        void generateHypotheses();
+      // Keep the recommendations panel in sync with what the server just did:
+      // an EMPTY save wipes them (mirror handleClearAll) — otherwise a
+      // hand-cleared «Сохранить» would leave deleted recs on screen under a
+      // misleading «устарели» banner until reload; a NON-empty edit marks
+      // existing recs stale and, on the first one, kicks off generation.
+      if (!compileBriefText(fields).trim()) {
+        setHypothesesText(null);
+        setHypothesesAt(null);
+        setHypothesesError(null);
+        setHypothesesStale(false);
+        autoTriggeredRef.current = false;
+      } else {
+        if (hypothesesText) setHypothesesStale(true);
+        if (
+          hypothesesEndpoint &&
+          !hypothesesText &&
+          !hypothesesError &&
+          !autoTriggeredRef.current
+        ) {
+          autoTriggeredRef.current = true;
+          void generateHypotheses();
+        }
       }
     } catch (err) {
       void logError(`${auditPrefix}.save.failed`, err);
