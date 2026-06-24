@@ -769,7 +769,7 @@ async function enrichSelectedRows(
     await ensureNotCancelled();
     const group = entries[i];
     const first = group[0];
-    const domain = await resolveCompanyDomainByName(first.company_name);
+    const domain = await resolveCompanyDomainByName(first.company_name, { country: first.country_code });
     const siteUrl = domainToSiteUrl(domain);
     if (siteUrl) {
       for (const row of group) row.company_site_url = siteUrl;
