@@ -105,7 +105,7 @@ const MIN_ANNUAL_SALARY = 20_000;
 const MAX_ANNUAL_SALARY = 500_000;
 
 const B2B_TITLE_STRONG_RE =
-  /\b(account executive|\bae\b|account manager|account director|business development(?: representative| manager| director| lead)?|sales development(?: representative| manager| lead)?|revenue development(?: representative| manager| lead)?|sales representative|sales consultant|sales manager|sales director|sales executive|sales lead|enterprise sales|commercial account|commercial account executive|commercial account director|commercial relationship manager|client partner|channel sales|partnerships? manager|partnerships? director|partnership sales|partner sales|partner manager|(?:manager|director|vp|head|lead),?\s+(?:of\s+)?partnerships?|\bsdr\b|\bbdr\b|\brdr\b|go[-\s]?to[-\s]?market|\bgtm\b)\b/i;
+  /\b(account executive|\bae\b|account manager|account director|business development(?: representative| manager| director| lead)?|sales development(?: representative| manager| lead)?|revenue development(?: representative| manager| lead)?|sales representative|sales consultant|sales manager|sales director|sales executive|sales lead|enterprise sales|commercial account|commercial account executive|commercial account director|commercial relationship manager|client partner|channel sales|partnerships? manager|partnerships? director|partnership sales|partner sales|partner manager|(?:manager|director|vp|head|lead),?\s+(?:of\s+)?partnerships?|territory manager|inside sales|field sales|regional sales|national sales|sales operations|sales engineer|sales specialist|chief revenue officer|\bcro\b|(?:vp|head|director|chief),?\s+(?:of\s+)?(?:sales|revenue)|\bsdr\b|\bbdr\b|\brdr\b|go[-\s]?to[-\s]?market|\bgtm\b)\b/i;
 
 const B2B_TITLE_EXCLUDE_RE =
   /\b(psychiatrist|nurse|physician|clinical|therapist|engineer|engineering|developer|designer|product manager|program manager|project manager|field marketing|marketing event|content|community|people|hr|recruit|talent acquisition|finance|accounting|legal|operations|data scientist|security|customer support|technical support|teacher|warehouse|manufacturing|tax|audit|compliance|analyst|scrum master|assistant|administrator)\b/i;
@@ -486,7 +486,10 @@ function isB2BRoleSearch(text?: string | null): boolean {
 export function isHighIntentB2BSalesTitle(title: string): boolean {
   const cleanTitle = cleanPlainText(title);
   if (!B2B_TITLE_STRONG_RE.test(cleanTitle)) return false;
-  if (B2B_TITLE_EXCLUDE_RE.test(cleanTitle)) return false;
+  // Sales-aware exclude: "engineer"/"operations"/"analyst" etc. should only veto a
+  // NON-sales role — a title that explicitly says "sales" (Sales Engineer, Sales
+  // Operations Manager) is a genuine commercial role and must not be dropped.
+  if (B2B_TITLE_EXCLUDE_RE.test(cleanTitle) && !/\bsales\b/i.test(cleanTitle)) return false;
   return true;
 }
 

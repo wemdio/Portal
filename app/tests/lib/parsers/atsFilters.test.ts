@@ -110,6 +110,18 @@ describe('atsFilters — countries', () => {
     expect(us.test('Phoenix, AZ')).toBe(true);
   });
 
+  it('recovers space/dash-separated "City ST" US locations (Lever stores location verbatim)', () => {
+    const us = buildCountryRegex(['us'])!;
+    expect(us.test('Boulder CO')).toBe(true);
+    expect(us.test('Plano TX')).toBe(true);
+    expect(us.test('Bloomington IN')).toBe(true);
+    expect(us.test('Reston VA')).toBe(true);
+    expect(us.test('Austin, TX')).toBe(true); // comma form still works
+    // bounded: non-US region codes are not US state codes
+    expect(us.test('Toronto ON')).toBe(false);
+    expect(us.test('Cork IE')).toBe(false);
+  });
+
   it('remote matches remote postings', () => {
     const re = buildCountryRegex(['remote']);
     expect(re!.test('Remote — North America')).toBe(true);

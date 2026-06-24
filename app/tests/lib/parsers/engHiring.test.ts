@@ -6,6 +6,7 @@ import {
   dedupeEngHiringRowsBySourceJobId,
   mergeEngHiringVacancyDetail,
   matchesEngHiringVacancy,
+  isHighIntentB2BSalesTitle,
   normalizeAtsJobToEngVacancy,
   resolveEngHiringCompaniesLimit,
   stripUnstorableJsonChars,
@@ -537,6 +538,26 @@ Own B2B client communications and revenue expansion for enterprise accounts.
       country_code: 'gb',
     });
     expect(vacancy?.published_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+});
+
+describe('isHighIntentB2BSalesTitle — broadened sales titles', () => {
+  it('accepts genuine sales titles missed by the original strict regex', () => {
+    const yes = [
+      'Sales Engineer', 'Senior Sales Engineer', 'Sales Operations Manager',
+      'Territory Manager', 'Territory Sales Manager', 'Inside Sales', 'Inside Sales Representative',
+      'Field Sales Manager', 'Regional Sales Manager', 'National Sales Manager',
+      'VP of Sales', 'Head of Sales', 'Director of Sales', 'Chief Revenue Officer', 'Sales Specialist',
+    ];
+    for (const t of yes) expect(isHighIntentB2BSalesTitle(t)).toBe(true);
+  });
+
+  it('still rejects non-sales roles (the sales-aware exclude only bypasses for sales titles)', () => {
+    const no = [
+      'Software Engineer', 'Senior Backend Engineer', 'Operations Manager', 'Product Manager',
+      'Data Analyst', 'Marketing Manager', 'Nurse Practitioner', 'Financial Analyst', 'Recruiter',
+    ];
+    for (const t of no) expect(isHighIntentB2BSalesTitle(t)).toBe(false);
   });
 });
 
