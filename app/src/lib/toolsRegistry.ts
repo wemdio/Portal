@@ -321,9 +321,6 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description: 'Вставьте сайт компании — AI заполнит бриф и выдаст готовые гипотезы по сбору базы.',
     description_en: 'Paste a company website — AI fills the brief and returns ready lead-source hypotheses.',
     href: '/tools/sales-hypotheses',
-    badge: 'Новое',
-    badge_en: 'New',
-    badgeVariant: 'emerald',
     accentColor: 'emerald',
   },
   'knowledge-base': {
