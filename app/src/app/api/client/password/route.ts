@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
-import { sendBrevoEmail } from '@/lib/email/brevoClient';
+import { sendTransactionalEmail } from '@/lib/email/notisendClient';
 import { renderPasswordChangedEmail } from '@/lib/email/templates/passwordChanged';
 import { logAudit, logError } from '@/lib/loggerServer';
 
@@ -99,7 +99,7 @@ export async function POST(req: NextRequest) {
     changedAtMsk,
     ip,
   });
-  void sendBrevoEmail({ to: email, subject, html, text }).catch((err) =>
+  void sendTransactionalEmail({ to: email, subject, html, text }).catch((err) =>
     logError('client.password.email.failed', err, { to: email }, logMeta),
   );
 

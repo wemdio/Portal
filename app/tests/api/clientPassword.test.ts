@@ -18,7 +18,7 @@ const mockRequireClientAuth = jest.fn();
 const mockUpdateUserById = jest.fn();
 const mockGetUserById = jest.fn();
 const mockSignInWithPassword = jest.fn();
-const mockSendBrevoEmail = jest.fn();
+const mockSendTransactionalEmail = jest.fn();
 const mockLogAudit = jest.fn();
 const mockLogError = jest.fn();
 
@@ -49,8 +49,8 @@ jest.mock('@/lib/supabaseRouteClient', () => ({
   }),
 }));
 
-jest.mock('@/lib/email/brevoClient', () => ({
-  sendBrevoEmail: (...a: unknown[]) => mockSendBrevoEmail(...a),
+jest.mock('@/lib/email/notisendClient', () => ({
+  sendTransactionalEmail: (...a: unknown[]) => mockSendTransactionalEmail(...a),
 }));
 
 jest.mock('@/lib/loggerServer', () => ({
@@ -78,7 +78,7 @@ beforeEach(() => {
   });
   mockSignInWithPassword.mockResolvedValue({ data: { session: {} }, error: null });
   mockUpdateUserById.mockResolvedValue({ data: {}, error: null });
-  mockSendBrevoEmail.mockResolvedValue({ messageId: 'msg-1' });
+  mockSendTransactionalEmail.mockResolvedValue({ id: 1, status: 'queued' });
 });
 
 describe('POST /api/client/password', () => {
@@ -142,12 +142,12 @@ describe('POST /api/client/password', () => {
     expect(mockUpdateUserById).toHaveBeenCalledWith('user-1', { password: 'NewPass123!' });
   });
 
-  it('успех: отправляет письмо через Brevo с правильными аргументами', async () => {
+  it('успех: отправляет письмо через NotiSend с правильными аргументами', async () => {
     const { POST } = await import('@/app/api/client/password/route');
     await POST(makeReq({ currentPassword: 'OldPass1!', newPassword: 'NewPass123!' }));
     await new Promise((r) => setImmediate(r));
-    expect(mockSendBrevoEmail).toHaveBeenCalled();
-    const arg = mockSendBrevoEmail.mock.calls[0][0];
+    expect(mockSendTransactionalEmail).toHaveBeenCalled();
+    const arg = mockSendTransactionalEmail.mock.calls[0][0];
     expect(arg.to).toBe('me@example.com');
     expect(arg.html).toContain('NewPass123!');
     expect(arg.text).toContain('NewPass123!');
@@ -165,7 +165,7 @@ describe('POST /api/client/password', () => {
   });
 
   it('успех: возвращает 200 даже если email отправка упала', async () => {
-    mockSendBrevoEmail.mockRejectedValue(new Error('Brevo 500'));
+    mockSendTransactionalEmail.mockRejectedValue(new Error('NotiSend 500'));
     const { POST } = await import('@/app/api/client/password/route');
     const res = await POST(makeReq({ currentPassword: 'OldPass1!', newPassword: 'NewPass123!' }));
     await new Promise((r) => setImmediate(r));
