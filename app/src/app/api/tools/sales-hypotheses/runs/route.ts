@@ -11,6 +11,7 @@ import {
 import { normalizeWebsiteUrl } from '@/lib/clientBrief/autofill/fetchWebsiteHtml';
 import { compileBriefText, EMPTY_BRIEF_FIELDS } from '@/lib/clientBrief';
 import { mergePatchEmptyOnly } from '@/lib/clientBrief/autofill/mergePatchEmptyOnly';
+import { expandQueryToBrief } from '@/lib/salesHypotheses/expandQuery';
 import { RUN_DETAIL_COLUMNS, RUN_LIST_COLUMNS, serializeRun } from '@/lib/salesHypotheses/run';
 
 export const dynamic = 'force-dynamic';
@@ -67,28 +68,53 @@ export async function POST(req: NextRequest) {
         return jsonError('Invalid body', 400);
       }
 
-      const rawWebsite = typeof body?.website === 'string' ? body.website.trim() : '';
-      if (!rawWebsite) return jsonError('Укажите URL сайта', 400);
-      if (!normalizeWebsiteUrl(rawWebsite)) {
-        return jsonError('Невалидный URL сайта. Используйте домен (acme.com) или https://...', 400);
-      }
+      const rawInput = typeof body?.website === 'string' ? body.website.trim() : '';
+      if (!rawInput) return jsonError('Укажите сайт компании или запрос', 400);
+
+      // Вход может быть сайтом (домен/URL) ИЛИ свободным запросом сейлза
+      // («кому продавать франшизу кофеен?»). Сайт распознаём через
+      // normalizeWebsiteUrl — он возвращает null для текста со словами/пробелами.
+      const isWebsite = Boolean(normalizeWebsiteUrl(rawInput));
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), AUTOFILL_TIMEOUT_MS);
       try {
-        const result = await generateBriefAutofill({
-          apiKey: OPENROUTER_BRIEF_API_KEY,
-          website: rawWebsite,
-          signal: controller.signal,
-        });
+        let briefText: string;
+        let resolvedUrl: string | null = null;
+        let briefFields: typeof EMPTY_BRIEF_FIELDS | null = null;
+        let questions: string[] = [];
 
-        const mergedFields = mergePatchEmptyOnly(EMPTY_BRIEF_FIELDS, result.patch);
-        const briefText = compileBriefText(mergedFields).trim();
-        if (!briefText) {
-          return jsonError(
-            'Не удалось извлечь данные с сайта — бриф получился пустым. Проверьте URL или попробуйте другой сайт.',
-            422,
-          );
+        if (isWebsite) {
+          const result = await generateBriefAutofill({
+            apiKey: OPENROUTER_BRIEF_API_KEY,
+            website: rawInput,
+            signal: controller.signal,
+          });
+          const mergedFields = mergePatchEmptyOnly(EMPTY_BRIEF_FIELDS, result.patch);
+          briefText = compileBriefText(mergedFields).trim();
+          if (!briefText) {
+            return jsonError(
+              'Не удалось извлечь данные с сайта — бриф получился пустым. Проверьте URL или попробуйте другой сайт.',
+              422,
+            );
+          }
+          resolvedUrl = result.resolvedUrl ?? null;
+          briefFields = mergedFields;
+          questions = result.questions ?? [];
+        } else {
+          // Свободный запрос: разворачиваем в мини-бриф (аналог autofill, но из
+          // текста). Если развёртка не удалась — откатываемся на сырой запрос:
+          // генератор гипотез устойчив к коротким брифам.
+          try {
+            briefText = await expandQueryToBrief({
+              apiKey: OPENROUTER_BRIEF_API_KEY,
+              query: rawInput,
+              signal: controller.signal,
+            });
+          } catch (expandErr) {
+            await logError('tools.sales-hypotheses.query.expand_failed', expandErr, { userId });
+            briefText = rawInput;
+          }
         }
 
         const { data: inserted, error } = await supabase
@@ -96,42 +122,49 @@ export async function POST(req: NextRequest) {
           .insert({
             user_id: userId,
             status: 'autofilled',
-            website: rawWebsite.slice(0, 2000),
-            resolved_url: result.resolvedUrl ?? null,
-            brief_fields: mergedFields,
+            website: rawInput.slice(0, 2000),
+            resolved_url: resolvedUrl,
+            brief_fields: briefFields,
             brief_text: briefText,
-            autofill_questions: result.questions ?? [],
+            autofill_questions: questions,
           })
           .select(RUN_DETAIL_COLUMNS)
           .single();
 
         if (error || !inserted) {
-          await logError('tools.sales-hypotheses.autofill.persist_failed', error, { userId: userId });
+          await logError('tools.sales-hypotheses.autofill.persist_failed', error, { userId });
           return jsonError(error?.message ?? 'Не удалось сохранить прогон', 500);
         }
 
-        void logAudit('tools.sales-hypotheses.autofill.success', 'Sales hypotheses brief autofilled', {
-          userId: userId,
-          website: result.resolvedUrl,
-          filledFields: Object.keys(result.patch),
-          questionsCount: result.questions.length,
+        void logAudit('tools.sales-hypotheses.autofill.success', 'Sales hypotheses brief prepared', {
+          userId,
+          kind: isWebsite ? 'website' : 'query',
+          resolvedUrl,
+          questionsCount: questions.length,
         });
 
         return NextResponse.json({ run: serializeRun(inserted) });
       } catch (err) {
         if (err instanceof WebsiteFetchError) {
-          await logError('tools.sales-hypotheses.autofill.fetch_failed', err, { userId: userId, website: rawWebsite });
+          await logError('tools.sales-hypotheses.autofill.fetch_failed', err, { userId, website: rawInput });
           return jsonError(err.message, 502);
         }
         if (err instanceof AutofillTruncatedError) {
-          await logError('tools.sales-hypotheses.autofill.truncated', err, { userId: userId, website: rawWebsite });
+          await logError('tools.sales-hypotheses.autofill.truncated', err, { userId, website: rawInput });
           return jsonError(err.message, 502);
         }
         if (err instanceof Error && err.name === 'AbortError') {
-          return jsonError('Превышен таймаут анализа сайта. Попробуйте ещё раз.', 504);
+          return jsonError(
+            isWebsite
+              ? 'Превышен таймаут анализа сайта. Попробуйте ещё раз.'
+              : 'Превышен таймаут обработки запроса. Попробуйте ещё раз.',
+            504,
+          );
         }
-        await logError('tools.sales-hypotheses.autofill.failed', err, { userId: userId, website: rawWebsite });
-        const message = err instanceof Error ? `Не удалось проанализировать сайт: ${err.message}` : 'AI не ответил';
+        await logError('tools.sales-hypotheses.autofill.failed', err, { userId, website: rawInput });
+        const message = err instanceof Error
+          ? (isWebsite ? `Не удалось проанализировать сайт: ${err.message}` : `Не удалось обработать запрос: ${err.message}`)
+          : 'AI не ответил';
         return jsonError(message, 502);
       } finally {
         clearTimeout(timeoutId);
