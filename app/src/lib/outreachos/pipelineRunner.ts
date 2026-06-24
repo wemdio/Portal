@@ -27,7 +27,7 @@ import { findNewHhEmployers, deriveDomain, type HhEmployer } from '@/lib/jobs/hh
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import { loadOutreachOsConfig } from './config';
 import { buildExcludePatterns } from './excludePatterns';
-import { loadSeenEmployerIds, markSeen, type SeenEmployerUpsert } from './seenEmployers';
+import { loadRecentlySeen, markSeen, RECONTACT_AFTER_DAYS, type SeenEmployerUpsert } from './seenEmployers';
 import { employersToGrid, gridToLeadPayloads } from './gridMapping';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -118,10 +118,17 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     });
     log(`HH вернул ${employers.length} работодателей (после ICP-фильтра)`);
 
-    // 4. Дедуп против своего журнала.
-    const seen = await loadSeenEmployerIds();
-    const fresh = employers.filter((e) => !seen.has(e.id));
-    log(`Новых (не в seen): ${fresh.length}`);
+    // 4. Дедуп по окну: компании, контактированные за последние
+    //    RECONTACT_AFTER_DAYS дней, пропускаем (не пишем одной компании чаще
+    //    раза в 1.5 месяца). По hh_employer_id И по домену сайта. Компании
+    //    старше окна — снова eligible (повторный аутрич разрешён).
+    const seen = await loadRecentlySeen();
+    const fresh = employers.filter((e) => {
+      if (seen.ids.has(e.id)) return false;
+      const d = deriveDomain(e.siteUrl);
+      return !(d && seen.domains.has(d));
+    });
+    log(`Новых (не контактированы за ${RECONTACT_AFTER_DAYS}д): ${fresh.length}`);
 
     if (fresh.length === 0) {
       await finishRun({

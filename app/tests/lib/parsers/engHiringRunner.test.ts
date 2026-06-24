@@ -746,6 +746,51 @@ describe('runEngHiringParserJob cache-run resume', () => {
     expect(db.state.eng_hiring_vacancies.some((r) => r.source === 'bamboohr' && r.source_job_id === 'bh-1')).toBe(true);
   });
 
+  it('treats jobhive as a cache-only source: never fetches boards, but emits its cached rows', async () => {
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-jh',
+        status: 'running',
+        config: {
+          text: 'b2b manager',
+          sources: ['jobhive'],
+          countries: ['us'],
+          posted_within_days: 30,
+          now: '2026-06-24T00:00:00.000Z',
+          refresh_cache: true, // even with a refresh requested, a cache-only source must NOT fetch
+          enrich: false,
+          max_results: 20,
+        },
+      }],
+      eng_hiring_cache_runs: [],
+      eng_hiring_cache: [{
+        id: 'jh-1', source: 'jobhive', source_company_slug: 'greenhouse:acme-1', source_job_id: 'jh:acme:us',
+        company_name: 'Acme', company_site_url: 'https://acme.com', company_description: null,
+        vacancy_title: 'Enterprise Account Executive', vacancy_description: null,
+        vacancy_url: 'https://boards.greenhouse.io/acme/jobs/1', careers_url: null,
+        location: 'New York, NY', city: null, country: null, country_code: 'us',
+        salary_from: null, salary_to: null, salary_currency: null,
+        published_at: '2026-06-20T00:00:00.000Z', raw: {},
+      }],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+    fetchTextWithFallback.mockResolvedValue(makeCompanyCsv(5));
+    fetchJsonWithFallback.mockResolvedValue(makeGreenhouseJob('acme', 1));
+
+    await runEngHiringParserJob('job-jh');
+
+    // never fetched a jobhive company-token CSV, never fetched any board JSON
+    const textUrls = fetchTextWithFallback.mock.calls.map(([url]) => String(url));
+    expect(textUrls.some((url) => url.includes('jobhive'))).toBe(false);
+    expect(fetchJsonWithFallback).not.toHaveBeenCalled();
+    // no cache_run opened for a cache-only source
+    expect(db.operations.filter((op) => op.table === 'eng_hiring_cache_runs' && op.type === 'insert')).toHaveLength(0);
+    // the cached jobhive row was queried, matched and emitted as a result
+    expect(db.state.eng_hiring_vacancies.some((r) => r.source === 'jobhive' && r.source_job_id === 'jh:acme:us')).toBe(true);
+  });
+
   it('stores source diagnostics in the completed parser job progress detail', async () => {
     const { runEngHiringParserJob, supabaseAdmin } = await loadRunner();
     const db = makeDb({
