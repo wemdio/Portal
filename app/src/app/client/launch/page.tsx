@@ -1074,7 +1074,7 @@ export default function ClientLaunchPage() {
 
         {/* Step 4: Schedule */}
         {fileHeaders.length > 0 && (
-          <Section number={4} title="Расписание" subtitle="Когда Instantly будет отправлять письма. По умолчанию — настройки вашего пресета.">
+          <Section number={4} title="Расписание" subtitle="Когда система будет отправлять письма. По умолчанию — настройки вашего пресета.">
             <ScheduleEditor
               schedule={schedule}
               onChange={setSchedule}
@@ -1113,7 +1113,7 @@ export default function ClientLaunchPage() {
 
         {/* Step 7: Launch */}
         {fileHeaders.length > 0 && (
-          <Section number={7} title="Запуск" subtitle="Кампания будет создана в Instantly и сразу же активирована.">
+          <Section number={7} title="Запуск" subtitle="Кампания будет создана и сразу же активирована.">
             {launchError && (
               <div
                 className="mb-4 neu-inset rounded-md px-4 py-3 text-sm flex items-start gap-2.5"
@@ -1525,7 +1525,7 @@ function VariableReference({
         className="text-[10px] mt-2.5"
         style={{ color: 'var(--cp-paper-faint)' }}
       >
-        Если переменной нет у конкретного лида, Instantly подставит пустую строку.
+        Если переменной нет у конкретного лида, система подставит пустую строку.
       </p>
     </div>
   );
@@ -1653,7 +1653,7 @@ function EmailAccountsPicker({
       </div>
       {selected.length === 0 && (
         <p className="text-[11px]" style={{ color: 'var(--cp-amber)' }}>
-          Минимум один ящик — иначе Instantly не сможет отправить кампанию.
+          Минимум один ящик — иначе система не сможет отправить кампанию.
         </p>
       )}
     </div>
@@ -1676,7 +1676,7 @@ function BehaviorEditor({
       <BehaviorToggle
         checked={behavior.open_tracking}
         label="Отслеживать открытия писем"
-        description="Instantly будет считать открытия писем в статистике кампании."
+        description="Система будет считать открытия писем в статистике кампании."
         onToggle={() => toggle('open_tracking')}
       />
       <BehaviorToggle
@@ -1875,7 +1875,7 @@ function SequenceStepEditor({
             className="ml-2 text-[10px]"
             style={{ color: 'var(--cp-paper-faint)' }}
           >
-            Instantly случайно выберет один вариант для каждого лида
+            Система случайно выберет один вариант для каждого лида
           </span>
         )}
       </div>

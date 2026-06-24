@@ -56,7 +56,9 @@ const COUNTRY_MATCH_OVERRIDES: Record<string, string> = {
   us: [
     'united states(?: of america)?',
     locationToken(String.raw`u\.?s\.?a?\.?`),
-    `,\\s*${US_STATE_CODES}\\b`,
+    // "City, ST" AND "City ST" / "City-ST" — Lever stores location verbatim, so US
+    // state codes often arrive space/dash-separated, not comma-separated.
+    `[,\\s/\\-]\\s*${US_STATE_CODES}${TOKEN_END}`,
     `\\b${US_STATE_NAMES}\\b`,
     `\\b${US_MAJOR_CITIES}\\b`,
   ].join('|'),

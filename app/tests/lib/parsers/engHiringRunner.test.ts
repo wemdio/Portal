@@ -20,7 +20,8 @@ type Row = Record<string, unknown>;
 type Filter =
   | { kind: 'eq'; col: string; value: unknown }
   | { kind: 'in'; col: string; value: unknown[] }
-  | { kind: 'gte'; col: string; value: unknown };
+  | { kind: 'gte'; col: string; value: unknown }
+  | { kind: 'or'; expr: string };
 
 type MockDbState = Record<string, Row[]>;
 type QueryResult = { data: Row | Row[] | null; error: null };
@@ -34,6 +35,7 @@ type MockBuilder = {
   eq: (col: string, value: unknown) => MockBuilder;
   in: (col: string, value: unknown[]) => MockBuilder;
   gte: (col: string, value: unknown) => MockBuilder;
+  or: (expr: string) => MockBuilder;
   order: (col: string, opts?: { ascending?: boolean }) => MockBuilder;
   limit: (count: number) => MockBuilder;
   range: (start: number, end: number) => MockBuilder;
@@ -70,6 +72,19 @@ function rowMatches(row: Row, filters: Filter[]): boolean {
     if (filter.kind === 'eq') return row[filter.col] === filter.value;
     if (filter.kind === 'in') return filter.value.includes(row[filter.col]);
     if (filter.kind === 'gte') return String(row[filter.col] ?? '') >= String(filter.value ?? '');
+    if (filter.kind === 'or') {
+      return filter.expr.split(',').some((clause) => {
+        const d1 = clause.indexOf('.');
+        const d2 = clause.indexOf('.', d1 + 1);
+        const col = clause.slice(0, d1);
+        const op = clause.slice(d1 + 1, d2);
+        const val = clause.slice(d2 + 1);
+        const cell = row[col];
+        if (op === 'is') return val === 'null' ? cell == null : false;
+        if (op === 'gte') return cell != null && String(cell) >= String(val);
+        return false;
+      });
+    }
     return true;
   });
 }
@@ -190,6 +205,10 @@ function makeDb(initialState: MockDbState) {
       },
       gte: (col: string, value: unknown) => {
         filters.push({ kind: 'gte', col, value });
+        return builder;
+      },
+      or: (expr: string) => {
+        filters.push({ kind: 'or', expr });
         return builder;
       },
       order: (col: string, opts: { ascending?: boolean } = {}) => {
@@ -685,8 +704,46 @@ describe('runEngHiringParserJob cache-run resume', () => {
     expect(cacheSelect?.filters).toEqual(expect.arrayContaining([
       { kind: 'in', col: 'source', value: ['greenhouse'] },
       { kind: 'in', col: 'country_code', value: ['us'] },
-      { kind: 'gte', col: 'published_at', value: '2026-05-17T00:00:00.000Z' },
+      // null-tolerant so dateless sources are not pre-dropped at SQL
+      { kind: 'or', expr: 'published_at.gte.2026-05-17T00:00:00.000Z,published_at.is.null' },
     ]));
+  });
+
+  it('keeps BambooHR null-dated US rows through the recency query and emits them', async () => {
+    const { runEngHiringParserJob, supabaseAdmin } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: {
+          text: 'b2b manager',
+          sources: ['bamboohr'],
+          countries: ['us'],
+          posted_within_days: 30,
+          now: '2026-06-16T00:00:00.000Z',
+          refresh_cache: false,
+          enrich: false,
+          max_results: 20,
+        },
+      }],
+      eng_hiring_cache: [{
+        id: 'bh-1', source: 'bamboohr', source_company_slug: 'acme', source_job_id: 'bh-1',
+        company_name: 'Acme', company_site_url: 'https://acme.com', company_description: null,
+        vacancy_title: 'Enterprise Account Executive', vacancy_description: null,
+        vacancy_url: 'https://acme.bamboohr.com/careers/1', careers_url: 'https://acme.bamboohr.com/careers',
+        location: 'Austin, TX, United States', city: 'Austin', country: 'United States', country_code: 'us',
+        salary_from: null, salary_to: null, salary_currency: null,
+        published_at: null, // BambooHR list endpoint has no date
+        raw: {},
+      }],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+
+    await runEngHiringParserJob('job-1');
+
+    // the null-dated bamboohr row is NOT pre-dropped and is emitted as a result
+    expect(db.state.eng_hiring_vacancies.some((r) => r.source === 'bamboohr' && r.source_job_id === 'bh-1')).toBe(true);
   });
 
   it('stores source diagnostics in the completed parser job progress detail', async () => {
