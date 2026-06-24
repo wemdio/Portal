@@ -78,7 +78,10 @@ const SMTP_COMMAND_TIMEOUT_MS = 8_000;
  * empty (local dev).
  */
 const LOCAL_HELO_DOMAIN = process.env.EMAIL_VALIDATION_HELO_DOMAIN ?? os.hostname();
-const LOCAL_HELO_FROM = `verify@${LOCAL_HELO_DOMAIN}`;
+// RFC 5321 null sender by default (mirrors the smtp-proxy in smtp.ts) — avoids
+// "550 Sender verify failed" from receivers that callback-verify the sender's
+// domain. EMAIL_VALIDATION_MAIL_FROM overrides if set.
+const LOCAL_HELO_FROM = process.env.EMAIL_VALIDATION_MAIL_FROM ?? '';
 
 export type SmtpCheckResult = {
   code: number;
