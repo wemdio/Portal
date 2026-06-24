@@ -1,6 +1,7 @@
 'use client';
 
-import { authFetchJson } from '@/lib/authFetch';
+import { authFetchJson, isAuthExpiredError } from '@/lib/authFetch';
+import { scrubBrand } from '@/lib/scrubBrand';
 
 const inFlightClientReads = new Map<string, Promise<unknown>>();
 
@@ -20,18 +21,30 @@ function dedupKey(path: string, init?: RequestInit): string | null {
   return `${method} /api/client${path}`;
 }
 
+/**
+ * Client-side white-label scrub: strip the email-engine brand from any error
+ * surfaced to the client. PRESERVES the AuthExpiredError instance so callers'
+ * isAuthExpiredError(err) recovery checks keep working. Catch-all for the few
+ * client routes that return errors raw (bypassing the server-side jsonError scrub).
+ */
+function scrubClientError(e: unknown): unknown {
+  if (isAuthExpiredError(e)) return e;
+  if (e instanceof Error) e.message = scrubBrand(e.message);
+  return e;
+}
+
 export async function clientApiFetch<T = unknown>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
   const url = `/api/client${path}`;
   const key = dedupKey(path, init);
-  if (!key) return authFetchJson<T>(url, init);
+  if (!key) return authFetchJson<T>(url, init).catch((e) => { throw scrubClientError(e); });
 
   const existing = inFlightClientReads.get(key);
   if (existing) return existing as Promise<T>;
 
-  const request = authFetchJson<T>(url, init).finally(() => {
+  const request = authFetchJson<T>(url, init).catch((e) => { throw scrubClientError(e); }).finally(() => {
     if (inFlightClientReads.get(key) === request) {
       inFlightClientReads.delete(key);
     }

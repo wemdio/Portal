@@ -206,7 +206,7 @@ export function SalesHypothesesView() {
   const shownError = busy ? '' : errorMsg || (current?.status === 'failed' ? current.error ?? '' : '');
 
   return (
-    <div className="space-y-6 text-left max-w-full">
+    <div className="mx-auto max-w-5xl space-y-6 px-4 py-8 text-left">
       {/* Заголовок */}
       <div className="flex items-start gap-3">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
@@ -378,12 +378,12 @@ export function SalesHypothesesView() {
               </div>
 
               {current.questions.length > 0 && (
-                <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-4">
-                  <p className="flex items-center gap-2 text-xs font-semibold text-amber-800">
-                    <HelpCircle className="h-4 w-4" aria-hidden />
+                <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+                  <p className="flex items-center gap-2 text-sm font-semibold text-amber-800">
+                    <HelpCircle className="h-4 w-4 shrink-0" aria-hidden />
                     Стоит уточнить у клиента:
                   </p>
-                  <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-amber-900/80">
+                  <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-relaxed text-amber-900 marker:text-amber-500">
                     {current.questions.map((q, i) => (
                       <li key={`${i}-${q}`}>{q}</li>
                     ))}

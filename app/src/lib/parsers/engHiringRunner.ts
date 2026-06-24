@@ -719,7 +719,13 @@ async function loadMatchingCacheRows(db: Db, config: EngHiringSearchConfig): Pro
       .select('*')
       .in('source', sources);
     if (countryCodes.length) query = query.in('country_code', countryCodes);
-    if (publishedCutoff && config.include_unknown_dates !== true) query = query.gte('published_at', publishedCutoff);
+    // Keep null-dated rows in the SQL result (date >= cutoff OR date IS NULL) so the
+    // per-source recency policy is decided once, in matchesEngHiringVacancy. A bare
+    // .gte() would silently drop dateless sources (e.g. BambooHR) before that policy
+    // ever runs — Postgres treats NULL >= cutoff as NULL (not true).
+    if (publishedCutoff && config.include_unknown_dates !== true) {
+      query = query.or(`published_at.gte.${publishedCutoff},published_at.is.null`);
+    }
     const { data, error } = await query
       .order('published_at', { ascending: false })
       .range(offset, offset + 999);
