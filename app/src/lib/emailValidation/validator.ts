@@ -30,26 +30,63 @@ export type { ValidationResult, DomainInfo } from './shared';
 const dnsResolver = new dns.promises.Resolver();
 dnsResolver.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
 
-export async function lookupMX(domain: string): Promise<{ mxHosts: string[]; found: boolean }> {
+const MX_LOOKUP_MAX_ATTEMPTS = 3; // 1 try + 2 retries on transient DNS errors
+const MX_LOOKUP_BACKOFF_MS = 250;
+const dnsSleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Hard = the resolver gave an AUTHORITATIVE "no such record" (NXDOMAIN / no MX).
+ * Everything else (SERVFAIL, ETIMEDOUT, EAI_AGAIN, ECONNREFUSED, …) is a
+ * TRANSIENT resolver failure: the domain's MX status is UNDETERMINED, NOT absent.
+ * Collapsing transient failures into "no MX" is how a flaky DNS moment turned
+ * a valid domain into a permanent `invalid` verdict (cached 24h) and deleted
+ * live leads — the client-reported false-negative.
+ */
+function isHardDnsError(code: string | undefined): boolean {
+  return code === 'ENOTFOUND' || code === 'ENODATA';
+}
+
+// 'ok' = has A record (implicit MX); 'absent' = authoritative no-A; 'soft' = transient.
+async function tryResolve4(domain: string): Promise<'ok' | 'absent' | 'soft'> {
   try {
-    const records = await dnsResolver.resolveMx(domain);
-    if (records && records.length > 0) {
-      const sorted = records.sort((a, b) => a.priority - b.priority);
-      return { mxHosts: sorted.map((r) => r.exchange), found: true };
-    }
+    const a = await dnsResolver.resolve4(domain);
+    return a && a.length > 0 ? 'ok' : 'absent';
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOTFOUND' || code === 'ENODATA' || code === 'ESERVFAIL') {
-      try {
-        await dnsResolver.resolve4(domain);
-        return { mxHosts: [domain], found: true };
-      } catch {
-        return { mxHosts: [], found: false };
-      }
-    }
-    return { mxHosts: [], found: false };
+    return isHardDnsError((err as NodeJS.ErrnoException).code) ? 'absent' : 'soft';
   }
-  return { mxHosts: [], found: false };
+}
+
+export async function lookupMX(
+  domain: string,
+): Promise<{ mxHosts: string[]; found: boolean; lookupFailed: boolean }> {
+  for (let attempt = 1; attempt <= MX_LOOKUP_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const records = await dnsResolver.resolveMx(domain);
+      if (records && records.length > 0) {
+        const sorted = records.sort((a, b) => a.priority - b.priority);
+        return { mxHosts: sorted.map((r) => r.exchange), found: true, lookupFailed: false };
+      }
+      // No MX records → implicit MX = the domain's A record (RFC 5321 §5.1).
+      const a = await tryResolve4(domain);
+      if (a === 'ok') return { mxHosts: [domain], found: true, lookupFailed: false };
+      if (a === 'absent') return { mxHosts: [], found: false, lookupFailed: false };
+      // a === 'soft' → undetermined, fall through to retry
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (isHardDnsError(code)) {
+        // Authoritative "no MX": confirm there's no implicit-MX A record either.
+        const a = await tryResolve4(domain);
+        if (a === 'ok') return { mxHosts: [domain], found: true, lookupFailed: false };
+        if (a === 'absent') return { mxHosts: [], found: false, lookupFailed: false };
+        // a === 'soft' → can't confirm absence, fall through to retry
+      }
+      // soft/transient error → retry
+    }
+    if (attempt < MX_LOOKUP_MAX_ATTEMPTS) await dnsSleep(MX_LOOKUP_BACKOFF_MS * attempt);
+  }
+  // Retries exhausted on a transient failure: MX status undetermined. Caller must
+  // treat this as 'unknown' (retryable), NOT 'invalid', and must NOT cache it.
+  return { mxHosts: [], found: false, lookupFailed: true };
 }
 
 export async function checkDomain(domain: string): Promise<boolean> {
@@ -387,6 +424,19 @@ export async function validateEmail(
   let domainInfo = domainCache.get(domain);
   if (!domainInfo) {
     const mx = await lookupMX(domain);
+    if (mx.lookupFailed) {
+      // Transient DNS failure — MX status undetermined, NOT "no MX". Do NOT mark
+      // the address invalid and do NOT cache the negative (which would poison the
+      // whole domain for 24h). Return a retryable 'unknown' so the worker
+      // re-queues it instead of deleting a possibly-valid lead.
+      return {
+        result: 'unknown', quality: 'risky',
+        is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: false,
+        did_you_mean: didYouMean, mx_found: false, smtp_code: 0,
+        details: { step: 'mx', error: 'DNS lookup failed (MX undetermined)' },
+        error: 'DNS lookup failed (MX undetermined)',
+      };
+    }
     domainInfo = {
       domain,
       mxHosts: mx.mxHosts,
@@ -395,7 +445,7 @@ export async function validateEmail(
       isDisposable: disposableFlag,
       checkedAt: new Date(),
     };
-    domainCache.set(domain, domainInfo);
+    domainCache.set(domain, domainInfo); // cache only conclusive lookups
   }
 
   if (!domainInfo.mxFound) {
