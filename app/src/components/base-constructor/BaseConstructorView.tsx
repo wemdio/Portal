@@ -1128,11 +1128,20 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         //    default pipeline is restored cleanly, not as a superset of leftovers.
                         setSelectedSteps([]);
                       }}
-                      className={`neu-pill px-3 py-1 text-xs font-semibold transition-colors shrink-0 ${freeStepMode ? 'active' : ''}`}
-                      style={{ color: freeStepMode ? 'var(--cp-green)' : 'var(--cp-paper-mute)' }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all shrink-0"
+                      style={{
+                        color: freeStepMode ? 'var(--cp-green)' : 'var(--cp-paper-mute)',
+                        borderColor: freeStepMode ? 'var(--cp-green)' : 'var(--cp-divider-strong)',
+                        background: freeStepMode ? 'var(--cp-surface-active)' : 'var(--cp-surface-elev)',
+                      }}
                       title="Самостоятельно выбрать, какие шаги выполнить"
                     >
-                      {freeStepMode ? '✓ Выбираю шаги сам' : 'Выбрать шаги вручную'}
+                      <span
+                        aria-hidden
+                        className="inline-block w-2 h-2 rounded-full"
+                        style={{ background: freeStepMode ? 'var(--cp-green)' : 'var(--cp-paper-faint)' }}
+                      />
+                      {freeStepMode ? 'Ручной выбор включён' : 'Выбрать шаги вручную'}
                     </button>
                   )}
                 </div>
@@ -1220,7 +1229,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                                         ? 'border-[var(--cp-divider)] bg-[var(--cp-surface-rest)] cursor-not-allowed opacity-60'
                                         : showAsActive
                                         ? 'border-[var(--cp-paper-faint)] bg-[var(--cp-surface-active)]'
-                                        : 'border-[var(--cp-divider)] bg-[var(--cp-surface-rest)] hover:border-[var(--cp-divider-strong)]'
+                                        : 'border-[var(--cp-divider)] bg-[var(--cp-surface-rest)] cursor-pointer hover:border-[var(--cp-divider-strong)] hover:bg-[var(--cp-surface-elev)]'
                                     }`
                                   : `rounded-xl border-2 ${
                                       isAlwaysOn
@@ -1254,7 +1263,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                                       <Lock className="w-2.5 h-2.5" />
                                       Будет выполнено
                                     </span>
-                                  ) : (
+                                  ) : (clientMode && step.cost !== 'ai') ? null : (
                                     (() => {
                                       const badge = COST_BADGES[step.cost];
                                       const CostIcon = badge.icon;
@@ -1309,13 +1318,20 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                                   </p>
                                 )}
                               </div>
-                              {showAsActive && (
+                              {showAsActive ? (
                                 <div className={`absolute top-2 right-2 w-5 h-5 rounded-full ${
                                   clientMode ? 'bg-[var(--cp-paper)]' : isAlwaysOn ? 'bg-emerald-600' : 'bg-gray-900'
                                 } flex items-center justify-center`}>
                                   <Check className={`w-3 h-3 ${clientMode ? 'text-[var(--cp-ink)]' : 'text-white'}`} />
                                 </div>
-                              )}
+                              ) : (!isAlwaysOn && !disabledForBrief) ? (
+                                /* Empty selection circle → signals the card is a selectable toggle. */
+                                <div className={`absolute top-2 right-2 w-5 h-5 rounded-full border-2 transition ${
+                                  clientMode
+                                    ? 'border-[var(--cp-divider-strong)] group-hover:border-[var(--cp-paper-faint)]'
+                                    : 'border-gray-200 group-hover:border-gray-400'
+                                }`} />
+                              ) : null}
                             </button>
                           );
                         })}

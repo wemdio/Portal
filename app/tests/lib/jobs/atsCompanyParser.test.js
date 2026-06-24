@@ -437,6 +437,20 @@ describe('atsCompanyParser — domain helpers', () => {
 
     expect(domain).toBe('');
   });
+
+  it('refuses to guess when a name is ambiguous (multiple exact matches)', () => {
+    // Two distinct real companies share the name -> a wrong domain is worse than
+    // none for cold outreach, so return empty rather than picking the loudest.
+    expect(pickDomainFromSuggestions('Paradigm', [
+      { name: 'Paradigm', domain: 'paradigm.xyz' },
+      { name: 'Paradigm', domain: 'cecredentialtrust.com' },
+    ])).toBe('');
+    // a single exact match (with other near-but-not-exact names) still resolves
+    expect(pickDomainFromSuggestions('Paradigm', [
+      { name: 'Paradigm', domain: 'paradigm.xyz' },
+      { name: 'Paradigm Health', domain: 'paradigmhealth.com' },
+    ])).toBe('paradigm.xyz');
+  });
 });
 
 describe('atsCompanyParser — CSV parsing & export', () => {

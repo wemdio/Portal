@@ -45,6 +45,29 @@ function pick(params: Record<string, unknown>, keys: string[]): Record<string, u
   return result;
 }
 
+/**
+ * Резолвит текстовое имя специалиста в profiles.id, чтобы при записи проекта
+ * через бота проставлялась привязка specialist_user_id, а не только текст
+ * projects.specialist. Без линка лид-алерты по проекту молча не доходят —
+ * воркер уведомляет по аккаунту, не по тексту имени (инцидент PP Prod /
+ * Илиана, 2026-06-24). `ilike` без wildcard = точное совпадение без учёта
+ * регистра; вернёт null, если профиля с таким именем нет.
+ */
+async function resolveSpecialistUserId(
+  sb: NonNullable<typeof supabaseAdmin>,
+  name: unknown,
+): Promise<string | null> {
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  if (!trimmed) return null;
+  const { data } = await sb
+    .from('profiles')
+    .select('id')
+    .ilike('full_name', trimmed)
+    .limit(1)
+    .maybeSingle();
+  return (data?.id as string | undefined) ?? null;
+}
+
 export const updateProjectStatus: WriteToolHandler = async (params, user) => {
   const sb = ensureAdmin();
   const { project_id, new_status } = params as { project_id: string; new_status: string };
@@ -75,6 +98,11 @@ export const updateProjectFields: WriteToolHandler = async (params, user) => {
 
   if (Object.keys(fields).length === 0) return 'Не указаны поля для обновления.';
 
+  // Текст специалиста → привязка аккаунта, иначе лид-алерты не дойдут.
+  if ('specialist' in fields) {
+    fields.specialist_user_id = await resolveSpecialistUserId(sb, fields.specialist);
+  }
+
   const { data: project, error: fetchErr } = await sb
     .from('projects')
     .select('id, name')
@@ -101,6 +129,11 @@ export const createProject: WriteToolHandler = async (params, user) => {
 
   if (!data.name) return 'Название проекта обязательно.';
   if (!data.status) data.status = 'Подготовка';
+
+  // Текст специалиста → привязка аккаунта, иначе лид-алерты не дойдут.
+  if ('specialist' in data) {
+    data.specialist_user_id = await resolveSpecialistUserId(sb, data.specialist);
+  }
 
   const { data: created, error } = await sb
     .from('projects')

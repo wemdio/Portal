@@ -19,14 +19,40 @@ export interface SeenEmployerUpsert {
   status: SeenStatus;
 }
 
-/** Множество уже виденных hh_employer_id — для отсева в текущем прогоне. */
-export async function loadSeenEmployerIds(): Promise<Set<string>> {
-  if (!supabaseAdmin) return new Set();
+/**
+ * Окно «не контактировать одну компанию чаще, чем раз в N дней». 45 = 1.5 месяца.
+ * Повторный аутрич РАЗРЕШЁН — просто не чаще окна (компания старше окна снова
+ * eligible). Меняется одной строкой. Можно вынести в конфиг, если понадобится.
+ */
+export const RECONTACT_AFTER_DAYS = 45;
+
+export interface RecentlySeen {
+  ids: Set<string>;
+  domains: Set<string>;
+}
+
+/**
+ * Кого контактировали за последние RECONTACT_AFTER_DAYS дней (по last_status_at).
+ * Эти компании в текущем прогоне пропускаем. Дедуп по ДВУМ осям: hh_employer_id
+ * И домен сайта — вторая ось ловит компанию, пере-зарегавшуюся на HH с новым id.
+ * Компании с последним контактом старше окна в выборку НЕ попадают → снова eligible.
+ */
+export async function loadRecentlySeen(withinDays = RECONTACT_AFTER_DAYS): Promise<RecentlySeen> {
+  const empty: RecentlySeen = { ids: new Set(), domains: new Set() };
+  if (!supabaseAdmin) return empty;
+  const cutoff = new Date(Date.now() - withinDays * 86_400_000).toISOString();
   const { data, error } = await supabaseAdmin
     .from('outreachos_seen_employers')
-    .select('hh_employer_id');
-  if (error || !data) return new Set();
-  return new Set(data.map((r) => (r as { hh_employer_id: string }).hh_employer_id));
+    .select('hh_employer_id, domain')
+    .gte('last_status_at', cutoff);
+  if (error || !data) return empty;
+  const ids = new Set<string>();
+  const domains = new Set<string>();
+  for (const r of data as { hh_employer_id: string | null; domain: string | null }[]) {
+    if (r.hh_employer_id) ids.add(r.hh_employer_id);
+    if (r.domain) domains.add(r.domain.toLowerCase());
+  }
+  return { ids, domains };
 }
 
 /** Upsert статусов обработанных работодателей чанками по 500. */

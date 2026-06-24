@@ -607,15 +607,43 @@ async function notifySpecialistsAboutLead(
       const projectIds = links.map((l: { project_id: string }) => l.project_id);
       const { data: projects } = await supabaseMain
         .from('projects')
-        .select('specialist_user_id, client')
-        .in('id', projectIds)
-        .not('specialist_user_id', 'is', null);
+        .select('specialist_user_id, specialist, client')
+        .in('id', projectIds);
 
+      const unlinkedNames = new Set<string>();
       if (projects) {
         for (const p of projects) {
-          if (p.specialist_user_id) userIds.add(p.specialist_user_id as string);
+          if (p.specialist_user_id) {
+            userIds.add(p.specialist_user_id as string);
+          } else if (typeof p.specialist === 'string' && p.specialist.trim()) {
+            unlinkedNames.add(p.specialist.trim());
+          }
           const client = typeof p.client === 'string' ? p.client.trim() : '';
           if (client && !clientName) clientName = client;
+        }
+      }
+
+      // Fallback: у проекта специалист может быть задан ТОЛЬКО текстом
+      // (projects.specialist) без привязки specialist_user_id — так пишут
+      // telegram-бот (writeHandlers) и импорт/создание проекта; дропдаун в UI
+      // линкует аккаунт, а эти пути нет. Резолвим имя → profiles.id, чтобы
+      // алерт всё равно дошёл. Без этого лиды по таким проектам молча терялись
+      // (инцидент PP Prod / Илиана, 2026-06-24): лид квалифицировался, но
+      // notifySpecialistsAboutLead выходил с userIds.size === 0.
+      if (unlinkedNames.size > 0) {
+        const { data: byName } = await supabaseMain
+          .from('profiles')
+          .select('id, full_name')
+          .in('full_name', [...unlinkedNames]);
+        const matched = (byName ?? []) as Array<{ id: string; full_name: string }>;
+        for (const p of matched) {
+          if (p.id) userIds.add(p.id);
+        }
+        if (matched.length < unlinkedNames.size) {
+          workerLog(
+            'warn',
+            `Specialist set as free text without a linked account (campaign ${campaignId}): [${[...unlinkedNames].join(', ')}] — matched ${matched.length}/${unlinkedNames.size} by name. Unmatched get no alert; link the specialist via the project dropdown.`,
+          );
         }
       }
     }
