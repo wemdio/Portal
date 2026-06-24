@@ -90,7 +90,15 @@ export interface SmtpCheckRequest {
    * env var or os.hostname(). HELO/PTR must match the proxy's outbound IP.
    */
   heloDomain?: string;
-  /** Optional. Defaults to `verify@<heloDomain>`. */
+  /**
+   * Optional envelope sender for the probe. If omitted, defaults to the
+   * EMAIL_VALIDATION_MAIL_FROM env var, otherwise the RFC 5321 null sender
+   * `<>`. The null sender is the canonical bounce/verify path and is NOT
+   * subject to the receiver's sender-callback verification, so it avoids
+   * "550 Sender verify failed" false negatives from hosts (Exim/cPanel) that
+   * verify the sender's domain — which a non-deliverable `verify@<host>`
+   * sender (no MX) would trip. Pass an explicit address to override.
+   */
   heloFrom?: string;
   checkCatchAll?: boolean;
   timeout?: number;
@@ -101,7 +109,12 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
   const result: SmtpCheckResult = { code: 0, exists: null, isCatchAll: null, greylist: false };
 
   const heloDomain = req.heloDomain ?? DEFAULT_HELO_DOMAIN;
-  const heloFrom = req.heloFrom ?? `verify@${heloDomain}`;
+  // Default to the RFC 5321 null sender `<>` for the probe envelope. EHLO still
+  // uses heloDomain (must match the proxy's PTR), but the MAIL FROM is `<>` so
+  // receivers that do sender-callback verification (Exim/cPanel "verify =
+  // sender") can't reject us with "550 Sender verify failed" for an
+  // unverifiable sender domain. EMAIL_VALIDATION_MAIL_FROM overrides if set.
+  const heloFrom = req.heloFrom ?? process.env.EMAIL_VALIDATION_MAIL_FROM ?? '';
 
   let socket: net.Socket | null = null;
 

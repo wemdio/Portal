@@ -175,7 +175,9 @@ describe('stepFindEmails', () => {
 
 describe('stepValidateEmails', () => {
   // Helper: разные email мокаем по-разному.
-  const mockValidator = (mapping: Record<string, 'ok' | 'invalid' | 'catch_all' | 'disposable'>) => {
+  const mockValidator = (
+    mapping: Record<string, 'ok' | 'invalid' | 'catch_all' | 'disposable' | 'unknown'>,
+  ) => {
     (validateEmail as jest.Mock).mockImplementation(async (email: string) => ({
       result: mapping[email.toLowerCase()] ?? 'invalid',
       is_free: false,
@@ -275,6 +277,76 @@ describe('stepValidateEmails', () => {
     });
     expect(out).toEqual(data);
     expect(validateEmail).not.toHaveBeenCalled();
+  });
+
+  it('unknown («не удалось проверить») по умолчанию СОХРАНЯЕТСЯ с email, не дропается', async () => {
+    // Регрессия на жалобу клиента «убрали 20% рабочих почт»: greylist / блок
+    // нашего IP / sender-callback дают 'unknown', а не реальный отказ — раньше
+    // такие строки молча удалялись как invalid.
+    mockValidator({ 'ok@a.ru': 'ok', 'maybe@b.ru': 'unknown', 'bad@c.ru': 'invalid' });
+    const data = [
+      ['Email'],
+      ['ok@a.ru'],
+      ['maybe@b.ru'], // unknown → KEEP
+      ['bad@c.ru'], // invalid → DROP
+    ];
+    const out = await stepValidateEmails(data, noopProgress, undefined, {
+      validateTarget: 'original',
+    });
+    // header + ok + unknown (bad вылетел)
+    expect(out).toHaveLength(3);
+    const emails = out.slice(1).map((r) => r[0]);
+    expect(emails).toContain('ok@a.ru');
+    expect(emails).toContain('maybe@b.ru'); // сохранён, не обнулён
+    expect(emails).not.toContain('bad@c.ru'); // удалён
+    // Статус виден в колонке «Email Статус» (idx 1).
+    const unknownRow = out.find((r) => r[0] === 'maybe@b.ru')!;
+    expect(unknownRow[1]).toBe('unknown');
+  });
+
+  it('keepUnverifiable=false — unknown дропается как invalid (агрессивная очистка)', async () => {
+    mockValidator({ 'ok@a.ru': 'ok', 'maybe@b.ru': 'unknown' });
+    const data = [
+      ['Email'],
+      ['ok@a.ru'],
+      ['maybe@b.ru'], // unknown → DROP (opt-in)
+    ];
+    const out = await stepValidateEmails(data, noopProgress, undefined, {
+      validateTarget: 'original',
+      keepUnverifiable: false,
+    });
+    expect(out).toHaveLength(2);
+    expect(out[1][0]).toBe('ok@a.ru');
+  });
+
+  it('строка ТОЛЬКО с unknown email — остаётся (а не дропается как «без email»)', async () => {
+    mockValidator({ 'maybe@b.ru': 'unknown' });
+    const data = [
+      ['Email'],
+      ['maybe@b.ru'],
+    ];
+    const out = await stepValidateEmails(data, noopProgress, undefined, {
+      validateTarget: 'original',
+    });
+    expect(out).toHaveLength(2);
+    expect(out[1][0]).toBe('maybe@b.ru');
+  });
+
+  it('исключение валидатора (статус "error") тоже сохраняется по умолчанию', async () => {
+    (validateEmail as jest.Mock).mockImplementation(async (email: string) => {
+      if (email === 'boom@x.ru') throw new Error('SMTP crash');
+      return { result: 'ok', is_free: false, is_catch_all: false };
+    });
+    const data = [
+      ['Email'],
+      ['good@x.ru'],
+      ['boom@x.ru'], // throw → status 'error' → KEEP
+    ];
+    const out = await stepValidateEmails(data, noopProgress, undefined, {
+      validateTarget: 'original',
+    });
+    expect(out).toHaveLength(3);
+    expect(out.slice(1).map((r) => r[0])).toContain('boom@x.ru');
   });
 
   it('catch_all считается валидным (оставляет строку)', async () => {
