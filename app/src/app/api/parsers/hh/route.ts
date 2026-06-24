@@ -5,6 +5,7 @@ import type { HHSearchConfig } from '@/lib/parsers/hhParser';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getClientTariffUsage } from '@/lib/tariffs';
+import { blockDemo } from '@/lib/auth/blockDemo';
 
 export const dynamic = 'force-dynamic';
 
@@ -66,6 +67,8 @@ export async function POST(req: NextRequest) {
   if ('error' in auth) return auth.error;
 
   const { supabase, user } = auth;
+  const demo = await blockDemo(supabase, user.id);
+  if (demo) return demo;
   const requestId = req.headers.get('x-request-id') ?? crypto.randomUUID();
   const route = req.nextUrl.pathname;
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { blockDemo } from '@/lib/auth/blockDemo';
 
 export const dynamic = 'force-dynamic';
 
@@ -66,6 +67,9 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ jobId: st
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
   const logMeta = { userId: user.id, requestId, route, ip };
 
+  const demo = await blockDemo(supabase, user.id);
+  if (demo) return demo;
+
   let body: { action?: string };
   try {
     body = (await req.json()) as { action?: string };
@@ -108,6 +112,9 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ jobId: s
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
   const logMeta = { userId: user.id, requestId, route, ip };
   const { jobId } = await ctx.params;
+
+  const demo = await blockDemo(supabase, user.id);
+  if (demo) return demo;
 
   const { error } = await supabase
     .from('parser_jobs')

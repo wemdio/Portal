@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { withToolTrace } from '@/lib/toolTrace';
 import { normalizeOutputLanguage } from '@/lib/emailSequenceV2/prompts';
+import { blockDemo } from '@/lib/auth/blockDemo';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -54,6 +55,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ ru
       const supabase = createAuthedSupabaseClient(token);
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return jsonError('Unauthorized', 401);
+
+      const demo = await blockDemo(supabase, user.id);
+      if (demo) return demo;
 
       const { runId } = await params;
       if (!runId) return jsonError('Missing runId', 400);
@@ -117,6 +121,9 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ r
       const supabase = createAuthedSupabaseClient(token);
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return jsonError('Unauthorized', 401);
+
+      const demo = await blockDemo(supabase, user.id);
+      if (demo) return demo;
 
       const { runId } = await params;
       if (!runId) return jsonError('Missing runId', 400);

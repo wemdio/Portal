@@ -8,6 +8,7 @@ import { parseLettersFromModelOutput } from '@/lib/emailSequenceV2/letterParser'
 import type { EmailSequenceV2RunRow } from '@/types';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { blockDemo } from '@/lib/auth/blockDemo';
 import {
   countChains,
   getBillingPeriodStart,
@@ -32,6 +33,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return jsonError('Unauthorized', 401);
+
+  const demo = await blockDemo(supabase, user.id);
+  if (demo) return demo;
 
   const { runId } = await params;
   if (!runId) return jsonError('Missing runId', 400);

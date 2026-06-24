@@ -239,6 +239,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       updated_at: uploadedAt,
       // Сбрасываем предыдущую ошибку гипотез — новая попытка пойдёт чистой.
       lead_source_hypotheses_error: null,
+      // Бриф заменён → ранее сгенерированные гипотезы устарели (помечаем, не
+      // удаляем — храним как историю; UI покажет «пересоздайте»).
+      lead_source_hypotheses_stale: true,
     };
 
     const { error: updateError } = await supabaseAdmin
@@ -268,6 +271,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       lead_source_hypotheses: existing.lead_source_hypotheses,
       lead_source_hypotheses_generated_at: existing.lead_source_hypotheses_generated_at,
       lead_source_hypotheses_error: null,
+      lead_source_hypotheses_stale: true,
       // Подсказка для клиента: можно ли запустить генерацию гипотез.
       hypotheses_pending: !existing.lead_source_hypotheses,
     });

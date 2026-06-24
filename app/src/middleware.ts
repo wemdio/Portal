@@ -1,6 +1,9 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 import { DEFAULT_LOCALE, LOCALE_COOKIE, normalizeLocale } from '@/lib/i18n'
+import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient'
+import { isInternalRole } from '@/lib/roles'
+import type { UserRole } from '@/types'
 
 const ROLE_COOKIE = 'x-portal-role'
 const ROLE_COOKIE_MAX_AGE = 30 * 60
@@ -15,6 +18,126 @@ function decodeRoleCache(raw: string, currentUserId: string): string | null {
   if (sep === -1) return null
   if (raw.substring(0, sep) !== currentUserId) return null
   return raw.substring(sep + 1) || null
+}
+
+// Public / external API: authenticate with their OWN secret/signature or are
+// genuinely public. They skip the staff-only gate and enforce their own auth.
+// (The ai-caller Telegram webhook is excluded in its own block above.)
+function isPublicApiPath(p: string): boolean {
+  // External webhook receivers (Instantly / Telegram / Unipile / YooKassa, etc.)
+  // are called WITHOUT a user JWT and must validate their own secret/signature.
+  // Matches `.../webhook` and `.../webhook/...` but NOT the `.../webhooks` (plural)
+  // management routes, which stay staff-only.
+  if (p.endsWith('/webhook') || p.includes('/webhook/')) return true
+  return (
+    p === '/api/signup' ||
+    p === '/api/health' ||
+    p.startsWith('/api/partner/') || // external pull-API, auth'd by PARTNER_API_KEY
+    p.startsWith('/api/telegram/verify') ||
+    p.startsWith('/api/telegram/link') ||
+    p.startsWith('/api/database-review/guest/') ||
+    p.startsWith('/api/cron/')
+  )
+}
+
+// API the CLIENT portal legitimately calls (incl. OAuth callbacks under
+// /api/client). Routes enforce their own client/demo auth (requireClientAuth
+// blocks demo mutations). Verified by tracing every fetch from src/app/client/**
+// and its imported components (sidebar, global translator, parser/base-constructor
+// tool views). Everything else under /api is staff-only. NOTE: exact-or-slash
+// prefixes are deliberate — `startsWith('/api/parsers/hh')` would wrongly also
+// allowlist the INTERNAL `/api/parsers/hh-archive`.
+function isClientApiPath(p: string): boolean {
+  return (
+    p.startsWith('/api/client/') ||
+    p === '/api/user/locale' ||
+    p === '/api/portal/translate' ||
+    p === '/api/brief-scoring/parse-pdf' ||
+    p === '/api/parsers/search' ||
+    p.startsWith('/api/parsers/search/') ||
+    p === '/api/parsers/hh' ||
+    p.startsWith('/api/parsers/hh/') ||
+    p === '/api/parsers/yandexmaps' ||
+    p.startsWith('/api/parsers/yandexmaps/') ||
+    p === '/api/tools/base-constructor' ||
+    p.startsWith('/api/tools/base-constructor/') ||
+    p === '/api/tools/email-sequence-v2' ||
+    p.startsWith('/api/tools/email-sequence-v2/')
+  )
+}
+
+// Cron callers authenticate with CRON_SECRET (query ?secret=, x-vercel-cron-secret
+// header, or Authorization: Bearer <secret>) — not a user JWT. Matches the check
+// used by /api/cron/* handlers so those (and tool collectors triggered by cron)
+// pass the gate without an internal user.
+function hasValidCronSecret(request: NextRequest): boolean {
+  const secret = process.env.CRON_SECRET
+  if (!secret) return false
+  const provided =
+    request.nextUrl.searchParams.get('secret') ??
+    request.headers.get('x-vercel-cron-secret') ??
+    request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ??
+    null
+  return provided === secret
+}
+
+/**
+ * Staff-only gate for internal /api/* routes. Middleware historically did NOT
+ * gate /api/* by role, and many internal routes only did getUser() — or had no
+ * auth at all, using a service-role client — so a client/demo JWT (or even an
+ * anonymous request) could drive them: real phone calls, paid LLM/enrichment
+ * spend, proprietary-data export, cross-tenant writes. This closes the whole
+ * class at one point: allow a valid CRON_SECRET (cron callers) or an internal,
+ * non-demo user; deny everyone else. Fail-CLOSED: anonymous / client / demo /
+ * unverifiable => 403. Public and client-facing paths are allowlisted by the
+ * caller before this runs.
+ */
+async function denyApiForNonInternal(request: NextRequest): Promise<NextResponse | null> {
+  if (hasValidCronSecret(request)) return null
+
+  // Auth source priority: Bearer header (API fetches) or `?t=` query token
+  // (file-download navigations carry the JWT in the query, not a header).
+  // Otherwise fall back to the session cookies — top-level browser navigations
+  // send cookies, not a Bearer header.
+  const queryToken = request.nextUrl.searchParams.get('t')
+  const token =
+    getBearerToken(request.headers.get('authorization')) ??
+    (queryToken && queryToken.startsWith('eyJ') ? queryToken : null)
+
+  try {
+    let sb
+    if (token) {
+      sb = createAuthedSupabaseClient(token)
+    } else {
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+      const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+      if (!supabaseUrl || !supabaseAnonKey) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+      }
+      sb = createServerClient(supabaseUrl, supabaseAnonKey, {
+        cookies: {
+          get(name: string) {
+            return request.cookies.get(name)?.value
+          },
+          set() {},
+          remove() {},
+        },
+      })
+    }
+    const { data: { user } } = await sb.auth.getUser()
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    const { data: profile } = await sb
+      .from('profiles')
+      .select('role, is_demo')
+      .eq('id', user.id)
+      .single()
+    if (profile && profile.is_demo !== true && isInternalRole((profile.role ?? null) as UserRole | null)) {
+      return null
+    }
+    return NextResponse.json({ error: 'Forbidden', code: 'INTERNAL_ONLY' }, { status: 403 })
+  } catch {
+    return NextResponse.json({ error: 'Forbidden', code: 'INTERNAL_ONLY' }, { status: 403 })
+  }
 }
 
 export async function middleware(request: NextRequest) {
@@ -62,6 +185,12 @@ export async function middleware(request: NextRequest) {
   }
 
   if (pathname.startsWith('/api/ai-caller')) {
+    // Telegram/VAPI webhook is hit by external services (no user JWT) — skip the
+    // staff-only gate for it; everything else in the namespace is enforced.
+    if (!pathname.startsWith('/api/ai-caller/telegram/webhook')) {
+      const denied = await denyApiForNonInternal(request)
+      if (denied) return denied
+    }
     const referer = request.headers.get('referer') ?? ''
     if (referer.includes('/tools/ai-caller-v2')) {
       const headers = new Headers(request.headers)
@@ -72,6 +201,15 @@ export async function middleware(request: NextRequest) {
   }
 
   if (pathname.startsWith('/api')) {
+    // Default-deny for /api/*: public (own-secret/webhook/cron) and client-facing
+    // paths are allowlisted; everything else is internal staff-only. This is the
+    // systemic fix — middleware never gated /api by role, so any client/demo (or
+    // anonymous) token reached internal routes that only did getUser() or no auth.
+    if (isPublicApiPath(pathname) || isClientApiPath(pathname)) {
+      return response
+    }
+    const denied = await denyApiForNonInternal(request)
+    if (denied) return denied
     return response
   }
 
@@ -119,6 +257,7 @@ export async function middleware(request: NextRequest) {
       pathname === '/login' ||
       pathname === '/signup' ||
       pathname === '/offer' ||
+      pathname === '/demo' ||
       pathname.startsWith('/api/signup') ||
       pathname.startsWith('/api/telegram/verify') ||
       pathname.startsWith('/api/telegram/link') ||

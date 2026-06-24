@@ -53,6 +53,7 @@ interface ProjectRow {
   lead_source_hypotheses: string | null;
   lead_source_hypotheses_generated_at: string | null;
   lead_source_hypotheses_error: string | null;
+  lead_source_hypotheses_stale: boolean;
 }
 
 async function fetchProjectRow(projectId: string): Promise<ProjectRow | null> {
@@ -60,7 +61,7 @@ async function fetchProjectRow(projectId: string): Promise<ProjectRow | null> {
   const { data } = await supabaseAdmin
     .from('projects')
     .select(
-      'id, brief_text, brief_file_path, lead_source_hypotheses, lead_source_hypotheses_generated_at, lead_source_hypotheses_error',
+      'id, brief_text, brief_file_path, lead_source_hypotheses, lead_source_hypotheses_generated_at, lead_source_hypotheses_error, lead_source_hypotheses_stale',
     )
     .eq('id', projectId)
     .single<ProjectRow>();
@@ -99,6 +100,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         lead_source_hypotheses: project.lead_source_hypotheses,
         lead_source_hypotheses_generated_at: project.lead_source_hypotheses_generated_at,
         lead_source_hypotheses_error: null,
+        lead_source_hypotheses_stale: project.lead_source_hypotheses_stale,
         skipped: true,
       });
     }
@@ -129,13 +131,21 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     const generatedAt = hypotheses ? new Date().toISOString() : null;
 
+    // On SUCCESS: replace with fresh recs and clear the stale flag. On FAILURE:
+    // keep the previous (stale-but-useful) recommendations and only record the
+    // error — don't destroy recoverable state behind the «Сгенерировать заново» button.
+    const updatePayload: Record<string, unknown> = {
+      lead_source_hypotheses_error: errorMessage,
+    };
+    if (hypotheses) {
+      updatePayload.lead_source_hypotheses = hypotheses;
+      updatePayload.lead_source_hypotheses_generated_at = generatedAt;
+      updatePayload.lead_source_hypotheses_stale = false;
+    }
+
     const { error: updateError } = await supabaseAdmin
       .from('projects')
-      .update({
-        lead_source_hypotheses: hypotheses,
-        lead_source_hypotheses_generated_at: generatedAt ?? project.lead_source_hypotheses_generated_at,
-        lead_source_hypotheses_error: errorMessage,
-      })
+      .update(updatePayload)
       .eq('id', projectId);
 
     if (updateError) {
@@ -177,6 +187,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       lead_source_hypotheses: hypotheses,
       lead_source_hypotheses_generated_at: generatedAt,
       lead_source_hypotheses_error: null,
+      lead_source_hypotheses_stale: false,
       regenerated: regenerate,
     });
   } catch (err) {

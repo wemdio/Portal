@@ -48,6 +48,18 @@ export async function POST(req: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return jsonError('Unauthorized', 401);
 
+  // Demo accounts are strictly read-only — block real (paid) search jobs. Read via
+  // the user's own client (RLS self-read) so it does NOT depend on supabaseAdmin
+  // being configured (otherwise a misconfig would fail OPEN for demo).
+  const { data: selfProfile } = await supabase
+    .from('profiles')
+    .select('is_demo')
+    .eq('id', user.id)
+    .single();
+  if (selfProfile?.is_demo === true) {
+    return jsonError('Демо-режим: запуск поиска недоступен.', 403);
+  }
+
   try {
     const payload = (await req.json()) as SearchJobPayload;
     const brief = typeof payload?.brief === 'string' ? payload.brief.trim() : '';

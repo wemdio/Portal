@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { blockDemo } from '@/lib/auth/blockDemo';
 
 export const dynamic = 'force-dynamic';
 
@@ -41,6 +42,9 @@ export async function PATCH(req: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return jsonError('Unauthorized', 401);
 
+  const demo = await blockDemo(supabase, user.id);
+  if (demo) return demo;
+
   const jobId = getJobIdFromUrl(req);
   const { data: updated, error } = await supabase
     .from('yandex_maps_jobs')
@@ -64,6 +68,9 @@ export async function DELETE(req: NextRequest) {
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return jsonError('Unauthorized', 401);
+
+  const demo = await blockDemo(supabase, user.id);
+  if (demo) return demo;
 
   const jobId = getJobIdFromUrl(req);
   const { error } = await supabase

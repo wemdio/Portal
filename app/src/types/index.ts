@@ -76,6 +76,7 @@ export interface Project {
   lead_source_hypotheses?: string | null;
   lead_source_hypotheses_generated_at?: string | null;
   lead_source_hypotheses_error?: string | null;
+  lead_source_hypotheses_stale?: boolean | null;
 }
 
 export type TaskStatus = 'pending' | 'in_progress' | 'done';
