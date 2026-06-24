@@ -380,58 +380,76 @@ export default function ClientTariffPage() {
               <div>
                 <p className="ds-eyebrow mb-2">02<span aria-hidden> → </span>текущий тариф</p>
                 <div className="flex items-center gap-3 flex-wrap">
-                  <h2
-                    className="text-2xl font-bold m-0"
-                    style={{ color: 'var(--cp-paper)' }}
-                  >
-                    {TARIFF_LABELS[data.tariff_type]}
-                  </h2>
-                  {/* Quieter: dot + colored label, no tag wrapper / uppercase pill. */}
-                  <span
-                    className="inline-flex items-center gap-1.5 text-sm"
-                    style={{ color: statusDot(data.status) }}
-                  >
-                    <span
-                      aria-hidden
-                      className="inline-block h-1.5 w-1.5 rounded-full"
-                      style={{ background: statusDot(data.status) }}
-                    />
-                    {STATUS_LABELS[data.status]}
-                  </span>
+                  {/* Когда клиент только зарегистрировался и status='inactive' (нет
+                      paid_at) — показывать дефолтный tariff_type='standard' было
+                      бы враньём: подписки нет. Пишем «Нет тарифа» в красном. */}
+                  {data.status === 'inactive' && !data.paid_at ? (
+                    <h2
+                      className="text-2xl font-bold m-0"
+                      style={{ color: 'var(--cp-red)' }}
+                    >
+                      Нет тарифа
+                    </h2>
+                  ) : (
+                    <>
+                      <h2
+                        className="text-2xl font-bold m-0"
+                        style={{ color: 'var(--cp-paper)' }}
+                      >
+                        {TARIFF_LABELS[data.tariff_type]}
+                      </h2>
+                      {/* Quieter: dot + colored label, no tag wrapper / uppercase pill. */}
+                      <span
+                        className="inline-flex items-center gap-1.5 text-sm"
+                        style={{ color: statusDot(data.status) }}
+                      >
+                        <span
+                          aria-hidden
+                          className="inline-block h-1.5 w-1.5 rounded-full"
+                          style={{ background: statusDot(data.status) }}
+                        />
+                        {STATUS_LABELS[data.status]}
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
               {/* Distilled: was two rounded-md "tile" boxes — micro-card pattern
                   that fought the ledger aesthetic below. Now: inline editorial
                   run, eyebrow + mono value, with the "осталось N дней" suffix
-                  inline so the user doesn't have to compute the period length. */}
-              <div className="flex flex-col gap-1.5 text-xs sm:text-sm sm:items-end">
-                <div className="flex items-baseline gap-2">
-                  <span className="ds-eyebrow">период с</span>
-                  <span
-                    className="ds-mono font-semibold"
-                    style={{ color: 'var(--cp-paper)' }}
-                  >
-                    {formatDate(data.period_start)}
-                  </span>
-                </div>
-                <div className="flex items-baseline gap-2 flex-wrap">
-                  <span className="ds-eyebrow">оплачен до</span>
-                  <span
-                    className="ds-mono font-semibold"
-                    style={{ color: 'var(--cp-paper)' }}
-                  >
-                    {formatDate(data.paid_until)}
-                  </span>
-                  {daysLeftInPeriod !== null && (
+                  inline so the user doesn't have to compute the period length.
+                  При status='inactive' без paid_at дат ещё нет — скрываем блок,
+                  чтобы не мозолить глаз заглушками «период с DD.MM.YYYY / —». */}
+              {!(data.status === 'inactive' && !data.paid_at) && (
+                <div className="flex flex-col gap-1.5 text-xs sm:text-sm sm:items-end">
+                  <div className="flex items-baseline gap-2">
+                    <span className="ds-eyebrow">период с</span>
                     <span
-                      className="ds-mono text-xs"
-                      style={{ color: 'var(--cp-paper-mute)' }}
+                      className="ds-mono font-semibold"
+                      style={{ color: 'var(--cp-paper)' }}
                     >
-                      ({daysLeftInPeriod} {plural(daysLeftInPeriod, 'день', 'дня', 'дней')})
+                      {formatDate(data.period_start)}
                     </span>
-                  )}
+                  </div>
+                  <div className="flex items-baseline gap-2 flex-wrap">
+                    <span className="ds-eyebrow">оплачен до</span>
+                    <span
+                      className="ds-mono font-semibold"
+                      style={{ color: 'var(--cp-paper)' }}
+                    >
+                      {formatDate(data.paid_until)}
+                    </span>
+                    {daysLeftInPeriod !== null && (
+                      <span
+                        className="ds-mono text-xs"
+                        style={{ color: 'var(--cp-paper-mute)' }}
+                      >
+                        ({daysLeftInPeriod} {plural(daysLeftInPeriod, 'день', 'дня', 'дней')})
+                      </span>
+                    )}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
             {/* The faux "N из M единиц" total has been deleted — see critique
                 2026-05-24: cannot sum контакты + запросы + AI-цепочки as one
@@ -873,22 +891,86 @@ function LimitRow({
   );
 }
 
+type PaidTariff = 'standard' | 'pro';
+type TariffChoice = PaidTariff | 'custom';
+type PeriodKey = 'month' | 'quarter' | 'half_year' | 'year';
+
+const PERIOD_MONTHS: Record<PeriodKey, number> = { month: 1, quarter: 3, half_year: 6, year: 12 };
+const PERIOD_DISCOUNT: Record<PeriodKey, number> = { month: 1, quarter: 1, half_year: 0.9, year: 0.8 };
+const PERIOD_LABEL: Record<PeriodKey, string> = {
+  month: '1 месяц',
+  quarter: '3 месяца',
+  half_year: '6 месяцев',
+  year: '12 месяцев',
+};
+const MONTHLY_BASE: Record<PaidTariff, number> = { standard: 40_000, pro: 65_000 };
+
+interface TariffCardSpec {
+  id: TariffChoice;
+  label: string;
+  badge?: string;
+  summary: string;
+  features: string[];
+  included: string;
+}
+
+const TARIFF_CARDS: TariffCardSpec[] = [
+  {
+    id: 'standard',
+    label: 'Запуск',
+    summary: 'Запустить outbound и выйти на первые встречи.',
+    features: [
+      'быстрый запуск',
+      'базовая настройка инфраструктуры',
+      'прогрев почт',
+      'аудит вашего аутрича',
+    ],
+    included: '10 000 контактов, 16 почт',
+  },
+  {
+    id: 'pro',
+    label: 'Поток',
+    badge: 'чаще берут',
+    summary: 'Больше объёма и плотное сопровождение для предсказуемого потока встреч.',
+    features: [
+      'запуск и настройка системы',
+      'прогрев инфраструктуры',
+      'настройка первых цепочек',
+      'аудит outbound-процессов',
+    ],
+    included: '20 000 контактов, 32 почты',
+  },
+  {
+    id: 'custom',
+    label: 'Масштаб',
+    summary: 'Для команд с большими объёмами и своих аутрич-отделов.',
+    features: [
+      'объём под задачу',
+      'выделенный менеджер',
+      'стратегия масштабирования outbound',
+      'перенос инфраструктуры',
+      'резерв доменов и почт',
+    ],
+    included: 'мощность подбираем под объём отправки',
+  },
+];
+
 function TariffSelectionWidget() {
-  const [tariff, setTariff] = useState<'standard' | 'pro'>('standard');
-  const [period, setPeriod] = useState<'month' | 'quarter' | 'half_year' | 'year'>('month');
+  const [tariff, setTariff] = useState<TariffChoice>('pro');
+  // Дефолт — 1 месяц (минимальный entry-point). Период «3 мес»/quarter мы
+  // оставили в BillingPeriod (старые подписки могут на нём сидеть), но в UI
+  // саморегистрации не показываем — клиент выбирает 1 / 6 / 12 мес.
+  const [period, setPeriod] = useState<PeriodKey>('month');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const priceTable: Record<'standard' | 'pro', number> = { standard: 40_000, pro: 80_000 };
-  const periodMonths: Record<'month' | 'quarter' | 'half_year' | 'year', number> = {
-    month: 1, quarter: 3, half_year: 6, year: 12,
-  };
-  const periodLabel: Record<'month' | 'quarter' | 'half_year' | 'year', string> = {
-    month: '1 месяц', quarter: '3 месяца', half_year: '6 месяцев', year: '1 год',
-  };
-  const amount = priceTable[tariff] * periodMonths[period];
+  const isPaid = tariff !== 'custom';
+  const monthly = isPaid ? Math.round(MONTHLY_BASE[tariff as PaidTariff] * PERIOD_DISCOUNT[period]) : null;
+  const total = monthly !== null ? monthly * PERIOD_MONTHS[period] : null;
+  const discountPct = Math.round((1 - PERIOD_DISCOUNT[period]) * 100);
 
   const handlePay = async () => {
+    if (!isPaid) return;
     setLoading(true);
     setError(null);
     try {
@@ -909,55 +991,186 @@ function TariffSelectionWidget() {
   };
 
   return (
-    <section className="mb-6 rounded-2xl border border-indigo-200 bg-indigo-50/40 p-5">
-      <h2 className="text-base font-semibold text-gray-900 mb-1">Выберите тариф</h2>
-      <p className="text-xs text-gray-600 mb-4">После оплаты — 15 дней прогрев почт, затем активный период.</p>
-
-      <div className="grid sm:grid-cols-2 gap-3 mb-4">
-        <button
-          type="button"
-          onClick={() => setTariff('standard')}
-          className={`text-left rounded-xl border px-4 py-3 transition ${tariff === 'standard' ? 'border-indigo-500 bg-white shadow' : 'border-gray-200 bg-white/60'}`}
-        >
-          <p className="font-semibold text-gray-900">Стандарт</p>
-          <p className="text-xs text-gray-600">40 000 ₽/мес · 10 000 контактов, 16 почт</p>
-        </button>
-        <button
-          type="button"
-          onClick={() => setTariff('pro')}
-          className={`text-left rounded-xl border px-4 py-3 transition ${tariff === 'pro' ? 'border-indigo-500 bg-white shadow' : 'border-gray-200 bg-white/60'}`}
-        >
-          <p className="font-semibold text-gray-900">Про</p>
-          <p className="text-xs text-gray-600">80 000 ₽/мес · 20 000 контактов, 32 почты</p>
-        </button>
+    <section
+      className="mb-8 rounded-2xl p-5 sm:p-7"
+      style={{
+        background: 'var(--cp-surface-rest)',
+        border: '1px solid var(--cp-divider)',
+      }}
+    >
+      <div className="mb-5">
+        <h2 className="text-lg font-semibold tracking-tight" style={{ color: 'var(--cp-paper)' }}>
+          Выберите тариф
+        </h2>
+        <p className="mt-1 text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+          После оплаты — 15 дней прогрев почт, затем активный период.
+        </p>
       </div>
 
-      <div className="flex flex-wrap gap-2 mb-4">
-        {(['month', 'quarter', 'half_year', 'year'] as const).map((p) => (
-          <button
-            key={p}
-            type="button"
-            onClick={() => setPeriod(p)}
-            className={`rounded-full border px-3 py-1.5 text-xs font-medium ${period === p ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-gray-200 bg-white text-gray-700'}`}
-          >
-            {periodLabel[p]}
-          </button>
-        ))}
+      {/* Period selector */}
+      <div className="mb-6 inline-flex rounded-lg p-0.5" style={{ background: 'var(--cp-surface-elev)' }}>
+        {(['month', 'half_year', 'year'] as const).map((p) => {
+          const active = period === p;
+          const pct = Math.round((1 - PERIOD_DISCOUNT[p]) * 100);
+          return (
+            <button
+              key={p}
+              type="button"
+              onClick={() => setPeriod(p)}
+              className="px-3.5 py-1.5 rounded-md text-xs font-medium transition flex items-center gap-1.5"
+              style={{
+                background: active ? 'var(--cp-paper)' : 'transparent',
+                color: active ? 'var(--cp-ink)' : 'var(--cp-paper-mute)',
+              }}
+            >
+              {PERIOD_LABEL[p]}
+              {pct > 0 && (
+                <span
+                  className="text-[10px] font-semibold"
+                  style={{ color: active ? 'var(--cp-amber)' : 'var(--cp-amber)' }}
+                >
+                  −{pct}%
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
-      <div className="flex items-center justify-between border-t border-indigo-100 pt-3">
-        <p className="text-sm text-gray-700">К оплате: <span className="font-semibold text-gray-900">{amount.toLocaleString('ru-RU')} ₽</span></p>
-        <button
-          onClick={handlePay}
-          disabled={loading}
-          className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
-        >
-          {loading ? 'Создаём счёт…' : 'Оплатить через ЮKassa'}
-        </button>
+      {/* 3 cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        {TARIFF_CARDS.map((card) => {
+          const isSelected = tariff === card.id;
+          const cardMonthly = card.id === 'custom'
+            ? null
+            : Math.round(MONTHLY_BASE[card.id as PaidTariff] * PERIOD_DISCOUNT[period]);
+          const cardTotal = cardMonthly !== null ? cardMonthly * PERIOD_MONTHS[period] : null;
+
+          return (
+            <button
+              key={card.id}
+              type="button"
+              onClick={() => setTariff(card.id)}
+              className="text-left rounded-xl p-5 transition flex flex-col gap-3"
+              style={{
+                background: isSelected ? 'var(--cp-surface-active)' : 'var(--cp-surface-elev)',
+                border: `1px solid ${isSelected ? 'var(--cp-paper)' : 'var(--cp-divider)'}`,
+                opacity: isSelected ? 1 : 0.85,
+              }}
+            >
+              <div className="flex items-start justify-between">
+                <p
+                  className="text-[11px] font-semibold uppercase tracking-wider"
+                  style={{ color: 'var(--cp-paper-mute)' }}
+                >
+                  {card.label}
+                </p>
+                {card.badge && (
+                  <span
+                    className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                    style={{
+                      color: 'var(--cp-ink)',
+                      background: 'var(--cp-amber)',
+                    }}
+                  >
+                    {card.badge}
+                  </span>
+                )}
+              </div>
+
+              <div>
+                {cardMonthly !== null ? (
+                  <>
+                    <p className="text-3xl font-bold tabular-nums" style={{ color: 'var(--cp-paper)' }}>
+                      {cardMonthly.toLocaleString('ru-RU')} ₽
+                      <span className="ml-1 text-xs font-normal" style={{ color: 'var(--cp-paper-mute)' }}>/мес</span>
+                    </p>
+                    {cardTotal !== null && PERIOD_MONTHS[period] > 1 && (
+                      <p className="mt-1 text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                        {cardTotal.toLocaleString('ru-RU')} ₽ за {PERIOD_LABEL[period].toLowerCase()}
+                        {discountPct > 0 && (
+                          <span className="ml-1.5" style={{ color: 'var(--cp-amber)' }}>−{discountPct}%</span>
+                        )}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-2xl font-bold" style={{ color: 'var(--cp-paper)' }}>Индивидуально</p>
+                )}
+              </div>
+
+              <p className="text-xs leading-relaxed" style={{ color: 'var(--cp-paper-mute)' }}>
+                {card.summary}
+              </p>
+
+              <ul className="text-xs space-y-1 mt-1" style={{ color: 'var(--cp-paper)' }}>
+                {card.features.map((f) => (
+                  <li key={f}>· {f}</li>
+                ))}
+              </ul>
+
+              <p className="text-[11px] mt-auto pt-2" style={{ color: 'var(--cp-paper-faint)' }}>
+                Включено: {card.included}
+              </p>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Pay button row */}
+      <div
+        className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-4"
+        style={{ borderTop: '1px solid var(--cp-divider)' }}
+      >
+        {isPaid && total !== null ? (
+          <>
+            <p className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
+              К оплате:{' '}
+              <span className="font-semibold tabular-nums" style={{ color: 'var(--cp-paper)' }}>
+                {total.toLocaleString('ru-RU')} ₽
+              </span>
+              <span className="ml-2 text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
+                за {PERIOD_LABEL[period].toLowerCase()}
+              </span>
+            </p>
+            <button
+              type="button"
+              onClick={handlePay}
+              disabled={loading}
+              className="rounded-lg px-6 py-2.5 text-sm font-semibold transition disabled:opacity-60"
+              style={{
+                background: 'var(--cp-paper)',
+                color: 'var(--cp-ink)',
+              }}
+            >
+              {loading ? 'Создаём счёт…' : 'Оплатить'}
+            </button>
+          </>
+        ) : (
+          <>
+            <p className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
+              Для масштабных задач — пишите менеджеру в Telegram.
+            </p>
+            <a
+              href="https://t.me/ROP_PolzaAgency"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center justify-center rounded-lg px-6 py-2.5 text-sm font-semibold transition"
+              style={{
+                background: 'var(--cp-paper)',
+                color: 'var(--cp-ink)',
+              }}
+            >
+              Обсудить задачу
+            </a>
+          </>
+        )}
       </div>
 
       {error && (
-        <p className="mt-2 text-xs text-red-700">{error}</p>
+        <p className="mt-3 text-xs" style={{ color: 'var(--cp-red)' }}>
+          {error}
+        </p>
       )}
     </section>
   );

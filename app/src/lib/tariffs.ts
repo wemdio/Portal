@@ -37,10 +37,11 @@ export type BillingPeriod = 'month' | 'quarter' | 'half_year' | 'year';
 /**
  * Цены тарифов за месяц для выставления счёта (отличаются от цен автопродления
  * в /api/cron/auto-renew). Custom — сумма проставляется вручную.
+ * Выровнено с outreachos.pro лендингом 23.06.2026: ЗАПУСК=40k, ПОТОК=65k.
  */
 export const TARIFF_MONTHLY_PRICE: Record<'standard' | 'pro', number> = {
   standard: 40_000,
-  pro: 80_000,
+  pro: 65_000,
 };
 
 /** Множители месяцев для периодов оплаты (без скидок). */
@@ -52,12 +53,24 @@ export const BILLING_PERIOD_MONTHS: Record<BillingPeriod, number> = {
 };
 
 /**
- * Считает сумму к оплате за выбранный период. Для custom возвращает null —
- * сумма проставляется вручную при выставлении счёта.
+ * Скидка по периоду (множитель к итоговой сумме). 6 мес = -10%, 12 мес = -20%.
+ * Месяц и квартал — без скидки. Выровнено с outreachos.pro лендингом.
+ */
+export const BILLING_PERIOD_DISCOUNT: Record<BillingPeriod, number> = {
+  month: 1,
+  quarter: 1,
+  half_year: 0.9,
+  year: 0.8,
+};
+
+/**
+ * Считает сумму к оплате за выбранный период с учётом скидки. Для custom
+ * возвращает null — сумма проставляется вручную при выставлении счёта.
  */
 export function calcBillingAmount(tariff: TariffType, period: BillingPeriod): number | null {
   if (tariff === 'custom') return null;
-  return TARIFF_MONTHLY_PRICE[tariff] * BILLING_PERIOD_MONTHS[period];
+  const base = TARIFF_MONTHLY_PRICE[tariff] * BILLING_PERIOD_MONTHS[period];
+  return Math.round(base * BILLING_PERIOD_DISCOUNT[period]);
 }
 
 export type ClientTariffRow = {

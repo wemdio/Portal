@@ -37,10 +37,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Пароль должен быть от 8 символов' }, { status: 400 });
   }
 
+  // Триггер public.handle_new_user (см. supabase/migrations/20260204_0002_*)
+  // автоматически создаёт строку в profiles при INSERT в auth.users.
+  // Он читает role из raw_user_meta_data — поэтому передаём user_metadata,
+  // а сами в profiles не лезем (иначе primary key conflict — что и было
+  // в проде 23.06: «Ошибка создания профиля», 500).
   const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
     email,
     password,
     email_confirm: true,
+    user_metadata: { role: 'client' },
   });
 
   if (createErr || !created?.user) {
@@ -54,12 +60,16 @@ export async function POST(req: NextRequest) {
 
   const userId = created.user.id;
 
+  // Defense-in-depth: если триггер по какой-то причине не сработал или
+  // сработал с role='technician' (старый формат raw_user_meta_data) — добиваем
+  // нужную роль через update. Идемпотентно: если уже client — no-op.
   const { error: profileErr } = await supabaseAdmin
     .from('profiles')
-    .insert({ id: userId, email, role: 'client', locale: 'ru' });
+    .update({ role: 'client', locale: 'ru' })
+    .eq('id', userId);
   if (profileErr) {
-    await logError('signup.profile_insert_failed', profileErr, { userId });
-    return NextResponse.json({ error: 'Ошибка создания профиля' }, { status: 500 });
+    await logError('signup.profile_update_failed', profileErr, { userId });
+    return NextResponse.json({ error: 'Ошибка обновления профиля' }, { status: 500 });
   }
 
   const { error: tariffErr } = await supabaseAdmin

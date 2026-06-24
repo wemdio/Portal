@@ -74,6 +74,7 @@ jobs:
           build-args: |
             NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
             NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+            NEXT_PUBLIC_SIGNUP_HOSTS=${{ vars.NEXT_PUBLIC_SIGNUP_HOSTS }}
 
       - name: Push worker image to Docker Hub
         uses: docker/build-push-action@v6

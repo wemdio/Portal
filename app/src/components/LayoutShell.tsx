@@ -102,9 +102,15 @@ export function LayoutShell({
   // they can't use, and an authenticated user gets a clean printable-feeling
   // legal page instead of the page nested inside the workflow shell.
   const isOfferPage = pathname === '/offer';
-  const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || isClientPortal || isOfferPage;
+  // /signup — публичная страница саморегистрации (см. middleware.ts isPublicPath
+  // + app/signup/page.tsx). Должна быть чистым standalone-листом без TopNav и
+  // sidebar, как /offer и /login. Залогиненного юзера middleware и так уводит
+  // отсюда на /client или /, но если он сюда всё же попал (стейл-кука, прямой
+  // переход) — не показываем ему портальную обвязку поверх формы регистрации.
+  const isSignupPage = pathname === '/signup';
+  const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || isClientPortal || isOfferPage || isSignupPage;
 
-  if (isClientPortal || isOfferPage) {
+  if (isClientPortal || isOfferPage || isSignupPage) {
     return <>{children}</>;
   }
 
@@ -163,7 +169,7 @@ export function LayoutShell({
     {/* Плавающий помощник по инструментам — только для авторизованного портала.
         Прячем на чужих/гостевых/служебных страницах, где /api/tools-assistant
         всё равно вернёт 401. */}
-    {!isTma && !hideNav && pathname !== '/login' && <ToolsAssistant />}
+    {!isTma && !hideNav && pathname !== '/login' && pathname !== '/signup' && <ToolsAssistant />}
     </PortalLoadingProvider>
     </UserProvider>
     </>
