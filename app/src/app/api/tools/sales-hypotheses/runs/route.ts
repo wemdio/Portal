@@ -155,7 +155,14 @@ export async function POST(req: NextRequest) {
       } catch (err) {
         if (err instanceof WebsiteFetchError) {
           await logError('tools.sales-hypotheses.autofill.fetch_failed', err, { userId, website: rawInput });
-          return jsonError(err.message, 502);
+          // 403/недоступность часто = анти-бот защита сайта (mod_dp и т.п.):
+          // зафетчить его с сервера нельзя ни с каким User-Agent. Подсказываем
+          // сейлзу query-режим — он не заходит на сайт.
+          return jsonError(
+            `Не удалось зайти на сайт: ${err.message} Возможно, сайт защищён от ботов или недоступен с сервера. ` +
+              'Вставьте вместо ссылки короткое описание компании или запрос — AI соберёт гипотезы без захода на сайт.',
+            502,
+          );
         }
         if (err instanceof AutofillTruncatedError) {
           await logError('tools.sales-hypotheses.autofill.truncated', err, { userId, website: rawInput });
