@@ -20,7 +20,9 @@ function mockDb(rows: Row[], error: { message: string } | null = null) {
     }),
     pattern: () => captured,
   };
-  return db as any;
+  // Структурный мок только под аргумент db — каст к типу третьего параметра
+  // (через Parameters, чтобы не экспортировать DomainDb), без any (eslint).
+  return db as unknown as Parameters<typeof resolveCompanyDomainViaPdl>[2];
 }
 
 describe('resolveCompanyDomainViaPdl', () => {
