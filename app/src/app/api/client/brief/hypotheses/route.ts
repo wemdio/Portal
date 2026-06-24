@@ -20,13 +20,14 @@ interface BriefRow {
   lead_source_hypotheses: string | null;
   lead_source_hypotheses_generated_at: string | null;
   lead_source_hypotheses_error: string | null;
+  lead_source_hypotheses_stale: boolean;
 }
 
 async function loadBrief(userId: string): Promise<BriefRow | null> {
   if (!supabaseInstantly) return null;
   const { data } = await supabaseInstantly
     .from('client_briefs')
-    .select('id, fields, lead_source_hypotheses, lead_source_hypotheses_generated_at, lead_source_hypotheses_error')
+    .select('id, fields, lead_source_hypotheses, lead_source_hypotheses_generated_at, lead_source_hypotheses_error, lead_source_hypotheses_stale')
     .eq('client_user_id', userId)
     .maybeSingle();
   return (data as BriefRow | null) ?? null;
@@ -43,6 +44,7 @@ export async function GET(req: NextRequest) {
     lead_source_hypotheses: brief?.lead_source_hypotheses ?? null,
     lead_source_hypotheses_generated_at: brief?.lead_source_hypotheses_generated_at ?? null,
     lead_source_hypotheses_error: brief?.lead_source_hypotheses_error ?? null,
+    lead_source_hypotheses_stale: brief?.lead_source_hypotheses_stale ?? false,
   });
 }
 
@@ -74,6 +76,7 @@ export async function POST(req: NextRequest) {
         lead_source_hypotheses: brief.lead_source_hypotheses,
         lead_source_hypotheses_generated_at: brief.lead_source_hypotheses_generated_at,
         lead_source_hypotheses_error: null,
+        lead_source_hypotheses_stale: brief.lead_source_hypotheses_stale,
       });
     }
 
@@ -108,6 +111,8 @@ export async function POST(req: NextRequest) {
         lead_source_hypotheses: hypotheses,
         lead_source_hypotheses_generated_at: generatedAt ?? brief.lead_source_hypotheses_generated_at,
         lead_source_hypotheses_error: errorMessage,
+        // Just (re)generated against the current brief → no longer stale.
+        lead_source_hypotheses_stale: false,
       })
       .eq('client_user_id', userId);
 
@@ -145,6 +150,7 @@ export async function POST(req: NextRequest) {
       lead_source_hypotheses: hypotheses,
       lead_source_hypotheses_generated_at: generatedAt,
       lead_source_hypotheses_error: null,
+      lead_source_hypotheses_stale: false,
       regenerated: regenerate,
     });
   } catch (err) {
