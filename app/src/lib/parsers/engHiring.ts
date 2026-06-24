@@ -6,9 +6,9 @@ import {
 } from '@/lib/jobs/atsCompanyParser';
 import { ATS_COUNTRIES, buildCountryRegex, buildRolesRegex } from '@/lib/parsers/atsFilters';
 
-export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee' | 'breezy' | 'workday' | 'smartrecruiters' | 'teamtailor';
+export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee' | 'breezy' | 'workday' | 'smartrecruiters' | 'teamtailor' | 'jobhive';
 
-export const ENG_HIRING_SOURCES: EngHiringSource[] = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday', 'smartrecruiters', 'teamtailor'];
+export const ENG_HIRING_SOURCES: EngHiringSource[] = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday', 'smartrecruiters', 'teamtailor', 'jobhive'];
 
 // Sources whose LIST endpoint exposes no posting date at all (BambooHR
 // /careers/list). For these, published_at=null is not a freshness signal — the
@@ -181,7 +181,7 @@ function decodeHtmlEntitiesOnce(text: string): string {
     .replace(/&amp;/gi, '&');
 }
 
-function cleanHtml(value: unknown): string {
+export function cleanHtml(value: unknown): string {
   const stripped = String(value ?? '')
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')

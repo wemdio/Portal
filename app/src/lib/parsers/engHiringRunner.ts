@@ -633,6 +633,12 @@ async function enrichVacancyDetails(
   }
 }
 
+// Sources populated out-of-band by a dedicated bulk ingest (worker/jobhiveIngestCron),
+// not by per-board fetching. The run treats them as cache-only: it queries + filters +
+// dedups + enriches their cached rows downstream, but never fetches boards or opens a
+// cache run for them.
+const CACHE_ONLY_SOURCES = new Set<EngHiringSource>(['jobhive']);
+
 async function ensureCache(
   db: Db,
   config: EngHiringSearchConfig,
@@ -656,6 +662,8 @@ async function ensureCache(
 
   for (let i = 0; i < sources.length; i += 1) {
     const source = sources[i];
+    // Bulk sources are filled by their own ingest job — never fetch their boards here.
+    if (CACHE_ONLY_SOURCES.has(source)) continue;
     await ensureNotCancelled();
     const needs = await sourceNeedsRefresh(db, source, limit, maxAgeHours);
     if (!needs) continue;
