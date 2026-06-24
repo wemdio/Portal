@@ -49,6 +49,9 @@ function formatDate(iso: string): string {
   }
 }
 
+// Метка прогона для истории/шапки. Для сайта — короткий хост; для прогона по
+// запросу (resolvedUrl=null) — сам текст запроса (regex'ы для http-префикса и
+// слеша на нём просто no-op). В истории обрезается классом `truncate`.
 function prettyHost(run: SalesHypothesesRunDTO): string {
   const raw = run.resolvedUrl || run.website;
   return raw.replace(/^https?:\/\/(www\.)?/i, '').replace(/\/$/, '');
@@ -213,7 +216,7 @@ export function SalesHypothesesView() {
           <Lightbulb className="h-5 w-5" aria-hidden />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Гипотезы по сайту</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Гипотезы (сайт или запрос)</h1>
           <p className="text-sm text-gray-500">
             Вставьте сайт компании или опишите запрос — AI соберёт бриф и предложит 5–10 гипотез по сбору базы.
           </p>

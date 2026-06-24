@@ -83,6 +83,7 @@ export async function POST(req: NextRequest) {
         let resolvedUrl: string | null = null;
         let briefFields: typeof EMPTY_BRIEF_FIELDS | null = null;
         let questions: string[] = [];
+        let filledFields: string[] = [];
 
         if (isWebsite) {
           const result = await generateBriefAutofill({
@@ -101,6 +102,7 @@ export async function POST(req: NextRequest) {
           resolvedUrl = result.resolvedUrl ?? null;
           briefFields = mergedFields;
           questions = result.questions ?? [];
+          filledFields = Object.keys(result.patch);
         } else {
           // Свободный запрос: разворачиваем в мини-бриф (аналог autofill, но из
           // текста). Если развёртка не удалась — откатываемся на сырой запрос:
@@ -112,6 +114,11 @@ export async function POST(req: NextRequest) {
               signal: controller.signal,
             });
           } catch (expandErr) {
+            // Таймаут (AbortError) пробрасываем наружу → отдадим 504, как
+            // website-путь. Откат на сырой запрос — только для НАСТОЯЩИХ ошибок
+            // модели (4xx/5xx/пустой ответ), а не для подвисшего вызова, иначе
+            // зависший AI маскируется под успех с сырым запросом вместо брифа.
+            if (expandErr instanceof Error && expandErr.name === 'AbortError') throw expandErr;
             await logError('tools.sales-hypotheses.query.expand_failed', expandErr, { userId });
             briefText = rawInput;
           }
@@ -140,6 +147,7 @@ export async function POST(req: NextRequest) {
           userId,
           kind: isWebsite ? 'website' : 'query',
           resolvedUrl,
+          filledFields,
           questionsCount: questions.length,
         });
 
@@ -161,7 +169,12 @@ export async function POST(req: NextRequest) {
             504,
           );
         }
-        await logError('tools.sales-hypotheses.autofill.failed', err, { userId, website: rawInput });
+        await logError('tools.sales-hypotheses.autofill.failed', err, {
+          userId,
+          // На query-пути rawInput — свободный текст (возможны имена клиентов):
+          // в лог пишем урезанно, как и success-аудит не пишет сырой запрос.
+          website: isWebsite ? rawInput : rawInput.slice(0, 80),
+        });
         const message = err instanceof Error
           ? (isWebsite ? `Не удалось проанализировать сайт: ${err.message}` : `Не удалось обработать запрос: ${err.message}`)
           : 'AI не ответил';
