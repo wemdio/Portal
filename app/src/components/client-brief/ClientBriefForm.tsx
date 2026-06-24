@@ -11,6 +11,7 @@ import {
   SOCIAL_PROOF_LABELS,
   ALLOWED_PRICE_TIERS,
   normalizeBriefFields,
+  compileBriefText,
 } from '@/lib/clientBrief';
 import type {
   ClientBriefFields,
@@ -51,6 +52,7 @@ interface HypothesesApiResponse {
   lead_source_hypotheses: string | null;
   lead_source_hypotheses_generated_at: string | null;
   lead_source_hypotheses_error: string | null;
+  lead_source_hypotheses_stale?: boolean;
 }
 
 interface BriefApiResponse {
@@ -242,6 +244,7 @@ interface HypothesesSectionProps {
   error: string | null;
   generating: boolean;
   briefSaved: boolean;
+  stale: boolean;
   onGenerate: () => void;
 }
 
@@ -251,6 +254,7 @@ function HypothesesSection({
   error,
   generating,
   briefSaved,
+  stale,
   onGenerate,
 }: HypothesesSectionProps) {
   const hasResult = !!text;
@@ -333,6 +337,23 @@ function HypothesesSection({
 
         {hasResult && (
           <div className="space-y-2">
+            {stale && (
+              <div
+                className="flex items-start gap-2.5 rounded-md px-4 py-3 text-sm"
+                style={statusBoxStyle}
+                role="alert"
+              >
+                <span
+                  aria-hidden
+                  className="ds-status-dot shrink-0"
+                  style={{ background: 'var(--cp-amber)', marginTop: '7px' }}
+                />
+                <span style={{ color: 'var(--cp-paper)' }}>
+                  Бриф изменился после генерации — рекомендации устарели. Нажмите
+                  «Сгенерировать заново», чтобы обновить их под текущий бриф.
+                </span>
+              </div>
+            )}
             {formattedAt && (
               <p className="text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
                 Сгенерировано: {formattedAt}
@@ -371,6 +392,7 @@ export function ClientBriefForm({
   const [fields, setFields] = useState<ClientBriefFields>(EMPTY_BRIEF_FIELDS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [error, setError] = useState('');
   const [savedAt, setSavedAt] = useState<string | null>(null);
 
@@ -379,6 +401,7 @@ export function ClientBriefForm({
   const [hypothesesAt, setHypothesesAt] = useState<string | null>(null);
   const [hypothesesError, setHypothesesError] = useState<string | null>(null);
   const [hypothesesGenerating, setHypothesesGenerating] = useState(false);
+  const [hypothesesStale, setHypothesesStale] = useState(false);
   // Tracks "we already auto-triggered after a save" to avoid loops on errors.
   const autoTriggeredRef = useRef(false);
 
@@ -440,6 +463,7 @@ export function ClientBriefForm({
         setHypothesesText(data.lead_source_hypotheses);
         setHypothesesAt(data.lead_source_hypotheses_generated_at);
         setHypothesesError(data.lead_source_hypotheses_error);
+        setHypothesesStale(data.lead_source_hypotheses_stale ?? false);
       } catch (err) {
         if (!cancelled) {
           void logError(`${auditPrefix}.hypotheses.load.failed`, err);
@@ -462,6 +486,7 @@ export function ClientBriefForm({
         setHypothesesText(data.lead_source_hypotheses);
         setHypothesesAt(data.lead_source_hypotheses_generated_at);
         setHypothesesError(data.lead_source_hypotheses_error);
+        setHypothesesStale(data.lead_source_hypotheses_stale ?? false);
         if (data.lead_source_hypotheses) {
           void logAudit(`${auditPrefix}.hypotheses.generated`, 'Hypotheses generated', {
             regenerate: !!opts.regenerate,
@@ -491,21 +516,69 @@ export function ClientBriefForm({
       }
       void logAudit(`${auditPrefix}.save.success`, 'Brief saved');
 
-      // Auto-trigger hypotheses generation on first save (no existing result, no recent error).
-      if (
-        hypothesesEndpoint &&
-        !hypothesesText &&
-        !hypothesesError &&
-        !autoTriggeredRef.current
-      ) {
-        autoTriggeredRef.current = true;
-        void generateHypotheses();
+      // Keep the recommendations panel in sync with what the server just did:
+      // an EMPTY save wipes them (mirror handleClearAll) — otherwise a
+      // hand-cleared «Сохранить» would leave deleted recs on screen under a
+      // misleading «устарели» banner until reload; a NON-empty edit marks
+      // existing recs stale and, on the first one, kicks off generation.
+      if (!compileBriefText(fields).trim()) {
+        setHypothesesText(null);
+        setHypothesesAt(null);
+        setHypothesesError(null);
+        setHypothesesStale(false);
+        autoTriggeredRef.current = false;
+      } else {
+        if (hypothesesText) setHypothesesStale(true);
+        if (
+          hypothesesEndpoint &&
+          !hypothesesText &&
+          !hypothesesError &&
+          !autoTriggeredRef.current
+        ) {
+          autoTriggeredRef.current = true;
+          void generateHypotheses();
+        }
       }
     } catch (err) {
       void logError(`${auditPrefix}.save.failed`, err);
       setError(err instanceof Error ? err.message : 'Ошибка сохранения');
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Wipe the whole brief in one click — for when the client repurposes the slot
+  // for a new project (e.g. changed the website) and wants a clean slate instead
+  // of clearing each field by hand. Saving an empty brief also clears the stored
+  // lead-source recommendations server-side, so old suggestions don't linger.
+  async function handleClearAll() {
+    if (
+      typeof window !== 'undefined' &&
+      !window.confirm('Очистить весь бриф? Все поля и сгенерированные рекомендации будут удалены. Действие необратимо.')
+    ) {
+      return;
+    }
+    setClearing(true);
+    setError('');
+    try {
+      const data = await apiFetch<BriefApiResponse>(endpoint, {
+        method: 'PUT',
+        body: JSON.stringify({ fields: EMPTY_BRIEF_FIELDS }),
+      });
+      setFields(data.brief ? normalizeBriefFields(data.brief.fields) : EMPTY_BRIEF_FIELDS);
+      if (data.brief) setSavedAt(data.brief.updated_at);
+      // Recommendations are wiped server-side on an empty save — clear the display too.
+      setHypothesesText(null);
+      setHypothesesAt(null);
+      setHypothesesError(null);
+      setHypothesesStale(false);
+      autoTriggeredRef.current = false;
+      void logAudit(`${auditPrefix}.clear.success`, 'Brief cleared');
+    } catch (err) {
+      void logError(`${auditPrefix}.clear.failed`, err);
+      setError(err instanceof Error ? err.message : 'Не удалось очистить бриф');
+    } finally {
+      setClearing(false);
     }
   }
 
@@ -808,6 +881,7 @@ export function ClientBriefForm({
           error={hypothesesError}
           generating={hypothesesGenerating}
           briefSaved={!!savedAt}
+          stale={hypothesesStale}
           onGenerate={() => void generateHypotheses({ regenerate: !!hypothesesText })}
         />
       )}
@@ -823,8 +897,17 @@ export function ClientBriefForm({
         )}
         <button
           type="button"
+          onClick={() => void handleClearAll()}
+          disabled={saving || clearing}
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-gray-200 px-4 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:opacity-50"
+        >
+          {clearing && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
+          {clearing ? 'Очистка...' : 'Очистить бриф'}
+        </button>
+        <button
+          type="button"
           onClick={() => void handleSave()}
-          disabled={saving}
+          disabled={saving || clearing}
           className="ds-btn-primary inline-flex h-10 items-center justify-center gap-2 px-6"
         >
           {saving && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}

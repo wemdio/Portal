@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { blockNonInternal } from '@/lib/ai-caller/requireInternal';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,6 +10,9 @@ const VAPI_KEY = process.env.VAPI_API_KEY ?? '';
 
 /** POST — send call recording as a voice message to Telegram */
 export async function POST(req: NextRequest) {
+  const blocked = await blockNonInternal(req);
+  if (blocked) return blocked;
+
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 

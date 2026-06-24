@@ -73,17 +73,25 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
   const validation = validateBriefInput(fields);
   if (!validation.ok) return jsonError(validation.error, 400);
 
+  // Clearing the brief also wipes stored lead-source recommendations (same as
+  // the client-facing route), so they don't linger after the data is erased.
+  const compiled = compileBriefText(fields).trim();
+  const upsertPayload: Record<string, unknown> = {
+    client_user_id: clientUserId,
+    fields,
+    created_by: user.id,
+    updated_by: user.id,
+    lead_source_hypotheses_stale: !!compiled,
+  };
+  if (!compiled) {
+    upsertPayload.lead_source_hypotheses = null;
+    upsertPayload.lead_source_hypotheses_generated_at = null;
+    upsertPayload.lead_source_hypotheses_error = null;
+  }
+
   const { data, error } = await supabaseInstantly
     .from('client_briefs')
-    .upsert(
-      {
-        client_user_id: clientUserId,
-        fields,
-        created_by: user.id,
-        updated_by: user.id,
-      },
-      { onConflict: 'client_user_id' },
-    )
+    .upsert(upsertPayload, { onConflict: 'client_user_id' })
     .select('id, fields, pdf_file_name, pdf_uploaded_at, updated_at')
     .single();
 

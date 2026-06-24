@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { blockDemo } from '@/lib/auth/blockDemo';
 import { withToolTrace } from '@/lib/toolTrace';
 import { extractEmail, findColumnIndex } from '@/lib/tools/dfybUtils';
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
@@ -8,9 +10,9 @@ const admin = supabaseAdmin!;
 
 async function getUser(req: NextRequest) {
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
-  if (!token) return null;
+  if (!token) return { user: null, token: null };
   const { data } = await admin.auth.getUser(token);
-  return data.user;
+  return { user: data.user, token };
 }
 
 /**
@@ -138,8 +140,14 @@ export async function GET(
   return withToolTrace(
     { request: req, operation: 'tools.base-constructor.by-id.get' },
     async () => {
-      const user = await getUser(req);
+      const { user, token } = await getUser(req);
       if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+      // This GET triggers autoCompleteIfStuck() which MUTATES / resumes jobs — a
+      // hidden side effect, so it must be demo-gated like the mutating handlers.
+      const supabase = createAuthedSupabaseClient(token!);
+      const demo = await blockDemo(supabase, user.id);
+      if (demo) return demo;
 
       const { id } = await params;
       await autoCompleteIfStuck(id).catch((err) =>
@@ -166,8 +174,12 @@ export async function PATCH(
   return withToolTrace(
     { request: req, operation: 'tools.base-constructor.by-id.patch' },
     async () => {
-      const user = await getUser(req);
+      const { user, token } = await getUser(req);
       if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+      const supabase = createAuthedSupabaseClient(token!);
+      const demo = await blockDemo(supabase, user.id);
+      if (demo) return demo;
 
       const { id } = await params;
       const body = await req.json();

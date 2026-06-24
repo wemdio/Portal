@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { isTargetLocale } from '@/lib/i18n';
 import { translateBatch } from '@/lib/portalTranslate';
+import { blockDemo } from '@/lib/auth/blockDemo';
 
 /**
  * POST /api/portal/translate
@@ -59,6 +60,8 @@ export async function POST(req: NextRequest) {
     if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+    const demo = await blockDemo(supabase, user.id);
+    if (demo) return demo;
 
     let body: TranslateRequestBody;
     try {

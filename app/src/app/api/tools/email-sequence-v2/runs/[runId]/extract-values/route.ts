@@ -6,6 +6,7 @@ import { getExtractValuesPrompt, normalizeOutputLanguage } from '@/lib/emailSequ
 import { extractCompanyNameFromValuesHeader, extractTextFromBriefFile } from '@/lib/emailSequenceV2/briefExtractor';
 import { putMainS3Object } from '@/lib/mainS3Server';
 import { logError, logInfo } from '@/lib/loggerServer';
+import { blockDemo } from '@/lib/auth/blockDemo';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -24,6 +25,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return jsonError('Unauthorized', 401);
+
+  const demo = await blockDemo(supabase, user.id);
+  if (demo) return demo;
 
   const { runId } = await params;
   if (!runId) return jsonError('Missing runId', 400);

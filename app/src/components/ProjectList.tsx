@@ -2819,6 +2819,7 @@ export function ProjectList() {
                     lead_source_hypotheses: selectedProject.lead_source_hypotheses,
                     lead_source_hypotheses_generated_at: selectedProject.lead_source_hypotheses_generated_at,
                     lead_source_hypotheses_error: selectedProject.lead_source_hypotheses_error,
+                    lead_source_hypotheses_stale: selectedProject.lead_source_hypotheses_stale,
                   }}
                   canEdit={canEdit}
                   onChange={(next) => {

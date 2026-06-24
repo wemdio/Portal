@@ -773,6 +773,7 @@ export default function ProjectPage() {
                lead_source_hypotheses: project.lead_source_hypotheses,
                lead_source_hypotheses_generated_at: project.lead_source_hypotheses_generated_at,
                lead_source_hypotheses_error: project.lead_source_hypotheses_error,
+               lead_source_hypotheses_stale: project.lead_source_hypotheses_stale,
              }}
              canEdit={canEdit}
              onChange={(next) => {
@@ -962,6 +963,7 @@ export default function ProjectPage() {
               lead_source_hypotheses: project.lead_source_hypotheses,
               lead_source_hypotheses_generated_at: project.lead_source_hypotheses_generated_at,
               lead_source_hypotheses_error: project.lead_source_hypotheses_error,
+              lead_source_hypotheses_stale: project.lead_source_hypotheses_stale,
             }}
             canEdit={canEdit}
             onChange={(next) => {
