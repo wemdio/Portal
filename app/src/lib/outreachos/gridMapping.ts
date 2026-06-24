@@ -12,6 +12,7 @@ import {
   findColumnIndex,
   findPreferredSiteColumnIndexes,
 } from '@/lib/tools/dfybUtils';
+import { isOutreachOsExcludedEmail } from './excludeLocalParts';
 
 /** Заголовки сетки, которую кормим конструктору баз. */
 export const GRID_HEADER = ['Компания', 'Сайт', 'Город', 'Email'] as const;
@@ -82,6 +83,9 @@ export function gridToLeadPayloads(grid: string[][]): LeadCreatePayload[] {
       if (email) break;
     }
     if (!email || seenEmails.has(email)) continue;
+    // HR/recruiting-ящики в лиды не идут (мы продаём аутрич — HR не покупатель).
+    // Отсев только в нашем пайплайне, общий конструктор оставляет hr@ как есть.
+    if (isOutreachOsExcludedEmail(email)) continue;
     seenEmails.add(email);
 
     const company = companyIdx >= 0 ? (row[companyIdx] ?? '').trim() : '';
