@@ -90,6 +90,21 @@ export const CLIENT_NAV_OFFER: ClientNavItem = {
   descriptionEn: 'Public offer — platform terms of service',
 };
 
+/**
+ * Account settings (password change today; profile fields later). Top-level
+ * item rendered in the bottom block of the sidebar between Support and Offer
+ * — it's an always-available account surface, not a workflow step. Visible
+ * in both manual and auto modes (every client has an account).
+ */
+export const CLIENT_NAV_SETTINGS: ClientNavItem = {
+  id: 'settings',
+  label: 'Настройки',
+  labelEn: 'Settings',
+  href: '/client/settings',
+  description: 'Сменить пароль и управлять аккаунтом',
+  descriptionEn: 'Change password and manage your account',
+};
+
 const startGroup: ClientNavGroup = {
   id: 'start',
   label: 'Старт',
@@ -367,6 +382,9 @@ export function resolveActiveNavId(pathname: string): string | null {
   }
   if (pathname === CLIENT_NAV_OFFER.href || pathname.startsWith(`${CLIENT_NAV_OFFER.href}/`)) {
     return CLIENT_NAV_OFFER.id;
+  }
+  if (pathname === CLIENT_NAV_SETTINGS.href || pathname.startsWith(`${CLIENT_NAV_SETTINGS.href}/`)) {
+    return CLIENT_NAV_SETTINGS.id;
   }
   // «Базы» hub absorbs the legacy URLs (companies-search, parsers, base-constructor).
   for (const prefix of BUILD_LEGACY_PREFIXES) {

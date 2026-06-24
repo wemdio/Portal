@@ -9,6 +9,7 @@ import {
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_GROUPS,
   CLIENT_NAV_OFFER,
+  CLIENT_NAV_SETTINGS,
   CLIENT_NAV_SUPPORT,
   filterClientNavGroupsForMode,
   type ClientNavItem,
@@ -183,6 +184,14 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
           locale={locale}
           onItemClick={onItemClick}
           badge={supportBadge}
+        />
+        {/* Настройки аккаунта — смена пароля. Live между Support и Offer:
+            Support = коммуникация, Settings = свой аккаунт, Offer = правовая. */}
+        <NavItemRow
+          item={CLIENT_NAV_SETTINGS}
+          active={activeId === CLIENT_NAV_SETTINGS.id}
+          locale={locale}
+          onItemClick={onItemClick}
         />
         {/* Договор оферты — in-portal version at /client/offer (wrapped by
             the client layout's top bar + sidebar). The standalone /offer
