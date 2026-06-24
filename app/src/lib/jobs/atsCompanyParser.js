@@ -546,8 +546,12 @@ function buildCompanyLeads(jobs) {
 function pickDomainFromSuggestions(name, suggestions) {
   if (!Array.isArray(suggestions) || suggestions.length === 0) return '';
   const key = companyDedupKey(name);
-  const exact = suggestions.find((s) => companyDedupKey(s?.name || '') === key);
-  return normalizeWhitespace(exact?.domain);
+  const exact = suggestions.filter((s) => companyDedupKey(s?.name || '') === key);
+  // Exactly one exact-name match → confident. Zero → unknown. More than one means
+  // several distinct companies share the name (e.g. "Paradigm", "Momentum"); refuse
+  // to guess, because a wrong domain is worse than none for cold outreach.
+  if (exact.length !== 1) return '';
+  return normalizeWhitespace(exact[0]?.domain);
 }
 
 function escapeCsv(value) {
