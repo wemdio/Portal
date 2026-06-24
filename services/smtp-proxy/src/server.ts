@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import { smtpCheck, type SmtpCheckRequest, type SmtpCheckResult } from './smtp.js';
 
@@ -10,12 +11,21 @@ if (!API_KEY) {
   process.exit(1);
 }
 
+const EXPECTED_AUTH = `Bearer ${API_KEY}`;
+
+// Constant-time comparison so the key can't be recovered by timing the 401.
+function authOk(header: string | undefined): boolean {
+  if (!header) return false;
+  const a = Buffer.from(header);
+  const b = Buffer.from(EXPECTED_AUTH);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 const app = Fastify({ logger: true });
 
 app.addHook('onRequest', async (req, reply) => {
   if (req.url === '/health') return;
-  const auth = req.headers.authorization;
-  if (!auth || auth !== `Bearer ${API_KEY}`) {
+  if (!authOk(req.headers.authorization)) {
     reply.code(401).send({ error: 'Unauthorized' });
   }
 });
