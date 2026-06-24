@@ -9,8 +9,6 @@
  */
 
 import * as dns from 'dns';
-import * as net from 'net';
-import * as os from 'os';
 import {
   checkSyntax,
   isDisposable,
@@ -106,25 +104,15 @@ export async function checkDomain(domain: string): Promise<boolean> {
 // ─── 7. SMTP Verification ──────────────────────────────────────────────────
 
 const SMTP_CONNECT_TIMEOUT_MS = 8_000;
-const SMTP_COMMAND_TIMEOUT_MS = 8_000;
-
-/**
- * HELO domain for the local-dev direct SMTP fallback. In production all
- * traffic goes through the smtp-proxy, which picks its own HELO based on
- * the proxy VPS's hostname/PTR. This is used only when SMTP_PROXY_URLS is
- * empty (local dev).
- */
-const LOCAL_HELO_DOMAIN = process.env.EMAIL_VALIDATION_HELO_DOMAIN ?? os.hostname();
-// RFC 5321 null sender by default (mirrors the smtp-proxy in smtp.ts) — avoids
-// "550 Sender verify failed" from receivers that callback-verify the sender's
-// domain. EMAIL_VALIDATION_MAIL_FROM overrides if set.
-const LOCAL_HELO_FROM = process.env.EMAIL_VALIDATION_MAIL_FROM ?? '';
 
 export type SmtpCheckResult = {
   code: number;
   exists: boolean | null;
   isCatchAll: boolean | null;
   greylist: boolean;
+  /** Full text of the RCPT TO reply (set by the proxy), used to tell a real
+   *  "user unknown" 5xx from a policy/rate-limit 5xx. */
+  smtpText?: string;
   error?: string;
 };
 
@@ -200,173 +188,6 @@ async function smtpVerifyViaProxy(
   return { code: 0, exists: null, isCatchAll: null, greylist: false, error: lastError ?? 'All SMTP proxies failed' };
 }
 
-// ─── 7b. Direct SMTP (fallback for local dev / no proxy configured) ─────────
-
-type SmtpResponse = { code: number; text: string };
-
-function parseSmtpResponse(data: string): SmtpResponse {
-  const match = data.match(/^(\d{3})[\s-]/);
-  return { code: match ? parseInt(match[1], 10) : 0, text: data.trim() };
-}
-
-function smtpCommand(socket: net.Socket, command: string, timeoutMs: number): Promise<SmtpResponse> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`SMTP timeout waiting for response to: ${command.split('\r\n')[0]}`));
-    }, timeoutMs);
-
-    const onData = (data: Buffer) => {
-      clearTimeout(timer);
-      socket.removeListener('data', onData);
-      socket.removeListener('error', onError);
-      const text = data.toString('utf-8');
-      if (/^\d{3} /m.test(text)) {
-        resolve(parseSmtpResponse(text));
-      } else {
-        let accumulated = text;
-        const onMore = (chunk: Buffer) => {
-          accumulated += chunk.toString('utf-8');
-          if (/^\d{3} /m.test(accumulated)) {
-            clearTimeout(timer);
-            socket.removeListener('data', onMore);
-            resolve(parseSmtpResponse(accumulated));
-          }
-        };
-        socket.on('data', onMore);
-      }
-    };
-    const onError = (err: Error) => {
-      clearTimeout(timer);
-      socket.removeListener('data', onData);
-      reject(err);
-    };
-
-    socket.once('error', onError);
-    socket.on('data', onData);
-    socket.write(command + '\r\n');
-  });
-}
-
-function waitForGreeting(socket: net.Socket, timeoutMs: number): Promise<SmtpResponse> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error('SMTP greeting timeout'));
-    }, timeoutMs);
-
-    const onData = (data: Buffer) => {
-      clearTimeout(timer);
-      socket.removeListener('data', onData);
-      socket.removeListener('error', onError);
-      resolve(parseSmtpResponse(data.toString('utf-8')));
-    };
-    const onError = (err: Error) => {
-      clearTimeout(timer);
-      socket.removeListener('data', onData);
-      reject(err);
-    };
-
-    socket.once('data', onData);
-    socket.once('error', onError);
-  });
-}
-
-async function smtpVerifyDirect(
-  email: string,
-  mxHost: string,
-  options?: { checkCatchAll?: boolean; timeout?: number },
-): Promise<SmtpCheckResult> {
-  const timeout = options?.timeout ?? SMTP_CONNECT_TIMEOUT_MS;
-  const result: SmtpCheckResult = { code: 0, exists: null, isCatchAll: null, greylist: false };
-  const helo = { domain: LOCAL_HELO_DOMAIN, from: LOCAL_HELO_FROM };
-
-  let socket: net.Socket | null = null;
-
-  try {
-    socket = await new Promise<net.Socket>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('SMTP connect timeout')), timeout);
-      const s = net.createConnection({ host: mxHost, port: 25, timeout }, () => {
-        clearTimeout(timer);
-        resolve(s);
-      });
-      s.once('error', (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-    });
-
-    const greeting = await waitForGreeting(socket, SMTP_COMMAND_TIMEOUT_MS);
-    if (greeting.code !== 220) {
-      result.error = `Unexpected greeting: ${greeting.code}`;
-      return result;
-    }
-
-    const ehloResp = await smtpCommand(socket, `EHLO ${helo.domain}`, SMTP_COMMAND_TIMEOUT_MS);
-    if (ehloResp.code !== 250) {
-      const heloResp = await smtpCommand(socket, `HELO ${helo.domain}`, SMTP_COMMAND_TIMEOUT_MS);
-      if (heloResp.code !== 250) {
-        result.error = `EHLO/HELO rejected: ${heloResp.code}`;
-        return result;
-      }
-    }
-
-    const mailFrom = await smtpCommand(socket, `MAIL FROM:<${helo.from}>`, SMTP_COMMAND_TIMEOUT_MS);
-    if (mailFrom.code !== 250) {
-      result.error = `MAIL FROM rejected: ${mailFrom.code}`;
-      return result;
-    }
-
-    const rcptTo = await smtpCommand(socket, `RCPT TO:<${email}>`, SMTP_COMMAND_TIMEOUT_MS);
-    result.code = rcptTo.code;
-
-    if (rcptTo.code === 250) {
-      result.exists = true;
-    } else if (rcptTo.code >= 550 && rcptTo.code <= 559) {
-      result.exists = false;
-    } else if (rcptTo.code >= 450 && rcptTo.code <= 459) {
-      result.greylist = true;
-      result.exists = null;
-    } else if (rcptTo.code >= 400 && rcptTo.code < 500) {
-      result.greylist = true;
-      result.exists = null;
-    }
-
-    if (options?.checkCatchAll && result.exists === true) {
-      const domain = email.split('@')[1];
-      const randomLocal = `verify-check-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
-      const randomEmail = `${randomLocal}@${domain}`;
-
-      await smtpCommand(socket, 'RSET', SMTP_COMMAND_TIMEOUT_MS);
-      await smtpCommand(socket, `MAIL FROM:<${helo.from}>`, SMTP_COMMAND_TIMEOUT_MS);
-      const catchAllRcpt = await smtpCommand(socket, `RCPT TO:<${randomEmail}>`, SMTP_COMMAND_TIMEOUT_MS);
-
-      if (catchAllRcpt.code === 250) {
-        result.isCatchAll = true;
-      } else if (catchAllRcpt.code >= 550 && catchAllRcpt.code <= 559) {
-        result.isCatchAll = false;
-      }
-    }
-
-    try {
-      await smtpCommand(socket, 'QUIT', 3000);
-    } catch {
-      // QUIT timeout is non-critical
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'SMTP error';
-    result.error = msg;
-
-    if (msg.includes('ECONNREFUSED') || msg.includes('connect timeout')) {
-      result.exists = null;
-    }
-  } finally {
-    if (socket) {
-      try { socket.destroy(); } catch { /* ignore */ }
-    }
-  }
-
-  return result;
-}
-
 // ─── 7c. Public entry point ─────────────────────────────────────────────────
 
 export async function smtpVerify(
@@ -380,6 +201,32 @@ export async function smtpVerify(
   throw new Error(
     'SMTP_PROXY_URLS is not configured. Direct SMTP connections on port 25 are disabled to prevent IP blacklisting. Set SMTP_PROXY_URLS environment variable.',
   );
+}
+
+// ─── 8. 5xx RCPT classification ──────────────────────────────────────────────
+
+// "user unknown" signals → the mailbox genuinely does not exist (invalid).
+const RCPT_USER_UNKNOWN_RE =
+  /(no.?such.?(user|recipient|mailbox|address)|user.?unknown|unknown.?(user|recipient)|user.?not.?found|recipient.?(not.?found|rejected)|mailbox.?(unavailable|not.?found|disabled)|address.?(unknown|rejected)|does.?n.?.?t.?exist|not.?exist|invalid.?(recipient|mailbox|address)|5\.1\.[0-9]|нет.?такого|не.?существ|пользовател)/i;
+// policy / rate-limit / temporary signals → we can't trust the 5xx as "dead".
+const RCPT_POLICY_BLOCK_RE =
+  /(rate.?limit|too.?many|try.?again|temporar|greylist|deferred|throttl|reputation|black.?list|blocked|spam|policy|denied|not.?allowed|service.?unavailable|5\.7\.[0-9])/i;
+
+/**
+ * Decide whether a 5xx RCPT reply means the mailbox doesn't exist ('invalid')
+ * or is a policy/rate-limit/temporary rejection we can't trust ('unknown').
+ * Default is 'invalid' (most 5xx at RCPT are genuine "user unknown"); we only
+ * downgrade to 'unknown' when the reply clearly looks like a policy block AND
+ * does NOT also say the user is unknown (e.g. Yandex "550 5.7.1 No such user!"
+ * stays invalid). Falls back to 'invalid' when no reply text is available
+ * (older proxy build), preserving previous behaviour.
+ */
+export function classifyRcpt5xx(text: string | undefined): 'invalid' | 'unknown' {
+  const t = (text ?? '').trim();
+  if (!t) return 'invalid';
+  if (RCPT_USER_UNKNOWN_RE.test(t)) return 'invalid';
+  if (RCPT_POLICY_BLOCK_RE.test(t)) return 'unknown';
+  return 'invalid';
 }
 
 // ─── 10. Smart Verify (Aggregate Signals) ───────────────────────────────────
@@ -471,6 +318,10 @@ export async function validateEmail(
       }
       if (smtpResult.exists !== null || smtpResult.isCatchAll !== null) break;
       if (smtpResult.greylist) break;
+      // Proxy transport itself failed (HTTP 5xx / abort / all proxies down) —
+      // don't retry the other MX through the same down proxy; let the worker
+      // re-queue the whole item instead.
+      if (smtpResult.error && /prox/i.test(smtpResult.error)) break;
     } catch {
       details.mxHostFailed = mxHost;
       continue;
@@ -522,6 +373,18 @@ export async function validateEmail(
   }
 
   if (smtpResult.exists === false) {
+    // A 5xx at RCPT is usually a genuine "user unknown" → invalid. But some
+    // hosts return 5xx for policy/rate-limit reasons; those we keep as
+    // 'unknown' (couldn't verify) rather than deleting a possibly-valid lead.
+    if (classifyRcpt5xx(smtpResult.smtpText) === 'unknown') {
+      return {
+        result: 'unknown', quality: 'risky',
+        is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: false,
+        did_you_mean: didYouMean, mx_found: mxFound, smtp_code: smtpResult.code,
+        details: { ...details, step: 'smtp_5xx_policy', smtp_text: smtpResult.smtpText },
+        error: `Сервер отклонил по политике/лимиту (${smtpResult.code})`,
+      };
+    }
     return {
       result: 'invalid', quality: 'bad',
       is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: false,

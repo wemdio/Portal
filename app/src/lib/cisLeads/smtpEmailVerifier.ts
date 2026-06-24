@@ -1,152 +1,54 @@
 /**
- * SMTP email verifier — checks if an email address is deliverable
- * by resolving MX records and performing an SMTP RCPT TO handshake.
+ * SMTP email verifier for the CIS lead pipeline.
  *
- * Limitations:
- * - Port 25 may be blocked on some hosting providers
- * - Catch-all domains always return valid
- * - Some servers greylist first attempts
+ * Delegates to the shared email-validation engine (lib/emailValidation), which
+ * performs the SMTP RCPT-callout through the smtp-proxy on the dedicated VPS
+ * (144) — NEVER directly from this (app/prod) host. `smtpVerify` throws when no
+ * proxy is configured, so port-25 probes can never egress from the app server's
+ * IP. This also lets cisLeads inherit the engine's fixes (RFC 5321 null sender,
+ * transient-DNS handling, catch-all detection) instead of a frozen fork.
+ *
+ * Previously this file opened a raw `net.createConnection(host, 25)` straight
+ * from the Next.js process with a non-deliverable `verify@portal-check.ru`
+ * sender — both removed.
  */
 import 'server-only';
 
-import dns from 'node:dns';
-import net from 'node:net';
-
-const SMTP_TIMEOUT_MS = 8_000;
-const FROM_EMAIL = 'verify@portal-check.ru';
+import { validateEmail } from '@/lib/emailValidation/validator';
+import type { DomainInfo } from '@/lib/emailValidation/shared';
 
 export type VerifyResult = 'valid' | 'invalid' | 'catch_all' | 'unknown';
 
-interface MxRecord {
-  exchange: string;
-  priority: number;
+function toVerifyResult(result: string): VerifyResult {
+  switch (result) {
+    case 'ok':
+      return 'valid';
+    case 'catch_all':
+      return 'catch_all';
+    case 'invalid':
+    case 'disposable':
+      return 'invalid';
+    default:
+      // 'unknown' or anything unexpected → couldn't verify (never assume valid).
+      return 'unknown';
+  }
 }
 
-async function resolveMx(domain: string): Promise<MxRecord[]> {
-  return new Promise((resolve, reject) => {
-    dns.resolveMx(domain, (err, records) => {
-      if (err) return reject(err);
-      const sorted = (records ?? []).sort((a, b) => a.priority - b.priority);
-      resolve(sorted);
-    });
-  });
-}
-
-function smtpCheck(host: string, email: string): Promise<{ code: number; catchAll: boolean }> {
-  return new Promise((resolve) => {
-    let resolved = false;
-    let buffer = '';
-    let stage: 'greeting' | 'ehlo' | 'mail' | 'rcpt' | 'rcpt_fake' | 'quit' = 'greeting';
-    let rcptCode = 0;
-
-    const finish = (code: number, catchAll = false) => {
-      if (resolved) return;
-      resolved = true;
-      socket.destroy();
-      resolve({ code, catchAll });
-    };
-
-    const socket = net.createConnection({ host, port: 25, timeout: SMTP_TIMEOUT_MS });
-
-    const timer = setTimeout(() => finish(0), SMTP_TIMEOUT_MS);
-
-    socket.on('timeout', () => finish(0));
-    socket.on('error', () => finish(0));
-    socket.on('close', () => { clearTimeout(timer); if (!resolved) finish(0); });
-
-    socket.on('data', (chunk: Buffer) => {
-      buffer += chunk.toString();
-      if (!buffer.includes('\r\n') && !buffer.includes('\n')) return;
-
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        const code = parseInt(line.slice(0, 3), 10);
-        if (isNaN(code)) continue;
-        if (line.length > 3 && line[3] === '-') continue;
-
-        switch (stage) {
-          case 'greeting':
-            if (code >= 200 && code < 300) {
-              stage = 'ehlo';
-              socket.write('EHLO portal-check.ru\r\n');
-            } else {
-              finish(0);
-            }
-            break;
-
-          case 'ehlo':
-            if (code >= 200 && code < 300) {
-              stage = 'mail';
-              socket.write(`MAIL FROM:<${FROM_EMAIL}>\r\n`);
-            } else {
-              finish(0);
-            }
-            break;
-
-          case 'mail':
-            if (code === 250) {
-              stage = 'rcpt';
-              socket.write(`RCPT TO:<${email}>\r\n`);
-            } else {
-              finish(0);
-            }
-            break;
-
-          case 'rcpt':
-            rcptCode = code;
-            stage = 'rcpt_fake';
-            socket.write(`RCPT TO:<definitely-nonexistent-${Date.now()}@${email.split('@')[1]}>\r\n`);
-            break;
-
-          case 'rcpt_fake': {
-            const fakeAccepted = code === 250;
-            stage = 'quit';
-            socket.write('QUIT\r\n');
-            if (rcptCode === 250 && fakeAccepted) {
-              finish(rcptCode, true);
-            } else {
-              finish(rcptCode);
-            }
-            break;
-          }
-
-          case 'quit':
-            finish(rcptCode);
-            break;
-        }
-      }
-    });
-  });
-}
-
-export async function verifyEmail(email: string): Promise<VerifyResult> {
+export async function verifyEmail(
+  email: string,
+  domainCache?: Map<string, DomainInfo>,
+): Promise<VerifyResult> {
   const parts = email.split('@');
-  if (parts.length !== 2) return 'invalid';
-  const domain = parts[1]!;
-
-  let mxRecords: MxRecord[];
+  if (parts.length !== 2 || !parts[1]) return 'invalid';
   try {
-    mxRecords = await resolveMx(domain);
+    const result = await validateEmail(email, domainCache ?? new Map());
+    return toVerifyResult(result.result);
   } catch {
-    return 'invalid';
+    // Proxy not configured / transport error. The engine never falls back to a
+    // direct connection, so we simply cannot verify → 'unknown' (callers skip
+    // rather than write a wrong email).
+    return 'unknown';
   }
-
-  if (mxRecords.length === 0) return 'invalid';
-
-  for (const mx of mxRecords.slice(0, 2)) {
-    try {
-      const result = await smtpCheck(mx.exchange, email);
-      if (result.catchAll) return 'catch_all';
-      if (result.code === 250) return 'valid';
-      if (result.code >= 500 && result.code < 600) return 'invalid';
-    } catch {
-      continue;
-    }
-  }
-
-  return 'unknown';
 }
 
 export async function verifyEmailBatch(
@@ -154,14 +56,15 @@ export async function verifyEmailBatch(
   concurrency = 3,
 ): Promise<Map<string, VerifyResult>> {
   const results = new Map<string, VerifyResult>();
+  // Shared per-batch domain cache: MX + catch-all are resolved once per domain.
+  const domainCache = new Map<string, DomainInfo>();
   let idx = 0;
 
   const run = async () => {
     while (idx < emails.length) {
       const i = idx++;
       const email = emails[i]!;
-      const result = await verifyEmail(email);
-      results.set(email, result);
+      results.set(email, await verifyEmail(email, domainCache));
     }
   };
 

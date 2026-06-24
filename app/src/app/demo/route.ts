@@ -31,9 +31,12 @@ function rateLimited(ip: string): boolean {
   return recent.length > MAX_HITS;
 }
 
-function toLogin(req: NextRequest, reason: string) {
+function toLogin(reason: string) {
   console.warn(`[demo] -> /login: ${reason}`);
-  return NextResponse.redirect(new URL('/login', req.url));
+  // Relative Location: the browser resolves it against the public origin. Behind
+  // the prod proxy, req.url resolves to the internal bind (0.0.0.0:3000), so an
+  // absolute redirect built from req.url would send the browser to a dead address.
+  return new NextResponse(null, { status: 303, headers: { Location: '/login' } });
 }
 
 export async function GET(req: NextRequest) {
@@ -41,14 +44,16 @@ export async function GET(req: NextRequest) {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!email || !supabaseAdmin || !supabaseUrl || !anonKey) {
-    return toLogin(req, 'demo not configured (DEMO_ACCOUNT_EMAIL / supabase env)');
+    return toLogin('demo not configured (DEMO_ACCOUNT_EMAIL / supabase env)');
   }
 
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
   if (rateLimited(ip)) return new NextResponse('Too Many Requests', { status: 429 });
 
-  // The session cookies must land on the redirect response itself.
-  const res = NextResponse.redirect(new URL('/client', req.url));
+  // The session cookies must land on the redirect response itself. Relative
+  // Location (see toLogin) so the browser lands on the public origin, not the
+  // internal 0.0.0.0:3000 that req.url resolves to behind the prod proxy.
+  const res = new NextResponse(null, { status: 303, headers: { Location: '/client' } });
   const supabase = createServerClient(supabaseUrl, anonKey, {
     cookies: {
       get(name: string) {
@@ -80,5 +85,5 @@ export async function GET(req: NextRequest) {
     lastErr = error.message;
   }
 
-  return toLogin(req, `verifyOtp failed: ${lastErr}`);
+  return toLogin(`verifyOtp failed: ${lastErr}`);
 }
