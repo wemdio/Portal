@@ -1028,6 +1028,26 @@ export interface StepValidateEmailsOptions {
    */
   dropRowsWithoutEmail?: boolean;
   /**
+   * Что делать со статусом 'unknown' (и 'error') — «не удалось проверить»
+   * (greylisting, отказ/таймаут соединения, заблокированный IP SMTP-пробы,
+   * неоднозначный ответ, исключение валидатора). Это НЕ «подтверждённо
+   * мёртвый» адрес.
+   *
+   *   - true (default): такие строки СОХРАНЯЮТСЯ с email'ом нетронутым,
+   *     статус 'unknown' виден в колонке «… Статус». Раньше 'unknown'
+   *     удалялся наравне с 'invalid' и молча выкидывал, скорее всего,
+   *     валидные адреса (жалоба клиента: «убрали 20% рабочих почт»). Многие
+   *     почтовики дают 'unknown' (Yandex/Workspace при блоке нашего IP,
+   *     greylisting, sender-callback), а не настоящий отказ.
+   *
+   *   - false: агрессивная очистка — 'unknown' удаляется как 'invalid'
+   *     (прежнее поведение). Когда нужна максимально «чистая» база ценой
+   *     возможной потери валидных адресов.
+   *
+   * 'invalid' и 'disposable' (подтверждённо плохие) удаляются всегда.
+   */
+  keepUnverifiable?: boolean;
+  /**
    * Callback для checkpoint'а данных каждые N строк. То же зачем что
    * и в stepFindEmails: на redeploy/crash посреди шага следующий worker
    * читает свежий checkpoint вместо стартовых данных и продолжает с
@@ -1044,6 +1064,7 @@ export async function stepValidateEmails(
   options?: StepValidateEmailsOptions,
 ): Promise<string[][]> {
   const dropRowsWithoutEmail = options?.dropRowsWithoutEmail ?? true;
+  const keepUnverifiable = options?.keepUnverifiable ?? true;
   const header = data[0];
   const body = data.slice(1);
   const originalEmailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
@@ -1139,23 +1160,37 @@ export async function stepValidateEmails(
   });
 
   // Фильтрация: строка остаётся ЕСЛИ хотя бы в одной из валидируемых колонок
-  // email прошёл (ok/catch_all). Это семантика «строка имеет хотя бы один
-  // рабочий email» — для outreach это и нужно.
+  // email прошёл (ok/catch_all) ЛИБО его не удалось проверить (unknown/error
+  // при keepUnverifiable). Это семантика «строка имеет хотя бы один
+  // потенциально рабочий email» — для outreach это и нужно.
   //
-  // Дополнительно: для каждой строки в провалившихся колонках обнуляем email
-  // (status != ok/catch_all → пишем '' в src-колонку), чтобы в финальном файле
-  // не торчал заведомо плохой email. Это касается ТОЛЬКО валидируемых колонок —
-  // другие колонки остаются как есть.
+  // Дополнительно: для каждой строки в ПОДТВЕРЖДЁННО плохих колонках обнуляем
+  // email (status invalid/disposable → пишем '' в src-колонку), чтобы в
+  // финальном файле не торчал заведомо мёртвый адрес. «Не удалось проверить»
+  // (unknown/error) НЕ обнуляем — он скорее всего валиден, а статус виден в
+  // колонке «… Статус». Это касается ТОЛЬКО валидируемых колонок — другие
+  // остаются как есть.
   const VALID_STATUSES = new Set(['ok', 'catch_all']);
+  // «Не удалось проверить»: greylist, отказ/таймаут соединения, блок IP-пробы,
+  // неоднозначный SMTP-ответ (validateEmail → 'unknown') или исключение
+  // валидатора (→ 'error'). НЕ «подтверждённо мёртвый».
+  const UNVERIFIABLE_STATUSES = new Set(['unknown', 'error']);
   const filtered = newBody.filter((row) => {
     let anyValid = false;
+    let anyUnverifiable = false;
     for (const m of meta) {
       const status = row[m.statusIdx];
       if (status === '') continue; // пустой email в этой колонке — не учитываем
       if (VALID_STATUSES.has(status)) {
         anyValid = true;
+      } else if (keepUnverifiable && UNVERIFIABLE_STATUSES.has(status)) {
+        // Не удалось проверить — оставляем email как есть (статус виден в
+        // колонке «… Статус»), src-ячейку НЕ чистим.
+        anyUnverifiable = true;
       } else {
-        // Невалидный — чистим src-ячейку чтобы потомки (export, merge) не видели.
+        // Подтверждённо плохой (invalid/disposable) — или unknown/error при
+        // keepUnverifiable=false — чистим src-ячейку чтобы потомки (export,
+        // merge) не видели заведомо плохой email.
         row[m.srcIdx] = '';
       }
     }
@@ -1167,7 +1202,7 @@ export async function stepValidateEmails(
     // (см. job polza@polza.ru 8b188038-…: 1795 пустых строк из 2418).
     const hadAnyEmail = meta.some((m) => row[m.statusIdx] !== '');
     if (!hadAnyEmail) return !dropRowsWithoutEmail;
-    return anyValid;
+    return anyValid || anyUnverifiable;
   });
 
   await onProgress(100);
