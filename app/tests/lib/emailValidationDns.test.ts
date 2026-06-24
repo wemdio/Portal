@@ -23,7 +23,7 @@ jest.mock('dns', () => {
   return { promises: { Resolver } };
 });
 
-import { lookupMX, validateEmail } from '@/lib/emailValidation/validator';
+import { lookupMX, validateEmail, classifyRcpt5xx } from '@/lib/emailValidation/validator';
 import type { DomainInfo } from '@/lib/emailValidation/shared';
 
 const dnsErr = (code: string) => Object.assign(new Error(code), { code });
@@ -66,6 +66,32 @@ describe('lookupMX — transient vs authoritative DNS errors', () => {
     mockResolveMx.mockRejectedValue(dnsErr('ENOTFOUND'));
     mockResolve4.mockRejectedValue(dnsErr('ESERVFAIL'));
     expect((await lookupMX('ambiguous.example')).lookupFailed).toBe(true);
+  });
+});
+
+describe('classifyRcpt5xx — genuine "user unknown" vs policy/rate-limit 5xx', () => {
+  it('Yandex "550 5.7.1 No such user!" → invalid (user-unknown text wins over the 5.7.1 policy code)', () => {
+    expect(classifyRcpt5xx('550 5.7.1 No such user! 1782325033-abc')).toBe('invalid');
+  });
+  it('Gmail "550 5.1.1 ... NoSuchUser" → invalid', () => {
+    expect(classifyRcpt5xx('550 5.1.1 https://support.google.com/mail/?p=NoSuchUser')).toBe('invalid');
+  });
+  it('common user-unknown phrasings → invalid', () => {
+    expect(classifyRcpt5xx('550 mailbox unavailable')).toBe('invalid');
+    expect(classifyRcpt5xx('550 recipient rejected')).toBe('invalid');
+    expect(classifyRcpt5xx('550 user not found')).toBe('invalid');
+    expect(classifyRcpt5xx('550 5.1.10 RESOLVER.ADR.RecipNotFound')).toBe('invalid');
+  });
+  it('rate-limit / policy 5xx → unknown (do NOT delete — keep as unverifiable)', () => {
+    expect(classifyRcpt5xx('550 5.7.1 too many connections, try again later')).toBe('unknown');
+    expect(classifyRcpt5xx('554 5.7.1 Service unavailable; client host blocked')).toBe('unknown');
+    expect(classifyRcpt5xx('550 5.7.1 Access denied by policy')).toBe('unknown');
+    expect(classifyRcpt5xx('421 greylisted, please retry')).toBe('unknown');
+  });
+  it('bare 5xx with no recognizable text or missing text → invalid (preserve default)', () => {
+    expect(classifyRcpt5xx('550 Requested action aborted')).toBe('invalid');
+    expect(classifyRcpt5xx('')).toBe('invalid');
+    expect(classifyRcpt5xx(undefined)).toBe('invalid');
   });
 });
 
