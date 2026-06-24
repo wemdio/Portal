@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { blockDemo } from '@/lib/auth/blockDemo';
 import { encryptJsonAes256Gcm } from '@/lib/cryptoGcm';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getClientTariffUsage } from '@/lib/tariffs';
@@ -35,6 +36,9 @@ export async function POST(req: NextRequest) {
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return jsonError('Unauthorized', 401);
+
+  const demo = await blockDemo(supabase, user.id);
+  if (demo) return demo;
 
   try {
     const body = await req.json();

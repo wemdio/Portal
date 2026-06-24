@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logAudit } from '@/lib/loggerServer';
+import { blockDemo } from '@/lib/auth/blockDemo';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,6 +23,9 @@ export async function POST(req: NextRequest) {
 
   const { data: { user }, error: authError } = await supabase.auth.getUser();
   if (authError || !user) return jsonError('Unauthorized', 401, { request_id: requestId });
+
+  const demo = await blockDemo(supabase, user.id);
+  if (demo) return demo;
 
   const logMeta = { userId: user.id, requestId, route, ip };
 

@@ -4,11 +4,15 @@ import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteC
 import { listCalls, createCall } from '@/lib/ai-caller-provider';
 import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 import { normalizeRuPhoneNumber } from '@/lib/phone-normalization';
+import { blockNonInternal } from '@/lib/ai-caller/requireInternal';
 
 export const dynamic = 'force-dynamic';
 
 /** GET — список звонков из Vapi */
 export async function GET(req: NextRequest) {
+  const blocked = await blockNonInternal(req);
+  if (blocked) return blocked;
+
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -32,6 +36,9 @@ export async function GET(req: NextRequest) {
 
 /** POST — создать (инициировать) звонок */
 export async function POST(req: NextRequest) {
+  const blocked = await blockNonInternal(req);
+  if (blocked) return blocked;
+
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 

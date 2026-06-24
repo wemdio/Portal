@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { blockDemo } from '@/lib/auth/blockDemo';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -44,6 +45,9 @@ export async function PATCH(
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return jsonError('Unauthorized', 401);
+
+  const demo = await blockDemo(supabase, user.id);
+  if (demo) return demo;
 
   const { runId, letterId } = await params;
   if (!runId || !letterId) return jsonError('Missing ids', 400);
@@ -90,6 +94,9 @@ export async function DELETE(
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return jsonError('Unauthorized', 401);
+
+  const demo = await blockDemo(supabase, user.id);
+  if (demo) return demo;
 
   const { runId, letterId } = await params;
   if (!runId || !letterId) return jsonError('Missing ids', 400);

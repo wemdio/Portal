@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { blockDemo } from '@/lib/auth/blockDemo';
 import { withToolTrace } from '@/lib/toolTrace';
 import { AVAILABLE_STEPS, type StepKey } from '@/lib/tools/processingSteps';
 import { applyClientGuard } from '@/lib/tools/baseConstructorClientGuard';
@@ -32,9 +34,9 @@ const MAX_QUEUE_WAITING = MAX_ACTIVE_JOBS_PER_USER - PARALLEL_PROCESSING;
 
 async function getUser(req: NextRequest) {
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
-  if (!token) return null;
+  if (!token) return { user: null, token: null };
   const { data } = await admin.auth.getUser(token);
-  return data.user;
+  return { user: data.user, token };
 }
 
 async function getUserRole(userId: string): Promise<string | null> {
@@ -50,8 +52,12 @@ export async function POST(req: NextRequest) {
   return withToolTrace(
     { request: req, operation: 'tools.base-constructor.post' },
     async () => {
-      const user = await getUser(req);
+      const { user, token } = await getUser(req);
       if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+      const supabase = createAuthedSupabaseClient(token!);
+      const demo = await blockDemo(supabase, user.id);
+      if (demo) return demo;
 
       const body = await req.json();
       const { data, selected_steps, step_config, file_name, free_steps } = body;
@@ -191,7 +197,7 @@ export async function GET(req: NextRequest) {
   return withToolTrace(
     { request: req, operation: 'tools.base-constructor.get' },
     async () => {
-      const user = await getUser(req);
+      const { user } = await getUser(req);
       if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
       const { data, error } = await admin
