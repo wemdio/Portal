@@ -32,6 +32,17 @@ export async function POST(req: NextRequest) {
         }
 
         await upsertBotChat(msg.chat.id, msg.chat.title ?? '', msg.chat.type ?? 'group', msg.message_id);
+        if (supabaseAdmin && msg.message_thread_id != null && msg.message_thread_id !== 0) {
+          try {
+            await supabaseAdmin
+              .from('tg_bot_chats')
+              .update({ last_message_id: msg.message_id, updated_at: new Date().toISOString() })
+              .eq('chat_id', msg.chat.id)
+              .eq('topic_id', msg.message_thread_id);
+          } catch {
+            // ignore — best-effort topic anchor update
+          }
+        }
 
         const videoInfo = extractVideoInfo(msg);
         if (!videoInfo) {
