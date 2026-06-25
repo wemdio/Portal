@@ -21,6 +21,8 @@ import { detectRawHtmlTags } from '@/lib/clientLaunch/buildCampaignPayload';
 import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 import { EmailBodyField } from '@/components/client/EmailBodyField';
 import { ScheduleEditor } from '@/components/client/ScheduleEditor';
+import { useDemoMode } from '@/lib/clientDemo/useDemoMode';
+import { DemoLaunchPreview } from '@/components/client/DemoLaunchPreview';
 
 interface PresetSummary {
   id: string;
@@ -178,6 +180,7 @@ function LaunchHeader({ title, eyebrow = 'Запуск' }: { title: string; eyeb
 }
 
 export default function ClientLaunchPage() {
+  const isDemo = useDemoMode();
   const [presetLoading, setPresetLoading] = useState(true);
   const [preset, setPreset] = useState<PresetSummary | null>(null);
   const [presetError, setPresetError] = useState('');
@@ -827,6 +830,8 @@ export default function ClientLaunchPage() {
         </div>
         <PresetBadge preset={preset} />
       </header>
+
+      {isDemo && <DemoLaunchPreview />}
 
       <div className="space-y-5 sm:space-y-6">
         {/* Step 1: Upload */}

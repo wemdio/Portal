@@ -23,7 +23,8 @@ import {
   DEMO_TARIFF_RESPONSE,
   DEMO_LAUNCHES_RESPONSE,
   DEMO_SUPPORT_RESPONSE,
-  DEMO_COMPANIES_SEARCH_RESPONSE,
+  getDemoCompaniesSearch,
+  type DemoCompaniesFilters,
   DEMO_ACTIVITY_TYPES_RESPONSE,
   DEMO_LEAD_COMMENTS,
   getDemoLeadsResponse,
@@ -79,8 +80,10 @@ export async function serveClientDemo(req: NextRequest): Promise<NextResponse> {
     }
     case '/support/thread':
       return json(DEMO_SUPPORT_RESPONSE);
-    case '/companies-search':
-      return json(DEMO_COMPANIES_SEARCH_RESPONSE);
+    case '/companies-search': {
+      const body = await readJsonBody<DemoCompaniesFilters>(req);
+      return json(getDemoCompaniesSearch(body ?? {}));
+    }
     case '/companies-search/activity-types':
       return json(DEMO_ACTIVITY_TYPES_RESPONSE);
     case '/leads': {
