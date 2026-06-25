@@ -73,16 +73,27 @@ export async function PUT(req: NextRequest) {
   const validation = validateBriefInput(fields);
   if (!validation.ok) return jsonError(validation.error, 400);
 
+  // When the brief is fully cleared, also wipe the stored lead-source
+  // recommendations — otherwise the client keeps seeing suggestions built from
+  // data they just erased. Non-empty edits leave existing hypotheses untouched.
+  const compiled = compileBriefText(fields).trim();
+  const upsertPayload: Record<string, unknown> = {
+    client_user_id: userId,
+    fields,
+    updated_by: userId,
+    // Mark stored recommendations stale on any non-empty edit → UI prompts a
+    // regenerate. They're nulled below when the brief is fully cleared.
+    lead_source_hypotheses_stale: !!compiled,
+  };
+  if (!compiled) {
+    upsertPayload.lead_source_hypotheses = null;
+    upsertPayload.lead_source_hypotheses_generated_at = null;
+    upsertPayload.lead_source_hypotheses_error = null;
+  }
+
   const { data, error } = await supabaseInstantly
     .from('client_briefs')
-    .upsert(
-      {
-        client_user_id: userId,
-        fields,
-        updated_by: userId,
-      },
-      { onConflict: 'client_user_id' },
-    )
+    .upsert(upsertPayload, { onConflict: 'client_user_id' })
     .select('id, fields, pdf_file_name, pdf_uploaded_at, updated_at')
     .single();
 

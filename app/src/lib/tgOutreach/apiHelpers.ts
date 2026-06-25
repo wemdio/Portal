@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { isInternalUser } from '@/lib/auth/internalGuard';
 
 export function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -100,6 +101,12 @@ export async function authenticateRequest(authHeader: string | null) {
   try {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return { error: jsonError('Необходима авторизация', 401) } as const;
+    // /api/tools/* are internal (staff) tools — not reachable from the client
+    // portal UI, but middleware doesn't gate /api/* by role. Enforce staff-only
+    // here so a client/demo JWT can't drive real outreach via crafted requests.
+    if (!(await isInternalUser(supabase, user.id))) {
+      return { error: jsonError('Доступ только для сотрудников', 403) } as const;
+    }
     return { supabase, user } as const;
   } catch (error) {
     console.error('[auth] supabase getUser failed', error);

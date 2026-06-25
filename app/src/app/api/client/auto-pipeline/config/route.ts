@@ -8,6 +8,7 @@ import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaign
 import { createCampaign, updateCampaign } from '@/lib/instantly/client';
 import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
+import { scrubBrand } from '@/lib/scrubBrand';
 import type {
   ClientCampaignPreset,
   ClientLaunchSequence,
@@ -305,7 +306,7 @@ export async function PUT(req: NextRequest) {
           });
           const created = await createCampaign(payload, instantlyRequestOptions);
           const createdId = (created as { id?: string }).id ?? null;
-          if (!createdId) throw new Error('Instantly returned campaign without id');
+          if (!createdId) throw new Error('Система рассылки вернула кампанию без идентификатора');
           instantlyCampaignId = createdId;
           await supabaseInstantly.from('client_instantly_access').upsert(
             {
@@ -324,7 +325,7 @@ export async function PUT(req: NextRequest) {
           await upsertInstantlyCatalogFromCampaign(created, instantlyAccountId);
         }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Instantly sync failed';
+        const msg = scrubBrand(err instanceof Error ? err.message : 'Ошибка синхронизации с системой рассылки');
         await logError(
           'client.auto-pipeline.config.sync_failed',
           err,

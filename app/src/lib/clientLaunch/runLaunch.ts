@@ -23,6 +23,7 @@
 
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { scrubBrand } from '@/lib/scrubBrand';
 import { buildCampaignPayloadFromPreset } from './buildCampaignPayload';
 import { validateClientLaunchInput } from './validateLaunchInput';
 import type {
@@ -275,7 +276,7 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
     });
     const created = await createCampaign(payload, instantlyRequestOptions);
     instantlyCampaignId = (created as { id?: string }).id ?? null;
-    if (!instantlyCampaignId) throw new Error('Instantly returned campaign without id');
+    if (!instantlyCampaignId) throw new Error('Система рассылки вернула кампанию без идентификатора');
 
     await supabaseInstantly
       .from('client_campaign_launches')
@@ -361,7 +362,7 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
       blocked_rows: blockedCount,
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Не удалось запустить кампанию';
+    const message = scrubBrand(err instanceof Error ? err.message : 'Не удалось запустить кампанию');
     await logError('client.launches.run.launch_failed', err, { instantlyCampaignId }, logMeta);
     await supabaseInstantly
       .from('client_campaign_launches')

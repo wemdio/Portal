@@ -6,9 +6,14 @@ import {
 } from '@/lib/jobs/atsCompanyParser';
 import { ATS_COUNTRIES, buildCountryRegex, buildRolesRegex } from '@/lib/parsers/atsFilters';
 
-export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee' | 'breezy' | 'workday' | 'smartrecruiters' | 'teamtailor';
+export type EngHiringSource = 'greenhouse' | 'lever' | 'ashby' | 'workable' | 'bamboohr' | 'recruitee' | 'breezy' | 'workday' | 'smartrecruiters' | 'teamtailor' | 'jobhive';
 
-export const ENG_HIRING_SOURCES: EngHiringSource[] = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday', 'smartrecruiters', 'teamtailor'];
+export const ENG_HIRING_SOURCES: EngHiringSource[] = ['greenhouse', 'lever', 'ashby', 'workable', 'bamboohr', 'recruitee', 'breezy', 'workday', 'smartrecruiters', 'teamtailor', 'jobhive'];
+
+// Sources whose LIST endpoint exposes no posting date at all (BambooHR
+// /careers/list). For these, published_at=null is not a freshness signal — the
+// role is open now — so a recency filter must not silently drop them.
+const DATELESS_SOURCES = new Set<EngHiringSource>(['bamboohr']);
 export const DEFAULT_ENG_HIRING_COMPANIES_LIMIT = 1000;
 export const DEFAULT_ENG_HIRING_MAX_COVERAGE_LIMIT = 25000;
 
@@ -100,7 +105,7 @@ const MIN_ANNUAL_SALARY = 20_000;
 const MAX_ANNUAL_SALARY = 500_000;
 
 const B2B_TITLE_STRONG_RE =
-  /\b(account executive|\bae\b|account manager|account director|business development(?: representative| manager| director| lead)?|sales development(?: representative| manager| lead)?|revenue development(?: representative| manager| lead)?|sales representative|sales consultant|sales manager|sales director|sales executive|sales lead|enterprise sales|commercial account|commercial account executive|commercial account director|commercial relationship manager|client partner|channel sales|partnerships? manager|partnerships? director|partnership sales|partner sales|partner manager|(?:manager|director|vp|head|lead),?\s+(?:of\s+)?partnerships?|\bsdr\b|\bbdr\b|\brdr\b|go[-\s]?to[-\s]?market|\bgtm\b)\b/i;
+  /\b(account executive|\bae\b|account manager|account director|business development(?: representative| manager| director| lead)?|sales development(?: representative| manager| lead)?|revenue development(?: representative| manager| lead)?|sales representative|sales consultant|sales manager|sales director|sales executive|sales lead|enterprise sales|commercial account|commercial account executive|commercial account director|commercial relationship manager|client partner|channel sales|partnerships? manager|partnerships? director|partnership sales|partner sales|partner manager|(?:manager|director|vp|head|lead),?\s+(?:of\s+)?partnerships?|territory manager|inside sales|field sales|regional sales|national sales|sales operations|sales engineer|sales specialist|chief revenue officer|\bcro\b|(?:vp|head|director|chief),?\s+(?:of\s+)?(?:sales|revenue)|\bsdr\b|\bbdr\b|\brdr\b|go[-\s]?to[-\s]?market|\bgtm\b)\b/i;
 
 const B2B_TITLE_EXCLUDE_RE =
   /\b(psychiatrist|nurse|physician|clinical|therapist|engineer|engineering|developer|designer|product manager|program manager|project manager|field marketing|marketing event|content|community|people|hr|recruit|talent acquisition|finance|accounting|legal|operations|data scientist|security|customer support|technical support|teacher|warehouse|manufacturing|tax|audit|compliance|analyst|scrum master|assistant|administrator)\b/i;
@@ -144,17 +149,46 @@ function salaryNumberValue(value: unknown): number | null {
   return rounded;
 }
 
-function cleanHtml(value: unknown): string {
-  return String(value ?? '')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
+function safeFromCodePoint(cp: number): string {
+  // Skip NUL, BOM, out-of-range, and lone surrogates (un-storable / invalid).
+  if (!Number.isFinite(cp) || cp <= 0 || cp === 0xfeff || cp > 0x10ffff) return '';
+  if (cp >= 0xd800 && cp <= 0xdfff) return '';
+  try {
+    return String.fromCodePoint(cp);
+  } catch {
+    return '';
+  }
+}
+
+function decodeHtmlEntitiesOnce(text: string): string {
+  return text
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => safeFromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => safeFromCodePoint(parseInt(dec, 10)))
     .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
+    .replace(/&mdash;/gi, '—')
+    .replace(/&ndash;/gi, '–')
+    .replace(/&hellip;/gi, '…')
+    .replace(/&rsquo;/gi, '’')
+    .replace(/&lsquo;/gi, '‘')
+    .replace(/&rdquo;/gi, '”')
+    .replace(/&ldquo;/gi, '“')
+    .replace(/&trade;/gi, '™')
+    .replace(/&reg;/gi, '®')
+    .replace(/&copy;/gi, '©')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
-    .replace(/&#39;/g, "'")
     .replace(/&quot;/gi, '"')
+    .replace(/&amp;/gi, '&');
+}
+
+export function cleanHtml(value: unknown): string {
+  const stripped = String(value ?? '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ');
+  // Decode twice to also resolve one level of double-encoding (e.g. "&amp;#xa0;"
+  // -> "&#xa0;" -> the character). The numeric passes cover &#39; etc. too.
+  return decodeHtmlEntitiesOnce(decodeHtmlEntitiesOnce(stripped))
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -452,7 +486,10 @@ function isB2BRoleSearch(text?: string | null): boolean {
 export function isHighIntentB2BSalesTitle(title: string): boolean {
   const cleanTitle = cleanPlainText(title);
   if (!B2B_TITLE_STRONG_RE.test(cleanTitle)) return false;
-  if (B2B_TITLE_EXCLUDE_RE.test(cleanTitle)) return false;
+  // Sales-aware exclude: "engineer"/"operations"/"analyst" etc. should only veto a
+  // NON-sales role — a title that explicitly says "sales" (Sales Engineer, Sales
+  // Operations Manager) is a genuine commercial role and must not be dropped.
+  if (B2B_TITLE_EXCLUDE_RE.test(cleanTitle) && !/\bsales\b/i.test(cleanTitle)) return false;
   return true;
 }
 
@@ -537,7 +574,7 @@ export function matchesEngHiringVacancy(vacancy: EngHiringVacancy, config: EngHi
 
   const days = Number(config.posted_within_days ?? 0);
   if (Number.isFinite(days) && days > 0) {
-    if (!vacancy.published_at) return config.include_unknown_dates === true;
+    if (!vacancy.published_at) return config.include_unknown_dates === true || DATELESS_SOURCES.has(vacancy.source);
     const now = config.now ? new Date(config.now) : new Date();
     const published = new Date(vacancy.published_at);
     if (Number.isNaN(now.getTime()) || Number.isNaN(published.getTime())) return false;

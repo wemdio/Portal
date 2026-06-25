@@ -18,9 +18,9 @@ const SOURCE_OPTIONS: { key: EngHiringSource; label: string }[] = [
   { key: 'bamboohr', label: 'BambooHR' },
   { key: 'recruitee', label: 'Recruitee' },
   { key: 'breezy', label: 'Breezy' },
-  { key: 'workday', label: 'Workday' },
   { key: 'smartrecruiters', label: 'SmartRecruiters' },
   { key: 'teamtailor', label: 'Teamtailor' },
+  { key: 'jobhive', label: 'JobHive (агрегатор, 47 ATS)' },
 ];
 
 export function EngHiringParserForm({ onStart, busy }: Props) {
@@ -87,7 +87,7 @@ export function EngHiringParserForm({ onStart, busy }: Props) {
             ENG вакансии через ATS
           </h2>
           <p className="mt-1 max-w-3xl text-sm text-gray-500">
-            First-party вакансии Greenhouse, Lever, Ashby, Workable, BambooHR, Recruitee, Breezy, Workday, SmartRecruiters и Teamtailor с cache-first сбором: компания, сайт, описание, вакансия, зарплата и локация.
+            First-party вакансии Greenhouse, Lever, Ashby, Workable, BambooHR, Recruitee, Breezy, SmartRecruiters и Teamtailor с cache-first сбором: компания, сайт, описание, вакансия, зарплата и локация.
           </p>
         </div>
         <button

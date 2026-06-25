@@ -5,9 +5,11 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import type { ClientAccessRow } from '@/lib/clientAccess';
 import { withApiTiming } from '@/lib/apiTiming';
+import { scrubBrand } from '@/lib/scrubBrand';
 
 export function jsonError(message: string, status: number) {
-  return NextResponse.json({ error: message }, { status });
+  // White-label: never leak the email-engine brand into a client error.
+  return NextResponse.json({ error: scrubBrand(message) }, { status });
 }
 
 export interface ClientAuthResult {

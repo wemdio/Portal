@@ -43,6 +43,18 @@ export async function POST(req: NextRequest) {
     } = await supabase.auth.getUser();
     if (!user) return jsonError('Unauthorized', 401);
 
+    // Demo accounts are strictly read-only — block paid PDF parsing. Read via the
+    // user's own client (RLS self-read) so it does NOT depend on supabaseAdmin
+    // (otherwise a misconfig would fail OPEN for demo).
+    const { data: demoProfile } = await supabase
+      .from('profiles')
+      .select('is_demo')
+      .eq('id', user.id)
+      .single();
+    if (demoProfile?.is_demo === true) {
+      return jsonError('Демо-режим: парсинг недоступен.', 403);
+    }
+
     const contentType = req.headers.get('content-type') ?? '';
     let buffer: Buffer;
     let fileName = 'brief.pdf';

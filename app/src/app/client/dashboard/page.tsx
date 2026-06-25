@@ -50,8 +50,20 @@ interface CampaignRow {
   open_count: number | null;
   reply_count: number | null;
   reply_count_unique: number | null;
+  reply_count_automatic_unique: number | null;
   new_leads_contacted_count: number | null;
   analytics_synced_at: string | null;
+}
+
+// «Ответы как в списке Instantly» = уникальные живые + уникальные авто-ответы
+// (reply_count_unique + reply_count_automatic_unique). Фоллбэк на reply_count.
+function replyTotal(
+  c: { reply_count_unique: number | null; reply_count_automatic_unique: number | null; reply_count: number | null },
+): number {
+  if (c.reply_count_unique != null) {
+    return Number(c.reply_count_unique) + Number(c.reply_count_automatic_unique ?? 0);
+  }
+  return Number(c.reply_count ?? 0);
 }
 
 interface CampaignsResponse {
@@ -240,7 +252,7 @@ export default function ClientDashboardPage() {
     [campaigns],
   );
   const totalReplies = useMemo(
-    () => (campaigns ?? []).reduce((sum, c) => sum + Number(c.reply_count_unique ?? c.reply_count ?? 0), 0),
+    () => (campaigns ?? []).reduce((sum, c) => sum + replyTotal(c), 0),
     [campaigns],
   );
 
@@ -532,7 +544,7 @@ export default function ClientDashboardPage() {
             <div className="neu-card overflow-hidden">
               {recentCampaigns.map((c, idx) => {
                 const sent = Number(c.emails_sent_count ?? 0);
-                const replied = Number(c.reply_count_unique ?? c.reply_count ?? 0);
+                const replied = replyTotal(c);
                 const contacted = Number(c.new_leads_contacted_count ?? 0);
                 const replyRate = contacted > 0 ? (replied / contacted) * 100 : 0;
                 const info = statusInfo(c.status);

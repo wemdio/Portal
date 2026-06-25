@@ -330,6 +330,8 @@ export interface CampaignAnalytics {
   open_count_unique?: number;
   reply_count?: number;
   reply_count_unique?: number;
+  /** Уникальные АВТО-ответы (OOO/боты). Список Instantly = unique + automatic_unique. */
+  reply_count_automatic_unique?: number;
   bounced_count?: number;
   unsubscribed_count?: number;
   leads_count?: number;

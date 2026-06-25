@@ -633,6 +633,12 @@ async function enrichVacancyDetails(
   }
 }
 
+// Sources populated out-of-band by a dedicated bulk ingest (worker/jobhiveIngestCron),
+// not by per-board fetching. The run treats them as cache-only: it queries + filters +
+// dedups + enriches their cached rows downstream, but never fetches boards or opens a
+// cache run for them.
+const CACHE_ONLY_SOURCES = new Set<EngHiringSource>(['jobhive']);
+
 async function ensureCache(
   db: Db,
   config: EngHiringSearchConfig,
@@ -656,6 +662,8 @@ async function ensureCache(
 
   for (let i = 0; i < sources.length; i += 1) {
     const source = sources[i];
+    // Bulk sources are filled by their own ingest job — never fetch their boards here.
+    if (CACHE_ONLY_SOURCES.has(source)) continue;
     await ensureNotCancelled();
     const needs = await sourceNeedsRefresh(db, source, limit, maxAgeHours);
     if (!needs) continue;
@@ -719,7 +727,13 @@ async function loadMatchingCacheRows(db: Db, config: EngHiringSearchConfig): Pro
       .select('*')
       .in('source', sources);
     if (countryCodes.length) query = query.in('country_code', countryCodes);
-    if (publishedCutoff && config.include_unknown_dates !== true) query = query.gte('published_at', publishedCutoff);
+    // Keep null-dated rows in the SQL result (date >= cutoff OR date IS NULL) so the
+    // per-source recency policy is decided once, in matchesEngHiringVacancy. A bare
+    // .gte() would silently drop dateless sources (e.g. BambooHR) before that policy
+    // ever runs — Postgres treats NULL >= cutoff as NULL (not true).
+    if (publishedCutoff && config.include_unknown_dates !== true) {
+      query = query.or(`published_at.gte.${publishedCutoff},published_at.is.null`);
+    }
     const { data, error } = await query
       .order('published_at', { ascending: false })
       .range(offset, offset + 999);
@@ -763,7 +777,7 @@ async function enrichSelectedRows(
     await ensureNotCancelled();
     const group = entries[i];
     const first = group[0];
-    const domain = await resolveCompanyDomainByName(first.company_name);
+    const domain = await resolveCompanyDomainByName(first.company_name, { country: first.country_code });
     const siteUrl = domainToSiteUrl(domain);
     if (siteUrl) {
       for (const row of group) row.company_site_url = siteUrl;

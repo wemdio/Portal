@@ -39,6 +39,36 @@ function toCsv(grid) {
   return '﻿' + grid.map((row) => row.map(esc).join(',')).join('\r\n');
 }
 
+// HR/recruiting локалпарты — отсев для OutreachOS. ДЕРЖАТЬ В СИНХРОНЕ с
+// src/lib/outreachos/excludeLocalParts.ts (standalone .mjs не импортит .ts).
+const HR_LOCALPARTS = new Set([
+  'hr','hrd','hrm','hrbp','hrgroup','recruit','recruiter','recruiters','recruitment','recruiting',
+  'podbor','kadry','kadri','personnel','vacancy','vacancies','vakansia','vakansiya','vakansii',
+  'job','jobs','career','careers','rabota',
+]);
+function isHrEmail(email) {
+  const at = String(email ?? '').indexOf('@');
+  if (at <= 0) return false;
+  const local = String(email).slice(0, at).trim().toLowerCase();
+  if (HR_LOCALPARTS.has(local)) return true;
+  const m = local.match(/^([a-z]+)(?=[._+\-0-9])/);
+  return !!m && HR_LOCALPARTS.has(m[1]);
+}
+function emailColIdx(header) {
+  const lower = (header || []).map((h) => String(h).trim().toLowerCase());
+  for (const n of ['email', 'e-mail', 'почта', 'mail']) { const i = lower.indexOf(n); if (i >= 0) return i; }
+  return -1;
+}
+function siteColIdx(header) {
+  const lower = (header || []).map((h) => String(h).trim().toLowerCase());
+  for (const n of ['сайт', 'site', 'website', 'домен', 'domain', 'url']) { const i = lower.indexOf(n); if (i >= 0) return i; }
+  return -1;
+}
+function hostOf(url) {
+  if (!url) return '';
+  try { const u = new URL(String(url).startsWith('http') ? url : 'https://' + url); return u.hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
+}
+
 async function main() {
   const jobIdArg = process.argv.find((a) => !a.startsWith('-') && a.length > 20 && a.includes('-'));
 
@@ -87,13 +117,39 @@ async function main() {
   const grid = Array.isArray(job.data) ? job.data : null;
   if (!grid || grid.length < 1) { console.error(`\nJob ${job.id} без data-грида (status=${job.status}).`); process.exit(1); }
 
+  // Приводим к live-базе: (1) HR-отсев, (2) потолок 3 почты на email-домен.
+  const header = grid[0];
+  const eIdx = emailColIdx(header);
+  const body = grid.slice(1);
+
+  const afterHr = eIdx >= 0 ? body.filter((r) => !isHrEmail(r[eIdx])) : body;
+  const hrDropped = body.length - afterHr.length;
+
+  const sIdx = siteColIdx(header);
+  const perDomain = new Map();
+  const ready = [];
+  for (const r of afterHr) {
+    if (eIdx < 0) { ready.push(r); continue; }
+    const em = String(r[eIdx] ?? '');
+    const at = em.indexOf('@');
+    const emailDom = at > 0 ? em.slice(at + 1).trim().toLowerCase() : '';
+    // По домену САЙТА компании, не по email-домену (gmail.com не капать глобально).
+    const dom = (sIdx >= 0 ? hostOf(r[sIdx]) : '') || emailDom;
+    const used = perDomain.get(dom) ?? 0;
+    if (dom && used >= 3) continue; // MAX_EMAILS_PER_DOMAIN — синхрон с gridMapping.ts
+    perDomain.set(dom, used + 1);
+    ready.push(r);
+  }
+  const domainCapped = afterHr.length - ready.length;
+
   const outName = `outreachos-base-${(job.file_name || job.id).replace(/[^a-z0-9-]/gi, '_')}.csv`;
-  writeFileSync(outName, toCsv(grid), 'utf8');
+  writeFileSync(outName, toCsv([header, ...ready]), 'utf8');
 
   console.log('\n=== База ===');
   console.log(`  job ${job.id} (${job.file_name}, status=${job.status})`);
-  console.log(`  строк: ${grid.length - 1}, колонки: ${grid[0]?.join(' | ')}`);
-  console.log(`  → ${outName}`);
+  console.log(`  колонки: ${header?.join(' | ')}`);
+  console.log(`  всего валидных: ${body.length} | HR-отсев: ${hrDropped} | >3/домен срезано: ${domainCapped} | готовых: ${ready.length}`);
+  console.log(`  → ${outName} (без HR + ≤3 почты/домен)`);
 }
 
 main().catch((e) => { console.error('FATAL:', e.message); process.exit(1); });

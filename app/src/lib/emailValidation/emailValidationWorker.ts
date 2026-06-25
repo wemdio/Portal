@@ -222,6 +222,8 @@ function shouldRetry(error: string | undefined, attempts: number): boolean {
   const retryable = [
     'greylist', 'timeout', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED',
     'EHOSTUNREACH', 'ENETUNREACH', 'временн', '450', '451',
+    'dns lookup failed', // transient MX-undetermined (not greylist) → re-queue
+    'prox', 'fetch failed', 'aborted', // proxy down/restarting → re-queue, not terminal
   ];
   const lower = error.toLowerCase();
   return retryable.some((k) => lower.includes(k.toLowerCase()));

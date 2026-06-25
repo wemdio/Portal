@@ -14,6 +14,7 @@ interface BriefFields {
   lead_source_hypotheses?: string | null;
   lead_source_hypotheses_generated_at?: string | null;
   lead_source_hypotheses_error?: string | null;
+  lead_source_hypotheses_stale?: boolean | null;
 }
 
 interface ProjectBriefSectionProps {
@@ -31,6 +32,7 @@ interface BriefApiResponse {
   lead_source_hypotheses?: string | null;
   lead_source_hypotheses_generated_at?: string | null;
   lead_source_hypotheses_error?: string | null;
+  lead_source_hypotheses_stale?: boolean | null;
 }
 
 function SectionCard({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
@@ -74,6 +76,7 @@ export function ProjectBriefSection({
 
   const hasBrief = Boolean(brief.brief_file_path);
   const hasHypotheses = Boolean(brief.lead_source_hypotheses);
+  const hasStale = Boolean(brief.lead_source_hypotheses_stale);
   const hypothesesError = brief.lead_source_hypotheses_error;
   const autoTriggeredRef = useRef<string | null>(null);
 
@@ -99,6 +102,7 @@ export function ProjectBriefSection({
         lead_source_hypotheses: payload.lead_source_hypotheses ?? null,
         lead_source_hypotheses_generated_at: payload.lead_source_hypotheses_generated_at ?? null,
         lead_source_hypotheses_error: payload.lead_source_hypotheses_error ?? null,
+        lead_source_hypotheses_stale: payload.lead_source_hypotheses_stale ?? false,
       });
       if (!res.ok) {
         throw new Error(payload.error || `HTTP ${res.status}`);
@@ -144,6 +148,7 @@ export function ProjectBriefSection({
         lead_source_hypotheses: payload.lead_source_hypotheses ?? null,
         lead_source_hypotheses_generated_at: payload.lead_source_hypotheses_generated_at ?? null,
         lead_source_hypotheses_error: payload.lead_source_hypotheses_error ?? null,
+        lead_source_hypotheses_stale: payload.lead_source_hypotheses_stale ?? false,
       });
       setPendingFile(null);
     } catch (err) {
@@ -284,6 +289,15 @@ export function ProjectBriefSection({
         <SectionCard title="Гипотезы по сбору баз (AI)">
           {hasHypotheses ? (
             <>
+              {hasStale && (
+                <div className="mb-3 flex items-start gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                  <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                  <span>
+                    Бриф изменён после генерации — рекомендации устарели. Нажмите
+                    «Сгенерировать заново», чтобы обновить их под новый бриф.
+                  </span>
+                </div>
+              )}
               <LeadSourceHypothesesView markdown={brief.lead_source_hypotheses ?? ''} />
               <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
                 <p className="text-xs text-gray-400">

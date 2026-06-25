@@ -382,7 +382,7 @@ export default function AutoPipelineSetupPage() {
             style={{ color: 'var(--cp-paper-faint)' }}
           >
             {syncWarnings.length > 0
-              ? `Сохранено, но ${syncWarnings.length} ${syncWarnings.length === 1 ? 'кампания' : 'кампаний'} не синхронизирована${syncWarnings.length === 1 ? '' : 'ы'} с Instantly`
+              ? `Сохранено, но ${syncWarnings.length} ${syncWarnings.length === 1 ? 'кампания' : 'кампаний'} не синхронизирована${syncWarnings.length === 1 ? '' : 'ы'} с системой рассылки`
               : 'Изменения применятся ко всем будущим прогонам'}
           </span>
         )}
@@ -416,7 +416,7 @@ export default function AutoPipelineSetupPage() {
               className="ds-status-dot"
               style={{ background: 'var(--cp-amber)' }}
             />
-            Не удалось синхронизировать с Instantly
+            Не удалось синхронизировать с системой рассылки
           </p>
           <ul
             className="list-disc list-inside space-y-0.5 mt-1.5"
@@ -499,7 +499,7 @@ function BucketCard({
   const hasContent = bucketHasContent(bucket);
   const statusLabel = useMemo(() => {
     if (!hasContent) return 'Не пишем — лиды сохраняются без отправки';
-    if (bucket.instantly_campaign_id) return 'Кампания в Instantly: создана';
+    if (bucket.instantly_campaign_id) return 'Кампания: создана';
     return 'Кампания создастся при сохранении';
   }, [hasContent, bucket.instantly_campaign_id]);
 
@@ -618,7 +618,7 @@ function SequenceEditor({
           style={{ color: 'var(--cp-paper-mute)' }}
         >
           Цепочка пуста — лиды этого диапазона будут попадать в журнал
-          (status=stored), но в Instantly не отправятся. Чтобы начать слать —
+          (status=stored), но отправлены не будут. Чтобы начать слать —
           добавьте первое письмо ниже.
         </div>
       )}
@@ -799,7 +799,7 @@ function FirstStepVariants({
           className="text-[11px]"
           style={{ color: 'var(--cp-paper-faint)' }}
         >
-          Можно добавить 1-2 альтернативных варианта — Instantly случайно выберет один на каждого лида.
+          Можно добавить 1-2 альтернативных варианта — система случайно выберет один на каждого лида.
         </p>
       ) : (
         <div className="flex flex-col gap-2">

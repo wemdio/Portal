@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { isInternalUser } from '@/lib/auth/internalGuard';
 
 interface AuthContext {
   supabase: SupabaseClient;
@@ -18,6 +19,9 @@ export function withCopilotAuth(handler: HandlerFn) {
     const supabase = createAuthedSupabaseClient(token);
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!(await isInternalUser(supabase, user.id))) {
+      return NextResponse.json({ error: 'Forbidden', code: 'INTERNAL_ONLY' }, { status: 403 });
+    }
 
     try {
       const params = routeCtx?.params ? await routeCtx.params : undefined;

@@ -36,6 +36,7 @@ interface CampaignRow {
   open_count: number | null;
   reply_count: number | null;
   reply_count_unique: number | null;
+  reply_count_automatic_unique: number | null;
   new_leads_contacted_count: number | null;
   contacted_count: number | null;
   analytics_synced_at: string | null;
@@ -45,6 +46,18 @@ interface CampaignsResponse {
   total: number;
   campaigns: CampaignRow[];
   lastSyncedAt: string | null;
+}
+
+// «Ответы как в списке Instantly» = уникальные живые + уникальные авто-ответы
+// (reply_count_unique + reply_count_automatic_unique — так список Instantly
+// считает REPLIED). Фоллбэк на reply_count, пока синк не заполнил новые колонки.
+function replyTotal(
+  c: Pick<CampaignRow, 'reply_count_unique' | 'reply_count_automatic_unique' | 'reply_count'>,
+): number {
+  if (c.reply_count_unique != null) {
+    return Number(c.reply_count_unique) + Number(c.reply_count_automatic_unique ?? 0);
+  }
+  return Number(c.reply_count ?? 0);
 }
 
 type SortCol = 'name' | 'sent' | 'opened' | 'openRate' | 'replied' | 'replyRate';
@@ -284,7 +297,7 @@ function CampaignsPageContent() {
     (acc, c) => ({
       sent: acc.sent + Number(c.emails_sent_count ?? 0),
       opened: acc.opened + Number(c.open_count ?? 0),
-      replied: acc.replied + Number(c.reply_count_unique ?? c.reply_count ?? 0),
+      replied: acc.replied + replyTotal(c),
       contacted: acc.contacted + Number(c.new_leads_contacted_count ?? 0),
       reached: acc.reached + Number(c.contacted_count ?? c.emails_sent_count ?? 0),
     }),
@@ -300,7 +313,7 @@ function CampaignsPageContent() {
         .map((c) => {
           const sent = Number(c.emails_sent_count ?? 0);
           const opened = Number(c.open_count ?? 0);
-          const replied = Number(c.reply_count_unique ?? c.reply_count ?? 0);
+          const replied = replyTotal(c);
           const contacted = Number(c.new_leads_contacted_count ?? 0);
           // Открываемость — на КОНТАКТ (contacted_count), не на письмо. См. totals.
           const reached = Number(c.contacted_count ?? c.emails_sent_count ?? 0);

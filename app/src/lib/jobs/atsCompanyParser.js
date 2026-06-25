@@ -347,12 +347,28 @@ function normalizeSmartrecruitersJob(job, { slug, companyName } = {}) {
   });
 }
 
+let _regionDisplayNames;
+// Resolve a bare ISO-3166 alpha-2 code to its English country name so it cannot
+// collide with a US state code during inference (e.g. "DE" = Germany, not
+// Delaware; "ID" = Indonesia, not Idaho). Full names / non-2-letter values pass
+// through unchanged.
+function isoCountryName(value) {
+  const raw = normalizeWhitespace(value);
+  if (!/^[A-Za-z]{2}$/.test(raw)) return raw;
+  try {
+    _regionDisplayNames = _regionDisplayNames || new Intl.DisplayNames(['en'], { type: 'region' });
+    return _regionDisplayNames.of(raw.toUpperCase()) || raw;
+  } catch {
+    return raw;
+  }
+}
+
 function normalizeTeamtailorJob(job, { slug, companyName } = {}) {
   // jobs.json items embed a schema.org JobPosting under `_jobposting`, the only
   // place with structured location (jobLocation[].address.addressCountry).
   const posting = job?._jobposting || {};
   const address = (Array.isArray(posting.jobLocation) ? posting.jobLocation[0]?.address : null) || {};
-  const country = address.addressCountry || '';
+  const country = isoCountryName(address.addressCountry || '');
   return baseJob({
     ats: 'teamtailor',
     slug,
@@ -530,8 +546,12 @@ function buildCompanyLeads(jobs) {
 function pickDomainFromSuggestions(name, suggestions) {
   if (!Array.isArray(suggestions) || suggestions.length === 0) return '';
   const key = companyDedupKey(name);
-  const exact = suggestions.find((s) => companyDedupKey(s?.name || '') === key);
-  return normalizeWhitespace(exact?.domain);
+  const exact = suggestions.filter((s) => companyDedupKey(s?.name || '') === key);
+  // Exactly one exact-name match → confident. Zero → unknown. More than one means
+  // several distinct companies share the name (e.g. "Paradigm", "Momentum"); refuse
+  // to guess, because a wrong domain is worse than none for cold outreach.
+  if (exact.length !== 1) return '';
+  return normalizeWhitespace(exact[0]?.domain);
 }
 
 function escapeCsv(value) {

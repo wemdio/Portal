@@ -27,7 +27,7 @@ import { findNewHhEmployers, deriveDomain, type HhEmployer } from '@/lib/jobs/hh
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import { loadOutreachOsConfig } from './config';
 import { buildExcludePatterns } from './excludePatterns';
-import { loadSeenEmployerIds, markSeen, type SeenEmployerUpsert } from './seenEmployers';
+import { loadRecentlySeen, markSeen, RECONTACT_AFTER_DAYS, type SeenEmployerUpsert } from './seenEmployers';
 import { employersToGrid, gridToLeadPayloads } from './gridMapping';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -118,10 +118,17 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     });
     log(`HH вернул ${employers.length} работодателей (после ICP-фильтра)`);
 
-    // 4. Дедуп против своего журнала.
-    const seen = await loadSeenEmployerIds();
-    const fresh = employers.filter((e) => !seen.has(e.id));
-    log(`Новых (не в seen): ${fresh.length}`);
+    // 4. Дедуп по окну: компании, контактированные за последние
+    //    RECONTACT_AFTER_DAYS дней, пропускаем (не пишем одной компании чаще
+    //    раза в 1.5 месяца). По hh_employer_id И по домену сайта. Компании
+    //    старше окна — снова eligible (повторный аутрич разрешён).
+    const seen = await loadRecentlySeen();
+    const fresh = employers.filter((e) => {
+      if (seen.ids.has(e.id)) return false;
+      const d = deriveDomain(e.siteUrl);
+      return !(d && seen.domains.has(d));
+    });
+    log(`Новых (не контактированы за ${RECONTACT_AFTER_DAYS}д): ${fresh.length}`);
 
     if (fresh.length === 0) {
       await finishRun({
@@ -254,13 +261,29 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       };
     }
 
-    // 8. Добор в фиксированную кампанию Instantly. Сюда попадаем только в
-    //    live-режиме (measureOnly=false), а верхний гард гарантирует, что тогда
-    //    campaign_id задан. Захватываем в const, чтобы сузить тип до string.
+    // Сюда попадаем только в live-режиме (measureOnly=false), верхний гард
+    // гарантирует, что campaign_id задан. Захватываем в const (тип → string).
     const campaignId = config.campaign_id;
     if (!campaignId) {
       throw new Error('campaign_id отсутствует в live-режиме (не должно случаться)');
     }
+
+    // 8. ФИКСИРУЕМ seen-окно ДО append. append необратим (лиды улетают в
+    //    Instantly, возможно несколькими chunk'ами по 1000); если он затем
+    //    частично/полностью упадёт, эти компании НЕЛЬЗЯ пере-залить на следующем
+    //    прогоне (клиент чистит кампанию → skip_if_in_campaign не спасёт). Поэтому
+    //    окно 45 дней ставится РАНЬШЕ, чем хоть один лид попал в Instantly.
+    //    Ранние сбои (HH/конструктор, выше) сюда не доходят → корректно ретраятся.
+    //    Если markSeen упадёт — append (ниже) не выполнится → компании ретраятся,
+    //    в Instantly чисто. Цена: при чистом полном сбое append (ничего не залито)
+    //    эти компании на 45 дней не трогаем — осознанно (под-контакт ОК,
+    //    пере-контакт — нет; требование «не чаще раза в 1.5 месяца»).
+    const leadDomains = new Set(
+      leads.map((l) => deriveDomain(l.website ?? null)).filter((d): d is string => !!d),
+    );
+    await markSeen(fresh.map(toSeen(leadDomains, 'no_email')));
+
+    // 9. Добор в фиксированную кампанию Instantly (seen уже зафиксирован).
     const appendResult = await appendLeadsToClientCampaign({
       userId: config.client_user_id,
       campaignId,
@@ -268,15 +291,6 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       contextLabel: 'OutreachOS daily',
     });
     log(`Instantly: accepted=${appendResult.accepted} skipped=${appendResult.skipped}`);
-
-    // 9. Журнал seen — только на happy-path (job completed + append прошёл).
-    //    Домены, попавшие в лиды → 'appended', остальные fresh → 'no_email'.
-    const leadDomains = new Set(
-      leads.map((l) => deriveDomain(l.website ?? null)).filter((d): d is string => !!d),
-    );
-    // fallback='no_email': работодатели, чей домен НЕ дал лида, — это именно
-    // no_email, а не appended (иначе метрики seen врут).
-    await markSeen(fresh.map(toSeen(leadDomains, 'no_email')));
 
     await finishRun({
       status: 'completed',
@@ -308,8 +322,11 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // На любой ошибке НЕ помечаем seen — работодатели переедут на следующий
-    // прогон после устранения причины (скрейп пере-выполнится, это допустимо).
+    // Здесь seen НЕ трогаем. Сбои ДО шага 8 (HH/конструктор) seen не писали →
+    // компании корректно ретраятся на следующем прогоне. Сбои НА/ПОСЛЕ шага 8
+    // (append) уже прошли markSeen (шаг 8 выше append) → компании зафиксированы
+    // в окне и НЕ будут пере-залиты, даже если append упал частично. Так блокер
+    // «залито в Instantly, но не записано в seen → дубль в окне» закрыт.
     await finishRun({ status: 'failed', error_message: message });
     await logError('outreachos.run.failed', err, { runId });
     return { ...empty, runId, status: 'failed', error: message };

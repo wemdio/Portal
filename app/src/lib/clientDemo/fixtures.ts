@@ -37,6 +37,7 @@ interface DemoCampaign {
   open_count: number;
   reply_count: number;
   reply_count_unique: number;
+  reply_count_automatic_unique: number;
   contacted_count: number;
   new_leads_contacted_count: number;
   bounced_count: number;
@@ -56,6 +57,7 @@ export const DEMO_CAMPAIGNS: DemoCampaign[] = [
     open_count: 612,
     reply_count: 74,
     reply_count_unique: 52,
+    reply_count_automatic_unique: 22,
     contacted_count: 1000,
     new_leads_contacted_count: 920,
     bounced_count: 21,
@@ -71,6 +73,7 @@ export const DEMO_CAMPAIGNS: DemoCampaign[] = [
     open_count: 388,
     reply_count: 41,
     reply_count_unique: 29,
+    reply_count_automatic_unique: 12,
     contacted_count: 620,
     new_leads_contacted_count: 560,
     bounced_count: 12,
@@ -86,6 +89,7 @@ export const DEMO_CAMPAIGNS: DemoCampaign[] = [
     open_count: 240,
     reply_count: 19,
     reply_count_unique: 13,
+    reply_count_automatic_unique: 6,
     contacted_count: 410,
     new_leads_contacted_count: 380,
     bounced_count: 9,
@@ -101,6 +105,7 @@ export const DEMO_CAMPAIGNS: DemoCampaign[] = [
     open_count: 901,
     reply_count: 112,
     reply_count_unique: 78,
+    reply_count_automatic_unique: 34,
     contacted_count: 1480,
     new_leads_contacted_count: 1150,
     bounced_count: 28,
@@ -135,6 +140,7 @@ function demoCampaignDetail(id: string) {
       open_count: c.open_count,
       reply_count: c.reply_count,
       reply_count_unique: c.reply_count_unique,
+      reply_count_automatic_unique: c.reply_count_automatic_unique,
       contacted_count: c.contacted_count,
       new_leads_contacted_count: c.new_leads_contacted_count,
       bounced_count: c.bounced_count,
@@ -879,7 +885,7 @@ function buildDemoReportResponse(campaigns: DemoCampaign[]) {
       acc.sent += c.emails_sent_count;
       acc.reached += c.contacted_count;
       acc.opened += c.open_count;
-      acc.replies += c.reply_count;
+      acc.replies += c.reply_count_unique + c.reply_count_automatic_unique;
       acc.leads += c.leads_count;
       acc.bounced += c.bounced_count;
       return acc;
@@ -897,8 +903,8 @@ function buildDemoReportResponse(campaigns: DemoCampaign[]) {
       c.emails_sent_count,
       c.open_count,
       `${((c.open_count / c.contacted_count) * 100).toFixed(1)}%`,
-      c.reply_count,
-      `${((c.reply_count / c.new_leads_contacted_count) * 100).toFixed(1)}%`,
+      c.reply_count_unique + c.reply_count_automatic_unique,
+      `${(((c.reply_count_unique + c.reply_count_automatic_unique) / c.new_leads_contacted_count) * 100).toFixed(1)}%`,
       c.bounced_count,
     ]),
   ];

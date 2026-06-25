@@ -49,6 +49,9 @@ function formatDate(iso: string): string {
   }
 }
 
+// Метка прогона для истории/шапки. Для сайта — короткий хост; для прогона по
+// запросу (resolvedUrl=null) — сам текст запроса (regex'ы для http-префикса и
+// слеша на нём просто no-op). В истории обрезается классом `truncate`.
 function prettyHost(run: SalesHypothesesRunDTO): string {
   const raw = run.resolvedUrl || run.website;
   return raw.replace(/^https?:\/\/(www\.)?/i, '').replace(/\/$/, '');
@@ -206,16 +209,16 @@ export function SalesHypothesesView() {
   const shownError = busy ? '' : errorMsg || (current?.status === 'failed' ? current.error ?? '' : '');
 
   return (
-    <div className="space-y-6 text-left max-w-full">
+    <div className="mx-auto max-w-5xl space-y-6 px-4 py-8 text-left">
       {/* Заголовок */}
       <div className="flex items-start gap-3">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
           <Lightbulb className="h-5 w-5" aria-hidden />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Гипотезы по сайту</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Гипотезы (сайт или запрос)</h1>
           <p className="text-sm text-gray-500">
-            Вставьте сайт компании — AI изучит его, заполнит бриф и предложит 5–10 гипотез по сбору базы.
+            Вставьте сайт компании или опишите запрос — AI соберёт бриф и предложит 5–10 гипотез по сбору базы.
           </p>
         </div>
       </div>
@@ -223,7 +226,7 @@ export function SalesHypothesesView() {
       {/* Ввод сайта */}
       <div className="rounded-2xl border border-gray-200 bg-white p-5">
         <label htmlFor="sh-website" className="block text-sm font-medium text-gray-700">
-          Сайт компании
+          Сайт или запрос
         </label>
         <div className="mt-2 flex flex-col gap-2 sm:flex-row">
           <div className="relative flex-1">
@@ -236,7 +239,7 @@ export function SalesHypothesesView() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter') void handleGenerate();
               }}
-              placeholder="например, acme.com или https://acme.com"
+              placeholder="acme.com или запрос: «кому продавать франшизу кофеен?»"
               disabled={busy}
               className="w-full rounded-lg border border-gray-300 py-2.5 pl-9 pr-3 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:bg-gray-50"
             />
@@ -252,7 +255,7 @@ export function SalesHypothesesView() {
           </button>
         </div>
         <p className="mt-2 text-xs text-gray-400">
-          Бриф заполняется автоматически и не показывается — на выходе только готовые гипотезы. Анализ занимает 1–2 минуты.
+          Можно вставить сайт компании или коротко описать задачу («кому продавать …?»). Бриф собирается автоматически и не показывается — на выходе только готовые гипотезы. Занимает 1–2 минуты.
         </p>
       </div>
 
@@ -309,7 +312,7 @@ export function SalesHypothesesView() {
         <section className="order-1 min-w-0 lg:order-2">
           {busyPhase === 'autofilling' && (
             <StatusBox icon="spin" tone="info">
-              Изучаем сайт и заполняем бриф — обычно 30–60 секунд…
+              Готовим бриф — обычно 30–60 секунд…
             </StatusBox>
           )}
           {(busyPhase === 'generating' || busyPhase === 'regenerating') && (
@@ -343,15 +346,23 @@ export function SalesHypothesesView() {
             <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <a
-                    href={current.resolvedUrl || (current.website.startsWith('http') ? current.website : `https://${current.website}`)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1.5 text-sm font-semibold text-gray-900 hover:text-blue-700"
-                  >
-                    <Globe className="h-3.5 w-3.5 text-gray-400" aria-hidden />
-                    {prettyHost(current)}
-                  </a>
+                  {current.resolvedUrl ? (
+                    <a
+                      href={current.resolvedUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 text-sm font-semibold text-gray-900 hover:text-blue-700"
+                    >
+                      <Globe className="h-3.5 w-3.5 shrink-0 text-gray-400" aria-hidden />
+                      {prettyHost(current)}
+                    </a>
+                  ) : (
+                    // Прогон по свободному запросу — нет URL, показываем сам запрос.
+                    <span className="flex items-start gap-1.5 text-sm font-semibold text-gray-900">
+                      <Lightbulb className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gray-400" aria-hidden />
+                      <span className="line-clamp-2">{current.website}</span>
+                    </span>
+                  )}
                   {current.hypothesesGeneratedAt && (
                     <p className="text-[11px] text-gray-400">Сгенерировано: {formatDate(current.hypothesesGeneratedAt)}</p>
                   )}
@@ -378,12 +389,12 @@ export function SalesHypothesesView() {
               </div>
 
               {current.questions.length > 0 && (
-                <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-4">
-                  <p className="flex items-center gap-2 text-xs font-semibold text-amber-800">
-                    <HelpCircle className="h-4 w-4" aria-hidden />
+                <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+                  <p className="flex items-center gap-2 text-sm font-semibold text-amber-800">
+                    <HelpCircle className="h-4 w-4 shrink-0" aria-hidden />
                     Стоит уточнить у клиента:
                   </p>
-                  <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-amber-900/80">
+                  <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-relaxed text-amber-900 marker:text-amber-500">
                     {current.questions.map((q, i) => (
                       <li key={`${i}-${q}`}>{q}</li>
                     ))}
@@ -398,9 +409,9 @@ export function SalesHypothesesView() {
           {!busy && !shownError && !current?.hypotheses && (
             <div className="flex h-full min-h-[260px] flex-col items-center justify-center rounded-2xl border border-dashed border-gray-200 bg-gray-50/50 p-10 text-center">
               <Lightbulb className="mb-3 h-8 w-8 text-gray-300" aria-hidden />
-              <p className="text-sm font-medium text-gray-500">Вставьте сайт компании выше</p>
+              <p className="text-sm font-medium text-gray-500">Вставьте сайт или запрос выше</p>
               <p className="mt-1 text-xs text-gray-400">
-                AI заполнит бриф по сайту и предложит готовые гипотезы по сбору базы.
+                AI соберёт бриф и предложит готовые гипотезы по сбору базы.
               </p>
             </div>
           )}

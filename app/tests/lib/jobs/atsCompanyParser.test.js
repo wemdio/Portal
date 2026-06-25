@@ -302,12 +302,31 @@ describe('atsCompanyParser — normalizers', () => {
       slug: 'acme',
       company: 'Acme',
       title: 'Enterprise Account Executive',
-      location: 'New York, NY, US',
-      country: 'US',
+      // ISO-2 country code resolved to a full name so it does not collide with a
+      // US state code (e.g. "DE" = Germany, not Delaware) during country inference.
+      location: 'New York, NY, United States',
+      country: 'United States',
       url: 'https://acme.teamtailor.com/jobs/7793185-enterprise-account-executive',
       roles: ['b2b_sales'],
     });
     expect(job.posted_at).toBe(new Date('2026-06-04T08:33:05+02:00').toISOString());
+  });
+
+  it('resolves Teamtailor ISO-2 country codes to full names (no US-state collision)', () => {
+    const de = normalizeTeamtailorJob(
+      { id: '1', title: 'Key Account Manager', url: 'https://x.teamtailor.com/jobs/1', date_published: '2026-06-04T00:00:00Z',
+        _jobposting: { hiringOrganization: { name: 'Bihr' }, jobLocation: [{ address: { addressLocality: 'Glinde', addressCountry: 'DE' } }] } },
+      { slug: 'x', companyName: 'Bihr' },
+    );
+    expect(de.location).toBe('Glinde, Germany');
+    expect(de.country).toBe('Germany');
+
+    const id = normalizeTeamtailorJob(
+      { id: '2', title: 'Key Account Executive', url: 'https://y.teamtailor.com/jobs/2', date_published: '2026-06-04T00:00:00Z',
+        _jobposting: { hiringOrganization: { name: 'Cartrack' }, jobLocation: [{ address: { addressLocality: 'Jakarta', addressCountry: 'ID' } }] } },
+      { slug: 'y', companyName: 'Cartrack' },
+    );
+    expect(id.country).toBe('Indonesia');
   });
 
   it('builds public endpoints and extracts jobs for the added ATS sources', () => {
@@ -417,6 +436,20 @@ describe('atsCompanyParser — domain helpers', () => {
     ]);
 
     expect(domain).toBe('');
+  });
+
+  it('refuses to guess when a name is ambiguous (multiple exact matches)', () => {
+    // Two distinct real companies share the name -> a wrong domain is worse than
+    // none for cold outreach, so return empty rather than picking the loudest.
+    expect(pickDomainFromSuggestions('Paradigm', [
+      { name: 'Paradigm', domain: 'paradigm.xyz' },
+      { name: 'Paradigm', domain: 'cecredentialtrust.com' },
+    ])).toBe('');
+    // a single exact match (with other near-but-not-exact names) still resolves
+    expect(pickDomainFromSuggestions('Paradigm', [
+      { name: 'Paradigm', domain: 'paradigm.xyz' },
+      { name: 'Paradigm Health', domain: 'paradigmhealth.com' },
+    ])).toBe('paradigm.xyz');
   });
 });
 

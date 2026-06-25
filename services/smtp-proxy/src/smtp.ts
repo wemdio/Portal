@@ -13,6 +13,10 @@ export type SmtpCheckResult = {
   exists: boolean | null;
   isCatchAll: boolean | null;
   greylist: boolean;
+  /** Full text of the RCPT TO reply — lets the caller distinguish a genuine
+   *  "user unknown" 550 from a policy/rate-limit 550 instead of treating every
+   *  5xx as invalid. */
+  smtpText?: string;
   error?: string;
 };
 
@@ -21,65 +25,59 @@ function parseSmtpResponse(data: string): SmtpResponse {
   return { code: match ? parseInt(match[1], 10) : 0, text: data.trim() };
 }
 
-function smtpCommand(socket: net.Socket, command: string, timeoutMs: number): Promise<SmtpResponse> {
+/**
+ * Read one SMTP reply, accumulating across TCP segments. A reply is complete
+ * when its FINAL line is "<code><SP>" ("<code>-" marks non-final multiline
+ * lines). `data`, `error` and `close` listeners stay attached for the whole
+ * read and are torn down in ONE place on settle — so a connection RST mid-reply
+ * rejects the promise instead of emitting an unhandled 'error' that crashes the
+ * process. Used for both the greeting (no command) and every command.
+ */
+function readSmtpReply(
+  socket: net.Socket,
+  timeoutMs: number,
+  label: string,
+  command?: string,
+): Promise<SmtpResponse> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`SMTP timeout waiting for response to: ${command.split('\r\n')[0]}`));
-    }, timeoutMs);
-
-    const onData = (data: Buffer) => {
+    let accumulated = '';
+    let settled = false;
+    const cleanup = () => {
       clearTimeout(timer);
       socket.removeListener('data', onData);
       socket.removeListener('error', onError);
-      const text = data.toString('utf-8');
-      if (/^\d{3} /m.test(text)) {
-        resolve(parseSmtpResponse(text));
-      } else {
-        let accumulated = text;
-        const onMore = (chunk: Buffer) => {
-          accumulated += chunk.toString('utf-8');
-          if (/^\d{3} /m.test(accumulated)) {
-            clearTimeout(timer);
-            socket.removeListener('data', onMore);
-            resolve(parseSmtpResponse(accumulated));
-          }
-        };
-        socket.on('data', onMore);
-      }
+      socket.removeListener('close', onClose);
     };
-    const onError = (err: Error) => {
-      clearTimeout(timer);
-      socket.removeListener('data', onData);
-      reject(err);
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn();
     };
+    const timer = setTimeout(
+      () => settle(() => reject(new Error(`SMTP timeout waiting for ${label}`))),
+      timeoutMs,
+    );
+    const onData = (chunk: Buffer) => {
+      accumulated += chunk.toString('utf-8');
+      if (/^\d{3} /m.test(accumulated)) settle(() => resolve(parseSmtpResponse(accumulated)));
+    };
+    const onError = (err: Error) => settle(() => reject(err));
+    const onClose = () => settle(() => reject(new Error(`SMTP connection closed before ${label}`)));
 
-    socket.once('error', onError);
     socket.on('data', onData);
-    socket.write(command + '\r\n');
+    socket.once('error', onError);
+    socket.once('close', onClose);
+    if (command !== undefined) socket.write(command + '\r\n');
   });
 }
 
+function smtpCommand(socket: net.Socket, command: string, timeoutMs: number): Promise<SmtpResponse> {
+  return readSmtpReply(socket, timeoutMs, `response to: ${command.split('\r\n')[0]}`, command);
+}
+
 function waitForGreeting(socket: net.Socket, timeoutMs: number): Promise<SmtpResponse> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error('SMTP greeting timeout'));
-    }, timeoutMs);
-
-    const onData = (data: Buffer) => {
-      clearTimeout(timer);
-      socket.removeListener('data', onData);
-      socket.removeListener('error', onError);
-      resolve(parseSmtpResponse(data.toString('utf-8')));
-    };
-    const onError = (err: Error) => {
-      clearTimeout(timer);
-      socket.removeListener('data', onData);
-      reject(err);
-    };
-
-    socket.once('data', onData);
-    socket.once('error', onError);
-  });
+  return readSmtpReply(socket, timeoutMs, 'greeting');
 }
 
 export interface SmtpCheckRequest {
@@ -90,7 +88,15 @@ export interface SmtpCheckRequest {
    * env var or os.hostname(). HELO/PTR must match the proxy's outbound IP.
    */
   heloDomain?: string;
-  /** Optional. Defaults to `verify@<heloDomain>`. */
+  /**
+   * Optional envelope sender for the probe. If omitted, defaults to the
+   * EMAIL_VALIDATION_MAIL_FROM env var, otherwise the RFC 5321 null sender
+   * `<>`. The null sender is the canonical bounce/verify path and is NOT
+   * subject to the receiver's sender-callback verification, so it avoids
+   * "550 Sender verify failed" false negatives from hosts (Exim/cPanel) that
+   * verify the sender's domain — which a non-deliverable `verify@<host>`
+   * sender (no MX) would trip. Pass an explicit address to override.
+   */
   heloFrom?: string;
   checkCatchAll?: boolean;
   timeout?: number;
@@ -101,7 +107,21 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
   const result: SmtpCheckResult = { code: 0, exists: null, isCatchAll: null, greylist: false };
 
   const heloDomain = req.heloDomain ?? DEFAULT_HELO_DOMAIN;
-  const heloFrom = req.heloFrom ?? `verify@${heloDomain}`;
+  // Default to the RFC 5321 null sender `<>` for the probe envelope. EHLO still
+  // uses heloDomain (must match the proxy's PTR), but the MAIL FROM is `<>` so
+  // receivers that do sender-callback verification (Exim/cPanel "verify =
+  // sender") can't reject us with "550 Sender verify failed" for an
+  // unverifiable sender domain. EMAIL_VALIDATION_MAIL_FROM overrides if set.
+  const heloFrom = req.heloFrom ?? process.env.EMAIL_VALIDATION_MAIL_FROM ?? '';
+
+  // Reject control chars (CR/LF/NUL) in anything interpolated into an SMTP
+  // command line — blocks SMTP command injection on the connection we open.
+  for (const v of [req.email, req.mxHost, heloDomain, heloFrom]) {
+    if (typeof v === 'string' && /[\r\n\0]/.test(v)) {
+      result.error = 'Invalid characters in request';
+      return result;
+    }
+  }
 
   let socket: net.Socket | null = null;
 
@@ -141,6 +161,7 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
 
     const rcptTo = await smtpCommand(socket, `RCPT TO:<${req.email}>`, SMTP_COMMAND_TIMEOUT_MS);
     result.code = rcptTo.code;
+    result.smtpText = rcptTo.text;
 
     if (rcptTo.code === 250) {
       result.exists = true;

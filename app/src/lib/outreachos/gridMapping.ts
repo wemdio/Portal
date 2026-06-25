@@ -12,9 +12,29 @@ import {
   findColumnIndex,
   findPreferredSiteColumnIndexes,
 } from '@/lib/tools/dfybUtils';
+import { isOutreachOsExcludedEmail } from './excludeLocalParts';
 
 /** Заголовки сетки, которую кормим конструктору баз. */
 export const GRID_HEADER = ['Компания', 'Сайт', 'Город', 'Email'] as const;
+
+/**
+ * Потолок почт на один ДОМЕН КОМПАНИИ (по сайту) в финальной базе. Конструктор
+ * дедупит по АДРЕСУ (dedup_email), но не ограничивает «N почт с одной компании»
+ * — поэтому одна компания даёт info@/info_sft@/info_kt@/info_st@ (по сути один
+ * инбокс → спам). Берём не больше 3 (без приоритета — первые 3 по порядку сетки).
+ */
+export const MAX_EMAILS_PER_DOMAIN = 3;
+
+/** Хост из URL сайта (без протокола/www/пути), lowercase. '' если не парсится. */
+function hostOf(url: string): string {
+  if (!url) return '';
+  try {
+    const u = new URL(url.startsWith('http') ? url : `https://${url}`);
+    return u.hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
 
 /**
  * HhEmployer[] → сетка string[][] для base_constructor_jobs.data.
@@ -73,6 +93,8 @@ export function gridToLeadPayloads(grid: string[][]): LeadCreatePayload[] {
 
   const leads: LeadCreatePayload[] = [];
   const seenEmails = new Set<string>();
+  // Сколько почт уже взято с каждого email-домена (потолок MAX_EMAILS_PER_DOMAIN).
+  const perDomain = new Map<string, number>();
 
   for (let r = 1; r < grid.length; r++) {
     const row = grid[r];
@@ -82,10 +104,21 @@ export function gridToLeadPayloads(grid: string[][]): LeadCreatePayload[] {
       if (email) break;
     }
     if (!email || seenEmails.has(email)) continue;
-    seenEmails.add(email);
+    // HR/recruiting-ящики в лиды не идут (мы продаём аутрич — HR не покупатель).
+    // Отсев только в нашем пайплайне, общий конструктор оставляет hr@ как есть.
+    if (isOutreachOsExcludedEmail(email)) continue;
 
     const company = companyIdx >= 0 ? (row[companyIdx] ?? '').trim() : '';
     const website = siteIdx >= 0 ? (row[siteIdx] ?? '').trim() : '';
+
+    // Потолок: не больше MAX_EMAILS_PER_DOMAIN почт на ДОМЕН КОМПАНИИ (по сайту).
+    // НЕ по email-домену: иначе общие провайдеры (gmail.com/mail.ru/yandex.ru)
+    // капаются глобально и выкидывают разные компании, у которых единственный
+    // контакт — на бесплатной почте. Fallback на email-домен, если сайта нет.
+    const domainKey = hostOf(website) || email.slice(email.indexOf('@') + 1).toLowerCase();
+    if ((perDomain.get(domainKey) ?? 0) >= MAX_EMAILS_PER_DOMAIN) continue;
+    perDomain.set(domainKey, (perDomain.get(domainKey) ?? 0) + 1);
+    seenEmails.add(email);
 
     const lead: LeadCreatePayload = { email };
     if (company) lead.company_name = company;

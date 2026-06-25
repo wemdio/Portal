@@ -20,15 +20,17 @@ interface BriefRow {
   lead_source_hypotheses: string | null;
   lead_source_hypotheses_generated_at: string | null;
   lead_source_hypotheses_error: string | null;
+  lead_source_hypotheses_stale: boolean;
 }
 
 async function loadBrief(userId: string): Promise<BriefRow | null> {
   if (!supabaseInstantly) return null;
-  const { data } = await supabaseInstantly
+  const { data, error } = await supabaseInstantly
     .from('client_briefs')
-    .select('id, fields, lead_source_hypotheses, lead_source_hypotheses_generated_at, lead_source_hypotheses_error')
+    .select('id, fields, lead_source_hypotheses, lead_source_hypotheses_generated_at, lead_source_hypotheses_error, lead_source_hypotheses_stale')
     .eq('client_user_id', userId)
     .maybeSingle();
+  if (error) await logError('client.brief.hypotheses.load.failed', error, { userId });
   return (data as BriefRow | null) ?? null;
 }
 
@@ -43,6 +45,7 @@ export async function GET(req: NextRequest) {
     lead_source_hypotheses: brief?.lead_source_hypotheses ?? null,
     lead_source_hypotheses_generated_at: brief?.lead_source_hypotheses_generated_at ?? null,
     lead_source_hypotheses_error: brief?.lead_source_hypotheses_error ?? null,
+    lead_source_hypotheses_stale: brief?.lead_source_hypotheses_stale ?? false,
   });
 }
 
@@ -74,6 +77,7 @@ export async function POST(req: NextRequest) {
         lead_source_hypotheses: brief.lead_source_hypotheses,
         lead_source_hypotheses_generated_at: brief.lead_source_hypotheses_generated_at,
         lead_source_hypotheses_error: null,
+        lead_source_hypotheses_stale: brief.lead_source_hypotheses_stale,
       });
     }
 
@@ -102,13 +106,22 @@ export async function POST(req: NextRequest) {
 
     const generatedAt = hypotheses ? new Date().toISOString() : null;
 
+    // On SUCCESS: replace with fresh recommendations and clear the stale flag.
+    // On FAILURE: keep the previous (stale-but-useful) recommendations and only
+    // record the error — don't destroy recoverable state, since the «Сгенерировать
+    // заново» button (prompted by the stale banner) leads straight into this path.
+    const updatePayload: Record<string, unknown> = {
+      lead_source_hypotheses_error: errorMessage,
+    };
+    if (hypotheses) {
+      updatePayload.lead_source_hypotheses = hypotheses;
+      updatePayload.lead_source_hypotheses_generated_at = generatedAt;
+      updatePayload.lead_source_hypotheses_stale = false;
+    }
+
     const { error: updateError } = await supabaseInstantly
       .from('client_briefs')
-      .update({
-        lead_source_hypotheses: hypotheses,
-        lead_source_hypotheses_generated_at: generatedAt ?? brief.lead_source_hypotheses_generated_at,
-        lead_source_hypotheses_error: errorMessage,
-      })
+      .update(updatePayload)
       .eq('client_user_id', userId);
 
     if (updateError) {
@@ -145,6 +158,7 @@ export async function POST(req: NextRequest) {
       lead_source_hypotheses: hypotheses,
       lead_source_hypotheses_generated_at: generatedAt,
       lead_source_hypotheses_error: null,
+      lead_source_hypotheses_stale: false,
       regenerated: regenerate,
     });
   } catch (err) {

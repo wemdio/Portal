@@ -316,14 +316,11 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
   },
   'sales-hypotheses': {
     id: 'sales-hypotheses',
-    title: 'Гипотезы по сайту',
-    title_en: 'Hypotheses from website',
-    description: 'Вставьте сайт компании — AI заполнит бриф и выдаст готовые гипотезы по сбору базы.',
-    description_en: 'Paste a company website — AI fills the brief and returns ready lead-source hypotheses.',
+    title: 'Гипотезы (сайт или запрос)',
+    title_en: 'Hypotheses (site or query)',
+    description: 'Вставьте сайт компании или запрос — AI соберёт бриф и выдаст готовые гипотезы по сбору базы.',
+    description_en: 'Paste a website or a query — AI builds the brief and returns ready lead-source hypotheses.',
     href: '/tools/sales-hypotheses',
-    badge: 'Новое',
-    badge_en: 'New',
-    badgeVariant: 'emerald',
     accentColor: 'emerald',
   },
   'knowledge-base': {

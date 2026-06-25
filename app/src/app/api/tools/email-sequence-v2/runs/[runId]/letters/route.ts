@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { blockDemo } from '@/lib/auth/blockDemo';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -27,6 +28,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return jsonError('Unauthorized', 401);
+
+  const demo = await blockDemo(supabase, user.id);
+  if (demo) return demo;
 
   const { runId } = await params;
   if (!runId) return jsonError('Missing runId', 400);
