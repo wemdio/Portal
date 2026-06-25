@@ -20,3 +20,9 @@ create index if not exists demo_leads_created_at_idx
 -- No client access: RLS on with no policies → only the service role (which
 -- bypasses RLS) can read/write. Matches how other ops-only tables are locked.
 alter table public.demo_leads enable row level security;
+
+-- The /api/demo-lead writer connects as the service role, which needs an EXPLICIT
+-- grant (the migration runner does not inherit default privileges — see the
+-- migration GRANT lint, tests/migrations/grants.test.ts). Deliberately NO grant to
+-- `authenticated`: demo_leads is ops-only and stays RLS-locked from clients.
+grant all on public.demo_leads to service_role;
