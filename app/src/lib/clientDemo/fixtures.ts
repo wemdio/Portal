@@ -1045,14 +1045,44 @@ export const DEMO_REPORT_RESPONSE = getDemoReportResponse();
 
 // ─── B2B-поиск компаний ──────────────────────────────────────────────────────
 
-export const DEMO_COMPANIES_SEARCH_RESPONSE = {
-  count: 1284,
-  companies: [
-    { name: 'ООО «Складские решения»', inn: '7700000001', address: 'Москва', activity: 'Складское хозяйство' },
-    { name: 'ООО «РитейлЛогистик»', inn: '7800000002', address: 'Санкт-Петербург', activity: 'Розничная торговля' },
-    { name: 'ООО «ФулфилментЦентр»', inn: '5000000003', address: 'Московская обл.', activity: 'Логистика' },
-  ],
+/**
+ * Демо-поиск компаний. Страница /client/companies-search шлёт только
+ * `{ ...filters, countOnly: true }` и показывает СЧЁТЧИК (data.count) + остаток
+ * по тарифу — без списка результатов. Чтобы поиск ощущался живым (а не висел на
+ * статичных 1284), считаем счётчик ДЕТЕРМИНИРОВАННО от фильтров: больше
+ * регионов/ОКВЭД — шире, булевы и диапазонные фильтры — у́же. Не рандом (одни и
+ * те же фильтры дают один и тот же счёт), правдоподобно, без выдачи реальных данных.
+ */
+export type DemoCompaniesFilters = {
+  regionCodes?: string[];
+  activityTypes?: string[];
+  okvedCodes?: string[];
+  legalForms?: string[];
+  hasPhone?: boolean;
+  hasEmail?: boolean;
+  hasWebsite?: boolean;
+  revenueFrom?: number | null;
+  revenueTo?: number | null;
+  employeesFrom?: number | null;
+  employeesTo?: number | null;
 };
+
+export function getDemoCompaniesSearch(filters: DemoCompaniesFilters) {
+  let count = 1284; // базовая «вселенная» без фильтров
+  const regionN = filters.regionCodes?.length ?? 0;
+  const actN = (filters.activityTypes?.length ?? 0) + (filters.okvedCodes?.length ?? 0);
+  if (regionN > 0) count = Math.round(count * Math.min(0.9, 0.28 + 0.06 * regionN));
+  if (actN > 0) count = Math.round(count * Math.min(0.9, 0.3 + 0.05 * actN));
+  if (filters.hasEmail) count = Math.round(count * 0.62);
+  if (filters.hasPhone) count = Math.round(count * 0.74);
+  if (filters.hasWebsite) count = Math.round(count * 0.66);
+  if (filters.legalForms?.length) count = Math.round(count * 0.7);
+  if (filters.revenueFrom != null || filters.revenueTo != null) count = Math.round(count * 0.55);
+  if (filters.employeesFrom != null || filters.employeesTo != null) count = Math.round(count * 0.52);
+  count = Math.max(12, count);
+  // remaining зеркалит демо-тариф (max_rows 50000 − использовано 9120 ≈ 40880).
+  return { count, remaining: 40880 };
+}
 
 export const DEMO_ACTIVITY_TYPES_RESPONSE = {
   activityTypes: [
