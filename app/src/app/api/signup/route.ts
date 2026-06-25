@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { sendDemoLeadTelegramAlert } from '@/lib/demoLead/notify';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,6 +11,10 @@ export const dynamic = 'force-dynamic';
  * lands in their portal in "demo" mode (status=inactive). They pay later
  * from /client/tariff. No email confirmation flow — email_confirm=true
  * marks the address as already confirmed (no Supabase email sent).
+ *
+ * Collects contact fields (name + company required, phone/telegram optional),
+ * persists them on the profile, and pings the team on Telegram (source=register)
+ * so a new registration is treated as a sales lead like the landing forms.
  */
 function isEmailLike(s: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
@@ -20,7 +25,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
   }
 
-  let body: { email?: string; password?: string };
+  let body: {
+    email?: string; password?: string;
+    full_name?: string; company?: string; phone?: string; telegram?: string;
+  };
   try {
     body = await req.json();
   } catch {
@@ -29,6 +37,10 @@ export async function POST(req: NextRequest) {
 
   const email = (body.email ?? '').trim().toLowerCase();
   const password = body.password ?? '';
+  const fullName = (body.full_name ?? '').trim();
+  const company = (body.company ?? '').trim();
+  const phone = (body.phone ?? '').trim();
+  const telegram = (body.telegram ?? '').trim();
 
   if (!email || !isEmailLike(email)) {
     return NextResponse.json({ error: 'Введите корректный email' }, { status: 400 });
@@ -36,6 +48,14 @@ export async function POST(req: NextRequest) {
   if (password.length < 8) {
     return NextResponse.json({ error: 'Пароль должен быть от 8 символов' }, { status: 400 });
   }
+  if (!fullName || fullName.length > 200) {
+    return NextResponse.json({ error: 'Укажите имя' }, { status: 400 });
+  }
+  if (!company || company.length > 200) {
+    return NextResponse.json({ error: 'Укажите компанию' }, { status: 400 });
+  }
+  if (phone.length > 50) return NextResponse.json({ error: 'Слишком длинный телефон' }, { status: 400 });
+  if (telegram.length > 100) return NextResponse.json({ error: 'Слишком длинный telegram' }, { status: 400 });
 
   // Триггер public.handle_new_user (см. supabase/migrations/20260204_0002_*)
   // автоматически создаёт строку в profiles при INSERT в auth.users.
@@ -65,7 +85,14 @@ export async function POST(req: NextRequest) {
   // нужную роль через update. Идемпотентно: если уже client — no-op.
   const { error: profileErr } = await supabaseAdmin
     .from('profiles')
-    .update({ role: 'client', locale: 'ru' })
+    .update({
+      role: 'client',
+      locale: 'ru',
+      full_name: fullName,
+      company,
+      phone: phone || null,
+      telegram: telegram || null,
+    })
     .eq('id', userId);
   if (profileErr) {
     await logError('signup.profile_update_failed', profileErr, { userId });
@@ -86,6 +113,16 @@ export async function POST(req: NextRequest) {
   }
 
   await logAudit('signup.created', `New client signed up: ${email}`, { userId, email });
+
+  // Treat a new registration as a sales lead — best-effort TG ping (never throws).
+  await sendDemoLeadTelegramAlert({
+    name: fullName,
+    email,
+    phone: phone || null,
+    telegram: telegram || null,
+    company,
+    source: 'register',
+  });
 
   return NextResponse.json({ ok: true, user_id: userId }, { status: 201 });
 }
