@@ -926,7 +926,7 @@ export default function BillingCalendarView() {
                           key={sub.id}
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (isLead(userRole) && (sub.status === 'pending_review' || sub.status === 'keep' || sub.status === 'cancel')) {
+                            if (isLead(userRole) && (sub.status === 'active' || sub.status === 'pending_review' || sub.status === 'keep' || sub.status === 'cancel')) {
                               openDecisionModal(sub);
                             } else if (isTechnician(userRole)) {
                               openEditModal(sub);
@@ -1008,7 +1008,7 @@ export default function BillingCalendarView() {
                         type="button"
                         onClick={() => {
                           setDayPopover(null);
-                          if (isLead(userRole) && (sub.status === 'pending_review' || sub.status === 'keep' || sub.status === 'cancel')) {
+                          if (isLead(userRole) && (sub.status === 'active' || sub.status === 'pending_review' || sub.status === 'keep' || sub.status === 'cancel')) {
                             openDecisionModal(sub);
                           } else if (isTechnician(userRole)) {
                             openEditModal(sub);
