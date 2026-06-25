@@ -1,10 +1,13 @@
 /**
  * Telegram ping to the team when a visitor submits the landing demo-gate
  * (name/phone/email) before entering /demo. Mirrors the support/lead alert
- * pattern (lib/clientSupport/telegramAlert.ts): reuses the existing alerts bot
- * token (LEAD_ALERTS → CHANGELOG fallback), so NO new bot is required. Chat:
- * DEMO_LEADS_TELEGRAM_CHAT_ID, falling back to the lead-alerts chat so it works
- * out of the box (demo signups are leads); set the dedicated env to split them.
+ * pattern (lib/clientSupport/telegramAlert.ts).
+ *   - Bot token: DEMO_LEADS_TELEGRAM_BOT_TOKEN (dedicated bot for demo signups),
+ *     falling back to LEAD_ALERTS → CHANGELOG so it still works before a dedicated
+ *     bot is provisioned. Set the dedicated token to split it off its own bot.
+ *   - Chat: DEMO_LEADS_TELEGRAM_CHAT_ID, falling back to the lead-alerts chat so
+ *     it works out of the box (demo signups are leads); set the dedicated env to
+ *     route them to their own chat.
  *
  * Never throws: the /api/demo-lead route awaits it best-effort; a TG outage must
  * not break the visitor reaching the demo. The lead is already stored regardless.
@@ -22,6 +25,7 @@ export interface DemoLeadData {
 
 function getToken(): string {
   return (
+    process.env.DEMO_LEADS_TELEGRAM_BOT_TOKEN ||
     process.env.LEAD_ALERTS_TELEGRAM_BOT_TOKEN ||
     process.env.CHANGELOG_BOT_TOKEN ||
     ''
@@ -46,7 +50,8 @@ export async function sendDemoLeadTelegramAlert(data: DemoLeadData): Promise<voi
   if (!token || !chatId) {
     console.warn(
       `[demo-lead-alert] skipped (token=${token ? 'set' : 'missing'}, chat=${chatId ? 'set' : 'missing'}). ` +
-        'Set DEMO_LEADS_TELEGRAM_CHAT_ID (token falls back to LEAD_ALERTS/CHANGELOG).',
+        'Set DEMO_LEADS_TELEGRAM_BOT_TOKEN + DEMO_LEADS_TELEGRAM_CHAT_ID ' +
+        '(token falls back to LEAD_ALERTS/CHANGELOG).',
     );
     return;
   }
