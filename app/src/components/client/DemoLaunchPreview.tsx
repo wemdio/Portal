@@ -1,12 +1,15 @@
+'use client';
+
 /**
  * Read-only "example launch" shown ONLY in the demo portal (is_demo) above the
  * real launch wizard. A prospect lands on /client/launch and, instead of an
  * empty form they can't submit, sees end-to-end what a configured campaign looks
  * like: base + mapping, the 2-step sequence (same copy as the demo campaigns),
- * schedule/sending settings, and a disabled launch button. Self-contained markup
- * (client theme tokens) — does NOT touch the wizard logic. Pure presentation.
+ * schedule/sending settings, and a launch button that invites registration.
+ * Self-contained markup (client theme tokens) — does NOT touch the wizard logic.
  */
 import { Upload, Mail, Clock, Settings, Send, Check, Info } from 'lucide-react';
+import { promptDemoRegister } from '@/lib/clientDemo/registerPrompt';
 
 const PREVIEW_STEPS = [
   {
@@ -123,15 +126,16 @@ export function DemoLaunchPreview() {
       </div>
 
       <div className="mt-5 flex items-center gap-3 flex-wrap">
-        <span
-          className="neu-sm inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold opacity-60 cursor-not-allowed select-none"
-          style={{ color: 'var(--cp-paper)' }}
-          aria-disabled="true"
+        <button
+          type="button"
+          onClick={() => promptDemoRegister('запустить кампанию')}
+          className="neu-pill inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold"
+          style={{ background: 'var(--cp-amber)', color: 'var(--cp-ink)' }}
         >
           <Send size={15} /> Запустить кампанию
-        </span>
+        </button>
         <span className="text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
-          Демо: запуск недоступен. В рабочем аккаунте — одна кнопка.
+          В демо — только просмотр. Регистрация откроет запуск.
         </span>
       </div>
     </div>

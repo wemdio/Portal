@@ -23,6 +23,7 @@ import { clientApiFetch } from '@/lib/clientFetcher';
 import { ClientSidebar } from '@/components/client/ClientSidebar';
 import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
 import { DemoBanner } from '@/components/client/DemoBanner';
+import { DemoRegisterGate } from '@/components/client/DemoRegisterGate';
 import { PaymentLockedBanner } from '@/components/client/PaymentLockedBanner';
 import { ClientPortalProvider } from '@/lib/clientPortalContext';
 
@@ -207,6 +208,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     <LanguageLoadingOverlay />
     <div className={`client-portal ${inter.variable} ${jetbrainsMono.variable} flex flex-col min-h-screen`}>
       <DemoBanner />
+      <DemoRegisterGate />
       <PaymentLockedBanner />
       <header className="sticky top-0 z-40 px-3 pt-3 pb-1 sm:px-4 sm:pt-4 sm:pb-2">
         {/* Brand left, controls right. Earlier iteration dropped the flex-1
