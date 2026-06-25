@@ -31,6 +31,7 @@ function isPublicApiPath(p: string): boolean {
   if (p.endsWith('/webhook') || p.includes('/webhook/')) return true
   return (
     p === '/api/signup' ||
+    p === '/api/demo-lead' || // public landing demo-gate lead capture
     p === '/api/health' ||
     p.startsWith('/api/partner/') || // external pull-API, auth'd by PARTNER_API_KEY
     p.startsWith('/api/telegram/verify') ||
