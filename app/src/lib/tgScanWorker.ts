@@ -175,9 +175,10 @@ export async function runTgScanJob(jobId: string): Promise<void> {
 
     let startMsgId = (chatRow?.last_message_id as number | null) ?? 0;
 
-    if (!startMsgId) {
+    const probeErrors: string[] = [];
+    const tryProbe = async (withTopic: boolean): Promise<number | null> => {
       const probeBody: Record<string, unknown> = { chat_id: chatId, text: '🔍 Сканирование...' };
-      if (topicId != null) probeBody.message_thread_id = topicId;
+      if (withTopic && topicId != null) probeBody.message_thread_id = topicId;
       try {
         const probe = await fetch(`${tgApiBase()}/sendMessage`, {
           method: 'POST',
@@ -185,22 +186,56 @@ export async function runTgScanJob(jobId: string): Promise<void> {
           body: JSON.stringify(probeBody),
           signal: AbortSignal.timeout(10000),
         });
-        const probeJson = (await probe.json()) as { ok: boolean; result?: { message_id: number } };
+        const probeJson = (await probe.json()) as {
+          ok: boolean;
+          result?: { message_id: number };
+          description?: string;
+          error_code?: number;
+        };
         if (probeJson.ok && probeJson.result) {
-          startMsgId = probeJson.result.message_id;
+          const mid = probeJson.result.message_id;
           void fetch(`${tgApiBase()}/deleteMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId, message_id: startMsgId }),
+            body: JSON.stringify({ chat_id: chatId, message_id: mid }),
           }).catch(() => {});
+          return mid;
         }
-      } catch {
-        // Telegram API недоступен
+        const tag = withTopic ? `topic ${topicId}` : 'no-topic';
+        const msg = probeJson.description ?? `ok=false${probeJson.error_code ? ` (код ${probeJson.error_code})` : ''}`;
+        probeErrors.push(`${tag}: ${msg}`);
+        await logInfo('tg-scan.probe.fail', `Probe sendMessage failed for chat ${chatId} ${tag}`, {
+          chatId, topicId: topicId ?? 0, withTopic, description: probeJson.description, errorCode: probeJson.error_code,
+        });
+        return null;
+      } catch (err) {
+        const tag = withTopic ? `topic ${topicId}` : 'no-topic';
+        const msg = err instanceof Error ? err.message : 'сетевая ошибка';
+        probeErrors.push(`${tag}: ${msg}`);
+        await logInfo('tg-scan.probe.exception', `Probe sendMessage exception for chat ${chatId} ${tag}`, {
+          chatId, topicId: topicId ?? 0, withTopic, error: msg,
+        });
+        return null;
+      }
+    };
+
+    if (!startMsgId) {
+      if (topicId != null) {
+        startMsgId = (await tryProbe(true)) ?? 0;
+        if (!startMsgId) {
+          startMsgId = (await tryProbe(false)) ?? 0;
+        }
+      } else {
+        startMsgId = (await tryProbe(false)) ?? 0;
       }
     }
 
     if (!startMsgId) {
-      throw new Error('Не удалось определить последнее сообщение. Telegram API недоступен.');
+      const hint = topicId != null
+        ? 'Проверьте, что бот добавлен в группу как админ и имеет право писать в General и/или в выбранный подчат.'
+        : 'Проверьте, что бот добавлен в группу и может отправлять сообщения.';
+      const reason = probeErrors.length ? ` Причина: ${probeErrors.join('; ')}.` : '';
+      throw new Error(`Не удалось отправить тестовое сообщение в чат для определения стартовой позиции.${reason} ${hint}`);
     }
 
     // Scan loop
