@@ -12,6 +12,12 @@ jest.mock('@/lib/loggerServer', () => ({
   logWarn: jest.fn(async () => {}),
 }));
 
+// Signup fires a lead alert on success. Mock it so the test never makes a real
+// Telegram fetch (the test env loads .env, where the fallback bot token may be set).
+jest.mock('@/lib/demoLead/notify', () => ({
+  sendDemoLeadTelegramAlert: jest.fn(async () => {}),
+}));
+
 import { POST } from '@/app/api/signup/route';
 import { NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -98,8 +104,25 @@ describe('POST /api/signup', () => {
     expect(res.status).toBe(400);
   });
 
-  it('creates auth user with user_metadata.role=client + sets profile.role + creates inactive tariff', async () => {
-    const res = await POST(makeReq({ email: 'new@user.com', password: 'longenough123' }));
+  it('rejects missing name', async () => {
+    const res = await POST(makeReq({ email: 'a@b.com', password: 'longenough123', company: 'Acme' }));
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects missing company', async () => {
+    const res = await POST(makeReq({ email: 'a@b.com', password: 'longenough123', full_name: 'Иван' }));
+    expect(res.status).toBe(400);
+  });
+
+  it('creates auth user with role=client + persists contact fields + creates inactive tariff', async () => {
+    const res = await POST(makeReq({
+      email: 'new@user.com',
+      password: 'longenough123',
+      full_name: 'Иван Тест',
+      company: 'ООО Ромашка',
+      phone: '+70000000000',
+      telegram: '@ivan',
+    }));
     expect(res.status).toBe(201);
     const c = (supabaseAdmin as unknown as MockedAdmin).__created;
 
@@ -107,7 +130,17 @@ describe('POST /api/signup', () => {
     expect(c.auth.at(-1)).toMatchObject({ user_metadata: { role: 'client' } });
 
     expect(c.profileUpdates.length).toBeGreaterThanOrEqual(1);
-    expect(c.profileUpdates.at(-1)).toMatchObject({ id: 'user-123', patch: { role: 'client', locale: 'ru' } });
+    expect(c.profileUpdates.at(-1)).toMatchObject({
+      id: 'user-123',
+      patch: {
+        role: 'client',
+        locale: 'ru',
+        full_name: 'Иван Тест',
+        company: 'ООО Ромашка',
+        phone: '+70000000000',
+        telegram: '@ivan',
+      },
+    });
 
     expect(c.tariffs.length).toBeGreaterThanOrEqual(1);
     expect(c.tariffs.at(-1)).toMatchObject({ user_id: 'user-123', is_active: false, tariff_type: 'standard' });
