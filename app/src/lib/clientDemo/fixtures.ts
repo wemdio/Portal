@@ -121,6 +121,107 @@ export const DEMO_CAMPAIGNS_RESPONSE = {
   lastSyncedAt: SYNCED_AT,
 };
 
+// ─── Цепочки писем по кампаниям ──────────────────────────────────────────────
+// Шаблоны последовательностей (вкладка «Цепочка» на детали кампании). Темы
+// совпадают с темами ответов в DEMO_REPLIES, чтобы демо было связным: проспект
+// видит и исходный шаблон, и реальный ответ на него. Merge-теги ({{firstName}})
+// демонстрируют персонализацию. Тексты правдоподобные, без завышенных обещаний.
+
+const DEMO_SEQUENCES: Record<
+  string,
+  { steps: { subject: string; body: string; wait_days: number }[] }
+> = {
+  'demo-cmp-retail': {
+    steps: [
+      {
+        subject: 'Сократили пересорт на складе на 30%',
+        wait_days: 0,
+        body:
+          'Здравствуйте, {{firstName}}!\n\n' +
+          'У сетей с несколькими складами почти всегда болит пересорт и долгая инвентаризация — склад встаёт на 1–2 дня.\n\n' +
+          'Мы, Орбита, — облачная WMS. Рознице «ТоргДом» с 12 складами помогли сократить потери на пересорте с 15% до 5% за 3 месяца, без замены 1С и без остановки операций.\n\n' +
+          'Откликается тема? Пришлю короткий расчёт под ваш профиль.',
+      },
+      {
+        subject: 'Инвентаризация 6 складов — за 4 часа вместо 2 дней',
+        wait_days: 3,
+        body:
+          'Добрый день, {{firstName}}!\n\n' +
+          'Возвращаюсь к прошлому письму с конкретикой: у «ТоргДома» инвентаризация 6 складов теперь занимает 4 часа вместо двух дней — за счёт онлайн-остатков и ТСД.\n\n' +
+          'Покажу на 15-минутном демо, как это выглядит у вас. Когда удобно?',
+      },
+    ],
+  },
+  'demo-cmp-3pl': {
+    steps: [
+      {
+        subject: 'WMS под фулфилмент за 3 недели',
+        wait_days: 0,
+        body:
+          'Здравствуйте, {{firstName}}!\n\n' +
+          '3PL и фулфилмент-операторы часто упираются в самописные системы, которые некому поддерживать.\n\n' +
+          'Орбита разворачивает WMS под фулфилмент за 3 недели — без даунтайма, с интеграциями под Wildberries / Ozon / Я.Маркет и кросс-докингом из коробки.\n\n' +
+          'Покажу кейс миграции — интересно?',
+      },
+      {
+        subject: 'Кейсы по 3PL-операторам вашего размера',
+        wait_days: 3,
+        body:
+          'Добрый день, {{firstName}}!\n\n' +
+          'Пара кейсов под ваш масштаб: Fulfillment Pro перешёл с самописной системы на облако без остановки и снизил ошибки сборки на 32% за квартал.\n\n' +
+          'Готовы 15 минут на созвон на этой неделе?',
+      },
+    ],
+  },
+  'demo-cmp-manufacturing': {
+    steps: [
+      {
+        subject: 'Учёт сырья и готовой продукции без Excel',
+        wait_days: 0,
+        body:
+          'Здравствуйте, {{firstName}}!\n\n' +
+          'На производстве учёт сырья и готовой продукции в Excel рано или поздно перестаёт сходиться — нет онлайн-остатков, простои из-за пересорта.\n\n' +
+          'Орбита даёт складской учёт с онлайн-остатками и интеграцией с 1С, внедрение за 2–3 недели. У «ПромЗавода» так ушли от Excel и сократили простои на 15%.\n\n' +
+          'Рассказать подробнее?',
+      },
+      {
+        subject: 'Онлайн-остатки на производстве: как у «ПромЗавода»',
+        wait_days: 3,
+        body:
+          'Добрый день, {{firstName}}!\n\n' +
+          'Коротко по сути: вместо ежемесячной сверки в Excel — онлайн-остатки сырья и продукции в реальном времени, доступ с ТСД на складе.\n\n' +
+          'Если актуально, покажу на коротком демо под ваш процесс. Когда удобно?',
+      },
+    ],
+  },
+  'demo-cmp-marketplace': {
+    steps: [
+      {
+        subject: 'Отгрузки на WB и Ozon из одного окна',
+        wait_days: 0,
+        body:
+          'Здравствуйте, {{firstName}}!\n\n' +
+          'У продавцов на маркетплейсах с несколькими складами обычно расходятся остатки между WB, Ozon и Я.Маркет — отсюда штрафы и упущенные продажи.\n\n' +
+          'Орбита сводит отгрузки и остатки в одно окно с онлайн-синхронизацией. Подключение быстрое, без своих серверов.\n\n' +
+          'Интересно посмотреть, как это у вас?',
+      },
+      {
+        subject: 'Как продавцы с 3 складами синхронизируют остатки',
+        wait_days: 3,
+        body:
+          'Добрый день, {{firstName}}!\n\n' +
+          'Дополню прошлое письмо: «МаркетСейл» с 3 складами синхронизирует остатки по всем маркетплейсам автоматически — без ручных выгрузок.\n\n' +
+          'Готов показать на 15-минутном демо. Какой день удобен?',
+      },
+    ],
+  },
+};
+
+function getDemoCampaignSequences(id: string) {
+  const s = DEMO_SEQUENCES[id] ?? DEMO_SEQUENCES['demo-cmp-retail'];
+  return [s];
+}
+
 // ─── Деталь кампании ─────────────────────────────────────────────────────────
 
 function demoCampaignDetail(id: string) {
@@ -132,6 +233,8 @@ function demoCampaignDetail(id: string) {
       status: c.status,
       timestamp_created: '2026-03-12T10:00:00.000Z',
       timestamp_updated: SYNCED_AT,
+      // Цепочка писем (вкладка «Цепочка»): иначе показывает «Цепочка не настроена».
+      sequences: getDemoCampaignSequences(c.id),
     },
     analytics: {
       campaign_id: c.id,
@@ -942,14 +1045,44 @@ export const DEMO_REPORT_RESPONSE = getDemoReportResponse();
 
 // ─── B2B-поиск компаний ──────────────────────────────────────────────────────
 
-export const DEMO_COMPANIES_SEARCH_RESPONSE = {
-  count: 1284,
-  companies: [
-    { name: 'ООО «Складские решения»', inn: '7700000001', address: 'Москва', activity: 'Складское хозяйство' },
-    { name: 'ООО «РитейлЛогистик»', inn: '7800000002', address: 'Санкт-Петербург', activity: 'Розничная торговля' },
-    { name: 'ООО «ФулфилментЦентр»', inn: '5000000003', address: 'Московская обл.', activity: 'Логистика' },
-  ],
+/**
+ * Демо-поиск компаний. Страница /client/companies-search шлёт только
+ * `{ ...filters, countOnly: true }` и показывает СЧЁТЧИК (data.count) + остаток
+ * по тарифу — без списка результатов. Чтобы поиск ощущался живым (а не висел на
+ * статичных 1284), считаем счётчик ДЕТЕРМИНИРОВАННО от фильтров: больше
+ * регионов/ОКВЭД — шире, булевы и диапазонные фильтры — у́же. Не рандом (одни и
+ * те же фильтры дают один и тот же счёт), правдоподобно, без выдачи реальных данных.
+ */
+export type DemoCompaniesFilters = {
+  regionCodes?: string[];
+  activityTypes?: string[];
+  okvedCodes?: string[];
+  legalForms?: string[];
+  hasPhone?: boolean;
+  hasEmail?: boolean;
+  hasWebsite?: boolean;
+  revenueFrom?: number | null;
+  revenueTo?: number | null;
+  employeesFrom?: number | null;
+  employeesTo?: number | null;
 };
+
+export function getDemoCompaniesSearch(filters: DemoCompaniesFilters) {
+  let count = 1284; // базовая «вселенная» без фильтров
+  const regionN = filters.regionCodes?.length ?? 0;
+  const actN = (filters.activityTypes?.length ?? 0) + (filters.okvedCodes?.length ?? 0);
+  if (regionN > 0) count = Math.round(count * Math.min(0.9, 0.28 + 0.06 * regionN));
+  if (actN > 0) count = Math.round(count * Math.min(0.9, 0.3 + 0.05 * actN));
+  if (filters.hasEmail) count = Math.round(count * 0.62);
+  if (filters.hasPhone) count = Math.round(count * 0.74);
+  if (filters.hasWebsite) count = Math.round(count * 0.66);
+  if (filters.legalForms?.length) count = Math.round(count * 0.7);
+  if (filters.revenueFrom != null || filters.revenueTo != null) count = Math.round(count * 0.55);
+  if (filters.employeesFrom != null || filters.employeesTo != null) count = Math.round(count * 0.52);
+  count = Math.max(12, count);
+  // remaining зеркалит демо-тариф (max_rows 50000 − использовано 9120 ≈ 40880).
+  return { count, remaining: 40880 };
+}
 
 export const DEMO_ACTIVITY_TYPES_RESPONSE = {
   activityTypes: [
