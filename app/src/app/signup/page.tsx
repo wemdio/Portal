@@ -13,7 +13,11 @@ import { supabase } from '@/lib/supabaseClient';
  */
 export default function SignupPage() {
   const router = useRouter();
+  const [name, setName] = useState('');
+  const [company, setCompany] = useState('');
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [telegram, setTelegram] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -26,7 +30,7 @@ export default function SignupPage() {
       const res = await fetch('/api/signup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, full_name: name, company, phone, telegram }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -54,6 +58,30 @@ export default function SignupPage() {
 
         <form onSubmit={onSubmit} className="space-y-3">
           <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Имя</label>
+            <input
+              type="text"
+              required
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+              autoComplete="name"
+              maxLength={200}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Компания</label>
+            <input
+              type="text"
+              required
+              value={company}
+              onChange={(e) => setCompany(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+              autoComplete="organization"
+              maxLength={200}
+            />
+          </div>
+          <div>
             <label className="block text-xs font-medium text-gray-700 mb-1">Email</label>
             <input
               type="email"
@@ -62,6 +90,32 @@ export default function SignupPage() {
               onChange={(e) => setEmail(e.target.value)}
               className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
               autoComplete="email"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">
+              Телефон <span className="text-gray-400 font-normal">— по желанию</span>
+            </label>
+            <input
+              type="tel"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+              autoComplete="tel"
+              maxLength={50}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">
+              Telegram <span className="text-gray-400 font-normal">— по желанию</span>
+            </label>
+            <input
+              type="text"
+              value={telegram}
+              onChange={(e) => setTelegram(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+              placeholder="@username"
+              maxLength={100}
             />
           </div>
           <div>
