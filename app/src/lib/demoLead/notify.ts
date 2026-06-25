@@ -24,7 +24,22 @@ export interface DemoLeadData {
   email: string;
   phone?: string | null;
   telegram?: string | null;
+  company?: string | null;
+  message?: string | null;
+  /** Which surface produced the lead — drives the alert title. */
+  source?: string | null;
   referrer?: string | null;
+}
+
+/** Human label per lead source, for the Telegram alert title. */
+const SOURCE_LABEL: Record<string, string> = {
+  hero: 'Обсудить задачу',
+  register: 'Регистрация',
+  demo: 'Демо',
+};
+
+function sourceLabel(source?: string | null): string {
+  return (source && SOURCE_LABEL[source]) || 'лендинг';
 }
 
 function getToken(): string {
@@ -72,13 +87,18 @@ export async function sendDemoLeadTelegramAlert(data: DemoLeadData): Promise<voi
   }
 
   const lines: string[] = [
-    '🎯 <b>Новый лид с лендинга (демо)</b>',
+    `🎯 <b>Новый лид — ${esc(sourceLabel(data.source))}</b>`,
     '',
     `<b>Имя:</b> ${esc(data.name)}`,
     `<b>Почта:</b> ${esc(data.email)}`,
   ];
+  if (data.company) lines.push(`<b>Компания:</b> ${esc(data.company)}`);
   if (data.phone) lines.push(`<b>Телефон:</b> ${esc(data.phone)}`);
   if (data.telegram) lines.push(`<b>Telegram:</b> ${esc(data.telegram)}`);
+  if (data.message) {
+    lines.push('');
+    lines.push(esc(data.message));
+  }
   if (data.referrer) {
     lines.push('');
     lines.push(`<i>${esc(data.referrer)}</i>`);
