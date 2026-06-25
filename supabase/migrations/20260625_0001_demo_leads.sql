@@ -8,6 +8,7 @@ create table if not exists public.demo_leads (
   name        text not null,
   email       text not null,
   phone       text,
+  telegram    text,
   referrer    text,
   user_agent  text,
   created_at  timestamptz not null default now()

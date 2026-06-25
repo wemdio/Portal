@@ -16,6 +16,7 @@ export interface DemoLeadData {
   name: string;
   email: string;
   phone?: string | null;
+  telegram?: string | null;
   referrer?: string | null;
 }
 
@@ -57,6 +58,7 @@ export async function sendDemoLeadTelegramAlert(data: DemoLeadData): Promise<voi
     `<b>Почта:</b> ${esc(data.email)}`,
   ];
   if (data.phone) lines.push(`<b>Телефон:</b> ${esc(data.phone)}`);
+  if (data.telegram) lines.push(`<b>Telegram:</b> ${esc(data.telegram)}`);
   if (data.referrer) {
     lines.push('');
     lines.push(`<i>${esc(data.referrer)}</i>`);

@@ -29,42 +29,46 @@ function rateLimited(ip: string): boolean {
   return recent.length > MAX_HITS;
 }
 
-async function readFields(req: NextRequest): Promise<{ name: string; email: string; phone: string }> {
+async function readFields(req: NextRequest): Promise<{ name: string; email: string; phone: string; telegram: string }> {
   const ct = req.headers.get('content-type') ?? '';
   let name = '';
   let email = '';
   let phone = '';
+  let telegram = '';
   if (ct.includes('application/json')) {
-    const b = (await req.json()) as { name?: unknown; email?: unknown; phone?: unknown };
+    const b = (await req.json()) as { name?: unknown; email?: unknown; phone?: unknown; telegram?: unknown };
     name = typeof b.name === 'string' ? b.name : '';
     email = typeof b.email === 'string' ? b.email : '';
     phone = typeof b.phone === 'string' ? b.phone : '';
+    telegram = typeof b.telegram === 'string' ? b.telegram : '';
   } else {
     const fd = await req.formData();
     name = String(fd.get('name') ?? '');
     email = String(fd.get('email') ?? '');
     phone = String(fd.get('phone') ?? '');
+    telegram = String(fd.get('telegram') ?? '');
   }
-  return { name: name.trim(), email: email.trim().toLowerCase(), phone: phone.trim() };
+  return { name: name.trim(), email: email.trim().toLowerCase(), phone: phone.trim(), telegram: telegram.trim() };
 }
 
 export async function POST(req: NextRequest) {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
   if (rateLimited(ip)) return NextResponse.json({ error: 'Too Many Requests' }, { status: 429 });
 
-  let fields: { name: string; email: string; phone: string };
+  let fields: { name: string; email: string; phone: string; telegram: string };
   try {
     fields = await readFields(req);
   } catch {
     return NextResponse.json({ error: 'Invalid body' }, { status: 400 });
   }
-  const { name, email, phone } = fields;
+  const { name, email, phone, telegram } = fields;
 
   if (!name || name.length > 200) return NextResponse.json({ error: 'Укажите имя' }, { status: 400 });
   if (!EMAIL_RE.test(email) || email.length > 320) {
     return NextResponse.json({ error: 'Укажите корректный email' }, { status: 400 });
   }
   if (phone.length > 50) return NextResponse.json({ error: 'Слишком длинный телефон' }, { status: 400 });
+  if (telegram.length > 100) return NextResponse.json({ error: 'Слишком длинный telegram' }, { status: 400 });
 
   const referrer = req.headers.get('referer') ?? null;
 
@@ -73,6 +77,7 @@ export async function POST(req: NextRequest) {
       name,
       email,
       phone: phone || null,
+      telegram: telegram || null,
       referrer,
       user_agent: req.headers.get('user-agent')?.slice(0, 500) ?? null,
     });
@@ -83,7 +88,7 @@ export async function POST(req: NextRequest) {
 
   // Awaited best-effort (never throws) — serverless can freeze after the response,
   // so don't fire-and-forget the notify.
-  await sendDemoLeadTelegramAlert({ name, email, phone: phone || null, referrer });
+  await sendDemoLeadTelegramAlert({ name, email, phone: phone || null, telegram: telegram || null, referrer });
 
   return NextResponse.json({ ok: true });
 }
