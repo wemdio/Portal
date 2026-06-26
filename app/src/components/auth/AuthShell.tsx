@@ -29,10 +29,7 @@ export function AuthShell({
     >
       <div className="neu-card w-full max-w-md p-6 sm:p-8">
         <div className="mb-6 text-center">
-          <span className="text-xl font-extrabold tracking-tight select-none" style={{ color: 'var(--cp-paper)' }}>
-            outreach<span style={{ color: 'var(--cp-amber)' }}>OS</span>
-          </span>
-          <h1 className="mt-5 text-2xl font-bold tracking-tight" style={{ color: 'var(--cp-paper)' }}>
+          <h1 className="text-2xl font-bold tracking-tight" style={{ color: 'var(--cp-paper)' }}>
             {title}
           </h1>
           {subtitle ? (
