@@ -282,19 +282,35 @@ export interface VideoProgressEvent {
   transcriptionJobId?: string;
 }
 
-async function hasSuccessfulTranscript(chatId: number, messageId: number): Promise<boolean> {
+async function hasSuccessfulTranscript(chatId: number, messageId: number, topicId: number): Promise<boolean> {
   if (!supabaseAdmin) return false;
   try {
     const { data, error } = await supabaseAdmin
       .from('tg_video_transcripts')
-      .select('id')
+      .select('id, topic_id')
       .eq('tg_chat_id', chatId)
       .eq('tg_message_id', messageId)
       .eq('status', 'completed')
       .is('error_text', null)
       .limit(1);
     if (error) return false;
-    return (data?.length ?? 0) > 0;
+    const row = data?.[0];
+    if (!row) return false;
+    // Existing transcript: re-tag the topic_id if we now know it differs.
+    // Lets legacy NULL or wrong-bucket rows migrate to the correct topic
+    // without re-burning transcription quota.
+    const existingTopicId = (row as { topic_id: number | null }).topic_id;
+    if (existingTopicId !== topicId) {
+      try {
+        await supabaseAdmin
+          .from('tg_video_transcripts')
+          .update({ topic_id: topicId })
+          .eq('id', (row as { id: string }).id);
+      } catch {
+        // best-effort re-tag; skip remains correct either way
+      }
+    }
+    return true;
   } catch {
     return false;
   }
@@ -309,7 +325,7 @@ export async function processVideoMessage(
     throw new Error('Supabase admin client not configured');
   }
 
-  if (await hasSuccessfulTranscript(msg.chat.id, msg.message_id)) {
+  if (await hasSuccessfulTranscript(msg.chat.id, msg.message_id, msg.message_thread_id ?? 0)) {
     console.log(`[tg-transcribe] Skipping ${videoInfo.filename} (msgId=${msg.message_id}) — already transcribed`);
     return { status: 'skipped_exists' };
   }
@@ -329,6 +345,7 @@ export async function processVideoMessage(
     await safeInsertTranscript({
       tg_chat_id: msg.chat.id,
       tg_message_id: msg.message_id,
+      topic_id: msg.message_thread_id ?? 0,
       tg_sender_id: senderId,
       sender_name: senderName,
       filename: videoInfo.filename,
@@ -399,6 +416,7 @@ export async function processVideoMessage(
   await safeInsertTranscript({
     tg_chat_id: msg.chat.id,
     tg_message_id: msg.message_id,
+    topic_id: msg.message_thread_id ?? 0,
     tg_sender_id: senderId,
     sender_name: senderName,
     filename: videoInfo.filename,
@@ -434,11 +452,14 @@ export async function upsertBotChat(
   if (!supabaseAdmin) return;
   const row: Record<string, unknown> = {
     chat_id: chatId,
-    title,
     chat_type: chatType,
     topic_id: topicId ?? 0,
     updated_at: new Date().toISOString(),
   };
+  // Only overwrite the title if we have a non-empty value — otherwise a
+  // webhook payload missing chat.title would blank out a user-curated
+  // "Group → Topic" label set via /chats/add.
+  if (title) row.title = title;
   if (lastMessageId != null) row.last_message_id = lastMessageId;
   if (isForum != null) row.is_forum = isForum;
   if (topicName !== undefined) row.topic_name = topicName;
@@ -477,6 +498,7 @@ export async function saveErrorRecord(
   await safeInsertTranscript({
     tg_chat_id: msg.chat.id,
     tg_message_id: msg.message_id,
+    topic_id: msg.message_thread_id ?? 0,
     tg_sender_id: getSenderId(msg),
     sender_name: getSenderName(msg),
     filename: videoInfo.filename,

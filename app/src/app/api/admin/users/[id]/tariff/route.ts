@@ -5,7 +5,15 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isAdmin } from '@/lib/roles';
 import type { UserRole } from '@/types';
-import { type TariffType, type BillingPeriod, SETUP_DAYS, calcBillingAmount, BILLING_PERIOD_MONTHS } from '@/lib/tariffs';
+import {
+  type TariffType,
+  type BillingPeriod,
+  SETUP_DAYS,
+  calcBillingAmount,
+  BILLING_PERIOD_MONTHS,
+  TEST_PERIOD_MINUTES_BY_PERIOD,
+  TEST_SETUP_MINUTES,
+} from '@/lib/tariffs';
 import { ensurePendingInvoiceForTariff } from '@/lib/billing';
 
 export const dynamic = 'force-dynamic';
@@ -77,10 +85,14 @@ type TariffBody = {
   test_minutes?: number | null;
 };
 
-/** Normalises body.billing_period/billing_amount, returning [period, amount] or null on invalid. */
+/** Normalises body.billing_period/billing_amount, returning [period, amount] or null on invalid.
+ *  When isTestShop=true and tariff is standard/pro, the amount is overridden
+ *  with the test-shop price (10/15/20 ₽ standard, 11/16/21 ₽ pro). Custom
+ *  tariffs still require an explicit billing_amount regardless of shop. */
 function normalisePeriodAndAmount(
   tariffType: TariffType,
   body: TariffBody,
+  isTestShop = false,
 ): { period: BillingPeriod | null; amount: number | null; error?: string } {
   if (!body.billing_period) return { period: null, amount: null };
   if (!VALID_PERIODS.has(body.billing_period)) {
@@ -94,7 +106,7 @@ function normalisePeriodAndAmount(
     }
     return { period, amount: manual };
   }
-  return { period, amount: calcBillingAmount(tariffType, period) };
+  return { period, amount: calcBillingAmount(tariffType, period, isTestShop) };
 }
 
 function clampInt(v: unknown): number | null {
@@ -154,7 +166,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       ? (body.tariff_type as TariffType)
       : 'standard';
 
-    // QA test mode — replaces the 3-day setup phase + monthly period with a
+    // QA test mode — replaces the 15-day setup phase + monthly period with a
     // short minutes-based period so the autopay cron loop can be exercised in
     // minutes against the real YK shop. Treats every tariff like 'custom'
     // (admin must supply billing_amount) so we don't price-distort the test.
@@ -162,6 +174,14 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       ? Math.floor(Number(body.test_minutes))
       : null;
     const isTestMode = testMinutes != null && testMinutes > 0;
+
+    // Test-shop mode — bundle: test YK creds + fixed test-store prices
+    // (10/15/20₽ standard, 11/16/21₽ pro) + period collapsed to 10/15/20 min
+    // + 5-min setup trial (replaces 15-day prod trial). Coexists with the
+    // legacy isTestMode above: if both are set, isTestMode wins (admin's
+    // explicit minutes override). Bot can ignore is_test_shop on invoice
+    // billing_mode — the shop only matters for autopayment.
+    const wantsTestShop = body.is_test_shop === true && billingMode === 'autopayment' && !isTestMode;
 
     let period: BillingPeriod | null;
     let amount: number | null;
@@ -173,18 +193,35 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       period = null;
       amount = manualAmt;
     } else {
-      const norm = normalisePeriodAndAmount(tariffType, body);
+      const norm = normalisePeriodAndAmount(tariffType, body, wantsTestShop);
       if (norm.error) return jsonError(norm.error, 400);
       period = norm.period;
       amount = norm.amount;
     }
 
-    // Test mode: no 3-day setup, instant active period of N minutes.
-    // Normal mode: 3-day setup + N months.
-    const effectiveSetupUntil = isTestMode ? now : setupUntil;
+    // Test-shop minutes derived from chosen period: month→10, half_year→15, year→20.
+    const testShopMinutes = wantsTestShop && period != null
+      ? (TEST_PERIOD_MINUTES_BY_PERIOD[period] ?? null)
+      : null;
+
+    // Setup-until:
+    //   - isTestMode (legacy QA): no setup phase, paid_until = now + N minutes
+    //   - wantsTestShop: setup_until = now + 5 min, paid_until = setup + 10/15/20 min
+    //   - normal: setup_until = now + 15 days, paid_until = setup + N months
+    let effectiveSetupUntil: Date;
+    if (isTestMode) {
+      effectiveSetupUntil = now;
+    } else if (wantsTestShop) {
+      effectiveSetupUntil = new Date(now);
+      effectiveSetupUntil.setMinutes(effectiveSetupUntil.getMinutes() + TEST_SETUP_MINUTES);
+    } else {
+      effectiveSetupUntil = setupUntil;
+    }
     const paidUntil = new Date(effectiveSetupUntil);
     if (isTestMode) {
       paidUntil.setMinutes(paidUntil.getMinutes() + testMinutes);
+    } else if (wantsTestShop && testShopMinutes != null) {
+      paidUntil.setMinutes(paidUntil.getMinutes() + testShopMinutes);
     } else {
       const monthsToAdd = period ? BILLING_PERIOD_MONTHS[period] : 1;
       paidUntil.setMonth(paidUntil.getMonth() + monthsToAdd);
@@ -200,7 +237,9 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       payment_locked: paymentLocked,
       billing_period: period,
       billing_amount: amount,
-      test_period_minutes: isTestMode ? testMinutes : null,
+      // Either path that wants minutes-based extension lands here. The webhook
+      // path applyInvoicePaidToTariff already honours this column.
+      test_period_minutes: isTestMode ? testMinutes : testShopMinutes,
       updated_at: now.toISOString(),
     };
 
@@ -286,9 +325,20 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       ? (body.tariff_type as TariffType)
       : 'standard';
 
-    const { period, amount, error: periodErr } = normalisePeriodAndAmount(tariffType, body);
+    const billingMode = body.billing_mode ?? null;
+    const paymentLocked = billingMode !== null;
+    const wantsTestShop = body.is_test_shop === true && billingMode === 'autopayment';
+
+    const { period, amount, error: periodErr } = normalisePeriodAndAmount(tariffType, body, wantsTestShop);
     if (periodErr) return jsonError(periodErr, 400);
     if (!period) return jsonError('billing_period required for extend', 400);
+
+    // Mirror activate's bundle: when extending on the test shop, derive the
+    // minutes-mode period so the manual (billing_mode=null) branch below
+    // bumps paid_until in minutes instead of months.
+    const testShopMinutes = wantsTestShop
+      ? (TEST_PERIOD_MINUTES_BY_PERIOD[period] ?? null)
+      : null;
 
     const now = new Date();
     // База: текущий paid_until (если в будущем), иначе setup_until (если в будущем), иначе now.
@@ -299,10 +349,11 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       base = new Date(existingForExtend.setup_until);
     }
     const newPaidUntil = new Date(base);
-    newPaidUntil.setMonth(newPaidUntil.getMonth() + BILLING_PERIOD_MONTHS[period]);
-
-    const billingMode = body.billing_mode ?? null;
-    const paymentLocked = billingMode !== null;
+    if (testShopMinutes != null) {
+      newPaidUntil.setMinutes(newPaidUntil.getMinutes() + testShopMinutes);
+    } else {
+      newPaidUntil.setMonth(newPaidUntil.getMonth() + BILLING_PERIOD_MONTHS[period]);
+    }
 
     const extendFields: Record<string, unknown> = {
       tariff_type: tariffType,
@@ -313,6 +364,8 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       // Если оплата через счёт, очищаем paid_until — подписка продлится после оплаты.
       // Если manual (billing_mode=null), сразу проставляем новый paid_until.
       paid_until: billingMode ? null : newPaidUntil.toISOString(),
+      // Webhook применит этот же режим минут при следующем оплаченном счёте.
+      test_period_minutes: testShopMinutes,
       updated_at: now.toISOString(),
     };
 

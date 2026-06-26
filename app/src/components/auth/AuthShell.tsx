@@ -17,10 +17,13 @@ export function AuthShell({
   title,
   subtitle,
   children,
+  overlay,
 }: {
   title: string;
   subtitle?: string;
   children: ReactNode;
+  /** Full-screen overlay (e.g. a modal) rendered inside .client-portal but outside the card. */
+  overlay?: ReactNode;
 }) {
   return (
     <div
@@ -40,6 +43,7 @@ export function AuthShell({
         </div>
         {children}
       </div>
+      {overlay}
     </div>
   );
 }

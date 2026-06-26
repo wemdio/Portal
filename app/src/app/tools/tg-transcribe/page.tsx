@@ -30,6 +30,7 @@ interface TranscriptItem {
   tg_message_date: string | null;
   tg_chat_id: number;
   tg_message_id: number;
+  topic_id: number | null;
   tg_sender_id: number;
   sender_name: string;
   caption: string | null;
@@ -41,6 +42,13 @@ interface TranscriptItem {
   status: string;
   error_text: string | null;
   hasFullText?: boolean;
+}
+
+interface TranscribedChat {
+  chatId: number;
+  topicId: number;
+  displayName: string;
+  count: number;
 }
 
 interface BotChat {
@@ -80,6 +88,7 @@ interface ScanJob {
   tg_chat_id: number;
   topic_id: number | null;
   video_count: number;
+  scan_mode?: 'limited' | 'full';
   scanned: number;
   videos_found: number;
   completed: number;
@@ -90,6 +99,17 @@ interface ScanJob {
   started_at: string | null;
   finished_at: string | null;
   isOwner?: boolean;
+}
+
+interface QueueEntry {
+  id: string;
+  tg_chat_id: number;
+  topic_id: number | null;
+  scan_mode: 'limited' | 'full';
+  status: 'pending' | 'running';
+  isOwner: boolean;
+  started_at: string | null;
+  created_at: string;
 }
 
 function formatBytes(bytes: number | null) {
@@ -116,6 +136,15 @@ function formatDate(iso: string) {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function pluralizeRu(n: number, one: string, few: string, many: string): string {
+  const mod100 = Math.abs(n) % 100;
+  const mod10 = mod100 % 10;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
 }
 
 function phaseLabel(phase: string): { text: string; color: string } {
@@ -329,9 +358,88 @@ function StopConfirmDialog({
   );
 }
 
+function FullScanConfirmDialog({
+  open,
+  chatLabel,
+  onConfirm,
+  onCancel,
+  pending,
+}: {
+  open: boolean;
+  chatLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  pending: boolean;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div className="relative w-full max-w-md rounded-2xl border border-gray-200 bg-white p-6 shadow-xl">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={pending}
+          className="absolute right-3 top-3 rounded-lg p-1 text-gray-400 hover:text-gray-600 transition"
+        >
+          <X className="h-4 w-4" />
+        </button>
+
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 rounded-full bg-indigo-100 p-2">
+            <Search className="h-5 w-5 text-indigo-600" />
+          </div>
+          <div className="space-y-2">
+            <h3 className="text-sm font-semibold text-gray-900">Сканировать весь чат?</h3>
+            <p className="text-xs text-gray-500 leading-relaxed">
+              Бот пройдёт всю историю чата <strong>«{chatLabel}»</strong> от новых сообщений к самым старым
+              и расшифрует все найденные видео. Уже расшифрованные видео пропускаются.
+            </p>
+            <p className="text-xs text-amber-700 leading-relaxed">
+              Это может занять <strong>часы</strong> на больших чатах. Можно остановить в любой момент —
+              уже обработанные транскрибации сохранятся.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-full border border-gray-200 bg-white px-4 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 transition"
+          >
+            Отмена
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={pending}
+            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-60"
+          >
+            {pending ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Запускаем…
+              </>
+            ) : (
+              <>
+                <Search className="h-3 w-3" />
+                Запустить
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function TgTranscribePage() {
   const [allItems, setAllItems] = useState<TranscriptItem[]>([]);
   const [activeSender, setActiveSender] = useState<string | null>(null);
+  const [activeChat, setActiveChat] = useState<{ chatId: number; topicId: number } | null>(null);
+  const [transcribedChats, setTranscribedChats] = useState<TranscribedChat[]>([]);
   const [sortOrder, setSortOrder] = useState<'created_at' | 'message_date'>('created_at');
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
@@ -355,6 +463,7 @@ export default function TgTranscribePage() {
 
   const [activeJob, setActiveJob] = useState<ScanJob | null>(null);
   const [scanResult, setScanResult] = useState<ScanJob | null>(null);
+  const [scanQueue, setScanQueue] = useState<QueueEntry[]>([]);
   const [scanError, setScanError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -365,8 +474,40 @@ export default function TgTranscribePage() {
   const [addChatId, setAddChatId] = useState('');
   const [addChatTitle, setAddChatTitle] = useState('');
 
+  const [showManageChats, setShowManageChats] = useState(false);
+  const [chatToDelete, setChatToDelete] = useState<
+    { chatId: number; topicId: number | null; label: string } | null
+  >(null);
+  const [deletingChat, setDeletingChat] = useState(false);
+
   const isJobActive = activeJob && ['pending', 'running'].includes(activeJob.status);
   const isJobOwner = activeJob?.isOwner !== false;
+  const isFullScan = activeJob?.scan_mode === 'full';
+
+  // Resolve a friendly "<group title> / <topic name>" label for a (chatId, topicId)
+  // pair from the registered chats list. Falls back to the bare chat_id when the
+  // chat isn't in the local list (e.g. it was removed after the job started, or
+  // a different user registered it under a different name).
+  const chatLabel = useCallback(
+    (chatId: number, topicId: number | null): string => {
+      const match = botChats.find(
+        (c) => c.chatId === chatId && (c.topicId ?? null) === (topicId ?? null),
+      );
+      if (match) {
+        const base = match.title || `Chat ${chatId}`;
+        return match.topicName ? `${base} / ${match.topicName}` : base;
+      }
+      // No registered (chat, topic) row — fall back to any row matching this chat,
+      // appending the topic id raw so the user at least knows which topic it is.
+      const chatOnly = botChats.find((c) => c.chatId === chatId);
+      if (chatOnly) {
+        const base = chatOnly.title || `Chat ${chatId}`;
+        return topicId != null ? `${base} / topic ${topicId}` : base;
+      }
+      return topicId != null ? `Chat ${chatId} / topic ${topicId}` : `Chat ${chatId}`;
+    },
+    [botChats],
+  );
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -375,28 +516,33 @@ export default function TgTranscribePage() {
     }
   }, []);
 
-  const fetchJobStatus = useCallback(async (): Promise<ScanJob | null> => {
+  const fetchJobStatus = useCallback(async (): Promise<{ job: ScanJob | null; queue: QueueEntry[] }> => {
     try {
       const res = await authFetch('/api/tools/tg-transcribe/scan');
-      if (!res.ok) return null;
-      const json = (await res.json()) as { job: ScanJob | null };
-      return json.job;
+      if (!res.ok) return { job: null, queue: [] };
+      const json = (await res.json()) as { job: ScanJob | null; queue?: QueueEntry[] };
+      return { job: json.job, queue: json.queue ?? [] };
     } catch {
-      return null;
+      return { job: null, queue: [] };
     }
   }, []);
 
   const startPolling = useCallback(() => {
     stopPolling();
     pollRef.current = setInterval(async () => {
-      const job = await fetchJobStatus();
+      const { job, queue } = await fetchJobStatus();
+      setScanQueue(queue);
       if (!job) return;
 
       if (['pending', 'running'].includes(job.status)) {
         setActiveJob(job);
       } else {
         setActiveJob(null);
-        stopPolling();
+        // Keep polling while OTHER scans are still running on the system, so the
+        // queue indicator stays fresh. Stop only when nothing is active anywhere.
+        if (queue.length === 0) {
+          stopPolling();
+        }
 
         if (job.status === 'completed') {
           setScanResult(job);
@@ -421,8 +567,14 @@ export default function TgTranscribePage() {
     initialCheckDone.current = true;
 
     (async () => {
-      const job = await fetchJobStatus();
-      if (!job) return;
+      const { job, queue } = await fetchJobStatus();
+      setScanQueue(queue);
+      if (!job) {
+        // No primary job for this user, but other scans might be running — keep
+        // polling so the queue indicator updates.
+        if (queue.length > 0) startPolling();
+        return;
+      }
 
       if (['pending', 'running'].includes(job.status)) {
         setActiveJob(job);
@@ -432,6 +584,7 @@ export default function TgTranscribePage() {
         if (job.status === 'failed') {
           setScanError(job.error_message ?? 'Ошибка сканирования');
         }
+        if (queue.length > 0) startPolling();
       }
     })();
   }, [fetchJobStatus, startPolling]);
@@ -480,6 +633,36 @@ export default function TgTranscribePage() {
   }, []);
 
   const [deleting, setDeleting] = useState(false);
+
+  // Delete a (chat, topic) row from the registered list — by passing chatId without
+  // topicId, the DELETE endpoint removes ALL topic rows for that chat. We always pass
+  // the topicId we have (or omit when null = chat-wide row), so we never accidentally
+  // wipe a chat-wide row by clicking delete on a per-topic row.
+  const deleteChatRow = useCallback(
+    async (chatId: number, topicId: number | null) => {
+      const params = new URLSearchParams({ chatId: String(chatId) });
+      if (topicId != null) params.set('topicId', String(topicId));
+      const res = await authFetch(`/api/tools/tg-transcribe/chats?${params}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        const json = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(json.error ?? 'Не удалось удалить');
+      }
+      // If we just removed the chat currently selected in the dropdown, clear it
+      // so the form stops referencing a row that no longer exists.
+      if (
+        selectedChatId === chatId &&
+        (selectedChatTopicId ?? null) === (topicId ?? null)
+      ) {
+        setSelectedChatId(null);
+        setSelectedChatTopicId(null);
+      }
+      await fetchChats();
+    },
+    [fetchChats, selectedChatId, selectedChatTopicId],
+  );
+
   const onDeleteChat = async () => {
     if (!selectedChatId || deleting) return;
     const chat = botChats.find(
@@ -488,23 +671,24 @@ export default function TgTranscribePage() {
     if (!chat) return;
     setDeleting(true);
     try {
-      const params = new URLSearchParams({ chatId: String(chat.chatId) });
-      if (chat.topicId != null) params.set('topicId', String(chat.topicId));
-      const res = await authFetch(`/api/tools/tg-transcribe/chats?${params}`, {
-        method: 'DELETE',
-      });
-      if (res.ok) {
-        setSelectedChatId(null);
-        setSelectedChatTopicId(null);
-        void fetchChats();
-      } else {
-        const json = await res.json().catch(() => ({})) as { error?: string };
-        setScanError(json.error ?? 'Не удалось удалить');
-      }
-    } catch {
-      setScanError('Ошибка при удалении');
+      await deleteChatRow(chat.chatId, chat.topicId ?? null);
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : 'Ошибка при удалении');
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const confirmDeleteChatRow = async () => {
+    if (!chatToDelete || deletingChat) return;
+    setDeletingChat(true);
+    try {
+      await deleteChatRow(chatToDelete.chatId, chatToDelete.topicId);
+      setChatToDelete(null);
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : 'Ошибка при удалении');
+    } finally {
+      setDeletingChat(false);
     }
   };
 
@@ -538,6 +722,49 @@ export default function TgTranscribePage() {
       }
     } catch {
       setScanError('Ошибка при добавлении группы');
+    }
+  };
+
+  const [fullScanPending, setFullScanPending] = useState(false);
+  const [showFullScanDialog, setShowFullScanDialog] = useState(false);
+
+  // Full-chat scan: walk the entire history of the SELECTED chat (no message cap,
+  // no video count cap) until it hits the beginning of the chat or the user stops
+  // the job. Long-running by design — can take hours on busy chats. Behind a
+  // confirmation dialog so it isn't triggered by mis-click.
+  const onScanFullChat = async () => {
+    if (!selectedChatId) {
+      setScanError('Выберите группу');
+      return;
+    }
+    if (fullScanPending) return;
+    setScanError(null);
+    setScanResult(null);
+    setFullScanPending(true);
+    try {
+      const res = await authFetch('/api/tools/tg-transcribe/scan', {
+        method: 'POST',
+        body: JSON.stringify({
+          chatId: selectedChatId,
+          topicId: selectedChatTopicId,
+          mode: 'full',
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        let msg = 'Ошибка запуска сканирования';
+        try { msg = JSON.parse(text).error ?? msg; } catch { /* default */ }
+        setScanError(msg);
+        return;
+      }
+      const json = (await res.json()) as { job: ScanJob };
+      setActiveJob(json.job);
+      startPolling();
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : 'Ошибка');
+    } finally {
+      setFullScanPending(false);
+      setShowFullScanDialog(false);
     }
   };
 
@@ -609,10 +836,17 @@ export default function TgTranscribePage() {
 
   const PAGE_SIZE = 50;
 
-  const fetchAllItems = useCallback(async (sort: 'created_at' | 'message_date' = 'created_at') => {
+  const fetchAllItems = useCallback(async (
+    sort: 'created_at' | 'message_date' = 'created_at',
+    chatFilter: { chatId: number; topicId: number } | null = null,
+  ) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ limit: '200', sort });
+      if (chatFilter) {
+        params.set('chatId', String(chatFilter.chatId));
+        params.set('topicId', String(chatFilter.topicId));
+      }
       const res = await authFetch(`/api/tools/tg-transcribe?${params}`);
       if (!res.ok) { setAllItems([]); return; }
       const json = (await res.json()) as { items: TranscriptItem[] };
@@ -625,6 +859,17 @@ export default function TgTranscribePage() {
     }
   }, []);
 
+  const fetchTranscribedChats = useCallback(async () => {
+    try {
+      const res = await authFetch('/api/tools/tg-transcribe/transcribed-chats');
+      if (!res.ok) return;
+      const json = (await res.json()) as { chats: TranscribedChat[] };
+      setTranscribedChats(json.chats ?? []);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   const senders = React.useMemo(() => {
     const names = new Set<string>();
     for (const item of allItems) {
@@ -634,7 +879,13 @@ export default function TgTranscribePage() {
   }, [allItems]);
 
   const filteredItems = React.useMemo(() => {
-    let result = activeSender ? allItems.filter((i) => i.sender_name === activeSender) : allItems;
+    // activeChat is pushed to the server in fetchAllItems, so allItems is
+    // already chat-scoped when a chat is selected. We only filter client-side
+    // by sender and search.
+    let result = allItems;
+    if (activeSender) {
+      result = result.filter((i) => i.sender_name === activeSender);
+    }
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
       result = result.filter((i) =>
@@ -653,9 +904,15 @@ export default function TgTranscribePage() {
   );
 
   useEffect(() => {
-    void fetchAllItems(sortOrder);
+    void fetchAllItems(sortOrder, activeChat);
+  }, [fetchAllItems, sortOrder, activeChat]);
+
+  // Mount-only fetches for sidebar data that doesn't depend on sort/filter.
+  useEffect(() => {
     void fetchChats();
-  }, [fetchAllItems, fetchChats, sortOrder]);
+    void fetchTranscribedChats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Refresh transcript list when a video completes or job finishes
   const prevJobRef = useRef<string | null>(null);
@@ -665,17 +922,25 @@ export default function TgTranscribePage() {
       prevJobRef.current = activeJob.id;
       if (activeJob.completed > prevCompletedRef.current) {
         prevCompletedRef.current = activeJob.completed;
-        void fetchAllItems(sortOrder);
+        void fetchAllItems(sortOrder, activeChat);
+        void fetchTranscribedChats();
       }
     } else if (prevJobRef.current && scanResult) {
       prevCompletedRef.current = 0;
-      void fetchAllItems(sortOrder);
+      void fetchAllItems(sortOrder, activeChat);
+      void fetchTranscribedChats();
       prevJobRef.current = null;
     }
-  }, [activeJob, scanResult, fetchAllItems, sortOrder]);
+  }, [activeJob, scanResult, fetchAllItems, fetchTranscribedChats, sortOrder, activeChat]);
 
   const handleSenderChange = (sender: string | null) => {
     setActiveSender(sender);
+    setPage(0);
+    setExpandedId(null);
+  };
+
+  const handleChatChange = (chat: { chatId: number; topicId: number } | null) => {
+    setActiveChat(chat);
     setPage(0);
     setExpandedId(null);
   };
@@ -803,8 +1068,70 @@ export default function TgTranscribePage() {
                 >
                   {showAddChat ? 'Отмена' : '+ Добавить'}
                 </button>
+                {botChats.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowManageChats((v) => !v)}
+                    className="shrink-0 text-xs text-gray-600 hover:text-gray-900 cursor-pointer transition font-medium"
+                  >
+                    {showManageChats ? 'Скрыть список' : `Управление (${botChats.length})`}
+                  </button>
+                )}
               </div>
             </div>
+
+            {/* Manage-chats list: full registered list with per-row delete. Lets users
+                clean up junk entries without having to flip the dropdown one item at
+                a time. Confirmation gates accidental clicks. */}
+            {showManageChats && botChats.length > 0 && (
+              <div className="rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2 space-y-1">
+                <div className="text-[11px] font-medium text-gray-500 pb-1">
+                  Зарегистрированные чаты ({botChats.length})
+                </div>
+                <ul className="divide-y divide-gray-150 max-h-64 overflow-auto">
+                  {botChats.map((c, i) => (
+                    <li
+                      key={`${c.chatId}-${c.topicId ?? 'all'}-${i}`}
+                      className="flex items-center gap-2 py-1.5"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs text-gray-800 truncate">
+                          {c.topicName
+                            ? `${c.title || `Chat ${c.chatId}`} / ${c.topicName}`
+                            : c.title || `Chat ${c.chatId}`}
+                        </div>
+                        <div className="text-[10px] text-gray-400 truncate">
+                          id {c.chatId}
+                          {c.topicId != null && ` · topic ${c.topicId}`}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setChatToDelete({
+                            chatId: c.chatId,
+                            topicId: c.topicId ?? null,
+                            label: c.topicName
+                              ? `${c.title || `Chat ${c.chatId}`} / ${c.topicName}`
+                              : c.title || `Chat ${c.chatId}`,
+                          })
+                        }
+                        className="shrink-0 inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600 cursor-pointer transition"
+                        title="Удалить из списка"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                        Удалить
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <p className="pt-1 text-[10px] text-gray-400 leading-relaxed">
+                  Удаление убирает чат/подчат из списка. Расшифровки в архиве остаются.
+                  Чтобы заново подписать чат — добавьте его через «+ Добавить» или отправьте
+                  в нём любое сообщение боту.
+                </p>
+              </div>
+            )}
 
             {/* Inline add-chat form */}
             {showAddChat && (
@@ -928,20 +1255,41 @@ export default function TgTranscribePage() {
                   Остановить
                 </button>
               ) : !isJobActive ? (
-                <button
-                  type="button"
-                  onClick={onScan}
-                  disabled={!selectedChatId}
-                  className={[
-                    'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition',
-                    !selectedChatId
-                      ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                      : 'bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer',
-                  ].join(' ')}
-                >
-                  <Search className="h-3.5 w-3.5" />
-                  Сканировать
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={onScan}
+                    disabled={!selectedChatId}
+                    className={[
+                      'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition',
+                      !selectedChatId
+                        ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                        : 'bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer',
+                    ].join(' ')}
+                  >
+                    <Search className="h-3.5 w-3.5" />
+                    Сканировать
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowFullScanDialog(true)}
+                    disabled={fullScanPending || !selectedChatId}
+                    title="Пройти ВСЮ историю выбранного чата от новых к старым — без лимита на сообщения и без лимита на видео. Может работать часами на крупных чатах. Уже расшифрованные видео пропускаются."
+                    className={[
+                      'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition border',
+                      fullScanPending || !selectedChatId
+                        ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed'
+                        : 'bg-white text-indigo-700 border-indigo-300 hover:bg-indigo-50 cursor-pointer',
+                    ].join(' ')}
+                  >
+                    {fullScanPending ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Search className="h-3.5 w-3.5" />
+                    )}
+                    Сканировать весь чат
+                  </button>
+                </>
               ) : null}
             </div>
 
@@ -955,41 +1303,60 @@ export default function TgTranscribePage() {
             {/* Active job progress */}
             {isJobActive && activeJob && (
               <div className="space-y-3">
-                <div className="flex items-center justify-between rounded-lg border border-indigo-100 bg-indigo-50/50 px-3 py-2">
-                  <div className="flex items-center gap-2 text-xs text-indigo-700">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    <span className="font-medium">
-                      {isJobOwner ? 'Транскрибация выполняется в фоне' : 'Транскрибация запущена другим пользователем'}
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-indigo-100 bg-indigo-50/50 px-3 py-2">
+                  <div className="flex items-center gap-2 text-xs text-indigo-700 min-w-0">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                    <span className="font-medium truncate">
+                      {isFullScan ? 'Сканирование всего чата:' : 'Транскрибация:'}{' '}
+                      <span className="font-semibold">
+                        {chatLabel(activeJob.tg_chat_id, activeJob.topic_id)}
+                      </span>
                     </span>
+                    {!isJobOwner && (
+                      <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 shrink-0">
+                        другой пользователь
+                      </span>
+                    )}
                   </div>
-                  <span className="text-[10px] text-indigo-500">
-                    {isJobOwner ? 'Можно закрыть страницу — процесс продолжится' : 'Новую транскрибацию начать нельзя'}
+                  <span className="text-[10px] text-indigo-500 shrink-0">
+                    {isJobOwner ? 'Можно закрыть страницу — процесс продолжится' : 'Новую на этот чат начать нельзя'}
                   </span>
                 </div>
 
                 {activeJob.videos_found > 0 || activeJob.scanned > 0 ? (
                   <>
                     <div className="flex items-center justify-between text-xs text-gray-600">
-                      {activeJob.videos_found > 0 ? (
+                      {isFullScan ? (
                         <span>
-                          Найдено видео: {activeJob.videos_found} из {activeJob.video_count}
+                          Найдено видео: <span className="font-medium text-gray-800">{activeJob.videos_found}</span>
+                          {' '}— проверено{' '}
+                          <span className="font-medium text-gray-800">{activeJob.scanned.toLocaleString('ru-RU')}</span>{' '}
+                          сообщ.
                         </span>
+                      ) : activeJob.videos_found > 0 ? (
+                        <>
+                          <span>
+                            Найдено видео: {activeJob.videos_found} из {activeJob.video_count}
+                          </span>
+                          {activeJob.scanned > 0 && (
+                            <span className="text-gray-400">
+                              проверено {activeJob.scanned} сообщ.
+                            </span>
+                          )}
+                        </>
                       ) : (
                         <span className="text-gray-500">
                           Поиск видео… проверено {activeJob.scanned} сообщ.
                         </span>
                       )}
-                      {activeJob.scanned > 0 && (
-                        <span className="text-gray-400">
-                          проверено {activeJob.scanned} сообщ.
-                        </span>
-                      )}
                     </div>
                     <div className="h-1.5 w-full rounded-full bg-gray-200 overflow-hidden">
-                      {activeJob.videos_found > 0 ? (
+                      {/* In 'full' mode video_count is the 0-sentinel — fall back to an
+                          indeterminate pulse bar since there's no known target. */}
+                      {!isFullScan && activeJob.videos_found > 0 && activeJob.video_count > 0 ? (
                         <div
                           className="h-full rounded-full bg-indigo-500 transition-all duration-300"
-                          style={{ width: `${Math.round((activeJob.videos_found / activeJob.video_count) * 100)}%` }}
+                          style={{ width: `${Math.min(100, Math.round((activeJob.videos_found / activeJob.video_count) * 100))}%` }}
                         />
                       ) : (
                         <div className="h-full rounded-full bg-indigo-300 animate-pulse" style={{ width: '30%' }} />
@@ -1018,11 +1385,44 @@ export default function TgTranscribePage() {
               </div>
             )}
 
+            {/* Queue indicator: other scans currently running/pending in the system.
+                Helps explain "почему мой ещё не начался" when worker concurrency
+                is saturated, and surfaces what other users are scanning. */}
+            {scanQueue.length > 0 && (
+              <div className="rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2 space-y-1">
+                <div className="text-[11px] font-medium text-gray-500">
+                  Параллельно работают / ждут очереди ({scanQueue.length})
+                </div>
+                <ul className="space-y-0.5">
+                  {scanQueue.map((q) => (
+                    <li key={q.id} className="flex items-center gap-2 text-[11px] text-gray-600">
+                      {q.status === 'running' ? (
+                        <Loader2 className="h-3 w-3 animate-spin text-indigo-500 shrink-0" />
+                      ) : (
+                        <Clock className="h-3 w-3 text-gray-400 shrink-0" />
+                      )}
+                      <span className="truncate">{chatLabel(q.tg_chat_id, q.topic_id)}</span>
+                      {q.scan_mode === 'full' && (
+                        <span className="rounded-full bg-indigo-100 px-1.5 py-0 text-[9px] font-medium text-indigo-700 shrink-0">
+                          весь чат
+                        </span>
+                      )}
+                      {q.isOwner ? (
+                        <span className="ml-auto text-[9px] text-indigo-500 shrink-0">ваш</span>
+                      ) : (
+                        <span className="ml-auto text-[9px] text-gray-400 shrink-0">другой пользователь</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {/* Finished job result */}
             {!isJobActive && scanResult && (
               <div
                 className={[
-                  'rounded-lg border px-3 py-2 text-xs',
+                  'rounded-lg border px-3 py-2 text-xs space-y-1',
                   scanResult.status === 'stopped'
                     ? 'border-amber-200 bg-amber-50 text-amber-800'
                     : scanResult.status === 'failed'
@@ -1030,30 +1430,36 @@ export default function TgTranscribePage() {
                       : 'border-emerald-200 bg-emerald-50 text-emerald-800',
                 ].join(' ')}
               >
-                {scanResult.status === 'stopped' ? (
-                  <>
-                    Остановлено. <strong>{scanResult.completed}</strong> транскрибировано
-                    {scanResult.errors > 0 && (
-                      <>, <strong className="text-rose-600">{scanResult.errors}</strong> ошибок</>
-                    )}
-                    . Найдено {scanResult.videos_found} видео среди {scanResult.scanned} сообщений.
-                  </>
-                ) : scanResult.status === 'failed' ? (
-                  <>
-                    Ошибка: {scanResult.error_message ?? 'Неизвестная ошибка'}
-                    {scanResult.completed > 0 && (
-                      <>. <strong>{scanResult.completed}</strong> транскрибировано до ошибки.</>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    Готово: <strong>{scanResult.completed}</strong> транскрибировано
-                    {scanResult.errors > 0 && (
-                      <>, <strong className="text-rose-600">{scanResult.errors}</strong> ошибок</>
-                    )}
-                    . Найдено {scanResult.videos_found} видео среди {scanResult.scanned} сообщений.
-                  </>
-                )}
+                <div className="text-[10px] opacity-70">
+                  {scanResult.scan_mode === 'full' ? 'Весь чат: ' : 'Чат: '}
+                  {chatLabel(scanResult.tg_chat_id, scanResult.topic_id)}
+                </div>
+                <div>
+                  {scanResult.status === 'stopped' ? (
+                    <>
+                      Остановлено. <strong>{scanResult.completed}</strong> транскрибировано
+                      {scanResult.errors > 0 && (
+                        <>, <strong className="text-rose-600">{scanResult.errors}</strong> ошибок</>
+                      )}
+                      . Найдено {scanResult.videos_found} видео среди {scanResult.scanned} сообщений.
+                    </>
+                  ) : scanResult.status === 'failed' ? (
+                    <>
+                      Ошибка: {scanResult.error_message ?? 'Неизвестная ошибка'}
+                      {scanResult.completed > 0 && (
+                        <>. <strong>{scanResult.completed}</strong> транскрибировано до ошибки.</>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      Готово: <strong>{scanResult.completed}</strong> транскрибировано
+                      {scanResult.errors > 0 && (
+                        <>, <strong className="text-rose-600">{scanResult.errors}</strong> ошибок</>
+                      )}
+                      . Найдено {scanResult.videos_found} видео среди {scanResult.scanned} сообщений.
+                    </>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -1079,6 +1485,49 @@ export default function TgTranscribePage() {
             </button>
           )}
         </div>
+
+        {/* Chat filter row */}
+        {transcribedChats.length > 0 && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5 text-xs text-gray-500 mr-1">
+              <MessageSquare className="h-3.5 w-3.5" />
+              Чат:
+            </div>
+            <button
+              type="button"
+              onClick={() => handleChatChange(null)}
+              className={[
+                'rounded-full px-3 py-1 text-xs font-medium transition border',
+                activeChat === null
+                  ? 'bg-indigo-600 text-white border-indigo-600'
+                  : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
+              ].join(' ')}
+            >
+              Все
+            </button>
+            {transcribedChats.map((c) => {
+              const isActive =
+                activeChat?.chatId === c.chatId && activeChat?.topicId === c.topicId;
+              return (
+                <button
+                  key={`${c.chatId}:${c.topicId}`}
+                  type="button"
+                  onClick={() => handleChatChange({ chatId: c.chatId, topicId: c.topicId })}
+                  className={[
+                    'rounded-full px-3 py-1 text-xs font-medium transition border',
+                    isActive
+                      ? 'bg-indigo-600 text-white border-indigo-600'
+                      : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
+                  ].join(' ')}
+                  title={`${c.count} ${pluralizeRu(c.count, 'запись', 'записи', 'записей')}`}
+                >
+                  {c.displayName}
+                  <span className="ml-1.5 text-[10px] opacity-70">{c.count}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* Filters row */}
         <div className="flex items-start gap-4 flex-wrap">
@@ -1172,18 +1621,29 @@ export default function TgTranscribePage() {
         )}
 
         {/* Empty state */}
-        {!loading && items.length === 0 && (
-          <div className="rounded-2xl border border-gray-200 bg-white/90 p-8 text-center">
-            <Video className="mx-auto h-10 w-10 text-gray-300 mb-3" />
-            <p className="text-sm text-gray-500">
-              {searchQuery.trim()
-                ? `Ничего не найдено по запросу «${searchQuery.trim()}».`
-                : activeSender
-                  ? `Нет транскрибаций от ${activeSender}.`
-                  : 'Пока нет транскрибаций. Добавьте бота в ТГ-группу и отправьте видео.'}
-            </p>
-          </div>
-        )}
+        {!loading && items.length === 0 && (() => {
+          const activeChatLabel = activeChat
+            ? transcribedChats.find(
+                (c) => c.chatId === activeChat.chatId && c.topicId === activeChat.topicId,
+              )?.displayName ?? 'выбранном чате'
+            : null;
+          return (
+            <div className="rounded-2xl border border-gray-200 bg-white/90 p-8 text-center">
+              <Video className="mx-auto h-10 w-10 text-gray-300 mb-3" />
+              <p className="text-sm text-gray-500">
+                {searchQuery.trim()
+                  ? `Ничего не найдено по запросу «${searchQuery.trim()}».`
+                  : activeSender && activeChatLabel
+                    ? `Нет транскрибаций от ${activeSender} в чате «${activeChatLabel}».`
+                    : activeSender
+                      ? `Нет транскрибаций от ${activeSender}.`
+                      : activeChatLabel
+                        ? `В чате «${activeChatLabel}» пока нет транскрибаций среди последних 200 записей.`
+                        : 'Пока нет транскрибаций. Добавьте бота в ТГ-группу и отправьте видео.'}
+              </p>
+            </div>
+          );
+        })()}
 
         {/* Transcript list */}
         {!loading && items.length > 0 && (
@@ -1393,6 +1853,74 @@ export default function TgTranscribePage() {
         onCancel={() => setShowStopDialog(false)}
         stopping={stopping}
       />
+
+      {/* Full-chat scan confirmation — long-running, gated to avoid mis-click */}
+      <FullScanConfirmDialog
+        open={showFullScanDialog}
+        chatLabel={selectedChatId != null ? chatLabel(selectedChatId, selectedChatTopicId) : ''}
+        onConfirm={() => void onScanFullChat()}
+        onCancel={() => setShowFullScanDialog(false)}
+        pending={fullScanPending}
+      />
+
+      {/* Per-row "remove from list" confirmation. We don't auto-delete on icon click —
+          users complained about accidental loss before, plus the chat row is the only
+          handle for re-running scans/webhook routing. */}
+      {chatToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="relative w-full max-w-sm rounded-2xl border border-gray-200 bg-white p-6 shadow-xl">
+            <button
+              type="button"
+              onClick={() => setChatToDelete(null)}
+              disabled={deletingChat}
+              className="absolute right-3 top-3 rounded-lg p-1 text-gray-400 hover:text-gray-600 transition"
+            >
+              <X className="h-4 w-4" />
+            </button>
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 rounded-full bg-rose-100 p-2">
+                <Trash2 className="h-5 w-5 text-rose-600" />
+              </div>
+              <div className="space-y-2">
+                <h3 className="text-sm font-semibold text-gray-900">Удалить из списка?</h3>
+                <p className="text-xs text-gray-500 leading-relaxed">
+                  <strong>«{chatToDelete.label}»</strong> исчезнет из выпадающего списка и из{' '}
+                  кнопок сканирования. Уже сделанные транскрибации в архиве{' '}
+                  останутся.
+                </p>
+              </div>
+            </div>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setChatToDelete(null)}
+                disabled={deletingChat}
+                className="rounded-full border border-gray-200 bg-white px-4 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 transition"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDeleteChatRow()}
+                disabled={deletingChat}
+                className="inline-flex items-center gap-1.5 rounded-full bg-rose-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 transition disabled:opacity-60"
+              >
+                {deletingChat ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Удаляем…
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="h-3 w-3" />
+                    Удалить
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -10877,14 +10877,14 @@ export function DatabaseSpreadsheet() {
                 onClick={() => resetFilter(filterMenu.col)}
                 className="text-gray-600 hover:text-gray-900"
               >
-                Сбросить
+                Выделить всё
               </button>
               <button
                 type="button"
                 onClick={() => clearFilter(filterMenu.col)}
                 className="text-gray-600 hover:text-gray-900"
               >
-                Очистить
+                Снять всё
               </button>
             </div>
           </div>

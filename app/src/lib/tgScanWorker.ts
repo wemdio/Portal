@@ -33,6 +33,7 @@ interface TgChatFull {
   id: number;
   title?: string;
   type?: string;
+  is_forum?: boolean;
 }
 
 /* ───── Helpers ───── */
@@ -69,13 +70,17 @@ async function getChatInfo(chatId: number): Promise<TgChatFull | null> {
  * The Bot API response includes message_thread_id of the thread the
  * original message lives in. Returns 0 for non-forum chats.
  */
-async function detectTopicId(chatId: number, messageId: number): Promise<number> {
+async function detectTopicId(chatId: number, messageId: number): Promise<number | null> {
   const res = await fetch(`${tgApiBase()}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: chatId,
       text: '.',
+      // disable_notification keeps the probe from pinging the original
+      // sender's device; the message still appears briefly in the chat
+      // until deleteMessage lands below.
+      disable_notification: true,
       reply_parameters: { message_id: messageId },
     }),
   });
@@ -85,7 +90,9 @@ async function detectTopicId(chatId: number, messageId: number): Promise<number>
     await logInfo('tg-scan.detectTopic.fail', `detectTopicId failed for msg ${messageId}`, {
       chatId, messageId, ok: json.ok, description: json.description,
     });
-    return 0;
+    // null signals "couldn't determine" — distinct from 0 which means
+    // "confirmed General / non-forum". Callers can decide to skip vs default.
+    return null;
   }
 
   const threadId = json.result.message_thread_id ?? 0;
@@ -94,11 +101,19 @@ async function detectTopicId(chatId: number, messageId: number): Promise<number>
     chatId, messageId, threadId,
   });
 
-  void fetch(`${tgApiBase()}/deleteMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, message_id: json.result.message_id }),
-  }).catch(() => {});
+  try {
+    await fetch(`${tgApiBase()}/deleteMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: json.result.message_id }),
+    });
+  } catch {
+    // Probe '.' remains in the chat — log so operators can tell when this
+    // starts piling up (network blip vs revoked permission vs rate-limited).
+    await logInfo('tg-scan.detectTopic.deleteFailed', `Failed to delete probe message in chat ${chatId}`, {
+      chatId, probeMessageId: json.result.message_id,
+    });
+  }
 
   return threadId;
 }
@@ -138,8 +153,12 @@ export async function runTgScanJob(jobId: string): Promise<void> {
   }
 
   const chatId: number = job.tg_chat_id;
-  const videoCount: number = job.video_count;
   const topicId: number | null = job.topic_id ?? null;
+  const scanMode: 'limited' | 'full' = job.scan_mode === 'full' ? 'full' : 'limited';
+  // For 'full' scans the video_count column is stored as 0 (sentinel); the loop
+  // walks every message until startMsgId hits 0 or the user stops the job.
+  const videoCount: number =
+    scanMode === 'full' ? Number.POSITIVE_INFINITY : (job.video_count as number);
 
   await updateJob(jobId, { status: 'running', started_at: new Date().toISOString() });
 
@@ -149,14 +168,29 @@ export async function runTgScanJob(jobId: string): Promise<void> {
 
     const chatInfo = await getChatInfo(chatId);
     if (chatInfo) {
-      void upsertBotChat(chatInfo.id, chatInfo.title ?? '', chatInfo.type ?? 'group');
+      // Cache-warm the (chat, topicId) row — match what the user picked in
+      // the UI. Skip the title arg (passing '' lets upsertBotChat preserve a
+      // user-curated "Group → Topic" label set via /chats/add).
+      void upsertBotChat(
+        chatInfo.id,
+        '',
+        chatInfo.type ?? 'group',
+        undefined,
+        chatInfo.is_forum,
+        topicId,
+      );
     }
+    const isForumChat = chatInfo?.is_forum ?? false;
 
-    // Load already-processed messages
-    const { data: existing } = await admin
+    // Load already-processed messages. Filter by topic when the job is
+    // topic-scoped, otherwise alreadyProcessed.has() could false-positive
+    // on the same msg_id in a different topic of the same chat.
+    let existingQ = admin
       .from('tg_video_transcripts')
       .select('tg_message_id, status')
       .eq('tg_chat_id', chatId);
+    if (topicId != null) existingQ = existingQ.eq('topic_id', topicId);
+    const { data: existing } = await existingQ;
 
     const alreadyProcessed = new Set(
       (existing ?? []).filter((r) => r.status !== 'error').map((r) => Number(r.tg_message_id)),
@@ -243,7 +277,11 @@ export async function runTgScanJob(jobId: string): Promise<void> {
     let completed = 0;
     let errors = 0;
     let scanned = 0;
-    const maxScan = 2000;
+    // 'limited' scans keep the historic 2000-message ceiling — enough to find ~50 videos
+    // in a typical chat without hammering Bot API. 'full' scans run until startMsgId
+    // reaches 0 (or the user stops them); we use a very large but finite bound so the
+    // loop counter still terminates even if startMsgId somehow misbehaves.
+    const maxScan = scanMode === 'full' ? 10_000_000 : 2000;
     const videos: ScanVideoRow[] = [];
     let lastDbWrite = 0;
 
@@ -254,8 +292,9 @@ export async function runTgScanJob(jobId: string): Promise<void> {
       await updateJob(jobId, { scanned, videos_found: videosFound, completed, errors, videos });
     };
 
-    await logInfo('tg-transcribe.scan.start', `Scanning for ${videoCount} videos from msg#${startMsgId} in chat ${chatId}`, {
-      chatId, startMsgId, videoCount, topicId,
+    const targetLabel = scanMode === 'full' ? 'whole chat' : `${videoCount} videos`;
+    await logInfo('tg-transcribe.scan.start', `Scanning ${targetLabel} from msg#${startMsgId} in chat ${chatId}`, {
+      chatId, startMsgId, videoCount: scanMode === 'full' ? null : videoCount, scanMode, topicId,
     });
 
     for (let msgId = startMsgId; msgId > 0 && videosFound < videoCount && scanned < maxScan; msgId--) {
@@ -288,23 +327,31 @@ export async function runTgScanJob(jobId: string): Promise<void> {
       const videoInfo = extractVideoInfo(forwarded);
       if (!videoInfo) continue;
 
-      // For forum topics: check the original message's topic via reply probe.
-      // Only done for video messages to minimize API calls.
-      if (topicId != null) {
-        try {
-          const msgTopicId = await detectTopicId(chatId, msgId);
-          if (msgTopicId !== topicId) continue;
-        } catch {
-          continue;
+      // For forum chats: probe to learn which topic the ORIGINAL message
+      // belongs to. forwardMessage lands the bot's copy in General with
+      // no source-thread info, so without detection we'd silently bucket
+      // every video under topic_id=0. Skip the probe for non-forum chats
+      // (one extra API call per video is wasted) and when topicId filter
+      // is "no filter" on a non-forum chat (nothing to learn anyway).
+      let resolvedTopicId: number | null = null;
+      if (isForumChat || topicId != null) {
+        resolvedTopicId = await detectTopicId(chatId, msgId);
+        // null = probe failed. Treat as "unknown topic": when filter active,
+        // skip (can't confirm match); when no filter, default to 0 so we
+        // at least record the video under chat-level bucket.
+        if (topicId != null) {
+          if (resolvedTopicId == null || resolvedTopicId !== topicId) continue;
         }
       }
 
       videosFound++;
 
+      const effectiveTopicId = resolvedTopicId ?? topicId ?? 0;
       const syntheticMsg: TgMessage = {
         ...forwarded,
         chat: { id: chatId },
         message_id: msgId,
+        message_thread_id: effectiveTopicId || undefined,
       };
 
       const senderName = getSenderName(syntheticMsg);

@@ -63,12 +63,42 @@ export const BILLING_PERIOD_DISCOUNT: Record<BillingPeriod, number> = {
   year: 0.8,
 };
 
+/* ─── Test shop tariffs ──────────────────────────────────────────────────
+ * Когда admin включает is_test_shop в модалке, подписка попадает в
+ * тестовый магазин YooKassa с этими ценами и сокращёнными сроками.
+ * Quarter не поддерживается — admin-UI его не показывает.
+ * Месяц/полугодие/год прод-периодов отображаются на 10/15/20 минут.
+ */
+export const TEST_TARIFF_PRICE: Record<'standard' | 'pro', Partial<Record<BillingPeriod, number>>> = {
+  standard: { month: 10, half_year: 15, year: 20 },
+  pro:      { month: 11, half_year: 16, year: 21 },
+};
+
+export const TEST_PERIOD_MINUTES_BY_PERIOD: Partial<Record<BillingPeriod, number>> = {
+  month:     10,
+  half_year: 15,
+  year:      20,
+};
+
+/** Setup-trial в тестовом магазине — +5 мин (в прод это SETUP_DAYS=15 дней). */
+export const TEST_SETUP_MINUTES = 5;
+
 /**
  * Считает сумму к оплате за выбранный период с учётом скидки. Для custom
  * возвращает null — сумма проставляется вручную при выставлении счёта.
+ *
+ * При isTestShop=true возвращает фиксированную тест-цену из TEST_TARIFF_PRICE
+ * (или null если связка tariff+period не определена — например, quarter).
  */
-export function calcBillingAmount(tariff: TariffType, period: BillingPeriod): number | null {
+export function calcBillingAmount(
+  tariff: TariffType,
+  period: BillingPeriod,
+  isTestShop = false,
+): number | null {
   if (tariff === 'custom') return null;
+  if (isTestShop) {
+    return TEST_TARIFF_PRICE[tariff][period] ?? null;
+  }
   const base = TARIFF_MONTHLY_PRICE[tariff] * BILLING_PERIOD_MONTHS[period];
   return Math.round(base * BILLING_PERIOD_DISCOUNT[period]);
 }
