@@ -19,8 +19,8 @@ const earlyTmaThemeScript = `(function(){try{var root=document.documentElement;v
 const earlyPortalThemeScript = `(function(){try{var root=document.documentElement;if(root.dataset.tma==="1"){return;}var saved=localStorage.getItem("portal_theme");var theme=(saved==="light"||saved==="dark")?saved:"light";root.dataset.portalTheme=theme;}catch(_err){}})();`;
 
 export const metadata: Metadata = {
-  title: "Portal",
-  description: "Internal portal for project management",
+  title: "outreachOS",
+  description: "outreachOS — платформа для холодного аутрича",
 };
 
 export const viewport: Viewport = {

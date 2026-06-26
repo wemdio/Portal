@@ -232,7 +232,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
             className="text-sm sm:text-base font-extrabold tracking-tight select-none shrink-0"
             style={{ color: 'var(--cp-text)' }}
           >
-            Portal
+            outreach<span style={{ color: 'var(--cp-amber)' }}>OS</span>
           </span>
 
           <div className="flex-1" />
