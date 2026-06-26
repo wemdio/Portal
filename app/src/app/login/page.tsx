@@ -2,9 +2,10 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import type { Route } from 'next';
 import { supabase } from '@/lib/supabaseClient';
 import { logAudit, logError } from '@/lib/loggerClient';
-import { useIsTma } from '@/lib/useIsTma';
+import { AuthShell, AuthField } from '@/components/auth/AuthShell';
 
 function isSignupHost(host: string): boolean {
   const hosts = (process.env.NEXT_PUBLIC_SIGNUP_HOSTS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -72,7 +73,6 @@ async function linkTelegramAccount(accessToken: string) {
 }
 
 export default function LoginPage() {
-  const isTma = useIsTma();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -179,176 +179,156 @@ export default function LoginPage() {
   };
 
   return (
-    <div className={isTma ? 'flex min-h-screen items-center justify-center bg-gray-50 px-4 py-6' : 'flex min-h-screen items-center justify-center bg-gray-50'}>
-      <div className={`w-full max-w-md bg-white rounded-xl border border-gray-100 shadow-sm ${isTma ? 'space-y-6 p-6' : 'space-y-8 p-8'}`}>
-        <div className="text-center">
-          <h2 className={`${isTma ? 'mt-4 text-2xl' : 'mt-6 text-3xl'} font-bold tracking-tight text-gray-900`}>
-            Вход в Портал
-          </h2>
-          <p className="mt-2 text-sm text-gray-600">
-            Введите свои данные для входа
-          </p>
-        </div>
-
-        <form className={`${isTma ? 'mt-6' : 'mt-8'} space-y-6`} onSubmit={handleAuth}>
-          <div className="space-y-4 rounded-md shadow-sm">
-            <div>
-              <input
-                id="email-address"
-                name="email"
-                type="email"
-                autoComplete="email"
-                required
-                className="relative block w-full rounded-md border-0 py-2 px-3 text-gray-900 ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:z-10 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm sm:leading-6"
-                placeholder="Email адрес"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </div>
-            <div>
-              <input
-                id="password"
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                required
-                className="relative block w-full rounded-md border-0 py-2 px-3 text-gray-900 ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:z-10 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm sm:leading-6"
-                placeholder="Пароль"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-          </div>
-
-          {error && (
-            <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md border border-red-200">
-              {error}
-            </div>
-          )}
-
-          <div>
-            <button
-              type="submit"
-              disabled={loading}
-              className="group relative flex w-full justify-center rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-50"
-            >
-              {loading ? 'Загрузка...' : 'Войти'}
-            </button>
-          </div>
-
-          {signupAllowed && (
-            <div className="text-center">
-              <button
-                type="button"
-                onClick={openForgot}
-                className="text-xs text-gray-500 hover:text-blue-600 hover:underline"
-              >
-                Забыли пароль?
-              </button>
-            </div>
-          )}
-        </form>
-
-        <p className="text-center text-sm text-gray-500">
-          Доступ к порталу выдаёт администратор
-        </p>
-
-        {signupAllowed && (
-          <p className="mt-2 text-center text-xs text-gray-600">
-            Нет аккаунта?{' '}
-            {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-            <Link href={'/signup' as any} className="font-medium text-indigo-600 hover:underline">
-              Зарегистрироваться
-            </Link>
-          </p>
-        )}
-
-        {/* Public link to the platform offer agreement. Always visible
-            (auth-walled users see it before they log in), styled as a quiet
-            text button so it doesn't compete with the primary Войти CTA. */}
-        <div className="border-t border-gray-100 pt-4">
-          <a
-            href="/offer"
-            className="block text-center text-xs font-medium text-gray-500 hover:text-gray-900 hover:underline"
-          >
-            Договор оферты
-          </a>
-        </div>
-      </div>
-
-      {forgotOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
-          onClick={closeForgot}
-        >
+    <AuthShell
+      title="Вход"
+      subtitle="Введите данные для входа"
+      overlay={
+        forgotOpen ? (
           <div
-            className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+            style={{ background: 'rgba(0,0,0,0.6)' }}
+            onClick={closeForgot}
           >
-            {forgotDone ? (
-              <>
-                <h3 className="text-lg font-semibold text-gray-900">Проверьте почту</h3>
-                <p className="mt-3 text-sm text-gray-600">
-                  Если такой аккаунт зарегистрирован — на привязанный email отправлен новый пароль.
-                  Войдите с ним и сразу смените на свой через «Настройки».
-                </p>
-                <p className="mt-2 text-xs text-gray-500">
-                  Письмо может прийти в течение минуты. Не пришло — проверь папку «Спам».
-                </p>
-                <div className="mt-5 flex justify-end">
-                  <button
-                    type="button"
-                    onClick={closeForgot}
-                    className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500"
-                  >
-                    Понятно
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <h3 className="text-lg font-semibold text-gray-900">Восстановление пароля</h3>
-                <p className="mt-2 text-sm text-gray-600">
-                  Укажи email от аккаунта — пришлём на него новый пароль.
-                </p>
-                <form onSubmit={handleForgot} className="mt-4 space-y-3">
-                  <input
-                    type="email"
-                    required
-                    autoFocus
-                    value={forgotEmail}
-                    onChange={(e) => setForgotEmail(e.target.value)}
-                    placeholder="Email"
-                    className="block w-full rounded-md border-0 py-2 px-3 text-gray-900 ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm"
-                  />
-                  {forgotError && (
-                    <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-700">
-                      {forgotError}
-                    </div>
-                  )}
-                  <div className="flex justify-end gap-2 pt-2">
-                    <button
-                      type="button"
-                      onClick={closeForgot}
-                      disabled={forgotLoading}
-                      className="rounded-md border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                    >
-                      Отмена
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={forgotLoading || !forgotEmail.trim()}
-                      className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
-                    >
-                      {forgotLoading ? 'Отправка…' : 'Сбросить'}
+            <div
+              className="neu-card w-full max-w-md p-6"
+              style={{ background: 'var(--cp-surface-elev)' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {forgotDone ? (
+                <>
+                  <h3 className="text-lg font-bold mb-2" style={{ color: 'var(--cp-paper)' }}>
+                    Проверьте почту
+                  </h3>
+                  <p className="text-sm mb-2" style={{ color: 'var(--cp-paper-mute)' }}>
+                    Если такой аккаунт зарегистрирован — на привязанный email отправлен новый пароль.
+                    Войдите с ним и сразу смените на свой через «Настройки».
+                  </p>
+                  <p className="text-xs mb-5" style={{ color: 'var(--cp-paper-faint)' }}>
+                    Письмо может прийти в течение минуты. Не пришло — проверьте папку «Спам».
+                  </p>
+                  <div className="flex justify-end">
+                    <button type="button" onClick={closeForgot} className="neu-btn px-4 py-2 text-sm font-semibold">
+                      Понятно
                     </button>
                   </div>
-                </form>
-              </>
-            )}
+                </>
+              ) : (
+                <>
+                  <h3 className="text-lg font-bold mb-2" style={{ color: 'var(--cp-paper)' }}>
+                    Восстановление пароля
+                  </h3>
+                  <p className="text-sm mb-4" style={{ color: 'var(--cp-paper-mute)' }}>
+                    Укажите email от аккаунта — пришлём на него новый пароль.
+                  </p>
+                  <form onSubmit={handleForgot} className="space-y-3">
+                    <input
+                      type="email"
+                      required
+                      autoFocus
+                      value={forgotEmail}
+                      onChange={(e) => setForgotEmail(e.target.value)}
+                      placeholder="Email"
+                      className="neu-input w-full px-3 py-2.5 text-sm"
+                    />
+                    {forgotError && (
+                      <div
+                        className="text-xs rounded-md p-2.5"
+                        style={{ background: 'rgba(229,72,77,0.1)', border: '1px solid var(--cp-red)', color: 'var(--cp-red)' }}
+                      >
+                        {forgotError}
+                      </div>
+                    )}
+                    <div className="flex justify-end gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={closeForgot}
+                        disabled={forgotLoading}
+                        className="px-4 py-2 text-sm font-semibold"
+                        style={{ color: 'var(--cp-paper-mute)' }}
+                      >
+                        Отмена
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={forgotLoading || !forgotEmail.trim()}
+                        className="neu-btn px-4 py-2 text-sm font-semibold"
+                      >
+                        {forgotLoading ? 'Отправка…' : 'Сбросить'}
+                      </button>
+                    </div>
+                  </form>
+                </>
+              )}
+            </div>
           </div>
-        </div>
+        ) : null
+      }
+    >
+      <form className="space-y-4" onSubmit={handleAuth}>
+        <AuthField
+          label="Email"
+          id="email-address"
+          name="email"
+          type="email"
+          autoComplete="email"
+          required
+          placeholder="you@company.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <AuthField
+          label="Пароль"
+          id="password"
+          name="password"
+          type="password"
+          autoComplete="current-password"
+          required
+          placeholder="••••••••"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+
+        {error && (
+          <div
+            className="text-xs rounded-md p-2.5"
+            style={{ background: 'rgba(229,72,77,0.1)', border: '1px solid var(--cp-red)', color: 'var(--cp-red)' }}
+          >
+            {error}
+          </div>
+        )}
+
+        <button type="submit" disabled={loading} className="neu-btn w-full px-4 py-2.5 text-sm font-semibold">
+          {loading ? 'Загрузка…' : 'Войти'}
+        </button>
+
+        {signupAllowed && (
+          <div className="text-center">
+            <button type="button" onClick={openForgot} className="text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
+              Забыли пароль?
+            </button>
+          </div>
+        )}
+      </form>
+
+      <p className="mt-5 text-center text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
+        Доступ выдаёт администратор
+      </p>
+
+      {signupAllowed && (
+        <p className="mt-2 text-center text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+          Нет аккаунта?{' '}
+          <Link href={'/signup' as Route} className="font-semibold" style={{ color: 'var(--cp-amber)' }}>
+            Зарегистрироваться
+          </Link>
+        </p>
       )}
-    </div>
+
+      {/* Public link to the platform offer agreement — quiet text button. */}
+      <div className="mt-5 pt-4" style={{ borderTop: '1px solid var(--cp-divider)' }}>
+        <a href="/offer" className="block text-center text-xs font-medium" style={{ color: 'var(--cp-paper-faint)' }}>
+          Договор оферты
+        </a>
+      </div>
+    </AuthShell>
   );
 }
