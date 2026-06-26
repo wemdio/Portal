@@ -153,8 +153,12 @@ export async function runTgScanJob(jobId: string): Promise<void> {
   }
 
   const chatId: number = job.tg_chat_id;
-  const videoCount: number = job.video_count;
   const topicId: number | null = job.topic_id ?? null;
+  const scanMode: 'limited' | 'full' = job.scan_mode === 'full' ? 'full' : 'limited';
+  // For 'full' scans the video_count column is stored as 0 (sentinel); the loop
+  // walks every message until startMsgId hits 0 or the user stops the job.
+  const videoCount: number =
+    scanMode === 'full' ? Number.POSITIVE_INFINITY : (job.video_count as number);
 
   await updateJob(jobId, { status: 'running', started_at: new Date().toISOString() });
 
@@ -273,7 +277,11 @@ export async function runTgScanJob(jobId: string): Promise<void> {
     let completed = 0;
     let errors = 0;
     let scanned = 0;
-    const maxScan = 2000;
+    // 'limited' scans keep the historic 2000-message ceiling — enough to find ~50 videos
+    // in a typical chat without hammering Bot API. 'full' scans run until startMsgId
+    // reaches 0 (or the user stops them); we use a very large but finite bound so the
+    // loop counter still terminates even if startMsgId somehow misbehaves.
+    const maxScan = scanMode === 'full' ? 10_000_000 : 2000;
     const videos: ScanVideoRow[] = [];
     let lastDbWrite = 0;
 
@@ -284,8 +292,9 @@ export async function runTgScanJob(jobId: string): Promise<void> {
       await updateJob(jobId, { scanned, videos_found: videosFound, completed, errors, videos });
     };
 
-    await logInfo('tg-transcribe.scan.start', `Scanning for ${videoCount} videos from msg#${startMsgId} in chat ${chatId}`, {
-      chatId, startMsgId, videoCount, topicId,
+    const targetLabel = scanMode === 'full' ? 'whole chat' : `${videoCount} videos`;
+    await logInfo('tg-transcribe.scan.start', `Scanning ${targetLabel} from msg#${startMsgId} in chat ${chatId}`, {
+      chatId, startMsgId, videoCount: scanMode === 'full' ? null : videoCount, scanMode, topicId,
     });
 
     for (let msgId = startMsgId; msgId > 0 && videosFound < videoCount && scanned < maxScan; msgId--) {
