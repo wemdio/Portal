@@ -184,6 +184,12 @@ export async function middleware(request: NextRequest) {
     if (pathname === '/maintenance' && hasBypassAccess) {
       return NextResponse.redirect(new URL('/', request.url))
     }
+  } else if (pathname === '/maintenance') {
+    // Deploy завершился, MAINTENANCE_MODE снят, но URL пользователя всё ещё
+    // /maintenance (его туда редиректил middleware пока MAINTENANCE_MODE был
+    // включён). Auto-refresh страницы /maintenance бы бесконечно её же и
+    // показывал — поэтому при выключенном maintenance отбрасываем на корень.
+    return NextResponse.redirect(new URL('/', request.url))
   }
 
   if (pathname.startsWith('/api/ai-caller')) {
