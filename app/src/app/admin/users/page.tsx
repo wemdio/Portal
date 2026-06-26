@@ -601,6 +601,13 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
                     🧪 Тестовый
                   </button>
                 </div>
+                {useTestShop && !useTestPeriod && (
+                  <p className="mt-1.5 text-[10px] leading-relaxed text-yellow-700 bg-yellow-50 border border-yellow-200 rounded px-2 py-1">
+                    Тарифы тест-магазина: <strong>10/15/20 ₽</strong> (Стандарт) и <strong>11/16/21 ₽</strong> (Про).
+                    Период действия: <strong>10/15/20 мин</strong> вместо 1/6/12 мес.
+                    Setup-trial: <strong>5 мин</strong> вместо 15 дней.
+                  </p>
+                )}
               </div>
             )}
             <button
@@ -764,6 +771,12 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
                   🧪 Тестовый
                 </button>
               </div>
+              {useTestShop && (
+                <p className="mt-1.5 text-[10px] leading-relaxed text-yellow-700 bg-yellow-50 border border-yellow-200 rounded px-2 py-1">
+                  Тарифы тест-магазина: <strong>10/15/20 ₽</strong> (Стандарт) и <strong>11/16/21 ₽</strong> (Про).
+                  Период действия: <strong>10/15/20 мин</strong> вместо 1/6/12 мес.
+                </p>
+              )}
             </div>
           )}
           <button

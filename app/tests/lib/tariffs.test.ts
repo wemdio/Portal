@@ -1,4 +1,11 @@
-import { calcBillingAmount, BILLING_PERIOD_MONTHS, BILLING_PERIOD_DISCOUNT } from '@/lib/tariffs';
+import {
+  calcBillingAmount,
+  BILLING_PERIOD_MONTHS,
+  BILLING_PERIOD_DISCOUNT,
+  TEST_TARIFF_PRICE,
+  TEST_PERIOD_MINUTES_BY_PERIOD,
+  TEST_SETUP_MINUTES,
+} from '@/lib/tariffs';
 
 describe('BillingPeriod tables', () => {
   it('BILLING_PERIOD_MONTHS.quarter === 3', () => {
@@ -53,5 +60,54 @@ describe('calcBillingAmount — custom', () => {
   it('возвращает null (сумма проставляется вручную)', () => {
     expect(calcBillingAmount('custom', 'month')).toBeNull();
     expect(calcBillingAmount('custom', 'year')).toBeNull();
+  });
+});
+
+describe('calcBillingAmount — тестовый магазин (isTestShop=true)', () => {
+  it('standard: 10/15/20 ₽ для month/half_year/year', () => {
+    expect(calcBillingAmount('standard', 'month', true)).toBe(10);
+    expect(calcBillingAmount('standard', 'half_year', true)).toBe(15);
+    expect(calcBillingAmount('standard', 'year', true)).toBe(20);
+  });
+
+  it('pro: 11/16/21 ₽ для month/half_year/year', () => {
+    expect(calcBillingAmount('pro', 'month', true)).toBe(11);
+    expect(calcBillingAmount('pro', 'half_year', true)).toBe(16);
+    expect(calcBillingAmount('pro', 'year', true)).toBe(21);
+  });
+
+  it('quarter в тест-магазине не поддержан → null (в админ-UI его нет)', () => {
+    expect(calcBillingAmount('standard', 'quarter', true)).toBeNull();
+    expect(calcBillingAmount('pro', 'quarter', true)).toBeNull();
+  });
+
+  it('custom игнорирует isTestShop, всегда null', () => {
+    expect(calcBillingAmount('custom', 'month', true)).toBeNull();
+    expect(calcBillingAmount('custom', 'year', true)).toBeNull();
+  });
+
+  it('isTestShop=false (дефолт) даёт прод-цены без изменений', () => {
+    expect(calcBillingAmount('standard', 'month', false)).toBe(40_000);
+    expect(calcBillingAmount('pro', 'year', false)).toBe(624_000);
+  });
+});
+
+describe('Test-shop константы', () => {
+  it('TEST_TARIFF_PRICE.standard = { month: 10, half_year: 15, year: 20 }', () => {
+    expect(TEST_TARIFF_PRICE.standard).toEqual({ month: 10, half_year: 15, year: 20 });
+  });
+
+  it('TEST_TARIFF_PRICE.pro = { month: 11, half_year: 16, year: 21 }', () => {
+    expect(TEST_TARIFF_PRICE.pro).toEqual({ month: 11, half_year: 16, year: 21 });
+  });
+
+  it('TEST_PERIOD_MINUTES_BY_PERIOD: month=10, half_year=15, year=20', () => {
+    expect(TEST_PERIOD_MINUTES_BY_PERIOD.month).toBe(10);
+    expect(TEST_PERIOD_MINUTES_BY_PERIOD.half_year).toBe(15);
+    expect(TEST_PERIOD_MINUTES_BY_PERIOD.year).toBe(20);
+  });
+
+  it('TEST_SETUP_MINUTES === 5', () => {
+    expect(TEST_SETUP_MINUTES).toBe(5);
   });
 });
