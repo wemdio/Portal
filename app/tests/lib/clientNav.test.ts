@@ -14,6 +14,7 @@ import {
   CLIENT_NAV_GROUPS,
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_OFFER,
+  CLIENT_NAV_SETTINGS,
   CLIENT_NAV_SUPPORT,
   ClientNavGroupId,
   resolveActiveNavId,
@@ -128,6 +129,25 @@ describe('client nav IA', () => {
   it('resolveActiveNavId picks offer for /client/offer', () => {
     expect(resolveActiveNavId('/client/offer')).toBe('offer');
     expect(resolveActiveNavId('/client/offer/foo')).toBe('offer');
+  });
+
+  it('exposes a settings root item linking to /client/settings', () => {
+    // Account-level settings page (password change today). Like Offer, it lives
+    // OUTSIDE the workflow groups — it's an always-available account surface,
+    // not a step. Therefore intentionally excluded from `allItems` invariants
+    // above and gets its own dedicated test instead.
+    expect(CLIENT_NAV_SETTINGS.href).toBe('/client/settings');
+    expect(CLIENT_NAV_SETTINGS.id).toBe('settings');
+    expect(CLIENT_NAV_SETTINGS.label).toBeTruthy();
+    expect(CLIENT_NAV_SETTINGS.labelEn).toBeTruthy();
+    for (const g of CLIENT_NAV_GROUPS) {
+      expect(g.items.some((i) => i.id === 'settings')).toBe(false);
+    }
+  });
+
+  it('resolveActiveNavId picks settings for /client/settings', () => {
+    expect(resolveActiveNavId('/client/settings')).toBe('settings');
+    expect(resolveActiveNavId('/client/settings/account')).toBe('settings');
   });
 
   it('resolveActiveNavId picks support for /client/support', () => {

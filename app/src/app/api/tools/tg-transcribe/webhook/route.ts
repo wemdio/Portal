@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
         } catch {
           return NextResponse.json({ ok: true });
         }
-      
+
         const msg = (update.message ?? update.channel_post) as (TgMessage & { chat: { id: number; title?: string; type?: string } }) | undefined;
         if (!msg) {
           return NextResponse.json({ ok: true });
@@ -56,7 +56,10 @@ export async function POST(req: NextRequest) {
               {
                 tg_chat_id: msg.chat.id,
                 tg_message_id: msg.message_id,
-                topic_id: msg.message_thread_id ?? null,
+                // 0 = General/non-forum sentinel — matches what processVideoMessage
+                // writes into tg_video_transcripts.topic_id, so the two tables stay
+                // joinable without coalesce dances.
+                topic_id: msg.message_thread_id ?? 0,
                 status: 'pending',
                 payload: { msg, videoInfo },
                 updated_at: new Date().toISOString(),

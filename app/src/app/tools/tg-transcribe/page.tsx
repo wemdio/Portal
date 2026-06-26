@@ -30,6 +30,7 @@ interface TranscriptItem {
   tg_message_date: string | null;
   tg_chat_id: number;
   tg_message_id: number;
+  topic_id: number | null;
   tg_sender_id: number;
   sender_name: string;
   caption: string | null;
@@ -41,6 +42,13 @@ interface TranscriptItem {
   status: string;
   error_text: string | null;
   hasFullText?: boolean;
+}
+
+interface TranscribedChat {
+  chatId: number;
+  topicId: number;
+  displayName: string;
+  count: number;
 }
 
 interface BotChat {
@@ -116,6 +124,15 @@ function formatDate(iso: string) {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function pluralizeRu(n: number, one: string, few: string, many: string): string {
+  const mod100 = Math.abs(n) % 100;
+  const mod10 = mod100 % 10;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
 }
 
 function phaseLabel(phase: string): { text: string; color: string } {
@@ -332,6 +349,8 @@ function StopConfirmDialog({
 export default function TgTranscribePage() {
   const [allItems, setAllItems] = useState<TranscriptItem[]>([]);
   const [activeSender, setActiveSender] = useState<string | null>(null);
+  const [activeChat, setActiveChat] = useState<{ chatId: number; topicId: number } | null>(null);
+  const [transcribedChats, setTranscribedChats] = useState<TranscribedChat[]>([]);
   const [sortOrder, setSortOrder] = useState<'created_at' | 'message_date'>('created_at');
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
@@ -541,6 +560,52 @@ export default function TgTranscribePage() {
     }
   };
 
+  const [scanAllPending, setScanAllPending] = useState(false);
+
+  const onScanAll = async () => {
+    const count = parseInt(videoCount, 10);
+    if (!count || count < 1) {
+      setScanError('Укажите количество видео');
+      return;
+    }
+    if (scanAllPending) return;
+    setScanError(null);
+    setScanResult(null);
+    setScanAllPending(true);
+    try {
+      const res = await authFetch('/api/tools/tg-transcribe/scan/all', {
+        method: 'POST',
+        body: JSON.stringify({ videoCount: count }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        let msg = 'Ошибка постановки в очередь';
+        try { msg = JSON.parse(text).error ?? msg; } catch { /* default */ }
+        setScanError(msg);
+        return;
+      }
+      const json = (await res.json()) as { queued: number; skipped: number };
+      if (json.queued === 0 && json.skipped === 0) {
+        setScanError('Нет зарегистрированных чатов для сканирования');
+        return;
+      }
+      const parts: string[] = [];
+      if (json.queued > 0) parts.push(`в очередь: ${json.queued}`);
+      if (json.skipped > 0) parts.push(`уже в работе: ${json.skipped}`);
+      setScanError(`Поставлено ${parts.join(', ')}. Бот будет обрабатывать по очереди.`);
+      // Immediately pick up the first job
+      const job = await fetchJobStatus();
+      if (job) {
+        setActiveJob(job);
+        startPolling();
+      }
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : 'Ошибка');
+    } finally {
+      setScanAllPending(false);
+    }
+  };
+
   const onScan = async () => {
     if (!selectedChatId) {
       setScanError('Выберите группу');
@@ -609,10 +674,17 @@ export default function TgTranscribePage() {
 
   const PAGE_SIZE = 50;
 
-  const fetchAllItems = useCallback(async (sort: 'created_at' | 'message_date' = 'created_at') => {
+  const fetchAllItems = useCallback(async (
+    sort: 'created_at' | 'message_date' = 'created_at',
+    chatFilter: { chatId: number; topicId: number } | null = null,
+  ) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ limit: '200', sort });
+      if (chatFilter) {
+        params.set('chatId', String(chatFilter.chatId));
+        params.set('topicId', String(chatFilter.topicId));
+      }
       const res = await authFetch(`/api/tools/tg-transcribe?${params}`);
       if (!res.ok) { setAllItems([]); return; }
       const json = (await res.json()) as { items: TranscriptItem[] };
@@ -625,6 +697,17 @@ export default function TgTranscribePage() {
     }
   }, []);
 
+  const fetchTranscribedChats = useCallback(async () => {
+    try {
+      const res = await authFetch('/api/tools/tg-transcribe/transcribed-chats');
+      if (!res.ok) return;
+      const json = (await res.json()) as { chats: TranscribedChat[] };
+      setTranscribedChats(json.chats ?? []);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   const senders = React.useMemo(() => {
     const names = new Set<string>();
     for (const item of allItems) {
@@ -634,7 +717,13 @@ export default function TgTranscribePage() {
   }, [allItems]);
 
   const filteredItems = React.useMemo(() => {
-    let result = activeSender ? allItems.filter((i) => i.sender_name === activeSender) : allItems;
+    // activeChat is pushed to the server in fetchAllItems, so allItems is
+    // already chat-scoped when a chat is selected. We only filter client-side
+    // by sender and search.
+    let result = allItems;
+    if (activeSender) {
+      result = result.filter((i) => i.sender_name === activeSender);
+    }
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
       result = result.filter((i) =>
@@ -653,9 +742,15 @@ export default function TgTranscribePage() {
   );
 
   useEffect(() => {
-    void fetchAllItems(sortOrder);
+    void fetchAllItems(sortOrder, activeChat);
+  }, [fetchAllItems, sortOrder, activeChat]);
+
+  // Mount-only fetches for sidebar data that doesn't depend on sort/filter.
+  useEffect(() => {
     void fetchChats();
-  }, [fetchAllItems, fetchChats, sortOrder]);
+    void fetchTranscribedChats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Refresh transcript list when a video completes or job finishes
   const prevJobRef = useRef<string | null>(null);
@@ -665,17 +760,25 @@ export default function TgTranscribePage() {
       prevJobRef.current = activeJob.id;
       if (activeJob.completed > prevCompletedRef.current) {
         prevCompletedRef.current = activeJob.completed;
-        void fetchAllItems(sortOrder);
+        void fetchAllItems(sortOrder, activeChat);
+        void fetchTranscribedChats();
       }
     } else if (prevJobRef.current && scanResult) {
       prevCompletedRef.current = 0;
-      void fetchAllItems(sortOrder);
+      void fetchAllItems(sortOrder, activeChat);
+      void fetchTranscribedChats();
       prevJobRef.current = null;
     }
-  }, [activeJob, scanResult, fetchAllItems, sortOrder]);
+  }, [activeJob, scanResult, fetchAllItems, fetchTranscribedChats, sortOrder, activeChat]);
 
   const handleSenderChange = (sender: string | null) => {
     setActiveSender(sender);
+    setPage(0);
+    setExpandedId(null);
+  };
+
+  const handleChatChange = (chat: { chatId: number; topicId: number } | null) => {
+    setActiveChat(chat);
     setPage(0);
     setExpandedId(null);
   };
@@ -928,20 +1031,41 @@ export default function TgTranscribePage() {
                   Остановить
                 </button>
               ) : !isJobActive ? (
-                <button
-                  type="button"
-                  onClick={onScan}
-                  disabled={!selectedChatId}
-                  className={[
-                    'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition',
-                    !selectedChatId
-                      ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                      : 'bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer',
-                  ].join(' ')}
-                >
-                  <Search className="h-3.5 w-3.5" />
-                  Сканировать
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={onScan}
+                    disabled={!selectedChatId}
+                    className={[
+                      'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition',
+                      !selectedChatId
+                        ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                        : 'bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer',
+                    ].join(' ')}
+                  >
+                    <Search className="h-3.5 w-3.5" />
+                    Сканировать
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void onScanAll()}
+                    disabled={scanAllPending || botChats.length === 0}
+                    title="Поставить в очередь scan-job для каждого зарегистрированного чата. Бот пройдёт их по очереди и пропустит уже расшифрованные видео."
+                    className={[
+                      'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition border',
+                      scanAllPending || botChats.length === 0
+                        ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed'
+                        : 'bg-white text-indigo-700 border-indigo-300 hover:bg-indigo-50 cursor-pointer',
+                    ].join(' ')}
+                  >
+                    {scanAllPending ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Search className="h-3.5 w-3.5" />
+                    )}
+                    Сканировать все
+                  </button>
+                </>
               ) : null}
             </div>
 
@@ -1080,6 +1204,49 @@ export default function TgTranscribePage() {
           )}
         </div>
 
+        {/* Chat filter row */}
+        {transcribedChats.length > 0 && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5 text-xs text-gray-500 mr-1">
+              <MessageSquare className="h-3.5 w-3.5" />
+              Чат:
+            </div>
+            <button
+              type="button"
+              onClick={() => handleChatChange(null)}
+              className={[
+                'rounded-full px-3 py-1 text-xs font-medium transition border',
+                activeChat === null
+                  ? 'bg-indigo-600 text-white border-indigo-600'
+                  : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
+              ].join(' ')}
+            >
+              Все
+            </button>
+            {transcribedChats.map((c) => {
+              const isActive =
+                activeChat?.chatId === c.chatId && activeChat?.topicId === c.topicId;
+              return (
+                <button
+                  key={`${c.chatId}:${c.topicId}`}
+                  type="button"
+                  onClick={() => handleChatChange({ chatId: c.chatId, topicId: c.topicId })}
+                  className={[
+                    'rounded-full px-3 py-1 text-xs font-medium transition border',
+                    isActive
+                      ? 'bg-indigo-600 text-white border-indigo-600'
+                      : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
+                  ].join(' ')}
+                  title={`${c.count} ${pluralizeRu(c.count, 'запись', 'записи', 'записей')}`}
+                >
+                  {c.displayName}
+                  <span className="ml-1.5 text-[10px] opacity-70">{c.count}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {/* Filters row */}
         <div className="flex items-start gap-4 flex-wrap">
           {/* Sender filter tabs */}
@@ -1172,18 +1339,29 @@ export default function TgTranscribePage() {
         )}
 
         {/* Empty state */}
-        {!loading && items.length === 0 && (
-          <div className="rounded-2xl border border-gray-200 bg-white/90 p-8 text-center">
-            <Video className="mx-auto h-10 w-10 text-gray-300 mb-3" />
-            <p className="text-sm text-gray-500">
-              {searchQuery.trim()
-                ? `Ничего не найдено по запросу «${searchQuery.trim()}».`
-                : activeSender
-                  ? `Нет транскрибаций от ${activeSender}.`
-                  : 'Пока нет транскрибаций. Добавьте бота в ТГ-группу и отправьте видео.'}
-            </p>
-          </div>
-        )}
+        {!loading && items.length === 0 && (() => {
+          const activeChatLabel = activeChat
+            ? transcribedChats.find(
+                (c) => c.chatId === activeChat.chatId && c.topicId === activeChat.topicId,
+              )?.displayName ?? 'выбранном чате'
+            : null;
+          return (
+            <div className="rounded-2xl border border-gray-200 bg-white/90 p-8 text-center">
+              <Video className="mx-auto h-10 w-10 text-gray-300 mb-3" />
+              <p className="text-sm text-gray-500">
+                {searchQuery.trim()
+                  ? `Ничего не найдено по запросу «${searchQuery.trim()}».`
+                  : activeSender && activeChatLabel
+                    ? `Нет транскрибаций от ${activeSender} в чате «${activeChatLabel}».`
+                    : activeSender
+                      ? `Нет транскрибаций от ${activeSender}.`
+                      : activeChatLabel
+                        ? `В чате «${activeChatLabel}» пока нет транскрибаций среди последних 200 записей.`
+                        : 'Пока нет транскрибаций. Добавьте бота в ТГ-группу и отправьте видео.'}
+              </p>
+            </div>
+          );
+        })()}
 
         {/* Transcript list */}
         {!loading && items.length > 0 && (
