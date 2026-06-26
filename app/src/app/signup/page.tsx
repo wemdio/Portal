@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
+import { AuthShell, AuthField } from '@/components/auth/AuthShell';
 
 /**
  * Self-signup page. Visible on hosts listed in NEXT_PUBLIC_SIGNUP_HOSTS
@@ -51,107 +52,89 @@ export default function SignupPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
-      <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-gray-200 p-6">
-        <h1 className="text-2xl font-bold text-gray-900 mb-1">Регистрация</h1>
-        <p className="text-sm text-gray-500 mb-5">Создайте аккаунт, чтобы начать работу с порталом</p>
+    <AuthShell title="Регистрация" subtitle="Создайте аккаунт за минуту">
+      <form onSubmit={onSubmit} className="space-y-3">
+        <AuthField
+          label="Имя"
+          id="name"
+          type="text"
+          required
+          autoComplete="name"
+          maxLength={200}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+        <AuthField
+          label="Компания"
+          id="company"
+          type="text"
+          required
+          autoComplete="organization"
+          maxLength={200}
+          value={company}
+          onChange={(e) => setCompany(e.target.value)}
+        />
+        <AuthField
+          label="Email"
+          id="email"
+          type="email"
+          required
+          autoComplete="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <AuthField
+          label="Телефон"
+          optional
+          id="phone"
+          type="tel"
+          autoComplete="tel"
+          maxLength={50}
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+        />
+        <AuthField
+          label="Telegram"
+          optional
+          id="telegram"
+          type="text"
+          maxLength={100}
+          placeholder="@username"
+          value={telegram}
+          onChange={(e) => setTelegram(e.target.value)}
+        />
+        <AuthField
+          label="Пароль"
+          id="password"
+          type="password"
+          required
+          minLength={8}
+          autoComplete="new-password"
+          hint="Минимум 8 символов"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
 
-        <form onSubmit={onSubmit} className="space-y-3">
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">Имя</label>
-            <input
-              type="text"
-              required
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-              autoComplete="name"
-              maxLength={200}
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">Компания</label>
-            <input
-              type="text"
-              required
-              value={company}
-              onChange={(e) => setCompany(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-              autoComplete="organization"
-              maxLength={200}
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">Email</label>
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-              autoComplete="email"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">
-              Телефон <span className="text-gray-400 font-normal">— по желанию</span>
-            </label>
-            <input
-              type="tel"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-              autoComplete="tel"
-              maxLength={50}
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">
-              Telegram <span className="text-gray-400 font-normal">— по желанию</span>
-            </label>
-            <input
-              type="text"
-              value={telegram}
-              onChange={(e) => setTelegram(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-              placeholder="@username"
-              maxLength={100}
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">Пароль</label>
-            <input
-              type="password"
-              required
-              minLength={8}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-              autoComplete="new-password"
-            />
-            <p className="mt-1 text-[11px] text-gray-500">Минимум 8 символов</p>
-          </div>
-
-          {error && (
-            <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">{error}</div>
-          )}
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
+        {error && (
+          <div
+            className="text-xs rounded-md p-2.5"
+            style={{ background: 'rgba(229,72,77,0.1)', border: '1px solid var(--cp-red)', color: 'var(--cp-red)' }}
           >
-            {loading ? 'Создаём аккаунт…' : 'Зарегистрироваться'}
-          </button>
-        </form>
+            {error}
+          </div>
+        )}
 
-        <p className="mt-4 text-center text-xs text-gray-500">
-          Уже есть аккаунт?{' '}
-          <Link href="/login" className="text-indigo-600 hover:underline">
-            Войти
-          </Link>
-        </p>
-      </div>
-    </div>
+        <button type="submit" disabled={loading} className="neu-btn w-full px-4 py-2.5 text-sm font-semibold">
+          {loading ? 'Создаём аккаунт…' : 'Зарегистрироваться'}
+        </button>
+      </form>
+
+      <p className="mt-4 text-center text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+        Уже есть аккаунт?{' '}
+        <Link href="/login" className="font-semibold" style={{ color: 'var(--cp-amber)' }}>
+          Войти
+        </Link>
+      </p>
+    </AuthShell>
   );
 }
