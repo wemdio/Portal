@@ -110,7 +110,17 @@ describe('POST /api/auth/forgot-password', () => {
     expect(mockSendTransactionalEmail).toHaveBeenCalledTimes(1);
     const emailArg = mockSendTransactionalEmail.mock.calls[0][0];
     expect(emailArg.to).toBe(email);
-    expect(emailArg.html).toContain(passwordPassed);
+    // Password contains chars from SPECIALS (!@#$%^&*-_+=), some of which are
+    // HTML-special (&). The template escapes them before injecting into HTML
+    // — the test would flake on a password containing & or " otherwise. The
+    // text version sees the raw password.
+    const escapeHtml = (s: string) => s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+    expect(emailArg.html).toContain(escapeHtml(passwordPassed));
     expect(emailArg.text).toContain(passwordPassed);
   });
 
