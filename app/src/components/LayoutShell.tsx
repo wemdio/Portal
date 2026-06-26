@@ -110,7 +110,10 @@ export function LayoutShell({
   const isSignupPage = pathname === '/signup';
   const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || isClientPortal || isOfferPage || isSignupPage;
 
-  if (isClientPortal || isOfferPage || isSignupPage) {
+  if (isClientPortal || isOfferPage || isSignupPage || isMaintenancePage) {
+    // Maintenance: render the page bare so its full-screen radial gradient
+    // and centred card aren't nested inside the portal frame/topnav. The
+    // page renders its own <main> with the dark background.
     return <>{children}</>;
   }
 
