@@ -1177,7 +1177,20 @@ function CampaignDetailPageContent() {
             sequences.map((step, idx) => {
               const subject = step.subject ?? step.variants?.[0]?.subject ?? '';
               const body = stripHtml(step.body ?? step.variants?.[0]?.body);
-              const waitDays = step.wait_days ?? (step.delay_unit === 'days' ? step.delay ?? null : null);
+              // «через N дн» = пауза ПЕРЕД этим письмом = delay ПРЕДЫДУЩЕГО шага.
+              // В Instantly delay шага — это пауза до СЛЕДУЮЩЕГО письма (а у
+              // последнего шага delay захардкожен в 1 при создании). Читаем как
+              // в форме редактирования (editableStepsFromCampaignSteps), иначе
+              // превью показывает сдвинутые значения и ложную «1» на последнем
+              // письме («открытий/шагов больше чем нужно»).
+              const prevStep = idx > 0 ? sequences[idx - 1] : null;
+              const waitDays = !prevStep
+                ? null
+                : prevStep.delay_unit === 'days' && typeof prevStep.delay === 'number'
+                  ? prevStep.delay
+                  : typeof step.wait_days === 'number'
+                    ? step.wait_days
+                    : null;
               const num = String(idx + 1).padStart(2, '0');
               return (
                 <div key={idx} className="neu-sm overflow-hidden">

@@ -1,6 +1,7 @@
 'use client';
 
 import { supabase } from '@/lib/supabaseClient';
+import { promptDemoRegister } from '@/lib/clientDemo/registerPrompt';
 
 /**
  * Thrown by authFetchJson when our backend returns 401 AND our one-shot
@@ -63,6 +64,20 @@ export async function authFetch(
       headers.set('Authorization', `Bearer ${refreshed}`);
       res = await fetch(url, { ...init, headers });
     }
+  }
+
+  // Central demo-block detection: any action the demo account is blocked from
+  // returns 403 + code DEMO_READONLY (clientApiHelper / blockDemo). Peek the body
+  // on a CLONE (so the caller's stream stays intact) and surface the global
+  // "register to unlock" modal. Fire-and-forget — never blocks the response.
+  if (res.status === 403 && typeof window !== 'undefined') {
+    res
+      .clone()
+      .json()
+      .then((b: { code?: string }) => {
+        if (b?.code === 'DEMO_READONLY') promptDemoRegister();
+      })
+      .catch(() => {});
   }
 
   return res;

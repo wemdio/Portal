@@ -73,11 +73,20 @@ function stripHtmlForPreview(value?: string): string {
   ).trim();
 }
 
-function getStepDisplay(step: SequenceStep) {
+function getStepDisplay(step: SequenceStep, prevStep: SequenceStep | null) {
   const primaryVariant = step.variants?.[0];
   const subject = step.subject ?? primaryVariant?.subject ?? '';
   const body = stripHtmlForPreview(step.body ?? primaryVariant?.body);
-  const waitDays = step.wait_days ?? (step.delay_unit === 'days' ? step.delay ?? null : null);
+  // «Ждать N дн» = пауза ПЕРЕД этим письмом = delay ПРЕДЫДУЩЕГО шага. В Instantly
+  // delay шага — это пауза до СЛЕДУЮЩЕГО письма (у последнего шага delay = 1 при
+  // создании), поэтому брать delay самого шага нельзя — превью сдвинется.
+  const waitDays = !prevStep
+    ? null
+    : prevStep.delay_unit === 'days' && typeof prevStep.delay === 'number'
+      ? prevStep.delay
+      : typeof step.wait_days === 'number'
+        ? step.wait_days
+        : null;
 
   return {
     subject,
@@ -487,8 +496,8 @@ export default function CampaignDetailPage() {
             <div className="mt-6 rounded-xl border border-zinc-200 bg-white p-5">
               <h3 className="mb-4 text-sm font-semibold text-zinc-900">Последовательность писем</h3>
               <div className="space-y-3">
-                {campaign.sequences[0].steps.map((step, i) => {
-                  const display = getStepDisplay(step);
+                {campaign.sequences[0].steps.map((step, i, arr) => {
+                  const display = getStepDisplay(step, i > 0 ? arr[i - 1] : null);
                   return (
                     <div key={i} className="rounded-lg border border-zinc-100 p-4">
                       <div className="flex items-center gap-2 mb-2">
@@ -525,8 +534,8 @@ export default function CampaignDetailPage() {
             <div className="p-5">
               <p className="mb-4 text-xs text-zinc-400">Аналитика по шагам пока недоступна. Последовательность писем:</p>
               <div className="space-y-3">
-                {campaign.sequences[0].steps.map((step, i) => {
-                  const display = getStepDisplay(step);
+                {campaign.sequences[0].steps.map((step, i, arr) => {
+                  const display = getStepDisplay(step, i > 0 ? arr[i - 1] : null);
                   return (
                     <div key={i} className="rounded-lg border border-zinc-100 p-4">
                       <div className="flex items-center gap-2 mb-2">
