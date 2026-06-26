@@ -560,6 +560,52 @@ export default function TgTranscribePage() {
     }
   };
 
+  const [scanAllPending, setScanAllPending] = useState(false);
+
+  const onScanAll = async () => {
+    const count = parseInt(videoCount, 10);
+    if (!count || count < 1) {
+      setScanError('Укажите количество видео');
+      return;
+    }
+    if (scanAllPending) return;
+    setScanError(null);
+    setScanResult(null);
+    setScanAllPending(true);
+    try {
+      const res = await authFetch('/api/tools/tg-transcribe/scan/all', {
+        method: 'POST',
+        body: JSON.stringify({ videoCount: count }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        let msg = 'Ошибка постановки в очередь';
+        try { msg = JSON.parse(text).error ?? msg; } catch { /* default */ }
+        setScanError(msg);
+        return;
+      }
+      const json = (await res.json()) as { queued: number; skipped: number };
+      if (json.queued === 0 && json.skipped === 0) {
+        setScanError('Нет зарегистрированных чатов для сканирования');
+        return;
+      }
+      const parts: string[] = [];
+      if (json.queued > 0) parts.push(`в очередь: ${json.queued}`);
+      if (json.skipped > 0) parts.push(`уже в работе: ${json.skipped}`);
+      setScanError(`Поставлено ${parts.join(', ')}. Бот будет обрабатывать по очереди.`);
+      // Immediately pick up the first job
+      const job = await fetchJobStatus();
+      if (job) {
+        setActiveJob(job);
+        startPolling();
+      }
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : 'Ошибка');
+    } finally {
+      setScanAllPending(false);
+    }
+  };
+
   const onScan = async () => {
     if (!selectedChatId) {
       setScanError('Выберите группу');
@@ -985,20 +1031,41 @@ export default function TgTranscribePage() {
                   Остановить
                 </button>
               ) : !isJobActive ? (
-                <button
-                  type="button"
-                  onClick={onScan}
-                  disabled={!selectedChatId}
-                  className={[
-                    'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition',
-                    !selectedChatId
-                      ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                      : 'bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer',
-                  ].join(' ')}
-                >
-                  <Search className="h-3.5 w-3.5" />
-                  Сканировать
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={onScan}
+                    disabled={!selectedChatId}
+                    className={[
+                      'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition',
+                      !selectedChatId
+                        ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                        : 'bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer',
+                    ].join(' ')}
+                  >
+                    <Search className="h-3.5 w-3.5" />
+                    Сканировать
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void onScanAll()}
+                    disabled={scanAllPending || botChats.length === 0}
+                    title="Поставить в очередь scan-job для каждого зарегистрированного чата. Бот пройдёт их по очереди и пропустит уже расшифрованные видео."
+                    className={[
+                      'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition border',
+                      scanAllPending || botChats.length === 0
+                        ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed'
+                        : 'bg-white text-indigo-700 border-indigo-300 hover:bg-indigo-50 cursor-pointer',
+                    ].join(' ')}
+                  >
+                    {scanAllPending ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Search className="h-3.5 w-3.5" />
+                    )}
+                    Сканировать все
+                  </button>
+                </>
               ) : null}
             </div>
 
