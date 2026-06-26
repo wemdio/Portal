@@ -1,7 +1,7 @@
 import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
 import { commonDictionary, dict, type Locale } from '@/lib/i18n';
 
-const SITE_LABEL = 'Portal';
+const SITE_LABEL = 'outreachOS';
 
 /** Sections reachable from the shell but not as a single `navItems.href` prefix. */
 const EXTRA_SECTION_PREFIXES: { prefix: string; titleRu: string; titleEn: string }[] = [
