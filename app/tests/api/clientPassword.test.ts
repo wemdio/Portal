@@ -49,7 +49,7 @@ jest.mock('@/lib/supabaseRouteClient', () => ({
   }),
 }));
 
-jest.mock('@/lib/email/notisendClient', () => ({
+jest.mock('@/lib/email/smtpClient', () => ({
   sendTransactionalEmail: (...a: unknown[]) => mockSendTransactionalEmail(...a),
 }));
 
@@ -142,7 +142,7 @@ describe('POST /api/client/password', () => {
     expect(mockUpdateUserById).toHaveBeenCalledWith('user-1', { password: 'NewPass123!' });
   });
 
-  it('успех: отправляет письмо через NotiSend с правильными аргументами', async () => {
+  it('успех: отправляет письмо через SMTP с правильными аргументами', async () => {
     const { POST } = await import('@/app/api/client/password/route');
     await POST(makeReq({ currentPassword: 'OldPass1!', newPassword: 'NewPass123!' }));
     await new Promise((r) => setImmediate(r));
@@ -165,7 +165,7 @@ describe('POST /api/client/password', () => {
   });
 
   it('успех: возвращает 200 даже если email отправка упала', async () => {
-    mockSendTransactionalEmail.mockRejectedValue(new Error('NotiSend 500'));
+    mockSendTransactionalEmail.mockRejectedValue(new Error('SMTP 500'));
     const { POST } = await import('@/app/api/client/password/route');
     const res = await POST(makeReq({ currentPassword: 'OldPass1!', newPassword: 'NewPass123!' }));
     await new Promise((r) => setImmediate(r));

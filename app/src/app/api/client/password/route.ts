@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
-import { sendTransactionalEmail } from '@/lib/email/notisendClient';
+import { sendTransactionalEmail } from '@/lib/email/smtpClient';
 import { renderPasswordChangedEmail } from '@/lib/email/templates/passwordChanged';
 import { logAudit, logError } from '@/lib/loggerServer';
 
