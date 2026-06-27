@@ -219,7 +219,8 @@ function applyColumnMapping(data: string[][], rawMapping?: string): string[][] {
   return [header, ...data.slice(1)];
 }
 
-async function updateJobProgress(
+/** @internal — exported только для тестов (lock cancel-stick guard); не вызывать снаружи модуля. */
+export async function updateJobProgress(
   jobId: string,
   stepIndex: number,
   stepKey: string,
