@@ -5,7 +5,10 @@ import { buildHypothesesPrompt, selectRelevantCatalog, type HypothesesAudience }
 export const DEFAULT_HYPOTHESES_MODEL =
   process.env.PROJECT_HYPOTHESES_MODEL ?? 'policy/gemini-flash';
 
-const DEFAULT_CATALOG_LIMIT = Number(process.env.PROJECT_HYPOTHESES_CATALOG_LIMIT ?? '60');
+// Урезано 60 → 20: при 60 в промпт попадал большой grab-bag export-base
+// категорий, и модель добивала ими гипотезы для любого клиента (см. разбор
+// прогонов Егора — одни и те же базы у разных ЦА). 20 релевантных достаточно.
+const DEFAULT_CATALOG_LIMIT = Number(process.env.PROJECT_HYPOTHESES_CATALOG_LIMIT ?? '20');
 
 const HH_SOURCE_RE = /^-\s*Источник\s*:\s*(?:.*\bHH\b|.*HeadHunter|.*hh\.ru)/im;
 const CLIENT_HH_FORBIDDEN_SIZE_METRICS =
