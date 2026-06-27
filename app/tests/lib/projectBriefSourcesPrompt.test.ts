@@ -41,6 +41,22 @@ describe('projectBriefHypotheses prompt', () => {
     }
   });
 
+  // Пинит суть фикса «одинаковые гипотезы разным клиентам»: внутренняя
+  // инструкция должна гнать модель выводить ICP, разнообразить ТИПЫ источников
+  // и не добивать гипотезы общими категориями. Без этого гарда ревёрт
+  // формулировок прошёл бы молча и вернул баг.
+  it('buildHypothesesPrompt (internal) пинит ICP-стир и правило разнообразия', () => {
+    const { system, user } = buildHypothesesPrompt({
+      briefText: 'test',
+      catalog: EXPORT_BASE_CATALOG.slice(0, 5),
+    });
+    const combined = `${system}\n${user}`;
+    expect(combined).toContain('КОНКРЕТНЫЙ ICP');
+    expect(combined).toContain('Разнообразь ТИПЫ источников');
+    expect(combined).toContain('НЕ добивай гипотезы общими категориями');
+    expect(system).toContain('6. РАЗНООБРАЗИЕ');
+  });
+
   it('buildHypothesesPrompt вставляет переданный сэмпл каталога export-base', () => {
     const sample = EXPORT_BASE_CATALOG.slice(0, 3);
     const { user } = buildHypothesesPrompt({ briefText: 'test', catalog: sample });
@@ -78,6 +94,30 @@ describe('projectBriefHypotheses prompt', () => {
     const urls = result.map((r) => r.url);
     expect(new Set(urls).size).toBe(urls.length);
   });
+
+  it('selectRelevantCatalog: бриф без keyword-совпадений отдаёт ПУСТО, не grab-bag', () => {
+    // Несвязный бриф (токены не пересекаются с названиями категорий) раньше
+    // проваливался в «универсальный» grab-bag (WB/OZON, госзакупки), который
+    // инструкция запрещает. Теперь — пусто, чтобы не было противоречия
+    // «вот запрещённое меню, но не используй его».
+    const result = selectRelevantCatalog('qwxzvb asdfghj zxcvbn plmokn', EXPORT_BASE_CATALOG, 20);
+    expect(result).toEqual([]);
+  });
+
+  it('selectRelevantCatalog: стемминг ловит русские словоформы (клиники↔клиник)', () => {
+    const mini = [
+      { category: 'Рубрика', name: 'База клиник и медицинских центров', url: 'u1' },
+      { category: 'Рубрика', name: 'База строительных компаний и подрядчиков', url: 'u2' },
+      { category: 'Рубрика', name: 'База автосалонов и дилеров', url: 'u3' },
+    ] as unknown as Parameters<typeof selectRelevantCatalog>[1];
+    // Бриф со СЛОВОФОРМАМИ (не точные токены каталога): «клиники»→«клиник»,
+    // «строительство»→«строительных». Раньше exact-match их терял.
+    const result = selectRelevantCatalog('частные клиники и строительство жилья', mini, 10);
+    const urls = result.map((r) => r.url);
+    expect(urls).toContain('u1');
+    expect(urls).toContain('u2');
+    expect(urls).not.toContain('u3');
+  });
 });
 
 describe('renderLeadSourcesKnowledge & client-mode prompt safety', () => {
@@ -96,6 +136,9 @@ describe('renderLeadSourcesKnowledge & client-mode prompt safety', () => {
   it('CLIENT_EXCLUDED_SOURCE_IDS включает team-only источники', () => {
     expect(CLIENT_EXCLUDED_SOURCE_IDS).toContain('signals');
     expect(CLIENT_EXCLUDED_SOURCE_IDS).toContain('crypto_payments');
+    // agency_catalogs (Рейтинг Рунета) — скрейпинг каталогов делает специалист,
+    // клиент сам не парсит → источник должен оставаться скрытым от клиента.
+    expect(CLIENT_EXCLUDED_SOURCE_IDS).toContain('agency_catalogs');
   });
 
   it('renderLeadSourcesKnowledge({ exclude: CLIENT_EXCLUDED_SOURCE_IDS }) НЕ содержит team-only секции', () => {
@@ -126,6 +169,7 @@ describe('renderLeadSourcesKnowledge & client-mode prompt safety', () => {
     const blockedFragments = [
       'Crypto Payments',
       'Сигналы',
+      'Рейтинг Рунета',
       '/tools',
       '/parsers',
       'кнопка',

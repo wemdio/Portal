@@ -653,12 +653,16 @@ services:
       - SMTP_PROXY_API_KEY=${SMTP_PROXY_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=baseconstructor
-      # Сколько job'ов параллельно. 1 job в памяти ≈ 0.5–1.5GB JS heap
-      # из-за большой `data` (string[][]). Memory limit ниже = floor *
-      # CONCURRENCY + запас. 2 — продуктовое решение (Dmitry, июнь 2026):
-      # пара обрабатывается, остальные ждут в очереди. Согласовано с
-      # лимитом MAX_ACTIVE_JOBS_PER_USER=6 в route.ts (2 в работе + 4 в очереди).
-      - BASE_CONSTRUCTOR_CONCURRENCY=${BASE_CONSTRUCTOR_CONCURRENCY:-2}
+      # Сколько job'ов параллельно во ВСЕЙ системе (один воркер, общий на всех
+      # юзеров). 1 job в памяти ≈ 0.5–1.5GB JS heap из-за большой `data`
+      # (string[][]), поэтому memory-лимит ниже масштабируется вместе с этим
+      # числом (peak ≈ CONCURRENCY × 1.5GB + overhead). Поднято 2 → 6 (2026):
+      # сервер 139 = 62GB RAM / 32 ядра и простаивает; «2 одновременно» было
+      # софт-лимитом, не потолком железа. Реальные потолки выше — внешние
+      # (AI-роутер, скрейпинг 15+5/job, запись блоба ~46MB в БД на каждом шаге).
+      # NB: прод-.env может ПЕРЕБИВАТЬ дефолт — проверь /home/Portal/prod/.env.
+      # Это НЕ то же, что per-user cap MAX_ACTIVE_JOBS_PER_USER=6 в route.ts.
+      - BASE_CONSTRUCTOR_CONCURRENCY=${BASE_CONSTRUCTOR_CONCURRENCY:-6}
       - BASE_CONSTRUCTOR_STALE_MINUTES=${BASE_CONSTRUCTOR_STALE_MINUTES:-15}
     # Job может занимать 30-60 минут (find_emails+enrich на 1.5к строк).
     # SIGTERM придёт при docker compose down, но шаг доработает до конца —
@@ -668,9 +672,11 @@ services:
     deploy:
       resources:
         limits:
-          # 3 concurrency × ~1.5GB peak + 1GB на overhead Node/V8.
-          memory: 6144M
-          cpus: '2'
+          # 6 concurrency × ~1.5GB peak + ~2GB overhead Node/V8 + запас.
+          # Host 139 имеет ~56GB свободно — лимит щедрый намеренно: OOM-kill
+          # воркера сбросил бы прогресс всех in-flight ta_scoring задач.
+          memory: 14336M
+          cpus: '4'
     restart: unless-stopped
     networks:
       - portal-network

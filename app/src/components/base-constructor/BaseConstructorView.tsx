@@ -26,15 +26,15 @@ import type { LucideIcon } from 'lucide-react';
 const ALWAYS_ON_SET = new Set<StepKey>(ALWAYS_ON_STEPS_FOR_CLIENT as readonly StepKey[]);
 
 /**
- * Сколько активных задач (pending + processing) у юзера разрешено одновременно.
- * Дублирует MAX_ACTIVE_JOBS_PER_USER в app/src/app/api/tools/base-constructor/route.ts —
- * UI блокирует кнопку «Запустить» при достижении лимита, бэк защищает от обхода через прямой POST.
- * Раскладка: PARALLEL_PROCESSING обрабатываются параллельно (= BASE_CONSTRUCTOR_CONCURRENCY
- * в воркере), MAX_QUEUE_WAITING ждут своей очереди. Если меняешь — меняй во всех трёх местах.
+ * Сколько активных задач (pending + processing) у ОДНОГО юзера разрешено
+ * одновременно (per-user cap). Дублирует MAX_ACTIVE_JOBS_PER_USER в
+ * app/src/app/api/tools/base-constructor/route.ts — UI блокирует кнопку
+ * «Запустить» при достижении лимита, бэк защищает от обхода через прямой POST.
+ * Это НЕ глобальная параллельность обработки — та задаётся
+ * BASE_CONSTRUCTOR_CONCURRENCY в воркере (docker-compose.prod.yml). Если меняешь
+ * этот per-user лимит — поменяй и в route.ts.
  */
 const MAX_ACTIVE_JOBS = 6;
-const PARALLEL_PROCESSING = 2;
-const MAX_QUEUE_WAITING = MAX_ACTIVE_JOBS - PARALLEL_PROCESSING;
 
 function isActiveJobStatus(status: string): boolean {
   return status === 'pending' || status === 'processing';
@@ -1784,8 +1784,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   >
                     <AlertTriangle className={clientMode ? 'w-4 h-4 mt-0.5 flex-shrink-0 text-[var(--cp-amber)]' : 'w-4 h-4 mt-0.5 flex-shrink-0 text-amber-600'} />
                     <span>
-                      Нельзя поставить больше {MAX_ACTIVE_JOBS} баз одновременно
-                      {' '}({PARALLEL_PROCESSING} обрабатываются + {MAX_QUEUE_WAITING} в очереди).
+                      Нельзя поставить больше {MAX_ACTIVE_JOBS} активных баз одновременно.
                       {' '}Подождите, пока какая-нибудь из предыдущих задач завершится.
                     </span>
                   </div>
