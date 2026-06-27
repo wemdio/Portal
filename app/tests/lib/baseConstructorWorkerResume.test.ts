@@ -36,6 +36,8 @@ jest.mock('@/lib/supabaseAdmin', () => {
       return builder;
     },
     eq: () => builder,
+    in: () => builder,
+    neq: () => builder,
     single: async () => ({ data: currentJob, error: null }),
     maybeSingle: async () => ({ data: currentJob, error: null }),
   };
