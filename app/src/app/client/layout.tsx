@@ -210,14 +210,14 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
       <DemoBanner />
       <DemoRegisterGate />
       <PaymentLockedBanner />
-      <header className="sticky top-0 z-40 px-3 pt-3 pb-1 sm:px-4 sm:pt-4 sm:pb-2">
-        {/* Brand left, controls right. Earlier iteration dropped the flex-1
-            spacer to "compact" the bar, but the resulting brand+controls
-            cluster on the left with empty right was the wrong asymmetry —
-            user preferred the canonical sign-out-anchored-right pattern.
-            Restored the spacer; controls pin to the right edge of the 1400px
-            shell, mirroring the sidebar's left anchor below. */}
-        <div className="neu-card flex items-center gap-2 sm:gap-3 px-3 py-2.5 sm:px-5 sm:py-3 mx-auto max-w-[1400px]">
+      <header
+        className="sticky top-0 z-40"
+        style={{ background: 'var(--cp-ink)', borderBottom: '1px solid var(--cp-divider)' }}
+      >
+        {/* Minimal bar — no card chrome. Logo left, controls (lang + sign out)
+            anchored right via the flex-1 spacer; bg matches the page with a thin
+            bottom hairline so scrolled content doesn't bleed under it. */}
+        <div className="flex items-center gap-2 sm:gap-3 px-3 py-2 sm:px-6 sm:py-2.5 mx-auto max-w-[1400px]">
           <button
             type="button"
             onClick={() => setDrawerOpen(true)}
