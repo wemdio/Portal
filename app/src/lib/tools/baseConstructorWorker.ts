@@ -239,7 +239,15 @@ async function updateJobProgress(
       // безопасно пере-запустить с этого места.
       started_at: new Date().toISOString(),
     })
-    .eq('id', jobId);
+    .eq('id', jobId)
+    // Guard: не воскрешать отменённую задачу. Heartbeat пишет status='processing'
+    // на каждом тике прогресса; без этого условия он гонкой затирал
+    // status='cancelled' (его ставит кнопка «Отменить»), и отмена «отлипала»
+    // обратно в «В работе» (баг Любы, 26.06 — отмена срабатывала только если
+    // задача в этот момент простаивала). Теперь, если задачу уже отменили,
+    // UPDATE не находит строку, прогресс/статус не перетираются, и следующий
+    // isCancelled() видит 'cancelled' → шаг бросает 'Отменено' и встаёт.
+    .in('status', ['pending', 'processing']);
 }
 
 async function isCancelled(jobId: string): Promise<boolean> {
@@ -630,10 +638,13 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error(`[base-constructor][${jobId}] Job FAILED:`, message);
+    // .neq('status','cancelled'): если шаг упал из-за отмены (stepTAScore и др.
+    // бросают 'Отменено' при isCancelled), НЕ перетираем намеренный 'cancelled'
+    // на 'failed' — иначе пользователь видит «Ошибка» вместо «Отменена».
     await admin.from('base_constructor_jobs').update({
       status: 'failed',
       error_message: message.slice(0, 500),
       completed_at: new Date().toISOString(),
-    }).eq('id', jobId);
+    }).eq('id', jobId).neq('status', 'cancelled');
   }
 }
