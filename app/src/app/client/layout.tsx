@@ -228,12 +228,14 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
             <Menu className="h-4 w-4" />
           </button>
 
-          <span
-            className="text-sm sm:text-base font-extrabold tracking-tight select-none shrink-0"
-            style={{ color: 'var(--cp-text)' }}
-          >
-            outreach<span style={{ color: 'var(--cp-amber)' }}>OS</span>
-          </span>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/outreachos-logo.png"
+            alt="outreachOS"
+            width={760}
+            height={139}
+            className="h-5 sm:h-6 w-auto shrink-0 select-none"
+          />
 
           <div className="flex-1" />
 
