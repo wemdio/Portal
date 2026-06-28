@@ -153,6 +153,13 @@ export default function SignupPage() {
         <button type="submit" disabled={loading || !consent} className="neu-btn w-full px-4 py-2.5 text-sm font-semibold">
           {loading ? 'Создаём аккаунт…' : 'Зарегистрироваться'}
         </button>
+
+        <p className="text-center text-[11px] leading-relaxed" style={{ color: 'var(--cp-paper-faint)' }}>
+          Нажимая «Зарегистрироваться», вы принимаете{' '}
+          <a href="/offer" target="_blank" rel="noopener" className="font-semibold" style={{ color: 'var(--cp-paper-mute)' }}>
+            Договор оферты
+          </a>.
+        </p>
       </form>
 
       <p className="mt-4 text-center text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
