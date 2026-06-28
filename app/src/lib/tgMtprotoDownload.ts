@@ -329,6 +329,177 @@ export async function getForumTopicsMtproto(chatId: number): Promise<MtprotoForu
   return topics;
 }
 
+export interface MtprotoTopicMessage {
+  /** Message id (equal to Bot API message_id). */
+  id: number;
+  /** UNIX timestamp from Telegram. */
+  date: number;
+  /** True when the message carries a video / video_note / video document. */
+  isVideo: boolean;
+  /** Original filename if present (only for document-style attachments). */
+  fileName?: string;
+  /** Size in bytes if present. */
+  fileSize?: number;
+  /** Duration in seconds (video / video_note). */
+  duration?: number;
+}
+
+export interface MtprotoTopicScanOptions {
+  /** Pagination cursor — fetch messages older than this id. 0 = newest first. */
+  offsetId?: number;
+  /** Max messages per page; Telegram caps around 100. */
+  limit?: number;
+}
+
+interface MaybeVideoSummary {
+  isVideo: boolean;
+  fileName?: string;
+  fileSize?: number;
+  duration?: number;
+}
+
+/**
+ * Extract video metadata from an MTProto Message.media. We only care about
+ * is-video and basic file info — the actual download happens later via Bot
+ * API forward + processVideoMessage (which then can use MTProto download by
+ * file_id for large files).
+ */
+function extractVideoSummary(msg: unknown): MaybeVideoSummary {
+  const empty: MaybeVideoSummary = { isVideo: false };
+  if (!msg || typeof msg !== 'object') return empty;
+  const media = (msg as { media?: unknown }).media;
+  if (!media || typeof media !== 'object') return empty;
+  const m = media as { className?: string; document?: unknown };
+  if (m.className !== 'MessageMediaDocument' || !m.document) return empty;
+
+  const doc = m.document as {
+    className?: string;
+    mimeType?: string;
+    size?: bigint | number;
+    attributes?: Array<{ className?: string; duration?: number; fileName?: string }>;
+  };
+  if (doc.className !== 'Document') return empty;
+
+  const attrs = Array.isArray(doc.attributes) ? doc.attributes : [];
+  const videoAttr = attrs.find((a) => a?.className === 'DocumentAttributeVideo');
+  const fileNameAttr = attrs.find((a) => a?.className === 'DocumentAttributeFilename');
+  const mimeType = doc.mimeType ?? '';
+  const isVideo = mimeType.startsWith('video/') || Boolean(videoAttr);
+  if (!isVideo) return empty;
+
+  return {
+    isVideo: true,
+    fileName: fileNameAttr?.fileName,
+    fileSize: doc.size != null ? Number(doc.size) : undefined,
+    duration: videoAttr?.duration != null ? Number(videoAttr.duration) : undefined,
+  };
+}
+
+/**
+ * Fetch a page of messages from a forum-group topic via MTProto.
+ *
+ * Replaces the previous "forward every message_id backwards via Bot API and
+ * filter on the fly" approach that flooded the source chat with N
+ * forward+delete pairs (one per message_id walked, regardless of media).
+ * MTProto messages.getReplies / getHistory have no chat-visible side effects.
+ *
+ * topicId semantics:
+ *   - null / 0 → whole chat (no topic filter). Uses getHistory.
+ *   - > 0      → real topic. Tries getReplies(top_msg_id=topicId) first; on
+ *                error (TOPIC_NOT_EXIST etc. — happens when the "topic" is
+ *                actually General renamed) falls back to getHistory and
+ *                filters messages by reply_to.reply_to_top_id.
+ *
+ * Returns up to `limit` messages newest-first; pass the smallest returned id
+ * back as `offsetId` for the next page.
+ */
+export async function getForumTopicMessagesMtproto(
+  chatId: number,
+  topicId: number | null,
+  options: MtprotoTopicScanOptions = {},
+): Promise<MtprotoTopicMessage[]> {
+  const c = await getClient();
+  const peer = await resolvePeer(c, chatId);
+  const limit = options.limit ?? 100;
+  const offsetId = options.offsetId ?? 0;
+  const normalizedTopicId = topicId != null && topicId > 0 ? topicId : 0;
+
+  type HistoryResult = { messages: unknown[] };
+  let history: HistoryResult | null = null;
+  let usedFallback = false;
+
+  if (normalizedTopicId > 0) {
+    try {
+      history = (await c.invoke(
+        new Api.messages.GetReplies({
+          peer,
+          msgId: normalizedTopicId,
+          offsetId,
+          offsetDate: 0,
+          addOffset: 0,
+          limit,
+          maxId: 0,
+          minId: 0,
+          hash: bigInt(0),
+        }),
+      )) as HistoryResult;
+    } catch (err) {
+      await logInfo(
+        'mtproto.getReplies.fail',
+        `messages.GetReplies failed for chat ${chatId} topic ${normalizedTopicId} — falling back to getHistory`,
+        { chatId, topicId: normalizedTopicId, error: err instanceof Error ? err.message : String(err) },
+      );
+      usedFallback = true;
+    }
+  }
+
+  if (!history) {
+    history = (await c.invoke(
+      new Api.messages.GetHistory({
+        peer,
+        offsetId,
+        offsetDate: 0,
+        addOffset: 0,
+        limit,
+        maxId: 0,
+        minId: 0,
+        hash: bigInt(0),
+      }),
+    )) as HistoryResult;
+  }
+
+  const messages = Array.isArray(history?.messages) ? history.messages : [];
+  const results: MtprotoTopicMessage[] = [];
+
+  for (const msg of messages) {
+    if (!msg || typeof msg !== 'object' || !('id' in msg)) continue;
+
+    if (normalizedTopicId > 0 && usedFallback) {
+      // getHistory fallback — filter by replyToTopId so we only keep messages
+      // that actually belong to the requested topic.
+      const replyTo = (msg as { replyTo?: { replyToTopId?: number | bigint } }).replyTo;
+      const replyToTopId = replyTo?.replyToTopId != null ? Number(replyTo.replyToTopId) : null;
+      if (replyToTopId !== normalizedTopicId) {
+        // Special-case: General-renamed topic with anchor id=1 may have
+        // messages with no replyToTopId at all. Accept those when filter==1.
+        if (!(normalizedTopicId === 1 && replyToTopId == null)) continue;
+      }
+    }
+
+    const summary = extractVideoSummary(msg);
+    results.push({
+      id: Number((msg as { id: number }).id),
+      date: Number((msg as { date?: number }).date ?? 0),
+      isVideo: summary.isVideo,
+      fileName: summary.fileName,
+      fileSize: summary.fileSize,
+      duration: summary.duration,
+    });
+  }
+
+  return results;
+}
+
 async function resolvePeer(c: TelegramClient, chatId: number): Promise<Api.TypeInputPeer> {
   try {
     return await c.getInputEntity(chatId);
