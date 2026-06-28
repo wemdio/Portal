@@ -348,9 +348,25 @@ export async function middleware(request: NextRequest) {
     // его всё равно не пустит default-deny ниже). Иначе был бы
     // редирект-цикл /login → / → /login.
     if (user && userRole && (pathname === '/login' || pathname === '/signup')) {
-      return NextResponse.redirect(
-        new URL(userRole === 'client' ? '/client' : '/', request.url)
-      )
+      // Demo accounts must be able to reach /signup to upgrade into a real account —
+      // don't bounce them to /client (this is the "returned from /demo, clicked
+      // Создать аккаунт, landed in the demo dashboard" bug). Signup signs them into
+      // the new account on success, replacing the shared demo session. /login still
+      // redirects every logged-in user. Targeted is_demo read only on this rare path.
+      let allowDemoSignup = false
+      if (pathname === '/signup' && userRole === 'client') {
+        const { data: demoProfile } = await supabase
+          .from('profiles')
+          .select('is_demo')
+          .eq('id', user.id)
+          .single()
+        allowDemoSignup = demoProfile?.is_demo === true
+      }
+      if (!allowDemoSignup) {
+        return NextResponse.redirect(
+          new URL(userRole === 'client' ? '/client' : '/', request.url)
+        )
+      }
     }
 
     // Default-deny для аккаунтов без роли. Саморегистрация закрыта
