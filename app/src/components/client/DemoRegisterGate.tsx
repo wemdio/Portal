@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { Send } from 'lucide-react';
+import { supabase } from '@/lib/supabaseClient';
 import {
   DEMO_REGISTER_PROMPT_EVENT,
   type DemoRegisterPromptDetail,
@@ -16,12 +17,29 @@ import {
  * wiring.
  *
  * Inert for real clients: they never receive a DEMO_READONLY 403, so the event
- * never fires and nothing renders. The "Зарегистрироваться" CTA navigates to
- * /signup (a fresh sign-in there replaces the shared demo session).
+ * never fires and nothing renders. The "Зарегистрироваться" CTA signs out the shared
+ * demo session FIRST, then navigates to /signup — otherwise middleware bounces the
+ * still-logged-in demo (role=client) straight back to /client (the "it just threw me
+ * to the dashboard" bug).
  */
 export function DemoRegisterGate() {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState<string | null>(null);
+  const [leaving, setLeaving] = useState(false);
+
+  const goRegister = async () => {
+    setLeaving(true);
+    // Sign out the shared demo session before /signup: middleware redirects an
+    // authenticated role=client away from /signup to /client. Cookie-based
+    // (@supabase/ssr) signOut clears the session cookie the middleware reads, so a
+    // full navigation then lands on /signup clean. Navigate regardless on failure.
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      /* ignore */
+    }
+    window.location.href = '/signup';
+  };
 
   useEffect(() => {
     const onPrompt = (e: Event) => {
@@ -69,13 +87,15 @@ export function DemoRegisterGate() {
           и работайте на своих данных: загрузка баз, запуск кампаний, выгрузки.
         </p>
         <div className="flex items-center gap-4 flex-wrap">
-          <a
-            href="/signup"
+          <button
+            type="button"
+            onClick={goRegister}
+            disabled={leaving}
             className="neu-pill inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold"
             style={{ background: 'var(--cp-amber)', color: 'var(--cp-ink)' }}
           >
-            <Send size={15} /> Зарегистрироваться
-          </a>
+            <Send size={15} /> {leaving ? 'Открываем…' : 'Зарегистрироваться'}
+          </button>
           <button
             type="button"
             onClick={() => setOpen(false)}

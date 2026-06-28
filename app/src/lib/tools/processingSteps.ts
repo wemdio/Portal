@@ -600,14 +600,65 @@ export async function stepTAScore(
   const header = data[0];
   const body = data.slice(1);
   const newHeader = [...header, 'ЦА Балл', 'ЦА Причина'];
-  const scored: string[][] = [];
+  // ── Дедуп по компании перед AI-оценкой ──────────────────────────────
+  // `split_emails` идёт ДО этого шага и размножает строки: одна компания с
+  // N почтами → N идентичных строк, различие только в колонке email. Балл ЦА
+  // зависит от компании (название/сайт/описание), а НЕ от адреса, поэтому
+  // раньше мы гоняли AI по каждой почте и переплачивали кратно. Реальный
+  // замер 26.06: СБИС-база = 5289 уникальных компаний, раздутых в 35525 строк
+  // (6.7×) → 3552 последовательных вызова вместо 529. Теперь оцениваем каждую
+  // УНИКАЛЬНУЮ компанию один раз (email в промпт НЕ передаём — балл зависит
+  // только от компании) и транслируем балл на все её строки. Контракт выхода
+  // (число строк, порядок, колонки, фильтр <7, телеметрия onStats) — прежний;
+  // меняется лишь то, что строки одной компании теперь гарантированно получают
+  // ОДИН балл (раньше AI оценивал каждую почту отдельно).
+  const companyIdx = findColumnIndex(header, 'company', 'компания', 'название', 'наименование', 'организация');
+  const siteIdx = findColumnIndex(header, 'сайт', 'site', 'website', 'домен', 'domain');
+  const emailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
 
-  for (let batch = 0; batch < body.length; batch += TA_BATCH) {
+  // Ключ группировки. Компания+сайт различают «однофамильцев» (одно имя у
+  // разных фирм → разные сайты → разные ключи). Если НЕТ ни компании, ни
+  // сайта — не схлопываем разные строки в одну: ключуем по всему контенту
+  // строки кроме email, т.е. деградируем к старому поведению (поштучно).
+  const keyOf = (row: string[]): string => {
+    const company = (companyIdx >= 0 ? row[companyIdx] || '' : '').trim().toLowerCase();
+    const site = (siteIdx >= 0 ? row[siteIdx] || '' : '').trim().toLowerCase();
+    // JSON.stringify even with a delimiter gives a collision-proof key
+    // (["ab","c"] != ["a","bc"]); key lives only in memory (Map), never in the DB.
+    if (company || site) return 'cs:' + JSON.stringify([company, site]);
+    const copy = [...row];
+    if (emailIdx >= 0) copy[emailIdx] = '';
+    return 'r:' + JSON.stringify(copy);
+  };
+
+  // Уникальные представители в порядке первого появления.
+  const repByKey = new Map<string, string[]>();
+  for (const row of body) {
+    const k = keyOf(row);
+    if (!repByKey.has(k)) repByKey.set(k, row);
+  }
+  const uniqueKeys = [...repByKey.keys()];
+  const uniqueRows = [...repByKey.values()];
+
+  if (uniqueRows.length < body.length) {
+    console.log(
+      `[ta_scoring] per-company dedup: ${body.length} rows → ${uniqueRows.length} unique ` +
+        `(${(body.length / Math.max(1, uniqueRows.length)).toFixed(1)}× fewer AI calls)`,
+    );
+  }
+
+  // ── AI-оценка уникальных представителей (тот же батч-протокол) ───────
+  const scoreByKey = new Map<string, { score: string; reason: string }>();
+  for (let batch = 0; batch < uniqueRows.length; batch += TA_BATCH) {
     if (isCancelled && await isCancelled()) throw new Error('Отменено');
-    const chunk = body.slice(batch, batch + TA_BATCH);
+    const chunkKeys = uniqueKeys.slice(batch, batch + TA_BATCH);
+    const chunk = uniqueRows.slice(batch, batch + TA_BATCH);
     const companies = chunk.map((row, bIdx) => {
       const obj: Record<string, string> = {};
-      header.forEach((h, c) => { obj[h] = row[c] || ''; });
+      // email НЕ кладём в промпт: оценка зависит от компании, а не от конкретного
+      // адреса — иначе балл представителя зависел бы от того, какая почта
+      // оказалась первой в группе, и дедуп переставал бы быть lossless.
+      header.forEach((h, c) => { obj[h] = c === emailIdx ? '' : (row[c] || ''); });
       return { idx: bIdx, data: obj };
     });
 
@@ -632,14 +683,21 @@ export async function stepTAScore(
 
       for (let i = 0; i < chunk.length; i++) {
         const s = scoreMap.get(i);
-        scored.push([...chunk[i], String(s?.score ?? 0), s?.reason ?? '']);
+        scoreByKey.set(chunkKeys[i], { score: String(s?.score ?? 0), reason: s?.reason ?? '' });
       }
     } catch {
-      for (const row of chunk) scored.push([...row, '5', 'Ошибка оценки']);
+      for (const k of chunkKeys) scoreByKey.set(k, { score: '5', reason: 'Ошибка оценки' });
     }
 
-    await onProgress(Math.round(((batch + chunk.length) / body.length) * 100));
+    await onProgress(Math.round(((batch + chunk.length) / uniqueRows.length) * 100));
   }
+
+  // Транслируем баллы обратно на ВСЕ строки в ИСХОДНОМ порядке. Строки одной
+  // компании получают один и тот же балл/причину (что и требуется).
+  const scored: string[][] = body.map((row) => {
+    const s = scoreByKey.get(keyOf(row)) ?? { score: '0', reason: '' };
+    return [...row, s.score, s.reason];
+  });
 
   const TA_MIN_SCORE = 7;
   const scoreColIdx = newHeader.length - 2;
