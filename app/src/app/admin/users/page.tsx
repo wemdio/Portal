@@ -33,6 +33,10 @@ type AdminUserTariffPayload = TariffData & {
   payment_locked?: boolean;
   billing_period?: 'month' | 'half_year' | 'year' | null;
   billing_amount?: number | null;
+  /** Персистентный флаг "клиент работает с тестовым магазином ЮКассы".
+   *  Управляется отдельным блоком в админ-модалке, переключает отображение
+   *  цен в клиентском ЛК и креды при создании счёта. */
+  is_test_shop?: boolean;
 };
 const TARIFF_DEFAULTS: Record<'standard' | 'pro', Omit<TariffData, 'tariff_type'>> = {
   standard: { max_contacts: 10_000, max_rows: 20_000, max_chains_per_month: 10, max_domains: 4, max_emails: 16 },
@@ -228,6 +232,10 @@ type SubscriptionPanelProps = {
   paymentLocked: boolean;
   billingPeriod: 'month' | 'half_year' | 'year' | null;
   billingAmount: number | null;
+  /** Префилл локального toggle "магазин ЮКасса" из персистентного флага на
+   *  профиле клиента. Админ всё ещё может одноразово переопределить для
+   *  конкретной активации/продления. */
+  defaultIsTestShop: boolean;
   onActivateResult: (res: {
     paid_until?: string | null;
     setup_until?: string | null;
@@ -262,6 +270,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
   paymentLocked,
   billingPeriod,
   billingAmount,
+  defaultIsTestShop,
   onActivateResult,
   onExtendResult,
   onFinishSetupResult,
@@ -275,7 +284,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
   const [activateCustomAmount, setActivateCustomAmount] = useState('');
   const [activating, setActivating] = useState(false);
   const [showExtendForm, setShowExtendForm] = useState(false);
-  const [useTestShop, setUseTestShop] = useState(false);
+  const [useTestShop, setUseTestShop] = useState(defaultIsTestShop);
   // QA test mode — replaces month/half_year/year with a minutes-based period.
   // Used to exercise the full autopayment + cron renewal loop against the
   // real YK shop in minutes instead of waiting a real month.
@@ -656,7 +665,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
             onClick={() => {
               setActivatePeriod('month');
               setActivateCustomAmount('');
-              setUseTestShop(false);
+              setUseTestShop(defaultIsTestShop);
               setShowExtendForm(true);
             }}
             className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 shadow-sm transition-colors hover:border-indigo-300 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
@@ -873,6 +882,12 @@ export default function UsersPage() {
   const [campaignPage, setCampaignPage] = useState(1);
 
   const [tariffType, setTariffType] = useState<TariffType>('standard');
+  // Персистентный флаг "клиент в тест-магазине". Меняется отдельным блоком
+  // «Магазин ЮКасса клиента» рядом с тарифом; сохраняется через PUT /tariff
+  // вместе с тарифом по «Сохранить изменения». Префиллит локальный toggle в
+  // SubscriptionPanel, чтобы активация/продление по умолчанию шли в нужный
+  // магазин.
+  const [clientIsTestShop, setClientIsTestShop] = useState(false);
   const [customLimits, setCustomLimits] = useState<Omit<TariffData, 'tariff_type'>>({ ...TARIFF_DEFAULTS.pro });
   const [subscriptionActive, setSubscriptionActive] = useState(false);
   const [subscriptionSetup, setSubscriptionSetup] = useState(false);
@@ -1126,6 +1141,7 @@ export default function UsersPage() {
       setClientCampaigns(campaigns);
       if (tariffRes.tariff) {
         setTariffType(tariffRes.tariff.tariff_type);
+        setClientIsTestShop(tariffRes.tariff.is_test_shop === true);
         setCustomLimits({
           max_contacts: tariffRes.tariff.max_contacts ?? TARIFF_DEFAULTS.pro.max_contacts,
           max_rows: tariffRes.tariff.max_rows ?? TARIFF_DEFAULTS.pro.max_rows,
@@ -1153,6 +1169,7 @@ export default function UsersPage() {
         setBillingAmount(tariffRes.tariff.billing_amount ?? null);
       } else {
         setTariffType('standard');
+        setClientIsTestShop(false);
         setCustomLimits({ ...TARIFF_DEFAULTS.pro });
         setSubscriptionActive(false);
         setSubscriptionSetup(false);
@@ -1177,6 +1194,7 @@ export default function UsersPage() {
       setToolVisibility({});
       setClientCampaigns([]);
       setTariffType('standard');
+      setClientIsTestShop(false);
       setCustomLimits({ ...TARIFF_DEFAULTS.pro });
       setSubscriptionActive(false);
       setSubscriptionSetup(false);
@@ -1376,6 +1394,7 @@ export default function UsersPage() {
           method: 'PUT',
           body: JSON.stringify({
             tariff_type: tariffType,
+            is_test_shop: clientIsTestShop,
             ...(tariffType === 'custom' ? customLimits : {}),
           }),
         });
@@ -1829,6 +1848,45 @@ export default function UsersPage() {
 
                 {modalRole === 'client' && (
                   <div className="space-y-4 pt-2 border-t border-gray-200">
+                    <div className="rounded-lg border border-gray-200 bg-white p-3">
+                      <h4 className="text-sm font-medium text-gray-900 mb-1">Магазин ЮКасса клиента</h4>
+                      <p className="text-[11px] text-gray-500 mb-2">
+                        Переключает магазин на постоянной основе. Влияет на цены в ЛК клиента и креды
+                        ЮКассы во всех будущих счетах/автоплатежах. Не создаёт счёт сам по себе.
+                      </p>
+                      <div className="flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setClientIsTestShop(false)}
+                          className={`flex-1 px-2 py-1.5 text-[12px] font-medium rounded-lg border transition-colors ${
+                            !clientIsTestShop
+                              ? 'bg-gray-900 text-white border-gray-900'
+                              : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'
+                          }`}
+                        >
+                          Боевой
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setClientIsTestShop(true)}
+                          className={`flex-1 px-2 py-1.5 text-[12px] font-medium rounded-lg border transition-colors ${
+                            clientIsTestShop
+                              ? 'bg-yellow-500 text-white border-yellow-500'
+                              : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'
+                          }`}
+                        >
+                          🧪 Тестовый
+                        </button>
+                      </div>
+                      {clientIsTestShop && (
+                        <p className="mt-2 text-[10px] leading-relaxed text-yellow-700 bg-yellow-50 border border-yellow-200 rounded px-2 py-1">
+                          В ЛК клиента покажутся тестовые цены: <strong>10/15/20 ₽</strong> (Стандарт)
+                          и <strong>11/16/21 ₽</strong> (Про). Период действия — <strong>10/15/20 мин</strong>,
+                          setup-trial — <strong>5 мин</strong>. Изменение применится после
+                          «Сохранить изменения».
+                        </p>
+                      )}
+                    </div>
                     <div>
                       <h4 className="text-sm font-medium text-gray-900 mb-2">Тариф клиента</h4>
                       <div className="flex gap-2">
@@ -1910,6 +1968,7 @@ export default function UsersPage() {
                         paymentLocked={paymentLocked}
                         billingPeriod={billingPeriod}
                         billingAmount={billingAmount}
+                        defaultIsTestShop={clientIsTestShop}
                         onActivateResult={handleActivateResult}
                         onExtendResult={handleExtendResult}
                         onFinishSetupResult={handleFinishSetupResult}

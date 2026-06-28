@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { calcBillingAmount, isPaymentLocked, SETUP_DAYS } from '@/lib/tariffs';
+import { calcBillingAmount, isPaymentLocked, SETUP_DAYS, TEST_PERIOD_MINUTES_BY_PERIOD, TEST_SETUP_MINUTES } from '@/lib/tariffs';
 import type { BillingPeriod, ClientTariffRow } from '@/lib/tariffs';
 import { ensurePendingInvoiceForTariff } from '@/lib/billing';
 
@@ -104,11 +104,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Неподдерживаемый период' }, { status: 400 });
   }
 
-  const amount = calcBillingAmount(tariffType, billingPeriod);
-  if (!amount) {
-    return NextResponse.json({ error: 'Не удалось посчитать сумму' }, { status: 400 });
-  }
-
   const { data: tariff } = await supabaseAdmin
     .from('client_tariffs')
     .select('*')
@@ -120,9 +115,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Подписка уже оплачена' }, { status: 400 });
   }
 
+  // Тест-магазин — персистентный флаг на профиле клиента (см. admin/users).
+  // При нём используем фиксированные тестовые цены (10/15/20 ₽ Стандарт,
+  // 11/16/21 ₽ Про), а setup-фазу схлопываем в 5 минут вместо 15 дней —
+  // чтобы прогнать полный autopayment loop без ожидания.
+  const isTestShop = tariff.is_test_shop === true;
+  const amount = calcBillingAmount(tariffType, billingPeriod, isTestShop);
+  if (!amount) {
+    return NextResponse.json({ error: 'Не удалось посчитать сумму' }, { status: 400 });
+  }
+
   const now = new Date();
   const setupUntil = new Date(now);
-  setupUntil.setDate(setupUntil.getDate() + SETUP_DAYS);
+  if (isTestShop) {
+    setupUntil.setMinutes(setupUntil.getMinutes() + TEST_SETUP_MINUTES);
+  } else {
+    setupUntil.setDate(setupUntil.getDate() + SETUP_DAYS);
+  }
+
+  // В тест-режиме paid_until должен прибавляться минутами через
+  // test_period_minutes (его уже уважают webhook + cron renew). Quarter в
+  // тест-магазине не поддерживается — UI его не отдаёт.
+  const testPeriodMinutes = isTestShop ? (TEST_PERIOD_MINUTES_BY_PERIOD[billingPeriod] ?? null) : null;
 
   const { error: updateErr } = await supabaseAdmin
     .from('client_tariffs')
@@ -134,6 +148,7 @@ export async function POST(req: NextRequest) {
       is_active: true,
       payment_locked: true,
       setup_until: setupUntil.toISOString(),
+      test_period_minutes: testPeriodMinutes,
       updated_at: now.toISOString(),
     })
     .eq('user_id', userId);
@@ -145,7 +160,7 @@ export async function POST(req: NextRequest) {
   const ensured = await ensurePendingInvoiceForTariff({
     userId,
     reason: 'client_self',
-    isTestShop: tariff.is_test_shop === true,
+    isTestShop,
   });
 
   if (!ensured.yookassaUrl) {
