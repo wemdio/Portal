@@ -3,18 +3,17 @@ import type { NextRequest } from 'next/server';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
-import {
-  generateLeadSourceHypotheses,
-  DEFAULT_HYPOTHESES_MODEL,
-} from '@/lib/projectBriefHypotheses/generateHypotheses';
+import { generateLeadSourceHypotheses } from '@/lib/projectBriefHypotheses/generateHypotheses';
+import { SALES_HYPOTHESES_MODEL } from '@/lib/salesHypotheses/model';
 import { RUN_DETAIL_COLUMNS, serializeRun } from '@/lib/salesHypotheses/run';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-export const maxDuration = 120;
+// 200с / 150с: двухшаговая генерация (разбор ЦА + гипотезы) = 2 AI-вызова.
+export const maxDuration = 200;
 
 const OPENROUTER_BRIEF_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
-const HYPOTHESES_TIMEOUT_MS = Number(process.env.PROJECT_HYPOTHESES_TIMEOUT_MS ?? '90000');
+const HYPOTHESES_TIMEOUT_MS = Number(process.env.PROJECT_HYPOTHESES_TIMEOUT_MS ?? '150000');
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -71,6 +70,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         hypotheses = await generateLeadSourceHypotheses({
           apiKey: OPENROUTER_BRIEF_API_KEY,
           briefText,
+          model: SALES_HYPOTHESES_MODEL,
+          icpModel: SALES_HYPOTHESES_MODEL,
           signal: controller.signal,
           audience: 'internal',
         });
@@ -98,7 +99,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             ? new Date().toISOString()
             : (row.hypotheses_generated_at ?? null),
           hypotheses_model: hypotheses
-            ? DEFAULT_HYPOTHESES_MODEL
+            ? SALES_HYPOTHESES_MODEL
             : (row.hypotheses_model ?? null),
           status: hypotheses ? 'completed' : (row.hypotheses ? 'completed' : 'failed'),
           error_message: errorMessage,
