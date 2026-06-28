@@ -12,7 +12,6 @@ import type { LegalSection } from '@/lib/legal/consentText';
 export const PRIVACY_TITLE = 'ПОЛИТИКА ОБРАБОТКИ ПЕРСОНАЛЬНЫХ ДАННЫХ';
 
 export const PRIVACY_LEAD: readonly string[] = [
-  'Редакция от 28 июня 2026 г.',
   'Оператор: Индивидуальный предприниматель Ерхов Никита Владимирович, ОГРНИП 310169035000013, ИНН 165808519703. Применяется к сайтам outreachos.pro, polza-portal.ru и иным доменам/поддоменам Portal. Контакт: sorichev@polzaagency.ru.',
 ];
 
