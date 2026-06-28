@@ -498,7 +498,10 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     : 'standard';
 
   const isCustom = tariffType === 'custom';
-  const payload = {
+  // Персистентный флаг "клиент работает с тестовым магазином". Шлётся отдельно
+  // из админ-модалки (блок «Магазин ЮКасса клиента»), отдельно от активации/
+  // продления. Если поле не пришло в body — текущее значение в БД не трогаем.
+  const payload: Record<string, unknown> = {
     tariff_type: tariffType,
     max_contacts: isCustom ? clampInt(body.max_contacts) : null,
     max_rows: isCustom ? clampInt(body.max_rows) : null,
@@ -507,6 +510,9 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     max_emails: isCustom ? clampInt(body.max_emails) : null,
     updated_at: new Date().toISOString(),
   };
+  if (typeof body.is_test_shop === 'boolean') {
+    payload.is_test_shop = body.is_test_shop;
+  }
 
   const { data: existing } = await supabaseAdmin
     .from('client_tariffs')
@@ -526,9 +532,13 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
   await logAudit(
     'admin.tariff.put.success',
     'Client tariff updated',
-    { tariffType, targetUserId },
+    { tariffType, targetUserId, ...(typeof body.is_test_shop === 'boolean' ? { is_test_shop: body.is_test_shop } : {}) },
     { userId: user.id },
   );
 
-  return NextResponse.json({ ok: true, tariff_type: tariffType });
+  return NextResponse.json({
+    ok: true,
+    tariff_type: tariffType,
+    ...(typeof body.is_test_shop === 'boolean' ? { is_test_shop: body.is_test_shop } : {}),
+  });
 }
