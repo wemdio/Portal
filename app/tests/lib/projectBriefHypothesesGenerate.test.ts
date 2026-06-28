@@ -1,4 +1,42 @@
-import { sanitizeClientHypothesesMarkdown } from '@/lib/projectBriefHypotheses/generateHypotheses';
+import {
+  sanitizeClientHypothesesMarkdown,
+  generateLeadSourceHypotheses,
+} from '@/lib/projectBriefHypotheses/generateHypotheses';
+
+// Мок fetchImpl без глобалов (jsdom не даёт fetch/Response): callOpenRouterChat
+// читает только .ok/.status/.text(). Считаем вызовы, чтобы проверить число шагов.
+function mockFetch(content: string) {
+  let calls = 0;
+  const fn = (async () => {
+    calls += 1;
+    return {
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({ choices: [{ message: { content }, finish_reason: 'stop' }] }),
+    } as unknown as Response;
+  }) as unknown as typeof fetch;
+  return { fn, calls: () => calls };
+}
+
+describe('generateLeadSourceHypotheses — двухшаговый разбор ЦА', () => {
+  const HYP = '### Гипотеза 1: x\n- Источник: HH (HeadHunter)';
+  it('internal делает 2 вызова (разбор ЦА + гипотезы), client — 1', async () => {
+    const a = mockFetch(HYP);
+    await generateLeadSourceHypotheses({
+      apiKey: 'k', briefText: 'продаём CRM медицинским клиникам', audience: 'internal',
+      fetchImpl: a.fn, maxRetries: 0,
+    });
+    expect(a.calls()).toBe(2);
+
+    const b = mockFetch(HYP);
+    await generateLeadSourceHypotheses({
+      apiKey: 'k', briefText: 'продаём CRM медицинским клиникам', audience: 'client',
+      fetchImpl: b.fn, maxRetries: 0,
+    });
+    expect(b.calls()).toBe(1);
+  });
+});
 
 describe('sanitizeClientHypothesesMarkdown', () => {
   it('removes company-size metrics from client HH hypotheses only', () => {

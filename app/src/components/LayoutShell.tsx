@@ -101,16 +101,16 @@ export function LayoutShell({
   // unauthenticated visitor reading the offer doesn't see Portal navigation
   // they can't use, and an authenticated user gets a clean printable-feeling
   // legal page instead of the page nested inside the workflow shell.
-  const isOfferPage = pathname === '/offer';
+  const isLegalPage = pathname === '/offer' || pathname === '/consent' || pathname === '/privacy';
   // /signup — публичная страница саморегистрации (см. middleware.ts isPublicPath
   // + app/signup/page.tsx). Должна быть чистым standalone-листом без TopNav и
   // sidebar, как /offer и /login. Залогиненного юзера middleware и так уводит
   // отсюда на /client или /, но если он сюда всё же попал (стейл-кука, прямой
   // переход) — не показываем ему портальную обвязку поверх формы регистрации.
   const isSignupPage = pathname === '/signup';
-  const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || isClientPortal || isOfferPage || isSignupPage;
+  const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || isClientPortal || isLegalPage || isSignupPage;
 
-  if (isClientPortal || isOfferPage || isSignupPage || isMaintenancePage) {
+  if (isClientPortal || isLegalPage || isSignupPage || isMaintenancePage) {
     // Maintenance: render the page bare so its full-screen radial gradient
     // and centred card aren't nested inside the portal frame/topnav. The
     // page renders its own <main> with the dark background.

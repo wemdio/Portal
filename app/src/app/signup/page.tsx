@@ -20,11 +20,16 @@ export default function SignupPage() {
   const [phone, setPhone] = useState('');
   const [telegram, setTelegram] = useState('');
   const [password, setPassword] = useState('');
+  const [consent, setConsent] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!consent) {
+      setError('Нужно согласие на обработку персональных данных');
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -124,7 +129,28 @@ export default function SignupPage() {
           </div>
         )}
 
-        <button type="submit" disabled={loading} className="neu-btn w-full px-4 py-2.5 text-sm font-semibold">
+        <label className="flex items-start gap-2 text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+          <input
+            type="checkbox"
+            checked={consent}
+            onChange={(e) => setConsent(e.target.checked)}
+            required
+            className="mt-0.5 shrink-0"
+            style={{ accentColor: 'var(--cp-amber)' }}
+          />
+          <span>
+            Я согласен на{' '}
+            <a href="/consent" target="_blank" rel="noopener" className="font-semibold" style={{ color: 'var(--cp-amber)' }}>
+              обработку персональных данных
+            </a>{' '}
+            и принимаю{' '}
+            <a href="/privacy" target="_blank" rel="noopener" className="font-semibold" style={{ color: 'var(--cp-amber)' }}>
+              политику
+            </a>.
+          </span>
+        </label>
+
+        <button type="submit" disabled={loading || !consent} className="neu-btn w-full px-4 py-2.5 text-sm font-semibold">
           {loading ? 'Создаём аккаунт…' : 'Зарегистрироваться'}
         </button>
       </form>

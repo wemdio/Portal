@@ -145,6 +145,22 @@ export function renderLeadSourcesKnowledge(opts: RenderLeadSourcesOptions = {}):
 /** Полный knowledge-блок (внутреннее использование, ничего не исключено). */
 export const LEAD_SOURCES_KNOWLEDGE = renderLeadSourcesKnowledge();
 
+/**
+ * Шпаргалка «наблюдаемый признак/сигнал ЦА → каким источником ловится». Подаётся
+ * ТОЛЬКО во внутренний промпт (упоминает team-only источники Сигналы/Crypto).
+ * Помогает модели матчить сигналы из разбора ЦА на конкретный источник, а не
+ * лепить общие категории каталога.
+ */
+export const SOURCE_SIGNAL_CHEATSHEET = `# Как матчить наблюдаемый признак/сигнал ЦА → источник
+- Активный наём роли / рост команды / открытие направления → HH (вакансии работодателей).
+- Чёткий ОКВЭД, выручка, ССЧ, форма собственности, возраст, лицензии, госконтракты → Реестры (Руспрофайл/Селеком/Сбис).
+- Нишевый продукт/услуга без явного ОКВЭД, но с сайтом и конкретными запросами → Поисковая выдача (Google+Яндекс).
+- Локальный/офлайн-бизнес, рубрика, рейтинг и отзывы (репутация) → Карты (Яндекс/Google).
+- Конкретный техстек: CMS, CRM, рекламные пиксели, эквайринг, чаты, дыра в стеке → Сигналы с сайтов.
+- Крипто-эквайринг на сайте → Crypto Payments.
+- digital/IT/маркетинг-агентства, веб-студии, подрядчики → Каталоги агентств (Рейтинг Рунета).
+- Тематика ЦА ТОЧНО совпадает с готовой категорией → export-base.ru (брать только при точном совпадении с продуктом/ЦА, не для добивки).`;
+
 const RUSSIAN_STOPWORDS = new Set([
   'и',
   'в',
@@ -275,6 +291,8 @@ export interface BuildHypothesesPromptInput {
   catalog: ExportBaseCatalogItem[];
   /** Кто читает/использует промпт. По умолчанию 'internal' — без исключений. */
   audience?: HypothesesAudience;
+  /** Разбор ЦА (шаг 1 двухшаговой генерации). Инжектится только для internal. */
+  icpAnalysis?: string;
 }
 
 export interface HypothesesPrompt {
@@ -287,9 +305,15 @@ export function buildHypothesesPrompt({
   briefText,
   catalog,
   audience = 'internal',
+  icpAnalysis,
 }: BuildHypothesesPromptInput): HypothesesPrompt {
   const safeBrief = (briefText ?? '').slice(0, MAX_BRIEF_CHARS);
   const isClientAudience = audience === 'client';
+  // Шпаргалка «сигнал→источник» и разбор ЦА — только для internal (sales/проекты).
+  const sourceCheatsheet = isClientAudience ? '' : `\n${SOURCE_SIGNAL_CHEATSHEET}\n`;
+  const icpBlock = icpAnalysis && !isClientAudience
+    ? `\nПРЕДВАРИТЕЛЬНЫЙ РАЗБОР ЦА КЛИЕНТА (боли и наблюдаемые сигналы — ОПИРАЙСЯ на него: каждую гипотезу привязывай к конкретной боли/сигналу ЦА и к источнику, который этот сигнал ловит):\n${icpAnalysis}\n`
+    : '';
   const excludedSourceIds = isClientAudience ? CLIENT_EXCLUDED_SOURCE_IDS : [];
 
   const catalogBlock = catalog.length
@@ -328,7 +352,7 @@ export function buildHypothesesPrompt({
 ${executionPolicy}
 
 ${knowledge}
-
+${sourceCheatsheet}
 ФОРМАТ ОТВЕТА — markdown без преамбулы и без заключения. Минимум 5 гипотез, идеально 7–8. Структура КАЖДОЙ гипотезы РОВНО такая, без отклонений:
 
 ### Гипотеза N: <короткое название>
@@ -352,7 +376,7 @@ ${knowledge}
 """
 ${safeBrief}
 """
-
+${icpBlock}
 РЕЛЕВАНТНЫЕ ГОТОВЫЕ БАЗЫ ИЗ КАТАЛОГА export-base.ru (можно ссылаться напрямую):
 ${catalogBlock}
 

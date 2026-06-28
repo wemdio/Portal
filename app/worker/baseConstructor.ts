@@ -45,6 +45,12 @@ const MAX_CONCURRENCY = Math.max(1, Number(process.env.BASE_CONSTRUCTOR_CONCURRE
  * чтобы redeploy не оставлял клиента ждать 15 мин до пере-claim'а
  * (как было в реальном случае polza@polza.ru job 55d37e8e — потеряли
  * почти час между «worker умер при redeploy» и «новый worker подобрал»).
+ *
+ * NB: код-дефолт 5, но прод ставит 15 (BASE_CONSTRUCTOR_STALE_MINUTES в
+ * docker-compose.prod.yml). С 3 репликами этот порог важен: пока он заметно
+ * больше heartbeat-интервала, реплика B не «угонит» живую job'у реплики A.
+ * 15 мин = с запасом; чистый redeploy всё равно реклеймит за ~5 сек через
+ * ageRunningJobsForFastHandoff (SIGTERM), не дожидаясь порога.
  */
 const STALE_JOB_MINUTES = Math.max(2, Number(process.env.BASE_CONSTRUCTOR_STALE_MINUTES ?? '5'));
 const WORKER_ID = `baseconstructor-${process.pid}-${Date.now()}`;

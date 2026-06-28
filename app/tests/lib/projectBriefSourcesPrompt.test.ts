@@ -57,6 +57,21 @@ describe('projectBriefHypotheses prompt', () => {
     expect(system).toContain('6. РАЗНООБРАЗИЕ');
   });
 
+  it('buildHypothesesPrompt: разбор ЦА инжектится для internal и НЕ для client', () => {
+    const icp = '## Боли ЦА\nУНИКАЛЬНЫЙ_МАРКЕР_БОЛИ_ЦА';
+    const internal = buildHypothesesPrompt({ briefText: 'test', catalog: EXPORT_BASE_CATALOG.slice(0, 3), icpAnalysis: icp });
+    expect(`${internal.system}\n${internal.user}`).toContain('УНИКАЛЬНЫЙ_МАРКЕР_БОЛИ_ЦА');
+    const client = buildHypothesesPrompt({ briefText: 'test', catalog: EXPORT_BASE_CATALOG.slice(0, 3), audience: 'client', icpAnalysis: icp });
+    expect(`${client.system}\n${client.user}`).not.toContain('УНИКАЛЬНЫЙ_МАРКЕР_БОЛИ_ЦА');
+  });
+
+  it('buildHypothesesPrompt: шпаргалка сигнал→источник во internal, НЕ во client (в ней team-only источники)', () => {
+    const internal = buildHypothesesPrompt({ briefText: 'test', catalog: EXPORT_BASE_CATALOG.slice(0, 3) });
+    expect(internal.system).toContain('Как матчить наблюдаемый признак/сигнал ЦА');
+    const client = buildHypothesesPrompt({ briefText: 'test', catalog: EXPORT_BASE_CATALOG.slice(0, 3), audience: 'client' });
+    expect(client.system).not.toContain('Как матчить наблюдаемый признак/сигнал ЦА');
+  });
+
   it('buildHypothesesPrompt вставляет переданный сэмпл каталога export-base', () => {
     const sample = EXPORT_BASE_CATALOG.slice(0, 3);
     const { user } = buildHypothesesPrompt({ briefText: 'test', catalog: sample });
