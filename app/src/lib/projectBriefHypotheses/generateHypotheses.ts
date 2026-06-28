@@ -1,6 +1,7 @@
 import { callOpenRouterChat } from '@/lib/openrouter/client';
 import { EXPORT_BASE_CATALOG } from './exportBaseCatalog';
 import { buildHypothesesPrompt, selectRelevantCatalog, type HypothesesAudience } from './sources';
+import { analyzeBriefIcp } from './analyzeIcp';
 
 export const DEFAULT_HYPOTHESES_MODEL =
   process.env.PROJECT_HYPOTHESES_MODEL ?? 'policy/gemini-flash';
@@ -9,6 +10,10 @@ export const DEFAULT_HYPOTHESES_MODEL =
 // категорий, и модель добивала ими гипотезы для любого клиента (см. разбор
 // прогонов Егора — одни и те же базы у разных ЦА). 20 релевантных достаточно.
 const DEFAULT_CATALOG_LIMIT = Number(process.env.PROJECT_HYPOTHESES_CATALOG_LIMIT ?? '20');
+
+// Суб-таймаут для шага 1 (разбор ЦА). Если разбор не успел — мягко продолжаем
+// без него (одношагово), чтобы не съесть весь бюджет запроса на шаг 2.
+const ICP_ANALYSIS_TIMEOUT_MS = Number(process.env.PROJECT_ICP_ANALYSIS_TIMEOUT_MS ?? '45000');
 
 const HH_SOURCE_RE = /^-\s*Источник\s*:\s*(?:.*\bHH\b|.*HeadHunter|.*hh\.ru)/im;
 const CLIENT_HH_FORBIDDEN_SIZE_METRICS =
@@ -61,6 +66,8 @@ export interface GenerateLeadSourceHypothesesOptions {
   apiKey: string;
   briefText: string;
   model?: string;
+  /** Модель для шага 1 (разбор ЦА). По умолчанию DEFAULT_ICP_MODEL. */
+  icpModel?: string;
   catalogLimit?: number;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
@@ -81,6 +88,7 @@ export async function generateLeadSourceHypotheses(
     apiKey,
     briefText,
     model = DEFAULT_HYPOTHESES_MODEL,
+    icpModel,
     catalogLimit = DEFAULT_CATALOG_LIMIT,
     signal,
     fetchImpl,
@@ -93,8 +101,25 @@ export async function generateLeadSourceHypotheses(
     throw new Error('Missing required field: briefText');
   }
 
+  // Шаг 1 (только internal — sales-инструмент + брифы проектов): разбор
+  // ЦА/болей/сигналов, чтобы гипотезы целились в наблюдаемые прокси болей, а не
+  // в общие категории. Клиентский путь оставляем одношаговым (быстрее). Разбор
+  // мягкий: ошибка ИЛИ суб-таймаут → продолжаем без него (одношагово).
+  let icpAnalysis: string | undefined;
+  if (audience === 'internal') {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutP = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), ICP_ANALYSIS_TIMEOUT_MS);
+    });
+    icpAnalysis = await Promise.race([
+      analyzeBriefIcp({ apiKey, briefText, model: icpModel, signal, fetchImpl, maxRetries: 1 }).catch(() => undefined),
+      timeoutP,
+    ]);
+    if (timer) clearTimeout(timer);
+  }
+
   const catalog = selectRelevantCatalog(briefText, EXPORT_BASE_CATALOG, catalogLimit);
-  const { system, user } = buildHypothesesPrompt({ briefText, catalog, audience });
+  const { system, user } = buildHypothesesPrompt({ briefText, catalog, audience, icpAnalysis });
 
   const content = await callOpenRouterChat({
     apiKey,
