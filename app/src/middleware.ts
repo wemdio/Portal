@@ -265,6 +265,8 @@ export async function middleware(request: NextRequest) {
       pathname === '/login' ||
       pathname === '/signup' ||
       pathname === '/offer' ||
+      pathname === '/consent' ||
+      pathname === '/privacy' ||
       pathname === '/demo' ||
       pathname.startsWith('/api/signup') ||
       pathname.startsWith('/api/telegram/verify') ||
@@ -364,6 +366,8 @@ export async function middleware(request: NextRequest) {
       const clientAllowed =
         pathname.startsWith('/client') ||
         pathname === '/maintenance' ||
+        pathname === '/consent' ||
+        pathname === '/privacy' ||
         pathname.startsWith('/review/base/')
       if (!clientAllowed) {
         return NextResponse.redirect(new URL('/client', request.url))

@@ -323,11 +323,16 @@ export default function LoginPage() {
         </p>
       )}
 
-      {/* Public link to the platform offer agreement — quiet text button. */}
-      <div className="mt-5 pt-4" style={{ borderTop: '1px solid var(--cp-divider)' }}>
-        <a href="/offer" className="block text-center text-xs font-medium" style={{ color: 'var(--cp-paper-faint)' }}>
-          Договор оферты
-        </a>
+      {/* Public legal links — quiet text buttons. */}
+      <div
+        className="mt-5 pt-4 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-center text-xs font-medium"
+        style={{ borderTop: '1px solid var(--cp-divider)', color: 'var(--cp-paper-faint)' }}
+      >
+        <a href="/offer" style={{ color: 'var(--cp-paper-faint)' }}>Договор оферты</a>
+        <span aria-hidden>·</span>
+        <a href="/consent" style={{ color: 'var(--cp-paper-faint)' }}>Согласие на обработку ПДн</a>
+        <span aria-hidden>·</span>
+        <a href="/privacy" style={{ color: 'var(--cp-paper-faint)' }}>Политика</a>
       </div>
     </AuthShell>
   );
