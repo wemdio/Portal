@@ -109,28 +109,30 @@ describe('__internal.isPendingInvoiceStillValid', () => {
   // expires_at on our row.
   const now = new Date('2026-06-09T12:00:00Z');
 
-  it('reuses an invoice created today', () => {
+  it('reuses an invoice created an hour ago', () => {
     expect(
       __internal.isPendingInvoiceStillValid(
-        { created_at: '2026-06-09T11:00:00Z', yookassa_payment_url: 'https://yookassa.ru/i/abc' },
+        { created_at: '2026-06-09T11:00:00Z', yookassa_payment_url: 'https://yookassa.ru/p/abc' },
         now,
       ),
     ).toBe(true);
   });
 
-  it('reuses an invoice created 29 days ago', () => {
+  it('reuses an invoice created 5 hours ago (within /v3/payments window)', () => {
+    // /v3/payments confirmation URLs live "a few hours" — мы консервативно
+    // переиспользуем в течение 6ч (см. YK_INVOICE_VALIDITY_MS в billing.ts).
     expect(
       __internal.isPendingInvoiceStillValid(
-        { created_at: '2026-05-11T12:00:00Z', yookassa_payment_url: 'https://yookassa.ru/i/abc' },
+        { created_at: '2026-06-09T07:00:00Z', yookassa_payment_url: 'https://yookassa.ru/p/abc' },
         now,
       ),
     ).toBe(true);
   });
 
-  it('does not reuse an invoice created 31 days ago', () => {
+  it('does not reuse an invoice created 7 hours ago', () => {
     expect(
       __internal.isPendingInvoiceStillValid(
-        { created_at: '2026-05-09T11:00:00Z', yookassa_payment_url: 'https://yookassa.ru/i/abc' },
+        { created_at: '2026-06-09T05:00:00Z', yookassa_payment_url: 'https://yookassa.ru/p/abc' },
         now,
       ),
     ).toBe(false);
