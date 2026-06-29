@@ -11,7 +11,7 @@ import {
   getSenderName,
 } from '@/lib/tgTranscribe';
 import {
-  isMtprotoAvailable,
+  isUserMtprotoAvailable,
   getForumTopicMessagesMtproto,
   type MtprotoTopicMessage,
 } from '@/lib/tgMtprotoDownload';
@@ -429,7 +429,7 @@ export async function runTgScanJob(jobId: string): Promise<void> {
     //
     // Activates when bot has MTProto creds AND chat is a forum. Non-forum
     // chats use the legacy path — there's no per-topic floods to avoid.
-    if (isForumChat && isMtprotoAvailable()) {
+    if (isForumChat && isUserMtprotoAvailable()) {
       const mtprotoRan = await runMtprotoForumScan({
         jobId,
         chatId,

@@ -28,6 +28,13 @@ _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 _model = None
 PROGRESS_TTL_SECONDS = int(os.getenv("PROGRESS_TTL_SECONDS", "3600"))
 
+# Track jobs through the lifecycle so we can report queue position to the UI.
+# _pending_jobs: arrived but waiting for the semaphore (no model time yet).
+# _active_jobs:  semaphore acquired, currently transcribing.
+# Order matters for _pending_jobs — index = position in queue.
+_pending_jobs: list[str] = []
+_active_jobs: set[str] = set()
+
 
 class ProgressState(TypedDict):
     job_id: str
@@ -107,11 +114,24 @@ def _get_model():
 
         log.info("Loading model %s (compute_type=%s) …", WHISPER_MODEL, WHISPER_COMPUTE_TYPE)
         t0 = time.monotonic()
+        # cpu_threads = threads PER transcribe call.
+        # num_workers = how many concurrent transcribe() calls the model can serve.
+        # With MAX_CONCURRENT=N we want num_workers>=N so ctranslate2 won't serialize.
+        # cpu_threads per worker = cores/N keeps the box from oversubscribing.
+        cpu_count = os.cpu_count() or 4
+        cpu_threads_env = int(os.getenv("CPU_THREADS", "0"))
+        cpu_threads = cpu_threads_env if cpu_threads_env > 0 else max(1, cpu_count // max(1, MAX_CONCURRENT))
+        num_workers = int(os.getenv("WHISPER_NUM_WORKERS", "0")) or MAX_CONCURRENT
+        log.info(
+            "Whisper config: cpu_count=%d, max_concurrent=%d, cpu_threads=%d, num_workers=%d",
+            cpu_count, MAX_CONCURRENT, cpu_threads, num_workers,
+        )
         _model = WhisperModel(
             WHISPER_MODEL,
             device=os.getenv("WHISPER_DEVICE", "auto"),
             compute_type=WHISPER_COMPUTE_TYPE,
-            cpu_threads=int(os.getenv("CPU_THREADS", "0")) or os.cpu_count() or 4,
+            cpu_threads=cpu_threads,
+            num_workers=num_workers,
         )
         log.info("Model loaded in %.1fs", time.monotonic() - t0)
     return _model
@@ -175,10 +195,28 @@ async def transcribe(file: UploadFile, x_transcribe_job_id: str | None = Header(
         raise HTTPException(400, "No file provided")
 
     job_id = (x_transcribe_job_id or "").strip() or str(uuid.uuid4())
+    with _progress_lock:
+        _pending_jobs.append(job_id)
     _set_progress(job_id, "queued", 0)
 
-    async with _semaphore:
-        return await _run_transcription(file, job_id)
+    try:
+        async with _semaphore:
+            with _progress_lock:
+                if job_id in _pending_jobs:
+                    _pending_jobs.remove(job_id)
+                _active_jobs.add(job_id)
+            try:
+                return await _run_transcription(file, job_id)
+            finally:
+                with _progress_lock:
+                    _active_jobs.discard(job_id)
+    finally:
+        # Belt-and-suspenders: if we never entered the semaphore (cancel mid-wait,
+        # request body error), still clean up the pending entry.
+        with _progress_lock:
+            if job_id in _pending_jobs:
+                _pending_jobs.remove(job_id)
+            _active_jobs.discard(job_id)
 
 
 @app.get("/progress/{job_id}")
@@ -186,7 +224,28 @@ async def get_progress(job_id: str):
     state = _get_progress(job_id)
     if state is None:
         raise HTTPException(404, "Progress not found")
-    return JSONResponse(state)
+
+    response = dict(state)
+    if state["stage"] == "queued":
+        with _progress_lock:
+            if job_id in _pending_jobs:
+                response["queue_position"] = _pending_jobs.index(job_id) + 1
+                response["queue_total"] = len(_pending_jobs) + len(_active_jobs)
+                response["active_count"] = len(_active_jobs)
+    return JSONResponse(response)
+
+
+@app.get("/queue")
+async def queue_info():
+    with _progress_lock:
+        return {
+            "active": list(_active_jobs),
+            "pending": list(_pending_jobs),
+            "active_count": len(_active_jobs),
+            "pending_count": len(_pending_jobs),
+            "total": len(_pending_jobs) + len(_active_jobs),
+            "capacity": MAX_CONCURRENT,
+        }
 
 
 @app.post("/cancel/{job_id}")
