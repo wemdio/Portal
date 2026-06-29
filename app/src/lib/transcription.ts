@@ -32,7 +32,14 @@ const transcribeAgent = new Agent({
   keepAliveMaxTimeout: 10_000,
 });
 
-type LocalProgressStage = 'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error';
+type LocalProgressStage =
+  | 'preparing'
+  | 'queued'
+  | 'converting'
+  | 'transcribing'
+  | 'done'
+  | 'cancelled'
+  | 'error';
 
 export interface LocalTranscriptionProgress {
   jobId: string;
@@ -41,6 +48,68 @@ export interface LocalTranscriptionProgress {
   processedSeconds: number | null;
   audioDurationSeconds: number | null;
   error: string | null;
+  /** 1-based position in the worker's pending queue. Set only while stage='queued'. */
+  queuePosition?: number;
+  /** Total jobs the worker is tracking (pending + active). */
+  queueTotal?: number;
+  /** How many jobs are currently being transcribed (semaphore taken). */
+  activeCount?: number;
+}
+
+/**
+ * In-process state for stages that happen on the Next.js side BEFORE the file is
+ * shipped to the transcribe-worker (upload buffer, ffmpeg conversion). Without
+ * this map polling sees 404s during that whole window and the UI is stuck at
+ * "Подготовка файла…" with no signal whether anything is happening.
+ *
+ * Caveat: portal Next.js runs in cluster mode (scripts/cluster.js spawns
+ * WEB_CONCURRENCY=8 workers in prod), so this Map is per-process. POST and
+ * GET requests may land on different cluster workers. Polling that misses
+ * just returns "not found" → UI keeps the previous hint and retries, so it
+ * degrades to "no extra info while waiting for first hit" rather than wrong
+ * info. Hit rate on a random poll is ~1/N, so within ~N×1.2s the right
+ * process answers and the UI updates. Good enough until/unless we add Redis.
+ */
+interface ServerProgressEntry {
+  stage: 'preparing' | 'converting';
+  progressPercent: number;
+  updatedAt: number;
+}
+const SERVER_PROGRESS = new Map<string, ServerProgressEntry>();
+const SERVER_PROGRESS_TTL_MS = 30 * 60 * 1000;
+
+function evictStaleServerProgress(now: number): void {
+  for (const [jobId, entry] of SERVER_PROGRESS.entries()) {
+    if (now - entry.updatedAt > SERVER_PROGRESS_TTL_MS) {
+      SERVER_PROGRESS.delete(jobId);
+    }
+  }
+}
+
+export function setServerSideProgress(
+  jobId: string,
+  stage: 'preparing' | 'converting',
+  percent: number,
+): void {
+  if (!jobId) return;
+  const now = Date.now();
+  evictStaleServerProgress(now);
+  SERVER_PROGRESS.set(jobId, {
+    stage,
+    progressPercent: Math.max(0, Math.min(100, Math.round(percent))),
+    updatedAt: now,
+  });
+}
+
+export function clearServerSideProgress(jobId: string): void {
+  if (!jobId) return;
+  SERVER_PROGRESS.delete(jobId);
+}
+
+export function getServerSideProgress(jobId: string): ServerProgressEntry | null {
+  if (!jobId) return null;
+  evictStaleServerProgress(Date.now());
+  return SERVER_PROGRESS.get(jobId) ?? null;
 }
 
 /**
@@ -335,12 +404,34 @@ export async function getLocalTranscriptionProgress(jobId: string): Promise<Loca
   if (!jobId.trim()) return null;
   if (TRANSCRIPTION_PROVIDER !== 'local') return null;
 
-  const res = await fetch(`${TRANSCRIPTION_WORKER_URL}/progress/${encodeURIComponent(jobId)}`, {
-    method: 'GET',
-    signal: AbortSignal.timeout(15_000),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${TRANSCRIPTION_WORKER_URL}/progress/${encodeURIComponent(jobId)}`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    // Worker unreachable / DNS / TCP — fall through to server-side state if any.
+    res = new Response(null, { status: 404 });
+  }
 
-  if (res.status === 404) return null;
+  if (res.status === 404) {
+    // Worker hasn't seen the job yet (file still uploading / converting on the
+    // Next.js side). Surface our own pre-worker stage so the UI shows progress
+    // instead of treating the job as missing.
+    const serverState = getServerSideProgress(jobId);
+    if (serverState) {
+      return {
+        jobId,
+        stage: serverState.stage,
+        progressPercent: serverState.progressPercent,
+        processedSeconds: null,
+        audioDurationSeconds: null,
+        error: null,
+      };
+    }
+    return null;
+  }
   if (!res.ok) {
     const raw = await res.text().catch(() => '');
     throw new Error(`Local progress error (${res.status}): ${raw || res.statusText}`);
@@ -353,6 +444,9 @@ export async function getLocalTranscriptionProgress(jobId: string): Promise<Loca
     processed_seconds?: number | null;
     audio_duration_seconds?: number | null;
     error?: string | null;
+    queue_position?: number;
+    queue_total?: number;
+    active_count?: number;
   };
 
   return {
@@ -364,6 +458,9 @@ export async function getLocalTranscriptionProgress(jobId: string): Promise<Loca
     audioDurationSeconds:
       typeof json.audio_duration_seconds === 'number' ? json.audio_duration_seconds : null,
     error: typeof json.error === 'string' ? json.error : null,
+    queuePosition: typeof json.queue_position === 'number' ? json.queue_position : undefined,
+    queueTotal: typeof json.queue_total === 'number' ? json.queue_total : undefined,
+    activeCount: typeof json.active_count === 'number' ? json.active_count : undefined,
   };
 }
 

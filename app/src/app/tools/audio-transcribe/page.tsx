@@ -24,11 +24,14 @@ interface TranscribeResponse {
 interface TranscribeProgressResponse {
   found: boolean;
   jobId: string;
-  stage?: 'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error';
+  stage?: 'preparing' | 'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error';
   progressPercent?: number;
   processedSeconds?: number | null;
   audioDurationSeconds?: number | null;
   error?: string | null;
+  queuePosition?: number;
+  queueTotal?: number;
+  activeCount?: number;
 }
 
 interface HistoryItem {
@@ -241,9 +244,30 @@ export default function AudioTranscribeToolPage() {
           const stage = progress.stage ?? 'queued';
           lastKnownStage = stage;
           setProgressPercent(nextPercent);
-          setProgressStage(stage);
+          setProgressStage(
+            // 'preparing' is a Next.js-side stage; map to 'queued' for the
+            // legacy state union to avoid widening the prop type.
+            stage === 'preparing' ? 'queued' : stage,
+          );
 
-          if (stage === 'converting') {
+          if (stage === 'preparing') {
+            setProgressHint('Загружаем файл на сервер...');
+          } else if (stage === 'queued') {
+            // Worker accepted the upload but other jobs are ahead in the queue.
+            // Tell the user where they are so a multi-hour wait isn't silent.
+            if (typeof progress.queuePosition === 'number' && progress.queuePosition > 0) {
+              const aheadOfYou = progress.queuePosition - 1;
+              if (aheadOfYou === 0) {
+                setProgressHint('Ваш файл следующий в очереди...');
+              } else {
+                setProgressHint(
+                  `В очереди: перед вами ещё ${aheadOfYou} ${aheadOfYou === 1 ? 'задача' : aheadOfYou < 5 ? 'задачи' : 'задач'}. Сейчас обрабатывается ${progress.activeCount ?? 1}.`,
+                );
+              }
+            } else {
+              setProgressHint('Файл в очереди на расшифровку...');
+            }
+          } else if (stage === 'converting') {
             setProgressHint('Конвертация аудио...');
           } else if (stage === 'transcribing') {
             if (
