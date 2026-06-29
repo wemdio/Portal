@@ -42,6 +42,12 @@ function sourceLabel(source?: string | null): string {
   return (source && SOURCE_LABEL[source]) || 'лендинг';
 }
 
+/** Headline: a registration is a sign-up notice, not a "новый лид". */
+function titleLine(source?: string | null): string {
+  if (source === 'register') return '✅ <b>Новая регистрация</b>';
+  return `🎯 <b>Новый лид — ${esc(sourceLabel(source))}</b>`;
+}
+
 function getToken(): string {
   return (
     process.env.DEMO_LEADS_TELEGRAM_BOT_TOKEN ||
@@ -87,7 +93,7 @@ export async function sendDemoLeadTelegramAlert(data: DemoLeadData): Promise<voi
   }
 
   const lines: string[] = [
-    `🎯 <b>Новый лид — ${esc(sourceLabel(data.source))}</b>`,
+    titleLine(data.source),
     '',
     `<b>Имя:</b> ${esc(data.name)}`,
     `<b>Почта:</b> ${esc(data.email)}`,
