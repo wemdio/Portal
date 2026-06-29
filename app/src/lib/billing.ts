@@ -461,7 +461,7 @@ interface RenewalTariffRow {
  *   1. INSERT invoices (pending, amount=resolved). yookassa_payment_url stays
  *      null because the cron flow charges directly via Payment API, not via
  *      the customer-facing Invoice URL.
- *   2. POST /payments with payment_method_id (idempotency = autorenew-{id}-{YYYY-MM}).
+ *   2. POST /payments with payment_method_id (idempotency = autorenew-{id}-{paid_until_ms}).
  *   3a. On succeeded: invoices→paid, yookassa_payment_id=payment.id; bump
  *       client_tariffs.paid_until by BILLING_PERIOD_MONTHS[billing_period]
  *       (12-month subscriptions extend by 12 months, not 1) — billing_amount
@@ -488,8 +488,18 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
   }
 
   const now = new Date();
-  const billingMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const idempotencyKey = `autorenew-${row.id}-${billingMonth}`;
+  // Idempotency-Key привязан к ТЕКУЩЕМУ paid_until — он уникален per-цикл:
+  //   • Все ретраи внутри одного цикла (cron упал → следующий тик через 5
+  //     мин повторил) используют ОДИН ключ → ЮКасса дедупит, двойного
+  //     списания нет.
+  //   • После успешного списания paid_until сдвигается на +период → ключ
+  //     становится другим → следующий цикл реально снимает с карты.
+  // Раньше ключ был привязан к YYYY-MM — на проде ломалось при ретрае
+  // через границу месяца (Jan 31 fail → Feb 1 retry с другим ключом →
+  // double charge), на тесте — наоборот, склеивало все циклы внутри
+  // календарного месяца в одну транзакцию.
+  const paidUntilMs = row.paid_until ? new Date(row.paid_until).getTime() : 0;
+  const idempotencyKey = `autorenew-${row.id}-${paidUntilMs}`;
 
   const profile = await lookupClientProfile(row.user_id);
   const companyName = resolveCompanyName(profile, row.user_id);
@@ -522,7 +532,7 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
       created_by: null,
       status: 'pending',
       is_test_shop: row.is_test_shop,
-      metadata: { source: 'cron_renew', billing_month: billingMonth, tariff_id: row.id },
+      metadata: { source: 'cron_renew', cycle_paid_until: row.paid_until, tariff_id: row.id },
     })
     .select('id')
     .single();
@@ -633,7 +643,9 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
   // 3b. Failure: keep invoice pending, expire access immediately, surface
   // the error to client UI. Setting paid_until=NOW closes the portal right
   // away (getClientStatus → 'expired'); the next cron run will retry the
-  // charge as long as paid_until is still ≤ NOW+24h (it is, by definition).
+  // charge as long as paid_until is still ≤ NOW+5min (it is, by definition,
+  // since we just set it to NOW). Retry использует ТОТ ЖЕ idem-key
+  // (paid_until не сдвинулся) → ЮКасса дедупит, без двойного списания.
   const errMsg = yookassaErrRu ?? mapYookassaErrorRu(null);
   await supabaseAdmin
     .from('client_tariffs')
@@ -658,16 +670,22 @@ export interface AutoRenewBatchResult {
 }
 
 /**
- * Find autopay subscriptions whose paid_until lands within the next 24h and
+ * Find autopay subscriptions whose paid_until is approaching expiry and
  * charge each via chargeMonthlyRenewal. Shared by:
  *   - /api/cron/auto-renew (HTTP fasade for external pingers like pg_cron)
- *   - worker/autoRenewCron.ts (in-process scheduler, runs every 5 min on prod)
+ *   - worker/autoRenewCron.ts (in-process scheduler, runs every 5 min)
  *
- * Idempotency: chargeMonthlyRenewal builds its key from
- *   autorenew-<tariffId>-<YYYY-MM>, so a second invocation in the same calendar
- *   month is safe — YooKassa de-duplicates on its side and our DB row stays
- *   pending until the first attempt either succeeds or fails for a different
- *   reason.
+ * Renewal window — 5 минут до истечения paid_until (или paid_until уже в
+ * прошлом). С тиком 5 мин это означает: каждая подписка попадает в
+ * выборку ровно на одном тике — последнем перед истечением либо первом
+ * после. Раньше окно было 24ч — для прода работало (месячный цикл »
+ * 24ч), но для тестовых подписок с минутными циклами окно ловило их
+ * сразу после оплаты и крутило ретраи бесконечно.
+ *
+ * Idempotency: chargeMonthlyRenewal строит ключ из текущего paid_until —
+ * все попытки в пределах одного цикла используют один ключ (ЮКасса
+ * дедупит, без двойного списания), после успешного продления ключ
+ * меняется и следующий цикл реально снимает с карты.
  */
 export async function runAutoRenewBatch(): Promise<AutoRenewBatchResult> {
   if (!supabaseAdmin) {
@@ -675,8 +693,10 @@ export async function runAutoRenewBatch(): Promise<AutoRenewBatchResult> {
   }
 
   const now = new Date();
-  const renewBefore = new Date(now);
-  renewBefore.setDate(renewBefore.getDate() + 1);
+  // 5 мин = тик воркера. Чуть-чуть «вперёд» (вместо 0) даёт буфер чтобы
+  // подписка не уходила в expired между тиками.
+  const RENEW_LOOKAHEAD_MS = 5 * 60 * 1000;
+  const renewBefore = new Date(now.getTime() + RENEW_LOOKAHEAD_MS);
 
   const { data: due, error: fetchErr } = await supabaseAdmin
     .from('client_tariffs')
