@@ -12,6 +12,7 @@ import { normalizeWebsiteUrl } from '@/lib/clientBrief/autofill/fetchWebsiteHtml
 import { compileBriefText, EMPTY_BRIEF_FIELDS } from '@/lib/clientBrief';
 import { mergePatchEmptyOnly } from '@/lib/clientBrief/autofill/mergePatchEmptyOnly';
 import { expandQueryToBrief } from '@/lib/salesHypotheses/expandQuery';
+import { SALES_HYPOTHESES_MODEL } from '@/lib/salesHypotheses/model';
 import { RUN_DETAIL_COLUMNS, RUN_LIST_COLUMNS, serializeRun } from '@/lib/salesHypotheses/run';
 
 export const dynamic = 'force-dynamic';
@@ -89,6 +90,7 @@ export async function POST(req: NextRequest) {
           const result = await generateBriefAutofill({
             apiKey: OPENROUTER_BRIEF_API_KEY,
             website: rawInput,
+            model: SALES_HYPOTHESES_MODEL,
             signal: controller.signal,
           });
           const mergedFields = mergePatchEmptyOnly(EMPTY_BRIEF_FIELDS, result.patch);
@@ -111,6 +113,7 @@ export async function POST(req: NextRequest) {
             briefText = await expandQueryToBrief({
               apiKey: OPENROUTER_BRIEF_API_KEY,
               query: rawInput,
+              model: SALES_HYPOTHESES_MODEL,
               signal: controller.signal,
             });
           } catch (expandErr) {

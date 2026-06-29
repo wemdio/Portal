@@ -10,11 +10,11 @@ import { generateLeadSourceHypotheses } from '@/lib/projectBriefHypotheses/gener
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-// Гипотезы — отдельный шаг после загрузки PDF. Может занимать до 60s,
-// но не блокирует upload и не упирается в общий таймаут одного запроса.
-export const maxDuration = 120;
+// Гипотезы — отдельный шаг после загрузки PDF. Двухшаговая генерация (разбор ЦА
+// + гипотезы) = 2 AI-вызова, поэтому 200с/150с. Не блокирует upload.
+export const maxDuration = 200;
 
-const HYPOTHESES_TIMEOUT_MS = Number(process.env.PROJECT_HYPOTHESES_TIMEOUT_MS ?? '90000');
+const HYPOTHESES_TIMEOUT_MS = Number(process.env.PROJECT_HYPOTHESES_TIMEOUT_MS ?? '150000');
 
 const OPENROUTER_BRIEF_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
 

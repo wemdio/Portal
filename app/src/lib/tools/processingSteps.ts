@@ -1,6 +1,9 @@
 /**
  * Shared processing step functions for base pipelines.
- * Used by both DFYB worker and Base Constructor worker.
+ * Used by the Base Constructor worker (+ helpers like companyNameCleanupBatch).
+ * NB: the DFYB worker has its OWN private step implementations and does NOT
+ * import this module - so the BASE_*_SCRAPE_CONCURRENCY env vars below affect
+ * only Base Constructor, never DFYB.
  * Each step accepts a ProgressFn callback to decouple from specific job tables.
  */
 
@@ -40,8 +43,12 @@ const SITE_CHECK_TIMEOUT = 12_000;
 // linear speedup until we hit (a) target-host rate-limits or (b) our
 // outbound socket pool. 15 is conservative for shared infrastructure;
 // can lift further if telemetry shows no upstream complaints.
-const EMAIL_CONCURRENCY = 15;
-const ENRICH_CONCURRENCY = 5;
+// Env-настраиваемо: при высокой глобальной параллельности (base-constructor =
+// 3 реплики x 4 = 12 job'ов) дефолтные 15+5 дали бы сотни исходящих коннектов
+// и риск IP-бана. base-constructor-контейнеры ставят BASE_*_SCRAPE_CONCURRENCY
+// ниже; кто не ставит (напр. DFYB) - остаётся на дефолтах 15/5.
+const EMAIL_CONCURRENCY = Math.max(1, Number(process.env.BASE_EMAIL_SCRAPE_CONCURRENCY) || 15);
+const ENRICH_CONCURRENCY = Math.max(1, Number(process.env.BASE_ENRICH_SCRAPE_CONCURRENCY) || 5);
 /**
  * Hard ceiling per site for enrich. fetchAndExtract internally tries main +
  * www + http variants + up to N about-page candidates with retries — each

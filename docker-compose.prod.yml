@@ -631,11 +631,14 @@ services:
       - portal-network
 
   # Конструктор баз. Выносит «pipeline для CSV/Excel баз» из HTTP-процесса
-  # portal'a в отдельный долгоживущий контейнер. Polling каждые 5 сек,
-  # параллельно обрабатывает до BASE_CONSTRUCTOR_CONCURRENCY задач.
-  # Stale (без heartbeat 15+ мин) processing-задачи автоматически
-  # резумятся с того шага, где остановились.
-  worker-baseconstructor:
+  # portal'a в отдельные долгоживущие контейнеры. 3 реплики (worker-
+  # baseconstructor / -2 / -3) делят одну очередь base_constructor_jobs через
+  # атомарный CAS-claim (UPDATE WHERE status='pending') - каждый job берёт
+  # ровно одна реплика. Параллельно: 3 x BASE_CONSTRUCTOR_CONCURRENCY = 3x4 = 12.
+  # Реплики дают отказоустойчивость: краш/OOM одной не уносит job'ы остальных.
+  # Stale (без heartbeat 15+ мин) processing-задачи любая реплика автоматически
+  # резумит с того шага, где остановились.
+  worker-baseconstructor: &worker-baseconstructor
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-baseconstructor
     env_file:
@@ -653,16 +656,21 @@ services:
       - SMTP_PROXY_API_KEY=${SMTP_PROXY_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=baseconstructor
-      # Сколько job'ов параллельно во ВСЕЙ системе (один воркер, общий на всех
-      # юзеров). 1 job в памяти ≈ 0.5–1.5GB JS heap из-за большой `data`
-      # (string[][]), поэтому memory-лимит ниже масштабируется вместе с этим
-      # числом (peak ≈ CONCURRENCY × 1.5GB + overhead). Поднято 2 → 6 (2026):
-      # сервер 139 = 62GB RAM / 32 ядра и простаивает; «2 одновременно» было
-      # софт-лимитом, не потолком железа. Реальные потолки выше — внешние
-      # (AI-роутер, скрейпинг 15+5/job, запись блоба ~46MB в БД на каждом шаге).
-      # NB: прод-.env может ПЕРЕБИВАТЬ дефолт — проверь /home/Portal/prod/.env.
+      # Сколько job'ов параллельно НА ОДНУ реплику. 1 job в памяти ~0.5-1.5GB
+      # JS heap из-за большой `data` (string[][]), поэтому memory-лимит реплики
+      # (ниже) ~ CONCURRENCY x 1.5GB + overhead. 4 на реплику x 3 реплики = 12
+      # параллельно во всей системе. Глобальный потолок дальше - НЕ железо
+      # (139 = 62GB / 32 ядра, простаивает), а внешнее: AI-роутер, скрейпинг,
+      # запись блоба в БД на 144. Поэтому per-job fan-out скрейпинга снижен (ниже).
+      # NB: прод-.env может ПЕРЕБИВАТЬ дефолт - проверь /home/Portal/prod/.env.
       # Это НЕ то же, что per-user cap MAX_ACTIVE_JOBS_PER_USER=6 в route.ts.
-      - BASE_CONSTRUCTOR_CONCURRENCY=${BASE_CONSTRUCTOR_CONCURRENCY:-6}
+      - BASE_CONSTRUCTOR_CONCURRENCY=${BASE_CONSTRUCTOR_CONCURRENCY:-4}
+      # Per-job fan-out скрейпинга (find_emails/enrich). На 12 параллельных
+      # job'ах дефолтные 15+5 = до ~240 исходящих коннектов -> риск IP-бана.
+      # Снижено для base-constructor (env, тюнится без передеплоя кода). DFYB
+      # эти env не ставит -> у него остаются дефолты 15/5.
+      - BASE_EMAIL_SCRAPE_CONCURRENCY=${BASE_EMAIL_SCRAPE_CONCURRENCY:-10}
+      - BASE_ENRICH_SCRAPE_CONCURRENCY=${BASE_ENRICH_SCRAPE_CONCURRENCY:-4}
       - BASE_CONSTRUCTOR_STALE_MINUTES=${BASE_CONSTRUCTOR_STALE_MINUTES:-15}
     # Job может занимать 30-60 минут (find_emails+enrich на 1.5к строк).
     # SIGTERM придёт при docker compose down, но шаг доработает до конца —
@@ -672,14 +680,24 @@ services:
     deploy:
       resources:
         limits:
-          # 6 concurrency × ~1.5GB peak + ~2GB overhead Node/V8 + запас.
-          # Host 139 имеет ~56GB свободно — лимит щедрый намеренно: OOM-kill
-          # воркера сбросил бы прогресс всех in-flight ta_scoring задач.
-          memory: 14336M
-          cpus: '4'
+          # На реплику: 4 concurrency x ~1.5GB peak + ~2GB overhead = ~8GB,
+          # ставим 10GB с запасом (OOM-kill сбросил бы in-flight ta_scoring).
+          # 3 реплики x 10GB = 30GB; host 139 имеет ~56GB свободно.
+          memory: 10240M
+          cpus: '3'
     restart: unless-stopped
     networks:
       - portal-network
+
+  # Реплики base-constructor. Делят очередь base_constructor_jobs через
+  # атомарный CAS-claim, как enrich-реплики. 3 x concurrency(4) = 12 параллельно.
+  worker-baseconstructor-2:
+    <<: *worker-baseconstructor
+    container_name: portal-worker-baseconstructor-2
+
+  worker-baseconstructor-3:
+    <<: *worker-baseconstructor
+    container_name: portal-worker-baseconstructor-3
 
   worker-instantly-leads:
     image: ${DOCKER_USERNAME}/portal-worker:prod
