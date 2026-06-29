@@ -586,7 +586,18 @@ export async function runTgScanJob(jobId: string): Promise<void> {
         // skip (can't confirm match); when no filter, default to 0 so we
         // at least record the video under chat-level bucket.
         if (topicId != null) {
-          if (resolvedTopicId == null || resolvedTopicId !== topicId) continue;
+          if (resolvedTopicId == null) continue;
+          // General-renamed quirk: when topic_id=1 in our DB actually points to
+          // the General topic of a forum (the user added e.g. "Звонки с клиентами"
+          // which was the renamed General), Bot API replies with no
+          // message_thread_id on those messages, so detectTopicId resolves to 0
+          // instead of 1. Without this union the legacy path would silently
+          // skip every video in such topics (saw a real "0 found in 4692"
+          // incident on prod). MTProto path handles this differently — see
+          // runMtprotoForumScan.
+          const matchesTopic =
+            resolvedTopicId === topicId || (topicId === 1 && resolvedTopicId === 0);
+          if (!matchesTopic) continue;
         }
       }
 

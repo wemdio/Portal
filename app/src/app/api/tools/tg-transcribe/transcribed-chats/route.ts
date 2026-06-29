@@ -84,10 +84,19 @@ export async function GET(req: NextRequest) {
         const fallback = exact ? null : chatMap.get(`${chatId}:0`);
         const info = exact ?? fallback;
         let displayName = info?.title || `Chat ${chatId}`;
-        // When two distinct topics both fall back to the chat-level row,
-        // the chips would render identical labels. Suffix to keep them
-        // visually distinct.
-        if (!exact && topicId > 0) displayName = `${displayName} · topic ${topicId}`;
+        // Three-tier disambiguation so two chips for the same chat never look
+        // identical:
+        //   1. Exact row carries a topic_name that the chat-level title
+        //      doesn't already include → "Group → TopicName" (covers admin
+        //      paths that stored topic_name separately from title, like
+        //      our Собеседования row).
+        //   2. No exact row, topicId > 0 → bare "· topic N" suffix as a
+        //      last-resort distinguisher.
+        if (exact?.topicName && !displayName.includes(exact.topicName)) {
+          displayName = `${displayName} → ${exact.topicName}`;
+        } else if (!exact && topicId > 0) {
+          displayName = `${displayName} · topic ${topicId}`;
+        }
         return { chatId, topicId, displayName, count };
       });
 
