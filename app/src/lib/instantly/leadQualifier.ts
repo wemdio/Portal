@@ -45,57 +45,82 @@ export async function fetchThreadContext(
     // fall through to campaign-wide fetch
   }
 
-  // Fallback: fetch recent campaign emails if search returned nothing
-  if (allEmails.length === 0) {
+  // The search=leadEmail query reliably returns the lead's INBOUND reply but
+  // often NOT our sends — Instantly's search matches the lead in from_address
+  // (their reply), not the to_address of our campaign sends. (And lead=email
+  // returns nothing at all in v2 — that's why search is used in the first place.)
+  // So when the search result contains no outbound of ours, ALSO pull the
+  // campaign-wide page and merge it in. This recovers the ~18-23% of replies
+  // where our last outbound was otherwise lost (→ proposal_seen wrongly false →
+  // the AI over-cautiously under-rates real leads). Verified against prod data.
+  // Fires only on that minority of replies, so no material extra Instantly load.
+  const hasOutbound = (list: Email[]): boolean =>
+    list.some((e) => (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3);
+
+  if (allEmails.length === 0 || !hasOutbound(allEmails)) {
     try {
       const response = await instantly.listEmails({
         campaign_id: campaignId,
         limit: 100,
       }, { accountId });
-      allEmails = response.items ?? [];
+      const seen = new Set(allEmails.map((e) => e.id));
+      for (const e of response.items ?? []) {
+        if (!e.id || !seen.has(e.id)) allEmails.push(e);
+      }
     } catch {
-      return null;
+      if (allEmails.length === 0) return null;
     }
   }
 
-  let threadEmails: Email[];
-  if (threadId) {
-    threadEmails = allEmails.filter((e) => e.thread_id === threadId);
-  } else {
-    threadEmails = allEmails.filter((e) => {
-      const from = e.from_address_email?.toLowerCase() ?? '';
-      const to = e.to_address_email_list?.toLowerCase() ?? '';
-      const target = leadEmail.toLowerCase();
-      return from.includes(target) || to.includes(target);
-    });
-  }
+  const target = leadEmail.toLowerCase();
+  const matchesLead = (e: Email): boolean => {
+    const from = e.from_address_email?.toLowerCase() ?? '';
+    const to = e.to_address_email_list?.toLowerCase() ?? '';
+    return from.includes(target) || to.includes(target);
+  };
 
-  if (threadEmails.length === 0) return null;
+  const byTs = (a: Email, b: Email) =>
+    new Date(a.timestamp_email ?? a.timestamp_created ?? 0).getTime() -
+    new Date(b.timestamp_email ?? b.timestamp_created ?? 0).getTime();
 
-  threadEmails.sort(
-    (a, b) =>
-      new Date(a.timestamp_email ?? a.timestamp_created ?? 0).getTime() -
-      new Date(b.timestamp_email ?? b.timestamp_created ?? 0).getTime(),
-  );
+  // Reply scope — PINNED to the dispatched thread. THE reply is always chosen
+  // from here, so a multi-thread lead can never shift the qualified reply to a
+  // different one (the row's instantly_email_id/thread_id and the analyzed
+  // reply_body stay in sync).
+  const replyScope = threadId
+    ? allEmails.filter((e) => e.thread_id === threadId)
+    : allEmails.filter(matchesLead);
 
-  const replyEmail = threadEmails.filter((e) => (e.ue_type ?? 1) === 2).pop();
+  if (replyScope.length === 0) return null;
+  replyScope.sort(byTs);
+
+  const replyEmail = replyScope.filter((e) => (e.ue_type ?? 1) === 2).pop();
   if (!replyEmail) return null;
 
   const replyTs = new Date(
     replyEmail.timestamp_email ?? replyEmail.timestamp_created ?? 0,
   ).getTime();
 
-  const outboundsBefore = threadEmails.filter((e) => {
-    const isOurs = (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3;
-    const ts = new Date(e.timestamp_email ?? e.timestamp_created ?? 0).getTime();
-    return isOurs && ts < replyTs;
-  });
+  // Outbound scope — same as replyScope, but widened to the lead's other threads
+  // ONLY when the reply's own thread carries no send of ours (Instantly sometimes
+  // files our send under a sibling thread_id). Used ONLY to recover lastOutbound;
+  // it never affects which reply is selected. No extra API call (in-memory).
+  const outboundScope =
+    threadId && !hasOutbound(replyScope) ? allEmails.filter(matchesLead) : replyScope;
+
+  const outboundsBefore = outboundScope
+    .filter((e) => {
+      const isOurs = (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3;
+      const ts = new Date(e.timestamp_email ?? e.timestamp_created ?? 0).getTime();
+      return isOurs && ts < replyTs;
+    })
+    .sort(byTs);
 
   const lastOutbound = outboundsBefore.length > 0
     ? outboundsBefore[outboundsBefore.length - 1]
     : null;
 
-  return { replyEmail, threadEmails, lastOutbound };
+  return { replyEmail, threadEmails: outboundScope, lastOutbound };
 }
 
 // ─── Body Text Extraction ────────────────────────────────────────────────────
