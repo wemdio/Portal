@@ -1143,6 +1143,41 @@ services:
     networks:
       - portal-network
 
+  # Auto-renew подписок ЮКассы. Раз в 5 минут (AUTORENEW_TICK_MS=300000)
+  # дёргает runAutoRenewBatch — для каждого клиента с auto_renew=true и
+  # paid_until в ближайшие 24ч списывает с привязанной карты через
+  # POST /v3/payments. 5 мин — компромисс между прод (месячные подписки)
+  # и тестовым сценарием (10-мин периоды): подписка просрочится максимум
+  # на 5 мин до следующего тика. Подкрутить до часа: AUTORENEW_TICK_MS=3600000. Использует креды prod- или test-магазина в
+  # зависимости от client_tariffs.is_test_shop у каждой подписки.
+  # Идемпотентность по (tariff_id, YYYY-MM) — повторный тик в том же
+  # месяце не дублирует списания.
+  worker-autorenew:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-autorenew
+    command: ["node", "/app/workers/autoRenewCron.js"]
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - YOOKASSA_SHOP_ID=${YOOKASSA_SHOP_ID}
+      - YOOKASSA_SECRET_KEY=${YOOKASSA_SECRET_KEY}
+      - YOOKASSA_TEST_SHOP_ID=${YOOKASSA_TEST_SHOP_ID:-}
+      - YOOKASSA_TEST_SECRET_KEY=${YOOKASSA_TEST_SECRET_KEY:-}
+      - YOOKASSA_FALLBACK_RECEIPT_EMAIL=${YOOKASSA_FALLBACK_RECEIPT_EMAIL:-}
+      - AUTORENEW_TICK_MS=${AUTORENEW_TICK_MS:-300000}
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.1'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   # OpenOutreach LinkedIn outreach runtime (см.
   # docs/superpowers/specs/2026-06-10-openoutreach-portal-native-design.md).
   # Один Django-контейнер обслуживает 5-20 LinkedIn-аккаунтов через

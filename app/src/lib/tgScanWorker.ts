@@ -10,6 +10,11 @@ import {
   saveErrorRecord,
   getSenderName,
 } from '@/lib/tgTranscribe';
+import {
+  isMtprotoAvailable,
+  getForumTopicMessagesMtproto,
+  type MtprotoTopicMessage,
+} from '@/lib/tgMtprotoDownload';
 import { logInfo, logError } from '@/lib/loggerServer';
 
 const admin = supabaseAdmin!;
@@ -138,6 +143,215 @@ async function forwardAndInspect(chatId: number, messageId: number): Promise<TgM
   return forwarded;
 }
 
+/* ───── MTProto forum scan ───── */
+
+interface MtprotoScanArgs {
+  jobId: string;
+  chatId: number;
+  topicId: number | null;
+  videoCount: number;
+  scanMode: 'limited' | 'full';
+  alreadyProcessed: Set<number>;
+  errorMessageIds: Set<number>;
+}
+
+/**
+ * Enumerate topic messages via MTProto (no chat side effects), process video
+ * messages only. Returns true when the scan completed (either successfully or
+ * because the user stopped it) — caller should NOT fall through to the legacy
+ * path. Returns false only when MTProto enumeration failed before doing any
+ * work, so the caller can fall back to the legacy forward-everything path.
+ */
+async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
+  const { jobId, chatId, topicId, videoCount, scanMode, alreadyProcessed, errorMessageIds } = args;
+
+  const PAGE_SIZE = 100;
+  // Limited scans keep the historic ~2000-message ceiling so a runaway job
+  // can't burn through the whole chat history. Full scans iterate until the
+  // topic returns an empty page (true end).
+  const MAX_PAGES = scanMode === 'full' ? 100_000 : 20;
+
+  let offsetId = 0;
+  let videosFound = 0;
+  let completed = 0;
+  let errors = 0;
+  let scanned = 0;
+  const videos: ScanVideoRow[] = [];
+  let lastDbWrite = 0;
+
+  const flushProgress = async (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastDbWrite < 3000) return;
+    lastDbWrite = now;
+    await updateJob(jobId, { scanned, videos_found: videosFound, completed, errors, videos });
+  };
+
+  const targetLabel = scanMode === 'full' ? 'whole topic' : `${videoCount} videos`;
+  await logInfo(
+    'tg-transcribe.scan.start',
+    `MTProto scanning ${targetLabel} in chat ${chatId} topic ${topicId ?? 0}`,
+    { chatId, topicId, videoCount: scanMode === 'full' ? null : videoCount, scanMode, path: 'mtproto' },
+  );
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    if (videosFound >= videoCount) break;
+
+    // Stop check every page (covers slow topics where a page can take seconds).
+    if (await isStopped(jobId)) {
+      await flushProgress(true);
+      return true;
+    }
+
+    let messages: MtprotoTopicMessage[];
+    try {
+      messages = await getForumTopicMessagesMtproto(chatId, topicId, { offsetId, limit: PAGE_SIZE });
+    } catch (err) {
+      // Hard MTProto failure. If we already processed something, finish what
+      // we have rather than re-doing it via the legacy path. If we're on the
+      // very first page with nothing done, signal fallback so the legacy code
+      // can take over.
+      await logError('tg-scan.mtproto.page.failed', err, { chatId, topicId, page, offsetId });
+      if (scanned === 0) return false;
+      break;
+    }
+
+    if (messages.length === 0) break;
+
+    for (const m of messages) {
+      if (videosFound >= videoCount) break;
+      scanned++;
+
+      if (alreadyProcessed.has(m.id)) {
+        // Skip without re-downloading: we already have a clean transcript for
+        // this msg_id. Count it toward the videoCount target so a re-scan
+        // doesn't keep digging deeper looking for "new" videos.
+        videosFound++;
+        completed++;
+        continue;
+      }
+
+      if (!m.isVideo) continue;
+
+      // Forward via Bot API to get the file_id + sender info processVideoMessage
+      // needs. This is the ONLY chat side-effect — and only for actual videos.
+      let forwarded: TgMessage | null;
+      try {
+        forwarded = await forwardAndInspect(chatId, m.id);
+      } catch {
+        continue;
+      }
+      if (!forwarded) continue;
+
+      const videoInfo = extractVideoInfo(forwarded);
+      if (!videoInfo) continue;
+
+      videosFound++;
+
+      const syntheticMsg: TgMessage = {
+        ...forwarded,
+        chat: { id: chatId },
+        message_id: m.id,
+        // Tag the transcript with the topic that was requested in the job. MTProto
+        // already enforced the topic filter via getReplies (or fallback filter),
+        // so we don't need a per-message detectTopicId probe.
+        message_thread_id: topicId != null && topicId > 0 ? topicId : undefined,
+      };
+
+      const senderName = getSenderName(syntheticMsg);
+      const videoIdx = videosFound;
+
+      videos.push({
+        idx: videoIdx,
+        sender: senderName,
+        filename: videoInfo.filename,
+        fileSize: videoInfo.fileSize ?? null,
+        duration: videoInfo.duration ?? null,
+        phase: 'found',
+      });
+      await flushProgress(true);
+
+      if (await isStopped(jobId)) {
+        await flushProgress(true);
+        return true;
+      }
+
+      if (errorMessageIds.has(m.id)) {
+        await admin
+          .from('tg_video_transcripts')
+          .delete()
+          .eq('tg_chat_id', chatId)
+          .eq('tg_message_id', m.id);
+      }
+
+      try {
+        const result = await processVideoMessage(syntheticMsg, videoInfo, (evt) => {
+          const v = videos.find((x) => x.idx === videoIdx);
+          if (v) {
+            v.phase = evt.phase;
+            if (evt.downloadedBytes != null) v.downloadedBytes = evt.downloadedBytes;
+            if (evt.totalBytes != null) v.totalBytes = evt.totalBytes;
+            if (evt.transcriptionJobId) v.transcriptionJobId = evt.transcriptionJobId;
+          }
+          void flushProgress();
+        });
+
+        const v = videos.find((x) => x.idx === videoIdx);
+        if (v) {
+          v.phase = (result.status === 'completed' || result.status === 'skipped_exists') ? 'done' : 'error';
+          if (result.error) v.error = result.error;
+        }
+
+        if (result.status === 'completed' || result.status === 'skipped_exists') {
+          completed++;
+        } else {
+          errors++;
+        }
+        await flushProgress(true);
+      } catch (err) {
+        await saveErrorRecord(syntheticMsg, videoInfo, err);
+        errors++;
+        const errorMsg = err instanceof Error ? err.message : 'Неизвестная ошибка';
+        const v = videos.find((x) => x.idx === videoIdx);
+        if (v) {
+          v.phase = 'error';
+          v.error = errorMsg;
+        }
+        await flushProgress(true);
+      }
+
+      // Small breathing room between video downloads — same throttle the
+      // legacy path has.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    // Pagination cursor: smallest id we saw this page becomes next page's
+    // offsetId (getReplies / getHistory go newest-first).
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg || lastMsg.id <= 0) break;
+    offsetId = lastMsg.id;
+
+    await flushProgress();
+  }
+
+  await logInfo(
+    'tg-transcribe.scan.done',
+    `MTProto scan done: ${completed} transcribed, ${errors} errors, scanned ${scanned} messages`,
+    { chatId, topicId, completed, errors, scanned, videosFound, path: 'mtproto' },
+  );
+
+  await updateJob(jobId, {
+    status: 'completed',
+    scanned,
+    videos_found: videosFound,
+    completed,
+    errors,
+    videos,
+    finished_at: new Date().toISOString(),
+  });
+
+  return true;
+}
+
 /* ───── Main worker ───── */
 
 export async function runTgScanJob(jobId: string): Promise<void> {
@@ -198,6 +412,38 @@ export async function runTgScanJob(jobId: string): Promise<void> {
     const errorMessageIds = new Set(
       (existing ?? []).filter((r) => r.status === 'error').map((r) => Number(r.tg_message_id)),
     );
+
+    // ── MTProto fast path for forum chats ──────────────────────────────
+    //
+    // Legacy path: probe last msg_id → iterate by -1 → forwardMessage every
+    // single message_id → filter by topic via "."-reply. On a chat with 5000
+    // total messages and 449 in the target subchat that's 5000 forwards
+    // + 5000 reply probes — all visible in the source chat as fleeting
+    // forward + "." pairs. Users see this as floods of notifications.
+    //
+    // New path: MTProto messages.getReplies pulls only the topic's messages
+    // (or fallback to getHistory + filter) with zero side effects. We only
+    // forwardMessage for messages MTProto already told us are videos, so the
+    // chat sees at most one forward per video found (≤ video_count, typically
+    // 5-50) instead of per-message-id-walked.
+    //
+    // Activates when bot has MTProto creds AND chat is a forum. Non-forum
+    // chats use the legacy path — there's no per-topic floods to avoid.
+    if (isForumChat && isMtprotoAvailable()) {
+      const mtprotoRan = await runMtprotoForumScan({
+        jobId,
+        chatId,
+        topicId,
+        videoCount,
+        scanMode,
+        alreadyProcessed,
+        errorMessageIds,
+      });
+      if (mtprotoRan) return;
+      await logInfo('tg-scan.mtproto.fallback', `MTProto path bailed for chat ${chatId} — using legacy forward scan`, {
+        chatId, topicId,
+      });
+    }
 
     // Resolve start message ID
     const { data: chatRow } = await admin
@@ -340,7 +586,18 @@ export async function runTgScanJob(jobId: string): Promise<void> {
         // skip (can't confirm match); when no filter, default to 0 so we
         // at least record the video under chat-level bucket.
         if (topicId != null) {
-          if (resolvedTopicId == null || resolvedTopicId !== topicId) continue;
+          if (resolvedTopicId == null) continue;
+          // General-renamed quirk: when topic_id=1 in our DB actually points to
+          // the General topic of a forum (the user added e.g. "Звонки с клиентами"
+          // which was the renamed General), Bot API replies with no
+          // message_thread_id on those messages, so detectTopicId resolves to 0
+          // instead of 1. Without this union the legacy path would silently
+          // skip every video in such topics (saw a real "0 found in 4692"
+          // incident on prod). MTProto path handles this differently — see
+          // runMtprotoForumScan.
+          const matchesTopic =
+            resolvedTopicId === topicId || (topicId === 1 && resolvedTopicId === 0);
+          if (!matchesTopic) continue;
         }
       }
 

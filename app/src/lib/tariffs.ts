@@ -294,6 +294,11 @@ export type ClientTariffUsageSummary = SubscriptionStatus &
   ClientAutopayFields & {
     period_start: string;
     usage: ClientTariffUsage;
+    /** TRUE = клиент переведён в режим тест-магазина ЮКассы. В ЛК показываются
+     *  тестовые цены (10/15/20 ₽ Стандарт, 11/16/21 ₽ Про), а при оплате счёт
+     *  создаётся через YOOKASSA_TEST_SHOP_ID/SECRET. Управляется админом на
+     *  /admin/users в блоке «Магазин ЮКасса клиента». */
+    is_test_shop: boolean;
   };
 
 function nonNegativeInt(value: unknown): number {
@@ -492,6 +497,7 @@ export async function getClientTariffUsage(userId: string): Promise<ClientTariff
     payment_method_saved: paymentMethodSaved,
     last_renewal_error: row?.last_renewal_error ?? null,
     last_payment_error: row?.last_payment_error ?? null,
+    is_test_shop: row?.is_test_shop === true,
     period_start: periodStart,
     usage: {
       max_contacts: usageBucket(limits.max_contacts, contacts),

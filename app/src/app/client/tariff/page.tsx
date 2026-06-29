@@ -57,6 +57,10 @@ type TariffResponse = {
   last_renewal_error: string | null;
   /** Mapped russian text from the last failed YooKassa payment attempt. */
   last_payment_error: string | null;
+  /** Клиент переведён админом в режим тест-магазина — показываем тестовые
+   *  цены (10/15/20 ₽ Стандарт, 11/16/21 ₽ Про), оплата идёт через тестовые
+   *  креды ЮКассы. */
+  is_test_shop: boolean;
   usage: Record<LimitKey, LimitUsage>;
 };
 
@@ -369,7 +373,7 @@ export default function ClientTariffPage() {
       )}
 
       {data && data.status === 'inactive' && !data.paid_at && (
-        <TariffSelectionWidget />
+        <TariffSelectionWidget isTestShop={data.is_test_shop} />
       )}
 
       {data && (
@@ -905,6 +909,16 @@ const PERIOD_LABEL: Record<PeriodKey, string> = {
 };
 const MONTHLY_BASE: Record<PaidTariff, number> = { standard: 40_000, pro: 65_000 };
 
+// Зеркало lib/tariffs.ts → TEST_TARIFF_PRICE. Когда админ переводит клиента в
+// режим тест-магазина (профиль клиента на /admin/users), здесь показываются
+// фиксированные тестовые цены вместо боевых. Quarter в тест-магазине не
+// поддерживается — webhook возвращает null при попытке, поэтому в UI просто
+// не показываем сумму для этого периода.
+const TEST_TOTAL_PRICE: Record<PaidTariff, Partial<Record<PeriodKey, number>>> = {
+  standard: { month: 10, half_year: 15, year: 20 },
+  pro:      { month: 11, half_year: 16, year: 21 },
+};
+
 interface TariffCardSpec {
   id: TariffChoice;
   label: string;
@@ -955,7 +969,7 @@ const TARIFF_CARDS: TariffCardSpec[] = [
   },
 ];
 
-function TariffSelectionWidget() {
+function TariffSelectionWidget({ isTestShop = false }: { isTestShop?: boolean }) {
   const [tariff, setTariff] = useState<TariffChoice>('pro');
   // Дефолт — 1 месяц (минимальный entry-point). Период «3 мес»/quarter мы
   // оставили в BillingPeriod (старые подписки могут на нём сидеть), но в UI
@@ -965,9 +979,20 @@ function TariffSelectionWidget() {
   const [error, setError] = useState<string | null>(null);
 
   const isPaid = tariff !== 'custom';
-  const monthly = isPaid ? Math.round(MONTHLY_BASE[tariff as PaidTariff] * PERIOD_DISCOUNT[period]) : null;
-  const total = monthly !== null ? monthly * PERIOD_MONTHS[period] : null;
-  const discountPct = Math.round((1 - PERIOD_DISCOUNT[period]) * 100);
+  // В тест-магазине total = фиксированная цена за период (10/15/20 ₽ для
+  // Стандарт, 11/16/21 ₽ для Про). Месячная цифра — для красоты деления.
+  const testTotal = isPaid ? (TEST_TOTAL_PRICE[tariff as PaidTariff][period] ?? null) : null;
+  const monthly = !isPaid
+    ? null
+    : isTestShop
+      ? (testTotal !== null ? Math.round((testTotal / PERIOD_MONTHS[period]) * 10) / 10 : null)
+      : Math.round(MONTHLY_BASE[tariff as PaidTariff] * PERIOD_DISCOUNT[period]);
+  const total = !isPaid
+    ? null
+    : isTestShop
+      ? testTotal
+      : (monthly !== null ? monthly * PERIOD_MONTHS[period] : null);
+  const discountPct = isTestShop ? 0 : Math.round((1 - PERIOD_DISCOUNT[period]) * 100);
 
   const handlePay = async () => {
     if (!isPaid) return;
@@ -1003,8 +1028,18 @@ function TariffSelectionWidget() {
           Выберите тариф
         </h2>
         <p className="mt-1 text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
-          После оплаты — 15 дней прогрев почт, затем активный период.
+          {isTestShop
+            ? 'Тестовый магазин: фиксированные цены, период — минуты вместо месяцев, setup-trial — 5 мин.'
+            : 'После оплаты — 15 дней прогрев почт, затем активный период.'}
         </p>
+        {isTestShop && (
+          <div
+            className="mt-3 inline-flex items-center gap-2 rounded-md px-2 py-1 text-[11px] font-semibold"
+            style={{ background: 'rgba(234,179,8,0.15)', color: 'var(--cp-amber)' }}
+          >
+            🧪 Режим тест-магазина ЮКассы
+          </div>
+        )}
       </div>
 
       {/* Period selector */}
@@ -1041,10 +1076,19 @@ function TariffSelectionWidget() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         {TARIFF_CARDS.map((card) => {
           const isSelected = tariff === card.id;
-          const cardMonthly = card.id === 'custom'
+          // В тест-магазине берём фиксированную цену за период из TEST_TOTAL_PRICE
+          // и обратно вычисляем «/мес» для отображения — иначе клиент видел бы
+          // тестовый и боевой ценник одновременно.
+          const cardTotal = card.id === 'custom'
             ? null
-            : Math.round(MONTHLY_BASE[card.id as PaidTariff] * PERIOD_DISCOUNT[period]);
-          const cardTotal = cardMonthly !== null ? cardMonthly * PERIOD_MONTHS[period] : null;
+            : isTestShop
+              ? (TEST_TOTAL_PRICE[card.id as PaidTariff][period] ?? null)
+              : Math.round(MONTHLY_BASE[card.id as PaidTariff] * PERIOD_DISCOUNT[period]) * PERIOD_MONTHS[period];
+          const cardMonthly = cardTotal === null
+            ? null
+            : isTestShop
+              ? Math.round((cardTotal / PERIOD_MONTHS[period]) * 10) / 10
+              : Math.round(MONTHLY_BASE[card.id as PaidTariff] * PERIOD_DISCOUNT[period]);
 
           return (
             <button

@@ -3,10 +3,10 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import {
   buildDefaultReceipt,
-  cancelYookassaInvoice,
+  cancelYookassaPayment,
   chargeRecurringPayment,
-  createYookassaInvoice,
-  extractInvoiceUrl,
+  createYookassaPayment,
+  extractPaymentUrl,
   isYookassaConfigured,
 } from '@/lib/yookassa';
 import {
@@ -32,13 +32,17 @@ import {
  *   - chargeMonthlyRenewal:          cron path that records the invoice AND charges
  *
  * Idempotency strategy: we treat an `invoices` row with status='pending' as the
- * authoritative "in-flight" record. YooKassa invoices live ~30 days (see
- * getDefaultYookassaInvoiceExpiresAt — 30d minus a 15-min buffer), so if our
- * row was created within that window AND has yookassa_payment_url, the customer
- * can still pay it. Older rows are auto-recreated.
+ * authoritative "in-flight" record. ЮКасса /v3/payments holds pending payments
+ * a few hours; we conservatively reuse within YK_INVOICE_VALIDITY_MS, anything
+ * older gets a fresh /v3/payments call with idempotency=<invoiceId>-rotN suffix.
  */
 
-const YK_INVOICE_VALIDITY_MS = 30 * 24 * 60 * 60 * 1000;
+// Сколько раз переиспользовать одну и ту же confirmation_url у /v3/payments.
+// В отличие от /v3/invoices (там URL живёт ~30 дней) у обычного платежа
+// pending status держится несколько часов — после этого ЮКасса считает
+// payment expired и URL отдаёт ошибку. Берём 6 ч с запасом: если клиент
+// возвращается позже — создаём новый payment с новым idempotency-suffix.
+const YK_INVOICE_VALIDITY_MS = 6 * 60 * 60 * 1000;
 
 export type EnsureInvoiceReason =
   | 'admin_activate'
@@ -181,6 +185,20 @@ function buildDescription(
   return INVOICE_DESCRIPTION;
 }
 
+/**
+ * Returns the URL ЮКасса redirects the client back to after they complete
+ * (or cancel) payment on the hosted checkout. Defaults to the client tariff
+ * page so the user lands back where they started. Falls back to a localhost
+ * placeholder so local dev still works — ЮКасса only requires a syntactically
+ * valid HTTPS URL, it never actually validates the host is reachable.
+ */
+function buildClientReturnUrl(): string {
+  const base = (process.env.NEXT_PUBLIC_SITE_URL ?? process.env.PORTAL_PUBLIC_URL ?? '')
+    .replace(/\/+$/, '');
+  if (base) return `${base}/client/tariff`;
+  return 'https://example.com/return';
+}
+
 function isPendingInvoiceStillValid(row: { created_at: string; yookassa_payment_url: string | null }, now = new Date()): boolean {
   if (!row.yookassa_payment_url) return false;
   const created = new Date(row.created_at);
@@ -274,7 +292,7 @@ export async function ensurePendingInvoiceForTariff(
     // conflicting "pay now" links.
     if (existing.yookassa_payment_id) {
       try {
-        await cancelYookassaInvoice(existing.yookassa_payment_id, existing.is_test_shop);
+        await cancelYookassaPayment(existing.yookassa_payment_id, existing.is_test_shop);
       } catch (cancelErr) {
         await logError('billing.ensure.cancel_old_on_shop_switch.failed', cancelErr, {
           userId,
@@ -354,7 +372,12 @@ export async function ensurePendingInvoiceForTariff(
   }
 
   try {
-    const yk = await createYookassaInvoice(
+    // Универсальный /v3/payments вместо /v3/invoices — продукт «Счета» в
+    // ЮКассе подключается отдельно (для тест-магазина по умолчанию выключен,
+    // даёт 403 forbidden), а Payments API доступен всем магазинам. Тот же
+    // save_payment_method=true + redirect-confirmation, тот же webhook
+    // (по yookassa_payment_id), тот же autopay loop.
+    const yk = await createYookassaPayment(
       {
         amount,
         currency: 'RUB',
@@ -363,6 +386,7 @@ export async function ensurePendingInvoiceForTariff(
         companyName,
         idempotencyKey: newInvoice.id,
         savePaymentMethod: true,
+        returnUrl: buildClientReturnUrl(),
         receipt: buildDefaultReceipt({
           customerEmail: receiptEmail,
           description,
@@ -372,7 +396,7 @@ export async function ensurePendingInvoiceForTariff(
       },
       isTestShop,
     );
-    const ykUrl = extractInvoiceUrl(yk);
+    const ykUrl = extractPaymentUrl(yk);
 
     await supabaseAdmin
       .from('invoices')
@@ -437,7 +461,7 @@ interface RenewalTariffRow {
  *   1. INSERT invoices (pending, amount=resolved). yookassa_payment_url stays
  *      null because the cron flow charges directly via Payment API, not via
  *      the customer-facing Invoice URL.
- *   2. POST /payments with payment_method_id (idempotency = autorenew-{id}-{YYYY-MM}).
+ *   2. POST /payments with payment_method_id (idempotency = autorenew-{id}-{paid_until_ms}).
  *   3a. On succeeded: invoices→paid, yookassa_payment_id=payment.id; bump
  *       client_tariffs.paid_until by BILLING_PERIOD_MONTHS[billing_period]
  *       (12-month subscriptions extend by 12 months, not 1) — billing_amount
@@ -464,8 +488,18 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
   }
 
   const now = new Date();
-  const billingMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const idempotencyKey = `autorenew-${row.id}-${billingMonth}`;
+  // Idempotency-Key привязан к ТЕКУЩЕМУ paid_until — он уникален per-цикл:
+  //   • Все ретраи внутри одного цикла (cron упал → следующий тик через 5
+  //     мин повторил) используют ОДИН ключ → ЮКасса дедупит, двойного
+  //     списания нет.
+  //   • После успешного списания paid_until сдвигается на +период → ключ
+  //     становится другим → следующий цикл реально снимает с карты.
+  // Раньше ключ был привязан к YYYY-MM — на проде ломалось при ретрае
+  // через границу месяца (Jan 31 fail → Feb 1 retry с другим ключом →
+  // double charge), на тесте — наоборот, склеивало все циклы внутри
+  // календарного месяца в одну транзакцию.
+  const paidUntilMs = row.paid_until ? new Date(row.paid_until).getTime() : 0;
+  const idempotencyKey = `autorenew-${row.id}-${paidUntilMs}`;
 
   const profile = await lookupClientProfile(row.user_id);
   const companyName = resolveCompanyName(profile, row.user_id);
@@ -498,7 +532,7 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
       created_by: null,
       status: 'pending',
       is_test_shop: row.is_test_shop,
-      metadata: { source: 'cron_renew', billing_month: billingMonth, tariff_id: row.id },
+      metadata: { source: 'cron_renew', cycle_paid_until: row.paid_until, tariff_id: row.id },
     })
     .select('id')
     .single();
@@ -609,7 +643,9 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
   // 3b. Failure: keep invoice pending, expire access immediately, surface
   // the error to client UI. Setting paid_until=NOW closes the portal right
   // away (getClientStatus → 'expired'); the next cron run will retry the
-  // charge as long as paid_until is still ≤ NOW+24h (it is, by definition).
+  // charge as long as paid_until is still ≤ NOW+5min (it is, by definition,
+  // since we just set it to NOW). Retry использует ТОТ ЖЕ idem-key
+  // (paid_until не сдвинулся) → ЮКасса дедупит, без двойного списания.
   const errMsg = yookassaErrRu ?? mapYookassaErrorRu(null);
   await supabaseAdmin
     .from('client_tariffs')
@@ -622,6 +658,88 @@ export async function chargeMonthlyRenewal(row: RenewalTariffRow): Promise<Month
     .eq('id', row.id);
 
   return { invoiceId: invoiceRow.id, success: false, errorRu: errMsg };
+}
+
+/* ─── runAutoRenewBatch ─── */
+
+export interface AutoRenewBatchResult {
+  processed: number;
+  succeeded: number;
+  failed: number;
+  results: Array<{ user_id: string; invoice_id: string | null; success: boolean; error?: string }>;
+}
+
+/**
+ * Find autopay subscriptions whose paid_until is approaching expiry and
+ * charge each via chargeMonthlyRenewal. Shared by:
+ *   - /api/cron/auto-renew (HTTP fasade for external pingers like pg_cron)
+ *   - worker/autoRenewCron.ts (in-process scheduler, runs every 5 min)
+ *
+ * Renewal window — 5 минут до истечения paid_until (или paid_until уже в
+ * прошлом). С тиком 5 мин это означает: каждая подписка попадает в
+ * выборку ровно на одном тике — последнем перед истечением либо первом
+ * после. Раньше окно было 24ч — для прода работало (месячный цикл »
+ * 24ч), но для тестовых подписок с минутными циклами окно ловило их
+ * сразу после оплаты и крутило ретраи бесконечно.
+ *
+ * Idempotency: chargeMonthlyRenewal строит ключ из текущего paid_until —
+ * все попытки в пределах одного цикла используют один ключ (ЮКасса
+ * дедупит, без двойного списания), после успешного продления ключ
+ * меняется и следующий цикл реально снимает с карты.
+ */
+export async function runAutoRenewBatch(): Promise<AutoRenewBatchResult> {
+  if (!supabaseAdmin) {
+    return { processed: 0, succeeded: 0, failed: 0, results: [] };
+  }
+
+  const now = new Date();
+  // 5 мин = тик воркера. Чуть-чуть «вперёд» (вместо 0) даёт буфер чтобы
+  // подписка не уходила в expired между тиками.
+  const RENEW_LOOKAHEAD_MS = 5 * 60 * 1000;
+  const renewBefore = new Date(now.getTime() + RENEW_LOOKAHEAD_MS);
+
+  const { data: due, error: fetchErr } = await supabaseAdmin
+    .from('client_tariffs')
+    .select('id, user_id, tariff_type, paid_until, yookassa_payment_method_id, billing_mode, billing_period, billing_amount, is_test_shop, test_period_minutes')
+    .eq('auto_renew', true)
+    .eq('is_active', true)
+    .eq('billing_mode', 'autopayment')
+    .not('yookassa_payment_method_id', 'is', null)
+    .lte('paid_until', renewBefore.toISOString());
+
+  if (fetchErr) {
+    await logError('billing.auto_renew.fetch.failed', fetchErr, {});
+    return { processed: 0, succeeded: 0, failed: 0, results: [] };
+  }
+
+  const results: AutoRenewBatchResult['results'] = [];
+  for (const row of due ?? []) {
+    const renewal = await chargeMonthlyRenewal({
+      id: row.id,
+      user_id: row.user_id,
+      tariff_type: row.tariff_type as TariffType,
+      paid_until: row.paid_until,
+      billing_period: row.billing_period as BillingPeriod | null,
+      billing_amount: row.billing_amount,
+      yookassa_payment_method_id: row.yookassa_payment_method_id,
+      is_test_shop: row.is_test_shop === true,
+      test_period_minutes: row.test_period_minutes ?? null,
+    });
+
+    results.push({
+      user_id: row.user_id,
+      invoice_id: renewal.invoiceId,
+      success: renewal.success,
+      ...(renewal.errorRu ? { error: renewal.errorRu } : {}),
+    });
+  }
+
+  return {
+    processed: results.length,
+    succeeded: results.filter((r) => r.success).length,
+    failed: results.filter((r) => !r.success).length,
+    results,
+  };
 }
 
 /* ─── exports for tests ─── */
@@ -637,5 +755,4 @@ export const __internal = {
   YK_INVOICE_VALIDITY_MS,
   TARIFF_MONTHLY_PRICE,
   BILLING_PERIOD_MONTHS,
-  cancelYookassaInvoice, // surfaced for /api/invoices/[id] integration; not used here
 };

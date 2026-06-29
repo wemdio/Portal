@@ -3,8 +3,6 @@ export interface PasswordResetEmailArgs {
   password: string;
   /** Moscow time when the reset was triggered, formatted like "25.06.2026, 14:23 МСК". */
   resetAtMsk: string;
-  /** IP of the request that initiated the reset. "unknown" when not behind a proxy that sets x-forwarded-for. */
-  ip: string;
 }
 
 export interface RenderedEmail {
@@ -34,7 +32,7 @@ function esc(s: string): string {
  *   - We tell them to log in with this password and change it via Настройки.
  */
 export function renderPasswordResetEmail(args: PasswordResetEmailArgs): RenderedEmail {
-  const subject = 'Portal: восстановление пароля';
+  const subject = 'outreachOS: восстановление пароля';
 
   const html = `<!doctype html>
 <html lang="ru">
@@ -45,9 +43,8 @@ export function renderPasswordResetEmail(args: PasswordResetEmailArgs): Rendered
         <tr><td>
           <h1 style="font-size:20px;margin:0 0 16px;color:#1a1a1a;">Восстановление пароля</h1>
           <p style="font-size:15px;line-height:1.5;margin:0 0 12px;">
-            Кто-то запросил сброс пароля для вашего аккаунта Portal <strong>${esc(args.resetAtMsk)}</strong>.
+            Кто-то запросил сброс пароля для вашего аккаунта outreachOS <strong>${esc(args.resetAtMsk)}</strong>.
           </p>
-          <p style="font-size:15px;line-height:1.5;margin:0 0 12px;">IP запроса: <code style="font-family:Menlo,Consolas,monospace;font-size:14px;color:#444;">${esc(args.ip)}</code></p>
           <p style="font-size:15px;line-height:1.5;margin:24px 0 8px;">Ваш новый пароль для входа:</p>
           <p style="margin:0 0 24px;">
             <code style="display:inline-block;font-family:Menlo,Consolas,monospace;font-size:18px;background:#f0f0f0;padding:12px 16px;border-radius:6px;letter-spacing:0.5px;">${esc(args.password)}</code>
@@ -60,7 +57,7 @@ export function renderPasswordResetEmail(args: PasswordResetEmailArgs): Rendered
           </p>
           <hr style="border:none;border-top:1px solid #eee;margin:24px 0;" />
           <p style="font-size:13px;line-height:1.5;margin:0;color:#a00;">
-            <strong>Если это были не вы</strong> — никто посторонний не получит доступ: новый пароль приходит только на email, к которому привязан аккаунт. Но прежний пароль больше не работает: войдите с этим новым паролем и смените его, чтобы вернуть контроль над сессией.
+            <strong>Если это были не вы</strong> — обратитесь к администратору.
           </p>
         </td></tr>
       </table>
@@ -72,14 +69,13 @@ export function renderPasswordResetEmail(args: PasswordResetEmailArgs): Rendered
   const text = [
     'Восстановление пароля',
     '',
-    `Кто-то запросил сброс пароля для вашего аккаунта Portal ${args.resetAtMsk}.`,
-    `IP запроса: ${args.ip}`,
+    `Кто-то запросил сброс пароля для вашего аккаунта outreachOS ${args.resetAtMsk}.`,
     '',
     `Новый пароль: ${args.password}`,
     '',
     'Войдите с этим паролем, затем смените его на свой через раздел «Настройки» в кабинете.',
     '',
-    'Если это были не вы — войдите с этим новым паролем и смените его, чтобы вернуть контроль над аккаунтом.',
+    'Если это были не вы — обратитесь к администратору.',
   ].join('\n');
 
   return { subject, html, text };

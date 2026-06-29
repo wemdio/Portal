@@ -5,7 +5,30 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isTechnician } from '@/lib/roles';
 import type { UserRole } from '@/types';
-import { getYookassaInvoice, createYookassaInvoice, cancelYookassaInvoice, extractInvoiceUrl, isYookassaConfigured, buildDefaultReceipt } from '@/lib/yookassa';
+import {
+  getYookassaInvoice,
+  createYookassaInvoice,
+  cancelYookassaInvoice,
+  extractInvoiceUrl,
+  getYookassaPayment,
+  createYookassaPayment,
+  cancelYookassaPayment,
+  extractPaymentUrl,
+  isYookassaConfigured,
+  buildDefaultReceipt,
+} from '@/lib/yookassa';
+
+/**
+ * Распознаёт, лежит ли в строке /v3/invoices-объект (admin вручную выставил
+ * счёт через /invoices UI) или /v3/payments-объект (autopay flow создал —
+ * первый платёж клиента + cron renew). Различаем по metadata.source — его
+ * ставит ensurePendingInvoiceForTariff и chargeMonthlyRenewal, ручной
+ * админ-флоу его не ставит.
+ */
+function isPaymentBackedInvoice(row: { metadata?: unknown }): boolean {
+  const meta = row.metadata as { source?: string } | null | undefined;
+  return Boolean(meta?.source);
+}
 import { applyInvoicePaidToTariff } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
@@ -93,7 +116,11 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     // Cancel in YooKassa if the invoice is still pending there
     if (existing.yookassa_payment_id && existing.status === 'pending' && isYookassaConfigured(isTestShop)) {
       try {
-        await cancelYookassaInvoice(existing.yookassa_payment_id, isTestShop);
+        if (isPaymentBackedInvoice(existing)) {
+          await cancelYookassaPayment(existing.yookassa_payment_id, isTestShop);
+        } else {
+          await cancelYookassaInvoice(existing.yookassa_payment_id, isTestShop);
+        }
       } catch (ykErr) {
         // Log but don't block archiving — YK invoice may already be cancelled/expired
         await logError('invoices.archive.yk_cancel.failed', ykErr, { id, yk_id: existing.yookassa_payment_id, is_test_shop: isTestShop });
@@ -132,7 +159,14 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       }
 
       if (existing.yookassa_payment_id && !existing.yookassa_payment_url) {
-        // Invoice exists in YK but URL wasn't saved — fetch it
+        // Invoice exists in YK but URL wasn't saved — fetch it.
+        // Payment-backed (autopay flow) объекты у /v3/payments URL не отдают
+        // после первого создания (confirmation_url одноразовый), так что
+        // restore возможен только для /v3/invoices-флоу. Для payment-backed
+        // создадим новый payment ниже через create_yookassa_payment.
+        if (isPaymentBackedInvoice(existing)) {
+          return jsonError('Платёж создан, но URL утерян. Архивируйте счёт и создайте новый.', 410);
+        }
         const ykInvoice = await getYookassaInvoice(existing.yookassa_payment_id, isTestShop);
         const ykUrl = extractInvoiceUrl(ykInvoice);
         if (ykUrl) {
@@ -164,29 +198,59 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
       const description = existing.description ?? `Счёт для ${existing.company_name}`;
       const amountNum = Number(existing.amount);
-      const ykInvoice = await createYookassaInvoice(
-        {
-          amount: amountNum,
-          currency: existing.currency,
-          description,
-          invoiceId: existing.id,
-          companyName: existing.company_name,
-          idempotencyKey: existing.id,
-          receipt: buildDefaultReceipt({
-            customerEmail,
-            description,
-            amount: amountNum,
-            currency: existing.currency,
-          }),
-        },
-        isTestShop,
-      );
+      // Payment-backed (autopay) счета пересоздаём через /v3/payments — иначе
+      // получаем 403 forbidden, если у магазина не подключены «Счета».
+      // Admin manual /invoices остаётся на /v3/invoices без изменений.
+      const isPaymentBacked = isPaymentBackedInvoice(existing);
+      const ykObject = isPaymentBacked
+        ? await createYookassaPayment(
+            {
+              amount: amountNum,
+              currency: existing.currency,
+              description,
+              invoiceId: existing.id,
+              companyName: existing.company_name,
+              idempotencyKey: `${existing.id}-admin-retry`,
+              returnUrl: (() => {
+                const base = (process.env.NEXT_PUBLIC_SITE_URL ?? process.env.PORTAL_PUBLIC_URL ?? '').replace(/\/+$/, '');
+                return base ? `${base}/client/tariff` : 'https://example.com/return';
+              })(),
+              savePaymentMethod: true,
+              receipt: buildDefaultReceipt({
+                customerEmail,
+                description,
+                amount: amountNum,
+                currency: existing.currency,
+              }),
+            },
+            isTestShop,
+          )
+        : await createYookassaInvoice(
+            {
+              amount: amountNum,
+              currency: existing.currency,
+              description,
+              invoiceId: existing.id,
+              companyName: existing.company_name,
+              idempotencyKey: existing.id,
+              receipt: buildDefaultReceipt({
+                customerEmail,
+                description,
+                amount: amountNum,
+                currency: existing.currency,
+              }),
+            },
+            isTestShop,
+          );
 
+      const ykUrl = isPaymentBacked
+        ? extractPaymentUrl(ykObject as Awaited<ReturnType<typeof createYookassaPayment>>)
+        : extractInvoiceUrl(ykObject as Awaited<ReturnType<typeof createYookassaInvoice>>);
       const { error: ykUpdateErr } = await supabaseAdmin
         .from('invoices')
         .update({
-          yookassa_payment_id: ykInvoice.id,
-          yookassa_payment_url: extractInvoiceUrl(ykInvoice),
+          yookassa_payment_id: ykObject.id,
+          yookassa_payment_url: ykUrl,
         })
         .eq('id', id);
 
@@ -195,7 +259,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
         return jsonError('Invoice created in YK but failed to save', 500);
       }
 
-      await logAudit('invoices.yk_invoice_created', `YK invoice created for ${id}`, { id, yk_id: ykInvoice.id, is_test_shop: isTestShop }, { userId: user.id });
+      await logAudit('invoices.yk_invoice_created', `YK invoice created for ${id}`, { id, yk_id: ykObject.id, is_test_shop: isTestShop, payment_backed: isPaymentBacked }, { userId: user.id });
       const { data: updatedAfterYk } = await supabaseAdmin.from('invoices').select('*').eq('id', id).single();
       return NextResponse.json({ invoice: updatedAfterYk });
     } catch (ykErr) {
@@ -209,17 +273,21 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   if (body.sync_yookassa && existing.yookassa_payment_id) {
     const isTestShop = existing.is_test_shop === true;
     try {
-      const ykInvoice = await getYookassaInvoice(existing.yookassa_payment_id, isTestShop);
+      // Payment-backed (autopay) row → /v3/payments/{id}; admin manual → /v3/invoices/{id}.
+      // Оба отдают status в одинаковой семантике: succeeded → paid, canceled → cancelled.
+      const ykObject = isPaymentBackedInvoice(existing)
+        ? await getYookassaPayment(existing.yookassa_payment_id, isTestShop)
+        : await getYookassaInvoice(existing.yookassa_payment_id, isTestShop);
       const newStatus =
-        ykInvoice.status === 'succeeded' ? 'paid' :
-        ykInvoice.status === 'canceled' ? 'cancelled' :
+        ykObject.status === 'succeeded' ? 'paid' :
+        ykObject.status === 'canceled' ? 'cancelled' :
         existing.status;
 
       const { error: syncErr } = await supabaseAdmin
         .from('invoices')
         .update({
           status: newStatus,
-          paid_at: ykInvoice.status === 'succeeded' && !existing.paid_at
+          paid_at: ykObject.status === 'succeeded' && !existing.paid_at
             ? new Date().toISOString()
             : existing.paid_at,
         })
@@ -241,7 +309,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       //      a previous sync only updated the invoice row).
       // The second branch checks tariff state explicitly to avoid double-
       // applying a renewal on a re-sync of an already-processed invoice.
-      if (ykInvoice.status === 'succeeded' && existing.client_user_id) {
+      if (ykObject.status === 'succeeded' && existing.client_user_id) {
         try {
           const wasUnpaid = existing.status !== 'paid';
           let needsApply = wasUnpaid;
@@ -258,7 +326,19 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
           }
 
           if (needsApply) {
-            const tariffUpdate = await applyInvoicePaidToTariff(existing.client_user_id);
+            // Pull payment_method out of the YK object so manual sync also
+            // attaches the saved card — иначе webhook отрабатывает autopay,
+            // а ручной sync recovery эту часть теряет, и cron не сможет
+            // списывать (yookassa_payment_method_id остался null).
+            // Только /v3/payments объекты несут payment_method; /v3/invoices
+            // объекты — нет (payment живёт отдельно), для них передаём null.
+            const ykPaymentMethod = isPaymentBackedInvoice(existing)
+              ? (ykObject as { payment_method?: { id?: string | null; saved?: boolean | null } | null }).payment_method ?? null
+              : null;
+            const tariffUpdate = await applyInvoicePaidToTariff(
+              existing.client_user_id,
+              { paymentMethod: ykPaymentMethod },
+            );
             if (Object.keys(tariffUpdate).length > 0) {
               await logAudit(
                 'invoices.sync.tariff_unlocked',
