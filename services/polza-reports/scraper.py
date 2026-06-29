@@ -297,21 +297,51 @@ async def _get_analytics(page: Page, campaign: Campaign) -> Optional[CampaignAna
             letters=letters,
         )
 
-    letter_rows = await page.locator("tbody tr").all()
+    # Coldy's «Статистика писем» columns are NOT fixed: the «Открыли» column
+    # disappears when open-tracking is off, and a «Баунс» column may or may not be
+    # present. Reading by position made replies come from the bounce column (or, on
+    # tables without it, default to 0). Map columns by header instead. Find the
+    # per-letter table by its «Письмо» header (skips the «Статистика почт» table).
+    col: dict[str, int] = {}
+    row_scope = page
+    for tbl in await page.locator("table").all():
+        try:
+            headers = [h.strip().lower() for h in await tbl.locator("thead th, thead td").all_inner_texts()]
+        except Exception:  # noqa: BLE001
+            headers = []
+        if not any(h.startswith("письмо") for h in headers):
+            continue
+        for i, h in enumerate(headers):
+            if h.startswith("письмо"):
+                col["name"] = i
+            elif "отправл" in h:
+                col["sent"] = i
+            elif "ответ" in h:
+                col["replied"] = i
+            elif "открыл" in h:
+                col["opened"] = i
+        row_scope = tbl
+        break
+
+    def _pick(texts: list[str], key: str) -> str:
+        i = col.get(key)
+        return texts[i] if (i is not None and i < len(texts)) else ""
+
+    letter_rows = await row_scope.locator("tbody tr").all()
     for lr in letter_rows:
         lcells = await lr.locator("td").all()
-        if len(lcells) < 3:
+        if len(lcells) < 2:
             continue
-        letter_name = (await lcells[0].inner_text()).strip()
-        if "@" in letter_name:
+        texts = [(await c.inner_text()).strip() for c in lcells]
+        letter_name = _pick(texts, "name") or texts[0]
+        if "@" in letter_name:  # skip rows from the per-mailbox «Статистика почт» table
             continue
-        l_sent = _parse_int(await lcells[1].inner_text())
-        l_open_text = (await lcells[2].inner_text()).strip()
-        l_rep_text = (await lcells[3].inner_text()).strip() if len(lcells) > 3 else "0"
+        l_open_text = _pick(texts, "opened")
+        l_rep_text = _pick(texts, "replied")
 
         letters.append(LetterStat(
             name=letter_name,
-            sent=l_sent,
+            sent=_parse_int(_pick(texts, "sent")),
             opened=_parse_int(l_open_text.split("(")[0]),
             opened_pct=_parse_pct(l_open_text),
             replied=_parse_int(l_rep_text.split("(")[0]),
