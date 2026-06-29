@@ -22,15 +22,26 @@ export async function GET(req: NextRequest) {
           .select('*')
           .order('updated_at', { ascending: false });
 
-        const chats = (rows ?? []).map((r: Record<string, unknown>) => ({
-          chatId: r.chat_id as number,
-          title: (r.title as string) || `Chat ${r.chat_id}`,
-          chatType: r.chat_type as string,
-          lastMessageId: r.last_message_id as number | null,
-          isForum: (r.is_forum as boolean) ?? false,
-          topicId: (r.topic_id as number) || null,
-          topicName: (r.topic_name as string | null) ?? null,
-        }));
+        const chats = (rows ?? []).map((r: Record<string, unknown>) => {
+          const rawTopicId = Number(r.topic_id ?? 0);
+          const topicName = (r.topic_name as string | null) ?? null;
+          // Legacy semantic: topic_id=0 + no topic_name → chat-level placeholder,
+          // expose as null so the dropdown groups it under "whole chat".
+          // New semantic: topic_id=0 + topic_name set → a real topic that
+          // lives at the General anchor (e.g. renamed "Звонки с клиентами").
+          // Surface it as 0 so the scan endpoint forwards a defined filter
+          // through to the worker instead of dropping it as "no filter".
+          const topicId = rawTopicId > 0 || topicName != null ? rawTopicId : null;
+          return {
+            chatId: r.chat_id as number,
+            title: (r.title as string) || `Chat ${r.chat_id}`,
+            chatType: r.chat_type as string,
+            lastMessageId: r.last_message_id as number | null,
+            isForum: (r.is_forum as boolean) ?? false,
+            topicId,
+            topicName,
+          };
+        });
 
         return NextResponse.json({ chats });
     },
