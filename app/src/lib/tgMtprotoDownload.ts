@@ -12,6 +12,14 @@ const BOT_TOKEN = process.env.TG_TRANSCRIBE_BOT_TOKEN || '';
 
 let client: TelegramClient | null = null;
 let connecting: Promise<TelegramClient> | null = null;
+
+// Separate MTProto client authed as the TG_TARGET user account. The bot
+// account hits BOT_METHOD_INVALID on messages.GetHistory / GetReplies which
+// are needed for forum-topic enumeration, so we route those calls through
+// a user account that's already added to the target chats (see /tools/
+// tg-transcribe screen — "Никита" account is the one configured here).
+let userClient: TelegramClient | null = null;
+let userConnecting: Promise<TelegramClient> | null = null;
 const MT_RETRY_ATTEMPTS = 3;
 const MT_RETRY_DELAY_MS = 1500;
 const CHUNK_STALL_TIMEOUT_MS = 600_000; // 10 min with no data = stalled
@@ -67,6 +75,47 @@ async function getClient(): Promise<TelegramClient> {
 
 export function isMtprotoAvailable(): boolean {
   return !!(API_ID && API_HASH && BOT_TOKEN);
+}
+
+/**
+ * MTProto creds for the target USER account (Никита, per current prod).
+ * Required for any MTProto call that bots can't make — most notably
+ * messages.GetHistory and messages.GetReplies for chats that aren't
+ * actually owned by the bot.
+ */
+export function isUserMtprotoAvailable(): boolean {
+  return !!(
+    process.env.TG_TARGET_API_ID &&
+    process.env.TG_TARGET_API_HASH &&
+    process.env.TG_TARGET_SESSION
+  );
+}
+
+async function getUserClient(): Promise<TelegramClient> {
+  if (userClient?.connected) return userClient;
+  if (userConnecting) return userConnecting;
+
+  userConnecting = (async () => {
+    const apiId = Number(process.env.TG_TARGET_API_ID || '0');
+    const apiHash = process.env.TG_TARGET_API_HASH || '';
+    const sessionStr = process.env.TG_TARGET_SESSION || '';
+    if (!apiId || !apiHash || !sessionStr) {
+      throw new Error('TG_TARGET_API_ID / TG_TARGET_API_HASH / TG_TARGET_SESSION not configured');
+    }
+    const c = new TelegramClient(new StringSession(sessionStr), apiId, apiHash, {
+      connectionRetries: 3,
+    });
+    await c.connect();
+    if (!(await c.checkAuthorization())) {
+      throw new Error('TG_TARGET_SESSION expired — user account is no longer authorized');
+    }
+    await logInfo('mtproto.userClient.connected', 'GramJS MTProto user client connected (TG_TARGET account)');
+    userClient = c;
+    userConnecting = null;
+    return c;
+  })();
+
+  return userConnecting;
 }
 
 /**
@@ -246,7 +295,10 @@ export interface MtprotoForumTopic {
  * message to get the topic title.
  */
 export async function getForumTopicsMtproto(chatId: number): Promise<MtprotoForumTopic[]> {
-  const c = await getClient();
+  // messages.GetHistory is bot-restricted (BOT_METHOD_INVALID) for most
+  // forum chats. Use the TG_TARGET user account when available; fall back
+  // to the bot client only for legacy backwards compatibility.
+  const c = isUserMtprotoAvailable() ? await getUserClient() : await getClient();
 
   const peer = await resolvePeer(c, chatId);
 
@@ -418,7 +470,16 @@ export async function getForumTopicMessagesMtproto(
   topicId: number | null,
   options: MtprotoTopicScanOptions = {},
 ): Promise<MtprotoTopicMessage[]> {
-  const c = await getClient();
+  // Force user-account auth — bots get BOT_METHOD_INVALID on both
+  // messages.GetReplies and messages.GetHistory for forum chats they don't
+  // own. The TG_TARGET account is the one configured to actually sit in the
+  // chats we transcribe (see UI screen — "Никита" account).
+  if (!isUserMtprotoAvailable()) {
+    throw new Error(
+      'Topic enumeration requires TG_TARGET_API_ID/HASH/SESSION — the bot account cannot enumerate forum topics via MTProto.',
+    );
+  }
+  const c = await getUserClient();
   const peer = await resolvePeer(c, chatId);
   const limit = options.limit ?? 100;
   const offsetId = options.offsetId ?? 0;
@@ -525,5 +586,13 @@ export async function disconnectMtproto(): Promise<void> {
       // ignore disconnect errors
     }
     client = null;
+  }
+  if (userClient?.connected) {
+    try {
+      await userClient.disconnect();
+    } catch {
+      // ignore disconnect errors
+    }
+    userClient = null;
   }
 }

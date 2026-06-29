@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
+import {
+  extractOrConvertToMp3,
+  transcribeAudio,
+  setServerSideProgress,
+  clearServerSideProgress,
+} from '@/lib/transcription';
 import { startTrace } from '@/lib/tracer';
 import { logError, logInfo } from '@/lib/loggerServer';
 
@@ -89,6 +94,13 @@ export async function POST(req: NextRequest) {
     userId: user.id,
   });
 
+  // Surface "we got your request and we're reading the file" the moment we
+  // start parsing — otherwise polling sees 404 for the entire upload-buffer
+  // window (can be minutes for big files) and the UI looks frozen.
+  if (transcribeJobId) {
+    setServerSideProgress(transcribeJobId, 'preparing', 2);
+  }
+
   let file;
   try {
     file = await readFileFromRequest(req);
@@ -97,6 +109,7 @@ export async function POST(req: NextRequest) {
       err instanceof Error ? err.message : 'Не удалось прочитать тело запроса (formData)';
     await trace?.fail(err, { stage: 'read_form_data' });
     await logError('audio.transcribe.read.failed', err, { stage: 'read_form_data' }, logMeta);
+    if (transcribeJobId) clearServerSideProgress(transcribeJobId);
     return jsonError(message, 400);
   }
   if (!file.ok || !file.bytes || !file.filename) {
@@ -109,6 +122,7 @@ export async function POST(req: NextRequest) {
       { stage: 'validate_file' },
       logMeta,
     );
+    if (transcribeJobId) clearServerSideProgress(transcribeJobId);
     return jsonError(message, 400);
   }
 
@@ -119,10 +133,17 @@ export async function POST(req: NextRequest) {
       { filename: file.filename, inputBytes: file.bytes.byteLength, extension: file.ext ?? null },
       logMeta,
     );
+    if (transcribeJobId) {
+      setServerSideProgress(transcribeJobId, 'converting', 3);
+    }
     const mp3 = await extractOrConvertToMp3({
       bytes: file.bytes,
       inputExt: file.ext ?? getExtension(file.filename),
     });
+    // Hand off to the worker — clear our local pre-worker state so the next
+    // /progress poll sees the worker's authoritative "queued"/"converting"
+    // state instead of our stale "converting".
+    if (transcribeJobId) clearServerSideProgress(transcribeJobId);
     await trace?.setOutput({
       filename: file.filename,
       inputBytes: file.bytes.byteLength,
@@ -176,6 +197,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Неизвестная ошибка при расшифровке аудио';
+    if (transcribeJobId) clearServerSideProgress(transcribeJobId);
     await trace?.fail(err, {
       stage: 'transcribe',
       filename: file.filename,

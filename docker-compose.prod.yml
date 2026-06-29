@@ -738,7 +738,13 @@ services:
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
       - WHISPER_BEAM_SIZE=${WHISPER_BEAM_SIZE:-1}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-}
-      - MAX_CONCURRENT=${TRANSCRIBE_MAX_CONCURRENT:-2}
+      # 4 parallel jobs on 6 cores. Worker auto-splits cpu_threads = cores /
+      # MAX_CONCURRENT (= 1 thread/job here) and passes num_workers=4 into
+      # faster-whisper so ctranslate2 doesn't internally serialize. Bumping
+      # to 4 turned the queue from "1 job at a time" → "4 in flight" — see
+      # 29.06 incident, audio-transcribe UI was stuck on "Подготовка файла…"
+      # for hours because all earlier jobs were waiting on the semaphore.
+      - MAX_CONCURRENT=${TRANSCRIBE_MAX_CONCURRENT:-4}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8070/health')"]
       interval: 30s
@@ -749,7 +755,7 @@ services:
       resources:
         limits:
           memory: 4096M
-          cpus: '3'
+          cpus: '6'
     restart: unless-stopped
     networks:
       - portal-network
