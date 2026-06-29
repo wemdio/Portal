@@ -1,7 +1,7 @@
 /**
  * Always-on воркер автопродления подписок ЮКассы.
  *
- * Каждый тик (по умолчанию 1ч, override через AUTORENEW_TICK_MS) дёргает
+ * Каждый тик (по умолчанию 5 мин, override через AUTORENEW_TICK_MS) дёргает
  * runAutoRenewBatch() из lib/billing.ts:
  *   1. Берёт все client_tariffs с auto_renew=true, билинг=autopayment,
  *      привязанной картой (yookassa_payment_method_id != null) и paid_until
@@ -26,7 +26,7 @@ import { runAutoRenewBatch } from '@/lib/billing';
 import { isYookassaConfigured } from '@/lib/yookassa';
 
 const WORKER_ID = 'auto-renew-cron';
-const TICK_MS = Number(process.env.AUTORENEW_TICK_MS ?? '3600000'); // 1 ч
+const TICK_MS = Number(process.env.AUTORENEW_TICK_MS ?? '300000'); // 5 мин
 
 async function tickOnce(log: ReturnType<typeof createWorkerLogger>): Promise<void> {
   const startedAt = Date.now();

@@ -326,7 +326,19 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
           }
 
           if (needsApply) {
-            const tariffUpdate = await applyInvoicePaidToTariff(existing.client_user_id);
+            // Pull payment_method out of the YK object so manual sync also
+            // attaches the saved card — иначе webhook отрабатывает autopay,
+            // а ручной sync recovery эту часть теряет, и cron не сможет
+            // списывать (yookassa_payment_method_id остался null).
+            // Только /v3/payments объекты несут payment_method; /v3/invoices
+            // объекты — нет (payment живёт отдельно), для них передаём null.
+            const ykPaymentMethod = isPaymentBackedInvoice(existing)
+              ? (ykObject as { payment_method?: { id?: string | null; saved?: boolean | null } | null }).payment_method ?? null
+              : null;
+            const tariffUpdate = await applyInvoicePaidToTariff(
+              existing.client_user_id,
+              { paymentMethod: ykPaymentMethod },
+            );
             if (Object.keys(tariffUpdate).length > 0) {
               await logAudit(
                 'invoices.sync.tariff_unlocked',
