@@ -130,7 +130,6 @@ export async function POST(req: NextRequest) {
   const { subject, html, text } = renderPasswordResetEmail({
     password: newPassword,
     resetAtMsk,
-    ip,
   });
 
   try {

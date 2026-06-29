@@ -4,13 +4,23 @@ describe('renderPasswordResetEmail', () => {
   const args = {
     password: 'AbcDef123!@x',
     resetAtMsk: '25.06.2026, 18:42 МСК',
-    ip: '203.0.113.42',
   };
 
-  it('subject упоминает восстановление пароля', () => {
+  it('subject упоминает восстановление пароля и бренд outreachOS', () => {
     const { subject } = renderPasswordResetEmail(args);
     expect(subject).toMatch(/восстановлени|пароль/i);
-    expect(subject).toMatch(/Portal/i);
+    expect(subject).toMatch(/outreachOS/i);
+  });
+
+  it('HTML использует outreachOS как название аккаунта, не Portal', () => {
+    const { html } = renderPasswordResetEmail(args);
+    expect(html).toMatch(/outreachOS/i);
+    expect(html).not.toMatch(/Portal/);
+  });
+
+  it('HTML не упоминает IP запроса (по требованию: убрали из шаблона)', () => {
+    const { html } = renderPasswordResetEmail(args);
+    expect(html).not.toMatch(/IP/i);
   });
 
   it('HTML содержит новый пароль в <code>', () => {
@@ -19,10 +29,9 @@ describe('renderPasswordResetEmail', () => {
     expect(html).toContain('AbcDef123!@x');
   });
 
-  it('HTML содержит время сброса и IP', () => {
+  it('HTML содержит время сброса', () => {
     const { html } = renderPasswordResetEmail(args);
     expect(html).toContain('25.06.2026, 18:42 МСК');
-    expect(html).toContain('203.0.113.42');
   });
 
   it('HTML подсказывает сменить пароль через Настройки', () => {
@@ -30,11 +39,20 @@ describe('renderPasswordResetEmail', () => {
     expect(html).toMatch(/Настройк/i);
   });
 
+  it('оранжевый блок содержит только короткое «обратитесь к администратору»', () => {
+    const { html } = renderPasswordResetEmail(args);
+    expect(html).toMatch(/обратитесь к администратору/i);
+    // Контролируем что длинная старая копия не вернулась.
+    expect(html).not.toMatch(/никто посторонний не получит доступ/);
+    expect(html).not.toMatch(/чтобы вернуть контроль/);
+  });
+
   it('text-версия содержит пароль и инструкцию', () => {
     const { text } = renderPasswordResetEmail(args);
     expect(text.length).toBeGreaterThan(50);
     expect(text).toContain('AbcDef123!@x');
     expect(text).toMatch(/Настройк/i);
+    expect(text).toMatch(/обратитесь к администратору/i);
   });
 
   it('экранирует HTML-спецсимволы в пароле', () => {
@@ -44,14 +62,5 @@ describe('renderPasswordResetEmail', () => {
     });
     expect(html).toContain('a&lt;b&gt;c&amp;d&quot;e');
     expect(html).not.toMatch(/<b>c/);
-  });
-
-  it('экранирует HTML в IP (защита от injection через X-Forwarded-For)', () => {
-    const { html } = renderPasswordResetEmail({
-      ...args,
-      ip: '1.2.3.4<script>alert(1)</script>',
-    });
-    expect(html).not.toContain('<script>');
-    expect(html).toContain('&lt;script&gt;');
   });
 });
