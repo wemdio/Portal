@@ -28,12 +28,15 @@ interface RawWebhook {
   target_hook_url?: string;
   event_type?: string | null;
   name?: string | null;
+  // Instantly disables a webhook (status:-1) after repeated delivery failures
+  // and never re-enables it. We read it to detect + recreate dead hooks.
+  status?: number | null;
 }
 
 export interface EnsureWebhookResult {
   account: string;
   event: ActivityEvent;
-  action: 'created' | 'updated' | 'exists' | 'error';
+  action: 'created' | 'recreated' | 'updated' | 'exists' | 'error';
   id?: string;
   error?: string;
 }
@@ -122,21 +125,37 @@ export async function ensureActivityWebhooks(): Promise<EnsureWebhookResult[]> {
       continue;
     }
 
+    const isDead = (w: RawWebhook): boolean => typeof w.status === 'number' && w.status < 0;
+
     for (const event of ACTIVITY_EVENTS) {
       try {
-        const match = existing.find(
+        const matches = existing.filter(
           (w) => w.event_type === event && samePath(w.target_hook_url, desiredPath),
         );
-        if (match) {
-          if (match.target_hook_url !== desiredUrl) {
+        // Instantly disables a hook (status:-1) after repeated delivery failures
+        // (e.g. our receiver was briefly down during a deploy) and NEVER re-enables
+        // it. A PATCH or no-op leaves it dead → silent permanent outage. So DELETE
+        // every dead match and recreate a fresh (active) one. This is what makes
+        // re-running register self-heal a disabled webhook.
+        const dead = matches.filter(isDead);
+        for (const w of dead) {
+          try {
+            await instantlyFetch(apiKey, `/webhooks/${w.id}`, { method: 'DELETE' });
+          } catch {
+            // best-effort; we recreate below regardless
+          }
+        }
+        const live = matches.find((w) => !isDead(w));
+        if (live) {
+          if (live.target_hook_url !== desiredUrl) {
             // Path matches but token rotated → update in place (no duplicate).
-            await instantlyFetch(apiKey, `/webhooks/${match.id}`, {
+            await instantlyFetch(apiKey, `/webhooks/${live.id}`, {
               method: 'PATCH',
               body: { target_hook_url: desiredUrl },
             });
-            results.push({ account: account.id, event, action: 'updated', id: match.id });
+            results.push({ account: account.id, event, action: 'updated', id: live.id });
           } else {
-            results.push({ account: account.id, event, action: 'exists', id: match.id });
+            results.push({ account: account.id, event, action: 'exists', id: live.id });
           }
           continue;
         }
@@ -148,7 +167,12 @@ export async function ensureActivityWebhooks(): Promise<EnsureWebhookResult[]> {
             event_type: event,
           },
         })) as { id?: string } | null;
-        results.push({ account: account.id, event, action: 'created', id: created?.id });
+        results.push({
+          account: account.id,
+          event,
+          action: dead.length > 0 ? 'recreated' : 'created',
+          id: created?.id,
+        });
       } catch (e) {
         results.push({
           account: account.id,

@@ -202,6 +202,11 @@ function buildSystemPrompt(briefText?: string | null): string {
 - Пересылка контакта без ознакомления с предложением
 - Ответ ТОЛЬКО на запрос контакта (без предложения) с просто контактными данными
 
+ВАЖНО — НЕ путай дежурные контакты с интересом:
+- Телефон/адрес/сайт в подписи или в шаблонном подтверждении ("Спасибо за сообщение", "Ваше письмо получено", "свяжемся / предоставим ответ", "звоните по любым вопросам") — это АВТООТВЕТ-подтверждение получения, а НЕ интерес. Само по себе это is_lead=false, proposal_seen=false.
+- "Предложение позвонить/встретиться" считается сигналом интереса ТОЛЬКО если клиент явно зовёт обсудить НАШЕ предложение ("давайте созвонимся по вашему КП", "наберите по поводу внедрения"), а не просто оставил дежурный контакт в подписи.
+- Вежливость ("спасибо", "благодарю за информацию") без вопросов, запроса цен или обсуждения условий — НЕ лид.
+
 ФОРМАТ ОТВЕТА (только валидный JSON, без markdown):
 {
   "is_lead": true/false,
@@ -227,6 +232,13 @@ export interface ClassifyOptions {
   model?: string;
   maxRetries?: number;
   briefText?: string | null;
+  /**
+   * Уже полученный контекст переписки. Если передан — qualifyReply НЕ дёргает
+   * Instantly /emails за тредом, а использует его. Нужно real-time-разгребателю
+   * очереди вебхуков: он фетчит тред один раз (проверка готовности + id письма) и
+   * переиспользует здесь, чтобы не делать второй вызов Instantly на тот же ответ.
+   */
+  prefetchedContext?: ThreadContext | null;
 }
 
 const DEFAULT_MODEL = 'policy/gemini-flash';
@@ -583,7 +595,7 @@ export async function qualifyReply(
     threadContext: ThreadContext | null;
   }
 > {
-  const ctx = await fetchThreadContext(campaignId, leadEmail, threadId, accountId);
+  const ctx = aiOptions.prefetchedContext ?? (await fetchThreadContext(campaignId, leadEmail, threadId, accountId));
   if (!ctx) {
     return {
       isLead: false,

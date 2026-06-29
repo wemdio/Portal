@@ -343,27 +343,27 @@ export async function middleware(request: NextRequest) {
       })
     }
 
-    // Demo accounts (role=client + is_demo) must be able to reach /signup to upgrade
-    // into a real account. BOTH guards below — the /login·/signup redirect AND the
-    // client-path redirect — would otherwise bounce them to /client (the "returned
-    // from /demo, clicked Создать аккаунт, landed in the demo dashboard" bug).
-    // Compute the flag once and honour it in both. Targeted is_demo read only on this
-    // rare path (a logged-in client hitting /signup).
-    let isDemoOnSignup = false
-    if (user && userRole === 'client' && pathname === '/signup') {
+    // Demo accounts (role=client + is_demo) must be able to reach BOTH /signup (to
+    // register a real account) and /login (to sign into one) — otherwise the two
+    // guards below bounce them to /client (the "came from /demo, clicked Создать
+    // аккаунт / Войти, landed back in the demo dashboard" bug). Compute the flag once
+    // and honour it in both guards. Targeted is_demo read only on this rare path (a
+    // logged-in client hitting /login or /signup).
+    let isDemoOnAuthPage = false
+    if (user && userRole === 'client' && (pathname === '/login' || pathname === '/signup')) {
       const { data: demoProfile } = await supabase
         .from('profiles')
         .select('is_demo')
         .eq('id', user.id)
         .single()
-      isDemoOnSignup = demoProfile?.is_demo === true
+      isDemoOnAuthPage = demoProfile?.is_demo === true
     }
 
     // Авторизованного пользователя С РОЛЬЮ уводим с /login в его раздел.
     // Аккаунт без роли НЕ уводим — пусть остаётся на /login (внутрь портала
     // его всё равно не пустит default-deny ниже). Иначе был бы
-    // редирект-цикл /login → / → /login. Демо на /signup — исключение (см. выше).
-    if (user && userRole && (pathname === '/login' || pathname === '/signup') && !isDemoOnSignup) {
+    // редирект-цикл /login → / → /login. Демо на /login·/signup — исключение (см. выше).
+    if (user && userRole && (pathname === '/login' || pathname === '/signup') && !isDemoOnAuthPage) {
       return NextResponse.redirect(
         new URL(userRole === 'client' ? '/client' : '/', request.url)
       )
@@ -380,7 +380,7 @@ export async function middleware(request: NextRequest) {
 
     if (user && userRole === 'client') {
       const clientAllowed =
-        isDemoOnSignup ||
+        isDemoOnAuthPage ||
         pathname.startsWith('/client') ||
         pathname === '/maintenance' ||
         pathname === '/consent' ||
