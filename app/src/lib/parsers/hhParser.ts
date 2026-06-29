@@ -1,6 +1,6 @@
 import type { Dispatcher } from 'undici';
 import { ProxyAgent } from 'undici';
-import { logInfo, logError } from '@/lib/loggerServer';
+import { logInfo, logWarn, logError } from '@/lib/loggerServer';
 import type { Span } from '@/lib/tracer';
 
 export type HHSearchConfig = {
@@ -402,10 +402,16 @@ function addDays(date: Date, days: number): Date {
 
 const HH_API_VALID_PARAMS = new Set([
   'text',
+  'excluded_text',
   'search_field',
   'experience',
   'employment',
   'schedule',
+  // HH renamed the remote/on-site filter from `schedule=remote` to
+  // `work_format=REMOTE|ON_SITE|HYBRID|FIELD_WORK`. Without this the
+  // copied search URL's remote filter was silently dropped and the parser
+  // returned all on-site jobs too (10k vs ~2.7k on the site).
+  'work_format',
   'area',
   'metro',
   'professional_role',
@@ -438,6 +444,33 @@ const HH_API_VALID_PARAMS = new Set([
   'host',
 ]);
 
+// HH web-search URLs also carry params we intentionally do NOT forward to the
+// API: pure UI/analytics chrome, or values we remap ourselves (currency_code ->
+// currency, items_on_page -> per_page). These are expected drops — no warning.
+const HH_IGNORED_WEB_PARAMS = new Set([
+  'ored_clusters',
+  'enable_snippets',
+  'salary_mode',
+  'currency_code',
+  'items_on_page',
+  'suggestId',
+  'suggest_id',
+  'hhtmFrom',
+  'hhtmFromLabel',
+  'from',
+  'disableBrowserCache',
+  'forceFiltersSaving',
+  'searchSessionId',
+  'search_session_id',
+  'L_save_area',
+  'customDomain',
+]);
+
+// Warn at most once per process per unknown param, so a future HH rename (like
+// schedule -> work_format) surfaces in the logs instead of silently dropping a
+// filter and inflating result counts.
+const warnedDroppedHhParams = new Set<string>();
+
 const HH_NOOP_VALUES: Record<string, Set<string>> = {
   experience: new Set(['doesNotMatter']),
   order_by: new Set(['']),
@@ -453,7 +486,18 @@ function normalizeExtraParams(params?: HHSearchParams): HHSearchParams | undefin
 
   for (const [key, value] of Object.entries(params)) {
     if (!key) continue;
-    if (!HH_API_VALID_PARAMS.has(key)) continue;
+    if (!HH_API_VALID_PARAMS.has(key)) {
+      if (!HH_IGNORED_WEB_PARAMS.has(key) && !warnedDroppedHhParams.has(key)) {
+        warnedDroppedHhParams.add(key);
+        const sample = Array.isArray(value) ? value.join(', ') : String(value);
+        void logWarn(
+          'parser.hh.dropped_param',
+          `HH search param "${key}" is not in HH_API_VALID_PARAMS and was dropped before the API call; if HH added or renamed a filter, add it to the allowlist`,
+          { param: key, sample: sample.slice(0, 200) },
+        );
+      }
+      continue;
+    }
     if (Array.isArray(value)) {
       const items = value.map((item) => String(item).trim()).filter((v) => v && !isNoopValue(key, v));
       if (items.length === 1) cleaned[key] = items[0];
