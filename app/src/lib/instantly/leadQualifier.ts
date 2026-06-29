@@ -45,29 +45,51 @@ export async function fetchThreadContext(
     // fall through to campaign-wide fetch
   }
 
-  // Fallback: fetch recent campaign emails if search returned nothing
-  if (allEmails.length === 0) {
+  // The search=leadEmail query reliably returns the lead's INBOUND reply but
+  // often NOT our sends — Instantly's search matches the lead in from_address
+  // (their reply), not the to_address of our campaign sends. (And lead=email
+  // returns nothing at all in v2 — that's why search is used in the first place.)
+  // So when the search result contains no outbound of ours, ALSO pull the
+  // campaign-wide page and merge it in. This recovers the ~18-23% of replies
+  // where our last outbound was otherwise lost (→ proposal_seen wrongly false →
+  // the AI over-cautiously under-rates real leads). Verified against prod data.
+  // Fires only on that minority of replies, so no material extra Instantly load.
+  const hasOutbound = (list: Email[]): boolean =>
+    list.some((e) => (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3);
+
+  if (allEmails.length === 0 || !hasOutbound(allEmails)) {
     try {
       const response = await instantly.listEmails({
         campaign_id: campaignId,
         limit: 100,
       }, { accountId });
-      allEmails = response.items ?? [];
+      const seen = new Set(allEmails.map((e) => e.id));
+      for (const e of response.items ?? []) {
+        if (!e.id || !seen.has(e.id)) allEmails.push(e);
+      }
     } catch {
-      return null;
+      if (allEmails.length === 0) return null;
     }
   }
+
+  const target = leadEmail.toLowerCase();
+  const matchesLead = (e: Email): boolean => {
+    const from = e.from_address_email?.toLowerCase() ?? '';
+    const to = e.to_address_email_list?.toLowerCase() ?? '';
+    return from.includes(target) || to.includes(target);
+  };
 
   let threadEmails: Email[];
   if (threadId) {
     threadEmails = allEmails.filter((e) => e.thread_id === threadId);
+    // Instantly sometimes files our send under a SIBLING thread_id than the
+    // reply's. If the reply's thread has no outbound, widen to all of this lead's
+    // emails so the split-threaded send is recovered (no extra API call).
+    if (!hasOutbound(threadEmails)) {
+      threadEmails = allEmails.filter(matchesLead);
+    }
   } else {
-    threadEmails = allEmails.filter((e) => {
-      const from = e.from_address_email?.toLowerCase() ?? '';
-      const to = e.to_address_email_list?.toLowerCase() ?? '';
-      const target = leadEmail.toLowerCase();
-      return from.includes(target) || to.includes(target);
-    });
+    threadEmails = allEmails.filter(matchesLead);
   }
 
   if (threadEmails.length === 0) return null;
