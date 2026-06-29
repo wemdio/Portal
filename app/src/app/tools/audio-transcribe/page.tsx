@@ -414,8 +414,8 @@ export default function AudioTranscribeToolPage() {
   };
 
   return (
-    <div className="flex gap-6 text-left max-w-full">
-      <div className="min-w-0 flex-1 max-w-7xl space-y-8">
+    <div className="flex justify-center gap-6 text-left max-w-full">
+      <div className="min-w-0 flex-1 max-w-7xl mx-auto space-y-8">
         <header className="flex items-start justify-between gap-4">
           <div className="space-y-2">
             <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
@@ -434,14 +434,13 @@ export default function AudioTranscribeToolPage() {
           </div>
         </header>
 
-        <section className="grid gap-6 md:grid-cols-[minmax(0,1.1fr)_minmax(0,1.8fr)_minmax(0,1.1fr)] items-start">
-        <div className="space-y-4">
+        <section className="mx-auto w-full max-w-2xl space-y-4">
           <div
             onDrop={onDrop}
             onDragOver={onDragOver}
             onDragLeave={onDragLeave}
             className={[
-              'relative flex flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-8 transition-colors cursor-pointer min-h-[180px]',
+              'relative flex flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-10 transition-colors cursor-pointer min-h-[200px]',
               dragActive
                 ? 'border-indigo-400 bg-indigo-50/60'
                 : 'border-gray-200 bg-gray-50/80 hover:border-indigo-300 hover:bg-indigo-50/40',
@@ -455,17 +454,17 @@ export default function AudioTranscribeToolPage() {
               accept={ACCEPT_EXT}
               onChange={onFileChange}
             />
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white shadow-sm mb-3">
-              <UploadCloud className="h-6 w-6 text-indigo-500" />
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white shadow-sm mb-4">
+              <UploadCloud className="h-7 w-7 text-indigo-500" />
             </div>
-            <p className="text-sm font-medium text-gray-900">
+            <p className="text-base font-medium text-gray-900">
               Перетащите файл сюда или нажмите, чтобы выбрать
             </p>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1.5 text-xs text-gray-500">
               Поддерживаемые форматы: MP3, WAV, MP4, AVI. До 600&nbsp;МБ.
             </p>
             {file && (
-              <div className="mt-4 flex items-center gap-3 rounded-xl bg-white/80 px-3 py-2 text-xs text-gray-700 shadow-sm">
+              <div className="mt-5 flex items-center gap-3 rounded-xl bg-white/80 px-3 py-2 text-xs text-gray-700 shadow-sm">
                 <FileAudio2 className="h-4 w-4 text-indigo-500 shrink-0" />
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium">{file.name}</p>
@@ -475,12 +474,12 @@ export default function AudioTranscribeToolPage() {
             )}
           </div>
 
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-xs text-gray-500">
-              Файл не отправляется, пока вы не нажмёте кнопку ниже. Для новой записи просто
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="text-xs text-gray-500 max-w-sm">
+              Файл не отправляется, пока вы не нажмёте кнопку. Для новой записи просто
               выберите другой файл.
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 sm:justify-end">
               {loading && (
                 <button
                   type="button"
@@ -495,7 +494,7 @@ export default function AudioTranscribeToolPage() {
                 onClick={onSubmit}
                 disabled={!file || loading}
                 className={[
-                  'inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold shadow-sm transition',
+                  'inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-semibold shadow-sm transition',
                   !file || loading
                     ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
                     : 'bg-indigo-600 text-white hover:bg-indigo-700',
@@ -535,8 +534,9 @@ export default function AudioTranscribeToolPage() {
               </p>
             </div>
           )}
-        </div>
+        </section>
 
+        <section className="mx-auto w-full max-w-4xl grid gap-6 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] items-start">
         <div className="space-y-3 rounded-2xl border border-gray-200 bg-white/90 p-4 shadow-sm min-h-[220px]">
           <div className="flex items-center justify-between gap-2">
             <div className="space-y-0.5">
