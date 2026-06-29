@@ -375,6 +375,126 @@ export function buildDefaultReceipt(params: {
   };
 }
 
+export interface CreatePaymentParams {
+  amount: number;
+  currency?: string;
+  description: string;
+  invoiceId: string;
+  companyName: string;
+  /** Must be unique per attempt — use the DB invoice id (+optional retry suffix) */
+  idempotencyKey: string;
+  /** ЛК-страница / любой URL, на который ЮКасса вернёт клиента после оплаты. */
+  returnUrl: string;
+  /** Сохранить карту для последующих autopay-списаний (через chargeRecurringPayment). */
+  savePaymentMethod?: boolean;
+  /** 54-ФЗ чек — обязателен для магазинов с фискализацией. */
+  receipt?: YookassaReceipt;
+}
+
+export interface YookassaPaymentCreateResponse {
+  id: string;
+  status: 'pending' | 'waiting_for_capture' | 'succeeded' | 'canceled';
+  confirmation?: {
+    type: string;
+    confirmation_url?: string;
+    return_url?: string;
+  };
+  created_at: string;
+}
+
+/**
+ * Create a one-off payment with a hosted YooKassa checkout page.
+ *
+ * Uses POST /v3/payments (NOT /v3/invoices) — universal endpoint that doesn't
+ * require the merchant to enable the «Счета» product separately. Same shape
+ * as chargeRecurringPayment below, but with confirmation.redirect instead of
+ * payment_method_id and with save_payment_method=true so the chosen card is
+ * persisted for the autopay loop.
+ *
+ * Returns confirmation_url to redirect the client to.
+ */
+export async function createYookassaPayment(
+  params: CreatePaymentParams,
+  isTestShop: boolean = false,
+): Promise<YookassaPaymentCreateResponse> {
+  const body = {
+    amount: {
+      value: params.amount.toFixed(2),
+      currency: params.currency ?? 'RUB',
+    },
+    capture: true,
+    confirmation: {
+      type: 'redirect',
+      return_url: params.returnUrl,
+    },
+    description: params.description,
+    metadata: {
+      invoice_id: params.invoiceId,
+      company_name: params.companyName,
+    },
+    ...(params.savePaymentMethod ? { save_payment_method: true } : {}),
+    ...(params.receipt ? { receipt: params.receipt } : {}),
+  };
+
+  const res = await fetch(`${YOOKASSA_API}/payments`, {
+    method: 'POST',
+    headers: {
+      Authorization: basicAuth(isTestShop),
+      'Content-Type': 'application/json',
+      'Idempotence-Key': params.idempotencyKey,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(`YooKassa error ${res.status}: ${JSON.stringify(err)}`);
+  }
+
+  return (await res.json()) as YookassaPaymentCreateResponse;
+}
+
+/** Получить confirmation_url из ответа /v3/payments — пинаем клиента сюда. */
+export function extractPaymentUrl(p: YookassaPaymentCreateResponse): string | null {
+  return p.confirmation?.confirmation_url ?? null;
+}
+
+/** Fetch the current state of a /v3/payments object — admin sync кнопка использует. */
+export async function getYookassaPayment(paymentId: string, isTestShop: boolean = false): Promise<YookassaPayment> {
+  const res = await fetch(`${YOOKASSA_API}/payments/${paymentId}`, {
+    headers: { Authorization: basicAuth(isTestShop) },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(`YooKassa error ${res.status}: ${JSON.stringify(err)}`);
+  }
+
+  return (await res.json()) as YookassaPayment;
+}
+
+/**
+ * Cancel a pending YooKassa payment (вместо /invoices/{id}/cancel).
+ * Используется когда персистентный test-shop тоггл переключили и старый
+ * pending-инвойс надо схлопнуть, чтобы клиент не видел две ссылки.
+ */
+export async function cancelYookassaPayment(paymentId: string, isTestShop: boolean = false): Promise<void> {
+  const res = await fetch(`${YOOKASSA_API}/payments/${paymentId}/cancel`, {
+    method: 'POST',
+    headers: {
+      Authorization: basicAuth(isTestShop),
+      'Content-Type': 'application/json',
+      'Idempotence-Key': `cancel-${paymentId}`,
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    // 200/202 + already canceled тоже норм — игнорируем idempotent re-cancel.
+    throw new Error(`YooKassa cancel error ${res.status}: ${JSON.stringify(err)}`);
+  }
+}
+
 /**
  * Charge a saved payment method without requiring user interaction.
  *
