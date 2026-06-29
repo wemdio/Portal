@@ -5,6 +5,8 @@ import {
   getBodyText,
   fetchBriefByCampaign,
   isAutoReplyOrUnsubscribe,
+  fetchThreadContext,
+  type ThreadContext,
 } from './leadQualifier';
 import { sendLeadTelegramAlert, type LeadTelegramSpecialistMention } from './leadTelegramAlerts';
 import {
@@ -339,6 +341,7 @@ async function qualifyOneReply(
   reply: Email,
   apiKey: string,
   accountId?: string,
+  prefetchedContext?: ThreadContext | null,
 ): Promise<void> {
   const campaignId = reply.campaign_id;
   const leadEmail =
@@ -357,6 +360,7 @@ async function qualifyOneReply(
     apiKey,
     model: MODEL,
     briefText: cachedBrief,
+    prefetchedContext,
   }, accountId);
 
   const campaignName = await resolveCampaignName(campaignId, accountId);
@@ -473,6 +477,161 @@ async function qualifyOneReply(
       replyTimestamp: reply.timestamp_email ?? null,
     });
   }
+}
+
+// ─── Real-time path: drain webhook queue (additive, flag-gated) ───────────────
+
+function drainEnabled(): boolean {
+  const v = (process.env.INSTANTLY_WEBHOOK_DRAIN_ENABLED ?? '').toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+// Кэш поверхности кампаний на пару тиков, чтобы не дёргать БД каждые ~7с.
+let drainCampaignCache: { at: number; byAccount: Map<string, Set<string>> } | null = null;
+async function getCampaignsByAccountCached(): Promise<Map<string, Set<string>>> {
+  const ttl = envNumber('INSTANTLY_DRAIN_CAMPAIGN_TTL_MS', 30000);
+  if (drainCampaignCache && Date.now() - drainCampaignCache.at < ttl) {
+    return drainCampaignCache.byAccount;
+  }
+  const projectCampaignIds = await getPortalLinkedCampaignIds();
+  const clientByAccount = await getClientCampaignsByAccount();
+  const byAccount = new Map<string, Set<string>>();
+  byAccount.set('main', new Set<string>(projectCampaignIds));
+  for (const [accountId, idSet] of clientByAccount) {
+    let set = byAccount.get(accountId);
+    if (!set) {
+      set = new Set<string>();
+      byAccount.set(accountId, set);
+    }
+    for (const id of idSet) set.add(id);
+  }
+  drainCampaignCache = { at: Date.now(), byAccount };
+  return byAccount;
+}
+
+/**
+ * Real-time путь (additive, флаг INSTANTLY_WEBHOOK_DRAIN_ENABLED, default OFF):
+ * разгребает reply-события, которые вебхук-приёмник положил в
+ * instantly_webhook_events, и квалифицирует их СРАЗУ — через ТУ ЖЕ qualifyOneReply,
+ * что и поллинг. Поллинг (pollAndQualifyReplies) остаётся reconciliation-бэкапом;
+ * обе ветки сходятся на UNIQUE-ключе instantly_email_id, поэтому ответ,
+ * обработанный здесь, поллинг молча пропускает (dedup-skip) и наоборот.
+ *
+ * Нагрузку на Instantly /emails НЕ увеличивает: тред дотягивается ОДИН раз (он же
+ * проверка готовности + источник настоящего id письма), результат переиспользуется
+ * в qualifyReply через prefetchedContext, а перед AI идёт дедуп по instantly_email_id.
+ */
+export async function drainWebhookQueue(): Promise<number> {
+  if (!drainEnabled() || !supabaseAdmin) return 0;
+  const db = supabaseAdmin;
+  const apiKey = API_KEY();
+  if (!apiKey) return 0;
+
+  const batchSize = envNumber('INSTANTLY_WEBHOOK_DRAIN_BATCH', 25);
+  const minAgeMs = envNumber('INSTANTLY_WEBHOOK_DRAIN_MIN_AGE_MS', 3000);
+  const youngMs = envNumber('INSTANTLY_WEBHOOK_DRAIN_YOUNG_MS', 90000);
+  const olderThanIso = new Date(Date.now() - minAgeMs).toISOString();
+
+  // 1. Берём старейшие необработанные reply-события, успевшие «отлежаться» (min-age
+  //    — чтобы Instantly успел проиндексировать письмо в /emails), и атомарно их
+  //    клеймим (processed=true): конкурентный поллинг очередь не читает, повторный
+  //    drain их уже не возьмёт.
+  const { data: candidates, error: selErr } = await db
+    .from('instantly_webhook_events')
+    .select('id')
+    .eq('processed', false)
+    .ilike('event_type', '%repl%')
+    .lt('created_at', olderThanIso)
+    .order('created_at', { ascending: true })
+    .limit(batchSize);
+  if (selErr) {
+    workerLog('warn', `drain: select failed: ${selErr.message}`);
+    return 0;
+  }
+  if (!candidates || candidates.length === 0) return 0;
+
+  const ids = (candidates as Array<{ id: string }>).map((c) => c.id);
+  const { data: claimed } = await db
+    .from('instantly_webhook_events')
+    .update({ processed: true })
+    .in('id', ids)
+    .eq('processed', false)
+    .select('id, campaign_id, lead_email, thread_id, created_at');
+  if (!claimed || claimed.length === 0) return 0;
+
+  const campaignsByAccount = await getCampaignsByAccountCached();
+  const accountForCampaign = (campaignId: string): string | null => {
+    for (const [accountId, set] of campaignsByAccount) {
+      if (set.has(campaignId)) return accountId;
+    }
+    return null;
+  };
+
+  const interDelay = Math.max(1000, envNumber('INSTANTLY_LEADS_INTER_REPLY_DELAY_MS', 3500));
+  let qualified = 0;
+  let fetched = 0;
+  for (const row of claimed as Array<{
+    id: string;
+    campaign_id: string | null;
+    lead_email: string | null;
+    thread_id: string | null;
+    created_at: string | null;
+  }>) {
+    const campaignId = row.campaign_id ?? '';
+    const leadEmail = row.lead_email ?? '';
+    if (!campaignId || !leadEmail) continue; // непригодное событие — оставляем acked
+    const accountId = accountForCampaign(campaignId);
+    if (!accountId) continue; // не Portal-linked/client кампания — поллинг её тоже не берёт
+
+    if (fetched > 0) await new Promise((r) => setTimeout(r, interDelay));
+    fetched++;
+    try {
+      // Один вызов Instantly: проверка готовности + источник настоящего id письма.
+      const ctx = await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId);
+      if (!ctx) {
+        const ageMs = Date.now() - new Date(row.created_at ?? 0).getTime();
+        if (ageMs < youngMs) {
+          // Ответ ещё не проиндексирован Instantly → ретрай на следующем тике. НЕ
+          // пишем строку квалификации, иначе её instantly_email_id отравит дедуп
+          // поллинга и заморозит ответ навсегда.
+          await db.from('instantly_webhook_events').update({ processed: false }).eq('id', row.id);
+        }
+        // Старое + всё ещё нет контекста → оставляем acked; бэкап — поллинг.
+        continue;
+      }
+
+      // Берём НАСТОЯЩЕЕ письмо-ответ из треда: его id совпадёт с тем, что взял бы
+      // поллинг (reply.id) → обе ветки сходятся на одном instantly_email_id.
+      const reply = {
+        ...ctx.replyEmail,
+        campaign_id: ctx.replyEmail.campaign_id ?? campaignId,
+      } as Email;
+      if (!reply.id) continue; // без id невозможен дедуп-конвердж — пропускаем
+
+      // Дедуп по авторитетному id ДО AI: если поллинг (или прошлый drain) уже
+      // квалифицировал — пропускаем без вызова модели.
+      const { data: existing } = await db
+        .from('instantly_lead_qualifications')
+        .select('instantly_email_id')
+        .eq('instantly_email_id', reply.id)
+        .maybeSingle();
+      if (existing) continue;
+
+      await qualifyOneReply(db, reply, apiKey, accountId, ctx);
+      qualified++;
+
+      // Провенанс (best-effort): связать строку квалификации с её событием.
+      await db
+        .from('instantly_lead_qualifications')
+        .update({ webhook_event_id: row.id })
+        .eq('instantly_email_id', reply.id)
+        .is('webhook_event_id', null);
+    } catch (err) {
+      workerLog('error', `drain: failed on event ${row.id} (${leadEmail})`, err);
+    }
+  }
+  if (qualified > 0) workerLog('info', `drain: qualified ${qualified} reply(s) from webhook queue`);
+  return qualified;
 }
 
 /**

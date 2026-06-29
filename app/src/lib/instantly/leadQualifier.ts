@@ -232,6 +232,13 @@ export interface ClassifyOptions {
   model?: string;
   maxRetries?: number;
   briefText?: string | null;
+  /**
+   * Уже полученный контекст переписки. Если передан — qualifyReply НЕ дёргает
+   * Instantly /emails за тредом, а использует его. Нужно real-time-разгребателю
+   * очереди вебхуков: он фетчит тред один раз (проверка готовности + id письма) и
+   * переиспользует здесь, чтобы не делать второй вызов Instantly на тот же ответ.
+   */
+  prefetchedContext?: ThreadContext | null;
 }
 
 const DEFAULT_MODEL = 'policy/gemini-flash';
@@ -588,7 +595,7 @@ export async function qualifyReply(
     threadContext: ThreadContext | null;
   }
 > {
-  const ctx = await fetchThreadContext(campaignId, leadEmail, threadId, accountId);
+  const ctx = aiOptions.prefetchedContext ?? (await fetchThreadContext(campaignId, leadEmail, threadId, accountId));
   if (!ctx) {
     return {
       isLead: false,
