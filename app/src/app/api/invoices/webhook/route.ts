@@ -60,18 +60,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
   }
 
-  // With Invoices API, the YK invoice ID is in payment.invoice_details.invoice_id.
-  // Legacy: metadata.invoice_id (payments API). Cron-charged payments don't
-  // have invoice_details — find them by payment id then.
-  const ykInvoiceId =
-    (payment as { invoice_details?: { invoice_id?: string } }).invoice_details?.invoice_id ??
-    payment.metadata?.invoice_id ??
-    null;
+  // Two YK flows write yookassa_payment_id differently:
+  //   - Admin manual /invoices (POST /v3/invoices) → stored = YK invoice.id.
+  //     Webhook payment carries payment.invoice_details.invoice_id == that.
+  //   - Autopay flow (POST /v3/payments — first pay + cron renew)
+  //     → stored = YK payment.id. Webhook payment.id == that.
+  // NOTE: payment.metadata.invoice_id is OUR DB id, NOT a YK id —
+  // do NOT use it for routing (was a bug pre-/v3/payments switch).
+  const invoiceDetailsId =
+    (payment as { invoice_details?: { invoice_id?: string } }).invoice_details?.invoice_id ?? null;
+  const candidateIds = [invoiceDetailsId, payment.id].filter((v): v is string => Boolean(v));
 
   const { data: invoice, error: findErr } = await supabaseAdmin
     .from('invoices')
     .select('id, status, paid_at, client_user_id')
-    .eq('yookassa_payment_id', ykInvoiceId ?? payment.id)
+    .in('yookassa_payment_id', candidateIds)
+    .order('created_at', { ascending: false })
+    .limit(1)
     .maybeSingle();
 
   if (findErr) {
