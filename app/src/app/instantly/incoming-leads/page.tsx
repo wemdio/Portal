@@ -323,6 +323,13 @@ function ForwardToClientDialog({
 
 /* ─── Forward via Email (reply with CC) ──────────────────────────────────────── */
 
+/** Пресеты «легенды передачи» — специалист задаёт историю, ИИ адаптирует под контекст. */
+const HANDOFF_FRAMING_PRESETS: { label: string; framing: string }[] = [
+  { label: 'Основная почта', framing: 'Вы ставите свою основную почту в копию и продолжите общение уже с неё.' },
+  { label: 'Коллега', framing: 'Вы ставите ответственного коллегу в копию, он(а) продолжит общение напрямую.' },
+  { label: 'На конференции', framing: 'Вы в отъезде/на конференции, поэтому ставите коллегу в копию — он(а) подхватит и ответит.' },
+];
+
 function ForwardEmailDialog({
   qualificationId, companyName, campaignId, leadEmail, onClose, onForwarded,
 }: {
@@ -333,6 +340,32 @@ function ForwardEmailDialog({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
+  const [framing, setFraming] = useState('');
+  const [generating, setGenerating] = useState(false);
+
+  const handleGenerate = async () => {
+    if (generating) return;
+    setGenerating(true);
+    setError('');
+    try {
+      const data = await fetchWithAuth<{ draft: string }>(
+        '/api/instantly/qualified-leads/handoff-draft',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            qualification_id: qualificationId,
+            framing: framing.trim() || undefined,
+          }),
+        },
+      );
+      if (data?.draft) setReplyText(data.draft);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сгенерировать');
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   const handleSend = async () => {
     if (!clientEmail.trim() || !replyText.trim()) return;
@@ -378,6 +411,42 @@ function ForwardEmailDialog({
           {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
 
           <MacroPicker companyName={companyName} campaignId={campaignId} leadEmail={leadEmail} onSelect={setReplyText} />
+
+          {/* AI-передача: специалист задаёт легенду → ИИ пишет контекстный ответ в поле ниже */}
+          <div className="rounded-lg border border-violet-100 bg-violet-50/40 p-2.5 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-semibold text-violet-700">Легенда передачи</span>
+              <button
+                type="button"
+                onClick={handleGenerate}
+                disabled={generating}
+                className="inline-flex items-center gap-1 rounded-md bg-violet-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-50 transition-colors"
+              >
+                {generating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+                Сгенерировать
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {HANDOFF_FRAMING_PRESETS.map((p) => (
+                <button
+                  key={p.label}
+                  type="button"
+                  onClick={() => setFraming(p.framing)}
+                  className="rounded-md border border-violet-200 bg-white px-2 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-100 transition-colors"
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <input
+              type="text"
+              value={framing}
+              onChange={(e) => setFraming(e.target.value)}
+              placeholder="Что сказать лиду про передачу (необязательно)"
+              className="w-full rounded-md border border-violet-200 bg-white px-2 py-1.5 text-xs focus:border-violet-300 focus:outline-none focus:ring-2 focus:ring-violet-100 placeholder:text-zinc-300"
+            />
+            <p className="text-[10px] text-violet-500/80">ИИ напишет ответ под контекст лида (демо/цена/звонок) на его языке и подставит в поле ниже. Проверьте перед отправкой.</p>
+          </div>
 
           <div>
             <label className="block text-xs font-medium text-zinc-500 mb-1">Email клиента (CC)</label>
