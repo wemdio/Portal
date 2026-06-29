@@ -330,9 +330,9 @@ export default function LoginPage() {
       >
         <a href="/offer" style={{ color: 'var(--cp-paper-faint)' }}>Договор оферты</a>
         <span aria-hidden>·</span>
-        <a href="/consent" style={{ color: 'var(--cp-paper-faint)' }}>Согласие на обработку ПДн</a>
+        <a href="/consent" style={{ color: 'var(--cp-paper-faint)' }}>Согласие на обработку персональных данных</a>
         <span aria-hidden>·</span>
-        <a href="/privacy" style={{ color: 'var(--cp-paper-faint)' }}>Политика</a>
+        <a href="/privacy" style={{ color: 'var(--cp-paper-faint)' }}>Политика конфиденциальности</a>
       </div>
     </AuthShell>
   );
