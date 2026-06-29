@@ -77,6 +77,10 @@ export interface Project {
   lead_source_hypotheses_generated_at?: string | null;
   lead_source_hypotheses_error?: string | null;
   lead_source_hypotheses_stale?: boolean | null;
+
+  /** Lead handoff to client (auto-передача). Empty handoff_email = disabled. */
+  handoff_email?: string | null;
+  handoff_legend?: string | null;
 }
 
 export type TaskStatus = 'pending' | 'in_progress' | 'done';

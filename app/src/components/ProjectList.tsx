@@ -2803,6 +2803,41 @@ export function ProjectList() {
                 )}
               </section>
 
+              {/* Lead handoff to client — CC email + AI legend (auto-передача) */}
+              <section>
+                <h3 className="text-sm font-medium text-zinc-900 mb-2">Передача лида клиенту</h3>
+                <p className="text-[11px] text-zinc-400 mb-2">
+                  Когда ИИ находит заинтересованного лида, в TG придёт готовый ответ по легенде с кнопкой «Отправить» (жмёт ответственный спец). Пусто → авто-передача для проекта выключена.
+                </p>
+                <div className="space-y-2">
+                  <div>
+                    <label className="block text-[11px] font-medium text-zinc-500 mb-1">Почта клиента (в копию)</label>
+                    <input
+                      type="email"
+                      value={getDraftValue(selectedProject, 'handoff_email')}
+                      onChange={(e) => setDraftValue(selectedProject.id, 'handoff_email', e.target.value)}
+                      onBlur={(e) => void commitProjectUpdate(selectedProject, { handoff_email: e.target.value })}
+                      disabled={!canEdit}
+                      placeholder="client@company.com"
+                      className="w-full rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs focus:border-blue-400 focus:outline-none disabled:bg-zinc-50"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-zinc-500 mb-1">Легенда передачи</label>
+                    <textarea
+                      value={getDraftValue(selectedProject, 'handoff_legend')}
+                      onChange={(e) => setDraftValue(selectedProject.id, 'handoff_legend', e.target.value)}
+                      onBlur={(e) => void commitProjectUpdate(selectedProject, { handoff_legend: e.target.value })}
+                      disabled={!canEdit}
+                      rows={3}
+                      placeholder="Напр.: поставил свою основную почту в копию, скоро отвечу уже с неё"
+                      className="w-full rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs focus:border-blue-400 focus:outline-none disabled:bg-zinc-50 resize-none"
+                    />
+                    <p className="mt-1 text-[10px] text-zinc-400">ИИ адаптирует легенду под контекст ответа лида (демо/цена/звонок) и его язык.</p>
+                  </div>
+                </div>
+              </section>
+
               {/* Honest campaign-insights over the analytics dataset (no AI at render) */}
               <section>
                 <InstantlyInsightsSection projectId={selectedProject.id} />

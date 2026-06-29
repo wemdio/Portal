@@ -15,6 +15,15 @@ import {
   buildClientReplyMessage,
 } from '@/lib/clientReplyBot/bot';
 import * as instantly from './client';
+import { generateHandoffReply } from './handoffGenerator';
+import { signHandoffCallback } from './handoffCallback';
+import {
+  handoffBotToken,
+  handoffChatId,
+  handoffThreadId,
+  postHandoffMessage,
+  escapeHtml,
+} from './handoffTelegram';
 import type { Email } from './types';
 
 const REPLY_EMAILS_PAGE_SIZE = 100;
@@ -456,6 +465,22 @@ async function qualifyOneReply(
       replyText || null,
       result.reason ?? null,
     );
+  }
+
+  if (status === 'lead' && inserted?.id) {
+    await maybePostLeadHandoff({
+      instantlyDb: db,
+      qualificationId: inserted.id,
+      campaignId,
+      reply,
+      leadEmail,
+      leadName: leadName ?? null,
+      campaignName,
+      leadReplyText: replyText,
+      lastOutboundText: lastOutText,
+      apiKey,
+      accountId,
+    });
   }
 
   // Client-facing notification: DM the reply text to the client who owns this
@@ -940,5 +965,158 @@ async function sendTelegramLeadAlertForSpecialists(data: {
     }
   } catch (err) {
     workerLog('error', 'Error sending Telegram lead alert', err);
+  }
+}
+
+function handoffEnabled(): boolean {
+  const v = (process.env.LEAD_HANDOFF_ENABLED ?? '').toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+/**
+ * If the lead's project has handoff configured (handoff_email + handoff_legend)
+ * and a responsible specialist, generate a handoff reply and post it to Telegram
+ * with a "Передать клиенту" button. The press (handled by
+ * /api/telegram/handoff/webhook) is what actually sends it — only the responsible
+ * specialist may press. Gated by LEAD_HANDOFF_ENABLED; never throws into the
+ * qualification flow.
+ */
+async function maybePostLeadHandoff(opts: {
+  instantlyDb: NonNullable<typeof supabaseAdmin>;
+  qualificationId: string;
+  campaignId: string;
+  reply: Email;
+  leadEmail: string;
+  leadName: string | null;
+  campaignName: string | null;
+  leadReplyText: string;
+  lastOutboundText: string | null;
+  apiKey: string;
+  accountId?: string;
+}): Promise<void> {
+  try {
+    if (!handoffEnabled() || !supabaseMain) return;
+    const main = supabaseMain;
+    const { instantlyDb, qualificationId, campaignId } = opts;
+
+    // 1. Project → handoff config + responsible specialist.
+    const { data: legacyLinks } = await instantlyDb
+      .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+    const { data: periodLinks } = await instantlyDb
+      .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+    const projectIds = [...(periodLinks ?? []), ...(legacyLinks ?? [])]
+      .map((l: { project_id: string }) => l.project_id)
+      .filter(Boolean);
+    if (projectIds.length === 0) return;
+
+    const { data: projects } = await main
+      .from('projects')
+      .select('handoff_email, handoff_legend, specialist_user_id')
+      .in('id', projectIds);
+    const project = (projects ?? []).find(
+      (p) =>
+        Boolean((p.handoff_email as string | null)?.trim()) &&
+        Boolean((p.handoff_legend as string | null)?.trim()),
+    ) as { handoff_email: string; handoff_legend: string; specialist_user_id: string | null } | undefined;
+    if (!project) return; // handoff not configured → off for this project
+
+    if (!project.specialist_user_id) {
+      workerLog('warn', `Handoff: campaign ${campaignId} project has no specialist_user_id — skip (only the responsible specialist may send)`);
+      return;
+    }
+
+    // 2. One handoff per qualification.
+    const { data: existing } = await instantlyDb
+      .from('instantly_pending_handoffs').select('id').eq('qualification_id', qualificationId).maybeSingle();
+    if (existing) return;
+
+    // 3. Reply target + sending mailbox.
+    const replyToUuid = opts.reply.id;
+    if (!replyToUuid) return;
+    let eaccount = (opts.reply as { eaccount?: string | null }).eaccount ?? null;
+    if (!eaccount) {
+      try {
+        const e = await instantly.getEmail(replyToUuid, { accountId: opts.accountId });
+        eaccount = (e as { eaccount?: string | null })?.eaccount ?? null;
+      } catch {
+        /* fall through to skip */
+      }
+    }
+    if (!eaccount) {
+      workerLog('warn', `Handoff: no eaccount for ${opts.leadEmail} (qual ${qualificationId}) — skip`);
+      return;
+    }
+
+    // 4. Generate the handoff reply from the project legend + lead context.
+    const draft = await generateHandoffReply(
+      {
+        leadReplyText: opts.leadReplyText,
+        lastOutboundText: opts.lastOutboundText,
+        leadName: opts.leadName,
+        framing: project.handoff_legend,
+      },
+      { apiKey: opts.apiKey },
+    );
+    if (!draft.trim()) return;
+
+    // 5. Responsible specialist name (display only).
+    let specialistName = 'ответственный';
+    const { data: prof } = await main
+      .from('profiles').select('full_name, email').eq('id', project.specialist_user_id).maybeSingle();
+    if (prof) specialistName = (prof.full_name as string) || (prof.email as string) || specialistName;
+
+    // 6. Post to Telegram with the Send button.
+    const token = handoffBotToken();
+    const chatId = handoffChatId();
+    if (!token || !chatId) {
+      workerLog('warn', 'Handoff: LEAD_ALERTS bot token/chat missing — skip post');
+      return;
+    }
+    const contactLabel = opts.leadName ? `${opts.leadName} (${opts.leadEmail})` : opts.leadEmail;
+    const text = [
+      '<b>🤝 Передача лида клиенту</b>',
+      `<b>Лид:</b> ${escapeHtml(contactLabel)}`,
+      opts.campaignName ? `<b>Кампания:</b> ${escapeHtml(opts.campaignName)}` : '',
+      `<b>Клиент в копию:</b> ${escapeHtml(project.handoff_email)}`,
+      `<b>Ответственный:</b> ${escapeHtml(specialistName)}`,
+      '',
+      '<b>Уйдёт лиду:</b>',
+      `<pre>${escapeHtml(draft.slice(0, 1500))}</pre>`,
+      '',
+      'Нажмите «Передать клиенту» — письмо уйдёт лиду, клиент в копии. Нажать может только ответственный.',
+    ].filter(Boolean).join('\n');
+
+    const messageId = await postHandoffMessage({
+      token,
+      chatId,
+      text,
+      callbackData: signHandoffCallback(qualificationId, token),
+      threadId: handoffThreadId(),
+    });
+    if (!messageId) {
+      workerLog('warn', `Handoff: failed to post TG message (qual ${qualificationId})`);
+      return;
+    }
+
+    // 7. Pending record the webhook handler acts on.
+    const { error: insErr } = await instantlyDb.from('instantly_pending_handoffs').insert({
+      qualification_id: qualificationId,
+      campaign_id: campaignId,
+      draft_text: draft,
+      reply_to_uuid: replyToUuid,
+      eaccount,
+      client_email: project.handoff_email,
+      responsible_user_id: project.specialist_user_id,
+      tg_chat_id: Number(chatId),
+      tg_message_id: messageId,
+      status: 'pending',
+    });
+    if (insErr) {
+      workerLog('error', `Handoff: pending insert failed (qual ${qualificationId}): ${insErr.message}`);
+    } else {
+      workerLog('info', `Handoff posted for ${opts.leadEmail} (qual ${qualificationId}); awaiting ${specialistName}`);
+    }
+  } catch (err) {
+    workerLog('error', `Handoff post failed (qual ${opts.qualificationId})`, err);
   }
 }
