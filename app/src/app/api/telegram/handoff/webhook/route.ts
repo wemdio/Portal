@@ -180,7 +180,7 @@ export async function POST(req: NextRequest) {
       token,
       chatId,
       messageId,
-      `✅ <b>Передано клиенту</b> — ${pending.client_email}\n(лиду ушёл ответ, клиент в копии)`,
+      `✅ <b>Передано клиенту</b> — ${pending.client_email}\n(лиду ушёл ответ, клиент в копии${replyAllCc.length ? ` + участники переписки: ${replyAllCc.join(', ')}` : ''})`,
     );
   }
   await answerCallback(token, cq.id, 'Передано клиенту ✅');

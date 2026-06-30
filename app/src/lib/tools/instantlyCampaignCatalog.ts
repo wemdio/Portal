@@ -254,6 +254,9 @@ export async function syncInstantlyCampaignAnalytics(): Promise<{ rows: number }
           name: typeof a.campaign_name === 'string' ? a.campaign_name : '',
           emails_sent_count: typeof a.emails_sent_count === 'number' ? a.emails_sent_count : null,
           open_count: typeof a.open_count === 'number' ? a.open_count : null,
+          // Уникальные открытия — для открываемости «на контакт» ≤100% (open_count
+          // считает повторные открытия → ставка вылетает за 100%). См. список /client.
+          open_count_unique: typeof a.open_count_unique === 'number' ? a.open_count_unique : null,
           reply_count: typeof a.reply_count === 'number' ? a.reply_count : null,
           reply_count_unique: typeof a.reply_count_unique === 'number' ? a.reply_count_unique : null,
           reply_count_automatic_unique:
@@ -425,6 +428,8 @@ export interface CampaignDbRow {
   status: number | null;
   emails_sent_count: number | null;
   open_count: number | null;
+  /** Уникальные открытия (≤ contacted_count) — открываемость «на контакт» ≤100%. */
+  open_count_unique: number | null;
   reply_count: number | null;
   /** Уникальные живые ответившие из /campaigns/analytics (страница аналитики Instantly). */
   reply_count_unique: number | null;
@@ -450,7 +455,7 @@ export async function readCampaignAnalyticsFromDb(allowedIds: string[]): Promise
   const { data, error } = await supabaseAdmin
     .from('instantly_campaign_catalog')
     .select(
-      'id,name,status,emails_sent_count,open_count,reply_count,reply_count_unique,reply_count_automatic_unique,new_leads_contacted_count,contacted_count,bounced_count,unsubscribed_count,leads_count,analytics_synced_at',
+      'id,name,status,emails_sent_count,open_count,open_count_unique,reply_count,reply_count_unique,reply_count_automatic_unique,new_leads_contacted_count,contacted_count,bounced_count,unsubscribed_count,leads_count,analytics_synced_at',
     )
     .in('id', allowedIds);
 
@@ -512,7 +517,9 @@ export function buildClientReport(rows: CampaignDbRow[]): ClientReportResult {
   for (const c of rows) {
     const contacts = n(c.new_leads_contacted_count);
     const sent = n(c.emails_sent_count);
-    const opened = n(c.open_count);
+    // Открытия = УНИКАЛЬНЫЕ (≤ contacted → ставка ≤100%), как на детальной/списке.
+    // Фоллбэк на open_count, пока синк не заполнил колонку (тогда может быть >100%).
+    const opened = c.open_count_unique != null ? n(c.open_count_unique) : n(c.open_count);
     // «Ответы как в списке Instantly» = уникальные живые + уникальные авто-ответы
     // (так список Instantly считает REPLIED). Согласовано со страницей кампаний /
     // деталью / дашбордом. Фоллбэк на reply_count, пока синк не заполнил колонки.
