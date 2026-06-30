@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { handleClientReplyBotMessage, type ClientReplyBotMessage } from '@/lib/clientReplyBot/handleUpdate';
 import { logError } from '@/lib/loggerServer';
-import { telegramWebhookSecretOk } from '@/lib/telegram/webhookSecret';
+import { telegramWebhookAllowed } from '@/lib/telegram/webhookSecret';
+import { getClientRepliesBotToken } from '@/lib/clientReplyBot/bot';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,9 +20,9 @@ function isDuplicate(chatId: number, messageId: number): boolean {
 }
 
 export async function POST(req: NextRequest) {
-  // Reject forged webhook calls (see telegramWebhookSecretOk). No-op until
-  // CLIENT_REPLIES_WEBHOOK_SECRET is set + setWebhook re-run with that token.
-  if (!telegramWebhookSecretOk(req, process.env.CLIENT_REPLIES_WEBHOOK_SECRET)) {
+  // Reject forged webhook calls. No-op until the webhook is re-registered (register
+  // route auto-sets the derived secret) AND TELEGRAM_WEBHOOK_SECRET_ENFORCED=1.
+  if (!telegramWebhookAllowed(req, getClientRepliesBotToken())) {
     return NextResponse.json({ ok: true });
   }
 
