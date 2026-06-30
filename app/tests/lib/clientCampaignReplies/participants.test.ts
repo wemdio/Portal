@@ -2,6 +2,7 @@ import type { Email } from '@/lib/instantly/types';
 import {
   getEmailRecipients,
   computeReplyAllCc,
+  computeReplyAllRecipients,
   mergeCcLists,
 } from '@/lib/clientCampaignReplies/participants';
 
@@ -71,6 +72,26 @@ describe('computeReplyAllCc', () => {
       to_address_json: [{ address: 'ourbox@us.com' }],
     });
     expect(computeReplyAllCc(original, { eaccount: 'ourbox@us.com', leadEmail: 'lead@co.com' })).toEqual([]);
+  });
+});
+
+describe('computeReplyAllRecipients', () => {
+  // Same selection as computeReplyAllCc but returns Recipient[] WITH names —
+  // drives the composer "останутся в копии" preview.
+  it('keeps looped-in participants with their display names', () => {
+    const original = email({
+      from_address_email: 'j.generalova@rocketf.com',
+      to_address_json: [
+        { address: 'admin@pitchstudio.ru', name: 'Анастасия' },
+        { address: 's.bespalova@rocketf.com', name: 'Svetlana' },
+      ],
+    });
+    expect(
+      computeReplyAllRecipients(original, {
+        eaccount: 'admin@pitchstudio.ru',
+        leadEmail: 'j.generalova@rocketf.com',
+      }),
+    ).toEqual([{ email: 's.bespalova@rocketf.com', name: 'Svetlana' }]);
   });
 });
 

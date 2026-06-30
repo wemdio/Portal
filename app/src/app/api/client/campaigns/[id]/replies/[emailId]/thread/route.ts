@@ -5,6 +5,8 @@ import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { getEmail, listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToThreadMessage } from '@/lib/clientCampaignReplies/mapEmail';
+import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
+import { computeReplyAllRecipients } from '@/lib/clientCampaignReplies/participants';
 import { recordEmailRead } from '@/lib/clientCampaignReplies/clientEmailReads';
 import type { ClientReplyThread } from '@/lib/clientCampaignReplies/types';
 import { logError } from '@/lib/loggerServer';
@@ -93,9 +95,23 @@ export async function GET(
       return tb - ta;
     });
 
+    // Reply preview for the composer: who a reply goes TO (the lead) and who is
+    // auto-kept in CC («ответить всем») — the same set the reply route applies,
+    // so the client SEES exactly who stays in copy before sending.
+    const eaccount = findEaccountForReply({ originalEmail: original, threadEmails: candidates });
+    const fromName =
+      Array.isArray(original.from_address_json) && typeof original.from_address_json[0]?.name === 'string'
+        ? original.from_address_json[0].name.trim() || null
+        : null;
+    const replyToEmail = original.from_address_email ?? leadEmail ?? null;
+    const reply_to = replyToEmail ? { email: replyToEmail, name: fromName } : null;
+    const reply_all_cc = computeReplyAllRecipients(original, { eaccount, leadEmail });
+
     const payload: ClientReplyThread = {
       thread_id: threadId,
       messages,
+      reply_to,
+      reply_all_cc,
     };
     return NextResponse.json(payload);
   } catch (err) {

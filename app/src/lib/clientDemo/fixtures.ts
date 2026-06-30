@@ -487,6 +487,8 @@ export function getDemoThread(campaignId: string, emailId: string) {
         cc_recipients: [],
       },
     ],
+    reply_to: reply.from_email ? { email: reply.from_email, name: reply.from_name ?? null } : null,
+    reply_all_cc: [],
   };
 }
 
