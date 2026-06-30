@@ -42,6 +42,19 @@ interface HistoryItem {
   text: string;
 }
 
+/**
+ * Thrown when the upload POST gets killed by a gateway/upstream timeout
+ * (nginx 502/503/504) — the file is still being processed on the server,
+ * we just lost the response channel. The caller should fall through to
+ * the progress-polling code path instead of telling the user it failed.
+ */
+class UpstreamTimeoutError extends Error {
+  constructor(public readonly status: number) {
+    super(`Upstream timeout (HTTP ${status})`);
+    this.name = 'UpstreamTimeoutError';
+  }
+}
+
 async function uploadForTranscription(
   file: File,
   jobId: string,
@@ -72,6 +85,12 @@ async function uploadForTranscription(
   if (!res.ok) {
     if (res.status === 413) {
       throw new Error('Файл слишком большой для загрузки на сервер.');
+    }
+    // 502/503/504 = nginx couldn't reach upstream in time. The worker is
+    // very likely still chewing on our file — bail out of the upload promise
+    // and let the polling path detect completion when the worker finishes.
+    if (res.status === 502 || res.status === 503 || res.status === 504) {
+      throw new UpstreamTimeoutError(res.status);
     }
     throw new Error(
       json?.error ||
@@ -316,20 +335,27 @@ export default function AudioTranscribeToolPage() {
       const aborted = err instanceof DOMException && err.name === 'AbortError';
       const networkFailed = err instanceof TypeError
         && /(fetch failed|failed to fetch|networkerror)/i.test(err.message);
+      // Nginx couldn't reach the upstream in time but the worker is still
+      // crunching our file — same recovery as a hard network drop.
+      const upstreamTimeout = err instanceof UpstreamTimeoutError;
       const message = aborted
         ? 'Расшифровка остановлена. Для продолжения запустите её заново с нуля.'
         : (err instanceof Error ? err.message : 'Неизвестная ошибка');
       if (aborted || cancelRequestedRef.current) {
         setProgressStage('cancelled');
         setProgressHint('Расшифровка остановлена');
-      } else if (networkFailed) {
+      } else if (networkFailed || upstreamTimeout) {
         shouldAwaitByProgress = true;
-        setProgressHint('Соединение потеряно, ожидаем завершение по прогрессу...');
+        setProgressHint(
+          upstreamTimeout
+            ? 'Файл всё ещё расшифровывается на сервере, ждём результат...'
+            : 'Соединение потеряно, ожидаем завершение по прогрессу...',
+        );
       } else {
         setProgressStage('error');
         setProgressHint(message);
       }
-      if (!networkFailed) {
+      if (!networkFailed && !upstreamTimeout) {
         setError(message);
         setResult(null);
       }
