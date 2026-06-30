@@ -370,11 +370,33 @@ export async function getForumTopicsMtproto(chatId: number): Promise<MtprotoForu
         }
       }
     } catch {
-      // topic 1 = "General" in most forum groups
-      if (topicId === 1) {
-        topics.push({ id: 1, title: 'General' });
-      }
+      // topic 1 = "General" in most forum groups — see fallback below.
     }
+  }
+
+  // The General topic of a forum has no MessageActionTopicCreate (it's
+  // implicit at chat creation), so the loop above never pushes it. Add it
+  // explicitly if we haven't yet — using the channel title as a hint when
+  // General was renamed (e.g. «Звонки с клиентами»). Without this entry the
+  // UI dropdown is missing General and users have no way to add it.
+  if (!topics.find((t) => t.id === 1)) {
+    let generalTitle = 'General';
+    try {
+      const full = await c.invoke(new Api.channels.GetFullChannel({ channel: peer as Api.InputPeerChannel }));
+      const chats = 'chats' in full ? full.chats : [];
+      const expectedId = Math.abs(chatId) - 1_000_000_000_000;
+      const chat = chats.find((ch) => {
+        const raw = (ch as unknown as { id?: bigint | number | string }).id;
+        return raw != null && Number(raw) === expectedId;
+      });
+      const title = (chat as unknown as { title?: unknown })?.title;
+      if (typeof title === 'string' && title.length > 0) {
+        generalTitle = `${title} (General)`;
+      }
+    } catch {
+      // Best-effort — fall back to plain "General" label.
+    }
+    topics.push({ id: 1, title: generalTitle });
   }
 
   topics.sort((a, b) => a.id - b.id);
