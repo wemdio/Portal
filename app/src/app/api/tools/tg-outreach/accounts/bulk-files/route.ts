@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { sqliteBufferToSessionString } from '@/lib/telegram/sessionUtils';
 
 export const dynamic = 'force-dynamic';
 
@@ -115,6 +116,7 @@ export async function POST(req: NextRequest) {
       if (insertError) return jsonError(insertError.message, 500);
 
       const ids = inserted ?? [];
+      const sessionConvertErrors: Array<{ base: string; error: string }> = [];
       if (supabaseAdmin) {
         for (let i = 0; i < ordered.length; i++) {
           const { base, sessionBuf } = ordered[i];
@@ -128,15 +130,40 @@ export async function POST(req: NextRequest) {
           if (uploadErr) {
             return jsonError(`Не удалось загрузить .session для ${base}: ${uploadErr.message}`, 500);
           }
+
+          // Convert the SQLite blob to a gramJS StringSession and persist it
+          // alongside session_file_path. Without this the worker falls back to
+          // re-parsing the SQLite every cycle (gramClient.ts), a code path that
+          // empirically caused getDialogs to hang for 180s on multi-DC sessions
+          // and triggered the per-account degraded auto-disable. A failed
+          // conversion is non-fatal: the row keeps session_file_path so the
+          // legacy path remains available, and the error is surfaced in the
+          // response so the operator can re-upload via the upload-session route.
+          let sessionData = '';
+          try {
+            sessionData = await sqliteBufferToSessionString(sessionBuf);
+          } catch (e) {
+            sessionConvertErrors.push({
+              base,
+              error: e instanceof Error ? e.message : String(e),
+            });
+          }
+
           await db
             .from('tg_outreach_accounts')
-            .update({ session_file_path: path })
+            .update({ session_file_path: path, session_data: sessionData })
             .eq('id', row.id);
         }
       }
 
       return NextResponse.json(
-        { items: inserted ?? [], count: ids.length },
+        {
+          items: inserted ?? [],
+          count: ids.length,
+          ...(sessionConvertErrors.length
+            ? { session_convert_errors: sessionConvertErrors }
+            : {}),
+        },
         { status: 201 },
       );
     },
