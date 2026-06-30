@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { handleAgentMessage, handleCallbackQuery } from '@/lib/telegramAgent/agent';
 import { logError } from '@/lib/loggerServer';
 import { isInAppBotEnabled } from '@/lib/adminBots/inAppState';
+import { telegramWebhookSecretOk } from '@/lib/telegram/webhookSecret';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 120;
@@ -19,6 +20,12 @@ function isDuplicate(chatId: number, messageId: number): boolean {
 }
 
 export async function POST(req: NextRequest) {
+  // Reject forged webhook calls (see telegramWebhookSecretOk). No-op until
+  // TELEGRAM_AGENT_WEBHOOK_SECRET is set + setWebhook re-run with that token.
+  if (!telegramWebhookSecretOk(req, process.env.TELEGRAM_AGENT_WEBHOOK_SECRET)) {
+    return NextResponse.json({ ok: true });
+  }
+
   const enabled = await isInAppBotEnabled('tg-agent');
   if (!enabled) {
     return NextResponse.json({ ok: true });
