@@ -472,6 +472,8 @@ export function getDemoThread(campaignId: string, emailId: string) {
         from_email: reply.from_email,
         from_name: reply.from_name,
         body_text: reply.body,
+        to_recipients: [{ email: 'team@demo-agency.example', name: 'OutreachOS · Команда' }],
+        cc_recipients: [],
       },
       {
         id: `${reply.id}-outbound`,
@@ -481,6 +483,8 @@ export function getDemoThread(campaignId: string, emailId: string) {
         from_email: 'team@demo-agency.example',
         from_name: 'OutreachOS · Команда',
         body_text: `Здравствуйте!\n\n${getDemoOutboundBody(campaignId)}\n\nЕсли тема актуальна — отвечайте на это письмо, обсудим детали.\n\nС уважением,\nКоманда OutreachOS`,
+        to_recipients: reply.from_email ? [{ email: reply.from_email, name: reply.from_name ?? null }] : [],
+        cc_recipients: [],
       },
     ],
   };

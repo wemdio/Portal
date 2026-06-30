@@ -385,6 +385,7 @@ export interface Email {
   body?: { html?: string; text?: string } | string;
   from_address_email?: string;
   to_address_email_list?: string;
+  cc_address_email_list?: string;
   eaccount?: string;
   lead?: string;
   campaign_id?: string;
@@ -398,6 +399,7 @@ export interface Email {
   content_preview?: string;
   from_address_json?: { address: string; name?: string }[];
   to_address_json?: { address: string; name?: string }[];
+  cc_address_json?: { address: string; name?: string }[];
   [key: string]: unknown;
 }
 

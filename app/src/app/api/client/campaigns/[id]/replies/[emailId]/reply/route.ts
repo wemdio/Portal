@@ -4,6 +4,7 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { getEmail, listEmails, replyToEmail } from '@/lib/instantly/client';
 import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
+import { computeReplyAllCc, mergeCcLists } from '@/lib/clientCampaignReplies/participants';
 import { validateReplyInput } from '@/lib/clientCampaignReplies/validate';
 import { textToReplyHtml } from '@/lib/clientCampaignReplies/bodyHtml';
 import { logAudit, logError } from '@/lib/loggerServer';
@@ -68,6 +69,15 @@ export async function POST(
       return jsonError('Не удалось определить аккаунт отправки. Попробуйте позже.', 400);
     }
 
+    // «Ответить всем» по умолчанию: сохраняем всех, кого лид завёл в тред (То/CC
+    // исходного письма, кроме нашего ящика и самого лида — он уйдёт в «Кому» через
+    // reply_to_uuid), плюс то, что клиент дописал в CC руками. Иначе подключённого
+    // лидом коллегу/ЛПР молча теряем (был инцидент: лид добавил линейного
+    // продюсера, наш ответ ушёл без него, лид написал «вы удалили из копии»).
+    const replyAllCc = computeReplyAllCc(original, { eaccount, leadEmail: original.lead });
+    const manualCc = validation.cc ? validation.cc.split(',') : [];
+    const mergedCc = mergeCcLists(replyAllCc, manualCc);
+
     await replyToEmail(
       {
         reply_to_uuid: emailId,
@@ -79,7 +89,7 @@ export async function POST(
           html: textToReplyHtml(validation.body_text!),
           text: validation.body_text!,
         },
-        ...(validation.cc ? { cc_address_email_list: validation.cc } : {}),
+        ...(mergedCc.length ? { cc_address_email_list: mergedCc.join(', ') } : {}),
         ...(validation.bcc ? { bcc_address_email_list: validation.bcc } : {}),
       },
       instantlyRequestOptions,
@@ -99,7 +109,7 @@ export async function POST(
     void logAudit('client.campaign.replies.reply.sent', 'Client replied via Instantly', {
       campaignId,
       emailId,
-      cc_count: validation.cc ? validation.cc.split(',').length : 0,
+      cc_count: mergedCc.length,
       bcc_count: validation.bcc ? validation.bcc.split(',').length : 0,
       userId,
     });

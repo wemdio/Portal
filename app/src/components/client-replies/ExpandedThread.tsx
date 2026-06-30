@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { isAuthExpiredError } from '@/lib/authFetch';
-import type { ClientReplyThread, ThreadMessage } from '@/lib/clientCampaignReplies/types';
+import type { ClientReplyThread, ThreadMessage, Recipient } from '@/lib/clientCampaignReplies/types';
 
 /**
  * The expandable lead-reply thread block. Shows the full message history
@@ -47,6 +47,11 @@ function formatReplyDate(iso: string | null): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+/** «Имя <email>» (или просто email), через запятую — для строк «Кому»/«Копия». */
+function formatRecipients(list: Recipient[]): string {
+  return list.map((r) => (r.name ? `${r.name} <${r.email}>` : r.email)).join(', ');
 }
 
 /**
@@ -106,6 +111,25 @@ function ThreadMessageCard({ msg }: { msg: ThreadMessage }) {
           {formatReplyDate(msg.timestamp)}
         </span>
       </div>
+      {(msg.to_recipients.length > 0 || msg.cc_recipients.length > 0) && (
+        <div
+          className="text-[10px] leading-snug mb-1.5 space-y-0.5"
+          style={{ color: 'var(--cp-paper-faint)' }}
+        >
+          {msg.to_recipients.length > 0 && (
+            <p className="truncate">
+              <span style={{ color: 'var(--cp-paper-mute)' }}>Кому: </span>
+              {formatRecipients(msg.to_recipients)}
+            </p>
+          )}
+          {msg.cc_recipients.length > 0 && (
+            <p className="truncate">
+              <span style={{ color: 'var(--cp-paper-mute)' }}>Копия: </span>
+              {formatRecipients(msg.cc_recipients)}
+            </p>
+          )}
+        </div>
+      )}
       {msg.subject && (
         <p
           className="text-[11px] font-semibold mb-1 truncate"
@@ -185,9 +209,12 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
         type="text"
         value={cc}
         onChange={(e) => setCc(e.target.value)}
-        placeholder="CC (через запятую): boss@company.ru, team@..."
+        placeholder="Добавить ещё в копию (через запятую)"
         className="ds-input w-full text-[11px] sm:text-xs"
       />
+      <p className="text-[10px] leading-snug" style={{ color: 'var(--cp-paper-faint)' }}>
+        Участники переписки останутся в копии автоматически («ответить всем») — никого не потеряем.
+      </p>
       {showBcc ? (
         <input
           type="text"
