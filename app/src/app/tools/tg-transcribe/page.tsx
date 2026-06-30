@@ -123,9 +123,17 @@ function formatBytes(bytes: number | null) {
 
 function formatDuration(seconds: number | null) {
   if (seconds == null) return '';
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${s.toString().padStart(2, '0')}`;
+  // Telegram returns duration as a float (e.g. 878.333…). The old version
+  // did `seconds % 60` which preserved the fractional part, then
+  // `.toString().padStart(2, '0')` did nothing to round it — the user saw
+  // "14:38.33299999999997". Floor everything to whole seconds and add an
+  // H:MM:SS branch for videos longer than an hour.
+  const total = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
 function formatDate(iso: string) {
