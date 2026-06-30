@@ -123,156 +123,106 @@ function PeriodDialogField({
   );
 }
 
-/* ── KPI pace tooltip (hover on KPI Факт cell) ── */
+/* ── Pace tooltip (hover on «KPI Факт» / «Контакты» cell) ──────────────────
+ *
+ * Позиционируется через `position: fixed` от bounding rect якоря с авто-
+ * флипом вверх/вниз по доступному месту во вьюпорте. Раньше панель была
+ * `absolute … bottom-full` внутри ячейки, а таблица живёт в
+ * overflow-hidden + overflow-auto контейнерах — поэтому у верхних строк
+ * всплывашка уезжала вверх под липкий тулбар и обрезалась скролл-
+ * контейнером («заползала за верхнюю панель»). `fixed` не клипается
+ * overflow-предками — тот же приём, что в ItemPopover ниже.
+ *
+ * KPI и контакты были двумя почти одинаковыми компонентами; объединены в
+ * один с `kind`, чтобы логика позиционирования не разъезжалась.
+ */
+const PACE_TOOLTIP_WIDTH = 256; // = w-64 (px)
+const PACE_TOOLTIP_EST_HEIGHT = 200; // оценка высоты панели для выбора направления флипа
 
-function KpiPaceTooltip({
-  projectId, periodId, kpiPlan, kpiFact, deadline, children,
+function PaceTooltip({
+  kind, projectId, periodId, plan, fact, deadline, children,
 }: {
-  projectId: string; periodId?: string | null; kpiPlan: number; kpiFact: number; deadline: string | null;
+  kind: 'kpi' | 'contacts';
+  projectId: string;
+  periodId?: string | null;
+  /** kpi_plan (kind=kpi) либо contacts_obligation (kind=contacts). ≤0 ⇒ тултип отключён. */
+  plan: number;
+  /** kpi_fact (kind=kpi) либо contacts_done (kind=contacts). */
+  fact: number;
+  deadline: string | null;
   children: React.ReactNode;
 }) {
   const [pace, setPace] = useState<PaceData | null>(null);
   const [loading, setLoading] = useState(false);
   const [show, setShow] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number; openUp: boolean } | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const anchorRef = useRef<HTMLDivElement | null>(null);
 
   const loadPace = async () => {
-    if (pace || loading || kpiPlan <= 0) return;
+    if (pace || loading || plan <= 0) return;
     setLoading(true);
     try {
-      const result = await loadKpiPaceData(supabase, {
-        projectId,
-        periodId,
-        kpiPlan,
-        kpiFact,
-        deadline,
-      });
+      const result =
+        kind === 'kpi'
+          ? await loadKpiPaceData(supabase, { projectId, periodId, kpiPlan: plan, kpiFact: fact, deadline })
+          : await loadContactsPaceData(supabase, { projectId, periodId, obligation: plan, done: fact, deadline });
       if (result) setPace(result);
     } catch { /* ignore */ }
     finally { setLoading(false); }
   };
 
   const handleEnter = () => {
-    timerRef.current = setTimeout(() => { setShow(true); void loadPace(); }, 400);
+    timerRef.current = setTimeout(() => {
+      const el = anchorRef.current;
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        const spaceBelow = window.innerHeight - rect.bottom;
+        const spaceAbove = rect.top;
+        // Флип вверх только если снизу не помещается, а сверху места больше.
+        // У верхних строк снизу места хватает ⇒ панель открывается ВНИЗ и не
+        // уезжает под липкий тулбар (исходный баг).
+        const openUp = spaceBelow < PACE_TOOLTIP_EST_HEIGHT && spaceAbove > spaceBelow;
+        const center = rect.left + rect.width / 2;
+        const left = Math.min(
+          Math.max(8, center - PACE_TOOLTIP_WIDTH / 2),
+          window.innerWidth - PACE_TOOLTIP_WIDTH - 8,
+        );
+        setPos({ top: openUp ? rect.top : rect.bottom, left, openUp });
+      }
+      setShow(true);
+      void loadPace();
+    }, 400);
   };
   const handleLeave = () => {
     if (timerRef.current) clearTimeout(timerRef.current);
     setShow(false);
   };
 
-  if (kpiPlan <= 0) return <>{children}</>;
+  if (plan <= 0) return <>{children}</>;
+
+  const title = kind === 'kpi' ? 'Анализ KPI' : 'Анализ темпа';
+  const doneMsg = kind === 'kpi' ? 'KPI выполнен' : 'Обязательство выполнено';
 
   return (
-    <div className="relative" onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
+    <div ref={anchorRef} className="relative" onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
       {children}
-      {show && (
-        <div className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 rounded-lg border border-zinc-200 bg-white p-3 shadow-xl text-xs text-zinc-700 pointer-events-none">
-          <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px border-4 border-transparent border-t-white" />
-          <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-zinc-200" />
+      {show && pos && (
+        <div
+          className="fixed z-50 w-64 rounded-lg border border-zinc-200 bg-white p-3 shadow-xl text-xs text-zinc-700 pointer-events-none"
+          style={
+            pos.openUp
+              ? { left: pos.left, bottom: window.innerHeight - pos.top + 8 }
+              : { left: pos.left, top: pos.top + 8 }
+          }
+        >
           {loading ? (
             <div className="text-center text-zinc-400">Загрузка...</div>
           ) : !pace || pace.dataPoints < 2 ? (
             <div className="text-center text-zinc-400">Недостаточно данных (нужно 2+ дня)</div>
           ) : (
             <div className="space-y-1.5">
-              <div className="font-semibold text-zinc-900 text-[13px]">Анализ KPI</div>
-              <div className="flex justify-between">
-                <span className="text-zinc-500">Темп</span>
-                <span className="font-medium tabular-nums">~{formatPaceValue(pace.avgPerDay)}/день</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-zinc-500">Осталось</span>
-                <span className="font-medium tabular-nums">{pace.remaining}</span>
-              </div>
-              {pace.forecastDays !== null && pace.forecastDays > 0 && (
-                <div className="flex justify-between">
-                  <span className="text-zinc-500">Прогноз</span>
-                  <span className="font-medium tabular-nums">{pace.forecastDays} дн. ({pace.forecastDate})</span>
-                </div>
-              )}
-              {pace.forecastDays === 0 && (
-                <div className="text-emerald-600 font-medium">KPI выполнен</div>
-              )}
-              {pace.deadline && (
-                <>
-                  <div className="flex justify-between">
-                    <span className="text-zinc-500">Дедлайн</span>
-                    <span className="font-medium">{new Date(pace.deadline).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}</span>
-                  </div>
-                  {pace.onTrack !== null && (
-                    <div className={`flex items-center gap-1 font-medium ${pace.onTrack ? 'text-emerald-600' : 'text-red-500'}`}>
-                      {pace.onTrack ? '✓ Успеваем' : '✗ Не успеваем'}
-                      {!pace.onTrack && pace.requiredPace !== null && (
-                        <span className="text-zinc-400 font-normal ml-1">(нужно ~{pace.requiredPace}/день)</span>
-                      )}
-                    </div>
-                  )}
-                </>
-              )}
-              <div className="text-[10px] text-zinc-400 pt-0.5 border-t border-zinc-100">
-                На основе {pace.periodDays} дн. ({pace.dataPoints} точек)
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ── Contacts pace tooltip (hover on contacts cell) ── */
-
-function ContactsPaceTooltip({
-  projectId, periodId, obligation, done, deadline, children,
-}: {
-  projectId: string; periodId?: string | null; obligation: number; done: number; deadline: string | null;
-  children: React.ReactNode;
-}) {
-  const [pace, setPace] = useState<PaceData | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [show, setShow] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const loadPace = async () => {
-    if (pace || loading || obligation <= 0) return;
-    setLoading(true);
-    try {
-      const result = await loadContactsPaceData(supabase, {
-        projectId,
-        periodId,
-        obligation,
-        done,
-        deadline,
-      });
-      if (result) setPace(result);
-    } catch { /* ignore */ }
-    finally { setLoading(false); }
-  };
-
-  const handleEnter = () => {
-    timerRef.current = setTimeout(() => { setShow(true); void loadPace(); }, 400);
-  };
-  const handleLeave = () => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    setShow(false);
-  };
-
-  if (obligation <= 0) return <>{children}</>;
-
-  return (
-    <div className="relative" onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
-      {children}
-      {show && (
-        <div className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 rounded-lg border border-zinc-200 bg-white p-3 shadow-xl text-xs text-zinc-700 pointer-events-none">
-          <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px border-4 border-transparent border-t-white" />
-          <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-zinc-200" />
-          {loading ? (
-            <div className="text-center text-zinc-400">Загрузка...</div>
-          ) : !pace || pace.dataPoints < 2 ? (
-            <div className="text-center text-zinc-400">Недостаточно данных (нужно 2+ дня)</div>
-          ) : (
-            <div className="space-y-1.5">
-              <div className="font-semibold text-zinc-900 text-[13px]">Анализ темпа</div>
+              <div className="font-semibold text-zinc-900 text-[13px]">{title}</div>
               <div className="flex justify-between">
                 <span className="text-zinc-500">Темп</span>
                 <span className="font-medium tabular-nums">~{formatPaceValue(pace.avgPerDay)}/день</span>
@@ -288,7 +238,7 @@ function ContactsPaceTooltip({
                 </div>
               )}
               {pace.forecastDays === 0 && (
-                <div className="text-emerald-600 font-medium">Обязательство выполнено</div>
+                <div className="text-emerald-600 font-medium">{doneMsg}</div>
               )}
               {pace.deadline && (
                 <>
@@ -2058,11 +2008,12 @@ export function ProjectList() {
                           const kpiPlanNum = parseInt(project.kpi_plan ?? '0', 10) || 0;
                           const kpiFactNum = parseInt(project.kpi_fact ?? '0', 10) || 0;
                           return (
-                          <KpiPaceTooltip
+                          <PaceTooltip
+                            kind="kpi"
                             projectId={project.id}
                             periodId={activePeriodsByProjectId.get(project.id)?.id ?? null}
-                            kpiPlan={kpiPlanNum}
-                            kpiFact={kpiFactNum}
+                            plan={kpiPlanNum}
+                            fact={kpiFactNum}
                             deadline={project.deadline ?? null}
                           >
                           <div className="flex items-center gap-1">
@@ -2100,7 +2051,7 @@ export function ProjectList() {
                               </div>
                             )}
                           </div>
-                          </KpiPaceTooltip>
+                          </PaceTooltip>
                           );
                         })()}
                       </td>
@@ -2181,11 +2132,12 @@ export function ProjectList() {
                             : undefined;
 
                           return (
-                            <ContactsPaceTooltip
+                            <PaceTooltip
+                              kind="contacts"
                               projectId={project.id}
                               periodId={activePeriodsByProjectId.get(project.id)?.id ?? null}
-                              obligation={obligation}
-                              done={done}
+                              plan={obligation}
+                              fact={done}
                               deadline={project.deadline ?? null}
                             >
                             <div
@@ -2213,7 +2165,7 @@ export function ProjectList() {
                                 <span className="text-zinc-300">—</span>
                               )}
                             </div>
-                            </ContactsPaceTooltip>
+                            </PaceTooltip>
                           );
                         })()}
                       </td>
