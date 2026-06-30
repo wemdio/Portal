@@ -180,6 +180,8 @@ function LeadDetail({
                 from_email: lead.lead_email ?? null,
                 from_name: lead.lead_name ?? null,
                 body_text: lead.reply_body ?? null,
+                to_recipients: [],
+                cc_recipients: [],
               }] : []}
             />
           </div>

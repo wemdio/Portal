@@ -34,6 +34,9 @@ export async function GET(
         'started_at, finished_at, error_message, expires_at',
     )
     .eq('id', id)
+    // Defense-in-depth: RLS already restricts to client_user_id = auth.uid(),
+    // but pin the owner explicitly so an id from another tenant can never leak.
+    .eq('client_user_id', user.id)
     .single();
 
   if (error || !data) {

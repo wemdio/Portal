@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { timingSafeEqual } from 'crypto';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { listInstantlyAccounts, resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { mskDayWindowUtc, toMskIso } from '@/lib/instantly/activity';
@@ -30,6 +31,14 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
+/** Constant-time string compare — avoids leaking the key via response timing. */
+function safeEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
+
 function resolvePartnerAccountId(): string {
   const env = (process.env.PARTNER_ACTIVITY_ACCOUNT_ID || '').trim();
   if (env) return resolveInstantlyAccountId(env);
@@ -47,7 +56,7 @@ export async function GET(req: NextRequest) {
   const auth = req.headers.get('authorization') || '';
   const bearer = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
   const key = bearer || (req.headers.get('x-api-key') || '').trim();
-  if (!key || key !== expected) return jsonError('Unauthorized', 401);
+  if (!key || !safeEqual(key, expected)) return jsonError('Unauthorized', 401);
 
   const sp = req.nextUrl.searchParams;
   const dateParam = sp.get('date')?.trim();

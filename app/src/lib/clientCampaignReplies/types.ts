@@ -38,6 +38,12 @@ export interface ClientRepliesPage {
  */
 export type ThreadDirection = 'inbound' | 'outbound';
 
+/** A To/CC participant of a message (address + optional display name). */
+export interface Recipient {
+  email: string;
+  name: string | null;
+}
+
 export interface ThreadMessage {
   id: string;
   direction: ThreadDirection;
@@ -46,6 +52,10 @@ export interface ThreadMessage {
   from_email: string | null;
   from_name: string | null;
   body_text: string | null;
+  /** Direct recipients (To) of this message — so the client sees who was looped in. */
+  to_recipients: Recipient[];
+  /** Carbon-copy (CC) recipients of this message. */
+  cc_recipients: Recipient[];
 }
 
 export interface ClientReplyThread {
