@@ -5,6 +5,7 @@ import {
   ensureTgApiReady,
   upsertBotChat,
   type TgMessage,
+  type VideoInfo,
   extractVideoInfo,
   processVideoMessage,
   saveErrorRecord,
@@ -231,33 +232,46 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
       }
 
       if (!m.isVideo) continue;
-
-      // Forward via Bot API to get the file_id + sender info processVideoMessage
-      // needs. This is the ONLY chat side-effect — and only for actual videos.
-      let forwarded: TgMessage | null;
-      try {
-        forwarded = await forwardAndInspect(chatId, m.id);
-      } catch {
+      if (!m.document) {
+        // No download ref on the MTProto msg (rare — non-Document video media,
+        // or the sender's file_reference expired). Skip rather than fall back
+        // to a bot forward; the whole point of this path is no chat spam.
+        await logInfo(
+          'tg-scan.mtproto.no-document',
+          `Skipping video msg ${m.id} in chat ${chatId} — no MTProto document ref`,
+          { chatId, topicId, messageId: m.id },
+        );
         continue;
       }
-      if (!forwarded) continue;
 
-      const videoInfo = extractVideoInfo(forwarded);
-      if (!videoInfo) continue;
+      // Build a synthetic Bot API-shape TgMessage + VideoInfo from the MTProto
+      // payload. processVideoMessage will see videoInfo.mtprotoDoc and take
+      // its direct-download branch — no Bot API forward, no chat side effects.
+      const videoInfo: VideoInfo = {
+        fileId: '',  // unused on the mtprotoDoc branch
+        fileSize: m.fileSize,
+        duration: m.duration,
+        filename: m.fileName ?? `video-${m.id}.mp4`,
+        mtprotoDoc: m.document,
+      };
 
       videosFound++;
 
       const syntheticMsg: TgMessage = {
-        ...forwarded,
         chat: { id: chatId },
         message_id: m.id,
-        // Tag the transcript with the topic that was requested in the job. MTProto
-        // already enforced the topic filter via getReplies (or fallback filter),
-        // so we don't need a per-message detectTopicId probe.
+        date: m.date,
         message_thread_id: topicId != null && topicId > 0 ? topicId : undefined,
+        caption: m.caption,
+        from: m.senderId != null
+          ? {
+              id: m.senderId,
+              first_name: m.senderName ?? `User ${m.senderId}`,
+            }
+          : undefined,
       };
 
-      const senderName = getSenderName(syntheticMsg);
+      const senderName = m.senderName ?? getSenderName(syntheticMsg);
       const videoIdx = videosFound;
 
       videos.push({

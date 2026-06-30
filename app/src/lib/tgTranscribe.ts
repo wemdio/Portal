@@ -1,7 +1,14 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { extractOrConvertToMp3, extractMp3FromFile, transcribeAudio } from '@/lib/transcription';
 import { logError, logInfo } from '@/lib/loggerServer';
-import { isMtprotoAvailable, downloadFileByFileId, downloadFileByFileIdToPath } from '@/lib/tgMtprotoDownload';
+import {
+  isMtprotoAvailable,
+  isUserMtprotoAvailable,
+  downloadFileByFileId,
+  downloadFileByFileIdToPath,
+  downloadMtprotoDocToPath,
+  type MtprotoDocumentRef,
+} from '@/lib/tgMtprotoDownload';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -155,6 +162,14 @@ export interface VideoInfo {
   fileSize: number | undefined;
   duration: number | undefined;
   filename: string;
+  /**
+   * When set, processVideoMessage downloads the video directly from MTProto
+   * using this reference and skips every Bot API path (getFile / forward /
+   * downloadFileByFileId). Populated by the MTProto forum scan path — that
+   * way the bot never has to forward the message into the source chat to
+   * obtain a file_id, which is what created the visible "→ <forward>" spam.
+   */
+  mtprotoDoc?: MtprotoDocumentRef;
 }
 
 export function extractVideoInfo(msg: TgMessage): VideoInfo | null {
@@ -361,10 +376,31 @@ export async function processVideoMessage(
     return { status: 'skipped_size', error: errorText };
   }
 
-  console.log(`[tg-transcribe] Processing ${videoInfo.filename} (${((videoInfo.fileSize ?? 0) / 1e6).toFixed(1)} MB), mtproto=${canUseMtproto}, large=${isLargeFile}, localApi=${isLocalApi()}`);
+  console.log(`[tg-transcribe] Processing ${videoInfo.filename} (${((videoInfo.fileSize ?? 0) / 1e6).toFixed(1)} MB), mtproto=${canUseMtproto}, large=${isLargeFile}, localApi=${isLocalApi()}, mtprotoDoc=${!!videoInfo.mtprotoDoc}`);
   onProgress?.({ phase: 'downloading', downloadedBytes: 0, totalBytes: videoInfo.fileSize });
 
-  if (canUseMtproto && isLargeFile) {
+  if (videoInfo.mtprotoDoc && isUserMtprotoAvailable()) {
+    // Direct MTProto download — used by the forum-topic scanner so the bot
+    // doesn't have to forward+delete the message in the source chat just to
+    // produce a file_id. The forward path was visible to chat members and
+    // generated push notifications even though the message got deleted right
+    // after; this branch skips it entirely.
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-tg-dl-'));
+    const ext = getExtFromFilename(videoInfo.filename);
+    const videoPath = path.join(tmpDir, `video${ext}`);
+    try {
+      await downloadMtprotoDocToPath(videoInfo.mtprotoDoc, videoPath, (downloaded, total) => {
+        onProgress?.({ phase: 'downloading', downloadedBytes: downloaded, totalBytes: total });
+      });
+      const stat = await fs.stat(videoPath);
+      fileSizeBytes = stat.size;
+      console.log(`[tg-transcribe] Downloaded ${videoInfo.filename} via MTProto-direct, ${(fileSizeBytes / 1e6).toFixed(1)} MB, converting...`);
+      onProgress?.({ phase: 'converting' });
+      mp3 = await extractMp3FromFile(videoPath);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  } else if (canUseMtproto && isLargeFile) {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-tg-dl-'));
     const ext = getExtFromFilename(videoInfo.filename);
     const videoPath = path.join(tmpDir, `video${ext}`);
