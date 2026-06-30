@@ -686,7 +686,17 @@ export async function getForumTopicMessagesMtproto(
   const peer = await resolvePeer(c, chatId);
   const limit = options.limit ?? 100;
   const offsetId = options.offsetId ?? 0;
-  const normalizedTopicId = topicId != null && topicId > 0 ? topicId : 0;
+  // Tristate input:
+  //   null → whole chat, no topic filter (used for non-forum chats).
+  //   0    → the General topic of a forum. Callers store 0 in the DB after
+  //          we migrated the General-renamed entry off of topic_id=1, but
+  //          Telegram itself addresses General by the channel-create message
+  //          (msg_id = 1). Normalize 0 → 1 so GetReplies(1) actually runs;
+  //          otherwise the function falls through to whole-chat GetHistory
+  //          and pulls in messages from neighbouring topics (29.06 incident:
+  //          scan of «Звонки с клиентами» returned a video from «Собеседования»).
+  //   >0   → specific named topic, unchanged.
+  const normalizedTopicId = topicId == null ? 0 : (topicId === 0 ? 1 : topicId);
 
   type HistoryResult = { messages: unknown[]; users?: unknown[]; chats?: unknown[] };
   let history: HistoryResult | null = null;
