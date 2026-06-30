@@ -236,9 +236,16 @@ export default function AudioTranscribeToolPage() {
     setError(null);
     setLoading(true);
     setCopied(false);
+    setResult(null);
     setProgressPercent(0);
     setProgressStage('queued');
-    setProgressHint('Подготовка файла...');
+    // Honest initial hint — until the worker accepts the job (couple of
+    // minutes for a big file: upload + ffmpeg), polling sees 404 and the
+    // UI is otherwise frozen. Telling the user the file size + a rough
+    // wait estimate beats "Подготовка файла..." in silence.
+    setProgressHint(
+      `Загружаем ${formatBytes(file.size)} на сервер... подождите 1–3 минуты до начала расшифровки`,
+    );
 
     const jobId = crypto.randomUUID();
     setActiveJobId(jobId);
@@ -618,18 +625,16 @@ export default function AudioTranscribeToolPage() {
 
           <div className="relative">
             <div className="max-h-72 min-h-[160px] overflow-auto rounded-xl bg-gray-50 px-3 py-2 text-xs leading-relaxed text-gray-800">
-              {loading && (
+              {result?.text ? (
+                <pre className="whitespace-pre-wrap break-words font-mono text-[11px]">
+                  {result.text}
+                </pre>
+              ) : loading ? (
                 <div className="flex h-full items-center justify-center text-gray-500">
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   Идёт расшифровка аудио...
                 </div>
-              )}
-              {!loading && result?.text && (
-                <pre className="whitespace-pre-wrap break-words font-mono text-[11px]">
-                  {result.text}
-                </pre>
-              )}
-              {!loading && !result?.text && (
+              ) : (
                 <div className="flex h-full items-center justify-center text-gray-400 text-xs">
                   Загрузите аудио и запустите расшифровку, чтобы увидеть текст здесь.
                 </div>
