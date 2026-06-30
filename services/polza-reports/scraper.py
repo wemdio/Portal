@@ -303,7 +303,7 @@ async def _get_analytics(page: Page, campaign: Campaign) -> Optional[CampaignAna
     # tables without it, default to 0). Map columns by header instead. Find the
     # per-letter table by its «Письмо» header (skips the «Статистика почт» table).
     col: dict[str, int] = {}
-    row_scope = page
+    letters_table = None
     for tbl in await page.locator("table").all():
         try:
             headers = [h.strip().lower() for h in await tbl.locator("thead th, thead td").all_inner_texts()]
@@ -311,23 +311,45 @@ async def _get_analytics(page: Page, campaign: Campaign) -> Optional[CampaignAna
             headers = []
         if not any(h.startswith("письмо") for h in headers):
             continue
+        candidate: dict[str, int] = {}
         for i, h in enumerate(headers):
             if h.startswith("письмо"):
-                col["name"] = i
+                candidate["name"] = i
             elif "отправл" in h:
-                col["sent"] = i
-            elif "ответ" in h:
-                col["replied"] = i
-            elif "открыл" in h:
-                col["opened"] = i
-        row_scope = tbl
-        break
+                candidate["sent"] = i
+            elif h.startswith("ответ"):  # startswith, so «Не ответили» can't match
+                candidate["replied"] = i
+            elif h.startswith("открыл"):
+                candidate["opened"] = i
+        # A real «Статистика писем» table has both a letter column and a replies
+        # column — require them so a decoy/«Итого» table headed «Письмо» is ignored.
+        if "name" in candidate and "replied" in candidate:
+            col = candidate
+            letters_table = tbl
+            break
+
+    if letters_table is None:
+        # Unrecognised layout (e.g. Coldy drops the <thead>, renames or localizes
+        # headers). Do NOT emit zero-stat letters from it — the formatter would then
+        # override the correct list/card totals with 0 and silently zero the whole
+        # campaign. Leave letters empty so the report falls back to list-level values.
+        logger.warning("Letters table header not recognised for %s — falling back to list totals", campaign.name)
+        return CampaignAnalytics(
+            connected=conn_val,
+            opened=open_val,
+            opened_pct=open_pct,
+            replied=rep_val,
+            replied_pct=rep_pct,
+            interested=int_val,
+            interested_pct=int_pct,
+            letters=letters,
+        )
 
     def _pick(texts: list[str], key: str) -> str:
         i = col.get(key)
         return texts[i] if (i is not None and i < len(texts)) else ""
 
-    letter_rows = await row_scope.locator("tbody tr").all()
+    letter_rows = await letters_table.locator("tbody tr").all()
     for lr in letter_rows:
         lcells = await lr.locator("td").all()
         if len(lcells) < 2:
