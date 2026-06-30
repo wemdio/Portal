@@ -4,6 +4,8 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import * as instantly from '@/lib/instantly/client';
 import { verifyHandoffCallback } from '@/lib/instantly/handoffCallback';
 import { handoffBotToken, answerCallback, editHandoffMessage } from '@/lib/instantly/handoffTelegram';
+import { computeReplyAllCc, mergeCcLists } from '@/lib/clientCampaignReplies/participants';
+import { logError } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
 
@@ -106,14 +108,34 @@ export async function POST(req: NextRequest) {
     .eq('id', qualificationId)
     .maybeSingle();
 
-  // Send: reply into the lead's thread with the client in CC.
+  // «Ответить всем»: к адресу клиента (handoff CC) добавляем участников, которых
+  // лид завёл в тред (То+CC оригинала, кроме нашего ящика и самого лида), иначе
+  // молча теряем подключённого лидом ЛПР/коллегу (как в инциденте 30.06). Хандофф —
+  // только «под ключ» = main-аккаунт, поэтому accountId не нужен (дефолт = main).
+  // getEmail best-effort: не достали оригинал → шлём как раньше, только клиенту.
+  let replyAllCc: string[] = [];
+  try {
+    const original = await instantly.getEmail(pending.reply_to_uuid as string);
+    replyAllCc = computeReplyAllCc(original, {
+      eaccount: pending.eaccount as string,
+      leadEmail: (qual?.lead_email as string | null) ?? null,
+    });
+  } catch (err) {
+    await logError('instantly.handoff.replyall_fetch_failed', err, {
+      pendingId: pending.id,
+      reply_to_uuid: pending.reply_to_uuid,
+    });
+  }
+  const ccList = mergeCcLists(replyAllCc, ((pending.client_email as string) ?? '').split(','));
+
+  // Send: reply into the lead's thread with the client + thread participants in CC.
   try {
     await instantly.replyToEmail({
       reply_to_uuid: pending.reply_to_uuid as string,
       eaccount: pending.eaccount as string,
       subject: buildReplySubject((qual?.reply_subject as string | null) ?? null),
       body: { text: pending.draft_text as string },
-      cc_address_email_list: pending.client_email as string,
+      ...(ccList.length ? { cc_address_email_list: ccList.join(', ') } : {}),
     });
   } catch (err) {
     await instDb
