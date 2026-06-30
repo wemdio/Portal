@@ -51,7 +51,24 @@ export type ExtractorKey =
   // Заменил собой 8 event_* ключей (открытие/ребрендинг/ремонт/география +
   // их summaries) — на практике event-сигналы у большинства компаний были
   // Нет/Нет/Нет/—. Один читабельный пост даёт больше пользы для outreach.
-  | 'social_latest_news';
+  | 'social_latest_news'
+  // ── Сервисы сквозной аналитики / коллтрекинга (matrix-пресет) ──
+  // 13 по-сервисных ключей ('да'/'') + сводный 'analytics_services'.
+  // Источник правды по сервисам и regex'ам — analyticsServicesDetector.ts.
+  | 'svc_roistat'
+  | 'svc_k50'
+  | 'svc_owox_bi'
+  | 'svc_envybox'
+  | 'svc_smartis'
+  | 'svc_calltouch'
+  | 'svc_comagic'
+  | 'svc_mango_office'
+  | 'svc_ringostat'
+  | 'svc_callibri'
+  | 'svc_uiscom'
+  | 'svc_primegate'
+  | 'svc_alloka'
+  | 'analytics_services';
 
 export const ALL_EXTRACTOR_KEYS: ExtractorKey[] = [
   'stack',
@@ -71,6 +88,22 @@ export const ALL_EXTRACTOR_KEYS: ExtractorKey[] = [
   'blog_last_post',
   'social_media',
   'social_latest_news',
+  // Сервисы сквозной аналитики (matrix-пресет). Порядок = порядок колонок
+  // (sanitizeExtractorList упорядочивает выбор по этому массиву).
+  'svc_roistat',
+  'svc_k50',
+  'svc_owox_bi',
+  'svc_envybox',
+  'svc_smartis',
+  'svc_calltouch',
+  'svc_comagic',
+  'svc_mango_office',
+  'svc_ringostat',
+  'svc_callibri',
+  'svc_uiscom',
+  'svc_primegate',
+  'svc_alloka',
+  'analytics_services',
 ];
 
 /** Which subpages each extractor needs to be fetched. Empty = main page only. */
@@ -99,6 +132,21 @@ export const EXTRACTOR_TO_SUBPAGES: Record<ExtractorKey, SubpageKind[]> = {
   // Подстраницы те же что у social_media — нужно чтобы парсер нашёл ссылки
   // на TG/VK/OK; сами посты тянутся уже отдельным запросом по этим URL'ам.
   social_latest_news: ['about'],
+  // Сервисы сквозной аналитики — детект по уже скачанной главной, без подстраниц.
+  svc_roistat: [],
+  svc_k50: [],
+  svc_owox_bi: [],
+  svc_envybox: [],
+  svc_smartis: [],
+  svc_calltouch: [],
+  svc_comagic: [],
+  svc_mango_office: [],
+  svc_ringostat: [],
+  svc_callibri: [],
+  svc_uiscom: [],
+  svc_primegate: [],
+  svc_alloka: [],
+  analytics_services: [],
 };
 
 /**
@@ -140,13 +188,28 @@ export const EXTRACTOR_LABELS: Record<ExtractorKey, string> = {
   blog_last_post: 'Последний пост',
   social_media: 'Соцсети',
   social_latest_news: 'Последняя новость из соц сетей',
+  // Сервисы сквозной аналитики — заголовки = имена сервисов (как в базе-примере).
+  svc_roistat: 'Roistat',
+  svc_k50: 'K50',
+  svc_owox_bi: 'OWOX BI',
+  svc_envybox: 'Envybox',
+  svc_smartis: 'Smartis',
+  svc_calltouch: 'Calltouch',
+  svc_comagic: 'CoMagic',
+  svc_mango_office: 'Mango Office',
+  svc_ringostat: 'Ringostat',
+  svc_callibri: 'Callibri',
+  svc_uiscom: 'UIScom',
+  svc_primegate: 'PrimeGate',
+  svc_alloka: 'Alloka',
+  analytics_services: 'Обнаружено сервисов',
 };
 
 /**
  * Built-in presets the user sees as quick-start buttons. Custom user presets
  * are persisted to localStorage on top of these.
  */
-export type SignalPresetId = 'basic' | 'outreach' | 'audit' | 'all';
+export type SignalPresetId = 'basic' | 'outreach' | 'audit' | 'all' | 'analytics';
 
 export interface SignalPreset {
   id: SignalPresetId;
@@ -154,6 +217,29 @@ export interface SignalPreset {
   description: string;
   extractors: ExtractorKey[];
 }
+
+/**
+ * Ключи matrix-пресета «Сервисы сквозной аналитики» в порядке колонок (13
+ * по-сервисных + сводный). Держим отдельным списком, а не импортом значения из
+ * analyticsServicesDetector, чтобы не плодить циклический value-импорт в types.
+ * ДОЛЖНЫ совпадать с ANALYTICS_SERVICES[].key + ANALYTICS_SUMMARY_KEY там.
+ */
+export const ANALYTICS_PRESET_KEYS: ExtractorKey[] = [
+  'svc_roistat',
+  'svc_k50',
+  'svc_owox_bi',
+  'svc_envybox',
+  'svc_smartis',
+  'svc_calltouch',
+  'svc_comagic',
+  'svc_mango_office',
+  'svc_ringostat',
+  'svc_callibri',
+  'svc_uiscom',
+  'svc_primegate',
+  'svc_alloka',
+  'analytics_services',
+];
 
 export const BUILTIN_PRESETS: Readonly<Record<SignalPresetId, SignalPreset>> = {
   basic: {
@@ -206,7 +292,19 @@ export const BUILTIN_PRESETS: Readonly<Record<SignalPresetId, SignalPreset>> = {
     id: 'all',
     name: 'Все',
     description: 'Все доступные сигналы — включая последнюю новость из соцсетей (LLM выбирает один лучший пост из последних). Самый полный набор.',
-    extractors: [...ALL_EXTRACTOR_KEYS],
+    // «Все» = все обычные сигналы, но БЕЗ matrix сквозной аналитики — это
+    // узкая competitor-фича (дублирует названия в «Стек»), включается отдельной
+    // кнопкой, чтобы случайно не плодить +14 колонок на обычном прогоне.
+    extractors: ALL_EXTRACTOR_KEYS.filter((k) => !ANALYTICS_PRESET_KEYS.includes(k)),
+  },
+  // Productized-версия локального enrich-roistat-competitors: колонка на каждый
+  // сервис сквозной аналитики/коллтрекинга («да») + сводная «Обнаружено сервисов».
+  analytics: {
+    id: 'analytics',
+    name: 'Сервисы сквозной аналитики',
+    description:
+      'Колонка на каждый сервис сквозной аналитики/коллтрекинга (Roistat, K50, OWOX BI, Calltouch, CoMagic, Mango Office, Ringostat, Callibri, UIScom, Smartis, PrimeGate, Alloka, Envybox) с «да» + сводная «Обнаружено сервисов».',
+    extractors: ['stack', 'profile', ...ANALYTICS_PRESET_KEYS],
   },
 };
 
@@ -251,6 +349,12 @@ export const EXTRACTOR_GROUPS: ExtractorGroup[] = [
     title: 'Компания и интеграции',
     description: 'Подгружает /about, /integrations, /blog.',
     extractors: ['integrations', 'founded_year', 'team_size', 'blog_last_post', 'social_media', 'social_latest_news'],
+  },
+  {
+    id: 'analytics_services',
+    title: 'Сервисы сквозной аналитики',
+    description: 'Главная страница. Roistat и конкуренты (коллтрекинг + сквозная аналитика) — колонка на сервис + «Обнаружено сервисов».',
+    extractors: [...ANALYTICS_PRESET_KEYS],
   },
 ];
 
@@ -319,4 +423,24 @@ export interface ExtractedData {
    * Заменил собой event_* (открытие/ребрендинг/ремонт/география).
    */
   social_latest_news?: string;
+
+  // ── Сервисы сквозной аналитики (matrix-пресет) ──
+  // 'да' если сервис задетектен на главной, '' если просканировали и не нашли.
+  // (Строки-ошибки получают DASH от applier'а, не отсюда.) Ключи/regex'ы — в
+  // analyticsServicesDetector.ts; здесь только хранимая форма для result_text.
+  svc_roistat?: string;
+  svc_k50?: string;
+  svc_owox_bi?: string;
+  svc_envybox?: string;
+  svc_smartis?: string;
+  svc_calltouch?: string;
+  svc_comagic?: string;
+  svc_mango_office?: string;
+  svc_ringostat?: string;
+  svc_callibri?: string;
+  svc_uiscom?: string;
+  svc_primegate?: string;
+  svc_alloka?: string;
+  /** Сводная «Обнаружено сервисов» — найденные сервисы через запятую. */
+  analytics_services?: string;
 }

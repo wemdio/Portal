@@ -578,10 +578,14 @@ function CampaignDetailPageContent() {
   if (!campaign) return null;
 
   const sentCount = Number(analytics?.emails_sent_count ?? 0);
-  const openCount = Number(analytics?.open_count ?? 0);
+  // Открытия = УНИКАЛЬНЫЕ (open_count_unique): сколько РАЗНЫХ контактов открыли письмо
+  // хотя бы раз. НЕ open_count — он считает каждое повторное открытие / перезагрузку
+  // трекинг-пикселя (Apple Mail Privacy, прокси картинок Gmail), из-за чего «% открытий»
+  // вылетал за 100%. Уникальные ≤ contacted_count → ставка всегда ≤100%, как в Instantly.
+  const openCount = Number(analytics?.open_count_unique ?? analytics?.open_count ?? 0);
   // «Как в Instantly» (согласовано со списком /client): ответы = уникальные живые +
   // уникальные авто-ответы (так список Instantly считает REPLIED), открываемость =
-  // на КОНТАКТ (open_count ÷ contacted_count), не на письмо. reachedCount — контакты.
+  // на КОНТАКТ (open_count_unique ÷ contacted_count). reachedCount — контакты.
   const replyCount = analytics?.reply_count_unique != null
     ? Number(analytics.reply_count_unique) + Number(analytics.reply_count_automatic_unique ?? 0)
     : Number(analytics?.reply_count ?? 0);
