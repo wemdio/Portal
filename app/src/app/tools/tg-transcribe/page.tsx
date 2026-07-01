@@ -67,6 +67,7 @@ interface ScanVideoInfo {
   filename: string;
   fileSize: number | null;
   duration: number | null;
+  messageDate?: number | null;
   phase: string;
   downloadedBytes?: number;
   totalBytes?: number;
@@ -259,6 +260,17 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
           <span className="text-gray-400 truncate">{video.filename}</span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {video.messageDate != null && (
+            <span className="text-gray-400">
+              {new Date(video.messageDate * 1000).toLocaleString('ru-RU', {
+                day: '2-digit',
+                month: '2-digit',
+                year: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+              })}
+            </span>
+          )}
           {video.fileSize != null && (
             <span className="text-gray-400">{formatBytes(video.fileSize)}</span>
           )}

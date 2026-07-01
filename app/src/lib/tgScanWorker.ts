@@ -27,6 +27,8 @@ interface ScanVideoRow {
   filename: string;
   fileSize: number | null;
   duration: number | null;
+  /** UNIX timestamp when the message was sent in the source chat. */
+  messageDate?: number | null;
   phase: string;
   downloadedBytes?: number;
   totalBytes?: number;
@@ -106,6 +108,22 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
   const videos: ScanVideoRow[] = [];
   let lastDbWrite = 0;
 
+  // Parallel video pipeline. The whisper worker has MAX_CONCURRENT=4 slots
+  // but the scan used to feed it one video at a time — the other three
+  // sat idle while a big video downloaded/transcribed. Spawn up to N
+  // in-flight tasks; a single 26-min / 1.85 GB video no longer blocks the
+  // 20 small videos behind it in the same scan job.
+  const MAX_CONCURRENT_VIDEOS = 3;
+  const inflight = new Set<Promise<void>>();
+  const waitForSlot = async () => {
+    if (inflight.size >= MAX_CONCURRENT_VIDEOS) {
+      await Promise.race(inflight);
+    }
+  };
+  const drainAllInflight = async () => {
+    await Promise.all([...inflight]);
+  };
+
   const flushProgress = async (force = false) => {
     const now = Date.now();
     if (!force && now - lastDbWrite < 3000) return;
@@ -125,6 +143,7 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
 
     // Stop check every page (covers slow topics where a page can take seconds).
     if (await isStopped(jobId)) {
+      await drainAllInflight();
       await flushProgress(true);
       return true;
     }
@@ -206,62 +225,76 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
         filename: videoInfo.filename,
         fileSize: videoInfo.fileSize ?? null,
         duration: videoInfo.duration ?? null,
+        messageDate: m.date ?? null,
         phase: 'found',
       });
       await flushProgress(true);
 
       if (await isStopped(jobId)) {
+        await drainAllInflight();
         await flushProgress(true);
         return true;
       }
 
-      if (errorMessageIds.has(m.id)) {
-        await admin
-          .from('tg_video_transcripts')
-          .delete()
-          .eq('tg_chat_id', chatId)
-          .eq('tg_message_id', m.id);
-      }
+      // Wait for a free slot before spawning the next per-video pipeline.
+      // waitForSlot returns immediately when inflight < MAX_CONCURRENT_VIDEOS,
+      // so up to N videos are being downloaded / transcribed at once.
+      await waitForSlot();
 
-      try {
-        const result = await processVideoMessage(syntheticMsg, videoInfo, (evt) => {
+      // Background task — one full pipeline for this video (delete stale
+      // error row, download, ffmpeg, transcribe, insert). Errors are
+      // caught inside so Promise.race in waitForSlot never sees a
+      // rejection and the outer loop can keep enumerating messages.
+      const task = (async () => {
+        try {
+          if (errorMessageIds.has(m.id)) {
+            await admin
+              .from('tg_video_transcripts')
+              .delete()
+              .eq('tg_chat_id', chatId)
+              .eq('tg_message_id', m.id);
+          }
+
+          const result = await processVideoMessage(syntheticMsg, videoInfo, (evt) => {
+            const v = videos.find((x) => x.idx === videoIdx);
+            if (v) {
+              v.phase = evt.phase;
+              if (evt.downloadedBytes != null) v.downloadedBytes = evt.downloadedBytes;
+              if (evt.totalBytes != null) v.totalBytes = evt.totalBytes;
+              if (evt.transcriptionJobId) v.transcriptionJobId = evt.transcriptionJobId;
+            }
+            void flushProgress();
+          });
+
           const v = videos.find((x) => x.idx === videoIdx);
           if (v) {
-            v.phase = evt.phase;
-            if (evt.downloadedBytes != null) v.downloadedBytes = evt.downloadedBytes;
-            if (evt.totalBytes != null) v.totalBytes = evt.totalBytes;
-            if (evt.transcriptionJobId) v.transcriptionJobId = evt.transcriptionJobId;
+            v.phase = (result.status === 'completed' || result.status === 'skipped_exists') ? 'done' : 'error';
+            if (result.error) v.error = result.error;
           }
-          void flushProgress();
-        });
 
-        const v = videos.find((x) => x.idx === videoIdx);
-        if (v) {
-          v.phase = (result.status === 'completed' || result.status === 'skipped_exists') ? 'done' : 'error';
-          if (result.error) v.error = result.error;
-        }
-
-        if (result.status === 'completed' || result.status === 'skipped_exists') {
-          completed++;
-        } else {
+          if (result.status === 'completed' || result.status === 'skipped_exists') {
+            completed++;
+          } else {
+            errors++;
+          }
+        } catch (err) {
+          await saveErrorRecord(syntheticMsg, videoInfo, err);
           errors++;
+          const errorMsg = err instanceof Error ? err.message : 'Неизвестная ошибка';
+          const v = videos.find((x) => x.idx === videoIdx);
+          if (v) {
+            v.phase = 'error';
+            v.error = errorMsg;
+          }
         }
         await flushProgress(true);
-      } catch (err) {
-        await saveErrorRecord(syntheticMsg, videoInfo, err);
-        errors++;
-        const errorMsg = err instanceof Error ? err.message : 'Неизвестная ошибка';
-        const v = videos.find((x) => x.idx === videoIdx);
-        if (v) {
-          v.phase = 'error';
-          v.error = errorMsg;
-        }
-        await flushProgress(true);
-      }
+      })();
+      task.finally(() => inflight.delete(task));
+      inflight.add(task);
 
-      // Small breathing room between video downloads — same throttle the
-      // legacy path has.
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Small breathing room between spawns — prevents a burst of 100
+      // concurrent MTProto opens if a page hits many small videos.
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
 
     // Pagination cursor: smallest id we saw this page becomes next page's
@@ -272,6 +305,12 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
 
     await flushProgress();
   }
+
+  // Enumeration finished. Wait for the last batch of in-flight video
+  // pipelines before marking the job as completed — otherwise the UI would
+  // show 100% but some tail videos would still be transcribing in the
+  // background and their transcripts would appear seconds later.
+  await drainAllInflight();
 
   await logInfo(
     'tg-transcribe.scan.done',

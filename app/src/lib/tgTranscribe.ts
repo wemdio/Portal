@@ -415,9 +415,18 @@ export async function processVideoMessage(
     const ext = getExtFromFilename(videoInfo.filename);
     const videoPath = path.join(tmpDir, `video${ext}`);
     try {
-      await downloadMtprotoDocToPath(videoInfo.mtprotoDoc, videoPath, (downloaded, total) => {
-        onProgress?.({ phase: 'downloading', downloadedBytes: downloaded, totalBytes: total });
-      });
+      await downloadMtprotoDocToPath(
+        videoInfo.mtprotoDoc,
+        videoPath,
+        (downloaded, total) => {
+          onProgress?.({ phase: 'downloading', downloadedBytes: downloaded, totalBytes: total });
+        },
+        // Refresh context: if the fileReference has expired (common when a
+        // scan sits on message N for hours while earlier messages in the
+        // same batch age out), the downloader re-fetches the message from
+        // Telegram and retries with a fresh reference.
+        { chatId: msg.chat.id, msgId: msg.message_id },
+      );
       const stat = await fs.stat(videoPath);
       fileSizeBytes = stat.size;
       console.log(`[tg-transcribe] Downloaded ${videoInfo.filename} via MTProto-direct, ${(fileSizeBytes / 1e6).toFixed(1)} MB, converting...`);

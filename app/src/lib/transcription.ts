@@ -10,12 +10,23 @@ const OPENROUTER_VIDEO_TRANSCRIPT_API_KEY = (
 ).trim();
 const OPENROUTER_MODEL = 'policy/transcription';
 
+const GROQ_API_KEY = (process.env.GROQ_API_KEY ?? '').trim();
+// whisper-large-v3-turbo: ~190x real-time, tiny quality drop vs large-v3.
+// whisper-large-v3: ~165x real-time, best quality. Override via env if needed.
+const GROQ_MODEL = process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3-turbo';
+// Hint the recognizer with the source language when we know it — saves the
+// auto-detect pass and slightly improves accuracy on non-English audio.
+// Empty string = auto-detect. Common values: 'ru', 'en'.
+const GROQ_LANGUAGE = (process.env.GROQ_LANGUAGE ?? '').trim();
+// Groq's whisper endpoint accepts up to 25 MB per request.
+export const MAX_GROQ_AUDIO_BYTES = 25 * 1024 * 1024;
+
 export const MAX_OPENROUTER_AUDIO_BYTES = 25 * 1024 * 1024;
 const TRANSCRIPTION_CHUNK_SECONDS = 40 * 60;
 
 const FFMPEG_EXE = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
 
-type TranscriptionProvider = 'local' | 'openrouter';
+type TranscriptionProvider = 'local' | 'openrouter' | 'groq';
 
 const TRANSCRIPTION_PROVIDER: TranscriptionProvider =
   (process.env.TRANSCRIPTION_PROVIDER as TranscriptionProvider) || 'local';
@@ -310,6 +321,125 @@ async function callOpenRouterTranscriptionSingle(input: { audioMp3: Buffer }): P
   return text;
 }
 
+/**
+ * Send an mp3 to Groq's Whisper endpoint and get plain text back.
+ *
+ * Groq's whisper-large-v3-turbo runs at ~190x real-time on their inference
+ * hardware — an hour of audio comes back in ~20 seconds, and typical
+ * 20-minute call recordings finish in 5-10 s. Rate limits on the free
+ * tier are 25 requests/min and 7200 audio-seconds/min. When we hit them
+ * the API replies with HTTP 429 + Retry-After; we wait and retry rather
+ * than surfacing an error to the user.
+ */
+async function callGroqTranscriptionSingle(input: {
+  audioMp3: Buffer;
+  filename?: string;
+}): Promise<string> {
+  if (!GROQ_API_KEY) {
+    throw new Error(
+      'Сервис распознавания Groq не настроен (GROQ_API_KEY отсутствует в окружении).',
+    );
+  }
+  if (input.audioMp3.byteLength > MAX_GROQ_AUDIO_BYTES) {
+    const mb = (input.audioMp3.byteLength / (1024 * 1024)).toFixed(1);
+    throw new Error(
+      `Аудио-фрагмент слишком большой для Groq (${mb} МБ, лимит 25 МБ). ` +
+      'Разбейте на части через splitMp3ForTranscription.',
+    );
+  }
+
+  const audioBytes = Uint8Array.from(input.audioMp3);
+  const blob = new Blob([audioBytes], { type: 'audio/mpeg' });
+
+  const maxRetries = 6;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+    // Rebuild the form each attempt — some fetch implementations invalidate
+    // the multipart stream after the first send.
+    const form = new FormData();
+    form.append('file', blob, input.filename ?? 'audio.mp3');
+    form.append('model', GROQ_MODEL);
+    form.append('response_format', 'json');
+    if (GROQ_LANGUAGE) form.append('language', GROQ_LANGUAGE);
+
+    let res: Response;
+    try {
+      res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${GROQ_API_KEY}` },
+        body: form,
+        signal: AbortSignal.timeout(10 * 60 * 1000),
+      });
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= maxRetries) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 5_000 * attempt));
+      continue;
+    }
+
+    if (res.status === 429) {
+      // Rate-limited — Groq returns Retry-After in seconds. Cap at 120 s so a
+      // stuck header doesn't wedge us forever.
+      const retryAfter = Math.min(
+        Math.max(1, Number(res.headers.get('retry-after')) || 30),
+        120,
+      );
+      const raw = await res.text().catch(() => '');
+      lastErr = new Error(`Groq rate limited: ${raw || res.statusText}`);
+      if (attempt >= maxRetries) throw lastErr;
+      await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
+      continue;
+    }
+
+    const raw = await res.text().catch(() => '');
+    if (!res.ok) {
+      // 5xx: retry once with backoff; 4xx: fail fast.
+      if (res.status >= 500 && attempt < maxRetries) {
+        lastErr = new Error(`Groq server error (${res.status}): ${raw || res.statusText}`);
+        await new Promise((resolve) => setTimeout(resolve, 5_000 * attempt));
+        continue;
+      }
+      throw new Error(`Groq API (${res.status}): ${raw || res.statusText || 'unknown error'}`);
+    }
+
+    const json = JSON.parse(raw) as { text?: string };
+    const text = (json.text ?? '').trim();
+    if (!text) {
+      throw new Error('Groq не вернул текст расшифровки');
+    }
+    return text;
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Groq transcription failed');
+}
+
+export async function callGroqTranscription(input: {
+  audioMp3: Buffer;
+  filename?: string;
+}): Promise<string> {
+  if (input.audioMp3.byteLength <= MAX_GROQ_AUDIO_BYTES) {
+    return callGroqTranscriptionSingle(input);
+  }
+  // Long audio: split into <40-min mp3 chunks (same helper OpenRouter uses)
+  // and glue the transcripts back together in order.
+  const chunks = await splitMp3ForTranscription(input.audioMp3);
+  const parts: string[] = [];
+  for (let i = 0; i < chunks.length; i += 1) {
+    const partFilename = input.filename
+      ? input.filename.replace(/(\.[^.]+)$/, `-part${i + 1}$1`)
+      : `audio-part${i + 1}.mp3`;
+    const text = await callGroqTranscriptionSingle({
+      audioMp3: chunks[i],
+      filename: partFilename,
+    });
+    if (text) parts.push(text.trim());
+  }
+  const merged = parts.join('\n\n').trim();
+  if (!merged) {
+    throw new Error('Не удалось получить текст при расшифровке фрагментов через Groq.');
+  }
+  return merged;
+}
+
 async function splitMp3ForTranscription(audioMp3: Buffer): Promise<Buffer[]> {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-audio-split-'));
   const inPath = path.join(tmpDir, 'in.mp3');
@@ -391,11 +521,19 @@ async function callLocalTranscription(input: {
 }
 
 /**
- * Unified entry point: routes to local worker or OpenRouter based on TRANSCRIPTION_PROVIDER env.
+ * Unified entry point: routes to the configured provider.
+ *
+ * TRANSCRIPTION_PROVIDER values:
+ *   - "local"      → self-hosted whisper (portal-transcribe-worker)
+ *   - "openrouter" → Requesty policy/transcription (fallback path)
+ *   - "groq"       → Groq's Whisper Large v3 Turbo (fast, cheap, rate-limited)
  */
 export async function transcribeAudio(input: { audioMp3: Buffer; filename?: string; jobId?: string }): Promise<string> {
   if (TRANSCRIPTION_PROVIDER === 'local') {
     return callLocalTranscription(input);
+  }
+  if (TRANSCRIPTION_PROVIDER === 'groq') {
+    return callGroqTranscription({ audioMp3: input.audioMp3, filename: input.filename });
   }
   return callOpenRouterTranscription(input);
 }
