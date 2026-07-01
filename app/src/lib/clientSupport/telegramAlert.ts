@@ -50,7 +50,7 @@ function getThreadId(): number | null {
 }
 
 function getPortalUrl(): string {
-  return (process.env.SUPPORT_ALERTS_PORTAL_URL || process.env.NEXT_PUBLIC_SITE_URL || '')
+  return (process.env.SUPPORT_ALERTS_PORTAL_URL || process.env.PORTAL_PUBLIC_URL || process.env.NEXT_PUBLIC_SITE_URL || '')
     .trim()
     .replace(/\/+$/, '');
 }
