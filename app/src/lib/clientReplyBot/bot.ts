@@ -156,7 +156,7 @@ export function buildClientReplyMessage(data: ClientReplyMessageData): string {
     lines.push(`<pre>${escapeHtml(body)}</pre>`);
   }
 
-  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL ?? '').replace(/\/+$/, '');
+  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || process.env.PORTAL_PUBLIC_URL || '').replace(/\/+$/, '');
   if (siteUrl) {
     lines.push('');
     lines.push(`🔗 <a href="${siteUrl}/client/replies">Открыть в портале</a>`);
