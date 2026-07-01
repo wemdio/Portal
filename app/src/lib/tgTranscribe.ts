@@ -38,11 +38,37 @@ function markTranscriptWriteFailure(error: unknown): void {
   }
 }
 
+/**
+ * Fields in tg_video_transcripts that are integer columns in Postgres.
+ * Telegram MTProto returns some of them as floats (duration especially —
+ * seen 596.8, 12.5, etc.), and passing those through to supabase-js used
+ * to fail with "invalid input syntax for type integer: 596.8" and then
+ * the swallowed error would silently drop the whole batch for 15 s.
+ */
+const INT_COLUMNS = new Set([
+  'duration_seconds',
+  'file_size_bytes',
+  'length',
+]);
+
+function sanitizeTranscriptRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...row };
+  for (const key of INT_COLUMNS) {
+    const v = out[key];
+    if (typeof v === 'number' && Number.isFinite(v) && !Number.isInteger(v)) {
+      out[key] = Math.round(v);
+    }
+  }
+  return out;
+}
+
 async function safeInsertTranscript(row: Record<string, unknown>): Promise<boolean> {
   if (!supabaseAdmin) return false;
   if (!canAttemptTranscriptWrite()) return false;
   try {
-    const { error } = await supabaseAdmin.from('tg_video_transcripts').insert(row);
+    const { error } = await supabaseAdmin
+      .from('tg_video_transcripts')
+      .insert(sanitizeTranscriptRow(row));
     if (error) {
       markTranscriptWriteFailure(error);
       return false;
@@ -449,7 +475,7 @@ export async function processVideoMessage(
   const text = await transcribeAudio({ audioMp3: mp3, filename: videoInfo.filename, jobId: transcriptionJobId });
   console.log(`[tg-transcribe] Transcribed ${videoInfo.filename}, text length: ${text.length}`);
 
-  await safeInsertTranscript({
+  const insertOk = await safeInsertTranscript({
     tg_chat_id: msg.chat.id,
     tg_message_id: msg.message_id,
     topic_id: msg.message_thread_id ?? 0,
@@ -464,6 +490,16 @@ export async function processVideoMessage(
     length: text.length,
     status: 'completed',
   });
+
+  if (!insertOk) {
+    // Escalate — otherwise the scan worker will happily mark this video as
+    // completed while the transcript is nowhere in the DB, and the user
+    // sees ✓ in the scan progress but the record never appears in History.
+    throw new Error(
+      `Не удалось записать транскрипт в БД (msg ${msg.message_id}). ` +
+      'Скорее всего Postgres отклонил вставку (см. предыдущий log).',
+    );
+  }
 
   await logInfo('tg-transcribe.completed', `Transcribed video from ${senderName}`, {
     chatId: msg.chat.id,
