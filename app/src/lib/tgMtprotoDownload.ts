@@ -572,43 +572,86 @@ function resolveSenderFromFromId(
 }
 
 /**
+ * Re-fetch a message from Telegram and extract a fresh MtprotoDocumentRef.
+ * File references on media documents expire (usually within hours) — when
+ * that happens Telegram replies with FILE_REFERENCE_EXPIRED and the only
+ * fix is to ask for the message again. Call this from the downloader when
+ * it catches that error; caller should retry with the fresh ref.
+ */
+async function refreshMtprotoDocRef(chatId: number, msgId: number): Promise<MtprotoDocumentRef | null> {
+  if (!isUserMtprotoAvailable()) return null;
+  const c = await getUserClient();
+  const peer = await resolvePeer(c, chatId);
+  const result = await c.invoke(
+    new Api.channels.GetMessages({
+      channel: peer as Api.InputPeerChannel,
+      id: [new Api.InputMessageID({ id: msgId })],
+    }),
+  );
+  const messages = 'messages' in result ? result.messages : [];
+  for (const m of messages) {
+    if (!m || typeof m !== 'object') continue;
+    const summary = extractVideoSummary(m);
+    if (summary.document) return summary.document;
+  }
+  return null;
+}
+
+function isFileReferenceExpiredError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = `${err.message} ${String((err as { cause?: unknown }).cause ?? '')}`;
+  return /FILE_REFERENCE_EXPIRED|FILE_REFERENCE_INVALID/i.test(msg);
+}
+
+/**
  * Download a media document directly from MTProto using a previously-extracted
  * MtprotoDocumentRef. Streams to disk like downloadFileByFileIdToPath; the
  * difference is the input — no Bot API file_id round trip required, no bot
  * forward needed to obtain that file_id in the first place. Uses the user
  * client when configured (downloads visible to TG_TARGET account), falls back
  * to the bot client only if TG_TARGET creds are absent.
+ *
+ * If chatId+msgId are provided, a FILE_REFERENCE_EXPIRED error triggers a
+ * refresh: we re-fetch the message via channels.GetMessages, extract the
+ * new fileReference, and retry the download with the fresh descriptor.
+ * This is common on long scans — 100 messages fetched together share the
+ * same batch of references, and by the time we get to message #80 the
+ * earlier references may have already expired.
  */
 export async function downloadMtprotoDocToPath(
   ref: MtprotoDocumentRef,
   destPath: string,
   onProgress?: (downloaded: number, total: number | undefined) => void,
+  refreshCtx?: { chatId: number; msgId: number },
 ): Promise<void> {
-  const fileRef = ref.fileReferenceHex
-    ? Buffer.from(ref.fileReferenceHex, 'hex')
-    : Buffer.alloc(0);
+  let activeRef = ref;
+  let buildInputLocation = () => {
+    const fileRef = activeRef.fileReferenceHex
+      ? Buffer.from(activeRef.fileReferenceHex, 'hex')
+      : Buffer.alloc(0);
+    return new Api.InputDocumentFileLocation({
+      id: bigInt(activeRef.id),
+      accessHash: bigInt(activeRef.accessHash),
+      fileReference: fileRef,
+      thumbSize: '',
+    });
+  };
 
-  const inputLocation = new Api.InputDocumentFileLocation({
-    id: bigInt(ref.id),
-    accessHash: bigInt(ref.accessHash),
-    fileReference: fileRef,
-    thumbSize: '',
-  });
-
-  await logInfo('mtproto.docDownload.start', `Downloading mtproto doc to disk (dc=${ref.dcId})`, {
-    dcId: ref.dcId, fileSize: ref.size, destPath,
+  await logInfo('mtproto.docDownload.start', `Downloading mtproto doc to disk (dc=${activeRef.dcId})`, {
+    dcId: activeRef.dcId, fileSize: activeRef.size, destPath,
   });
 
   let lastError: unknown;
   let resumeOffset = 0;
+  let refreshedOnce = false;
   for (let attempt = 1; attempt <= MT_RETRY_ATTEMPTS; attempt += 1) {
     const c = isUserMtprotoAvailable() ? await getUserClient() : await getClient();
     const startTime = Date.now();
     const writeStream = createWriteStream(destPath, { flags: resumeOffset > 0 ? 'a' : 'w' });
     try {
       const iterDownload = c.iterDownload({
-        file: inputLocation,
-        dcId: ref.dcId,
+        file: buildInputLocation(),
+        dcId: activeRef.dcId,
         offset: bigInt(resumeOffset),
         requestSize: 512 * 1024,
       });
@@ -626,14 +669,14 @@ export async function downloadMtprotoDocToPath(
           const now = Date.now();
           if (now - lastProgressAt >= 2000) {
             lastProgressAt = now;
-            onProgress(totalBytes, ref.size);
+            onProgress(totalBytes, activeRef.size);
           }
         }
         if (!canContinue) {
           await new Promise<void>((resolve) => writeStream.once('drain', resolve));
         }
       }
-      onProgress?.(totalBytes, ref.size);
+      onProgress?.(totalBytes, activeRef.size);
 
       await new Promise<void>((resolve, reject) => {
         writeStream.end(() => resolve());
@@ -649,6 +692,32 @@ export async function downloadMtprotoDocToPath(
     } catch (err) {
       writeStream.destroy();
       lastError = err;
+
+      // FILE_REFERENCE_EXPIRED — refresh the descriptor and retry from scratch.
+      // Only try this once per download so we don't loop forever if the msg
+      // itself is gone. Reset resumeOffset because the new file reference
+      // points to the same content but the server session state resets too.
+      if (isFileReferenceExpiredError(err) && refreshCtx && !refreshedOnce) {
+        refreshedOnce = true;
+        await logInfo('mtproto.docDownload.refFresh', 'FILE_REFERENCE_EXPIRED — refreshing document ref', {
+          chatId: refreshCtx.chatId, msgId: refreshCtx.msgId,
+        });
+        try {
+          const fresh = await refreshMtprotoDocRef(refreshCtx.chatId, refreshCtx.msgId);
+          if (fresh) {
+            activeRef = fresh;
+            resumeOffset = 0; // fresh ref → start from byte 0
+            // Don't count this against the attempt budget.
+            attempt -= 1;
+            continue;
+          }
+        } catch (refreshErr) {
+          await logInfo('mtproto.docDownload.refFreshFailed', 'Failed to refresh file reference', {
+            error: refreshErr instanceof Error ? refreshErr.message : String(refreshErr),
+          });
+        }
+      }
+
       if (isRetryableMtprotoError(err) && attempt < MT_RETRY_ATTEMPTS) {
         try {
           const current = await stat(destPath);
