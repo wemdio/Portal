@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { safeEqual } from '@/lib/crypto/safeEqual';
 import { UnipileClient } from '@/lib/liOutreach/unipileClient';
 import { generateAutoReply, leadToInfo, parseMessageTemplate } from '@/lib/liOutreach/aiService';
 import type { LiLead, LiSettings, LiCampaign } from '@/lib/liOutreach/types';
@@ -19,7 +20,7 @@ export async function POST(req: NextRequest) {
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
 
   const webhookSecret = (process.env.LI_OUTREACH_WEBHOOK_SECRET ?? '').trim();
-  if (webhookSecret && (req.nextUrl.searchParams.get('secret') ?? '') !== webhookSecret) {
+  if (webhookSecret && !safeEqual(req.nextUrl.searchParams.get('secret') ?? '', webhookSecret)) {
     // Forged / missing secret → drop quietly with 200 (Unipile retries on non-2xx).
     return NextResponse.json({ ok: true });
   }

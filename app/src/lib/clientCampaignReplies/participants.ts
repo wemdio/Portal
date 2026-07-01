@@ -59,25 +59,33 @@ export function getEmailRecipients(email: Email): { to: Recipient[]; cc: Recipie
  * CC'ing them would duplicate). This is what stops us silently dropping a
  * person the lead looped into the thread (a colleague / decision-maker).
  */
-export function computeReplyAllCc(
+export function computeReplyAllRecipients(
   email: Email,
   opts: { eaccount?: string | null; leadEmail?: string | null },
-): string[] {
+): Recipient[] {
   const { to, cc } = getEmailRecipients(email);
   const exclude = new Set(
     [opts.eaccount, opts.leadEmail, email.from_address_email]
       .filter((x): x is string => typeof x === 'string' && x.length > 0)
       .map(normEmail),
   );
-  const out: string[] = [];
+  const out: Recipient[] = [];
   const seen = new Set<string>();
   for (const r of [...to, ...cc]) {
     const k = normEmail(r.email);
     if (exclude.has(k) || seen.has(k)) continue;
     seen.add(k);
-    out.push(r.email);
+    out.push(r);
   }
   return out;
+}
+
+/** Reply-all CC addresses (email-only) — see computeReplyAllRecipients. */
+export function computeReplyAllCc(
+  email: Email,
+  opts: { eaccount?: string | null; leadEmail?: string | null },
+): string[] {
+  return computeReplyAllRecipients(email, opts).map((r) => r.email);
 }
 
 /** Case-insensitive merge of address lists, preserving the first spelling seen. */

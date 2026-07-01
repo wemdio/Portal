@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import type { NextRequest } from 'next/server';
+import { safeEqual } from '@/lib/crypto/safeEqual';
 
 /**
  * Derives a stable per-bot webhook secret from the bot token.
@@ -42,5 +43,5 @@ export function telegramWebhookAllowed(req: NextRequest, botToken: string | unde
   if (process.env.TELEGRAM_WEBHOOK_SECRET_ENFORCED !== '1') return true;
   const expected = deriveTelegramWebhookSecret(botToken);
   if (!expected) return true;
-  return req.headers.get('x-telegram-bot-api-secret-token') === expected;
+  return safeEqual(req.headers.get('x-telegram-bot-api-secret-token') ?? '', expected);
 }
