@@ -625,7 +625,7 @@ export async function downloadMtprotoDocToPath(
   refreshCtx?: { chatId: number; msgId: number },
 ): Promise<void> {
   let activeRef = ref;
-  let buildInputLocation = () => {
+  const buildInputLocation = () => {
     const fileRef = activeRef.fileReferenceHex
       ? Buffer.from(activeRef.fileReferenceHex, 'hex')
       : Buffer.alloc(0);
