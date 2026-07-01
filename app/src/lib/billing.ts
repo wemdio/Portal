@@ -191,10 +191,22 @@ function buildDescription(
  * page so the user lands back where they started. Falls back to a localhost
  * placeholder so local dev still works — ЮКасса only requires a syntactically
  * valid HTTPS URL, it never actually validates the host is reachable.
+ *
+ * Origin читается из YOOKASSA_RETURN_ORIGIN — отдельная env-переменная
+ * специально под этот кейс. PORTAL_PUBLIC_URL здесь не годится, потому что
+ * он раздаёт клиентам ссылки на «портальный» домен (polza-portal.ru), а
+ * пользователи клиентского кабинета сидят на app.outreachos.pro, и после
+ * оплаты их надо возвращать туда же, а не на polza-portal.ru. Fallback на
+ * PORTAL_PUBLIC_URL/NEXT_PUBLIC_SITE_URL оставлен на случай, когда новую
+ * переменную ещё не выкатили в env.
  */
 function buildClientReturnUrl(): string {
-  const base = (process.env.NEXT_PUBLIC_SITE_URL || process.env.PORTAL_PUBLIC_URL || '')
-    .replace(/\/+$/, '');
+  const base = (
+    process.env.YOOKASSA_RETURN_ORIGIN
+    || process.env.PORTAL_PUBLIC_URL
+    || process.env.NEXT_PUBLIC_SITE_URL
+    || ''
+  ).replace(/\/+$/, '');
   if (base) return `${base}/client/tariff`;
   return 'https://example.com/return';
 }

@@ -211,8 +211,15 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
               invoiceId: existing.id,
               companyName: existing.company_name,
               idempotencyKey: `${existing.id}-admin-retry`,
+              // Отдельная env под YK return_url — см. buildClientReturnUrl
+              // в lib/billing.ts (там же комментарий, почему не PORTAL_PUBLIC_URL).
               returnUrl: (() => {
-                const base = (process.env.NEXT_PUBLIC_SITE_URL || process.env.PORTAL_PUBLIC_URL || '').replace(/\/+$/, '');
+                const base = (
+                  process.env.YOOKASSA_RETURN_ORIGIN
+                  || process.env.PORTAL_PUBLIC_URL
+                  || process.env.NEXT_PUBLIC_SITE_URL
+                  || ''
+                ).replace(/\/+$/, '');
                 return base ? `${base}/client/tariff` : 'https://example.com/return';
               })(),
               savePaymentMethod: true,
