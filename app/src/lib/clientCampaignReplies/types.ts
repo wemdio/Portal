@@ -61,5 +61,13 @@ export interface ThreadMessage {
 export interface ClientReplyThread {
   thread_id: string | null;
   messages: ThreadMessage[];
+  /** Who a reply will be addressed to (the lead). Drives the composer preview. */
+  reply_to?: Recipient | null;
+  /**
+   * Who will be auto-kept in CC on a reply («ответить всем») — the other
+   * participants the lead looped into the thread, minus our mailbox and the lead.
+   * Lets the composer SHOW exactly who stays in copy before sending.
+   */
+  reply_all_cc?: Recipient[];
 }
 

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { timingSafeEqual } from 'crypto';
+import { safeEqual } from '@/lib/crypto/safeEqual';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { listInstantlyAccounts, resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { mskDayWindowUtc, toMskIso } from '@/lib/instantly/activity';
@@ -29,14 +29,6 @@ const MAX_ROWS = 50_000;
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
-}
-
-/** Constant-time string compare — avoids leaking the key via response timing. */
-function safeEqual(a: string, b: string): boolean {
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ba.length !== bb.length) return false;
-  return timingSafeEqual(ba, bb);
 }
 
 function resolvePartnerAccountId(): string {
