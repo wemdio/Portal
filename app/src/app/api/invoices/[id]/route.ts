@@ -212,7 +212,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
               companyName: existing.company_name,
               idempotencyKey: `${existing.id}-admin-retry`,
               returnUrl: (() => {
-                const base = (process.env.NEXT_PUBLIC_SITE_URL ?? process.env.PORTAL_PUBLIC_URL ?? '').replace(/\/+$/, '');
+                const base = (process.env.NEXT_PUBLIC_SITE_URL || process.env.PORTAL_PUBLIC_URL || '').replace(/\/+$/, '');
                 return base ? `${base}/client/tariff` : 'https://example.com/return';
               })(),
               savePaymentMethod: true,

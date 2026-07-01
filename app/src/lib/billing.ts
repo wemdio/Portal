@@ -193,7 +193,7 @@ function buildDescription(
  * valid HTTPS URL, it never actually validates the host is reachable.
  */
 function buildClientReturnUrl(): string {
-  const base = (process.env.NEXT_PUBLIC_SITE_URL ?? process.env.PORTAL_PUBLIC_URL ?? '')
+  const base = (process.env.NEXT_PUBLIC_SITE_URL || process.env.PORTAL_PUBLIC_URL || '')
     .replace(/\/+$/, '');
   if (base) return `${base}/client/tariff`;
   return 'https://example.com/return';

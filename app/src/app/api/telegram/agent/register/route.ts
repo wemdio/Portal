@@ -16,10 +16,13 @@ export async function POST(req: NextRequest) {
   const botToken = process.env.TG_AGENT_BOT_TOKEN;
   if (!botToken) return NextResponse.json({ error: 'TG_AGENT_BOT_TOKEN not configured' }, { status: 500 });
 
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
-  if (!siteUrl) return NextResponse.json({ error: 'NEXT_PUBLIC_SITE_URL not configured' }, { status: 500 });
+  // Prod sets PORTAL_PUBLIC_URL (not NEXT_PUBLIC_SITE_URL) — accept either, same
+  // as the client-replies register route. Without this fallback, re-registering
+  // the agent webhook 500s on prod (NEXT_PUBLIC_SITE_URL is empty there).
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || process.env.PORTAL_PUBLIC_URL;
+  if (!siteUrl) return NextResponse.json({ error: 'NEXT_PUBLIC_SITE_URL / PORTAL_PUBLIC_URL not configured' }, { status: 500 });
 
-  const webhookUrl = `${siteUrl}/api/telegram/agent/webhook`;
+  const webhookUrl = `${siteUrl.replace(/\/+$/, '')}/api/telegram/agent/webhook`;
 
   // Install the derived webhook secret automatically — enforced once
   // TELEGRAM_WEBHOOK_SECRET_ENFORCED=1 (see telegram/webhookSecret).
