@@ -1,5 +1,6 @@
 import type { Email } from '@/lib/instantly/types';
 import type { ClientReply, ThreadMessage } from './types';
+import { getEmailRecipients } from './participants';
 
 /** Hard cap on body text we return to the browser. */
 const MAX_BODY_TEXT_CHARS = 20_000;
@@ -99,6 +100,8 @@ export function mapInstantlyEmailToThreadMessage(email: Email): ThreadMessage {
       ? (email.eaccount as string | undefined) ?? email.from_address_email ?? null
       : email.from_address_email ?? null;
 
+  const { to, cc } = getEmailRecipients(email);
+
   return {
     id: email.id,
     direction,
@@ -107,5 +110,7 @@ export function mapInstantlyEmailToThreadMessage(email: Email): ThreadMessage {
     from_email: fromEmail,
     from_name: extractFromName(email),
     body_text: bodyText,
+    to_recipients: to,
+    cc_recipients: cc,
   };
 }

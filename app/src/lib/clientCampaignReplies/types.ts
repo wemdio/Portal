@@ -38,6 +38,12 @@ export interface ClientRepliesPage {
  */
 export type ThreadDirection = 'inbound' | 'outbound';
 
+/** A To/CC participant of a message (address + optional display name). */
+export interface Recipient {
+  email: string;
+  name: string | null;
+}
+
 export interface ThreadMessage {
   id: string;
   direction: ThreadDirection;
@@ -46,10 +52,22 @@ export interface ThreadMessage {
   from_email: string | null;
   from_name: string | null;
   body_text: string | null;
+  /** Direct recipients (To) of this message — so the client sees who was looped in. */
+  to_recipients: Recipient[];
+  /** Carbon-copy (CC) recipients of this message. */
+  cc_recipients: Recipient[];
 }
 
 export interface ClientReplyThread {
   thread_id: string | null;
   messages: ThreadMessage[];
+  /** Who a reply will be addressed to (the lead). Drives the composer preview. */
+  reply_to?: Recipient | null;
+  /**
+   * Who will be auto-kept in CC on a reply («ответить всем») — the other
+   * participants the lead looped into the thread, minus our mailbox and the lead.
+   * Lets the composer SHOW exactly who stays in copy before sending.
+   */
+  reply_all_cc?: Recipient[];
 }
 

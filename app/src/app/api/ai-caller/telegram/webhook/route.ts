@@ -80,8 +80,12 @@ async function handleCallbackQuery(update: Record<string, unknown>) {
     const chatId = (message?.chat as Record<string, unknown>)?.id;
 
     if (chatId && TG_TOKEN) {
-      const origin = process.env.NEXT_PUBLIC_SITE_URL || process.env.VERCEL_URL
-        ? `https://${process.env.VERCEL_URL}` : '';
+      // Self-hosted (nginx/Cloudflare), no VERCEL_URL. Prod sets PORTAL_PUBLIC_URL;
+      // NEXT_PUBLIC_SITE_URL is a build-time fallback. (The old expression had an
+      // operator-precedence bug: `A || B ? https://B : ''` never used A and B was
+      // always empty here, so the link came out relative = dead in Telegram.)
+      const origin = (process.env.PORTAL_PUBLIC_URL || process.env.NEXT_PUBLIC_SITE_URL || '')
+        .replace(/\/+$/, '');
       const guestUrl = `${origin}/review/base/${encodeURIComponent(guestToken)}`;
 
       await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {

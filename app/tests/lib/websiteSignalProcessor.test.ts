@@ -87,6 +87,43 @@ describe('processSignalsForUrl', () => {
     expect(fetchHtmlWithPlaywrightMock).not.toHaveBeenCalled();
   });
 
+  it('fills per-service "да" + rollup for the "Сервисы сквозной аналитики" preset', async () => {
+    const html = `
+      <html><body>
+        <script src="//cdn.roistat.com/rstat.js"></script>
+        <script src="//mod.calltouch.ru/init.js?id=1"></script>
+        <script src="//cdn.callibri.ru/widget.js"></script>
+      </body></html>`;
+    fetchHtmlWithRetryMock.mockResolvedValue({ html, status: 200 });
+
+    const result = await processSignalsForUrl('example.com', {
+      extractors: ['stack', 'profile', 'svc_roistat', 'svc_k50', 'svc_calltouch', 'svc_callibri', 'analytics_services'],
+    });
+
+    expect('error' in result).toBe(false);
+    const r = result as Record<string, unknown>;
+    expect(r.svc_roistat).toBe('да');
+    expect(r.svc_calltouch).toBe('да');
+    expect(r.svc_callibri).toBe('да');
+    // Requested but not on the page → blank cell (NOT "да", NOT undefined).
+    expect(r.svc_k50).toBe('');
+    // Rollup keeps canonical service order.
+    expect(r.analytics_services).toBe('Roistat, Calltouch, Callibri');
+  });
+
+  it('omits analytics fields when no analytics extractor is requested', async () => {
+    fetchHtmlWithRetryMock.mockResolvedValue({
+      html: '<html><body><script src="//cdn.roistat.com/rstat.js"></script></body></html>',
+      status: 200,
+    });
+    const result = await processSignalsForUrl('example.com', { extractors: ['stack', 'profile'] });
+
+    expect('error' in result).toBe(false);
+    const r = result as Record<string, unknown>;
+    expect(r.svc_roistat).toBeUndefined();
+    expect(r.analytics_services).toBeUndefined();
+  });
+
   it('falls back to Playwright when HTTP returns null for every variant', async () => {
     fetchHtmlWithRetryMock.mockResolvedValue(null);
     fetchHtmlWithPlaywrightMock.mockResolvedValue(HTML_WITH_SIGNALS);

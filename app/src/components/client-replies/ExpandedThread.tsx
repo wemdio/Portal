@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { isAuthExpiredError } from '@/lib/authFetch';
-import type { ClientReplyThread, ThreadMessage } from '@/lib/clientCampaignReplies/types';
+import type { ClientReplyThread, ThreadMessage, Recipient } from '@/lib/clientCampaignReplies/types';
 
 /**
  * The expandable lead-reply thread block. Shows the full message history
@@ -47,6 +47,11 @@ function formatReplyDate(iso: string | null): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+/** «Имя <email>» (или просто email), через запятую — для строк «Кому»/«Копия». */
+function formatRecipients(list: Recipient[]): string {
+  return list.map((r) => (r.name ? `${r.name} <${r.email}>` : r.email)).join(', ');
 }
 
 /**
@@ -106,6 +111,25 @@ function ThreadMessageCard({ msg }: { msg: ThreadMessage }) {
           {formatReplyDate(msg.timestamp)}
         </span>
       </div>
+      {(msg.to_recipients.length > 0 || msg.cc_recipients.length > 0) && (
+        <div
+          className="text-[10px] leading-snug mb-1.5 space-y-0.5"
+          style={{ color: 'var(--cp-paper-faint)' }}
+        >
+          {msg.to_recipients.length > 0 && (
+            <p className="truncate">
+              <span style={{ color: 'var(--cp-paper-mute)' }}>Кому: </span>
+              {formatRecipients(msg.to_recipients)}
+            </p>
+          )}
+          {msg.cc_recipients.length > 0 && (
+            <p className="truncate">
+              <span style={{ color: 'var(--cp-paper-mute)' }}>Копия: </span>
+              {formatRecipients(msg.cc_recipients)}
+            </p>
+          )}
+        </div>
+      )}
       {msg.subject && (
         <p
           className="text-[11px] font-semibold mb-1 truncate"
@@ -133,11 +157,13 @@ function ThreadMessageCard({ msg }: { msg: ThreadMessage }) {
 interface ReplyFormProps {
   campaignId: string;
   emailId: string;
+  replyTo?: Recipient | null;
+  replyAllCc?: Recipient[];
   onCancel: () => void;
   onSent: () => void;
 }
 
-function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
+function ReplyForm({ campaignId, emailId, replyTo, replyAllCc, onCancel, onSent }: ReplyFormProps) {
   const [bodyText, setBodyText] = useState('');
   const [cc, setCc] = useState('');
   const [bcc, setBcc] = useState('');
@@ -181,11 +207,31 @@ function ReplyForm({ campaignId, emailId, onCancel, onSent }: ReplyFormProps) {
           <X className="h-3 w-3" aria-hidden />
         </button>
       </div>
+      {replyTo ? (
+        <div className="text-[10px] leading-snug space-y-0.5" style={{ color: 'var(--cp-paper-faint)' }}>
+          <p className="truncate">
+            <span style={{ color: 'var(--cp-paper-mute)' }}>Ответ уйдёт: </span>
+            {replyTo.name ? `${replyTo.name} <${replyTo.email}>` : replyTo.email}
+          </p>
+          {replyAllCc && replyAllCc.length > 0 ? (
+            <p className="truncate">
+              <span style={{ color: 'var(--cp-paper-mute)' }}>Останутся в копии («ответить всем»): </span>
+              {formatRecipients(replyAllCc)}
+            </p>
+          ) : (
+            <p>В копии больше никого — в переписке только лид.</p>
+          )}
+        </div>
+      ) : (
+        <p className="text-[10px] leading-snug" style={{ color: 'var(--cp-paper-faint)' }}>
+          Участники переписки останутся в копии автоматически («ответить всем») — никого не потеряем.
+        </p>
+      )}
       <input
         type="text"
         value={cc}
         onChange={(e) => setCc(e.target.value)}
-        placeholder="CC (через запятую): boss@company.ru, team@..."
+        placeholder="Добавить ещё в копию (через запятую)"
         className="ds-input w-full text-[11px] sm:text-xs"
       />
       {showBcc ? (
@@ -403,6 +449,8 @@ export function ExpandedThread({
   className,
 }: ExpandedThreadProps) {
   const [thread, setThread] = useState<ThreadMessage[] | null>(null);
+  const [replyTo, setReplyTo] = useState<Recipient | null>(null);
+  const [replyAllCc, setReplyAllCc] = useState<Recipient[]>([]);
   const [threadLoading, setThreadLoading] = useState(false);
   const [threadError, setThreadError] = useState('');
   const [threadAuthExpired, setThreadAuthExpired] = useState(false);
@@ -417,6 +465,8 @@ export function ExpandedThread({
         `/campaigns/${campaignId}/replies/${emailId}/thread`,
       );
       setThread(data.messages);
+      setReplyTo(data.reply_to ?? null);
+      setReplyAllCc(data.reply_all_cc ?? []);
     } catch (err) {
       if (isAuthExpiredError(err)) setThreadAuthExpired(true);
       setThreadError(err instanceof Error ? err.message : 'Не удалось загрузить тред');
@@ -514,6 +564,8 @@ export function ExpandedThread({
         <ReplyForm
           campaignId={campaignId}
           emailId={emailId}
+          replyTo={replyTo}
+          replyAllCc={replyAllCc}
           onCancel={() => setActionMode(null)}
           onSent={() => {
             setActionMode(null);

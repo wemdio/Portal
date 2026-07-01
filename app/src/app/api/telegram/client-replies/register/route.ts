@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { getClientRepliesBotToken } from '@/lib/clientReplyBot/bot';
+import { deriveTelegramWebhookSecret } from '@/lib/telegram/webhookSecret';
 
 export const dynamic = 'force-dynamic';
 
@@ -26,10 +27,16 @@ export async function POST(req: NextRequest) {
 
   const webhookUrl = `${siteUrl.replace(/\/+$/, '')}/api/telegram/client-replies/webhook`;
 
+  // Install the derived webhook secret automatically — enforced once
+  // TELEGRAM_WEBHOOK_SECRET_ENFORCED=1 (see telegram/webhookSecret).
   const res = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: webhookUrl, allowed_updates: ['message'] }),
+    body: JSON.stringify({
+      url: webhookUrl,
+      allowed_updates: ['message'],
+      secret_token: deriveTelegramWebhookSecret(botToken),
+    }),
   });
 
   const data = await res.json();

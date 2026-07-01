@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { safeEqual } from '@/lib/crypto/safeEqual';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { listInstantlyAccounts, resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { mskDayWindowUtc, toMskIso } from '@/lib/instantly/activity';
@@ -47,7 +48,7 @@ export async function GET(req: NextRequest) {
   const auth = req.headers.get('authorization') || '';
   const bearer = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
   const key = bearer || (req.headers.get('x-api-key') || '').trim();
-  if (!key || key !== expected) return jsonError('Unauthorized', 401);
+  if (!key || !safeEqual(key, expected)) return jsonError('Unauthorized', 401);
 
   const sp = req.nextUrl.searchParams;
   const dateParam = sp.get('date')?.trim();

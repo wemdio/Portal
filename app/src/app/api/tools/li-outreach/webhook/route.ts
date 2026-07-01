@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { safeEqual } from '@/lib/crypto/safeEqual';
 import { UnipileClient } from '@/lib/liOutreach/unipileClient';
 import { generateAutoReply, leadToInfo, parseMessageTemplate } from '@/lib/liOutreach/aiService';
 import type { LiLead, LiSettings, LiCampaign } from '@/lib/liOutreach/types';
@@ -8,10 +9,21 @@ export const dynamic = 'force-dynamic';
 
 /**
  * Unipile webhook receiver.
- * No Bearer auth — uses webhook_secret for validation.
+ *
+ * Auth: optional shared secret in the URL query (`?secret=…`), ENFORCED ONLY when
+ * LI_OUTREACH_WEBHOOK_SECRET is set in env. To activate: set that env var and
+ * register the Unipile webhook URL with `?secret=<that value>`. Until then the
+ * endpoint stays open (legacy behaviour) so the live integration doesn't break.
+ * (Previously a comment claimed a secret check that did not actually exist.)
  */
 export async function POST(req: NextRequest) {
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
+
+  const webhookSecret = (process.env.LI_OUTREACH_WEBHOOK_SECRET ?? '').trim();
+  if (webhookSecret && !safeEqual(req.nextUrl.searchParams.get('secret') ?? '', webhookSecret)) {
+    // Forged / missing secret → drop quietly with 200 (Unipile retries on non-2xx).
+    return NextResponse.json({ ok: true });
+  }
 
   let payload: Record<string, unknown>;
   try {

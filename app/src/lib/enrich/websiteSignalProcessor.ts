@@ -2,6 +2,11 @@ import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websit
 import { logInfo } from '@/lib/loggerServer';
 import { normalizeUrl, extractNormalizedUrls } from '@/lib/enrich/urlUtils';
 import { detectSignals, determineProfile, formatStack, integrationsFromSignals } from '@/lib/enrich/signalDetector';
+import {
+  ANALYTICS_SERVICES,
+  ANALYTICS_SERVICE_KEYS,
+  detectAnalyticsServices,
+} from '@/lib/enrich/analyticsServicesDetector';
 import { discoverSubpaths, FALLBACK_PATHS } from '@/lib/enrich/subpathDiscovery';
 import {
   ExtractorKey,
@@ -279,6 +284,25 @@ export async function processSignalsForUrl(
     if (extractors.includes('stack')) out.stack = formatStack(mainSignals);
     if (extractors.includes('profile')) out.profile = determineProfile(mainSignals);
     out.signalIds = mainSignals.map((s) => s.id);
+  }
+
+  // ── Сервисы сквозной аналитики / коллтрекинга (matrix-пресет) ──
+  // Детект по уже скачанной главной (тот же HTML, что для «Стека»), отдельными
+  // домен-якорными regex'ами (analyticsServicesDetector). Каждый запрошенный
+  // сервис → 'да'/'' в своей колонке + сводная «Обнаружено сервисов». Запускаем
+  // только если выбран хоть один ключ фичи — иначе колонок не будет.
+  if (extractors.some((k) => ANALYTICS_SERVICE_KEYS.has(k))) {
+    const detected = detectAnalyticsServices(main.html);
+    const detectedIds = new Set(detected.map((d) => d.id));
+    const outRec = out as unknown as Record<string, unknown>;
+    for (const svc of ANALYTICS_SERVICES) {
+      if (extractors.includes(svc.key)) {
+        outRec[svc.key] = detectedIds.has(svc.id) ? 'да' : '';
+      }
+    }
+    if (extractors.includes('analytics_services')) {
+      out.analytics_services = detected.map((d) => d.label).join(', ');
+    }
   }
 
   // Determine which subpages we need based on selected extractors.

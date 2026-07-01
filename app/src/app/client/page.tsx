@@ -34,6 +34,7 @@ interface CampaignRow {
   status: number | null;
   emails_sent_count: number | null;
   open_count: number | null;
+  open_count_unique: number | null;
   reply_count: number | null;
   reply_count_unique: number | null;
   reply_count_automatic_unique: number | null;
@@ -296,7 +297,9 @@ function CampaignsPageContent() {
   }>(
     (acc, c) => ({
       sent: acc.sent + Number(c.emails_sent_count ?? 0),
-      opened: acc.opened + Number(c.open_count ?? 0),
+      // Открытия = УНИКАЛЬНЫЕ (≤ контактов → ставка ≤100%), как на детальной. Фоллбэк
+      // на open_count, пока синк не заполнил колонку.
+      opened: acc.opened + Number(c.open_count_unique ?? c.open_count ?? 0),
       replied: acc.replied + replyTotal(c),
       contacted: acc.contacted + Number(c.new_leads_contacted_count ?? 0),
       reached: acc.reached + Number(c.contacted_count ?? c.emails_sent_count ?? 0),
@@ -312,7 +315,7 @@ function CampaignsPageContent() {
       filteredCampaigns
         .map((c) => {
           const sent = Number(c.emails_sent_count ?? 0);
-          const opened = Number(c.open_count ?? 0);
+          const opened = Number(c.open_count_unique ?? c.open_count ?? 0);
           const replied = replyTotal(c);
           const contacted = Number(c.new_leads_contacted_count ?? 0);
           // Открываемость — на КОНТАКТ (contacted_count), не на письмо. См. totals.

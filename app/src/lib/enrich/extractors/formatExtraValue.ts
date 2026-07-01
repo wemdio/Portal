@@ -118,6 +118,25 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
       }
       return EMPTY_CELL_DASH;
     }
+    // Сервисы сквозной аналитики (matrix-пресет): per-service 'да'/'' + сводная.
+    // Пустая строка '' = просканировали, сервиса нет (как в базе-примере) — НЕ
+    // DASH. DASH остаётся только для строк-ошибок (их пишет applier напрямую,
+    // не через этот форматтер).
+    case 'svc_roistat':
+    case 'svc_k50':
+    case 'svc_owox_bi':
+    case 'svc_envybox':
+    case 'svc_smartis':
+    case 'svc_calltouch':
+    case 'svc_comagic':
+    case 'svc_mango_office':
+    case 'svc_ringostat':
+    case 'svc_callibri':
+    case 'svc_uiscom':
+    case 'svc_primegate':
+    case 'svc_alloka':
+    case 'analytics_services':
+      return typeof value === 'string' ? value : EMPTY_CELL_DASH;
     default:
       return EMPTY_CELL_DASH;
   }
