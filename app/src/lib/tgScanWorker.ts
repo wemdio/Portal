@@ -27,6 +27,8 @@ interface ScanVideoRow {
   filename: string;
   fileSize: number | null;
   duration: number | null;
+  /** UNIX timestamp when the message was sent in the source chat. */
+  messageDate?: number | null;
   phase: string;
   downloadedBytes?: number;
   totalBytes?: number;
@@ -223,6 +225,7 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
         filename: videoInfo.filename,
         fileSize: videoInfo.fileSize ?? null,
         duration: videoInfo.duration ?? null,
+        messageDate: m.date ?? null,
         phase: 'found',
       });
       await flushProgress(true);
