@@ -128,13 +128,30 @@ export async function POST(req: NextRequest) {
   }
   const ccList = mergeCcLists(replyAllCc, ((pending.client_email as string) ?? '').split(','));
 
+  // История переписки в теле: клиент в копии — НОВЫЙ в треде, ему доходит только
+  // это письмо, поэтому предыдущий диалог (ответ лида + процитированный им наш
+  // оффер, хранится в reply_body) цитируем прямо в тело — иначе клиент видит
+  // строку передачи без контекста.
+  const draftText = pending.draft_text as string;
+  const history = ((qual?.reply_body as string | null) ?? '').trim();
+  let bodyText = draftText;
+  if (history) {
+    const who = (qual?.lead_name as string | null) || (qual?.lead_email as string | null) || 'Лид';
+    const when = qual?.reply_timestamp
+      ? new Date(qual.reply_timestamp as string).toLocaleString('ru-RU')
+      : '';
+    const header = [when, who].filter(Boolean).join(', ');
+    const quoted = history.split('\n').map((l) => `> ${l}`).join('\n');
+    bodyText = `${draftText}\n\n${header ? `${header} писал(а):\n` : ''}${quoted}`;
+  }
+
   // Send: reply into the lead's thread with the client + thread participants in CC.
   try {
     await instantly.replyToEmail({
       reply_to_uuid: pending.reply_to_uuid as string,
       eaccount: pending.eaccount as string,
       subject: buildReplySubject((qual?.reply_subject as string | null) ?? null),
-      body: { text: pending.draft_text as string },
+      body: { text: bodyText },
       ...(ccList.length ? { cc_address_email_list: ccList.join(', ') } : {}),
     });
   } catch (err) {
