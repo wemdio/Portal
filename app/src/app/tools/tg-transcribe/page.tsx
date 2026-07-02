@@ -738,6 +738,7 @@ export default function TgTranscribePage() {
   const fetchAllItems = useCallback(async (
     sort: 'created_at' | 'message_date' = 'created_at',
     chatFilter: { chatId: number; topicId: number } | null = null,
+    search = '',
   ) => {
     setLoading(true);
     try {
@@ -746,6 +747,9 @@ export default function TgTranscribePage() {
         params.set('chatId', String(chatFilter.chatId));
         params.set('topicId', String(chatFilter.topicId));
       }
+      // Search runs server-side: the list holds only the newest 200 rows, so
+      // filtering them client-side made anything older unfindable.
+      if (search) params.set('q', search);
       const res = await authFetch(`/api/tools/tg-transcribe?${params}`);
       if (!res.ok) { setAllItems([]); return; }
       const json = (await res.json()) as { items: TranscriptItem[] };
@@ -777,10 +781,19 @@ export default function TgTranscribePage() {
     return Array.from(names).sort((a, b) => a.localeCompare(b, 'ru'));
   }, [allItems]);
 
+  // Debounced copy of the search box: the server is queried ~0.4 s after the
+  // user stops typing instead of on every keystroke.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchQuery.trim()), 400);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
   const filteredItems = React.useMemo(() => {
-    // activeChat is pushed to the server in fetchAllItems, so allItems is
-    // already chat-scoped when a chat is selected. We only filter client-side
-    // by sender and search.
+    // activeChat and searchQuery are pushed to the server in fetchAllItems,
+    // so allItems is already chat- and search-scoped. Client-side we only
+    // narrow by sender (and re-apply the search instantly while the
+    // debounced server refetch is in flight).
     let result = allItems;
     if (activeSender) {
       result = result.filter((i) => i.sender_name === activeSender);
@@ -803,8 +816,8 @@ export default function TgTranscribePage() {
   );
 
   useEffect(() => {
-    void fetchAllItems(sortOrder, activeChat);
-  }, [fetchAllItems, sortOrder, activeChat]);
+    void fetchAllItems(sortOrder, activeChat, debouncedSearch);
+  }, [fetchAllItems, sortOrder, activeChat, debouncedSearch]);
 
   // Mount-only fetches for sidebar data that doesn't depend on sort/filter.
   useEffect(() => {
@@ -821,16 +834,16 @@ export default function TgTranscribePage() {
       prevJobRef.current = activeJob.id;
       if (activeJob.completed > prevCompletedRef.current) {
         prevCompletedRef.current = activeJob.completed;
-        void fetchAllItems(sortOrder, activeChat);
+        void fetchAllItems(sortOrder, activeChat, debouncedSearch);
         void fetchTranscribedChats();
       }
     } else if (prevJobRef.current && scanResult) {
       prevCompletedRef.current = 0;
-      void fetchAllItems(sortOrder, activeChat);
+      void fetchAllItems(sortOrder, activeChat, debouncedSearch);
       void fetchTranscribedChats();
       prevJobRef.current = null;
     }
-  }, [activeJob, scanResult, fetchAllItems, fetchTranscribedChats, sortOrder, activeChat]);
+  }, [activeJob, scanResult, fetchAllItems, fetchTranscribedChats, sortOrder, activeChat, debouncedSearch]);
 
   const handleSenderChange = (sender: string | null) => {
     setActiveSender(sender);

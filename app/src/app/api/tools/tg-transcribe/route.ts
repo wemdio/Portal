@@ -83,6 +83,25 @@ export async function GET(req: NextRequest) {
             else q = q.eq('topic_id', topicIdFilter);
           }
         }
+
+        // Server-side search. The UI loads only the newest `limit` rows, so a
+        // client-side search couldn't see anything older — a transcript from
+        // May was unfindable once a few hundred newer rows piled on top of it.
+        // Matches the same fields the UI used to filter by: caption, filename,
+        // sender name.
+        const searchParam = (url.searchParams.get('q') ?? '').trim();
+        if (searchParam) {
+          // Commas, parens and backslashes would break PostgREST's or=()
+          // syntax — replace with spaces. '*'/'%' just widen the match.
+          const safe = searchParam.replace(/[,()\\]/g, ' ').trim().slice(0, 100);
+          if (safe) {
+            const pattern = `*${safe}*`;
+            q = q.or(
+              `caption.ilike.${pattern},filename.ilike.${pattern},sender_name.ilike.${pattern}`,
+            );
+          }
+        }
+
         const { data, error } = await q;
 
         if (error) return jsonError(error.message, 500);
