@@ -351,7 +351,17 @@ async function callGroqTranscriptionSingle(input: {
   const audioBytes = Uint8Array.from(input.audioMp3);
   const blob = new Blob([audioBytes], { type: 'audio/mpeg' });
 
-  const maxRetries = 6;
+  // On the free tier Groq caps at 7200 audio-seconds/hour ("ASPH"). A queue
+  // of hour-long videos burns through the budget in minutes, and their
+  // Retry-After comes back at 15-25 min. We need to actually respect that,
+  // otherwise we spin, fail, and hand the file back to the scan worker for
+  // no reason. Two retry knobs:
+  //   - maxRetries=12 gives us ~2 h of possible wait per file, enough to
+  //     ride through 2-3 rate-limit windows if the queue is deep.
+  //   - retryAfterCapSeconds=1800 (30 min) trusts Groq's Retry-After hint
+  //     but keeps a ceiling in case a stuck header would wedge us forever.
+  const maxRetries = 12;
+  const retryAfterCapSeconds = 30 * 60;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     // Rebuild the form each attempt — some fetch implementations invalidate
@@ -378,11 +388,12 @@ async function callGroqTranscriptionSingle(input: {
     }
 
     if (res.status === 429) {
-      // Rate-limited — Groq returns Retry-After in seconds. Cap at 120 s so a
-      // stuck header doesn't wedge us forever.
+      // Rate-limited — Groq returns Retry-After in seconds. Respect the
+      // value, only cap at retryAfterCapSeconds so a broken header can't
+      // freeze the worker for an hour+.
       const retryAfter = Math.min(
-        Math.max(1, Number(res.headers.get('retry-after')) || 30),
-        120,
+        Math.max(1, Number(res.headers.get('retry-after')) || 60),
+        retryAfterCapSeconds,
       );
       const raw = await res.text().catch(() => '');
       lastErr = new Error(`Groq rate limited: ${raw || res.statusText}`);
