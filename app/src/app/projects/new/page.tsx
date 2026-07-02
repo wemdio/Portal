@@ -46,7 +46,8 @@ export default function NewProjectPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
-  
+  const [assigneeNameToId, setAssigneeNameToId] = useState<Map<string, string>>(new Map());
+
   useEffect(() => {
     void fetchAssigneeUsers();
   }, []);
@@ -55,13 +56,20 @@ export default function NewProjectPage() {
     try {
       const { data, error } = await supabase
         .from('profiles')
-        .select('email, full_name');
+        .select('id, email, full_name');
 
       if (error) throw error;
-      const options = buildAssigneeOptions(
-        ((data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name'>>),
-      );
-      setAssigneeOptions(options);
+      const profiles = (data ?? []) as Array<Pick<UserProfile, 'id' | 'email' | 'full_name'>>;
+      setAssigneeOptions(buildAssigneeOptions(profiles));
+      // Имя специалиста → id аккаунта, чтобы при СОЗДАНИИ проекта проставлялся
+      // specialist_user_id. Без него лид-алерты и авто-передача по проекту молча
+      // не работают (раньше линк ставился только в редактировании списка проектов).
+      const nameIdMap = new Map<string, string>();
+      for (const p of profiles) {
+        const name = p.full_name?.trim() || p.email?.split('@')[0]?.trim() || '';
+        if (name && p.id) nameIdMap.set(name, p.id);
+      }
+      setAssigneeNameToId(nameIdMap);
     } catch (fetchError) {
       void logError('projects.assignees.fetch.failed', fetchError);
     }
@@ -166,6 +174,9 @@ export default function NewProjectPage() {
           status: formData.status,
           manager: formData.manager || null,
           specialist: formData.specialist || null,
+          specialist_user_id: formData.specialist
+            ? (assigneeNameToId.get(formData.specialist) ?? null)
+            : null,
           budget: formData.budget || null,
           margin: formData.margin || null,
           contract_link: formData.contract_link || null,
