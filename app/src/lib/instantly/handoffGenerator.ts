@@ -75,7 +75,10 @@ export async function generateHandoffReply(
   input: HandoffInput,
   options: HandoffOptions,
 ): Promise<string> {
-  const model = options.model ?? process.env.LEAD_HANDOFF_MODEL ?? DEFAULT_MODEL;
+  // `||` not `??`: LEAD_HANDOFF_MODEL is passed via compose as `${...:-}`, so on
+  // prod it's an EMPTY STRING, not undefined — `??` would keep "" and Requesty
+  // rejects it ("Invalid model, expected provider/model"). `||` falls through.
+  const model = options.model || process.env.LEAD_HANDOFF_MODEL || DEFAULT_MODEL;
   const maxRetries = options.maxRetries ?? 2;
   const framing = input.framing?.trim() || DEFAULT_HANDOFF_FRAMING;
   const systemPrompt = buildSystemPrompt(framing);
