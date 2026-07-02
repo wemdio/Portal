@@ -47,6 +47,7 @@ function buildSystemPrompt(framing: string): string {
 - ОБЯЗАТЕЛЬНО отреагируй на КОНКРЕТНЫЙ запрос лида (демо / цена / звонок / вопрос) — упомяни его. Если лид просит демо — подтверди, что скоро вернутся именно по демо.
 - НЕ раскрывай, что человек в копии — из другой компании. Это «коллега» / «основная почта» / «ответственный».
 - Не выдумывай фактов, цен, дат, имён. Никакой конкретики, которой нет в переписке.
+- Никаких длинных тире («—», «–») — живой человек в письме ставит запятую, точку или дефис. Это касается и остальной «вылизанной» типографики: пиши как обычный человек в рабочей переписке.
 - Без подписи, без темы письма — только текст тела ответа.
 - Верни ТОЛЬКО текст ответа, без кавычек и пояснений.`;
 }
@@ -69,6 +70,19 @@ function sleep(ms: number): Promise<void> {
 /** Strips wrapping quotes a model sometimes adds around the whole reply. */
 function unwrapQuotes(text: string): string {
   return text.replace(/^["'«»\s]+|["'«»\s]+$/g, '').trim();
+}
+
+/**
+ * Типографские тира («—», «–») — маркер ИИ-текста: живой человек в письме
+ * печатает дефис. Промпт их запрещает, но модели правило иногда игнорируют,
+ * поэтому дочищаем результат программно. Переводы строк не трогаем (матчим
+ * только пробелы/табы вокруг символа), маркер списка в начале строки остаётся
+ * аккуратным.
+ */
+function humanizeDashes(text: string): string {
+  return text
+    .replace(/[ \t]*[—–][ \t]*/g, ' - ')
+    .replace(/^ - /gm, '- ');
 }
 
 export async function generateHandoffReply(
@@ -122,7 +136,7 @@ export async function generateHandoffReply(
         await sleep(1500 * 2 ** attempt);
         continue;
       }
-      return unwrapQuotes(text);
+      return humanizeDashes(unwrapQuotes(text));
     }
 
     if ([429, 502, 503, 504].includes(response.status) && attempt < maxRetries) {
