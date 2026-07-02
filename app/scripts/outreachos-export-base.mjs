@@ -142,14 +142,38 @@ async function main() {
   }
   const domainCapped = afterHr.length - ready.length;
 
+  // (3) Лимит доли catch-all ≤20% итоговой пачки — синхрон с gridMapping.ts
+  // (CATCH_ALL_MAX_SHARE). x <= ok * 0.2/0.8 = ok/4. Первые N по порядку.
+  const stIdx = (() => {
+    const lower = (header || []).map((h) => String(h).trim().toLowerCase());
+    for (const n of ['email статус', 'email status']) { const i = lower.indexOf(n); if (i >= 0) return i; }
+    return lower.findIndex((h) => h.endsWith('статус'));
+  })();
+  const isCatch = (r) => stIdx >= 0 && String(r[stIdx] ?? '').trim().toLowerCase().includes('catch');
+  const okCount = ready.filter((r) => !isCatch(r)).length;
+  const maxCatch = Math.floor(okCount / 4);
+  let catchTaken = 0;
+  const finalRows = [];
+  for (const r of ready) {
+    if (isCatch(r)) {
+      if (catchTaken >= maxCatch) continue;
+      catchTaken++;
+    }
+    finalRows.push(r);
+  }
+  const catchDropped = ready.length - finalRows.length;
+
   const outName = `outreachos-base-${(job.file_name || job.id).replace(/[^a-z0-9-]/gi, '_')}.csv`;
-  writeFileSync(outName, toCsv([header, ...ready]), 'utf8');
+  writeFileSync(outName, toCsv([header, ...finalRows]), 'utf8');
 
   console.log('\n=== База ===');
   console.log(`  job ${job.id} (${job.file_name}, status=${job.status})`);
   console.log(`  колонки: ${header?.join(' | ')}`);
-  console.log(`  всего валидных: ${body.length} | HR-отсев: ${hrDropped} | >3/домен срезано: ${domainCapped} | готовых: ${ready.length}`);
-  console.log(`  → ${outName} (без HR + ≤3 почты/домен)`);
+  console.log(
+    `  всего валидных: ${body.length} | HR-отсев: ${hrDropped} | >3/домен: ${domainCapped} | ` +
+    `catch-all сверх 20%: ${catchDropped} | готовых: ${finalRows.length} (ok=${okCount}, catch=${catchTaken})`,
+  );
+  console.log(`  → ${outName} (без HR + ≤3/домен + catch-all ≤20%)`);
 }
 
 main().catch((e) => { console.error('FATAL:', e.message); process.exit(1); });
