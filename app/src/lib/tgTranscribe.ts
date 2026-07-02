@@ -1,7 +1,14 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { extractOrConvertToMp3, extractMp3FromFile, transcribeAudio } from '@/lib/transcription';
 import { logError, logInfo } from '@/lib/loggerServer';
-import { isMtprotoAvailable, downloadFileByFileId, downloadFileByFileIdToPath } from '@/lib/tgMtprotoDownload';
+import {
+  isMtprotoAvailable,
+  isUserMtprotoAvailable,
+  downloadFileByFileId,
+  downloadFileByFileIdToPath,
+  downloadMtprotoDocToPath,
+  type MtprotoDocumentRef,
+} from '@/lib/tgMtprotoDownload';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -31,11 +38,37 @@ function markTranscriptWriteFailure(error: unknown): void {
   }
 }
 
+/**
+ * Fields in tg_video_transcripts that are integer columns in Postgres.
+ * Telegram MTProto returns some of them as floats (duration especially —
+ * seen 596.8, 12.5, etc.), and passing those through to supabase-js used
+ * to fail with "invalid input syntax for type integer: 596.8" and then
+ * the swallowed error would silently drop the whole batch for 15 s.
+ */
+const INT_COLUMNS = new Set([
+  'duration_seconds',
+  'file_size_bytes',
+  'length',
+]);
+
+function sanitizeTranscriptRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...row };
+  for (const key of INT_COLUMNS) {
+    const v = out[key];
+    if (typeof v === 'number' && Number.isFinite(v) && !Number.isInteger(v)) {
+      out[key] = Math.round(v);
+    }
+  }
+  return out;
+}
+
 async function safeInsertTranscript(row: Record<string, unknown>): Promise<boolean> {
   if (!supabaseAdmin) return false;
   if (!canAttemptTranscriptWrite()) return false;
   try {
-    const { error } = await supabaseAdmin.from('tg_video_transcripts').insert(row);
+    const { error } = await supabaseAdmin
+      .from('tg_video_transcripts')
+      .insert(sanitizeTranscriptRow(row));
     if (error) {
       markTranscriptWriteFailure(error);
       return false;
@@ -155,6 +188,14 @@ export interface VideoInfo {
   fileSize: number | undefined;
   duration: number | undefined;
   filename: string;
+  /**
+   * When set, processVideoMessage downloads the video directly from MTProto
+   * using this reference and skips every Bot API path (getFile / forward /
+   * downloadFileByFileId). Populated by the MTProto forum scan path — that
+   * way the bot never has to forward the message into the source chat to
+   * obtain a file_id, which is what created the visible "→ <forward>" spam.
+   */
+  mtprotoDoc?: MtprotoDocumentRef;
 }
 
 export function extractVideoInfo(msg: TgMessage): VideoInfo | null {
@@ -361,10 +402,40 @@ export async function processVideoMessage(
     return { status: 'skipped_size', error: errorText };
   }
 
-  console.log(`[tg-transcribe] Processing ${videoInfo.filename} (${((videoInfo.fileSize ?? 0) / 1e6).toFixed(1)} MB), mtproto=${canUseMtproto}, large=${isLargeFile}, localApi=${isLocalApi()}`);
+  console.log(`[tg-transcribe] Processing ${videoInfo.filename} (${((videoInfo.fileSize ?? 0) / 1e6).toFixed(1)} MB), mtproto=${canUseMtproto}, large=${isLargeFile}, localApi=${isLocalApi()}, mtprotoDoc=${!!videoInfo.mtprotoDoc}`);
   onProgress?.({ phase: 'downloading', downloadedBytes: 0, totalBytes: videoInfo.fileSize });
 
-  if (canUseMtproto && isLargeFile) {
+  if (videoInfo.mtprotoDoc && isUserMtprotoAvailable()) {
+    // Direct MTProto download — used by the forum-topic scanner so the bot
+    // doesn't have to forward+delete the message in the source chat just to
+    // produce a file_id. The forward path was visible to chat members and
+    // generated push notifications even though the message got deleted right
+    // after; this branch skips it entirely.
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-tg-dl-'));
+    const ext = getExtFromFilename(videoInfo.filename);
+    const videoPath = path.join(tmpDir, `video${ext}`);
+    try {
+      await downloadMtprotoDocToPath(
+        videoInfo.mtprotoDoc,
+        videoPath,
+        (downloaded, total) => {
+          onProgress?.({ phase: 'downloading', downloadedBytes: downloaded, totalBytes: total });
+        },
+        // Refresh context: if the fileReference has expired (common when a
+        // scan sits on message N for hours while earlier messages in the
+        // same batch age out), the downloader re-fetches the message from
+        // Telegram and retries with a fresh reference.
+        { chatId: msg.chat.id, msgId: msg.message_id },
+      );
+      const stat = await fs.stat(videoPath);
+      fileSizeBytes = stat.size;
+      console.log(`[tg-transcribe] Downloaded ${videoInfo.filename} via MTProto-direct, ${(fileSizeBytes / 1e6).toFixed(1)} MB, converting...`);
+      onProgress?.({ phase: 'converting' });
+      mp3 = await extractMp3FromFile(videoPath);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  } else if (canUseMtproto && isLargeFile) {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-tg-dl-'));
     const ext = getExtFromFilename(videoInfo.filename);
     const videoPath = path.join(tmpDir, `video${ext}`);
@@ -413,7 +484,7 @@ export async function processVideoMessage(
   const text = await transcribeAudio({ audioMp3: mp3, filename: videoInfo.filename, jobId: transcriptionJobId });
   console.log(`[tg-transcribe] Transcribed ${videoInfo.filename}, text length: ${text.length}`);
 
-  await safeInsertTranscript({
+  const insertOk = await safeInsertTranscript({
     tg_chat_id: msg.chat.id,
     tg_message_id: msg.message_id,
     topic_id: msg.message_thread_id ?? 0,
@@ -428,6 +499,16 @@ export async function processVideoMessage(
     length: text.length,
     status: 'completed',
   });
+
+  if (!insertOk) {
+    // Escalate — otherwise the scan worker will happily mark this video as
+    // completed while the transcript is nowhere in the DB, and the user
+    // sees ✓ in the scan progress but the record never appears in History.
+    throw new Error(
+      `Не удалось записать транскрипт в БД (msg ${msg.message_id}). ` +
+      'Скорее всего Postgres отклонил вставку (см. предыдущий log).',
+    );
+  }
 
   await logInfo('tg-transcribe.completed', `Transcribed video from ${senderName}`, {
     chatId: msg.chat.id,

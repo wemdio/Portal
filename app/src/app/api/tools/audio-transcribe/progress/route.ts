@@ -34,6 +34,9 @@ export async function GET(req: NextRequest) {
       processedSeconds: progress.processedSeconds,
       audioDurationSeconds: progress.audioDurationSeconds,
       error: progress.error,
+      queuePosition: progress.queuePosition,
+      queueTotal: progress.queueTotal,
+      activeCount: progress.activeCount,
     });
   } catch (err) {
     return jsonError(err instanceof Error ? err.message : 'Failed to fetch progress', 500);

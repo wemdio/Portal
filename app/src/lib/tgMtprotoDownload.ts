@@ -12,6 +12,14 @@ const BOT_TOKEN = process.env.TG_TRANSCRIBE_BOT_TOKEN || '';
 
 let client: TelegramClient | null = null;
 let connecting: Promise<TelegramClient> | null = null;
+
+// Separate MTProto client authed as the TG_TARGET user account. The bot
+// account hits BOT_METHOD_INVALID on messages.GetHistory / GetReplies which
+// are needed for forum-topic enumeration, so we route those calls through
+// a user account that's already added to the target chats (see /tools/
+// tg-transcribe screen — "Никита" account is the one configured here).
+let userClient: TelegramClient | null = null;
+let userConnecting: Promise<TelegramClient> | null = null;
 const MT_RETRY_ATTEMPTS = 3;
 const MT_RETRY_DELAY_MS = 1500;
 const CHUNK_STALL_TIMEOUT_MS = 600_000; // 10 min with no data = stalled
@@ -67,6 +75,47 @@ async function getClient(): Promise<TelegramClient> {
 
 export function isMtprotoAvailable(): boolean {
   return !!(API_ID && API_HASH && BOT_TOKEN);
+}
+
+/**
+ * MTProto creds for the target USER account (Никита, per current prod).
+ * Required for any MTProto call that bots can't make — most notably
+ * messages.GetHistory and messages.GetReplies for chats that aren't
+ * actually owned by the bot.
+ */
+export function isUserMtprotoAvailable(): boolean {
+  return !!(
+    process.env.TG_TARGET_API_ID &&
+    process.env.TG_TARGET_API_HASH &&
+    process.env.TG_TARGET_SESSION
+  );
+}
+
+async function getUserClient(): Promise<TelegramClient> {
+  if (userClient?.connected) return userClient;
+  if (userConnecting) return userConnecting;
+
+  userConnecting = (async () => {
+    const apiId = Number(process.env.TG_TARGET_API_ID || '0');
+    const apiHash = process.env.TG_TARGET_API_HASH || '';
+    const sessionStr = process.env.TG_TARGET_SESSION || '';
+    if (!apiId || !apiHash || !sessionStr) {
+      throw new Error('TG_TARGET_API_ID / TG_TARGET_API_HASH / TG_TARGET_SESSION not configured');
+    }
+    const c = new TelegramClient(new StringSession(sessionStr), apiId, apiHash, {
+      connectionRetries: 3,
+    });
+    await c.connect();
+    if (!(await c.checkAuthorization())) {
+      throw new Error('TG_TARGET_SESSION expired — user account is no longer authorized');
+    }
+    await logInfo('mtproto.userClient.connected', 'GramJS MTProto user client connected (TG_TARGET account)');
+    userClient = c;
+    userConnecting = null;
+    return c;
+  })();
+
+  return userConnecting;
 }
 
 /**
@@ -246,7 +295,10 @@ export interface MtprotoForumTopic {
  * message to get the topic title.
  */
 export async function getForumTopicsMtproto(chatId: number): Promise<MtprotoForumTopic[]> {
-  const c = await getClient();
+  // messages.GetHistory is bot-restricted (BOT_METHOD_INVALID) for most
+  // forum chats. Use the TG_TARGET user account when available; fall back
+  // to the bot client only for legacy backwards compatibility.
+  const c = isUserMtprotoAvailable() ? await getUserClient() : await getClient();
 
   const peer = await resolvePeer(c, chatId);
 
@@ -318,15 +370,52 @@ export async function getForumTopicsMtproto(chatId: number): Promise<MtprotoForu
         }
       }
     } catch {
-      // topic 1 = "General" in most forum groups
-      if (topicId === 1) {
-        topics.push({ id: 1, title: 'General' });
-      }
+      // topic 1 = "General" in most forum groups — see fallback below.
     }
+  }
+
+  // The General topic of a forum has no MessageActionTopicCreate (it's
+  // implicit at chat creation), so the loop above never pushes it. Add it
+  // explicitly if we haven't yet — using the channel title as a hint when
+  // General was renamed (e.g. «Звонки с клиентами»). Without this entry the
+  // UI dropdown is missing General and users have no way to add it.
+  if (!topics.find((t) => t.id === 1)) {
+    let generalTitle = 'General';
+    try {
+      const full = await c.invoke(new Api.channels.GetFullChannel({ channel: peer as Api.InputPeerChannel }));
+      const chats = 'chats' in full ? full.chats : [];
+      const expectedId = Math.abs(chatId) - 1_000_000_000_000;
+      const chat = chats.find((ch) => {
+        const raw = (ch as unknown as { id?: bigint | number | string }).id;
+        return raw != null && Number(raw) === expectedId;
+      });
+      const title = (chat as unknown as { title?: unknown })?.title;
+      if (typeof title === 'string' && title.length > 0) {
+        generalTitle = `${title} (General)`;
+      }
+    } catch {
+      // Best-effort — fall back to plain "General" label.
+    }
+    topics.push({ id: 1, title: generalTitle });
   }
 
   topics.sort((a, b) => a.id - b.id);
   return topics;
+}
+
+/**
+ * Opaque-ish reference to an MTProto Document — everything `client.downloadFile`
+ * needs to re-fetch the actual bytes without forwarding through the bot first.
+ * Sourced from `msg.media.document` on a message we already received via
+ * messages.GetReplies/GetHistory, so we never have to call Bot API getFile or
+ * forwardMessage to produce a file_id.
+ */
+export interface MtprotoDocumentRef {
+  dcId: number;
+  id: string;             // bigInt as string to survive JSON serialization
+  accessHash: string;     // same
+  fileReferenceHex: string;
+  size: number | undefined;
 }
 
 export interface MtprotoTopicMessage {
@@ -342,6 +431,14 @@ export interface MtprotoTopicMessage {
   fileSize?: number;
   /** Duration in seconds (video / video_note). */
   duration?: number;
+  /** Direct-download reference — set only for video messages. */
+  document?: MtprotoDocumentRef;
+  /** Sender user id (or chat id when sent on behalf of a channel). */
+  senderId?: number;
+  /** Best-effort sender display name resolved from the same response. */
+  senderName?: string;
+  /** Caption / text payload of the message. */
+  caption?: string;
 }
 
 export interface MtprotoTopicScanOptions {
@@ -356,13 +453,15 @@ interface MaybeVideoSummary {
   fileName?: string;
   fileSize?: number;
   duration?: number;
+  document?: MtprotoDocumentRef;
 }
 
 /**
- * Extract video metadata from an MTProto Message.media. We only care about
- * is-video and basic file info — the actual download happens later via Bot
- * API forward + processVideoMessage (which then can use MTProto download by
- * file_id for large files).
+ * Extract video metadata + download ref from an MTProto Message.media. The ref
+ * lets the caller call downloadMtprotoDocToPath directly — no bot forward, no
+ * Bot API file_id round-trip. That's what gets the scan worker out of the chat:
+ * pre-fix every video required a forward+delete pair from the bot, which
+ * users saw briefly (and notification recipients always saw).
  */
 function extractVideoSummary(msg: unknown): MaybeVideoSummary {
   const empty: MaybeVideoSummary = { isVideo: false };
@@ -377,6 +476,10 @@ function extractVideoSummary(msg: unknown): MaybeVideoSummary {
     mimeType?: string;
     size?: bigint | number;
     attributes?: Array<{ className?: string; duration?: number; fileName?: string }>;
+    id?: bigint | number | string;
+    accessHash?: bigint | number | string;
+    fileReference?: Buffer | Uint8Array | { type?: string; data?: number[] };
+    dcId?: number;
   };
   if (doc.className !== 'Document') return empty;
 
@@ -387,12 +490,255 @@ function extractVideoSummary(msg: unknown): MaybeVideoSummary {
   const isVideo = mimeType.startsWith('video/') || Boolean(videoAttr);
   if (!isVideo) return empty;
 
+  let document: MtprotoDocumentRef | undefined;
+  if (doc.id != null && doc.accessHash != null && doc.dcId != null) {
+    // gramJS returns fileReference as either a Node Buffer or {type:'Buffer',data}
+    // depending on how it was serialized along the way. Normalize to a hex
+    // string so the descriptor survives a JSON round-trip if anyone caches it.
+    let fileReferenceHex = '';
+    const ref = doc.fileReference;
+    if (Buffer.isBuffer(ref)) {
+      fileReferenceHex = ref.toString('hex');
+    } else if (ref instanceof Uint8Array) {
+      fileReferenceHex = Buffer.from(ref).toString('hex');
+    } else if (ref && typeof ref === 'object' && Array.isArray((ref as { data?: number[] }).data)) {
+      fileReferenceHex = Buffer.from((ref as { data: number[] }).data).toString('hex');
+    }
+    document = {
+      dcId: Number(doc.dcId),
+      id: String(doc.id),
+      accessHash: String(doc.accessHash),
+      fileReferenceHex,
+      size: doc.size != null ? Number(doc.size) : undefined,
+    };
+  }
+
   return {
     isVideo: true,
     fileName: fileNameAttr?.fileName,
     fileSize: doc.size != null ? Number(doc.size) : undefined,
     duration: videoAttr?.duration != null ? Number(videoAttr.duration) : undefined,
+    document,
   };
+}
+
+/**
+ * Build a quick {peerId → displayName} lookup from the users/chats arrays
+ * Telegram returns alongside messages.* responses. Lets us tag each message
+ * with a sender name without making per-message getEntity calls.
+ */
+function buildSenderLookup(
+  users: unknown[],
+  chats: unknown[],
+): Map<string, { name: string; id: number }> {
+  const map = new Map<string, { name: string; id: number }>();
+  for (const u of users) {
+    if (!u || typeof u !== 'object') continue;
+    const user = u as { id?: bigint | number | string; firstName?: string; lastName?: string; username?: string };
+    if (user.id == null) continue;
+    const first = (user.firstName ?? '').trim();
+    const last = (user.lastName ?? '').trim();
+    const username = (user.username ?? '').trim();
+    const name = [first, last].filter(Boolean).join(' ') || username || `User ${user.id}`;
+    map.set(`user:${user.id}`, { name, id: Number(user.id) });
+  }
+  for (const ch of chats) {
+    if (!ch || typeof ch !== 'object') continue;
+    const chat = ch as { id?: bigint | number | string; title?: string; username?: string };
+    if (chat.id == null) continue;
+    const name = (chat.title ?? '').trim() || (chat.username ?? '').trim() || `Chat ${chat.id}`;
+    map.set(`chat:${chat.id}`, { name, id: Number(chat.id) });
+    map.set(`channel:${chat.id}`, { name, id: Number(chat.id) });
+  }
+  return map;
+}
+
+function resolveSenderFromFromId(
+  fromId: unknown,
+  lookup: Map<string, { name: string; id: number }>,
+): { id?: number; name?: string } {
+  if (!fromId || typeof fromId !== 'object') return {};
+  const p = fromId as { className?: string; userId?: bigint | number | string; chatId?: bigint | number | string; channelId?: bigint | number | string };
+  if (p.className === 'PeerUser' && p.userId != null) {
+    return lookup.get(`user:${p.userId}`) ?? { id: Number(p.userId) };
+  }
+  if (p.className === 'PeerChat' && p.chatId != null) {
+    return lookup.get(`chat:${p.chatId}`) ?? { id: Number(p.chatId) };
+  }
+  if (p.className === 'PeerChannel' && p.channelId != null) {
+    return lookup.get(`channel:${p.channelId}`) ?? { id: Number(p.channelId) };
+  }
+  return {};
+}
+
+/**
+ * Re-fetch a message from Telegram and extract a fresh MtprotoDocumentRef.
+ * File references on media documents expire (usually within hours) — when
+ * that happens Telegram replies with FILE_REFERENCE_EXPIRED and the only
+ * fix is to ask for the message again. Call this from the downloader when
+ * it catches that error; caller should retry with the fresh ref.
+ */
+async function refreshMtprotoDocRef(chatId: number, msgId: number): Promise<MtprotoDocumentRef | null> {
+  if (!isUserMtprotoAvailable()) return null;
+  const c = await getUserClient();
+  const peer = await resolvePeer(c, chatId);
+  const result = await c.invoke(
+    new Api.channels.GetMessages({
+      channel: peer as Api.InputPeerChannel,
+      id: [new Api.InputMessageID({ id: msgId })],
+    }),
+  );
+  const messages = 'messages' in result ? result.messages : [];
+  for (const m of messages) {
+    if (!m || typeof m !== 'object') continue;
+    const summary = extractVideoSummary(m);
+    if (summary.document) return summary.document;
+  }
+  return null;
+}
+
+function isFileReferenceExpiredError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = `${err.message} ${String((err as { cause?: unknown }).cause ?? '')}`;
+  return /FILE_REFERENCE_EXPIRED|FILE_REFERENCE_INVALID/i.test(msg);
+}
+
+/**
+ * Download a media document directly from MTProto using a previously-extracted
+ * MtprotoDocumentRef. Streams to disk like downloadFileByFileIdToPath; the
+ * difference is the input — no Bot API file_id round trip required, no bot
+ * forward needed to obtain that file_id in the first place. Uses the user
+ * client when configured (downloads visible to TG_TARGET account), falls back
+ * to the bot client only if TG_TARGET creds are absent.
+ *
+ * If chatId+msgId are provided, a FILE_REFERENCE_EXPIRED error triggers a
+ * refresh: we re-fetch the message via channels.GetMessages, extract the
+ * new fileReference, and retry the download with the fresh descriptor.
+ * This is common on long scans — 100 messages fetched together share the
+ * same batch of references, and by the time we get to message #80 the
+ * earlier references may have already expired.
+ */
+export async function downloadMtprotoDocToPath(
+  ref: MtprotoDocumentRef,
+  destPath: string,
+  onProgress?: (downloaded: number, total: number | undefined) => void,
+  refreshCtx?: { chatId: number; msgId: number },
+): Promise<void> {
+  let activeRef = ref;
+  const buildInputLocation = () => {
+    const fileRef = activeRef.fileReferenceHex
+      ? Buffer.from(activeRef.fileReferenceHex, 'hex')
+      : Buffer.alloc(0);
+    return new Api.InputDocumentFileLocation({
+      id: bigInt(activeRef.id),
+      accessHash: bigInt(activeRef.accessHash),
+      fileReference: fileRef,
+      thumbSize: '',
+    });
+  };
+
+  await logInfo('mtproto.docDownload.start', `Downloading mtproto doc to disk (dc=${activeRef.dcId})`, {
+    dcId: activeRef.dcId, fileSize: activeRef.size, destPath,
+  });
+
+  let lastError: unknown;
+  let resumeOffset = 0;
+  let refreshedOnce = false;
+  for (let attempt = 1; attempt <= MT_RETRY_ATTEMPTS; attempt += 1) {
+    const c = isUserMtprotoAvailable() ? await getUserClient() : await getClient();
+    const startTime = Date.now();
+    const writeStream = createWriteStream(destPath, { flags: resumeOffset > 0 ? 'a' : 'w' });
+    try {
+      const iterDownload = c.iterDownload({
+        file: buildInputLocation(),
+        dcId: activeRef.dcId,
+        offset: bigInt(resumeOffset),
+        requestSize: 512 * 1024,
+      });
+
+      let totalBytes = resumeOffset;
+      let lastProgressAt = 0;
+      const iter = iterDownload[Symbol.asyncIterator]();
+      while (true) {
+        const result = await nextChunkWithTimeout(iter, CHUNK_STALL_TIMEOUT_MS);
+        if (result.done) break;
+        const buf = Buffer.isBuffer(result.value) ? result.value : Buffer.from(result.value as string);
+        const canContinue = writeStream.write(buf);
+        totalBytes += buf.byteLength;
+        if (onProgress) {
+          const now = Date.now();
+          if (now - lastProgressAt >= 2000) {
+            lastProgressAt = now;
+            onProgress(totalBytes, activeRef.size);
+          }
+        }
+        if (!canContinue) {
+          await new Promise<void>((resolve) => writeStream.once('drain', resolve));
+        }
+      }
+      onProgress?.(totalBytes, activeRef.size);
+
+      await new Promise<void>((resolve, reject) => {
+        writeStream.end(() => resolve());
+        writeStream.on('error', reject);
+      });
+
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      const sizeMb = (totalBytes / (1024 * 1024)).toFixed(1);
+      await logInfo('mtproto.docDownload.done', `Downloaded ${sizeMb} MB to disk in ${elapsed}s`, {
+        bytes: totalBytes, elapsed, destPath,
+      });
+      return;
+    } catch (err) {
+      writeStream.destroy();
+      lastError = err;
+
+      // FILE_REFERENCE_EXPIRED — refresh the descriptor and retry from scratch.
+      // Only try this once per download so we don't loop forever if the msg
+      // itself is gone. Reset resumeOffset because the new file reference
+      // points to the same content but the server session state resets too.
+      if (isFileReferenceExpiredError(err) && refreshCtx && !refreshedOnce) {
+        refreshedOnce = true;
+        await logInfo('mtproto.docDownload.refFresh', 'FILE_REFERENCE_EXPIRED — refreshing document ref', {
+          chatId: refreshCtx.chatId, msgId: refreshCtx.msgId,
+        });
+        try {
+          const fresh = await refreshMtprotoDocRef(refreshCtx.chatId, refreshCtx.msgId);
+          if (fresh) {
+            activeRef = fresh;
+            resumeOffset = 0; // fresh ref → start from byte 0
+            // Don't count this against the attempt budget.
+            attempt -= 1;
+            continue;
+          }
+        } catch (refreshErr) {
+          await logInfo('mtproto.docDownload.refFreshFailed', 'Failed to refresh file reference', {
+            error: refreshErr instanceof Error ? refreshErr.message : String(refreshErr),
+          });
+        }
+      }
+
+      if (isRetryableMtprotoError(err) && attempt < MT_RETRY_ATTEMPTS) {
+        try {
+          const current = await stat(destPath);
+          resumeOffset = Number(current.size);
+        } catch {
+          resumeOffset = 0;
+        }
+      }
+      if (!isRetryableMtprotoError(err) || attempt >= MT_RETRY_ATTEMPTS) {
+        throw err;
+      }
+      await logInfo('mtproto.docDownload.retry', `Retrying mtproto doc download (${attempt}/${MT_RETRY_ATTEMPTS})`, {
+        attempt,
+        resumeOffset,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await disconnectMtproto();
+      await sleep(MT_RETRY_DELAY_MS);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('MTProto doc download failed');
 }
 
 /**
@@ -418,13 +764,32 @@ export async function getForumTopicMessagesMtproto(
   topicId: number | null,
   options: MtprotoTopicScanOptions = {},
 ): Promise<MtprotoTopicMessage[]> {
-  const c = await getClient();
+  // Force user-account auth — bots get BOT_METHOD_INVALID on both
+  // messages.GetReplies and messages.GetHistory for forum chats they don't
+  // own. The TG_TARGET account is the one configured to actually sit in the
+  // chats we transcribe (see UI screen — "Никита" account).
+  if (!isUserMtprotoAvailable()) {
+    throw new Error(
+      'Topic enumeration requires TG_TARGET_API_ID/HASH/SESSION — the bot account cannot enumerate forum topics via MTProto.',
+    );
+  }
+  const c = await getUserClient();
   const peer = await resolvePeer(c, chatId);
   const limit = options.limit ?? 100;
   const offsetId = options.offsetId ?? 0;
-  const normalizedTopicId = topicId != null && topicId > 0 ? topicId : 0;
+  // Tristate input:
+  //   null → whole chat, no topic filter (used for non-forum chats).
+  //   0    → the General topic of a forum. Callers store 0 in the DB after
+  //          we migrated the General-renamed entry off of topic_id=1, but
+  //          Telegram itself addresses General by the channel-create message
+  //          (msg_id = 1). Normalize 0 → 1 so GetReplies(1) actually runs;
+  //          otherwise the function falls through to whole-chat GetHistory
+  //          and pulls in messages from neighbouring topics (29.06 incident:
+  //          scan of «Звонки с клиентами» returned a video from «Собеседования»).
+  //   >0   → specific named topic, unchanged.
+  const normalizedTopicId = topicId == null ? 0 : (topicId === 0 ? 1 : topicId);
 
-  type HistoryResult = { messages: unknown[] };
+  type HistoryResult = { messages: unknown[]; users?: unknown[]; chats?: unknown[] };
   let history: HistoryResult | null = null;
   let usedFallback = false;
 
@@ -469,6 +834,10 @@ export async function getForumTopicMessagesMtproto(
   }
 
   const messages = Array.isArray(history?.messages) ? history.messages : [];
+  const senderLookup = buildSenderLookup(
+    Array.isArray(history?.users) ? history.users : [],
+    Array.isArray(history?.chats) ? history.chats : [],
+  );
   const results: MtprotoTopicMessage[] = [];
 
   for (const msg of messages) {
@@ -487,6 +856,9 @@ export async function getForumTopicMessagesMtproto(
     }
 
     const summary = extractVideoSummary(msg);
+    const sender = resolveSenderFromFromId((msg as { fromId?: unknown }).fromId, senderLookup);
+    const rawMessageField = (msg as { message?: unknown }).message;
+    const caption = typeof rawMessageField === 'string' ? rawMessageField : undefined;
     results.push({
       id: Number((msg as { id: number }).id),
       date: Number((msg as { date?: number }).date ?? 0),
@@ -494,6 +866,10 @@ export async function getForumTopicMessagesMtproto(
       fileName: summary.fileName,
       fileSize: summary.fileSize,
       duration: summary.duration,
+      document: summary.document,
+      senderId: sender.id,
+      senderName: sender.name,
+      caption: caption && caption.length > 0 ? caption : undefined,
     });
   }
 
@@ -525,5 +901,13 @@ export async function disconnectMtproto(): Promise<void> {
       // ignore disconnect errors
     }
     client = null;
+  }
+  if (userClient?.connected) {
+    try {
+      await userClient.disconnect();
+    } catch {
+      // ignore disconnect errors
+    }
+    userClient = null;
   }
 }

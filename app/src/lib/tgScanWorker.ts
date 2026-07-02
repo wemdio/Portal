@@ -5,13 +5,13 @@ import {
   ensureTgApiReady,
   upsertBotChat,
   type TgMessage,
-  extractVideoInfo,
+  type VideoInfo,
   processVideoMessage,
   saveErrorRecord,
   getSenderName,
 } from '@/lib/tgTranscribe';
 import {
-  isMtprotoAvailable,
+  isUserMtprotoAvailable,
   getForumTopicMessagesMtproto,
   type MtprotoTopicMessage,
 } from '@/lib/tgMtprotoDownload';
@@ -27,6 +27,8 @@ interface ScanVideoRow {
   filename: string;
   fileSize: number | null;
   duration: number | null;
+  /** UNIX timestamp when the message was sent in the source chat. */
+  messageDate?: number | null;
   phase: string;
   downloadedBytes?: number;
   totalBytes?: number;
@@ -70,79 +72,6 @@ async function getChatInfo(chatId: number): Promise<TgChatFull | null> {
   }
 }
 
-/**
- * Determine which forum topic a message belongs to by replying to it.
- * The Bot API response includes message_thread_id of the thread the
- * original message lives in. Returns 0 for non-forum chats.
- */
-async function detectTopicId(chatId: number, messageId: number): Promise<number | null> {
-  const res = await fetch(`${tgApiBase()}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: '.',
-      // disable_notification keeps the probe from pinging the original
-      // sender's device; the message still appears briefly in the chat
-      // until deleteMessage lands below.
-      disable_notification: true,
-      reply_parameters: { message_id: messageId },
-    }),
-  });
-
-  const json = (await res.json()) as { ok: boolean; result?: TgMessage; description?: string };
-  if (!json.ok || !json.result) {
-    await logInfo('tg-scan.detectTopic.fail', `detectTopicId failed for msg ${messageId}`, {
-      chatId, messageId, ok: json.ok, description: json.description,
-    });
-    // null signals "couldn't determine" — distinct from 0 which means
-    // "confirmed General / non-forum". Callers can decide to skip vs default.
-    return null;
-  }
-
-  const threadId = json.result.message_thread_id ?? 0;
-
-  await logInfo('tg-scan.detectTopic', `msg ${messageId} → topic ${threadId}`, {
-    chatId, messageId, threadId,
-  });
-
-  try {
-    await fetch(`${tgApiBase()}/deleteMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, message_id: json.result.message_id }),
-    });
-  } catch {
-    // Probe '.' remains in the chat — log so operators can tell when this
-    // starts piling up (network blip vs revoked permission vs rate-limited).
-    await logInfo('tg-scan.detectTopic.deleteFailed', `Failed to delete probe message in chat ${chatId}`, {
-      chatId, probeMessageId: json.result.message_id,
-    });
-  }
-
-  return threadId;
-}
-
-async function forwardAndInspect(chatId: number, messageId: number): Promise<TgMessage | null> {
-  const res = await fetch(`${tgApiBase()}/forwardMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, from_chat_id: chatId, message_id: messageId }),
-  });
-
-  const json = (await res.json()) as { ok: boolean; result?: TgMessage };
-  if (!json.ok || !json.result) return null;
-
-  const forwarded = json.result;
-  void fetch(`${tgApiBase()}/deleteMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, message_id: forwarded.message_id }),
-  }).catch(() => {});
-
-  return forwarded;
-}
-
 /* ───── MTProto forum scan ───── */
 
 interface MtprotoScanArgs {
@@ -179,6 +108,22 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
   const videos: ScanVideoRow[] = [];
   let lastDbWrite = 0;
 
+  // Parallel video pipeline. The whisper worker has MAX_CONCURRENT=4 slots
+  // but the scan used to feed it one video at a time — the other three
+  // sat idle while a big video downloaded/transcribed. Spawn up to N
+  // in-flight tasks; a single 26-min / 1.85 GB video no longer blocks the
+  // 20 small videos behind it in the same scan job.
+  const MAX_CONCURRENT_VIDEOS = 3;
+  const inflight = new Set<Promise<void>>();
+  const waitForSlot = async () => {
+    if (inflight.size >= MAX_CONCURRENT_VIDEOS) {
+      await Promise.race(inflight);
+    }
+  };
+  const drainAllInflight = async () => {
+    await Promise.all([...inflight]);
+  };
+
   const flushProgress = async (force = false) => {
     const now = Date.now();
     if (!force && now - lastDbWrite < 3000) return;
@@ -198,6 +143,7 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
 
     // Stop check every page (covers slow topics where a page can take seconds).
     if (await isStopped(jobId)) {
+      await drainAllInflight();
       await flushProgress(true);
       return true;
     }
@@ -231,33 +177,46 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
       }
 
       if (!m.isVideo) continue;
-
-      // Forward via Bot API to get the file_id + sender info processVideoMessage
-      // needs. This is the ONLY chat side-effect — and only for actual videos.
-      let forwarded: TgMessage | null;
-      try {
-        forwarded = await forwardAndInspect(chatId, m.id);
-      } catch {
+      if (!m.document) {
+        // No download ref on the MTProto msg (rare — non-Document video media,
+        // or the sender's file_reference expired). Skip rather than fall back
+        // to a bot forward; the whole point of this path is no chat spam.
+        await logInfo(
+          'tg-scan.mtproto.no-document',
+          `Skipping video msg ${m.id} in chat ${chatId} — no MTProto document ref`,
+          { chatId, topicId, messageId: m.id },
+        );
         continue;
       }
-      if (!forwarded) continue;
 
-      const videoInfo = extractVideoInfo(forwarded);
-      if (!videoInfo) continue;
+      // Build a synthetic Bot API-shape TgMessage + VideoInfo from the MTProto
+      // payload. processVideoMessage will see videoInfo.mtprotoDoc and take
+      // its direct-download branch — no Bot API forward, no chat side effects.
+      const videoInfo: VideoInfo = {
+        fileId: '',  // unused on the mtprotoDoc branch
+        fileSize: m.fileSize,
+        duration: m.duration,
+        filename: m.fileName ?? `video-${m.id}.mp4`,
+        mtprotoDoc: m.document,
+      };
 
       videosFound++;
 
       const syntheticMsg: TgMessage = {
-        ...forwarded,
         chat: { id: chatId },
         message_id: m.id,
-        // Tag the transcript with the topic that was requested in the job. MTProto
-        // already enforced the topic filter via getReplies (or fallback filter),
-        // so we don't need a per-message detectTopicId probe.
+        date: m.date,
         message_thread_id: topicId != null && topicId > 0 ? topicId : undefined,
+        caption: m.caption,
+        from: m.senderId != null
+          ? {
+              id: m.senderId,
+              first_name: m.senderName ?? `User ${m.senderId}`,
+            }
+          : undefined,
       };
 
-      const senderName = getSenderName(syntheticMsg);
+      const senderName = m.senderName ?? getSenderName(syntheticMsg);
       const videoIdx = videosFound;
 
       videos.push({
@@ -266,62 +225,76 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
         filename: videoInfo.filename,
         fileSize: videoInfo.fileSize ?? null,
         duration: videoInfo.duration ?? null,
+        messageDate: m.date ?? null,
         phase: 'found',
       });
       await flushProgress(true);
 
       if (await isStopped(jobId)) {
+        await drainAllInflight();
         await flushProgress(true);
         return true;
       }
 
-      if (errorMessageIds.has(m.id)) {
-        await admin
-          .from('tg_video_transcripts')
-          .delete()
-          .eq('tg_chat_id', chatId)
-          .eq('tg_message_id', m.id);
-      }
+      // Wait for a free slot before spawning the next per-video pipeline.
+      // waitForSlot returns immediately when inflight < MAX_CONCURRENT_VIDEOS,
+      // so up to N videos are being downloaded / transcribed at once.
+      await waitForSlot();
 
-      try {
-        const result = await processVideoMessage(syntheticMsg, videoInfo, (evt) => {
+      // Background task — one full pipeline for this video (delete stale
+      // error row, download, ffmpeg, transcribe, insert). Errors are
+      // caught inside so Promise.race in waitForSlot never sees a
+      // rejection and the outer loop can keep enumerating messages.
+      const task = (async () => {
+        try {
+          if (errorMessageIds.has(m.id)) {
+            await admin
+              .from('tg_video_transcripts')
+              .delete()
+              .eq('tg_chat_id', chatId)
+              .eq('tg_message_id', m.id);
+          }
+
+          const result = await processVideoMessage(syntheticMsg, videoInfo, (evt) => {
+            const v = videos.find((x) => x.idx === videoIdx);
+            if (v) {
+              v.phase = evt.phase;
+              if (evt.downloadedBytes != null) v.downloadedBytes = evt.downloadedBytes;
+              if (evt.totalBytes != null) v.totalBytes = evt.totalBytes;
+              if (evt.transcriptionJobId) v.transcriptionJobId = evt.transcriptionJobId;
+            }
+            void flushProgress();
+          });
+
           const v = videos.find((x) => x.idx === videoIdx);
           if (v) {
-            v.phase = evt.phase;
-            if (evt.downloadedBytes != null) v.downloadedBytes = evt.downloadedBytes;
-            if (evt.totalBytes != null) v.totalBytes = evt.totalBytes;
-            if (evt.transcriptionJobId) v.transcriptionJobId = evt.transcriptionJobId;
+            v.phase = (result.status === 'completed' || result.status === 'skipped_exists') ? 'done' : 'error';
+            if (result.error) v.error = result.error;
           }
-          void flushProgress();
-        });
 
-        const v = videos.find((x) => x.idx === videoIdx);
-        if (v) {
-          v.phase = (result.status === 'completed' || result.status === 'skipped_exists') ? 'done' : 'error';
-          if (result.error) v.error = result.error;
-        }
-
-        if (result.status === 'completed' || result.status === 'skipped_exists') {
-          completed++;
-        } else {
+          if (result.status === 'completed' || result.status === 'skipped_exists') {
+            completed++;
+          } else {
+            errors++;
+          }
+        } catch (err) {
+          await saveErrorRecord(syntheticMsg, videoInfo, err);
           errors++;
+          const errorMsg = err instanceof Error ? err.message : 'Неизвестная ошибка';
+          const v = videos.find((x) => x.idx === videoIdx);
+          if (v) {
+            v.phase = 'error';
+            v.error = errorMsg;
+          }
         }
         await flushProgress(true);
-      } catch (err) {
-        await saveErrorRecord(syntheticMsg, videoInfo, err);
-        errors++;
-        const errorMsg = err instanceof Error ? err.message : 'Неизвестная ошибка';
-        const v = videos.find((x) => x.idx === videoIdx);
-        if (v) {
-          v.phase = 'error';
-          v.error = errorMsg;
-        }
-        await flushProgress(true);
-      }
+      })();
+      task.finally(() => inflight.delete(task));
+      inflight.add(task);
 
-      // Small breathing room between video downloads — same throttle the
-      // legacy path has.
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Small breathing room between spawns — prevents a burst of 100
+      // concurrent MTProto opens if a page hits many small videos.
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
 
     // Pagination cursor: smallest id we saw this page becomes next page's
@@ -332,6 +305,12 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
 
     await flushProgress();
   }
+
+  // Enumeration finished. Wait for the last batch of in-flight video
+  // pipelines before marking the job as completed — otherwise the UI would
+  // show 100% but some tail videos would still be transcribing in the
+  // background and their transcripts would appear seconds later.
+  await drainAllInflight();
 
   await logInfo(
     'tg-transcribe.scan.done',
@@ -413,282 +392,45 @@ export async function runTgScanJob(jobId: string): Promise<void> {
       (existing ?? []).filter((r) => r.status === 'error').map((r) => Number(r.tg_message_id)),
     );
 
-    // ── MTProto fast path for forum chats ──────────────────────────────
+    // ── MTProto-only path ──────────────────────────────────────────────
     //
-    // Legacy path: probe last msg_id → iterate by -1 → forwardMessage every
-    // single message_id → filter by topic via "."-reply. On a chat with 5000
-    // total messages and 449 in the target subchat that's 5000 forwards
-    // + 5000 reply probes — all visible in the source chat as fleeting
-    // forward + "." pairs. Users see this as floods of notifications.
-    //
-    // New path: MTProto messages.getReplies pulls only the topic's messages
-    // (or fallback to getHistory + filter) with zero side effects. We only
-    // forwardMessage for messages MTProto already told us are videos, so the
-    // chat sees at most one forward per video found (≤ video_count, typically
-    // 5-50) instead of per-message-id-walked.
-    //
-    // Activates when bot has MTProto creds AND chat is a forum. Non-forum
-    // chats use the legacy path — there's no per-topic floods to avoid.
-    if (isForumChat && isMtprotoAvailable()) {
-      const mtprotoRan = await runMtprotoForumScan({
-        jobId,
-        chatId,
-        topicId,
-        videoCount,
-        scanMode,
-        alreadyProcessed,
-        errorMessageIds,
-      });
-      if (mtprotoRan) return;
-      await logInfo('tg-scan.mtproto.fallback', `MTProto path bailed for chat ${chatId} — using legacy forward scan`, {
-        chatId, topicId,
-      });
+    // The legacy bot-forward scan was retired 01.07 after auto-sync cron
+    // hit «Продажи Polza» — a chat where the TG_TARGET user account isn't
+    // a member — and the fallback dumped ~50 forward+delete pairs into
+    // that (client-visible) chat. MTProto through the user account never
+    // touches the source chat; if it can't do the work, the job fails
+    // with a clear message and a human unstucks it (invites the user
+    // into the chat, re-auths the session, etc.).
+    if (!isUserMtprotoAvailable()) {
+      throw new Error(
+        'MTProto пользовательский аккаунт не настроен ' +
+        '(TG_TARGET_API_ID / TG_TARGET_API_HASH / TG_TARGET_SESSION). ' +
+        'Скан невозможен — легаси-путь через бота отключён.',
+      );
     }
 
-    // Resolve start message ID
-    const { data: chatRow } = await admin
-      .from('tg_bot_chats')
-      .select('last_message_id')
-      .eq('chat_id', chatId)
-      .eq('topic_id', topicId ?? 0)
-      .single();
+    // For non-forum chats the tg_bot_chats row may still carry topic_id=0
+    // as a schema default. Pass null so MTProto does GetHistory over the
+    // whole chat instead of trying to filter on the (non-existent)
+    // General topic of a non-forum chat.
+    const effectiveTopicId = isForumChat ? topicId : null;
 
-    let startMsgId = (chatRow?.last_message_id as number | null) ?? 0;
-
-    const probeErrors: string[] = [];
-    const tryProbe = async (withTopic: boolean): Promise<number | null> => {
-      const probeBody: Record<string, unknown> = { chat_id: chatId, text: '🔍 Сканирование...' };
-      if (withTopic && topicId != null) probeBody.message_thread_id = topicId;
-      try {
-        const probe = await fetch(`${tgApiBase()}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(probeBody),
-          signal: AbortSignal.timeout(10000),
-        });
-        const probeJson = (await probe.json()) as {
-          ok: boolean;
-          result?: { message_id: number };
-          description?: string;
-          error_code?: number;
-        };
-        if (probeJson.ok && probeJson.result) {
-          const mid = probeJson.result.message_id;
-          void fetch(`${tgApiBase()}/deleteMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId, message_id: mid }),
-          }).catch(() => {});
-          return mid;
-        }
-        const tag = withTopic ? `topic ${topicId}` : 'no-topic';
-        const msg = probeJson.description ?? `ok=false${probeJson.error_code ? ` (код ${probeJson.error_code})` : ''}`;
-        probeErrors.push(`${tag}: ${msg}`);
-        await logInfo('tg-scan.probe.fail', `Probe sendMessage failed for chat ${chatId} ${tag}`, {
-          chatId, topicId: topicId ?? 0, withTopic, description: probeJson.description, errorCode: probeJson.error_code,
-        });
-        return null;
-      } catch (err) {
-        const tag = withTopic ? `topic ${topicId}` : 'no-topic';
-        const msg = err instanceof Error ? err.message : 'сетевая ошибка';
-        probeErrors.push(`${tag}: ${msg}`);
-        await logInfo('tg-scan.probe.exception', `Probe sendMessage exception for chat ${chatId} ${tag}`, {
-          chatId, topicId: topicId ?? 0, withTopic, error: msg,
-        });
-        return null;
-      }
-    };
-
-    if (!startMsgId) {
-      if (topicId != null) {
-        startMsgId = (await tryProbe(true)) ?? 0;
-        if (!startMsgId) {
-          startMsgId = (await tryProbe(false)) ?? 0;
-        }
-      } else {
-        startMsgId = (await tryProbe(false)) ?? 0;
-      }
-    }
-
-    if (!startMsgId) {
-      const hint = topicId != null
-        ? 'Проверьте, что бот добавлен в группу как админ и имеет право писать в General и/или в выбранный подчат.'
-        : 'Проверьте, что бот добавлен в группу и может отправлять сообщения.';
-      const reason = probeErrors.length ? ` Причина: ${probeErrors.join('; ')}.` : '';
-      throw new Error(`Не удалось отправить тестовое сообщение в чат для определения стартовой позиции.${reason} ${hint}`);
-    }
-
-    // Scan loop
-    let videosFound = 0;
-    let completed = 0;
-    let errors = 0;
-    let scanned = 0;
-    // 'limited' scans keep the historic 2000-message ceiling — enough to find ~50 videos
-    // in a typical chat without hammering Bot API. 'full' scans run until startMsgId
-    // reaches 0 (or the user stops them); we use a very large but finite bound so the
-    // loop counter still terminates even if startMsgId somehow misbehaves.
-    const maxScan = scanMode === 'full' ? 10_000_000 : 2000;
-    const videos: ScanVideoRow[] = [];
-    let lastDbWrite = 0;
-
-    const flushProgress = async (force = false) => {
-      const now = Date.now();
-      if (!force && now - lastDbWrite < 3000) return;
-      lastDbWrite = now;
-      await updateJob(jobId, { scanned, videos_found: videosFound, completed, errors, videos });
-    };
-
-    const targetLabel = scanMode === 'full' ? 'whole chat' : `${videoCount} videos`;
-    await logInfo('tg-transcribe.scan.start', `Scanning ${targetLabel} from msg#${startMsgId} in chat ${chatId}`, {
-      chatId, startMsgId, videoCount: scanMode === 'full' ? null : videoCount, scanMode, topicId,
+    const mtprotoRan = await runMtprotoForumScan({
+      jobId,
+      chatId,
+      topicId: effectiveTopicId,
+      videoCount,
+      scanMode,
+      alreadyProcessed,
+      errorMessageIds,
     });
+    if (mtprotoRan) return;
 
-    for (let msgId = startMsgId; msgId > 0 && videosFound < videoCount && scanned < maxScan; msgId--) {
-      if (scanned % 20 === 0 && scanned > 0) {
-        if (await isStopped(jobId)) {
-          await flushProgress(true);
-          return;
-        }
-      }
+    throw new Error(
+      'Аккаунт Никиты ещё не состоит в этом чате — добавьте его, пожалуйста, ' +
+      'и запустите сканирование заново.',
+    );
 
-      scanned++;
-
-      if (alreadyProcessed.has(msgId)) {
-        videosFound++;
-        completed++;
-        continue;
-      }
-
-      if (scanned % 50 === 0) await flushProgress();
-
-      let forwarded: TgMessage | null;
-      try {
-        forwarded = await forwardAndInspect(chatId, msgId);
-      } catch {
-        continue;
-      }
-
-      if (!forwarded) continue;
-
-      const videoInfo = extractVideoInfo(forwarded);
-      if (!videoInfo) continue;
-
-      // For forum chats: probe to learn which topic the ORIGINAL message
-      // belongs to. forwardMessage lands the bot's copy in General with
-      // no source-thread info, so without detection we'd silently bucket
-      // every video under topic_id=0. Skip the probe for non-forum chats
-      // (one extra API call per video is wasted) and when topicId filter
-      // is "no filter" on a non-forum chat (nothing to learn anyway).
-      let resolvedTopicId: number | null = null;
-      if (isForumChat || topicId != null) {
-        resolvedTopicId = await detectTopicId(chatId, msgId);
-        // null = probe failed. Treat as "unknown topic": when filter active,
-        // skip (can't confirm match); when no filter, default to 0 so we
-        // at least record the video under chat-level bucket.
-        if (topicId != null) {
-          if (resolvedTopicId == null) continue;
-          // General-renamed quirk: when topic_id=1 in our DB actually points to
-          // the General topic of a forum (the user added e.g. "Звонки с клиентами"
-          // which was the renamed General), Bot API replies with no
-          // message_thread_id on those messages, so detectTopicId resolves to 0
-          // instead of 1. Without this union the legacy path would silently
-          // skip every video in such topics (saw a real "0 found in 4692"
-          // incident on prod). MTProto path handles this differently — see
-          // runMtprotoForumScan.
-          const matchesTopic =
-            resolvedTopicId === topicId || (topicId === 1 && resolvedTopicId === 0);
-          if (!matchesTopic) continue;
-        }
-      }
-
-      videosFound++;
-
-      const effectiveTopicId = resolvedTopicId ?? topicId ?? 0;
-      const syntheticMsg: TgMessage = {
-        ...forwarded,
-        chat: { id: chatId },
-        message_id: msgId,
-        message_thread_id: effectiveTopicId || undefined,
-      };
-
-      const senderName = getSenderName(syntheticMsg);
-      const videoIdx = videosFound;
-
-      videos.push({
-        idx: videoIdx,
-        sender: senderName,
-        filename: videoInfo.filename,
-        fileSize: videoInfo.fileSize ?? null,
-        duration: videoInfo.duration ?? null,
-        phase: 'found',
-      });
-      await flushProgress(true);
-
-      if (await isStopped(jobId)) {
-        await flushProgress(true);
-        return;
-      }
-
-      if (errorMessageIds.has(msgId)) {
-        await admin
-          .from('tg_video_transcripts')
-          .delete()
-          .eq('tg_chat_id', chatId)
-          .eq('tg_message_id', msgId);
-      }
-
-      try {
-        const result = await processVideoMessage(syntheticMsg, videoInfo, (evt) => {
-          const v = videos.find((x) => x.idx === videoIdx);
-          if (v) {
-            v.phase = evt.phase;
-            if (evt.downloadedBytes != null) v.downloadedBytes = evt.downloadedBytes;
-            if (evt.totalBytes != null) v.totalBytes = evt.totalBytes;
-            if (evt.transcriptionJobId) v.transcriptionJobId = evt.transcriptionJobId;
-          }
-          void flushProgress();
-        });
-
-        const v = videos.find((x) => x.idx === videoIdx);
-        if (v) {
-          v.phase = (result.status === 'completed' || result.status === 'skipped_exists') ? 'done' : 'error';
-          if (result.error) v.error = result.error;
-        }
-
-        if (result.status === 'completed' || result.status === 'skipped_exists') {
-          completed++;
-        } else {
-          errors++;
-        }
-        await flushProgress(true);
-      } catch (err) {
-        await saveErrorRecord(syntheticMsg, videoInfo, err);
-        errors++;
-        const errorMsg = err instanceof Error ? err.message : 'Неизвестная ошибка';
-        const v = videos.find((x) => x.idx === videoIdx);
-        if (v) {
-          v.phase = 'error';
-          v.error = errorMsg;
-        }
-        await flushProgress(true);
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
-
-    await logInfo('tg-transcribe.scan.done', `Scan complete: ${completed} transcribed, ${errors} errors, scanned ${scanned} messages`, {
-      chatId, completed, errors, scanned, videosFound,
-    });
-
-    await updateJob(jobId, {
-      status: 'completed',
-      scanned,
-      videos_found: videosFound,
-      completed,
-      errors,
-      videos,
-      finished_at: new Date().toISOString(),
-    });
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : 'Неизвестная ошибка';
     await logError('tg-transcribe.scan.error', err, { jobId });

@@ -67,6 +67,7 @@ interface ScanVideoInfo {
   filename: string;
   fileSize: number | null;
   duration: number | null;
+  messageDate?: number | null;
   phase: string;
   downloadedBytes?: number;
   totalBytes?: number;
@@ -123,9 +124,17 @@ function formatBytes(bytes: number | null) {
 
 function formatDuration(seconds: number | null) {
   if (seconds == null) return '';
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${s.toString().padStart(2, '0')}`;
+  // Telegram returns duration as a float (e.g. 878.333…). The old version
+  // did `seconds % 60` which preserved the fractional part, then
+  // `.toString().padStart(2, '0')` did nothing to round it — the user saw
+  // "14:38.33299999999997". Floor everything to whole seconds and add an
+  // H:MM:SS branch for videos longer than an hour.
+  const total = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
 function formatDate(iso: string) {
@@ -251,6 +260,17 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
           <span className="text-gray-400 truncate">{video.filename}</span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {video.messageDate != null && (
+            <span className="text-gray-400">
+              {new Date(video.messageDate * 1000).toLocaleString('ru-RU', {
+                day: '2-digit',
+                month: '2-digit',
+                year: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+              })}
+            </span>
+          )}
           {video.fileSize != null && (
             <span className="text-gray-400">{formatBytes(video.fileSize)}</span>
           )}
@@ -358,83 +378,6 @@ function StopConfirmDialog({
   );
 }
 
-function FullScanConfirmDialog({
-  open,
-  chatLabel,
-  onConfirm,
-  onCancel,
-  pending,
-}: {
-  open: boolean;
-  chatLabel: string;
-  onConfirm: () => void;
-  onCancel: () => void;
-  pending: boolean;
-}) {
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="relative w-full max-w-md rounded-2xl border border-gray-200 bg-white p-6 shadow-xl">
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={pending}
-          className="absolute right-3 top-3 rounded-lg p-1 text-gray-400 hover:text-gray-600 transition"
-        >
-          <X className="h-4 w-4" />
-        </button>
-
-        <div className="flex items-start gap-3">
-          <div className="mt-0.5 rounded-full bg-indigo-100 p-2">
-            <Search className="h-5 w-5 text-indigo-600" />
-          </div>
-          <div className="space-y-2">
-            <h3 className="text-sm font-semibold text-gray-900">Сканировать весь чат?</h3>
-            <p className="text-xs text-gray-500 leading-relaxed">
-              Бот пройдёт всю историю чата <strong>«{chatLabel}»</strong> от новых сообщений к самым старым
-              и расшифрует все найденные видео. Уже расшифрованные видео пропускаются.
-            </p>
-            <p className="text-xs text-amber-700 leading-relaxed">
-              Это может занять <strong>часы</strong> на больших чатах. Можно остановить в любой момент —
-              уже обработанные транскрибации сохранятся.
-            </p>
-          </div>
-        </div>
-
-        <div className="mt-5 flex items-center justify-end gap-2">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={pending}
-            className="rounded-full border border-gray-200 bg-white px-4 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 transition"
-          >
-            Отмена
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={pending}
-            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-60"
-          >
-            {pending ? (
-              <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Запускаем…
-              </>
-            ) : (
-              <>
-                <Search className="h-3 w-3" />
-                Запустить
-              </>
-            )}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function TgTranscribePage() {
   const [allItems, setAllItems] = useState<TranscriptItem[]>([]);
   const [activeSender, setActiveSender] = useState<string | null>(null);
@@ -459,7 +402,6 @@ export default function TgTranscribePage() {
   const [selectedTopicId, setSelectedTopicId] = useState<number | null>(null);
   const [manualTopicId, setManualTopicId] = useState('');
   const [topicNameInput, setTopicNameInput] = useState('');
-  const [videoCount, setVideoCount] = useState('5');
 
   const [activeJob, setActiveJob] = useState<ScanJob | null>(null);
   const [scanResult, setScanResult] = useState<ScanJob | null>(null);
@@ -726,7 +668,6 @@ export default function TgTranscribePage() {
   };
 
   const [fullScanPending, setFullScanPending] = useState(false);
-  const [showFullScanDialog, setShowFullScanDialog] = useState(false);
 
   // Full-chat scan: walk the entire history of the SELECTED chat (no message cap,
   // no video count cap) until it hits the beginning of the chat or the user stops
@@ -764,48 +705,6 @@ export default function TgTranscribePage() {
       setScanError(err instanceof Error ? err.message : 'Ошибка');
     } finally {
       setFullScanPending(false);
-      setShowFullScanDialog(false);
-    }
-  };
-
-  const onScan = async () => {
-    if (!selectedChatId) {
-      setScanError('Выберите группу');
-      return;
-    }
-    const count = parseInt(videoCount, 10);
-    if (!count || count < 1) {
-      setScanError('Укажите количество видео');
-      return;
-    }
-
-    setScanError(null);
-    setScanResult(null);
-    setActiveJob(null);
-
-    try {
-      const res = await authFetch('/api/tools/tg-transcribe/scan', {
-        method: 'POST',
-        body: JSON.stringify({
-          chatId: selectedChatId,
-          videoCount: count,
-          topicId: selectedChatTopicId,
-        }),
-      });
-
-      if (!res.ok) {
-        const text = await res.text();
-        let msg = 'Ошибка сканирования';
-        try { msg = JSON.parse(text).error ?? msg; } catch { /* use default */ }
-        setScanError(msg);
-        return;
-      }
-
-      const json = (await res.json()) as { job: ScanJob };
-      setActiveJob(json.job);
-      startPolling();
-    } catch (err) {
-      setScanError(err instanceof Error ? err.message : 'Ошибка');
     }
   };
 
@@ -1231,20 +1130,8 @@ export default function TgTranscribePage() {
               </div>
             )}
 
-            {/* Row 2: Video count + Scan button + Stop button */}
+            {/* Single scan button — always parses the whole chat / selected topic. */}
             <div className="flex items-end gap-3">
-              <label className="space-y-1">
-                <span className="text-[11px] font-medium text-gray-500">Кол-во видео</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={50}
-                  value={videoCount}
-                  onChange={(e) => setVideoCount(e.target.value)}
-                  disabled={!!isJobActive}
-                  className="block w-20 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none disabled:opacity-50"
-                />
-              </label>
               {isJobActive && isJobOwner ? (
                 <button
                   type="button"
@@ -1255,41 +1142,25 @@ export default function TgTranscribePage() {
                   Остановить
                 </button>
               ) : !isJobActive ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={onScan}
-                    disabled={!selectedChatId}
-                    className={[
-                      'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition',
-                      !selectedChatId
-                        ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                        : 'bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer',
-                    ].join(' ')}
-                  >
+                <button
+                  type="button"
+                  onClick={() => void onScanFullChat()}
+                  disabled={fullScanPending || !selectedChatId}
+                  title="Пройти все видео выбранного чата (или подчата) от новых к старым через MTProto-аккаунт. Уже расшифрованные пропускаются."
+                  className={[
+                    'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition',
+                    fullScanPending || !selectedChatId
+                      ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                      : 'bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer',
+                  ].join(' ')}
+                >
+                  {fullScanPending ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
                     <Search className="h-3.5 w-3.5" />
-                    Сканировать
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowFullScanDialog(true)}
-                    disabled={fullScanPending || !selectedChatId}
-                    title="Пройти ВСЮ историю выбранного чата от новых к старым — без лимита на сообщения и без лимита на видео. Может работать часами на крупных чатах. Уже расшифрованные видео пропускаются."
-                    className={[
-                      'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition border',
-                      fullScanPending || !selectedChatId
-                        ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed'
-                        : 'bg-white text-indigo-700 border-indigo-300 hover:bg-indigo-50 cursor-pointer',
-                    ].join(' ')}
-                  >
-                    {fullScanPending ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Search className="h-3.5 w-3.5" />
-                    )}
-                    Сканировать весь чат
-                  </button>
-                </>
+                  )}
+                  Сканировать чат
+                </button>
               ) : null}
             </div>
 
@@ -1852,15 +1723,6 @@ export default function TgTranscribePage() {
         onConfirm={() => void onStopScan()}
         onCancel={() => setShowStopDialog(false)}
         stopping={stopping}
-      />
-
-      {/* Full-chat scan confirmation — long-running, gated to avoid mis-click */}
-      <FullScanConfirmDialog
-        open={showFullScanDialog}
-        chatLabel={selectedChatId != null ? chatLabel(selectedChatId, selectedChatTopicId) : ''}
-        onConfirm={() => void onScanFullChat()}
-        onCancel={() => setShowFullScanDialog(false)}
-        pending={fullScanPending}
       />
 
       {/* Per-row "remove from list" confirmation. We don't auto-delete on icon click —

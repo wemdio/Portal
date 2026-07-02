@@ -24,11 +24,14 @@ interface TranscribeResponse {
 interface TranscribeProgressResponse {
   found: boolean;
   jobId: string;
-  stage?: 'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error';
+  stage?: 'preparing' | 'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error';
   progressPercent?: number;
   processedSeconds?: number | null;
   audioDurationSeconds?: number | null;
   error?: string | null;
+  queuePosition?: number;
+  queueTotal?: number;
+  activeCount?: number;
 }
 
 interface HistoryItem {
@@ -37,6 +40,19 @@ interface HistoryItem {
   filename: string;
   length: number;
   text: string;
+}
+
+/**
+ * Thrown when the upload POST gets killed by a gateway/upstream timeout
+ * (nginx 502/503/504) — the file is still being processed on the server,
+ * we just lost the response channel. The caller should fall through to
+ * the progress-polling code path instead of telling the user it failed.
+ */
+class UpstreamTimeoutError extends Error {
+  constructor(public readonly status: number) {
+    super(`Upstream timeout (HTTP ${status})`);
+    this.name = 'UpstreamTimeoutError';
+  }
 }
 
 async function uploadForTranscription(
@@ -69,6 +85,12 @@ async function uploadForTranscription(
   if (!res.ok) {
     if (res.status === 413) {
       throw new Error('Файл слишком большой для загрузки на сервер.');
+    }
+    // 502/503/504 = nginx couldn't reach upstream in time. The worker is
+    // very likely still chewing on our file — bail out of the upload promise
+    // and let the polling path detect completion when the worker finishes.
+    if (res.status === 502 || res.status === 503 || res.status === 504) {
+      throw new UpstreamTimeoutError(res.status);
     }
     throw new Error(
       json?.error ||
@@ -214,9 +236,16 @@ export default function AudioTranscribeToolPage() {
     setError(null);
     setLoading(true);
     setCopied(false);
+    setResult(null);
     setProgressPercent(0);
     setProgressStage('queued');
-    setProgressHint('Подготовка файла...');
+    // Honest initial hint — until the worker accepts the job (couple of
+    // minutes for a big file: upload + ffmpeg), polling sees 404 and the
+    // UI is otherwise frozen. Telling the user the file size + a rough
+    // wait estimate beats "Подготовка файла..." in silence.
+    setProgressHint(
+      `Загружаем ${formatBytes(file.size)} на сервер... подождите 1–3 минуты до начала расшифровки`,
+    );
 
     const jobId = crypto.randomUUID();
     setActiveJobId(jobId);
@@ -241,9 +270,30 @@ export default function AudioTranscribeToolPage() {
           const stage = progress.stage ?? 'queued';
           lastKnownStage = stage;
           setProgressPercent(nextPercent);
-          setProgressStage(stage);
+          setProgressStage(
+            // 'preparing' is a Next.js-side stage; map to 'queued' for the
+            // legacy state union to avoid widening the prop type.
+            stage === 'preparing' ? 'queued' : stage,
+          );
 
-          if (stage === 'converting') {
+          if (stage === 'preparing') {
+            setProgressHint('Загружаем файл на сервер...');
+          } else if (stage === 'queued') {
+            // Worker accepted the upload but other jobs are ahead in the queue.
+            // Tell the user where they are so a multi-hour wait isn't silent.
+            if (typeof progress.queuePosition === 'number' && progress.queuePosition > 0) {
+              const aheadOfYou = progress.queuePosition - 1;
+              if (aheadOfYou === 0) {
+                setProgressHint('Ваш файл следующий в очереди...');
+              } else {
+                setProgressHint(
+                  `В очереди: перед вами ещё ${aheadOfYou} ${aheadOfYou === 1 ? 'задача' : aheadOfYou < 5 ? 'задачи' : 'задач'}. Сейчас обрабатывается ${progress.activeCount ?? 1}.`,
+                );
+              }
+            } else {
+              setProgressHint('Файл в очереди на расшифровку...');
+            }
+          } else if (stage === 'converting') {
             setProgressHint('Конвертация аудио...');
           } else if (stage === 'transcribing') {
             if (
@@ -292,20 +342,27 @@ export default function AudioTranscribeToolPage() {
       const aborted = err instanceof DOMException && err.name === 'AbortError';
       const networkFailed = err instanceof TypeError
         && /(fetch failed|failed to fetch|networkerror)/i.test(err.message);
+      // Nginx couldn't reach the upstream in time but the worker is still
+      // crunching our file — same recovery as a hard network drop.
+      const upstreamTimeout = err instanceof UpstreamTimeoutError;
       const message = aborted
         ? 'Расшифровка остановлена. Для продолжения запустите её заново с нуля.'
         : (err instanceof Error ? err.message : 'Неизвестная ошибка');
       if (aborted || cancelRequestedRef.current) {
         setProgressStage('cancelled');
         setProgressHint('Расшифровка остановлена');
-      } else if (networkFailed) {
+      } else if (networkFailed || upstreamTimeout) {
         shouldAwaitByProgress = true;
-        setProgressHint('Соединение потеряно, ожидаем завершение по прогрессу...');
+        setProgressHint(
+          upstreamTimeout
+            ? 'Файл всё ещё расшифровывается на сервере, ждём результат...'
+            : 'Соединение потеряно, ожидаем завершение по прогрессу...',
+        );
       } else {
         setProgressStage('error');
         setProgressHint(message);
       }
-      if (!networkFailed) {
+      if (!networkFailed && !upstreamTimeout) {
         setError(message);
         setResult(null);
       }
@@ -390,8 +447,8 @@ export default function AudioTranscribeToolPage() {
   };
 
   return (
-    <div className="flex gap-6 text-left max-w-full">
-      <div className="min-w-0 flex-1 max-w-7xl space-y-8">
+    <div className="flex justify-center gap-6 text-left max-w-full">
+      <div className="min-w-0 flex-1 max-w-7xl mx-auto space-y-8">
         <header className="flex items-start justify-between gap-4">
           <div className="space-y-2">
             <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
@@ -410,14 +467,13 @@ export default function AudioTranscribeToolPage() {
           </div>
         </header>
 
-        <section className="grid gap-6 md:grid-cols-[minmax(0,1.1fr)_minmax(0,1.8fr)_minmax(0,1.1fr)] items-start">
-        <div className="space-y-4">
+        <section className="mx-auto w-full max-w-2xl space-y-4">
           <div
             onDrop={onDrop}
             onDragOver={onDragOver}
             onDragLeave={onDragLeave}
             className={[
-              'relative flex flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-8 transition-colors cursor-pointer min-h-[180px]',
+              'relative flex flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-10 transition-colors cursor-pointer min-h-[200px]',
               dragActive
                 ? 'border-indigo-400 bg-indigo-50/60'
                 : 'border-gray-200 bg-gray-50/80 hover:border-indigo-300 hover:bg-indigo-50/40',
@@ -431,17 +487,17 @@ export default function AudioTranscribeToolPage() {
               accept={ACCEPT_EXT}
               onChange={onFileChange}
             />
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white shadow-sm mb-3">
-              <UploadCloud className="h-6 w-6 text-indigo-500" />
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white shadow-sm mb-4">
+              <UploadCloud className="h-7 w-7 text-indigo-500" />
             </div>
-            <p className="text-sm font-medium text-gray-900">
+            <p className="text-base font-medium text-gray-900">
               Перетащите файл сюда или нажмите, чтобы выбрать
             </p>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1.5 text-xs text-gray-500">
               Поддерживаемые форматы: MP3, WAV, MP4, AVI. До 600&nbsp;МБ.
             </p>
             {file && (
-              <div className="mt-4 flex items-center gap-3 rounded-xl bg-white/80 px-3 py-2 text-xs text-gray-700 shadow-sm">
+              <div className="mt-5 flex items-center gap-3 rounded-xl bg-white/80 px-3 py-2 text-xs text-gray-700 shadow-sm">
                 <FileAudio2 className="h-4 w-4 text-indigo-500 shrink-0" />
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium">{file.name}</p>
@@ -451,12 +507,12 @@ export default function AudioTranscribeToolPage() {
             )}
           </div>
 
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-xs text-gray-500">
-              Файл не отправляется, пока вы не нажмёте кнопку ниже. Для новой записи просто
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="text-xs text-gray-500 max-w-sm">
+              Файл не отправляется, пока вы не нажмёте кнопку. Для новой записи просто
               выберите другой файл.
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 sm:justify-end">
               {loading && (
                 <button
                   type="button"
@@ -471,7 +527,7 @@ export default function AudioTranscribeToolPage() {
                 onClick={onSubmit}
                 disabled={!file || loading}
                 className={[
-                  'inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold shadow-sm transition',
+                  'inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-semibold shadow-sm transition',
                   !file || loading
                     ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
                     : 'bg-indigo-600 text-white hover:bg-indigo-700',
@@ -511,8 +567,9 @@ export default function AudioTranscribeToolPage() {
               </p>
             </div>
           )}
-        </div>
+        </section>
 
+        <section className="mx-auto w-full max-w-4xl grid gap-6 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] items-start">
         <div className="space-y-3 rounded-2xl border border-gray-200 bg-white/90 p-4 shadow-sm min-h-[220px]">
           <div className="flex items-center justify-between gap-2">
             <div className="space-y-0.5">
@@ -568,18 +625,16 @@ export default function AudioTranscribeToolPage() {
 
           <div className="relative">
             <div className="max-h-72 min-h-[160px] overflow-auto rounded-xl bg-gray-50 px-3 py-2 text-xs leading-relaxed text-gray-800">
-              {loading && (
+              {result?.text ? (
+                <pre className="whitespace-pre-wrap break-words font-mono text-[11px]">
+                  {result.text}
+                </pre>
+              ) : loading ? (
                 <div className="flex h-full items-center justify-center text-gray-500">
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   Идёт расшифровка аудио...
                 </div>
-              )}
-              {!loading && result?.text && (
-                <pre className="whitespace-pre-wrap break-words font-mono text-[11px]">
-                  {result.text}
-                </pre>
-              )}
-              {!loading && !result?.text && (
+              ) : (
                 <div className="flex h-full items-center justify-center text-gray-400 text-xs">
                   Загрузите аудио и запустите расшифровку, чтобы увидеть текст здесь.
                 </div>
