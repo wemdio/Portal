@@ -33,17 +33,27 @@ export function jsonError(message: string, status: number) {
  *      а `user:pass` как hostname:port — реальный коннект уходит в никуда.
  *   5. `host:port`           → `http://host:port`.
  */
+// Провайдеры (Infatica, pool.proxy.market и т.п.) иногда экспортируют тип
+// прокси как последний сегмент: `host:port:user:pass:HTTP`. Без этого guard'а
+// хвостовой `HTTP` склеивался с паролем в split на 4+ части, и в БД уходил
+// URL с `%3AHTTP` в user-info — коннект летел с невалидной учёткой (см. фикс
+// 402 строк в tg_outreach_proxies 2026-07-02). Тип тут отбрасываем: URL-путь
+// поддерживает только http:// (см. коммент выше про HttpConnectSocket).
+const PROXY_TYPE_SUFFIX = /:(?:HTTP|HTTPS|SOCKS4|SOCKS5)$/i;
+
 export function normalizeProxyUrl(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return trimmed;
   if (trimmed.includes('://')) return trimmed;
 
+  const working = trimmed.replace(PROXY_TYPE_SUFFIX, '');
+
   // host:port:user:pass — четыре сегмента через двоеточие, без `@`.
   // Допускаем что в pass могут встречаться `:` — поэтому split на максимум 4
   // не подойдёт, но split с лимитом 4 даёт нам ['host', 'port', 'user', 'rest'],
   // где rest может содержать `:` (для редких паролей с двоеточием).
-  if (!trimmed.includes('@')) {
-    const parts = trimmed.split(':');
+  if (!working.includes('@')) {
+    const parts = working.split(':');
     if (parts.length >= 4) {
       const [host, port, user, ...passParts] = parts;
       const pass = passParts.join(':');
@@ -51,7 +61,7 @@ export function normalizeProxyUrl(raw: string): string {
         return `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
       }
     }
-    return `http://${trimmed}`;
+    return `http://${working}`;
   }
 
   // Дальше есть `@`. Два формата с одной точкой разделения:
@@ -62,9 +72,9 @@ export function normalizeProxyUrl(raw: string): string {
   // справа — это (а), оборачиваем в http://. Если слева — это (б),
   // переставляем стороны местами. lastIndexOf('@') страхует от редкого случая
   // когда пароль содержит `@` в стандартном формате (а).
-  const atIdx = trimmed.lastIndexOf('@');
-  const left = trimmed.slice(0, atIdx);
-  const right = trimmed.slice(atIdx + 1);
+  const atIdx = working.lastIndexOf('@');
+  const left = working.slice(0, atIdx);
+  const right = working.slice(atIdx + 1);
   const endsWithPort = /:\d+$/;
 
   if (endsWithPort.test(right)) {
@@ -72,7 +82,7 @@ export function normalizeProxyUrl(raw: string): string {
     // user/pass смысла нет: если они уже встретили `@`, значит пользователь
     // подразумевает именно такой формат, и percent-encoding только сломает то,
     // что уже валидно.
-    return `http://${trimmed}`;
+    return `http://${working}`;
   }
 
   if (endsWithPort.test(left)) {
@@ -90,7 +100,7 @@ export function normalizeProxyUrl(raw: string): string {
     return `http://${encodeURIComponent(right)}@${host}:${port}`;
   }
 
-  return `http://${trimmed}`;
+  return `http://${working}`;
 }
 
 export async function authenticateRequest(authHeader: string | null) {

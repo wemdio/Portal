@@ -24,6 +24,41 @@ const MT_RETRY_ATTEMPTS = 3;
 const MT_RETRY_DELAY_MS = 1500;
 const CHUNK_STALL_TIMEOUT_MS = 600_000; // 10 min with no data = stalled
 
+/* ── Global download slots ─────────────────────────────────────────────
+ *
+ * Every heavy download goes through ONE Telegram account (TG_TARGET user),
+ * and Telegram throttles upload.GetFile per account. With 5 scan jobs × 3
+ * videos each all pulling 512 KB chunks at once, prod logs were a solid
+ * wall of "Sleeping on flood wait (Caused by upload.GetFile)" — 15 parallel
+ * downloads each crawling slower than 2 sequential ones would. Cap
+ * simultaneous downloads process-wide; ffmpeg conversion and transcription
+ * of other videos still overlap freely while a download waits for its turn.
+ */
+const MAX_PARALLEL_DOWNLOADS = (() => {
+  const v = Number(process.env.TG_MTPROTO_MAX_PARALLEL_DOWNLOADS);
+  return Number.isFinite(v) && v > 0 ? v : 2;
+})();
+let downloadsActive = 0;
+const downloadWaiters: Array<() => void> = [];
+
+async function acquireDownloadSlot(): Promise<() => void> {
+  if (downloadsActive >= MAX_PARALLEL_DOWNLOADS) {
+    // The slot is handed over directly by a releasing download (count stays
+    // constant across the handover — no window for an extra download to slip in).
+    await new Promise<void>((resolve) => downloadWaiters.push(resolve));
+  } else {
+    downloadsActive += 1;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const next = downloadWaiters.shift();
+    if (next) next();
+    else downloadsActive = Math.max(0, downloadsActive - 1);
+  };
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -127,6 +162,18 @@ export async function downloadFileByFileId(
   fileId: string,
   fileSize?: number,
 ): Promise<Buffer> {
+  const releaseSlot = await acquireDownloadSlot();
+  try {
+    return await downloadFileByFileIdInner(fileId, fileSize);
+  } finally {
+    releaseSlot();
+  }
+}
+
+async function downloadFileByFileIdInner(
+  fileId: string,
+  fileSize?: number,
+): Promise<Buffer> {
   const decoded = decodeFileId(fileId);
 
   const fileRef = decoded.fileReference
@@ -187,6 +234,20 @@ export async function downloadFileByFileId(
  * streaming directly to a file on disk to avoid holding large files in RAM.
  */
 export async function downloadFileByFileIdToPath(
+  fileId: string,
+  destPath: string,
+  fileSize?: number,
+  onProgress?: (downloaded: number, total: number | undefined) => void,
+): Promise<void> {
+  const releaseSlot = await acquireDownloadSlot();
+  try {
+    return await downloadFileByFileIdToPathInner(fileId, destPath, fileSize, onProgress);
+  } finally {
+    releaseSlot();
+  }
+}
+
+async function downloadFileByFileIdToPathInner(
   fileId: string,
   destPath: string,
   fileSize?: number,
@@ -619,6 +680,20 @@ function isFileReferenceExpiredError(err: unknown): boolean {
  * earlier references may have already expired.
  */
 export async function downloadMtprotoDocToPath(
+  ref: MtprotoDocumentRef,
+  destPath: string,
+  onProgress?: (downloaded: number, total: number | undefined) => void,
+  refreshCtx?: { chatId: number; msgId: number },
+): Promise<void> {
+  const releaseSlot = await acquireDownloadSlot();
+  try {
+    return await downloadMtprotoDocToPathInner(ref, destPath, onProgress, refreshCtx);
+  } finally {
+    releaseSlot();
+  }
+}
+
+async function downloadMtprotoDocToPathInner(
   ref: MtprotoDocumentRef,
   destPath: string,
   onProgress?: (downloaded: number, total: number | undefined) => void,

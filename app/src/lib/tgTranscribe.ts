@@ -1,5 +1,11 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { extractOrConvertToMp3, extractMp3FromFile, transcribeAudio } from '@/lib/transcription';
+import {
+  extractOrConvertToMp3,
+  extractMp3FromFile,
+  transcribeAudio,
+  analyzeAudioActivity,
+  NoSpeechError,
+} from '@/lib/transcription';
 import { logError, logInfo } from '@/lib/loggerServer';
 import {
   isMtprotoAvailable,
@@ -323,6 +329,19 @@ export interface VideoProgressEvent {
   transcriptionJobId?: string;
 }
 
+/**
+ * Statuses that mean "we're done with this message forever" — the file either
+ * has a transcript or PERMANENTLY can't have one (no audio track / no speech).
+ * Scans must not re-download or re-submit these: before this list existed, a
+ * 3 GB silent screen recording was re-downloaded by every nightly scan just
+ * to fail on the same "no audio stream" ffmpeg error again.
+ */
+export const TERMINAL_TRANSCRIPT_STATUSES = [
+  'completed',
+  'skipped_no_audio',
+  'skipped_no_speech',
+] as const;
+
 async function hasSuccessfulTranscript(chatId: number, messageId: number, topicId: number): Promise<boolean> {
   if (!supabaseAdmin) return false;
   try {
@@ -331,8 +350,7 @@ async function hasSuccessfulTranscript(chatId: number, messageId: number, topicI
       .select('id, topic_id')
       .eq('tg_chat_id', chatId)
       .eq('tg_message_id', messageId)
-      .eq('status', 'completed')
-      .is('error_text', null)
+      .in('status', [...TERMINAL_TRANSCRIPT_STATUSES])
       .limit(1);
     if (error) return false;
     const row = data?.[0];
@@ -357,11 +375,79 @@ async function hasSuccessfulTranscript(chatId: number, messageId: number, topicI
   }
 }
 
+/** ffmpeg's way of saying "this video has no audio track at all" (-vn drops video, nothing remains). */
+function isNoAudioStreamError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return /does not contain any stream|Output file is empty/i.test(err.message);
+}
+
+/** Whisper (local 422 / Groq empty result) reported that there is no recognizable speech. */
+function isNoSpeechProviderError(err: unknown): boolean {
+  if (err instanceof NoSpeechError) return true;
+  if (!(err instanceof Error)) return false;
+  return /Не удалось распознать речь/i.test(err.message);
+}
+
+/**
+ * Record a PERMANENT skip (no audio track / no speech) as a terminal status.
+ * Unlike status='error' rows, these are never deleted-and-retried by the
+ * scan worker, so the file stops being re-downloaded every night.
+ */
+async function saveSkippedRecord(
+  msg: TgMessage,
+  videoInfo: VideoInfo,
+  status: 'skipped_no_audio' | 'skipped_no_speech',
+  reason: string,
+  fileSizeBytes?: number,
+): Promise<void> {
+  console.log(
+    `[tg-transcribe] Permanently skipping ${videoInfo.filename} (msgId=${msg.message_id}): ${reason}`,
+  );
+  await logInfo('tg-transcribe.skipped', reason, {
+    chatId: msg.chat.id,
+    messageId: msg.message_id,
+    status,
+    filename: videoInfo.filename,
+  });
+  await safeInsertTranscript({
+    tg_chat_id: msg.chat.id,
+    tg_message_id: msg.message_id,
+    topic_id: msg.message_thread_id ?? 0,
+    tg_sender_id: getSenderId(msg),
+    sender_name: getSenderName(msg),
+    filename: videoInfo.filename,
+    file_size_bytes: fileSizeBytes ?? videoInfo.fileSize ?? null,
+    duration_seconds: videoInfo.duration ?? null,
+    tg_message_date: msg.date != null ? new Date(msg.date * 1000).toISOString() : null,
+    caption: msg.caption ?? null,
+    text: '',
+    length: 0,
+    status,
+    error_text: reason,
+  });
+}
+
+export type ProcessVideoStatus =
+  | 'completed'
+  | 'error'
+  | 'skipped_size'
+  | 'skipped_exists'
+  | 'skipped_no_audio'
+  | 'skipped_no_speech';
+
+/** Statuses that count as successfully dealt with (not an error, no retry needed). */
+export function isTerminalOkStatus(status: ProcessVideoStatus): boolean {
+  return status === 'completed'
+    || status === 'skipped_exists'
+    || status === 'skipped_no_audio'
+    || status === 'skipped_no_speech';
+}
+
 export async function processVideoMessage(
   msg: TgMessage,
   videoInfo: VideoInfo,
   onProgress?: (event: VideoProgressEvent) => void,
-): Promise<{ status: 'completed' | 'error' | 'skipped_size' | 'skipped_exists'; text?: string; error?: string }> {
+): Promise<{ status: ProcessVideoStatus; text?: string; error?: string }> {
   if (!supabaseAdmin) {
     throw new Error('Supabase admin client not configured');
   }
@@ -405,83 +491,132 @@ export async function processVideoMessage(
   console.log(`[tg-transcribe] Processing ${videoInfo.filename} (${((videoInfo.fileSize ?? 0) / 1e6).toFixed(1)} MB), mtproto=${canUseMtproto}, large=${isLargeFile}, localApi=${isLocalApi()}, mtprotoDoc=${!!videoInfo.mtprotoDoc}`);
   onProgress?.({ phase: 'downloading', downloadedBytes: 0, totalBytes: videoInfo.fileSize });
 
-  if (videoInfo.mtprotoDoc && isUserMtprotoAvailable()) {
-    // Direct MTProto download — used by the forum-topic scanner so the bot
-    // doesn't have to forward+delete the message in the source chat just to
-    // produce a file_id. The forward path was visible to chat members and
-    // generated push notifications even though the message got deleted right
-    // after; this branch skips it entirely.
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-tg-dl-'));
-    const ext = getExtFromFilename(videoInfo.filename);
-    const videoPath = path.join(tmpDir, `video${ext}`);
-    try {
-      await downloadMtprotoDocToPath(
-        videoInfo.mtprotoDoc,
-        videoPath,
-        (downloaded, total) => {
+  try {
+    if (videoInfo.mtprotoDoc && isUserMtprotoAvailable()) {
+      // Direct MTProto download — used by the forum-topic scanner so the bot
+      // doesn't have to forward+delete the message in the source chat just to
+      // produce a file_id. The forward path was visible to chat members and
+      // generated push notifications even though the message got deleted right
+      // after; this branch skips it entirely.
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-tg-dl-'));
+      const ext = getExtFromFilename(videoInfo.filename);
+      const videoPath = path.join(tmpDir, `video${ext}`);
+      try {
+        await downloadMtprotoDocToPath(
+          videoInfo.mtprotoDoc,
+          videoPath,
+          (downloaded, total) => {
+            onProgress?.({ phase: 'downloading', downloadedBytes: downloaded, totalBytes: total });
+          },
+          // Refresh context: if the fileReference has expired (common when a
+          // scan sits on message N for hours while earlier messages in the
+          // same batch age out), the downloader re-fetches the message from
+          // Telegram and retries with a fresh reference.
+          { chatId: msg.chat.id, msgId: msg.message_id },
+        );
+        const stat = await fs.stat(videoPath);
+        fileSizeBytes = stat.size;
+        console.log(`[tg-transcribe] Downloaded ${videoInfo.filename} via MTProto-direct, ${(fileSizeBytes / 1e6).toFixed(1)} MB, converting...`);
+        onProgress?.({ phase: 'converting' });
+        mp3 = await extractMp3FromFile(videoPath);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      }
+    } else if (canUseMtproto && isLargeFile) {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-tg-dl-'));
+      const ext = getExtFromFilename(videoInfo.filename);
+      const videoPath = path.join(tmpDir, `video${ext}`);
+      try {
+        await downloadFileByFileIdToPath(videoInfo.fileId, videoPath, videoInfo.fileSize, (downloaded, total) => {
           onProgress?.({ phase: 'downloading', downloadedBytes: downloaded, totalBytes: total });
-        },
-        // Refresh context: if the fileReference has expired (common when a
-        // scan sits on message N for hours while earlier messages in the
-        // same batch age out), the downloader re-fetches the message from
-        // Telegram and retries with a fresh reference.
-        { chatId: msg.chat.id, msgId: msg.message_id },
-      );
-      const stat = await fs.stat(videoPath);
-      fileSizeBytes = stat.size;
-      console.log(`[tg-transcribe] Downloaded ${videoInfo.filename} via MTProto-direct, ${(fileSizeBytes / 1e6).toFixed(1)} MB, converting...`);
+        });
+        const stat = await fs.stat(videoPath);
+        fileSizeBytes = stat.size;
+        console.log(`[tg-transcribe] Downloaded ${videoInfo.filename}, ${(fileSizeBytes / 1e6).toFixed(1)} MB on disk, converting...`);
+        onProgress?.({ phase: 'converting' });
+        mp3 = await extractMp3FromFile(videoPath);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      }
+    } else if (canUseMtproto) {
+      const bytes = await downloadFileByFileId(videoInfo.fileId, videoInfo.fileSize);
+      fileSizeBytes = bytes.byteLength;
       onProgress?.({ phase: 'converting' });
-      mp3 = await extractMp3FromFile(videoPath);
-    } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-    }
-  } else if (canUseMtproto && isLargeFile) {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-tg-dl-'));
-    const ext = getExtFromFilename(videoInfo.filename);
-    const videoPath = path.join(tmpDir, `video${ext}`);
-    try {
-      await downloadFileByFileIdToPath(videoInfo.fileId, videoPath, videoInfo.fileSize, (downloaded, total) => {
-        onProgress?.({ phase: 'downloading', downloadedBytes: downloaded, totalBytes: total });
-      });
-      const stat = await fs.stat(videoPath);
-      fileSizeBytes = stat.size;
-      console.log(`[tg-transcribe] Downloaded ${videoInfo.filename}, ${(fileSizeBytes / 1e6).toFixed(1)} MB on disk, converting...`);
+      const ext = getExtFromFilename(videoInfo.filename);
+      mp3 = await extractOrConvertToMp3({ bytes, inputExt: ext });
+    } else if (isLocalApi() && isLargeFile) {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-tg-dl-'));
+      const ext = getExtFromFilename(videoInfo.filename);
+      const videoPath = path.join(tmpDir, `video${ext}`);
+      try {
+        await downloadTelegramFileToDisk(videoInfo.fileId, videoPath);
+        const stat = await fs.stat(videoPath);
+        fileSizeBytes = stat.size;
+        onProgress?.({ phase: 'converting' });
+        mp3 = await extractMp3FromFile(videoPath);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      }
+    } else {
+      const result = await downloadTelegramFile(videoInfo.fileId);
+      fileSizeBytes = result.bytes.byteLength;
       onProgress?.({ phase: 'converting' });
-      mp3 = await extractMp3FromFile(videoPath);
-    } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      const ext = getExtFromPath(result.filePath);
+      mp3 = await extractOrConvertToMp3({ bytes: result.bytes, inputExt: ext });
     }
-  } else if (canUseMtproto) {
-    const bytes = await downloadFileByFileId(videoInfo.fileId, videoInfo.fileSize);
-    fileSizeBytes = bytes.byteLength;
-    onProgress?.({ phase: 'converting' });
-    const ext = getExtFromFilename(videoInfo.filename);
-    mp3 = await extractOrConvertToMp3({ bytes, inputExt: ext });
-  } else if (isLocalApi() && isLargeFile) {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-tg-dl-'));
-    const ext = getExtFromFilename(videoInfo.filename);
-    const videoPath = path.join(tmpDir, `video${ext}`);
-    try {
-      await downloadTelegramFileToDisk(videoInfo.fileId, videoPath);
-      const stat = await fs.stat(videoPath);
-      fileSizeBytes = stat.size;
-      onProgress?.({ phase: 'converting' });
-      mp3 = await extractMp3FromFile(videoPath);
-    } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  } catch (err) {
+    if (isNoAudioStreamError(err)) {
+      // Stickers, GIF-style memes and muted screen recordings have no audio
+      // track at all. That can't change on retry — record it as a terminal
+      // skip so nightly scans stop re-downloading the file (a 3 GB silent
+      // screen recording used to be pulled from Telegram every single night).
+      const reason = 'В файле нет аудиодорожки (стикер/гифка/запись экрана без звука) — расшифровывать нечего.';
+      await saveSkippedRecord(msg, videoInfo, 'skipped_no_audio', reason, fileSizeBytes || undefined);
+      return { status: 'skipped_no_audio', error: reason };
     }
-  } else {
-    const result = await downloadTelegramFile(videoInfo.fileId);
-    fileSizeBytes = result.bytes.byteLength;
-    onProgress?.({ phase: 'converting' });
-    const ext = getExtFromPath(result.filePath);
-    mp3 = await extractOrConvertToMp3({ bytes: result.bytes, inputExt: ext });
+    throw err;
   }
 
   console.log(`[tg-transcribe] Converted ${videoInfo.filename} → MP3 (${(mp3.byteLength / 1e6).toFixed(1)} MB), sending to transcriber...`);
+
+  // Pre-flight: measure audible signal before spending transcription quota.
+  // Threshold is deliberately conservative — only files with < 3 s of sound
+  // above -40 dB are skipped, so quiet-but-real speech still goes through.
+  if (process.env.TG_TRANSCRIBE_SILENCE_PREFLIGHT !== '0') {
+    try {
+      const activity = await analyzeAudioActivity(mp3);
+      if (activity.activeSeconds < 3) {
+        const reason =
+          `В записи не слышно речи (звук громче порога: ~${Math.round(activity.activeSeconds)} с ` +
+          `из ${Math.round(activity.durationSeconds)} с) — файл пропущен, квота расшифровки не потрачена.`;
+        await saveSkippedRecord(msg, videoInfo, 'skipped_no_speech', reason, fileSizeBytes || undefined);
+        return { status: 'skipped_no_speech', error: reason };
+      }
+    } catch (preflightErr) {
+      // Best-effort check: if ffmpeg hiccups here, just proceed to the provider.
+      console.warn(
+        '[tg-transcribe] Silence pre-flight failed (ignored):',
+        preflightErr instanceof Error ? preflightErr.message : preflightErr,
+      );
+    }
+  }
+
   const transcriptionJobId = crypto.randomUUID();
   onProgress?.({ phase: 'transcribing', transcriptionJobId });
-  const text = await transcribeAudio({ audioMp3: mp3, filename: videoInfo.filename, jobId: transcriptionJobId });
+  let text: string;
+  try {
+    text = await transcribeAudio({ audioMp3: mp3, filename: videoInfo.filename, jobId: transcriptionJobId });
+  } catch (err) {
+    if (isNoSpeechProviderError(err)) {
+      // Whisper listened to the whole file and found nothing to write down
+      // (music without words, background noise). Same deal as no-audio:
+      // permanent, don't burn quota on it again tomorrow night.
+      const reason = 'Распознавание не нашло речи в записи (музыка или шум без слов) — файл помечен как обработанный.';
+      await saveSkippedRecord(msg, videoInfo, 'skipped_no_speech', reason, fileSizeBytes || undefined);
+      return { status: 'skipped_no_speech', error: reason };
+    }
+    throw err;
+  }
   console.log(`[tg-transcribe] Transcribed ${videoInfo.filename}, text length: ${text.length}`);
 
   const insertOk = await safeInsertTranscript({

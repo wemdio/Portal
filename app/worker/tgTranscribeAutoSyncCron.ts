@@ -43,7 +43,7 @@ async function main(): Promise<number> {
   log('info', 'Loading registered tg_bot_chats…');
   const { data: chats, error: chatsErr } = await db
     .from('tg_bot_chats')
-    .select('chat_id, topic_id, title, topic_name');
+    .select('chat_id, topic_id, title, topic_name, is_forum');
 
   if (chatsErr) {
     log('error', `Failed to load tg_bot_chats: ${chatsErr.message}`);
@@ -69,23 +69,40 @@ async function main(): Promise<number> {
     return 1;
   }
 
+  // In a forum chat topic_id=0 and topic_id=1 are the SAME thread (General):
+  // the DB historically stores both spellings, and the scanner itself
+  // normalizes 0 → 1 before calling Telegram. Without normalizing here too,
+  // a chat registered under both spellings got TWO identical full scans every
+  // night — double downloads, double quota pressure (seen on prod: two jobs
+  // for the same General topic with identical found/completed counts).
+  const forumChats = new Set<number>();
+  for (const c of chats) {
+    if (c.is_forum) forumChats.add(Number(c.chat_id));
+  }
+  const jobKey = (chatId: number, topicId: number | null): string => {
+    const tid = topicId ?? 0;
+    const norm = forumChats.has(chatId) && (tid === 0 || tid === 1) ? 1 : tid;
+    return `${chatId}:${norm}`;
+  };
+
   const inFlight = new Set<string>();
   for (const j of existingJobs ?? []) {
-    const tid = (j.topic_id as number | null) ?? 0;
-    inFlight.add(`${j.tg_chat_id}:${tid}`);
+    inFlight.add(jobKey(Number(j.tg_chat_id), (j.topic_id as number | null) ?? 0));
   }
 
   const rowsToInsert: Array<Record<string, unknown>> = [];
   const labels: string[] = [];
+  const queuedKeys = new Set<string>();
   let skipped = 0;
   for (const c of chats) {
     const chatId = Number(c.chat_id);
     const topicId = (c.topic_id as number | null) ?? null;
-    const key = `${chatId}:${topicId ?? 0}`;
-    if (inFlight.has(key)) {
+    const key = jobKey(chatId, topicId);
+    if (inFlight.has(key) || queuedKeys.has(key)) {
       skipped++;
       continue;
     }
+    queuedKeys.add(key);
     rowsToInsert.push({
       tg_chat_id: chatId,
       topic_id: topicId,
