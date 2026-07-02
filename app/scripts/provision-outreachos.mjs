@@ -81,14 +81,24 @@ const SELECTED_STEPS = [
 const TARIFF = {
   tariff_type: 'custom',
   is_active: true,
-  max_contacts: 20000,
+  max_contacts: 40000,   // advisory; месяц на полной мощности ≈ 2450×30 отправок → до ~30k новых лидов
   max_rows: 200000,
-  max_emails: 16,
-  max_domains: 4,
+  max_emails: 40,        // план: 35 ящиков (лимит с запасом; admin preset route валидирует count ≤ max_emails)
+  max_domains: 10,
   max_chains_per_month: 60,
 };
 
-/** outreachos_pipeline_config (id=1). enabled=false до go-live. */
+/**
+ * outreachos_pipeline_config (id=1). enabled=false до go-live.
+ *
+ * daily_limit: калибровка под 35 ящиков (40→50→70 писем/день; 1400→1750→2450
+ * отправок). Выход воронки ~0.45 лида/компанию (замер 1500: HR + ≤3/домен +
+ * catch-all ≤20% → 677/1500). При 2-3-шаговой цепочке новых лидов нужно
+ * ~560-700/день на старте → 1500 ок; к месяцу (~980-1225/день) поднять до
+ * ~2200-2700: UPDATE outreachos_pipeline_config SET daily_limit=… WHERE id=1.
+ * Следить по журналу прогонов за parsed vs new (seen-окно со временем съедает
+ * часть выборки — лимит поднимать и по этой причине).
+ */
 const PIPELINE_CONFIG = {
   id: 1,
   enabled: false,                                  // включить вручную после campaign_id + ящиков
@@ -98,18 +108,23 @@ const PIPELINE_CONFIG = {
   area: '113',                                     // Россия
   window_hours: 24,
   max_employees: null,                             // без отсечки по размеру (можно поставить, напр. 5000)
-  daily_limit: 2000,
+  daily_limit: 1500,
   selected_steps: SELECTED_STEPS,
   extra_exclude: [],
   job_poll_timeout_minutes: 180,
 };
 
-/** Preset (Instantly DB). Почты подключим позже — пул пустой. */
+/**
+ * Preset (Instantly DB). Почты подключим позже — пул пустой (35 ящиков на go-live).
+ * daily_limit/daily_max_leads = старт прогрева 40/ящик; через неделю поднять до 50,
+ * через месяц до 70 — через админку /admin/clients/[id]/preset (она синкает
+ * работающие кампании) или UPDATE client_campaign_presets.
+ */
 const PRESET = {
   instantly_account_id: 'main',
   email_account_ids: [],
-  daily_limit: 30,
-  daily_max_leads: 30,
+  daily_limit: 40,
+  daily_max_leads: 40,
   email_gap_minutes: 10,
   open_tracking: true,
   link_tracking: true,

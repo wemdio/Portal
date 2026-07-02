@@ -137,8 +137,17 @@ export async function POST(req: NextRequest) {
   let bodyText = draftText;
   if (history) {
     const who = (qual?.lead_name as string | null) || (qual?.lead_email as string | null) || 'Лид';
+    // Контейнер в UTC — без явной таймзоны в шапке цитаты было бы «14:01»
+    // вместо «17:01», которые лид видел у себя в письме.
     const when = qual?.reply_timestamp
-      ? new Date(qual.reply_timestamp as string).toLocaleString('ru-RU')
+      ? new Date(qual.reply_timestamp as string).toLocaleString('ru-RU', {
+          timeZone: 'Europe/Moscow',
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        })
       : '';
     const header = [when, who].filter(Boolean).join(', ');
     const quoted = history.split('\n').map((l) => `> ${l}`).join('\n');
