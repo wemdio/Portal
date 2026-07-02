@@ -25,6 +25,9 @@ export async function GET(req: NextRequest) {
         const { data, error } = await supabase
           .from('tg_video_transcripts')
           .select('sender_name')
+          // Match the History list — only completed transcripts are shown
+          // there, so error/skipped rows shouldn't inflate the chip counts.
+          .eq('status', 'completed')
           .order('sender_name');
       
         if (error) {

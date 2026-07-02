@@ -51,6 +51,9 @@ export async function GET(req: NextRequest) {
           const { data: page, error: pageErr } = await supabaseAdmin
             .from('tg_video_transcripts')
             .select('tg_chat_id, topic_id')
+            // Keep in sync with the RPC and the History list: only completed
+            // transcripts count, not error rows or permanent-skip markers.
+            .eq('status', 'completed')
             .order('tg_chat_id', { ascending: true })
             .range(offset, offset + PAGE - 1);
           if (pageErr) return NextResponse.json({ error: pageErr.message }, { status: 500 });
