@@ -733,7 +733,7 @@ export default function TgTranscribePage() {
     }
   };
 
-  const PAGE_SIZE = 50;
+  const PAGE_SIZE = 30;
 
   const fetchAllItems = useCallback(async (
     sort: 'created_at' | 'message_date' = 'created_at',
@@ -741,7 +741,10 @@ export default function TgTranscribePage() {
   ) => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ limit: '200', sort });
+      // limit=all: the server returns EVERY completed transcript (previews
+      // only, ~0.5 KB per row), so search and the sender filter see the whole
+      // history — the old newest-200 window made anything older unfindable.
+      const params = new URLSearchParams({ limit: 'all', sort });
       if (chatFilter) {
         params.set('chatId', String(chatFilter.chatId));
         params.set('topicId', String(chatFilter.topicId));
@@ -778,9 +781,8 @@ export default function TgTranscribePage() {
   }, [allItems]);
 
   const filteredItems = React.useMemo(() => {
-    // activeChat is pushed to the server in fetchAllItems, so allItems is
-    // already chat-scoped when a chat is selected. We only filter client-side
-    // by sender and search.
+    // allItems holds the ENTIRE history (limit=all, chat-scoped server-side
+    // when a chat is selected), so filtering here really covers everything.
     let result = allItems;
     if (activeSender) {
       result = result.filter((i) => i.sender_name === activeSender);
