@@ -35,6 +35,10 @@ REMOTE=/opt/instantly-dataset-sync
 "$PSCP" -batch -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" \
   app/scripts/instantly-dataset/label-new-replies.mjs "$PROD:$REMOTE/label-new-replies.mjs"
 
+# 1c. label-new-segments.mjs (ночная авто-разметка НИШ кампаний: правила + Requesty LLM)
+"$PSCP" -batch -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" \
+  app/scripts/instantly-dataset/label-new-segments.mjs "$PROD:$REMOTE/label-new-segments.mjs"
+
 # 2. package.json (just pg)
 cat > /tmp/dataset-sync-package.json <<'EOF'
 {
@@ -48,8 +52,9 @@ EOF
 "$PSCP" -batch -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" \
   /tmp/dataset-sync-package.json "$PROD:$REMOTE/package.json"
 
-# 3. .env with only the keys sync.mjs + label-new-replies.mjs need
-grep -E '^(INSTANTLY_EXPORT_API_KEY|INSTANTLY_PORTAL_API_KEY|INSTANTLY_DATASET_DB_URL|REQUESTY_API_KEY|REQUESTY_MODEL|REQUESTY_ENDPOINT|LABEL_WINDOW_DAYS|LABEL_NIGHTLY_CAP|LABEL_BATCH_SIZE)=' .env > /tmp/dataset-sync.env
+# 3. .env with only the keys sync.mjs + label-new-replies.mjs + label-new-segments.mjs need
+#    (INSTANTLY_SEGMENT_MODEL опционален — если не задан, скрипт берёт policy/INSTANTLY_LEAD_QUAL_MODEL)
+grep -E '^(INSTANTLY_EXPORT_API_KEY|INSTANTLY_PORTAL_API_KEY|INSTANTLY_DATASET_DB_URL|REQUESTY_API_KEY|REQUESTY_MODEL|REQUESTY_ENDPOINT|LABEL_WINDOW_DAYS|LABEL_NIGHTLY_CAP|LABEL_BATCH_SIZE|INSTANTLY_SEGMENT_MODEL|SEGMENT_BATCH_SIZE|SEGMENT_CAP)=' .env > /tmp/dataset-sync.env
 "$PSCP" -batch -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" \
   /tmp/dataset-sync.env "$PROD:$REMOTE/.env"
 
@@ -57,13 +62,13 @@ grep -E '^(INSTANTLY_EXPORT_API_KEY|INSTANTLY_PORTAL_API_KEY|INSTANTLY_DATASET_D
 "$PLINK" -batch -ssh -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" "$PROD" \
   "cd $REMOTE && docker run --rm -v \$PWD:/app -w /app node:22-alpine npm install --omit=dev --silent 2>&1 | tail -5"
 
-# 5. cron entries — idempotent. sync at 00:00 UTC, reply-labeler at 02:00 UTC (после синка).
+# 5. cron entries — idempotent. sync 00:00 UTC, reply-labeler 02:00, segment-labeler 02:30 (после синка).
 "$PLINK" -batch -ssh -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" "$PROD" \
-  "(crontab -l 2>/dev/null | grep -v instantly-dataset-sync | grep -v instantly-reply-labeler; echo '0 0 * * * docker run --rm -v /opt/instantly-dataset-sync:/app -w /app --env-file /opt/instantly-dataset-sync/.env --name instantly-dataset-sync node:22-alpine node sync.mjs >> /var/log/instantly-dataset-sync/\$(date -u +\\%Y-\\%m-\\%d).log 2>&1'; echo '0 2 * * * docker run --rm -v /opt/instantly-dataset-sync:/app -w /app --env-file /opt/instantly-dataset-sync/.env --name instantly-reply-labeler node:22-alpine node label-new-replies.mjs >> /var/log/instantly-dataset-sync/labeler-\$(date -u +\\%Y-\\%m-\\%d).log 2>&1') | crontab -"
+  "(crontab -l 2>/dev/null | grep -v instantly-dataset-sync | grep -v instantly-reply-labeler | grep -v instantly-segment-labeler; echo '0 0 * * * docker run --rm -v /opt/instantly-dataset-sync:/app -w /app --env-file /opt/instantly-dataset-sync/.env --name instantly-dataset-sync node:22-alpine node sync.mjs >> /var/log/instantly-dataset-sync/\$(date -u +\\%Y-\\%m-\\%d).log 2>&1'; echo '0 2 * * * docker run --rm -v /opt/instantly-dataset-sync:/app -w /app --env-file /opt/instantly-dataset-sync/.env --name instantly-reply-labeler node:22-alpine node label-new-replies.mjs >> /var/log/instantly-dataset-sync/labeler-\$(date -u +\\%Y-\\%m-\\%d).log 2>&1'; echo '30 2 * * * docker run --rm -v /opt/instantly-dataset-sync:/app -w /app --env-file /opt/instantly-dataset-sync/.env --name instantly-segment-labeler node:22-alpine node label-new-segments.mjs >> /var/log/instantly-dataset-sync/segments-\$(date -u +\\%Y-\\%m-\\%d).log 2>&1') | crontab -"
 
 # 6. Show final state
 echo "=== installed files ==="
-"$PLINK" -batch -ssh -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" "$PROD" "ls -la $REMOTE && echo && echo '=== cron ===' && crontab -l | grep -E 'instantly-dataset-sync|instantly-reply-labeler' && echo && echo '=== docker node test ===' && docker run --rm node:22-alpine node --version"
+"$PLINK" -batch -ssh -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" "$PROD" "ls -la $REMOTE && echo && echo '=== cron ===' && crontab -l | grep -E 'instantly-dataset-sync|instantly-reply-labeler|instantly-segment-labeler' && echo && echo '=== docker node test ===' && docker run --rm node:22-alpine node --version"
 
 # Cleanup local temp files
 rm -f /tmp/dataset-sync-package.json /tmp/dataset-sync.env
