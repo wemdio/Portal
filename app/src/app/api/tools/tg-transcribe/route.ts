@@ -65,6 +65,13 @@ export async function GET(req: NextRequest) {
         let q = admin
           .from('tg_video_transcripts')
           .select('id, created_at, tg_message_date, tg_chat_id, tg_message_id, topic_id, tg_sender_id, sender_name, caption, filename, file_size_bytes, duration_seconds, text, length, status, error_text')
+          // Only real transcripts in the History list. Excluded:
+          //   - status='error' (Groq 429s, FILE_REFERENCE_EXPIRED, …) — the
+          //     scan worker retries those on the next pass;
+          //   - status='skipped_no_audio' / 'skipped_no_speech' — permanent
+          //     empty-text markers (stickers, muted recordings) kept in the
+          //     DB only so scans stop re-downloading those files.
+          .eq('status', 'completed')
           .order(sortColumn, { ascending: false, nullsFirst: false })
           .limit(limit);
         if (chatIdFilter && Number.isFinite(chatIdFilter)) {
