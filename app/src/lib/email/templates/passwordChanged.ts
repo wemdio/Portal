@@ -1,7 +1,6 @@
 export interface PasswordChangedEmailArgs {
   password: string;
   changedAtMsk: string;
-  ip: string;
 }
 
 export interface RenderedEmail {
@@ -33,7 +32,6 @@ export function renderPasswordChangedEmail(args: PasswordChangedEmailArgs): Rend
           <p style="font-size:15px;line-height:1.5;margin:0 0 12px;">
             Пароль вашего аккаунта в Portal был успешно изменён <strong>${esc(args.changedAtMsk)}</strong>.
           </p>
-          <p style="font-size:15px;line-height:1.5;margin:0 0 12px;">IP, с которого выполнено изменение: <code style="font-family:Menlo,Consolas,monospace;font-size:14px;color:#444;">${esc(args.ip)}</code></p>
           <p style="font-size:15px;line-height:1.5;margin:24px 0 8px;">Ваш новый пароль:</p>
           <p style="margin:0 0 24px;">
             <code style="display:inline-block;font-family:Menlo,Consolas,monospace;font-size:18px;background:#f0f0f0;padding:12px 16px;border-radius:6px;letter-spacing:0.5px;">${esc(args.password)}</code>
@@ -56,7 +54,6 @@ export function renderPasswordChangedEmail(args: PasswordChangedEmailArgs): Rend
     'Пароль изменён',
     '',
     `Пароль вашего аккаунта в Portal был успешно изменён ${args.changedAtMsk}.`,
-    `IP: ${args.ip}`,
     '',
     `Новый пароль: ${args.password}`,
     '',
