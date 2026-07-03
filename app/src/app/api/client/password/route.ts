@@ -97,7 +97,6 @@ export async function POST(req: NextRequest) {
   const { subject, html, text } = renderPasswordChangedEmail({
     password: newPassword,
     changedAtMsk,
-    ip,
   });
   void sendTransactionalEmail({ to: email, subject, html, text }).catch((err) =>
     logError('client.password.email.failed', err, { to: email }, logMeta),

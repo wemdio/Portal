@@ -4,7 +4,6 @@ describe('renderPasswordChangedEmail', () => {
   const args = {
     password: 'AbcDef123!@x',
     changedAtMsk: '24.06.2026, 15:30 МСК',
-    ip: '203.0.113.42',
   };
 
   it('subject упоминает Portal и пароль', () => {
@@ -19,10 +18,14 @@ describe('renderPasswordChangedEmail', () => {
     expect(html).toContain('AbcDef123!@x');
   });
 
-  it('HTML содержит время изменения и IP', () => {
+  it('HTML содержит время изменения', () => {
     const { html } = renderPasswordChangedEmail(args);
     expect(html).toContain('24.06.2026, 15:30 МСК');
-    expect(html).toContain('203.0.113.42');
+  });
+
+  it('HTML не содержит строку про IP', () => {
+    const { html } = renderPasswordChangedEmail(args);
+    expect(html).not.toMatch(/IP/);
   });
 
   it('HTML содержит призыв обратиться в поддержку если это не вы', () => {
@@ -36,6 +39,11 @@ describe('renderPasswordChangedEmail', () => {
     expect(text).toContain('AbcDef123!@x');
   });
 
+  it('text-версия не содержит IP', () => {
+    const { text } = renderPasswordChangedEmail(args);
+    expect(text).not.toMatch(/IP/);
+  });
+
   it('экранирует HTML-спецсимволы в пароле', () => {
     const { html } = renderPasswordChangedEmail({
       ...args,
@@ -43,14 +51,5 @@ describe('renderPasswordChangedEmail', () => {
     });
     expect(html).toContain('a&lt;b&gt;c&amp;d&quot;e');
     expect(html).not.toMatch(/<b>c/);
-  });
-
-  it('экранирует HTML в IP (защита от injection через X-Forwarded-For)', () => {
-    const { html } = renderPasswordChangedEmail({
-      ...args,
-      ip: '1.2.3.4<script>alert(1)</script>',
-    });
-    expect(html).not.toContain('<script>');
-    expect(html).toContain('&lt;script&gt;');
   });
 });
