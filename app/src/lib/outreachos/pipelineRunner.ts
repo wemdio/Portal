@@ -283,24 +283,62 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     );
     await markSeen(fresh.map(toSeen(leadDomains, 'no_email')));
 
-    // 9. Добор в фиксированную кампанию Instantly (seen уже зафиксирован).
-    const appendResult = await appendLeadsToClientCampaign({
-      userId: config.client_user_id,
-      campaignId,
-      leads,
-      contextLabel: 'OutreachOS daily',
-    });
-    log(`Instantly: accepted=${appendResult.accepted} skipped=${appendResult.skipped}`);
+    // 9. Добор в кампании Instantly (seen уже зафиксирован). При заданной
+    //    campaign_id_b — A/B-сплит офферов: лиды делятся 50/50 детерминированно
+    //    по домену КОМПАНИИ (hash%2), чтобы все почты одной компании попали в
+    //    ОДНУ кампанию (одна фирма не должна получить два разных оффера) и
+    //    чтобы при ретраях лид не мигрировал между кампаниями.
+    const campaignIdB = config.campaign_id_b;
+    const batches: { campaign: string; label: 'A' | 'B'; leads: typeof leads }[] = [];
+    if (campaignIdB) {
+      const a: typeof leads = [];
+      const b: typeof leads = [];
+      for (const l of leads) (splitBucket(l.website ?? '', l.email) === 0 ? a : b).push(l);
+      batches.push({ campaign: campaignId, label: 'A', leads: a });
+      batches.push({ campaign: campaignIdB, label: 'B', leads: b });
+      log(`A/B-сплит по домену компании: A=${a.length} B=${b.length}`);
+    } else {
+      batches.push({ campaign: campaignId, label: 'A', leads });
+    }
+
+    let acceptedA = 0;
+    let acceptedB = 0;
+    let skippedTotal = 0;
+    const appendErrors: string[] = [];
+    for (const batch of batches) {
+      if (batch.leads.length === 0) continue;
+      try {
+        const res = await appendLeadsToClientCampaign({
+          userId: config.client_user_id,
+          campaignId: batch.campaign,
+          leads: batch.leads,
+          contextLabel: `OutreachOS daily (${batch.label})`,
+        });
+        if (batch.label === 'A') acceptedA = res.accepted;
+        else acceptedB = res.accepted;
+        skippedTotal += res.skipped;
+        log(`Instantly [${batch.label}]: accepted=${res.accepted} skipped=${res.skipped}`);
+      } catch (err) {
+        // Сбой одной кампании не отменяет вторую: seen уже зафиксирован (шаг 8),
+        // пере-заливки этих компаний не будет — фиксируем ошибку и продолжаем.
+        appendErrors.push(`[${batch.label}] ${err instanceof Error ? err.message : String(err)}`);
+        await logError('outreachos.append.failed', err, { runId, campaign: batch.campaign });
+      }
+    }
+    const totalAccepted = acceptedA + acceptedB;
+    const runStatus: 'completed' | 'failed' = appendErrors.length > 0 ? 'failed' : 'completed';
 
     await finishRun({
-      status: 'completed',
+      status: runStatus,
       parsed: employers.length,
       after_icp: employers.length,
       new_employers: fresh.length,
       base_job_id: baseJobId,
       valid_contacts: leads.length,
-      appended: appendResult.accepted,
-      skipped: appendResult.skipped,
+      appended: acceptedA,
+      appended_b: acceptedB,
+      skipped: skippedTotal,
+      ...(appendErrors.length > 0 ? { error_message: appendErrors.join('; ') } : {}),
     });
 
     await logAudit('outreachos.run.completed', 'OutreachOS daily pipeline completed', {
@@ -308,17 +346,20 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       parsed: employers.length,
       newEmployers: fresh.length,
       validContacts: leads.length,
-      appended: appendResult.accepted,
+      appendedA: acceptedA,
+      appendedB: acceptedB,
+      appendErrors: appendErrors.length,
     });
 
     return {
       runId,
-      status: 'completed',
+      status: runStatus,
       parsed: employers.length,
       newEmployers: fresh.length,
       validContacts: leads.length,
-      appended: appendResult.accepted,
-      skipped: appendResult.skipped,
+      appended: totalAccepted,
+      skipped: skippedTotal,
+      ...(appendErrors.length > 0 ? { error: appendErrors.join('; ') } : {}),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -331,6 +372,20 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     await logError('outreachos.run.failed', err, { runId });
     return { ...empty, runId, status: 'failed', error: message };
   }
+}
+
+/**
+ * Детерминированный сплит 50/50 для A/B офферов: bucket по домену КОМПАНИИ
+ * (сайт; fallback — домен почты). djb2-hash % 2 — стабилен между прогонами
+ * (одна компания всегда в одной кампании) и не зависит от порядка лидов.
+ */
+export function splitBucket(website: string, email: string): 0 | 1 {
+  const key =
+    deriveDomain(website.trim() || null) ??
+    email.slice(email.indexOf('@') + 1).toLowerCase();
+  let h = 5381;
+  for (let i = 0; i < key.length; i++) h = ((h * 33) ^ key.charCodeAt(i)) >>> 0;
+  return (h % 2) as 0 | 1;
 }
 
 /**
