@@ -2763,16 +2763,17 @@ export function ProjectList() {
                 </p>
                 <div className="space-y-2">
                   <div>
-                    <label className="block text-[11px] font-medium text-zinc-500 mb-1">Почта клиента (в копию)</label>
+                    <label className="block text-[11px] font-medium text-zinc-500 mb-1">Почты клиента (в копию)</label>
                     <input
-                      type="email"
+                      type="text"
                       value={getDraftValue(selectedProject, 'handoff_email')}
                       onChange={(e) => setDraftValue(selectedProject.id, 'handoff_email', e.target.value)}
-                      onBlur={(e) => void commitProjectUpdate(selectedProject, { handoff_email: e.target.value })}
+                      onBlur={(e) => void commitProjectUpdate(selectedProject, { handoff_email: e.target.value.replace(/;/g, ',') })}
                       disabled={!canEdit}
-                      placeholder="client@company.com"
+                      placeholder="manager@company.com, client@company.com"
                       className="w-full rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs focus:border-blue-400 focus:outline-none disabled:bg-zinc-50"
                     />
+                    <p className="mt-1 text-[10px] text-zinc-400">Можно несколько адресов через запятую — все попадут в копию (напр. менеджер клиента + сам клиент).</p>
                   </div>
                   <div>
                     <label className="block text-[11px] font-medium text-zinc-500 mb-1">Легенда передачи</label>

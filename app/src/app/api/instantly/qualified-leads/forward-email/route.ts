@@ -33,9 +33,16 @@ export const POST = withAuth(async (req, user) => {
   }
 
   if (client_email) {
+    // Несколько адресов через запятую (менеджер клиента + сам клиент и т.п.) —
+    // Instantly принимает cc_address_email_list как comma-строку, валидируем каждый.
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(client_email)) {
-      return NextResponse.json({ error: 'Некорректный email' }, { status: 400 });
+    const parts = client_email.split(',').map((p) => p.trim()).filter(Boolean);
+    const bad = parts.filter((p) => !emailRegex.test(p));
+    if (parts.length === 0 || bad.length > 0) {
+      return NextResponse.json(
+        { error: `Некорректный email: ${bad.join(', ') || client_email}` },
+        { status: 400 },
+      );
     }
   }
 

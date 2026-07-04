@@ -1,37 +1,28 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError } from '@/lib/loggerServer';
+import {
+  CLEANUP_JSON_SYSTEM_PROMPT,
+  CLEANUP_BATCH,
+  buildCleanupUserMessage,
+  parseCleanupResponseJson,
+  parseCleanupResponse,
+} from '@/lib/nameCleanupProtocol';
 
-const BATCH_SIZE = 100;
 const TIMEOUT_MS = 70_000;
-
-const CLEANUP_PROMPT = `Ты очищаешь названия компаний для использования в персонализированных email-письмах.
-
-Правила:
-1. Оставь только само название (2-3 слова максимум)
-2. Удали: Inc, Ltd, Corp, LLC, ООО, ИП, АО, ЗАО, ПАО, ГК, НКО, GmbH и т.п.
-3. Удали текст после: -, |, /, ,, :
-4. Удали текст в скобках
-5. Удали символы: ®, ™, ©, #, !, ?
-6. Если >3 слов — сделай аббревиатуру (если уместно)
-7. Если всё КАПСОМ (6+ букв) — преобразуй в Title Case
-8. Результат должен красиво звучать в предложении: "Я заметил что КОМПАНИЯ..."
-
-ФОРМАТ: Очищенные названия с нумерацией строго в формате:
-1. Название
-2. Название
-...и так далее.
-Без пояснений, без кавычек. Количество строк = количеству входных компаний. Порядок и нумерация те же.
-Если не знаешь как очистить — верни оригинальное название с его номером. НИКОГДА не пропускай строки.`;
 
 function getApiKey(): string {
   return (process.env.OPENROUTER_AGENT_API_KEY ?? '').trim();
 }
 
+/**
+ * JSON-протокол nameCleanupProtocol — как в base-constructor'е. До 04.07.2026
+ * тут была своя копия нумерованного текста: один уровень «N. » срезался, но
+ * двойные префиксы протекали, а сбой нумерации молча терял хвост батча.
+ * Возвращает Map с 1-based ключами (контракт parseCleanupResponseJson).
+ */
 async function callCleanupLlm(names: string[]): Promise<Map<number, string>> {
   const apiKey = getApiKey();
   if (!apiKey) return new Map();
-
-  const input = names.map((n, i) => `${i + 1}. ${n}`).join('\n');
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -49,27 +40,24 @@ async function callCleanupLlm(names: string[]): Promise<Map<number, string>> {
       body: JSON.stringify({
         model: 'policy/cleanup',
         messages: [
-          { role: 'system', content: CLEANUP_PROMPT },
-          { role: 'user', content: input },
+          { role: 'system', content: CLEANUP_JSON_SYSTEM_PROMPT },
+          { role: 'user', content: buildCleanupUserMessage(names.map((n) => ({ name: n }))) },
         ],
         temperature: 0.1,
         max_tokens: 4000,
+        response_format: { type: 'json_object' },
       }),
     });
 
     if (!res.ok) return new Map();
 
     const data = await res.json() as { choices?: { message?: { content?: string } }[] };
-    const content = data.choices?.[0]?.message?.content ?? '';
+    const content = data.choices?.[0]?.message?.content?.trim() ?? '';
+    if (!content) return new Map();
 
-    const result = new Map<number, string>();
-    for (const line of content.split('\n')) {
-      const match = line.trim().match(/^(\d+)\.\s*(.+)/);
-      if (match) {
-        result.set(parseInt(match[1], 10), match[2].trim());
-      }
-    }
-    return result;
+    return parseCleanupResponseJson(content)
+      ?? parseCleanupResponse(content, names.length)
+      ?? new Map();
   } catch {
     return new Map();
   } finally {
@@ -133,8 +121,8 @@ export async function cleanCompanyNames(
   const typedRows = rows as unknown as Row[];
   let cleanedCount = 0;
 
-  for (let i = 0; i < typedRows.length; i += BATCH_SIZE) {
-    const batch = typedRows.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < typedRows.length; i += CLEANUP_BATCH) {
+    const batch = typedRows.slice(i, i + CLEANUP_BATCH);
     const names = batch.map((r) => String(r[nameCol] ?? ''));
 
     const cleanedMap = await callCleanupLlm(names);

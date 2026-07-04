@@ -3,6 +3,13 @@ import * as os from 'node:os';
 
 const SMTP_CONNECT_TIMEOUT_MS = 8_000;
 const SMTP_COMMAND_TIMEOUT_MS = 8_000;
+// Порт SMTP-проб. Всегда 25 в проде; переопределяется только в тестах
+// (локально нельзя слушать :25 без прав администратора).
+const SMTP_PROBE_PORT = Number(process.env.SMTP_PROBE_PORT ?? '25');
+// Исходящий IP пробы. Нужен, когда на машине несколько IPv4 и этот инстанс
+// прокси должен ходить со «своего» (PTR и HELO_DOMAIN настроены на него).
+// Не задан → ОС выбирает адрес сама (поведение как раньше).
+const SMTP_PROBE_LOCAL_ADDRESS = process.env.SMTP_PROBE_LOCAL_ADDRESS?.trim() || undefined;
 
 const DEFAULT_HELO_DOMAIN = process.env.EMAIL_VALIDATION_HELO_DOMAIN ?? os.hostname();
 
@@ -102,7 +109,74 @@ export interface SmtpCheckRequest {
   timeout?: number;
 }
 
+function randomProbeAddress(domain: string): string {
+  return `verify-check-${Date.now()}-${Math.random().toString(36).substring(2, 10)}@${domain}`;
+}
+
+// Fresh-connection catch-all retry: only start it if the main session finished
+// fast enough — the worker aborts the whole HTTP call at 25s, so a retry that
+// starts late never delivers its answer and only ties up the proxy.
+const CATCHALL_RETRY_BUDGET_MS = 12_000;
+const CATCHALL_RETRY_TIMEOUT_MS = 5_000;
+
+/**
+ * One-shot RCPT probe on a FRESH connection: connect → EHLO/HELO →
+ * MAIL FROM → RCPT TO:<recipient>. Fallback for the catch-all check: часть
+ * серверов отвечает 4xx/503 на ВТОРУЮ транзакцию (RSET → MAIL FROM → RCPT)
+ * в той же сессии, из-за чего isCatchAll оставался null и вердикт деградировал
+ * до 'unknown', хотя на свежей сессии тот же сервер отвечает однозначно.
+ * Returns the RCPT reply, or null if the session failed at any earlier step.
+ */
+async function probeOnFreshConnection(
+  mxHost: string,
+  heloDomain: string,
+  heloFrom: string,
+  recipient: string,
+  timeout: number,
+): Promise<SmtpResponse | null> {
+  let socket: net.Socket | null = null;
+  try {
+    socket = await new Promise<net.Socket>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('SMTP connect timeout')), timeout);
+      const s = net.createConnection(
+        { host: mxHost, port: SMTP_PROBE_PORT, timeout, localAddress: SMTP_PROBE_LOCAL_ADDRESS },
+        () => {
+          clearTimeout(timer);
+          resolve(s);
+        },
+      );
+      s.once('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    const greeting = await waitForGreeting(socket, timeout);
+    if (greeting.code !== 220) return null;
+    const ehloResp = await smtpCommand(socket, `EHLO ${heloDomain}`, timeout);
+    if (ehloResp.code !== 250) {
+      const heloResp = await smtpCommand(socket, `HELO ${heloDomain}`, timeout);
+      if (heloResp.code !== 250) return null;
+    }
+    const mailFrom = await smtpCommand(socket, `MAIL FROM:<${heloFrom}>`, timeout);
+    if (mailFrom.code !== 250) return null;
+    const rcpt = await smtpCommand(socket, `RCPT TO:<${recipient}>`, timeout);
+    try {
+      await smtpCommand(socket, 'QUIT', 1500);
+    } catch {
+      // QUIT timeout is non-critical
+    }
+    return rcpt;
+  } catch {
+    return null;
+  } finally {
+    if (socket) {
+      try { socket.destroy(); } catch { /* ignore */ }
+    }
+  }
+}
+
 export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult> {
+  const startedAt = Date.now();
   const timeout = req.timeout ?? SMTP_CONNECT_TIMEOUT_MS;
   const result: SmtpCheckResult = { code: 0, exists: null, isCatchAll: null, greylist: false };
 
@@ -128,10 +202,13 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
   try {
     socket = await new Promise<net.Socket>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('SMTP connect timeout')), timeout);
-      const s = net.createConnection({ host: req.mxHost, port: 25, timeout }, () => {
-        clearTimeout(timer);
-        resolve(s);
-      });
+      const s = net.createConnection(
+        { host: req.mxHost, port: SMTP_PROBE_PORT, timeout, localAddress: SMTP_PROBE_LOCAL_ADDRESS },
+        () => {
+          clearTimeout(timer);
+          resolve(s);
+        },
+      );
       s.once('error', (err) => {
         clearTimeout(timer);
         reject(err);
@@ -177,8 +254,7 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
 
     if (req.checkCatchAll && result.exists === true) {
       const domain = req.email.split('@')[1];
-      const randomLocal = `verify-check-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
-      const randomEmail = `${randomLocal}@${domain}`;
+      const randomEmail = randomProbeAddress(domain);
 
       await smtpCommand(socket, 'RSET', SMTP_COMMAND_TIMEOUT_MS);
       await smtpCommand(socket, `MAIL FROM:<${heloFrom}>`, SMTP_COMMAND_TIMEOUT_MS);
@@ -206,6 +282,28 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
   } finally {
     if (socket) {
       try { socket.destroy(); } catch { /* ignore */ }
+    }
+  }
+
+  // In-session catch-all probe came back inconclusive (4xx/503 on the second
+  // transaction, or the session died after RCPT) → one retry on a FRESH
+  // connection, budget-bounded so the whole request stays inside the worker's
+  // 25s HTTP timeout. Failure here just leaves isCatchAll=null (как раньше).
+  if (
+    req.checkCatchAll &&
+    result.exists === true &&
+    result.isCatchAll === null &&
+    Date.now() - startedAt < CATCHALL_RETRY_BUDGET_MS
+  ) {
+    const domain = req.email.split('@')[1];
+    if (domain) {
+      const rcpt = await probeOnFreshConnection(
+        req.mxHost, heloDomain, heloFrom, randomProbeAddress(domain), CATCHALL_RETRY_TIMEOUT_MS,
+      );
+      if (rcpt) {
+        if (rcpt.code === 250) result.isCatchAll = true;
+        else if (rcpt.code >= 550 && rcpt.code <= 559) result.isCatchAll = false;
+      }
     }
   }
 

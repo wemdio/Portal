@@ -380,12 +380,12 @@ function ForwardEmailDialog({
           <MacroPicker companyName={companyName} campaignId={campaignId} leadEmail={leadEmail} onSelect={setReplyText} />
 
           <div>
-            <label className="block text-xs font-medium text-zinc-500 mb-1">Email клиента (CC)</label>
+            <label className="block text-xs font-medium text-zinc-500 mb-1">Email клиента (CC) — можно несколько через запятую</label>
             <input
-              type="email"
+              type="text"
               value={clientEmail}
               onChange={(e) => setClientEmail(e.target.value)}
-              placeholder="client@company.com"
+              placeholder="manager@company.com, client@company.com"
               className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm focus:border-violet-300 focus:outline-none focus:ring-2 focus:ring-violet-100 placeholder:text-zinc-300"
             />
           </div>
