@@ -261,15 +261,28 @@ describe('POST /api/client/launches — источник = база из Кон�
         }),
       ]),
     );
+
+    // Пин двухшаговой загрузки: первый select — ownership/status БЕЗ блоба
+    // (data до 46МБ не должен де-TOAST'иться до authz), второй — только data.
+    const jobSelects = mockMainDb.selects.filter((s) => s.table === 'base_constructor_jobs');
+    expect(jobSelects).toHaveLength(2);
+    expect(jobSelects[0].columns).not.toContain('data');
+    expect(jobSelects[1].columns).toBe('data');
   });
 
-  it('чужая база → 404 (неотличимо от несуществующей)', async () => {
-    seedBaseJob({ user_id: 'someone-else' });
+  it('чужая база → 404 (неотличимо от несуществующей), ownership проверяется РАНЬШЕ статуса и без загрузки блоба', async () => {
+    // status='processing' у чужого джоба: если бы статус проверялся раньше
+    // ownership, ответ был бы 400 и палил существование чужой базы.
+    seedBaseJob({ user_id: 'someone-else', status: 'processing' });
     const { POST } = await import('@/app/api/client/launches/route');
 
     const res = await POST(makeBaseLaunchReq());
     expect(res.status).toBe(404);
     expect(mockCreateCampaign).not.toHaveBeenCalled();
+    // Для чужого джоба блоб data не запрашивается вовсе.
+    const jobSelects = mockMainDb.selects.filter((s) => s.table === 'base_constructor_jobs');
+    expect(jobSelects).toHaveLength(1);
+    expect(jobSelects[0].columns).not.toContain('data');
   });
 
   it('несуществующий job id → 404', async () => {

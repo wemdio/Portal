@@ -55,6 +55,12 @@ export interface UpdateCall {
   filters: Filter[];
 }
 
+export interface SelectCall {
+  table: string;
+  /** Raw projection string passed to .select() ('*' when omitted). */
+  columns: string;
+}
+
 export interface MockSupabaseClient {
   from: (table: string) => Builder;
 
@@ -67,6 +73,12 @@ export interface MockSupabaseClient {
   upserts: UpsertCall[];
   /** Recorded updates in chronological order. */
   updates: UpdateCall[];
+  /**
+   * Recorded .select() projections in chronological order. Lets tests pin
+   * WHICH columns a query asked for — e.g. «the ownership check must not
+   * de-TOAST the data blob» (see clientLaunchesRoute.test.ts).
+   */
+  selects: SelectCall[];
 }
 
 type Op = 'eq' | 'neq' | 'in' | 'gte' | 'lte' | 'gt' | 'lt' | 'is' | 'not_is' | 'not_in';
@@ -203,6 +215,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
   const inserts: InsertCall[] = [];
   const upserts: UpsertCall[] = [];
   const updates: UpdateCall[] = [];
+  const selects: SelectCall[] = [];
   let generatedIdSeq = 1;
 
   function withGeneratedId(table: string, row: Row): Row {
@@ -277,7 +290,10 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
     }
 
     const builder: Builder = {
-      select: () => builder,
+      select: (columns) => {
+        selects.push({ table, columns: columns ?? '*' });
+        return builder;
+      },
       insert: (rows) => {
         mode = 'insert';
         pendingInsert = Array.isArray(rows) ? rows.slice() : [rows];
@@ -349,5 +365,6 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
     inserts,
     upserts,
     updates,
+    selects,
   };
 }

@@ -274,6 +274,12 @@ export default function ClientLaunchPage() {
   // See DRAFT_KEY comment above for rationale.
   const [draftSavedAt, setDraftSavedAt] = useState<Date | null>(null);
   const [draftRestored, setDraftRestored] = useState(false);
+  // Non-decaying «draft owns schedule/behavior/mailboxes» flag. draftRestored
+  // (state) flips back to false ~500ms after restore (debounced save) — if the
+  // preset loaded LATER than that, the hydration effect used to clobber the
+  // restored values with preset defaults and then persist them. The ref never
+  // decays, so hydration can honor the draft regardless of timing.
+  const restoredFromDraftRef = useRef(false);
 
   // Restore once on mount. Bad JSON / sandbox / no storage → silent skip.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -290,10 +296,17 @@ export default function ClientLaunchPage() {
       if (Array.isArray(draft.activeVariantIdx)) setActiveVariantIdx(draft.activeVariantIdx);
       if (draft.mapping && typeof draft.mapping === 'object') setMapping(draft.mapping);
       if (Array.isArray(draft.customVars)) setCustomVars(draft.customVars);
-      if (draft.schedule && typeof draft.schedule === 'object') setSchedule(draft.schedule);
-      if (draft.behavior && typeof draft.behavior === 'object') setBehavior(draft.behavior);
+      if (draft.schedule && typeof draft.schedule === 'object') {
+        setSchedule(draft.schedule);
+        restoredFromDraftRef.current = true;
+      }
+      if (draft.behavior && typeof draft.behavior === 'object') {
+        setBehavior(draft.behavior);
+        restoredFromDraftRef.current = true;
+      }
       if (Array.isArray(draft.selectedEmailAccountIds)) {
         setSelectedEmailAccountIds(draft.selectedEmailAccountIds);
+        restoredFromDraftRef.current = true;
       }
       if (
         draft.selectedBase &&
@@ -396,9 +409,25 @@ export default function ClientLaunchPage() {
   // there's no restored draft to honor. Otherwise we'd silently clobber
   // Olga's custom schedule/behavior with preset defaults: race surfaced by
   // /impeccable re-critique 2026-05-24 (N1). Draft always wins on restore.
+  // ONE-SHOT via scheduleHydrated + the non-decaying restoredFromDraftRef:
+  // the old guard read draftRestored (state), which flips false ~500ms after
+  // restore — a preset that loaded later than that clobbered the draft and
+  // the debounced save then persisted the clobber (lost custom schedule /
+  // unticked mailboxes for good).
   useEffect(() => {
     if (!preset) return;
-    if (draftRestored) return; // draft already populated schedule/behavior — keep them
+    if (scheduleHydrated) return; // one-shot: never re-hydrate/clobber
+    if (restoredFromDraftRef.current) {
+      // Draft already populated schedule/behavior/mailboxes — keep them and
+      // just mark hydration done (unblocks the schedule editor). Backfill the
+      // mailbox pool for drafts that predate the picker (no
+      // selectedEmailAccountIds key): the one-shot latch closes here, so
+      // without this the selection would stay null forever and the picker
+      // would never render.
+      setSelectedEmailAccountIds((prev) => (prev === null ? [...preset.email_account_ids] : prev));
+      setScheduleHydrated(true);
+      return;
+    }
     setSchedule({
       from: preset.schedule_from || '09:00',
       to: preset.schedule_to || '18:00',
@@ -415,7 +444,7 @@ export default function ClientLaunchPage() {
     // policy — if a draft already hydrated this state, leave it alone.
     setSelectedEmailAccountIds([...preset.email_account_ids]);
     setScheduleHydrated(true);
-  }, [preset, draftRestored]);
+  }, [preset, scheduleHydrated]);
 
   // If the preset's mailbox pool changes (e.g. admin removed a mailbox)
   // while client has already selected a subset, prune the selection to
@@ -813,7 +842,10 @@ export default function ClientLaunchPage() {
     setLaunchError('');
     setResult(null);
     // Also wipe any persisted draft — an explicit "start fresh" wins over
-    // any saved draft from a prior session.
+    // any saved draft from a prior session. Schedule/behavior/mailbox
+    // selection intentionally KEEP their current (possibly draft-restored)
+    // values — the hydration latch stays closed; «с нуля» resets the
+    // campaign content, not the sending settings the user can see and edit.
     setDraftSavedAt(null);
     setDraftRestored(false);
     try {
