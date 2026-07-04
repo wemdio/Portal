@@ -104,3 +104,28 @@ describe('classifyWithAI', () => {
     expect(body.max_tokens).toBe(2400);
   });
 });
+
+describe('getBodyText', () => {
+  it('декодирует числовые HTML-сущности в html-only письмах (mail.ru)', async () => {
+    const { getBodyText } = await import('@/lib/instantly/leadQualifier');
+    const html =
+      '<div>&#1047;&#1076;&#1088;&#1072;&#1074;&#1089;&#1090;&#1074;&#1091;&#1081;&#1090;&#1077;, ' +
+      '&laquo;&#1058;&#1077;&#1089;&#1090;&raquo; &mdash; &#x442;&#x435;&#x441;&#x442;</div>';
+    expect(getBodyText({ html } as Email['body'])).toBe('Здравствуйте, «Тест» — тест');
+  });
+
+  it('декодирует &amp; последним (двойное кодирование не схлопывается)', async () => {
+    const { getBodyText } = await import('@/lib/instantly/leadQualifier');
+    expect(getBodyText({ html: 'a &amp;lt; b' } as Email['body'])).toBe('a &lt; b');
+  });
+
+  it('не трогает некорректные коды и неизвестные сущности', async () => {
+    const { getBodyText } = await import('@/lib/instantly/leadQualifier');
+    expect(getBodyText({ html: '&#99999999; &copy; ок' } as Email['body'])).toBe('&#99999999; &copy; ок');
+  });
+
+  it('plain-text часть возвращается как есть (без декода)', async () => {
+    const { getBodyText } = await import('@/lib/instantly/leadQualifier');
+    expect(getBodyText({ text: 'обычный текст &#1059;' } as Email['body'])).toBe('обычный текст &#1059;');
+  });
+});

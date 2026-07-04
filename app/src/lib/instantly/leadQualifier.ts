@@ -125,21 +125,45 @@ export async function fetchThreadContext(
 
 // ─── Body Text Extraction ────────────────────────────────────────────────────
 
+const NAMED_HTML_ENTITIES: Record<string, string> = {
+  nbsp: ' ',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  laquo: '«',
+  raquo: '»',
+  mdash: '—',
+  ndash: '–',
+  hellip: '…',
+};
+
+function decodeCodePoint(code: number, fallback: string): string {
+  return Number.isFinite(code) && code > 0 && code <= 0x10ffff
+    ? String.fromCodePoint(code)
+    : fallback;
+}
+
 export function getBodyText(body: Email['body']): string {
   if (!body) return '';
   if (typeof body === 'string') return body;
   if (body.text) return body.text;
   if (body.html) {
-    return body.html
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
-      .replace(/<[^>]+>/g, '')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .trim();
+    return (
+      body.html
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
+        .replace(/<[^>]+>/g, '')
+        // Числовые сущности (&#1059; / &#x442;): mail.ru и часть клиентов шлют
+        // html-only письма со ВСЕЙ кириллицей в таком виде — без декода в
+        // reply_body/алертах «каша» из кодов вместо текста.
+        .replace(/&#(\d+);/g, (m, dec: string) => decodeCodePoint(Number(dec), m))
+        .replace(/&#x([0-9a-f]+);/gi, (m, hex: string) => decodeCodePoint(parseInt(hex, 16), m))
+        .replace(/&([a-z]+);/gi, (m, name: string) => NAMED_HTML_ENTITIES[name.toLowerCase()] ?? m)
+        // &amp; последним — чтобы двойное кодирование (&amp;lt;) не превращалось в "<"
+        .replace(/&amp;/gi, '&')
+        .trim()
+    );
   }
   return '';
 }

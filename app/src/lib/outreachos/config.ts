@@ -40,6 +40,11 @@ export interface OutreachOsConfig {
   client_user_id: string;
   /** Одна заранее созданная кампания Instantly для ежедневного добора. */
   campaign_id: string | null;
+  /**
+   * Вторая кампания для A/B-сплита офферов. NULL = сплит выключен (всё в
+   * campaign_id). Задана → лиды делятся 50/50 по hash домена компании.
+   */
+  campaign_id_b: string | null;
   /** HH top-level industry id'ы (см. lib/jobs/hhIndustries). Пусто = без industry-фильтра. */
   industries: string[];
   area: string;
