@@ -1,6 +1,13 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { buildHeuristicCleanupResults, type CompanyCleanupEntry } from '@/lib/companyNameCleanup';
+import {
+  CLEANUP_JSON_SYSTEM_PROMPT,
+  CLEANUP_BATCH,
+  buildCleanupUserMessage,
+  parseCleanupResponseJson,
+  parseCleanupResponse,
+} from '@/lib/nameCleanupProtocol';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 
 export const dynamic = 'force-dynamic';
@@ -13,57 +20,14 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-const SYSTEM_PROMPT = `Сейчас я пришлю тебе названия компаний.
-1)Основная задача оставить только название компании, которое потом будет использоваться как автоматическая переменная для персонализации писем (поэтому название компании должно быть без лишней информации). Ты должен вернуть список очищенных названий в той же последовательности с нумерацией (1. 2. 3. и т.д.). Убери всё то, что не является названием, а лишь его описанием.
-2)Это должно выглядеть так: Я заметил что "КОМПАНИЯ" имеет большое количество сотрудников.
-Вместо слова "компания" будут вставляться эти названия компаний. Они должны логично звучать.
-3)Ориентируйся также на название домена этой компании при очистке, чтобы не обрезать лишнего. Действуй в совокупности. Если в домене есть что-то полезное для правильной корректировки названия компании, то учитывай это. (но это не значит что надо писать все слова слитно и с маленькой буквы, т.е. не просто скопировать название домена, а просто понять, как сокращенно может писаться название компании). Например, название компании: IBEX IT Business Experts. А домен компании: http://www.ibexexperts.com. Тогда очищенное название компании: IBEX Experts и так далее.
-4)Вот остальной примерный план по очистке:
-Удаление текста после определенных символов:
-Удаляет все текст после первого знака дефиса (включая сам знак дефиса).
-Удаляет все текст после символа "|" (включая сам символ "|").
-Удаляет все текст после символа "/" (включая сам символ "/").
-Удаляет все текст после символа "," (включая сам символ ",").
-Удаляет все текст после символа ":" (включая сам символ ":").
-Удаление определенных символов и фраз:
-Удаляет символы: "®", "™", "©", "#", "!", "?".
-Удаляет определенные слова и фразы: "Incorporated", "Inc", "Limited", "Ltd", "dba", "Corp", и другие подобные слова, а также названия стран и суффиксы (.com, .uk и т.п.).
-5)Удаление текста внутри скобок:
-Удаляет весь текст, который находится внутри скобок (включая сами скобки).
-Преобразование текста к формату "Название С Заглавной Буквы":
-6)Если ячейка содержит слово, состоящее из шести или более заглавных букв, то все слова в ячейке преобразуются к формату "Название С Заглавной Буквы".
-Преобразование текста в аббревиатуру:
-Если в ячейке текст содержит более 3 слов, то необходимо привести этот текст в формат аббревиатуры, если такое возможно.
-7)Будь аккуратен и точен. Грамотно очищай названия компаний, чтобы их можно было в дальнейшем использовать в письмах и в них не оставалось лишних слов, не относящихся к названию компании.
-8)Вот пару примеров по очистке:
-Было: CGT Staffing (CompuGroup Technologies)
-Стало: CGT Staffing
-Было: Albano Systems, Inc.
-Стало: Albano Systems
-Было: Alliance of Professionals & Consultants, Inc. (APC)
-Стало: APC
-Было: BIO-key International, Inc. Домен: http://www.bio-key.com
-Стало: BIO-key
-Было: QuesTek Innovations LLC Домен: http://www.questek.com
-Стало: QuesTek
-9) Самое главное, чтобы результат был не более 2-3 слов и имел красивый, логичный и читаемый вид (включая аббревиатуры) ЭТО ОЧЕНЬ ВАЖНО!!!
-
-ФОРМАТ ОТВЕТА:
-Верни очищенные названия с нумерацией строго в формате:
-1. Название
-2. Название
-3. Название
-...и так далее.
-Без пояснений, без кавычек. Количество строк в ответе должно ТОЧНО совпадать с количеством компаний во входных данных.
-Порядок и нумерация должны быть ТОЧНО такими же, как во входных данных. Если не знаешь как очистить — верни оригинальное название с его номером.
-НИКОГДА не пропускай строки. Если на входе 100 компаний — в ответе должно быть ровно 100 пронумерованных строк.`;
-
 type RequestBody = {
   companies: CompanyCleanupEntry[];
 };
 
 const MAX_RETRIES = 3;
-const RETRY_BASE_DELAY = 1500;
+// Env-переопределение — для тестов (иначе ретраи с backoff'ом растягивают
+// jest-прогон на десятки секунд).
+const RETRY_BASE_DELAY = Number(process.env.CLEANUP_RETRY_BASE_DELAY_MS ?? 1500);
 
 function getFetchFailureReason(err: unknown): string {
   if (err instanceof Error && err.cause instanceof Error) {
@@ -76,6 +40,105 @@ function getFetchFailureReason(err: unknown): string {
   }
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+type SubBatchOutcome =
+  | { kind: 'ok'; cleanedMap: Map<number, string> }
+  | { kind: 'ai_unavailable'; reason: string }
+  | { kind: 'fatal'; reason: string };
+
+/**
+ * Один суб-батч (<=CLEANUP_BATCH) через JSON-протокол nameCleanupProtocol —
+ * тот же механизм, что stepNameCleanup в base-constructor'е (единый источник
+ * правды). Ретраим сеть/таймаут/пустой ответ/5xx; 4xx = fatal (ключ/квота —
+ * дальше долбить бессмысленно).
+ *
+ * История: до 04.07.2026 роут просил нумерованный текст и в positional
+ * fallback'е писал строки с «N. » префиксами как есть; масштабный тест на
+ * 2000 имён показал ~20% сбойных батчей даже на здоровой модели. JSON-mode
+ * с idx устраняет класс бага целиком.
+ */
+async function cleanupSubBatch(entries: CompanyCleanupEntry[]): Promise<SubBatchOutcome> {
+  const userMessage = buildCleanupUserMessage(entries);
+  let lastError = 'Unknown AI error';
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+    if (attempt > 0) await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt - 1));
+
+    let response: Response;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const controller = new AbortController();
+      timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
+      response = await fetch('https://router.requesty.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENROUTER_CLEANUP_API_KEY}`,
+          'HTTP-Referer': 'https://portal.app',
+          'X-Title': 'Portal - Name Cleanup',
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: CLEANUP_MODEL,
+          messages: [
+            { role: 'system', content: CLEANUP_JSON_SYSTEM_PROMPT },
+            { role: 'user', content: userMessage },
+          ],
+          temperature: 0.1,
+          max_tokens: 4000,
+          response_format: { type: 'json_object' },
+        }),
+      });
+    } catch (err) {
+      lastError = err instanceof Error && err.name === 'AbortError'
+        ? 'Превышено время ожидания ответа от AI'
+        : `Ошибка сети при обращении к AI: ${getFetchFailureReason(err)}`;
+      continue;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+
+    if (response.ok) {
+      const data = await response.json().catch(() => null) as
+        | { choices?: { message?: { content?: string } }[] }
+        | null;
+      const content = data?.choices?.[0]?.message?.content?.trim() ?? '';
+      if (!content) {
+        lastError = 'Пустой ответ от AI';
+        continue;
+      }
+      // Основной путь — JSON. Если модель проигнорировала response_format и
+      // вернула нумерованный текст — страховочный text-парсер (он стрипает
+      // префиксы и спецтокены во всех режимах).
+      const cleanedMap = parseCleanupResponseJson(content)
+        ?? parseCleanupResponse(content, entries.length);
+      if (!cleanedMap || cleanedMap.size === 0) {
+        lastError = 'Нераспознаваемый ответ от AI';
+        continue;
+      }
+      return { kind: 'ok', cleanedMap };
+    }
+
+    let errorMessage = `API error: ${response.status}`;
+    try {
+      const errorData = await response.json() as { error?: { message?: string } | string };
+      if (typeof errorData.error === 'string') {
+        errorMessage = errorData.error;
+      } else if (typeof errorData.error?.message === 'string') {
+        errorMessage = errorData.error.message;
+      }
+    } catch {
+      // ignore
+    }
+    lastError = errorMessage;
+
+    const providerError = /provider returned error/i.test(errorMessage);
+    const retryable = providerError || [500, 502, 503, 504].includes(response.status);
+    if (!retryable) return { kind: 'fatal', reason: errorMessage };
+  }
+
+  return { kind: 'ai_unavailable', reason: lastError };
 }
 
 export async function POST(req: NextRequest) {
@@ -107,153 +170,60 @@ export async function POST(req: NextRequest) {
     return jsonError('Missing required field: companies (non-empty array)', 400);
   }
 
-  // --- Build user message (numbered for reliable mapping) ---
-  const companyLines = companies.map((c, i) => {
-    const num = i + 1;
-    if (c.domain && c.domain.trim()) {
-      return `${num}. ${c.name} Домен: ${c.domain.trim()}`;
-    }
-    return `${num}. ${c.name}`;
-  });
+  // Клиент шлёт до 100 компаний за запрос; внутри дробим по CLEANUP_BATCH (50),
+  // чтобы ответ модели гарантированно влезал в лимит выходных токенов.
+  // Суб-батчи независимы — гоним параллельно: латентность запроса остаётся
+  // ~как у одного AI-вызова (за Cloudflare лимит ~100с, последовательные
+  // суб-батчи с ретраями в него не влезали бы).
+  const subBatches: CompanyCleanupEntry[][] = [];
+  for (let start = 0; start < companies.length; start += CLEANUP_BATCH) {
+    subBatches.push(companies.slice(start, start + CLEANUP_BATCH));
+  }
+  const outcomes = await Promise.all(subBatches.map((b) => cleanupSubBatch(b)));
 
-  const userMessage = companyLines.join('\n');
+  const results: { idx: number; cleanedName: string }[] = [];
+  let heuristicReason: string | null = null;
 
-  // --- Call Requesty with routing policy (handles fallback internally) ---
+  for (let b = 0; b < subBatches.length; b += 1) {
+    const subBatch = subBatches[b];
+    const outcome = outcomes[b];
 
-  let lastAiError = 'Unknown AI error';
-  let sawNonRetryableFailure = false;
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-    let response: Response;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-
-    try {
-      const controller = new AbortController();
-      timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
-      response = await fetch('https://router.requesty.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${OPENROUTER_CLEANUP_API_KEY}`,
-          'HTTP-Referer': 'https://portal.app',
-          'X-Title': 'Portal - Name Cleanup',
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: CLEANUP_MODEL,
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: userMessage },
-          ],
-          temperature: 0.1,
-          max_tokens: 4000,
-        }),
-      });
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        lastAiError = 'Превышено время ожидания ответа от AI';
-      } else {
-        lastAiError = `Ошибка сети при обращении к AI: ${getFetchFailureReason(err)}`;
-      }
-
-      if (attempt < MAX_RETRIES) {
-        await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
-        continue;
-      }
-      break;
-    } finally {
-      if (timeout) clearTimeout(timeout);
+    if (outcome.kind === 'fatal') {
+      // Non-retryable (невалидный ключ, 4xx) — почти наверняка затронуло все
+      // суб-батчи; отдаём ошибку целиком, клиент оставит оригиналы.
+      return jsonError(`Не удалось получить ответ от AI. ${CLEANUP_MODEL}: ${outcome.reason}`, 502);
     }
 
-    if (response.ok) {
-      const data = await response.json();
-      const content = data.choices?.[0]?.message?.content?.trim() ?? '';
-
-      if (!content) {
-        lastAiError = 'Пустой ответ от AI';
-        if (attempt < MAX_RETRIES) {
-          await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
-          continue;
-        }
-        break;
-      }
-
-      // Parse numbered response: "1. Name", "2. Name", etc.
-      const lines = content.split('\n').map((line: string) => line.trim());
-      const numberedMap = new Map<number, string>();
-
-      for (const line of lines) {
-        if (!line) continue;
-        const match = line.match(/^(\d+)\.\s*(.+)/);
-        if (match) {
-          numberedMap.set(parseInt(match[1], 10), match[2].trim());
-        }
-      }
-
-      let results: { idx: number; cleanedName: string }[];
-
-      if (numberedMap.size >= companies.length * 0.8) {
-        // Numbered format detected — map by number
-        results = companies.map((c, i) => ({
-          idx: c.idx,
-          cleanedName: numberedMap.get(i + 1) || c.name,
-        }));
-      } else {
-        // Fallback: positional mapping (non-empty lines only)
-        const cleanedNames = lines.filter((l: string) => l.length > 0);
-        results = companies.map((c, i) => ({
-          idx: c.idx,
-          cleanedName: cleanedNames[i] && cleanedNames[i].length > 0
-            ? cleanedNames[i]
-            : c.name,
-        }));
-      }
-
-      return NextResponse.json({ results });
-    }
-
-    let errorMessage = `API error: ${response.status}`;
-    try {
-      const errorData = await response.json() as { error?: { message?: string } | string };
-      if (typeof errorData.error === 'string') {
-        errorMessage = errorData.error;
-      } else if (typeof errorData.error?.message === 'string') {
-        errorMessage = errorData.error.message;
-      }
-    } catch {
-      // ignore
-    }
-
-    lastAiError = errorMessage;
-    const providerError = /provider returned error/i.test(errorMessage);
-    const shouldRetry = providerError || [500, 502, 503, 504].includes(response.status);
-    if (!shouldRetry) {
-      sawNonRetryableFailure = true;
-    }
-    if (shouldRetry && attempt < MAX_RETRIES) {
-      await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
+    if (outcome.kind === 'ai_unavailable') {
+      // AI недоступен по retryable-причине — локальная эвристика для этого
+      // суб-батча (ООО/кавычки/суффиксы снимет, хуже оригинала не будет).
+      results.push(...buildHeuristicCleanupResults(subBatch));
+      heuristicReason = outcome.reason;
       continue;
     }
-    break;
+
+    // Ключи map'а 1-based (get(i+1)) — контракт parseCleanupResponseJson.
+    // Для строк без ответа оставляем оригинал, как stepNameCleanup.
+    for (let i = 0; i < subBatch.length; i += 1) {
+      const c = subBatch[i];
+      results.push({ idx: c.idx, cleanedName: outcome.cleanedMap.get(i + 1) || c.name });
+    }
   }
 
-  if (!sawNonRetryableFailure) {
-    const results = buildHeuristicCleanupResults(companies);
-    const warning = `AI временно недоступен, применена локальная очистка. Модель: ${CLEANUP_MODEL}. Причина: ${lastAiError}`;
-
+  if (heuristicReason) {
+    const warning = `AI временно недоступен, к части строк применена локальная очистка. Модель: ${CLEANUP_MODEL}. Причина: ${heuristicReason}`;
     console.warn('[cleanup-names] Falling back to heuristic cleanup', {
       model: CLEANUP_MODEL,
       companyCount: companies.length,
-      reason: lastAiError,
+      reason: heuristicReason,
     });
-
     return NextResponse.json(
       { results, warning },
       { headers: { 'X-Portal-Name-Cleanup-Fallback': 'heuristic' } },
     );
   }
 
-  return jsonError(`Не удалось получить ответ от AI. ${CLEANUP_MODEL}: ${lastAiError}`, 502);
+  return NextResponse.json({ results });
 }
 
 function sleep(ms: number) {
