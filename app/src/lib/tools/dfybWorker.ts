@@ -12,6 +12,13 @@ import {
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
 import { runSearchParserJob } from '@/lib/parsers/searchParserWorker';
+import {
+  CLEANUP_JSON_SYSTEM_PROMPT,
+  CLEANUP_BATCH,
+  buildCleanupUserMessage,
+  parseCleanupResponseJson,
+  parseCleanupResponse,
+} from '@/lib/nameCleanupProtocol';
 
 /* ═══════════════════════════════════════════
    CONSTANTS
@@ -29,7 +36,7 @@ const BROWSER_UA =
 const SITE_CHECK_TIMEOUT = 12_000;
 
 const TA_BATCH = 10;
-const CLEANUP_BATCH = 100;
+// CLEANUP_BATCH импортируется из nameCleanupProtocol (50, не 100 — см. там).
 const PERSONALIZATION_BATCH = 5;
 const SITE_CHECK_BATCH = 50;
 const EMAIL_CONCURRENCY = 5;
@@ -513,25 +520,6 @@ async function stepTAScore(jobId: string, data: string[][], taBrief: string): Pr
    STEP 11: NAME CLEANUP
    ═══════════════════════════════════════════ */
 
-const CLEANUP_SYSTEM_PROMPT = `Ты очищаешь названия компаний для использования в персонализированных email-письмах.
-
-Правила:
-1. Оставь только само название (2-3 слова максимум)
-2. Удали: Inc, Ltd, Corp, LLC, ООО, ИП, АО, ЗАО, GmbH и т.п.
-3. Удали текст после: -, |, /, ,, :
-4. Удали текст в скобках
-5. Удали символы: ®, ™, ©, #, !, ?
-6. Если >3 слов — сделай аббревиатуру (если уместно)
-7. Если всё КАПСОМ (6+ букв) — преобразуй в Title Case
-8. Результат должен красиво звучать в предложении: "Я заметил что КОМПАНИЯ..."
-
-ФОРМАТ: Очищенные названия с нумерацией строго в формате:
-1. Название
-2. Название
-...и так далее.
-Без пояснений, без кавычек. Количество строк = количеству входных компаний. Порядок и нумерация те же.
-Если не знаешь как очистить — верни оригинальное название с его номером. НИКОГДА не пропускай строки.`;
-
 async function stepNameCleanup(jobId: string, data: string[][]): Promise<string[][]> {
   const header = data[0];
   const body = data.slice(1);
@@ -545,43 +533,26 @@ async function stepNameCleanup(jobId: string, data: string[][]): Promise<string[
   for (let batch = 0; batch < body.length; batch += CLEANUP_BATCH) {
     if (await isCancelled(jobId)) throw new Error('Отменено');
     const chunk = body.slice(batch, batch + CLEANUP_BATCH);
-    const input = chunk
-      .map((row, i) => {
-        const num = i + 1;
-        const name = row[nameIdx] || '';
-        const domain = siteIdx >= 0 ? row[siteIdx] || '' : '';
-        return domain ? `${num}. ${name} Домен: ${domain}` : `${num}. ${name}`;
-      })
-      .join('\n');
+    // JSON-протокол nameCleanupProtocol — как в base-constructor'е. До
+    // 04.07.2026 тут была своя копия нумерованного текста с positional
+    // fallback'ом без снятия «N. » префиксов (тот же баг, что в
+    // /api/cleanup-names — префиксы и спецтокены протекали в базу).
+    const userMsg = buildCleanupUserMessage(
+      chunk.map((row) => ({
+        name: row[nameIdx] || '',
+        domain: siteIdx >= 0 ? row[siteIdx] || null : null,
+      })),
+    );
 
     let cleanedMap: Map<number, string> | null = null;
     try {
       const content = await callOpenRouter(OPENROUTER_CLEANUP_API_KEY, CLEANUP_MODEL, [
-        { role: 'system', content: CLEANUP_SYSTEM_PROMPT },
-        { role: 'user', content: input },
-      ], { temperature: 0.1, title: 'Portal - DFYB Cleanup' });
+        { role: 'system', content: CLEANUP_JSON_SYSTEM_PROMPT },
+        { role: 'user', content: userMsg },
+      ], { temperature: 0.1, json: true, title: 'Portal - DFYB Cleanup' });
 
-      const numbered = new Map<number, string>();
-      const allLines: string[] = [];
-      for (const line of content.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        const match = trimmed.match(/^(\d+)\.\s*(.+)/);
-        if (match) {
-          numbered.set(parseInt(match[1], 10), match[2].trim());
-        }
-        allLines.push(trimmed);
-      }
-
-      if (numbered.size >= chunk.length * 0.8) {
-        cleanedMap = numbered;
-      } else if (allLines.length > 0) {
-        const positional = new Map<number, string>();
-        for (let j = 0; j < allLines.length && j < chunk.length; j++) {
-          if (allLines[j]) positional.set(j + 1, allLines[j]);
-        }
-        cleanedMap = positional;
-      }
+      cleanedMap = parseCleanupResponseJson(content)
+        ?? parseCleanupResponse(content, chunk.length);
     } catch {
       // routing policy handles fallback; skip batch on total failure
     }
