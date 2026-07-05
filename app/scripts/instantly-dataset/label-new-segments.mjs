@@ -83,7 +83,9 @@ logistics_transport, construction_realestate, medical_pharma, retail_ecommerce, 
 
 async function classifyBatch(names) {
   const lines = names.map((nm, i) => `${i + 1}. ${(nm || '').slice(0, 200)}`).join('\n');
-  const body = { model: MODEL, max_tokens: 900, temperature: 0,
+  // Политика = reasoning-модель (deepseek): токены размышлений считаются в max_tokens,
+  // при малом лимите content обрезается до пустоты («no JSON array»). Держим запас.
+  const body = { model: MODEL, max_tokens: 6000, temperature: 0,
     messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: lines }] };
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -92,8 +94,9 @@ async function classifyBatch(names) {
         body: JSON.stringify(body) });
       const j = await res.json();
       if (j.error) throw new Error(JSON.stringify(j.error).slice(0, 160));
-      const m = (j.choices?.[0]?.message?.content || '').match(/\[[\s\S]*\]/);
-      if (!m) throw new Error('no JSON array');
+      const choice = j.choices?.[0];
+      const m = (choice?.message?.content || '').match(/\[[\s\S]*\]/);
+      if (!m) throw new Error(`no JSON array (finish=${choice?.finish_reason}, content="${(choice?.message?.content || '').slice(0, 80)}")`);
       const arr = JSON.parse(m[0]);
       if (!Array.isArray(arr) || arr.length !== names.length) throw new Error(`len ${arr?.length}!=${names.length}`);
       return { labels: arr.map((x) => (VALID.has(x) ? x : 'other_unclear')), cost: j.usage?.cost || 0 };
