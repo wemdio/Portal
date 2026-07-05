@@ -341,7 +341,7 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     await finishRun({
       status: runStatus,
       parsed: employers.length,
-      after_icp: employers.length,
+      after_icp: icp.length,
       new_employers: fresh.length,
       base_job_id: baseJobId,
       valid_contacts: leads.length,
