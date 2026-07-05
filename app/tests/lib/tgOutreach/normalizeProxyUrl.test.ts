@@ -65,6 +65,51 @@ describe('normalizeProxyUrl', () => {
     );
   });
 
+  // Провайдеры (Infatica, pool.proxy.market) экспортируют тип последним
+  // сегментом: `host:port:user:pass:HTTP`. До фикса `HTTP` попадал в пароль
+  // через `:`, и в БД уходил URL с `%3AHTTP` в user-info — на проде так утекло
+  // 402 прокси в tg_outreach_proxies (кампании Лидген 3.0 и Profitsol 3.0).
+  describe('trailing type suffix (HTTP/SOCKS4/SOCKS5)', () => {
+    it('strips trailing :HTTP from host:port:user:pass:HTTP', () => {
+      expect(normalizeProxyUrl('mobpool.proxy.market:10000:7JQO8UV8C6:2gFrv0aYGh:HTTP')).toBe(
+        'http://7JQO8UV8C6:2gFrv0aYGh@mobpool.proxy.market:10000',
+      );
+    });
+
+    it('strips trailing :SOCKS5 in lowercase too', () => {
+      expect(normalizeProxyUrl('1.2.3.4:8080:user:pass:socks5')).toBe(
+        'http://user:pass@1.2.3.4:8080',
+      );
+    });
+
+    it('strips trailing :HTTPS', () => {
+      expect(normalizeProxyUrl('1.2.3.4:8080:user:pass:HTTPS')).toBe(
+        'http://user:pass@1.2.3.4:8080',
+      );
+    });
+
+    it('does not strip :HTTP when it is not the last segment', () => {
+      // Пароль реально «HTTP:something» — хвост уже не «просто HTTP».
+      expect(normalizeProxyUrl('1.2.3.4:8080:user:HTTP:x')).toBe(
+        'http://user:HTTP%3Ax@1.2.3.4:8080',
+      );
+    });
+
+    it('does not strip when scheme already present', () => {
+      // Если URL уже нормальный — не трогаем ничего, включая теоретический
+      // trailing :HTTP (маловероятно, но контракт «есть ://» → сквозной).
+      expect(normalizeProxyUrl('http://user:pass@1.2.3.4:8080')).toBe(
+        'http://user:pass@1.2.3.4:8080',
+      );
+    });
+
+    it('strips trailing type in host:port@user:pass form too', () => {
+      expect(normalizeProxyUrl('pool.proxy.market:10989@user:pass:HTTP')).toBe(
+        'http://user:pass@pool.proxy.market:10989',
+      );
+    });
+  });
+
   it('returns empty string unchanged', () => {
     expect(normalizeProxyUrl('')).toBe('');
     expect(normalizeProxyUrl('   ')).toBe('');

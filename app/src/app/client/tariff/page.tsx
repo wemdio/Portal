@@ -161,6 +161,13 @@ export default function ClientTariffPage() {
   const [unlinkOpen, setUnlinkOpen] = useState(false);
   const [unlinking, setUnlinking] = useState(false);
   const [unlinkError, setUnlinkError] = useState<string | null>(null);
+  // «Выбрать другой тариф»: клиент оказался на locked-экране после того как
+  // сформировал счёт и не оплатил. Модалка → DELETE /api/client/payment
+  // отменяет счёт в ЮКассе + сбрасывает tariff row в inactive, после чего
+  // страница перерисовывается и снова показывает TariffSelectionWidget.
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
 
   const handlePay = useCallback(async () => {
     setPaying(true);
@@ -187,6 +194,24 @@ export default function ClientTariffPage() {
       setLoading(false);
     }
   }, []);
+
+  const handleResetTariff = useCallback(async () => {
+    setResetting(true);
+    setResetError(null);
+    try {
+      await clientApiFetch<{ ok: boolean }>('/payment', { method: 'DELETE' });
+      setResetOpen(false);
+      // Сбрасываем локально запомненный payment_url — старая ссылка теперь
+      // ведёт на отменённый счёт в ЮКассе.
+      setPaymentUrl(null);
+      setPayError(null);
+      await load(false);
+    } catch (e) {
+      setResetError(e instanceof Error ? e.message : 'Ошибка');
+    } finally {
+      setResetting(false);
+    }
+  }, [load]);
 
   const handleUnlinkAutopay = useCallback(async () => {
     setUnlinking(true);
@@ -511,30 +536,49 @@ export default function ClientTariffPage() {
                 </div>
                 {data.billing_mode === 'autopayment' && !data.paid_at && (
                   <div className="flex flex-col items-end gap-1">
-                    {paymentUrl ? (
-                      <a
-                        href={paymentUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="ds-btn-primary inline-flex items-center gap-2 px-4 py-2 text-sm"
-                      >
-                        <ExternalLink className="h-4 w-4" aria-hidden />
-                        Перейти к оплате
-                      </a>
-                    ) : (
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      {paymentUrl ? (
+                        <a
+                          href={paymentUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="ds-btn-primary inline-flex items-center gap-2 px-4 py-2 text-sm"
+                        >
+                          <ExternalLink className="h-4 w-4" aria-hidden />
+                          Перейти к оплате
+                        </a>
+                      ) : (
+                        <button
+                          onClick={handlePay}
+                          disabled={paying || resetting}
+                          className="ds-btn-primary inline-flex items-center gap-2 px-4 py-2 text-sm disabled:opacity-60"
+                        >
+                          {paying ? (
+                            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                          ) : (
+                            <Zap className="h-4 w-4" aria-hidden />
+                          )}
+                          {paying ? 'Открываем счёт…' : 'Оплатить подписку'}
+                        </button>
+                      )}
+                      {/* «Выбрать другой тариф» — оранжевый выход из ловушки:
+                          клиент сформировал счёт, не оплатил, теперь не может
+                          передумать. Клик → модалка → DELETE /api/client/payment
+                          отменяет счёт в ЮКассе и БД, сбрасывает tariff row в
+                          inactive, страница снова показывает выбор тарифов. */}
                       <button
-                        onClick={handlePay}
-                        disabled={paying}
-                        className="ds-btn-primary inline-flex items-center gap-2 px-4 py-2 text-sm disabled:opacity-60"
+                        type="button"
+                        onClick={() => {
+                          setResetOpen(true);
+                          setResetError(null);
+                        }}
+                        disabled={paying || resetting}
+                        className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition disabled:opacity-60"
+                        style={{ background: 'var(--cp-amber)', color: 'var(--cp-ink)' }}
                       >
-                        {paying ? (
-                          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                        ) : (
-                          <Zap className="h-4 w-4" aria-hidden />
-                        )}
-                        {paying ? 'Открываем счёт…' : 'Оплатить подписку'}
+                        Выбрать другой тариф
                       </button>
-                    )}
+                    </div>
                     {/* Last-attempt error from YooKassa webhook (payment.canceled).
                         Helps Olga understand WHY her previous click didn't work
                         without us hiding behind a generic "try again". Cleared
@@ -744,6 +788,72 @@ export default function ClientTariffPage() {
             )}
           </section>
         </>
+      )}
+
+      {/* Reset-tariff confirmation — клиент возвращается к выбору тарифа,
+          сформированный счёт отменяется в ЮКассе и БД. Действие обратимое
+          (можно выбрать тот же или другой тариф и оплатить заново), но
+          спрашиваем, чтобы не отменять по случайному клику. */}
+      {resetOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'var(--cp-scrim)' }}
+        >
+          <div
+            className="rounded-lg w-full max-w-md overflow-hidden"
+            style={{
+              background: 'var(--cp-surface-elev)',
+              border: '1px solid var(--cp-divider-strong)',
+              color: 'var(--cp-paper)',
+            }}
+          >
+            <div className="px-6 pt-6 pb-2">
+              <h2
+                className="text-base font-semibold m-0"
+                style={{ color: 'var(--cp-paper)' }}
+              >
+                Выбрать другой тариф?
+              </h2>
+              <p
+                className="text-xs mt-2 leading-relaxed"
+                style={{ color: 'var(--cp-paper-mute)' }}
+              >
+                Текущий счёт будет отменён — в ЮКассе и у нас. После этого вы
+                снова увидите выбор тарифов и сможете сформировать новый счёт.
+              </p>
+              {resetError && (
+                <p
+                  className="ds-mono mt-2 text-xs"
+                  style={{ color: 'var(--cp-red)' }}
+                >
+                  {resetError}
+                </p>
+              )}
+            </div>
+            <div className="flex gap-2 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setResetOpen(false);
+                  setResetError(null);
+                }}
+                disabled={resetting}
+                className="ds-btn-secondary flex-1 px-4 py-2 text-sm disabled:opacity-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleResetTariff()}
+                disabled={resetting}
+                className="flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition disabled:opacity-60"
+                style={{ background: 'var(--cp-amber)', color: 'var(--cp-ink)' }}
+              >
+                {resetting ? 'Отменяем счёт…' : 'Выбрать другой тариф'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Destructive-action confirmation. Modal acceptable here — high-stakes

@@ -1,6 +1,7 @@
 import {
   extractVideoInfo,
   processVideoMessage,
+  isTerminalOkStatus,
   saveErrorRecord,
   type TgMessage,
   type VideoInfo,
@@ -110,7 +111,7 @@ async function runTranscribeJob(job: TgTranscribeJobRow): Promise<void> {
   try {
     const result = await processVideoMessage(msg, resolvedVideoInfo);
 
-    if (result.status === 'completed' || result.status === 'skipped_exists') {
+    if (isTerminalOkStatus(result.status)) {
       await db
         .from('tg_transcribe_jobs')
         .update({

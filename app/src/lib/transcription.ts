@@ -4,6 +4,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Agent } from 'undici';
+import {
+  acquireGroqSlot,
+  reportGroqRateLimit,
+  estimateGroqWaitSeconds,
+} from '@/lib/groqRateGate';
 
 const OPENROUTER_VIDEO_TRANSCRIPT_API_KEY = (
   process.env.OPENROUTER_VIDEO_TRANSCRIPT_API_KEY ?? ''
@@ -23,6 +28,46 @@ export const MAX_GROQ_AUDIO_BYTES = 25 * 1024 * 1024;
 
 export const MAX_OPENROUTER_AUDIO_BYTES = 25 * 1024 * 1024;
 const TRANSCRIPTION_CHUNK_SECONDS = 40 * 60;
+
+// Groq free tier: 7200 audio-seconds per rolling hour. A 60-min video sent
+// as ONE request needs half of that budget free at once — the API keeps
+// replying 429 until a near-empty window shows up. Splitting long audio into
+// ~10-minute chunks lets each piece slip into whatever budget is currently
+// free, so long videos drain the quota gradually instead of blocking on it.
+const GROQ_CHUNK_SECONDS = (() => {
+  const v = Number(process.env.GROQ_CHUNK_SECONDS);
+  return Number.isFinite(v) && v >= 60 ? v : 600;
+})();
+
+// Opt-in hybrid mode: when the Groq queue is longer than this many minutes,
+// send the file to the local faster-whisper worker instead of waiting.
+// 0 / unset = disabled (local "small" model is noticeably weaker on Russian,
+// so the trade-off is the user's call via env).
+const GROQ_LOCAL_FALLBACK_MINUTES = (() => {
+  const v = Number(process.env.GROQ_LOCAL_FALLBACK_MINUTES);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+})();
+
+// All mp3s we send to providers are produced by our own ffmpeg calls with
+// "-b:a 48k" (CBR), so duration ≈ bytes * 8 / 48000. Used to book the right
+// amount of Groq quota before dispatching a request.
+const MP3_BITRATE_BPS = 48_000;
+
+export function estimateMp3DurationSeconds(audioMp3: Buffer): number {
+  return Math.max(1, Math.round((audioMp3.byteLength * 8) / MP3_BITRATE_BPS));
+}
+
+/**
+ * "The audio contains no recognizable speech" — a PERMANENT outcome, not a
+ * transient failure. Callers use it to mark the source file as processed so
+ * nightly re-scans stop re-downloading and re-submitting it forever.
+ */
+export class NoSpeechError extends Error {
+  constructor(message = 'Не удалось распознать речь в аудио (тишина или музыка без слов).') {
+    super(message);
+    this.name = 'NoSpeechError';
+  }
+}
 
 const FFMPEG_EXE = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
 
@@ -158,7 +203,7 @@ async function resolveFfmpegPath(): Promise<string> {
   return 'ffmpeg';
 }
 
-async function runFfmpeg(args: string[]): Promise<void> {
+async function runFfmpeg(args: string[]): Promise<string> {
   const ff = await resolveFfmpegPath();
   if (!ff) {
     throw new Error(
@@ -166,7 +211,7 @@ async function runFfmpeg(args: string[]): Promise<void> {
     );
   }
 
-  await new Promise<void>((resolve, reject) => {
+  return new Promise<string>((resolve, reject) => {
     const child = spawn(ff, args, { windowsHide: true });
     let stderr = '';
     child.stderr.on('data', (d) => {
@@ -184,10 +229,69 @@ async function runFfmpeg(args: string[]): Promise<void> {
       }
     });
     child.on('close', (code) => {
-      if (code === 0) return resolve();
+      // ffmpeg writes ALL diagnostics (silencedetect stamps, Duration, etc.)
+      // to stderr even on success — hand it to callers that parse it.
+      if (code === 0) return resolve(stderr);
       reject(new Error(stderr.trim() || `ffmpeg exited with code ${code ?? 'unknown'}`));
     });
   });
+}
+
+export interface AudioActivitySummary {
+  durationSeconds: number;
+  /** Seconds of audio louder than the silence threshold. */
+  activeSeconds: number;
+}
+
+/**
+ * Cheap pre-flight before burning transcription quota: decode the mp3 once
+ * with ffmpeg silencedetect and measure how much of it is actually audible.
+ * Runs at ~100x real time on one core. Stickers, muted screen recordings and
+ * "camera on, mic off" videos come back with activeSeconds ≈ 0 — those files
+ * used to go to Groq (wasting audio-seconds from the hourly budget), fail
+ * with "не удалось распознать речь" and then get retried every nightly scan.
+ */
+export async function analyzeAudioActivity(audioMp3: Buffer): Promise<AudioActivitySummary> {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-audio-vad-'));
+  const inPath = path.join(tmpDir, 'in.mp3');
+  try {
+    await fs.writeFile(inPath, audioMp3);
+    const stderr = await runFfmpeg([
+      '-i',
+      inPath,
+      '-af',
+      'silencedetect=noise=-40dB:d=2',
+      '-f',
+      'null',
+      '-',
+    ]);
+
+    const durationSeconds = estimateMp3DurationSeconds(audioMp3);
+
+    // Sum explicit silence intervals; an unterminated silence_start means
+    // the file goes quiet until the end.
+    let silence = 0;
+    let openStart: number | null = null;
+    const re = /silence_(start|end): ([\d.]+)(?: \| silence_duration: ([\d.]+))?/g;
+    for (const m of stderr.matchAll(re)) {
+      if (m[1] === 'start') {
+        openStart = Number(m[2]);
+      } else {
+        silence += Number(m[3] ?? 0);
+        openStart = null;
+      }
+    }
+    if (openStart != null) {
+      silence += Math.max(0, durationSeconds - openStart);
+    }
+
+    return {
+      durationSeconds,
+      activeSeconds: Math.max(0, durationSeconds - silence),
+    };
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 export async function extractOrConvertToMp3(input: {
@@ -350,8 +454,15 @@ async function callGroqTranscriptionSingle(input: {
 
   const audioBytes = Uint8Array.from(input.audioMp3);
   const blob = new Blob([audioBytes], { type: 'audio/mpeg' });
+  const estimateSeconds = estimateMp3DurationSeconds(input.audioMp3);
 
-  const maxRetries = 6;
+  // Every request goes through the process-wide quota gate (groqRateGate.ts):
+  // it books `estimateSeconds` from the free-tier hourly budget BEFORE the
+  // request goes out, so parallel pipelines queue up instead of stampeding
+  // into 429s. Waiting for budget happens inside acquireGroqSlot — the retry
+  // loop below only deals with genuinely unexpected failures.
+  const maxRetries = 12;
+  const retryAfterCapSeconds = 30 * 60;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     // Rebuild the form each attempt — some fetch implementations invalidate
@@ -362,6 +473,8 @@ async function callGroqTranscriptionSingle(input: {
     form.append('response_format', 'json');
     if (GROQ_LANGUAGE) form.append('language', GROQ_LANGUAGE);
 
+    const slot = await acquireGroqSlot(estimateSeconds);
+
     let res: Response;
     try {
       res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
@@ -371,6 +484,7 @@ async function callGroqTranscriptionSingle(input: {
         signal: AbortSignal.timeout(10 * 60 * 1000),
       });
     } catch (err) {
+      slot.release({ refundQuota: true }); // nothing reached Groq's meter
       lastErr = err;
       if (attempt >= maxRetries) throw err;
       await new Promise((resolve) => setTimeout(resolve, 5_000 * attempt));
@@ -378,22 +492,26 @@ async function callGroqTranscriptionSingle(input: {
     }
 
     if (res.status === 429) {
-      // Rate-limited — Groq returns Retry-After in seconds. Cap at 120 s so a
-      // stuck header doesn't wedge us forever.
+      // Still rate-limited despite our own accounting (another process on
+      // the same key, or budget drift). Refund the booking and propagate
+      // Groq's Retry-After into the gate so ALL queued requests hold off —
+      // the next acquireGroqSlot call sleeps exactly as long as needed.
       const retryAfter = Math.min(
-        Math.max(1, Number(res.headers.get('retry-after')) || 30),
-        120,
+        Math.max(1, Number(res.headers.get('retry-after')) || 60),
+        retryAfterCapSeconds,
       );
       const raw = await res.text().catch(() => '');
+      slot.release({ refundQuota: true });
+      reportGroqRateLimit(retryAfter);
       lastErr = new Error(`Groq rate limited: ${raw || res.statusText}`);
       if (attempt >= maxRetries) throw lastErr;
-      await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
       continue;
     }
 
     const raw = await res.text().catch(() => '');
     if (!res.ok) {
-      // 5xx: retry once with backoff; 4xx: fail fast.
+      // 5xx: request failed server-side, quota almost surely not counted.
+      slot.release({ refundQuota: res.status >= 500 });
       if (res.status >= 500 && attempt < maxRetries) {
         lastErr = new Error(`Groq server error (${res.status}): ${raw || res.statusText}`);
         await new Promise((resolve) => setTimeout(resolve, 5_000 * attempt));
@@ -402,12 +520,13 @@ async function callGroqTranscriptionSingle(input: {
       throw new Error(`Groq API (${res.status}): ${raw || res.statusText || 'unknown error'}`);
     }
 
+    slot.release(); // success — the booked seconds stay in the window
+
     const json = JSON.parse(raw) as { text?: string };
-    const text = (json.text ?? '').trim();
-    if (!text) {
-      throw new Error('Groq не вернул текст расшифровки');
-    }
-    return text;
+    // Empty text is a legitimate outcome for silent/music-only audio — the
+    // caller aggregates chunks and decides whether the WHOLE file is
+    // speechless (NoSpeechError), so don't treat one quiet chunk as a crash.
+    return (json.text ?? '').trim();
   }
   throw lastErr instanceof Error ? lastErr : new Error('Groq transcription failed');
 }
@@ -415,13 +534,49 @@ async function callGroqTranscriptionSingle(input: {
 export async function callGroqTranscription(input: {
   audioMp3: Buffer;
   filename?: string;
+  jobId?: string;
 }): Promise<string> {
-  if (input.audioMp3.byteLength <= MAX_GROQ_AUDIO_BYTES) {
-    return callGroqTranscriptionSingle(input);
+  const totalSeconds = estimateMp3DurationSeconds(input.audioMp3);
+
+  // Hybrid mode (opt-in via GROQ_LOCAL_FALLBACK_MINUTES): when the Groq
+  // queue+quota wait for this file is longer than the threshold, hand it to
+  // the local faster-whisper worker that otherwise sits idle. Worse model,
+  // but "готово через 20 минут" beats "идеально, но завтра".
+  if (GROQ_LOCAL_FALLBACK_MINUTES > 0) {
+    const waitSeconds = estimateGroqWaitSeconds(totalSeconds);
+    if (waitSeconds > GROQ_LOCAL_FALLBACK_MINUTES * 60) {
+      try {
+        console.log(
+          `[transcription] Groq queue ~${Math.round(waitSeconds / 60)} min for ` +
+          `${input.filename ?? 'audio'} (${Math.round(totalSeconds / 60)} min audio) — ` +
+          'routing to local whisper worker instead',
+        );
+        return await callLocalTranscription(input);
+      } catch (err) {
+        // Local worker down/failed — fall through to the normal Groq path.
+        console.warn(
+          '[transcription] Local fallback failed, falling back to Groq queue:',
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
   }
-  // Long audio: split into <40-min mp3 chunks (same helper OpenRouter uses)
-  // and glue the transcripts back together in order.
-  const chunks = await splitMp3ForTranscription(input.audioMp3);
+
+  // Fits in one request both by bytes and by quota granularity → send as is.
+  // The 1.5× slack avoids silly splits like 11 min → 10 min + 1 min.
+  if (
+    input.audioMp3.byteLength <= MAX_GROQ_AUDIO_BYTES &&
+    totalSeconds <= GROQ_CHUNK_SECONDS * 1.5
+  ) {
+    const text = await callGroqTranscriptionSingle(input);
+    if (!text) throw new NoSpeechError();
+    return text;
+  }
+
+  // Long audio: split into ~GROQ_CHUNK_SECONDS pieces. Each chunk books its
+  // own slice of the hourly budget, so a 2-hour recording drains through
+  // the free tier chunk by chunk instead of 429-ing as one giant request.
+  const chunks = await splitMp3ForTranscription(input.audioMp3, GROQ_CHUNK_SECONDS);
   const parts: string[] = [];
   for (let i = 0; i < chunks.length; i += 1) {
     const partFilename = input.filename
@@ -435,12 +590,15 @@ export async function callGroqTranscription(input: {
   }
   const merged = parts.join('\n\n').trim();
   if (!merged) {
-    throw new Error('Не удалось получить текст при расшифровке фрагментов через Groq.');
+    throw new NoSpeechError();
   }
   return merged;
 }
 
-async function splitMp3ForTranscription(audioMp3: Buffer): Promise<Buffer[]> {
+async function splitMp3ForTranscription(
+  audioMp3: Buffer,
+  chunkSeconds: number = TRANSCRIPTION_CHUNK_SECONDS,
+): Promise<Buffer[]> {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-audio-split-'));
   const inPath = path.join(tmpDir, 'in.mp3');
   const outPattern = path.join(tmpDir, 'chunk_%03d.mp3');
@@ -453,7 +611,7 @@ async function splitMp3ForTranscription(audioMp3: Buffer): Promise<Buffer[]> {
       '-f',
       'segment',
       '-segment_time',
-      String(TRANSCRIPTION_CHUNK_SECONDS),
+      String(chunkSeconds),
       '-c',
       'copy',
       outPattern,
@@ -533,7 +691,7 @@ export async function transcribeAudio(input: { audioMp3: Buffer; filename?: stri
     return callLocalTranscription(input);
   }
   if (TRANSCRIPTION_PROVIDER === 'groq') {
-    return callGroqTranscription({ audioMp3: input.audioMp3, filename: input.filename });
+    return callGroqTranscription(input);
   }
   return callOpenRouterTranscription(input);
 }

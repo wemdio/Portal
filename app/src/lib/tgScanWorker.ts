@@ -7,6 +7,7 @@ import {
   type TgMessage,
   type VideoInfo,
   processVideoMessage,
+  isTerminalOkStatus,
   saveErrorRecord,
   getSenderName,
 } from '@/lib/tgTranscribe';
@@ -105,6 +106,11 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
   let completed = 0;
   let errors = 0;
   let scanned = 0;
+  // Sum of durations of videos this scan actually has to process (new ones,
+  // not already-transcribed skips). Logged at the end so it's visible how
+  // much of the hourly transcription budget (7200 audio-sec on Groq free
+  // tier) a night's batch is going to eat.
+  let plannedAudioSeconds = 0;
   const videos: ScanVideoRow[] = [];
   let lastDbWrite = 0;
 
@@ -218,6 +224,7 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
 
       const senderName = m.senderName ?? getSenderName(syntheticMsg);
       const videoIdx = videosFound;
+      plannedAudioSeconds += m.duration ?? 0;
 
       videos.push({
         idx: videoIdx,
@@ -268,11 +275,11 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
 
           const v = videos.find((x) => x.idx === videoIdx);
           if (v) {
-            v.phase = (result.status === 'completed' || result.status === 'skipped_exists') ? 'done' : 'error';
+            v.phase = isTerminalOkStatus(result.status) ? 'done' : 'error';
             if (result.error) v.error = result.error;
           }
 
-          if (result.status === 'completed' || result.status === 'skipped_exists') {
+          if (isTerminalOkStatus(result.status)) {
             completed++;
           } else {
             errors++;
@@ -312,10 +319,12 @@ async function runMtprotoForumScan(args: MtprotoScanArgs): Promise<boolean> {
   // background and their transcripts would appear seconds later.
   await drainAllInflight();
 
+  const plannedAudioMinutes = Math.round(plannedAudioSeconds / 60);
   await logInfo(
     'tg-transcribe.scan.done',
-    `MTProto scan done: ${completed} transcribed, ${errors} errors, scanned ${scanned} messages`,
-    { chatId, topicId, completed, errors, scanned, videosFound, path: 'mtproto' },
+    `MTProto scan done: ${completed} transcribed, ${errors} errors, scanned ${scanned} messages, ` +
+    `~${plannedAudioMinutes} min of new audio (Groq free tier fits ~120 min/hour)`,
+    { chatId, topicId, completed, errors, scanned, videosFound, plannedAudioMinutes, path: 'mtproto' },
   );
 
   await updateJob(jobId, {
@@ -354,6 +363,15 @@ export async function runTgScanJob(jobId: string): Promise<void> {
     scanMode === 'full' ? Number.POSITIVE_INFINITY : (job.video_count as number);
 
   await updateJob(jobId, { status: 'running', started_at: new Date().toISOString() });
+
+  // Heartbeat: keep updated_at fresh for the whole lifetime of the scan.
+  // Waiting out Groq quota produces no progress events for 10+ minutes, and
+  // markStaleJobs() reads a stale updated_at as "worker died mid-scan" — it
+  // was flagging perfectly alive jobs as failed while they queued for quota.
+  const heartbeat = setInterval(() => {
+    void updateJob(jobId, {});
+  }, 60_000);
+  (heartbeat as unknown as { unref?: () => void }).unref?.();
 
   try {
     if (!TG_TOKEN) throw new Error('TG_TRANSCRIBE_BOT_TOKEN не настроен');
@@ -439,6 +457,8 @@ export async function runTgScanJob(jobId: string): Promise<void> {
       error_message: errorMessage,
       finished_at: new Date().toISOString(),
     });
+  } finally {
+    clearInterval(heartbeat);
   }
 }
 
