@@ -28,6 +28,7 @@ import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import { loadOutreachOsConfig } from './config';
 import { buildExcludePatterns } from './excludePatterns';
 import { isOutreachOsB2cCompany } from './excludeB2c';
+import { llmClassifyNoise, type CompanyForClassify } from './classifyCompanies';
 import { loadRecentlySeen, markSeen, RECONTACT_AFTER_DAYS, type SeenEmployerUpsert } from './seenEmployers';
 import { employersToGrid, gridToLeadPayloads } from './gridMapping';
 
@@ -278,6 +279,33 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       throw new Error('campaign_id отсутствует в live-режиме (не должно случаться)');
     }
 
+    // 7b. LLM-отсев B2C/ИП/гос (ТРЕТИЙ рубеж, только live): структурные правила
+    //     ловят ~4%, но онлайн-школа с нейтральным доменом от B2B неотличима.
+    //     Классифицируем УНИКАЛЬНЫЕ компании (не лиды), выкидываем лиды шумовых.
+    //     Fail-open: сбой LLM = едем без этого фильтра, лиды не теряем.
+    //     Шумовые компании остаются в fresh → попадут в markSeen (45д не трогаем
+    //     — им и не надо писать; спустя окно их снова классифицирует LLM).
+    const uniqueCompanies: CompanyForClassify[] = [];
+    const companyIdxByKey = new Map<string, number>();
+    const leadCompanyIdx: number[] = [];
+    for (const l of leads) {
+      const key = `${(l.company_name ?? '').trim().toLowerCase()}|${(l.website ?? '').trim().toLowerCase()}`;
+      let idx = companyIdxByKey.get(key);
+      if (idx === undefined) {
+        idx = uniqueCompanies.length;
+        companyIdxByKey.set(key, idx);
+        uniqueCompanies.push({ name: l.company_name ?? '', website: l.website ?? '' });
+      }
+      leadCompanyIdx.push(idx);
+    }
+    const llm = await llmClassifyNoise(uniqueCompanies, (m) => log(`[llm] ${m}`));
+    const keptLeads = leads.filter((_, i) => !llm.noise.has(leadCompanyIdx[i]));
+    log(
+      `LLM-отсев: компаний ${uniqueCompanies.length}, вердиктов ${llm.classified}, ` +
+        `шум ${llm.noise.size} (рефьют спас ${llm.refuted}), лидов ${leads.length} → ${keptLeads.length}` +
+        (llm.failedBatches > 0 ? ` (батчей без фильтра: ${llm.failedBatches})` : ''),
+    );
+
     // 8. ФИКСИРУЕМ seen-окно ДО append. append необратим (лиды улетают в
     //    Instantly, возможно несколькими chunk'ами по 1000); если он затем
     //    частично/полностью упадёт, эти компании НЕЛЬЗЯ пере-залить на следующем
@@ -289,7 +317,7 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     //    эти компании на 45 дней не трогаем — осознанно (под-контакт ОК,
     //    пере-контакт — нет; требование «не чаще раза в 1.5 месяца»).
     const leadDomains = new Set(
-      leads.map((l) => deriveDomain(l.website ?? null)).filter((d): d is string => !!d),
+      keptLeads.map((l) => deriveDomain(l.website ?? null)).filter((d): d is string => !!d),
     );
     await markSeen(fresh.map(toSeen(leadDomains, 'no_email')));
 
@@ -299,16 +327,16 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     //    ОДНУ кампанию (одна фирма не должна получить два разных оффера) и
     //    чтобы при ретраях лид не мигрировал между кампаниями.
     const campaignIdB = config.campaign_id_b;
-    const batches: { campaign: string; label: 'A' | 'B'; leads: typeof leads }[] = [];
+    const batches: { campaign: string; label: 'A' | 'B'; leads: typeof keptLeads }[] = [];
     if (campaignIdB) {
-      const a: typeof leads = [];
-      const b: typeof leads = [];
-      for (const l of leads) (splitBucket(l.website ?? '', l.email) === 0 ? a : b).push(l);
+      const a: typeof keptLeads = [];
+      const b: typeof keptLeads = [];
+      for (const l of keptLeads) (splitBucket(l.website ?? '', l.email) === 0 ? a : b).push(l);
       batches.push({ campaign: campaignId, label: 'A', leads: a });
       batches.push({ campaign: campaignIdB, label: 'B', leads: b });
       log(`A/B-сплит по домену компании: A=${a.length} B=${b.length}`);
     } else {
-      batches.push({ campaign: campaignId, label: 'A', leads });
+      batches.push({ campaign: campaignId, label: 'A', leads: keptLeads });
     }
 
     let acceptedA = 0;
