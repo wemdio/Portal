@@ -409,6 +409,53 @@ describe('syncProjectContactsFromInstantly', () => {
       expect(mainDb.getRows('project_contacts_history')).toHaveLength(0);
     });
 
+    it('writes period_id via a single (project_id, recorded_at) upsert — never keyed by period', async () => {
+      // Регрессия 2026-07: period-строки апсертились отдельно с onConflict
+      // 'period_id,recorded_at', но арбитром там был частичный уникальный
+      // индекс — Postgres отвечал 42P10 и снапшоты активных периодов молча
+      // не писались (0 из 6251 строк с period_id). Пинним: один upsert по
+      // project_id,recorded_at; строка периодного проекта несёт period_id,
+      // legacy-строка — period_id: null; существующая строка того же дня
+      // получает period_id при конфликте.
+      const mainDb = createMockSupabase({
+        tables: {
+          projects: [
+            { id: 'p1', contacts_done: '300', kpi_fact: null },
+            { id: 'koldi', contacts_done: '777', kpi_fact: null },
+          ],
+          project_periods: [
+            { id: 'period-1', project_id: 'p1', status: 'active', period_start: '2026-04-01', period_end: null },
+          ],
+          // Снапшот уже записан сегодня ДО создания периода — без period_id.
+          project_contacts_history: [
+            { project_id: 'p1', period_id: null, contacts_done: 250, kpi_fact: null, recorded_at: TODAY },
+          ],
+        },
+      });
+      const instantlyDb = createMockSupabase({
+        tables: { project_instantly_campaigns: [], instantly_campaign_catalog: [] },
+      });
+
+      await syncProjectContactsFromInstantly({
+        mainDb: mainDb as never,
+        instantlyDb: instantlyDb as never,
+        now: NOW,
+      });
+
+      const historyUpserts = mainDb.upserts.filter((u) => u.table === 'project_contacts_history');
+      expect(historyUpserts).toHaveLength(1);
+      expect(historyUpserts[0].onConflict).toBe('project_id,recorded_at');
+
+      const history = mainDb.getRows('project_contacts_history');
+      const p1Rows = history.filter((h) => h.project_id === 'p1' && h.recorded_at === TODAY);
+      expect(p1Rows).toHaveLength(1);
+      expect(p1Rows[0]).toEqual(
+        expect.objectContaining({ period_id: 'period-1', contacts_done: 300 }),
+      );
+      const koldi = history.find((h) => h.project_id === 'koldi');
+      expect(koldi).toEqual(expect.objectContaining({ period_id: null, contacts_done: 777 }));
+    });
+
     it('upserts on (project_id, recorded_at) so re-running the cron is idempotent', async () => {
       const mainDb = createMockSupabase({
         tables: {
