@@ -27,6 +27,7 @@ import { findNewHhEmployers, deriveDomain, type HhEmployer } from '@/lib/jobs/hh
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import { loadOutreachOsConfig } from './config';
 import { buildExcludePatterns } from './excludePatterns';
+import { isOutreachOsB2cCompany } from './excludeB2c';
 import { loadRecentlySeen, markSeen, RECONTACT_AFTER_DAYS, type SeenEmployerUpsert } from './seenEmployers';
 import { employersToGrid, gridToLeadPayloads } from './gridMapping';
 
@@ -118,12 +119,21 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     });
     log(`HH вернул ${employers.length} работодателей (после ICP-фильтра)`);
 
+    // 3b. Структурный B2C/ИП-отсев по названию+домену (excludeB2c.ts): школы,
+    //     отели, ИП-ФИО, .shop и т.п. — ДО конструктора, чтобы не жечь скрейп
+    //     на компании, которым мы всё равно не пишем. Отсев только наш,
+    //     общий конструктор/HH-парсер не меняются.
+    const icp = employers.filter((e) => !isOutreachOsB2cCompany(e.name ?? '', e.siteUrl ?? ''));
+    if (icp.length < employers.length) {
+      log(`B2C/ИП-отсев: -${employers.length - icp.length} → ${icp.length}`);
+    }
+
     // 4. Дедуп по окну: компании, контактированные за последние
     //    RECONTACT_AFTER_DAYS дней, пропускаем (не пишем одной компании чаще
     //    раза в 1.5 месяца). По hh_employer_id И по домену сайта. Компании
     //    старше окна — снова eligible (повторный аутрич разрешён).
     const seen = await loadRecentlySeen();
-    const fresh = employers.filter((e) => {
+    const fresh = icp.filter((e) => {
       if (seen.ids.has(e.id)) return false;
       const d = deriveDomain(e.siteUrl);
       return !(d && seen.domains.has(d));
@@ -134,7 +144,7 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       await finishRun({
         status: 'completed',
         parsed: employers.length,
-        after_icp: employers.length,
+        after_icp: icp.length,
         new_employers: 0,
         valid_contacts: 0,
         appended: 0,
@@ -217,7 +227,7 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       await finishRun({
         status: 'completed',
         parsed: employers.length,
-        after_icp: employers.length,
+        after_icp: icp.length,
         new_employers: fresh.length,
         base_job_id: baseJobId,
         valid_contacts: leads.length,
@@ -243,7 +253,7 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       await finishRun({
         status: 'completed',
         parsed: employers.length,
-        after_icp: employers.length,
+        after_icp: icp.length,
         new_employers: fresh.length,
         base_job_id: baseJobId,
         valid_contacts: 0,
