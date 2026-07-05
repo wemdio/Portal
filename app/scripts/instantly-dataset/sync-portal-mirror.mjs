@@ -86,11 +86,12 @@ const JOBS = [
     FROM kb_documents
     WHERE status = 'ready' AND category IN ('cases','product_info')`,
     ['id','title','category','description','content_text','source_type','token_count','uploaded_by','created_at','updated_at']],
+  // client_email НЕ тянем (аудит 06.07): в handoff-auto строках он равен handoff_email проекта.
   ['portal_forwarded_leads', 'inst', `
     SELECT id, campaign_id, campaign_name, lead_email, lead_name, company_name, status,
-           client_user_id, client_email, forwarded_by, forwarded_via, reply_timestamp, created_at
+           client_user_id, forwarded_by, forwarded_via, reply_timestamp, created_at
     FROM client_forwarded_leads`,
-    ['id','campaign_id','campaign_name','lead_email','lead_name','company_name','status','client_user_id','client_email','forwarded_by','forwarded_via','reply_timestamp','created_at']],
+    ['id','campaign_id','campaign_name','lead_email','lead_name','company_name','status','client_user_id','forwarded_by','forwarded_via','reply_timestamp','created_at']],
 ];
 
 (async () => {

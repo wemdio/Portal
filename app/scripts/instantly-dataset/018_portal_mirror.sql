@@ -86,10 +86,12 @@ CREATE TABLE IF NOT EXISTS portal_forwarded_leads (
   id uuid PRIMARY KEY,
   campaign_id text, campaign_name text,
   lead_email text, lead_name text, company_name text, status text,
-  client_user_id uuid, client_email text, forwarded_by uuid, forwarded_via text,
+  client_user_id uuid, forwarded_by uuid, forwarded_via text,
   reply_timestamp timestamptz, created_at timestamptz
 );
-COMMENT ON TABLE portal_forwarded_leads IS 'Факт передачи лида клиенту (portal|email|handoff-auto). forwarded_by → portal_specialists. ГОЧА: project_id в источнике не заполняется, а мост покрывает ~5/63 кампаний передач — связь с проектом строить по campaign_id и относиться скептически.';
+-- client_email убран (аудит 06.07): через него значением протекал handoff_email проекта.
+ALTER TABLE portal_forwarded_leads DROP COLUMN IF EXISTS client_email;
+COMMENT ON TABLE portal_forwarded_leads IS 'Факт передачи лида клиенту (portal|email|handoff-auto). forwarded_by → portal_specialists; клиент — по client_user_id → portal_specialists (role=client). ГОЧА: project_id в источнике не заполняется, а мост покрывает ~5/63 кампаний передач — связь с проектом строить по campaign_id и относиться скептически.';
 
 CREATE TABLE IF NOT EXISTS portal_kb_documents (
   id uuid PRIMARY KEY,
@@ -103,6 +105,30 @@ CREATE TABLE IF NOT EXISTS portal_mirror_meta (
   table_name text PRIMARY KEY, rows integer, synced_at timestamptz
 );
 COMMENT ON TABLE portal_mirror_meta IS 'Свежесть зеркала: когда и сколько строк синкнуто по каждой portal_-таблице.';
+
+-- ── Безопасный парсер свободнотекстовых дат Портала. НЕ CASE в вьюхе: битые значения
+--    (напр. US-формат '05.18.2026' — месяц 18) роняли to_date рантайм-ошибкой на ЛЮБОМ
+--    запросе к вьюхе (аудит 06.07). Функция глотает исключение → NULL, US-формат чинит. ──
+CREATE OR REPLACE FUNCTION portal_parse_date(t text) RETURNS date
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE a int; b int;
+BEGIN
+  IF t IS NULL OR btrim(t) = '' THEN RETURN NULL; END IF;
+  IF t ~ '^\s*\d{4}-\d{2}-\d{2}' THEN
+    RETURN substring(t FROM '\d{4}-\d{2}-\d{2}')::date;
+  END IF;
+  IF t ~ '^\s*\d{1,2}\.\d{1,2}\.\d{4}' THEN
+    a := split_part(substring(t FROM '\d{1,2}\.\d{1,2}\.\d{4}'), '.', 1)::int;
+    b := split_part(substring(t FROM '\d{1,2}\.\d{1,2}\.\d{4}'), '.', 2)::int;
+    IF b BETWEEN 1 AND 12 THEN
+      RETURN to_date(substring(t FROM '\d{1,2}\.\d{1,2}\.\d{4}'), 'DD.MM.YYYY');
+    ELSIF a BETWEEN 1 AND 12 THEN  -- US-формат MM.DD.YYYY ('05.18.2026')
+      RETURN to_date(substring(t FROM '\d{1,2}\.\d{1,2}\.\d{4}'), 'MM.DD.YYYY');
+    END IF;
+  END IF;
+  RETURN NULL;
+EXCEPTION WHEN others THEN RETURN NULL;
+END $$;
 
 -- ── Вьюха темпа: воспроизводит computePace из UI (окно = последние ≤90 снапшотов;
 --    при активном периоде история изолируется по period_id; avgPerDay дробный) ──
@@ -152,10 +178,7 @@ WITH parsed AS (
     COALESCE(NULLIF(substring(p.contacts_done       FROM '^\s*(\d+)'), '')::bigint, 0) AS fact_contacts,
     COALESCE(NULLIF(substring(p.kpi_plan            FROM '^\s*(\d+)'), '')::bigint, 0) AS plan_kpi,
     COALESCE(NULLIF(substring(p.kpi_fact            FROM '^\s*(\d+)'), '')::bigint, 0) AS fact_kpi,
-    CASE
-      WHEN p.deadline ~ '^\d{4}-\d{2}-\d{2}'        THEN substring(p.deadline FROM '^\d{4}-\d{2}-\d{2}')::date
-      WHEN p.deadline ~ '^\d{1,2}\.\d{1,2}\.\d{4}'  THEN to_date(substring(p.deadline FROM '^\d{1,2}\.\d{1,2}\.\d{4}'), 'DD.MM.YYYY')
-    END AS deadline_date,
+    portal_parse_date(p.deadline) AS deadline_date,
     p.status ILIKE '%заверш%' OR p.status ILIKE '%отмен%' AS is_completed
   FROM portal_projects p
 )
