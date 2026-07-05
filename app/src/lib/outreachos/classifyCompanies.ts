@@ -39,6 +39,15 @@ export interface LlmNoiseResult {
   failedBatches: number;
   /** Сколько кандидатов в шум спас «адвокат дьявола» (ступень 2). */
   refuted: number;
+  /**
+   * Сработал предохранитель: модель пометила шумом подозрительно много
+   * (> MAX_NOISE_SHARE) ЛИБО ступень 2 не отработала ни разу (одноступенчатый
+   * режим эвал забраковал: 18/37 ложных киллов B2B). Все флаги сняты (fail-open).
+   * Прецедент, ради которого это нужно: Requesty молча ремапнул policy-алиас
+   * (память requesty-policy-gemini-flash-broken) — валидный JSON, мусорные
+   * вердикты; без предохранителя такой день выжигает всю пачку в seen на 45д.
+   */
+  guardTripped: boolean;
 }
 
 const REQUESTY_URL = 'https://router.requesty.ai/v1/chat/completions';
@@ -46,6 +55,12 @@ const MODEL = process.env.OUTREACHOS_CLASSIFY_MODEL || 'policy/cleanup';
 const BATCH_SIZE = 40;
 const MAX_RETRIES = 2;
 const RETRY_BASE_DELAY_MS = 1500;
+/** Больше этой доли шума = не верим модели (реальный шум ~10-14%). */
+const MAX_NOISE_SHARE = 0.5;
+/** Предохранитель доли активен только на статистически осмысленном объёме. */
+const GUARD_MIN_COMPANIES = 20;
+/** Общий бюджет времени на весь LLM-отсев: дольше — едем без фильтра. */
+const TOTAL_BUDGET_MS = 10 * 60_000;
 
 /** Категории-шум: только эти вердикты выкидывают компанию из заливки. */
 const NOISE_CATEGORIES = new Set(['B2C', 'IP', 'GOV']);
@@ -84,6 +99,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** 400/401/403 — конфигурационные ошибки, повтор не поможет (ревью-находка). */
+class NonRetryableError extends Error {}
+
 /** Вызов Requesty с ретраями на 5xx — паттерн callOpenRouter из processingSteps. */
 async function callLlm(key: string, systemPrompt: string, userContent: string): Promise<string> {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -117,6 +135,9 @@ async function callLlm(key: string, systemPrompt: string, userContent: string): 
         };
         return json.choices?.[0]?.message?.content || '';
       }
+      if ([400, 401, 403].includes(res.status)) {
+        throw new NonRetryableError(`Requesty ${res.status}`);
+      }
       if ([429, 502, 503, 504].includes(res.status) && attempt < MAX_RETRIES) {
         await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt);
         continue;
@@ -124,7 +145,7 @@ async function callLlm(key: string, systemPrompt: string, userContent: string): 
       throw new Error(`Requesty ${res.status}`);
     } catch (err) {
       clearTimeout(timeout);
-      if (attempt >= MAX_RETRIES) throw err;
+      if (err instanceof NonRetryableError || attempt >= MAX_RETRIES) throw err;
       await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt);
     }
   }
@@ -173,22 +194,37 @@ export async function llmClassifyNoise(
   companies: readonly CompanyForClassify[],
   log: (msg: string) => void = () => {},
 ): Promise<LlmNoiseResult> {
-  const result: LlmNoiseResult = { noise: new Set(), classified: 0, failedBatches: 0, refuted: 0 };
+  const result: LlmNoiseResult = {
+    noise: new Set(),
+    classified: 0,
+    failedBatches: 0,
+    refuted: 0,
+    guardTripped: false,
+  };
   if (companies.length === 0) return result;
   const key = apiKey();
   if (!key) {
     log('LLM-фильтр: нет OUTREACHOS_CLASSIFY_API_KEY/OPENROUTER_CLEANUP_API_KEY — пропускаем (fail-open)');
     return result;
   }
+  const deadline = Date.now() + TOTAL_BUDGET_MS;
 
+  // Названия приходят из HH — чужой ввод внутри промпта. Схлопываем переводы
+  // строк (ломают нумерованный список = дешёвая инъекция) и ограничиваем длину.
+  const sanitize = (s: string): string => s.replace(/\s+/g, ' ').trim().slice(0, 120);
   const listingOf = (items: readonly CompanyForClassify[]): string =>
     items
-      .map((c, j) => `${j + 1}. ${c.name || '(без названия)'} — ${c.website || '(без сайта)'}`)
+      .map((c, j) => `${j + 1}. ${sanitize(c.name) || '(без названия)'} — ${sanitize(c.website) || '(без сайта)'}`)
       .join('\n');
 
   // Ступень 1: классификация → кандидаты в шум.
   for (let start = 0; start < companies.length; start += BATCH_SIZE) {
     const batch = companies.slice(start, start + BATCH_SIZE);
+    if (Date.now() > deadline) {
+      result.failedBatches++;
+      log(`LLM-фильтр: бюджет ${TOTAL_BUDGET_MS / 60000} мин исчерпан — батч ${start}+ без фильтрации`);
+      continue;
+    }
     try {
       const raw = await callLlm(key, SYSTEM_PROMPT, `Компании (${batch.length}):\n${listingOf(batch)}`);
       const verdicts = parseVerdicts(raw);
@@ -213,10 +249,18 @@ export async function llmClassifyNoise(
   }
 
   // Ступень 2: адвокат дьявола — снимаем флаг при убедительном B2B-сценарии.
-  // Сбой рефьюта СОХРАНЯЕТ флаг (шум важнее недобора — выбор владельца).
+  // Сбой ОДНОГО рефьют-батча СОХРАНЯЕТ его флаги (шум важнее недобора — выбор
+  // владельца); полный отказ ступени 2 обрабатывается предохранителем ниже.
   const flagged = [...result.noise].sort((a, b) => a - b);
+  let refuteBatchesOk = 0;
+  let refuteBatchesTotal = 0;
   for (let start = 0; start < flagged.length; start += BATCH_SIZE) {
     const chunk = flagged.slice(start, start + BATCH_SIZE);
+    refuteBatchesTotal++;
+    if (Date.now() > deadline) {
+      log(`LLM-фильтр: бюджет исчерпан — рефьют ${start}+ не выполнен`);
+      continue;
+    }
     try {
       const raw = await callLlm(
         key,
@@ -228,6 +272,7 @@ export async function llmClassifyNoise(
         log(`LLM-фильтр: рефьют ${start}-${start + chunk.length - 1} — кривой JSON, флаги сохранены`);
         continue;
       }
+      refuteBatchesOk++;
       const seen = new Set<number>();
       for (const { i, noise } of refutes) {
         if (!Number.isInteger(i) || i < 1 || i > chunk.length || seen.has(i)) continue;
@@ -242,6 +287,28 @@ export async function llmClassifyNoise(
         `LLM-фильтр: рефьют ${start}-${start + chunk.length - 1} упал (${err instanceof Error ? err.message : String(err)}), флаги сохранены`,
       );
     }
+  }
+
+  // Предохранители (оба → fail-open, снимаем ВСЕ флаги; фильтра сегодня нет,
+  // но и B2B не выжигаем):
+  // 1) Ступень 2 не отработала НИ РАЗУ при наличии кандидатов — остался
+  //    одноступенчатый режим, который эвал забраковал (ложно убивал 18/37 B2B).
+  // 2) Доля шума неправдоподобна (>50% при реальных ~10-14%) — модель сломана
+  //    (прецедент: Requesty молча ремапит policy-алиасы).
+  if (refuteBatchesTotal > 0 && refuteBatchesOk === 0) {
+    log(`LLM-фильтр: ПРЕДОХРАНИТЕЛЬ — ступень 2 не отработала ни разу (${result.noise.size} флагов снято, fail-open)`);
+    result.guardTripped = true;
+    result.noise.clear();
+  } else if (
+    companies.length >= GUARD_MIN_COMPANIES &&
+    result.noise.size / companies.length > MAX_NOISE_SHARE
+  ) {
+    log(
+      `LLM-фильтр: ПРЕДОХРАНИТЕЛЬ — шум ${result.noise.size}/${companies.length} ` +
+        `(>${MAX_NOISE_SHARE * 100}%) неправдоподобен, флаги сняты (fail-open)`,
+    );
+    result.guardTripped = true;
+    result.noise.clear();
   }
   return result;
 }

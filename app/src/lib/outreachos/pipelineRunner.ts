@@ -250,7 +250,7 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     if (leads.length === 0) {
       // Скрейп отработал, но почт не нашли — помечаем seen как no_email,
       // чтобы не гонять тех же работодателей завтра.
-      await markSeen(fresh.map(toSeen(new Set(), 'no_email')));
+      await markSeen(fresh.map(toSeen(new Set(), new Set(), 'no_email')));
       await finishRun({
         status: 'completed',
         parsed: employers.length,
@@ -303,8 +303,21 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     log(
       `LLM-отсев: компаний ${uniqueCompanies.length}, вердиктов ${llm.classified}, ` +
         `шум ${llm.noise.size} (рефьют спас ${llm.refuted}), лидов ${leads.length} → ${keptLeads.length}` +
-        (llm.failedBatches > 0 ? ` (батчей без фильтра: ${llm.failedBatches})` : ''),
+        (llm.failedBatches > 0 ? ` (батчей без фильтра: ${llm.failedBatches})` : '') +
+        (llm.guardTripped ? ' [ПРЕДОХРАНИТЕЛЬ: фильтр отключён на этот прогон]' : ''),
     );
+    // Известное ограничение: кап catch-all ≤20% посчитан в gridToLeadPayloads ДО
+    // этого отсева; если LLM выкинул преимущественно ok-компании, доля catch-all
+    // в финальной пачке может слегка превысить 20% (статусов у лидов здесь уже
+    // нет — пересчитать нечем). При штатном шуме ~10-14% overshoot ≤ ~2 п.п.
+
+    // Домены LLM-шума — для честного статуса в seen-журнале ('skipped', не
+    // 'no_email': почты у них НАЙДЕНЫ, мы их отсеяли сами).
+    const noiseDomains = new Set<string>();
+    for (const idx of llm.noise) {
+      const d = deriveDomain(uniqueCompanies[idx].website || null);
+      if (d) noiseDomains.add(d);
+    }
 
     // 8. ФИКСИРУЕМ seen-окно ДО append. append необратим (лиды улетают в
     //    Instantly, возможно несколькими chunk'ами по 1000); если он затем
@@ -319,7 +332,7 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     const leadDomains = new Set(
       keptLeads.map((l) => deriveDomain(l.website ?? null)).filter((d): d is string => !!d),
     );
-    await markSeen(fresh.map(toSeen(leadDomains, 'no_email')));
+    await markSeen(fresh.map(toSeen(leadDomains, noiseDomains, 'no_email')));
 
     // 9. Добор в кампании Instantly (seen уже зафиксирован). При заданной
     //    campaign_id_b — A/B-сплит офферов: лиды делятся 50/50 детерминированно
@@ -373,6 +386,13 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       new_employers: fresh.length,
       base_job_id: baseJobId,
       valid_contacts: leads.length,
+      // LLM-отсев персистится (миграция 20260706_0001): без этого разница
+      // valid_contacts↔appended в БД неотличима от отказов Instantly, а
+      // деградация модели (шум 90%) незаметна до ручного чтения логов.
+      llm_noise: llm.noise.size,
+      llm_kept: keptLeads.length,
+      llm_failed_batches: llm.failedBatches,
+      llm_guard_tripped: llm.guardTripped,
       appended: acceptedA,
       appended_b: acceptedB,
       skipped: skippedTotal,
@@ -384,6 +404,10 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       parsed: employers.length,
       newEmployers: fresh.length,
       validContacts: leads.length,
+      llmNoise: llm.noise.size,
+      llmKept: keptLeads.length,
+      llmFailedBatches: llm.failedBatches,
+      llmGuardTripped: llm.guardTripped,
       appendedA: acceptedA,
       appendedB: acceptedB,
       appendErrors: appendErrors.length,
@@ -427,17 +451,24 @@ export function splitBucket(website: string, email: string): 0 | 1 {
 }
 
 /**
- * Фабрика маппера HhEmployer → SeenEmployerUpsert. Если домен работодателя есть
- * в leadDomains — статус 'appended', иначе fallback-статус.
+ * Фабрика маппера HhEmployer → SeenEmployerUpsert. Статусы: домен в leadDomains
+ * → 'appended'; в skippedDomains (LLM-шум: почты найдены, отсеяли сами) →
+ * 'skipped'; иначе fallback ('no_email' = скрейп реально не нашёл почту).
  */
 function toSeen(
   leadDomains: Set<string>,
+  skippedDomains: Set<string>,
   fallback: SeenEmployerUpsert['status'],
 ): (e: HhEmployer) => SeenEmployerUpsert {
   return (e) => {
     const domain = deriveDomain(e.siteUrl);
-    const status: SeenEmployerUpsert['status'] =
-      domain && leadDomains.has(domain) ? 'appended' : fallback;
+    const status: SeenEmployerUpsert['status'] = !domain
+      ? fallback
+      : leadDomains.has(domain)
+        ? 'appended'
+        : skippedDomains.has(domain)
+          ? 'skipped'
+          : fallback;
     return {
       hh_employer_id: e.id,
       hh_employer_name: e.name ?? null,
