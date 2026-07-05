@@ -287,7 +287,10 @@ interface CampaignStep {
 interface CampaignRecord {
   name: string;
   contacts: number;
+  /** Неуникальные открытия (open_count) — оставлено для истории отчётов. */
   opened: number;
+  /** Уникальные открытия по лидам (open_count_unique). */
+  openedUnique: number;
   replies: number;
   leads: number;
   bounced: number;
@@ -298,26 +301,61 @@ interface CampaignRecord {
 interface TotalStats {
   contacts: number;
   opened: number;
+  openedUnique: number;
   replies: number;
   leads: number;
   sent: number;
   bounced: number;
 }
 
+/** Воронка «контакт → открытие → ответ»: каждый процент — от предыдущего этапа. */
+export interface AutoReportFunnel {
+  contacts: number;
+  openedUnique: number;
+  openPctOfContacts: string;
+  replies: number;
+  replyPctOfOpened: string;
+}
+
+export interface AutoReportSummary {
+  totalCampaigns: number;
+  totalContacts: number;
+  totalEmailsSent: number;
+  totalOpened: number;
+  totalReplies: number;
+  totalLeads: number;
+  totalBounced: number;
+  conversion: { openPctAllEmails: string; replyPctByLeads: string };
+  funnel: AutoReportFunnel;
+}
+
+/**
+ * «Дошло до след. шага»: sent следующего шага ÷ sent текущего.
+ * Instantly не раскрывает причины выбытия по шагам (ответ/отписка/баунс),
+ * а по активным кампаниям часть базы ещё не дошла до поздних шагов.
+ */
+export function stepTransition(
+  steps: Record<number, CampaignStep>,
+  sortedStepNumbers: number[],
+  index: number,
+): { nextSent: number; pct: string } | null {
+  const current = steps[sortedStepNumbers[index]];
+  const next = index + 1 < sortedStepNumbers.length ? steps[sortedStepNumbers[index + 1]] : undefined;
+  if (!current || !next || current.totalSent <= 0) return null;
+  return {
+    nextSent: next.totalSent,
+    pct: ((next.totalSent / current.totalSent) * 100).toFixed(1),
+  };
+}
+
+export const STEP_TRANSITION_NOTE =
+  '«Дошло до след. шага» — сколько контактов получили следующее письмо. По активным кампаниям часть базы ещё в пути, поэтому по поздним шагам значение занижено.';
+
 function buildReportFromNormalized(normalized: NormalizedItem[]): {
   tableText: string;
   csvText: string;
   rows: (string | number)[][];
-  summary: {
-    totalCampaigns: number;
-    totalContacts: number;
-    totalEmailsSent: number;
-    totalOpened: number;
-    totalReplies: number;
-    totalLeads: number;
-    totalBounced: number;
-    conversion: { openPctAllEmails: string; replyPctByLeads: string };
-  };
+  summary: AutoReportSummary;
   campaignData: Record<string, CampaignRecord>;
 } {
   const detailsData: { index: number; data: unknown[] }[] = [];
@@ -369,6 +407,7 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
   const totalStats: TotalStats = {
     contacts: 0,
     opened: 0,
+    openedUnique: 0,
     replies: 0,
     leads: 0,
     sent: 0,
@@ -380,6 +419,7 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
     const campaignName = (s.campaign_name as string) || `Campaign ${idx + 1}`;
     const contacts = num(s.new_leads_contacted_count);
     const opened = num(s.open_count);
+    const openedUnique = num(s.open_count_unique ?? s.open_count);
     const replies = num(s.reply_count);
     const sent = num(s.emails_sent_count);
     const leads = num(s.leads_count);
@@ -389,6 +429,7 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
       name: campaignName,
       contacts,
       opened,
+      openedUnique,
       replies,
       leads,
       bounced,
@@ -404,6 +445,7 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
         name: `Campaign ${idx + 1}`,
         contacts: 0,
         opened: 0,
+        openedUnique: 0,
         replies: 0,
         leads: 0,
         bounced: 0,
@@ -447,6 +489,7 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
   Object.values(campaignData).forEach((c) => {
     totalStats.contacts += num(c.contacts);
     totalStats.opened += num(c.opened);
+    totalStats.openedUnique += num(c.openedUnique);
     totalStats.replies += num(c.replies);
     totalStats.leads += num(c.leads);
     totalStats.sent += num(c.totalEmailsSent);
@@ -459,59 +502,75 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
   let tableText = `Отчёт по email-кампании\n`;
   tableText += `Период: ${period}\n\n`;
   tableText += `Статистика по кампаниям:\n`;
-  tableText += `Название кампании\tКонтактов\tОтправлено писем\tОткрытий\t% открытий всех писем\tОтветов\t% ответов\tЛидов\tОстаток базы\n`;
+  tableText += `Название кампании\tКонтактов\tОтправлено писем\tУник. открытий\t% открываемости\tОтветов\t% ответов\tЛидов\tОстаток базы\n`;
 
   Object.values(campaignData).forEach((c) => {
     const contacts = num(c.contacts);
     const sent = num(c.totalEmailsSent);
-    const opened = num(c.opened);
+    const openedUnique = num(c.openedUnique);
     const replies = num(c.replies);
     const leads = num(c.leads);
-    const openRate = sent > 0 ? (opened / sent * 100).toFixed(1) : '0.0';
+    const openRate = contacts > 0 ? (openedUnique / contacts * 100).toFixed(1) : '0.0';
     const replyRate = contacts > 0 ? (replies / contacts * 100).toFixed(1) : '0.0';
     const remainingBase = Math.max(0, leads - contacts);
-    tableText += `${c.name}\t${contacts}\t${sent}\t${opened}\t${openRate}%\t${replies}\t${replyRate}%\t${leads}\t${remainingBase}\n`;
+    tableText += `${c.name}\t${contacts}\t${sent}\t${openedUnique}\t${openRate}%\t${replies}\t${replyRate}%\t${leads}\t${remainingBase}\n`;
   });
 
   const totalOpenPct =
     totalStats.sent > 0 ? (totalStats.opened / totalStats.sent * 100).toFixed(1) : '0.0';
   const totalReplyPct =
     totalStats.contacts > 0 ? (totalStats.replies / totalStats.contacts * 100).toFixed(1) : '0.0';
+  // Знаменатель — то же число контактов, что показано в отчёте,
+  // чтобы проценты сходились при ручном пересчёте от видимых цифр.
+  const funnelOpenPct =
+    totalStats.contacts > 0
+      ? (totalStats.openedUnique / totalStats.contacts * 100).toFixed(1)
+      : '0.0';
+  const funnelReplyPct =
+    totalStats.openedUnique > 0
+      ? (totalStats.replies / totalStats.openedUnique * 100).toFixed(1)
+      : '0.0';
 
   tableText += `\nОбщая статистика:\n`;
-  tableText += `Показатель\tЗначение\tПроцент\n`;
+  tableText += `Показатель\tЗначение\tКонверсия из предыдущего этапа\n`;
   tableText += `Общее количество контактов\t${totalStats.contacts}\t\n`;
   tableText += `Общее количество отправленных писем\t${totalStats.sent}\t\n`;
-  tableText += `Общее количество открытий\t${totalStats.opened}\t${totalOpenPct}%\n`;
-  tableText += `Общее количество ответов\t${totalStats.replies}\t${totalReplyPct}%\n`;
-  tableText += `Общее количество лидов\t${totalStats.leads}\t\n`;
+  tableText += `Общее количество уникальных открытий\t${totalStats.openedUnique}\t${funnelOpenPct}% от контактов\n`;
+  tableText += `Общее количество ответов\t${totalStats.replies}\t${funnelReplyPct}% от открывших\n`;
+  tableText += `Лиды (заполняется вручную)\t\t\n`;
+  tableText += `Общее количество лидов в базе\t${totalStats.leads}\t\n`;
   tableText += `Общее количество бракованных\t${totalStats.bounced}\t\n`;
 
-  tableText += `\nДетализация по письмам:\n\n`;
+  tableText += `\nДетализация по письмам:\n`;
+  tableText += `${STEP_TRANSITION_NOTE}\n\n`;
   Object.values(campaignData).forEach((c) => {
     tableText += `${c.name}\n`;
-    tableText += `STEP\tSENT\tOPENED\tREPLIED\tCLICKED\tOPPORTUNITIES\n`;
+    tableText += `STEP\tSENT\tOPENED\tREPLIED\tCLICKED\tOPPORTUNITIES\tДОШЛО ДО СЛЕД. ШАГА\n`;
     if (Object.keys(c.steps).length === 0) {
       const openRate =
         c.totalEmailsSent > 0 ? (num(c.opened) / num(c.totalEmailsSent) * 100).toFixed(1) : '0.0';
       const replyRate = num(c.contacts) > 0 ? (num(c.replies) / num(c.contacts) * 100).toFixed(1) : '0.0';
-      tableText += `Общая статистика\t${num(c.totalEmailsSent)}\t${num(c.opened)}|${openRate}%\t${num(c.replies)}|${replyRate}%\t0\t0\n\n`;
+      tableText += `Общая статистика\t${num(c.totalEmailsSent)}\t${num(c.opened)}|${openRate}%\t${num(c.replies)}|${replyRate}%\t0\t0\t\n\n`;
       return;
     }
-    const sortedSteps = Object.keys(c.steps).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
-    sortedSteps.forEach((stepNumber) => {
-      const step = c.steps[Number(stepNumber)];
+    const sortedStepNumbers = Object.keys(c.steps)
+      .map((k) => parseInt(k, 10))
+      .sort((a, b) => a - b);
+    sortedStepNumbers.forEach((stepNumber, stepIdx) => {
+      const step = c.steps[stepNumber];
       const stepOpenRate =
         step.totalSent > 0 ? (step.totalOpened / step.totalSent * 100).toFixed(1) : '0.0';
       const stepReplyRate =
         step.totalSent > 0 ? (step.totalReplied / step.totalSent * 100).toFixed(1) : '0.0';
-      tableText += `${step.stepName}\t${step.totalSent}\t${step.totalOpened}|${stepOpenRate}%\t${step.totalReplied}|${stepReplyRate}%\t${step.totalClicked}\t${step.totalOpportunities}\n`;
+      const transition = stepTransition(c.steps, sortedStepNumbers, stepIdx);
+      const transitionText = transition ? `${transition.nextSent}|${transition.pct}%` : '—';
+      tableText += `${step.stepName}\t${step.totalSent}\t${step.totalOpened}|${stepOpenRate}%\t${step.totalReplied}|${stepReplyRate}%\t${step.totalClicked}\t${step.totalOpportunities}\t${transitionText}\n`;
       const sortedVariants = Object.keys(step.variants).sort();
       sortedVariants.forEach((letter) => {
         const v = step.variants[letter];
         const vOpen = v.sent > 0 ? (v.opened / v.sent * 100).toFixed(0) : '0';
         const vReply = v.sent > 0 ? (v.replied / v.sent * 100).toFixed(0) : '0';
-        tableText += `${letter}\t${v.sent}\t${v.opened}|${vOpen}%\t${v.replied}|${vReply}%\t${v.clicked}\t${v.opportunities}\n`;
+        tableText += `${letter}\t${v.sent}\t${v.opened}|${vOpen}%\t${v.replied}|${vReply}%\t${v.clicked}\t${v.opportunities}\t\n`;
       });
       tableText += `\n`;
     });
@@ -525,8 +584,8 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
     'Кампания',
     'Контактов',
     'Отправлено писем',
-    'Открытий',
-    '% открытий всех писем',
+    'Уник. открытий',
+    '% открываемости',
     'Ответов',
     '% ответов',
     'Браков',
@@ -534,17 +593,17 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
   Object.values(campaignData).forEach((c) => {
     const contacts = num(c.contacts);
     const sent = num(c.totalEmailsSent);
-    const opened = num(c.opened);
+    const openedUnique = num(c.openedUnique);
     const replies = num(c.replies);
     const bounced = num(c.bounced);
-    const openRate = sent > 0 ? (opened / sent * 100).toFixed(1) : '0.0';
+    const openRate = contacts > 0 ? (openedUnique / contacts * 100).toFixed(1) : '0.0';
     const replyRate = contacts > 0 ? (replies / contacts * 100).toFixed(1) : '0.0';
     rows.push([
       currentDate,
       c.name,
       contacts,
       sent,
-      opened,
+      openedUnique,
       `${openRate}%`,
       replies,
       `${replyRate}%`,
@@ -556,8 +615,8 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
     'ИТОГО',
     totalStats.contacts,
     totalStats.sent,
-    totalStats.opened,
-    `${totalOpenPct}%`,
+    totalStats.openedUnique,
+    `${funnelOpenPct}%`,
     totalStats.replies,
     `${totalReplyPct}%`,
     totalStats.bounced,
@@ -579,6 +638,13 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
         openPctAllEmails: totalOpenPct,
         replyPctByLeads: totalReplyPct,
       },
+      funnel: {
+        contacts: totalStats.contacts,
+        openedUnique: totalStats.openedUnique,
+        openPctOfContacts: funnelOpenPct,
+        replies: totalStats.replies,
+        replyPctOfOpened: funnelReplyPct,
+      },
     },
     campaignData,
   };
@@ -595,16 +661,7 @@ export async function buildAutoReport(
   tableText: string;
   csvText: string;
   rows: (string | number)[][];
-  summary: {
-    totalCampaigns: number;
-    totalContacts: number;
-    totalEmailsSent: number;
-    totalOpened: number;
-    totalReplies: number;
-    totalLeads: number;
-    totalBounced: number;
-    conversion: { openPctAllEmails: string; replyPctByLeads: string };
-  };
+  summary: AutoReportSummary;
   campaignData: Record<string, CampaignRecord>;
 }> {
   if (!campaignIds.length) {
