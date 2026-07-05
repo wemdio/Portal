@@ -64,9 +64,9 @@ grep -E '^(INSTANTLY_EXPORT_API_KEY|INSTANTLY_PORTAL_API_KEY|INSTANTLY_DATASET_D
 "$PSCP" -batch -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" \
   /tmp/dataset-sync.env "$PROD:$REMOTE/.env"
 # 3b. MAIN_DB_URL для зеркала Портала — берём НА СЕРВЕРЕ из прод-.env приложения
-#     (локальный DATABASE_URL — это облачный dev, его в прод-крон нельзя)
+#     (локальный DATABASE_URL — это облачный dev, его в прод-крон нельзя) + ужимаем права файла
 "$PLINK" -batch -ssh -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" "$PROD" \
-  "grep '^DATABASE_URL=' /home/Portal/prod/.env | sed 's/^DATABASE_URL=/MAIN_DB_URL=/' >> $REMOTE/.env"
+  "grep '^DATABASE_URL=' /home/Portal/prod/.env | sed 's/^DATABASE_URL=/MAIN_DB_URL=/' >> $REMOTE/.env && chmod 600 $REMOTE/.env"
 
 # 4. npm install via docker (host has no node)
 "$PLINK" -batch -ssh -hostkey "$PROD_SERVER_HOST_KEY" -pw "$PROD_SERVER_PASSWORD" "$PROD" \
