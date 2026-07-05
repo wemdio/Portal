@@ -80,6 +80,12 @@ const JOBS = [
            reply_timestamp, read_at, read_by, created_at
     FROM instantly_lead_qualifications`,
     ['id','campaign_id','campaign_name','lead_email','lead_name','company_name','status','ai_reason','ai_confidence','reply_timestamp','read_at','read_by','created_at']],
+  ['portal_kb_documents', 'main', `
+    SELECT id, title, category, description, content_text, source_type, token_count,
+           user_id AS uploaded_by, created_at, updated_at
+    FROM kb_documents
+    WHERE status = 'ready' AND category IN ('cases','product_info')`,
+    ['id','title','category','description','content_text','source_type','token_count','uploaded_by','created_at','updated_at']],
   ['portal_forwarded_leads', 'inst', `
     SELECT id, campaign_id, campaign_name, lead_email, lead_name, company_name, status,
            client_user_id, client_email, forwarded_by, forwarded_via, reply_timestamp, created_at

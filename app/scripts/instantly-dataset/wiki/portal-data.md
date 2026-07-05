@@ -33,6 +33,7 @@ ORDER BY days_until_deadline NULLS LAST;
 | `portal_project_campaigns` | **мост проект↔кампания** | denylist уже вычтен; ~92% квалификаций резолвятся в проект; редкие кампании ведут на 2 проекта |
 | `portal_lead_qualifications` | ИИ-квалификация ответов | `status='lead'` = квалифицированный лид (money-метрика). Тексты ответов НЕ здесь — join к `raw_emails` по campaign_id+lead_email. `read_at` пуст = спец не прочитал (SLA!) |
 | `portal_forwarded_leads` | передачи лидов клиентам | ⚠️ связь с проектом слабая: project_id в источнике пуст, мост покрывает ~5/63 — судить по `campaign_id`, скептически |
+| `portal_kb_documents` | **кейсы** + продуктовая информация из «Базы знаний» | `category`: cases \| product_info; `content_text` = полный текст. Переписки/транскрипты не зеркалятся; семантический поиск — только в Портале, здесь ILIKE/полнотекст |
 
 ## Метрики кампаний по проекту (мост в деле)
 ```sql
@@ -57,6 +58,10 @@ ORDER BY q.created_at;
 -- нагрузка: активные проекты по спецам:
 SELECT specialist, count(*) FROM portal_projects
 WHERE status NOT ILIKE '%заверш%' AND status NOT ILIKE '%отмен%' GROUP BY 1 ORDER BY 2 DESC;
+-- кейсы из базы знаний по теме (напр. под нишу/оффер):
+SELECT title, left(content_text, 300) FROM portal_kb_documents
+WHERE category='cases' AND (title ILIKE '%логист%' OR content_text ILIKE '%логист%')
+ORDER BY created_at DESC LIMIT 10;
 ```
 
 ## Чего в зеркале СОЗНАТЕЛЬНО нет

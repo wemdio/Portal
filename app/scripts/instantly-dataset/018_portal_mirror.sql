@@ -91,6 +91,14 @@ CREATE TABLE IF NOT EXISTS portal_forwarded_leads (
 );
 COMMENT ON TABLE portal_forwarded_leads IS 'Факт передачи лида клиенту (portal|email|handoff-auto). forwarded_by → portal_specialists. ГОЧА: project_id в источнике не заполняется, а мост покрывает ~5/63 кампаний передач — связь с проектом строить по campaign_id и относиться скептически.';
 
+CREATE TABLE IF NOT EXISTS portal_kb_documents (
+  id uuid PRIMARY KEY,
+  title text, category text, description text, content_text text,
+  source_type text, token_count integer, uploaded_by uuid,
+  created_at timestamptz, updated_at timestamptz
+);
+COMMENT ON TABLE portal_kb_documents IS 'Кейсы и продуктовая информация из «Базы знаний» Портала (категории cases + product_info, только status=ready). content_text = полный текст кейса — искать ILIKE/полнотекстом. Переписки (sales_chats/client_chats) и видео-транскрипты СОЗНАТЕЛЬНО не зеркалятся. Семантический (embedding) поиск остаётся в Портале — здесь только текст.';
+
 CREATE TABLE IF NOT EXISTS portal_mirror_meta (
   table_name text PRIMARY KEY, rows integer, synced_at timestamptz
 );
@@ -202,5 +210,5 @@ COMMENT ON VIEW v_portal_project_health IS 'Управленческий кон�
 GRANT SELECT ON portal_projects, portal_project_periods, portal_contacts_history,
   portal_tasks, portal_task_boards, portal_task_board_columns, portal_specialists,
   portal_project_notes, portal_project_campaigns, portal_period_campaigns,
-  portal_lead_qualifications, portal_forwarded_leads, portal_mirror_meta,
-  v_portal_project_pace, v_portal_project_health TO dataset_ro;
+  portal_lead_qualifications, portal_forwarded_leads, portal_kb_documents,
+  portal_mirror_meta, v_portal_project_pace, v_portal_project_health TO dataset_ro;
