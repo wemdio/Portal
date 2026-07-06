@@ -21,6 +21,7 @@ import type {
 import { mergePatchEmptyOnly } from '@/lib/clientBrief/autofill/mergePatchEmptyOnly';
 import { LeadSourceHypothesesView } from '@/components/projects/LeadSourceHypothesesView';
 import { BriefAutofillPanel, type BriefAutofillResult } from './BriefAutofillPanel';
+import { BriefSectionNav } from './BriefSectionNav';
 
 interface ClientBriefFormProps {
   /** API endpoint that supports GET/PUT for the brief */
@@ -657,6 +658,8 @@ export function ClientBriefForm({
         </div>
       )}
 
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px] xl:gap-6 xl:items-start">
+        <div className="min-w-0 space-y-6">
       {autofillEndpoint && (
         <BriefAutofillPanel
           initialWebsite={fields.company_website}
@@ -665,7 +668,7 @@ export function ClientBriefForm({
         />
       )}
 
-      <section className={SECTION_BASE} style={SECTION_STYLE}>
+      <section id="brief-section-1" className={`${SECTION_BASE} scroll-mt-4`} style={SECTION_STYLE}>
         <SectionHeader number={1} title="О компании" />
         <div className="p-6 space-y-4">
           <TextField
@@ -703,7 +706,7 @@ export function ClientBriefForm({
         </div>
       </section>
 
-      <section className={SECTION_BASE} style={SECTION_STYLE}>
+      <section id="brief-section-2" className={`${SECTION_BASE} scroll-mt-4`} style={SECTION_STYLE}>
         <SectionHeader number={2} title="Продукт / услуга" />
         <div className="p-6 space-y-4">
           <TextAreaField
@@ -752,7 +755,7 @@ export function ClientBriefForm({
         </div>
       </section>
 
-      <section className={SECTION_BASE} style={SECTION_STYLE}>
+      <section id="brief-section-3" className={`${SECTION_BASE} scroll-mt-4`} style={SECTION_STYLE}>
         <SectionHeader number={3} title="Целевая аудитория" />
         <div className="p-6 space-y-4">
           <TextAreaField
@@ -777,7 +780,7 @@ export function ClientBriefForm({
         </div>
       </section>
 
-      <section className={SECTION_BASE} style={SECTION_STYLE}>
+      <section id="brief-section-4" className={`${SECTION_BASE} scroll-mt-4`} style={SECTION_STYLE}>
         <SectionHeader number={4} title="Коммуникация" />
         <div className="p-6 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -828,7 +831,7 @@ export function ClientBriefForm({
         </div>
       </section>
 
-      <section className={SECTION_BASE} style={SECTION_STYLE}>
+      <section id="brief-section-5" className={`${SECTION_BASE} scroll-mt-4`} style={SECTION_STYLE}>
         <SectionHeader number={5} title="Доказательства" />
         <div className="p-6 space-y-4">
           <TextAreaField
@@ -848,7 +851,7 @@ export function ClientBriefForm({
         </div>
       </section>
 
-      <section className={SECTION_BASE} style={SECTION_STYLE}>
+      <section id="brief-section-6" className={`${SECTION_BASE} scroll-mt-4`} style={SECTION_STYLE}>
         <SectionHeader number={6} title="Social proof" />
         <div className="p-6">
           <p className="text-[11px] text-gray-500 mb-3">
@@ -861,7 +864,7 @@ export function ClientBriefForm({
         </div>
       </section>
 
-      <section className={SECTION_BASE} style={SECTION_STYLE}>
+      <section id="brief-section-7" className={`${SECTION_BASE} scroll-mt-4`} style={SECTION_STYLE}>
         <SectionHeader number={7} title="Дополнительный контекст" />
         <div className="p-6">
           <TextAreaField
@@ -886,12 +889,21 @@ export function ClientBriefForm({
         />
       )}
 
-      <div className="sticky bottom-4 bg-white rounded-xl border border-gray-200 shadow-lg p-4 flex items-center justify-end gap-3">
-        <span className="text-xs text-gray-500 mr-auto">
-          Бриф можно сохранять как черновик — все поля опциональные.
+      {/* Мобильный/планшетный сейв-бар: на xl+ действия уезжают в правый
+          навигатор (BriefSectionNav). */}
+      <div
+        className="xl:hidden sticky bottom-4 rounded-xl p-4 flex items-center justify-end gap-3"
+        style={{
+          background: 'var(--cp-surface-elev)',
+          border: '1px solid var(--cp-divider)',
+          boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+        }}
+      >
+        <span className="text-xs mr-auto" style={{ color: 'var(--cp-paper-mute)' }}>
+          Все поля опциональны — можно как черновик.
         </span>
         {savedAt && !saving && (
-          <span className="inline-flex items-center gap-1 text-xs text-green-700">
+          <span className="inline-flex items-center gap-1 text-xs" style={{ color: 'var(--cp-green)' }}>
             <Check className="h-3.5 w-3.5" /> Сохранено
           </span>
         )}
@@ -899,10 +911,11 @@ export function ClientBriefForm({
           type="button"
           onClick={() => void handleClearAll()}
           disabled={saving || clearing}
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-gray-200 px-4 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:opacity-50"
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg px-4 text-sm font-medium transition-colors disabled:opacity-50"
+          style={{ color: 'var(--cp-paper-mute)', border: '1px solid var(--cp-divider)' }}
         >
           {clearing && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
-          {clearing ? 'Очистка...' : 'Очистить бриф'}
+          {clearing ? 'Очистка…' : 'Очистить'}
         </button>
         <button
           type="button"
@@ -911,8 +924,22 @@ export function ClientBriefForm({
           className="ds-btn-primary inline-flex h-10 items-center justify-center gap-2 px-6"
         >
           {saving && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
-          {saving ? 'Сохранение...' : 'Сохранить бриф'}
+          {saving ? 'Сохранение…' : 'Сохранить'}
         </button>
+      </div>
+        </div>
+
+        {/* Правый липкий навигатор (кольцо прогресса + карта разделов) — xl+. */}
+        <aside className="hidden xl:block">
+          <BriefSectionNav
+            fields={fields}
+            savedAt={savedAt}
+            saving={saving}
+            clearing={clearing}
+            onSave={() => void handleSave()}
+            onClear={() => void handleClearAll()}
+          />
+        </aside>
       </div>
     </div>
   );
