@@ -771,7 +771,7 @@ services:
     # сотни zombie за день (сегодня 342). init: true = tini в роли PID 1.
     init: true
     environment:
-      - YANDEXMAPS_CONCURRENCY=4
+      - YANDEXMAPS_CONCURRENCY=2
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
