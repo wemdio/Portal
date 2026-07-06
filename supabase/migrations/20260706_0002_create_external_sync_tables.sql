@@ -221,6 +221,28 @@ begin
   end loop;
 end$$;
 
+-- ─── Service_role grants (обязательно — иначе migration lint падает) ───
+-- Sync worker пишет и читает через SUPABASE_DB_URL под service_role.
+
+grant all on public.amo_leads                    to service_role, postgres;
+grant all on public.amo_events                   to service_role, postgres;
+grant all on public.metrika_visits               to service_role, postgres;
+grant all on public.metrika_visits_daily         to service_role, postgres;
+grant all on public.bank_transactions            to service_role, postgres;
+grant all on public.attribution_amo_project      to service_role, postgres;
+grant all on public.attribution_payment_project  to service_role, postgres;
+grant all on public.attribution_visit_lead       to service_role, postgres;
+grant all on public.external_sync_runs           to service_role, postgres;
+
+grant usage, select on sequence public.amo_leads_id_seq                   to service_role, postgres;
+grant usage, select on sequence public.amo_events_id_seq                  to service_role, postgres;
+grant usage, select on sequence public.metrika_visits_id_seq              to service_role, postgres;
+grant usage, select on sequence public.bank_transactions_id_seq           to service_role, postgres;
+grant usage, select on sequence public.attribution_amo_project_id_seq     to service_role, postgres;
+grant usage, select on sequence public.attribution_payment_project_id_seq to service_role, postgres;
+grant usage, select on sequence public.attribution_visit_lead_id_seq      to service_role, postgres;
+grant usage, select on sequence public.external_sync_runs_id_seq          to service_role, postgres;
+
 -- ─── Grants для readonly-роли (Codex MCP) ───────────────────────────────
 -- Если readonly уже существует (см. setup_dbreader.sh), раскомментируй:
 
