@@ -55,7 +55,7 @@ export async function PATCH(
   const owner = await ensureLetterOwnership(supabase, runId, letterId, user.id);
   if (!owner.ok) return jsonError(owner.message, owner.status);
 
-  let body: { subject?: string | null; body?: string } = {};
+  let body: { subject?: string | null; body?: string; wait_days?: number } = {};
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -69,6 +69,12 @@ export async function PATCH(
   if ('body' in body && typeof body.body === 'string') {
     if (!body.body.trim()) return jsonError('Тело письма не может быть пустым.', 400);
     update.body = body.body.slice(0, 50_000);
+  }
+  if ('wait_days' in body) {
+    if (typeof body.wait_days !== 'number' || !Number.isFinite(body.wait_days)) {
+      return jsonError('wait_days должен быть числом.', 400);
+    }
+    update.wait_days = Math.min(90, Math.max(0, Math.trunc(body.wait_days)));
   }
 
   if (Object.keys(update).length === 0) return jsonError('Нет полей для обновления.', 400);
@@ -123,9 +129,13 @@ export async function DELETE(
   if (tailErr) return jsonError(tailErr.message, 500);
 
   for (const row of tail ?? []) {
+    const patch: Record<string, unknown> = { letter_index: row.letter_index - 1 };
+    // Письмо, ставшее первым (index 1), отправляется сразу — держим инвариант
+    // wait_days=0 в БД, чтобы прямые читатели таблицы не унаследовали старую паузу.
+    if (row.letter_index - 1 === 1) patch.wait_days = 0;
     const { error } = await supabase
       .from('email_sequence_v2_letters')
-      .update({ letter_index: row.letter_index - 1 })
+      .update(patch)
       .eq('id', row.id);
     if (error) return jsonError(error.message, 500);
   }

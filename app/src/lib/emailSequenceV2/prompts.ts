@@ -124,7 +124,7 @@ export function getPrimerPrompt(lang: EmailSequenceV2OutputLanguage): string {
 const TASK_PROMPTS: Record<EmailSequenceV2OutputLanguage, string> = {
   ru: `Ты — senior email outreach специалист с опытом запуска более 400 успешных холодных рассылок в B2B (средний reply rate 8–18%).
 
-Тебе нужно создать цепочку из 4–6 писем для холодной/тёплой рассылки, которая максимально соответствует вводным данным.
+Тебе нужно создать цепочку из 3–5 писем для холодной/тёплой рассылки, которая максимально соответствует вводным данным.
 
 Входящие материалы (используй их все):
 
@@ -138,7 +138,7 @@ const TASK_PROMPTS: Record<EmailSequenceV2OutputLanguage, string> = {
 
 5. Операторы для персонализации определяют границы адаптивности и индивидуальности каждого письма. Используй их уместно, чтобы персонализировать письмо. Если операторы не переданы — пиши без подстановок.
 
-Задача: Создай последовательную цепочку из 5 писем (можно 4 или 6, если это логично и лучше).
+Задача: Создай последовательную цепочку из 4 писем (можно 3 или 5, если это логично и лучше). Если регламент или примеры предполагают больше писем — приоритет у этого задания.
 
 ЯЗЫК: пиши всю цепочку строго на русском, даже если бриф, сегмент, правки и примеры поданы на другом языке. Передавай смысл, а не делай дословный перевод. Бренды, имена собственные и устоявшиеся технические термины можно оставлять в оригинале.
 
@@ -162,13 +162,15 @@ const TASK_PROMPTS: Record<EmailSequenceV2OutputLanguage, string> = {
 - Каждое письмо начинается с "Тема: ..." сразу после маркера.
 - Служебные маркеры формата (строки вида «---LETTER N---» и слово «Тема:») пиши именно так и не меняй их — на русский переводи только сам текст темы и тела письма.
 - Тело письма — простым разговорным языком, короткими абзацами.
+- ОБЪЁМ (жёсткий лимит, важнее примеров, шаблона и регламента): первое письмо — не длиннее 100 слов; каждый промежуточный фоллоу-ап (все письма между первым и последним) — 40–80 слов и короче предыдущего; последнее письмо — 2–4 коротких предложения. Если примеры или регламент в материалах длиннее — всё равно соблюдай этот лимит.
+- Одно письмо — одна ключевая мысль. Не перечисляй все УТП и преимущества в одном письме — распределяй их по цепочке.
 - Если в данных были операторы персонализации (например, {{firstName}}, {{companyName}}), вставляй их там, где уместно.
 
 Приступай к выполнению.`,
 
   en: `You are a senior email outreach specialist with experience launching over 400 successful cold B2B campaigns (average reply rate 8–18%).
 
-You need to create a sequence of 4–6 emails for a cold/warm campaign that best matches the input data.
+You need to create a sequence of 3–5 emails for a cold/warm campaign that best matches the input data.
 
 Input materials (use all of them):
 
@@ -182,7 +184,7 @@ Input materials (use all of them):
 
 5. Personalization operators define the boundaries of each email's adaptivity and individuality. Use them appropriately to personalize the email. If no operators are provided — write without substitutions.
 
-Task: Create a coherent sequence of 5 emails (4 or 6 is fine if it is more logical and works better).
+Task: Create a coherent sequence of 4 emails (3 or 5 is fine if it is more logical and works better). If the guidelines or examples imply more emails — this task takes priority.
 
 LANGUAGE: write the entire sequence strictly in English, even if the brief, segment, edits and examples are provided in another language. Convey the meaning, do not translate word for word. Brands, proper names and established technical terms may be kept in the original.
 
@@ -206,13 +208,15 @@ REQUIREMENTS:
 - Each email starts with "Subject: ..." right after the marker.
 - Write the format markers (lines like "---LETTER N---" and the word "Subject:") exactly like that and do NOT change them — translate into English only the actual subject and body text.
 - The email body — in plain conversational language, with short paragraphs.
+- LENGTH (hard limit, takes priority over the examples, the template and the guidelines): the first email — no longer than 100 words; each intermediate follow-up (every email between the first and the last) — 40–80 words and shorter than the previous one; the last email — 2–4 short sentences. Even if the provided examples or guidelines are longer, obey this limit.
+- One email — one key idea. Do not list every USP and benefit in a single email — spread them across the sequence.
 - If personalization operators were provided in the data (e.g. {{firstName}}, {{companyName}}), insert them where appropriate.
 
 Get started.`,
 
   pl: `Jesteś starszym specjalistą ds. email outreach z doświadczeniem w uruchomieniu ponad 400 udanych zimnych kampanii B2B (średni reply rate 8–18%).
 
-Musisz stworzyć sekwencję 4–6 maili do zimnej/ciepłej kampanii, która maksymalnie odpowiada danym wejściowym.
+Musisz stworzyć sekwencję 3–5 maili do zimnej/ciepłej kampanii, która maksymalnie odpowiada danym wejściowym.
 
 Materiały wejściowe (wykorzystaj je wszystkie):
 
@@ -226,7 +230,7 @@ Materiały wejściowe (wykorzystaj je wszystkie):
 
 5. Operatory personalizacji określają granice adaptacyjności i indywidualności każdego maila. Używaj ich odpowiednio, aby spersonalizować maila. Jeśli operatory nie zostały przekazane — pisz bez podstawień.
 
-Zadanie: Stwórz spójną sekwencję 5 maili (4 lub 6 jest w porządku, jeśli to bardziej logiczne i działa lepiej).
+Zadanie: Stwórz spójną sekwencję 4 maili (3 lub 5 jest w porządku, jeśli to bardziej logiczne i działa lepiej). Jeśli regulamin lub przykłady zakładają więcej maili — priorytet ma to zadanie.
 
 JĘZYK: napisz całą sekwencję wyłącznie po polsku, nawet jeśli brief, segment, uwagi i przykłady są w innym języku. Przekazuj sens, nie tłumacz słowo w słowo. Marki, nazwy własne i utrwalone terminy techniczne można zostawić w oryginale.
 
@@ -250,6 +254,8 @@ WYMAGANIA:
 - Każdy mail zaczyna się od "Temat: ..." zaraz po znaczniku.
 - Znaczniki formatu (wiersze typu "---LETTER N---" i słowo "Temat:") pisz dokładnie tak i NIE zmieniaj ich — na polski tłumacz tylko właściwy temat i treść maila.
 - Treść maila — prostym, konwersacyjnym językiem, krótkimi akapitami.
+- OBJĘTOŚĆ (twardy limit, ważniejszy niż przykłady, szablon i regulamin): pierwszy mail — nie dłuższy niż 100 słów; każdy pośredni follow-up (wszystkie maile między pierwszym a ostatnim) — 40–80 słów i krótszy od poprzedniego; ostatni mail — 2–4 krótkie zdania. Nawet jeśli przykłady lub regulamin w materiałach są dłuższe — przestrzegaj tego limitu.
+- Jeden mail — jedna kluczowa myśl. Nie wymieniaj wszystkich USP i korzyści w jednym mailu — rozłóż je na całą sekwencję.
 - Jeśli w danych były operatory personalizacji (np. {{firstName}}, {{companyName}}), wstawiaj je tam, gdzie to odpowiednie.
 
 Przystąp do wykonania.`,

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import * as instantly from '@/lib/instantly/client';
+import { textToReplyHtml } from '@/lib/clientCampaignReplies/bodyHtml';
 
 export const dynamic = 'force-dynamic';
 
@@ -103,7 +104,9 @@ export const POST = withAuth(async (req, user) => {
       reply_to_uuid: instantlyEmailId,
       eaccount,
       subject: buildReplySubject((qual.reply_subject as string | null) ?? null),
-      body: { text: reply_text },
+      // HTML с <br> сохраняет переносы строк (text-only с \n Instantly
+      // рендерит «простынёй»); text — plain-text fallback.
+      body: { html: textToReplyHtml(reply_text), text: reply_text },
       ...(client_email ? { cc_address_email_list: client_email } : {}),
     });
   } catch (err) {
