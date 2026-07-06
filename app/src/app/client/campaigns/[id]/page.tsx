@@ -40,6 +40,7 @@ import type {
   ClientReply, ClientRepliesPage,
 } from '@/lib/clientCampaignReplies/types';
 import type { ClientLaunchScheduleOverride, ClientLaunchSequenceStep } from '@/lib/clientLaunch/types';
+import { CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP } from '@/lib/clientLaunch/types';
 import {
   campaignScheduleToOverride,
   validateScheduleOverride,
@@ -90,7 +91,8 @@ function stripHtml(value?: string): string {
     .trim();
 }
 
-const MAX_EDIT_VARIANTS = 3;
+// Единый лимит с мастером запуска и сервером (A/B/C/D).
+const MAX_EDIT_VARIANTS = CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP;
 
 function clampWaitDays(value: unknown): number {
   const n = Number(value);
