@@ -1,0 +1,18 @@
+"""Base class for sync sources. Subclasses override .name and .run()."""
+from __future__ import annotations
+
+import asyncpg
+
+
+class SyncSource:
+    #: Должно совпадать с CHECK constraint external_sync_runs.source
+    #: ('metrika' | 'amo_leads' | 'amo_events' | 'bank_tochka' | 'bank_tbank' | 'attribution').
+    name: str = ""
+
+    async def run(self, conn: asyncpg.Connection) -> int:
+        """Sync + upsert. Возвращает число upsert'нутых записей.
+
+        Raise NotImplementedError → main.py залогирует как 'partial' (не ошибка,
+        просто источник ещё не готов). Любое другое исключение → 'error'.
+        """
+        raise NotImplementedError(f"{self.name}: not yet implemented")

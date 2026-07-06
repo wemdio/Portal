@@ -869,6 +869,39 @@ services:
     networks:
       - portal-network
 
+  # Ночной синк внешних источников (Метрика / AMO / Точка / Т-Банк) в main-postgres.
+  # По умолчанию крутит cron '0 3 * * *' UTC через APScheduler (см. main.py).
+  # EXTERNAL_SYNC_RUN_ON_STARTUP=true — прогнать один раз сразу после старта
+  # контейнера (полезно при первом деплое / ручном бэкфилле). Attribution к
+  # проектам — отдельная задача, не в этом контейнере.
+  portal-external-sync:
+    image: ${DOCKER_USERNAME}/portal-external-sync:prod
+    container_name: portal-external-sync
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-0 3 * * *}
+      - EXTERNAL_SYNC_RUN_ON_STARTUP=${EXTERNAL_SYNC_RUN_ON_STARTUP:-false}
+      - YANDEX_METRIKA_TOKEN=${YANDEX_METRIKA_TOKEN:-}
+      - YANDEX_METRIKA_COUNTER_ID=${YANDEX_METRIKA_COUNTER_ID:-62363425}
+      - YANDEX_METRIKA_LOOKBACK_DAYS=${YANDEX_METRIKA_LOOKBACK_DAYS:-30}
+      - AMOCRM_TOKEN=${AMOCRM_TOKEN:-}
+      - AMO_ACCESS_TOKEN=${AMO_ACCESS_TOKEN:-}
+      - AMO_BASE_URL=${AMO_BASE_URL:-}
+      - AMO_FIELD_YM_CLIENT_ID=${AMO_FIELD_YM_CLIENT_ID:-}
+      - TBANK_TOKEN=${TBANK_TOKEN:-}
+      - TOCHKA_JWT=${TOCHKA_JWT:-}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.25'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   # pg_dump-бэкапы обеих БД (main + Instantly) → S3 / Supabase Storage.
   # Cron внутри контейнера; см. services/backup/crontab.
   portal-backup:
