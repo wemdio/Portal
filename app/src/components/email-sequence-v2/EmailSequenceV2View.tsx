@@ -33,6 +33,7 @@ import {
   type LetterExitIntent,
 } from '@/lib/emailSequenceV2/letterDirtyGuard';
 import { CLIENT_LAUNCH_DRAFT_KEY } from '@/lib/clientLaunch/constants';
+import { buildSequenceHandoffSteps } from '@/lib/clientLaunch/sequenceHandoff';
 
 const VALUES_MODEL_OPTIONS = [
   { value: 'gpt-5.2', label: 'gpt-5.2 (качество)' },
@@ -890,11 +891,9 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
       if (existing && !window.confirm('В мастере запуска уже есть черновик — заменить его этой цепочкой?')) {
         return;
       }
-      const steps = letters.map((l, i) => ({
-        subject: l.subject ?? '',
-        body: l.body,
-        wait_days: i === 0 ? 0 : Math.max(0, l.wait_days ?? 2),
-      }));
+      // Темы писем → A/B-варианты первого шага; тела фоллоу-апов → отдельные
+      // шаги с пустой темой (та же ветка). См. buildSequenceHandoffSteps.
+      const steps = buildSequenceHandoffSteps(letters);
       const draft = {
         campaignName: run?.company_name ?? '',
         sequenceSteps: steps,

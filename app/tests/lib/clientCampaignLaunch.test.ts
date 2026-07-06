@@ -435,7 +435,34 @@ describe('validateClientLaunchInput', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('rejects when variants exceed maximum (max 3 total per step → 2 extra)', () => {
+  it('rejects when variants exceed maximum (max 4 total per step → 4 extra отклоняются)', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 'A',
+            body: 'a',
+            wait_days: 0,
+            variants: [
+              { subject: 'B', body: 'b' },
+              { subject: 'C', body: 'c' },
+              { subject: 'D', body: 'd' },
+              { subject: 'E', body: 'e' },
+            ],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/вариант/i);
+  });
+
+  it('accepts exactly 3 extra variants (4 total: A/B/C/D — новый максимум)', () => {
     const result = validateClientLaunchInput({
       preset: validPreset,
       sequence: {
@@ -456,9 +483,7 @@ describe('validateClientLaunchInput', () => {
       mapping: validMapping,
       rowCount: 100,
     });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error).toMatch(/вариант/i);
+    expect(result.ok).toBe(true);
   });
 
   it('accepts exactly 2 extra variants (3 total: A + B + C)', () => {
