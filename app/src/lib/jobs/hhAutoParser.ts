@@ -79,6 +79,28 @@ export interface HhEmployer {
   employeeCount: number | null;
   /** Title of a recent vacancy that surfaced this employer (debug context). */
   vacancyTitle?: string;
+  /**
+   * HH company description (о компании) — сырой HTML с /employers/{id},
+   * тегами вычищенный, обрезанный. Контекст для LLM-классификатора: по
+   * названию+домену тип клиента часто неотличим, а описание проясняет.
+   */
+  description?: string;
+}
+
+/**
+ * HH «о компании» — сырой HTML: убираем теги, схлопываем пробелы, обрезаем.
+ * 400 символов достаточно для сигнала «кому продаёт», не раздувая промпт LLM.
+ */
+export function cleanHhDescription(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const text = raw
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&[a-z]+;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return undefined;
+  return text.length > 400 ? text.slice(0, 400) + '…' : text;
 }
 
 /** Domain extracted from siteUrl if any — useful for the scoring endpoint. */
@@ -368,6 +390,7 @@ export async function findNewHhEmployers(
       industries: (details.industries ?? []).map((i) => i.name ?? '').filter(Boolean),
       employeeCount,
       vacancyTitle: c.vacancyTitle,
+      description: cleanHhDescription(details.description),
     });
 
     if (results.length >= limit) break;

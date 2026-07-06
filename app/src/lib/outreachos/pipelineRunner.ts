@@ -24,7 +24,7 @@ import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { findNewHhEmployers, deriveDomain, type HhEmployer } from '@/lib/jobs/hhAutoParser';
-import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
+import { appendLeadsToClientCampaign, fetchExistingCampaignEmails } from '@/lib/clientLaunch/appendLeads';
 import { loadOutreachOsConfig } from './config';
 import { buildExcludePatterns } from './excludePatterns';
 import { isOutreachOsB2cCompany } from './excludeB2c';
@@ -304,6 +304,18 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     //     Fail-open: сбой LLM = едем без этого фильтра, лиды не теряем.
     //     Шумовые компании остаются в fresh → попадут в markSeen (45д не трогаем
     //     — им и не надо писать; спустя окно их снова классифицирует LLM).
+    // Контекст HH по домену: индустрии/описание/вакансия из fresh (HhEmployer[])
+    // — они не доходят до грида (тот несёт только Компания/Сайт/Город/Email),
+    // поэтому классификатору их отдаём отдельным маппингом по домену сайта.
+    // Это резко сокращает «unclear»: «Смарт» → +индустрия +описание = ясный B2B.
+    const hhContext = new Map<string, { industries: string[]; description?: string; vacancyTitle?: string }>();
+    for (const e of fresh) {
+      const d = deriveDomain(e.siteUrl);
+      if (d && !hhContext.has(d)) {
+        hhContext.set(d, { industries: e.industries ?? [], description: e.description, vacancyTitle: e.vacancyTitle });
+      }
+    }
+
     const uniqueCompanies: CompanyForClassify[] = [];
     const companyIdxByKey = new Map<string, number>();
     const leadCompanyIdx: number[] = [];
@@ -313,7 +325,14 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       if (idx === undefined) {
         idx = uniqueCompanies.length;
         companyIdxByKey.set(key, idx);
-        uniqueCompanies.push({ name: l.company_name ?? '', website: l.website ?? '' });
+        const ctx = hhContext.get(deriveDomain(l.website ?? null) ?? '');
+        uniqueCompanies.push({
+          name: l.company_name ?? '',
+          website: l.website ?? '',
+          industries: ctx?.industries,
+          description: ctx?.description,
+          vacancyTitle: ctx?.vacancyTitle,
+        });
       }
       leadCompanyIdx.push(idx);
     }
@@ -353,22 +372,42 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     );
     await markSeen(fresh.map(toSeen(leadDomains, noiseDomains, 'no_email')));
 
-    // 9. Добор в кампании Instantly (seen уже зафиксирован). При заданной
-    //    campaign_id_b — A/B-сплит офферов: лиды делятся 50/50 детерминированно
-    //    по домену КОМПАНИИ (hash%2), чтобы все почты одной компании попали в
-    //    ОДНУ кампанию (одна фирма не должна получить два разных оффера) и
-    //    чтобы при ретраях лид не мигрировал между кампаниями.
+    // 8b. ДЕДУП ПРОТИВ СВОИХ КАМПАНИЙ (до Instantly). Мы шлём с
+    //     skip_if_in_campaign=false, потому что этот флаг у Instantly работает
+    //     на весь воркспейс и режет наши лиды по пересечению с ЧУЖИМИ клиентскими
+    //     кампаниями (у нас параллельно крутятся клиенты «под ключ»). Раз
+    //     воркспейс-дедуп выключен — сами не допускаем дубль в СВОИХ A/B (иначе
+    //     ре-контакт спустя 45д без чистки кампании создал бы вторую копию лида).
+    //     Fail-soft: не смогли прочитать кампании — шлём как есть (риск редкого
+    //     дубля лучше потери прогона; seen уже зафиксирован).
     const campaignIdB = config.campaign_id_b;
-    const batches: { campaign: string; label: 'A' | 'B'; leads: typeof keptLeads }[] = [];
+    const ourCampaigns = [campaignId, ...(campaignIdB ? [campaignIdB] : [])];
+    let existingEmails = new Set<string>();
+    try {
+      existingEmails = await fetchExistingCampaignEmails(config.client_user_id, ourCampaigns);
+    } catch (err) {
+      log(`[dedup] не удалось прочитать свои кампании (${err instanceof Error ? err.message : String(err)}) — шлём без дедупа против своих`);
+    }
+    const sendLeads = keptLeads.filter((l) => !existingEmails.has(l.email.trim().toLowerCase()));
+    if (sendLeads.length < keptLeads.length) {
+      log(`Дедуп против своих кампаний: -${keptLeads.length - sendLeads.length} (уже в наших A/B) → ${sendLeads.length}`);
+    }
+
+    // 9. Добор в кампании Instantly. При заданной campaign_id_b — A/B-сплит
+    //    офферов: лиды делятся 50/50 детерминированно по домену КОМПАНИИ
+    //    (hash%2), чтобы все почты одной компании попали в ОДНУ кампанию (одна
+    //    фирма не должна получить два разных оффера) и чтобы при ретраях лид не
+    //    мигрировал между кампаниями.
+    const batches: { campaign: string; label: 'A' | 'B'; leads: typeof sendLeads }[] = [];
     if (campaignIdB) {
-      const a: typeof keptLeads = [];
-      const b: typeof keptLeads = [];
-      for (const l of keptLeads) (splitBucket(l.website ?? '', l.email) === 0 ? a : b).push(l);
+      const a: typeof sendLeads = [];
+      const b: typeof sendLeads = [];
+      for (const l of sendLeads) (splitBucket(l.website ?? '', l.email) === 0 ? a : b).push(l);
       batches.push({ campaign: campaignId, label: 'A', leads: a });
       batches.push({ campaign: campaignIdB, label: 'B', leads: b });
       log(`A/B-сплит по домену компании: A=${a.length} B=${b.length}`);
     } else {
-      batches.push({ campaign: campaignId, label: 'A', leads: keptLeads });
+      batches.push({ campaign: campaignId, label: 'A', leads: sendLeads });
     }
 
     let acceptedA = 0;
@@ -383,6 +422,9 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
           campaignId: batch.campaign,
           leads: batch.leads,
           contextLabel: `OutreachOS daily (${batch.label})`,
+          // false: Instantly НЕ режет по пересечению с чужими клиентскими
+          // кампаниями (флаг у него воркспейс-широкий). Свой дедуп — шаг 8b.
+          skipIfInCampaign: false,
         });
         if (batch.label === 'A') acceptedA = res.accepted;
         else acceptedB = res.accepted;

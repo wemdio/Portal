@@ -275,6 +275,42 @@ describe('llmClassifyNoise', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1); // без ретраев
   });
 
+  it('обогащение: индустрии/вакансия/описание попадают в промпт', async () => {
+    let userContent = '';
+    const fetchMock = jest.fn().mockImplementation(async (_url, init) => {
+      const body = JSON.parse((init as RequestInit).body as string) as {
+        messages: { role: string; content: string }[];
+      };
+      userContent = body.messages.find((m) => m.role === 'user')!.content;
+      return llmResponse(JSON.stringify({ verdicts: [{ i: 1, c: 'B2B' }] }));
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    await llmClassifyNoise([
+      {
+        name: 'Смарт',
+        website: 'https://smart-os.ru',
+        industries: ['Разработка ПО', 'Системная интеграция'],
+        vacancyTitle: 'Backend-разработчик',
+        description: 'CRM-платформа для корпоративных отделов продаж',
+      },
+    ]);
+    expect(userContent).toContain('Индустрии HH: Разработка ПО, Системная интеграция');
+    expect(userContent).toContain('Вакансия: Backend-разработчик');
+    expect(userContent).toContain('О компании: CRM-платформа для корпоративных');
+  });
+
+  it('обогащение опционально: без контекста промпт как раньше', async () => {
+    let userContent = '';
+    global.fetch = jest.fn().mockImplementation(async (_url, init) => {
+      const body = JSON.parse((init as RequestInit).body as string) as { messages: { role: string; content: string }[] };
+      userContent = body.messages.find((m) => m.role === 'user')!.content;
+      return llmResponse(JSON.stringify({ verdicts: [{ i: 1, c: 'B2B' }] }));
+    }) as unknown as typeof fetch;
+    await llmClassifyNoise([{ name: 'Норд Клан', website: 'https://nordclan.com' }]);
+    expect(userContent).toContain('1. Норд Клан — https://nordclan.com');
+    expect(userContent).not.toContain('Индустрии HH:');
+  });
+
   it('санитизация: перевод строки в названии не ломает нумерованный список', async () => {
     let userContent = '';
     const fetchMock = jest.fn().mockImplementation(async (_url, init) => {
