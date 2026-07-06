@@ -1112,7 +1112,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
           <Section
             clientMode={clientMode}
             title="Этап 3. Генерация и редактор цепочки"
-            subtitle="Модель сгенерирует 4–6 писем по брифу, ценностям, сегменту и регламенту. Письма можно править, удалять и добавлять свои."
+            subtitle="Модель сгенерирует 3–5 коротких писем по брифу, ценностям, сегменту и регламенту. Письма можно править, удалять и добавлять свои."
             right={
               <div className="flex items-end gap-3">
                 <label className="block">
