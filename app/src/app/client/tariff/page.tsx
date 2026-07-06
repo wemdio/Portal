@@ -237,6 +237,21 @@ export default function ClientTariffPage() {
     void load();
   }, [load]);
 
+  // Возврат с ЮKassa через back-кнопку восстанавливает страницу из bfcache —
+  // useEffect на mount не срабатывает повторно, и клиент видит TariffSelection
+  // из старого React-state, хотя в БД уже создан pending-счёт и правильный
+  // экран — «Необходима оплата / Выбрать другой тариф». Слушаем pageshow с
+  // persisted=true и перезапрашиваем состояние тарифа.
+  useEffect(() => {
+    const handler = (e: PageTransitionEvent) => {
+      if (e.persisted) {
+        void load(false);
+      }
+    };
+    window.addEventListener('pageshow', handler);
+    return () => window.removeEventListener('pageshow', handler);
+  }, [load]);
+
   // Days remaining until period end (paid_until). Used to annotate the
   // "оплачен до" date inline — answers "сколько у меня ещё есть" without
   // mental subtraction.
