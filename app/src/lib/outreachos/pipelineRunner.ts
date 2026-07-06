@@ -27,6 +27,8 @@ import { findNewHhEmployers, deriveDomain, type HhEmployer } from '@/lib/jobs/hh
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import { loadOutreachOsConfig } from './config';
 import { buildExcludePatterns } from './excludePatterns';
+import { isOutreachOsB2cCompany } from './excludeB2c';
+import { llmClassifyNoise, type CompanyForClassify } from './classifyCompanies';
 import { loadRecentlySeen, markSeen, RECONTACT_AFTER_DAYS, type SeenEmployerUpsert } from './seenEmployers';
 import { employersToGrid, gridToLeadPayloads } from './gridMapping';
 
@@ -118,12 +120,21 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     });
     log(`HH вернул ${employers.length} работодателей (после ICP-фильтра)`);
 
+    // 3b. Структурный B2C/ИП-отсев по названию+домену (excludeB2c.ts): школы,
+    //     отели, ИП-ФИО, .shop и т.п. — ДО конструктора, чтобы не жечь скрейп
+    //     на компании, которым мы всё равно не пишем. Отсев только наш,
+    //     общий конструктор/HH-парсер не меняются.
+    const icp = employers.filter((e) => !isOutreachOsB2cCompany(e.name ?? '', e.siteUrl ?? ''));
+    if (icp.length < employers.length) {
+      log(`B2C/ИП-отсев: -${employers.length - icp.length} → ${icp.length}`);
+    }
+
     // 4. Дедуп по окну: компании, контактированные за последние
     //    RECONTACT_AFTER_DAYS дней, пропускаем (не пишем одной компании чаще
     //    раза в 1.5 месяца). По hh_employer_id И по домену сайта. Компании
     //    старше окна — снова eligible (повторный аутрич разрешён).
     const seen = await loadRecentlySeen();
-    const fresh = employers.filter((e) => {
+    const fresh = icp.filter((e) => {
       if (seen.ids.has(e.id)) return false;
       const d = deriveDomain(e.siteUrl);
       return !(d && seen.domains.has(d));
@@ -134,7 +145,7 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       await finishRun({
         status: 'completed',
         parsed: employers.length,
-        after_icp: employers.length,
+        after_icp: icp.length,
         new_employers: 0,
         valid_contacts: 0,
         appended: 0,
@@ -217,7 +228,7 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       await finishRun({
         status: 'completed',
         parsed: employers.length,
-        after_icp: employers.length,
+        after_icp: icp.length,
         new_employers: fresh.length,
         base_job_id: baseJobId,
         valid_contacts: leads.length,
@@ -239,11 +250,11 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     if (leads.length === 0) {
       // Скрейп отработал, но почт не нашли — помечаем seen как no_email,
       // чтобы не гонять тех же работодателей завтра.
-      await markSeen(fresh.map(toSeen(new Set(), 'no_email')));
+      await markSeen(fresh.map(toSeen(new Set(), new Set(), 'no_email')));
       await finishRun({
         status: 'completed',
         parsed: employers.length,
-        after_icp: employers.length,
+        after_icp: icp.length,
         new_employers: fresh.length,
         base_job_id: baseJobId,
         valid_contacts: 0,
@@ -268,6 +279,46 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       throw new Error('campaign_id отсутствует в live-режиме (не должно случаться)');
     }
 
+    // 7b. LLM-отсев B2C/ИП/гос (ТРЕТИЙ рубеж, только live): структурные правила
+    //     ловят ~4%, но онлайн-школа с нейтральным доменом от B2B неотличима.
+    //     Классифицируем УНИКАЛЬНЫЕ компании (не лиды), выкидываем лиды шумовых.
+    //     Fail-open: сбой LLM = едем без этого фильтра, лиды не теряем.
+    //     Шумовые компании остаются в fresh → попадут в markSeen (45д не трогаем
+    //     — им и не надо писать; спустя окно их снова классифицирует LLM).
+    const uniqueCompanies: CompanyForClassify[] = [];
+    const companyIdxByKey = new Map<string, number>();
+    const leadCompanyIdx: number[] = [];
+    for (const l of leads) {
+      const key = `${(l.company_name ?? '').trim().toLowerCase()}|${(l.website ?? '').trim().toLowerCase()}`;
+      let idx = companyIdxByKey.get(key);
+      if (idx === undefined) {
+        idx = uniqueCompanies.length;
+        companyIdxByKey.set(key, idx);
+        uniqueCompanies.push({ name: l.company_name ?? '', website: l.website ?? '' });
+      }
+      leadCompanyIdx.push(idx);
+    }
+    const llm = await llmClassifyNoise(uniqueCompanies, (m) => log(`[llm] ${m}`));
+    const keptLeads = leads.filter((_, i) => !llm.noise.has(leadCompanyIdx[i]));
+    log(
+      `LLM-отсев: компаний ${uniqueCompanies.length}, вердиктов ${llm.classified}, ` +
+        `шум ${llm.noise.size} (рефьют спас ${llm.refuted}), лидов ${leads.length} → ${keptLeads.length}` +
+        (llm.failedBatches > 0 ? ` (батчей без фильтра: ${llm.failedBatches})` : '') +
+        (llm.guardTripped ? ' [ПРЕДОХРАНИТЕЛЬ: фильтр отключён на этот прогон]' : ''),
+    );
+    // Известное ограничение: кап catch-all ≤20% посчитан в gridToLeadPayloads ДО
+    // этого отсева; если LLM выкинул преимущественно ok-компании, доля catch-all
+    // в финальной пачке может слегка превысить 20% (статусов у лидов здесь уже
+    // нет — пересчитать нечем). При штатном шуме ~10-14% overshoot ≤ ~2 п.п.
+
+    // Домены LLM-шума — для честного статуса в seen-журнале ('skipped', не
+    // 'no_email': почты у них НАЙДЕНЫ, мы их отсеяли сами).
+    const noiseDomains = new Set<string>();
+    for (const idx of llm.noise) {
+      const d = deriveDomain(uniqueCompanies[idx].website || null);
+      if (d) noiseDomains.add(d);
+    }
+
     // 8. ФИКСИРУЕМ seen-окно ДО append. append необратим (лиды улетают в
     //    Instantly, возможно несколькими chunk'ами по 1000); если он затем
     //    частично/полностью упадёт, эти компании НЕЛЬЗЯ пере-залить на следующем
@@ -279,28 +330,73 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     //    эти компании на 45 дней не трогаем — осознанно (под-контакт ОК,
     //    пере-контакт — нет; требование «не чаще раза в 1.5 месяца»).
     const leadDomains = new Set(
-      leads.map((l) => deriveDomain(l.website ?? null)).filter((d): d is string => !!d),
+      keptLeads.map((l) => deriveDomain(l.website ?? null)).filter((d): d is string => !!d),
     );
-    await markSeen(fresh.map(toSeen(leadDomains, 'no_email')));
+    await markSeen(fresh.map(toSeen(leadDomains, noiseDomains, 'no_email')));
 
-    // 9. Добор в фиксированную кампанию Instantly (seen уже зафиксирован).
-    const appendResult = await appendLeadsToClientCampaign({
-      userId: config.client_user_id,
-      campaignId,
-      leads,
-      contextLabel: 'OutreachOS daily',
-    });
-    log(`Instantly: accepted=${appendResult.accepted} skipped=${appendResult.skipped}`);
+    // 9. Добор в кампании Instantly (seen уже зафиксирован). При заданной
+    //    campaign_id_b — A/B-сплит офферов: лиды делятся 50/50 детерминированно
+    //    по домену КОМПАНИИ (hash%2), чтобы все почты одной компании попали в
+    //    ОДНУ кампанию (одна фирма не должна получить два разных оффера) и
+    //    чтобы при ретраях лид не мигрировал между кампаниями.
+    const campaignIdB = config.campaign_id_b;
+    const batches: { campaign: string; label: 'A' | 'B'; leads: typeof keptLeads }[] = [];
+    if (campaignIdB) {
+      const a: typeof keptLeads = [];
+      const b: typeof keptLeads = [];
+      for (const l of keptLeads) (splitBucket(l.website ?? '', l.email) === 0 ? a : b).push(l);
+      batches.push({ campaign: campaignId, label: 'A', leads: a });
+      batches.push({ campaign: campaignIdB, label: 'B', leads: b });
+      log(`A/B-сплит по домену компании: A=${a.length} B=${b.length}`);
+    } else {
+      batches.push({ campaign: campaignId, label: 'A', leads: keptLeads });
+    }
+
+    let acceptedA = 0;
+    let acceptedB = 0;
+    let skippedTotal = 0;
+    const appendErrors: string[] = [];
+    for (const batch of batches) {
+      if (batch.leads.length === 0) continue;
+      try {
+        const res = await appendLeadsToClientCampaign({
+          userId: config.client_user_id,
+          campaignId: batch.campaign,
+          leads: batch.leads,
+          contextLabel: `OutreachOS daily (${batch.label})`,
+        });
+        if (batch.label === 'A') acceptedA = res.accepted;
+        else acceptedB = res.accepted;
+        skippedTotal += res.skipped;
+        log(`Instantly [${batch.label}]: accepted=${res.accepted} skipped=${res.skipped}`);
+      } catch (err) {
+        // Сбой одной кампании не отменяет вторую: seen уже зафиксирован (шаг 8),
+        // пере-заливки этих компаний не будет — фиксируем ошибку и продолжаем.
+        appendErrors.push(`[${batch.label}] ${err instanceof Error ? err.message : String(err)}`);
+        await logError('outreachos.append.failed', err, { runId, campaign: batch.campaign });
+      }
+    }
+    const totalAccepted = acceptedA + acceptedB;
+    const runStatus: 'completed' | 'failed' = appendErrors.length > 0 ? 'failed' : 'completed';
 
     await finishRun({
-      status: 'completed',
+      status: runStatus,
       parsed: employers.length,
-      after_icp: employers.length,
+      after_icp: icp.length,
       new_employers: fresh.length,
       base_job_id: baseJobId,
       valid_contacts: leads.length,
-      appended: appendResult.accepted,
-      skipped: appendResult.skipped,
+      // LLM-отсев персистится (миграция 20260706_0001): без этого разница
+      // valid_contacts↔appended в БД неотличима от отказов Instantly, а
+      // деградация модели (шум 90%) незаметна до ручного чтения логов.
+      llm_noise: llm.noise.size,
+      llm_kept: keptLeads.length,
+      llm_failed_batches: llm.failedBatches,
+      llm_guard_tripped: llm.guardTripped,
+      appended: acceptedA,
+      appended_b: acceptedB,
+      skipped: skippedTotal,
+      ...(appendErrors.length > 0 ? { error_message: appendErrors.join('; ') } : {}),
     });
 
     await logAudit('outreachos.run.completed', 'OutreachOS daily pipeline completed', {
@@ -308,17 +404,24 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       parsed: employers.length,
       newEmployers: fresh.length,
       validContacts: leads.length,
-      appended: appendResult.accepted,
+      llmNoise: llm.noise.size,
+      llmKept: keptLeads.length,
+      llmFailedBatches: llm.failedBatches,
+      llmGuardTripped: llm.guardTripped,
+      appendedA: acceptedA,
+      appendedB: acceptedB,
+      appendErrors: appendErrors.length,
     });
 
     return {
       runId,
-      status: 'completed',
+      status: runStatus,
       parsed: employers.length,
       newEmployers: fresh.length,
       validContacts: leads.length,
-      appended: appendResult.accepted,
-      skipped: appendResult.skipped,
+      appended: totalAccepted,
+      skipped: skippedTotal,
+      ...(appendErrors.length > 0 ? { error: appendErrors.join('; ') } : {}),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -334,17 +437,38 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
 }
 
 /**
- * Фабрика маппера HhEmployer → SeenEmployerUpsert. Если домен работодателя есть
- * в leadDomains — статус 'appended', иначе fallback-статус.
+ * Детерминированный сплит 50/50 для A/B офферов: bucket по домену КОМПАНИИ
+ * (сайт; fallback — домен почты). djb2-hash % 2 — стабилен между прогонами
+ * (одна компания всегда в одной кампании) и не зависит от порядка лидов.
+ */
+export function splitBucket(website: string, email: string): 0 | 1 {
+  const key =
+    deriveDomain(website.trim() || null) ??
+    email.slice(email.indexOf('@') + 1).toLowerCase();
+  let h = 5381;
+  for (let i = 0; i < key.length; i++) h = ((h * 33) ^ key.charCodeAt(i)) >>> 0;
+  return (h % 2) as 0 | 1;
+}
+
+/**
+ * Фабрика маппера HhEmployer → SeenEmployerUpsert. Статусы: домен в leadDomains
+ * → 'appended'; в skippedDomains (LLM-шум: почты найдены, отсеяли сами) →
+ * 'skipped'; иначе fallback ('no_email' = скрейп реально не нашёл почту).
  */
 function toSeen(
   leadDomains: Set<string>,
+  skippedDomains: Set<string>,
   fallback: SeenEmployerUpsert['status'],
 ): (e: HhEmployer) => SeenEmployerUpsert {
   return (e) => {
     const domain = deriveDomain(e.siteUrl);
-    const status: SeenEmployerUpsert['status'] =
-      domain && leadDomains.has(domain) ? 'appended' : fallback;
+    const status: SeenEmployerUpsert['status'] = !domain
+      ? fallback
+      : leadDomains.has(domain)
+        ? 'appended'
+        : skippedDomains.has(domain)
+          ? 'skipped'
+          : fallback;
     return {
       hh_employer_id: e.id,
       hh_employer_name: e.name ?? null,

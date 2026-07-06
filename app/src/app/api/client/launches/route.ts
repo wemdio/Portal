@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { logError } from '@/lib/loggerServer';
 import { mapCsvRowsToLeads } from '@/lib/clientLaunch/mapRowsToLeads';
@@ -13,6 +14,7 @@ import type {
   ClientLaunchSequence,
 } from '@/lib/clientLaunch/types';
 import { normalizeClientLaunchSequenceSteps } from '@/lib/clientLaunch/requestParsing';
+import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
 import { getClientTariffUsage } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
@@ -34,6 +36,13 @@ interface LaunchBody {
    * usage error, not silent).
    */
   email_account_ids?: unknown;
+  /**
+   * Alternative lead source: a completed base-constructor run. When set,
+   * `headers`/`rows` from the body are IGNORED — the server pulls the job's
+   * result data itself (the blob can be tens of MB; it must never round-trip
+   * through the browser). Ownership: the job's user_id must equal the caller.
+   */
+  base_constructor_job_id?: unknown;
 }
 
 function parseScheduleOverride(raw: unknown): ClientLaunchScheduleOverride | undefined {
@@ -110,12 +119,73 @@ export async function POST(req: NextRequest) {
 
   const campaignName = typeof body.campaign_name === 'string' ? body.campaign_name : '';
   const mapping = (body.mapping ?? {}) as ClientLaunchColumnMapping;
-  const headers = isStringArray(body.headers) ? body.headers : [];
-  const rawRows = Array.isArray(body.rows) ? body.rows : [];
+  const baseJobId =
+    typeof body.base_constructor_job_id === 'string' ? body.base_constructor_job_id.trim() : '';
 
-  const rows: string[][] = rawRows.map((r) =>
-    Array.isArray(r) ? r.map((c) => (c == null ? '' : String(c))) : [],
-  );
+  let headers: string[];
+  let rows: string[][];
+
+  if (baseJobId) {
+    // Source = completed base-constructor run. Load the result server-side —
+    // the data blob can be tens of MB and must not round-trip via the browser.
+    if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
+
+    // Ownership/status check WITHOUT the data column first — selecting `data`
+    // de-TOASTs the blob (up to ~46 MB) before any check runs, so a cheap
+    // request with someone's pending job id would ship megabytes between the
+    // DB host and prod for a guaranteed error. Same two-step pattern as
+    // tools/base-constructor/[id]/data.
+    const { data: jobMeta, error: jobMetaError } = await supabaseAdmin
+      .from('base_constructor_jobs')
+      .select('user_id, status')
+      .eq('id', baseJobId)
+      .single<{ user_id: string; status: string }>();
+
+    // Not-found and foreign jobs are indistinguishable on purpose.
+    if (jobMetaError || !jobMeta || jobMeta.user_id !== userId) {
+      return jsonError('База не найдена', 404);
+    }
+    if (jobMeta.status !== 'completed') {
+      return jsonError('База ещё обрабатывается — дождитесь завершения в Конструкторе баз', 400);
+    }
+
+    const { data: jobData, error: jobDataError } = await supabaseAdmin
+      .from('base_constructor_jobs')
+      .select('data')
+      .eq('id', baseJobId)
+      .single<{ data: unknown }>();
+    if (jobDataError || !jobData) {
+      return jsonError('База не найдена', 404);
+    }
+
+    const allRows = Array.isArray(jobData.data) ? (jobData.data as unknown[]) : [];
+    if (allRows.length < 2) {
+      return jsonError('В выбранной базе нет данных', 400);
+    }
+
+    const toCells = (r: unknown): string[] =>
+      Array.isArray(r) ? r.map((c) => (c == null ? '' : String(c))) : [];
+    headers = toCells(allRows[0]).map((h) => h.trim());
+    rows = allRows.slice(1).map(toCells);
+  } else {
+    headers = isStringArray(body.headers) ? body.headers : [];
+    const rawRows = Array.isArray(body.rows) ? body.rows : [];
+    rows = rawRows.map((r) =>
+      Array.isArray(r) ? r.map((c) => (c == null ? '' : String(c))) : [],
+    );
+  }
+
+  // Cap on RAW rows, before email filtering. validateClientLaunchInput checks
+  // the limit on valid leads only, so a 50k-row base with ≤10k valid emails
+  // would otherwise slip past (the UI disables such bases in the picker, but
+  // the API must hold on its own).
+  if (rows.length > CLIENT_LAUNCH_ROW_LIMIT) {
+    return jsonError(
+      `Лимит ${CLIENT_LAUNCH_ROW_LIMIT.toLocaleString('ru-RU')} строк для одного запуска. ` +
+        `${baseJobId ? 'В базе' : 'В файле'} ${rows.length.toLocaleString('ru-RU')} строк.`,
+      400,
+    );
+  }
 
   const sequence: ClientLaunchSequence = {
     name: campaignName,
@@ -133,7 +203,10 @@ export async function POST(req: NextRequest) {
 
   const leads = mapCsvRowsToLeads({ headers, rows, mapping });
   if (leads.length === 0) {
-    return jsonError('В файле нет валидных email-адресов', 400);
+    return jsonError(
+      baseJobId ? 'В выбранной базе нет валидных email-адресов' : 'В файле нет валидных email-адресов',
+      400,
+    );
   }
 
   try {

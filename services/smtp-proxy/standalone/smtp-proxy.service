@@ -1,0 +1,18 @@
+[Unit]
+Description=SMTP probe proxy (python)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/opt/smtp-proxy/proxy.env
+# Restrict the proxy port to the app host + loopback (idempotent, re-applied each start).
+ExecStartPre=-/bin/sh -c 'iptables -C INPUT -p tcp --dport 3100 -j DROP 2>/dev/null || iptables -A INPUT -p tcp --dport 3100 -j DROP'
+ExecStartPre=-/bin/sh -c 'iptables -C INPUT -i lo -p tcp --dport 3100 -j ACCEPT 2>/dev/null || iptables -I INPUT -i lo -p tcp --dport 3100 -j ACCEPT'
+ExecStartPre=-/bin/sh -c 'iptables -C INPUT -p tcp --dport 3100 -s 139.60.162.12 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 3100 -s 139.60.162.12 -j ACCEPT'
+ExecStart=/usr/bin/python3 /opt/smtp-proxy/smtp_proxy.py
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

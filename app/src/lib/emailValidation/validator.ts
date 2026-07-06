@@ -137,6 +137,26 @@ function nextProxyUrl(): string {
   return url;
 }
 
+/**
+ * True when the proxy answered us but could NOT complete an SMTP conversation
+ * with the recipient's MX — connect timeout / refused / reset / host
+ * unreachable, or the MX rejected US at greeting/EHLO/MAIL FROM. These are
+ * almost always properties of the *egress IP* (the MX blocks that specific
+ * probe IP), so the SAME probe from a DIFFERENT proxy/IP may well succeed —
+ * worth a failover retry.
+ *
+ * A greylist 4xx, or any 2xx/5xx at RCPT, is a REAL answer about the mailbox
+ * (exists/isCatchAll/greylist set) — NOT inconclusive, so we must NOT retry it
+ * on the other IP (that would just double the load and risk a contradictory
+ * read). Empty error with all-null is left as-is (no signal to act on).
+ */
+function isInconclusiveTransport(r: SmtpCheckResult): boolean {
+  if (r.exists !== null || r.isCatchAll !== null || r.greylist) return false;
+  const e = (r.error ?? '').toLowerCase();
+  if (!e) return false;
+  return /timeout|econnrefused|econnreset|ehostunreach|enetunreach|closed before|connect|unexpected greeting|ehlo\/helo rejected|mail from rejected/.test(e);
+}
+
 async function smtpVerifyViaProxy(
   email: string,
   mxHost: string,
@@ -152,6 +172,9 @@ async function smtpVerifyViaProxy(
   };
 
   let lastError: string | undefined;
+  // Holds a result where the proxy worked but its egress IP couldn't reach the
+  // MX — kept as the fallback to return if every other proxy is also blocked.
+  let lastInconclusive: SmtpCheckResult | null = null;
 
   for (let attempt = 0; attempt < SMTP_PROXY_URLS.length; attempt++) {
     const baseUrl = nextProxyUrl();
@@ -178,13 +201,25 @@ async function smtpVerifyViaProxy(
         continue;
       }
 
-      return (await res.json()) as SmtpCheckResult;
+      const result = (await res.json()) as SmtpCheckResult;
+      // Definitive answer (mailbox exists/catch-all/greylist, or a plain
+      // all-null with no transport error) → return immediately.
+      if (!isInconclusiveTransport(result)) return result;
+      // This egress IP is blocked by the MX (e.g. the new probe IP can't reach
+      // Yandex). Remember it and retry the SAME probe via the next proxy/IP —
+      // failover, not round-robin, so complementary IPs strictly widen coverage.
+      lastInconclusive = result;
+      lastError = result.error;
+      continue;
     } catch (err) {
       lastError = `Proxy ${baseUrl}: ${err instanceof Error ? err.message : 'unknown error'}`;
       continue;
     }
   }
 
+  // Every proxy was blocked/unreachable: prefer returning the real MX-level
+  // inconclusive result (carries smtp code/text) over a synthetic error.
+  if (lastInconclusive) return lastInconclusive;
   return { code: 0, exists: null, isCatchAll: null, greylist: false, error: lastError ?? 'All SMTP proxies failed' };
 }
 
@@ -364,6 +399,30 @@ export async function validateEmail(
   }
 
   if (smtpResult.exists === true) {
+    // RCPT подтверждён, но catch-all проверка не дала ответа (random-проба
+    // получила не-250/не-55x: 4xx rate-limit, 503 на второй MAIL FROM в той же
+    // сессии и т.п.). Такой хост может принимать ВСЁ — «ok» не заслужен: так
+    // typo-squat домены (maail.ru, eandex.ru…) получали «Хороший» и уходили в
+    // рассылку. Формулировка с «временный» делает статус ретраябельным в
+    // queue-воркере (shouldRetry ищет «временн»); после исчерпания попыток
+    // адрес остаётся 'unknown'/risky, а не 'ok'.
+    if (domainInfo.isCatchAll === null) {
+      return {
+        result: 'unknown', quality: 'risky',
+        is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: false,
+        did_you_mean: didYouMean, mx_found: mxFound, smtp_code: smtpResult.code,
+        details: { ...details, step: 'catch_all_undetermined' },
+        error: 'Catch-all статус домена не определён (временный сбой проверки)',
+      };
+    }
+    // did_you_mean НЕ понижает вердикт: сюда мы попадаем только когда домен
+    // КОНКЛЮЗИВНО отверг случайный адрес (isCatchAll=false) и подтвердил
+    // конкретный ящик — это поведение честного сервера, а не typo-ловушки.
+    // Реальные typo-squat ловушки принимают всё подряд и уходят в ветки
+    // catch_all / catch_all_undetermined выше. Понижение по одной лишь
+    // levenshtein-близости к крупному провайдеру било по легитимным коротким
+    // доменам (vk.com, hh.ru, 1c.ru, yandex.by…). Подсказка остаётся в
+    // did_you_mean как информационная.
     return {
       result: 'ok', quality: 'good',
       is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: false,

@@ -7404,7 +7404,7 @@ export function DatabaseSpreadsheet() {
         message: errorCount > 0
           ? `Очистка названий: ${successCount} успешно, ${errorCount} с ошибками`
           : usedLocalCleanupFallback
-            ? `Очистка названий завершена локально: ${processedCount} строк`
+            ? `Очистка названий завершена (AI был недоступен, часть строк очищена локально): ${processedCount} строк`
           : `Очистка названий завершена: ${processedCount} строк`,
         time: Date.now(),
       });

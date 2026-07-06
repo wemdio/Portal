@@ -8,16 +8,16 @@
 
 ## Шаг 0 — найти кампании клиента (внутри датасета)
 
-Датасет сам размечает кампании по **клиенту-отправителю** и по **нише**:
+Лучший путь — **портальный мост** (авто-матчинг Портала, зеркалится в `portal_*`, см. док `portal-data`):
 
 ```sql
--- кампании клиента (клиент = отправитель/проект):
-SELECT campaign_id, client FROM v_campaign_client WHERE client ILIKE '%X%';
--- запасной путь по имени кампании (имя обычно содержит клиента):
-SELECT id, name FROM raw_campaigns WHERE name ILIKE '%X%';
--- ниша каждой кампании (отрасль получателей):
-SELECT campaign_id, segment FROM v_campaign_segment WHERE campaign_id = ANY($cids);
+-- проект клиента → его кампании:
+SELECT b.campaign_id FROM portal_projects p
+JOIN portal_project_campaigns b ON b.project_id = p.id
+WHERE p.client ILIKE '%X%';
 ```
+Запасные пути: `v_campaign_client WHERE client ILIKE '%X%'` (разметка по имени кампании)
+или `raw_campaigns WHERE name ILIKE '%X%'`. Ниша кампании — `v_campaign_segment`.
 
 Покрытие клиент-разметки — почти все кампании, но не 100%; если клиент не нашёлся в
 `v_campaign_client`, ищи по имени. Какие кампании активны/завершены — `status` +

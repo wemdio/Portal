@@ -13,6 +13,7 @@ import {
   findPreferredSiteColumnIndexes,
 } from '@/lib/tools/dfybUtils';
 import { isOutreachOsExcludedEmail } from './excludeLocalParts';
+import { isOutreachOsB2cCompany } from './excludeB2c';
 
 /** Заголовки сетки, которую кормим конструктору баз. */
 export const GRID_HEADER = ['Компания', 'Сайт', 'Город', 'Email'] as const;
@@ -139,6 +140,11 @@ export function gridToLeadPayloads(grid: string[][]): LeadCreatePayload[] {
 
     const company = companyIdx >= 0 ? (row[companyIdx] ?? '').trim() : '';
     const website = siteIdx >= 0 ? (row[siteIdx] ?? '').trim() : '';
+
+    // B2C/ИП-отсев на уровне лида (второй рубеж после pipelineRunner: сюда же
+    // может прийти сетка, собранная в обход пайплайна). Проверяет название,
+    // сайт И домен почты. До капов — исключённые не занимают квоту домена.
+    if (isOutreachOsB2cCompany(company, website, email.slice(email.indexOf('@') + 1))) continue;
 
     // Потолок: не больше MAX_EMAILS_PER_DOMAIN почт на ДОМЕН КОМПАНИИ (по сайту).
     // НЕ по email-домену: иначе общие провайдеры (gmail.com/mail.ru/yandex.ru)
