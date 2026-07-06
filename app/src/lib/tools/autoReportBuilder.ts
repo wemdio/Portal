@@ -429,11 +429,18 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
     const s = wrap.data;
     const campaignName = (s.campaign_name as string) || `Campaign ${idx + 1}`;
     const contacts = num(s.new_leads_contacted_count);
-    const contacted = num(s.contacted_count) || contacts;
+    const sent = num(s.emails_sent_count);
+    // Знаменатель охвата — как в клиентском ЛК (buildClientReport): contacted_count,
+    // а при отсутствии — отправленные письма (НЕ new_leads), чтобы отчёты сходились.
+    const contacted = num(s.contacted_count) || sent;
     const opened = num(s.open_count);
     const openedUnique = num(s.open_count_unique ?? s.open_count);
-    const replies = num(s.reply_count);
-    const sent = num(s.emails_sent_count);
+    // «Ответы как в Instantly» = уникальные живые + уникальные авто-ответы, как в
+    // клиентском ЛК (список Instantly так считает REPLIED). Фолбэк на reply_count.
+    const replies =
+      s.reply_count_unique != null
+        ? num(s.reply_count_unique) + num(s.reply_count_automatic_unique)
+        : num(s.reply_count);
     const leads = num(s.leads_count);
     const bounced = num(s.bounced_count);
     const campaignKey = `campaign_${Object.keys(campaignData).length + 1}`;
