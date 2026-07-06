@@ -55,7 +55,7 @@ export default function ClientParsersPage() {
   const tariffNotPaid = tariffStatus === 'inactive' || tariffStatus === 'expired';
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className={`mx-auto ${activeTab === 'email-sequence' ? 'max-w-7xl' : 'max-w-5xl'}`}>
       <header className="mb-6 sm:mb-8">
         <h1
           className="text-xl sm:text-2xl font-bold m-0"
