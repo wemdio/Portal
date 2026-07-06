@@ -27,6 +27,11 @@ import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
 import type { EmailSequenceV2LetterRow, EmailSequenceV2OutputLanguage, EmailSequenceV2RunRow } from '@/types';
 import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 import { parseValuesChips } from '@/lib/emailSequenceV2/valuesChips';
+import {
+  decideLetterExit,
+  LETTER_EXIT_MESSAGE,
+  type LetterExitIntent,
+} from '@/lib/emailSequenceV2/letterDirtyGuard';
 import { CLIENT_LAUNCH_DRAFT_KEY } from '@/lib/clientLaunch/constants';
 
 const VALUES_MODEL_OPTIONS = [
@@ -481,6 +486,15 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
     if (dirty) dirtyLettersRef.current.add(id);
     else dirtyLettersRef.current.delete(id);
   }, []);
+  // Единая политика выхода из редактора при несохранённых правках (см.
+  // letterDirtyGuard). Возвращает true = продолжать, false = пользователь
+  // отменил. Побочно чистит реестр по политике интента.
+  const requestLetterExit = useCallback((intent: LetterExitIntent): boolean => {
+    const { confirm, clear } = decideLetterExit(intent, dirtyLettersRef.current.size > 0);
+    if (confirm && !window.confirm(LETTER_EXIT_MESSAGE[intent])) return false;
+    if (clear) dirtyLettersRef.current.clear();
+    return true;
+  }, []);
 
   const loadRuns = useCallback(async () => {
     const data = await authFetchJson<{ runs: EmailSequenceV2RunRow[] }>('/api/tools/email-sequence-v2/runs', { method: 'GET' });
@@ -766,9 +780,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
     if (!run) return;
     // loadRun ниже заменит letters серверными строками и очистит реестр —
     // предупреждаем, чтобы не потерять правки открытого письма молча.
-    if (dirtyLettersRef.current.size > 0) {
-      if (!window.confirm('В открытом письме есть несохранённые правки. Продолжить без сохранения?')) return;
-    }
+    if (!requestLetterExit('addLetter')) return;
     setBusy({ type: 'letter', action: 'add', id: 'new' });
     setError(null);
     try {
@@ -785,7 +797,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
     } finally {
       setBusy(null);
     }
-  }, [loadRun, run, showNotice]);
+  }, [loadRun, run, showNotice, requestLetterExit]);
 
   const deleteRun = useCallback(async () => {
     if (!run) return;
@@ -872,11 +884,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
     if (!clientMode || letters.length === 0) return;
     // В рассылку уходит СЕРВЕРНОЕ состояние писем — предупреждаем, если в
     // открытом редакторе есть несохранённые правки (иначе уедет старый текст).
-    if (dirtyLettersRef.current.size > 0) {
-      if (!window.confirm('В письме есть несохранённые правки — они не попадут в рассылку. Сначала сохраните письмо. Продолжить без них?')) {
-        return;
-      }
-    }
+    if (!requestLetterExit('sendToLaunch')) return;
     try {
       const existing = window.localStorage.getItem(CLIENT_LAUNCH_DRAFT_KEY);
       if (existing && !window.confirm('В мастере запуска уже есть черновик — заменить его этой цепочкой?')) {
@@ -898,7 +906,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
       // sandbox/квота — уходим без черновика, клиент вставит вручную
     }
     router.push('/client/launch');
-  }, [clientMode, letters, run, router]);
+  }, [clientMode, letters, run, router, requestLetterExit]);
 
   /* ── деривативы ── */
   const stage1Done = Boolean(run?.values_text);
@@ -914,21 +922,17 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
   const goToStep = useCallback((i: number) => {
     if (i > maxReachable) return;
     // Уход со шага «Письма» размонтирует редактор (его правки теряются) —
-    // чистим реестр грязных, как «Назад», иначе протухший флаг даст ложное
-    // предупреждение при возврате.
-    if (step === 2 && i !== 2) dirtyLettersRef.current.clear();
+    // тихо чистим реестр грязных (политика leaveStep).
+    if (step === 2 && i !== 2) requestLetterExit('leaveStep');
     setStep(i);
-  }, [maxReachable, step]);
+  }, [maxReachable, step, requestLetterExit]);
 
   // Переключение письма с защитой от потери несохранённых правок открытого.
   const selectLetter = useCallback((id: string) => {
     if (id === selectedLetterId) return;
-    if (dirtyLettersRef.current.size > 0) {
-      if (!window.confirm('В открытом письме есть несохранённые правки. Переключиться без сохранения?')) return;
-      dirtyLettersRef.current.clear();
-    }
+    if (!requestLetterExit('switchLetter')) return;
     setSelectedLetterId(id);
-  }, [selectedLetterId]);
+  }, [selectedLetterId, requestLetterExit]);
 
   const nextFromAudience = useCallback(async () => {
     const ok = await saveStage2();
@@ -1374,9 +1378,8 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                   type="button"
                   onClick={() => {
                     // Уход со шага «Письма» размонтирует редактор — его локальные
-                    // правки теряются, поэтому чистим реестр, иначе предупреждение
-                    // о несохранённом станет ложным при возврате.
-                    if (step === 2) dirtyLettersRef.current.clear();
+                    // правки теряются (политика leaveStep: тихо чистим реестр).
+                    if (step === 2) requestLetterExit('leaveStep');
                     setStep((s) => Math.max(0, s - 1));
                   }}
                   disabled={step === 0 || busy != null}
