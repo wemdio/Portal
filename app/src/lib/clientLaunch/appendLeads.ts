@@ -17,7 +17,7 @@
  */
 
 import { logAudit, logError } from '@/lib/loggerServer';
-import { createLeads } from '@/lib/instantly/client';
+import { createLeads, listLeads } from '@/lib/instantly/client';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
@@ -44,11 +44,62 @@ export interface AppendLeadsToClientCampaignInput {
    * "Auto HH — High score".
    */
   contextLabel?: string;
+  /**
+   * Instantly-флаг skip_if_in_campaign. По умолчанию true — как для клиентских
+   * запусков (не дублировать лид в кампании при ежедневном доборе).
+   *
+   * ВАЖНО: вопреки названию, у Instantly этот флаг работает НА ВЕСЬ ВОРКСПЕЙС —
+   * лид отсеивается, если он есть в ЛЮБОЙ кампании, включая чужие клиентские
+   * (проверено эмпирически). OutreachOS ставит false: наш пайплайн сам решает,
+   * кого слать (свой seen-журнал + дедуп против СВОИХ кампаний), а Instantly
+   * должен грузить всё подготовленное, не отсеивая по пересечению с клиентами.
+   */
+  skipIfInCampaign?: boolean;
 }
 
 export interface AppendLeadsResult {
   accepted: number;
   skipped: number;
+}
+
+/**
+ * Собирает email всех лидов, уже лежащих в указанных кампаниях клиента.
+ * Нужно OutreachOS-пайплайну: он шлёт с skip_if_in_campaign=false (чтобы
+ * Instantly не резал по пересечению с чужими клиентскими кампаниями), поэтому
+ * дедуп против СВОИХ кампаний должен делать сам — ДО Instantly. Аккаунт берём
+ * из пресета клиента (как в append). Пагинация по 100; кап страниц — предохранитель.
+ */
+export async function fetchExistingCampaignEmails(
+  userId: string,
+  campaignIds: readonly string[],
+): Promise<Set<string>> {
+  const emails = new Set<string>();
+  if (!supabaseInstantly || campaignIds.length === 0) return emails;
+
+  const { data: presetRow } = await supabaseInstantly
+    .from('client_campaign_presets')
+    .select('instantly_account_id')
+    .eq('client_user_id', userId)
+    .maybeSingle();
+  const accountId = resolveInstantlyAccountId(
+    (presetRow as { instantly_account_id?: string } | null)?.instantly_account_id ?? null,
+  );
+  const opts = { accountId };
+
+  const MAX_PAGES = 500; // 50k лидов на кампанию — с огромным запасом
+  for (const campaignId of campaignIds) {
+    let after: string | undefined;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const res = await listLeads({ campaign_id: campaignId, limit: 100, starting_after: after }, opts);
+      for (const l of res.items ?? []) {
+        const e = (l.email ?? '').trim().toLowerCase();
+        if (e) emails.add(e);
+      }
+      after = res.next_starting_after || undefined;
+      if (!after) break;
+    }
+  }
+  return emails;
 }
 
 export async function appendLeadsToClientCampaign(
@@ -62,6 +113,7 @@ export async function appendLeadsToClientCampaign(
   }
 
   const { userId, campaignId, leads, contextLabel } = input;
+  const skipIfInCampaign = input.skipIfInCampaign ?? true;
   const logMeta = { userId, campaignId, contextLabel };
 
   // 1. Load preset — нужен только чтобы понять, в какой Instantly-аккаунт
@@ -135,7 +187,7 @@ export async function appendLeadsToClientCampaign(
   try {
     const leadResult = await createLeads(
       leadsToSend,
-      { campaign_id: campaignId, skip_if_in_campaign: true },
+      { campaign_id: campaignId, skip_if_in_campaign: skipIfInCampaign },
       instantlyRequestOptions,
     );
 

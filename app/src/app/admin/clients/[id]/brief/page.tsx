@@ -37,7 +37,7 @@ export default function AdminClientBriefPage() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-10">
+    <div className="max-w-4xl xl:max-w-6xl mx-auto px-4 py-10">
       <div className="mb-6">
         <Link href="/admin/users" className="text-sm font-medium text-blue-600 hover:text-blue-700">
           ← Назад к пользователям
