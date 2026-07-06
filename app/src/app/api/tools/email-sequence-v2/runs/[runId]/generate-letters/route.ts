@@ -156,6 +156,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
       letter_index: i + 1,
       subject: l.subject,
       body: l.body,
+      // Дефолтный график: первое сразу, дальше каждые 2 дня. Клиент может
+      // поменять per-letter в редакторе цепочки.
+      wait_days: i === 0 ? 0 : 2,
       is_user_added: false,
     }));
     const { error: insErr } = await supabase.from('email_sequence_v2_letters').insert(payload);
