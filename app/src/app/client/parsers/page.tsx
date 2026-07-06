@@ -55,7 +55,11 @@ export default function ClientParsersPage() {
   const tariffNotPaid = tariffStatus === 'inactive' || tariffStatus === 'expired';
 
   return (
-    <div className="mx-auto max-w-5xl">
+    // Широкий контейнер: все вкладки — плотные инструменты (парсеры с панелью
+    // 380px + результаты, генератор цепочек с редактором + сайдбар), которым
+    // тесно в max-w-5xl. max-w-7xl упирается в ширину main (~1160px под кэпом
+    // лейаута 1400px), т.е. использует всю доступную ширину.
+    <div className="mx-auto max-w-7xl">
       <header className="mb-6 sm:mb-8">
         <h1
           className="text-xl sm:text-2xl font-bold m-0"

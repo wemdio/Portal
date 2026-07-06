@@ -99,7 +99,7 @@ export function validateClientLaunchSequence(
       if (totalVariants > CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP) {
         return {
           ok: false,
-          error: `Шаг ${i + 1}: максимум ${CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP} вариантов на шаг (A/B/C).`,
+          error: `Шаг ${i + 1}: максимум ${CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP} вариантов на шаг (A/B/C/D).`,
         };
       }
       for (let v = 0; v < step.variants.length; v++) {
