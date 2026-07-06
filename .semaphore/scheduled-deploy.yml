@@ -385,13 +385,13 @@ blocks:
                   sleep 3;
                   echo \"\${cids}\" | xargs -r sudo -n docker rm -f 2>/dev/null || true;
                 };
-                echo '--- Step 4: restart portal + yandexmaps + transcribe-worker + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot + instantly-sync-bot + portal-backup + changelog-bot + polza-reports + openoutreach ---';
+                echo '--- Step 4: restart portal + yandexmaps + transcribe-worker + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot + instantly-sync-bot + portal-external-sync + portal-backup + changelog-bot + polza-reports + openoutreach ---';
                 echo '[deploy] graceful-stop openoutreach (SIGTERM, до 120s): даём демону доделать in-flight LinkedIn-task и сохранить storage_state до пересоздания контейнера';
                 sudo -n docker stop -t 120 portal-openoutreach 2>/dev/null || true;
-                for svc in portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot portal-backup changelog-bot polza-reports openoutreach; do force_rm_svc \"\$svc\"; done;
-                sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-transcribe-worker portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot portal-instantly-sync-bot portal-backup portal-changelog-bot portal-polza-reports portal-openoutreach 2>/dev/null || true;
+                for svc in portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot portal-external-sync portal-backup changelog-bot polza-reports openoutreach; do force_rm_svc \"\$svc\"; done;
+                sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-transcribe-worker portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot portal-instantly-sync-bot portal-external-sync portal-backup portal-changelog-bot portal-polza-reports portal-openoutreach 2>/dev/null || true;
                 wait_port_free 3000 15;
-                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot portal-backup changelog-bot polza-reports openoutreach;
+                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot portal-external-sync portal-backup changelog-bot polza-reports openoutreach;
                 echo '--- Step 4.1: verify Docker socket access inside portal ---';
                 PORTAL_GROUPS=\$(sudo -n docker inspect portal --format '{{json .HostConfig.GroupAdd}}' 2>/dev/null || echo '[]');
                 echo \"portal GroupAdd=\${PORTAL_GROUPS}\";
