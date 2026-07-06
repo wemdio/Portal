@@ -47,6 +47,11 @@ export interface EmailSequenceV2LetterRow {
   letter_index: number;
   subject: string | null;
   body: string;
+  /**
+   * Пауза перед ЭТИМ письмом в днях относительно предыдущего (gap).
+   * 0 = «сразу» (первое письмо). UI показывает кумулятивную сумму.
+   */
+  wait_days: number;
   is_user_added: boolean;
   created_at: string;
   updated_at: string;

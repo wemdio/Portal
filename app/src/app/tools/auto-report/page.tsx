@@ -1331,9 +1331,15 @@ export default function AutoReportPage() {
       setCampaignsLoading(true);
     }
     setError('');
+    // Клиентский таймаут: если запрос повис на уровне прокси/сети (сервер уже имеет
+    // свой таймаут к 144), список не грузится вечно — через 35с покажем ошибку и ретрай.
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 35_000);
     try {
       const sourceSuffix = direct ? '?source=instantly' : '';
-      const res = await authFetch(`/api/tools/auto-report/campaigns${sourceSuffix}`);
+      const res = await authFetch(`/api/tools/auto-report/campaigns${sourceSuffix}`, {
+        signal: controller.signal,
+      });
       const data = (await res.json().catch(() => ({}))) as {
         campaigns?: InstantlyCampaignItem[];
         meta?: CampaignsListMeta;
@@ -1377,8 +1383,16 @@ export default function AutoReportPage() {
         setCatalogSyncPending(false);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка загрузки кампаний');
+      const aborted = err instanceof DOMException && err.name === 'AbortError';
+      setError(
+        aborted
+          ? 'Список кампаний не загрузился за 35 секунд (возможен сбой сети или БД). Нажмите «Обновить список».'
+          : err instanceof Error
+            ? err.message
+            : 'Ошибка загрузки кампаний',
+      );
     } finally {
+      window.clearTimeout(timeoutId);
       if (!silent) {
         setCampaignsLoading(false);
       }

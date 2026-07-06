@@ -28,6 +28,11 @@ import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import { loadOutreachOsConfig } from './config';
 import { buildExcludePatterns } from './excludePatterns';
 import { isOutreachOsB2cCompany } from './excludeB2c';
+import {
+  EMPTY_SUPPRESSION,
+  isSuppressedCompany,
+  type OutreachOsSuppression,
+} from './suppression';
 import { llmClassifyNoise, type CompanyForClassify } from './classifyCompanies';
 import { loadRecentlySeen, markSeen, RECONTACT_AFTER_DAYS, type SeenEmployerUpsert } from './seenEmployers';
 import { employersToGrid, gridToLeadPayloads } from './gridMapping';
@@ -124,9 +129,23 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     //     отели, ИП-ФИО, .shop и т.п. — ДО конструктора, чтобы не жечь скрейп
     //     на компании, которым мы всё равно не пишем. Отсев только наш,
     //     общий конструктор/HH-парсер не меняются.
-    const icp = employers.filter((e) => !isOutreachOsB2cCompany(e.name ?? '', e.siteUrl ?? ''));
-    if (icp.length < employers.length) {
-      log(`B2C/ИП-отсев: -${employers.length - icp.length} → ${icp.length}`);
+    const b2cFiltered = employers.filter(
+      (e) => !isOutreachOsB2cCompany(e.name ?? '', e.siteUrl ?? ''),
+    );
+    if (b2cFiltered.length < employers.length) {
+      log(`B2C/ИП-отсев: -${employers.length - b2cFiltered.length} → ${b2cFiltered.length}`);
+    }
+
+    // 3c. SUPPRESSION: наши клиенты (AMO) не должны получать self-outreach
+    //     НИКОГДА. Fail-closed: не смогли прочитать список — роняем прогон
+    //     (пропущенный день лучше письма собственному клиенту); сбой ДО шага 8,
+    //     так что завтра всё ретраится. Компании клиентов отсеиваются по домену
+    //     сайта ДО конструктора; рубеж по почте — в gridToLeadPayloads.
+    const suppression = await loadSuppression(db);
+    log(`Suppression-список: ${suppression.emails.size} почт, ${suppression.domains.size} доменов`);
+    const icp = b2cFiltered.filter((e) => !isSuppressedCompany(e.siteUrl ?? '', suppression));
+    if (icp.length < b2cFiltered.length) {
+      log(`Suppression-отсев клиентов: -${b2cFiltered.length - icp.length} → ${icp.length}`);
     }
 
     // 4. Дедуп по окну: компании, контактированные за последние
@@ -217,8 +236,8 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       break;
     }
 
-    // 7. Сетка → лиды.
-    const leads = gridToLeadPayloads(finalGrid ?? []);
+    // 7. Сетка → лиды (с suppression-рубежом по почте/домену внутри).
+    const leads = gridToLeadPayloads(finalGrid ?? [], suppression);
     log(`Валидных контактов на выходе конструктора: ${leads.length}`);
 
     // MEASURE-режим: только меряем воронку (parsed→new→valid). НЕ заливаем в
@@ -434,6 +453,46 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
     await logError('outreachos.run.failed', err, { runId });
     return { ...empty, runId, status: 'failed', error: message };
   }
+}
+
+/**
+ * Читает suppression-список целиком (пагинация по 1000 — PostgREST режет
+ * большие выборки). 3 попытки, затем throw: suppression обязателен (fail-closed).
+ */
+async function loadSuppression(
+  db: NonNullable<typeof supabaseAdmin>,
+): Promise<OutreachOsSuppression> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const emails = new Set<string>();
+      const domains = new Set<string>();
+      const PAGE = 1000;
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await db
+          .from('outreachos_suppression')
+          .select('kind, value')
+          .range(from, from + PAGE - 1);
+        if (error) throw new Error(error.message);
+        const rows = (data ?? []) as { kind: string; value: string }[];
+        for (const r of rows) {
+          const v = (r.value ?? '').trim().toLowerCase();
+          if (!v) continue;
+          if (r.kind === 'email') emails.add(v);
+          else if (r.kind === 'domain') domains.add(v);
+        }
+        if (rows.length < PAGE) break;
+      }
+      return { emails, domains };
+    } catch (err) {
+      if (attempt === 3) {
+        throw new Error(
+          `suppression load failed (клиентам писать нельзя — прогон остановлен): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      await sleep(2000 * attempt);
+    }
+  }
+  return EMPTY_SUPPRESSION; // недостижимо, для типов
 }
 
 /**

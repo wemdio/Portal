@@ -38,7 +38,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
   const owner = await ensureRunOwner(supabase, runId, user.id);
   if (!owner.ok) return jsonError(owner.message, owner.status);
 
-  let body: { subject?: string; body?: string; insert_after_index?: number } = {};
+  let body: { subject?: string; body?: string; insert_after_index?: number; wait_days?: number } = {};
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -48,6 +48,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
   const subject = (body.subject ?? '').trim().slice(0, 500) || null;
   const text = (body.body ?? '').trim();
   if (!text) return jsonError('Тело письма не может быть пустым.', 400);
+  const waitDaysRaw = typeof body.wait_days === 'number' && Number.isFinite(body.wait_days)
+    ? Math.min(90, Math.max(0, Math.trunc(body.wait_days)))
+    : null;
 
   // Determine new letter_index. If insert_after_index provided (>=0), we shift
   // subsequent letters down by 1. Otherwise append at the end.
@@ -87,6 +90,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
       letter_index: newIndex,
       subject,
       body: text.slice(0, 50_000),
+      // Первое письмо цепочки уходит сразу; для остальных дефолт 2 дня.
+      wait_days: waitDaysRaw ?? (newIndex === 1 ? 0 : 2),
       is_user_added: true,
     })
     .select('*')

@@ -139,9 +139,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
     });
 
     const letters = parseLettersFromModelOutput(raw);
-    if (letters.length < 4 || letters.length > 6) {
+    // Промпт просит 3–5 писем; верхнюю границу держим 6 (толерантность к
+    // моделям, которые «перевыполняют») — важно не завалить прогон парс-ошибкой.
+    if (letters.length < 3 || letters.length > 6) {
       throw new Error(
-        `Не удалось получить 4-6 писем из ответа модели (получено: ${letters.length}).`,
+        `Не удалось получить 3-5 писем из ответа модели (получено: ${letters.length}).`,
       );
     }
 
@@ -154,6 +156,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
       letter_index: i + 1,
       subject: l.subject,
       body: l.body,
+      // Дефолтный график: первое сразу, дальше каждые 2 дня. Клиент может
+      // поменять per-letter в редакторе цепочки.
+      wait_days: i === 0 ? 0 : 2,
       is_user_added: false,
     }));
     const { error: insErr } = await supabase.from('email_sequence_v2_letters').insert(payload);
