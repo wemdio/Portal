@@ -5,6 +5,7 @@ import * as instantly from '@/lib/instantly/client';
 import { verifyHandoffCallback } from '@/lib/instantly/handoffCallback';
 import { handoffBotToken, answerCallback, editHandoffMessage } from '@/lib/instantly/handoffTelegram';
 import { computeReplyAllCc, mergeCcLists } from '@/lib/clientCampaignReplies/participants';
+import { textToReplyHtml } from '@/lib/clientCampaignReplies/bodyHtml';
 import { logError } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
@@ -160,7 +161,10 @@ export async function POST(req: NextRequest) {
       reply_to_uuid: pending.reply_to_uuid as string,
       eaccount: pending.eaccount as string,
       subject: buildReplySubject((qual?.reply_subject as string | null) ?? null),
-      body: { text: bodyText },
+      // HTML с <br> сохраняет переносы строк: Instantly шлёт тело как HTML-письмо,
+      // и text-only с \n схлопывается «простынёй» (жалоба спеца на Чизмоле —
+      // история переписки уходила одной строкой). text — plain-text fallback.
+      body: { html: textToReplyHtml(bodyText), text: bodyText },
       ...(ccList.length ? { cc_address_email_list: ccList.join(', ') } : {}),
     });
   } catch (err) {
