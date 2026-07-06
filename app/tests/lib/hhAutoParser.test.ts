@@ -5,7 +5,32 @@
  * в endpoint клиента: ошибка нормализации = промах в скоринг.
  */
 
-import { deriveDomain } from '@/lib/jobs/hhAutoParser';
+import { deriveDomain, cleanHhDescription } from '@/lib/jobs/hhAutoParser';
+
+describe('cleanHhDescription', () => {
+  it('undefined/пустое → undefined', () => {
+    expect(cleanHhDescription(undefined)).toBeUndefined();
+    expect(cleanHhDescription('')).toBeUndefined();
+    expect(cleanHhDescription('   ')).toBeUndefined();
+  });
+
+  it('вычищает HTML-теги и схлопывает пробелы', () => {
+    expect(cleanHhDescription('<p>Мы <b>интегратор</b>&nbsp;1С</p>\n  для бизнеса')).toBe(
+      'Мы интегратор 1С для бизнеса',
+    );
+  });
+
+  it('обрезает до 400 символов с многоточием', () => {
+    const long = 'а'.repeat(500);
+    const out = cleanHhDescription(long)!;
+    expect(out.length).toBe(401); // 400 + …
+    expect(out.endsWith('…')).toBe(true);
+  });
+
+  it('чистый текст без тегов проходит как есть', () => {
+    expect(cleanHhDescription('Разработка ПО для банков')).toBe('Разработка ПО для банков');
+  });
+});
 
 describe('deriveDomain', () => {
   it('returns null for null input', () => {

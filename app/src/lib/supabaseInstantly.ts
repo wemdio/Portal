@@ -29,7 +29,13 @@ const postgrestFetch: typeof globalThis.fetch = (input, init) => {
 
   const controller = new AbortController();
   const timer = setTimeout(
-    () => controller.abort(new Error(`instantly PostgREST timeout после ${POSTGREST_TIMEOUT_MS}ms`)),
+    // ВАЖНО: причина отмены — DOMException с name='AbortError', а НЕ обычный Error.
+    // Иначе postgrest-js не распознаёт отмену и РЕТРАИТ идемпотентные GET/HEAD 3× с
+    // backoff (≈87с вместо 20с, долбя лежащую 144). Паттерн как в supabaseAdmin.ts.
+    () =>
+      controller.abort(
+        new DOMException(`instantly PostgREST timeout после ${POSTGREST_TIMEOUT_MS}ms`, 'AbortError'),
+      ),
     POSTGREST_TIMEOUT_MS,
   );
   // Уважаем внешний signal (если supabase-js когда-нибудь начнёт его передавать).
