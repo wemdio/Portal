@@ -313,6 +313,8 @@ interface TotalStats {
   openedUnique: number;
   replies: number;
   leads: number;
+  /** Σ по кампаниям max(0, leads − contacts) — остаток базы (надёжен у активных). */
+  remaining: number;
   sent: number;
   bounced: number;
 }
@@ -335,6 +337,8 @@ export interface AutoReportSummary {
   totalReplies: number;
   totalLeads: number;
   totalBounced: number;
+  /** Остаток базы (Σ max(0, leads − contacts)); нет в отчётах до 06.07. */
+  totalRemaining?: number;
   conversion: { openPctAllEmails: string; replyPctByLeads: string };
   funnel: AutoReportFunnel;
 }
@@ -421,6 +425,7 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
     openedUnique: 0,
     replies: 0,
     leads: 0,
+    remaining: 0,
     sent: 0,
     bounced: 0,
   };
@@ -514,6 +519,9 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
     totalStats.openedUnique += num(c.openedUnique);
     totalStats.replies += num(c.replies);
     totalStats.leads += num(c.leads);
+    // Остаток базы — клампим на уровне кампании (завершённые с leads=0 дают 0),
+    // потом суммируем, а не вычитаем суммы (иначе завершённые «съедят» остаток активных).
+    totalStats.remaining += Math.max(0, num(c.leads) - num(c.contacts));
     totalStats.sent += num(c.totalEmailsSent);
     totalStats.bounced += num(c.bounced);
   });
@@ -557,13 +565,13 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
 
   tableText += `\nОбщая статистика:\n`;
   tableText += `Показатель\tЗначение\tКонверсия из предыдущего этапа\n`;
-  tableText += `Общее количество контактов (первый контакт)\t${totalStats.contacts}\t\n`;
+  tableText += `Взято в работу (первый контакт)\t${totalStats.contacts}\t\n`;
   tableText += `Охвачено лидов (вкл. повторные касания)\t${totalStats.contacted}\t\n`;
+  tableText += `Остаток базы (ещё не в работе)\t${totalStats.remaining}\t\n`;
   tableText += `Общее количество отправленных писем\t${totalStats.sent}\t\n`;
   tableText += `Общее количество уникальных открытий\t${totalStats.openedUnique}\t${funnelOpenPct}% от охваченных\n`;
   tableText += `Общее количество ответов\t${totalStats.replies}\t${funnelReplyPct}% от открывших\n`;
   tableText += `Лиды (заполняется вручную)\t\t\n`;
-  tableText += `Общее количество лидов в базе\t${totalStats.leads}\t\n`;
   tableText += `Общее количество бракованных\t${totalStats.bounced}\t\n`;
 
   tableText += `\nДетализация по письмам:\n`;
@@ -663,6 +671,7 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
       totalReplies: totalStats.replies,
       totalLeads: totalStats.leads,
       totalBounced: totalStats.bounced,
+      totalRemaining: totalStats.remaining,
       conversion: {
         openPctAllEmails: totalOpenPct,
         replyPctByLeads: totalReplyPct,

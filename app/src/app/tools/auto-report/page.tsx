@@ -122,6 +122,8 @@ interface ReportSummary {
   totalReplies: number;
   totalLeads: number;
   totalBounced: number;
+  /** Остаток базы (Σ max(0, leads − contacts)); в старых отчётах считается из campaignData. */
+  totalRemaining?: number;
   conversion: { openPctAllEmails: string; replyPctByLeads: string };
   /** Отсутствует в отчётах из старой истории (localStorage). */
   funnel?: ReportFunnel;
@@ -333,7 +335,18 @@ function getFunnelDisplay(summary: ReportSummary): FunnelDisplayRows {
 }
 
 const CONTACTED_ROW_LABEL = 'Охвачено лидов (вкл. повторные касания)';
-const CONTACTS_ROW_LABEL = 'Общее количество контактов (первый контакт)';
+const CONTACTS_ROW_LABEL = 'Взято в работу (первый контакт)';
+const REMAINING_ROW_LABEL = 'Остаток базы (ещё не в работе)';
+
+/**
+ * Остаток базы (Σ по кампаниям max(0, leads − contacts)). Надёжен у активных
+ * кампаний (Instantly даёт размер базы), у завершённых = 0 (база отработана).
+ * Клампим на уровне кампании — из summary при наличии, иначе из campaignData.
+ */
+function totalRemainingBase(summary: ReportSummary, campaigns: CampaignRecordView[]): number {
+  if (typeof summary.totalRemaining === 'number') return summary.totalRemaining;
+  return campaigns.reduce((s, c) => s + Math.max(0, num(c.leads) - num(c.contacts)), 0);
+}
 
 const STEP_TRANSITION_NOTE =
   '«Дошло до след. шага» — сколько контактов получили следующее письмо. По активным кампаниям часть базы ещё в пути, поэтому по поздним шагам значение занижено.';
@@ -350,6 +363,7 @@ function StyledReportView({
 }) {
   const campaigns = Object.values(campaignData);
   const funnelRows = getFunnelDisplay(summary);
+  const totalRemaining = totalRemainingBase(summary, campaigns);
 
   const cell = 'px-3 py-2 text-sm border border-gray-300';
   const headerCell = `${cell} font-semibold text-white`;
@@ -506,6 +520,11 @@ function StyledReportView({
                 </tr>
               )}
               <tr className="bg-white">
+                <td className={`${cell} font-medium text-gray-900`}>{REMAINING_ROW_LABEL}</td>
+                <td className={`${cell} text-gray-900`}>{totalRemaining}</td>
+                <td className={cell} />
+              </tr>
+              <tr className="bg-white">
                 <td className={`${cell} font-medium text-gray-900`}>
                   Общее количество отправленных писем
                 </td>
@@ -527,13 +546,6 @@ function StyledReportView({
               <tr className="bg-white">
                 <td className={`${cell} font-medium text-gray-900`}>{MANUAL_LEADS_LABEL}</td>
                 <td className={cell} />
-                <td className={cell} />
-              </tr>
-              <tr className="bg-white">
-                <td className={`${cell} font-medium text-gray-900`}>
-                  Общее количество лидов в базе
-                </td>
-                <td className={`${cell} text-gray-900`}>{summary.totalLeads}</td>
                 <td className={cell} />
               </tr>
               <tr className="bg-white">
@@ -857,11 +869,11 @@ function buildSheetsHtmlReport({
     ...(funnelRows.contactedValue !== null
       ? ([[CONTACTED_ROW_LABEL, String(funnelRows.contactedValue), '']] as Array<[string, string, string]>)
       : []),
+    [REMAINING_ROW_LABEL, String(totalRemainingBase(summary, campaigns)), ''],
     ['Общее количество отправленных писем', String(summary.totalEmailsSent), ''],
     [funnelRows.openedLabel, String(funnelRows.openedValue), funnelRows.openedConv],
     ['Общее количество ответов', String(summary.totalReplies), funnelRows.repliesConv],
     [MANUAL_LEADS_LABEL, '', ''],
-    ['Общее количество лидов в базе', String(summary.totalLeads), ''],
     ['Общее количество бракованных', String(summary.totalBounced), ''],
   ];
   for (const [label, value, conv] of overallRows) {
@@ -1156,11 +1168,11 @@ async function downloadExcelFormatted(
     ...(funnelRows.contactedValue !== null
       ? [[CONTACTED_ROW_LABEL, funnelRows.contactedValue, ''] as (string | number)[]]
       : []),
+    [REMAINING_ROW_LABEL, totalRemainingBase(summary, campaigns), ''],
     ['Общее количество отправленных писем', summary.totalEmailsSent, ''],
     [funnelRows.openedLabel, funnelRows.openedValue, funnelRows.openedConv],
     ['Общее количество ответов', summary.totalReplies, funnelRows.repliesConv],
     [MANUAL_LEADS_LABEL, '', ''],
-    ['Общее количество лидов в базе', summary.totalLeads, ''],
     ['Общее количество бракованных', summary.totalBounced, ''],
   ];
   const overallStartRow = row;
