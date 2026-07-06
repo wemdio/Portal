@@ -267,7 +267,7 @@ export async function syncProjectContactsFromInstantly(
   } else {
     const historyRows: Array<{
       project_id: string;
-      period_id?: string;
+      period_id: string | null;
       contacts_done: number;
       kpi_fact: number | null;
       recorded_at: string;
@@ -280,7 +280,7 @@ export async function syncProjectContactsFromInstantly(
       const activePeriod = activePeriods.get(p.id);
       historyRows.push({
         project_id: p.id,
-        ...(activePeriod ? { period_id: activePeriod.id } : {}),
+        period_id: activePeriod?.id ?? null,
         contacts_done: contacts,
         kpi_fact: Number.isFinite(kpi) ? kpi : null,
         recorded_at: today,
@@ -288,29 +288,23 @@ export async function syncProjectContactsFromInstantly(
     }
 
     if (historyRows.length > 0) {
-      const periodRows = historyRows.filter((row) => row.period_id);
-      const legacyRows = historyRows.filter((row) => !row.period_id);
-
-      if (periodRows.length > 0) {
-        const { error: histErr } = await mainDb
-          .from('project_contacts_history')
-          .upsert(periodRows, { onConflict: 'period_id,recorded_at', ignoreDuplicates: false });
-        if (histErr) {
-          log('error', `period contacts history upsert failed: ${histErr.message}`);
-        } else {
-          historyWritten += periodRows.length;
-        }
-      }
-
-      if (legacyRows.length > 0) {
-        const { error: histErr } = await mainDb
-          .from('project_contacts_history')
-          .upsert(legacyRows, { onConflict: 'project_id,recorded_at', ignoreDuplicates: false });
-        if (histErr) {
-          log('error', `contacts history upsert failed: ${histErr.message}`);
-        } else {
-          historyWritten += legacyRows.length;
-        }
+      // Единый upsert по unique(project_id, recorded_at): одна строка на проект
+      // в день, period_id — атрибут строки, не ключ конфликта.
+      //
+      // НЕ переводить arbiter на (period_id, recorded_at): idx_pch_period_date
+      // исторически был частичным (WHERE period_id IS NOT NULL), а PostgREST
+      // не передаёт WHERE-предикат в ON CONFLICT — Postgres отвечает 42P10,
+      // и снапшоты проектов с активным периодом молча теряются (так period_id
+      // и не записывался ни разу до 2026-07). Плюс period-строка за день, когда
+      // legacy-строка уже существует, конфликтует именно по (project_id,
+      // recorded_at) — этот arbiter разрешает и её.
+      const { error: histErr } = await mainDb
+        .from('project_contacts_history')
+        .upsert(historyRows, { onConflict: 'project_id,recorded_at', ignoreDuplicates: false });
+      if (histErr) {
+        log('error', `contacts history upsert failed: ${histErr.message}`);
+      } else {
+        historyWritten = historyRows.length;
       }
     }
   }

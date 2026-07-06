@@ -105,8 +105,11 @@ const CampaignRow = memo(function CampaignRow({
 
 interface ReportFunnel {
   contacts: number;
+  /** Охваченные лиды (contacted_count); нет в воронке первой версии (06.07). */
+  contacted?: number;
   openedUnique: number;
-  openPctOfContacts: string;
+  /** % открываемости от охваченных; нет в воронке первой версии (06.07). */
+  openPctOfContacted?: string;
   replies: number;
   replyPctOfOpened: string;
 }
@@ -119,6 +122,8 @@ interface ReportSummary {
   totalReplies: number;
   totalLeads: number;
   totalBounced: number;
+  /** Остаток базы (Σ max(0, leads − contacts)); в старых отчётах считается из campaignData. */
+  totalRemaining?: number;
   conversion: { openPctAllEmails: string; replyPctByLeads: string };
   /** Отсутствует в отчётах из старой истории (localStorage). */
   funnel?: ReportFunnel;
@@ -179,6 +184,8 @@ interface CampaignStepView {
 interface CampaignRecordView {
   name: string;
   contacts: number;
+  /** contacted_count (охваченные лиды); отсутствует в отчётах из старой истории. */
+  contacted?: number;
   opened: number;
   /** open_count_unique; отсутствует в отчётах из старой истории. */
   openedUnique?: number;
@@ -243,9 +250,15 @@ function num(n: unknown): number {
   return Number.isFinite(v) ? v : 0;
 }
 
-/** Уникальные открытия и открываемость кампании (уник. открытия ÷ контакты из той же строки). */
+/**
+ * Уникальные открытия и открываемость кампании: уник. открытия ÷ охваченные лиды
+ * (contacted_count) — уникальные открытия считаются по всем, кому кампания писала,
+ * а не только по новым контактам, иначе % превышает 100.
+ */
 function campaignOpenStats(c: CampaignRecordView): {
   openedUnique: number;
+  /** null — отчёт из старой истории, охваченных в данных нет. */
+  contactedDisplay: number | null;
   openPct: string;
 } {
   if (c.openedUnique === undefined) {
@@ -255,13 +268,14 @@ function campaignOpenStats(c: CampaignRecordView): {
     const sent = num(c.totalEmailsSent);
     return {
       openedUnique: opened,
+      contactedDisplay: null,
       openPct: sent > 0 ? ((opened / sent) * 100).toFixed(1) : '0.0',
     };
   }
   const openedUnique = num(c.openedUnique);
-  const contacts = num(c.contacts);
-  const openPct = contacts > 0 ? ((openedUnique / contacts) * 100).toFixed(1) : '0.0';
-  return { openedUnique, openPct };
+  const contacted = num(c.contacted) || num(c.contacts);
+  const openPct = contacted > 0 ? ((openedUnique / contacted) * 100).toFixed(1) : '0.0';
+  return { openedUnique, contactedDisplay: c.contacted === undefined ? null : contacted, openPct };
 }
 
 /** «Дошло до след. шага»: sent следующего шага ÷ sent текущего; null для последнего шага. */
@@ -287,6 +301,8 @@ function sortedStepNumbersOf(c: CampaignRecordView): number[] {
 
 /** Строки открытий/ответов для блока «Общая статистика». */
 interface FunnelDisplayRows {
+  /** Строка «Охвачено лидов»; null — в данных отчёта охваченных нет. */
+  contactedValue: number | null;
   openedLabel: string;
   openedValue: number;
   openedConv: string;
@@ -294,25 +310,42 @@ interface FunnelDisplayRows {
 }
 
 /**
- * Воронка из summary. Отчёты из старой истории не содержат уникальных открытий,
- * поэтому для них честно показываем прежние метрики (все открытия ÷ письма),
- * а не выдаём неуникальные открытия за уникальные.
+ * Воронка из summary. Отчёты из старой истории (и однодневной первой версии
+ * воронки без охваченных) не содержат нужных полей — для них честно показываем
+ * прежние метрики (все открытия ÷ письма), а не выдаём приблизительные.
  */
 function getFunnelDisplay(summary: ReportSummary): FunnelDisplayRows {
-  if (summary.funnel) {
+  const funnel = summary.funnel;
+  if (funnel && typeof funnel.contacted === 'number' && funnel.openPctOfContacted !== undefined) {
     return {
+      contactedValue: funnel.contacted,
       openedLabel: 'Общее количество уникальных открытий',
-      openedValue: summary.funnel.openedUnique,
-      openedConv: `${summary.funnel.openPctOfContacts}% от контактов`,
-      repliesConv: `${summary.funnel.replyPctOfOpened}% от открывших`,
+      openedValue: funnel.openedUnique,
+      openedConv: `${funnel.openPctOfContacted}% от охваченных`,
+      repliesConv: `${funnel.replyPctOfOpened}% от открывших`,
     };
   }
   return {
+    contactedValue: null,
     openedLabel: 'Общее количество открытий',
     openedValue: summary.totalOpened,
     openedConv: `${summary.conversion.openPctAllEmails}%`,
     repliesConv: `${summary.conversion.replyPctByLeads}%`,
   };
+}
+
+const CONTACTED_ROW_LABEL = 'Охвачено лидов (вкл. повторные касания)';
+const CONTACTS_ROW_LABEL = 'Взято в работу (первый контакт)';
+const REMAINING_ROW_LABEL = 'Остаток базы (ещё не в работе)';
+
+/**
+ * Остаток базы (Σ по кампаниям max(0, leads − contacts)). Надёжен у активных
+ * кампаний (Instantly даёт размер базы), у завершённых = 0 (база отработана).
+ * Клампим на уровне кампании — из summary при наличии, иначе из campaignData.
+ */
+function totalRemainingBase(summary: ReportSummary, campaigns: CampaignRecordView[]): number {
+  if (typeof summary.totalRemaining === 'number') return summary.totalRemaining;
+  return campaigns.reduce((s, c) => s + Math.max(0, num(c.leads) - num(c.contacts)), 0);
 }
 
 const STEP_TRANSITION_NOTE =
@@ -330,6 +363,7 @@ function StyledReportView({
 }) {
   const campaigns = Object.values(campaignData);
   const funnelRows = getFunnelDisplay(summary);
+  const totalRemaining = totalRemainingBase(summary, campaigns);
 
   const cell = 'px-3 py-2 text-sm border border-gray-300';
   const headerCell = `${cell} font-semibold text-white`;
@@ -366,6 +400,12 @@ function StyledReportView({
                   style={{ backgroundColor: REPORT_COLORS.headerBg }}
                 >
                   Контактов
+                </th>
+                <th
+                  className={headerCell}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  Охвачено
                 </th>
                 <th
                   className={headerCell}
@@ -413,7 +453,7 @@ function StyledReportView({
             </thead>
             <tbody>
               {campaigns.map((c) => {
-                const { openedUnique, openPct } = campaignOpenStats(c);
+                const { openedUnique, contactedDisplay, openPct } = campaignOpenStats(c);
                 const replyPct =
                   c.contacts > 0 ? ((c.replies / c.contacts) * 100).toFixed(1) : '0.0';
                 const remainingBase = Math.max(0, c.leads - c.contacts);
@@ -421,6 +461,7 @@ function StyledReportView({
                   <tr key={c.name} className="bg-white">
                     <td className={`${cell} text-gray-900`}>{c.name}</td>
                     <td className={`${cell} text-gray-900 text-right`}>{c.contacts}</td>
+                    <td className={`${cell} text-gray-900 text-right`}>{contactedDisplay ?? '—'}</td>
                     <td className={`${cell} text-gray-900 text-right`}>{openedUnique}</td>
                     <td className={`${cell} text-gray-900 text-right`}>{openPct}%</td>
                     <td className={`${cell} text-gray-900 text-right`}>{c.replies}</td>
@@ -465,8 +506,22 @@ function StyledReportView({
             </thead>
             <tbody>
               <tr className="bg-white">
-                <td className={`${cell} font-medium text-gray-900`}>Общее количество контактов</td>
+                <td className={`${cell} font-medium text-gray-900`}>
+                  {funnelRows.contactedValue !== null ? CONTACTS_ROW_LABEL : 'Общее количество контактов'}
+                </td>
                 <td className={`${cell} text-gray-900`}>{summary.totalContacts}</td>
+                <td className={cell} />
+              </tr>
+              {funnelRows.contactedValue !== null && (
+                <tr className="bg-white">
+                  <td className={`${cell} font-medium text-gray-900`}>{CONTACTED_ROW_LABEL}</td>
+                  <td className={`${cell} text-gray-900`}>{funnelRows.contactedValue}</td>
+                  <td className={cell} />
+                </tr>
+              )}
+              <tr className="bg-white">
+                <td className={`${cell} font-medium text-gray-900`}>{REMAINING_ROW_LABEL}</td>
+                <td className={`${cell} text-gray-900`}>{totalRemaining}</td>
                 <td className={cell} />
               </tr>
               <tr className="bg-white">
@@ -491,13 +546,6 @@ function StyledReportView({
               <tr className="bg-white">
                 <td className={`${cell} font-medium text-gray-900`}>{MANUAL_LEADS_LABEL}</td>
                 <td className={cell} />
-                <td className={cell} />
-              </tr>
-              <tr className="bg-white">
-                <td className={`${cell} font-medium text-gray-900`}>
-                  Общее количество лидов в базе
-                </td>
-                <td className={`${cell} text-gray-900`}>{summary.totalLeads}</td>
                 <td className={cell} />
               </tr>
               <tr className="bg-white">
@@ -733,7 +781,7 @@ function buildSheetsHtmlReport({
     sectionCell: `background:#ffffff; font-weight:700; font-size:12px; color:#111827; padding:12px 12px 6px 12px;`,
   } as const;
 
-  const colWidthsPx = [SHEETS_COL_A_WIDTH_PX, 96, 130, 120, 90, 90, 120, 140, 120] as const;
+  const colWidthsPx = [SHEETS_COL_A_WIDTH_PX, 96, 96, 130, 120, 90, 90, 120, 140, 120] as const;
   const colgroup = `<colgroup>${colWidthsPx
     .map((w) => `<col style="width:${w}px" width="${w}">`)
     .join('')}</colgroup>`;
@@ -751,19 +799,20 @@ function buildSheetsHtmlReport({
   // Title + Period (merged across A..I)
   // Важно: `css.td` содержит `color:#111827` и может перетирать белый текст заголовка,
   // поэтому специфичные стили (title/period) должны быть ПОСЛЕ базовых.
-  rows.push(tr(td('Отчёт по email-кампании', `${css.td}; ${css.titleCell}`, 9)));
-  rows.push(tr(td(escapeHtml(periodText), `${css.td}; ${css.periodCell}`, 9)));
+  rows.push(tr(td('Отчёт по email-кампании', `${css.td}; ${css.titleCell}`, 10)));
+  rows.push(tr(td(escapeHtml(periodText), `${css.td}; ${css.periodCell}`, 10)));
 
   // Spacer
-  rows.push(tr(td('&nbsp;', `${css.td}; padding:6px 0; border-left:1px solid ${REPORT_COLORS.border}; border-right:1px solid ${REPORT_COLORS.border};`, 9)));
+  rows.push(tr(td('&nbsp;', `${css.td}; padding:6px 0; border-left:1px solid ${REPORT_COLORS.border}; border-right:1px solid ${REPORT_COLORS.border};`, 10)));
 
   // Campaign stats section
-  rows.push(tr(td('Статистика по кампаниям:', `${css.sectionCell}; ${css.td}`, 9)));
+  rows.push(tr(td('Статистика по кампаниям:', `${css.sectionCell}; ${css.td}`, 10)));
   rows.push(
     tr(
       [
         th('Название кампании', `${css.th}; text-align:left; ${css.colA}`),
         th('Контактов', css.th),
+        th('Охвачено', css.th),
         th('Уник. открытий', css.th),
         th('% открываемости', css.th),
         th('Ответов', css.th),
@@ -775,7 +824,7 @@ function buildSheetsHtmlReport({
     )
   );
   for (const c of campaigns) {
-    const { openedUnique, openPct } = campaignOpenStats(c);
+    const { openedUnique, contactedDisplay, openPct } = campaignOpenStats(c);
     const replyPct = c.contacts > 0 ? ((c.replies / c.contacts) * 100).toFixed(1) : '0.0';
     const remainingBase = Math.max(0, c.leads - c.contacts);
     rows.push(
@@ -783,6 +832,7 @@ function buildSheetsHtmlReport({
         [
           td(escapeHtml(c.name), `${css.td}; ${css.colA}`),
           td(String(c.contacts), `${css.td}; ${css.tdRight}`),
+          td(contactedDisplay === null ? '—' : String(contactedDisplay), `${css.td}; ${css.tdRight}`),
           td(String(openedUnique), `${css.td}; ${css.tdRight}`),
           td(`${openPct}%`, `${css.td}; ${css.tdRight}`),
           td(String(c.replies), `${css.td}; ${css.tdRight}`),
@@ -796,27 +846,34 @@ function buildSheetsHtmlReport({
   }
 
   // Spacer
-  rows.push(tr(td('&nbsp;', `${css.td}; padding:8px 0;`, 9)));
+  rows.push(tr(td('&nbsp;', `${css.td}; padding:8px 0;`, 10)));
 
-  // Overall section (use A..C; merge D..I as empty)
-  rows.push(tr(td('Общая статистика:', `${css.sectionCell}; ${css.td}`, 9)));
+  // Overall section (use A..C; merge D..J as empty)
+  rows.push(tr(td('Общая статистика:', `${css.sectionCell}; ${css.td}`, 10)));
   rows.push(
     tr(
       [
         th('Показатель', `${css.th}; text-align:left; ${css.colA}`),
         th('Значение', css.th),
         th('Конверсия из предыдущего этапа', css.th),
-        td('&nbsp;', `${css.td}; border-left:none;`, 6),
+        td('&nbsp;', `${css.td}; border-left:none;`, 7),
       ].join('')
     )
   );
   const overallRows: Array<[string, string, string]> = [
-    ['Общее количество контактов', String(summary.totalContacts), ''],
+    [
+      funnelRows.contactedValue !== null ? CONTACTS_ROW_LABEL : 'Общее количество контактов',
+      String(summary.totalContacts),
+      '',
+    ],
+    ...(funnelRows.contactedValue !== null
+      ? ([[CONTACTED_ROW_LABEL, String(funnelRows.contactedValue), '']] as Array<[string, string, string]>)
+      : []),
+    [REMAINING_ROW_LABEL, String(totalRemainingBase(summary, campaigns)), ''],
     ['Общее количество отправленных писем', String(summary.totalEmailsSent), ''],
     [funnelRows.openedLabel, String(funnelRows.openedValue), funnelRows.openedConv],
     ['Общее количество ответов', String(summary.totalReplies), funnelRows.repliesConv],
     [MANUAL_LEADS_LABEL, '', ''],
-    ['Общее количество лидов в базе', String(summary.totalLeads), ''],
     ['Общее количество бракованных', String(summary.totalBounced), ''],
   ];
   for (const [label, value, conv] of overallRows) {
@@ -826,24 +883,24 @@ function buildSheetsHtmlReport({
           td(escapeHtml(label), `${css.td}; ${css.colA}; font-weight:600; white-space:normal;`),
           td(escapeHtml(value), css.td),
           td(escapeHtml(conv), css.td),
-          td('&nbsp;', `${css.td}; border-left:none;`, 6),
+          td('&nbsp;', `${css.td}; border-left:none;`, 7),
         ].join('')
       )
     );
   }
 
   // Spacer
-  rows.push(tr(td('&nbsp;', `${css.td}; padding:8px 0;`, 9)));
+  rows.push(tr(td('&nbsp;', `${css.td}; padding:8px 0;`, 10)));
 
-  // Details section (use A..G; merge H..I)
-  rows.push(tr(td('Детализация по письмам:', `${css.sectionCell}; ${css.td}`, 9)));
+  // Details section (use A..G; merge H..J)
+  rows.push(tr(td('Детализация по письмам:', `${css.sectionCell}; ${css.td}`, 10)));
   rows.push(
-    tr(td(escapeHtml(STEP_TRANSITION_NOTE), `${css.td}; font-size:10px; color:#6b7280;`, 9))
+    tr(td(escapeHtml(STEP_TRANSITION_NOTE), `${css.td}; font-size:10px; color:#6b7280;`, 10))
   );
 
   for (const c of campaigns) {
     rows.push(
-      tr([td(escapeHtml(c.name), `${css.td}; ${css.subheader}`, 7), td('&nbsp;', `${css.td}; border-left:none;`, 2)].join(''))
+      tr([td(escapeHtml(c.name), `${css.td}; ${css.subheader}`, 7), td('&nbsp;', `${css.td}; border-left:none;`, 3)].join(''))
     );
     rows.push(
       tr(
@@ -855,7 +912,7 @@ function buildSheetsHtmlReport({
           th('CLICKED', css.th),
           th('OPPORTUNITIES', css.th),
           th('ДОШЛО ДО СЛЕД. ШАГА', css.th),
-          td('&nbsp;', `${css.td}; border-left:none;`, 2),
+          td('&nbsp;', `${css.td}; border-left:none;`, 3),
         ].join('')
       )
     );
@@ -875,7 +932,7 @@ function buildSheetsHtmlReport({
             td('0', `${css.td}; ${css.tdRight}`),
             td('0', `${css.td}; ${css.tdRight}`),
             td('&nbsp;', css.td),
-            td('&nbsp;', `${css.td}; border-left:none;`, 2),
+            td('&nbsp;', `${css.td}; border-left:none;`, 3),
           ].join('')
         )
       );
@@ -898,7 +955,7 @@ function buildSheetsHtmlReport({
               td(String(step.totalClicked), `${css.td}; ${css.tdRight}; ${css.stepRow}`),
               td(String(step.totalOpportunities), `${css.td}; ${css.tdRight}; ${css.stepRow}`),
               td(transitionText, `${css.td}; ${css.tdRight}; ${css.stepRow}`),
-              td('&nbsp;', `${css.td}; border-left:none;`, 2),
+              td('&nbsp;', `${css.td}; border-left:none;`, 3),
             ].join('')
           )
         );
@@ -917,7 +974,7 @@ function buildSheetsHtmlReport({
                 td(String(v.clicked), `${css.td}; ${css.tdRight}`),
                 td(String(v.opportunities), `${css.td}; ${css.tdRight}`),
                 td('&nbsp;', css.td),
-                td('&nbsp;', `${css.td}; border-left:none;`, 2),
+                td('&nbsp;', `${css.td}; border-left:none;`, 3),
               ].join('')
             )
           );
@@ -926,7 +983,7 @@ function buildSheetsHtmlReport({
     }
 
     // Spacer between campaigns
-    rows.push(tr(td('&nbsp;', `${css.td}; padding:8px 0;`, 9)));
+    rows.push(tr(td('&nbsp;', `${css.td}; padding:8px 0;`, 10)));
   }
 
   return `
@@ -1018,6 +1075,7 @@ async function downloadExcelFormatted(
   ws.columns = [
     { width: 42 },
     { width: 12 },
+    { width: 12 },
     { width: 28 },
     { width: 14 },
     { width: 26 },
@@ -1030,15 +1088,15 @@ async function downloadExcelFormatted(
   let row = 1;
 
   const mergeAndStyle = (r: number, _from: string, _to: string, value: string, fill: string, fontColor: string) => {
-    ws.mergeCells(`A${r}:I${r}`);
+    ws.mergeCells(`A${r}:J${r}`);
     const cell = ws.getCell(r, 1);
     cell.value = value;
     setCellStyle(cell, { fill, fontBold: true, fontColor, border: true });
   };
 
-  mergeAndStyle(row, 'A', 'I', 'Отчёт по email-кампании', EXCEL_COLORS.titleBg, EXCEL_COLORS.white);
+  mergeAndStyle(row, 'A', 'J', 'Отчёт по email-кампании', EXCEL_COLORS.titleBg, EXCEL_COLORS.white);
   row += 1;
-  mergeAndStyle(row, 'A', 'I', periodText, EXCEL_COLORS.periodBg, EXCEL_COLORS.black);
+  mergeAndStyle(row, 'A', 'J', periodText, EXCEL_COLORS.periodBg, EXCEL_COLORS.black);
   row += 2;
 
   ws.getCell(row, 1).value = 'Статистика по кампаниям:';
@@ -1048,6 +1106,7 @@ async function downloadExcelFormatted(
   const campaignHeaders = [
     'Название кампании',
     'Контактов',
+    'Охвачено',
     'Отправлено писем',
     'Уник. открытий',
     '% открываемости',
@@ -1064,12 +1123,13 @@ async function downloadExcelFormatted(
   row += 1;
 
   campaigns.forEach((c) => {
-    const { openedUnique, openPct } = campaignOpenStats(c);
+    const { openedUnique, contactedDisplay, openPct } = campaignOpenStats(c);
     const replyPct = c.contacts > 0 ? ((c.replies / c.contacts) * 100).toFixed(1) : '0.0';
     const remainingBase = Math.max(0, c.leads - c.contacts);
     const values = [
       c.name,
       c.contacts,
+      contactedDisplay === null ? '—' : contactedDisplay,
       c.totalEmailsSent,
       openedUnique,
       `${openPct}%`,
@@ -1100,17 +1160,24 @@ async function downloadExcelFormatted(
   row += 1;
 
   const overallRows: (string | number)[][] = [
-    ['Общее количество контактов', summary.totalContacts, ''],
+    [
+      funnelRows.contactedValue !== null ? CONTACTS_ROW_LABEL : 'Общее количество контактов',
+      summary.totalContacts,
+      '',
+    ],
+    ...(funnelRows.contactedValue !== null
+      ? [[CONTACTED_ROW_LABEL, funnelRows.contactedValue, ''] as (string | number)[]]
+      : []),
+    [REMAINING_ROW_LABEL, totalRemainingBase(summary, campaigns), ''],
     ['Общее количество отправленных писем', summary.totalEmailsSent, ''],
     [funnelRows.openedLabel, funnelRows.openedValue, funnelRows.openedConv],
     ['Общее количество ответов', summary.totalReplies, funnelRows.repliesConv],
     [MANUAL_LEADS_LABEL, '', ''],
-    ['Общее количество лидов в базе', summary.totalLeads, ''],
     ['Общее количество бракованных', summary.totalBounced, ''],
   ];
   const overallStartRow = row;
-  const repliesRowIdx = 3;
-  const manualLeadsRowIdx = 4;
+  const repliesRowIdx = overallRows.findIndex((r) => r[0] === 'Общее количество ответов');
+  const manualLeadsRowIdx = overallRows.findIndex((r) => r[0] === MANUAL_LEADS_LABEL);
   overallRows.forEach((rValues, idx) => {
     rValues.forEach((v, col) => {
       const cell = ws.getCell(row, col + 1);
