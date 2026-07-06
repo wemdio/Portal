@@ -892,7 +892,9 @@ services:
       - AMO_BASE_URL=${AMO_BASE_URL:-}
       - AMO_FIELD_YM_CLIENT_ID=${AMO_FIELD_YM_CLIENT_ID:-}
       - TBANK_TOKEN=${TBANK_TOKEN:-}
+      - TBANK_ACCOUNT=${TBANK_ACCOUNT:-40802810600001780269}
       - TOCHKA_JWT=${TOCHKA_JWT:-}
+      - BANK_OWN_INN=${BANK_OWN_INN:-165808519703}
     deploy:
       resources:
         limits:
