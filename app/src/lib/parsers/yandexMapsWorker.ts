@@ -2,7 +2,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo, logWarn } from '@/lib/loggerServer';
 import { decryptJsonAes256Gcm } from '@/lib/cryptoGcm';
 import { normalizeYandexOrgUrls } from '@/lib/parsers/yandexMapsUrlUtils';
-import { yandexMapsCollectLinksStream, yandexMapsHealth, yandexMapsParseOrgs } from '@/lib/parsers/yandexMapsServiceClient';
+import { YandexMapsBlockedError, yandexMapsCollectLinksStream, yandexMapsHealth, yandexMapsParseOrgs } from '@/lib/parsers/yandexMapsServiceClient';
 import { startTrace } from '@/lib/tracer';
 
 type ProxyCreds = { username: string; password: string };
@@ -153,7 +153,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
 
     void logInfo('parser.yandexmaps.collect.start', 'YandexMaps collect-links started', { jobId, searchUrlsCount: searchUrls.length }, logMeta);
 
-    const collectConcurrency = Number(process.env.YANDEXMAPS_COLLECT_CONCURRENCY ?? '4');
+    const collectConcurrency = Number(process.env.YANDEXMAPS_COLLECT_CONCURRENCY ?? '2');
     let completedUrls = 0;
     const proxy = buildProxy(job);
 
@@ -359,7 +359,10 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
           await supabaseAdmin.from('yandex_maps_organizations').upsert(rows, { onConflict: 'job_id,card_url' });
         }
 
-        processed += part.length;
+        // Считаем реально сохранённые организации, а не размер пачки — иначе
+        // UI показывает "4089/4089", когда Яндекс отдал пустые страницы и
+        // в БД записано сильно меньше.
+        processed += rows.length;
         await setJobPatch(jobId, {
           processed_organizations: processed,
           progress_stage: `parsing_organizations:${i + 1}/${chunks.length}`,
@@ -368,6 +371,18 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
         await partSpan?.end({ parsed: orgs.length, processed_links: processed });
       } catch (e) {
         await partSpan?.fail(e);
+        if (e instanceof YandexMapsBlockedError) {
+          const msg = 'Яндекс временно блокирует запросы (детектит бот/капчу). Подождите 30–60 минут или смените прокси, затем перезапустите парсинг.';
+          await setJobPatch(jobId, {
+            status: 'failed',
+            error_message: msg,
+            progress_stage: 'yandex_blocked',
+            processed_organizations: processed,
+          });
+          void logWarn('parser.yandexmaps.parse.blocked', 'Yandex anti-bot triggered', { jobId, chunk: i + 1, processed }, logMeta);
+          await trace?.fail(e);
+          return;
+        }
         void logWarn('parser.yandexmaps.parse.chunk_failed', 'Parse-orgs chunk failed', { jobId, chunk: i + 1 }, logMeta);
       }
     }

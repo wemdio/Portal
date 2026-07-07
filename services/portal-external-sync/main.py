@@ -2,11 +2,17 @@
 portal-external-sync — nightly sync of external data into main-postgres.
 
 Sources: Yandex Metrika, AMO CRM, Точка Банк, Т-Банк.
-Schedule: EXTERNAL_SYNC_CRON (default '0 3 * * *' UTC), APScheduler cron trigger.
-Attribution to projects лежит отдельно — здесь только raw pulls.
 
-Manual run: EXTERNAL_SYNC_RUN_ON_STARTUP=true (полезно при первом деплое / бэкфилле).
-Логи по прогонам — таблица external_sync_runs (см. миграцию 20260706_0001).
+Расписание:
+- Cron `EXTERNAL_SYNC_CRON` (default '0 2 * * *' UTC = 5:00 МСК) через APScheduler.
+- На старте контейнера: если время старта попадает в окно
+  [STARTUP_WINDOW_START_MSK, STARTUP_WINDOW_END_MSK) МСК (default 3-9),
+  запускается синк сразу. Цель — при деплое в 3-5 МСК контейнер сам догонит
+  пропущенный ночной cron, но обычные рестарты в течение дня НЕ триггерят
+  ненужный синк. UPSERT-таблицы делают любой повторный прогон безопасным.
+
+Attribution to projects — отдельная задача, здесь только raw pulls.
+Логи по прогонам — таблица external_sync_runs.
 """
 from __future__ import annotations
 
@@ -14,6 +20,7 @@ import asyncio
 import os
 import sys
 import traceback
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -36,9 +43,13 @@ from sources.bank_tbank import BankTBankSync
 
 # ── Config ────────────────────────────────────────────────────────────────
 
-CRON = os.environ.get("EXTERNAL_SYNC_CRON", "0 3 * * *")
+CRON = os.environ.get("EXTERNAL_SYNC_CRON", "0 2 * * *")  # 5:00 МСК
 DATABASE_URL = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL", "")
-RUN_ON_STARTUP = os.environ.get("EXTERNAL_SYNC_RUN_ON_STARTUP", "false").lower() == "true"
+
+# Окно (по МСК), внутри которого рестарт контейнера триггерит синк сразу.
+STARTUP_WINDOW_START_MSK = int(os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK", "3"))
+STARTUP_WINDOW_END_MSK   = int(os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK", "9"))
+MSK_TZ = timezone(timedelta(hours=3))
 
 SOURCES = [
     MetrikaSync(),
@@ -76,10 +87,29 @@ async def run_all() -> None:
         print("[main] cycle finished", flush=True)
 
 
+# ── Startup window check ──────────────────────────────────────────────────
+
+def _in_startup_window() -> tuple[bool, str]:
+    """Проверяет, попадает ли текущий момент по МСК в окно deploy-догона.
+
+    Возвращает (should_run, human_reason).
+    """
+    now_msk = datetime.now(MSK_TZ)
+    hour = now_msk.hour
+    in_window = STARTUP_WINDOW_START_MSK <= hour < STARTUP_WINDOW_END_MSK
+    stamp = now_msk.strftime("%H:%M МСК")
+    window = f"{STARTUP_WINDOW_START_MSK:02d}:00-{STARTUP_WINDOW_END_MSK:02d}:00 МСК"
+    if in_window:
+        return True, f"старт в {stamp} — внутри deploy-окна {window} → синк сразу"
+    return False, f"старт в {stamp} — вне deploy-окна {window} → жду cron"
+
+
 # ── Entry ─────────────────────────────────────────────────────────────────
 
 async def main() -> None:
-    print(f"portal-external-sync starting; cron='{CRON}', run_on_startup={RUN_ON_STARTUP}", flush=True)
+    should_run, reason = _in_startup_window()
+    print(f"portal-external-sync starting; cron='{CRON}'", flush=True)
+    print(f"[main] {reason}", flush=True)
 
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -91,8 +121,7 @@ async def main() -> None:
     )
     scheduler.start()
 
-    if RUN_ON_STARTUP:
-        print("[main] EXTERNAL_SYNC_RUN_ON_STARTUP=true → immediate run", flush=True)
+    if should_run:
         await run_all()
 
     # Держим event loop живым; APScheduler крутится в фоне.
