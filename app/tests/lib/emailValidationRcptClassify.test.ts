@@ -31,6 +31,20 @@ describe('classifyRcpt5xx: настоящий user-unknown остаётся inva
     expect(classifyRcpt5xx('550 нет такого пользователя')).toBe('invalid');
   });
 
+  it('мёртвый role-ящик spf@/dkim@/dmarc@ (эхо адреса) остаётся invalid, не unknown', () => {
+    // Сервер эхом возвращает адрес; токен в localpart НЕ должен спутать с SPF-отказом
+    expect(classifyRcpt5xx('550 5.1.1 <spf@acme.com>: Recipient address rejected: User unknown')).toBe('invalid');
+    expect(classifyRcpt5xx('550 5.1.1 <dkim@acme.com>: No such user')).toBe('invalid');
+    expect(classifyRcpt5xx('550 5.1.1 <dmarc-reports@acme.com>: User unknown')).toBe('invalid');
+    // look-alike ДОМЕН тоже не должен ловиться
+    expect(classifyRcpt5xx('550 5.1.1 <bob@dmarc.io>: No such user')).toBe('invalid');
+  });
+
+  it('настоящий SPF/backscatter отказ (вне <скобок>) по-прежнему → unknown', () => {
+    expect(classifyRcpt5xx('550 5.7.23 <a@b.ru>: SPF check failed')).toBe('unknown');
+    expect(classifyRcpt5xx('550 5.1.1 <a@b.ru> Backscatter Protection detected an invalid or unauthenticated address')).toBe('unknown');
+  });
+
   it('policy/rate 5xx → unknown (как было)', () => {
     expect(classifyRcpt5xx('554 Transaction failed, spam policy')).toBe('unknown');
     expect(classifyRcpt5xx('550 5.7.1 message blocked')).toBe('unknown');

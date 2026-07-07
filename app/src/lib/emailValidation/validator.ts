@@ -325,7 +325,15 @@ export function classifyRcpt5xx(text: string | undefined): 'invalid' | 'unknown'
   // the server rejected our probe, not the mailbox. Checked FIRST so its 5.1.1
   // code isn't mistaken for "user unknown". A live mailbox can get this, so we
   // must NOT call it invalid — it's unverifiable.
-  if (RCPT_ANTIPROBE_RE.test(t)) return 'unknown';
+  //
+  // Strip the echoed <recipient@domain> first: most MTAs echo the probed address
+  // in the reply, so a genuinely-dead role/monitoring mailbox like <spf@…>,
+  // <dkim@…> or a look-alike domain like <x@dmarc.io> would otherwise match the
+  // SPF/DKIM/DMARC tokens and wrongly survive as 'unknown' — the dangerous
+  // direction (dead address kept → bounce). Real anti-probe phrasing
+  // ("Backscatter Protection", "SPF check failed") lives OUTSIDE the brackets.
+  const antiprobeText = t.replace(/<[^>]*>/g, ' ');
+  if (RCPT_ANTIPROBE_RE.test(antiprobeText)) return 'unknown';
   if (RCPT_USER_UNKNOWN_RE.test(t)) return 'invalid';
   if (RCPT_POLICY_BLOCK_RE.test(t)) return 'unknown';
   return 'invalid';
