@@ -217,7 +217,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         {/* Minimal bar — no card chrome. Logo left, controls (lang + sign out)
             anchored right via the flex-1 spacer; bg matches the page with a thin
             bottom hairline so scrolled content doesn't bleed under it. */}
-        <div className="flex items-center gap-2 sm:gap-3 px-3 py-2 sm:px-6 sm:py-2.5 mx-auto max-w-[1400px]">
+        <div className="flex items-center gap-2 sm:gap-3 px-3 py-2 sm:px-6 sm:py-2.5 mx-auto max-w-[1600px]">
           <button
             type="button"
             onClick={() => setDrawerOpen(true)}
@@ -332,7 +332,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         mode={navMode}
       />
 
-      {/* Layout shell: wrap sidebar + main in the same 1400px viewport-centered
+      {/* Layout shell: wrap sidebar + main in the same 1600px viewport-centered
           column the header uses (line 134), so:
             (a) sidebar's left edge sits at the header's left edge — they look
                 like one column, not two layout systems competing,
@@ -340,7 +340,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
                 rather than `viewport-minus-sidebar`, removing the ~140px
                 perceptual rightward drift the user flagged in the 2026-05-26
                 dashboard screenshot. */}
-      <div className="flex-1 flex w-full max-w-[1400px] mx-auto">
+      <div className="flex-1 flex w-full max-w-[1600px] mx-auto">
         <ClientSidebar activeId={activeId} locale={locale} mode={navMode} />
         <main className="flex-1 min-w-0 px-3 py-4 sm:px-4 sm:py-6 md:px-8 md:py-8">
           {children}

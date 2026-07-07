@@ -94,6 +94,11 @@ export async function generateHandoffReply(
   // rejects it ("Invalid model, expected provider/model"). `||` falls through.
   const model = options.model || process.env.LEAD_HANDOFF_MODEL || DEFAULT_MODEL;
   const maxRetries = options.maxRetries ?? 2;
+  // deepseek (текущий бэкенд policy/gemini-flash) — reasoning-модель: тратит
+  // 500–900 токенов на «размышления» ДО ответа, поэтому при max_tokens=600 ответ
+  // мог обрезаться (finish=length) и вернуться пустым/куцым. Даём запас; env для
+  // тюнинга без деплоя.
+  const maxTokens = Math.max(600, Number(process.env.LEAD_HANDOFF_MAX_TOKENS) || 2000);
   const framing = input.framing?.trim() || DEFAULT_HANDOFF_FRAMING;
   const systemPrompt = buildSystemPrompt(framing);
   const userMessage = buildUserMessage(input);
@@ -116,7 +121,7 @@ export async function generateHandoffReply(
             { role: 'user', content: userMessage },
           ],
           temperature: 0.4,
-          max_tokens: 600,
+          max_tokens: maxTokens,
         }),
       });
     } catch (err) {
@@ -129,10 +134,13 @@ export async function generateHandoffReply(
 
     if (response.ok) {
       const data = (await response.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
+        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
       };
-      const text = data.choices?.[0]?.message?.content?.trim() ?? '';
-      if (!text && attempt < maxRetries) {
+      const choice = data.choices?.[0];
+      const text = choice?.message?.content?.trim() ?? '';
+      // Обрезка по лимиту (reasoning съел бюджет) либо пустой ответ — ретраим,
+      // чтобы не отдать клиенту куцый/пустой драфт.
+      if ((choice?.finish_reason === 'length' || !text) && attempt < maxRetries) {
         await sleep(1500 * 2 ** attempt);
         continue;
       }
