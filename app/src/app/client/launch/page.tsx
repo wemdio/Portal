@@ -9,7 +9,7 @@ import {
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { authFetchJson } from '@/lib/authFetch';
 import { readSpreadsheetFile } from '@/lib/spreadsheet/parseCSV';
-import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
+import { CLIENT_LAUNCH_ROW_LIMIT, CLIENT_LAUNCH_DRAFT_KEY } from '@/lib/clientLaunch/constants';
 import {
   CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP,
   type ClientLaunchColumnMapping,
@@ -75,7 +75,7 @@ interface LaunchResult {
  * or a tab refresh without losing 40 minutes of typing — the most
  * catastrophic failure mode flagged in /impeccable critique 2026-05-24.
  */
-const DRAFT_KEY = 'client.launch.draft.v1';
+const DRAFT_KEY = CLIENT_LAUNCH_DRAFT_KEY;
 
 interface DraftPayload {
   campaignName: string;
@@ -2242,7 +2242,7 @@ function SequenceStepEditor({
             aria-hidden
           />
           <span style={{ color: 'var(--cp-paper-mute)' }}>
-            Новая тема создаст отдельную ветку — получатель не увидит историю переписки. Оставьте пустым, чтобы продолжить ту же ветку.
+            Своя тема здесь начнёт новую ветку письма. Обычно у последующих писем тему оставляют пустой — тогда они идут в той же переписке.
           </span>
         </div>
       )}

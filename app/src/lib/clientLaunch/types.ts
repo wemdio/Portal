@@ -29,15 +29,15 @@ export interface ClientLaunchSequenceStep {
   body: string;
   wait_days: number;
   /**
-   * Optional A/B/C variants. When present, Instantly randomises which variant
+   * Optional A/B/C/D variants. When present, Instantly randomises which variant
    * is sent to each lead. The step's own `subject`+`body` is treated as
-   * Variant A, and `variants[]` are extra variants (max 2 → 3 total per step).
+   * Variant A, and `variants[]` are extra variants (max 3 → 4 total per step).
    */
   variants?: ClientLaunchSequenceVariant[];
 }
 
 /** Max total variants per step (Variant A is the step itself + N entries in variants[]). */
-export const CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP = 3;
+export const CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP = 4;
 
 /**
  * Schedule override that the client can submit per-launch from the launch UI.

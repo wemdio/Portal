@@ -28,6 +28,12 @@ import 'server-only';
 export interface CompanyForClassify {
   name: string;
   website: string;
+  /** Индустрии HH — уже парсятся в hhAutoParser, дают сильный сигнал типа клиента. */
+  industries?: string[];
+  /** «О компании» с HH-профиля (очищенное, ≤400 симв) — проясняет unclear. */
+  description?: string;
+  /** Заголовок вакансии, поднявшей компанию (доп. контекст ниши). */
+  vacancyTitle?: string;
 }
 
 export interface LlmNoiseResult {
@@ -67,7 +73,7 @@ const NOISE_CATEGORIES = new Set(['B2C', 'IP', 'GOV']);
 
 const SYSTEM_PROMPT = `Ты классифицируешь российские компании для базы B2B cold-outreach (продукт — платформа холодных email-рассылок, покупатель — компании, продающие другим бизнесам).
 
-Для КАЖДОЙ компании из списка определи по названию и домену, кому она продаёт:
+Для КАЖДОЙ компании из списка определи, кому она продаёт. Опирайся на ВСЕ данные строки: название, домен, «Индустрии HH», «Вакансия», «О компании». Описание и индустрии важнее домена: «Смарт» с индустрией «Разработка ПО» и описанием про CRM — это B2B, даже если по названию неясно.
 - B2B — бизнесам: софт, IT-услуги, интеграторы, промышленность/опт, агентства, консалтинг, HR-услуги для компаний, поставщики В потребительские вертикали (оборудование для ресторанов, финтех для школ — это B2B).
 - B2C — физлицам: онлайн-школы/курсы/репетиторы, ритейл и интернет-магазины, услуги населению (ремонт, такси, салоны), недвижимость физлицам, медиа/ТВ/игры для аудитории, спортклубы, отели, развлечения.
 - MIXED — заметно и бизнесу, и физлицам.
@@ -214,7 +220,14 @@ export async function llmClassifyNoise(
   const sanitize = (s: string): string => s.replace(/\s+/g, ' ').trim().slice(0, 120);
   const listingOf = (items: readonly CompanyForClassify[]): string =>
     items
-      .map((c, j) => `${j + 1}. ${sanitize(c.name) || '(без названия)'} — ${sanitize(c.website) || '(без сайта)'}`)
+      .map((c, j) => {
+        const parts = [`${j + 1}. ${sanitize(c.name) || '(без названия)'} — ${sanitize(c.website) || '(без сайта)'}`];
+        const ind = (c.industries ?? []).map((x) => sanitize(x)).filter(Boolean).join(', ');
+        if (ind) parts.push(`   Индустрии HH: ${ind}`);
+        if (c.vacancyTitle) parts.push(`   Вакансия: ${sanitize(c.vacancyTitle)}`);
+        if (c.description) parts.push(`   О компании: ${sanitize(c.description)}`);
+        return parts.join('\n');
+      })
       .join('\n');
 
   // Ступень 1: классификация → кандидаты в шум.

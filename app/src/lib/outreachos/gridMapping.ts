@@ -14,6 +14,11 @@ import {
 } from '@/lib/tools/dfybUtils';
 import { isOutreachOsExcludedEmail } from './excludeLocalParts';
 import { isOutreachOsB2cCompany } from './excludeB2c';
+import {
+  EMPTY_SUPPRESSION,
+  isSuppressedLead,
+  type OutreachOsSuppression,
+} from './suppression';
 
 /** Заголовки сетки, которую кормим конструктору баз. */
 export const GRID_HEADER = ['Компания', 'Сайт', 'Город', 'Email'] as const;
@@ -87,7 +92,10 @@ export function employersToGrid(employers: HhEmployer[]): string[][] {
  * отсеивает невалид), по одной на уникальный email (split_emails + dedup_email).
  * Берём email / company_name / website, дедупим по email на всякий случай.
  */
-export function gridToLeadPayloads(grid: string[][]): LeadCreatePayload[] {
+export function gridToLeadPayloads(
+  grid: string[][],
+  suppression: OutreachOsSuppression = EMPTY_SUPPRESSION,
+): LeadCreatePayload[] {
   if (!grid || grid.length < 2) return [];
   const header = grid[0];
 
@@ -145,6 +153,11 @@ export function gridToLeadPayloads(grid: string[][]): LeadCreatePayload[] {
     // может прийти сетка, собранная в обход пайплайна). Проверяет название,
     // сайт И домен почты. До капов — исключённые не занимают квоту домена.
     if (isOutreachOsB2cCompany(company, website, email.slice(email.indexOf('@') + 1))) continue;
+
+    // SUPPRESSION: наши клиенты (AMO) — точная почта, домен почты или домен
+    // сайта. Конструктор мог найти почту на клиентском домене у компании,
+    // прошедшей рубеж по сайту, — поэтому проверка и здесь.
+    if (isSuppressedLead(email, website, suppression)) continue;
 
     // Потолок: не больше MAX_EMAILS_PER_DOMAIN почт на ДОМЕН КОМПАНИИ (по сайту).
     // НЕ по email-домену: иначе общие провайдеры (gmail.com/mail.ru/yandex.ru)
