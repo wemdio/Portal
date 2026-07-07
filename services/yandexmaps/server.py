@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from yandex_parser import Organization, ProxySettings, YandexMapsParser
+from yandex_parser import Organization, ProxySettings, YandexBlockedError, YandexMapsParser
 
 
 app = FastAPI()
@@ -185,6 +185,8 @@ async def parse_orgs(req: ParseOrgsRequest):
     except asyncio.TimeoutError:
       parser.stop()
       raise HTTPException(status_code=504, detail=f"parse-orgs timed out after {PARSE_TIMEOUT_SEC}s")
+    except YandexBlockedError as e:
+      raise HTTPException(status_code=429, detail=f"yandex_blocked: {e}")
     except Exception as e:
       raise HTTPException(status_code=500, detail=str(e))
     finally:

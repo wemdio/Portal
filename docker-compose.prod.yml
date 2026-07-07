@@ -771,7 +771,7 @@ services:
     # сотни zombie за день (сегодня 342). init: true = tini в роли PID 1.
     init: true
     environment:
-      - YANDEXMAPS_CONCURRENCY=4
+      - YANDEXMAPS_CONCURRENCY=2
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -870,10 +870,19 @@ services:
       - portal-network
 
   # Ночной синк внешних источников (Метрика / AMO / Точка / Т-Банк) в main-postgres.
-  # По умолчанию крутит cron '0 3 * * *' UTC через APScheduler (см. main.py).
-  # EXTERNAL_SYNC_RUN_ON_STARTUP=true — прогнать один раз сразу после старта
-  # контейнера (полезно при первом деплое / ручном бэкфилле). Attribution к
-  # проектам — отдельная задача, не в этом контейнере.
+  # Расписание cron '0 2 * * *' UTC (= 5:00 МСК) через APScheduler — совпадает
+  # с окном деплоев в 3-5 утра МСК, чтобы свежие данные были к утреннему часу.
+  #
+  # На старте контейнер проверяет текущее время по МСК: если попадает в окно
+  # [3:00, 9:00) — синк запускается сразу (догоняем пропущенный cron после
+  # деплоя). Вне окна — просто ждём следующего cron, не тратим API-запросы
+  # на каждый рестарт в течение дня. UPSERT-таблицы делают любой повторный
+  # прогон безопасным.
+  #
+  # Логи бинд-маунтятся на хост в /var/log/portal-external-sync/, чтобы
+  # переживать docker rm -f при деплое (иначе история stdout уходит вместе
+  # с контейнером). Внутри контейнера пишутся через tee — виден как в
+  # `docker logs`, так и в файле на хосте `tail /var/log/portal-external-sync/main.log`.
   portal-external-sync:
     image: ${DOCKER_USERNAME}/portal-external-sync:prod
     container_name: portal-external-sync
@@ -882,8 +891,9 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - SUPABASE_DB_URL=${SUPABASE_DB_URL}
-      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-0 23 * * *}  # 23:00 UTC = 2:00 МСК
-      - EXTERNAL_SYNC_RUN_ON_STARTUP=${EXTERNAL_SYNC_RUN_ON_STARTUP:-false}
+      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-0 2 * * *}  # 02:00 UTC = 5:00 МСК
+      - EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK:-3}
+      - EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK:-9}
       - YANDEX_METRIKA_TOKEN=${YANDEX_METRIKA_TOKEN:-}
       - YANDEX_METRIKA_COUNTER_ID=${YANDEX_METRIKA_COUNTER_ID:-62363425}
       - YANDEX_METRIKA_LOOKBACK_DAYS=${YANDEX_METRIKA_LOOKBACK_DAYS:-30}
@@ -895,6 +905,9 @@ services:
       - TBANK_ACCOUNT=${TBANK_ACCOUNT:-40802810600001780269}
       - TOCHKA_JWT=${TOCHKA_JWT:-}
       - BANK_OWN_INN=${BANK_OWN_INN:-165808519703}
+    volumes:
+      - /var/log/portal-external-sync:/var/log/sync
+    command: sh -c "mkdir -p /var/log/sync && exec python -u main.py 2>&1 | tee -a /var/log/sync/main.log"
     deploy:
       resources:
         limits:

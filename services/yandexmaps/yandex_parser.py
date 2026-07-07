@@ -1,8 +1,22 @@
 import os
+import random
 import re
 import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional
+
+
+class YandexBlockedError(Exception):
+  """Raised when Yandex likely blocks the parser (captcha / anti-bot page).
+
+  Detected when we can't extract organization names from several cards in a row —
+  either the page didn't load, or Yandex served a captcha stub.
+  """
+
+
+PARSE_MIN_DELAY_SEC = float(os.environ.get("YANDEXMAPS_PARSE_MIN_DELAY_SEC", "1.5"))
+PARSE_MAX_DELAY_SEC = float(os.environ.get("YANDEXMAPS_PARSE_MAX_DELAY_SEC", "3.0"))
+PARSE_MAX_CONSECUTIVE_EMPTY = int(os.environ.get("YANDEXMAPS_PARSE_MAX_CONSECUTIVE_EMPTY", "5"))
 
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -455,6 +469,7 @@ class YandexMapsParser:
     self.is_running = True
     organizations: list[Organization] = []
     deadline = time.monotonic() + max_seconds
+    consecutive_empty = 0
 
     try:
       if not self.driver:
@@ -467,8 +482,22 @@ class YandexMapsParser:
         org = self.parse_organization(url)
         if org.name:
           organizations.append(org)
-        time.sleep(0.2)
+          consecutive_empty = 0
+        else:
+          consecutive_empty += 1
+          if consecutive_empty >= PARSE_MAX_CONSECUTIVE_EMPTY:
+            self.log(
+              f"[!] {consecutive_empty} карточек подряд без данных — "
+              f"вероятно Яндекс включил антибот/капчу. Останавливаем чанк."
+            )
+            raise YandexBlockedError(
+              f"Не удалось извлечь данные из {consecutive_empty} карточек подряд. "
+              "Возможно, Яндекс временно блокирует запросы."
+            )
+        time.sleep(random.uniform(PARSE_MIN_DELAY_SEC, PARSE_MAX_DELAY_SEC))
       return organizations
+    except YandexBlockedError:
+      raise
     except Exception as e:
       self.log(f"[X] Критическая ошибка: {e}")
       return organizations
