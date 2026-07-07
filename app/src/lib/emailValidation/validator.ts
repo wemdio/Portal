@@ -131,10 +131,62 @@ const SMTP_PROXY_TIMEOUT_MS = 25_000;
 
 let proxyIndex = 0;
 
-function nextProxyUrl(): string {
-  const url = SMTP_PROXY_URLS[proxyIndex % SMTP_PROXY_URLS.length];
-  proxyIndex = (proxyIndex + 1) % SMTP_PROXY_URLS.length;
-  return url;
+// ─── Per-(MX host × egress IP) transport-block memory ───────────────────────
+// Some MX operators block a specific probe IP (e.g. Yandex silently drops the
+// 31.76.79.220 egress → the probe eats the full connect timeout, ~8s, before
+// failover). Without memory, round-robin sends ~1/N of every same-MX probe into
+// that dead wait. We remember (mxHost, proxyUrl) transport failures and, on the
+// NEXT probe to that MX, try known-good IPs FIRST and blocked ones LAST — so
+// after ONE learning probe the ~8s penalty disappears for the rest of the job.
+//
+// This only REORDERS the failover sequence; a blocked IP is still tried as a
+// last resort, and entries expire, so it never drops coverage and never changes
+// a verdict — it only avoids known-dead waits.
+const SMTP_EGRESS_BLOCK_TTL_MS = Number(
+  process.env.SMTP_EGRESS_BLOCK_TTL_MS ?? String(30 * 60 * 1000),
+);
+const mxEgressBlock = new Map<string, Map<string, number>>();
+
+function isEgressBlocked(mxHost: string, url: string): boolean {
+  const m = mxEgressBlock.get(mxHost);
+  const exp = m?.get(url);
+  if (exp === undefined) return false;
+  if (exp <= Date.now()) {
+    m!.delete(url);
+    if (m!.size === 0) mxEgressBlock.delete(mxHost);
+    return false;
+  }
+  return true;
+}
+
+function markEgressBlocked(mxHost: string, url: string): void {
+  let m = mxEgressBlock.get(mxHost);
+  if (!m) {
+    m = new Map();
+    mxEgressBlock.set(mxHost, m);
+  }
+  m.set(url, Date.now() + SMTP_EGRESS_BLOCK_TTL_MS);
+}
+
+/** Reset the egress-block memory (tests only). */
+export function __resetEgressBlockCache(): void {
+  mxEgressBlock.clear();
+  proxyIndex = 0;
+}
+
+/**
+ * Failover try-order for this MX: the global round-robin rotation (advanced once
+ * per call for load-spreading), but with IPs known to be blocked for THIS mx
+ * moved to the end so they're only used as a last resort.
+ */
+function proxyTryOrder(mxHost: string): string[] {
+  const n = SMTP_PROXY_URLS.length;
+  const rotated: string[] = [];
+  for (let i = 0; i < n; i += 1) rotated.push(SMTP_PROXY_URLS[(proxyIndex + i) % n]);
+  proxyIndex = (proxyIndex + 1) % n;
+  const good = rotated.filter((u) => !isEgressBlocked(mxHost, u));
+  const bad = rotated.filter((u) => isEgressBlocked(mxHost, u));
+  return good.concat(bad);
 }
 
 /**
@@ -176,8 +228,7 @@ async function smtpVerifyViaProxy(
   // MX — kept as the fallback to return if every other proxy is also blocked.
   let lastInconclusive: SmtpCheckResult | null = null;
 
-  for (let attempt = 0; attempt < SMTP_PROXY_URLS.length; attempt++) {
-    const baseUrl = nextProxyUrl();
+  for (const baseUrl of proxyTryOrder(mxHost)) {
     const url = `${baseUrl.replace(/\/+$/, '')}/smtp-check`;
 
     try {
@@ -206,8 +257,10 @@ async function smtpVerifyViaProxy(
       // all-null with no transport error) → return immediately.
       if (!isInconclusiveTransport(result)) return result;
       // This egress IP is blocked by the MX (e.g. the new probe IP can't reach
-      // Yandex). Remember it and retry the SAME probe via the next proxy/IP —
-      // failover, not round-robin, so complementary IPs strictly widen coverage.
+      // Yandex). Remember it so same-MX probes deprioritise it, and retry the
+      // SAME probe via the next proxy/IP — failover, not round-robin, so
+      // complementary IPs strictly widen coverage.
+      markEgressBlocked(mxHost, baseUrl);
       lastInconclusive = result;
       lastError = result.error;
       continue;
