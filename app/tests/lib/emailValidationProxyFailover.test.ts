@@ -22,6 +22,7 @@ type SmtpPayload = {
 };
 
 let validateEmail: (email: string, cache: Map<string, DomainInfo>) => Promise<ValidationResult>;
+let resetEgressCache: () => void;
 const fetchMock = jest.fn();
 
 beforeAll(async () => {
@@ -29,11 +30,14 @@ beforeAll(async () => {
   process.env.SMTP_PROXY_URLS = 'http://proxy-a.test:3100,http://proxy-b.test:3101';
   delete process.env.SMTP_PROXY_URL;
   global.fetch = fetchMock as unknown as typeof fetch;
-  ({ validateEmail } = await import('@/lib/emailValidation/validator'));
+  const mod = await import('@/lib/emailValidation/validator');
+  validateEmail = mod.validateEmail;
+  resetEgressCache = mod.__resetEgressBlockCache;
 });
 
 beforeEach(() => {
   fetchMock.mockReset();
+  resetEgressCache(); // память слепых IP не должна течь между кейсами
 });
 
 function reply(payload: SmtpPayload) {
@@ -91,5 +95,45 @@ describe('failover между probe-IP', () => {
     expect(res.result).toBe('unknown');
     expect(res.mx_found).toBe(true); // домен жив, просто не смогли достучаться
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('память слепых IP (устраняет 8с-простой при round-robin)', () => {
+  it('после обучения (IP-A слеп к MX) следующая проба к тому же MX идёт СРАЗУ на IP-B', async () => {
+    // проба 1: IP-A таймаут → failover на IP-B; IP-A помечается слепым для mx.corp.ru
+    fetchMock
+      .mockResolvedValueOnce(reply({ code: 0, exists: null, isCatchAll: null, greylist: false, error: 'connect ETIMEDOUT' }))
+      .mockResolvedValueOnce(reply({ code: 250, exists: true, isCatchAll: false, greylist: false }));
+    await validateEmail('user1@corp.ru', cacheWith('corp.ru', false));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // проба 2 к тому же домену: рабочий IP-B пробуется ПЕРВЫМ → 1 вызов,
+    // без 8с-ожидания на слепом IP-A (это и есть устранённая латентность)
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(reply({ code: 250, exists: true, isCatchAll: false, greylist: false }));
+    const res = await validateEmail('user2@corp.ru', cacheWith('corp.ru', false));
+    expect(res.result).toBe('ok');
+    expect(fetchMock).toHaveBeenCalledTimes(1); // не потратили попытку на слепой IP-A
+    expect(String(fetchMock.mock.calls[0][0])).toContain('proxy-b'); // пошли сразу на рабочий IP
+  });
+
+  it('слепой IP всё равно пробуется ПОСЛЕДНИМ, если рабочий тоже отказал (покрытие не теряется)', async () => {
+    // обучаемся: IP-A слеп к mx.corp.ru
+    fetchMock
+      .mockResolvedValueOnce(reply({ code: 0, exists: null, isCatchAll: null, greylist: false, error: 'connect ETIMEDOUT' }))
+      .mockResolvedValueOnce(reply({ code: 250, exists: true, isCatchAll: false, greylist: false }));
+    await validateEmail('user1@corp.ru', cacheWith('corp.ru', false));
+
+    // теперь IP-B (рабочий) отдаёт транспортный сбой, а IP-A (слепой, последний) — реальный ответ:
+    // порядок [B, A], B inconclusive → failover на A → A подтверждает ящик. Оба IP использованы.
+    fetchMock.mockReset();
+    fetchMock
+      .mockResolvedValueOnce(reply({ code: 0, exists: null, isCatchAll: null, greylist: false, error: 'connect ETIMEDOUT' }))
+      .mockResolvedValueOnce(reply({ code: 250, exists: true, isCatchAll: false, greylist: false }));
+    const res = await validateEmail('user2@corp.ru', cacheWith('corp.ru', false));
+    expect(res.result).toBe('ok'); // слепой IP всё же дал ответ — покрытие сохранено
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('proxy-b'); // рабочий первым
+    expect(String(fetchMock.mock.calls[1][0])).toContain('proxy-a'); // слепой последним
   });
 });

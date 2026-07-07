@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
-import { rowsToCsvFile } from '@/lib/tools/rowsToCsv';
+import { rowsToCsvChunks } from '@/lib/tools/rowsToCsv';
 
 const admin = supabaseAdmin!;
 
@@ -42,12 +42,28 @@ export async function GET(
       if (job.user_id !== user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
       const rows = Array.isArray(job.data) ? (job.data as unknown[][]) : [];
-      // rowsToCsvFile prepends a UTF-8 BOM so Excel opens it correctly (matches
-      // the old client blob); the BOM is covered by rowsToCsv.test.ts.
-      const csv = rowsToCsvFile(rows);
+      // Stream the CSV chunk-by-chunk instead of building the whole (tens-of-MB)
+      // string and returning it in one shot. rowsToCsvChunks yields the SAME
+      // bytes as rowsToCsvFile (UTF-8 BOM first, so Excel detects UTF-8) — the
+      // output is byte-identical, locked by rowsToCsv.test.ts — but the
+      // ReadableStream applies backpressure, so a 13k-row / 14MB export no longer
+      // builds a giant string and blocks the shared portal event loop (which
+      // stretched such exports to ~60s under load; small bases were unaffected).
+      const encoder = new TextEncoder();
+      const chunks = rowsToCsvChunks(rows);
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          const { value, done } = chunks.next();
+          if (done) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(encoder.encode(value));
+        },
+      });
       const filename = `constructor_${new Date().toISOString().slice(0, 10)}.csv`;
 
-      return new NextResponse(csv, {
+      return new NextResponse(stream, {
         status: 200,
         headers: {
           'content-type': 'text/csv; charset=utf-8',

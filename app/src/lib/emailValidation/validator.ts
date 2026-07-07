@@ -131,10 +131,62 @@ const SMTP_PROXY_TIMEOUT_MS = 25_000;
 
 let proxyIndex = 0;
 
-function nextProxyUrl(): string {
-  const url = SMTP_PROXY_URLS[proxyIndex % SMTP_PROXY_URLS.length];
-  proxyIndex = (proxyIndex + 1) % SMTP_PROXY_URLS.length;
-  return url;
+// ─── Per-(MX host × egress IP) transport-block memory ───────────────────────
+// Some MX operators block a specific probe IP (e.g. Yandex silently drops the
+// 31.76.79.220 egress → the probe eats the full connect timeout, ~8s, before
+// failover). Without memory, round-robin sends ~1/N of every same-MX probe into
+// that dead wait. We remember (mxHost, proxyUrl) transport failures and, on the
+// NEXT probe to that MX, try known-good IPs FIRST and blocked ones LAST — so
+// after ONE learning probe the ~8s penalty disappears for the rest of the job.
+//
+// This only REORDERS the failover sequence; a blocked IP is still tried as a
+// last resort, and entries expire, so it never drops coverage and never changes
+// a verdict — it only avoids known-dead waits.
+const SMTP_EGRESS_BLOCK_TTL_MS = Number(
+  process.env.SMTP_EGRESS_BLOCK_TTL_MS ?? String(30 * 60 * 1000),
+);
+const mxEgressBlock = new Map<string, Map<string, number>>();
+
+function isEgressBlocked(mxHost: string, url: string): boolean {
+  const m = mxEgressBlock.get(mxHost);
+  const exp = m?.get(url);
+  if (exp === undefined) return false;
+  if (exp <= Date.now()) {
+    m!.delete(url);
+    if (m!.size === 0) mxEgressBlock.delete(mxHost);
+    return false;
+  }
+  return true;
+}
+
+function markEgressBlocked(mxHost: string, url: string): void {
+  let m = mxEgressBlock.get(mxHost);
+  if (!m) {
+    m = new Map();
+    mxEgressBlock.set(mxHost, m);
+  }
+  m.set(url, Date.now() + SMTP_EGRESS_BLOCK_TTL_MS);
+}
+
+/** Reset the egress-block memory (tests only). */
+export function __resetEgressBlockCache(): void {
+  mxEgressBlock.clear();
+  proxyIndex = 0;
+}
+
+/**
+ * Failover try-order for this MX: the global round-robin rotation (advanced once
+ * per call for load-spreading), but with IPs known to be blocked for THIS mx
+ * moved to the end so they're only used as a last resort.
+ */
+function proxyTryOrder(mxHost: string): string[] {
+  const n = SMTP_PROXY_URLS.length;
+  const rotated: string[] = [];
+  for (let i = 0; i < n; i += 1) rotated.push(SMTP_PROXY_URLS[(proxyIndex + i) % n]);
+  proxyIndex = (proxyIndex + 1) % n;
+  const good = rotated.filter((u) => !isEgressBlocked(mxHost, u));
+  const bad = rotated.filter((u) => isEgressBlocked(mxHost, u));
+  return good.concat(bad);
 }
 
 /**
@@ -176,8 +228,7 @@ async function smtpVerifyViaProxy(
   // MX — kept as the fallback to return if every other proxy is also blocked.
   let lastInconclusive: SmtpCheckResult | null = null;
 
-  for (let attempt = 0; attempt < SMTP_PROXY_URLS.length; attempt++) {
-    const baseUrl = nextProxyUrl();
+  for (const baseUrl of proxyTryOrder(mxHost)) {
     const url = `${baseUrl.replace(/\/+$/, '')}/smtp-check`;
 
     try {
@@ -206,8 +257,10 @@ async function smtpVerifyViaProxy(
       // all-null with no transport error) → return immediately.
       if (!isInconclusiveTransport(result)) return result;
       // This egress IP is blocked by the MX (e.g. the new probe IP can't reach
-      // Yandex). Remember it and retry the SAME probe via the next proxy/IP —
-      // failover, not round-robin, so complementary IPs strictly widen coverage.
+      // Yandex). Remember it so same-MX probes deprioritise it, and retry the
+      // SAME probe via the next proxy/IP — failover, not round-robin, so
+      // complementary IPs strictly widen coverage.
+      markEgressBlocked(mxHost, baseUrl);
       lastInconclusive = result;
       lastError = result.error;
       continue;
@@ -240,6 +293,15 @@ export async function smtpVerify(
 
 // ─── 8. 5xx RCPT classification ──────────────────────────────────────────────
 
+// ANTI-PROBE rejections → the server rejected OUR probe (its sender/envelope/IP),
+// NOT the recipient. Even real, live mailboxes get these, so a 5xx here is NOT
+// proof the address is dead — treat as unverifiable ('unknown'). Observed on
+// strict corporate/pharma gateways: "550 5.1.1 Backscatter Protection detected
+// an invalid or unauthenticated address" for both real AND fake recipients.
+// Must be checked BEFORE user-unknown, because these replies often also carry a
+// 5.1.1 code that would otherwise be read as "user unknown".
+const RCPT_ANTIPROBE_RE =
+  /(backscatter|sender.?(verif|callout|callback|address.?verif)|call.?back|un.?authenticat|not.?authenticat|authentication.?(fail|requir)|\bspf\b|\bdkim\b|\bdmarc\b|relay(ing)?.?(denied|access)|reverse.?dns|missing.?ptr|no.?ptr)/i;
 // "user unknown" signals → the mailbox genuinely does not exist (invalid).
 const RCPT_USER_UNKNOWN_RE =
   /(no.?such.?(user|recipient|mailbox|address)|user.?unknown|unknown.?(user|recipient)|user.?not.?found|recipient.?(not.?found|rejected)|mailbox.?(unavailable|not.?found|disabled)|address.?(unknown|rejected)|does.?n.?.?t.?exist|not.?exist|invalid.?(recipient|mailbox|address)|5\.1\.[0-9]|нет.?такого|не.?существ|пользовател)/i;
@@ -259,6 +321,19 @@ const RCPT_POLICY_BLOCK_RE =
 export function classifyRcpt5xx(text: string | undefined): 'invalid' | 'unknown' {
   const t = (text ?? '').trim();
   if (!t) return 'invalid';
+  // Anti-probe rejection (backscatter / sender-verify / auth / relay-denied):
+  // the server rejected our probe, not the mailbox. Checked FIRST so its 5.1.1
+  // code isn't mistaken for "user unknown". A live mailbox can get this, so we
+  // must NOT call it invalid — it's unverifiable.
+  //
+  // Strip the echoed <recipient@domain> first: most MTAs echo the probed address
+  // in the reply, so a genuinely-dead role/monitoring mailbox like <spf@…>,
+  // <dkim@…> or a look-alike domain like <x@dmarc.io> would otherwise match the
+  // SPF/DKIM/DMARC tokens and wrongly survive as 'unknown' — the dangerous
+  // direction (dead address kept → bounce). Real anti-probe phrasing
+  // ("Backscatter Protection", "SPF check failed") lives OUTSIDE the brackets.
+  const antiprobeText = t.replace(/<[^>]*>/g, ' ');
+  if (RCPT_ANTIPROBE_RE.test(antiprobeText)) return 'unknown';
   if (RCPT_USER_UNKNOWN_RE.test(t)) return 'invalid';
   if (RCPT_POLICY_BLOCK_RE.test(t)) return 'unknown';
   return 'invalid';

@@ -1,4 +1,4 @@
-import { rowsToCsv, rowsToCsvFile } from '@/lib/tools/rowsToCsv';
+import { rowsToCsv, rowsToCsvFile, rowsToCsvChunks } from '@/lib/tools/rowsToCsv';
 
 describe('rowsToCsv', () => {
   it('quotes every cell and joins with comma / newline', () => {
@@ -51,5 +51,34 @@ describe('rowsToCsvFile', () => {
 
   it('still emits the BOM for an empty result', () => {
     expect(rowsToCsvFile([])).toBe('﻿');
+  });
+});
+
+describe('rowsToCsvChunks (streaming download)', () => {
+  const cases = [
+    [],
+    [['a']],
+    [['a', 'b'], ['c', 'd']],
+    [['say "hi"', 'a,b'], ['c\nd', ''], [null, undefined, 0]],
+    Array.from({ length: 25 }, (_, i) => [`r${i}`, `v${i}`, i]),
+  ] as ReadonlyArray<ReadonlyArray<ReadonlyArray<unknown>>>;
+
+  it('concatenated chunks are byte-identical to rowsToCsvFile, for every chunk size', () => {
+    for (const chunkRows of [1, 2, 3, 10, 1000]) {
+      for (const rows of cases) {
+        expect([...rowsToCsvChunks(rows, chunkRows)].join('')).toBe(rowsToCsvFile(rows));
+      }
+    }
+  });
+
+  it('yields the BOM first and only the BOM for empty input', () => {
+    expect([...rowsToCsvChunks([])]).toEqual(['﻿']);
+  });
+
+  it('guards chunkRows <= 0 / non-finite (no infinite loop, output still correct)', () => {
+    const rows = [['a'], ['b'], ['c']];
+    for (const bad of [0, -5, NaN]) {
+      expect([...rowsToCsvChunks(rows, bad)].join('')).toBe(rowsToCsvFile(rows));
+    }
   });
 });
