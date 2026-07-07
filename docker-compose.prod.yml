@@ -870,12 +870,14 @@ services:
       - portal-network
 
   # Ночной синк внешних источников (Метрика / AMO / Точка / Т-Банк) в main-postgres.
-  # Расписание cron '0 23 * * *' UTC (= 2:00 МСК) через APScheduler.
-  # EXTERNAL_SYNC_RUN_ON_STARTUP=true — прогнать один раз при старте контейнера.
-  # Полезно потому что деплой в 3-5 утра МСК пересоздаёт контейнер уже ПОСЛЕ
-  # 2:00 МСК и APScheduler «догонять» пропущенный триггер не умеет — RUN_ON_STARTUP
-  # решает это, синк идёт сразу после деплоя. UPSERT-таблицы позволяют перезапуск
-  # многократно без дублирования данных.
+  # Расписание cron '0 2 * * *' UTC (= 5:00 МСК) через APScheduler — совпадает
+  # с окном деплоев в 3-5 утра МСК, чтобы свежие данные были к утреннему часу.
+  #
+  # На старте контейнер проверяет текущее время по МСК: если попадает в окно
+  # [3:00, 9:00) — синк запускается сразу (догоняем пропущенный cron после
+  # деплоя). Вне окна — просто ждём следующего cron, не тратим API-запросы
+  # на каждый рестарт в течение дня. UPSERT-таблицы делают любой повторный
+  # прогон безопасным.
   #
   # Логи бинд-маунтятся на хост в /var/log/portal-external-sync/, чтобы
   # переживать docker rm -f при деплое (иначе история stdout уходит вместе
@@ -889,8 +891,9 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - SUPABASE_DB_URL=${SUPABASE_DB_URL}
-      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-0 23 * * *}  # 23:00 UTC = 2:00 МСК
-      - EXTERNAL_SYNC_RUN_ON_STARTUP=${EXTERNAL_SYNC_RUN_ON_STARTUP:-true}
+      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-0 2 * * *}  # 02:00 UTC = 5:00 МСК
+      - EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK:-3}
+      - EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK:-9}
       - YANDEX_METRIKA_TOKEN=${YANDEX_METRIKA_TOKEN:-}
       - YANDEX_METRIKA_COUNTER_ID=${YANDEX_METRIKA_COUNTER_ID:-62363425}
       - YANDEX_METRIKA_LOOKBACK_DAYS=${YANDEX_METRIKA_LOOKBACK_DAYS:-30}
