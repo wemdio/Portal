@@ -293,6 +293,15 @@ export async function smtpVerify(
 
 // ─── 8. 5xx RCPT classification ──────────────────────────────────────────────
 
+// ANTI-PROBE rejections → the server rejected OUR probe (its sender/envelope/IP),
+// NOT the recipient. Even real, live mailboxes get these, so a 5xx here is NOT
+// proof the address is dead — treat as unverifiable ('unknown'). Observed on
+// strict corporate/pharma gateways: "550 5.1.1 Backscatter Protection detected
+// an invalid or unauthenticated address" for both real AND fake recipients.
+// Must be checked BEFORE user-unknown, because these replies often also carry a
+// 5.1.1 code that would otherwise be read as "user unknown".
+const RCPT_ANTIPROBE_RE =
+  /(backscatter|sender.?(verif|callout|callback|address.?verif)|call.?back|un.?authenticat|not.?authenticat|authentication.?(fail|requir)|\bspf\b|\bdkim\b|\bdmarc\b|relay(ing)?.?(denied|access)|reverse.?dns|missing.?ptr|no.?ptr)/i;
 // "user unknown" signals → the mailbox genuinely does not exist (invalid).
 const RCPT_USER_UNKNOWN_RE =
   /(no.?such.?(user|recipient|mailbox|address)|user.?unknown|unknown.?(user|recipient)|user.?not.?found|recipient.?(not.?found|rejected)|mailbox.?(unavailable|not.?found|disabled)|address.?(unknown|rejected)|does.?n.?.?t.?exist|not.?exist|invalid.?(recipient|mailbox|address)|5\.1\.[0-9]|нет.?такого|не.?существ|пользовател)/i;
@@ -312,6 +321,11 @@ const RCPT_POLICY_BLOCK_RE =
 export function classifyRcpt5xx(text: string | undefined): 'invalid' | 'unknown' {
   const t = (text ?? '').trim();
   if (!t) return 'invalid';
+  // Anti-probe rejection (backscatter / sender-verify / auth / relay-denied):
+  // the server rejected our probe, not the mailbox. Checked FIRST so its 5.1.1
+  // code isn't mistaken for "user unknown". A live mailbox can get this, so we
+  // must NOT call it invalid — it's unverifiable.
+  if (RCPT_ANTIPROBE_RE.test(t)) return 'unknown';
   if (RCPT_USER_UNKNOWN_RE.test(t)) return 'invalid';
   if (RCPT_POLICY_BLOCK_RE.test(t)) return 'unknown';
   return 'invalid';
