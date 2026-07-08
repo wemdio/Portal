@@ -11,6 +11,7 @@ services:
     container_name: portal
     depends_on:
       - yandexmaps
+      - googleparsers
       - telegram-bot-api
       - transcribe-worker
     ports:
@@ -36,6 +37,8 @@ services:
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
       - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
+      - GOOGLEPARSERS_SERVICE_URL=http://googleparsers:8001
+      - GOOGLEPARSERS_PROXY_ENCRYPTION_KEY=${GOOGLEPARSERS_PROXY_ENCRYPTION_KEY}
       - POLZA_CRED_KEY=${POLZA_CRED_KEY}
       - TG_AGENT_BOT_TOKEN=${TG_AGENT_BOT_TOKEN}
       - OPENROUTER_AGENT_API_KEY=${OPENROUTER_AGENT_API_KEY}
@@ -73,12 +76,15 @@ services:
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
       - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
+      - GOOGLEPARSERS_SERVICE_URL=http://googleparsers:8001
+      - GOOGLEPARSERS_PROXY_ENCRYPTION_KEY=${GOOGLEPARSERS_PROXY_ENCRYPTION_KEY}
       - WORKER_POLL_INTERVAL_MS=3000
       - TG_TARGET_API_ID=${TG_TARGET_API_ID}
       - TG_TARGET_API_HASH=${TG_TARGET_API_HASH}
       - TG_TARGET_SESSION=${TG_TARGET_SESSION}
     depends_on:
       - yandexmaps
+      - googleparsers
     restart: unless-stopped
     networks:
       - portal-network
@@ -107,6 +113,37 @@ services:
     container_name: portal-yandexmaps
     ports:
       - "8010:8000"
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  googleparsers:
+    build:
+      context: ./services/googleparsers
+      dockerfile: Dockerfile
+    container_name: portal-googleparsers-dev
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  worker-googleparsers:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: portal-worker-googleparsers-dev
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - GOOGLEPARSERS_SERVICE_URL=http://googleparsers:8001
+      - GOOGLEPARSERS_CONCURRENCY=1
+      - GOOGLEPARSERS_PROXY_ENCRYPTION_KEY=${GOOGLEPARSERS_PROXY_ENCRYPTION_KEY}
+      - WORKER_POLL_INTERVAL_MS=3000
+      - WORKER_KIND=googleparsers
+    depends_on:
+      - googleparsers
     restart: unless-stopped
     networks:
       - portal-network
