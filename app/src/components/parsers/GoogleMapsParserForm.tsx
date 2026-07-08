@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Globe, Play, Loader2, Settings2, Shield } from 'lucide-react';
+import { GOOGLE_LANGUAGES, GOOGLE_REGIONS, ensureLocaleOption } from '@/lib/parsers/googleLocales';
 
 export type GoogleMapsFormValues = {
   inputLines: string;
@@ -80,6 +81,9 @@ export function GoogleMapsParserForm({
     [proxies],
   );
 
+  const languageOptions = useMemo(() => ensureLocaleOption(GOOGLE_LANGUAGES, language), [language]);
+  const regionOptions = useMemo(() => ensureLocaleOption(GOOGLE_REGIONS, region), [region]);
+
   const canSubmit = lineCount > 0 && !submitting;
 
   const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
@@ -107,130 +111,139 @@ export function GoogleMapsParserForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
-      {/* Queries section */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="p-5 border-b border-gray-100 bg-gray-50/50">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-                <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
-                  <Globe className="h-3.5 w-3.5" />
-                </span>
-                URL Google Maps или поисковые запросы
-              </h3>
-              <p className="text-sm text-gray-500 mt-1">
-                По строке — либо готовая ссылка на выдачу Google Maps, либо ключевая фраза.
-              </p>
-            </div>
-            <span className="inline-flex items-center rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-700/10 shrink-0">
-              {lineCount} запр.
-            </span>
-          </div>
-        </div>
-        <div className="p-5">
-          <textarea
-            className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none text-sm font-mono min-h-[150px] p-3"
-            placeholder="https://www.google.com/maps/search/cafe+moscow"
-            value={inputLines}
-            onChange={(e) => setInputLines(e.target.value)}
-          />
-        </div>
-      </div>
-
-      {/* Settings section */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="p-5 border-b border-gray-100 bg-gray-50/50">
-          <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-            <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-violet-100 text-violet-600">
-              <Settings2 className="h-3.5 w-3.5" />
-            </span>
-            Параметры
-          </h3>
-        </div>
-
-        <div className="p-5 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-gray-700">
-              Лимит организаций на запрос
-            </label>
-            <input
-              type="number"
-              min={1}
-              max={100}
-              value={limitPerQuery}
-              onChange={(e) => setLimitPerQuery(Number(e.target.value))}
-              className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
-            />
-            <p className="text-xs text-gray-500">1–100.</p>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-gray-700">Язык</label>
-            <input
-              type="text"
-              value={language}
-              onChange={(e) => setLanguage(e.target.value)}
-              className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
-              placeholder="ru"
-            />
-            <p className="text-xs text-gray-500">ISO 639-1 (ru, en, ...).</p>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-gray-700">Регион (ISO 3166)</label>
-            <input
-              type="text"
-              value={region}
-              onChange={(e) => setRegion(e.target.value.toUpperCase())}
-              className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
-              placeholder="RU"
-            />
-            <p className="text-xs text-gray-500">RU, US, DE, ...</p>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-gray-700">Мин. задержка, мс</label>
-            <input
-              type="number"
-              min={300}
-              max={30000}
-              value={minDelayMs}
-              onChange={(e) => setMinDelayMs(Number(e.target.value))}
-              className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
-            />
-            <p className="text-xs text-gray-500">300–30000 мс.</p>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-gray-700">Макс. задержка, мс</label>
-            <input
-              type="number"
-              min={minDelayMs}
-              max={60000}
-              value={maxDelayMs}
-              onChange={(e) => setMaxDelayMs(Number(e.target.value))}
-              className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
-            />
-            <p className="text-xs text-gray-500">Не меньше «мин. задержки», до 60000 мс.</p>
-          </div>
-
-          <div className="flex items-start gap-2 md:col-span-2 lg:col-span-3 rounded-lg border border-gray-200 bg-gray-50/60 p-3">
-            <input
-              id="google-maps-enrich-contacts"
-              type="checkbox"
-              className="mt-0.5 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-              checked={enrichContacts}
-              onChange={(e) => setEnrichContacts(e.target.checked)}
-            />
-            <label
-              htmlFor="google-maps-enrich-contacts"
-              className="text-sm text-gray-700 cursor-pointer select-none"
-            >
-              Искать email, LinkedIn и соцсети на сайте
-              <span className="block text-xs text-gray-500 mt-0.5">
-                Заходит на сайт компании после карточки и собирает публичные контакты.
+      {/* URLs + Parameters in one row (50/50 on lg) */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Queries section */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col">
+          <div className="p-5 border-b border-gray-100 bg-gray-50/50">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
+                    <Globe className="h-3.5 w-3.5" />
+                  </span>
+                  URL Google Maps или поисковые запросы
+                </h3>
+                <p className="text-sm text-gray-500 mt-1">
+                  По строке — либо готовая ссылка на выдачу Google Maps, либо ключевая фраза.
+                </p>
+              </div>
+              <span className="inline-flex items-center rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-700/10 shrink-0">
+                {lineCount} запр.
               </span>
-            </label>
+            </div>
+          </div>
+          <div className="p-5 flex-1 flex">
+            <textarea
+              className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none text-sm font-mono min-h-[280px] p-3"
+              placeholder="https://www.google.com/maps/search/cafe+moscow"
+              value={inputLines}
+              onChange={(e) => setInputLines(e.target.value)}
+            />
+          </div>
+        </div>
+
+        {/* Settings section */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="p-5 border-b border-gray-100 bg-gray-50/50">
+            <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+              <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-violet-100 text-violet-600">
+                <Settings2 className="h-3.5 w-3.5" />
+              </span>
+              Параметры
+            </h3>
+          </div>
+
+          <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-gray-700">
+                Лимит организаций на запрос
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={limitPerQuery}
+                onChange={(e) => setLimitPerQuery(Number(e.target.value))}
+                className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
+              />
+              <p className="text-xs text-gray-500">1–100</p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-gray-700">Язык</label>
+              <select
+                value={language}
+                onChange={(e) => setLanguage(e.target.value)}
+                className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
+              >
+                {languageOptions.map((opt) => (
+                  <option key={opt.code} value={opt.code}>
+                    {opt.label} ({opt.code})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-gray-700">Регион</label>
+              <select
+                value={region}
+                onChange={(e) => setRegion(e.target.value)}
+                className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
+              >
+                {regionOptions.map((opt) => (
+                  <option key={opt.code} value={opt.code}>
+                    {opt.label} ({opt.code})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-gray-700">Мин. задержка, мс</label>
+              <input
+                type="number"
+                min={300}
+                max={30000}
+                value={minDelayMs}
+                onChange={(e) => setMinDelayMs(Number(e.target.value))}
+                className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
+              />
+              <p className="text-xs text-gray-500">300–30000 мс</p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-gray-700">Макс. задержка, мс</label>
+              <input
+                type="number"
+                min={minDelayMs}
+                max={60000}
+                value={maxDelayMs}
+                onChange={(e) => setMaxDelayMs(Number(e.target.value))}
+                className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
+              />
+              <p className="text-xs text-gray-500">Не меньше «мин. задержки», до 60000 мс</p>
+            </div>
+
+            <div className="flex items-start gap-2 sm:col-span-2 rounded-lg border border-gray-200 bg-gray-50/60 p-3">
+              <input
+                id="google-maps-enrich-contacts"
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                checked={enrichContacts}
+                onChange={(e) => setEnrichContacts(e.target.checked)}
+              />
+              <label
+                htmlFor="google-maps-enrich-contacts"
+                className="text-sm text-gray-700 cursor-pointer select-none"
+              >
+                Искать email, LinkedIn и соцсети на сайте
+                <span className="block text-xs text-gray-500 mt-0.5">
+                  Заходит на сайт компании после карточки и собирает публичные контакты.
+                </span>
+              </label>
+            </div>
           </div>
         </div>
       </div>

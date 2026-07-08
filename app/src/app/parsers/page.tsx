@@ -27,8 +27,8 @@ export default function ParsersPage() {
         <p className="text-sm text-gray-500 mt-1">Инструменты для сбора данных</p>
       </div>
 
-      <div className="border-b border-gray-200">
-        <nav className="-mb-px flex space-x-8" aria-label="Tabs">
+      <div className="border-b border-gray-200 overflow-x-auto overflow-y-hidden pb-2">
+        <nav className="flex space-x-8 pr-6 min-w-max" aria-label="Tabs">
           <button
             onClick={() => setActiveTab('hh')}
             className={`
