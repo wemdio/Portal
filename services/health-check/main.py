@@ -1628,10 +1628,12 @@ async def run_li_outreach_report() -> None:
               COUNT(*) FILTER (WHERE message ILIKE '%Ошибка GPT%') AS err
             FROM li_campaign_logs WHERE created_at > NOW() - INTERVAL '24 hours'
         """)
+        # Only li_campaigns.ai_model is on the live GPT path. li_settings.openai_model
+        # is a dead BYOK-era column no code reads (see BYOK removal 2026-05), so a bare
+        # value there can't break Requesty — don't flag it (was a false 🔴 on 2026-07-08).
         bare = await conn.fetchrow("""
             SELECT
-              (SELECT COUNT(*) FROM li_campaigns WHERE ai_model IS NOT NULL AND ai_model<>'' AND ai_model NOT LIKE '%/%') AS camp,
-              (SELECT COUNT(*) FROM li_settings  WHERE openai_model IS NOT NULL AND openai_model<>'' AND openai_model NOT LIKE '%/%') AS sett
+              (SELECT COUNT(*) FROM li_campaigns WHERE ai_model IS NOT NULL AND ai_model<>'' AND ai_model NOT LIKE '%/%') AS camp
         """)
         byok = await conn.fetchval("""
             SELECT COUNT(*) FROM li_settings WHERE openai_api_key IS NOT NULL AND openai_api_key<>''
@@ -1656,7 +1658,7 @@ async def run_li_outreach_report() -> None:
         await conn.close()
 
     gpt_ok, gpt_noop, gpt_err = (gpt["ok"] or 0), (gpt["noop"] or 0), (gpt["err"] or 0)
-    bare_total = (bare["camp"] or 0) + (bare["sett"] or 0)
+    bare_total = bare["camp"] or 0
 
     def mark(v: int) -> str:
         return "✅" if v == 0 else "⚠️"
