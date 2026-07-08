@@ -181,10 +181,12 @@ afterEach(() => {
 describe('LI Outreach — user_id isolation on list endpoints', () => {
   // Cross-specialist visibility (2026-05): the accounts/campaigns LIST endpoints
   // intentionally return ALL specialists' rows so everyone sees every launch in
-  // one window. This is read-only — mutation/by-id endpoints still enforce
-  // ownership (covered by the "owner check" describe block below). A foreign
-  // account's proxy_url is redacted server-side so credentials don't leak.
-  it('GET /accounts returns all specialists’ accounts, redacting others’ proxy', async () => {
+  // one window. Team-wide edit access (2026-07): the accounts route now returns
+  // each account's proxy_url as-is — the shared Unipile account uses one
+  // proxy managed centrally, and per-account overrides are editable by any
+  // team member. (Previously the proxy_url was redacted to null for foreign
+  // accounts; that gate was removed together with the "только просмотр" UI.)
+  it('GET /accounts returns all specialists’ accounts with proxy visible', async () => {
     state.rowsByTable.li_accounts = [
       { id: 'a1', user_id: AUTH_USER_ID, name: 'Mine', proxy_url: 'http://mine:secret@h:1' },
       { id: 'a2', user_id: OTHER_USER_ID, name: 'NotMine', proxy_url: 'http://other:secret@h:2' },
@@ -196,9 +198,9 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     expect(accounts.map((a) => a.id).sort()).toEqual(['a1', 'a2']);
     // No user_id scoping on the list anymore.
     expect(ownsUserScope('li_accounts')).toBe(false);
-    // Own proxy preserved, the other specialist's proxy redacted to null.
+    // Both proxies are visible — team-wide edit access.
     expect(accounts.find((a) => a.id === 'a1')!.proxy_url).toBe('http://mine:secret@h:1');
-    expect(accounts.find((a) => a.id === 'a2')!.proxy_url).toBeNull();
+    expect(accounts.find((a) => a.id === 'a2')!.proxy_url).toBe('http://other:secret@h:2');
   });
 
   it('GET /campaigns returns all specialists’ campaigns (cross-user visibility)', async () => {
@@ -383,21 +385,24 @@ describe('LI Outreach — owner check on by-id campaign endpoints', () => {
     expect(body.campaign.id).toBe('c2');
   });
 
-  it('PUT /campaigns/[id] does not mutate a campaign owned by another user', async () => {
+  // Team-wide edit access (2026-07): PUT/start/stop on a foreign campaign now
+  // succeed (200) — any team member can edit any campaign. DELETE stays
+  // owner-only as a safety guard against destructive typos.
+  it('PUT /campaigns/[id] allows editing a campaign owned by another team member', async () => {
     seedCampaigns();
     const { PUT } = await import('@/app/api/tools/li-outreach/campaigns/[id]/route');
     const res = await PUT(
       makeReq('http://x/api/tools/li-outreach/campaigns/c2', {
         method: 'PUT',
-        body: JSON.stringify({ name: 'Hacked' }),
+        body: JSON.stringify({ name: 'Renamed by teammate' }),
         headers: { 'content-type': 'application/json' },
       }),
       { params: Promise.resolve({ id: 'c2' }) },
     );
-    expect([403, 404]).toContain((res as Response).status);
+    expect((res as Response).status).toBe(200);
   });
 
-  it('DELETE /campaigns/[id] does not delete a campaign owned by another user', async () => {
+  it('DELETE /campaigns/[id] does not delete a campaign owned by another user (owner-only)', async () => {
     seedCampaigns();
     const { DELETE } = await import('@/app/api/tools/li-outreach/campaigns/[id]/route');
     const res = await DELETE(makeReq('http://x/api/tools/li-outreach/campaigns/c2', { method: 'DELETE' }), {
@@ -406,22 +411,22 @@ describe('LI Outreach — owner check on by-id campaign endpoints', () => {
     expect([403, 404]).toContain((res as Response).status);
   });
 
-  it('POST /campaigns/[id]/start refuses a campaign owned by another user', async () => {
+  it('POST /campaigns/[id]/start allows starting a campaign owned by another team member', async () => {
     seedCampaigns();
     const { POST } = await import('@/app/api/tools/li-outreach/campaigns/[id]/start/route');
     const res = await POST(makeReq('http://x/api/tools/li-outreach/campaigns/c2/start', { method: 'POST' }), {
       params: Promise.resolve({ id: 'c2' }),
     });
-    expect([403, 404]).toContain((res as Response).status);
+    expect((res as Response).status).toBe(200);
   });
 
-  it('POST /campaigns/[id]/stop refuses a campaign owned by another user', async () => {
+  it('POST /campaigns/[id]/stop allows stopping a campaign owned by another team member', async () => {
     seedCampaigns();
     const { POST } = await import('@/app/api/tools/li-outreach/campaigns/[id]/stop/route');
     const res = await POST(makeReq('http://x/api/tools/li-outreach/campaigns/c2/stop', { method: 'POST' }), {
       params: Promise.resolve({ id: 'c2' }),
     });
-    expect([403, 404]).toContain((res as Response).status);
+    expect((res as Response).status).toBe(200);
   });
 
   it('GET /campaigns/[id]/stats returns a foreign campaign read-only', async () => {
@@ -582,7 +587,13 @@ describe('LI Outreach — account ownership guard on write paths', () => {
     expect((res as Response).status).toBe(403);
   });
 
-  it('PUT /campaigns/[id] rejects reassigning to another specialist’s account (403)', async () => {
+  // Team-wide edit access (2026-07): PUT reassigning a campaign to another
+  // team member's account is now allowed. The team is trusted with each
+  // other's Unipile accounts (they use one shared workspace anyway), and the
+  // previous 403 blocked the legit case where a teammate edits a foreign
+  // campaign and re-submits its unchanged account_id. POST (create) still
+  // guards this because new campaigns default to the creator's own account.
+  it('PUT /campaigns/[id] allows reassigning to another team member’s account', async () => {
     state.rowsByTable.li_campaigns = [
       { id: 'c1', user_id: AUTH_USER_ID, name: 'Mine', status: 'draft', lead_list_id: null },
     ];
@@ -596,7 +607,7 @@ describe('LI Outreach — account ownership guard on write paths', () => {
       }),
       { params: Promise.resolve({ id: 'c1' }) },
     );
-    expect((res as Response).status).toBe(403);
+    expect((res as Response).status).toBe(200);
   });
 
   it('PUT /campaigns/[id] allows reassigning to your OWN account', async () => {

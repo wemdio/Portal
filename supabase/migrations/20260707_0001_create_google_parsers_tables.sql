@@ -118,3 +118,16 @@ create policy google_news_results_own on public.google_news_results
   for all using (
     exists (select 1 from public.google_news_jobs j where j.id = job_id and j.user_id = auth.uid())
   );
+
+-- Grants. worker-googleparsers uses the service_role key to bypass RLS while
+-- polling and writing results. Regular users hit the tables through Next.js
+-- API routes with an authenticated JWT — RLS above narrows them to own rows.
+grant all on public.google_maps_jobs to service_role;
+grant all on public.google_maps_places to service_role;
+grant all on public.google_news_jobs to service_role;
+grant all on public.google_news_results to service_role;
+
+grant select, insert, update, delete on public.google_maps_jobs to authenticated;
+grant select, insert, update, delete on public.google_maps_places to authenticated;
+grant select, insert, update, delete on public.google_news_jobs to authenticated;
+grant select, insert, update, delete on public.google_news_results to authenticated;
