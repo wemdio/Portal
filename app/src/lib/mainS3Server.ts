@@ -1,6 +1,12 @@
 import 'server-only';
 
-import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  DeleteObjectCommand,
+} from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { Readable } from 'stream';
@@ -160,6 +166,11 @@ export async function getMainS3ObjectBuffer(key: string): Promise<Buffer | null>
     if (/NoSuchKey|NotFound/i.test(String(code))) return null;
     throw err;
   }
+}
+
+export async function deleteMainS3Object(key: string): Promise<void> {
+  const { s3, bucket } = getConfig();
+  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 }
 
 export async function mainS3ObjectExists(key: string): Promise<boolean> {

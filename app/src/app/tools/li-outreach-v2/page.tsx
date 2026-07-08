@@ -10,7 +10,6 @@ type Tab = 'campaigns' | 'leads' | 'dialogs' | 'logs' | 'settings';
 type Settings = {
   linkedin_email: string;
   linkedin_password: string;
-  proxy_url: string;
   connect_daily_limit: number;
   connect_weekly_limit: number;
   follow_up_daily_limit: number;
@@ -92,7 +91,6 @@ const API = '/api/tools/li-outreach-v2';
 const DEFAULT_SETTINGS: Settings = {
   linkedin_email: '',
   linkedin_password: '',
-  proxy_url: '',
   connect_daily_limit: 20,
   connect_weekly_limit: 100,
   follow_up_daily_limit: 25,
@@ -680,10 +678,12 @@ export default function LiOutreachV2Page() {
                 Сохранить
               </button>
             </div>
+            <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+              🔒 Прокси/VPN для LinkedIn управляется централизованно (env). Одинаков для всей команды.
+            </div>
             <div className="mt-5 grid gap-4 md:grid-cols-2">
               <Input label="LinkedIn email" value={settings.linkedin_email} onChange={(v) => setSettings({ ...settings, linkedin_email: v })} />
               <Input label="LinkedIn password" type="password" value={settings.linkedin_password} onChange={(v) => setSettings({ ...settings, linkedin_password: v })} />
-              <Input label="Proxy / VPN URL" value={settings.proxy_url} onChange={(v) => setSettings({ ...settings, proxy_url: v })} />
               <div className="grid grid-cols-3 gap-3">
                 <NumberInput label="Invite/day" value={settings.connect_daily_limit} onChange={(v) => setSettings({ ...settings, connect_daily_limit: v })} />
                 <NumberInput label="Invite/week" value={settings.connect_weekly_limit} onChange={(v) => setSettings({ ...settings, connect_weekly_limit: v })} />

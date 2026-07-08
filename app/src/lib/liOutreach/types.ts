@@ -58,18 +58,18 @@ export interface LiCampaignStep {
 export interface LiSettings {
   id: string;
   user_id: string;
-  unipile_dsn: string;
-  unipile_api_key: string;
-  // NOTE: the underlying table still has `openai_api_key` / `openai_model`
-  // columns from the BYOK era, but they're deliberately omitted from this
-  // interface so application code can't accidentally read them. AI creds for
-  // outreach now live in process.env.OPENROUTER_LI_OUTREACH_API_KEY (key)
-  // and li_campaigns.ai_model (per-campaign model override). The columns will
-  // be dropped in a follow-up destructive migration once we're confident no
-  // service still reads them — migration 20260525_0003 wiped the *values*
-  // for safety in the meantime.
+  // NOTE: the underlying table still has `openai_api_key` / `openai_model`,
+  // `unipile_dsn` / `unipile_api_key`, and `proxy_url` columns from the BYOK
+  // era, but they're deliberately omitted from this interface so application
+  // code can't accidentally read them. Central creds now live in env:
+  //   process.env.OPENROUTER_LI_OUTREACH_API_KEY  — AI (Requesty router)
+  //   process.env.UNIPILE_DSN / UNIPILE_API_KEY   — shared Unipile workspace
+  //   process.env.LI_PROXY_URL                    — shared LinkedIn proxy
+  // Per-campaign AI model override lives on `li_campaigns.ai_model`. The
+  // columns will be dropped in follow-up destructive migrations once we're
+  // confident no service still reads them — migrations 20260525_0003 and
+  // 20260708_0001 wiped the *values* for safety in the meantime.
   webhook_secret: string;
-  proxy_url: string;
   created_at: string;
   updated_at: string;
 }

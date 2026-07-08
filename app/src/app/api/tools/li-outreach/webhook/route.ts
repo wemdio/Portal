@@ -3,7 +3,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { safeEqual } from '@/lib/crypto/safeEqual';
 import { UnipileClient } from '@/lib/liOutreach/unipileClient';
 import { generateAutoReply, leadToInfo, parseMessageTemplate } from '@/lib/liOutreach/aiService';
-import type { LiLead, LiSettings, LiCampaign } from '@/lib/liOutreach/types';
+import type { LiLead, LiCampaign } from '@/lib/liOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -150,17 +150,13 @@ async function handleMessageReceived(payload: Record<string, unknown>): Promise<
     last_activity: new Date().toISOString(),
   }).eq('id', lead.id);
 
-  // Auto-reply if AI is configured. AI credentials now come from the central
-  // env Requesty router (BYOK in li_settings is deprecated — see migration
-  // 20260525_0003_li_outreach_drop_byok_keys.sql); we only still need the
-  // li_settings row for the Unipile DSN/api_key, since those *are* per-user.
-  const { data: settings } = await db
-    .from('li_settings')
-    .select('*')
-    .eq('user_id', lead.user_id)
-    .maybeSingle<LiSettings>();
+  // Auto-reply if AI is configured. Both AI creds AND Unipile creds now come
+  // from central env — BYOK in li_settings is fully deprecated (see migrations
+  // 20260525_0003 for AI and 20260708_0001 for Unipile).
   const aiApiKey = process.env.OPENROUTER_LI_OUTREACH_API_KEY ?? '';
-  if (!aiApiKey || !settings?.unipile_dsn) return;
+  const unipileDsn = process.env.UNIPILE_DSN ?? '';
+  const unipileApiKey = process.env.UNIPILE_API_KEY ?? '';
+  if (!aiApiKey || !unipileDsn || !unipileApiKey) return;
 
   // Find active campaign for this lead
   const { data: campaignLeads } = await db
@@ -183,7 +179,7 @@ async function handleMessageReceived(payload: Record<string, unknown>): Promise<
         leadToInfo(lead),
       );
       if (reply) {
-        const client = new UnipileClient(settings.unipile_dsn, settings.unipile_api_key, accountId || undefined);
+        const client = new UnipileClient(unipileDsn, unipileApiKey, accountId || undefined);
         try {
           await client.sendMessage(chatId, reply);
           const updatedHistory = [...history, { role: 'assistant', content: reply, ts: new Date().toISOString() }];
@@ -251,12 +247,10 @@ async function handleConnectionAccepted(payload: Record<string, unknown>): Promi
   const { data: campaign } = await db.from('li_campaigns').select('*').eq('id', campaignId).maybeSingle<LiCampaign>();
   if (!campaign?.welcome_message) return;
 
-  const { data: settings } = await db
-    .from('li_settings')
-    .select('*')
-    .eq('user_id', lead.user_id)
-    .maybeSingle<LiSettings>();
-  if (!settings?.unipile_dsn) return;
+  // Unipile creds from shared env (see migration 20260708_0001).
+  const unipileDsn = process.env.UNIPILE_DSN ?? '';
+  const unipileApiKey = process.env.UNIPILE_API_KEY ?? '';
+  if (!unipileDsn || !unipileApiKey) return;
 
   // Render template variables ({{first_name}}, {{company}}, …) before sending.
   // Without this, leads got literal "Hi {{first_name}}!" in their LinkedIn chat.
@@ -266,7 +260,7 @@ async function handleConnectionAccepted(payload: Record<string, unknown>): Promi
     return;
   }
 
-  const client = new UnipileClient(settings.unipile_dsn, settings.unipile_api_key, accountId || undefined);
+  const client = new UnipileClient(unipileDsn, unipileApiKey, accountId || undefined);
   try {
     let effectiveChatId = payloadChatId;
     if (!effectiveChatId) {

@@ -23,7 +23,6 @@ import type {
   LiCampaignLead,
   LiCampaignStep,
   LiLead,
-  LiSettings,
 } from './types';
 
 /**
@@ -123,15 +122,14 @@ export async function runCampaignTick(
     return { processed: 0, errors: 0 };
   }
 
-  // Load settings (for Unipile + OpenAI credentials)
-  const { data: settings } = await db
-    .from('li_settings')
-    .select('*')
-    .eq('user_id', userId)
-    .maybeSingle<LiSettings>();
-  if (!settings?.unipile_dsn || !settings?.unipile_api_key) {
-    console.warn(`[li-outreach] campaign ${campaignId}: no Unipile settings, skipping`);
-    log('error', 'Тик пропущен — не настроены Unipile DSN / API Key. Откройте вкладку «Настройки» и заполните их.');
+  // Unipile credentials come from the shared env — the studio uses ONE
+  // Unipile workspace across all specialists, so per-user BYOK in li_settings
+  // is deprecated (see migration 20260708_0001_li_outreach_shared_unipile.sql).
+  const unipileDsn = process.env.UNIPILE_DSN ?? '';
+  const unipileApiKey = process.env.UNIPILE_API_KEY ?? '';
+  if (!unipileDsn || !unipileApiKey) {
+    console.warn(`[li-outreach] campaign ${campaignId}: UNIPILE_DSN / UNIPILE_API_KEY not set in env, skipping`);
+    log('error', 'Тик пропущен — не сконфигурированы UNIPILE_DSN / UNIPILE_API_KEY в env на сервере. Обратитесь к админу.');
     return { processed: 0, errors: 0 };
   }
 
@@ -161,8 +159,8 @@ export async function runCampaignTick(
   }
 
   const client = new UnipileClient(
-    settings.unipile_dsn,
-    settings.unipile_api_key,
+    unipileDsn,
+    unipileApiKey,
     account?.unipile_account_id,
   );
 

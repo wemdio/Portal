@@ -12,8 +12,10 @@ import { AtsParserView } from '@/components/parsers/AtsParserView';
 import { EngHiringParserView } from '@/components/parsers/EngHiringParserView';
 import { EuUsCompanyBaseView } from '@/components/parsers/EuUsCompanyBaseView';
 import { CrunchbaseParserView } from '@/components/parsers/CrunchbaseParserView';
+import { GoogleMapsParserView } from '@/components/parsers/GoogleMapsParserView';
+import { GoogleNewsParserView } from '@/components/parsers/GoogleNewsParserView';
 
-type Tab = 'hh' | 'eng-hiring' | 'ats' | 'crunchbase' | 'eu-us-base' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto';
+type Tab = 'hh' | 'eng-hiring' | 'ats' | 'crunchbase' | 'eu-us-base' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto' | 'googlemaps' | 'googlenews';
 
 export default function ParsersPage() {
   const [activeTab, setActiveTab] = useState<Tab>('hh');
@@ -25,8 +27,8 @@ export default function ParsersPage() {
         <p className="text-sm text-gray-500 mt-1">Инструменты для сбора данных</p>
       </div>
 
-      <div className="border-b border-gray-200">
-        <nav className="-mb-px flex space-x-8" aria-label="Tabs">
+      <div className="border-b border-gray-200 overflow-x-auto overflow-y-hidden pb-2">
+        <nav className="flex space-x-8 pr-6 min-w-max" aria-label="Tabs">
           <button
             onClick={() => setActiveTab('hh')}
             className={`
@@ -128,28 +130,43 @@ export default function ParsersPage() {
           >
             Crypto Payments
           </button>
+          <button
+            onClick={() => setActiveTab('googlemaps')}
+            className={`
+              whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm
+              ${activeTab === 'googlemaps'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}
+            `}
+          >
+            Google Maps
+          </button>
+          <button
+            onClick={() => setActiveTab('googlenews')}
+            className={`
+              whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm
+              ${activeTab === 'googlenews'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}
+            `}
+          >
+            Google News
+          </button>
         </nav>
       </div>
 
-      {activeTab === 'hh'
-        ? <HHParserView />
-        : activeTab === 'eng-hiring'
-        ? <EngHiringParserView />
-        : activeTab === 'ats'
-        ? <AtsParserView />
-        : activeTab === 'crunchbase'
-        ? <CrunchbaseParserView />
-        : activeTab === 'eu-us-base'
-        ? <EuUsCompanyBaseView />
-        : activeTab === 'hh-archive'
-          ? <HHArchiveParserView />
-          : activeTab === 'search'
-            ? <SearchParserView />
-            : activeTab === 'yandexmaps'
-              ? <YandexMapsParserView />
-              : activeTab === 'yandexdirect'
-                ? <YandexDirectParserView />
-                : <CryptoPaymentParserView />}
+      {activeTab === 'hh' && <HHParserView />}
+      {activeTab === 'eng-hiring' && <EngHiringParserView />}
+      {activeTab === 'ats' && <AtsParserView />}
+      {activeTab === 'crunchbase' && <CrunchbaseParserView />}
+      {activeTab === 'eu-us-base' && <EuUsCompanyBaseView />}
+      {activeTab === 'hh-archive' && <HHArchiveParserView />}
+      {activeTab === 'search' && <SearchParserView />}
+      {activeTab === 'yandexmaps' && <YandexMapsParserView />}
+      {activeTab === 'yandexdirect' && <YandexDirectParserView />}
+      {activeTab === 'crypto' && <CryptoPaymentParserView />}
+      {activeTab === 'googlemaps' && <GoogleMapsParserView />}
+      {activeTab === 'googlenews' && <GoogleNewsParserView />}
     </div>
   );
 }

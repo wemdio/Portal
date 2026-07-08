@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError, checkIsAdmin, userOwnsAccount } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError, checkIsAdmin } from '@/lib/liOutreach/apiHelpers';
 import { normalizeTimezoneOffset, normalizeWorkingHours } from '@/lib/liOutreach/schedule';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
@@ -32,19 +32,22 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
     const { id } = await ctx.params;
-    const admin = await checkIsAdmin(auth.user.id);
 
-    let existQ = supabaseAdmin.from('li_campaigns').select('id').eq('id', id);
-    if (!admin) existQ = existQ.eq('user_id', auth.user.id);
-    const { data: existing } = await existQ.maybeSingle();
+    // Any authenticated team member can PUT a campaign (see migration
+    // 20260708_0002). Ownership is still tracked on the row via user_id for
+    // audit; only DELETE stays owner-only. We drop the previous
+    // `userOwnsAccount` guard on `account_id` too — under team-edit the whole
+    // team is trusted to attach any account to any campaign (previously a
+    // viewer might accidentally save an unchanged foreign account_id and
+    // hit a 403).
+    const { data: existing } = await supabaseAdmin
+      .from('li_campaigns')
+      .select('id')
+      .eq('id', id)
+      .maybeSingle();
     if (!existing) return jsonError('Campaign not found', 404);
 
     const body = (await req.json()) as Record<string, unknown>;
-    // Reassigning the campaign's LinkedIn account is only allowed to an account
-    // the editor owns (accounts are visible cross-specialist but not usable).
-    if (body.account_id && !(await userOwnsAccount(auth.user.id, String(body.account_id)))) {
-      return jsonError('Нельзя привязать кампанию к LinkedIn-аккаунту другого специалиста', 403);
-    }
     const allowed = [
       'name', 'account_id', 'lead_list_id', 'steps', 'use_ai', 'ai_prompt_invite', 'ai_prompt_chat',
       'stop_on_reply', 'min_delay', 'max_delay', 'daily_invite_limit', 'welcome_message',
