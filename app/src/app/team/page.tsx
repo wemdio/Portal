@@ -23,23 +23,24 @@ type ProfileData = Pick<UserProfile, 'id' | 'email' | 'full_name' | 'role' | 'av
 const STORAGE_KEY_CAPACITY = 'portal:team-capacity';
 const DEFAULT_CAPACITY = 4;
 const LEAD_ROLES = new Set<UserRole>(['lead']);
+const NO_SPEC = '— без специалиста';
 
 type Segment = 'leads' | 'specs' | 'projects';
 type SortKey = 'fact' | 'load' | 'result' | 'name';
 type StatusFilter = 'all' | 'Перегруз' | 'Норма' | 'Свободен';
-type ResultCat = 'delivered' | 'missed' | 'prep' | 'work';
+type ResultCat = 'delivered' | 'missed' | 'prep' | 'work' | 'other';
 type ResultFilter = 'all' | ResultCat;
 
 function normalizeAssigneeName(value: string | null | undefined): string {
   return value?.trim() || '';
 }
 
-function isWorkingStatus(status: string): boolean {
-  const s = status.toLowerCase();
+function isWorkingStatus(status: string | null | undefined): boolean {
+  const s = (status || '').toLowerCase();
   return s.includes('работ') || s.includes('тест');
 }
-function isPrepStatus(status: string): boolean {
-  return status.toLowerCase().includes('подготов');
+function isPrepStatus(status: string | null | undefined): boolean {
+  return (status || '').toLowerCase().includes('подготов');
 }
 
 /** kpi_plan / kpi_fact are free-text; pull the first number out. */
@@ -81,10 +82,10 @@ function deriveResult(p: ProjectData): Result {
     return { cat: 'delivered', label: 'Довели лидов' + suffix, badgeCls: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20', dotCls: 'bg-emerald-500' };
   }
   if (st.includes('отмен')) {
-    return { cat: 'work', label: 'Отменён', badgeCls: 'bg-gray-100 text-gray-500 ring-gray-500/20', dotCls: 'bg-gray-400' };
+    return { cat: 'other', label: 'Отменён', badgeCls: 'bg-gray-100 text-gray-500 ring-gray-500/20', dotCls: 'bg-gray-400' };
   }
   if (st.includes('пауз')) {
-    return { cat: 'work', label: 'На паузе', badgeCls: 'bg-gray-100 text-gray-500 ring-gray-500/20', dotCls: 'bg-gray-400' };
+    return { cat: 'other', label: 'На паузе', badgeCls: 'bg-gray-100 text-gray-500 ring-gray-500/20', dotCls: 'bg-gray-400' };
   }
   return { cat: 'work', label: 'в работе', badgeCls: 'bg-gray-100 text-gray-600 ring-gray-500/20', dotCls: 'bg-gray-400' };
 }
@@ -92,7 +93,10 @@ function deriveResult(p: ProjectData): Result {
 interface Roll { delivered: number; missed: number; work: number; prep: number }
 function rollup(projects: ProjectData[]): Roll {
   const r: Roll = { delivered: 0, missed: 0, work: 0, prep: 0 };
-  for (const p of projects) r[deriveResult(p).cat]++;
+  for (const p of projects) {
+    const c = deriveResult(p).cat;
+    if (c === 'delivered' || c === 'missed' || c === 'work' || c === 'prep') r[c]++;
+  }
   return r;
 }
 
@@ -157,7 +161,7 @@ function TeamMemberAvatar({
 
 function RollupStrip({ roll }: { roll: Roll }) {
   const items: { n: number; dot: string; text: string; title: string }[] = [];
-  if (roll.delivered) items.push({ n: roll.delivered, dot: 'bg-emerald-500', text: 'text-emerald-600', title: 'Довели лидов' });
+  if (roll.delivered) items.push({ n: roll.delivered, dot: 'bg-emerald-500', text: 'text-emerald-700', title: 'Довели лидов' });
   if (roll.missed) items.push({ n: roll.missed, dot: 'bg-red-500', text: 'text-red-600', title: 'Не довели' });
   if (roll.work) items.push({ n: roll.work, dot: 'bg-gray-400', text: 'text-gray-500', title: 'В работе' });
   if (roll.prep) items.push({ n: roll.prep, dot: 'bg-amber-500', text: 'text-amber-600', title: 'Подготовка' });
@@ -461,27 +465,43 @@ export default function TeamPage() {
   };
 
   // specialist sub-row inside a lead (read-only capacity, global stats)
-  const specSubRow = (lead: string, sname: string, countInLead: number, open: boolean, onToggle: () => void) => {
+  const specSubRow = (lead: string, sname: string, list: ProjectData[], open: boolean, onToggle: () => void) => {
+    const isPlaceholder = sname === NO_SPEC;
     const s = model.specStat(sname);
     const status = getLoadStatus(s.fact, s.plan);
+    const roll = isPlaceholder ? rollup(list) : s.roll;
+    const dash = <span className="text-sm text-gray-300">—</span>;
     return (
       <div className={`${GRID} border-b border-gray-100 bg-gray-50/60 hover:bg-gray-100/60 cursor-pointer transition-colors`} onClick={onToggle}>
         <div className="pl-11 pr-4 py-2.5 flex items-center gap-2 min-w-0">
           <Caret open={open} />
-          <TeamMemberAvatar displayName={sname} avatarUrl={nameToAvatarUrl.get(sname)} signedUrl={avatarSignedUrls[sname]} variant="specialist" size="sm" />
+          <TeamMemberAvatar displayName={isPlaceholder ? '?' : sname} avatarUrl={isPlaceholder ? null : nameToAvatarUrl.get(sname)} signedUrl={isPlaceholder ? null : avatarSignedUrls[sname]} variant="specialist" size="sm" />
           <div className="min-w-0">
-            <p className="text-sm font-medium text-gray-900 truncate">{sname}</p>
-            <p className="text-xs text-gray-500">специалист · {countInLead} {plural(countInLead)} у лида</p>
+            <p className={`text-sm font-medium truncate ${isPlaceholder ? 'text-gray-500 italic' : 'text-gray-900'}`}>{isPlaceholder ? 'Без специалиста' : sname}</p>
+            <p className="text-xs text-gray-500">{isPlaceholder ? `${list.length} ${plural(list.length)} без спеца` : `специалист · ${list.length} ${plural(list.length)} у лида`}</p>
           </div>
         </div>
-        <div className="px-2 flex justify-center">
-          <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ring-1 ring-inset ${status.color}`}>{status.label}</span>
-        </div>
-        <div className="px-2 text-center"><span className="text-base font-bold text-gray-900 tabular-nums">{s.fact}</span></div>
-        <div className="px-2 text-center"><span className={`text-sm font-medium tabular-nums ${s.prep > 0 ? 'text-gray-900' : 'text-gray-400'}`}>{s.prep}</span></div>
-        <div className="px-2 text-center"><span className="text-sm font-semibold text-gray-500 tabular-nums">{s.plan}</span></div>
-        <div className="px-2"><LoadBar fact={s.fact} plan={s.plan} /></div>
-        <div className="px-3"><RollupStrip roll={s.roll} /></div>
+        {isPlaceholder ? (
+          <>
+            <div className="px-2 flex justify-center">{dash}</div>
+            <div className="px-2 text-center">{dash}</div>
+            <div className="px-2 text-center">{dash}</div>
+            <div className="px-2 text-center">{dash}</div>
+            <div className="px-2 flex justify-center">{dash}</div>
+            <div className="px-3"><RollupStrip roll={roll} /></div>
+          </>
+        ) : (
+          <>
+            <div className="px-2 flex justify-center">
+              <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ring-1 ring-inset ${status.color}`}>{status.label}</span>
+            </div>
+            <div className="px-2 text-center"><span className="text-base font-bold text-gray-900 tabular-nums">{s.fact}</span></div>
+            <div className="px-2 text-center"><span className={`text-sm font-medium tabular-nums ${s.prep > 0 ? 'text-gray-900' : 'text-gray-400'}`}>{s.prep}</span></div>
+            <div className="px-2 text-center"><span className="text-sm font-semibold text-gray-500 tabular-nums">{s.plan}</span></div>
+            <div className="px-2"><LoadBar fact={s.fact} plan={s.plan} /></div>
+            <div className="px-3"><RollupStrip roll={roll} /></div>
+          </>
+        )}
       </div>
     );
   };
@@ -525,7 +545,7 @@ export default function TeamPage() {
           const visibleProjects = q && !L.name.toLowerCase().includes(q) ? L.projects.filter(matchProject) : L.projects;
           const bySpec = new Map<string, ProjectData[]>();
           for (const p of visibleProjects) {
-            const s = normalizeAssigneeName(p.specialist) || '— без специалиста';
+            const s = normalizeAssigneeName(p.specialist) || NO_SPEC;
             const a = bySpec.get(s) || []; a.push(p); bySpec.set(s, a);
           }
           return (
@@ -546,7 +566,7 @@ export default function TeamPage() {
                     const sOpen = q ? true : openSpecInLead.has(key);
                     return (
                       <div key={key}>
-                        {specSubRow(L.name, sname, list.length, sOpen, () => toggle(setOpenSpecInLead, key))}
+                        {specSubRow(L.name, sname, list, sOpen, () => toggle(setOpenSpecInLead, key))}
                         {sOpen && list.map((p) => projectRow(p, false))}
                       </div>
                     );
@@ -661,7 +681,7 @@ export default function TeamPage() {
           <div className="mt-1.5 space-y-1">
             <div className="flex items-center gap-2">
               <span className="h-2 w-2 rounded-full bg-emerald-500" />
-              <span className="text-lg font-bold text-emerald-600 tabular-nums">{kpi.delivered}</span>
+              <span className="text-lg font-bold text-emerald-700 tabular-nums">{kpi.delivered}</span>
               <span className="text-xs text-gray-500">довели лидов</span>
             </div>
             <div className="flex items-center gap-2">
