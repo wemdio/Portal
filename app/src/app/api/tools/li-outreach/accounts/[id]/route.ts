@@ -3,7 +3,6 @@ import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 import { UnipileClient } from '@/lib/liOutreach/unipileClient';
-import type { LiSettings } from '@/lib/liOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -36,17 +35,15 @@ export async function PATCH(
 
     // Сначала патчим Unipile — прокси должен жить ИМЕННО в Unipile (там
     // крутится браузерная сессия LinkedIn). Если Unipile отклонил — в нашу
-    // БД не пишем, иначе UI покажет прокси, которого фактически нет.
-    const { data: settings } = await auth.supabase
-      .from('li_settings')
-      .select('*')
-      .eq('user_id', auth.user.id)
-      .maybeSingle<LiSettings>();
+    // БД не пишем, иначе UI покажет прокси, которого фактически нет. Creds
+    // берём из env (см. миграцию 20260708_0001), а не из li_settings.
+    const unipileDsn = process.env.UNIPILE_DSN ?? '';
+    const unipileApiKey = process.env.UNIPILE_API_KEY ?? '';
 
     let unipilePatched = false;
-    if (settings?.unipile_dsn && settings?.unipile_api_key) {
+    if (unipileDsn && unipileApiKey) {
       try {
-        const client = new UnipileClient(settings.unipile_dsn, settings.unipile_api_key);
+        const client = new UnipileClient(unipileDsn, unipileApiKey);
         await client.patchAccountProxy(account.unipile_account_id, proxyUrl);
         unipilePatched = true;
       } catch (e) {
