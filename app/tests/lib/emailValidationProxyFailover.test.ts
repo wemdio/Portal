@@ -135,6 +135,27 @@ describe('память слепых IP (устраняет 8с-простой п
     expect(String(fetchMock.mock.calls[0][0])).toContain('proxy-a'); // тот же IP, что greylist-нул
   });
 
+  it('guard: affinity-IP, ставший transport-заблокированным, НЕ пинится первым', async () => {
+    // P1: proxy-a greylist → affinity=proxy-a (порядок [a,b], a первый)
+    fetchMock.mockResolvedValueOnce(reply({ code: 451, exists: null, isCatchAll: null, greylist: true }));
+    await validateEmail('u1@corp.ru', cacheWith('corp.ru', false));
+
+    // P2: affinity пинит a первым → [a,b]; a таймаутит → помечается egress-blocked → failover на b
+    fetchMock.mockReset();
+    fetchMock
+      .mockResolvedValueOnce(reply({ code: 0, exists: null, isCatchAll: null, greylist: false, error: 'connect ETIMEDOUT' }))
+      .mockResolvedValueOnce(reply({ code: 250, exists: true, isCatchAll: false, greylist: false }));
+    await validateEmail('u2@corp.ru', cacheWith('corp.ru', false));
+
+    // P3: a = affinity И egress-blocked → guard !isEgressBlocked НЕ пинит его → [b,a], b первый
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(reply({ code: 250, exists: true, isCatchAll: false, greylist: false }));
+    const r3 = await validateEmail('u3@corp.ru', cacheWith('corp.ru', false));
+    expect(r3.result).toBe('ok');
+    expect(fetchMock).toHaveBeenCalledTimes(1); // не платим дохлое ожидание на слепом a
+    expect(String(fetchMock.mock.calls[0][0])).toContain('proxy-b');
+  });
+
   it('слепой IP всё равно пробуется ПОСЛЕДНИМ, если рабочий тоже отказал (покрытие не теряется)', async () => {
     // обучаемся: IP-A слеп к mx.corp.ru
     fetchMock
