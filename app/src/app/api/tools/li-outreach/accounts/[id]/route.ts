@@ -17,11 +17,13 @@ export async function PATCH(
 
     const { id } = await params;
 
+    // Any authenticated team member can PATCH the proxy on any account
+    // (see migration 20260708_0002). Ownership is still tracked via user_id
+    // for audit; only DELETE stays owner-only as a safety guard.
     const { data: account } = await supabaseAdmin
       .from('li_accounts')
       .select('*')
       .eq('id', id)
-      .eq('user_id', auth.user.id)
       .maybeSingle();
     if (!account) return jsonError('Account not found', 404);
 
