@@ -84,6 +84,13 @@ jobs:
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/portal-worker:prod
 
+      - name: Push googleparsers image to Docker Hub
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/googleparsers
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/portal-googleparsers:prod
+
       - name: Push instantly-sync-bot image to Docker Hub
         uses: docker/build-push-action@v6
         with:

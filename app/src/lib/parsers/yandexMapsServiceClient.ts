@@ -171,7 +171,7 @@ export async function yandexMapsCollectLinks(req: CollectLinksRequest): Promise<
   return await postJson<CollectLinksResponse>('/collect-links', req);
 }
 
-export type CollectLinksChunk = { links: string[]; total: number; done?: boolean; error?: string };
+export type CollectLinksChunk = { links: string[]; total: number; done?: boolean; error?: string; blocked?: boolean };
 
 /**
  * Streaming version: calls /collect-links/stream and invokes onChunk for every
@@ -227,7 +227,12 @@ export async function yandexMapsCollectLinksStream(
         continue;
       }
 
-      if (parsed.error) throw new Error(`yandexmaps stream: ${parsed.error}`);
+      if (parsed.error) {
+        if (parsed.blocked || /yandex_blocked/i.test(parsed.error)) {
+          throw new YandexMapsBlockedError(`yandexmaps stream: ${parsed.error}`);
+        }
+        throw new Error(`yandexmaps stream: ${parsed.error}`);
+      }
 
       if (parsed.links) {
         for (const link of parsed.links) {

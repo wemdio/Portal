@@ -203,6 +203,37 @@ class YandexMapsParser:
     encoded_query = quote(search_query)
     return f"https://yandex.ru/maps/?text={encoded_query}"
 
+  def _page_looks_blocked(self) -> bool:
+    """Определяет, показал ли Яндекс капчу/антибот вместо результатов.
+
+    Проверяем и URL (редирект на showcaptcha), и содержимое страницы по
+    специфичным маркерам SmartCaptcha — чтобы не ловить ложные срабатывания.
+    """
+    try:
+      current_url = (self.driver.current_url or "").lower()
+    except Exception:
+      current_url = ""
+    if "showcaptcha" in current_url or "checkcaptcha" in current_url:
+      return True
+
+    try:
+      html = (self.driver.page_source or "").lower()
+    except Exception:
+      return False
+
+    markers = [
+      "smartcaptcha",
+      "showcaptcha",
+      "checkbox-captcha",
+      "js-button-captcha",
+      "подтвердите, что запросы отправляли вы",
+      "подтвердите, что вы не робот",
+      "вы не робот",
+      "confirm that you and not a robot",
+      "are you not a robot",
+    ]
+    return any(m in html for m in markers)
+
   def collect_organization_links(
     self,
     search_url: str,
@@ -219,6 +250,8 @@ class YandexMapsParser:
         self._create_driver()
 
       self.driver.get(search_url)
+      if self._page_looks_blocked():
+        raise YandexBlockedError("Яндекс показал капчу при загрузке страницы поиска")
       try:
         WebDriverWait(self.driver, 10).until(
           EC.presence_of_element_located(
@@ -238,6 +271,10 @@ class YandexMapsParser:
         time.sleep(1)
 
       if not sidebar_scroll:
+        # Список организаций не загрузился — либо капча, либо пустая выдача.
+        # Разделяем: капча => понятная ошибка, иначе — честный пустой результат.
+        if self._page_looks_blocked():
+          raise YandexBlockedError("Яндекс показал капчу (список организаций не загрузился)")
         soup = BeautifulSoup(self.driver.page_source, "lxml")
         links = self._extract_links_from_soup(soup)
         result = links[:max_results]
@@ -325,6 +362,8 @@ class YandexMapsParser:
         self.log(f"[!] Таймаут сбора ссылок ({max_seconds}с), собрано {len(links)}")
 
       return links[:max_results]
+    except YandexBlockedError:
+      raise
     except Exception as e:
       self.log(f"[X] Ошибка при сборе ссылок: {e}")
       return links[:max_results]

@@ -119,6 +119,8 @@ async def collect_links(req: CollectLinksRequest):
     except asyncio.TimeoutError:
       parser.stop()
       raise HTTPException(status_code=504, detail=f"collect-links timed out after {COLLECT_TIMEOUT_SEC}s")
+    except YandexBlockedError as e:
+      raise HTTPException(status_code=429, detail=f"yandex_blocked: {e}")
     except Exception as e:
       raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -163,6 +165,9 @@ async def collect_links_stream(req: CollectLinksRequest):
 
       all_links = task.result()
       yield json.dumps({"done": True, "total": len(all_links)}, ensure_ascii=False) + "\n"
+    except YandexBlockedError as e:
+      # Помечаем блокировку отдельным флагом, чтобы воркер отличил капчу от прочих ошибок.
+      yield json.dumps({"error": f"yandex_blocked: {e}", "blocked": True}, ensure_ascii=False) + "\n"
     except Exception as e:
       yield json.dumps({"error": str(e)}, ensure_ascii=False) + "\n"
     finally:
