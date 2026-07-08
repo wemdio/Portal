@@ -117,6 +117,24 @@ describe('память слепых IP (устраняет 8с-простой п
     expect(String(fetchMock.mock.calls[0][0])).toContain('proxy-b'); // пошли сразу на рабочий IP
   });
 
+  it('greylist-affinity: повтор к тому же MX идёт на IP, который greylist-нул (round-robin не рассеивает)', async () => {
+    // проба 1: первый IP (proxy-a) отдаёт greylist → affinity=proxy-a
+    fetchMock.mockResolvedValueOnce(reply({ code: 451, exists: null, isCatchAll: null, greylist: true }));
+    const r1 = await validateEmail('u1@corp.ru', cacheWith('corp.ru', false));
+    expect(r1.result).toBe('unknown');
+    expect(r1.details.step).toBe('greylist');
+    expect(String(fetchMock.mock.calls[0][0])).toContain('proxy-a');
+
+    // проба 2 (отложенный ретрай): без affinity round-robin пошёл бы на proxy-b,
+    // но affinity пинит proxy-a первым → greylist на нём снят → ok, 1 вызов
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(reply({ code: 250, exists: true, isCatchAll: false, greylist: false }));
+    const r2 = await validateEmail('u1@corp.ru', cacheWith('corp.ru', false));
+    expect(r2.result).toBe('ok');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('proxy-a'); // тот же IP, что greylist-нул
+  });
+
   it('слепой IP всё равно пробуется ПОСЛЕДНИМ, если рабочий тоже отказал (покрытие не теряется)', async () => {
     // обучаемся: IP-A слеп к mx.corp.ru
     fetchMock
