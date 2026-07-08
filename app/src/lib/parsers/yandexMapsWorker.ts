@@ -2,7 +2,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo, logWarn } from '@/lib/loggerServer';
 import { decryptJsonAes256Gcm } from '@/lib/cryptoGcm';
 import { normalizeYandexOrgUrls } from '@/lib/parsers/yandexMapsUrlUtils';
-import { yandexMapsCollectLinksStream, yandexMapsHealth, yandexMapsParseOrgs } from '@/lib/parsers/yandexMapsServiceClient';
+import { YandexMapsBlockedError, yandexMapsCollectLinksStream, yandexMapsHealth, yandexMapsParseOrgs } from '@/lib/parsers/yandexMapsServiceClient';
 import { startTrace } from '@/lib/tracer';
 
 type ProxyCreds = { username: string; password: string };
@@ -49,11 +49,15 @@ async function getJob(jobId: string) {
   return (data ?? null) as YandexMapsJobRow | null;
 }
 
-function buildProxy(job: YandexMapsJobRow): { enabled: boolean; protocol: 'http' | 'https' | 'socks5'; host: string; port: string; username?: string; password?: string } {
-  if (!job.proxy_enabled) return { enabled: false, protocol: 'http', host: '', port: '' };
+type ResolvedProxy = { enabled: boolean; protocol: 'http' | 'https' | 'socks5'; host: string; port: string; username?: string; password?: string };
+
+const NO_PROXY: ResolvedProxy = { enabled: false, protocol: 'http', host: '', port: '' };
+
+function buildProxy(job: YandexMapsJobRow): ResolvedProxy {
+  if (!job.proxy_enabled) return NO_PROXY;
 
   const protocol = (job.proxy_protocol ?? 'http') as 'http' | 'https' | 'socks5';
-  const proxy: { enabled: boolean; protocol: 'http' | 'https' | 'socks5'; host: string; port: string; username?: string; password?: string } = {
+  const proxy: ResolvedProxy = {
     enabled: true,
     protocol,
     host: String(job.proxy_host ?? ''),
@@ -71,6 +75,69 @@ function buildProxy(job: YandexMapsJobRow): { enabled: boolean; protocol: 'http'
   }
 
   return proxy;
+}
+
+/** Разбирает строку прокси вида `http://user:pass@host:port` в структуру. */
+function parseProxyUrl(raw: string): ResolvedProxy | null {
+  const s = (raw ?? '').trim();
+  if (!s) return null;
+  try {
+    const u = new URL(s);
+    const proto = u.protocol.replace(/:$/, '').toLowerCase();
+    const protocol: 'http' | 'https' | 'socks5' =
+      proto === 'https' ? 'https' : proto === 'socks5' || proto === 'socks' ? 'socks5' : 'http';
+    if (!u.hostname || !u.port) return null;
+    const proxy: ResolvedProxy = { enabled: true, protocol, host: u.hostname, port: u.port };
+    if (u.username) proxy.username = decodeURIComponent(u.username);
+    if (u.password) proxy.password = decodeURIComponent(u.password);
+    return proxy;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Пул прокси для Яндекс.Карт из env. Источник — YANDEXMAPS_PROXY_URLS, иначе
+ * общий PROXY_URLS (JSON-массив строк, либо адреса через запятую/пробел).
+ * Кэшируется на процесс — env не меняется в рантайме.
+ */
+let cachedProxyPool: ResolvedProxy[] | null = null;
+function getYandexMapsProxyPool(): ResolvedProxy[] {
+  if (cachedProxyPool) return cachedProxyPool;
+  const raw = (process.env.YANDEXMAPS_PROXY_URLS ?? process.env.PROXY_URLS ?? '').trim();
+  if (!raw) {
+    cachedProxyPool = [];
+    return cachedProxyPool;
+  }
+  let entries: string[] = [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) entries = parsed.filter((x): x is string => typeof x === 'string');
+  } catch {
+    entries = raw.split(/[\s,]+/).filter(Boolean);
+  }
+  cachedProxyPool = entries.map(parseProxyUrl).filter((p): p is ResolvedProxy => p !== null);
+  return cachedProxyPool;
+}
+
+/** Детерминированный сдвиг старта ротации по jobId — чтобы разные задачи начинали с разных прокси. */
+function jobProxyOffset(jobId: string): number {
+  let h = 0;
+  for (let i = 0; i < jobId.length; i += 1) h = (h * 31 + jobId.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+/**
+ * Выбор прокси для конкретной единицы работы (URL сбора / чанк парсинга).
+ * Приоритет — прокси, заданный в самой задаче; иначе round-robin по пулу из env;
+ * иначе прямое соединение (как раньше).
+ */
+function pickProxy(job: YandexMapsJobRow, index: number): ResolvedProxy {
+  if (job.proxy_enabled) return buildProxy(job);
+  const pool = getYandexMapsProxyPool();
+  if (pool.length === 0) return NO_PROXY;
+  const pos = (jobProxyOffset(job.id) + index) % pool.length;
+  return pool[pos]!;
 }
 
 export async function runYandexMapsCollectLinks(jobId: string) {
@@ -153,9 +220,11 @@ export async function runYandexMapsCollectLinks(jobId: string) {
 
     void logInfo('parser.yandexmaps.collect.start', 'YandexMaps collect-links started', { jobId, searchUrlsCount: searchUrls.length }, logMeta);
 
-    const collectConcurrency = Number(process.env.YANDEXMAPS_COLLECT_CONCURRENCY ?? '4');
+    const collectConcurrency = Number(process.env.YANDEXMAPS_COLLECT_CONCURRENCY ?? '2');
     let completedUrls = 0;
-    const proxy = buildProxy(job);
+    let blockedUrls = 0;
+    const proxyPoolSize = job.proxy_enabled ? 1 : getYandexMapsProxyPool().length;
+    void logInfo('parser.yandexmaps.collect.proxy', 'YandexMaps collect proxy pool', { jobId, proxyPoolSize }, logMeta);
 
     const urlBatches = chunk(
       searchUrls.map((url, i) => ({ url, index: i + 1 })),
@@ -178,7 +247,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
 
         try {
           const { total } = await yandexMapsCollectLinksStream(
-            { search_url, max_results: maxResults, headless, proxy },
+            { search_url, max_results: maxResults, headless, proxy: pickProxy(job, urlIndex - 1) },
             async (ch) => {
               if (ch.links.length > 0) {
                 const normalized = normalizeYandexOrgUrls(ch.links);
@@ -202,7 +271,12 @@ export async function runYandexMapsCollectLinks(jobId: string) {
           await urlSpan?.end({ links_collected: total, total_unique: allLinks.length });
         } catch (e) {
           await urlSpan?.fail(e);
-          void logWarn('parser.yandexmaps.collect.url_failed', 'Collect-links failed for URL', { jobId, search_url }, logMeta);
+          if (e instanceof YandexMapsBlockedError) {
+            blockedUrls += 1;
+            void logWarn('parser.yandexmaps.collect.url_blocked', 'Collect-links blocked (captcha) for URL', { jobId, search_url }, logMeta);
+          } else {
+            void logWarn('parser.yandexmaps.collect.url_failed', 'Collect-links failed for URL', { jobId, search_url }, logMeta);
+          }
         }
       }));
 
@@ -221,6 +295,17 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     if (allLinks.length > 0) {
       void logInfo('parser.yandexmaps.auto_parse', 'Auto-starting parse after collect', { jobId, totalLinks: allLinks.length }, logMeta);
       await runYandexMapsParseOrganizations(jobId);
+    } else if (blockedUrls > 0) {
+      // 0 ссылок и была блокировка => это не «пустая выдача», а капча/антибот.
+      // Пишем честную причину вместо вводящего в заблуждение «Завершено».
+      const msg = `Яндекс заблокировал сбор ссылок (капча) на ${blockedUrls} из ${searchUrls.length} запросов. Прокси могли попасть под блокировку — подождите 30–60 мин или смените прокси, затем перезапустите.`;
+      await setJobPatch(jobId, {
+        status: 'failed',
+        error_message: msg,
+        progress_stage: 'yandex_blocked',
+        completed_at: new Date().toISOString(),
+      });
+      void logWarn('parser.yandexmaps.collect.all_blocked', 'Collect finished with 0 links due to blocking', { jobId, blockedUrls, totalUrls: searchUrls.length }, logMeta);
     } else {
       await setJobPatch(jobId, {
         status: 'completed',
@@ -310,10 +395,11 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
 
     const chunks = chunk(remainingLinks, 15);
 
+    const parseProxyPoolSize = job.proxy_enabled ? 1 : getYandexMapsProxyPool().length;
     void logInfo(
       'parser.yandexmaps.parse.start',
       'YandexMaps parse-orgs started',
-      { jobId, totalLinks: links.length, alreadyParsed: parsedCardUrls.size, remaining: remainingLinks.length },
+      { jobId, totalLinks: links.length, alreadyParsed: parsedCardUrls.size, remaining: remainingLinks.length, proxyPoolSize: parseProxyPoolSize },
       logMeta,
     );
 
@@ -333,7 +419,7 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       });
 
       try {
-        const res = await yandexMapsParseOrgs({ links: part, headless, proxy: buildProxy(job) });
+        const res = await yandexMapsParseOrgs({ links: part, headless, proxy: pickProxy(job, i) });
         const orgs = res.organizations ?? [];
         const rows = orgs.map((o) => ({
           job_id: jobId,
@@ -359,7 +445,10 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
           await supabaseAdmin.from('yandex_maps_organizations').upsert(rows, { onConflict: 'job_id,card_url' });
         }
 
-        processed += part.length;
+        // Считаем реально сохранённые организации, а не размер пачки — иначе
+        // UI показывает "4089/4089", когда Яндекс отдал пустые страницы и
+        // в БД записано сильно меньше.
+        processed += rows.length;
         await setJobPatch(jobId, {
           processed_organizations: processed,
           progress_stage: `parsing_organizations:${i + 1}/${chunks.length}`,
@@ -368,6 +457,18 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
         await partSpan?.end({ parsed: orgs.length, processed_links: processed });
       } catch (e) {
         await partSpan?.fail(e);
+        if (e instanceof YandexMapsBlockedError) {
+          const msg = 'Яндекс временно блокирует запросы (детектит бот/капчу). Подождите 30–60 минут или смените прокси, затем перезапустите парсинг.';
+          await setJobPatch(jobId, {
+            status: 'failed',
+            error_message: msg,
+            progress_stage: 'yandex_blocked',
+            processed_organizations: processed,
+          });
+          void logWarn('parser.yandexmaps.parse.blocked', 'Yandex anti-bot triggered', { jobId, chunk: i + 1, processed }, logMeta);
+          await trace?.fail(e);
+          return;
+        }
         void logWarn('parser.yandexmaps.parse.chunk_failed', 'Parse-orgs chunk failed', { jobId, chunk: i + 1 }, logMeta);
       }
     }

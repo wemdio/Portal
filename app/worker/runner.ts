@@ -38,6 +38,10 @@ switch (kind) {
   case 'yandexmaps':
     run('./yandexmaps');
     break;
+  case 'googleparsers':
+  case 'google-parsers':
+    run('./googleparsers');
+    break;
   case 'emailvalidation':
     run('./emailvalidation');
     break;

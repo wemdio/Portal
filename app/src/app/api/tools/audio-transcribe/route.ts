@@ -6,13 +6,18 @@ import {
   setServerSideProgress,
   clearServerSideProgress,
 } from '@/lib/transcription';
+import {
+  getMainS3ObjectBuffer,
+  deleteMainS3Object,
+} from '@/lib/mainS3Server';
 import { startTrace } from '@/lib/tracer';
 import { logError, logInfo } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 const SUPPORTED_EXTENSIONS = new Set(['.mp3', '.wav', '.mp4', '.avi']);
-const MAX_FILE_SIZE_BYTES = 600 * 1024 * 1024; // 600 MB
+const MAX_FILE_SIZE_BYTES = 600 * 1024 * 1024;
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -32,46 +37,16 @@ function getIp(req: NextRequest) {
   return ip?.trim() || null;
 }
 
-async function readFileFromRequest(req: NextRequest): Promise<{
-  ok: boolean;
-  error?: string;
-  filename?: string;
-  bytes?: Buffer;
-  ext?: string;
-}> {
-  const contentType = req.headers.get('content-type') ?? '';
-  if (!contentType.startsWith('multipart/form-data')) {
-    return { ok: false, error: 'Ожидается multipart/form-data с файлом "file"' };
-  }
-
-  const formData = await req.formData();
-  const file = formData.get('file');
-  if (!(file instanceof File)) {
-    return { ok: false, error: 'Поле "file" обязательно' };
-  }
-
-  const filename = file.name ?? 'audio';
-  const ext = getExtension(filename);
-  if (!SUPPORTED_EXTENSIONS.has(ext)) {
-    return {
-      ok: false,
-      error: 'Неверный формат файла. Поддерживаются: MP3, WAV, MP4, AVI.',
-    };
-  }
-
-  const arrayBuffer = await file.arrayBuffer();
-  if (arrayBuffer.byteLength > MAX_FILE_SIZE_BYTES) {
-    return { ok: false, error: 'Файл превышает лимит 600 МБ.' };
-  }
-
-  return {
-    ok: true,
-    filename,
-    bytes: Buffer.from(arrayBuffer),
-    ext,
-  };
-}
-
+/**
+ * POST /api/tools/audio-transcribe
+ * Body: { s3Key: string, filename: string, jobId?: string }
+ *
+ * Файл уже залит браузером НАПРЯМУЮ в S3 через presigned PUT (см. /presign).
+ * Тело этого POST'а — крошечный JSON, поэтому корпоративные шлюзы, которые
+ * душат multipart-аплоды на polza-portal.ru, его не режут. Сервер сам
+ * скачивает файл из S3 быстрым server-to-server соединением и прогоняет
+ * его через ту же цепочку что и раньше (ffmpeg → transcribe-worker).
+ */
 export async function POST(req: NextRequest) {
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return jsonError('Необходима авторизация', 401);
@@ -82,76 +57,110 @@ export async function POST(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) return jsonError('Необходима авторизация', 401);
 
+  let body: { s3Key?: unknown; filename?: unknown; jobId?: unknown };
+  try {
+    body = (await req.json()) as { s3Key?: unknown; filename?: unknown; jobId?: unknown };
+  } catch {
+    return jsonError('Ожидается JSON с полем s3Key', 400);
+  }
+
+  const s3Key = typeof body.s3Key === 'string' ? body.s3Key.trim() : '';
+  const filename = typeof body.filename === 'string' ? body.filename.trim() : '';
+  const transcribeJobId =
+    typeof body.jobId === 'string' && body.jobId.trim() ? body.jobId.trim() : undefined;
+
+  if (!s3Key) return jsonError('Не указан ключ файла (s3Key)', 400);
+  if (!filename) return jsonError('Не указано имя файла', 400);
+
+  // Анти-spoofing: ключ обязан лежать в подкаталоге этого пользователя. Presign
+  // выдаёт ровно такой формат, любое отклонение = кто-то пытается прочитать
+  // чужой файл через свою сессию.
+  const expectedPrefix = `audio-transcribe/${user.id}/`;
+  if (!s3Key.startsWith(expectedPrefix)) {
+    return jsonError('Неверный ключ файла', 400);
+  }
+
+  const ext = getExtension(filename);
+  if (!SUPPORTED_EXTENSIONS.has(ext)) {
+    return jsonError('Неверный формат файла. Поддерживаются: MP3, WAV, MP4, AVI.', 400);
+  }
+
   const requestId = req.headers.get('x-request-id') ?? crypto.randomUUID();
-  const transcribeJobId = (req.headers.get('x-transcribe-job-id') ?? '').trim() || undefined;
   const route = req.nextUrl.pathname;
   const ip = getIp(req);
   const logMeta = { userId: user.id, requestId, route, ip };
   const trace: Awaited<ReturnType<typeof startTrace>> | null = await startTrace({
     name: 'audio_transcribe.process',
-    input: { requestId, route, ip, userId: user.id },
-    message: 'Запуск расшифровки аудио/видео',
+    input: { requestId, route, ip, userId: user.id, s3Key },
+    message: 'Запуск расшифровки аудио/видео (S3 upload)',
     userId: user.id,
   });
 
-  // Surface "we got your request and we're reading the file" the moment we
-  // start parsing — otherwise polling sees 404 for the entire upload-buffer
-  // window (can be minutes for big files) and the UI looks frozen.
+  // Сообщаем UI: файл на сервере уже принят, качаем из S3. Без этого polling
+  // видел бы 404 пока идёт скачивание + ffmpeg, и прогресс-бар стоял бы
+  // на «Загружаем...» лишние секунды/минуты.
   if (transcribeJobId) {
     setServerSideProgress(transcribeJobId, 'preparing', 2);
   }
 
-  let file;
+  let fileBytes: Buffer | null;
   try {
-    file = await readFileFromRequest(req);
+    fileBytes = await getMainS3ObjectBuffer(s3Key);
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : 'Не удалось прочитать тело запроса (formData)';
-    await trace?.fail(err, { stage: 'read_form_data' });
-    await logError('audio.transcribe.read.failed', err, { stage: 'read_form_data' }, logMeta);
     if (transcribeJobId) clearServerSideProgress(transcribeJobId);
-    return jsonError(message, 400);
+    await trace?.fail(err, { stage: 'download_from_s3', s3Key });
+    await logError('audio.transcribe.s3.download.failed', err, { stage: 'download_from_s3', s3Key }, logMeta);
+    return jsonError('Не удалось скачать файл из хранилища. Попробуйте загрузить заново.', 500);
   }
-  if (!file.ok || !file.bytes || !file.filename) {
-    const message = file.error ?? 'Неверный файл';
-    const err = new Error(message);
-    await trace?.fail(err, { stage: 'validate_file' });
-    await logError(
-      'audio.transcribe.validation.failed',
-      err,
-      { stage: 'validate_file' },
-      logMeta,
-    );
+
+  if (!fileBytes) {
     if (transcribeJobId) clearServerSideProgress(transcribeJobId);
-    return jsonError(message, 400);
+    const err = new Error(`S3 object not found: ${s3Key}`);
+    await trace?.fail(err, { stage: 'download_from_s3', s3Key });
+    await logError('audio.transcribe.s3.missing', err, { stage: 'download_from_s3', s3Key }, logMeta);
+    return jsonError('Файл не найден в хранилище. Загрузите заново.', 404);
+  }
+
+  if (fileBytes.byteLength > MAX_FILE_SIZE_BYTES) {
+    if (transcribeJobId) clearServerSideProgress(transcribeJobId);
+    const err = new Error(`File too large: ${fileBytes.byteLength} bytes`);
+    await trace?.fail(err, { stage: 'validate_file' });
+    await logError('audio.transcribe.validation.failed', err, { stage: 'validate_file' }, logMeta);
+    // Убираем битый файл сразу — незачем ему в S3 залёживаться.
+    void deleteMainS3Object(s3Key).catch(() => {});
+    return jsonError('Файл превышает лимит 600 МБ.', 400);
   }
 
   try {
     await logInfo(
       'audio.transcribe.start',
-      'Audio transcription started',
-      { filename: file.filename, inputBytes: file.bytes.byteLength, extension: file.ext ?? null },
+      'Audio transcription started (S3 flow)',
+      {
+        filename,
+        inputBytes: fileBytes.byteLength,
+        extension: ext,
+        s3Key,
+      },
       logMeta,
     );
     if (transcribeJobId) {
       setServerSideProgress(transcribeJobId, 'converting', 3);
     }
     const mp3 = await extractOrConvertToMp3({
-      bytes: file.bytes,
-      inputExt: file.ext ?? getExtension(file.filename),
+      bytes: fileBytes,
+      inputExt: ext,
     });
-    // Hand off to the worker — clear our local pre-worker state so the next
-    // /progress poll sees the worker's authoritative "queued"/"converting"
-    // state instead of our stale "converting".
+    // Хэндофф воркеру — очищаем локальное pre-worker-состояние, чтобы UI сразу
+    // начал видеть «настоящий» queued/converting/transcribing.
     if (transcribeJobId) clearServerSideProgress(transcribeJobId);
     await trace?.setOutput({
-      filename: file.filename,
-      inputBytes: file.bytes.byteLength,
+      filename,
+      inputBytes: fileBytes.byteLength,
       mp3Bytes: mp3.byteLength,
     });
     const text = await transcribeAudio({
       audioMp3: mp3,
-      filename: file.filename,
+      filename,
       jobId: transcribeJobId,
     });
 
@@ -159,7 +168,7 @@ export async function POST(req: NextRequest) {
       try {
         await supabase.from('audio_transcripts').insert({
           user_id: user.id,
-          filename: file.filename,
+          filename,
           length: text.length,
           text,
         });
@@ -168,10 +177,21 @@ export async function POST(req: NextRequest) {
       }
     })();
 
+    // Файл в S3 больше не нужен — расшифровка сохранена в БД. Fire-and-forget,
+    // ошибка удаления не должна валить успешный ответ пользователю.
+    void deleteMainS3Object(s3Key).catch((err) => {
+      void logError(
+        'audio.transcribe.s3.cleanup.failed',
+        err,
+        { s3Key },
+        logMeta,
+      );
+    });
+
     await trace?.end(
       {
-        filename: file.filename,
-        inputBytes: file.bytes.byteLength,
+        filename,
+        inputBytes: fileBytes.byteLength,
         mp3Bytes: mp3.byteLength,
         textLength: text.length,
       },
@@ -181,8 +201,8 @@ export async function POST(req: NextRequest) {
       'audio.transcribe.success',
       'Audio transcription completed',
       {
-        filename: file.filename,
-        inputBytes: file.bytes.byteLength,
+        filename,
+        inputBytes: fileBytes.byteLength,
         mp3Bytes: mp3.byteLength,
         textLength: text.length,
       },
@@ -191,25 +211,28 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       text,
-      filename: file.filename,
+      filename,
       length: text.length,
     });
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Неизвестная ошибка при расшифровке аудио';
     if (transcribeJobId) clearServerSideProgress(transcribeJobId);
+    // При ошибке файл в S3 тоже удаляем — юзер увидит ошибку и перезагрузит,
+    // а мусор в бакете копить незачем.
+    void deleteMainS3Object(s3Key).catch(() => {});
     await trace?.fail(err, {
       stage: 'transcribe',
-      filename: file.filename,
-      inputBytes: file.bytes.byteLength,
+      filename,
+      inputBytes: fileBytes.byteLength,
     });
     await logError(
       'audio.transcribe.failed',
       err,
       {
         stage: 'transcribe',
-        filename: file.filename,
-        inputBytes: file.bytes.byteLength,
+        filename,
+        inputBytes: fileBytes.byteLength,
       },
       logMeta,
     );

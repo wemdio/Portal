@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { getAccessToken, authFetch } from '@/lib/authFetch';
+import { authFetch } from '@/lib/authFetch';
 import {
   AudioLines,
   Loader2,
@@ -43,7 +43,7 @@ interface HistoryItem {
 }
 
 /**
- * Thrown when the upload POST gets killed by a gateway/upstream timeout
+ * Thrown when the finalize POST gets killed by a gateway/upstream timeout
  * (nginx 502/503/504) — the file is still being processed on the server,
  * we just lost the response channel. The caller should fall through to
  * the progress-polling code path instead of telling the user it failed.
@@ -55,25 +55,114 @@ class UpstreamTimeoutError extends Error {
   }
 }
 
-async function uploadForTranscription(
+/**
+ * Best-effort Content-Type for the S3 PUT. Presign roundtrip locks
+ * Content-Type into the signature, so client and server MUST use the
+ * same value — hence this shared helper.
+ */
+function getContentTypeForFile(file: File): string {
+  if (file.type) return file.type;
+  const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+  const map: Record<string, string> = {
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    mp4: 'video/mp4',
+    avi: 'video/x-msvideo',
+  };
+  return map[ext] ?? 'application/octet-stream';
+}
+
+async function presignUpload(
   file: File,
-  jobId: string,
-  signal?: AbortSignal
-): Promise<TranscribeResponse> {
-  const token = await getAccessToken();
-  const formData = new FormData();
-  formData.append('file', file);
-
-  const res = await fetch('/api/tools/audio-transcribe', {
+): Promise<{ uploadUrl: string; s3Key: string; contentType: string }> {
+  const contentType = getContentTypeForFile(file);
+  const res = await authFetch('/api/tools/audio-transcribe/presign', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'X-Transcribe-Job-Id': jobId,
-    },
-    body: formData,
-    signal,
+    body: JSON.stringify({
+      filename: file.name,
+      size: file.size,
+      contentType,
+    }),
   });
+  const raw = await res.text();
+  const json = (() => {
+    try {
+      return JSON.parse(raw) as { uploadUrl?: string; s3Key?: string; contentType?: string; error?: string };
+    } catch {
+      return null;
+    }
+  })();
+  if (!res.ok || !json?.uploadUrl || !json?.s3Key) {
+    throw new Error(json?.error || `Не удалось получить ссылку загрузки (HTTP ${res.status})`);
+  }
+  return {
+    uploadUrl: json.uploadUrl,
+    s3Key: json.s3Key,
+    contentType: json.contentType || contentType,
+  };
+}
 
+/**
+ * PUT the file straight to S3. Uses XMLHttpRequest instead of fetch so we
+ * get upload-progress events (fetch's ReadableStream body isn't universally
+ * supported for tracking bytes). The S3 domain is different from
+ * polza-portal.ru — that's the whole point: corporate proxies / VPN gateways
+ * that were dropping our multipart POSTs to the app leave S3 traffic alone.
+ */
+function uploadFileToS3(params: {
+  uploadUrl: string;
+  file: File;
+  contentType: string;
+  onProgress: (percent: number, loaded: number, total: number) => void;
+  signal: AbortSignal;
+}): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', params.uploadUrl);
+    xhr.setRequestHeader('Content-Type', params.contentType);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && e.total > 0) {
+        const percent = Math.max(0, Math.min(100, Math.round((e.loaded / e.total) * 100)));
+        params.onProgress(percent, e.loaded, e.total);
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new Error(`Не удалось загрузить файл в хранилище (HTTP ${xhr.status})`));
+      }
+    };
+    xhr.onerror = () =>
+      reject(new Error('Сетевая ошибка при загрузке файла в хранилище. Проверьте соединение.'));
+    xhr.ontimeout = () => reject(new Error('Таймаут при загрузке файла в хранилище.'));
+    xhr.onabort = () => reject(new DOMException('Aborted', 'AbortError'));
+
+    if (params.signal.aborted) {
+      xhr.abort();
+      return;
+    }
+    params.signal.addEventListener('abort', () => xhr.abort(), { once: true });
+
+    xhr.send(params.file);
+  });
+}
+
+async function finalizeTranscription(params: {
+  s3Key: string;
+  filename: string;
+  jobId: string;
+  signal?: AbortSignal;
+}): Promise<TranscribeResponse> {
+  const res = await authFetch('/api/tools/audio-transcribe', {
+    method: 'POST',
+    body: JSON.stringify({
+      s3Key: params.s3Key,
+      filename: params.filename,
+      jobId: params.jobId,
+    }),
+    signal: params.signal,
+  });
   const raw = await res.text();
   const json = (() => {
     try {
@@ -83,12 +172,8 @@ async function uploadForTranscription(
     }
   })();
   if (!res.ok) {
-    if (res.status === 413) {
-      throw new Error('Файл слишком большой для загрузки на сервер.');
-    }
-    // 502/503/504 = nginx couldn't reach upstream in time. The worker is
-    // very likely still chewing on our file — bail out of the upload promise
-    // and let the polling path detect completion when the worker finishes.
+    // 502/503/504: nginx лишился коннекта к Next.js, но воркер, скорее всего,
+    // уже жуёт наш файл — падать в UI не надо, отдадим управление polling'у.
     if (res.status === 502 || res.status === 503 || res.status === 504) {
       throw new UpstreamTimeoutError(res.status);
     }
@@ -239,13 +324,9 @@ export default function AudioTranscribeToolPage() {
     setResult(null);
     setProgressPercent(0);
     setProgressStage('queued');
-    // Honest initial hint — until the worker accepts the job (couple of
-    // minutes for a big file: upload + ffmpeg), polling sees 404 and the
-    // UI is otherwise frozen. Telling the user the file size + a rough
-    // wait estimate beats "Подготовка файла..." in silence.
-    setProgressHint(
-      `Загружаем ${formatBytes(file.size)} на сервер... подождите 1–3 минуты до начала расшифровки`,
-    );
+    // Первая фаза (presign) занимает пол-секунды — держим короткий, честный
+    // хинт. Дальше он перепишется на % загрузки в S3 из XHR-прогресса.
+    setProgressHint('Готовим загрузку...');
 
     const jobId = crypto.randomUUID();
     setActiveJobId(jobId);
@@ -332,7 +413,35 @@ export default function AudioTranscribeToolPage() {
     const pollingPromise = pollProgress();
     let shouldAwaitByProgress = false;
     try {
-      const resp = await uploadForTranscription(file, jobId, uploadAbort.signal);
+      // Шаг 1: presign — крошечный JSON-запрос, идёт даже через капризные шлюзы.
+      const { uploadUrl, s3Key, contentType } = await presignUpload(file);
+
+      // Шаг 2: PUT файла НАПРЯМУЮ в S3 (домен S3, не polza-portal.ru → минует
+      // тот прокси/VPN-шлюз, что рубил multipart POST'ы на портал).
+      await uploadFileToS3({
+        uploadUrl,
+        file,
+        contentType,
+        onProgress: (percent, loaded, total) => {
+          setProgressPercent(percent);
+          setProgressHint(
+            `Загружаем в хранилище: ${percent}% (${formatBytes(loaded)} из ${formatBytes(total)})`,
+          );
+        },
+        signal: uploadAbort.signal,
+      });
+
+      // Шаг 3: сообщаем серверу «файл лежит там-то, забирай и расшифровывай».
+      // Тело запроса — снова крошечный JSON, POST проходит без проблем.
+      // Прогресс дальше подхватит polling из воркера.
+      setProgressPercent(0);
+      setProgressHint('Файл загружен. Сервер начинает расшифровку...');
+      const resp = await finalizeTranscription({
+        s3Key,
+        filename: file.name,
+        jobId,
+        signal: uploadAbort.signal,
+      });
       setResult(resp);
       setProgressPercent(100);
       setProgressStage('done');

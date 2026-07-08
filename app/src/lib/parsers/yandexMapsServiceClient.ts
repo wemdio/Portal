@@ -52,6 +52,13 @@ function getServiceUrl() {
 
 class YandexMapsServiceHttpError extends Error {}
 
+export class YandexMapsBlockedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'YandexMapsBlockedError';
+  }
+}
+
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
@@ -125,6 +132,11 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
       if (!res.ok) {
         const text = await res.text().catch(() => '');
+        if (res.status === 429) {
+          throw new YandexMapsBlockedError(
+            text ? `yandex_blocked: ${text.slice(0, 300)}` : 'yandex_blocked',
+          );
+        }
         throw new YandexMapsServiceHttpError(
           `yandexmaps service error ${res.status}${text ? `: ${text.slice(0, 300)}` : ''}`,
         );
@@ -133,6 +145,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
       return (await res.json()) as T;
     } catch (err) {
       if (err instanceof YandexMapsServiceHttpError) throw err;
+      if (err instanceof YandexMapsBlockedError) throw err;
       lastErr = err;
       if (attempt >= maxRetries) break;
       await sleep(250 * Math.pow(2, attempt));
@@ -158,7 +171,7 @@ export async function yandexMapsCollectLinks(req: CollectLinksRequest): Promise<
   return await postJson<CollectLinksResponse>('/collect-links', req);
 }
 
-export type CollectLinksChunk = { links: string[]; total: number; done?: boolean; error?: string };
+export type CollectLinksChunk = { links: string[]; total: number; done?: boolean; error?: string; blocked?: boolean };
 
 /**
  * Streaming version: calls /collect-links/stream and invokes onChunk for every
@@ -214,7 +227,12 @@ export async function yandexMapsCollectLinksStream(
         continue;
       }
 
-      if (parsed.error) throw new Error(`yandexmaps stream: ${parsed.error}`);
+      if (parsed.error) {
+        if (parsed.blocked || /yandex_blocked/i.test(parsed.error)) {
+          throw new YandexMapsBlockedError(`yandexmaps stream: ${parsed.error}`);
+        }
+        throw new Error(`yandexmaps stream: ${parsed.error}`);
+      }
 
       if (parsed.links) {
         for (const link of parsed.links) {

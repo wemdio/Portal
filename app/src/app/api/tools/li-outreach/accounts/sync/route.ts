@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { UnipileClient } from '@/lib/liOutreach/unipileClient';
-import type { LiSettings } from '@/lib/liOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,16 +10,14 @@ export async function POST(req: NextRequest) {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
 
-    const { data: settings } = await auth.supabase
-      .from('li_settings')
-      .select('*')
-      .eq('user_id', auth.user.id)
-      .maybeSingle<LiSettings>();
-    if (!settings?.unipile_dsn || !settings?.unipile_api_key) {
-      return jsonError('Сначала настройте Unipile DSN и API Key в настройках', 400);
+    // Unipile creds come from the shared env — see migration 20260708_0001.
+    const unipileDsn = process.env.UNIPILE_DSN ?? '';
+    const unipileApiKey = process.env.UNIPILE_API_KEY ?? '';
+    if (!unipileDsn || !unipileApiKey) {
+      return jsonError('UNIPILE_DSN / UNIPILE_API_KEY не заданы в env на сервере — обратитесь к админу', 500);
     }
 
-    const client = new UnipileClient(settings.unipile_dsn, settings.unipile_api_key);
+    const client = new UnipileClient(unipileDsn, unipileApiKey);
 
     try {
       const accounts = await client.listAccounts();

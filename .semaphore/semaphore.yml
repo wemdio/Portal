@@ -53,6 +53,7 @@ blocks:
             - docker buildx create --use
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --build-arg NEXT_PUBLIC_RDP_WS_URL=${NEXT_PUBLIC_RDP_WS_URL} --build-arg NEXT_PUBLIC_SIGNUP_HOSTS=${NEXT_PUBLIC_SIGNUP_HOSTS} --platform linux/amd64 -f Dockerfile .'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-yandexmaps:prod --platform linux/amd64 -f services/yandexmaps/Dockerfile services/yandexmaps'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-googleparsers:prod --platform linux/amd64 -f services/googleparsers/Dockerfile services/googleparsers'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-rdp-ws:prod --platform linux/amd64 -f services/rdp-ws/Dockerfile services/rdp-ws'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --platform linux/amd64 -f Dockerfile.worker .'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-health-check:prod --platform linux/amd64 -f services/health-check/Dockerfile services/health-check'
@@ -63,3 +64,4 @@ blocks:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-changelog-bot:prod --platform linux/amd64 -f services/changelog-bot/Dockerfile services/changelog-bot'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-polza-reports:prod --platform linux/amd64 -f services/polza-reports/Dockerfile services/polza-reports'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-openoutreach:prod --platform linux/amd64 -f services/openoutreach/compose/linkedin/Dockerfile services/openoutreach'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-external-sync:prod --platform linux/amd64 -f services/portal-external-sync/Dockerfile services/portal-external-sync'

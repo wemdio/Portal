@@ -12,6 +12,7 @@ services:
     container_name: portal
     depends_on:
       - yandexmaps
+      - googleparsers
       - telegram-bot-api
       - transcribe-worker
     env_file:
@@ -51,6 +52,8 @@ services:
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
       - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
+      - GOOGLEPARSERS_SERVICE_URL=http://googleparsers:8001
+      - GOOGLEPARSERS_PROXY_ENCRYPTION_KEY=${GOOGLEPARSERS_PROXY_ENCRYPTION_KEY}
       - POLZA_CRED_KEY=${POLZA_CRED_KEY}
       - VAPI_API_KEY=${VAPI_API_KEY}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
@@ -282,11 +285,41 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
       - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
+      # Пул прокси для ротации (JSON-массив в .env). Без него — прямое соединение
+      # с IP сервера, которое Яндекс быстро отправляет в капчу.
+      - PROXY_URLS=${PROXY_URLS}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=yandexmaps
     depends_on:
       - yandexmaps
+    stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: '1'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  worker-googleparsers:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-googleparsers
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - GOOGLEPARSERS_SERVICE_URL=http://googleparsers:8001
+      - GOOGLEPARSERS_CONCURRENCY=1
+      - GOOGLEPARSERS_PROXY_ENCRYPTION_KEY=${GOOGLEPARSERS_PROXY_ENCRYPTION_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
+      - WORKER_KIND=googleparsers
+    depends_on:
+      - googleparsers
     stop_grace_period: 30m
     deploy:
       resources:
@@ -771,7 +804,7 @@ services:
     # сотни zombie за день (сегодня 342). init: true = tini в роли PID 1.
     init: true
     environment:
-      - YANDEXMAPS_CONCURRENCY=4
+      - YANDEXMAPS_CONCURRENCY=2
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -786,6 +819,15 @@ services:
     restart: unless-stopped
     ports:
       - "8010:8000"
+    networks:
+      - portal-network
+
+  googleparsers:
+    image: ${DOCKER_USERNAME}/portal-googleparsers:prod
+    container_name: portal-googleparsers
+    # Playwright/Chromium children — same reaping story as yandexmaps.
+    init: true
+    restart: unless-stopped
     networks:
       - portal-network
 
@@ -865,6 +907,54 @@ services:
         limits:
           memory: 1536M
           cpus: '0.5'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  # Ночной синк внешних источников (Метрика / AMO / Точка / Т-Банк) в main-postgres.
+  # Расписание cron '0 2 * * *' UTC (= 5:00 МСК) через APScheduler — совпадает
+  # с окном деплоев в 3-5 утра МСК, чтобы свежие данные были к утреннему часу.
+  #
+  # На старте контейнер проверяет текущее время по МСК: если попадает в окно
+  # [3:00, 9:00) — синк запускается сразу (догоняем пропущенный cron после
+  # деплоя). Вне окна — просто ждём следующего cron, не тратим API-запросы
+  # на каждый рестарт в течение дня. UPSERT-таблицы делают любой повторный
+  # прогон безопасным.
+  #
+  # Логи бинд-маунтятся на хост в /var/log/portal-external-sync/, чтобы
+  # переживать docker rm -f при деплое (иначе история stdout уходит вместе
+  # с контейнером). Внутри контейнера пишутся через tee — виден как в
+  # `docker logs`, так и в файле на хосте `tail /var/log/portal-external-sync/main.log`.
+  portal-external-sync:
+    image: ${DOCKER_USERNAME}/portal-external-sync:prod
+    container_name: portal-external-sync
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-0 2 * * *}  # 02:00 UTC = 5:00 МСК
+      - EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK:-3}
+      - EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK:-9}
+      - YANDEX_METRIKA_TOKEN=${YANDEX_METRIKA_TOKEN:-}
+      - YANDEX_METRIKA_COUNTER_ID=${YANDEX_METRIKA_COUNTER_ID:-62363425}
+      - YANDEX_METRIKA_LOOKBACK_DAYS=${YANDEX_METRIKA_LOOKBACK_DAYS:-30}
+      - AMOCRM_TOKEN=${AMOCRM_TOKEN:-}
+      - AMO_ACCESS_TOKEN=${AMO_ACCESS_TOKEN:-}
+      - AMO_BASE_URL=${AMO_BASE_URL:-}
+      - AMO_FIELD_YM_CLIENT_ID=${AMO_FIELD_YM_CLIENT_ID:-}
+      - TBANK_TOKEN=${TBANK_TOKEN:-}
+      - TBANK_ACCOUNT=${TBANK_ACCOUNT:-40802810600001780269}
+      - TOCHKA_JWT=${TOCHKA_JWT:-}
+      - BANK_OWN_INN=${BANK_OWN_INN:-165808519703}
+    volumes:
+      - /var/log/portal-external-sync:/var/log/sync
+    command: sh -c "mkdir -p /var/log/sync && exec python -u main.py 2>&1 | tee -a /var/log/sync/main.log"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.25'
     restart: unless-stopped
     networks:
       - portal-network

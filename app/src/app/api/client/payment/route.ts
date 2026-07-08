@@ -106,13 +106,38 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Неподдерживаемый период' }, { status: 400 });
   }
 
-  const { data: tariff } = await supabaseAdmin
+  // Строку в client_tariffs обычно создаёт /api/signup (см. там insert
+  // дефолта). Но у части клиентов строки нет — их аккаунты завели раньше,
+  // чем в signup появилась эта логика, или через админ-путь. Раньше POST в
+  // таком случае падал в 404 «Подписка не найдена», и клиент не мог выбрать
+  // тариф вообще. Теперь дефолт создаётся лениво прямо тут, чтобы любой
+  // клиент мог оплатить первый тариф.
+  let { data: tariff } = await supabaseAdmin
     .from('client_tariffs')
     .select('*')
     .eq('user_id', userId)
     .maybeSingle();
 
-  if (!tariff) return NextResponse.json({ error: 'Подписка не найдена' }, { status: 404 });
+  if (!tariff) {
+    const { data: inserted, error: insertErr } = await supabaseAdmin
+      .from('client_tariffs')
+      .insert({
+        user_id: userId,
+        tariff_type: 'standard',
+        is_active: false,
+        payment_locked: false,
+      })
+      .select('*')
+      .single();
+    if (insertErr || !inserted) {
+      return NextResponse.json(
+        { error: `Не удалось инициализировать тариф: ${insertErr?.message ?? 'unknown'}` },
+        { status: 500 },
+      );
+    }
+    tariff = inserted;
+  }
+
   if (tariff.paid_at) {
     return NextResponse.json({ error: 'Подписка уже оплачена' }, { status: 400 });
   }
