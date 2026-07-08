@@ -124,7 +124,7 @@ type LiTask = {
   } | null;
 };
 type LiCampaignLog = { id: number; level: string; message: string; lead_name: string | null; step_index: number | null; created_at: string };
-type LiSettings = { unipile_dsn: string; unipile_api_key: string; webhook_secret: string; proxy_url: string };
+type LiSettings = { webhook_secret: string };
 type CampaignStep = { type?: unknown; message?: unknown; days?: unknown; hours?: unknown };
 
 const UNLISTED_LEAD_LIST_FILTER = '__unlisted__';
@@ -203,7 +203,7 @@ export default function LiOutreachPage() {
   const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'24h' | '7d' | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
-  const [settingsForm, setSettingsForm] = useState<LiSettings>({ unipile_dsn: '', unipile_api_key: '', webhook_secret: '', proxy_url: '' });
+  const [settingsForm, setSettingsForm] = useState<LiSettings>({ webhook_secret: '' });
 
   // Scraper form
   const [scraperUrl, setScraperUrl] = useState('');
@@ -1958,19 +1958,14 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
       {/* Settings */}
       {tab === 'settings' && (
         <div className="rounded-xl border border-gray-200 p-4 space-y-4 max-w-lg">
-          <h2 className="text-sm font-semibold text-gray-900">Настройки Unipile & OpenAI</h2>
+          <h2 className="text-sm font-semibold text-gray-900">Настройки LinkedIn Outreach</h2>
+          <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+            🔒 Unipile-аккаунт и прокси управляются централизованно (env). Одинаковы для всей команды.
+          </div>
           <div className="space-y-3">
             <div>
-              <label className="text-xs text-gray-600">Unipile DSN</label>
-              <input type="text" placeholder="api23.unipile.com:15321" value={settingsForm.unipile_dsn} onChange={(e) => setSettingsForm({ ...settingsForm, unipile_dsn: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm mt-1" />
-            </div>
-            <div>
-              <label className="text-xs text-gray-600">Unipile API Key</label>
-              <input type="password" value={settingsForm.unipile_api_key} onChange={(e) => setSettingsForm({ ...settingsForm, unipile_api_key: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm mt-1" />
-            </div>
-            <div>
-              <label className="text-xs text-gray-600">Proxy (HTTP/HTTPS)</label>
-              <input type="text" placeholder="http://user:pass@host:port" value={settingsForm.proxy_url} onChange={(e) => setSettingsForm({ ...settingsForm, proxy_url: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm mt-1" />
+              <label className="text-xs text-gray-600">Webhook Secret</label>
+              <input type="password" value={settingsForm.webhook_secret} onChange={(e) => setSettingsForm({ ...settingsForm, webhook_secret: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm mt-1" />
             </div>
           </div>
           <button onClick={() => void saveSettings()} disabled={savingSettings} className="rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-50">
