@@ -54,6 +54,27 @@ async function tryResolve4(domain: string): Promise<'ok' | 'absent' | 'soft'> {
   }
 }
 
+/**
+ * Keep only DELIVERABLE MX exchanges, sorted by priority. Drops RFC 7505
+ * "null MX": a single `MX 0 .` record (Node reports its exchange as "" or ".")
+ * by which a domain EXPLICITLY declares it accepts no mail. If the records exist
+ * but are all null/empty, the result is [] → the domain has no deliverable MX,
+ * so the address is undeliverable (invalid), not "couldn't verify" (previously
+ * an empty exchange was probed as mxHost="" → proxy "Missing required fields" →
+ * a spurious 'unknown').
+ */
+export function deliverableMxHosts(
+  records: { exchange: string; priority: number }[],
+): string[] {
+  return records
+    .filter((r) => {
+      const h = (r.exchange ?? '').trim();
+      return h !== '' && h !== '.';
+    })
+    .sort((a, b) => a.priority - b.priority)
+    .map((r) => r.exchange.trim());
+}
+
 export async function lookupMX(
   domain: string,
 ): Promise<{ mxHosts: string[]; found: boolean; lookupFailed: boolean }> {
@@ -61,8 +82,10 @@ export async function lookupMX(
     try {
       const records = await dnsResolver.resolveMx(domain);
       if (records && records.length > 0) {
-        const sorted = records.sort((a, b) => a.priority - b.priority);
-        return { mxHosts: sorted.map((r) => r.exchange), found: true, lookupFailed: false };
+        const hosts = deliverableMxHosts(records);
+        if (hosts.length > 0) return { mxHosts: hosts, found: true, lookupFailed: false };
+        // Records existed but were all null-MX/empty → domain accepts no mail.
+        return { mxHosts: [], found: false, lookupFailed: false };
       }
       // No MX records → implicit MX = the domain's A record (RFC 5321 §5.1).
       const a = await tryResolve4(domain);
