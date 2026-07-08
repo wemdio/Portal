@@ -12,6 +12,7 @@ services:
     container_name: portal
     depends_on:
       - yandexmaps
+      - googleparsers
       - telegram-bot-api
       - transcribe-worker
     env_file:
@@ -51,6 +52,8 @@ services:
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
       - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
+      - GOOGLEPARSERS_SERVICE_URL=http://googleparsers:8001
+      - GOOGLEPARSERS_PROXY_ENCRYPTION_KEY=${GOOGLEPARSERS_PROXY_ENCRYPTION_KEY}
       - POLZA_CRED_KEY=${POLZA_CRED_KEY}
       - VAPI_API_KEY=${VAPI_API_KEY}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
@@ -287,6 +290,33 @@ services:
       - WORKER_KIND=yandexmaps
     depends_on:
       - yandexmaps
+    stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: '1'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  worker-googleparsers:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-googleparsers
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - GOOGLEPARSERS_SERVICE_URL=http://googleparsers:8001
+      - GOOGLEPARSERS_CONCURRENCY=1
+      - GOOGLEPARSERS_PROXY_ENCRYPTION_KEY=${GOOGLEPARSERS_PROXY_ENCRYPTION_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
+      - WORKER_KIND=googleparsers
+    depends_on:
+      - googleparsers
     stop_grace_period: 30m
     deploy:
       resources:
@@ -786,6 +816,15 @@ services:
     restart: unless-stopped
     ports:
       - "8010:8000"
+    networks:
+      - portal-network
+
+  googleparsers:
+    image: ${DOCKER_USERNAME}/portal-googleparsers:prod
+    container_name: portal-googleparsers
+    # Playwright/Chromium children — same reaping story as yandexmaps.
+    init: true
+    restart: unless-stopped
     networks:
       - portal-network
 

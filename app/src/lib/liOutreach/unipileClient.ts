@@ -401,6 +401,13 @@ export function extractPublicIdentifier(profileUrl: string): string | null {
 
 export function extractActivityUrn(postUrl: string): string | null {
   if (postUrl.startsWith('urn:li:activity:')) return postUrl;
-  const match = postUrl.match(/activity[:-](\d{19})/);
-  return match ? `urn:li:activity:${match[1]}` : null;
+  // 1) URNs with explicit `activity:` or `activity-` (feed/update or share URLs)
+  const explicit = postUrl.match(/activity[:-](\d{19})/);
+  if (explicit) return `urn:li:activity:${explicit[1]}`;
+  // 2) /posts/<slug>-<19-digit-id>-<4char-suffix>/ format (share links copied
+  //    from the browser address bar). Example:
+  //    https://www.linkedin.com/posts/foo-bar-baz-7261807508984389632-VDmI/?utm_source=...
+  const postsMatch = postUrl.match(/\/posts\/[^/?#]*?-(\d{19})(?:-[A-Za-z0-9_-]+)?(?:\/|\?|#|$)/);
+  if (postsMatch) return `urn:li:activity:${postsMatch[1]}`;
+  return null;
 }

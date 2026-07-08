@@ -7,7 +7,6 @@ import {
   detectAccountCooldownError,
   isAccountInCooldown,
 } from './accountCooldown';
-import type { LiSettings } from './types';
 
 /**
  * LinkedIn scraper — search by URL and post reactions.
@@ -95,17 +94,13 @@ export async function scrapeLinkedInSearch(
   if (!supabaseAdmin) return;
   const db = supabaseAdmin;
 
-  // Load settings
-  const { data: settings } = await db
-    .from('li_settings')
-    .select('*')
-    .eq('user_id', userId)
-    .maybeSingle<LiSettings>();
-  if (!settings?.unipile_dsn || !settings?.unipile_api_key) {
-    await db.from('li_tasks').update({ status: 'failed', error_message: 'Нет настроек Unipile' }).eq('id', taskId);
+  // Unipile creds come from the shared env — see migration 20260708_0001.
+  const unipileDsn = process.env.UNIPILE_DSN ?? '';
+  const unipileApiKey = process.env.UNIPILE_API_KEY ?? '';
+  if (!unipileDsn || !unipileApiKey) {
+    await db.from('li_tasks').update({ status: 'failed', error_message: 'UNIPILE_DSN / UNIPILE_API_KEY не заданы в env' }).eq('id', taskId);
     return;
   }
-
   // Get Unipile account ID + cooldown so we can bail out early.
   const { data: account } = await db
     .from('li_accounts')
@@ -118,7 +113,7 @@ export async function scrapeLinkedInSearch(
   }
   if (await bailIfAccountInCooldown(db, taskId, account)) return;
 
-  const client = new UnipileClient(settings.unipile_dsn, settings.unipile_api_key, account.unipile_account_id);
+  const client = new UnipileClient(unipileDsn, unipileApiKey, account.unipile_account_id);
 
   await db.from('li_tasks').update({ status: 'running', started_at: new Date().toISOString(), total: maxResults }).eq('id', taskId);
 
@@ -228,13 +223,10 @@ export async function scrapePostReactions(
   if (!supabaseAdmin) return;
   const db = supabaseAdmin;
 
-  const { data: settings } = await db
-    .from('li_settings')
-    .select('*')
-    .eq('user_id', userId)
-    .maybeSingle<LiSettings>();
-  if (!settings?.unipile_dsn || !settings?.unipile_api_key) {
-    await db.from('li_tasks').update({ status: 'failed', error_message: 'Нет настроек Unipile' }).eq('id', taskId);
+  const unipileDsn = process.env.UNIPILE_DSN ?? '';
+  const unipileApiKey = process.env.UNIPILE_API_KEY ?? '';
+  if (!unipileDsn || !unipileApiKey) {
+    await db.from('li_tasks').update({ status: 'failed', error_message: 'UNIPILE_DSN / UNIPILE_API_KEY не заданы в env' }).eq('id', taskId);
     return;
   }
 
@@ -255,7 +247,7 @@ export async function scrapePostReactions(
     return;
   }
 
-  const client = new UnipileClient(settings.unipile_dsn, settings.unipile_api_key, account.unipile_account_id);
+  const client = new UnipileClient(unipileDsn, unipileApiKey, account.unipile_account_id);
 
   await db.from('li_tasks').update({ status: 'running', started_at: new Date().toISOString(), total: maxResults }).eq('id', taskId);
 
