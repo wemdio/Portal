@@ -61,11 +61,13 @@ SELECT
 FROM li_campaign_logs
 WHERE created_at > NOW() - INTERVAL '7 days';
 
-\echo '=== 6. Bare-модели без provider/ (должно быть 0) ==='
+\echo '=== 6. Bare-модели без provider/ в li_campaigns (должно быть 0) ==='
 -- Фикс normalizeModel + миграция: Requesty принимает только provider/model.
+-- Считаем ТОЛЬКО li_campaigns.ai_model — это живой GPT-путь. li_settings.openai_model
+-- — мёртвая BYOK-колонка (её никто не читает после удаления BYOK), bare-значение там
+-- ни на что не влияет и раньше давало ложный 🔴 (2026-07-08).
 SELECT
-  (SELECT COUNT(*) FROM li_campaigns WHERE ai_model   IS NOT NULL AND ai_model   <> '' AND ai_model   NOT LIKE '%/%') AS bare_in_campaigns,
-  (SELECT COUNT(*) FROM li_settings  WHERE openai_model IS NOT NULL AND openai_model <> '' AND openai_model NOT LIKE '%/%') AS bare_in_settings;
+  (SELECT COUNT(*) FROM li_campaigns WHERE ai_model IS NOT NULL AND ai_model <> '' AND ai_model NOT LIKE '%/%') AS bare_in_campaigns;
 
 \echo '=== 7. Остаточные BYOK OpenAI-ключи в li_settings (должно быть 0) ==='
 -- Миграция 20260525_0003: per-user ключи вычищены, всё идёт через env Requesty.
