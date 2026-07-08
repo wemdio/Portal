@@ -6,7 +6,7 @@ import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
 
 // ---- Types ------------------------------------------------------------------
 
-type Tab = 'dashboard' | 'campaigns' | 'leads' | 'scraper' | 'accounts' | 'logs' | 'settings';
+type Tab = 'dashboard' | 'campaigns' | 'leads' | 'scraper' | 'accounts' | 'logs';
 
 type LiAccountCooldownReason = 'invitation_limit' | 'already_invited' | 'account_restricted';
 type LiAccount = {
@@ -124,7 +124,6 @@ type LiTask = {
   } | null;
 };
 type LiCampaignLog = { id: number; level: string; message: string; lead_name: string | null; step_index: number | null; created_at: string };
-type LiSettings = { webhook_secret: string };
 type CampaignStep = { type?: unknown; message?: unknown; days?: unknown; hours?: unknown };
 
 const UNLISTED_LEAD_LIST_FILTER = '__unlisted__';
@@ -195,15 +194,12 @@ export default function LiOutreachPage() {
   const [deletingLeads, setDeletingLeads] = useState(false);
   const [campaigns, setCampaigns] = useState<LiCampaign[]>([]);
   const [tasks, setTasks] = useState<LiTask[]>([]);
-  const [_settings, setSettings] = useState<LiSettings | null>(null);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [campaignLogs, setCampaignLogs] = useState<LiCampaignLog[]>([]);
   // Range key currently being exported (button shows '...' until done).
   // Null when no export is in flight.
   const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'24h' | '7d' | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const [savingSettings, setSavingSettings] = useState(false);
-  const [settingsForm, setSettingsForm] = useState<LiSettings>({ webhook_secret: '' });
 
   // Scraper form
   const [scraperUrl, setScraperUrl] = useState('');
@@ -313,13 +309,6 @@ export default function LiOutreachPage() {
   const loadTasks = useCallback(async () => {
     try { const d = await api<{ tasks: LiTask[] }>('/scraper/tasks'); setTasks(d.tasks); } catch (e) { console.error('[li-outreach] loadTasks failed', e); }
   }, []);
-  const loadSettings = useCallback(async () => {
-    try {
-      const d = await api<{ settings: LiSettings | null }>('/settings');
-      setSettings(d.settings);
-      if (d.settings) setSettingsForm(d.settings);
-    } catch (e) { console.error('[li-outreach] loadSettings failed', e); }
-  }, []);
   const loadCampaignLogs = useCallback(async (id: string) => {
     try {
       const d = await api<{ items: LiCampaignLog[]; total: number }>(`/campaigns/${id}/logs`);
@@ -348,7 +337,6 @@ export default function LiOutreachPage() {
             void loadAccountErrorCounts();
             void loadCampaigns();
             void loadLeadLists();
-            void loadSettings();
             subscription.unsubscribe();
           }
         });
@@ -359,7 +347,6 @@ export default function LiOutreachPage() {
       void loadAccountErrorCounts();
       void loadCampaigns();
       void loadLeadLists();
-      void loadSettings();
     };
     void init();
     return () => { cancelled = true; };
@@ -419,7 +406,6 @@ export default function LiOutreachPage() {
   // ---- Actions --------------------------------------------------------------
 
   const syncAccounts = async () => { setSyncing(true); try { await api('/accounts/sync', { method: 'POST', json: {} }); await loadAccounts(); } finally { setSyncing(false); } };
-  const saveSettings = async () => { setSavingSettings(true); try { await api('/settings', { method: 'PUT', json: settingsForm }); await loadSettings(); } finally { setSavingSettings(false); } };
   const startCampaign = async (id: string) => { await api(`/campaigns/${id}/start`, { method: 'POST', json: {} }); await loadCampaigns(); };
   const stopCampaign = async (id: string) => { await api(`/campaigns/${id}/stop`, { method: 'POST', json: {} }); await loadCampaigns(); };
   const deleteCampaign = async (id: string) => { if (!confirm('Удалить кампанию?')) return; await api(`/campaigns/${id}`, { method: 'DELETE' }); await loadCampaigns(); };
@@ -817,7 +803,6 @@ export default function LiOutreachPage() {
     { key: 'scraper', label: 'Скрапер' },
     { key: 'accounts', label: 'Аккаунты' },
     { key: 'logs', label: 'Логи' },
-    { key: 'settings', label: 'Настройки' },
   ];
 
   const selectedCampaign = useMemo(() => campaigns.find((c) => c.id === selectedCampaignId) ?? null, [campaigns, selectedCampaignId]);
@@ -1049,7 +1034,7 @@ export default function LiOutreachPage() {
             <div className="rounded-xl border border-gray-200 bg-white p-4">
               <h3 className="text-sm font-semibold text-gray-900 mb-3">Аккаунты</h3>
               {accounts.filter((a) => a.user_id === currentUserId).length === 0 ? (
-                <p className="text-xs text-gray-400">Нет аккаунтов. Подключите через Настройки → Синхронизация.</p>
+                <p className="text-xs text-gray-400">Нет аккаунтов. Откройте вкладку «Аккаунты» и нажмите «Синхронизировать».</p>
               ) : (
                 <div className="space-y-2">
                   {accounts.filter((a) => a.user_id === currentUserId).map((a) => {
@@ -1937,25 +1922,6 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
 
       {/* Logs */}
       {tab === 'logs' && <LiLogsTab campaigns={campaigns} />}
-
-      {/* Settings */}
-      {tab === 'settings' && (
-        <div className="rounded-xl border border-gray-200 p-4 space-y-4 max-w-lg">
-          <h2 className="text-sm font-semibold text-gray-900">Настройки LinkedIn Outreach</h2>
-          <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
-            🔒 Unipile-аккаунт и прокси управляются централизованно (env). Одинаковы для всей команды.
-          </div>
-          <div className="space-y-3">
-            <div>
-              <label className="text-xs text-gray-600">Webhook Secret</label>
-              <input type="password" value={settingsForm.webhook_secret} onChange={(e) => setSettingsForm({ ...settingsForm, webhook_secret: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm mt-1" />
-            </div>
-          </div>
-          <button onClick={() => void saveSettings()} disabled={savingSettings} className="rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-50">
-            {savingSettings ? 'Сохранение...' : 'Сохранить'}
-          </button>
-        </div>
-      )}
 
       {/* Per-account log modal */}
       {accountLogsModal && (
