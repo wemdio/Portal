@@ -1,14 +1,5 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import type { NewsResult, NewsTarget } from "../shared/types";
-import {
-  addNewsError,
-  addNewsResult,
-  persistNewsJob,
-  setCurrentNewsTarget,
-  setNewsJobStatus,
-  waitWhileNewsPaused,
-  type RuntimeNewsJob
-} from "../newsJobStore";
+import type { JobError, NewsJob, NewsResult, NewsTarget } from "../shared/types";
 import { fetchGoogleNewsRssResults } from "./googleNewsRss";
 
 interface ExtractedNewsItem {
@@ -21,13 +12,27 @@ interface ExtractedNewsItem {
 
 type ParseTargetResult = "ok" | "exhausted" | "terminal";
 
-export async function runGoogleNewsJob(job: RuntimeNewsJob): Promise<void> {
+export interface NewsRunCallbacks {
+  onResult: (result: NewsResult) => void;
+  onProgress: (progress: {
+    currentTargetIndex: number;
+    processedResults: number;
+    message: string;
+  }) => void;
+  onError: (error: JobError) => void;
+  shouldPause: () => boolean;
+  shouldStop: () => boolean;
+}
+
+export async function runGoogleNewsJob(job: NewsJob, cb: NewsRunCallbacks): Promise<void> {
   if (job.targets.length === 0) return;
 
   let browser: Browser | undefined;
+  let stopRequestedInternally = false;
+  const isStopped = (): boolean => stopRequestedInternally || cb.shouldStop();
 
   try {
-    setNewsJobStatus(job, "running", "Starting Chromium for Google News");
+    setStatus(job, cb, "running", "Starting Chromium for Google News");
     browser = await launchBrowser(job);
     const context = await browser.newContext({
       locale: `${job.settings.language}-${job.settings.country}`,
@@ -38,43 +43,43 @@ export async function runGoogleNewsJob(job: RuntimeNewsJob): Promise<void> {
     const exhaustedQueries = new Set<string>();
 
     for (let index = 0; index < job.targets.length; index += 1) {
-      if (job.control.stopRequested) break;
-      await waitWhileNewsPaused(job);
+      if (isStopped()) break;
+      await waitWhilePaused(cb);
 
       const target = job.targets[index];
       if (exhaustedQueries.has(target.query)) {
-        setCurrentNewsTarget(job, index, `Skipping exhausted query: ${target.query} / page ${target.page}`);
+        setCurrentTarget(job, cb, index, `Skipping exhausted query: ${target.query} / page ${target.page}`);
         continue;
       }
 
-      setCurrentNewsTarget(job, index, `Parsing Google News: ${target.query} / page ${target.page}`);
-      const result = await parseNewsTarget(context, job, target);
+      setCurrentTarget(job, cb, index, `Parsing Google News: ${target.query} / page ${target.page}`);
+      const result = await parseNewsTarget(context, job, cb, target, () => {
+        stopRequestedInternally = true;
+      }, isStopped);
       if (result === "exhausted") exhaustedQueries.add(target.query);
-      await persistNewsJob(job);
 
       if (result === "terminal" || job.status === "captcha" || job.status === "blocked" || job.status === "timeout") break;
     }
 
     if (job.status === "captcha" || job.status === "blocked" || job.status === "timeout") {
       // Keep the explicit Google protection status instead of overwriting it with "stopped".
-    } else if (job.control.stopRequested) {
-      setNewsJobStatus(job, "stopped", "News job stopped");
+    } else if (isStopped()) {
+      setStatus(job, cb, "stopped", "News job stopped");
     } else if ((job.status === "running" || job.status === "queued") && job.results.length === 0 && job.errors.length > 0) {
-      setNewsJobStatus(job, "failed", "No news results collected");
+      setStatus(job, cb, "failed", "No news results collected");
     } else if (job.status === "running" || job.status === "queued") {
-      setNewsJobStatus(job, "completed", `Done: ${job.results.length} news results`);
+      setStatus(job, cb, "completed", `Done: ${job.results.length} news results`);
     }
-    await persistNewsJob(job);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown Google News parser error";
-    setNewsJobStatus(job, message.toLowerCase().includes("timeout") ? "timeout" : "failed", message);
-    await addNewsError(job, { message });
+    setStatus(job, cb, message.toLowerCase().includes("timeout") ? "timeout" : "failed", message);
+    reportError(job, cb, { message });
   } finally {
     await browser?.close().catch(() => undefined);
   }
 }
 
-async function launchBrowser(job: RuntimeNewsJob): Promise<Browser> {
+async function launchBrowser(job: NewsJob): Promise<Browser> {
   const proxy = job.settings.proxies[0];
   return chromium.launch({
     headless: true,
@@ -82,10 +87,17 @@ async function launchBrowser(job: RuntimeNewsJob): Promise<Browser> {
   });
 }
 
-async function parseNewsTarget(context: BrowserContext, job: RuntimeNewsJob, target: NewsTarget): Promise<ParseTargetResult> {
-  const rssCount = await addRssFallbackResults(job, target, "RSS parsing").catch(async (error) => {
+async function parseNewsTarget(
+  context: BrowserContext,
+  job: NewsJob,
+  cb: NewsRunCallbacks,
+  target: NewsTarget,
+  requestStop: () => void,
+  isStopped: () => boolean
+): Promise<ParseTargetResult> {
+  const rssCount = await addRssFallbackResults(job, cb, target, "RSS parsing", isStopped).catch(async (error) => {
     if (target.page > 1 || hasResultsForQuery(job, target.query)) {
-      await addNewsError(job, {
+      reportError(job, cb, {
         targetId: target.id,
         message: error instanceof Error ? `RSS failed for ${target.query}: ${error.message}` : `RSS failed for ${target.query}`
       });
@@ -96,11 +108,11 @@ async function parseNewsTarget(context: BrowserContext, job: RuntimeNewsJob, tar
 
   if (rssCount > 0) return "ok";
   if (rssCount === 0 && hasResultsForQuery(job, target.query)) {
-    setNewsJobStatus(job, "running", `No more RSS results for ${target.query}`);
+    setStatus(job, cb, "running", `No more RSS results for ${target.query}`);
     return "exhausted";
   }
   if (rssCount === 0 && target.page > 1) {
-    setNewsJobStatus(job, "running", `No RSS results for ${target.query} / page ${target.page}`);
+    setStatus(job, cb, "running", `No RSS results for ${target.query} / page ${target.page}`);
     return "exhausted";
   }
 
@@ -113,11 +125,11 @@ async function parseNewsTarget(context: BrowserContext, job: RuntimeNewsJob, tar
 
     const blockReason = await detectBlockReason(page);
     if (blockReason) {
-      const fallbackCount = await addRssFallbackResults(job, target, `HTML ${blockReason}, RSS fallback`);
+      const fallbackCount = await addRssFallbackResults(job, cb, target, `HTML ${blockReason}, RSS fallback`, isStopped);
       if (fallbackCount === 0) {
-        await addNewsError(job, { targetId: target.id, message: `${blockReason} for ${target.query}` });
-        setNewsJobStatus(job, blockReason === "captcha" ? "captcha" : "blocked", `${blockReason} while parsing Google News`);
-        job.control.stopRequested = true;
+        reportError(job, cb, { targetId: target.id, message: `${blockReason} for ${target.query}` });
+        setStatus(job, cb, blockReason === "captcha" ? "captcha" : "blocked", `${blockReason} while parsing Google News`);
+        requestStop();
         return "terminal";
       }
       return "ok";
@@ -125,17 +137,17 @@ async function parseNewsTarget(context: BrowserContext, job: RuntimeNewsJob, tar
 
     const items = await extractNewsItems(page);
     if (items.length === 0) {
-      const fallbackCount = await addRssFallbackResults(job, target, "No HTML results, RSS fallback");
+      const fallbackCount = await addRssFallbackResults(job, cb, target, "No HTML results, RSS fallback", isStopped);
       if (fallbackCount === 0) {
-        await addNewsError(job, { targetId: target.id, message: `No news results found for ${target.query}` });
+        reportError(job, cb, { targetId: target.id, message: `No news results found for ${target.query}` });
       }
       return fallbackCount > 0 ? "ok" : "exhausted";
     }
 
     const pageOffset = (target.page - 1) * 10;
     for (let index = 0; index < items.length; index += 1) {
-      if (job.control.stopRequested) break;
-      await waitWhileNewsPaused(job);
+      if (isStopped()) break;
+      await waitWhilePaused(cb);
 
       const result: NewsResult = {
         query: target.query,
@@ -146,26 +158,26 @@ async function parseNewsTarget(context: BrowserContext, job: RuntimeNewsJob, tar
         source: items[index].source,
         link: items[index].link
       };
-      await addNewsResult(job, result);
+      addNewsResult(job, cb, result);
     }
 
-    setNewsJobStatus(job, "running", `Collected ${items.length} results for ${target.query} / page ${target.page}`);
+    setStatus(job, cb, "running", `Collected ${items.length} results for ${target.query} / page ${target.page}`);
     return "ok";
   } catch (error) {
     const message = error instanceof Error ? error.message : `Could not parse ${target.query}`;
-    const fallbackCount = await addRssFallbackResults(job, target, "HTML parser error, RSS fallback").catch(async (fallbackError) => {
-      await addNewsError(job, {
+    const fallbackCount = await addRssFallbackResults(job, cb, target, "HTML parser error, RSS fallback", isStopped).catch(async (fallbackError) => {
+      reportError(job, cb, {
         targetId: target.id,
         message: fallbackError instanceof Error ? `${message}; RSS fallback failed: ${fallbackError.message}` : message
       });
       return 0;
     });
     if (fallbackCount === 0 && message.toLowerCase().includes("timeout")) {
-      setNewsJobStatus(job, "timeout", message);
-      job.control.stopRequested = true;
+      setStatus(job, cb, "timeout", message);
+      requestStop();
       return "terminal";
     } else if (fallbackCount === 0) {
-      await addNewsError(job, { targetId: target.id, message });
+      reportError(job, cb, { targetId: target.id, message });
       return hasResultsForQuery(job, target.query) ? "exhausted" : "ok";
     }
     return "ok";
@@ -174,24 +186,30 @@ async function parseNewsTarget(context: BrowserContext, job: RuntimeNewsJob, tar
   }
 }
 
-async function addRssFallbackResults(job: RuntimeNewsJob, target: NewsTarget, reason: string): Promise<number> {
-  setNewsJobStatus(job, "running", `${reason}: ${target.query} / page ${target.page}`);
+async function addRssFallbackResults(
+  job: NewsJob,
+  cb: NewsRunCallbacks,
+  target: NewsTarget,
+  reason: string,
+  isStopped: () => boolean
+): Promise<number> {
+  setStatus(job, cb, "running", `${reason}: ${target.query} / page ${target.page}`);
   const results = await fetchGoogleNewsRssResults(job.settings, target);
 
   for (const result of results) {
-    if (job.control.stopRequested) break;
-    await waitWhileNewsPaused(job);
-    await addNewsResult(job, result);
+    if (isStopped()) break;
+    await waitWhilePaused(cb);
+    addNewsResult(job, cb, result);
   }
 
   if (results.length > 0) {
-    setNewsJobStatus(job, "running", `RSS fallback collected ${results.length} results for ${target.query} / page ${target.page}`);
+    setStatus(job, cb, "running", `RSS fallback collected ${results.length} results for ${target.query} / page ${target.page}`);
   }
 
   return results.length;
 }
 
-function hasResultsForQuery(job: RuntimeNewsJob, query: string): boolean {
+function hasResultsForQuery(job: NewsJob, query: string): boolean {
   return job.results.some((result) => result.query === query);
 }
 
@@ -339,9 +357,51 @@ async function extractNewsItems(page: Page): Promise<ExtractedNewsItem[]> {
   });
 }
 
-async function randomDelay(job: RuntimeNewsJob): Promise<void> {
+async function randomDelay(job: NewsJob): Promise<void> {
   const min = job.settings.minDelayMs;
   const max = Math.max(min, job.settings.maxDelayMs);
   const delay = min + Math.round(Math.random() * (max - min));
   await new Promise((resolve) => setTimeout(resolve, delay));
+}
+
+function setStatus(job: NewsJob, cb: NewsRunCallbacks, status: NewsJob["status"], message: string): void {
+  job.status = status;
+  job.message = message;
+  job.updatedAt = new Date().toISOString();
+  cb.onProgress({
+    currentTargetIndex: job.currentTargetIndex,
+    processedResults: job.processedResults,
+    message
+  });
+}
+
+function setCurrentTarget(job: NewsJob, cb: NewsRunCallbacks, index: number, message: string): void {
+  job.currentTargetIndex = index;
+  job.message = message;
+  job.updatedAt = new Date().toISOString();
+  cb.onProgress({
+    currentTargetIndex: index,
+    processedResults: job.processedResults,
+    message
+  });
+}
+
+function addNewsResult(job: NewsJob, cb: NewsRunCallbacks, result: NewsResult): void {
+  job.results.push(result);
+  job.processedResults += 1;
+  job.updatedAt = new Date().toISOString();
+  cb.onResult(result);
+}
+
+function reportError(job: NewsJob, cb: NewsRunCallbacks, error: Omit<JobError, "at">): void {
+  const record: JobError = { ...error, at: new Date().toISOString() };
+  job.errors.push(record);
+  job.updatedAt = new Date().toISOString();
+  cb.onError(record);
+}
+
+async function waitWhilePaused(cb: NewsRunCallbacks): Promise<void> {
+  while (cb.shouldPause() && !cb.shouldStop()) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
 }

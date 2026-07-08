@@ -1,29 +1,32 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { extractCoordinatesFromUrl, ensureGoogleMapsLocale } from "../shared/googleMaps";
-import { buildDedupeKey } from "../shared/normalize";
-import type { PlaceResult, SearchTarget } from "../shared/types";
-import {
-  addDiscoveredPlaces,
-  addError,
-  addResult,
-  persistJob,
-  setCurrentTarget,
-  setJobStatus,
-  waitWhilePaused,
-  type RuntimeJob
-} from "../jobStore";
+import { buildDedupeKey, mergeResult } from "../shared/normalize";
+import type { JobError, PlaceResult, ScrapeJob, SearchTarget } from "../shared/types";
 import { enrichWebsiteContacts } from "./contactEnrichment";
 
 const RESULT_LINK_SELECTOR = 'a[href*="/maps/place/"]';
 const FEED_SELECTOR = 'div[role="feed"]';
 
-export async function runGoogleMapsJob(job: RuntimeJob): Promise<void> {
+export interface MapsRunCallbacks {
+  onPlaceFound: (place: PlaceResult) => void;
+  onProgress: (progress: {
+    currentTargetIndex: number;
+    processedPlaces: number;
+    totalDiscovered: number;
+    message: string;
+  }) => void;
+  onError: (error: JobError) => void;
+  shouldPause: () => boolean;
+  shouldStop: () => boolean;
+}
+
+export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Promise<void> {
   if (job.targets.length === 0) return;
 
   let browser: Browser | undefined;
 
   try {
-    setJobStatus(job, "running", "Запускаю Chromium");
+    setStatus(job, cb, "running", "Запускаю Chromium");
     browser = await launchBrowser(job);
     const context = await browser.newContext({
       locale: job.settings.language,
@@ -33,30 +36,29 @@ export async function runGoogleMapsJob(job: RuntimeJob): Promise<void> {
     });
 
     for (let index = 0; index < job.targets.length; index += 1) {
-      if (job.control.stopRequested) break;
-      await waitWhilePaused(job);
+      if (cb.shouldStop()) break;
+      await waitWhilePaused(cb);
 
       const target = job.targets[index];
-      setCurrentTarget(job, index, `Парсю выдачу: ${target.query}`);
-      await parseTarget(context, job, target);
-      await persistJob(job);
+      setCurrentTarget(job, cb, index, `Парсю выдачу: ${target.query}`);
+      await parseTarget(context, job, cb, target);
     }
 
-    if (job.control.stopRequested) {
-      setJobStatus(job, "stopped", "Задача остановлена");
+    if (cb.shouldStop()) {
+      setStatus(job, cb, "stopped", "Задача остановлена");
     } else {
-      setJobStatus(job, "completed", `Готово: ${job.results.length} уникальных организаций`);
+      setStatus(job, cb, "completed", `Готово: ${job.results.length} уникальных организаций`);
     }
-    await persistJob(job);
   } catch (error) {
-    setJobStatus(job, "failed", error instanceof Error ? error.message : "Неизвестная ошибка парсера");
-    await addError(job, { message: job.message });
+    const message = error instanceof Error ? error.message : "Неизвестная ошибка парсера";
+    setStatus(job, cb, "failed", message);
+    reportError(job, cb, { message });
   } finally {
     await browser?.close().catch(() => undefined);
   }
 }
 
-async function launchBrowser(job: RuntimeJob): Promise<Browser> {
+async function launchBrowser(job: ScrapeJob): Promise<Browser> {
   const proxy = job.settings.proxies[0];
   return chromium.launch({
     headless: true,
@@ -64,7 +66,7 @@ async function launchBrowser(job: RuntimeJob): Promise<Browser> {
   });
 }
 
-async function parseTarget(context: BrowserContext, job: RuntimeJob, target: SearchTarget): Promise<void> {
+async function parseTarget(context: BrowserContext, job: ScrapeJob, cb: MapsRunCallbacks, target: SearchTarget): Promise<void> {
   const page = await context.newPage();
 
   try {
@@ -73,23 +75,23 @@ async function parseTarget(context: BrowserContext, job: RuntimeJob, target: Sea
     await randomDelay(job);
 
     if (await isBlocked(page)) {
-      await addError(job, { targetId: target.id, message: `Google вернул блокировку или captcha для ${target.query}` });
+      reportError(job, cb, { targetId: target.id, message: `Google вернул блокировку или captcha для ${target.query}` });
       return;
     }
 
-    const links = await collectPlaceLinks(page, job, target);
-    addDiscoveredPlaces(job, links.length);
+    const links = await collectPlaceLinks(page, job, cb, target);
+    addDiscoveredPlaces(job, cb, links.length);
 
     for (const link of links.slice(0, job.settings.limitPerQuery)) {
-      if (job.control.stopRequested) break;
-      await waitWhilePaused(job);
+      if (cb.shouldStop()) break;
+      await waitWhilePaused(cb);
 
       const result = await parsePlace(context, job, target, link);
-      await addResult(job, result);
+      addResult(job, cb, result);
       await randomDelay(job);
     }
   } catch (error) {
-    await addError(job, {
+    reportError(job, cb, {
       targetId: target.id,
       message: error instanceof Error ? error.message : `Не удалось обработать ${target.query}`
     });
@@ -98,15 +100,15 @@ async function parseTarget(context: BrowserContext, job: RuntimeJob, target: Sea
   }
 }
 
-async function collectPlaceLinks(page: Page, job: RuntimeJob, target: SearchTarget): Promise<string[]> {
+async function collectPlaceLinks(page: Page, job: ScrapeJob, cb: MapsRunCallbacks, target: SearchTarget): Promise<string[]> {
   const links = new Set<string>();
   let stableRounds = 0;
 
   await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => undefined);
   await page.waitForSelector(`${RESULT_LINK_SELECTOR}, ${FEED_SELECTOR}`, { timeout: 30000 }).catch(() => undefined);
 
-  while (links.size < job.settings.limitPerQuery && stableRounds < 7 && !job.control.stopRequested) {
-    await waitWhilePaused(job);
+  while (links.size < job.settings.limitPerQuery && stableRounds < 7 && !cb.shouldStop()) {
+    await waitWhilePaused(cb);
 
     const before = links.size;
     for (const href of await page.locator(RESULT_LINK_SELECTOR).evaluateAll((items) => items.map((item) => (item as HTMLAnchorElement).href))) {
@@ -116,7 +118,7 @@ async function collectPlaceLinks(page: Page, job: RuntimeJob, target: SearchTarg
     if (links.size === before) stableRounds += 1;
     else stableRounds = 0;
 
-    setJobStatus(job, "running", `Найдено ${links.size} ссылок для: ${target.query}`);
+    setStatus(job, cb, "running", `Найдено ${links.size} ссылок для: ${target.query}`);
     await scrollResults(page);
     await randomDelay(job);
   }
@@ -124,7 +126,7 @@ async function collectPlaceLinks(page: Page, job: RuntimeJob, target: SearchTarg
   return [...links];
 }
 
-async function parsePlace(context: BrowserContext, job: RuntimeJob, target: SearchTarget, url: string): Promise<PlaceResult> {
+async function parsePlace(context: BrowserContext, job: ScrapeJob, target: SearchTarget, url: string): Promise<PlaceResult> {
   const page = await context.newPage();
   const placeUrl = ensureGoogleMapsLocale(url, job.settings.language, job.settings.region);
 
@@ -321,9 +323,73 @@ function emptyResult(target: SearchTarget, googleMapsUrl: string, status: PlaceR
   };
 }
 
-async function randomDelay(job: RuntimeJob): Promise<void> {
+async function randomDelay(job: ScrapeJob): Promise<void> {
   const min = job.settings.minDelayMs;
   const max = Math.max(min, job.settings.maxDelayMs);
   const delay = min + Math.round(Math.random() * (max - min));
   await new Promise((resolve) => setTimeout(resolve, delay));
+}
+
+function setStatus(job: ScrapeJob, cb: MapsRunCallbacks, status: ScrapeJob["status"], message: string): void {
+  job.status = status;
+  job.message = message;
+  job.updatedAt = new Date().toISOString();
+  cb.onProgress({
+    currentTargetIndex: job.currentTargetIndex,
+    processedPlaces: job.processedPlaces,
+    totalDiscovered: job.totalDiscovered,
+    message
+  });
+}
+
+function setCurrentTarget(job: ScrapeJob, cb: MapsRunCallbacks, index: number, message: string): void {
+  job.currentTargetIndex = index;
+  job.message = message;
+  job.updatedAt = new Date().toISOString();
+  cb.onProgress({
+    currentTargetIndex: index,
+    processedPlaces: job.processedPlaces,
+    totalDiscovered: job.totalDiscovered,
+    message
+  });
+}
+
+function addDiscoveredPlaces(job: ScrapeJob, cb: MapsRunCallbacks, count: number): void {
+  job.totalDiscovered += count;
+  job.updatedAt = new Date().toISOString();
+  cb.onProgress({
+    currentTargetIndex: job.currentTargetIndex,
+    processedPlaces: job.processedPlaces,
+    totalDiscovered: job.totalDiscovered,
+    message: job.message
+  });
+}
+
+function addResult(job: ScrapeJob, cb: MapsRunCallbacks, result: PlaceResult): void {
+  const dedupeKey = result.dedupeKey || buildDedupeKey(result);
+  const normalizedResult: PlaceResult = { ...result, dedupeKey };
+  const existingIndex = dedupeKey ? job.results.findIndex((item) => item.dedupeKey === dedupeKey) : -1;
+
+  if (existingIndex >= 0) {
+    job.results[existingIndex] = mergeResult(job.results[existingIndex], normalizedResult);
+  } else {
+    job.results.push(normalizedResult);
+  }
+
+  job.processedPlaces += 1;
+  job.updatedAt = new Date().toISOString();
+  cb.onPlaceFound(normalizedResult);
+}
+
+function reportError(job: ScrapeJob, cb: MapsRunCallbacks, error: Omit<JobError, "at">): void {
+  const record: JobError = { ...error, at: new Date().toISOString() };
+  job.errors.push(record);
+  job.updatedAt = new Date().toISOString();
+  cb.onError(record);
+}
+
+async function waitWhilePaused(cb: MapsRunCallbacks): Promise<void> {
+  while (cb.shouldPause() && !cb.shouldStop()) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
 }
