@@ -33,7 +33,12 @@ function readSignupUtm(req: NextRequest): Record<string, string> | null {
   const raw = req.cookies.get(UTM_COOKIE)?.value;
   if (!raw) return null;
   try {
-    const obj = JSON.parse(decodeURIComponent(raw)) as Record<string, unknown>;
+    // Next.js RequestCookies already URL-decodes the value once on read
+    // (parseCookie → decodeURIComponent); the landing encodes it once on set, so
+    // the round-trip is balanced — parse as-is. A second decodeURIComponent here
+    // would throw URIError on any literal '%' (e.g. utm_campaign=50%off) and drop
+    // the whole attribution silently.
+    const obj = JSON.parse(raw) as Record<string, unknown>;
     if (!obj || typeof obj !== 'object') return null;
     const out: Record<string, string> = {};
     for (const k of UTM_FIELDS) {
@@ -41,7 +46,10 @@ function readSignupUtm(req: NextRequest): Record<string, string> | null {
       if (typeof v === 'string' && v) out[k] = v.slice(0, 300);
     }
     return Object.keys(out).length ? out : null;
-  } catch {
+  } catch (err) {
+    // Malformed / foreign cookie — best-effort: no attribution, never a failed signup.
+    // Logged so a silent attribution loss stays observable instead of invisible.
+    void logError('signup.utm_parse_failed', err);
     return null;
   }
 }
