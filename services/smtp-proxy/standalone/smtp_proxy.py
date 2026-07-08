@@ -15,7 +15,7 @@ Env: SMTP_PROXY_API_KEY (required), PORT (default 3100),
      EMAIL_VALIDATION_HELO_DOMAIN (HELO name), EMAIL_VALIDATION_MAIL_FROM (default ''),
      SMTP_PROBE_LOCAL_ADDRESS (optional egress bind).
 """
-import os, sys, json, socket, time, hmac, re
+import os, sys, json, socket, time, hmac, re, errno
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 API_KEY = os.environ.get("SMTP_PROXY_API_KEY", "")
@@ -178,7 +178,14 @@ def smtp_check(req):
     except (ConnectionResetError, ConnectionError) as e:
         result["error"] = "connection closed: %s" % (str(e) or "ECONNRESET")
     except OSError as e:
-        result["error"] = "%s" % (e.strerror or "connect error")
+        # Host/network unreachable etc. (EHOSTUNREACH, ENETUNREACH, EADDRNOTAVAIL,
+        # EACCES). Emit "connect <ERRNAME> ..." like Node's net error message so the
+        # worker's isInconclusiveTransport regex (matches "connect"/"ehostunreach"/
+        # "enetunreach") triggers FAILOVER to another egress IP instead of treating
+        # this as a definitive non-answer.
+        name = errno.errorcode.get(e.errno or 0, "")
+        result["error"] = ("connect %s %s" % (name, e.strerror or "")).strip()
+        result["exists"] = None
     finally:
         if s:
             try:

@@ -54,6 +54,27 @@ async function tryResolve4(domain: string): Promise<'ok' | 'absent' | 'soft'> {
   }
 }
 
+/**
+ * Keep only DELIVERABLE MX exchanges, sorted by priority. Drops RFC 7505
+ * "null MX": a single `MX 0 .` record (Node reports its exchange as "" or ".")
+ * by which a domain EXPLICITLY declares it accepts no mail. If the records exist
+ * but are all null/empty, the result is [] → the domain has no deliverable MX,
+ * so the address is undeliverable (invalid), not "couldn't verify" (previously
+ * an empty exchange was probed as mxHost="" → proxy "Missing required fields" →
+ * a spurious 'unknown').
+ */
+export function deliverableMxHosts(
+  records: { exchange: string; priority: number }[],
+): string[] {
+  return records
+    .filter((r) => {
+      const h = (r.exchange ?? '').trim();
+      return h !== '' && h !== '.';
+    })
+    .sort((a, b) => a.priority - b.priority)
+    .map((r) => r.exchange.trim());
+}
+
 export async function lookupMX(
   domain: string,
 ): Promise<{ mxHosts: string[]; found: boolean; lookupFailed: boolean }> {
@@ -61,8 +82,10 @@ export async function lookupMX(
     try {
       const records = await dnsResolver.resolveMx(domain);
       if (records && records.length > 0) {
-        const sorted = records.sort((a, b) => a.priority - b.priority);
-        return { mxHosts: sorted.map((r) => r.exchange), found: true, lookupFailed: false };
+        const hosts = deliverableMxHosts(records);
+        if (hosts.length > 0) return { mxHosts: hosts, found: true, lookupFailed: false };
+        // Records existed but were all null-MX/empty → domain accepts no mail.
+        return { mxHosts: [], found: false, lookupFailed: false };
       }
       // No MX records → implicit MX = the domain's A record (RFC 5321 §5.1).
       const a = await tryResolve4(domain);
@@ -131,10 +154,100 @@ const SMTP_PROXY_TIMEOUT_MS = 25_000;
 
 let proxyIndex = 0;
 
-function nextProxyUrl(): string {
-  const url = SMTP_PROXY_URLS[proxyIndex % SMTP_PROXY_URLS.length];
-  proxyIndex = (proxyIndex + 1) % SMTP_PROXY_URLS.length;
-  return url;
+// ─── Per-(MX host × egress IP) transport-block memory ───────────────────────
+// Some MX operators block a specific probe IP (e.g. Yandex silently drops the
+// 31.76.79.220 egress → the probe eats the full connect timeout, ~8s, before
+// failover). Without memory, round-robin sends ~1/N of every same-MX probe into
+// that dead wait. We remember (mxHost, proxyUrl) transport failures and, on the
+// NEXT probe to that MX, try known-good IPs FIRST and blocked ones LAST — so
+// after ONE learning probe the ~8s penalty disappears for the rest of the job.
+//
+// This only REORDERS the failover sequence; a blocked IP is still tried as a
+// last resort, and entries expire, so it never drops coverage and never changes
+// a verdict — it only avoids known-dead waits.
+const SMTP_EGRESS_BLOCK_TTL_MS = Number(
+  process.env.SMTP_EGRESS_BLOCK_TTL_MS ?? String(30 * 60 * 1000),
+);
+const mxEgressBlock = new Map<string, Map<string, number>>();
+
+function isEgressBlocked(mxHost: string, url: string): boolean {
+  const m = mxEgressBlock.get(mxHost);
+  const exp = m?.get(url);
+  if (exp === undefined) return false;
+  if (exp <= Date.now()) {
+    m!.delete(url);
+    if (m!.size === 0) mxEgressBlock.delete(mxHost);
+    return false;
+  }
+  return true;
+}
+
+function markEgressBlocked(mxHost: string, url: string): void {
+  let m = mxEgressBlock.get(mxHost);
+  if (!m) {
+    m = new Map();
+    mxEgressBlock.set(mxHost, m);
+  }
+  m.set(url, Date.now() + SMTP_EGRESS_BLOCK_TTL_MS);
+}
+
+// ─── Per-MX greylist IP-affinity ────────────────────────────────────────────
+// Greylisting keys on the SENDING IP (or its /24): the MX defers the first
+// contact from an unfamiliar IP and only accepts a retry FROM THE SAME IP after
+// a delay. With several probe IPs on different subnets, round-robin sends each
+// (delayed) greylist retry out a DIFFERENT IP → every attempt looks like a fresh
+// first-contact and the greylist counter never satisfies, so the address stays
+// 'unknown' forever. Remember which IP greylisted an MX and try THAT IP first on
+// the next probe, so the delayed retry lands on the same IP and clears.
+const SMTP_GREYLIST_AFFINITY_TTL_MS = Number(
+  process.env.SMTP_GREYLIST_AFFINITY_TTL_MS ?? String(30 * 60 * 1000),
+);
+const mxGreylistAffinity = new Map<string, { url: string; expiry: number }>();
+
+function getGreylistAffinity(mxHost: string): string | null {
+  const a = mxGreylistAffinity.get(mxHost);
+  if (!a) return null;
+  if (a.expiry <= Date.now()) {
+    mxGreylistAffinity.delete(mxHost);
+    return null;
+  }
+  return a.url;
+}
+
+function markGreylistAffinity(mxHost: string, url: string): void {
+  mxGreylistAffinity.set(mxHost, { url, expiry: Date.now() + SMTP_GREYLIST_AFFINITY_TTL_MS });
+}
+
+/** Reset the egress-block + greylist-affinity memory (tests only). */
+export function __resetEgressBlockCache(): void {
+  mxEgressBlock.clear();
+  mxGreylistAffinity.clear();
+  proxyIndex = 0;
+}
+
+/**
+ * Failover try-order for this MX: the global round-robin rotation (advanced once
+ * per call for load-spreading), with (a) the IP that greylisted this MX pinned
+ * FIRST (so a delayed retry hits the same IP and clears the greylist), and
+ * (b) IPs known to be transport-blocked for THIS mx moved to the end so they're
+ * only used as a last resort.
+ */
+function proxyTryOrder(mxHost: string): string[] {
+  const n = SMTP_PROXY_URLS.length;
+  const rotated: string[] = [];
+  for (let i = 0; i < n; i += 1) rotated.push(SMTP_PROXY_URLS[(proxyIndex + i) % n]);
+  proxyIndex = (proxyIndex + 1) % n;
+  const good = rotated.filter((u) => !isEgressBlocked(mxHost, u));
+  const bad = rotated.filter((u) => isEgressBlocked(mxHost, u));
+  let order = good.concat(bad);
+  // Greylist retries must return from the SAME IP that greylisted → pin it first
+  // (unless it has since become transport-blocked for this MX, in which case we
+  // don't want to pay its dead-wait first).
+  const affinity = getGreylistAffinity(mxHost);
+  if (affinity && !isEgressBlocked(mxHost, affinity) && order.includes(affinity)) {
+    order = [affinity, ...order.filter((u) => u !== affinity)];
+  }
+  return order;
 }
 
 /**
@@ -176,8 +289,7 @@ async function smtpVerifyViaProxy(
   // MX — kept as the fallback to return if every other proxy is also blocked.
   let lastInconclusive: SmtpCheckResult | null = null;
 
-  for (let attempt = 0; attempt < SMTP_PROXY_URLS.length; attempt++) {
-    const baseUrl = nextProxyUrl();
+  for (const baseUrl of proxyTryOrder(mxHost)) {
     const url = `${baseUrl.replace(/\/+$/, '')}/smtp-check`;
 
     try {
@@ -204,10 +316,17 @@ async function smtpVerifyViaProxy(
       const result = (await res.json()) as SmtpCheckResult;
       // Definitive answer (mailbox exists/catch-all/greylist, or a plain
       // all-null with no transport error) → return immediately.
-      if (!isInconclusiveTransport(result)) return result;
+      if (!isInconclusiveTransport(result)) {
+        // Greylisted → pin this IP for the MX so the delayed retry returns from
+        // the same egress and clears the greylist (see mxGreylistAffinity).
+        if (result.greylist) markGreylistAffinity(mxHost, baseUrl);
+        return result;
+      }
       // This egress IP is blocked by the MX (e.g. the new probe IP can't reach
-      // Yandex). Remember it and retry the SAME probe via the next proxy/IP —
-      // failover, not round-robin, so complementary IPs strictly widen coverage.
+      // Yandex). Remember it so same-MX probes deprioritise it, and retry the
+      // SAME probe via the next proxy/IP — failover, not round-robin, so
+      // complementary IPs strictly widen coverage.
+      markEgressBlocked(mxHost, baseUrl);
       lastInconclusive = result;
       lastError = result.error;
       continue;
@@ -240,6 +359,15 @@ export async function smtpVerify(
 
 // ─── 8. 5xx RCPT classification ──────────────────────────────────────────────
 
+// ANTI-PROBE rejections → the server rejected OUR probe (its sender/envelope/IP),
+// NOT the recipient. Even real, live mailboxes get these, so a 5xx here is NOT
+// proof the address is dead — treat as unverifiable ('unknown'). Observed on
+// strict corporate/pharma gateways: "550 5.1.1 Backscatter Protection detected
+// an invalid or unauthenticated address" for both real AND fake recipients.
+// Must be checked BEFORE user-unknown, because these replies often also carry a
+// 5.1.1 code that would otherwise be read as "user unknown".
+const RCPT_ANTIPROBE_RE =
+  /(backscatter|sender.?(verif|callout|callback|address.?verif)|call.?back|un.?authenticat|not.?authenticat|authentication.?(fail|requir)|\bspf\b|\bdkim\b|\bdmarc\b|relay(ing)?.?(denied|access)|reverse.?dns|missing.?ptr|no.?ptr)/i;
 // "user unknown" signals → the mailbox genuinely does not exist (invalid).
 const RCPT_USER_UNKNOWN_RE =
   /(no.?such.?(user|recipient|mailbox|address)|user.?unknown|unknown.?(user|recipient)|user.?not.?found|recipient.?(not.?found|rejected)|mailbox.?(unavailable|not.?found|disabled)|address.?(unknown|rejected)|does.?n.?.?t.?exist|not.?exist|invalid.?(recipient|mailbox|address)|5\.1\.[0-9]|нет.?такого|не.?существ|пользовател)/i;
@@ -259,6 +387,19 @@ const RCPT_POLICY_BLOCK_RE =
 export function classifyRcpt5xx(text: string | undefined): 'invalid' | 'unknown' {
   const t = (text ?? '').trim();
   if (!t) return 'invalid';
+  // Anti-probe rejection (backscatter / sender-verify / auth / relay-denied):
+  // the server rejected our probe, not the mailbox. Checked FIRST so its 5.1.1
+  // code isn't mistaken for "user unknown". A live mailbox can get this, so we
+  // must NOT call it invalid — it's unverifiable.
+  //
+  // Strip the echoed <recipient@domain> first: most MTAs echo the probed address
+  // in the reply, so a genuinely-dead role/monitoring mailbox like <spf@…>,
+  // <dkim@…> or a look-alike domain like <x@dmarc.io> would otherwise match the
+  // SPF/DKIM/DMARC tokens and wrongly survive as 'unknown' — the dangerous
+  // direction (dead address kept → bounce). Real anti-probe phrasing
+  // ("Backscatter Protection", "SPF check failed") lives OUTSIDE the brackets.
+  const antiprobeText = t.replace(/<[^>]*>/g, ' ');
+  if (RCPT_ANTIPROBE_RE.test(antiprobeText)) return 'unknown';
   if (RCPT_USER_UNKNOWN_RE.test(t)) return 'invalid';
   if (RCPT_POLICY_BLOCK_RE.test(t)) return 'unknown';
   return 'invalid';
