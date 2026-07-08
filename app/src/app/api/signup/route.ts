@@ -20,6 +20,32 @@ function isEmailLike(s: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
+/**
+ * Campaign attribution stashed by the landing in a parent-domain cookie
+ * (Domain=outreachos.pro), so it survives the hop to app.outreachos.pro — both
+ * the direct landing→/signup path and landing→/demo→…→«Зарегистрироваться». The
+ * cookie rides the same-origin signup fetch; we read + whitelist it here.
+ * Best-effort: any parse failure just means no attribution, never a failed signup.
+ */
+const UTM_COOKIE = 'oos_utm';
+const UTM_FIELDS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'referrer', 'landing', 'ts'] as const;
+function readSignupUtm(req: NextRequest): Record<string, string> | null {
+  const raw = req.cookies.get(UTM_COOKIE)?.value;
+  if (!raw) return null;
+  try {
+    const obj = JSON.parse(decodeURIComponent(raw)) as Record<string, unknown>;
+    if (!obj || typeof obj !== 'object') return null;
+    const out: Record<string, string> = {};
+    for (const k of UTM_FIELDS) {
+      const v = obj[k];
+      if (typeof v === 'string' && v) out[k] = v.slice(0, 300);
+    }
+    return Object.keys(out).length ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(req: NextRequest) {
   if (!supabaseAdmin) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
@@ -41,6 +67,7 @@ export async function POST(req: NextRequest) {
   const company = (body.company ?? '').trim();
   const phone = (body.phone ?? '').trim();
   const telegram = (body.telegram ?? '').trim();
+  const utm = readSignupUtm(req);
 
   if (!email || !isEmailLike(email)) {
     return NextResponse.json({ error: 'Введите корректный email' }, { status: 400 });
@@ -92,6 +119,7 @@ export async function POST(req: NextRequest) {
       company,
       phone: phone || null,
       telegram: telegram || null,
+      signup_utm: utm,
     })
     .eq('id', userId);
   if (profileErr) {
@@ -122,6 +150,8 @@ export async function POST(req: NextRequest) {
     telegram: telegram || null,
     company,
     source: 'register',
+    utm,
+    referrer: utm?.referrer ?? null,
   });
 
   return NextResponse.json({ ok: true, user_id: userId }, { status: 201 });

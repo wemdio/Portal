@@ -29,6 +29,12 @@ export interface DemoLeadData {
   /** Which surface produced the lead — drives the alert title. */
   source?: string | null;
   referrer?: string | null;
+  /**
+   * Campaign attribution captured on the landing via a parent-domain cookie
+   * (Domain=outreachos.pro) and read server-side at signup. Only the utm_* keys
+   * are rendered; referrer/landing/ts may also be present but are handled elsewhere.
+   */
+  utm?: Record<string, string> | null;
 }
 
 /** Human label per lead source, for the Telegram alert title. */
@@ -101,6 +107,13 @@ export async function sendDemoLeadTelegramAlert(data: DemoLeadData): Promise<voi
   if (data.company) lines.push(`<b>Компания:</b> ${esc(data.company)}`);
   if (data.phone) lines.push(`<b>Телефон:</b> ${esc(data.phone)}`);
   if (data.telegram) lines.push(`<b>Telegram:</b> ${esc(data.telegram)}`);
+  if (data.utm) {
+    const u = data.utm;
+    const main = [u.utm_source, u.utm_medium, u.utm_campaign].filter(Boolean).join(' / ');
+    if (main) lines.push(`<b>📈 UTM:</b> ${esc(main)}`);
+    const extra = [u.utm_term, u.utm_content].filter(Boolean).join(' / ');
+    if (extra) lines.push(`<b>UTM доп.:</b> ${esc(extra)}`);
+  }
   if (data.message) {
     lines.push('');
     lines.push(esc(data.message));
