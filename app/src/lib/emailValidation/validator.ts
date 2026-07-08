@@ -54,6 +54,27 @@ async function tryResolve4(domain: string): Promise<'ok' | 'absent' | 'soft'> {
   }
 }
 
+/**
+ * Keep only DELIVERABLE MX exchanges, sorted by priority. Drops RFC 7505
+ * "null MX": a single `MX 0 .` record (Node reports its exchange as "" or ".")
+ * by which a domain EXPLICITLY declares it accepts no mail. If the records exist
+ * but are all null/empty, the result is [] → the domain has no deliverable MX,
+ * so the address is undeliverable (invalid), not "couldn't verify" (previously
+ * an empty exchange was probed as mxHost="" → proxy "Missing required fields" →
+ * a spurious 'unknown').
+ */
+export function deliverableMxHosts(
+  records: { exchange: string; priority: number }[],
+): string[] {
+  return records
+    .filter((r) => {
+      const h = (r.exchange ?? '').trim();
+      return h !== '' && h !== '.';
+    })
+    .sort((a, b) => a.priority - b.priority)
+    .map((r) => r.exchange.trim());
+}
+
 export async function lookupMX(
   domain: string,
 ): Promise<{ mxHosts: string[]; found: boolean; lookupFailed: boolean }> {
@@ -61,8 +82,10 @@ export async function lookupMX(
     try {
       const records = await dnsResolver.resolveMx(domain);
       if (records && records.length > 0) {
-        const sorted = records.sort((a, b) => a.priority - b.priority);
-        return { mxHosts: sorted.map((r) => r.exchange), found: true, lookupFailed: false };
+        const hosts = deliverableMxHosts(records);
+        if (hosts.length > 0) return { mxHosts: hosts, found: true, lookupFailed: false };
+        // Records existed but were all null-MX/empty → domain accepts no mail.
+        return { mxHosts: [], found: false, lookupFailed: false };
       }
       // No MX records → implicit MX = the domain's A record (RFC 5321 §5.1).
       const a = await tryResolve4(domain);
@@ -168,16 +191,46 @@ function markEgressBlocked(mxHost: string, url: string): void {
   m.set(url, Date.now() + SMTP_EGRESS_BLOCK_TTL_MS);
 }
 
-/** Reset the egress-block memory (tests only). */
+// ─── Per-MX greylist IP-affinity ────────────────────────────────────────────
+// Greylisting keys on the SENDING IP (or its /24): the MX defers the first
+// contact from an unfamiliar IP and only accepts a retry FROM THE SAME IP after
+// a delay. With several probe IPs on different subnets, round-robin sends each
+// (delayed) greylist retry out a DIFFERENT IP → every attempt looks like a fresh
+// first-contact and the greylist counter never satisfies, so the address stays
+// 'unknown' forever. Remember which IP greylisted an MX and try THAT IP first on
+// the next probe, so the delayed retry lands on the same IP and clears.
+const SMTP_GREYLIST_AFFINITY_TTL_MS = Number(
+  process.env.SMTP_GREYLIST_AFFINITY_TTL_MS ?? String(30 * 60 * 1000),
+);
+const mxGreylistAffinity = new Map<string, { url: string; expiry: number }>();
+
+function getGreylistAffinity(mxHost: string): string | null {
+  const a = mxGreylistAffinity.get(mxHost);
+  if (!a) return null;
+  if (a.expiry <= Date.now()) {
+    mxGreylistAffinity.delete(mxHost);
+    return null;
+  }
+  return a.url;
+}
+
+function markGreylistAffinity(mxHost: string, url: string): void {
+  mxGreylistAffinity.set(mxHost, { url, expiry: Date.now() + SMTP_GREYLIST_AFFINITY_TTL_MS });
+}
+
+/** Reset the egress-block + greylist-affinity memory (tests only). */
 export function __resetEgressBlockCache(): void {
   mxEgressBlock.clear();
+  mxGreylistAffinity.clear();
   proxyIndex = 0;
 }
 
 /**
  * Failover try-order for this MX: the global round-robin rotation (advanced once
- * per call for load-spreading), but with IPs known to be blocked for THIS mx
- * moved to the end so they're only used as a last resort.
+ * per call for load-spreading), with (a) the IP that greylisted this MX pinned
+ * FIRST (so a delayed retry hits the same IP and clears the greylist), and
+ * (b) IPs known to be transport-blocked for THIS mx moved to the end so they're
+ * only used as a last resort.
  */
 function proxyTryOrder(mxHost: string): string[] {
   const n = SMTP_PROXY_URLS.length;
@@ -186,7 +239,15 @@ function proxyTryOrder(mxHost: string): string[] {
   proxyIndex = (proxyIndex + 1) % n;
   const good = rotated.filter((u) => !isEgressBlocked(mxHost, u));
   const bad = rotated.filter((u) => isEgressBlocked(mxHost, u));
-  return good.concat(bad);
+  let order = good.concat(bad);
+  // Greylist retries must return from the SAME IP that greylisted → pin it first
+  // (unless it has since become transport-blocked for this MX, in which case we
+  // don't want to pay its dead-wait first).
+  const affinity = getGreylistAffinity(mxHost);
+  if (affinity && !isEgressBlocked(mxHost, affinity) && order.includes(affinity)) {
+    order = [affinity, ...order.filter((u) => u !== affinity)];
+  }
+  return order;
 }
 
 /**
@@ -255,7 +316,12 @@ async function smtpVerifyViaProxy(
       const result = (await res.json()) as SmtpCheckResult;
       // Definitive answer (mailbox exists/catch-all/greylist, or a plain
       // all-null with no transport error) → return immediately.
-      if (!isInconclusiveTransport(result)) return result;
+      if (!isInconclusiveTransport(result)) {
+        // Greylisted → pin this IP for the MX so the delayed retry returns from
+        // the same egress and clears the greylist (see mxGreylistAffinity).
+        if (result.greylist) markGreylistAffinity(mxHost, baseUrl);
+        return result;
+      }
       // This egress IP is blocked by the MX (e.g. the new probe IP can't reach
       // Yandex). Remember it so same-MX probes deprioritise it, and retry the
       // SAME probe via the next proxy/IP — failover, not round-robin, so
