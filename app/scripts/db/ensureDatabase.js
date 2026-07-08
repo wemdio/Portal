@@ -186,6 +186,21 @@ async function runMigrations(dbUrl, migrationsDir, trackingTable) {
       await client.connect();
       await client.query('select 1');
 
+      // Fail fast on lock contention instead of hanging the whole deploy. A
+      // migration that can't acquire its lock (e.g. ACCESS EXCLUSIVE on the
+      // heavily-FK-referenced `profiles` table behind a live transaction) would
+      // otherwise block indefinitely — the preflight `docker run` never exits and
+      // the CI job is killed at its 30-min limit, stranding prod on the old build.
+      // lock_timeout bounds only the WAIT for a lock, not a migration's own runtime,
+      // so legitimate long migrations are unaffected; a contended one aborts after
+      // 30s and the deploy fails cleanly + retries. Adjustable via DB_MIGRATION_LOCK_TIMEOUT.
+      {
+        const lt = /^\d+(ms|s|min)?$/.test(process.env.DB_MIGRATION_LOCK_TIMEOUT || '')
+          ? process.env.DB_MIGRATION_LOCK_TIMEOUT
+          : '30s';
+        await client.query(`set lock_timeout = '${lt}'`);
+      }
+
       await client.query(
         `create table if not exists public.${trackingTable} (
           name text primary key,
