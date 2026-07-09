@@ -196,10 +196,16 @@ export default function LiOutreachPage() {
   const [tasks, setTasks] = useState<LiTask[]>([]);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [campaignLogs, setCampaignLogs] = useState<LiCampaignLog[]>([]);
-  // true, пока идёт первичный fetch /campaigns/:id/logs — показываем
-  // спиннер в правой панели логов вместо «Нет логов» (иначе пользователь
-  // видит «пусто» пока данные летят с бэка и думает что кампания молчит).
+  // Флаги первичной загрузки для каждой вкладки. Показываем крутящийся
+  // спиннер вместо «пусто», пока fetch летит — иначе пользователь видит
+  // мгновение полного отсутствия данных и думает что вкладка сломана.
+  // Для дашборда используется существующее dashLoading (см. loadDashboard).
   const [loadingCampaignLogs, setLoadingCampaignLogs] = useState(false);
+  const [loadingAccounts, setLoadingAccounts] = useState(false);
+  const [loadingLeadLists, setLoadingLeadLists] = useState(false);
+  const [loadingLeads, setLoadingLeads] = useState(false);
+  const [loadingCampaigns, setLoadingCampaigns] = useState(false);
+  const [loadingTasks, setLoadingTasks] = useState(false);
   // Range key currently being exported (button shows '...' until done).
   // Null when no export is in flight.
   const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'24h' | '7d' | null>(null);
@@ -288,7 +294,8 @@ export default function LiOutreachPage() {
   // ---- Data fetching --------------------------------------------------------
 
   const loadAccounts = useCallback(async () => {
-    try { const d = await api<{ accounts: LiAccount[] }>('/accounts'); setAccounts(d.accounts); } catch (e) { console.error('[li-outreach] loadAccounts failed', e); }
+    setLoadingAccounts(true);
+    try { const d = await api<{ accounts: LiAccount[] }>('/accounts'); setAccounts(d.accounts); } catch (e) { console.error('[li-outreach] loadAccounts failed', e); } finally { setLoadingAccounts(false); }
   }, []);
   const loadAccountErrorCounts = useCallback(async () => {
     try {
@@ -301,9 +308,11 @@ export default function LiOutreachPage() {
     }
   }, []);
   const loadLeadLists = useCallback(async () => {
-    try { const d = await api<{ lead_lists: LiLeadList[] }>('/lead-lists'); setLeadLists(d.lead_lists); } catch (e) { console.error('[li-outreach] loadLeadLists failed', e); }
+    setLoadingLeadLists(true);
+    try { const d = await api<{ lead_lists: LiLeadList[] }>('/lead-lists'); setLeadLists(d.lead_lists); } catch (e) { console.error('[li-outreach] loadLeadLists failed', e); } finally { setLoadingLeadLists(false); }
   }, []);
   const loadLeads = useCallback(async (listId?: string) => {
+    setLoadingLeads(true);
     try {
       const params = new URLSearchParams({ limit: '200' });
       if (listId === UNLISTED_LEAD_LIST_FILTER) params.set('lead_list_id', UNLISTED_LEAD_LIST_QUERY);
@@ -314,13 +323,17 @@ export default function LiOutreachPage() {
       setSelectedLeadIds(new Set());
     } catch (e) {
       console.error('[li-outreach] loadLeads failed', e);
+    } finally {
+      setLoadingLeads(false);
     }
   }, []);
   const loadCampaigns = useCallback(async () => {
-    try { const d = await api<{ campaigns: LiCampaign[] }>('/campaigns'); setCampaigns(d.campaigns); } catch (e) { console.error('[li-outreach] loadCampaigns failed', e); }
+    setLoadingCampaigns(true);
+    try { const d = await api<{ campaigns: LiCampaign[] }>('/campaigns'); setCampaigns(d.campaigns); } catch (e) { console.error('[li-outreach] loadCampaigns failed', e); } finally { setLoadingCampaigns(false); }
   }, []);
   const loadTasks = useCallback(async () => {
-    try { const d = await api<{ tasks: LiTask[] }>('/scraper/tasks'); setTasks(d.tasks); } catch (e) { console.error('[li-outreach] loadTasks failed', e); }
+    setLoadingTasks(true);
+    try { const d = await api<{ tasks: LiTask[] }>('/scraper/tasks'); setTasks(d.tasks); } catch (e) { console.error('[li-outreach] loadTasks failed', e); } finally { setLoadingTasks(false); }
   }, []);
   const loadCampaignLogs = useCallback(async (id: string) => {
     setLoadingCampaignLogs(true);
@@ -1453,7 +1466,11 @@ export default function LiOutreachPage() {
                   <button onClick={openCreateCampaignForm} className="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium">+ Новая</button>
                 )}
               </div>
-              {campaigns.length === 0 ? (
+              {loadingCampaigns && campaigns.length === 0 ? (
+                <div className="flex items-center justify-center py-16" role="status" aria-label="Загрузка кампаний">
+                  <div className="h-8 w-8 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
+                </div>
+              ) : campaigns.length === 0 ? (
                 <div className="text-sm text-gray-500">Нет кампаний</div>
               ) : campaigns.map((c) => {
                 // isOwn kept for two things now: visual card border (so operators
@@ -1827,6 +1844,13 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
             // invite_text не задан — колонка просто не рендерится, чтобы не
             // занимать место для обычных списков.
             const anyInvite = leads.some((l) => l.invite_text && l.invite_text.trim());
+            if (loadingLeads && leads.length === 0) {
+              return (
+                <div className="flex items-center justify-center py-20" role="status" aria-label="Загрузка лидов">
+                  <div className="h-8 w-8 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
+                </div>
+              );
+            }
             return (
               <div className="max-h-[600px] overflow-y-auto">
                 <table className="w-full text-sm">
@@ -1949,6 +1973,11 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
           </div>
           <div className="space-y-2">
             <h3 className="text-sm font-semibold text-gray-900">Задачи</h3>
+            {loadingTasks && tasks.length === 0 && (
+              <div className="flex items-center justify-center py-16" role="status" aria-label="Загрузка задач">
+                <div className="h-8 w-8 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
+              </div>
+            )}
             {tasks.map((t) => {
               const params = t.params ?? {};
               const taskUrl = String(t.type === 'post_reactions' ? (params.post_url ?? '') : (params.search_url ?? ''));
@@ -2030,7 +2059,11 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
               {syncing ? 'Синхронизация...' : 'Синхронизировать'}
             </button>
           </div>
-          {accounts.length === 0 ? (
+          {loadingAccounts && accounts.length === 0 ? (
+            <div className="flex items-center justify-center py-16" role="status" aria-label="Загрузка аккаунтов">
+              <div className="h-8 w-8 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
+            </div>
+          ) : accounts.length === 0 ? (
             <div className="text-sm text-gray-500">Нет аккаунтов. Настройте Unipile и нажмите «Синхронизировать».</div>
           ) : accounts.map((a) => (
             <AccountCard
