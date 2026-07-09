@@ -63,5 +63,4 @@ blocks:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-backup:prod --platform linux/amd64 -f services/backup/Dockerfile services/backup'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-changelog-bot:prod --platform linux/amd64 -f services/changelog-bot/Dockerfile services/changelog-bot'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-polza-reports:prod --platform linux/amd64 -f services/polza-reports/Dockerfile services/polza-reports'
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-openoutreach:prod --platform linux/amd64 -f services/openoutreach/compose/linkedin/Dockerfile services/openoutreach'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-external-sync:prod --platform linux/amd64 -f services/portal-external-sync/Dockerfile services/portal-external-sync'
