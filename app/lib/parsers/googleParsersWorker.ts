@@ -224,59 +224,83 @@ export async function runGoogleMapsJob(jobId: string): Promise<void> {
 
   let finalStatus: GoogleParserStatus = 'completed';
   let finalMessage = '';
+  // Track whether the parser emitted an error and whether it followed up with
+  // a `done` event. If we saw `error` but never `done`, the job must land in
+  // 'failed' — otherwise it would silently return the initial 'completed'.
+  let parserErrored = false;
+  let doneSeen = false;
 
-  await streamSse(
-    `${SERVICE_URL}/run/maps`,
-    { jobId, settings },
-    {
-      log: async (data) => {
-        const l = data as { level: LogLevel; message: string; meta?: Record<string, unknown> };
-        await writeLog(jobId, 'maps', l.level, l.message, l.meta);
+  try {
+    await streamSse(
+      `${SERVICE_URL}/run/maps`,
+      { jobId, settings },
+      {
+        log: async (data) => {
+          const l = data as { level: LogLevel; message: string; meta?: Record<string, unknown> };
+          await writeLog(jobId, 'maps', l.level, l.message, l.meta);
+        },
+        place: async (data) => {
+          const p = data as ParserPlace;
+          placeBatch.push(placeResultToRow(jobId, p));
+          await writeLog(jobId, 'maps', 'debug', 'Result received', { name: p.name });
+          if (placeBatch.length >= 20) await flush();
+        },
+        progress: async (data) => {
+          const p = data as {
+            currentTargetIndex: number;
+            processedPlaces: number;
+            totalDiscovered: number;
+            message: string;
+          };
+          await updateMapsJob(jobId, {
+            processed_targets: p.currentTargetIndex,
+            message: p.message,
+          });
+          await writeLog(jobId, 'maps', 'info', p.message, {
+            currentTargetIndex: p.currentTargetIndex,
+          });
+          const sig = await checkControlSignal('google_maps_jobs', jobId);
+          if (sig.stop) {
+            finalStatus = 'stopped';
+            await fetch(`${SERVICE_URL}/control/${jobId}/stop`, { method: 'POST' });
+          } else if (sig.pause) {
+            await fetch(`${SERVICE_URL}/control/${jobId}/pause`, { method: 'POST' });
+          }
+        },
+        error: async (data) => {
+          const e = data as { message: string };
+          finalMessage = e.message;
+          parserErrored = true;
+          await writeLog(jobId, 'maps', 'error', e.message);
+        },
+        done: async (data) => {
+          const d = data as { status: GoogleParserStatus; message: string };
+          finalStatus = d.status;
+          finalMessage = d.message || finalMessage;
+          doneSeen = true;
+          await writeLog(jobId, 'maps', 'info', 'Job finished', {
+            status: d.status,
+            message: d.message,
+          });
+        },
       },
-      place: async (data) => {
-        const p = data as ParserPlace;
-        placeBatch.push(placeResultToRow(jobId, p));
-        await writeLog(jobId, 'maps', 'debug', 'Result received', { name: p.name });
-        if (placeBatch.length >= 20) await flush();
-      },
-      progress: async (data) => {
-        const p = data as {
-          currentTargetIndex: number;
-          processedPlaces: number;
-          totalDiscovered: number;
-          message: string;
-        };
-        await updateMapsJob(jobId, {
-          processed_targets: p.currentTargetIndex,
-          message: p.message,
-        });
-        await writeLog(jobId, 'maps', 'info', p.message, {
-          currentTargetIndex: p.currentTargetIndex,
-        });
-        const sig = await checkControlSignal('google_maps_jobs', jobId);
-        if (sig.stop) {
-          finalStatus = 'stopped';
-          await fetch(`${SERVICE_URL}/control/${jobId}/stop`, { method: 'POST' });
-        } else if (sig.pause) {
-          await fetch(`${SERVICE_URL}/control/${jobId}/pause`, { method: 'POST' });
-        }
-      },
-      error: async (data) => {
-        const e = data as { message: string };
-        finalMessage = e.message;
-        await writeLog(jobId, 'maps', 'error', e.message);
-      },
-      done: async (data) => {
-        const d = data as { status: GoogleParserStatus; message: string };
-        finalStatus = d.status;
-        finalMessage = d.message || finalMessage;
-        await writeLog(jobId, 'maps', 'info', 'Job finished', {
-          status: d.status,
-          message: d.message,
-        });
-      },
-    },
-  );
+    );
+  } catch (err) {
+    // fetch failure, torn SSE stream, or a JSON.parse throw — surface it.
+    const msg = err instanceof Error ? err.message : String(err);
+    finalStatus = 'failed';
+    finalMessage = msg;
+    parserErrored = true;
+    await writeLog(jobId, 'maps', 'error', `Stream failed: ${msg}`);
+  }
+
+  // If the parser emitted `error` but never a `done`, promote to 'failed'.
+  // The cast is required because TS control-flow narrowing collapses
+  // finalStatus to `'completed' | 'failed'` (it can't see the assignment
+  // to 'stopped' inside the async progress-handler closure above).
+  if (!doneSeen && parserErrored && (finalStatus as GoogleParserStatus) !== 'stopped') {
+    finalStatus = 'failed';
+  }
 
   await flush();
   await updateMapsJob(jobId, {
@@ -320,59 +344,75 @@ export async function runGoogleNewsJob(jobId: string): Promise<void> {
 
   let finalStatus: GoogleParserStatus = 'completed';
   let finalMessage = '';
+  let parserErrored = false;
+  let doneSeen = false;
 
-  await streamSse(
-    `${SERVICE_URL}/run/news`,
-    { jobId, settings },
-    {
-      log: async (data) => {
-        const l = data as { level: LogLevel; message: string; meta?: Record<string, unknown> };
-        await writeLog(jobId, 'news', l.level, l.message, l.meta);
+  try {
+    await streamSse(
+      `${SERVICE_URL}/run/news`,
+      { jobId, settings },
+      {
+        log: async (data) => {
+          const l = data as { level: LogLevel; message: string; meta?: Record<string, unknown> };
+          await writeLog(jobId, 'news', l.level, l.message, l.meta);
+        },
+        result: async (data) => {
+          const n = data as ParserNews;
+          batch.push(newsResultToRow(jobId, n));
+          await writeLog(jobId, 'news', 'debug', 'Result received', { title: n.title });
+          if (batch.length >= 20) await flush();
+        },
+        progress: async (data) => {
+          // NewsJob only exposes currentTargetIndex, processedResults and message.
+          const p = data as {
+            currentTargetIndex: number;
+            processedResults: number;
+            message: string;
+          };
+          await updateNewsJob(jobId, {
+            processed_targets: p.currentTargetIndex,
+            message: p.message,
+          });
+          await writeLog(jobId, 'news', 'info', p.message, {
+            currentTargetIndex: p.currentTargetIndex,
+          });
+          const sig = await checkControlSignal('google_news_jobs', jobId);
+          if (sig.stop) {
+            finalStatus = 'stopped';
+            await fetch(`${SERVICE_URL}/control/${jobId}/stop`, { method: 'POST' });
+          } else if (sig.pause) {
+            await fetch(`${SERVICE_URL}/control/${jobId}/pause`, { method: 'POST' });
+          }
+        },
+        error: async (data) => {
+          const e = data as { message: string };
+          finalMessage = e.message;
+          parserErrored = true;
+          await writeLog(jobId, 'news', 'error', e.message);
+        },
+        done: async (data) => {
+          const d = data as { status: GoogleParserStatus; message: string };
+          finalStatus = d.status;
+          finalMessage = d.message || finalMessage;
+          doneSeen = true;
+          await writeLog(jobId, 'news', 'info', 'Job finished', {
+            status: d.status,
+            message: d.message,
+          });
+        },
       },
-      result: async (data) => {
-        const n = data as ParserNews;
-        batch.push(newsResultToRow(jobId, n));
-        await writeLog(jobId, 'news', 'debug', 'Result received', { title: n.title });
-        if (batch.length >= 20) await flush();
-      },
-      progress: async (data) => {
-        // NewsJob only exposes currentTargetIndex, processedResults and message.
-        const p = data as {
-          currentTargetIndex: number;
-          processedResults: number;
-          message: string;
-        };
-        await updateNewsJob(jobId, {
-          processed_targets: p.currentTargetIndex,
-          message: p.message,
-        });
-        await writeLog(jobId, 'news', 'info', p.message, {
-          currentTargetIndex: p.currentTargetIndex,
-        });
-        const sig = await checkControlSignal('google_news_jobs', jobId);
-        if (sig.stop) {
-          finalStatus = 'stopped';
-          await fetch(`${SERVICE_URL}/control/${jobId}/stop`, { method: 'POST' });
-        } else if (sig.pause) {
-          await fetch(`${SERVICE_URL}/control/${jobId}/pause`, { method: 'POST' });
-        }
-      },
-      error: async (data) => {
-        const e = data as { message: string };
-        finalMessage = e.message;
-        await writeLog(jobId, 'news', 'error', e.message);
-      },
-      done: async (data) => {
-        const d = data as { status: GoogleParserStatus; message: string };
-        finalStatus = d.status;
-        finalMessage = d.message || finalMessage;
-        await writeLog(jobId, 'news', 'info', 'Job finished', {
-          status: d.status,
-          message: d.message,
-        });
-      },
-    },
-  );
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    finalStatus = 'failed';
+    finalMessage = msg;
+    parserErrored = true;
+    await writeLog(jobId, 'news', 'error', `Stream failed: ${msg}`);
+  }
+
+  if (!doneSeen && parserErrored && (finalStatus as GoogleParserStatus) !== 'stopped') {
+    finalStatus = 'failed';
+  }
 
   await flush();
   await updateNewsJob(jobId, {
