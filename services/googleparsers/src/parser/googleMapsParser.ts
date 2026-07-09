@@ -91,18 +91,41 @@ export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Pr
 }
 
 async function launchBrowser(job: ScrapeJob): Promise<Browser> {
-  const proxy = job.settings.proxies[0];
+  // Из пула прокси случайно выбираем один — так последовательные джобы
+  // на прод-сервере не долбятся из одного и того же IP.
+  const pool = job.settings.proxies ?? [];
+  const proxy = pool.length > 0 ? pool[Math.floor(Math.random() * pool.length)] : undefined;
   return chromium.launch({
     headless: true,
     proxy: proxy ? { server: proxy } : undefined
   });
 }
 
+/**
+ * Navigate a page with a longer timeout and a fallback wait strategy.
+ *
+ * Google Maps / News are heavy pages (Maps easily 4-6MB of JS); with a slow
+ * proxy or ratelimited Google response, the default 60 s `domcontentloaded`
+ * wait misses. Bumped to 90 s per attempt, and if DOMContentLoaded never fires
+ * we retry once with `load` (fires later but doesn't hang on Google's stalled
+ * beacon requests). Total worst case: ~180 s per URL before we give up.
+ */
+async function gotoWithRetry(page: Page, url: string): Promise<void> {
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("Timeout")) throw err;
+    // Second attempt: allow full load event, not just DCL. Still bounded.
+    await page.goto(url, { waitUntil: "load", timeout: 90000 });
+  }
+}
+
 async function parseTarget(context: BrowserContext, job: ScrapeJob, cb: MapsRunCallbacks, target: SearchTarget): Promise<void> {
   const page = await context.newPage();
 
   try {
-    await page.goto(target.url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await gotoWithRetry(page, target.url);
     await maybeAcceptConsent(page);
     await randomDelay(job);
 
@@ -164,7 +187,7 @@ async function parsePlace(context: BrowserContext, job: ScrapeJob, cb: MapsRunCa
   const placeUrl = ensureGoogleMapsLocale(url, job.settings.language, job.settings.region);
 
   try {
-    await page.goto(placeUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await gotoWithRetry(page, placeUrl);
     await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => undefined);
     await page.waitForSelector("h1, body", { timeout: 15000 });
     await randomDelay(job);

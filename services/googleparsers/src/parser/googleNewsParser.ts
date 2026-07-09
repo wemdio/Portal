@@ -114,11 +114,29 @@ export async function runGoogleNewsJob(job: NewsJob, cb: NewsRunCallbacks): Prom
 }
 
 async function launchBrowser(job: NewsJob): Promise<Browser> {
-  const proxy = job.settings.proxies[0];
+  // Random pick из пула — см. googleMapsParser.launchBrowser.
+  const pool = job.settings.proxies ?? [];
+  const proxy = pool.length > 0 ? pool[Math.floor(Math.random() * pool.length)] : undefined;
   return chromium.launch({
     headless: true,
     proxy: proxy ? { server: proxy } : undefined
   });
+}
+
+/**
+ * Navigate with a longer timeout + fallback wait strategy. Same reasoning as
+ * googleMapsParser.gotoWithRetry — Google News' DOMContentLoaded stalls under
+ * a slow proxy; falling back to `load` wait gives Chromium more room to settle
+ * before we start looking for selectors.
+ */
+async function gotoWithRetry(page: Page, url: string): Promise<void> {
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("Timeout")) throw err;
+    await page.goto(url, { waitUntil: "load", timeout: 90000 });
+  }
 }
 
 async function parseNewsTarget(
@@ -152,7 +170,7 @@ async function parseNewsTarget(
 
   const page = await context.newPage();
   try {
-    await page.goto(target.url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await gotoWithRetry(page, target.url);
     await maybeHandleConsent(page);
     await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => undefined);
     await randomDelay(job);
