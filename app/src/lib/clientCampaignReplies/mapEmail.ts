@@ -24,7 +24,7 @@ function htmlToText(html: string): string {
     .trim();
 }
 
-function extractBodyText(body: Email['body']): string | null {
+export function extractBodyText(body: Email['body']): string | null {
   if (!body) return null;
   if (typeof body === 'string') {
     // Could be html or plain — be safe and convert.
