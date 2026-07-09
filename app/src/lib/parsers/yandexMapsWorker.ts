@@ -34,6 +34,23 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Ждёт готовности yandexmaps сервиса. Нужно, потому что при деплое воркер
+ * стартует секунд на 10 раньше, чем uvicorn поднимает Python-сервис —
+ * первая проверка возвращает false, но через минуту всё готово. Раньше
+ * одна неудача сразу помечала job как failed («health check failed»), из-за
+ * чего свежие задачи после деплоя приходилось перезапускать вручную.
+ */
+async function waitForYandexMapsHealth(attempts = 6, delayMs = 10_000): Promise<boolean> {
+  for (let i = 0; i < attempts; i += 1) {
+    if (await yandexMapsHealth()) return true;
+    if (i < attempts - 1) await sleep(delayMs);
+  }
+  return false;
+}
+
 async function setJobPatch(jobId: string, patch: Record<string, unknown>) {
   if (!supabaseAdmin) return;
   await supabaseAdmin.from('yandex_maps_jobs').update(patch).eq('id', jobId);
@@ -209,9 +226,9 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       return;
     }
 
-    const serviceHealthy = await yandexMapsHealth();
+    const serviceHealthy = await waitForYandexMapsHealth();
     if (!serviceHealthy) {
-      const msg = 'Сервис yandexmaps недоступен (health check failed). Проверьте, что контейнер yandexmaps запущен.';
+      const msg = 'Сервис yandexmaps недоступен (не поднялся за минуту). Проверьте, что контейнер yandexmaps запущен.';
       await setJobPatch(jobId, { status: 'failed', error_message: msg });
       await trace?.fail(new Error(msg));
       void logError('parser.yandexmaps.collect.health_failed', new Error(msg), { jobId }, logMeta);
@@ -384,9 +401,9 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       error_message: null,
     });
 
-    const serviceHealthy = await yandexMapsHealth();
+    const serviceHealthy = await waitForYandexMapsHealth();
     if (!serviceHealthy) {
-      const msg = 'Сервис yandexmaps недоступен (health check failed). Проверьте, что контейнер yandexmaps запущен.';
+      const msg = 'Сервис yandexmaps недоступен (не поднялся за минуту). Проверьте, что контейнер yandexmaps запущен.';
       await setJobPatch(jobId, { status: 'failed', error_message: msg });
       await trace?.fail(new Error(msg));
       void logError('parser.yandexmaps.parse.health_failed', new Error(msg), { jobId }, logMeta);
