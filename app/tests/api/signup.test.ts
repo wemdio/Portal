@@ -21,6 +21,7 @@ jest.mock('@/lib/demoLead/notify', () => ({
 import { POST } from '@/app/api/signup/route';
 import { NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { sendDemoLeadTelegramAlert } from '@/lib/demoLead/notify';
 
 type CreatedSink = {
   auth: Array<Record<string, unknown>>;
@@ -85,12 +86,22 @@ jest.mock('@/lib/supabaseAdmin', () => {
   return { supabaseAdmin: mock };
 });
 
-function makeReq(body: Record<string, unknown>): NextRequest {
-  return new Request('http://localhost/api/signup', {
+function makeReq(body: Record<string, unknown>, oosUtm?: string): NextRequest {
+  const req = new Request('http://localhost/api/signup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   }) as unknown as NextRequest;
+  // A plain Request has no NextRequest.cookies; stub the getter the route reads
+  // (readSignupUtm → req.cookies.get('oos_utm')). The value mimics what Next hands
+  // us AFTER its single URL-decode: the raw JSON string the landing set.
+  Object.defineProperty(req, 'cookies', {
+    configurable: true,
+    value: {
+      get: (name: string) => (name === 'oos_utm' && oosUtm ? { name, value: oosUtm } : undefined),
+    },
+  });
+  return req;
 }
 
 describe('POST /api/signup', () => {
@@ -144,5 +155,33 @@ describe('POST /api/signup', () => {
 
     expect(c.tariffs.length).toBeGreaterThanOrEqual(1);
     expect(c.tariffs.at(-1)).toMatchObject({ user_id: 'user-123', is_active: false, tariff_type: 'standard' });
+  });
+
+  it('captures UTM from the oos_utm cookie → profiles.signup_utm + register alert', async () => {
+    // Cookie value = what Next.js hands us after its single URL-decode: the raw JSON
+    // string the landing set. Includes a literal '%' (50%off) — exactly the case the
+    // old double-decode dropped (URIError → null).
+    const cookie = JSON.stringify({
+      utm_source: 'outreach', utm_medium: 'email', utm_campaign: '50%off',
+      referrer: 'https://mail.example/x', landing: '/?utm_campaign=50%off', ts: '2026-06-30T00:00:00.000Z',
+    });
+    const res = await POST(makeReq({
+      email: 'utm@user.com', password: 'longenough123', full_name: 'Пётр', company: 'ООО Аутрич',
+    }, cookie));
+    expect(res.status).toBe(201);
+
+    const c = (supabaseAdmin as unknown as MockedAdmin).__created;
+    expect(c.profileUpdates.at(-1)?.patch).toMatchObject({
+      signup_utm: { utm_source: 'outreach', utm_medium: 'email', utm_campaign: '50%off' },
+    });
+
+    const alert = sendDemoLeadTelegramAlert as unknown as jest.Mock;
+    const call = alert.mock.calls.find((args) => (args[0] as { email?: string })?.email === 'utm@user.com');
+    expect(call).toBeTruthy();
+    expect(call?.[0]).toMatchObject({
+      source: 'register',
+      utm: { utm_campaign: '50%off' },
+      referrer: 'https://mail.example/x',
+    });
   });
 });

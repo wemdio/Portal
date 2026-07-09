@@ -50,7 +50,7 @@ describe('llmClassifyNoise', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('выкидывает только B2C/IP/GOV; B2B/MIXED/UNCLEAR остаются', async () => {
+  it('выкидывает B2C/IP/GOV/OFF_ICP; B2B/MIXED/UNCLEAR остаются', async () => {
     global.fetch = jest.fn().mockResolvedValue(
       llmResponse(
         JSON.stringify({
@@ -61,13 +61,14 @@ describe('llmClassifyNoise', () => {
             { i: 4, c: 'IP' },
             { i: 5, c: 'GOV' },
             { i: 6, c: 'UNCLEAR' },
+            { i: 7, c: 'OFF_ICP' },
           ],
         }),
       ),
     ) as unknown as typeof fetch;
-    const res = await llmClassifyNoise(companies(6));
-    expect([...res.noise].sort()).toEqual([1, 3, 4]); // 0-based: B2C, IP, GOV
-    expect(res.classified).toBe(6);
+    const res = await llmClassifyNoise(companies(7));
+    expect([...res.noise].sort((a, b) => a - b)).toEqual([1, 3, 4, 6]); // 0-based: B2C, IP, GOV, OFF_ICP
+    expect(res.classified).toBe(7);
     expect(res.failedBatches).toBe(0);
   });
 
