@@ -507,13 +507,42 @@ export function GoogleNewsParserView() {
                         </div>
                       ) : null}
 
-                      {activeJob.error_message &&
+                      {(activeJob.status === 'failed' ||
+                        activeJob.status === 'captcha' ||
+                        activeJob.status === 'blocked' ||
+                        activeJob.status === 'timeout' ||
+                        activeJob.status === 'login_required') &&
                       !isStoppedByUser(
                         mapToParserJobStatus(activeJob.status),
                         activeJob.error_message,
                       ) ? (
-                        <div className="mt-4 rounded-md bg-red-50 p-3 text-sm text-red-700 border border-red-100">
-                          <span className="font-medium">Сообщение:</span> {activeJob.error_message}
+                        <div className="mt-4 rounded-md bg-red-50 p-3 text-sm text-red-700 border border-red-100 space-y-1">
+                          <div>
+                            <span className="font-medium">Статус:</span> {statusLabelRu(activeJob.status)}
+                          </div>
+                          {activeJob.error_message ? (
+                            <div>
+                              <span className="font-medium">Ошибка:</span>{' '}
+                              <span className="break-all">{activeJob.error_message}</span>
+                            </div>
+                          ) : null}
+                          {activeJob.message ? (
+                            <div>
+                              <span className="font-medium">Сообщение:</span>{' '}
+                              <span className="break-all">{activeJob.message}</span>
+                            </div>
+                          ) : null}
+                          {!activeJob.error_message && !activeJob.message ? (
+                            <div className="text-xs text-red-600/80">
+                              Диагностика не сохранена. Скорее всего воркер{' '}
+                              <code className="rounded bg-red-100 px-1">worker-googleparsers</code>{' '}
+                              не запущен, либо сервис{' '}
+                              <code className="rounded bg-red-100 px-1">googleparsers</code>{' '}
+                              (Playwright, порт 8001) недоступен. Проверь{' '}
+                              <code className="rounded bg-red-100 px-1">docker logs portal-worker-googleparsers</code>{' '}
+                              на прод-сервере.
+                            </div>
+                          ) : null}
                         </div>
                       ) : null}
                     </div>
