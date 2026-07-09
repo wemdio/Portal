@@ -16,16 +16,37 @@ export interface MapsRunCallbacks {
     message: string;
   }) => void;
   onError: (error: JobError) => void;
+  onLog?: (
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    meta?: Record<string, unknown>
+  ) => void;
   shouldPause: () => boolean;
   shouldStop: () => boolean;
 }
 
+function log(
+  cb: MapsRunCallbacks,
+  level: "debug" | "info" | "warn" | "error",
+  message: string,
+  meta?: Record<string, unknown>
+): void {
+  cb.onLog?.(level, message, meta);
+}
+
 export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Promise<void> {
-  if (job.targets.length === 0) return;
+  if (job.targets.length === 0) {
+    log(cb, "warn", "No targets to parse — job has empty target list");
+    return;
+  }
 
   let browser: Browser | undefined;
 
   try {
+    log(cb, "info", "Launching Chromium", {
+      proxy: job.settings.proxies[0] ? "set" : "none",
+      targets: job.targets.length
+    });
     setStatus(job, cb, "running", "Запускаю Chromium");
     browser = await launchBrowser(job);
     const context = await browser.newContext({
@@ -34,6 +55,7 @@ export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Pr
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
     });
+    log(cb, "info", "Chromium ready", { locale: job.settings.language });
 
     for (let index = 0; index < job.targets.length; index += 1) {
       if (cb.shouldStop()) break;
@@ -41,20 +63,30 @@ export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Pr
 
       const target = job.targets[index];
       setCurrentTarget(job, cb, index, `Парсю выдачу: ${target.query}`);
+      log(cb, "info", "Opening target", {
+        index,
+        total: job.targets.length,
+        url: target.url,
+        query: target.query
+      });
       await parseTarget(context, job, cb, target);
     }
 
     if (cb.shouldStop()) {
+      log(cb, "info", "Stop requested — halting");
       setStatus(job, cb, "stopped", "Задача остановлена");
     } else {
+      log(cb, "info", "All targets processed", { results: job.results.length });
       setStatus(job, cb, "completed", `Готово: ${job.results.length} уникальных организаций`);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Неизвестная ошибка парсера";
+    log(cb, "error", `Fatal parser error: ${message}`);
     setStatus(job, cb, "failed", message);
     reportError(job, cb, { message });
   } finally {
     await browser?.close().catch(() => undefined);
+    log(cb, "debug", "Chromium closed");
   }
 }
 
@@ -75,26 +107,27 @@ async function parseTarget(context: BrowserContext, job: ScrapeJob, cb: MapsRunC
     await randomDelay(job);
 
     if (await isBlocked(page)) {
+      log(cb, "error", "Captcha wall detected", { url: page.url(), query: target.query });
       reportError(job, cb, { targetId: target.id, message: `Google вернул блокировку или captcha для ${target.query}` });
       return;
     }
 
     const links = await collectPlaceLinks(page, job, cb, target);
+    log(cb, "info", "Discovered place links", { count: links.length, query: target.query });
     addDiscoveredPlaces(job, cb, links.length);
 
     for (const link of links.slice(0, job.settings.limitPerQuery)) {
       if (cb.shouldStop()) break;
       await waitWhilePaused(cb);
 
-      const result = await parsePlace(context, job, target, link);
+      const result = await parsePlace(context, job, cb, target, link);
       addResult(job, cb, result);
       await randomDelay(job);
     }
   } catch (error) {
-    reportError(job, cb, {
-      targetId: target.id,
-      message: error instanceof Error ? error.message : `Не удалось обработать ${target.query}`
-    });
+    const message = error instanceof Error ? error.message : `Не удалось обработать ${target.query}`;
+    log(cb, "error", `Target failed: ${message}`, { query: target.query });
+    reportError(job, cb, { targetId: target.id, message });
   } finally {
     await page.close().catch(() => undefined);
   }
@@ -126,7 +159,7 @@ async function collectPlaceLinks(page: Page, job: ScrapeJob, cb: MapsRunCallback
   return [...links];
 }
 
-async function parsePlace(context: BrowserContext, job: ScrapeJob, target: SearchTarget, url: string): Promise<PlaceResult> {
+async function parsePlace(context: BrowserContext, job: ScrapeJob, cb: MapsRunCallbacks, target: SearchTarget, url: string): Promise<PlaceResult> {
   const page = await context.newPage();
   const placeUrl = ensureGoogleMapsLocale(url, job.settings.language, job.settings.region);
 
@@ -137,6 +170,7 @@ async function parsePlace(context: BrowserContext, job: ScrapeJob, target: Searc
     await randomDelay(job);
 
     if (await isBlocked(page)) {
+      log(cb, "error", "Captcha on place page", { url: placeUrl });
       return emptyResult(target, placeUrl, "captcha", "Captcha или блокировка Google Maps");
     }
 
@@ -151,7 +185,14 @@ async function parsePlace(context: BrowserContext, job: ScrapeJob, target: Searc
     const reviewsCount = extractReviewsCount(await firstText(page, [".F7nice span[aria-label]", "[aria-label*='отзыв']", "[aria-label*='review']"]));
     const placeId = extractPlaceId(currentUrl);
     const googleId = extractGoogleId(currentUrl);
+    if (job.settings.enrichContacts && website) {
+      log(cb, "info", "Enriching website", { url: website });
+    }
     const enrichment = job.settings.enrichContacts && website ? await enrichWebsiteContacts(website) : { emails: [], phones: [], socials: [], linkedInUrl: "" };
+    if (job.settings.enrichContacts && website) {
+      log(cb, "debug", "Website enrichment done", { url: website, foundEmails: enrichment.emails.length });
+    }
+    log(cb, "debug", "Extracted place", { name, website: website || undefined });
 
     const result: PlaceResult = {
       query: target.query,
@@ -178,7 +219,9 @@ async function parsePlace(context: BrowserContext, job: ScrapeJob, target: Searc
 
     return { ...result, dedupeKey: buildDedupeKey(result) };
   } catch (error) {
-    const result = emptyResult(target, placeUrl, "error", error instanceof Error ? error.message : "Ошибка карточки");
+    const message = error instanceof Error ? error.message : "Ошибка карточки";
+    log(cb, "warn", `Place page error: ${message}`, { url: placeUrl });
+    const result = emptyResult(target, placeUrl, "error", message);
     return { ...result, dedupeKey: buildDedupeKey(result) };
   } finally {
     await page.close().catch(() => undefined);

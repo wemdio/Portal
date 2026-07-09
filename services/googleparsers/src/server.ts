@@ -54,6 +54,7 @@ app.post("/run/maps", async (req, res) => {
       onPlaceFound: (place) => emit("place", place),
       onProgress: (progress) => emit("progress", progress),
       onError: (error) => emit("error", error),
+      onLog: (level, message, meta) => emit("log", { level, message, meta }),
       shouldPause: () => control.paused,
       shouldStop: () => control.stopped
     });
@@ -99,6 +100,7 @@ app.post("/run/news", async (req, res) => {
       onResult: (result) => emit("result", result),
       onProgress: (progress) => emit("progress", progress),
       onError: (error) => emit("error", error),
+      onLog: (level, message, meta) => emit("log", { level, message, meta }),
       shouldPause: () => control.paused,
       shouldStop: () => control.stopped
     });
