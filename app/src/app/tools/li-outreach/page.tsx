@@ -1816,7 +1816,6 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
                   .map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.name || a.unipile_account_id}
-                      {a.user_id !== currentUserId ? ` (${a.owner_name ?? 'другой спец'})` : ''}
                     </option>
                   ))}
               </select>
