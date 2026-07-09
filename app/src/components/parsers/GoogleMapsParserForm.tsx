@@ -99,7 +99,7 @@ export function GoogleMapsParserForm({
       .filter(Boolean);
     onSubmit({
       inputLines: inputLinesArr,
-      limitPerQuery: clampNumber(limitPerQuery, 1, 100),
+      limitPerQuery: clampNumber(limitPerQuery, 1, 500),
       language: language.trim() || DEFAULTS.language,
       region: region.trim() || DEFAULTS.region,
       minDelayMs: clampNumber(minDelayMs, 300, 30000),
@@ -162,12 +162,12 @@ export function GoogleMapsParserForm({
               <input
                 type="number"
                 min={1}
-                max={100}
+                max={500}
                 value={limitPerQuery}
                 onChange={(e) => setLimitPerQuery(Number(e.target.value))}
                 className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
               />
-              <p className="text-xs text-gray-500">1–100</p>
+              <p className="text-xs text-gray-500">1–500</p>
             </div>
 
             <div className="space-y-1.5">

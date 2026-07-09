@@ -422,9 +422,13 @@ export function GoogleNewsParserView() {
                         : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
                     }`}
                   >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="font-mono text-xs font-medium text-gray-500">
-                        #{j.id.slice(0, 8)}
+                    <div className="flex items-center justify-between mb-2 gap-2">
+                      <span className="text-sm font-medium text-gray-900 truncate min-w-0">
+                        {(() => {
+                          const first = j.config?.queries?.[0]?.trim();
+                          if (first) return first.length > 32 ? first.slice(0, 32) + '…' : first;
+                          return `#${j.id.slice(0, 8)}`;
+                        })()}
                       </span>
                       <JobStatus
                         status={mapToParserJobStatus(j.status)}
@@ -467,9 +471,16 @@ export function GoogleNewsParserView() {
                   <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
                     <div className="min-w-0">
                       <div className="flex items-center gap-3 mb-1 flex-wrap">
-                        <h2 className="text-xl font-bold text-gray-900">
-                          Запуск #{activeJob.id.slice(0, 8)}
+                        <h2 className="text-xl font-bold text-gray-900 truncate max-w-[520px]">
+                          {(() => {
+                            // Первый ключевой запрос как заголовок. Обрезаем
+                            // 60 символов чтобы длинный запрос не растянул шапку.
+                            const first = activeJob.config?.queries?.[0]?.trim();
+                            if (first) return first.length > 60 ? first.slice(0, 60) + '…' : first;
+                            return `Запуск #${activeJob.id.slice(0, 8)}`;
+                          })()}
                         </h2>
+                        <span className="text-xs text-gray-400 shrink-0">#{activeJob.id.slice(0, 8)}</span>
                         <span
                           className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset ${
                             activeJob.status === 'completed'

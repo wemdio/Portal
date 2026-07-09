@@ -196,6 +196,16 @@ export default function LiOutreachPage() {
   const [tasks, setTasks] = useState<LiTask[]>([]);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [campaignLogs, setCampaignLogs] = useState<LiCampaignLog[]>([]);
+  // Флаги первичной загрузки для каждой вкладки. Показываем крутящийся
+  // спиннер вместо «пусто», пока fetch летит — иначе пользователь видит
+  // мгновение полного отсутствия данных и думает что вкладка сломана.
+  // Для дашборда используется существующее dashLoading (см. loadDashboard).
+  const [loadingCampaignLogs, setLoadingCampaignLogs] = useState(false);
+  const [loadingAccounts, setLoadingAccounts] = useState(false);
+  const [loadingLeadLists, setLoadingLeadLists] = useState(false);
+  const [loadingLeads, setLoadingLeads] = useState(false);
+  const [loadingCampaigns, setLoadingCampaigns] = useState(false);
+  const [loadingTasks, setLoadingTasks] = useState(false);
   // Range key currently being exported (button shows '...' until done).
   // Null when no export is in flight.
   const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'24h' | '7d' | null>(null);
@@ -207,6 +217,10 @@ export default function LiOutreachPage() {
   const [scraperListId, setScraperListId] = useState('');
   const [scraperMax, setScraperMax] = useState(100);
   const [scraperType, setScraperType] = useState<'search' | 'reactions'>('search');
+  // Guards against double-clicks: the create-task POST is fast enough that a
+  // user can click Запустить 3-4 times in a row and spawn duplicate scrape
+  // tasks. Toggled around startScrape().
+  const [startingScrape, setStartingScrape] = useState(false);
 
   const visibleLeadIds = useMemo(() => leads.map((lead) => lead.id), [leads]);
   const selectedVisibleLeadCount = useMemo(
@@ -259,6 +273,11 @@ export default function LiOutreachPage() {
   const [importing, setImporting] = useState(false);
   const [importListId, setImportListId] = useState('');
   const [showImportModal, setShowImportModal] = useState(false);
+  // Inline error messages shown INSIDE the import modals — replaces the old
+  // alert() so the user sees the reason (bad column, missing list, server 500)
+  // right next to the file input and can retry without losing state.
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importInvitesError, setImportInvitesError] = useState<string | null>(null);
   const [showCreateListModal, setShowCreateListModal] = useState(false);
   const [creatingList, setCreatingList] = useState(false);
   const [newListName, setNewListName] = useState('');
@@ -275,7 +294,8 @@ export default function LiOutreachPage() {
   // ---- Data fetching --------------------------------------------------------
 
   const loadAccounts = useCallback(async () => {
-    try { const d = await api<{ accounts: LiAccount[] }>('/accounts'); setAccounts(d.accounts); } catch (e) { console.error('[li-outreach] loadAccounts failed', e); }
+    setLoadingAccounts(true);
+    try { const d = await api<{ accounts: LiAccount[] }>('/accounts'); setAccounts(d.accounts); } catch (e) { console.error('[li-outreach] loadAccounts failed', e); } finally { setLoadingAccounts(false); }
   }, []);
   const loadAccountErrorCounts = useCallback(async () => {
     try {
@@ -288,9 +308,11 @@ export default function LiOutreachPage() {
     }
   }, []);
   const loadLeadLists = useCallback(async () => {
-    try { const d = await api<{ lead_lists: LiLeadList[] }>('/lead-lists'); setLeadLists(d.lead_lists); } catch (e) { console.error('[li-outreach] loadLeadLists failed', e); }
+    setLoadingLeadLists(true);
+    try { const d = await api<{ lead_lists: LiLeadList[] }>('/lead-lists'); setLeadLists(d.lead_lists); } catch (e) { console.error('[li-outreach] loadLeadLists failed', e); } finally { setLoadingLeadLists(false); }
   }, []);
   const loadLeads = useCallback(async (listId?: string) => {
+    setLoadingLeads(true);
     try {
       const params = new URLSearchParams({ limit: '200' });
       if (listId === UNLISTED_LEAD_LIST_FILTER) params.set('lead_list_id', UNLISTED_LEAD_LIST_QUERY);
@@ -301,21 +323,28 @@ export default function LiOutreachPage() {
       setSelectedLeadIds(new Set());
     } catch (e) {
       console.error('[li-outreach] loadLeads failed', e);
+    } finally {
+      setLoadingLeads(false);
     }
   }, []);
   const loadCampaigns = useCallback(async () => {
-    try { const d = await api<{ campaigns: LiCampaign[] }>('/campaigns'); setCampaigns(d.campaigns); } catch (e) { console.error('[li-outreach] loadCampaigns failed', e); }
+    setLoadingCampaigns(true);
+    try { const d = await api<{ campaigns: LiCampaign[] }>('/campaigns'); setCampaigns(d.campaigns); } catch (e) { console.error('[li-outreach] loadCampaigns failed', e); } finally { setLoadingCampaigns(false); }
   }, []);
   const loadTasks = useCallback(async () => {
-    try { const d = await api<{ tasks: LiTask[] }>('/scraper/tasks'); setTasks(d.tasks); } catch (e) { console.error('[li-outreach] loadTasks failed', e); }
+    setLoadingTasks(true);
+    try { const d = await api<{ tasks: LiTask[] }>('/scraper/tasks'); setTasks(d.tasks); } catch (e) { console.error('[li-outreach] loadTasks failed', e); } finally { setLoadingTasks(false); }
   }, []);
   const loadCampaignLogs = useCallback(async (id: string) => {
+    setLoadingCampaignLogs(true);
     try {
       const d = await api<{ items: LiCampaignLog[]; total: number }>(`/campaigns/${id}/logs`);
       setCampaignLogs(Array.isArray(d?.items) ? d.items : []);
     } catch (e) {
       console.error('[li-outreach] loadCampaignLogs failed', e);
       setCampaignLogs([]);
+    } finally {
+      setLoadingCampaignLogs(false);
     }
   }, []);
   const loadDashboard = useCallback(async () => {
@@ -362,9 +391,25 @@ export default function LiOutreachPage() {
   }, [tab, leadListFilterId]);
 
   useEffect(() => {
-    if (selectedCampaignId) void loadCampaignLogs(selectedCampaignId);
+    if (!selectedCampaignId) return;
+    // Стираем прошлые логи сразу — иначе при переключении между
+    // кампаниями секунду висят чужие сообщения и создают впечатление
+    // что новая кампания уже что-то нашла.
+    setCampaignLogs([]);
+    void loadCampaignLogs(selectedCampaignId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCampaignId]);
+
+  // Автообновление списка задач раз в 10 сек когда открыт «Скрапер», чтобы
+  // прогресс (X/Y) обновлялся сам и не приходилось перезагружать страницу.
+  // Останавливается когда пользователь уходит на другую вкладку.
+  useEffect(() => {
+    if (tab !== 'scraper') return;
+    const interval = window.setInterval(() => {
+      void loadTasks();
+    }, 10_000);
+    return () => window.clearInterval(interval);
+  }, [tab, loadTasks]);
 
   // Download the selected campaign's logs as a .txt for the given range.
   // Reuses the existing global export endpoint with campaign_id filter — same
@@ -415,6 +460,7 @@ export default function LiOutreachPage() {
     // даже когда аккаунт-то как раз и был выбран, и шли искать причину не
     // там. Сообщения теперь персональные: говорят ровно про то поле, которое
     // пустое.
+    if (startingScrape) return; // extra belt-and-suspenders vs double-click
     if (!scraperAccountId) { alert('Выберите LinkedIn-аккаунт справа от поля URL'); return; }
     if (!scraperUrl.trim()) {
       const hint = scraperType === 'search'
@@ -423,13 +469,25 @@ export default function LiOutreachPage() {
       alert(hint);
       return;
     }
+    // Снимок имён аккаунта и списка — чтобы даже после удаления аккаунта
+    // (например, при дедупе li_accounts) задача продолжала показывать
+    // человекочитаемое название, а не «аккаунт удалён».
+    const accountSnapshot = accounts.find((a) => a.id === scraperAccountId);
+    const listSnapshot = scraperListId ? leadLists.find((l) => l.id === scraperListId) : null;
+    const accountName = accountSnapshot?.name || accountSnapshot?.unipile_account_id || null;
+    const listName = listSnapshot?.name || null;
     const endpoint = scraperType === 'search' ? '/scraper/search' : '/scraper/reactions';
     const body = scraperType === 'search'
-      ? { search_url: scraperUrl, account_id: scraperAccountId, lead_list_id: scraperListId || undefined, max_results: scraperMax }
-      : { post_url: scraperUrl, account_id: scraperAccountId, lead_list_id: scraperListId || undefined, max_results: scraperMax };
-    await api(endpoint, { method: 'POST', json: body });
-    setScraperUrl('');
-    void loadTasks();
+      ? { search_url: scraperUrl, account_id: scraperAccountId, account_name: accountName, lead_list_id: scraperListId || undefined, lead_list_name: listName, max_results: scraperMax }
+      : { post_url: scraperUrl, account_id: scraperAccountId, account_name: accountName, lead_list_id: scraperListId || undefined, lead_list_name: listName, max_results: scraperMax };
+    setStartingScrape(true);
+    try {
+      await api(endpoint, { method: 'POST', json: body });
+      setScraperUrl('');
+      void loadTasks();
+    } finally {
+      setStartingScrape(false);
+    }
   };
 
   const cancelTask = async (taskId: string) => { await api(`/scraper/tasks/${taskId}/cancel`, { method: 'POST', json: {} }); void loadTasks(); };
@@ -454,18 +512,49 @@ export default function LiOutreachPage() {
     if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  /** Короткое название аккаунта по id — для подписи под задачей. */
-  const accountLabel = (id: string | undefined): string => {
+  /**
+   * Название аккаунта для подписи под задачей. Читаем сначала снимок из
+   * task.params.account_name (сохраняется при создании — переживёт даже
+   * удаление аккаунта из li_accounts, например после дедупа). Если снимка
+   * нет — идём в текущий список аккаунтов по id. Fallback — «аккаунт удалён»,
+   * а НЕ 8-символьный ломоть UUID, который для пользователя чистый шум.
+   */
+  const accountLabel = (params: Record<string, unknown>): string => {
+    const snapshot = String(params.account_name ?? '').trim();
+    if (snapshot) return snapshot;
+    const id = String(params.account_id ?? '').trim();
     if (!id) return '—';
     const acc = accounts.find((a) => a.id === id);
-    return acc?.name || acc?.unipile_account_id || id.slice(0, 8);
+    return acc?.name || acc?.unipile_account_id || 'аккаунт удалён';
   };
 
-  /** Название списка лидов по id — для подписи под задачей. */
-  const listLabel = (id: string | undefined): string => {
+  /** Название списка лидов по id — снимок → lookup → fallback. */
+  const listLabel = (params: Record<string, unknown>): string => {
+    const snapshot = String(params.lead_list_name ?? '').trim();
+    if (snapshot) return snapshot;
+    const id = String(params.lead_list_id ?? '').trim();
     if (!id) return 'без списка';
     const l = leadLists.find((x) => x.id === id);
-    return l?.name ?? id.slice(0, 8);
+    return l?.name ?? 'список удалён';
+  };
+
+  /** Тип таски → человекочитаемое название. */
+  const taskTypeLabelRu = (type: string): string => {
+    if (type === 'search') return 'Поиск';
+    if (type === 'post_reactions') return 'Реакции';
+    return type;
+  };
+
+  /** Статус таски → русский лейбл. */
+  const taskStatusLabelRu = (status: string): string => {
+    switch (status) {
+      case 'pending': return 'В очереди';
+      case 'running': return 'Выполняется';
+      case 'completed': return 'Готово';
+      case 'failed': return 'Ошибка';
+      case 'cancelled': return 'Отменено';
+      default: return status;
+    }
   };
 
   const createCampaign = async () => {
@@ -622,6 +711,7 @@ export default function LiOutreachPage() {
 
   const importLeadsCsv = async (file: File) => {
     setImporting(true);
+    setImportError(null);
     try {
       if (!importListId) throw new Error('Выберите список для импорта');
       const token = await getAccessToken();
@@ -642,10 +732,12 @@ export default function LiOutreachPage() {
         error?: string;
       };
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      // На успехе показываем короткое summary в toast (можно и без) и
+      // сразу закрываем модалку — пользователь видит новый список в чипсах.
       const alreadyContacted = data.already_contacted_skipped ?? 0;
       const dupInFile = data.dup_in_file_skipped ?? 0;
       const parts = [`Импортировано новых: ${data.imported ?? 0}`];
-      if (alreadyContacted > 0) parts.push(`⚠️ Уже контактировали ранее (пропущено): ${alreadyContacted}`);
+      if (alreadyContacted > 0) parts.push(`Уже контактировали (пропущено): ${alreadyContacted}`);
       if (dupInFile > 0) parts.push(`Дублей в файле (пропущено): ${dupInFile}`);
       if ((data.skipped ?? 0) > 0) parts.push(`Без валидных данных: ${data.skipped}`);
       alert(parts.join('\n'));
@@ -653,7 +745,7 @@ export default function LiOutreachPage() {
       await loadLeads(leadListFilterId);
       await loadLeadLists();
     } catch (e) {
-      alert('Ошибка импорта: ' + (e instanceof Error ? e.message : e));
+      setImportError(e instanceof Error ? e.message : String(e));
     } finally {
       setImporting(false);
     }
@@ -661,6 +753,7 @@ export default function LiOutreachPage() {
 
   const importLeadsWithInvitesCsv = async (file: File) => {
     setImporting(true);
+    setImportInvitesError(null);
     try {
       const token = await getAccessToken();
       if (!token) throw new Error('Not authenticated');
@@ -693,7 +786,7 @@ export default function LiOutreachPage() {
       if (data.lead_list?.id) setLeadListFilterId(data.lead_list.id);
       await loadLeads(data.lead_list?.id ?? leadListFilterId);
     } catch (e) {
-      alert('Ошибка импорта: ' + (e instanceof Error ? e.message : e));
+      setImportInvitesError(e instanceof Error ? e.message : String(e));
     } finally {
       setImporting(false);
     }
@@ -1138,7 +1231,11 @@ export default function LiOutreachPage() {
                     <option value="">Выберите...</option>
                     {accounts
                       .filter((a) => a.is_active || a.id === cf.account_id)
-                      .map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}{a.user_id !== currentUserId ? ` (${a.owner_name ?? 'другой спец'})` : ''}</option>)}
+                      .map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name || a.unipile_account_id}
+                        </option>
+                      ))}
                   </select>
                 </div>
                 <div>
@@ -1373,7 +1470,11 @@ export default function LiOutreachPage() {
                   <button onClick={openCreateCampaignForm} className="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium">+ Новая</button>
                 )}
               </div>
-              {campaigns.length === 0 ? (
+              {loadingCampaigns && campaigns.length === 0 ? (
+                <div className="flex items-center justify-center py-16" role="status" aria-label="Загрузка кампаний">
+                  <div className="h-8 w-8 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
+                </div>
+              ) : campaigns.length === 0 ? (
                 <div className="text-sm text-gray-500">Нет кампаний</div>
               ) : campaigns.map((c) => {
                 // isOwn kept for two things now: visual card border (so operators
@@ -1439,7 +1540,11 @@ export default function LiOutreachPage() {
                     </div>
                   </div>
                   <div className="max-h-[400px] overflow-y-auto space-y-1">
-                    {campaignLogs.length === 0 ? (
+                    {loadingCampaignLogs ? (
+                      <div className="flex items-center justify-center py-10" role="status" aria-label="Загрузка логов">
+                        <div className="h-6 w-6 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
+                      </div>
+                    ) : campaignLogs.length === 0 ? (
                       <div className="text-xs text-gray-400">Нет логов</div>
                     ) : campaignLogs.map((log) => (
                       <div key={log.id} className={`text-xs px-2 py-1 rounded ${log.level === 'error' ? 'bg-red-50 text-red-700' : log.level === 'warning' ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-700'}`}>
@@ -1548,22 +1653,22 @@ export default function LiOutreachPage() {
             <div className="fixed inset-0 z-40 bg-black/30 p-4 flex items-center justify-center">
               <div className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl">
                 <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
-                  <h3 className="text-sm font-semibold text-gray-900">Manage Lead Lists</h3>
+                  <h3 className="text-sm font-semibold text-gray-900">Управление списками лидов</h3>
                   <button onClick={() => setShowCreateListModal(false)} disabled={creatingList} className="text-sm text-gray-500 hover:text-gray-700 disabled:opacity-50">✕</button>
                 </div>
                 <div className="p-4 space-y-4">
                   <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
-                    <div className="text-xs font-medium text-gray-700 mb-2">Create New List</div>
+                    <div className="text-xs font-medium text-gray-700 mb-2">Создать новый список</div>
                     <div className="flex gap-2">
                       <input
                         type="text"
                         value={newListName}
                         onChange={(e) => setNewListName(e.target.value)}
-                        placeholder="List name"
+                        placeholder="Название списка"
                         className="flex-1 rounded-md border border-gray-200 bg-white px-3 py-2 text-sm"
                       />
                       <button onClick={() => void createLeadList()} disabled={creatingList} className="rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50">
-                        {creatingList ? '...' : 'Create'}
+                        {creatingList ? '...' : 'Создать'}
                       </button>
                     </div>
                   </div>
@@ -1579,11 +1684,11 @@ export default function LiOutreachPage() {
                             className={`text-left text-sm font-medium ${leadListFilterId === list.id ? 'text-blue-700' : 'text-gray-900 hover:text-blue-700'}`}
                           >
                             {list.name}
-                            <span className="ml-2 text-xs font-normal text-gray-500">({list.leads_count ?? 0} leads)</span>
+                            <span className="ml-2 text-xs font-normal text-gray-500">({list.leads_count ?? 0} лидов)</span>
                           </button>
                           <div className="flex items-center gap-3">
-                            <button onClick={() => void exportLeadListCsv(list)} className="text-xs text-blue-600 hover:underline">Export</button>
-                            <button onClick={() => void deleteLeadList(list)} className="text-xs text-red-600 hover:underline">Delete</button>
+                            <button onClick={() => void exportLeadListCsv(list)} className="text-xs text-blue-600 hover:underline">Экспорт</button>
+                            <button onClick={() => void deleteLeadList(list)} className="text-xs text-red-600 hover:underline">Удалить</button>
                           </div>
                         </div>
                       </div>
@@ -1594,88 +1699,118 @@ export default function LiOutreachPage() {
             </div>
           )}
 
-          {/* Import CSV with personalized invites */}
+          {/* Import CSV with personalized invites — fixed modal overlay. */}
           {showImportInvitesModal && (
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-900">Импорт CSV с персонализированными инвайтами</h3>
-                <button onClick={() => setShowImportInvitesModal(false)} className="text-xs text-gray-500 hover:text-gray-700">Закрыть</button>
-              </div>
-              <div className="text-xs text-gray-600 space-y-2">
-                <p>
-                  Формат CSV: <code className="bg-gray-100 px-1 rounded">LinkedIn ID, Invite</code>
-                  {' '}— первая колонка <b>ссылка на профиль LinkedIn</b>, вторая — <b>готовый текст инвайта</b>.
-                </p>
-                <pre className="bg-white border border-emerald-200 rounded-lg px-3 py-2 text-[11px] leading-relaxed font-mono text-gray-700 overflow-x-auto">{`LinkedIn ID,Invite
+            <div className="fixed inset-0 z-40 bg-black/30 p-4 flex items-center justify-center">
+              <div className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl flex flex-col">
+                <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+                  <h3 className="text-sm font-semibold text-gray-900">Импорт CSV с персонализированными инвайтами</h3>
+                  <button
+                    onClick={() => { setShowImportInvitesModal(false); setImportInvitesError(null); }}
+                    disabled={importing}
+                    className="text-sm text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="p-4 space-y-3 overflow-y-auto">
+                  <div className="text-xs text-gray-600 space-y-2">
+                    <p>
+                      Формат CSV: <code className="bg-gray-100 px-1 rounded">LinkedIn ID, Invite</code>
+                      {' '}— первая колонка <b>ссылка на профиль LinkedIn</b>, вторая — <b>готовый текст инвайта</b>.
+                    </p>
+                    <pre className="bg-white border border-emerald-200 rounded-lg px-3 py-2 text-[11px] leading-relaxed font-mono text-gray-700 overflow-x-auto">{`LinkedIn ID,Invite
 http://www.linkedin.com/in/ian-parris-95423229,"Hi Ian! IT services at Installation Technology are vital. Happy to connect!"
 http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Слежу за Monese, впечатлён фокусом на мультивалютности."`}</pre>
-                <p>
-                  На каждый импорт создаётся <b>новый список лидов</b> с пометкой «персонализированные инвайты».
-                  В редакторе кампании для такого списка появится тумблер «Использовать персонализированный инвайт» на шаге&nbsp;1.
-                </p>
-              </div>
-              <div className="flex gap-3 items-end flex-wrap">
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Название списка</label>
-                  <input
-                    type="text"
-                    value={importInvitesListName}
-                    onChange={(e) => setImportInvitesListName(e.target.value)}
-                    placeholder="Пусто = имя файла"
-                    className="rounded-lg border border-gray-200 px-3 py-2 text-sm w-56"
-                  />
+                    <p>
+                      На каждый импорт создаётся <b>новый список лидов</b> с пометкой «персонализированные инвайты».
+                      В редакторе кампании для такого списка появится тумблер «Использовать персонализированный инвайт» на шаге&nbsp;1.
+                    </p>
+                  </div>
+                  <div className="flex gap-3 items-end flex-wrap">
+                    <div>
+                      <label className="text-xs text-gray-600 block mb-1">Название списка</label>
+                      <input
+                        type="text"
+                        value={importInvitesListName}
+                        onChange={(e) => setImportInvitesListName(e.target.value)}
+                        placeholder="Пусто = имя файла"
+                        className="rounded-lg border border-gray-200 px-3 py-2 text-sm w-56"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-600 block mb-1">Файл CSV</label>
+                      <input
+                        type="file"
+                        accept=".csv,text/csv"
+                        disabled={importing}
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) void importLeadsWithInvitesCsv(f);
+                        }}
+                        className="text-sm file:mr-2 file:rounded-lg file:border-0 file:bg-emerald-600 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-emerald-700 disabled:opacity-50"
+                      />
+                    </div>
+                    {importing && <span className="text-xs text-gray-500">Загрузка…</span>}
+                  </div>
+                  {importInvitesError && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                      <span className="font-medium">Ошибка импорта:</span> {importInvitesError}
+                    </div>
+                  )}
                 </div>
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Файл CSV</label>
-                  <input
-                    type="file"
-                    accept=".csv,text/csv"
-                    disabled={importing}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) void importLeadsWithInvitesCsv(f);
-                    }}
-                    className="text-sm file:mr-2 file:rounded-lg file:border-0 file:bg-emerald-600 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-emerald-700 disabled:opacity-50"
-                  />
-                </div>
-                {importing && <span className="text-xs text-gray-500">Импорт...</span>}
               </div>
             </div>
           )}
 
-          {/* Import CSV Modal */}
+          {/* Import CSV — fixed modal overlay. */}
           {showImportModal && (
-            <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-900">Импорт лидов из CSV</h3>
-                <button onClick={() => setShowImportModal(false)} className="text-xs text-gray-500 hover:text-gray-700">Закрыть</button>
-              </div>
-              <p className="text-xs text-gray-500">
-                Формат CSV: <code className="bg-gray-100 px-1 rounded">name, first_name, last_name, position, company, profile_url, public_identifier</code>
-                <br />Первая строка — заголовки. Обязательное поле: <code className="bg-gray-100 px-1 rounded">name</code> (или <code className="bg-gray-100 px-1 rounded">first_name</code> + <code className="bg-gray-100 px-1 rounded">last_name</code>).
-              </p>
-              <div className="flex gap-3 items-end flex-wrap">
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Список для импорта</label>
-                  <select value={importListId} onChange={(e) => setImportListId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
-                    <option value="">Выберите список...</option>
-                    {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Файл CSV</label>
-                  <input
-                    type="file"
-                    accept=".csv,text/csv"
+            <div className="fixed inset-0 z-40 bg-black/30 p-4 flex items-center justify-center">
+              <div className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl flex flex-col">
+                <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+                  <h3 className="text-sm font-semibold text-gray-900">Импорт лидов из CSV</h3>
+                  <button
+                    onClick={() => { setShowImportModal(false); setImportError(null); }}
                     disabled={importing}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) void importLeadsCsv(f);
-                    }}
-                    className="text-sm file:mr-2 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-blue-700 disabled:opacity-50"
-                  />
+                    className="text-sm text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                  >
+                    ✕
+                  </button>
                 </div>
-                {importing && <span className="text-xs text-gray-500">Импорт...</span>}
+                <div className="p-4 space-y-3 overflow-y-auto">
+                  <p className="text-xs text-gray-500">
+                    Формат CSV: <code className="bg-gray-100 px-1 rounded">name, first_name, last_name, position, company, profile_url, public_identifier</code>
+                    <br />Первая строка — заголовки. Обязательное поле: <code className="bg-gray-100 px-1 rounded">name</code> (или <code className="bg-gray-100 px-1 rounded">first_name</code> + <code className="bg-gray-100 px-1 rounded">last_name</code>).
+                  </p>
+                  <div className="flex gap-3 items-end flex-wrap">
+                    <div>
+                      <label className="text-xs text-gray-600 block mb-1">Список для импорта</label>
+                      <select value={importListId} onChange={(e) => setImportListId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
+                        <option value="">Выберите список…</option>
+                        {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-600 block mb-1">Файл CSV</label>
+                      <input
+                        type="file"
+                        accept=".csv,text/csv"
+                        disabled={importing}
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) void importLeadsCsv(f);
+                        }}
+                        className="text-sm file:mr-2 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-blue-700 disabled:opacity-50"
+                      />
+                    </div>
+                    {importing && <span className="text-xs text-gray-500">Загрузка…</span>}
+                  </div>
+                  {importError && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                      <span className="font-medium">Ошибка импорта:</span> {importError}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -1713,6 +1848,13 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
             // invite_text не задан — колонка просто не рендерится, чтобы не
             // занимать место для обычных списков.
             const anyInvite = leads.some((l) => l.invite_text && l.invite_text.trim());
+            if (loadingLeads && leads.length === 0) {
+              return (
+                <div className="flex items-center justify-center py-20" role="status" aria-label="Загрузка лидов">
+                  <div className="h-8 w-8 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
+                </div>
+              );
+            }
             return (
               <div className="max-h-[600px] overflow-y-auto">
                 <table className="w-full text-sm">
@@ -1816,7 +1958,6 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
                   .map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.name || a.unipile_account_id}
-                      {a.user_id !== currentUserId ? ` (${a.owner_name ?? 'другой спец'})` : ''}
                     </option>
                   ))}
               </select>
@@ -1825,22 +1966,32 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
                 {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
               </select>
               <input type="number" value={scraperMax} onChange={(e) => setScraperMax(Number(e.target.value))} className="w-24 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-              <button onClick={() => void startScrape()} className="rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium">Запустить</button>
+              <button
+                onClick={() => void startScrape()}
+                disabled={startingScrape}
+                className="rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {startingScrape ? 'Запускаем…' : 'Запустить'}
+              </button>
             </div>
           </div>
           <div className="space-y-2">
             <h3 className="text-sm font-semibold text-gray-900">Задачи</h3>
+            {loadingTasks && tasks.length === 0 && (
+              <div className="flex items-center justify-center py-16" role="status" aria-label="Загрузка задач">
+                <div className="h-8 w-8 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
+              </div>
+            )}
             {tasks.map((t) => {
               const params = t.params ?? {};
               const taskUrl = String(t.type === 'post_reactions' ? (params.post_url ?? '') : (params.search_url ?? ''));
-              const taskTypeLabel = t.type === 'search' ? 'search' : t.type === 'post_reactions' ? 'reactions' : t.type;
               const canRepeat = t.type === 'search' || t.type === 'post_reactions';
               return (
                 <div key={t.id} className="rounded-xl border border-gray-200 px-3 py-2 text-sm">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium">{taskTypeLabel}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded ${t.status === 'completed' ? 'bg-green-100 text-green-700' : t.status === 'running' ? 'bg-blue-100 text-blue-700' : t.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>{t.status}</span>
+                      <span className="font-medium">{taskTypeLabelRu(t.type)}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded ${t.status === 'completed' ? 'bg-green-100 text-green-700' : t.status === 'running' ? 'bg-blue-100 text-blue-700' : t.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>{taskStatusLabelRu(t.status)}</span>
                       <span className="text-xs text-gray-500">{t.progress}/{t.total}</span>
                       {t.error_message && <span className="text-xs text-red-600">{t.error_message}</span>}
                     </div>
@@ -1880,8 +2031,8 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
                         </div>
                       )}
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-                        <span>аккаунт: <span className="text-gray-700">{accountLabel(params.account_id)}</span></span>
-                        <span>список: <span className="text-gray-700">{listLabel(params.lead_list_id)}</span></span>
+                        <span>аккаунт: <span className="text-gray-700">{accountLabel(params)}</span></span>
+                        <span>список: <span className="text-gray-700">{listLabel(params)}</span></span>
                         {typeof params.max_results === 'number' && (
                           <span>лимит: <span className="text-gray-700">{params.max_results}</span></span>
                         )}
@@ -1912,7 +2063,11 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
               {syncing ? 'Синхронизация...' : 'Синхронизировать'}
             </button>
           </div>
-          {accounts.length === 0 ? (
+          {loadingAccounts && accounts.length === 0 ? (
+            <div className="flex items-center justify-center py-16" role="status" aria-label="Загрузка аккаунтов">
+              <div className="h-8 w-8 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
+            </div>
+          ) : accounts.length === 0 ? (
             <div className="text-sm text-gray-500">Нет аккаунтов. Настройте Unipile и нажмите «Синхронизировать».</div>
           ) : accounts.map((a) => (
             <AccountCard
@@ -2125,7 +2280,10 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
 
   useEffect(() => {
     if (!autoRefresh) return;
-    const interval = setInterval(() => void fetchLogs(), 5000);
+    // Каждые 10 сек — раньше было 5, но лид-таблица и без того шумит
+    // сетевыми хвостами, а логи в реальном времени с такой частотой не
+    // нужны. Меньше запросов = меньше нагрузка на воркеры и сеть.
+    const interval = setInterval(() => void fetchLogs(), 10000);
     return () => clearInterval(interval);
   }, [fetchLogs, autoRefresh]);
 
