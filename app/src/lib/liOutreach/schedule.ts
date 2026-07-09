@@ -1,6 +1,5 @@
 /**
- * Per-campaign working-hours helpers shared by li-outreach (v1) and
- * li-outreach-v2.
+ * Per-campaign working-hours helpers for li-outreach.
  *
  * TG outreach defines `sleep_periods` — windows where the worker stays idle.
  * The LinkedIn flavours invert this: `working_hours` describes the window
