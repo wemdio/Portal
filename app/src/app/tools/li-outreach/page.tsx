@@ -1811,7 +1811,14 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
             <div className="flex gap-3 flex-wrap">
               <select value={scraperAccountId} onChange={(e) => setScraperAccountId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
                 <option value="">Аккаунт...</option>
-                {accounts.filter((a) => a.is_active && a.user_id === currentUserId).map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}</option>)}
+                {accounts
+                  .filter((a) => a.is_active)
+                  .map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name || a.unipile_account_id}
+                      {a.user_id !== currentUserId ? ` (${a.owner_name ?? 'другой спец'})` : ''}
+                    </option>
+                  ))}
               </select>
               <select value={scraperListId} onChange={(e) => setScraperListId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
                 <option value="">Список (опционально)</option>

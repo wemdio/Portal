@@ -399,15 +399,48 @@ export function extractPublicIdentifier(profileUrl: string): string | null {
   }
 }
 
-export function extractActivityUrn(postUrl: string): string | null {
-  if (postUrl.startsWith('urn:li:activity:')) return postUrl;
-  // 1) URNs with explicit `activity:` or `activity-` (feed/update or share URLs)
+/**
+ * Extract the 19-digit post ID from a LinkedIn URL (or return null if the URL
+ * doesn't contain one). LinkedIn packs the same numeric ID into three URN
+ * families — activity / share / ugcPost — and different posts require
+ * different URN types on Unipile's reactions endpoint. Callers should use
+ * {@link postReactionUrnCandidates} to iterate all three.
+ */
+export function extractPostNumericId(postUrl: string): string | null {
+  if (postUrl.startsWith('urn:li:activity:') || postUrl.startsWith('urn:li:share:') || postUrl.startsWith('urn:li:ugcPost:')) {
+    const m = postUrl.match(/:(\d{19})$/);
+    return m ? m[1] : null;
+  }
   const explicit = postUrl.match(/activity[:-](\d{19})/);
-  if (explicit) return `urn:li:activity:${explicit[1]}`;
-  // 2) /posts/<slug>-<19-digit-id>-<4char-suffix>/ format (share links copied
-  //    from the browser address bar). Example:
-  //    https://www.linkedin.com/posts/foo-bar-baz-7261807508984389632-VDmI/?utm_source=...
+  if (explicit) return explicit[1];
+  // /posts/<slug>-<19-digit-id>-<4char-suffix>/ — share links copied from
+  // the browser address bar. Example:
+  //   https://www.linkedin.com/posts/foo-bar-baz-7261807508984389632-VDmI/?...
   const postsMatch = postUrl.match(/\/posts\/[^/?#]*?-(\d{19})(?:-[A-Za-z0-9_-]+)?(?:\/|\?|#|$)/);
-  if (postsMatch) return `urn:li:activity:${postsMatch[1]}`;
+  if (postsMatch) return postsMatch[1];
   return null;
+}
+
+/**
+ * Given a numeric LinkedIn post ID, return the three URN variants Unipile
+ * accepts on `/posts/{urn}/reactions`. The correct one depends on the post
+ * type (feed activity vs share vs UGC post), which the URL alone can't tell
+ * us — so callers try each until they get a non-404 response.
+ */
+export function postReactionUrnCandidates(numericId: string): string[] {
+  return [
+    `urn:li:activity:${numericId}`,
+    `urn:li:share:${numericId}`,
+    `urn:li:ugcPost:${numericId}`,
+  ];
+}
+
+/**
+ * @deprecated Prefer {@link extractPostNumericId} + {@link postReactionUrnCandidates}.
+ * Kept for backwards compatibility with the older `activity`-only code path;
+ * still returns a valid URN when the URL contains a 19-digit ID.
+ */
+export function extractActivityUrn(postUrl: string): string | null {
+  const id = extractPostNumericId(postUrl);
+  return id ? `urn:li:activity:${id}` : null;
 }

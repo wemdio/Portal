@@ -38,18 +38,30 @@ export async function POST(req: NextRequest) {
         const publicId = String(im.publicIdentifier ?? '');
         const profileUrl = publicId ? `https://www.linkedin.com/in/${publicId}` : null;
 
-        await auth.supabase.from('li_accounts').upsert(
-          {
+        // Shared Unipile workspace: one li_accounts row per unipile_account_id
+        // (globally unique per migration 20260709_0002). Preserve the original
+        // inserter's user_id on updates — try UPDATE first, INSERT only if not
+        // found, so re-syncs from a different specialist don't churn user_id.
+        const commonPatch = {
+          name: String(acc.name ?? ''),
+          is_active: isActive,
+          profile_url: profileUrl,
+          headline: String((acc as Record<string, unknown>).headline ?? '') || null,
+          last_synced_at: new Date().toISOString(),
+        };
+        const { data: updated } = await auth.supabase
+          .from('li_accounts')
+          .update(commonPatch)
+          .eq('unipile_account_id', unipileId)
+          .select('id')
+          .maybeSingle();
+        if (!updated) {
+          await auth.supabase.from('li_accounts').insert({
             user_id: auth.user.id,
             unipile_account_id: unipileId,
-            name: String(acc.name ?? ''),
-            is_active: isActive,
-            profile_url: profileUrl,
-            headline: String((acc as Record<string, unknown>).headline ?? '') || null,
-            last_synced_at: new Date().toISOString(),
-          },
-          { onConflict: 'user_id,unipile_account_id' },
-        );
+            ...commonPatch,
+          });
+        }
         synced++;
       }
 
@@ -58,11 +70,12 @@ export async function POST(req: NextRequest) {
       // account_id, старая строка зависает дубликатом). Не удаляем
       // автоматически: если listAccounts дал транзиентный сбой, мы бы
       // потеряли валидные аккаунты. Удаление — вручную через DELETE.
+      // Смотрим на весь общий пул, а не только на свои — теперь
+      // unipile_account_id глобально уникален (миграция 20260709_0002).
       let staleMarked = 0;
       const { data: existing } = await auth.supabase
         .from('li_accounts')
-        .select('id, unipile_account_id')
-        .eq('user_id', auth.user.id);
+        .select('id, unipile_account_id');
       if (existing && liveIds.length > 0) {
         const liveSet = new Set(liveIds);
         const staleIds = existing
