@@ -1,7 +1,13 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { UnipileClient, extractPublicIdentifier, extractActivityUrn } from './unipileClient';
+import {
+  UnipileClient,
+  UnipileError,
+  extractPublicIdentifier,
+  extractPostNumericId,
+  postReactionUrnCandidates,
+} from './unipileClient';
 import {
   applyCooldownToAccount,
   detectAccountCooldownError,
@@ -241,9 +247,9 @@ export async function scrapePostReactions(
   }
   if (await bailIfAccountInCooldown(db, taskId, account)) return;
 
-  const activityUrn = extractActivityUrn(postUrl);
-  if (!activityUrn) {
-    await db.from('li_tasks').update({ status: 'failed', error_message: 'Не удалось извлечь activity URN из URL' }).eq('id', taskId);
+  const numericId = extractPostNumericId(postUrl);
+  if (!numericId) {
+    await db.from('li_tasks').update({ status: 'failed', error_message: 'Не удалось извлечь ID поста из URL' }).eq('id', taskId);
     return;
   }
 
@@ -251,16 +257,59 @@ export async function scrapePostReactions(
 
   await db.from('li_tasks').update({ status: 'running', started_at: new Date().toISOString(), total: maxResults }).eq('id', taskId);
 
-  let cursor: string | undefined;
+  // LinkedIn packs the same post ID into 3 URN families (activity / share /
+  // ugcPost); Unipile 404s on the wrong type. Probe each on the first fetch,
+  // then reuse whichever worked for pagination.
+  let workingUrn: string | null = null;
+  let firstBatchItems: Array<Record<string, unknown>> | null = null;
+  let firstBatchCursor: string | undefined = undefined;
+  const tried: Array<{ urn: string; status: number }> = [];
+  for (const candidate of postReactionUrnCandidates(numericId)) {
+    try {
+      const probe = await client.getPostReactions(candidate, { limit: 100 });
+      workingUrn = candidate;
+      firstBatchItems = (probe.items ?? []) as Array<Record<string, unknown>>;
+      firstBatchCursor = probe.cursor;
+      break;
+    } catch (e) {
+      if (e instanceof UnipileError && e.status === 404) {
+        tried.push({ urn: candidate, status: 404 });
+        continue;
+      }
+      throw e; // non-404 → surface original error
+    }
+  }
+  if (!workingUrn || firstBatchItems === null) {
+    const details = tried.map((t) => `${t.urn} → ${t.status}`).join('; ');
+    await db
+      .from('li_tasks')
+      .update({
+        status: 'failed',
+        error_message: `Пост не найден в Unipile ни по одному из URN (${details}). Возможно пост удалён / приватный, либо аккаунт не имеет к нему доступа.`,
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', taskId);
+    return;
+  }
+
+  let cursor: string | undefined = firstBatchCursor;
   let collected = 0;
+  let firstBatchConsumed = false;
 
   try {
     while (collected < maxResults) {
       const { data: task } = await db.from('li_tasks').select('status').eq('id', taskId).maybeSingle<{ status: string }>();
       if (task?.status === 'cancelled') break;
 
-      const result = await client.getPostReactions(activityUrn, { limit: 100, cursor });
-      const items = (result.items ?? []) as Array<Record<string, unknown>>;
+      let items: Array<Record<string, unknown>>;
+      if (!firstBatchConsumed) {
+        items = firstBatchItems!;
+        firstBatchConsumed = true;
+      } else {
+        const result = await client.getPostReactions(workingUrn, { limit: 100, cursor });
+        items = (result.items ?? []) as Array<Record<string, unknown>>;
+        cursor = result.cursor;
+      }
       if (items.length === 0) break;
 
       for (const item of items) {
@@ -307,7 +356,9 @@ export async function scrapePostReactions(
 
       await db.from('li_tasks').update({ progress: collected }).eq('id', taskId);
 
-      cursor = result.cursor;
+      // `cursor` is updated inside the else branch above (page ≥ 2); on the
+      // first page we consume the probe batch and keep whatever cursor the
+      // probe returned. Either way, stop when it runs out.
       if (!cursor) break;
 
       await new Promise((r) => setTimeout(r, DELAY_BETWEEN_PAGES_MS));
