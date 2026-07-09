@@ -3,6 +3,7 @@ import {
   appendQuotedHistoryText,
   appendQuotedHistoryHtml,
 } from '@/lib/clientCampaignReplies/quoteHistory';
+import { extractBodyText } from '@/lib/clientCampaignReplies/mapEmail';
 
 const SRC = {
   bodyText: 'Здравствуйте!\nИнтересует цена.',
@@ -76,5 +77,40 @@ describe('appendQuotedHistoryHtml', () => {
   it('АБЗАЦЫ в text-фолбэке: пустая строка цитируется как «> » (отступ сохранён)', () => {
     const text = appendQuotedHistoryText('Ответ', { bodyText: 'Абзац 1.\n\nАбзац 2.' });
     expect(text).toContain('> Абзац 1.\n> \n> Абзац 2.');
+  });
+
+  it('HTML-небезопасное имя отправителя в заголовке цитаты экранируется', () => {
+    const out = appendQuotedHistoryHtml('Ответ', {
+      bodyText: 'история',
+      fromName: '<img src=x onerror=alert(1)>',
+    });
+    expect(out).not.toContain('<img');
+    expect(out).toContain('&lt;img');
+  });
+
+  it('кап 20k: гигантская история обрезается с пометкой (payload в Instantly не раздувается)', () => {
+    const huge = 'а'.repeat(25_000);
+    const text = appendQuotedHistoryText('Ответ', { bodyText: huge });
+    expect(text).toContain('[…текст обрезан]');
+    expect(text.length).toBeLessThan(23_000); // 20k истории + префиксы «> » не бесконечно
+    const html = appendQuotedHistoryHtml('Ответ', { bodyText: huge });
+    expect(html).toContain('[…текст обрезан]');
+  });
+});
+
+describe('extractBodyText — html-only письма с числовыми сущностями (mail.ru)', () => {
+  it('декодит &#NNNN; / &#xHH; / именованные сущности в читаемый текст', () => {
+    // «Привет — ок» целиком числовыми сущностями + hex + mdash
+    const html =
+      '<div>&#1055;&#1088;&#1080;&#1074;&#1077;&#1090; &mdash; &#x43e;&#x43a;</div>';
+    expect(extractBodyText({ html })).toBe('Привет — ок');
+  });
+
+  it('двойное кодирование не разворачивается дважды (&amp;lt; → &lt;, не «<»)', () => {
+    expect(extractBodyText({ html: 'a &amp;lt; b' })).toBe('a &lt; b');
+  });
+
+  it('body.text имеет приоритет и не трогается декодом', () => {
+    expect(extractBodyText({ text: 'как есть &#1055;', html: '<b>x</b>' })).toBe('как есть &#1055;');
   });
 });
