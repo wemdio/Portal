@@ -1231,7 +1231,11 @@ export default function LiOutreachPage() {
                     <option value="">Выберите...</option>
                     {accounts
                       .filter((a) => a.is_active || a.id === cf.account_id)
-                      .map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}{a.user_id !== currentUserId ? ` (${a.owner_name ?? 'другой спец'})` : ''}</option>)}
+                      .map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name || a.unipile_account_id}
+                        </option>
+                      ))}
                   </select>
                 </div>
                 <div>

@@ -627,7 +627,12 @@ describe('LI Outreach — account ownership guard on write paths', () => {
     expect((res as Response).status).toBe(200);
   });
 
-  it('POST /scraper/search rejects another specialist’s account (403)', async () => {
+  // Team-wide edit access (2026-07): scraper routes accept a foreign account —
+  // shared Unipile workspace means any team member can scrape via any account.
+  // The task row still records auth.user.id so we can attribute who ran it,
+  // and account_id points at li_accounts.id (visible cross-specialist). The
+  // response comes back OK (route returns { task_id } with default 200).
+  it('POST /scraper/search accepts another team member’s account', async () => {
     seedAccounts();
     const { POST } = await import('@/app/api/tools/li-outreach/scraper/search/route');
     const res = await POST(
@@ -637,10 +642,10 @@ describe('LI Outreach — account ownership guard on write paths', () => {
         headers: { 'content-type': 'application/json' },
       }),
     );
-    expect((res as Response).status).toBe(403);
+    expect((res as Response).status).toBe(200);
   });
 
-  it('POST /scraper/reactions rejects another specialist’s account (403)', async () => {
+  it('POST /scraper/reactions accepts another team member’s account', async () => {
     seedAccounts();
     const { POST } = await import('@/app/api/tools/li-outreach/scraper/reactions/route');
     const res = await POST(
@@ -650,6 +655,6 @@ describe('LI Outreach — account ownership guard on write paths', () => {
         headers: { 'content-type': 'application/json' },
       }),
     );
-    expect((res as Response).status).toBe(403);
+    expect((res as Response).status).toBe(200);
   });
 });
