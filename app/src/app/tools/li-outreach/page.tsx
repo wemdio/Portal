@@ -2227,7 +2227,10 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
 
   useEffect(() => {
     if (!autoRefresh) return;
-    const interval = setInterval(() => void fetchLogs(), 5000);
+    // Каждые 10 сек — раньше было 5, но лид-таблица и без того шумит
+    // сетевыми хвостами, а логи в реальном времени с такой частотой не
+    // нужны. Меньше запросов = меньше нагрузка на воркеры и сеть.
+    const interval = setInterval(() => void fetchLogs(), 10000);
     return () => clearInterval(interval);
   }, [fetchLogs, autoRefresh]);
 
