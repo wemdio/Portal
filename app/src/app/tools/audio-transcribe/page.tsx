@@ -231,7 +231,7 @@ export default function AudioTranscribeToolPage() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [progressPercent, setProgressPercent] = useState(0);
-  const [_progressStage, setProgressStage] = useState<'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error' | null>(null);
+  const [progressStage, setProgressStage] = useState<'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error' | null>(null);
   const [progressHint, setProgressHint] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -323,7 +323,11 @@ export default function AudioTranscribeToolPage() {
     setCopied(false);
     setResult(null);
     setProgressPercent(0);
-    setProgressStage('queued');
+    // stage=null → бар в «честном» width-режиме, показывает реальный % байтов
+    // из XHR-прогресса во время S3-загрузки. Как только сервер увидит job
+    // и polling вернёт stage='preparing'/'queued'/'converting' — UI сам
+    // переключится на pulse-индикатор.
+    setProgressStage(null);
     // Первая фаза (presign) занимает пол-секунды — держим короткий, честный
     // хинт. Дальше он перепишется на % загрузки в S3 из XHR-прогресса.
     setProgressHint('Готовим загрузку...');
@@ -358,7 +362,12 @@ export default function AudioTranscribeToolPage() {
           );
 
           if (stage === 'preparing') {
-            setProgressHint('Загружаем файл на сервер...');
+            // В S3-флоу этот этап = сервер уже получил указание расшифровать
+            // и раскочегаривается (качает из S3 + подготавливает ffmpeg).
+            // Старый текст «Загружаем файл на сервер» вводил в заблуждение —
+            // казалось, будто мы снова что-то грузим после того, как только
+            // что показали «Файл загружен».
+            setProgressHint('Сервер готовит аудио к расшифровке...');
           } else if (stage === 'queued') {
             // Worker accepted the upload but other jobs are ahead in the queue.
             // Tell the user where they are so a multi-hour wait isn't silent.
@@ -645,7 +654,13 @@ export default function AudioTranscribeToolPage() {
                 {loading ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    {progressPercent > 0 ? `Обработка... ${progressPercent}%` : 'Обработка...'}
+                    {/* Процент показываем ТОЛЬКО когда он реально что-то значит:
+                        во время S3-загрузки (progressStage=null) — % байтов,
+                        во время расшифровки — % от длины аудио. На «раскачке»
+                        (queued/converting) процент почти нулевой и сбивает с толку. */}
+                    {(progressStage === null || progressStage === 'transcribing') && progressPercent > 0
+                      ? `Обработка... ${progressPercent}%`
+                      : 'Обработка...'}
                   </>
                 ) : (
                   <>
@@ -666,10 +681,20 @@ export default function AudioTranscribeToolPage() {
           {loading && (
             <div className="space-y-1.5">
               <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
-                <div
-                  className="h-full rounded-full bg-indigo-600 transition-all duration-300"
-                  style={{ width: `${Math.max(4, Math.min(100, progressPercent))}%` }}
-                />
+                {/* Во время «неопределённых» серверных стадий (сервер разгоняется,
+                    ставит в очередь, конвертит) реальный процент = 2-5% и бар
+                    выглядит замершим. Пульсирующая заливка на всю ширину даёт
+                    визуальный сигнал «идёт работа, не завис». Как только начнётся
+                    настоящая расшифровка с XX% real-progress'ом — переключаемся
+                    обратно на честный width-based индикатор. */}
+                {progressStage === 'queued' || progressStage === 'converting' ? (
+                  <div className="h-full w-full animate-pulse rounded-full bg-indigo-400" />
+                ) : (
+                  <div
+                    className="h-full rounded-full bg-indigo-600 transition-all duration-300"
+                    style={{ width: `${Math.max(4, Math.min(100, progressPercent))}%` }}
+                  />
+                )}
               </div>
               <p className="text-[11px] text-gray-500">
                 {progressHint ?? 'Идёт обработка...'}

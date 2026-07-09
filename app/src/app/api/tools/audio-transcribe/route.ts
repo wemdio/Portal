@@ -103,13 +103,35 @@ export async function POST(req: NextRequest) {
     setServerSideProgress(transcribeJobId, 'preparing', 2);
   }
 
-  let fileBytes: Buffer | null;
-  try {
-    fileBytes = await getMainS3ObjectBuffer(s3Key);
-  } catch (err) {
+  let fileBytes: Buffer | null = null;
+  let lastDownloadErr: unknown = null;
+  // Retry the S3 download на транзиентные сбои (сеть до Timeweb флапает,
+  // DNS иногда таймаутит). Три попытки с exp-бэкоффом достаточно, чтобы
+  // проскочить типичный blip и не мучать пользователя «загрузите заново».
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      fileBytes = await getMainS3ObjectBuffer(s3Key);
+      lastDownloadErr = null;
+      break;
+    } catch (err) {
+      lastDownloadErr = err;
+      // Дублируем в stderr — logError уходит в БД (application_logs), а её
+      // из `docker logs portal` не грепнешь. Без console.error расследование
+      // ошибки скачки требует ходить в базу.
+      console.error(
+        `[audio.transcribe] S3 download attempt ${attempt}/3 failed for key=${s3Key}:`,
+        err,
+      );
+      if (attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+      }
+    }
+  }
+
+  if (lastDownloadErr) {
     if (transcribeJobId) clearServerSideProgress(transcribeJobId);
-    await trace?.fail(err, { stage: 'download_from_s3', s3Key });
-    await logError('audio.transcribe.s3.download.failed', err, { stage: 'download_from_s3', s3Key }, logMeta);
+    await trace?.fail(lastDownloadErr, { stage: 'download_from_s3', s3Key });
+    await logError('audio.transcribe.s3.download.failed', lastDownloadErr, { stage: 'download_from_s3', s3Key }, logMeta);
     return jsonError('Не удалось скачать файл из хранилища. Попробуйте загрузить заново.', 500);
   }
 
