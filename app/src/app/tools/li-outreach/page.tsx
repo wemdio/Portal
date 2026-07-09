@@ -370,6 +370,17 @@ export default function LiOutreachPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCampaignId]);
 
+  // Автообновление списка задач раз в 10 сек когда открыт «Скрапер», чтобы
+  // прогресс (X/Y) обновлялся сам и не приходилось перезагружать страницу.
+  // Останавливается когда пользователь уходит на другую вкладку.
+  useEffect(() => {
+    if (tab !== 'scraper') return;
+    const interval = window.setInterval(() => {
+      void loadTasks();
+    }, 10_000);
+    return () => window.clearInterval(interval);
+  }, [tab, loadTasks]);
+
   // Download the selected campaign's logs as a .txt for the given range.
   // Reuses the existing global export endpoint with campaign_id filter — same
   // contract as the per-campaign export in tg-outreach.
@@ -428,10 +439,17 @@ export default function LiOutreachPage() {
       alert(hint);
       return;
     }
+    // Снимок имён аккаунта и списка — чтобы даже после удаления аккаунта
+    // (например, при дедупе li_accounts) задача продолжала показывать
+    // человекочитаемое название, а не «аккаунт удалён».
+    const accountSnapshot = accounts.find((a) => a.id === scraperAccountId);
+    const listSnapshot = scraperListId ? leadLists.find((l) => l.id === scraperListId) : null;
+    const accountName = accountSnapshot?.name || accountSnapshot?.unipile_account_id || null;
+    const listName = listSnapshot?.name || null;
     const endpoint = scraperType === 'search' ? '/scraper/search' : '/scraper/reactions';
     const body = scraperType === 'search'
-      ? { search_url: scraperUrl, account_id: scraperAccountId, lead_list_id: scraperListId || undefined, max_results: scraperMax }
-      : { post_url: scraperUrl, account_id: scraperAccountId, lead_list_id: scraperListId || undefined, max_results: scraperMax };
+      ? { search_url: scraperUrl, account_id: scraperAccountId, account_name: accountName, lead_list_id: scraperListId || undefined, lead_list_name: listName, max_results: scraperMax }
+      : { post_url: scraperUrl, account_id: scraperAccountId, account_name: accountName, lead_list_id: scraperListId || undefined, lead_list_name: listName, max_results: scraperMax };
     setStartingScrape(true);
     try {
       await api(endpoint, { method: 'POST', json: body });
@@ -464,18 +482,49 @@ export default function LiOutreachPage() {
     if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  /** Короткое название аккаунта по id — для подписи под задачей. */
-  const accountLabel = (id: string | undefined): string => {
+  /**
+   * Название аккаунта для подписи под задачей. Читаем сначала снимок из
+   * task.params.account_name (сохраняется при создании — переживёт даже
+   * удаление аккаунта из li_accounts, например после дедупа). Если снимка
+   * нет — идём в текущий список аккаунтов по id. Fallback — «аккаунт удалён»,
+   * а НЕ 8-символьный ломоть UUID, который для пользователя чистый шум.
+   */
+  const accountLabel = (params: Record<string, unknown>): string => {
+    const snapshot = String(params.account_name ?? '').trim();
+    if (snapshot) return snapshot;
+    const id = String(params.account_id ?? '').trim();
     if (!id) return '—';
     const acc = accounts.find((a) => a.id === id);
-    return acc?.name || acc?.unipile_account_id || id.slice(0, 8);
+    return acc?.name || acc?.unipile_account_id || 'аккаунт удалён';
   };
 
-  /** Название списка лидов по id — для подписи под задачей. */
-  const listLabel = (id: string | undefined): string => {
+  /** Название списка лидов по id — снимок → lookup → fallback. */
+  const listLabel = (params: Record<string, unknown>): string => {
+    const snapshot = String(params.lead_list_name ?? '').trim();
+    if (snapshot) return snapshot;
+    const id = String(params.lead_list_id ?? '').trim();
     if (!id) return 'без списка';
     const l = leadLists.find((x) => x.id === id);
-    return l?.name ?? id.slice(0, 8);
+    return l?.name ?? 'список удалён';
+  };
+
+  /** Тип таски → человекочитаемое название. */
+  const taskTypeLabelRu = (type: string): string => {
+    if (type === 'search') return 'Поиск';
+    if (type === 'post_reactions') return 'Реакции';
+    return type;
+  };
+
+  /** Статус таски → русский лейбл. */
+  const taskStatusLabelRu = (status: string): string => {
+    switch (status) {
+      case 'pending': return 'В очереди';
+      case 'running': return 'Выполняется';
+      case 'completed': return 'Готово';
+      case 'failed': return 'Ошибка';
+      case 'cancelled': return 'Отменено';
+      default: return status;
+    }
   };
 
   const createCampaign = async () => {
@@ -1848,14 +1897,13 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
             {tasks.map((t) => {
               const params = t.params ?? {};
               const taskUrl = String(t.type === 'post_reactions' ? (params.post_url ?? '') : (params.search_url ?? ''));
-              const taskTypeLabel = t.type === 'search' ? 'search' : t.type === 'post_reactions' ? 'reactions' : t.type;
               const canRepeat = t.type === 'search' || t.type === 'post_reactions';
               return (
                 <div key={t.id} className="rounded-xl border border-gray-200 px-3 py-2 text-sm">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium">{taskTypeLabel}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded ${t.status === 'completed' ? 'bg-green-100 text-green-700' : t.status === 'running' ? 'bg-blue-100 text-blue-700' : t.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>{t.status}</span>
+                      <span className="font-medium">{taskTypeLabelRu(t.type)}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded ${t.status === 'completed' ? 'bg-green-100 text-green-700' : t.status === 'running' ? 'bg-blue-100 text-blue-700' : t.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>{taskStatusLabelRu(t.status)}</span>
                       <span className="text-xs text-gray-500">{t.progress}/{t.total}</span>
                       {t.error_message && <span className="text-xs text-red-600">{t.error_message}</span>}
                     </div>
@@ -1895,8 +1943,8 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
                         </div>
                       )}
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-                        <span>аккаунт: <span className="text-gray-700">{accountLabel(params.account_id)}</span></span>
-                        <span>список: <span className="text-gray-700">{listLabel(params.lead_list_id)}</span></span>
+                        <span>аккаунт: <span className="text-gray-700">{accountLabel(params)}</span></span>
+                        <span>список: <span className="text-gray-700">{listLabel(params)}</span></span>
                         {typeof params.max_results === 'number' && (
                           <span>лимит: <span className="text-gray-700">{params.max_results}</span></span>
                         )}

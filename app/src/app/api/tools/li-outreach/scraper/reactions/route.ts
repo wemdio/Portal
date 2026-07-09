@@ -14,20 +14,30 @@ export async function POST(req: NextRequest) {
     const body = (await req.json()) as {
       post_url?: string;
       account_id?: string;
+      account_name?: string | null;
       lead_list_id?: string;
+      lead_list_name?: string | null;
       max_results?: number;
     };
     if (!body.post_url) return jsonError('post_url is required', 400);
     if (!body.account_id) return jsonError('account_id is required', 400);
     // Shared Unipile workspace: any team member can scrape via any account.
 
+    // account_name / lead_list_name — снимки для UI, см. search/route.ts.
     const { data: task, error } = await auth.supabase
       .from('li_tasks')
       .insert({
         user_id: auth.user.id,
         type: 'post_reactions',
         status: 'pending',
-        params: { post_url: body.post_url, account_id: body.account_id, lead_list_id: body.lead_list_id, max_results: body.max_results ?? 100 },
+        params: {
+          post_url: body.post_url,
+          account_id: body.account_id,
+          account_name: body.account_name ?? null,
+          lead_list_id: body.lead_list_id,
+          lead_list_name: body.lead_list_name ?? null,
+          max_results: body.max_results ?? 100,
+        },
       })
       .select()
       .single<{ id: string }>();
