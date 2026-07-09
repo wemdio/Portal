@@ -54,14 +54,21 @@ export async function runGoogleNewsJob(job: NewsJob, cb: NewsRunCallbacks): Prom
       targets: job.targets.length
     });
     setStatus(job, cb, "running", "Starting Chromium for Google News");
-    browser = await launchBrowser(job);
+    const launched = await launchBrowser(job);
+    browser = launched.browser;
     const context = await browser.newContext({
       locale: `${job.settings.language}-${job.settings.country}`,
       viewport: { width: 1365, height: 900 },
       userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     });
-    log(cb, "info", "Chromium ready", { locale: `${job.settings.language}-${job.settings.country}` });
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    });
+    log(cb, "info", "Chromium ready", {
+      locale: `${job.settings.language}-${job.settings.country}`,
+      proxy: maskProxy(launched.proxy)
+    });
     const exhaustedQueries = new Set<string>();
 
     for (let index = 0; index < job.targets.length; index += 1) {
@@ -113,12 +120,45 @@ export async function runGoogleNewsJob(job: NewsJob, cb: NewsRunCallbacks): Prom
   }
 }
 
-async function launchBrowser(job: NewsJob): Promise<Browser> {
-  const proxy = job.settings.proxies[0];
-  return chromium.launch({
+function maskProxy(proxy: string | undefined): string {
+  if (!proxy) return "none";
+  return proxy.replace(/:\/\/([^:@]+):[^@]+@/, "://$1:***@");
+}
+
+async function launchBrowser(job: NewsJob): Promise<{ browser: Browser; proxy: string | undefined }> {
+  // Random pick из пула — см. googleMapsParser.launchBrowser.
+  const pool = job.settings.proxies ?? [];
+  const proxy = pool.length > 0 ? pool[Math.floor(Math.random() * pool.length)] : undefined;
+  const browser = await chromium.launch({
     headless: true,
-    proxy: proxy ? { server: proxy } : undefined
+    proxy: proxy ? { server: proxy } : undefined,
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=IsolateOrigins,site-per-process",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-web-security",
+      "--lang=ru-RU,ru,en-US,en"
+    ]
   });
+  return { browser, proxy };
+}
+
+/**
+ * Navigate with a longer timeout + fallback wait strategy. Same reasoning as
+ * googleMapsParser.gotoWithRetry — Google News' DOMContentLoaded stalls under
+ * a slow proxy; falling back to `commit` fires the earliest possible signal
+ * so downstream selector waits can take over.
+ */
+async function gotoWithRetry(page: Page, url: string, cb: NewsRunCallbacks): Promise<void> {
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("Timeout")) throw err;
+    log(cb, "warn", "DCL timed out, retrying with commit wait", { url });
+    await page.goto(url, { waitUntil: "commit", timeout: 30000 });
+  }
 }
 
 async function parseNewsTarget(
@@ -152,7 +192,7 @@ async function parseNewsTarget(
 
   const page = await context.newPage();
   try {
-    await page.goto(target.url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await gotoWithRetry(page, target.url, cb);
     await maybeHandleConsent(page);
     await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => undefined);
     await randomDelay(job);
