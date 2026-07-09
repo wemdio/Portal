@@ -19,14 +19,29 @@ PARSE_MAX_DELAY_SEC = float(os.environ.get("YANDEXMAPS_PARSE_MAX_DELAY_SEC", "3.
 PARSE_MAX_CONSECUTIVE_EMPTY = int(os.environ.get("YANDEXMAPS_PARSE_MAX_CONSECUTIVE_EMPTY", "5"))
 
 from bs4 import BeautifulSoup
-from selenium import webdriver
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
+
+
+# Свежий пул User-Agent'ов: Chrome 130-131 на Windows/Mac + мобильный Android,
+# чтобы Яндекс не палил по стабильному fingerprint'у одного и того же UA.
+# Обновлять раз в 3-6 мес — старые версии Chrome сами по себе триггерят подозрение.
+USER_AGENT_POOL = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+]
+
+# Реалистичные размеры окна — Яндекс может сверять с UA (мобильный UA + 1920×1080
+# = очевидный бот). Пары подобраны под каждый UA-класс через выбор в _create_driver.
+WINDOW_SIZES_DESKTOP = [(1366, 768), (1440, 900), (1536, 864), (1920, 1080)]
+WINDOW_SIZES_MOBILE = [(412, 915), (390, 844), (375, 812)]
 
 
 @dataclass
@@ -131,58 +146,83 @@ class YandexMapsParser:
       self.progress_callback(current, total, message)
 
   def _create_driver(self):
+    """Создаёт браузер на undetected-chromedriver (маскирует признаки Selenium).
+
+    Раньше был обычный selenium.webdriver + ручные патчи `navigator.webdriver`
+    и `disable-blink-features=AutomationControlled` — Яндекс всё равно палил
+    (SmartCaptcha сверяет десятки fingerprint-признаков: WebGL, Canvas,
+    навигатор.plugins, порядок TLS-хендшейка). undetected-chromedriver
+    патчит бинарь chromedriver, чтобы убрать почти все эти маркеры.
+
+    Auth-прокси (наши резидентные с логином/паролем) идут через
+    selenium-wire — он инжектит basic-auth в http-заголовок, не запуская
+    диалог браузера, который в headless-режиме недоступен.
+    """
     chrome_options = Options()
 
     if self.headless:
       chrome_options.add_argument("--headless=new")
 
-    chrome_options.add_argument("--start-maximized")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--disable-infobars")
-    chrome_options.add_argument("--disable-extensions")
+    # Обязательные флаги для контейнерного Chromium.
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-infobars")
     chrome_options.add_argument("--lang=ru-RU")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
+
+    # Рандомизация UA + window-size на каждую сессию. Мобильный UA пары'ится
+    # с мобильным viewport'ом — иначе противоречие в самом User-Agent-Client-Hints
+    # даёт Яндексу сигнал "это бот".
+    ua = random.choice(USER_AGENT_POOL)
+    is_mobile = "Mobile" in ua
+    width, height = random.choice(WINDOW_SIZES_MOBILE if is_mobile else WINDOW_SIZES_DESKTOP)
+    chrome_options.add_argument(f"--user-agent={ua}")
+    chrome_options.add_argument(f"--window-size={width},{height}")
 
     chrome_bin = (os.environ.get("CHROME_BIN") or "").strip()
     if chrome_bin:
       chrome_options.binary_location = chrome_bin
 
+    # Путь к системному chromedriver (Debian apt: /usr/bin/chromedriver).
+    # Передаём явно, чтобы uc не пытался качать сам — в контейнере нет
+    # интернета в build-time для webdriver_manager'а.
+    driver_path = (os.environ.get("CHROMEDRIVER_PATH") or "").strip() or None
+    for candidate in ("/usr/bin/chromedriver", "/usr/local/bin/chromedriver"):
+      if driver_path:
+        break
+      if os.path.exists(candidate):
+        driver_path = candidate
+
     if self.proxy_settings.enabled and self.proxy_settings.username:
+      # Auth-прокси через seleniumwire.undetected_chromedriver — это его
+      # официальная интеграция; обычный uc не умеет username:password.
       try:
-        from seleniumwire import webdriver as sw_webdriver
+        from seleniumwire import undetected_chromedriver as swuc
 
         seleniumwire_options = self.proxy_settings.get_selenium_wire_options()
-        self.driver = sw_webdriver.Chrome(
-          service=self._get_chrome_service(),
+        self.driver = swuc.Chrome(
           options=chrome_options,
           seleniumwire_options=seleniumwire_options,
+          driver_executable_path=driver_path,
+          browser_executable_path=chrome_bin or None,
+          use_subprocess=True,
+          headless=self.headless,
         )
-      except Exception:
-        self._create_simple_driver(chrome_options)
-    elif self.proxy_settings.enabled and self.proxy_settings.host:
+        return
+      except Exception as e:
+        self.log(f"[!] seleniumwire+uc не стартовал ({e}), падаем на обычный uc без auth-прокси")
+
+    if self.proxy_settings.enabled and self.proxy_settings.host:
       proxy_arg = f"--proxy-server={self.proxy_settings.protocol}://{self.proxy_settings.host}:{self.proxy_settings.port}"
       chrome_options.add_argument(proxy_arg)
-      self._create_simple_driver(chrome_options)
-    else:
-      self._create_simple_driver(chrome_options)
 
-  def _get_chrome_service(self) -> Service:
-    env_driver = (os.environ.get("CHROMEDRIVER_PATH") or "").strip()
-    candidates = [env_driver, "/usr/bin/chromedriver", "/usr/local/bin/chromedriver"]
-    for c in candidates:
-      if c and os.path.exists(c):
-        return Service(c)
-    return Service(ChromeDriverManager().install())
-
-  def _create_simple_driver(self, chrome_options: Options):
-    self.driver = webdriver.Chrome(service=self._get_chrome_service(), options=chrome_options)
-    try:
-      self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    except Exception:
-      pass
+    import undetected_chromedriver as uc
+    self.driver = uc.Chrome(
+      options=chrome_options,
+      driver_executable_path=driver_path,
+      browser_executable_path=chrome_bin or None,
+      use_subprocess=True,
+      headless=self.headless,
+    )
 
   def stop(self):
     self.is_running = False
