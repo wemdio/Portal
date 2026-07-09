@@ -7,6 +7,8 @@ import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
 import { computeReplyAllCc, mergeCcLists } from '@/lib/clientCampaignReplies/participants';
 import { validateReplyInput } from '@/lib/clientCampaignReplies/validate';
 import { textToReplyHtml } from '@/lib/clientCampaignReplies/bodyHtml';
+import { extractBodyText } from '@/lib/clientCampaignReplies/mapEmail';
+import { appendQuotedHistoryText, appendQuotedHistoryHtml } from '@/lib/clientCampaignReplies/quoteHistory';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { recordEmailReplied, recordEmailRead } from '@/lib/clientCampaignReplies/clientEmailReads';
 
@@ -78,16 +80,26 @@ export async function POST(
     const manualCc = validation.cc ? validation.cc.split(',') : [];
     const mergedCc = mergeCcLists(replyAllCc, manualCc);
 
+    // Цитируем письмо лида в тело: добавленный в CC коллега (Настя) — новый в
+    // треде, Instantly не подкладывает ему прошлую переписку, иначе он видит
+    // наш ответ без контекста. См. quoteHistory (инцидент 09.07).
+    const quoteSrc = {
+      bodyText: extractBodyText(original.body),
+      fromName: original.from_address_json?.[0]?.name ?? null,
+      fromEmail: original.from_address_email ?? original.lead ?? null,
+      timestamp: original.timestamp_email ?? original.timestamp_created ?? null,
+    };
+
     await replyToEmail(
       {
         reply_to_uuid: emailId,
         eaccount,
         subject: buildReplySubject(original.subject),
         // HTML с <br> сохраняет переносы строк (иначе письмо уходит «простынёй»);
-        // text — plain-text fallback.
+        // text — plain-text fallback. К обоим дописываем процитированную историю.
         body: {
-          html: textToReplyHtml(validation.body_text!),
-          text: validation.body_text!,
+          html: appendQuotedHistoryHtml(textToReplyHtml(validation.body_text!), quoteSrc),
+          text: appendQuotedHistoryText(validation.body_text!, quoteSrc),
         },
         ...(mergedCc.length ? { cc_address_email_list: mergedCc.join(', ') } : {}),
         ...(validation.bcc ? { bcc_address_email_list: validation.bcc } : {}),
