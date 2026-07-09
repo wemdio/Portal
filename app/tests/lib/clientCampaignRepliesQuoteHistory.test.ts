@@ -63,4 +63,18 @@ describe('appendQuotedHistoryHtml', () => {
   it('пустая история → возвращает html как есть', () => {
     expect(appendQuotedHistoryHtml('<b>x</b>', { bodyText: '' })).toBe('<b>x</b>');
   });
+
+  it('АБЗАЦЫ И СПЕЙСИНГ сохраняются: пустая строка между абзацами → <br><br> (не «простыня»)', () => {
+    const html = appendQuotedHistoryHtml('Ответ', { bodyText: 'Абзац 1.\n\nАбзац 2.', fromName: 'N' });
+    // каждый перенос стал <br>; двойной перенос (абзацный отступ) = два <br>
+    expect(html).toContain('Абзац 1.<br>\n<br>\nАбзац 2.');
+    // текст НЕ схлопнут в одну строку
+    expect(html).not.toContain('Абзац 1. Абзац 2.');
+    expect(html).not.toContain('Абзац 1.Абзац 2.');
+  });
+
+  it('АБЗАЦЫ в text-фолбэке: пустая строка цитируется как «> » (отступ сохранён)', () => {
+    const text = appendQuotedHistoryText('Ответ', { bodyText: 'Абзац 1.\n\nАбзац 2.' });
+    expect(text).toContain('> Абзац 1.\n> \n> Абзац 2.');
+  });
 });
