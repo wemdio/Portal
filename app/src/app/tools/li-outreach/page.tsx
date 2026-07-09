@@ -207,6 +207,10 @@ export default function LiOutreachPage() {
   const [scraperListId, setScraperListId] = useState('');
   const [scraperMax, setScraperMax] = useState(100);
   const [scraperType, setScraperType] = useState<'search' | 'reactions'>('search');
+  // Guards against double-clicks: the create-task POST is fast enough that a
+  // user can click Запустить 3-4 times in a row and spawn duplicate scrape
+  // tasks. Toggled around startScrape().
+  const [startingScrape, setStartingScrape] = useState(false);
 
   const visibleLeadIds = useMemo(() => leads.map((lead) => lead.id), [leads]);
   const selectedVisibleLeadCount = useMemo(
@@ -415,6 +419,7 @@ export default function LiOutreachPage() {
     // даже когда аккаунт-то как раз и был выбран, и шли искать причину не
     // там. Сообщения теперь персональные: говорят ровно про то поле, которое
     // пустое.
+    if (startingScrape) return; // extra belt-and-suspenders vs double-click
     if (!scraperAccountId) { alert('Выберите LinkedIn-аккаунт справа от поля URL'); return; }
     if (!scraperUrl.trim()) {
       const hint = scraperType === 'search'
@@ -427,9 +432,14 @@ export default function LiOutreachPage() {
     const body = scraperType === 'search'
       ? { search_url: scraperUrl, account_id: scraperAccountId, lead_list_id: scraperListId || undefined, max_results: scraperMax }
       : { post_url: scraperUrl, account_id: scraperAccountId, lead_list_id: scraperListId || undefined, max_results: scraperMax };
-    await api(endpoint, { method: 'POST', json: body });
-    setScraperUrl('');
-    void loadTasks();
+    setStartingScrape(true);
+    try {
+      await api(endpoint, { method: 'POST', json: body });
+      setScraperUrl('');
+      void loadTasks();
+    } finally {
+      setStartingScrape(false);
+    }
   };
 
   const cancelTask = async (taskId: string) => { await api(`/scraper/tasks/${taskId}/cancel`, { method: 'POST', json: {} }); void loadTasks(); };
@@ -1824,7 +1834,13 @@ http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Сл
                 {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
               </select>
               <input type="number" value={scraperMax} onChange={(e) => setScraperMax(Number(e.target.value))} className="w-24 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-              <button onClick={() => void startScrape()} className="rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium">Запустить</button>
+              <button
+                onClick={() => void startScrape()}
+                disabled={startingScrape}
+                className="rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {startingScrape ? 'Запускаем…' : 'Запустить'}
+              </button>
             </div>
           </div>
           <div className="space-y-2">
