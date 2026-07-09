@@ -11,6 +11,26 @@ import type {
 const SERVICE_URL = process.env.GOOGLEPARSERS_SERVICE_URL ?? 'http://googleparsers:8001';
 const PROXY_KEY = process.env.GOOGLEPARSERS_PROXY_ENCRYPTION_KEY ?? '';
 
+/**
+ * Общий пул прокси на прод-сервере — используется как fallback, если у
+ * джобы не заполнено поле «Прокси» в форме. Ту же переменную читают
+ * Яндекс.Карты / HH / ENG-hiring / прочие скрейперы. Формат: JSON-массив
+ * строк "http://user:pass@host:port". Парсится один раз при импорте
+ * модуля — без runtime-запроса и без throw на пустом/сломанном значении.
+ */
+function loadDefaultProxies(): string[] {
+  const raw = process.env.PROXY_URLS?.trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((s) => typeof s === 'string' && s.length > 0) : [];
+  } catch {
+    console.warn('[gp-worker] PROXY_URLS is set but not valid JSON, ignoring');
+    return [];
+  }
+}
+const DEFAULT_PROXIES = loadDefaultProxies();
+
 // Parser types mirror the ones in services/googleparsers/src/shared/types.ts.
 // Kept as a local shape (not imported) so the portal build stays decoupled
 // from the parser-service package.
@@ -200,15 +220,20 @@ export async function runGoogleMapsJob(jobId: string): Promise<void> {
     .single<GoogleMapsJobRow>();
   if (!job) throw new Error(`job ${jobId} not found`);
 
-  const proxies =
+  const perJobProxies =
     job.proxy_enabled && job.proxy_encrypted
       ? decryptJsonAes256Gcm<string[]>(job.proxy_encrypted, PROXY_KEY)
       : [];
+  // Если оператор не указал персональный прокси-пул для этой джобы —
+  // валимся на общий PROXY_URLS. Без прокси Google ловит капчу почти
+  // мгновенно (пример: News уходит в captcha на 2-й запрос).
+  const proxies = perJobProxies.length > 0 ? perJobProxies : DEFAULT_PROXIES;
 
   const settings = { ...job.config, cities: [], categories: [], keyword: '', proxies };
 
   await writeLog(jobId, 'maps', 'info', 'Worker picked up job', {
     proxies: proxies.length,
+    proxiesSource: perJobProxies.length > 0 ? 'per-job' : (DEFAULT_PROXIES.length > 0 ? 'env-default' : 'none'),
     config: job.config,
   });
 
@@ -322,15 +347,20 @@ export async function runGoogleNewsJob(jobId: string): Promise<void> {
     .single<GoogleNewsJobRow>();
   if (!job) throw new Error(`job ${jobId} not found`);
 
-  const proxies =
+  const perJobProxies =
     job.proxy_enabled && job.proxy_encrypted
       ? decryptJsonAes256Gcm<string[]>(job.proxy_encrypted, PROXY_KEY)
       : [];
+  // Если оператор не указал персональный прокси-пул для этой джобы —
+  // валимся на общий PROXY_URLS. Без прокси Google ловит капчу почти
+  // мгновенно (пример: News уходит в captcha на 2-й запрос).
+  const proxies = perJobProxies.length > 0 ? perJobProxies : DEFAULT_PROXIES;
 
   const settings = { ...job.config, proxies };
 
   await writeLog(jobId, 'news', 'info', 'Worker picked up job', {
     proxies: proxies.length,
+    proxiesSource: perJobProxies.length > 0 ? 'per-job' : (DEFAULT_PROXIES.length > 0 ? 'env-default' : 'none'),
     config: job.config,
   });
 

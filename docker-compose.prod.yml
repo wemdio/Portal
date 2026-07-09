@@ -292,7 +292,11 @@ services:
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=yandexmaps
     depends_on:
-      - yandexmaps
+      # Дожидаемся именно healthy, не просто "процесс стартовал": иначе
+      # воркер стартует за ~10 сек до готовности uvicorn и первая же задача
+      # падает с "health check failed".
+      yandexmaps:
+        condition: service_healthy
     stop_grace_period: 30m
     deploy:
       resources:
@@ -315,6 +319,10 @@ services:
       - GOOGLEPARSERS_SERVICE_URL=http://googleparsers:8001
       - GOOGLEPARSERS_CONCURRENCY=1
       - GOOGLEPARSERS_PROXY_ENCRYPTION_KEY=${GOOGLEPARSERS_PROXY_ENCRYPTION_KEY}
+      # Fallback proxy pool used when a job's per-job proxy textarea is empty.
+      # Same env var other workers already read (Yandex, HH, etc.) — shared JSON
+      # list of "http://user:pass@host:port" strings.
+      - PROXY_URLS=${PROXY_URLS}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=googleparsers
