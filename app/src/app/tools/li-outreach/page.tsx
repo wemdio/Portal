@@ -196,6 +196,10 @@ export default function LiOutreachPage() {
   const [tasks, setTasks] = useState<LiTask[]>([]);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [campaignLogs, setCampaignLogs] = useState<LiCampaignLog[]>([]);
+  // true, пока идёт первичный fetch /campaigns/:id/logs — показываем
+  // спиннер в правой панели логов вместо «Нет логов» (иначе пользователь
+  // видит «пусто» пока данные летят с бэка и думает что кампания молчит).
+  const [loadingCampaignLogs, setLoadingCampaignLogs] = useState(false);
   // Range key currently being exported (button shows '...' until done).
   // Null when no export is in flight.
   const [exportingCampaignLogsRange, setExportingCampaignLogsRange] = useState<'24h' | '7d' | null>(null);
@@ -319,12 +323,15 @@ export default function LiOutreachPage() {
     try { const d = await api<{ tasks: LiTask[] }>('/scraper/tasks'); setTasks(d.tasks); } catch (e) { console.error('[li-outreach] loadTasks failed', e); }
   }, []);
   const loadCampaignLogs = useCallback(async (id: string) => {
+    setLoadingCampaignLogs(true);
     try {
       const d = await api<{ items: LiCampaignLog[]; total: number }>(`/campaigns/${id}/logs`);
       setCampaignLogs(Array.isArray(d?.items) ? d.items : []);
     } catch (e) {
       console.error('[li-outreach] loadCampaignLogs failed', e);
       setCampaignLogs([]);
+    } finally {
+      setLoadingCampaignLogs(false);
     }
   }, []);
   const loadDashboard = useCallback(async () => {
@@ -371,7 +378,12 @@ export default function LiOutreachPage() {
   }, [tab, leadListFilterId]);
 
   useEffect(() => {
-    if (selectedCampaignId) void loadCampaignLogs(selectedCampaignId);
+    if (!selectedCampaignId) return;
+    // Стираем прошлые логи сразу — иначе при переключении между
+    // кампаниями секунду висят чужие сообщения и создают впечатление
+    // что новая кампания уже что-то нашла.
+    setCampaignLogs([]);
+    void loadCampaignLogs(selectedCampaignId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCampaignId]);
 
@@ -1507,7 +1519,11 @@ export default function LiOutreachPage() {
                     </div>
                   </div>
                   <div className="max-h-[400px] overflow-y-auto space-y-1">
-                    {campaignLogs.length === 0 ? (
+                    {loadingCampaignLogs ? (
+                      <div className="flex items-center justify-center py-10" role="status" aria-label="Загрузка логов">
+                        <div className="h-6 w-6 rounded-full border-2 border-gray-200 border-t-blue-600 animate-spin" />
+                      </div>
+                    ) : campaignLogs.length === 0 ? (
                       <div className="text-xs text-gray-400">Нет логов</div>
                     ) : campaignLogs.map((log) => (
                       <div key={log.id} className={`text-xs px-2 py-1 rounded ${log.level === 'error' ? 'bg-red-50 text-red-700' : log.level === 'warning' ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-700'}`}>
