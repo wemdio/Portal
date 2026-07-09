@@ -263,6 +263,11 @@ export default function LiOutreachPage() {
   const [importing, setImporting] = useState(false);
   const [importListId, setImportListId] = useState('');
   const [showImportModal, setShowImportModal] = useState(false);
+  // Inline error messages shown INSIDE the import modals — replaces the old
+  // alert() so the user sees the reason (bad column, missing list, server 500)
+  // right next to the file input and can retry without losing state.
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importInvitesError, setImportInvitesError] = useState<string | null>(null);
   const [showCreateListModal, setShowCreateListModal] = useState(false);
   const [creatingList, setCreatingList] = useState(false);
   const [newListName, setNewListName] = useState('');
@@ -681,6 +686,7 @@ export default function LiOutreachPage() {
 
   const importLeadsCsv = async (file: File) => {
     setImporting(true);
+    setImportError(null);
     try {
       if (!importListId) throw new Error('Выберите список для импорта');
       const token = await getAccessToken();
@@ -701,10 +707,12 @@ export default function LiOutreachPage() {
         error?: string;
       };
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      // На успехе показываем короткое summary в toast (можно и без) и
+      // сразу закрываем модалку — пользователь видит новый список в чипсах.
       const alreadyContacted = data.already_contacted_skipped ?? 0;
       const dupInFile = data.dup_in_file_skipped ?? 0;
       const parts = [`Импортировано новых: ${data.imported ?? 0}`];
-      if (alreadyContacted > 0) parts.push(`⚠️ Уже контактировали ранее (пропущено): ${alreadyContacted}`);
+      if (alreadyContacted > 0) parts.push(`Уже контактировали (пропущено): ${alreadyContacted}`);
       if (dupInFile > 0) parts.push(`Дублей в файле (пропущено): ${dupInFile}`);
       if ((data.skipped ?? 0) > 0) parts.push(`Без валидных данных: ${data.skipped}`);
       alert(parts.join('\n'));
@@ -712,7 +720,7 @@ export default function LiOutreachPage() {
       await loadLeads(leadListFilterId);
       await loadLeadLists();
     } catch (e) {
-      alert('Ошибка импорта: ' + (e instanceof Error ? e.message : e));
+      setImportError(e instanceof Error ? e.message : String(e));
     } finally {
       setImporting(false);
     }
@@ -720,6 +728,7 @@ export default function LiOutreachPage() {
 
   const importLeadsWithInvitesCsv = async (file: File) => {
     setImporting(true);
+    setImportInvitesError(null);
     try {
       const token = await getAccessToken();
       if (!token) throw new Error('Not authenticated');
@@ -752,7 +761,7 @@ export default function LiOutreachPage() {
       if (data.lead_list?.id) setLeadListFilterId(data.lead_list.id);
       await loadLeads(data.lead_list?.id ?? leadListFilterId);
     } catch (e) {
-      alert('Ошибка импорта: ' + (e instanceof Error ? e.message : e));
+      setImportInvitesError(e instanceof Error ? e.message : String(e));
     } finally {
       setImporting(false);
     }
@@ -1607,22 +1616,22 @@ export default function LiOutreachPage() {
             <div className="fixed inset-0 z-40 bg-black/30 p-4 flex items-center justify-center">
               <div className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl">
                 <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
-                  <h3 className="text-sm font-semibold text-gray-900">Manage Lead Lists</h3>
+                  <h3 className="text-sm font-semibold text-gray-900">Управление списками лидов</h3>
                   <button onClick={() => setShowCreateListModal(false)} disabled={creatingList} className="text-sm text-gray-500 hover:text-gray-700 disabled:opacity-50">✕</button>
                 </div>
                 <div className="p-4 space-y-4">
                   <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
-                    <div className="text-xs font-medium text-gray-700 mb-2">Create New List</div>
+                    <div className="text-xs font-medium text-gray-700 mb-2">Создать новый список</div>
                     <div className="flex gap-2">
                       <input
                         type="text"
                         value={newListName}
                         onChange={(e) => setNewListName(e.target.value)}
-                        placeholder="List name"
+                        placeholder="Название списка"
                         className="flex-1 rounded-md border border-gray-200 bg-white px-3 py-2 text-sm"
                       />
                       <button onClick={() => void createLeadList()} disabled={creatingList} className="rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50">
-                        {creatingList ? '...' : 'Create'}
+                        {creatingList ? '...' : 'Создать'}
                       </button>
                     </div>
                   </div>
@@ -1638,11 +1647,11 @@ export default function LiOutreachPage() {
                             className={`text-left text-sm font-medium ${leadListFilterId === list.id ? 'text-blue-700' : 'text-gray-900 hover:text-blue-700'}`}
                           >
                             {list.name}
-                            <span className="ml-2 text-xs font-normal text-gray-500">({list.leads_count ?? 0} leads)</span>
+                            <span className="ml-2 text-xs font-normal text-gray-500">({list.leads_count ?? 0} лидов)</span>
                           </button>
                           <div className="flex items-center gap-3">
-                            <button onClick={() => void exportLeadListCsv(list)} className="text-xs text-blue-600 hover:underline">Export</button>
-                            <button onClick={() => void deleteLeadList(list)} className="text-xs text-red-600 hover:underline">Delete</button>
+                            <button onClick={() => void exportLeadListCsv(list)} className="text-xs text-blue-600 hover:underline">Экспорт</button>
+                            <button onClick={() => void deleteLeadList(list)} className="text-xs text-red-600 hover:underline">Удалить</button>
                           </div>
                         </div>
                       </div>
@@ -1653,88 +1662,118 @@ export default function LiOutreachPage() {
             </div>
           )}
 
-          {/* Import CSV with personalized invites */}
+          {/* Import CSV with personalized invites — fixed modal overlay. */}
           {showImportInvitesModal && (
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-900">Импорт CSV с персонализированными инвайтами</h3>
-                <button onClick={() => setShowImportInvitesModal(false)} className="text-xs text-gray-500 hover:text-gray-700">Закрыть</button>
-              </div>
-              <div className="text-xs text-gray-600 space-y-2">
-                <p>
-                  Формат CSV: <code className="bg-gray-100 px-1 rounded">LinkedIn ID, Invite</code>
-                  {' '}— первая колонка <b>ссылка на профиль LinkedIn</b>, вторая — <b>готовый текст инвайта</b>.
-                </p>
-                <pre className="bg-white border border-emerald-200 rounded-lg px-3 py-2 text-[11px] leading-relaxed font-mono text-gray-700 overflow-x-auto">{`LinkedIn ID,Invite
+            <div className="fixed inset-0 z-40 bg-black/30 p-4 flex items-center justify-center">
+              <div className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl flex flex-col">
+                <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+                  <h3 className="text-sm font-semibold text-gray-900">Импорт CSV с персонализированными инвайтами</h3>
+                  <button
+                    onClick={() => { setShowImportInvitesModal(false); setImportInvitesError(null); }}
+                    disabled={importing}
+                    className="text-sm text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="p-4 space-y-3 overflow-y-auto">
+                  <div className="text-xs text-gray-600 space-y-2">
+                    <p>
+                      Формат CSV: <code className="bg-gray-100 px-1 rounded">LinkedIn ID, Invite</code>
+                      {' '}— первая колонка <b>ссылка на профиль LinkedIn</b>, вторая — <b>готовый текст инвайта</b>.
+                    </p>
+                    <pre className="bg-white border border-emerald-200 rounded-lg px-3 py-2 text-[11px] leading-relaxed font-mono text-gray-700 overflow-x-auto">{`LinkedIn ID,Invite
 http://www.linkedin.com/in/ian-parris-95423229,"Hi Ian! IT services at Installation Technology are vital. Happy to connect!"
 http://www.linkedin.com/in/norris-koppel,"Norris, здравствуйте! Слежу за Monese, впечатлён фокусом на мультивалютности."`}</pre>
-                <p>
-                  На каждый импорт создаётся <b>новый список лидов</b> с пометкой «персонализированные инвайты».
-                  В редакторе кампании для такого списка появится тумблер «Использовать персонализированный инвайт» на шаге&nbsp;1.
-                </p>
-              </div>
-              <div className="flex gap-3 items-end flex-wrap">
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Название списка</label>
-                  <input
-                    type="text"
-                    value={importInvitesListName}
-                    onChange={(e) => setImportInvitesListName(e.target.value)}
-                    placeholder="Пусто = имя файла"
-                    className="rounded-lg border border-gray-200 px-3 py-2 text-sm w-56"
-                  />
+                    <p>
+                      На каждый импорт создаётся <b>новый список лидов</b> с пометкой «персонализированные инвайты».
+                      В редакторе кампании для такого списка появится тумблер «Использовать персонализированный инвайт» на шаге&nbsp;1.
+                    </p>
+                  </div>
+                  <div className="flex gap-3 items-end flex-wrap">
+                    <div>
+                      <label className="text-xs text-gray-600 block mb-1">Название списка</label>
+                      <input
+                        type="text"
+                        value={importInvitesListName}
+                        onChange={(e) => setImportInvitesListName(e.target.value)}
+                        placeholder="Пусто = имя файла"
+                        className="rounded-lg border border-gray-200 px-3 py-2 text-sm w-56"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-600 block mb-1">Файл CSV</label>
+                      <input
+                        type="file"
+                        accept=".csv,text/csv"
+                        disabled={importing}
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) void importLeadsWithInvitesCsv(f);
+                        }}
+                        className="text-sm file:mr-2 file:rounded-lg file:border-0 file:bg-emerald-600 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-emerald-700 disabled:opacity-50"
+                      />
+                    </div>
+                    {importing && <span className="text-xs text-gray-500">Загрузка…</span>}
+                  </div>
+                  {importInvitesError && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                      <span className="font-medium">Ошибка импорта:</span> {importInvitesError}
+                    </div>
+                  )}
                 </div>
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Файл CSV</label>
-                  <input
-                    type="file"
-                    accept=".csv,text/csv"
-                    disabled={importing}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) void importLeadsWithInvitesCsv(f);
-                    }}
-                    className="text-sm file:mr-2 file:rounded-lg file:border-0 file:bg-emerald-600 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-emerald-700 disabled:opacity-50"
-                  />
-                </div>
-                {importing && <span className="text-xs text-gray-500">Импорт...</span>}
               </div>
             </div>
           )}
 
-          {/* Import CSV Modal */}
+          {/* Import CSV — fixed modal overlay. */}
           {showImportModal && (
-            <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-900">Импорт лидов из CSV</h3>
-                <button onClick={() => setShowImportModal(false)} className="text-xs text-gray-500 hover:text-gray-700">Закрыть</button>
-              </div>
-              <p className="text-xs text-gray-500">
-                Формат CSV: <code className="bg-gray-100 px-1 rounded">name, first_name, last_name, position, company, profile_url, public_identifier</code>
-                <br />Первая строка — заголовки. Обязательное поле: <code className="bg-gray-100 px-1 rounded">name</code> (или <code className="bg-gray-100 px-1 rounded">first_name</code> + <code className="bg-gray-100 px-1 rounded">last_name</code>).
-              </p>
-              <div className="flex gap-3 items-end flex-wrap">
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Список для импорта</label>
-                  <select value={importListId} onChange={(e) => setImportListId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
-                    <option value="">Выберите список...</option>
-                    {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Файл CSV</label>
-                  <input
-                    type="file"
-                    accept=".csv,text/csv"
+            <div className="fixed inset-0 z-40 bg-black/30 p-4 flex items-center justify-center">
+              <div className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl flex flex-col">
+                <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+                  <h3 className="text-sm font-semibold text-gray-900">Импорт лидов из CSV</h3>
+                  <button
+                    onClick={() => { setShowImportModal(false); setImportError(null); }}
                     disabled={importing}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) void importLeadsCsv(f);
-                    }}
-                    className="text-sm file:mr-2 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-blue-700 disabled:opacity-50"
-                  />
+                    className="text-sm text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                  >
+                    ✕
+                  </button>
                 </div>
-                {importing && <span className="text-xs text-gray-500">Импорт...</span>}
+                <div className="p-4 space-y-3 overflow-y-auto">
+                  <p className="text-xs text-gray-500">
+                    Формат CSV: <code className="bg-gray-100 px-1 rounded">name, first_name, last_name, position, company, profile_url, public_identifier</code>
+                    <br />Первая строка — заголовки. Обязательное поле: <code className="bg-gray-100 px-1 rounded">name</code> (или <code className="bg-gray-100 px-1 rounded">first_name</code> + <code className="bg-gray-100 px-1 rounded">last_name</code>).
+                  </p>
+                  <div className="flex gap-3 items-end flex-wrap">
+                    <div>
+                      <label className="text-xs text-gray-600 block mb-1">Список для импорта</label>
+                      <select value={importListId} onChange={(e) => setImportListId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
+                        <option value="">Выберите список…</option>
+                        {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-600 block mb-1">Файл CSV</label>
+                      <input
+                        type="file"
+                        accept=".csv,text/csv"
+                        disabled={importing}
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) void importLeadsCsv(f);
+                        }}
+                        className="text-sm file:mr-2 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-blue-700 disabled:opacity-50"
+                      />
+                    </div>
+                    {importing && <span className="text-xs text-gray-500">Загрузка…</span>}
+                  </div>
+                  {importError && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                      <span className="font-medium">Ошибка импорта:</span> {importError}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
