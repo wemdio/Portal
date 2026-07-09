@@ -48,14 +48,23 @@ export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Pr
       targets: job.targets.length
     });
     setStatus(job, cb, "running", "Запускаю Chromium");
-    browser = await launchBrowser(job);
+    const launched = await launchBrowser(job);
+    browser = launched.browser;
     const context = await browser.newContext({
       locale: job.settings.language,
       viewport: { width: 1365, height: 900 },
       userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     });
-    log(cb, "info", "Chromium ready", { locale: job.settings.language });
+    // Скрываем navigator.webdriver — самый простой fingerprint,
+    // по которому Google Maps выкидывает captcha/блок.
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    });
+    log(cb, "info", "Chromium ready", {
+      locale: job.settings.language,
+      proxy: maskProxy(launched.proxy)
+    });
 
     for (let index = 0; index < job.targets.length; index += 1) {
       if (cb.shouldStop()) break;
@@ -90,15 +99,38 @@ export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Pr
   }
 }
 
-async function launchBrowser(job: ScrapeJob): Promise<Browser> {
+/**
+ * Mask a proxy URL for logging — strip password so credentials never end up
+ * in Supabase logs / docker stdout. "http://user:PASS@1.2.3.4:80" →
+ * "http://user:***@1.2.3.4:80".
+ */
+function maskProxy(proxy: string | undefined): string {
+  if (!proxy) return "none";
+  return proxy.replace(/:\/\/([^:@]+):[^@]+@/, "://$1:***@");
+}
+
+async function launchBrowser(job: ScrapeJob): Promise<{ browser: Browser; proxy: string | undefined }> {
   // Из пула прокси случайно выбираем один — так последовательные джобы
   // на прод-сервере не долбятся из одного и того же IP.
   const pool = job.settings.proxies ?? [];
   const proxy = pool.length > 0 ? pool[Math.floor(Math.random() * pool.length)] : undefined;
-  return chromium.launch({
+  const browser = await chromium.launch({
     headless: true,
-    proxy: proxy ? { server: proxy } : undefined
+    proxy: proxy ? { server: proxy } : undefined,
+    // Скрываем telltale-флаги автоматизации, из-за которых Google быстрее
+    // отдаёт captcha или молча вешает соединение. Chromium в headless-режиме
+    // по умолчанию выставляет navigator.webdriver=true и exposes ряд других
+    // сигналов автоматизации — эти args их гасят.
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=IsolateOrigins,site-per-process",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-web-security",
+      "--lang=ru-RU,ru,en-US,en"
+    ]
   });
+  return { browser, proxy };
 }
 
 /**
@@ -106,18 +138,24 @@ async function launchBrowser(job: ScrapeJob): Promise<Browser> {
  *
  * Google Maps / News are heavy pages (Maps easily 4-6MB of JS); with a slow
  * proxy or ratelimited Google response, the default 60 s `domcontentloaded`
- * wait misses. Bumped to 90 s per attempt, and if DOMContentLoaded never fires
- * we retry once with `load` (fires later but doesn't hang on Google's stalled
- * beacon requests). Total worst case: ~180 s per URL before we give up.
+ * wait misses. Strategy:
+ *   1. `domcontentloaded` + 90 s — fires when HTML is parsed, fastest signal
+ *      the page actually loaded.
+ *   2. On Timeout, fall back to `commit` + 30 s — fires as soon as
+ *      navigation commits (before any content loads). Good enough for the
+ *      captcha-wall check downstream; if page is genuinely captcha we exit
+ *      fast; if it's fine, subsequent `waitForSelector` / `networkidle`
+ *      inside collectPlaceLinks will handle rendering.
+ * Total worst case: ~120 s per URL before we give up.
  */
-async function gotoWithRetry(page: Page, url: string): Promise<void> {
+async function gotoWithRetry(page: Page, url: string, cb: MapsRunCallbacks): Promise<void> {
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (!msg.includes("Timeout")) throw err;
-    // Second attempt: allow full load event, not just DCL. Still bounded.
-    await page.goto(url, { waitUntil: "load", timeout: 90000 });
+    log(cb, "warn", `DCL timed out, retrying with commit wait`, { url });
+    await page.goto(url, { waitUntil: "commit", timeout: 30000 });
   }
 }
 
@@ -125,7 +163,7 @@ async function parseTarget(context: BrowserContext, job: ScrapeJob, cb: MapsRunC
   const page = await context.newPage();
 
   try {
-    await gotoWithRetry(page, target.url);
+    await gotoWithRetry(page, target.url, cb);
     await maybeAcceptConsent(page);
     await randomDelay(job);
 
@@ -187,7 +225,7 @@ async function parsePlace(context: BrowserContext, job: ScrapeJob, cb: MapsRunCa
   const placeUrl = ensureGoogleMapsLocale(url, job.settings.language, job.settings.region);
 
   try {
-    await gotoWithRetry(page, placeUrl);
+    await gotoWithRetry(page, placeUrl, cb);
     await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => undefined);
     await page.waitForSelector("h1, body", { timeout: 15000 });
     await randomDelay(job);
