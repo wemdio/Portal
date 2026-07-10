@@ -40,6 +40,7 @@ function accessTagForNavItem(item: NavItem): string {
   if (item.adminOnly) return 'Админ';
   if (item.technicianOrAdmin) return 'Технарь, Админ';
   if (item.billingCalendarOnly) return 'Технарь, Лид, Руководитель, Админ';
+  if (item.leadOnly) return 'Лид, Руководитель, Админ';
   return 'все роли (общедоступно)';
 }
 
