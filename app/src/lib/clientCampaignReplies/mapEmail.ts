@@ -6,6 +6,25 @@ import { getEmailRecipients } from './participants';
 const MAX_BODY_TEXT_CHARS = 20_000;
 const MAX_PREVIEW_CHARS = 200;
 
+const NAMED_HTML_ENTITIES: Record<string, string> = {
+  nbsp: ' ',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  laquo: '«',
+  raquo: '»',
+  mdash: '—',
+  ndash: '–',
+  hellip: '…',
+};
+
+function decodeCodePoint(code: number, fallback: string): string {
+  return Number.isFinite(code) && code > 0 && code <= 0x10ffff
+    ? String.fromCodePoint(code)
+    : fallback;
+}
+
 /** Lightweight HTML → plain-text. Intentionally minimal: replies are usually short. */
 function htmlToText(html: string): string {
   return html
@@ -13,18 +32,21 @@ function htmlToText(html: string): string {
     .replace(/<\/p>\s*<p[^>]*>/gi, '\n')
     .replace(/<\/?(div|p|li)[^>]*>/gi, '\n')
     .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
+    // Числовые сущности (&#1055; / &#x442;): mail.ru и часть клиентов шлют
+    // html-only письма со ВСЕЙ кириллицей в таком виде — без декода тред-вью и
+    // процитированная история (quoteHistory) превращаются в «кашу» из кодов.
+    // Зеркалит закалённый getBodyText из leadQualifier.
+    .replace(/&#(\d+);/g, (m, dec: string) => decodeCodePoint(Number(dec), m))
+    .replace(/&#x([0-9a-f]+);/gi, (m, hex: string) => decodeCodePoint(parseInt(hex, 16), m))
+    .replace(/&([a-z]+);/gi, (m, name: string) => NAMED_HTML_ENTITIES[name.toLowerCase()] ?? m)
+    // &amp; последним — чтобы двойное кодирование (&amp;lt;) не превращалось в "<"
+    .replace(/&amp;/gi, '&')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
-function extractBodyText(body: Email['body']): string | null {
+export function extractBodyText(body: Email['body']): string | null {
   if (!body) return null;
   if (typeof body === 'string') {
     // Could be html or plain — be safe and convert.
