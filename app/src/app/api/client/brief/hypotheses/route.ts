@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
+import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { compileBriefText, normalizeBriefFields } from '@/lib/clientBrief';
@@ -38,6 +39,9 @@ async function loadBrief(userId: string): Promise<BriefRow | null> {
 export async function GET(req: NextRequest) {
   const auth = await requireClientAuth(req);
   if ('error' in auth) return auth.error;
+  // Демо-аккаунт: фикстура гипотез (иначе секция под брифом пустая — у демо-юзера
+  // нет строки в client_briefs). POST (генерация) режется в requireClientAuth.
+  if (auth.auth.isDemo) return serveClientDemo(req);
   if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
 
   const brief = await loadBrief(auth.auth.userId);

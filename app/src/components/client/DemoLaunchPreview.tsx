@@ -10,19 +10,28 @@
  */
 import { Upload, Mail, Clock, Settings, Send, Check, Info } from 'lucide-react';
 import { promptDemoRegister } from '@/lib/clientDemo/registerPrompt';
+import { DemoLetterCard, type DemoLetter } from '@/components/client/DemoLetterCard';
 
-const PREVIEW_STEPS = [
+// Полные тексты — те же, что в цепочке демо-кампании «Орбита — розничные сети»
+// (fixtures DEMO_SEQUENCES), чтобы демо было связным. Карточка сворачивает их
+// до темы + первой строки, «Развернуть письмо» раскрывает целиком.
+const PREVIEW_STEPS: DemoLetter[] = [
   {
     when: 'сразу',
     subject: 'Сократили пересорт на складе на 30%',
     body:
-      'Здравствуйте, {{firstName}}! У сетей с несколькими складами почти всегда болит пересорт и долгая инвентаризация — склад встаёт на 1–2 дня…',
+      'Здравствуйте, {{firstName}}!\n\n' +
+      'У сетей с несколькими складами почти всегда болит пересорт и долгая инвентаризация — склад встаёт на 1–2 дня.\n\n' +
+      'Мы, Орбита, — облачная WMS. Рознице «ТоргДом» с 12 складами помогли сократить потери на пересорте с 15% до 5% за 3 месяца, без замены 1С и без остановки операций.\n\n' +
+      'Откликается тема? Пришлю короткий расчёт под ваш профиль.',
   },
   {
     when: 'через 3 дня',
     subject: 'Инвентаризация 6 складов — за 4 часа вместо 2 дней',
     body:
-      'Возвращаюсь с конкретикой: у «ТоргДома» инвентаризация 6 складов теперь занимает 4 часа вместо двух дней — за счёт онлайн-остатков и ТСД…',
+      'Добрый день, {{firstName}}!\n\n' +
+      'Возвращаюсь к прошлому письму с конкретикой: у «ТоргДома» инвентаризация 6 складов теперь занимает 4 часа вместо двух дней — за счёт онлайн-остатков и ТСД.\n\n' +
+      'Покажу на 15-минутном демо, как это выглядит у вас. Когда удобно?',
   },
 ];
 
@@ -74,24 +83,7 @@ export function DemoLaunchPreview() {
           </div>
           <div className="space-y-2">
             {PREVIEW_STEPS.map((s, i) => (
-              <div key={i} className="neu-sm overflow-hidden">
-                <div className="px-3 py-2 flex items-center gap-3">
-                  <span className="ds-mono text-xs font-semibold shrink-0" style={{ color: 'var(--cp-paper-faint)' }}>
-                    {String(i + 1).padStart(2, '0')}
-                    <span aria-hidden> → </span>
-                  </span>
-                  <span className="text-xs sm:text-sm font-semibold flex-1 min-w-0 truncate" style={{ color: 'var(--cp-paper)' }}>
-                    {s.subject}
-                  </span>
-                  <span className="ds-mono text-[10px] shrink-0" style={{ color: 'var(--cp-paper-faint)' }}>
-                    {s.when}
-                  </span>
-                </div>
-                <hr className="neu-divider mx-3" />
-                <p className="px-3 py-2 text-[11px] sm:text-xs leading-relaxed m-0" style={{ color: 'var(--cp-paper-mute)' }}>
-                  {s.body}
-                </p>
-              </div>
+              <DemoLetterCard key={i} letter={s} index={i} idPrefix="launch-preview" />
             ))}
           </div>
         </section>
