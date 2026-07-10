@@ -316,4 +316,62 @@ describe('pollAndQualifyReplies', () => {
     expect(leadRow).toBeDefined();
     expect(String(leadRow?.ai_reason ?? '')).not.toContain('от нашего клиента');
   });
+
+  // «Слепые» письма (кейс NAIS→KIRA.PW 10.07): нашего ящика нет в To/CC —
+  // скрытая копия / чужое письмо с домена лида, приклеенное Instantly к
+  // кампании. Не lead-алерт, а needs_review без пинга и без вызова ИИ.
+  it('routes emails not addressed to our mailbox (BCC/stray) to needs_review without AI or alert', async () => {
+    listEmails.mockResolvedValue({
+      items: [
+        replyEmail({
+          id: 'stray-email',
+          from_address_email: 'head_market@nais.ru',
+          eaccount: 'lyamina@ritso-contact.ru',
+          to_address_email_list: 'kirill@kira-aggregator.ru',
+        }),
+      ],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1);
+    expect(qualifyReply).not.toHaveBeenCalled();
+    expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('needs_review');
+    expect(String(rows[0].ai_reason)).toContain('нет в To/CC');
+  });
+
+  it('does not flag as stray when our mailbox IS a recipient (including "Name <addr>" format) or when To/CC data is absent', async () => {
+    listEmails.mockResolvedValue({
+      items: [
+        // Наш ящик в To в формате с именем — обычная квалификация.
+        replyEmail({
+          id: 'normal-reply',
+          eaccount: 'lyamina@ritso-contact.ru',
+          to_address_email_list: 'Yanislava Lyamina <lyamina@ritso-contact.ru>',
+        }),
+        // Листинг без To/CC-полей — проверка невозможна, fail-open в ИИ-путь.
+        replyEmail({
+          id: 'no-recipient-data',
+          from_address_email: 'other-lead@example.com',
+          eaccount: 'lyamina@ritso-contact.ru',
+        }),
+      ],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(2);
+    expect(qualifyReply).toHaveBeenCalledTimes(2);
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    for (const row of rows) {
+      expect(String(row.ai_reason ?? '')).not.toContain('нет в To/CC');
+    }
+  });
 });

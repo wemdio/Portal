@@ -16,6 +16,7 @@ import {
 } from '@/lib/clientReplyBot/bot';
 import * as instantly from './client';
 import { isFreeProvider } from '@/lib/emailValidation/shared';
+import { getEmailRecipients } from '@/lib/clientCampaignReplies/participants';
 import { generateHandoffReply } from './handoffGenerator';
 import { signHandoffCallback } from './handoffCallback';
 import {
@@ -473,6 +474,63 @@ async function qualifyOneReply(
     }
     workerLog('info', `Skipped client-authored reply from ${fromLower} in campaign ${campaignId} (post-handoff echo, no alert)`);
     return;
+  }
+
+  // «Слепое» письмо: нашего ящика (eaccount) нет ни в To, ни в CC — это не
+  // прямой ответ нам (Reply на наше письмо всегда содержит наш адрес).
+  // Реальный кейс NAIS→KIRA.PW (баг от спеца, 10.07): сотрудница ЛИДА просила
+  // подробности у ДРУГОГО вендора (To = его адрес), письмо прилетело нам
+  // скрытой копией/пересылкой, Instantly приклеил его к кампании по домену
+  // лида, ИИ прочитал «расскажите подробнее» → ложный lead-пинг. Такие письма
+  // не глушим совсем (это всё же домен лида) — needs_review без пинга, пусть
+  // человек глянет. Fail-open: без eaccount или без To/CC в данных листинга
+  // проверка невозможна — идём обычным путём.
+  const ourMailbox = (reply.eaccount ?? '').trim().toLowerCase();
+  if (ourMailbox) {
+    const { to: toRcpt, cc: ccRcpt } = getEmailRecipients(reply);
+    const recipientAddrs = new Set<string>();
+    for (const r of [...toRcpt, ...ccRcpt]) {
+      // Токен может быть «Name <addr>» — достаём адреса регекспом, а не
+      // строгим равенством токена.
+      for (const m of r.email.toLowerCase().match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+/g) ?? []) {
+        recipientAddrs.add(m);
+      }
+    }
+    if (recipientAddrs.size > 0 && !recipientAddrs.has(ourMailbox)) {
+      const replyText = getBodyText(reply.body);
+      const { error: strayUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+        {
+          campaign_id: campaignId,
+          campaign_name: await resolveCampaignName(campaignId, accountId),
+          lead_email: leadEmail,
+          thread_id: reply.thread_id,
+          reply_subject: reply.subject ?? null,
+          reply_preview: replyText.slice(0, 300) || null,
+          reply_body: replyText || null,
+          status: 'needs_review',
+          proposal_seen: false,
+          interest_signals: [],
+          ai_reason: `Письмо не адресовано нашему ящику (${ourMailbox} нет в To/CC — скрытая копия или чужое письмо с домена лида). Автоматический вердикт ненадёжен, нужна ручная проверка.`,
+          ai_confidence: 0,
+          instantly_email_id: reply.id,
+          instantly_lead_id: null,
+          reply_timestamp: reply.timestamp_email ?? null,
+        },
+        { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+      );
+      if (strayUpsertErr) {
+        workerLog(
+          'error',
+          `Stray-email dedup upsert failed for ${fromLower} (campaign ${campaignId}, email_id=${reply.id ?? 'null'}): ${strayUpsertErr.message ?? String(strayUpsertErr)}`,
+        );
+        throw new Error(`Stray-email upsert failed: ${strayUpsertErr.message ?? 'unknown'}`);
+      }
+      workerLog(
+        'info',
+        `Stray email from ${fromLower} in campaign ${campaignId}: our mailbox ${ourMailbox} not in To/CC → needs_review, no alert`,
+      );
+      return;
+    }
   }
 
   if (!briefCache.has(campaignId)) {
