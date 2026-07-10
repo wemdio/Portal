@@ -16,6 +16,7 @@ import {
 } from '@/lib/clientReplyBot/bot';
 import * as instantly from './client';
 import { isFreeProvider } from '@/lib/emailValidation/shared';
+import { getEmailRecipients } from '@/lib/clientCampaignReplies/participants';
 import { generateHandoffReply } from './handoffGenerator';
 import { signHandoffCallback } from './handoffCallback';
 import {
@@ -475,6 +476,123 @@ async function qualifyOneReply(
     return;
   }
 
+  // «Слепое» письмо: нашего ящика (eaccount) нет ни в To, ни в CC — это не
+  // прямой ответ нам (Reply на наше письмо всегда содержит наш адрес).
+  // Реальный кейс NAIS→KIRA.PW (баг от спеца, 10.07): сотрудница ЛИДА просила
+  // подробности у ДРУГОГО вендора (To = его адрес), письмо прилетело нам
+  // скрытой копией/пересылкой, Instantly приклеил его к кампании по домену
+  // лида, ИИ прочитал «расскажите подробнее» → ложный lead-пинг. Такие письма
+  // не глушим совсем (это всё же домен лида) — needs_review без пинга, пусть
+  // человек глянет. Fail-open: без eaccount или без To/CC в данных листинга
+  // проверка невозможна — идём обычным путём.
+  const ourMailbox = (reply.eaccount ?? '').trim().toLowerCase();
+  if (ourMailbox) {
+    const { to: toRcpt, cc: ccRcpt } = getEmailRecipients(reply);
+    const recipientAddrs = new Set<string>();
+    for (const r of [...toRcpt, ...ccRcpt]) {
+      // Токен может быть «Name <addr>» — достаём адреса регекспом, а не
+      // строгим равенством токена.
+      for (const m of r.email.toLowerCase().match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+/g) ?? []) {
+        recipientAddrs.add(m);
+      }
+    }
+    if (recipientAddrs.size > 0 && !recipientAddrs.has(ourMailbox)) {
+      const replyText = getBodyText(reply.body);
+      const { error: strayUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+        {
+          campaign_id: campaignId,
+          campaign_name: await resolveCampaignName(campaignId, accountId),
+          lead_email: leadEmail,
+          thread_id: reply.thread_id,
+          reply_subject: reply.subject ?? null,
+          reply_preview: replyText.slice(0, 300) || null,
+          reply_body: replyText || null,
+          status: 'needs_review',
+          proposal_seen: false,
+          interest_signals: [],
+          ai_reason: `Письмо не адресовано нашему ящику (${ourMailbox} нет в To/CC — скрытая копия или чужое письмо с домена лида). Автоматический вердикт ненадёжен, нужна ручная проверка.`,
+          ai_confidence: 0,
+          instantly_email_id: reply.id,
+          instantly_lead_id: null,
+          reply_timestamp: reply.timestamp_email ?? null,
+        },
+        { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+      );
+      if (strayUpsertErr) {
+        workerLog(
+          'error',
+          `Stray-email dedup upsert failed for ${fromLower} (campaign ${campaignId}, email_id=${reply.id ?? 'null'}): ${strayUpsertErr.message ?? String(strayUpsertErr)}`,
+        );
+        throw new Error(`Stray-email upsert failed: ${strayUpsertErr.message ?? 'unknown'}`);
+      }
+      workerLog(
+        'info',
+        `Stray email from ${fromLower} in campaign ${campaignId}: our mailbox ${ourMailbox} not in To/CC → needs_review, no alert`,
+      );
+      return;
+    }
+  }
+
+  // Кросс-клиентский доменный матч Instantly (кейс NAIS→KIRA, 10.07): лид
+  // получил рассылки ДВУХ наших клиентов и написал НОВОЕ письмо (без
+  // In-Reply-To) на ящик клиента A — Instantly, не найдя тред, приклеил его по
+  // домену отправителя к лиду/кампании клиента B. Детектор: ящик, куда письмо
+  // физически пришло (eaccount), не совпадает ни с одним ящиком, который писал
+  // лиду в этом треде. Контекст треда фетчим здесь и передаём в qualifyReply
+  // как prefetchedContext — итоговое число вызовов Instantly не растёт.
+  const ctx =
+    prefetchedContext ??
+    (await fetchThreadContext(campaignId, leadEmail, reply.thread_id, accountId));
+  if (ourMailbox && ctx) {
+    // Тред-исходящие ∪ ящики кампании (campaignOutboundMailboxes — из уже
+    // скачанных страниц, без доп. вызовов). Только тредовых НЕДОСТАТОЧНО: для
+    // «слепого» письма search идёт по адресу ОТПРАВИТЕЛЯ (кампания ему не
+    // писала) и тред-скоуп часто пуст → guard молча fail-open'ился бы в своём
+    // же флагманском сценарии (находка адверсариального ревью).
+    const outboundMailboxes = new Set(
+      [...ctx.threadEmails, ...(ctx.lastOutbound ? [ctx.lastOutbound] : [])]
+        .filter((e) => (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3)
+        .map((e) => (e.eaccount ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    );
+    for (const m of ctx.campaignOutboundMailboxes ?? []) outboundMailboxes.add(m);
+    if (outboundMailboxes.size > 0 && !outboundMailboxes.has(ourMailbox)) {
+      const replyText = getBodyText(reply.body);
+      const { error: crossUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+        {
+          campaign_id: campaignId,
+          campaign_name: await resolveCampaignName(campaignId, accountId),
+          lead_email: leadEmail,
+          thread_id: reply.thread_id,
+          reply_subject: reply.subject ?? null,
+          reply_preview: replyText.slice(0, 300) || null,
+          reply_body: replyText || null,
+          status: 'needs_review',
+          proposal_seen: false,
+          interest_signals: [],
+          ai_reason: `Письмо пришло в ящик ${ourMailbox}, а лиду в этой кампании писал ${[...outboundMailboxes].join(', ')} — Instantly привязал его по домену отправителя. Похоже, это ответ на рассылку ДРУГОГО клиента (чей ящик ${ourMailbox}) — проверьте и передайте его специалисту вручную.`,
+          ai_confidence: 0,
+          instantly_email_id: reply.id,
+          instantly_lead_id: null,
+          reply_timestamp: reply.timestamp_email ?? null,
+        },
+        { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+      );
+      if (crossUpsertErr) {
+        workerLog(
+          'error',
+          `Cross-client dedup upsert failed for ${fromLower} (campaign ${campaignId}, email_id=${reply.id ?? 'null'}): ${crossUpsertErr.message ?? String(crossUpsertErr)}`,
+        );
+        throw new Error(`Cross-client upsert failed: ${crossUpsertErr.message ?? 'unknown'}`);
+      }
+      workerLog(
+        'info',
+        `Cross-client email from ${fromLower}: arrived at ${ourMailbox}, campaign ${campaignId} thread was mailed by ${[...outboundMailboxes].join(', ')} → needs_review, no alert`,
+      );
+      return;
+    }
+  }
+
   if (!briefCache.has(campaignId)) {
     briefCache.set(campaignId, await fetchBriefByCampaign(campaignId));
   }
@@ -484,7 +602,8 @@ async function qualifyOneReply(
     apiKey,
     model: MODEL,
     briefText: cachedBrief,
-    prefetchedContext,
+    // Контекст уже зафетчен выше (кросс-клиентский guard) — не фетчим второй раз.
+    prefetchedContext: ctx,
   }, accountId);
 
   const campaignName = await resolveCampaignName(campaignId, accountId);

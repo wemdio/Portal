@@ -7,6 +7,8 @@ import { SearchParserView } from '@/components/parsers/SearchParserView';
 import { YandexMapsParserView } from '@/components/parsers/YandexMapsParserView';
 import { EmailSequenceV2View } from '@/components/email-sequence-v2/EmailSequenceV2View';
 import { clientApiFetch } from '@/lib/clientFetcher';
+import { useDemoMode } from '@/lib/clientDemo/useDemoMode';
+import { DemoSequenceExample } from '@/components/client/DemoSequenceExample';
 
 type Tab = 'hh' | 'search' | 'yandexmaps' | 'email-sequence';
 
@@ -28,6 +30,7 @@ type TariffStatus = 'setup' | 'active' | 'expired' | 'inactive';
 
 export default function ClientParsersPage() {
   const searchParams = useSearchParams();
+  const isDemo = useDemoMode();
   const [activeTab, setActiveTab] = useState<Tab>(() => parseTab(searchParams?.get('tab')));
   const [tariffStatus, setTariffStatus] = useState<TariffStatus | null>(null);
   const [tariffLoading, setTariffLoading] = useState(true);
@@ -106,7 +109,16 @@ export default function ClientParsersPage() {
           {activeTab === 'hh' && <HHParserView clientMode />}
           {activeTab === 'search' && <SearchParserView clientMode />}
           {activeTab === 'yandexmaps' && <YandexMapsParserView clientMode />}
-          {activeTab === 'email-sequence' && <EmailSequenceV2View clientMode />}
+          {/* Демо: вместо живого генератора — read-only пример «вход → цепочка»
+              (tools-API демо-аккаунту недоступен, у живой вкладки был бы пустой
+              список запусков). До резолва demo-status не монтируем живой инструмент,
+              чтобы под демо не улетал его стартовый запрос списка запусков. */}
+          {activeTab === 'email-sequence' &&
+            (isDemo === true ? (
+              <DemoSequenceExample />
+            ) : isDemo === false ? (
+              <EmailSequenceV2View clientMode />
+            ) : null)}
         </>
       )}
     </div>
