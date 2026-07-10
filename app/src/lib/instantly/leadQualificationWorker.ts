@@ -15,6 +15,7 @@ import {
   buildClientReplyMessage,
 } from '@/lib/clientReplyBot/bot';
 import * as instantly from './client';
+import { isFreeProvider } from '@/lib/emailValidation/shared';
 import { generateHandoffReply } from './handoffGenerator';
 import { signHandoffCallback } from './handoffCallback';
 import {
@@ -345,6 +346,77 @@ export async function pollAndQualifyReplies(): Promise<number> {
   return processed;
 }
 
+function splitEmailList(value: string | null | undefined): string[] {
+  return (value ?? '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e.includes('@'));
+}
+
+/**
+ * Адреса «стороны клиента» для кампании: handoff_email привязанных проектов +
+ * client_email прошлых передач (client_forwarded_leads). Письмо С ЭТИХ адресов —
+ * не ответ лида, а ответ НАШЕГО КЛИЕНТА в треде: после передачи лида клиент
+ * продолжает переписку со своей почты, наш Instantly-ящик остаётся в копии, и
+ * Instantly кладёт его письмо в кампанию как received. Без guard'а ИИ честно
+ * читает «просит встречу / видел оффер» → ложный status='lead' и пинг спеца
+ * (кейс «Умные Новации» 10.07.2026: алерт на письмо ОТ клиента лиду).
+ *
+ * Домены добавляем только корпоративные (не freemail!): коллега клиента с того
+ * же домена — тоже клиент, но доменный матч по gmail/mail.ru зарубил бы
+ * настоящих лидов с бесплатной почтой.
+ */
+async function getClientPartyAddresses(
+  instantlyDb: NonNullable<typeof supabaseAdmin>,
+  campaignId: string,
+): Promise<{ addresses: Set<string>; domains: Set<string> }> {
+  const addresses = new Set<string>();
+
+  // Ошибки запросов НЕ роняют квалификацию (fail-open: письмо уйдёт в обычный
+  // AI-путь — хуже ложный алерт, чем потерянный настоящий лид), но деградацию
+  // guard'а обязаны логировать: молчаливый fail-open во время блипа БД внешне
+  // неотличим от «guard решил, что это лид».
+  const logDegraded = (source: string, message: string | undefined) =>
+    workerLog('warn', `client-echo guard degraded (fail-open): ${source} query failed — ${message ?? 'unknown'}`);
+
+  const { data: legacyLinks, error: legacyErr } = await instantlyDb
+    .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  if (legacyErr) logDegraded('project_instantly_campaigns', legacyErr.message);
+  const { data: periodLinks, error: periodErr } = await instantlyDb
+    .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  if (periodErr) logDegraded('project_period_instantly_campaigns', periodErr.message);
+  const projectIds = [
+    ...new Set(
+      [...(legacyLinks ?? []), ...(periodLinks ?? [])]
+        .map((l: { project_id?: string | null }) => l.project_id)
+        .filter(Boolean) as string[],
+    ),
+  ];
+
+  if (projectIds.length > 0 && supabaseMain) {
+    const { data: projects, error: projectsErr } = await supabaseMain
+      .from('projects').select('handoff_email').in('id', projectIds);
+    if (projectsErr) logDegraded('projects.handoff_email', projectsErr.message);
+    for (const p of projects ?? []) {
+      for (const a of splitEmailList(p.handoff_email as string | null)) addresses.add(a);
+    }
+  }
+
+  const { data: forwarded, error: forwardedErr } = await instantlyDb
+    .from('client_forwarded_leads').select('client_email').eq('campaign_id', campaignId);
+  if (forwardedErr) logDegraded('client_forwarded_leads', forwardedErr.message);
+  for (const f of forwarded ?? []) {
+    for (const a of splitEmailList(f.client_email as string | null)) addresses.add(a);
+  }
+
+  const domains = new Set<string>();
+  for (const a of addresses) {
+    const domain = a.split('@')[1];
+    if (domain && !isFreeProvider(domain)) domains.add(domain);
+  }
+  return { addresses, domains };
+}
+
 async function qualifyOneReply(
   db: NonNullable<typeof supabaseAdmin>,
   reply: Email,
@@ -359,6 +431,49 @@ async function qualifyOneReply(
     '';
 
   if (!campaignId || !leadEmail) return;
+
+  // Пост-handoff эхо: письмо от нашего клиента (он отвечает лиду со своей
+  // почты, мы в копии) — не квалифицируем как лида. Строку всё равно пишем:
+  // дедуп по instantly_email_id иначе будет пытаться заново каждый тик.
+  const fromLower = leadEmail.trim().toLowerCase();
+  const fromDomain = fromLower.split('@')[1] ?? '';
+  const clientParty = await getClientPartyAddresses(db, campaignId);
+  if (clientParty.addresses.has(fromLower) || (fromDomain && clientParty.domains.has(fromDomain))) {
+    const replyText = getBodyText(reply.body);
+    // Как и основной upsert ниже: ошибку НЕ глотаем. Молча потерянная строка =
+    // нет дедупа → это же эхо переобрабатывается каждый тик, занимая слот из
+    // MAX_QUALIFY_PER_TICK. throw → внешний catch запишет status='error'
+    // (видимость + дедуп-строка), ровно как при сбое основного пути.
+    const { error: guardUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+      {
+        campaign_id: campaignId,
+        campaign_name: await resolveCampaignName(campaignId, accountId),
+        lead_email: leadEmail,
+        thread_id: reply.thread_id,
+        reply_subject: reply.subject ?? null,
+        reply_preview: replyText.slice(0, 300) || null,
+        reply_body: replyText || null,
+        status: 'not_lead',
+        proposal_seen: false,
+        interest_signals: [],
+        ai_reason: `Письмо от нашего клиента (${fromLower} — адрес передачи лида/handoff этого проекта), а не от лида. Алерт не требуется.`,
+        ai_confidence: 1,
+        instantly_email_id: reply.id,
+        instantly_lead_id: null,
+        reply_timestamp: reply.timestamp_email ?? null,
+      },
+      { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+    );
+    if (guardUpsertErr) {
+      workerLog(
+        'error',
+        `Client-echo dedup upsert failed for ${fromLower} (campaign ${campaignId}, email_id=${reply.id ?? 'null'}): ${guardUpsertErr.message ?? String(guardUpsertErr)}`,
+      );
+      throw new Error(`Client-echo upsert failed: ${guardUpsertErr.message ?? 'unknown'}`);
+    }
+    workerLog('info', `Skipped client-authored reply from ${fromLower} in campaign ${campaignId} (post-handoff echo, no alert)`);
+    return;
+  }
 
   if (!briefCache.has(campaignId)) {
     briefCache.set(campaignId, await fetchBriefByCampaign(campaignId));
@@ -876,7 +991,7 @@ async function notifySpecialistsAboutLead(
         { onConflict: 'entity_type,entity_id,level' },
       );
 
-    await sendTelegramLeadAlertForSpecialists({
+    const tgResult = await sendTelegramLeadAlertForSpecialists({
       userIds: userIdList,
       qualificationId,
       campaignId,
@@ -890,7 +1005,27 @@ async function notifySpecialistsAboutLead(
       aiReason,
     });
 
-    workerLog('info', `Created lead notifications for ${userIds.size} specialist(s)`);
+    // Персистим исход TG-отправки: раньше сбой уходил только в stdout-warn и
+    // терялся при рестарте воркера → нельзя было доказать, каким лидам алерт не
+    // дошёл (инцидент 08.07, PP Prod/Илиана). Теперь tg_sent/tg_error видны в
+    // deadline_notification_log — можно диагностировать и ретраить неудачные.
+    await supabaseMain
+      .from('deadline_notification_log')
+      .update({
+        tg_sent: tgResult.sent,
+        tg_message_id: tgResult.messageId,
+        tg_error: tgResult.error,
+        tg_sent_at: new Date().toISOString(),
+      })
+      .eq('entity_type', 'lead_qualification')
+      .eq('entity_id', qualificationId)
+      .eq('level', 'specialist');
+
+    workerLog(
+      'info',
+      `Created lead notifications for ${userIds.size} specialist(s)` +
+        (tgResult.sent ? '' : ` — TG send FAILED: ${tgResult.error ?? 'unknown'}`),
+    );
   } catch (err) {
     workerLog('error', 'Error creating lead notifications', err);
   }
@@ -908,8 +1043,8 @@ async function sendTelegramLeadAlertForSpecialists(data: {
   replySubject: string | null;
   replyPreview: string | null;
   aiReason: string | null;
-}): Promise<void> {
-  if (!supabaseMain) return;
+}): Promise<{ sent: boolean; messageId: number | null; error: string | null }> {
+  if (!supabaseMain) return { sent: false, messageId: null, error: 'supabaseMain not configured' };
 
   try {
     const { data: profiles } = await supabaseMain
@@ -961,10 +1096,12 @@ async function sendTelegramLeadAlertForSpecialists(data: {
     });
 
     if (!result.sent) {
-      workerLog('warn', `Telegram lead alert skipped or failed for qualification ${data.qualificationId}`);
+      workerLog('warn', `Telegram lead alert skipped or failed for qualification ${data.qualificationId}: ${result.error ?? 'unknown'}`);
     }
+    return result;
   } catch (err) {
     workerLog('error', 'Error sending Telegram lead alert', err);
+    return { sent: false, messageId: null, error: err instanceof Error ? err.message : String(err) };
   }
 }
 

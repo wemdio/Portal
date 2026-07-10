@@ -234,4 +234,86 @@ describe('pollAndQualifyReplies', () => {
       ],
     }));
   });
+
+  // Пост-handoff эхо (кейс «Умные Новации» 10.07.2026): после передачи лида
+  // клиент отвечает лиду со своей почты, наш ящик в копии → Instantly кладёт
+  // письмо в кампанию как received, ИИ честно читает «просит встречу» → ложный
+  // lead-алерт. Guard: письмо с handoff-адреса или его корп-домена не
+  // квалифицируется, но строка пишется (дедуп), алерта и ИИ нет.
+  it('skips client-authored post-handoff replies (exact handoff address + corporate-domain colleague) without AI or alert', async () => {
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          {
+            id: 'project-1',
+            client: 'Умные Новации',
+            specialist_user_id: 'specialist-1',
+            handoff_email: 'roman.maslikhov@umnovation.ru, boss@umnovation.ru',
+          },
+        ],
+        profiles: [],
+        telegram_links: [],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [
+        replyEmail({ id: 'client-echo', from_address_email: 'roman.maslikhov@umnovation.ru' }),
+        // Коллега клиента: адреса нет в handoff-списке, но корп-домен тот же.
+        replyEmail({ id: 'client-colleague', from_address_email: 'manager@umnovation.ru' }),
+      ],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(2);
+    expect(qualifyReply).not.toHaveBeenCalled();
+    expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.status).toBe('not_lead');
+      expect(String(row.ai_reason)).toContain('от нашего клиента');
+    }
+  });
+
+  it('does not block freemail domains: a gmail lead still qualifies even when a past forward went to a gmail client address', async () => {
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          { project_id: 'project-1', campaign_id: 'linked-campaign', match_source: 'auto' },
+        ],
+        instantly_lead_qualifications: [],
+        client_forwarded_leads: [
+          { campaign_id: 'linked-campaign', client_email: 'client.person@gmail.com' },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [
+        // Точный клиентский адрес — глушим; чужой gmail — обычный лид (домен
+        // freemail в доменный блок НЕ попадает, иначе зарубили бы всех лидов
+        // с бесплатной почтой).
+        replyEmail({ id: 'gmail-client', from_address_email: 'client.person@gmail.com' }),
+        replyEmail({ id: 'gmail-lead', from_address_email: 'someone.else@gmail.com' }),
+      ],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(2);
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    const clientRow = rows.find((r) => r.instantly_email_id === 'gmail-client');
+    const leadRow = rows.find((r) => r.instantly_email_id === 'gmail-lead');
+    expect(clientRow?.status).toBe('not_lead');
+    expect(String(clientRow?.ai_reason)).toContain('от нашего клиента');
+    expect(leadRow).toBeDefined();
+    expect(String(leadRow?.ai_reason ?? '')).not.toContain('от нашего клиента');
+  });
 });
