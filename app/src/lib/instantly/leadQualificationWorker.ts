@@ -15,6 +15,7 @@ import {
   buildClientReplyMessage,
 } from '@/lib/clientReplyBot/bot';
 import * as instantly from './client';
+import { isFreeProvider } from '@/lib/emailValidation/shared';
 import { generateHandoffReply } from './handoffGenerator';
 import { signHandoffCallback } from './handoffCallback';
 import {
@@ -345,6 +346,66 @@ export async function pollAndQualifyReplies(): Promise<number> {
   return processed;
 }
 
+function splitEmailList(value: string | null | undefined): string[] {
+  return (value ?? '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e.includes('@'));
+}
+
+/**
+ * Адреса «стороны клиента» для кампании: handoff_email привязанных проектов +
+ * client_email прошлых передач (client_forwarded_leads). Письмо С ЭТИХ адресов —
+ * не ответ лида, а ответ НАШЕГО КЛИЕНТА в треде: после передачи лида клиент
+ * продолжает переписку со своей почты, наш Instantly-ящик остаётся в копии, и
+ * Instantly кладёт его письмо в кампанию как received. Без guard'а ИИ честно
+ * читает «просит встречу / видел оффер» → ложный status='lead' и пинг спеца
+ * (кейс «Умные Новации» 10.07.2026: алерт на письмо ОТ клиента лиду).
+ *
+ * Домены добавляем только корпоративные (не freemail!): коллега клиента с того
+ * же домена — тоже клиент, но доменный матч по gmail/mail.ru зарубил бы
+ * настоящих лидов с бесплатной почтой.
+ */
+async function getClientPartyAddresses(
+  instantlyDb: NonNullable<typeof supabaseAdmin>,
+  campaignId: string,
+): Promise<{ addresses: Set<string>; domains: Set<string> }> {
+  const addresses = new Set<string>();
+
+  const { data: legacyLinks } = await instantlyDb
+    .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  const { data: periodLinks } = await instantlyDb
+    .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  const projectIds = [
+    ...new Set(
+      [...(legacyLinks ?? []), ...(periodLinks ?? [])]
+        .map((l: { project_id?: string | null }) => l.project_id)
+        .filter(Boolean) as string[],
+    ),
+  ];
+
+  if (projectIds.length > 0 && supabaseMain) {
+    const { data: projects } = await supabaseMain
+      .from('projects').select('handoff_email').in('id', projectIds);
+    for (const p of projects ?? []) {
+      for (const a of splitEmailList(p.handoff_email as string | null)) addresses.add(a);
+    }
+  }
+
+  const { data: forwarded } = await instantlyDb
+    .from('client_forwarded_leads').select('client_email').eq('campaign_id', campaignId);
+  for (const f of forwarded ?? []) {
+    for (const a of splitEmailList(f.client_email as string | null)) addresses.add(a);
+  }
+
+  const domains = new Set<string>();
+  for (const a of addresses) {
+    const domain = a.split('@')[1];
+    if (domain && !isFreeProvider(domain)) domains.add(domain);
+  }
+  return { addresses, domains };
+}
+
 async function qualifyOneReply(
   db: NonNullable<typeof supabaseAdmin>,
   reply: Email,
@@ -359,6 +420,38 @@ async function qualifyOneReply(
     '';
 
   if (!campaignId || !leadEmail) return;
+
+  // Пост-handoff эхо: письмо от нашего клиента (он отвечает лиду со своей
+  // почты, мы в копии) — не квалифицируем как лида. Строку всё равно пишем:
+  // дедуп по instantly_email_id иначе будет пытаться заново каждый тик.
+  const fromLower = leadEmail.trim().toLowerCase();
+  const fromDomain = fromLower.split('@')[1] ?? '';
+  const clientParty = await getClientPartyAddresses(db, campaignId);
+  if (clientParty.addresses.has(fromLower) || (fromDomain && clientParty.domains.has(fromDomain))) {
+    const replyText = getBodyText(reply.body);
+    await db.from('instantly_lead_qualifications').upsert(
+      {
+        campaign_id: campaignId,
+        campaign_name: await resolveCampaignName(campaignId, accountId),
+        lead_email: leadEmail,
+        thread_id: reply.thread_id,
+        reply_subject: reply.subject ?? null,
+        reply_preview: replyText.slice(0, 300) || null,
+        reply_body: replyText || null,
+        status: 'not_lead',
+        proposal_seen: false,
+        interest_signals: [],
+        ai_reason: `Письмо от нашего клиента (${fromLower} — адрес передачи лида/handoff этого проекта), а не от лида. Алерт не требуется.`,
+        ai_confidence: 1,
+        instantly_email_id: reply.id,
+        instantly_lead_id: null,
+        reply_timestamp: reply.timestamp_email ?? null,
+      },
+      { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+    );
+    workerLog('info', `Skipped client-authored reply from ${fromLower} in campaign ${campaignId} (post-handoff echo, no alert)`);
+    return;
+  }
 
   if (!briefCache.has(campaignId)) {
     briefCache.set(campaignId, await fetchBriefByCampaign(campaignId));
