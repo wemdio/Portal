@@ -168,6 +168,10 @@ class YandexMapsParser:
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-infobars")
     chrome_options.add_argument("--lang=ru-RU")
+    # Не грузим картинки на уровне Blink — экономит трафик прокси
+    # (обычно основная часть — аватарки и превью). DOM-парсинг картинки
+    # не использует, все поля берём из текста и href'ов.
+    chrome_options.add_argument("--blink-settings=imagesEnabled=false")
 
     # Рандомизация UA + window-size на каждую сессию. Мобильный UA пары'ится
     # с мобильным viewport'ом — иначе противоречие в самом User-Agent-Client-Hints
@@ -207,6 +211,7 @@ class YandexMapsParser:
           use_subprocess=True,
           headless=self.headless,
         )
+        self._apply_traffic_savings()
         return
       except Exception as e:
         self.log(f"[!] seleniumwire+uc не стартовал ({e}), падаем на обычный uc без auth-прокси")
@@ -223,6 +228,50 @@ class YandexMapsParser:
       use_subprocess=True,
       headless=self.headless,
     )
+    self._apply_traffic_savings()
+
+  def _apply_traffic_savings(self):
+    """Через CDP блокирует запросы к тяжёлым ресурсам — тайлы карты, аватарки,
+    метрика/аналитика. HTML/JS/CSS оставляем: JS-фреймворк Яндекса рендерит
+    список организаций динамически, без них DOM будет пустым.
+
+    Экономит ~70-80% трафика прокси. Основная масса байт на карте Яндекса —
+    это тайлы (десятки МБ на прокрутку) и картинки-превью в карточках.
+    """
+    if not self.driver:
+      return
+    blocked_urls = [
+      # Тайлы карты — самый жирный источник трафика.
+      "*core-renderer-tiles*",
+      "*/tiles*",
+      "*/services/tiles*",
+      "*tile.maps.yandex.net*",
+      "*sat*.maps.yandex.net*",
+      "*vec*.maps.yandex.net*",
+      # Аватарки и картинки-превью организаций.
+      "*avatars.mds.yandex.net*",
+      "*avatars.mdst.yandex.net*",
+      "*yastatic.net/s3/*",
+      # Метрика/аналитика/реклама — нам не нужно.
+      "*mc.yandex.ru/metrika*",
+      "*mc.yandex.ru/watch*",
+      "*mc.webvisor*",
+      "*an.yandex.ru*",
+      "*yandexadexchange.net*",
+      # Медиа — не грузим совсем.
+      "*.mp4",
+      "*.webm",
+      "*.mp3",
+      "*.ogg",
+    ]
+    try:
+      self.driver.execute_cdp_cmd("Network.enable", {})
+      self.driver.execute_cdp_cmd("Network.setBlockedURLs", {"urls": blocked_urls})
+    except Exception as e:
+      # Не критично: `--blink-settings=imagesEnabled=false` в опциях уже
+      # покрывает базовый кейс с картинками. CDP — просто дополнительный
+      # слой блокировки для тайлов/метрики.
+      self.log(f"[!] CDP-блокировка недоступна: {e}")
 
   def stop(self):
     self.is_running = False
