@@ -70,16 +70,18 @@ function deriveResult(p: ProjectData): Result {
   }
   const fact = parseNum(p.kpi_fact);
   const goal = parseNum(p.kpi_plan);
-  const finished = st.includes('заверш');
-  const hasVerdict = (fact != null && fact > 0) || (finished && goal != null && goal > 0);
-  if (hasVerdict) {
+  // Есть числовая цель (в т.ч. извлечённая из текста «20 встреч»/«10 квалов» → 20/10): показываем вердикт.
+  if (goal != null && goal > 0) {
     const f = fact ?? 0;
-    const g = goal ?? 0;
-    const suffix = ` (${f} из ${g})`;
-    if (g > 0 && f < g) {
+    const suffix = ` (${f} из ${goal})`;
+    if (f < goal) {
       return { cat: 'missed', label: 'Не довели лидов' + suffix, badgeCls: 'bg-red-50 text-red-700 ring-red-600/20', dotCls: 'bg-red-500' };
     }
     return { cat: 'delivered', label: 'Довели лидов' + suffix, badgeCls: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20', dotCls: 'bg-emerald-500' };
+  }
+  // Цели нет: если есть доведённые лиды — показываем просто их число (нейтрально, без ложного «довели»).
+  if (fact != null && fact > 0) {
+    return { cat: 'work', label: `${fact} ${pluralRu(fact, 'лид', 'лида', 'лидов')}`, badgeCls: 'bg-gray-100 text-gray-600 ring-gray-500/20', dotCls: 'bg-gray-400' };
   }
   if (st.includes('отмен')) {
     return { cat: 'other', label: 'Отменён', badgeCls: 'bg-gray-100 text-gray-500 ring-gray-500/20', dotCls: 'bg-gray-400' };
@@ -356,7 +358,8 @@ export default function TeamPage() {
     const free = Math.max(0, totalPlan - totalFact);
     const load = totalPlan > 0 ? Math.round((totalFact / totalPlan) * 100) : 0;
     const r = rollup(projects);
-    return { active, totalPlan, free, load, delivered: r.delivered, missed: r.missed };
+    const totalLeads = projects.reduce((s, p) => s + (parseNum(p.kpi_fact) ?? 0), 0);
+    return { active, totalPlan, free, load, delivered: r.delivered, missed: r.missed, totalLeads };
   }, [projects, model.specialists]);
 
   const q = query.trim().toLowerCase();
@@ -677,18 +680,14 @@ export default function TeamPage() {
           </div>
         ))}
         <div className={`bg-white rounded-2xl border border-gray-200 shadow-sm ${isTma ? 'p-4' : 'p-5'}`}>
-          <p className="text-sm font-medium text-gray-500">Результаты по проектам</p>
-          <div className="mt-1.5 space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-emerald-500" />
-              <span className="text-lg font-bold text-emerald-700 tabular-nums">{kpi.delivered}</span>
-              <span className="text-xs text-gray-500">довели лидов</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-red-500" />
-              <span className="text-lg font-bold text-red-600 tabular-nums">{kpi.missed}</span>
-              <span className="text-xs text-gray-500">не довели</span>
-            </div>
+          <p className="text-sm font-medium text-gray-500">Лидов доведено</p>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-2xl font-bold text-emerald-700 tabular-nums">{kpi.totalLeads}</span>
+            <span className="text-sm text-gray-400">всего</span>
+          </div>
+          <div className="mt-2 flex items-center gap-3 text-xs">
+            <span className="inline-flex items-center gap-1.5 text-gray-500"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />{kpi.delivered} довели цель</span>
+            <span className="inline-flex items-center gap-1.5 text-gray-500"><span className="h-1.5 w-1.5 rounded-full bg-red-500" />{kpi.missed} не довели</span>
           </div>
         </div>
       </div>
@@ -780,9 +779,12 @@ function resultRank(p: ProjectData): number {
   return 1; // prep
 }
 
-function plural(n: number): string {
+function pluralRu(n: number, one: string, few: string, many: string): string {
   const a = n % 10, b = n % 100;
-  if (a === 1 && b !== 11) return 'проект';
-  if (a >= 2 && a <= 4 && (b < 10 || b >= 20)) return 'проекта';
-  return 'проектов';
+  if (a === 1 && b !== 11) return one;
+  if (a >= 2 && a <= 4 && (b < 10 || b >= 20)) return few;
+  return many;
+}
+function plural(n: number): string {
+  return pluralRu(n, 'проект', 'проекта', 'проектов');
 }
