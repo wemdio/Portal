@@ -180,6 +180,12 @@ describe('pollAndQualifyReplies', () => {
     expect(listEmails.mock.calls[0][0]).not.toHaveProperty('campaign_id');
     expect(qualifyReply).toHaveBeenCalledTimes(1);
     expect(qualifyReply.mock.calls[0][0]).toBe('linked-campaign');
+    // Контракт против двойного фетча: воркер передаёт УЖЕ зафетченный контекст
+    // (здесь null — fetchThreadContext замокан в null) явно, а qualifyReply при
+    // непустом prefetchedContext (включая null) НЕ рефетчит.
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ prefetchedContext: null }),
+    );
     expect(mockInstantlyDb!.upserts).toHaveLength(1);
     expect(mockInstantlyDb!.upserts[0].rows[0]).toEqual(
       expect.objectContaining({
@@ -425,6 +431,41 @@ describe('pollAndQualifyReplies', () => {
     expect(rows[0].status).toBe('needs_review');
     expect(String(rows[0].ai_reason)).toContain('kirill@kira-aggregator.ru');
     expect(String(rows[0].ai_reason)).toContain('lyamina@ritso-contact.ru');
+  });
+
+  // Слепая зона, найденная адверсариальным ревью: у «слепого» письма тред не
+  // содержит наших исходящих (search идёт по адресу ОТПРАВИТЕЛЯ, кампания ему
+  // не писала) → сравнение только с тредом молча fail-open'илось. Теперь guard
+  // сравнивает ещё и с ящиками кампании (campaignOutboundMailboxes).
+  it('flags cross-client via campaign mailboxes when the thread itself has no outbounds', async () => {
+    fetchThreadContext.mockResolvedValue({
+      replyEmail: replyEmail({ id: 'cross-empty-thread' }),
+      threadEmails: [],
+      lastOutbound: null,
+      campaignOutboundMailboxes: ['lyamina@ritso-contact.ru'],
+    });
+    listEmails.mockResolvedValue({
+      items: [
+        replyEmail({
+          id: 'cross-empty-thread',
+          from_address_email: 'head_market@nais.ru',
+          eaccount: 'kirill@kira-aggregator.ru',
+          to_address_email_list: 'kirill@kira-aggregator.ru',
+        }),
+      ],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1);
+    expect(qualifyReply).not.toHaveBeenCalled();
+    expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('needs_review');
+    expect(String(rows[0].ai_reason)).toContain('kirill@kira-aggregator.ru');
   });
 
   it('does not flag cross-client when the reply arrived at the same mailbox that mailed the lead', async () => {

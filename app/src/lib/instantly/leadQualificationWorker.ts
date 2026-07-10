@@ -544,12 +544,18 @@ async function qualifyOneReply(
     prefetchedContext ??
     (await fetchThreadContext(campaignId, leadEmail, reply.thread_id, accountId));
   if (ourMailbox && ctx) {
+    // Тред-исходящие ∪ ящики кампании (campaignOutboundMailboxes — из уже
+    // скачанных страниц, без доп. вызовов). Только тредовых НЕДОСТАТОЧНО: для
+    // «слепого» письма search идёт по адресу ОТПРАВИТЕЛЯ (кампания ему не
+    // писала) и тред-скоуп часто пуст → guard молча fail-open'ился бы в своём
+    // же флагманском сценарии (находка адверсариального ревью).
     const outboundMailboxes = new Set(
       [...ctx.threadEmails, ...(ctx.lastOutbound ? [ctx.lastOutbound] : [])]
         .filter((e) => (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3)
         .map((e) => (e.eaccount ?? '').trim().toLowerCase())
         .filter(Boolean),
     );
+    for (const m of ctx.campaignOutboundMailboxes ?? []) outboundMailboxes.add(m);
     if (outboundMailboxes.size > 0 && !outboundMailboxes.has(ourMailbox)) {
       const replyText = getBodyText(reply.body);
       const { error: crossUpsertErr } = await db.from('instantly_lead_qualifications').upsert(

@@ -20,6 +20,15 @@ export interface ThreadContext {
   replyEmail: Email;
   threadEmails: Email[];
   lastOutbound: Email | null;
+  /**
+   * Ящики (eaccount, lowercase), с которых кампания слала письма — собраны из
+   * ВСЕХ писем, полученных при восстановлении контекста (search + campaign-wide
+   * fallback), без дополнительных API-вызовов. Нужны кросс-клиентскому guard'у
+   * воркера: threadEmails отфильтрованы по треду/лиду и для «слепых» писем
+   * (Instantly приклеил чужое письмо по домену) часто не содержат ни одного
+   * нашего исходящего — а campaign-wide страница содержит.
+   */
+  campaignOutboundMailboxes?: string[];
 }
 
 // ─── Thread Context Fetcher ──────────────────────────────────────────────────
@@ -120,7 +129,17 @@ export async function fetchThreadContext(
     ? outboundsBefore[outboundsBefore.length - 1]
     : null;
 
-  return { replyEmail, threadEmails: outboundScope, lastOutbound };
+  // Ящики кампании из всего скачанного (до тред/лид-фильтров) — in-memory.
+  const campaignOutboundMailboxes = [
+    ...new Set(
+      allEmails
+        .filter((e) => (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3)
+        .map((e) => (e.eaccount ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+
+  return { replyEmail, threadEmails: outboundScope, lastOutbound, campaignOutboundMailboxes };
 }
 
 // ─── Body Text Extraction ────────────────────────────────────────────────────
@@ -644,7 +663,14 @@ export async function qualifyReply(
     threadContext: ThreadContext | null;
   }
 > {
-  const ctx = aiOptions.prefetchedContext ?? (await fetchThreadContext(campaignId, leadEmail, threadId, accountId));
+  // `!== undefined`, НЕ `??`: null означает «вызывающий УЖЕ фетчил контекст и
+  // его нет» — рефетч тут удваивал бы вызовы /emails ровно на деградирующем
+  // Instantly (общий лимит воркспейса, инцидент 22 мая). undefined = «не
+  // префетчили» → фетчим сами.
+  const ctx =
+    aiOptions.prefetchedContext !== undefined
+      ? aiOptions.prefetchedContext
+      : await fetchThreadContext(campaignId, leadEmail, threadId, accountId);
   if (!ctx) {
     return {
       isLead: false,
