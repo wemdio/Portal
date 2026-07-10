@@ -163,6 +163,39 @@ describe('fetchThreadContext campaignOutboundMailboxes', () => {
   });
 });
 
+describe('isAutoReplyOrUnsubscribe — уведомления о смене/закрытии ящика', () => {
+  // Ложный лид stroytim_plus 29.06 (баг №1 от спеца): «почта прекратила свою
+  // работу» + список новых контактов ИИ вероятностно читал как интерес.
+  // Класс отсекается детерминированно, ДО модели.
+  it('матчит реальные формальные уведомления (кейсы из прода)', async () => {
+    const { isAutoReplyOrUnsubscribe } = await import('@/lib/instantly/leadQualifier');
+    const positives = [
+      'ООО «СТРОЙТАЙМ ПЛЮС» информирует Вас о том, что почта stroytim_plus@mail.ru прекратила свою работу. Официальная почта компании info@st-plus33.ru',
+      'Просим Вас вести переписку с сотрудниками по направлениям деятельности.',
+      'ООО "Татнефть-Самара" сообщает о смене адреса электронной почты.',
+      'Данный почтовый ящик больше не обслуживается.',
+      'This email address is no longer in use, please contact sales@example.com',
+      'Просим направлять корреспонденцию на info@example.ru',
+    ];
+    for (const text of positives) {
+      expect(isAutoReplyOrUnsubscribe(text)).toBe(true);
+    }
+  });
+
+  it('НЕ матчит живые ответы с упоминанием адреса/почты (их решает ИИ)', async () => {
+    const { isAutoReplyOrUnsubscribe } = await import('@/lib/instantly/leadQualifier');
+    const negatives = [
+      'Добрый день! Пришлите, пожалуйста, цены и условия.',
+      'Интересно. Вышлите предложение на info@company.ru, это почта директора.',
+      'Отправьте КП на другой адрес: zakupki@firma.ru, там быстрее посмотрят.',
+      'Да, тема актуальна. Давайте созвонимся во вторник.',
+    ];
+    for (const text of negatives) {
+      expect(isAutoReplyOrUnsubscribe(text)).toBe(false);
+    }
+  });
+});
+
 describe('getBodyText', () => {
   it('декодирует числовые HTML-сущности в html-only письмах (mail.ru)', async () => {
     const { getBodyText } = await import('@/lib/instantly/leadQualifier');
