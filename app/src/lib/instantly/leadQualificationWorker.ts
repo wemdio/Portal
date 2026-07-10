@@ -372,10 +372,19 @@ async function getClientPartyAddresses(
 ): Promise<{ addresses: Set<string>; domains: Set<string> }> {
   const addresses = new Set<string>();
 
-  const { data: legacyLinks } = await instantlyDb
+  // Ошибки запросов НЕ роняют квалификацию (fail-open: письмо уйдёт в обычный
+  // AI-путь — хуже ложный алерт, чем потерянный настоящий лид), но деградацию
+  // guard'а обязаны логировать: молчаливый fail-open во время блипа БД внешне
+  // неотличим от «guard решил, что это лид».
+  const logDegraded = (source: string, message: string | undefined) =>
+    workerLog('warn', `client-echo guard degraded (fail-open): ${source} query failed — ${message ?? 'unknown'}`);
+
+  const { data: legacyLinks, error: legacyErr } = await instantlyDb
     .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
-  const { data: periodLinks } = await instantlyDb
+  if (legacyErr) logDegraded('project_instantly_campaigns', legacyErr.message);
+  const { data: periodLinks, error: periodErr } = await instantlyDb
     .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  if (periodErr) logDegraded('project_period_instantly_campaigns', periodErr.message);
   const projectIds = [
     ...new Set(
       [...(legacyLinks ?? []), ...(periodLinks ?? [])]
@@ -385,15 +394,17 @@ async function getClientPartyAddresses(
   ];
 
   if (projectIds.length > 0 && supabaseMain) {
-    const { data: projects } = await supabaseMain
+    const { data: projects, error: projectsErr } = await supabaseMain
       .from('projects').select('handoff_email').in('id', projectIds);
+    if (projectsErr) logDegraded('projects.handoff_email', projectsErr.message);
     for (const p of projects ?? []) {
       for (const a of splitEmailList(p.handoff_email as string | null)) addresses.add(a);
     }
   }
 
-  const { data: forwarded } = await instantlyDb
+  const { data: forwarded, error: forwardedErr } = await instantlyDb
     .from('client_forwarded_leads').select('client_email').eq('campaign_id', campaignId);
+  if (forwardedErr) logDegraded('client_forwarded_leads', forwardedErr.message);
   for (const f of forwarded ?? []) {
     for (const a of splitEmailList(f.client_email as string | null)) addresses.add(a);
   }
@@ -429,7 +440,11 @@ async function qualifyOneReply(
   const clientParty = await getClientPartyAddresses(db, campaignId);
   if (clientParty.addresses.has(fromLower) || (fromDomain && clientParty.domains.has(fromDomain))) {
     const replyText = getBodyText(reply.body);
-    await db.from('instantly_lead_qualifications').upsert(
+    // Как и основной upsert ниже: ошибку НЕ глотаем. Молча потерянная строка =
+    // нет дедупа → это же эхо переобрабатывается каждый тик, занимая слот из
+    // MAX_QUALIFY_PER_TICK. throw → внешний catch запишет status='error'
+    // (видимость + дедуп-строка), ровно как при сбое основного пути.
+    const { error: guardUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
       {
         campaign_id: campaignId,
         campaign_name: await resolveCampaignName(campaignId, accountId),
@@ -449,6 +464,13 @@ async function qualifyOneReply(
       },
       { onConflict: 'instantly_email_id', ignoreDuplicates: true },
     );
+    if (guardUpsertErr) {
+      workerLog(
+        'error',
+        `Client-echo dedup upsert failed for ${fromLower} (campaign ${campaignId}, email_id=${reply.id ?? 'null'}): ${guardUpsertErr.message ?? String(guardUpsertErr)}`,
+      );
+      throw new Error(`Client-echo upsert failed: ${guardUpsertErr.message ?? 'unknown'}`);
+    }
     workerLog('info', `Skipped client-authored reply from ${fromLower} in campaign ${campaignId} (post-handoff echo, no alert)`);
     return;
   }
