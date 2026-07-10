@@ -533,6 +533,60 @@ async function qualifyOneReply(
     }
   }
 
+  // Кросс-клиентский доменный матч Instantly (кейс NAIS→KIRA, 10.07): лид
+  // получил рассылки ДВУХ наших клиентов и написал НОВОЕ письмо (без
+  // In-Reply-To) на ящик клиента A — Instantly, не найдя тред, приклеил его по
+  // домену отправителя к лиду/кампании клиента B. Детектор: ящик, куда письмо
+  // физически пришло (eaccount), не совпадает ни с одним ящиком, который писал
+  // лиду в этом треде. Контекст треда фетчим здесь и передаём в qualifyReply
+  // как prefetchedContext — итоговое число вызовов Instantly не растёт.
+  const ctx =
+    prefetchedContext ??
+    (await fetchThreadContext(campaignId, leadEmail, reply.thread_id, accountId));
+  if (ourMailbox && ctx) {
+    const outboundMailboxes = new Set(
+      [...ctx.threadEmails, ...(ctx.lastOutbound ? [ctx.lastOutbound] : [])]
+        .filter((e) => (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3)
+        .map((e) => (e.eaccount ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    );
+    if (outboundMailboxes.size > 0 && !outboundMailboxes.has(ourMailbox)) {
+      const replyText = getBodyText(reply.body);
+      const { error: crossUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+        {
+          campaign_id: campaignId,
+          campaign_name: await resolveCampaignName(campaignId, accountId),
+          lead_email: leadEmail,
+          thread_id: reply.thread_id,
+          reply_subject: reply.subject ?? null,
+          reply_preview: replyText.slice(0, 300) || null,
+          reply_body: replyText || null,
+          status: 'needs_review',
+          proposal_seen: false,
+          interest_signals: [],
+          ai_reason: `Письмо пришло в ящик ${ourMailbox}, а лиду в этой кампании писал ${[...outboundMailboxes].join(', ')} — Instantly привязал его по домену отправителя. Похоже, это ответ на рассылку ДРУГОГО клиента (чей ящик ${ourMailbox}) — проверьте и передайте его специалисту вручную.`,
+          ai_confidence: 0,
+          instantly_email_id: reply.id,
+          instantly_lead_id: null,
+          reply_timestamp: reply.timestamp_email ?? null,
+        },
+        { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+      );
+      if (crossUpsertErr) {
+        workerLog(
+          'error',
+          `Cross-client dedup upsert failed for ${fromLower} (campaign ${campaignId}, email_id=${reply.id ?? 'null'}): ${crossUpsertErr.message ?? String(crossUpsertErr)}`,
+        );
+        throw new Error(`Cross-client upsert failed: ${crossUpsertErr.message ?? 'unknown'}`);
+      }
+      workerLog(
+        'info',
+        `Cross-client email from ${fromLower}: arrived at ${ourMailbox}, campaign ${campaignId} thread was mailed by ${[...outboundMailboxes].join(', ')} → needs_review, no alert`,
+      );
+      return;
+    }
+  }
+
   if (!briefCache.has(campaignId)) {
     briefCache.set(campaignId, await fetchBriefByCampaign(campaignId));
   }
@@ -542,7 +596,8 @@ async function qualifyOneReply(
     apiKey,
     model: MODEL,
     briefText: cachedBrief,
-    prefetchedContext,
+    // Контекст уже зафетчен выше (кросс-клиентский guard) — не фетчим второй раз.
+    prefetchedContext: ctx,
   }, accountId);
 
   const campaignName = await resolveCampaignName(campaignId, accountId);

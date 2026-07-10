@@ -11,6 +11,7 @@ const getLeadsByEmail = jest.fn();
 const getCampaign = jest.fn();
 const qualifyReply = jest.fn();
 const fetchBriefByCampaign = jest.fn();
+const fetchThreadContext = jest.fn();
 const sendLeadTelegramAlert = jest.fn();
 
 jest.mock('@/lib/supabaseInstantly', () => ({
@@ -36,6 +37,7 @@ jest.mock('@/lib/instantly/leadQualifier', () => ({
   __esModule: true,
   qualifyReply: (...args: unknown[]) => qualifyReply(...args),
   fetchBriefByCampaign: (...args: unknown[]) => fetchBriefByCampaign(...args),
+  fetchThreadContext: (...args: unknown[]) => fetchThreadContext(...args),
   getBodyText: (body: Email['body']) => {
     if (!body) return '';
     if (typeof body === 'string') return body;
@@ -76,6 +78,9 @@ describe('pollAndQualifyReplies', () => {
     getCampaign.mockReset().mockResolvedValue({ id: 'linked-campaign', name: 'Кампания Новикова' });
     sendLeadTelegramAlert.mockReset().mockResolvedValue({ sent: true, messageId: 42 });
     fetchBriefByCampaign.mockReset().mockResolvedValue(null);
+    // null = контекст треда не восстановлен → кросс-клиентский guard скипается
+    // (fail-open), тесты обычного потока не затрагиваются.
+    fetchThreadContext.mockReset().mockResolvedValue(null);
     qualifyReply.mockReset().mockResolvedValue({
       isLead: false,
       proposalSeen: true,
@@ -373,5 +378,80 @@ describe('pollAndQualifyReplies', () => {
     for (const row of rows) {
       expect(String(row.ai_reason ?? '')).not.toContain('нет в To/CC');
     }
+  });
+
+  // Кросс-клиентский доменный матч Instantly (кейс NAIS→KIRA 10.07): лид двух
+  // наших клиентов написал НОВОЕ письмо на ящик клиента A (To=eaccount, поэтому
+  // BCC-guard молчит), а Instantly приклеил его по домену отправителя к
+  // кампании клиента B. Детектор: eaccount ≠ ящики, писавшие лиду в треде.
+  it('routes cross-client domain-matched emails (arrived at another client mailbox) to needs_review without AI or alert', async () => {
+    fetchThreadContext.mockResolvedValue({
+      replyEmail: replyEmail({ id: 'cross-email' }),
+      threadEmails: [
+        replyEmail({
+          id: 'our-outbound',
+          ue_type: 1,
+          eaccount: 'lyamina@ritso-contact.ru',
+          from_address_email: 'lyamina@ritso-contact.ru',
+        }),
+      ],
+      lastOutbound: replyEmail({
+        id: 'our-outbound',
+        ue_type: 1,
+        eaccount: 'lyamina@ritso-contact.ru',
+        from_address_email: 'lyamina@ritso-contact.ru',
+      }),
+    });
+    listEmails.mockResolvedValue({
+      items: [
+        replyEmail({
+          id: 'cross-email',
+          from_address_email: 'head_market@nais.ru',
+          eaccount: 'kirill@kira-aggregator.ru',
+          to_address_email_list: 'kirill@kira-aggregator.ru',
+        }),
+      ],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1);
+    expect(qualifyReply).not.toHaveBeenCalled();
+    expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('needs_review');
+    expect(String(rows[0].ai_reason)).toContain('kirill@kira-aggregator.ru');
+    expect(String(rows[0].ai_reason)).toContain('lyamina@ritso-contact.ru');
+  });
+
+  it('does not flag cross-client when the reply arrived at the same mailbox that mailed the lead', async () => {
+    fetchThreadContext.mockResolvedValue({
+      replyEmail: replyEmail({ id: 'same-mailbox-email' }),
+      threadEmails: [
+        replyEmail({ id: 'our-outbound-2', ue_type: 1, eaccount: 'lyamina@ritso-contact.ru' }),
+      ],
+      lastOutbound: replyEmail({ id: 'our-outbound-2', ue_type: 1, eaccount: 'lyamina@ritso-contact.ru' }),
+    });
+    listEmails.mockResolvedValue({
+      items: [
+        replyEmail({
+          id: 'same-mailbox-email',
+          eaccount: 'lyamina@ritso-contact.ru',
+          to_address_email_list: 'lyamina@ritso-contact.ru',
+        }),
+      ],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1);
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(String(rows[0]?.ai_reason ?? '')).not.toContain('привязал его по домену');
   });
 });
