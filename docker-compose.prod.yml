@@ -1,11 +1,6 @@
 # Лимиты memory+cpus — потолки; суммы ≤90-95 % от 32 vCPU / 64 GB RAM.
 # Сервер: 2×Xeon E5-2670 (16C/32T) / 64 GB / 1 TB HDD SFF / HW RAID / 2×PSU.
 # CPU: 29.15 / 32 = 91 %; RAM: 61 184 / 65 536 = 93 %. Остаток — ОС и Docker daemon.
-#
-# 2026-06-10: убран worker-enrich-10 (-2 GB / -1 CPU), добавлен openoutreach
-# (+2.56 GB / +1.5 CPU). Чистый delta: +0.56 GB / +0.5 CPU. Enrich-pool теперь
-# 9 реплик вместо 10 (по комментарию ниже пул overcapped, throughput-impact
-# минимальный). См. docs/superpowers/specs/2026-06-10-openoutreach-portal-native-design.md.
 services:
   portal:
     image: ${DOCKER_USERNAME}/portal:prod
@@ -240,8 +235,7 @@ services:
   worker-enrich-7: { <<: *worker-enrich, container_name: portal-worker-enrich-7 }
   worker-enrich-8: { <<: *worker-enrich, container_name: portal-worker-enrich-8 }
   worker-enrich-9: { <<: *worker-enrich, container_name: portal-worker-enrich-9 }
-  # worker-enrich-10 убран 2026-06-10: освобождает 2 GB / 1 CPU под
-  # openoutreach (см. сервис ниже). Если когда-нибудь захочется вернуть —
+  # worker-enrich-10 убран 2026-06-10. Если когда-нибудь захочется вернуть —
   # просто откоммитить эту строку и пересчитать суммы вверху.
 
   # ─── Single-writer coordinator для buffer'а ────────────────────────────
@@ -292,7 +286,11 @@ services:
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=yandexmaps
     depends_on:
-      - yandexmaps
+      # Дожидаемся именно healthy, не просто "процесс стартовал": иначе
+      # воркер стартует за ~10 сек до готовности uvicorn и первая же задача
+      # падает с "health check failed".
+      yandexmaps:
+        condition: service_healthy
     stop_grace_period: 30m
     deploy:
       resources:
@@ -315,6 +313,10 @@ services:
       - GOOGLEPARSERS_SERVICE_URL=http://googleparsers:8001
       - GOOGLEPARSERS_CONCURRENCY=1
       - GOOGLEPARSERS_PROXY_ENCRYPTION_KEY=${GOOGLEPARSERS_PROXY_ENCRYPTION_KEY}
+      # Fallback proxy pool used when a job's per-job proxy textarea is empty.
+      # Same env var other workers already read (Yandex, HH, etc.) — shared JSON
+      # list of "http://user:pass@host:port" strings.
+      - PROXY_URLS=${PROXY_URLS}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=googleparsers
@@ -1274,74 +1276,6 @@ services:
         limits:
           memory: 256M
           cpus: '0.1'
-    restart: unless-stopped
-    networks:
-      - portal-network
-
-  # OpenOutreach LinkedIn outreach runtime (см.
-  # docs/superpowers/specs/2026-06-10-openoutreach-portal-native-design.md).
-  # Один Django-контейнер обслуживает 5-20 LinkedIn-аккаунтов через
-  # async main loop + ephemeral Chromium per task (cap=3 одновременных).
-  # Polls li2_accounts.status=='running' каждые 5s, выполняет li2_tasks
-  # внутри campaign.working_hours окон. Cookies/storage_state в Postgres,
-  # контейнер stateless.
-  #
-  # VNC :6080 (внутри сети) для прохождения CAPTCHA — оператор открывает
-  # https://polza-portal.ru/openoutreach-vnc/ (basic auth через nginx),
-  # проходит проверку руками, шлёт POST /tools/li-outreach-v2/accounts/
-  # resume-from-captcha — daemon продолжит.
-  openoutreach:
-    image: ${DOCKER_USERNAME}/portal-openoutreach:prod
-    container_name: portal-openoutreach
-    build:
-      context: ./services/openoutreach
-      dockerfile: compose/linkedin/Dockerfile
-      args:
-        BUILD_ENV: production
-    env_file:
-      - .env
-    environment:
-      - DJANGO_SETTINGS_MODULE=linkedin.django_settings
-      # SUPABASE_DB_URL — наш self-hosted Postgres на 144.31.54.166. Django
-      # читает его как DATABASE_URL (см. linkedin/django_settings.py).
-      - DATABASE_URL=${SUPABASE_DB_URL}
-      # OpenOutreach LLM key — общий для всех аккаунтов, как в start/route.ts.
-      - OPENROUTER_LI_OUTREACH_API_KEY=${OPENROUTER_LI_OUTREACH_API_KEY}
-      # Daemon tuning
-      - LI2_DAEMON_POLL_INTERVAL_SEC=${LI2_DAEMON_POLL_INTERVAL_SEC:-5}
-      - LI2_MAX_CONCURRENT_BROWSERS=${LI2_MAX_CONCURRENT_BROWSERS:-3}
-      - ENABLE_VNC=true
-      # headless по умолчанию. Для прохождения CAPTCHA через VNC оператор
-      # ставит LI2_BROWSER_HEADLESS=false в .env — Chromium рисует на Xvfb :99
-      # (его шарит x11vnc). ВНИМАНИЕ: keep-alive паузы на checkpoint пока нет —
-      # см. docs/captcha-vnc-plan.md.
-      - LI2_BROWSER_HEADLESS=${LI2_BROWSER_HEADLESS:-true}
-    # noVNC слушает :6080 внутри контейнера. Публикуем ТОЛЬКО на 127.0.0.1 —
-    # наружу проксирует nginx с basic-auth (см. docs/captcha-vnc-plan.md).
-    ports:
-      - "127.0.0.1:6080:6080"
-    labels:
-      - autoheal=true
-    healthcheck:
-      # daemon пишет /tmp/li2-daemon-heartbeat на каждой итерации main_loop'a
-      # (~ каждые 5s). 300s threshold — даём запас на startup'ы task'ов
-      # (Playwright cold start, LLM-вызовы) которые могут на минуту-другую
-      # затянуть итерацию.
-      test: ["CMD-SHELL", "test -f /tmp/li2-daemon-heartbeat && test $$(( $$(date +%s) - $$(cat /tmp/li2-daemon-heartbeat | cut -c1-10) )) -lt 300 || exit 1"]
-      interval: 60s
-      timeout: 5s
-      retries: 3
-      start_period: 180s
-    # Грейс-период должен дать текущим в полёте Chromium'ам корректно закрыться
-    # и сохранить storage_state. Task'и идут 30-180s, дадим 5 минут с запасом.
-    stop_grace_period: 5m
-    deploy:
-      resources:
-        limits:
-          # 500 MB Django + ML (FastEmbed model в RAM ~ 300 MB) + 3 × ~500 MB
-          # peak Chromium на LinkedIn-heavy страницах + headroom для bursts.
-          memory: 2560M
-          cpus: '1.5'
     restart: unless-stopped
     networks:
       - portal-network

@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "express": "^4.21.2",
-    "playwright": "^1.49.1",
+    "playwright": "1.61.1",
     "tsx": "^4.19.2",
     "ws": "^8.18.0"
   },

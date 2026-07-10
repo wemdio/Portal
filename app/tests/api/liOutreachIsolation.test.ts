@@ -627,8 +627,19 @@ describe('LI Outreach — account ownership guard on write paths', () => {
     expect((res as Response).status).toBe(200);
   });
 
-  it('POST /scraper/search rejects another specialist’s account (403)', async () => {
+  // Team-wide edit access (2026-07): scraper routes accept a foreign account —
+  // shared Unipile workspace means any team member can scrape via any account.
+  // The task row still records auth.user.id so we can attribute who ran it,
+  // and account_id points at li_accounts.id (visible cross-specialist). The
+  // response comes back OK (route returns { task_id } with default 200).
+  //
+  // Mock note: makeBuilder's `insert().select().single()` reads rows from
+  // state.rowsByTable[table] rather than simulating an actual insert, so we
+  // seed a placeholder li_tasks row for the mock to return — otherwise the
+  // route sees `error: 'not found'` and short-circuits to 500.
+  it('POST /scraper/search accepts another team member’s account', async () => {
     seedAccounts();
+    state.rowsByTable.li_tasks = [{ id: 'seeded-task-id' }];
     const { POST } = await import('@/app/api/tools/li-outreach/scraper/search/route');
     const res = await POST(
       makeReq('http://x/api/tools/li-outreach/scraper/search', {
@@ -637,11 +648,12 @@ describe('LI Outreach — account ownership guard on write paths', () => {
         headers: { 'content-type': 'application/json' },
       }),
     );
-    expect((res as Response).status).toBe(403);
+    expect((res as Response).status).toBe(200);
   });
 
-  it('POST /scraper/reactions rejects another specialist’s account (403)', async () => {
+  it('POST /scraper/reactions accepts another team member’s account', async () => {
     seedAccounts();
+    state.rowsByTable.li_tasks = [{ id: 'seeded-task-id' }];
     const { POST } = await import('@/app/api/tools/li-outreach/scraper/reactions/route');
     const res = await POST(
       makeReq('http://x/api/tools/li-outreach/scraper/reactions', {
@@ -650,6 +662,6 @@ describe('LI Outreach — account ownership guard on write paths', () => {
         headers: { 'content-type': 'application/json' },
       }),
     );
-    expect((res as Response).status).toBe(403);
+    expect((res as Response).status).toBe(200);
   });
 });

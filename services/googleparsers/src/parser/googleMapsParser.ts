@@ -16,23 +16,54 @@ export interface MapsRunCallbacks {
     message: string;
   }) => void;
   onError: (error: JobError) => void;
+  onLog?: (
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    meta?: Record<string, unknown>
+  ) => void;
   shouldPause: () => boolean;
   shouldStop: () => boolean;
 }
 
+function log(
+  cb: MapsRunCallbacks,
+  level: "debug" | "info" | "warn" | "error",
+  message: string,
+  meta?: Record<string, unknown>
+): void {
+  cb.onLog?.(level, message, meta);
+}
+
 export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Promise<void> {
-  if (job.targets.length === 0) return;
+  if (job.targets.length === 0) {
+    log(cb, "warn", "No targets to parse — job has empty target list");
+    return;
+  }
 
   let browser: Browser | undefined;
 
   try {
+    log(cb, "info", "Launching Chromium", {
+      proxy: job.settings.proxies[0] ? "set" : "none",
+      targets: job.targets.length
+    });
     setStatus(job, cb, "running", "Запускаю Chromium");
-    browser = await launchBrowser(job);
+    const launched = await launchBrowser(job);
+    browser = launched.browser;
     const context = await browser.newContext({
       locale: job.settings.language,
       viewport: { width: 1365, height: 900 },
       userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    });
+    // Скрываем navigator.webdriver — самый простой fingerprint,
+    // по которому Google Maps выкидывает captcha/блок.
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    });
+    log(cb, "info", "Chromium ready", {
+      locale: job.settings.language,
+      proxy: maskProxy(launched.proxy)
     });
 
     for (let index = 0; index < job.targets.length; index += 1) {
@@ -41,60 +72,123 @@ export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Pr
 
       const target = job.targets[index];
       setCurrentTarget(job, cb, index, `Парсю выдачу: ${target.query}`);
+      log(cb, "info", "Opening target", {
+        index,
+        total: job.targets.length,
+        url: target.url,
+        query: target.query
+      });
       await parseTarget(context, job, cb, target);
     }
 
     if (cb.shouldStop()) {
+      log(cb, "info", "Stop requested — halting");
       setStatus(job, cb, "stopped", "Задача остановлена");
     } else {
+      log(cb, "info", "All targets processed", { results: job.results.length });
       setStatus(job, cb, "completed", `Готово: ${job.results.length} уникальных организаций`);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Неизвестная ошибка парсера";
+    log(cb, "error", `Fatal parser error: ${message}`);
     setStatus(job, cb, "failed", message);
     reportError(job, cb, { message });
   } finally {
     await browser?.close().catch(() => undefined);
+    log(cb, "debug", "Chromium closed");
   }
 }
 
-async function launchBrowser(job: ScrapeJob): Promise<Browser> {
-  const proxy = job.settings.proxies[0];
-  return chromium.launch({
+/**
+ * Mask a proxy URL for logging — strip password so credentials never end up
+ * in Supabase logs / docker stdout. "http://user:PASS@1.2.3.4:80" →
+ * "http://user:***@1.2.3.4:80".
+ */
+function maskProxy(proxy: string | undefined): string {
+  if (!proxy) return "none";
+  return proxy.replace(/:\/\/([^:@]+):[^@]+@/, "://$1:***@");
+}
+
+async function launchBrowser(job: ScrapeJob): Promise<{ browser: Browser; proxy: string | undefined }> {
+  // Из пула прокси случайно выбираем один — так последовательные джобы
+  // на прод-сервере не долбятся из одного и того же IP.
+  const pool = job.settings.proxies ?? [];
+  const proxy = pool.length > 0 ? pool[Math.floor(Math.random() * pool.length)] : undefined;
+  const browser = await chromium.launch({
     headless: true,
-    proxy: proxy ? { server: proxy } : undefined
+    proxy: proxy ? { server: proxy } : undefined,
+    // Скрываем telltale-флаги автоматизации, из-за которых Google быстрее
+    // отдаёт captcha или молча вешает соединение. Chromium в headless-режиме
+    // по умолчанию выставляет navigator.webdriver=true и exposes ряд других
+    // сигналов автоматизации — эти args их гасят.
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=IsolateOrigins,site-per-process",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-web-security",
+      "--lang=ru-RU,ru,en-US,en"
+    ]
   });
+  return { browser, proxy };
+}
+
+/**
+ * Navigate a page with a longer timeout and a fallback wait strategy.
+ *
+ * Google Maps / News are heavy pages (Maps easily 4-6MB of JS); with a slow
+ * proxy or ratelimited Google response, the default 60 s `domcontentloaded`
+ * wait misses. Strategy:
+ *   1. `domcontentloaded` + 90 s — fires when HTML is parsed, fastest signal
+ *      the page actually loaded.
+ *   2. On Timeout, fall back to `commit` + 30 s — fires as soon as
+ *      navigation commits (before any content loads). Good enough for the
+ *      captcha-wall check downstream; if page is genuinely captcha we exit
+ *      fast; if it's fine, subsequent `waitForSelector` / `networkidle`
+ *      inside collectPlaceLinks will handle rendering.
+ * Total worst case: ~120 s per URL before we give up.
+ */
+async function gotoWithRetry(page: Page, url: string, cb: MapsRunCallbacks): Promise<void> {
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("Timeout")) throw err;
+    log(cb, "warn", `DCL timed out, retrying with commit wait`, { url });
+    await page.goto(url, { waitUntil: "commit", timeout: 30000 });
+  }
 }
 
 async function parseTarget(context: BrowserContext, job: ScrapeJob, cb: MapsRunCallbacks, target: SearchTarget): Promise<void> {
   const page = await context.newPage();
 
   try {
-    await page.goto(target.url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await gotoWithRetry(page, target.url, cb);
     await maybeAcceptConsent(page);
     await randomDelay(job);
 
     if (await isBlocked(page)) {
+      log(cb, "error", "Captcha wall detected", { url: page.url(), query: target.query });
       reportError(job, cb, { targetId: target.id, message: `Google вернул блокировку или captcha для ${target.query}` });
       return;
     }
 
     const links = await collectPlaceLinks(page, job, cb, target);
+    log(cb, "info", "Discovered place links", { count: links.length, query: target.query });
     addDiscoveredPlaces(job, cb, links.length);
 
     for (const link of links.slice(0, job.settings.limitPerQuery)) {
       if (cb.shouldStop()) break;
       await waitWhilePaused(cb);
 
-      const result = await parsePlace(context, job, target, link);
+      const result = await parsePlace(context, job, cb, target, link);
       addResult(job, cb, result);
       await randomDelay(job);
     }
   } catch (error) {
-    reportError(job, cb, {
-      targetId: target.id,
-      message: error instanceof Error ? error.message : `Не удалось обработать ${target.query}`
-    });
+    const message = error instanceof Error ? error.message : `Не удалось обработать ${target.query}`;
+    log(cb, "error", `Target failed: ${message}`, { query: target.query });
+    reportError(job, cb, { targetId: target.id, message });
   } finally {
     await page.close().catch(() => undefined);
   }
@@ -126,17 +220,18 @@ async function collectPlaceLinks(page: Page, job: ScrapeJob, cb: MapsRunCallback
   return [...links];
 }
 
-async function parsePlace(context: BrowserContext, job: ScrapeJob, target: SearchTarget, url: string): Promise<PlaceResult> {
+async function parsePlace(context: BrowserContext, job: ScrapeJob, cb: MapsRunCallbacks, target: SearchTarget, url: string): Promise<PlaceResult> {
   const page = await context.newPage();
   const placeUrl = ensureGoogleMapsLocale(url, job.settings.language, job.settings.region);
 
   try {
-    await page.goto(placeUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await gotoWithRetry(page, placeUrl, cb);
     await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => undefined);
     await page.waitForSelector("h1, body", { timeout: 15000 });
     await randomDelay(job);
 
     if (await isBlocked(page)) {
+      log(cb, "error", "Captcha on place page", { url: placeUrl });
       return emptyResult(target, placeUrl, "captcha", "Captcha или блокировка Google Maps");
     }
 
@@ -151,7 +246,14 @@ async function parsePlace(context: BrowserContext, job: ScrapeJob, target: Searc
     const reviewsCount = extractReviewsCount(await firstText(page, [".F7nice span[aria-label]", "[aria-label*='отзыв']", "[aria-label*='review']"]));
     const placeId = extractPlaceId(currentUrl);
     const googleId = extractGoogleId(currentUrl);
+    if (job.settings.enrichContacts && website) {
+      log(cb, "info", "Enriching website", { url: website });
+    }
     const enrichment = job.settings.enrichContacts && website ? await enrichWebsiteContacts(website) : { emails: [], phones: [], socials: [], linkedInUrl: "" };
+    if (job.settings.enrichContacts && website) {
+      log(cb, "debug", "Website enrichment done", { url: website, foundEmails: enrichment.emails.length });
+    }
+    log(cb, "debug", "Extracted place", { name, website: website || undefined });
 
     const result: PlaceResult = {
       query: target.query,
@@ -178,7 +280,9 @@ async function parsePlace(context: BrowserContext, job: ScrapeJob, target: Searc
 
     return { ...result, dedupeKey: buildDedupeKey(result) };
   } catch (error) {
-    const result = emptyResult(target, placeUrl, "error", error instanceof Error ? error.message : "Ошибка карточки");
+    const message = error instanceof Error ? error.message : "Ошибка карточки";
+    log(cb, "warn", `Place page error: ${message}`, { url: placeUrl });
+    const result = emptyResult(target, placeUrl, "error", message);
     return { ...result, dedupeKey: buildDedupeKey(result) };
   } finally {
     await page.close().catch(() => undefined);

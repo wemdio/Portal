@@ -4,10 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { authFetchJson } from '@/lib/authFetch';
 import { supabase } from '@/lib/supabaseClient';
 import {
+  ChevronDown,
+  ChevronUp,
   Clock,
   Database,
   Download,
   FileJson,
+  FileText,
   MapPinned,
   Pause,
   Play,
@@ -17,6 +20,7 @@ import {
 } from 'lucide-react';
 import type { GoogleMapsJobRow, GoogleMapsPlaceRow, GoogleParserStatus } from '@/types/googleParsers';
 import type { QueueStatusResponse } from '@/app/api/parsers/googlemaps/queue-status/route';
+import type { GoogleParserLogRow } from '@/app/api/parsers/googlemaps/[jobId]/logs/route';
 import { GoogleMapsParserForm } from '@/components/parsers/GoogleMapsParserForm';
 import { JobStatus, isStoppedByUser } from '@/components/parsers/JobStatus';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
@@ -110,6 +114,8 @@ export function GoogleMapsParserView() {
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ tone: 'success' | 'error'; message: string; href?: string } | null>(null);
   const [queueStatus, setQueueStatus] = useState<QueueStatusResponse | null>(null);
+  const [logs, setLogs] = useState<GoogleParserLogRow[]>([]);
+  const [showLogs, setShowLogs] = useState(false);
   const { flag: refreshed, trigger: triggerRefreshed } = useTimedFlag(1200);
 
   const activeJob = useMemo(() => jobs.find((j) => j.id === activeJobId) ?? null, [jobs, activeJobId]);
@@ -169,6 +175,17 @@ export function GoogleMapsParserView() {
     }
   }, []);
 
+  const loadLogs = useCallback(async (jobId: string) => {
+    try {
+      const data = await authFetchJson<{ logs: GoogleParserLogRow[] }>(
+        `/api/parsers/googlemaps/${jobId}/logs?limit=500`,
+      );
+      setLogs(data.logs ?? []);
+    } catch (e) {
+      console.error('[googlemaps] loadLogs failed', e);
+    }
+  }, []);
+
   // Initial load
   useEffect(() => {
     void refreshJobs();
@@ -179,12 +196,22 @@ export function GoogleMapsParserView() {
   useEffect(() => {
     if (!activeJobId) {
       setResults([]);
+      setLogs([]);
       return;
     }
     void loadResults(activeJobId);
+    setLogs([]);
   }, [activeJobId, loadResults]);
 
-  // Poll active job status + results while it's live
+  // Fetch logs when the panel is first opened for a job.
+  useEffect(() => {
+    if (!activeJobId || !showLogs) return;
+    void loadLogs(activeJobId);
+  }, [activeJobId, showLogs, loadLogs]);
+
+  // Poll active job status + results while it's live. Also refresh logs if
+  // the panel is open — piggybacked on the same tick so we don't run two
+  // parallel polling loops.
   useEffect(() => {
     if (!activeJobId || !activeJob) return;
     if (!isActiveStatus(activeJob.status)) return;
@@ -192,9 +219,10 @@ export function GoogleMapsParserView() {
       void refreshActiveJob(activeJobId);
       void refreshQueueStatus();
       void loadResults(activeJobId);
+      if (showLogs) void loadLogs(activeJobId);
     }, POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [activeJob, activeJobId, refreshActiveJob, refreshQueueStatus, loadResults]);
+  }, [activeJob, activeJobId, refreshActiveJob, refreshQueueStatus, loadResults, loadLogs, showLogs]);
 
   // Auto-dismiss toast
   useEffect(() => {
@@ -460,9 +488,13 @@ export function GoogleMapsParserView() {
                         : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
                     }`}
                   >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="font-mono text-xs font-medium text-gray-500">
-                        #{j.id.slice(0, 8)}
+                    <div className="flex items-center justify-between mb-2 gap-2">
+                      <span className="text-sm font-medium text-gray-900 truncate min-w-0">
+                        {(() => {
+                          const first = j.config?.inputLines?.[0]?.trim();
+                          if (first) return first.length > 32 ? first.slice(0, 32) + '…' : first;
+                          return `#${j.id.slice(0, 8)}`;
+                        })()}
                       </span>
                       <JobStatus
                         status={mapToParserJobStatus(j.status)}
@@ -505,9 +537,17 @@ export function GoogleMapsParserView() {
                   <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
                     <div className="min-w-0">
                       <div className="flex items-center gap-3 mb-1 flex-wrap">
-                        <h2 className="text-xl font-bold text-gray-900">
-                          Запуск #{activeJob.id.slice(0, 8)}
+                        <h2 className="text-xl font-bold text-gray-900 truncate max-w-[520px]">
+                          {(() => {
+                            // Первая строка запроса как заголовок — обычно
+                            // это либо URL Google Maps, либо ключевая фраза.
+                            // Обрезаем 60 символов чтобы не растянуть шапку.
+                            const first = activeJob.config?.inputLines?.[0]?.trim();
+                            if (first) return first.length > 60 ? first.slice(0, 60) + '…' : first;
+                            return `Запуск #${activeJob.id.slice(0, 8)}`;
+                          })()}
                         </h2>
+                        <span className="text-xs text-gray-400 shrink-0">#{activeJob.id.slice(0, 8)}</span>
                         <span
                           className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset ${
                             activeJob.status === 'completed'
@@ -573,13 +613,42 @@ export function GoogleMapsParserView() {
                         </div>
                       ) : null}
 
-                      {activeJob.error_message &&
+                      {(activeJob.status === 'failed' ||
+                        activeJob.status === 'captcha' ||
+                        activeJob.status === 'blocked' ||
+                        activeJob.status === 'timeout' ||
+                        activeJob.status === 'login_required') &&
                       !isStoppedByUser(
                         mapToParserJobStatus(activeJob.status),
                         activeJob.error_message,
                       ) ? (
-                        <div className="mt-4 rounded-md bg-red-50 p-3 text-sm text-red-700 border border-red-100">
-                          <span className="font-medium">Сообщение:</span> {activeJob.error_message}
+                        <div className="mt-4 rounded-md bg-red-50 p-3 text-sm text-red-700 border border-red-100 space-y-1">
+                          <div>
+                            <span className="font-medium">Статус:</span> {statusLabelRu(activeJob.status)}
+                          </div>
+                          {activeJob.error_message ? (
+                            <div>
+                              <span className="font-medium">Ошибка:</span>{' '}
+                              <span className="break-all">{activeJob.error_message}</span>
+                            </div>
+                          ) : null}
+                          {activeJob.message ? (
+                            <div>
+                              <span className="font-medium">Сообщение:</span>{' '}
+                              <span className="break-all">{activeJob.message}</span>
+                            </div>
+                          ) : null}
+                          {!activeJob.error_message && !activeJob.message ? (
+                            <div className="text-xs text-red-600/80">
+                              Диагностика не сохранена. Скорее всего воркер{' '}
+                              <code className="rounded bg-red-100 px-1">worker-googleparsers</code>{' '}
+                              не запущен, либо сервис{' '}
+                              <code className="rounded bg-red-100 px-1">googleparsers</code>{' '}
+                              (Playwright, порт 8001) недоступен. Проверь{' '}
+                              <code className="rounded bg-red-100 px-1">docker logs portal-worker-googleparsers</code>{' '}
+                              на прод-сервере.
+                            </div>
+                          ) : null}
                         </div>
                       ) : null}
                     </div>
@@ -625,6 +694,52 @@ export function GoogleMapsParserView() {
                       {error}
                     </div>
                   ) : null}
+                </div>
+
+                {/* Logs panel — expandable */}
+                <div className="mx-6 mb-6 rounded-lg border border-gray-200 overflow-hidden">
+                  <button
+                    type="button"
+                    className="w-full flex items-center justify-between px-3 py-2 text-sm bg-gray-50 hover:bg-gray-100"
+                    onClick={() => setShowLogs((v) => !v)}
+                  >
+                    <span className="flex items-center gap-2">
+                      <FileText className="h-4 w-4" />
+                      <span>Логи парсинга</span>
+                      {logs.length > 0 && (
+                        <span className="text-xs text-gray-500">({logs.length})</span>
+                      )}
+                    </span>
+                    {showLogs ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                  </button>
+                  {showLogs && (
+                    <div className="max-h-96 overflow-y-auto bg-gray-950 text-gray-100 font-mono text-xs">
+                      {logs.length === 0 ? (
+                        <div className="p-3 text-gray-500">Пока пусто…</div>
+                      ) : (
+                        logs.map((l) => (
+                          <div
+                            key={l.id}
+                            className={`px-3 py-1 border-b border-gray-800 flex gap-2 ${
+                              l.level === 'error'
+                                ? 'text-red-300'
+                                : l.level === 'warn'
+                                  ? 'text-amber-300'
+                                  : l.level === 'debug'
+                                    ? 'text-gray-500'
+                                    : 'text-gray-100'
+                            }`}
+                          >
+                            <span className="text-gray-500 shrink-0">
+                              {new Date(l.created_at).toLocaleTimeString('ru-RU')}
+                            </span>
+                            <span className="uppercase text-[10px] pt-0.5 shrink-0">[{l.level}]</span>
+                            <span className="break-all">{l.message}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
 

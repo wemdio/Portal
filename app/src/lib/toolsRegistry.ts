@@ -44,7 +44,6 @@ export const ALL_TOOL_IDS = [
   'tg-parser',
   'cis-lead-finder',
   'li-outreach',
-  'li-outreach-v2',
   'sales-copilot',
   'sales-hypotheses',
   'knowledge-base',
@@ -252,18 +251,6 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     href: '/tools/li-outreach',
     accentColor: 'blue',
   },
-  'li-outreach-v2': {
-    id: 'li-outreach-v2',
-    title: 'LinkedIn Outreach 2.0',
-    description: 'OpenOutreach runtime: продукт и ICP на входе, автономный поиск, квалификация и LinkedIn-диалоги на выходе.',
-    description_en: 'OpenOutreach runtime: product and ICP in, autonomous LinkedIn discovery, qualification, and conversations out.',
-    href: '/tools/li-outreach-v2',
-    badge: 'В разработке',
-    badge_en: 'In development',
-    badgeVariant: 'amber',
-    accentColor: 'emerald',
-    disabled: true,
-  },
   rdp: {
     id: 'rdp',
     title: 'Удалённый рабочий стол',
@@ -398,7 +385,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Аутрич',
     label_en: 'Outreach',
-    toolIds: ['instantly', 'li-outreach', 'li-outreach-v2', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'sales-hypotheses', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
+    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'sales-hypotheses', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
   },
   {
     label: 'Базы и данные',
