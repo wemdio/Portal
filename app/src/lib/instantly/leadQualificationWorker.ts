@@ -876,7 +876,7 @@ async function notifySpecialistsAboutLead(
         { onConflict: 'entity_type,entity_id,level' },
       );
 
-    await sendTelegramLeadAlertForSpecialists({
+    const tgResult = await sendTelegramLeadAlertForSpecialists({
       userIds: userIdList,
       qualificationId,
       campaignId,
@@ -890,7 +890,27 @@ async function notifySpecialistsAboutLead(
       aiReason,
     });
 
-    workerLog('info', `Created lead notifications for ${userIds.size} specialist(s)`);
+    // Персистим исход TG-отправки: раньше сбой уходил только в stdout-warn и
+    // терялся при рестарте воркера → нельзя было доказать, каким лидам алерт не
+    // дошёл (инцидент 08.07, PP Prod/Илиана). Теперь tg_sent/tg_error видны в
+    // deadline_notification_log — можно диагностировать и ретраить неудачные.
+    await supabaseMain
+      .from('deadline_notification_log')
+      .update({
+        tg_sent: tgResult.sent,
+        tg_message_id: tgResult.messageId,
+        tg_error: tgResult.error,
+        tg_sent_at: new Date().toISOString(),
+      })
+      .eq('entity_type', 'lead_qualification')
+      .eq('entity_id', qualificationId)
+      .eq('level', 'specialist');
+
+    workerLog(
+      'info',
+      `Created lead notifications for ${userIds.size} specialist(s)` +
+        (tgResult.sent ? '' : ` — TG send FAILED: ${tgResult.error ?? 'unknown'}`),
+    );
   } catch (err) {
     workerLog('error', 'Error creating lead notifications', err);
   }
@@ -908,8 +928,8 @@ async function sendTelegramLeadAlertForSpecialists(data: {
   replySubject: string | null;
   replyPreview: string | null;
   aiReason: string | null;
-}): Promise<void> {
-  if (!supabaseMain) return;
+}): Promise<{ sent: boolean; messageId: number | null; error: string | null }> {
+  if (!supabaseMain) return { sent: false, messageId: null, error: 'supabaseMain not configured' };
 
   try {
     const { data: profiles } = await supabaseMain
@@ -961,10 +981,12 @@ async function sendTelegramLeadAlertForSpecialists(data: {
     });
 
     if (!result.sent) {
-      workerLog('warn', `Telegram lead alert skipped or failed for qualification ${data.qualificationId}`);
+      workerLog('warn', `Telegram lead alert skipped or failed for qualification ${data.qualificationId}: ${result.error ?? 'unknown'}`);
     }
+    return result;
   } catch (err) {
     workerLog('error', 'Error sending Telegram lead alert', err);
+    return { sent: false, messageId: null, error: err instanceof Error ? err.message : String(err) };
   }
 }
 

@@ -134,17 +134,18 @@ function buildMessage(data: LeadTelegramAlertData): string {
 
 export async function sendLeadTelegramAlert(
   data: LeadTelegramAlertData,
-): Promise<{ sent: boolean; messageId: number | null }> {
+): Promise<{ sent: boolean; messageId: number | null; error: string | null }> {
   const token = getToken();
   const chatId = getChatId();
   if (!token || !chatId) {
     // Silent fail в прошлом приводил к «лиды есть, чат пустой» без объяснений.
     // Логируем чтобы причина была видна в docker logs portal-worker-instantly-leads.
+    const error = `config missing (token=${token ? 'set' : 'missing'}, chat=${chatId ? 'set' : 'missing'})`;
     console.warn(
-      `[lead-telegram-alert] skipped (token=${token ? 'set' : 'missing'}, chat=${chatId ? 'set' : 'missing'}). ` +
+      `[lead-telegram-alert] skipped (${error}). ` +
         `Set LEAD_ALERTS_TELEGRAM_BOT_TOKEN/CHAT_ID (or rely on CHANGELOG_* fallback).`,
     );
-    return { sent: false, messageId: null };
+    return { sent: false, messageId: null, error };
   }
 
   const body: Record<string, unknown> = {
@@ -163,15 +164,26 @@ export async function sendLeadTelegramAlert(
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(TG_FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) return { sent: false, messageId: null };
+    if (!res.ok) {
+      // Тело Telegram-ответа содержит error_code + description (403 bot kicked,
+      // 400 bad thread/parse, 429 rate limit) — сохраняем, чтобы причина сбоя
+      // доставки не терялась, а писалась в deadline_notification_log.tg_error.
+      const detail = await res.text().catch(() => '');
+      return { sent: false, messageId: null, error: `HTTP ${res.status}: ${detail.slice(0, 300)}` };
+    }
 
     const json = await res.json() as TgSendResult;
     return {
       sent: json.ok,
       messageId: json.result?.message_id ?? null,
+      error: json.ok ? null : JSON.stringify(json).slice(0, 300),
     };
-  } catch {
-    return { sent: false, messageId: null };
+  } catch (err) {
+    return {
+      sent: false,
+      messageId: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
