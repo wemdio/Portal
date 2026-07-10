@@ -77,13 +77,21 @@ function normalizeUsername(username: string | null): string | null {
 }
 
 function mentionSpecialist(specialist: LeadTelegramSpecialistMention): string {
-  const username = normalizeUsername(specialist.telegramUsername);
-  if (username) return `@${escapeHtml(username)}`;
-
-  const name = specialist.fullName?.trim() || 'Специалист';
+  // Пинг по числовому telegram_id НАДЁЖНЕЕ, чем @username. Ник кэшируется в
+  // telegram_links при линковке и устаревает: сменил ник или даже регистр —
+  // @упоминание перестаёт пинговать, хотя человек в группе. Инцидент Илианы
+  // (10.07.2026): в БД `gziliana`, реальный ник стал `gzIliana` → бот «перестал
+  // отмечать» по PP Prod. telegram_id неизменен, а text_mention по нему пингует
+  // любого участника группы. Поэтому ID — приоритетный путь, @username — фолбэк.
+  const name =
+    specialist.fullName?.trim() ||
+    normalizeUsername(specialist.telegramUsername) ||
+    'Специалист';
   if (specialist.telegramId) {
     return `<a href="tg://user?id=${escapeHtml(String(specialist.telegramId))}">${escapeHtml(name)}</a>`;
   }
+  const username = normalizeUsername(specialist.telegramUsername);
+  if (username) return `@${escapeHtml(username)}`;
   return escapeHtml(name);
 }
 
