@@ -10,12 +10,23 @@ import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 
 interface ProjectData {
   id: string;
+  client: string | null;
   name: string;
   status: string;
   manager: string | null;
   specialist: string | null;
   kpi_plan: string | null;
   kpi_fact: string | null;
+}
+
+/** Заголовок проекта в приложении — это client («Onescreen»); name хранит услуги («Аутрич, Лидскан»). */
+function projectTitle(p: ProjectData): string {
+  return p.client?.trim() || p.name?.trim() || 'Без названия';
+}
+
+function isFinishedStatus(status: string | null | undefined): boolean {
+  const s = (status || '').toLowerCase();
+  return s.includes('заверш') || s.includes('отмен');
 }
 
 type ProfileData = Pick<UserProfile, 'id' | 'email' | 'full_name' | 'role' | 'avatar_url'>;
@@ -70,22 +81,27 @@ function deriveResult(p: ProjectData): Result {
   }
   const fact = parseNum(p.kpi_fact);
   const goal = parseNum(p.kpi_plan);
-  const finished = st.includes('заверш');
-  const hasVerdict = (fact != null && fact > 0) || (finished && goal != null && goal > 0);
-  if (hasVerdict) {
+  // Есть числовая цель (в т.ч. извлечённая из текста «20 встреч»/«10 квалов» → 20/10): показываем вердикт.
+  if (goal != null && goal > 0) {
     const f = fact ?? 0;
-    const g = goal ?? 0;
-    const suffix = ` (${f} из ${g})`;
-    if (g > 0 && f < g) {
+    const suffix = ` (${f} из ${goal})`;
+    if (f < goal) {
       return { cat: 'missed', label: 'Не довели лидов' + suffix, badgeCls: 'bg-red-50 text-red-700 ring-red-600/20', dotCls: 'bg-red-500' };
     }
     return { cat: 'delivered', label: 'Довели лидов' + suffix, badgeCls: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20', dotCls: 'bg-emerald-500' };
+  }
+  // Цели нет: если есть доведённые лиды — показываем просто их число (нейтрально, без ложного «довели»).
+  if (fact != null && fact > 0) {
+    return { cat: 'work', label: `${fact} ${pluralRu(fact, 'лид', 'лида', 'лидов')}`, badgeCls: 'bg-gray-100 text-gray-600 ring-gray-500/20', dotCls: 'bg-gray-400' };
   }
   if (st.includes('отмен')) {
     return { cat: 'other', label: 'Отменён', badgeCls: 'bg-gray-100 text-gray-500 ring-gray-500/20', dotCls: 'bg-gray-400' };
   }
   if (st.includes('пауз')) {
     return { cat: 'other', label: 'На паузе', badgeCls: 'bg-gray-100 text-gray-500 ring-gray-500/20', dotCls: 'bg-gray-400' };
+  }
+  if (st.includes('заверш')) {
+    return { cat: 'other', label: 'Завершён', badgeCls: 'bg-gray-100 text-gray-500 ring-gray-500/20', dotCls: 'bg-gray-400' };
   }
   return { cat: 'work', label: 'в работе', badgeCls: 'bg-gray-100 text-gray-600 ring-gray-500/20', dotCls: 'bg-gray-400' };
 }
@@ -220,6 +236,7 @@ export default function TeamPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [resultFilter, setResultFilter] = useState<ResultFilter>('all');
   const [sortKey, setSortKey] = useState<SortKey>('fact');
+  const [showFinished, setShowFinished] = useState(false);
   const [openLeads, setOpenLeads] = useState<Set<string>>(new Set());
   const [openSpecInLead, setOpenSpecInLead] = useState<Set<string>>(new Set());
   const [openSpecs, setOpenSpecs] = useState<Set<string>>(new Set());
@@ -291,7 +308,7 @@ export default function TeamPage() {
   async function fetchData() {
     try {
       const [projectsResult, profilesResult] = await Promise.all([
-        supabase.from('projects').select('id, name, status, manager, specialist, kpi_plan, kpi_fact'),
+        supabase.from('projects').select('id, client, name, status, manager, specialist, kpi_plan, kpi_fact'),
         supabase.from('profiles').select('id, email, full_name, role, avatar_url'),
       ]);
       if (projectsResult.error) throw projectsResult.error;
@@ -356,12 +373,14 @@ export default function TeamPage() {
     const free = Math.max(0, totalPlan - totalFact);
     const load = totalPlan > 0 ? Math.round((totalFact / totalPlan) * 100) : 0;
     const r = rollup(projects);
-    return { active, totalPlan, free, load, delivered: r.delivered, missed: r.missed };
+    const totalLeads = projects.reduce((s, p) => s + (parseNum(p.kpi_fact) ?? 0), 0);
+    return { active, totalPlan, free, load, delivered: r.delivered, missed: r.missed, totalLeads };
   }, [projects, model.specialists]);
 
   const q = query.trim().toLowerCase();
   const matchProject = (p: ProjectData) =>
-    p.name.toLowerCase().includes(q) ||
+    projectTitle(p).toLowerCase().includes(q) ||
+    (p.name || '').toLowerCase().includes(q) ||
     normalizeAssigneeName(p.specialist).toLowerCase().includes(q) ||
     normalizeAssigneeName(p.manager).toLowerCase().includes(q);
 
@@ -445,7 +464,13 @@ export default function TeamPage() {
           <TeamMemberAvatar displayName={person.name} avatarUrl={nameToAvatarUrl.get(person.name)} signedUrl={avatarSignedUrls[person.name]} variant={opts.variant} />
           <div className="min-w-0">
             <p className="text-sm font-semibold text-gray-900 truncate">{person.name}</p>
-            <p className="text-xs text-gray-500">{person.projects.length} {plural(person.projects.length)}</p>
+            <p className="text-xs text-gray-500">
+              {(() => {
+                const act = person.projects.filter((p) => !isFinishedStatus(p.status)).length;
+                const fin = person.projects.length - act;
+                return `${act} ${plural(act)}${fin > 0 ? ` · ${fin} заверш.` : ''}`;
+              })()}
+            </p>
           </div>
         </div>
         <div className="px-2 flex justify-center">
@@ -506,16 +531,21 @@ export default function TeamPage() {
     );
   };
 
-  const projectRow = (p: ProjectData, showLead: boolean) => (
-    <div key={p.id} className={`${GRID} border-b border-gray-100 bg-white hover:bg-gray-50 transition-colors`}>
-      <div className="pl-[68px] pr-4 py-2.5 flex items-center gap-2 min-w-0 col-span-1">
-        <span className="h-px w-3 bg-gray-200 flex-shrink-0" />
-        <span className="text-sm text-gray-800 truncate">{p.name}</span>
-        {showLead && normalizeAssigneeName(p.manager) && <span className="text-xs text-gray-400 flex-shrink-0">· лид {normalizeAssigneeName(p.manager)}</span>}
+  const projectRow = (p: ProjectData, showLead: boolean) => {
+    const title = projectTitle(p);
+    const services = p.client?.trim() && p.name?.trim() && p.name.trim() !== p.client.trim() ? p.name.trim() : null;
+    return (
+      <div key={p.id} className={`${GRID} border-b border-gray-100 bg-white hover:bg-gray-50 transition-colors`}>
+        <div className="pl-[68px] pr-4 py-2.5 flex items-center gap-2 min-w-0 col-span-1">
+          <span className="h-px w-3 bg-gray-200 flex-shrink-0" />
+          <span className="text-sm text-gray-800 truncate">{title}</span>
+          {services && <span className="text-xs text-gray-400 truncate flex-shrink min-w-0">· {services}</span>}
+          {showLead && normalizeAssigneeName(p.manager) && <span className="text-xs text-gray-400 flex-shrink-0">· лид {normalizeAssigneeName(p.manager)}</span>}
+        </div>
+        <div className="col-start-7 px-3 py-2.5"><ResultBadge p={p} /></div>
       </div>
-      <div className="col-start-7 px-3 py-2.5"><ResultBadge p={p} /></div>
-    </div>
-  );
+    );
+  };
 
   // ---- column header ----
   const columnHeader = (firstLabel: string) => (
@@ -542,7 +572,8 @@ export default function TeamPage() {
         {columnHeader('Лид')}
         {leads.map((L) => {
           const open = q ? true : openLeads.has(L.name);
-          const visibleProjects = q && !L.name.toLowerCase().includes(q) ? L.projects.filter(matchProject) : L.projects;
+          let visibleProjects = q && !L.name.toLowerCase().includes(q) ? L.projects.filter(matchProject) : L.projects;
+          if (!showFinished) visibleProjects = visibleProjects.filter((p) => !isFinishedStatus(p.status));
           const bySpec = new Map<string, ProjectData[]>();
           for (const p of visibleProjects) {
             const s = normalizeAssigneeName(p.specialist) || NO_SPEC;
@@ -558,8 +589,10 @@ export default function TeamPage() {
                 onToggle: () => toggle(setOpenLeads, L.name),
               })}
               {open && (
-                L.projects.length === 0 ? (
-                  <div className="pl-[68px] py-3 text-sm text-gray-400 italic bg-gray-50/40 border-b border-gray-100">Нет проектов у этого лида</div>
+                visibleProjects.length === 0 ? (
+                  <div className="pl-[68px] py-3 text-sm text-gray-400 italic bg-gray-50/40 border-b border-gray-100">
+                    {L.projects.length > 0 ? 'Все проекты завершены — включите «Завершённые»' : 'Нет проектов у этого лида'}
+                  </div>
                 ) : (
                   Array.from(bySpec.entries()).map(([sname, list]) => {
                     const key = `${L.name}||${sname}`;
@@ -593,7 +626,8 @@ export default function TeamPage() {
         {columnHeader('Специалист')}
         {specs.map((S) => {
           const open = q ? true : openSpecs.has(S.name);
-          const visibleProjects = q && !S.name.toLowerCase().includes(q) ? S.projects.filter(matchProject) : S.projects;
+          let visibleProjects = q && !S.name.toLowerCase().includes(q) ? S.projects.filter(matchProject) : S.projects;
+          if (!showFinished) visibleProjects = visibleProjects.filter((p) => !isFinishedStatus(p.status));
           return (
             <div key={S.name}>
               {capacityRow(S, {
@@ -617,9 +651,9 @@ export default function TeamPage() {
     let rows = projects.slice();
     if (resultFilter !== 'all') rows = rows.filter((p) => deriveResult(p).cat === resultFilter);
     if (q) rows = rows.filter(matchProject);
-    if (sortKey === 'name') rows.sort((a, b) => a.name.localeCompare(b.name, 'ru-RU'));
+    if (sortKey === 'name') rows.sort((a, b) => projectTitle(a).localeCompare(projectTitle(b), 'ru-RU'));
     else if (sortKey === 'result') rows.sort((a, b) => resultRank(b) - resultRank(a));
-    else rows.sort((a, b) => normalizeAssigneeName(a.manager).localeCompare(normalizeAssigneeName(b.manager), 'ru-RU') || a.name.localeCompare(b.name, 'ru-RU'));
+    else rows.sort((a, b) => normalizeAssigneeName(a.manager).localeCompare(normalizeAssigneeName(b.manager), 'ru-RU') || projectTitle(a).localeCompare(projectTitle(b), 'ru-RU'));
 
     const PGRID = 'grid grid-cols-[minmax(180px,1.4fr)_minmax(130px,1fr)_minmax(130px,1fr)_minmax(190px,1fr)] items-center';
     return (
@@ -632,7 +666,12 @@ export default function TeamPage() {
         </div>
         {rows.map((p) => (
           <div key={p.id} className={`${PGRID} border-b border-gray-100 bg-white hover:bg-gray-50 transition-colors`}>
-            <div className="px-4 py-3 text-sm font-medium text-gray-900 truncate">{p.name}</div>
+            <div className="px-4 py-3 min-w-0">
+              <p className="text-sm font-medium text-gray-900 truncate">{projectTitle(p)}</p>
+              {p.client?.trim() && p.name?.trim() && p.name.trim() !== p.client.trim() && (
+                <p className="text-xs text-gray-400 truncate">{p.name.trim()}</p>
+              )}
+            </div>
             <div className="px-4 py-3 min-w-0">
               {normalizeAssigneeName(p.manager)
                 ? <span className="inline-flex items-center gap-2 min-w-0"><TeamMemberAvatar displayName={normalizeAssigneeName(p.manager)} avatarUrl={nameToAvatarUrl.get(normalizeAssigneeName(p.manager))} signedUrl={avatarSignedUrls[normalizeAssigneeName(p.manager)]} variant="manager" size="sm" /><span className="text-sm text-gray-700 truncate">{normalizeAssigneeName(p.manager)}</span></span>
@@ -677,18 +716,14 @@ export default function TeamPage() {
           </div>
         ))}
         <div className={`bg-white rounded-2xl border border-gray-200 shadow-sm ${isTma ? 'p-4' : 'p-5'}`}>
-          <p className="text-sm font-medium text-gray-500">Результаты по проектам</p>
-          <div className="mt-1.5 space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-emerald-500" />
-              <span className="text-lg font-bold text-emerald-700 tabular-nums">{kpi.delivered}</span>
-              <span className="text-xs text-gray-500">довели лидов</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-red-500" />
-              <span className="text-lg font-bold text-red-600 tabular-nums">{kpi.missed}</span>
-              <span className="text-xs text-gray-500">не довели</span>
-            </div>
+          <p className="text-sm font-medium text-gray-500">Лидов доведено</p>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-2xl font-bold text-emerald-700 tabular-nums">{kpi.totalLeads}</span>
+            <span className="text-sm text-gray-400">всего</span>
+          </div>
+          <div className="mt-2 flex items-center gap-3 text-xs">
+            <span className="inline-flex items-center gap-1.5 text-gray-500"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />{kpi.delivered} довели цель</span>
+            <span className="inline-flex items-center gap-1.5 text-gray-500"><span className="h-1.5 w-1.5 rounded-full bg-red-500" />{kpi.missed} не довели</span>
           </div>
         </div>
       </div>
@@ -717,6 +752,7 @@ export default function TeamPage() {
               {resultChip('missed', 'Не довели', 'bg-red-500')}
               {resultChip('work', 'В работе', 'bg-gray-400')}
               {resultChip('prep', 'Подготовка', 'bg-amber-500')}
+              {resultChip('other', 'Завершён/пауза', 'bg-gray-300')}
             </>
           ) : (
             <>
@@ -727,6 +763,17 @@ export default function TeamPage() {
             </>
           )}
         </div>
+        {!isProjectsView && (
+          <button
+            type="button"
+            onClick={() => setShowFinished((v) => !v)}
+            className={`h-9 px-3 rounded-xl border text-sm font-medium inline-flex items-center gap-1.5 transition-colors ${showFinished ? 'border-gray-300 bg-gray-100 text-gray-900' : 'border-gray-200 bg-white text-gray-500 hover:text-gray-800'}`}
+            title="Показывать завершённые и отменённые проекты в списке"
+          >
+            <span className={`h-1.5 w-1.5 rounded-full ${showFinished ? 'bg-gray-500' : 'bg-gray-300'}`} />
+            Завершённые
+          </button>
+        )}
         <div className="flex-1" />
         <select
           value={sortKey}
@@ -780,9 +827,12 @@ function resultRank(p: ProjectData): number {
   return 1; // prep
 }
 
-function plural(n: number): string {
+function pluralRu(n: number, one: string, few: string, many: string): string {
   const a = n % 10, b = n % 100;
-  if (a === 1 && b !== 11) return 'проект';
-  if (a >= 2 && a <= 4 && (b < 10 || b >= 20)) return 'проекта';
-  return 'проектов';
+  if (a === 1 && b !== 11) return one;
+  if (a >= 2 && a <= 4 && (b < 10 || b >= 20)) return few;
+  return many;
+}
+function plural(n: number): string {
+  return pluralRu(n, 'проект', 'проекта', 'проектов');
 }

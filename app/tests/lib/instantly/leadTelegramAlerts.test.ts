@@ -36,7 +36,7 @@ describe('leadTelegramAlerts', () => {
     else process.env.LEAD_ALERTS_TELEGRAM_THREAD_ID = oldThreadId;
   });
 
-  it('posts a lead alert to the configured chat with username mention and escaped HTML', async () => {
+  it('posts a lead alert mentioning the specialist by stable telegram_id (not cached username) with escaped HTML', async () => {
     const result = await sendLeadTelegramAlert({
       qualificationId: 'qual-1',
       campaignId: 'campaign-1',
@@ -53,7 +53,7 @@ describe('leadTelegramAlerts', () => {
       aiReason: 'positive & explicit',
     });
 
-    expect(result).toEqual({ sent: true, messageId: 42 });
+    expect(result).toEqual({ sent: true, messageId: 42, error: null });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe('https://api.telegram.org/botdev-summary-token/sendMessage');
 
@@ -64,7 +64,11 @@ describe('leadTelegramAlerts', () => {
       parse_mode: 'HTML',
       disable_web_page_preview: true,
     }));
-    expect(body.text).toContain('@sergey_portal');
+    // Пин инцидента Илианы (10.07.2026): кэшированный @username устаревает
+    // (смена ника) → пинг молча пропадает. При наличии telegram_id упоминание
+    // обязано идти по нему, а НЕ по нику.
+    expect(body.text).toContain('<a href="tg://user?id=123456">Sergey Petrov</a>');
+    expect(body.text).not.toContain('@sergey_portal');
     expect(body.text).toContain('Ivan &lt;Lead&gt;');
     expect(body.text).toContain('ACME &amp; Co');
     expect(body.text).toContain('Growth &lt;Q2&gt;');
@@ -93,6 +97,54 @@ describe('leadTelegramAlerts', () => {
     expect(body.text).toContain('<a href="tg://user?id=654321">Maria Ivanova</a>');
   });
 
+  it('falls back to @username mention when telegram_id is missing', async () => {
+    await sendLeadTelegramAlert({
+      qualificationId: 'qual-2b',
+      campaignId: 'campaign-2b',
+      leadEmail: 'lead2b@example.com',
+      leadName: null,
+      companyName: null,
+      campaignName: null,
+      clientName: null,
+      specialistMentions: [
+        { userId: 'u-3', fullName: 'Petr Sidorov', telegramId: null, telegramUsername: 'petr_portal' },
+      ],
+      replySubject: null,
+      replyPreview: null,
+      aiReason: null,
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.text).toContain('@petr_portal');
+  });
+
+  it('returns the Telegram error body on a failed send (persisted to deadline_notification_log)', async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () => '{"ok":false,"error_code":400,"description":"Bad Request: message thread not found"}',
+    });
+
+    const result = await sendLeadTelegramAlert({
+      qualificationId: 'qual-4',
+      campaignId: 'campaign-4',
+      leadEmail: 'lead4@example.com',
+      leadName: null,
+      companyName: null,
+      campaignName: null,
+      clientName: null,
+      specialistMentions: [],
+      replySubject: null,
+      replyPreview: null,
+      aiReason: null,
+    });
+
+    expect(result.sent).toBe(false);
+    expect(result.messageId).toBeNull();
+    expect(result.error).toContain('HTTP 400');
+    expect(result.error).toContain('message thread not found');
+  });
+
   it('skips sending when chat id is not configured', async () => {
     delete process.env.LEAD_ALERTS_TELEGRAM_CHAT_ID;
 
@@ -110,7 +162,11 @@ describe('leadTelegramAlerts', () => {
       aiReason: null,
     });
 
-    expect(result).toEqual({ sent: false, messageId: null });
+    expect(result).toEqual({
+      sent: false,
+      messageId: null,
+      error: 'config missing (token=set, chat=missing)',
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

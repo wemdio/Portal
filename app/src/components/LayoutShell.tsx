@@ -67,6 +67,7 @@ export function LayoutShell({
     (
       pathname === '/projects/new' ||
       pathname === '/analytics/projects' ||
+      pathname === '/analytics/mailbox-load' ||
       pathname === '/tasks' ||
       pathname === '/team' ||
       pathname === '/finance' ||

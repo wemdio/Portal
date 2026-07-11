@@ -16,7 +16,15 @@ export function useDemoMode(): boolean | null {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await clientApiFetch<{ isDemo?: boolean }>('/demo-status');
+        // Таймаут обязателен: страницы гейтят контент на isDemo (null = ничего
+        // не рендерим), и зависший — не упавший — запрос оставил бы вкладку
+        // вечно пустой (класс инцидента «бесконечная загрузка каталога»).
+        const res = await Promise.race([
+          clientApiFetch<{ isDemo?: boolean }>('/demo-status'),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('demo-status timeout')), 10_000),
+          ),
+        ]);
         if (!cancelled) setIsDemo(res.isDemo === true);
       } catch {
         // Статус демо — не критичная информация: при сбое считаем «не демо».

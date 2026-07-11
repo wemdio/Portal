@@ -15,6 +15,8 @@ import {
   buildClientReplyMessage,
 } from '@/lib/clientReplyBot/bot';
 import * as instantly from './client';
+import { isFreeProvider } from '@/lib/emailValidation/shared';
+import { getEmailRecipients } from '@/lib/clientCampaignReplies/participants';
 import { generateHandoffReply } from './handoffGenerator';
 import { signHandoffCallback } from './handoffCallback';
 import {
@@ -345,6 +347,77 @@ export async function pollAndQualifyReplies(): Promise<number> {
   return processed;
 }
 
+function splitEmailList(value: string | null | undefined): string[] {
+  return (value ?? '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e.includes('@'));
+}
+
+/**
+ * Адреса «стороны клиента» для кампании: handoff_email привязанных проектов +
+ * client_email прошлых передач (client_forwarded_leads). Письмо С ЭТИХ адресов —
+ * не ответ лида, а ответ НАШЕГО КЛИЕНТА в треде: после передачи лида клиент
+ * продолжает переписку со своей почты, наш Instantly-ящик остаётся в копии, и
+ * Instantly кладёт его письмо в кампанию как received. Без guard'а ИИ честно
+ * читает «просит встречу / видел оффер» → ложный status='lead' и пинг спеца
+ * (кейс «Умные Новации» 10.07.2026: алерт на письмо ОТ клиента лиду).
+ *
+ * Домены добавляем только корпоративные (не freemail!): коллега клиента с того
+ * же домена — тоже клиент, но доменный матч по gmail/mail.ru зарубил бы
+ * настоящих лидов с бесплатной почтой.
+ */
+async function getClientPartyAddresses(
+  instantlyDb: NonNullable<typeof supabaseAdmin>,
+  campaignId: string,
+): Promise<{ addresses: Set<string>; domains: Set<string> }> {
+  const addresses = new Set<string>();
+
+  // Ошибки запросов НЕ роняют квалификацию (fail-open: письмо уйдёт в обычный
+  // AI-путь — хуже ложный алерт, чем потерянный настоящий лид), но деградацию
+  // guard'а обязаны логировать: молчаливый fail-open во время блипа БД внешне
+  // неотличим от «guard решил, что это лид».
+  const logDegraded = (source: string, message: string | undefined) =>
+    workerLog('warn', `client-echo guard degraded (fail-open): ${source} query failed — ${message ?? 'unknown'}`);
+
+  const { data: legacyLinks, error: legacyErr } = await instantlyDb
+    .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  if (legacyErr) logDegraded('project_instantly_campaigns', legacyErr.message);
+  const { data: periodLinks, error: periodErr } = await instantlyDb
+    .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  if (periodErr) logDegraded('project_period_instantly_campaigns', periodErr.message);
+  const projectIds = [
+    ...new Set(
+      [...(legacyLinks ?? []), ...(periodLinks ?? [])]
+        .map((l: { project_id?: string | null }) => l.project_id)
+        .filter(Boolean) as string[],
+    ),
+  ];
+
+  if (projectIds.length > 0 && supabaseMain) {
+    const { data: projects, error: projectsErr } = await supabaseMain
+      .from('projects').select('handoff_email').in('id', projectIds);
+    if (projectsErr) logDegraded('projects.handoff_email', projectsErr.message);
+    for (const p of projects ?? []) {
+      for (const a of splitEmailList(p.handoff_email as string | null)) addresses.add(a);
+    }
+  }
+
+  const { data: forwarded, error: forwardedErr } = await instantlyDb
+    .from('client_forwarded_leads').select('client_email').eq('campaign_id', campaignId);
+  if (forwardedErr) logDegraded('client_forwarded_leads', forwardedErr.message);
+  for (const f of forwarded ?? []) {
+    for (const a of splitEmailList(f.client_email as string | null)) addresses.add(a);
+  }
+
+  const domains = new Set<string>();
+  for (const a of addresses) {
+    const domain = a.split('@')[1];
+    if (domain && !isFreeProvider(domain)) domains.add(domain);
+  }
+  return { addresses, domains };
+}
+
 async function qualifyOneReply(
   db: NonNullable<typeof supabaseAdmin>,
   reply: Email,
@@ -360,6 +433,166 @@ async function qualifyOneReply(
 
   if (!campaignId || !leadEmail) return;
 
+  // Пост-handoff эхо: письмо от нашего клиента (он отвечает лиду со своей
+  // почты, мы в копии) — не квалифицируем как лида. Строку всё равно пишем:
+  // дедуп по instantly_email_id иначе будет пытаться заново каждый тик.
+  const fromLower = leadEmail.trim().toLowerCase();
+  const fromDomain = fromLower.split('@')[1] ?? '';
+  const clientParty = await getClientPartyAddresses(db, campaignId);
+  if (clientParty.addresses.has(fromLower) || (fromDomain && clientParty.domains.has(fromDomain))) {
+    const replyText = getBodyText(reply.body);
+    // Как и основной upsert ниже: ошибку НЕ глотаем. Молча потерянная строка =
+    // нет дедупа → это же эхо переобрабатывается каждый тик, занимая слот из
+    // MAX_QUALIFY_PER_TICK. throw → внешний catch запишет status='error'
+    // (видимость + дедуп-строка), ровно как при сбое основного пути.
+    const { error: guardUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+      {
+        campaign_id: campaignId,
+        campaign_name: await resolveCampaignName(campaignId, accountId),
+        lead_email: leadEmail,
+        thread_id: reply.thread_id,
+        reply_subject: reply.subject ?? null,
+        reply_preview: replyText.slice(0, 300) || null,
+        reply_body: replyText || null,
+        status: 'not_lead',
+        proposal_seen: false,
+        interest_signals: [],
+        ai_reason: `Письмо от нашего клиента (${fromLower} — адрес передачи лида/handoff этого проекта), а не от лида. Алерт не требуется.`,
+        ai_confidence: 1,
+        instantly_email_id: reply.id,
+        instantly_lead_id: null,
+        reply_timestamp: reply.timestamp_email ?? null,
+      },
+      { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+    );
+    if (guardUpsertErr) {
+      workerLog(
+        'error',
+        `Client-echo dedup upsert failed for ${fromLower} (campaign ${campaignId}, email_id=${reply.id ?? 'null'}): ${guardUpsertErr.message ?? String(guardUpsertErr)}`,
+      );
+      throw new Error(`Client-echo upsert failed: ${guardUpsertErr.message ?? 'unknown'}`);
+    }
+    workerLog('info', `Skipped client-authored reply from ${fromLower} in campaign ${campaignId} (post-handoff echo, no alert)`);
+    return;
+  }
+
+  // «Слепое» письмо: нашего ящика (eaccount) нет ни в To, ни в CC — это не
+  // прямой ответ нам (Reply на наше письмо всегда содержит наш адрес).
+  // Реальный кейс NAIS→KIRA.PW (баг от спеца, 10.07): сотрудница ЛИДА просила
+  // подробности у ДРУГОГО вендора (To = его адрес), письмо прилетело нам
+  // скрытой копией/пересылкой, Instantly приклеил его к кампании по домену
+  // лида, ИИ прочитал «расскажите подробнее» → ложный lead-пинг. Такие письма
+  // не глушим совсем (это всё же домен лида) — needs_review без пинга, пусть
+  // человек глянет. Fail-open: без eaccount или без To/CC в данных листинга
+  // проверка невозможна — идём обычным путём.
+  const ourMailbox = (reply.eaccount ?? '').trim().toLowerCase();
+  if (ourMailbox) {
+    const { to: toRcpt, cc: ccRcpt } = getEmailRecipients(reply);
+    const recipientAddrs = new Set<string>();
+    for (const r of [...toRcpt, ...ccRcpt]) {
+      // Токен может быть «Name <addr>» — достаём адреса регекспом, а не
+      // строгим равенством токена.
+      for (const m of r.email.toLowerCase().match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+/g) ?? []) {
+        recipientAddrs.add(m);
+      }
+    }
+    if (recipientAddrs.size > 0 && !recipientAddrs.has(ourMailbox)) {
+      const replyText = getBodyText(reply.body);
+      const { error: strayUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+        {
+          campaign_id: campaignId,
+          campaign_name: await resolveCampaignName(campaignId, accountId),
+          lead_email: leadEmail,
+          thread_id: reply.thread_id,
+          reply_subject: reply.subject ?? null,
+          reply_preview: replyText.slice(0, 300) || null,
+          reply_body: replyText || null,
+          status: 'needs_review',
+          proposal_seen: false,
+          interest_signals: [],
+          ai_reason: `Письмо не адресовано нашему ящику (${ourMailbox} нет в To/CC — скрытая копия или чужое письмо с домена лида). Автоматический вердикт ненадёжен, нужна ручная проверка.`,
+          ai_confidence: 0,
+          instantly_email_id: reply.id,
+          instantly_lead_id: null,
+          reply_timestamp: reply.timestamp_email ?? null,
+        },
+        { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+      );
+      if (strayUpsertErr) {
+        workerLog(
+          'error',
+          `Stray-email dedup upsert failed for ${fromLower} (campaign ${campaignId}, email_id=${reply.id ?? 'null'}): ${strayUpsertErr.message ?? String(strayUpsertErr)}`,
+        );
+        throw new Error(`Stray-email upsert failed: ${strayUpsertErr.message ?? 'unknown'}`);
+      }
+      workerLog(
+        'info',
+        `Stray email from ${fromLower} in campaign ${campaignId}: our mailbox ${ourMailbox} not in To/CC → needs_review, no alert`,
+      );
+      return;
+    }
+  }
+
+  // Кросс-клиентский доменный матч Instantly (кейс NAIS→KIRA, 10.07): лид
+  // получил рассылки ДВУХ наших клиентов и написал НОВОЕ письмо (без
+  // In-Reply-To) на ящик клиента A — Instantly, не найдя тред, приклеил его по
+  // домену отправителя к лиду/кампании клиента B. Детектор: ящик, куда письмо
+  // физически пришло (eaccount), не совпадает ни с одним ящиком, который писал
+  // лиду в этом треде. Контекст треда фетчим здесь и передаём в qualifyReply
+  // как prefetchedContext — итоговое число вызовов Instantly не растёт.
+  const ctx =
+    prefetchedContext ??
+    (await fetchThreadContext(campaignId, leadEmail, reply.thread_id, accountId));
+  if (ourMailbox && ctx) {
+    // Тред-исходящие ∪ ящики кампании (campaignOutboundMailboxes — из уже
+    // скачанных страниц, без доп. вызовов). Только тредовых НЕДОСТАТОЧНО: для
+    // «слепого» письма search идёт по адресу ОТПРАВИТЕЛЯ (кампания ему не
+    // писала) и тред-скоуп часто пуст → guard молча fail-open'ился бы в своём
+    // же флагманском сценарии (находка адверсариального ревью).
+    const outboundMailboxes = new Set(
+      [...ctx.threadEmails, ...(ctx.lastOutbound ? [ctx.lastOutbound] : [])]
+        .filter((e) => (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3)
+        .map((e) => (e.eaccount ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    );
+    for (const m of ctx.campaignOutboundMailboxes ?? []) outboundMailboxes.add(m);
+    if (outboundMailboxes.size > 0 && !outboundMailboxes.has(ourMailbox)) {
+      const replyText = getBodyText(reply.body);
+      const { error: crossUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
+        {
+          campaign_id: campaignId,
+          campaign_name: await resolveCampaignName(campaignId, accountId),
+          lead_email: leadEmail,
+          thread_id: reply.thread_id,
+          reply_subject: reply.subject ?? null,
+          reply_preview: replyText.slice(0, 300) || null,
+          reply_body: replyText || null,
+          status: 'needs_review',
+          proposal_seen: false,
+          interest_signals: [],
+          ai_reason: `Письмо пришло в ящик ${ourMailbox}, а лиду в этой кампании писал ${[...outboundMailboxes].join(', ')} — Instantly привязал его по домену отправителя. Похоже, это ответ на рассылку ДРУГОГО клиента (чей ящик ${ourMailbox}) — проверьте и передайте его специалисту вручную.`,
+          ai_confidence: 0,
+          instantly_email_id: reply.id,
+          instantly_lead_id: null,
+          reply_timestamp: reply.timestamp_email ?? null,
+        },
+        { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+      );
+      if (crossUpsertErr) {
+        workerLog(
+          'error',
+          `Cross-client dedup upsert failed for ${fromLower} (campaign ${campaignId}, email_id=${reply.id ?? 'null'}): ${crossUpsertErr.message ?? String(crossUpsertErr)}`,
+        );
+        throw new Error(`Cross-client upsert failed: ${crossUpsertErr.message ?? 'unknown'}`);
+      }
+      workerLog(
+        'info',
+        `Cross-client email from ${fromLower}: arrived at ${ourMailbox}, campaign ${campaignId} thread was mailed by ${[...outboundMailboxes].join(', ')} → needs_review, no alert`,
+      );
+      return;
+    }
+  }
+
   if (!briefCache.has(campaignId)) {
     briefCache.set(campaignId, await fetchBriefByCampaign(campaignId));
   }
@@ -369,7 +602,8 @@ async function qualifyOneReply(
     apiKey,
     model: MODEL,
     briefText: cachedBrief,
-    prefetchedContext,
+    // Контекст уже зафетчен выше (кросс-клиентский guard) — не фетчим второй раз.
+    prefetchedContext: ctx,
   }, accountId);
 
   const campaignName = await resolveCampaignName(campaignId, accountId);
@@ -876,7 +1110,7 @@ async function notifySpecialistsAboutLead(
         { onConflict: 'entity_type,entity_id,level' },
       );
 
-    await sendTelegramLeadAlertForSpecialists({
+    const tgResult = await sendTelegramLeadAlertForSpecialists({
       userIds: userIdList,
       qualificationId,
       campaignId,
@@ -890,7 +1124,27 @@ async function notifySpecialistsAboutLead(
       aiReason,
     });
 
-    workerLog('info', `Created lead notifications for ${userIds.size} specialist(s)`);
+    // Персистим исход TG-отправки: раньше сбой уходил только в stdout-warn и
+    // терялся при рестарте воркера → нельзя было доказать, каким лидам алерт не
+    // дошёл (инцидент 08.07, PP Prod/Илиана). Теперь tg_sent/tg_error видны в
+    // deadline_notification_log — можно диагностировать и ретраить неудачные.
+    await supabaseMain
+      .from('deadline_notification_log')
+      .update({
+        tg_sent: tgResult.sent,
+        tg_message_id: tgResult.messageId,
+        tg_error: tgResult.error,
+        tg_sent_at: new Date().toISOString(),
+      })
+      .eq('entity_type', 'lead_qualification')
+      .eq('entity_id', qualificationId)
+      .eq('level', 'specialist');
+
+    workerLog(
+      'info',
+      `Created lead notifications for ${userIds.size} specialist(s)` +
+        (tgResult.sent ? '' : ` — TG send FAILED: ${tgResult.error ?? 'unknown'}`),
+    );
   } catch (err) {
     workerLog('error', 'Error creating lead notifications', err);
   }
@@ -908,8 +1162,8 @@ async function sendTelegramLeadAlertForSpecialists(data: {
   replySubject: string | null;
   replyPreview: string | null;
   aiReason: string | null;
-}): Promise<void> {
-  if (!supabaseMain) return;
+}): Promise<{ sent: boolean; messageId: number | null; error: string | null }> {
+  if (!supabaseMain) return { sent: false, messageId: null, error: 'supabaseMain not configured' };
 
   try {
     const { data: profiles } = await supabaseMain
@@ -961,10 +1215,12 @@ async function sendTelegramLeadAlertForSpecialists(data: {
     });
 
     if (!result.sent) {
-      workerLog('warn', `Telegram lead alert skipped or failed for qualification ${data.qualificationId}`);
+      workerLog('warn', `Telegram lead alert skipped or failed for qualification ${data.qualificationId}: ${result.error ?? 'unknown'}`);
     }
+    return result;
   } catch (err) {
     workerLog('error', 'Error sending Telegram lead alert', err);
+    return { sent: false, messageId: null, error: err instanceof Error ? err.message : String(err) };
   }
 }
 

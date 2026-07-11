@@ -17,6 +17,7 @@ import {
   DEMO_CAMPAIGNS_RESPONSE,
   DEMO_ONBOARDING_RESPONSE,
   DEMO_BRIEF_RESPONSE,
+  DEMO_BRIEF_HYPOTHESES_RESPONSE,
   DEMO_BASES_RESPONSE,
   DEMO_PROJECTS_RESPONSE,
   DEMO_PRESET_RESPONSE,
@@ -61,6 +62,8 @@ export async function serveClientDemo(req: NextRequest): Promise<NextResponse> {
       return json(DEMO_ONBOARDING_RESPONSE);
     case '/brief':
       return json(DEMO_BRIEF_RESPONSE);
+    case '/brief/hypotheses':
+      return json(DEMO_BRIEF_HYPOTHESES_RESPONSE);
     case '/bases':
       return json(DEMO_BASES_RESPONSE);
     case '/projects':

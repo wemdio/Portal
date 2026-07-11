@@ -11,8 +11,11 @@ jest.mock('@/lib/supabaseAdmin', () => ({
   supabaseAdmin: null,
 }));
 
+const mockListEmails = jest.fn();
+
 jest.mock('@/lib/instantly/client', () => ({
   __esModule: true,
+  listEmails: (...args: unknown[]) => mockListEmails(...args),
 }));
 
 function email(overrides: Partial<Email>): Email {
@@ -102,6 +105,94 @@ describe('classifyWithAI', () => {
     const [, init] = (global.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(String(init.body)) as { max_tokens?: number };
     expect(body.max_tokens).toBe(2400);
+  });
+});
+
+describe('qualifyReply prefetchedContext contract', () => {
+  // null = «вызывающий УЖЕ фетчил контекст, его нет» — рефетч удваивал бы
+  // /emails-вызовы ровно на деградирующем Instantly (общий лимит воркспейса).
+  // Пин против отката `!== undefined` обратно на `??`.
+  it('prefetchedContext: null → БЕЗ повторного fetchThreadContext, сразу needs_review', async () => {
+    mockListEmails.mockClear();
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+
+    const res = await qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      apiKey: 'test-key',
+      prefetchedContext: null,
+    });
+
+    expect(res.needsReview).toBe(true);
+    expect(res.reason).toContain('Не удалось восстановить контекст');
+    expect(mockListEmails).not.toHaveBeenCalled();
+  });
+});
+
+describe('fetchThreadContext campaignOutboundMailboxes', () => {
+  it('собирает ящики кампании из campaign-wide fallback (нормализованные) — база кросс-клиентского guard', async () => {
+    mockListEmails.mockClear();
+    const inbound = email({
+      id: 'stray-1',
+      ue_type: 2,
+      from_address_email: 'head_market@nais.ru',
+      to_address_email_list: 'kirill@kira-aggregator.ru',
+      eaccount: 'kirill@kira-aggregator.ru',
+      thread_id: 'thread-X',
+    });
+    const campaignOutbound = email({
+      id: 'camp-out-1',
+      ue_type: 1,
+      // Регистр+пробел — пин нормализации.
+      eaccount: ' Lyamina@Ritso-Contact.ru',
+      from_address_email: 'lyamina@ritso-contact.ru',
+      to_address_email_list: 'hr@nais.ru',
+      thread_id: 'thread-Y',
+      timestamp_email: '2026-07-01T00:00:00Z',
+    });
+    mockListEmails
+      .mockResolvedValueOnce({ items: [inbound] }) // search=адрес отправителя
+      .mockResolvedValueOnce({ items: [campaignOutbound] }); // campaign-wide fallback
+
+    const { fetchThreadContext } = await import('@/lib/instantly/leadQualifier');
+    const ctx = await fetchThreadContext('campaign-1', 'head_market@nais.ru', 'thread-X');
+
+    expect(ctx).not.toBeNull();
+    // Тред «слепого» письма наших исходящих не содержит…
+    expect(ctx!.lastOutbound).toBeNull();
+    // …но ящики кампании собраны из campaign-wide страницы — guard'у есть с чем сравнить.
+    expect(ctx!.campaignOutboundMailboxes).toEqual(['lyamina@ritso-contact.ru']);
+  });
+});
+
+describe('isAutoReplyOrUnsubscribe — уведомления о смене/закрытии ящика', () => {
+  // Ложный лид stroytim_plus 29.06 (баг №1 от спеца): «почта прекратила свою
+  // работу» + список новых контактов ИИ вероятностно читал как интерес.
+  // Класс отсекается детерминированно, ДО модели.
+  it('матчит реальные формальные уведомления (кейсы из прода)', async () => {
+    const { isAutoReplyOrUnsubscribe } = await import('@/lib/instantly/leadQualifier');
+    const positives = [
+      'ООО «СТРОЙТАЙМ ПЛЮС» информирует Вас о том, что почта stroytim_plus@mail.ru прекратила свою работу. Официальная почта компании info@st-plus33.ru',
+      'Просим Вас вести переписку с сотрудниками по направлениям деятельности.',
+      'ООО "Татнефть-Самара" сообщает о смене адреса электронной почты.',
+      'Данный почтовый ящик больше не обслуживается.',
+      'This email address is no longer in use, please contact sales@example.com',
+      'Просим направлять корреспонденцию на info@example.ru',
+    ];
+    for (const text of positives) {
+      expect(isAutoReplyOrUnsubscribe(text)).toBe(true);
+    }
+  });
+
+  it('НЕ матчит живые ответы с упоминанием адреса/почты (их решает ИИ)', async () => {
+    const { isAutoReplyOrUnsubscribe } = await import('@/lib/instantly/leadQualifier');
+    const negatives = [
+      'Добрый день! Пришлите, пожалуйста, цены и условия.',
+      'Интересно. Вышлите предложение на info@company.ru, это почта директора.',
+      'Отправьте КП на другой адрес: zakupki@firma.ru, там быстрее посмотрят.',
+      'Да, тема актуальна. Давайте созвонимся во вторник.',
+    ];
+    for (const text of negatives) {
+      expect(isAutoReplyOrUnsubscribe(text)).toBe(false);
+    }
   });
 });
 
