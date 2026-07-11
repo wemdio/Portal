@@ -99,16 +99,18 @@ export function personalizeCacheDomain(resolvedOrNormalizedUrl: string): string 
 }
 
 const LETTERS_SYSTEM_PROMPT = `Ты — копирайтер холодных B2B-писем на русском языке.
-По брифу компании напиши цепочку из РОВНО 3 коротких писем для холодной email-рассылки её потенциальным клиентам.
+По брифу компании напиши цепочку из РОВНО 5 коротких писем для холодной email-рассылки её потенциальным клиентам.
 
 Требования к письмам:
 - Каждое письмо 400–700 знаков, деловой тон без канцелярита, один чёткий CTA.
-- Письмо 1 — первое касание (боль + оффер), письмо 2 — follow-up с другим углом (кейс/цифры), письмо 3 — короткое закрывающее.
+- Письмо 1 — первое касание (боль + оффер); письма 2–4 — follow-up'ы с РАЗНЫМИ углами (кейс/цифры, другой сегмент боли, социальное доказательство); письмо 5 — короткий финальный заход с новым углом или мягким предложением следующего шага.
+- Каждое письмо самодостаточно и не повторяет предыдущие дословно.
+- НЕ пиши «прощальных»/breakup-писем: ни одно письмо (включая последнее) НЕ объявляет, что оно последнее, НЕ просит ответить «не нужно»/«не интересно», НЕ обещает «больше не беспокоить/писать» и НЕ упоминает отписку — это главный маркер массового спама, он убивает доверие.
 - Используй merge-теги {{firstName}} и {{companyName}} для персонализации получателя.
 - Никаких выдуманных фактов: только то, что есть в брифе. Если цифр нет — пиши без цифр.
 
-Ответ — СТРОГО валидный JSON-массив без пояснений и markdown-ограждений:
-[{"subject":"...","body":"...","wait_days":0},{"subject":"...","body":"...","wait_days":3},{"subject":"...","body":"...","wait_days":4}]`;
+Ответ — СТРОГО валидный JSON-массив из 5 объектов без пояснений и markdown-ограждений:
+[{"subject":"...","body":"...","wait_days":0},{"subject":"...","body":"...","wait_days":3},{"subject":"...","body":"...","wait_days":4},{"subject":"...","body":"...","wait_days":5},{"subject":"...","body":"...","wait_days":7}]`;
 
 function parseLettersJson(raw: string): DemoPersonalizeLetter[] {
   const cleaned = raw.replace(/```(?:json)?/gi, '').trim();
@@ -124,12 +126,14 @@ function parseLettersJson(raw: string): DemoPersonalizeLetter[] {
         typeof (l as DemoPersonalizeLetter).subject === 'string' &&
         typeof (l as DemoPersonalizeLetter).body === 'string',
     )
-    .slice(0, 3)
+    .slice(0, 5)
     .map((l) => ({
       subject: l.subject.trim().slice(0, 200),
       body: l.body.trim().slice(0, 2000),
       wait_days: Number.isFinite(l.wait_days) ? Math.max(0, Math.round(l.wait_days)) : 3,
     }));
+  // Панель показывает первые 3 и блюрит остальные; меньше 3 — цепочки нет.
+  // Не хардфейлим на 4 (лучше показать 3+1, чем 502), но промпт просит 5.
   if (letters.length < 3) throw new Error('AI вернул неполную цепочку');
   return letters;
 }
@@ -147,7 +151,7 @@ export async function generateDemoLetters(options: {
       { role: 'system', content: LETTERS_SYSTEM_PROMPT },
       { role: 'user', content: `БРИФ КОМПАНИИ:\n\n${options.briefText.slice(0, 12_000)}` },
     ],
-    maxTokens: 2500,
+    maxTokens: 4000,
     signal: options.signal,
   });
   return parseLettersJson(raw);
