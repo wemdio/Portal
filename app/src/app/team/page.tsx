@@ -468,7 +468,7 @@ export default function TeamPage() {
               {(() => {
                 const act = person.projects.filter((p) => !isFinishedStatus(p.status)).length;
                 const fin = person.projects.length - act;
-                return `${act} ${plural(act)}${fin > 0 ? ` · ${fin} заверш.` : ''}`;
+                return `${act} ${pluralRu(act, 'активный проект', 'активных проекта', 'активных проектов')}${fin > 0 ? ` · ${fin} ${pluralRu(fin, 'завершённый', 'завершённых', 'завершённых')}` : ''}`;
               })()}
             </p>
           </div>
