@@ -97,7 +97,7 @@ export function DemoSequenceExample() {
             title="Продукт — что дали на входе"
           />
           <p className="text-xs sm:text-sm m-0" style={{ color: 'var(--cp-paper-mute)' }}>
-            <span className="ds-mono">Источник: бриф из портала.</span> Орбита — облачная WMS для
+            <span className="ds-mono">Источник: бриф.</span> Орбита — облачная WMS для
             управления складом: онлайн-остатки, ТСД, интеграции с 1С и маркетплейсами. Кейсы:
             «ТоргДом» (12 складов), Fulfillment Pro, ПромЗавод.
           </p>

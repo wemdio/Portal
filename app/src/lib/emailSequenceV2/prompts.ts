@@ -258,6 +258,7 @@ WYMAGANIA:
 - Treść maila — prostym, konwersacyjnym językiem, krótkimi akapitami.
 - OBJĘTOŚĆ (twardy limit, ważniejszy niż przykłady, szablon i regulamin): pierwszy mail — nie dłuższy niż 100 słów; każdy pośredni follow-up (wszystkie maile między pierwszym a ostatnim) — 40–80 słów i krótszy od poprzedniego; ostatni mail — 2–4 krótkie zdania. Nawet jeśli przykłady lub regulamin w materiałach są dłuższe — przestrzegaj tego limitu.
 - Jeden mail — jedna kluczowa myśl. Nie wymieniaj wszystkich USP i korzyści w jednym mailu — rozłóż je na całą sekwencję.
+- ZAKAZ maili "pożegnalnych"/breakup. ŻADEN mail (łącznie z ostatnim) nie może: ogłaszać, że jest ostatni; prosić o odpowiedź "nie jestem zainteresowany"; obiecywać "nie będę więcej pisać"; przepraszać za zawracanie głowy; wspominać o wypisaniu się. To główny sygnał masowego spamu — nawet jeśli przykłady lub regulamin tak robią. Ostatni mail to po prostu jeszcze jeden krótki, wartościowy kontakt z NOWYM kątem i miękkim CTA, jak prawdziwa korespondencja 1:1.
 - Jeśli w danych były operatory personalizacji (np. {{firstName}}, {{companyName}}), wstawiaj je tam, gdzie to odpowiednie.
 
 Przystąp do wykonania.`,

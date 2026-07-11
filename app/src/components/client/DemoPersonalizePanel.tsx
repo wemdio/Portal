@@ -5,7 +5,8 @@
  *
  * Посетитель вставляет URL своего сайта → три последовательных шага к
  * /api/client/demo/personalize (бриф → гипотезы → письма), с живым прогрессом.
- * Письма 2–3 показываются под блюром до регистрации (promptDemoRegister).
+ * Из цепочки (обычно 5 писем) первые 3 показаны, остальные под блюром до
+ * регистрации (promptDemoRegister); если писем ≤3 — вместо блюра CTA-кнопка.
  * Рендерится ТОЛЬКО в демо (гейт в brief/page.tsx по useDemoMode).
  */
 
@@ -349,9 +350,24 @@ export function DemoPersonalizePanel() {
                     style={{ background: 'var(--cp-amber)', color: 'var(--cp-ink)' }}
                   >
                     <Lock size={14} aria-hidden />
-                    Показать письма 4–5 — создайте аккаунт
+                    Показать всю цепочку — создайте аккаунт
                   </button>
                 </div>
+              </div>
+            )}
+            {/* Цепочка ≤3 писем (толерантность парсера): блюрить нечего, но
+                конверсионный крючок не теряем — та же CTA без блюра. */}
+            {letterCards.length > 0 && letterCards.length <= 3 && (
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={() => promptDemoRegister('запустить такую цепочку по вашей базе')}
+                  className="neu-pill inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold"
+                  style={{ background: 'var(--cp-amber)', color: 'var(--cp-ink)' }}
+                >
+                  <Lock size={14} aria-hidden />
+                  Запустить по своей базе — создайте аккаунт
+                </button>
               </div>
             )}
           </div>
