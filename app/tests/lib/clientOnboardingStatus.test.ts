@@ -214,6 +214,21 @@ describe('computeOnboardingStatus', () => {
     expect(res2.items.find((i) => i.id === 'first_sequence')?.done).toBe(true);
   });
 
+  it('first_sequence засчитывает completed из v2-таблицы (клиент пишет только в неё)', async () => {
+    // Клиентский allowlist пускает только /api/tools/email-sequence-v2 —
+    // реальный клиент физически не создаёт v1-run. Без учёта v2 шаг никогда
+    // не завершался (пре-существующий баг, найден IA-верификацией 10.07).
+    state.rowsByTable.email_sequence_v2_runs = [
+      { user_id: USER_ID, status: 'extracting_values' },
+    ];
+    const res = await callStatus();
+    expect(res.items.find((i) => i.id === 'first_sequence')?.done).toBe(false);
+
+    state.rowsByTable.email_sequence_v2_runs.push({ user_id: USER_ID, status: 'completed' });
+    const res2 = await callStatus();
+    expect(res2.items.find((i) => i.id === 'first_sequence')?.done).toBe(true);
+  });
+
   it('first_launch only counts active/paused/completed; uploading/failed do not', async () => {
     state.rowsByTable.client_campaign_launches = [
       { client_user_id: USER_ID, status: 'uploading' },

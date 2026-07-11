@@ -92,8 +92,8 @@ export async function computeOnboardingStatus(
 ): Promise<OnboardingStatusResponse> {
   const { supabaseAdmin, supabaseInstantly } = deps;
 
-  // All five queries run in parallel — none depend on each other's output.
-  const [briefRes, presetRes, jobsRes, launchesRes, sequencesRes] = await Promise.all([
+  // All six queries run in parallel — none depend on each other's output.
+  const [briefRes, presetRes, jobsRes, launchesRes, sequencesRes, sequencesV2Res] = await Promise.all([
     supabaseInstantly
       .from('client_briefs')
       .select('fields')
@@ -116,6 +116,14 @@ export async function computeOnboardingStatus(
     // (см. /api/tools/email-sequence/runs). Нужен только status.
     supabaseAdmin
       .from('email_sequence_runs')
+      .select('status')
+      .eq('user_id', userId),
+    // v2-инструмент («Цепочки писем 2.0», /client/sequences) пишет в СВОЮ
+    // таблицу. Клиентский allowlist пускает только v2-роуты, поэтому без
+    // этого запроса шаг «первая цепочка» у реальных клиентов не завершался
+    // бы никогда. Зеркалит tariffs.countChains (считает обе таблицы).
+    supabaseAdmin
+      .from('email_sequence_v2_runs')
       .select('status')
       .eq('user_id', userId),
   ]);
@@ -150,7 +158,10 @@ export async function computeOnboardingStatus(
   // Считаем выполненным, когда есть run со status='completed' (его ставят
   // generate-segments и generate-chain). Симметрично с first_clean.
   const sequences = (sequencesRes.data ?? []) as { status?: unknown }[];
-  const firstSequenceDone = sequences.some((s) => s.status === 'completed');
+  const sequencesV2 = (sequencesV2Res.data ?? []) as { status?: unknown }[];
+  const firstSequenceDone =
+    sequences.some((s) => s.status === 'completed') ||
+    sequencesV2.some((s) => s.status === 'completed');
 
   const firstBaseDone = hasAnyJob || hasAnyLaunch;
   const firstCleanDone = hasCompletedJob;

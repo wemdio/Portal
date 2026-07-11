@@ -32,14 +32,19 @@ export default function ClientParsersPage() {
   const [tariffLoading, setTariffLoading] = useState(true);
 
   // «Цепочки писем» переехали на свою страницу (IA-переработка, июль 2026) —
-  // старые закладки/онбординг-ссылки на таб редиректим туда.
-  useEffect(() => {
-    if (searchParams?.get('tab') === 'email-sequence') {
-      router.replace('/client/sequences');
-    }
-  }, [searchParams, router]);
+  // старые закладки/онбординг-ссылки на таб редиректим туда. Пока редирект в
+  // пути — не рендерим и не грузим ничего (иначе мигал бы чужой заголовок и
+  // уходил лишний вызов /tariff, а при быстром ответе — и запросы HH-вкладки).
+  const redirectingToSequences = searchParams?.get('tab') === 'email-sequence';
 
   useEffect(() => {
+    if (redirectingToSequences) {
+      router.replace('/client/sequences');
+    }
+  }, [redirectingToSequences, router]);
+
+  useEffect(() => {
+    if (redirectingToSequences) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -54,12 +59,14 @@ export default function ClientParsersPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [redirectingToSequences]);
 
   // «Не оплачен» = никогда не оплачивался или истёк срок оплаты. Setup
   // (оплачен, идёт настройка ЛК) и active — тариф оплачен, инструменты
   // разрешены (внутри инструментов есть свои проверки лимитов).
   const tariffNotPaid = tariffStatus === 'inactive' || tariffStatus === 'expired';
+
+  if (redirectingToSequences) return null;
 
   return (
     // Широкий контейнер: вкладки — плотные инструменты (панель 380px +
