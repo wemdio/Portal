@@ -120,19 +120,27 @@ const startGroup: ClientNavGroup = {
     },
     {
       id: 'build',
-      label: 'Базы',
-      labelEn: 'Databases',
+      label: 'Сбор базы',
+      labelEn: 'Collect contacts',
       href: '/client/build',
-      description: 'Соберите контакты из источников и подготовьте к рассылке',
-      descriptionEn: 'Collect contacts from sources and prepare for outreach',
+      description: 'Пять источников: B2B-поиск, HH, поисковая выдача, Я.Карты, свой файл',
+      descriptionEn: 'Five sources: B2B search, HH, search results, Yandex Maps, your file',
     },
     {
-      id: 'parsers',
-      label: 'Инструменты парсинга',
-      labelEn: 'Parsing tools',
-      href: '/client/parsers',
-      description: 'Парсеры HH, Google, Яндекс.Карт и генерация цепочек',
-      descriptionEn: 'HH, Google, Yandex Maps parsers and chain generation',
+      id: 'base-constructor',
+      label: 'Конструктор баз',
+      labelEn: 'Base constructor',
+      href: '/client/base-constructor',
+      description: 'Очистка, поиск email, проверка сайтов, оценка ЦА — подготовка базы к рассылке',
+      descriptionEn: 'Cleaning, email finding, site checks, ICP scoring — prepare the base for outreach',
+    },
+    {
+      id: 'sequences',
+      label: 'Цепочки писем',
+      labelEn: 'Email sequences',
+      href: '/client/sequences',
+      description: 'AI-генератор цепочки по брифу и аудитории (не редактор писем кампании)',
+      descriptionEn: 'AI sequence generator from your brief (not the campaign step editor)',
     },
     {
       id: 'launch',
@@ -332,15 +340,17 @@ export function filterClientNavGroupsForMode(
 }
 
 /**
- * Phase 4 consolidation: the «Базы» hub at /client/build shows three legacy
- * tools as cards (companies-search, parsers, base-constructor). When a user
- * is on any of those legacy URLs the sidebar should still highlight «Базы»
- * because that's the hub they came from.
+ * «Сбор базы» hub at /client/build links source tools as cards
+ * (companies-search + the parser tabs). When a user is on any of those URLs
+ * the sidebar should still highlight «Сбор базы» because that's the hub they
+ * came from. NOTE: /client/base-constructor is NOT here anymore — the
+ * Constructor is a first-class sidebar item since the July 2026 IA rework
+ * (its href is matched by the generic group walk below).
  */
 const BUILD_LEGACY_PREFIXES: readonly string[] = [
   '/client/build',
   '/client/companies-search',
-  '/client/base-constructor',
+  '/client/parsers',
 ];
 
 /**
@@ -354,9 +364,6 @@ const BUILD_LEGACY_PREFIXES: readonly string[] = [
 export function resolveActiveNavId(pathname: string): string | null {
   if (pathname === '/client/dashboard' || pathname.startsWith('/client/dashboard/')) {
     return 'dashboard';
-  }
-  if (pathname === '/client/parsers' || pathname.startsWith('/client/parsers/')) {
-    return 'parsers';
   }
   if (
     pathname === '/client/auto-pipeline/setup' ||

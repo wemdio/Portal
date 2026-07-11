@@ -1,19 +1,16 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { HHParserView } from '@/components/parsers/HHParserView';
 import { SearchParserView } from '@/components/parsers/SearchParserView';
 import { YandexMapsParserView } from '@/components/parsers/YandexMapsParserView';
-import { EmailSequenceV2View } from '@/components/email-sequence-v2/EmailSequenceV2View';
 import { clientApiFetch } from '@/lib/clientFetcher';
-import { useDemoMode } from '@/lib/clientDemo/useDemoMode';
-import { DemoSequenceExample } from '@/components/client/DemoSequenceExample';
 
-type Tab = 'hh' | 'search' | 'yandexmaps' | 'email-sequence';
+type Tab = 'hh' | 'search' | 'yandexmaps';
 
 function parseTab(value: string | null | undefined): Tab {
-  if (value === 'hh' || value === 'search' || value === 'yandexmaps' || value === 'email-sequence') {
+  if (value === 'hh' || value === 'search' || value === 'yandexmaps') {
     return value;
   }
   return 'hh';
@@ -23,17 +20,24 @@ const TABS: { tab: Tab; label: string }[] = [
   { tab: 'hh', label: 'HH.ru парсер' },
   { tab: 'search', label: 'Поиск' },
   { tab: 'yandexmaps', label: 'Яндекс.Карты' },
-  { tab: 'email-sequence', label: 'Цепочки писем' },
 ];
 
 type TariffStatus = 'setup' | 'active' | 'expired' | 'inactive';
 
 export default function ClientParsersPage() {
   const searchParams = useSearchParams();
-  const isDemo = useDemoMode();
+  const router = useRouter();
   const [activeTab, setActiveTab] = useState<Tab>(() => parseTab(searchParams?.get('tab')));
   const [tariffStatus, setTariffStatus] = useState<TariffStatus | null>(null);
   const [tariffLoading, setTariffLoading] = useState(true);
+
+  // «Цепочки писем» переехали на свою страницу (IA-переработка, июль 2026) —
+  // старые закладки/онбординг-ссылки на таб редиректим туда.
+  useEffect(() => {
+    if (searchParams?.get('tab') === 'email-sequence') {
+      router.replace('/client/sequences');
+    }
+  }, [searchParams, router]);
 
   useEffect(() => {
     let cancelled = false;
@@ -58,10 +62,9 @@ export default function ClientParsersPage() {
   const tariffNotPaid = tariffStatus === 'inactive' || tariffStatus === 'expired';
 
   return (
-    // Широкий контейнер: все вкладки — плотные инструменты (парсеры с панелью
-    // 380px + результаты, генератор цепочек с редактором + сайдбар), которым
-    // тесно в max-w-5xl. Под кэпом кабинета 1600px (client/layout.tsx) max-w-7xl
-    // (1280) реально наполняется, т.е. использует почти всю доступную ширину main.
+    // Широкий контейнер: вкладки — плотные инструменты (панель 380px +
+    // результаты), которым тесно в max-w-5xl. Под кэпом кабинета 1600px
+    // (client/layout.tsx) max-w-7xl реально наполняется.
     <div className="mx-auto max-w-7xl">
       <header className="mb-6 sm:mb-8">
         <h1
@@ -71,7 +74,7 @@ export default function ClientParsersPage() {
           Инструменты парсинга
         </h1>
         <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
-          Парсеры и генерация контента
+          Парсеры HH.ru, поисковой выдачи и Яндекс.Карт
         </p>
       </header>
 
@@ -109,16 +112,6 @@ export default function ClientParsersPage() {
           {activeTab === 'hh' && <HHParserView clientMode />}
           {activeTab === 'search' && <SearchParserView clientMode />}
           {activeTab === 'yandexmaps' && <YandexMapsParserView clientMode />}
-          {/* Демо: вместо живого генератора — read-only пример «вход → цепочка»
-              (tools-API демо-аккаунту недоступен, у живой вкладки был бы пустой
-              список запусков). До резолва demo-status не монтируем живой инструмент,
-              чтобы под демо не улетал его стартовый запрос списка запусков. */}
-          {activeTab === 'email-sequence' &&
-            (isDemo === true ? (
-              <DemoSequenceExample />
-            ) : isDemo === false ? (
-              <EmailSequenceV2View clientMode />
-            ) : null)}
         </>
       )}
     </div>

@@ -266,7 +266,8 @@ describe('computeOnboardingStatus', () => {
     // After Phase 4 consolidation, first_base points at the /client/build hub.
     expect(itemHref('first_base')).toBe('/client/build');
     expect(itemHref('first_clean')).toBe('/client/base-constructor');
-    expect(itemHref('first_sequence')).toBe('/client/parsers?tab=email-sequence');
+    // July 2026 IA rework: «Цепочки писем» — своя страница (была табом парсеров).
+    expect(itemHref('first_sequence')).toBe('/client/sequences');
     expect(itemHref('first_launch')).toBe('/client/launch');
   });
 });

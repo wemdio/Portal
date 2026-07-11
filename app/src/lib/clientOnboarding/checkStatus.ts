@@ -196,7 +196,7 @@ export async function computeOnboardingStatus(
       id: 'first_sequence',
       label: 'Написать первую цепочку писем',
       done: firstSequenceDone,
-      href: '/client/parsers?tab=email-sequence',
+      href: '/client/sequences',
     },
     {
       id: 'first_launch',
