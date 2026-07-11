@@ -7,6 +7,8 @@ export type NavItem = {
   billingCalendarOnly?: boolean;
   /** Visible only to admins and technicians (uses lib/roles.ts isTechnician). */
   technicianOrAdmin?: boolean;
+  /** Visible only to management — lead / director / admin (uses lib/roles.ts isLead). */
+  leadOnly?: boolean;
   /** If set, this item is hidden when the user has it disabled in user_tool_visibility */
   navTabId?: string;
   requiresTool?: string;
@@ -21,6 +23,7 @@ export const NAV_PATH_ALIASES: Record<string, string[]> = {
 export const navItems: NavItem[] = [
   { id: 'projects', name: 'Проекты', nameEn: 'Projects', href: '/' },
   { id: 'projects-analytics', name: 'Аналитика проектов', nameEn: 'Project analytics', href: '/analytics/projects' },
+  { id: 'mailbox-load', name: 'Нагрузка почт', nameEn: 'Mailbox load', href: '/analytics/mailbox-load', leadOnly: true },
   { id: 'tasks', name: 'Задачи', nameEn: 'Tasks', href: '/tasks' },
   { id: 'board', name: 'Доска', nameEn: 'Board', href: '/board', navTabId: 'nav-tasks-board' },
   { id: 'team', name: 'Команда', nameEn: 'Team', href: '/team' },

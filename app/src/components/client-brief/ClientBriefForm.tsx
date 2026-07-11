@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, AlertCircle, Loader2 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { logAudit, logError } from '@/lib/loggerClient';
+import { promptDemoRegister } from '@/lib/clientDemo/registerPrompt';
 import {
   EMPTY_BRIEF_FIELDS,
   PRICE_TIER_LABELS,
@@ -420,13 +421,21 @@ export function ClientBriefForm({
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      let parsed: { error?: unknown; code?: unknown } | null = null;
       try {
-        const parsed = JSON.parse(text) as { error?: unknown };
-        const msg = typeof parsed?.error === 'string' ? parsed.error : '';
-        throw new Error(msg || text || `Request failed: ${res.status}`);
+        parsed = JSON.parse(text) as { error?: unknown; code?: unknown };
       } catch {
-        throw new Error(text || `Request failed: ${res.status}`);
+        parsed = null;
       }
+      // Демо-аккаунт: мутации центрально режутся 403 + code DEMO_READONLY.
+      // Локальный apiFetch идёт мимо authFetch (где живёт общий перехват),
+      // поэтому зеркалим его здесь — иначе демо-юзер видит сырую inline-ошибку
+      // вместо глобальной модалки «зарегистрируйтесь».
+      if (res.status === 403 && parsed?.code === 'DEMO_READONLY') {
+        promptDemoRegister();
+      }
+      const msg = typeof parsed?.error === 'string' ? parsed.error : '';
+      throw new Error(msg || text || `Request failed: ${res.status}`);
     }
     return (await res.json()) as T;
   }, []);

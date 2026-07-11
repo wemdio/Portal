@@ -410,6 +410,15 @@ export async function middleware(request: NextRequest) {
       }
     }
 
+    // Дашборд нагрузки почт — только руководство (lead/director/admin, = isLead).
+    // Оценка эффективности специалистов, не для рядовых ролей.
+    if (user && pathname.startsWith('/analytics/mailbox-load')) {
+      const allowedRoles = ['lead', 'director', 'admin']
+      if (!userRole || !allowedRoles.includes(userRole)) {
+        return NextResponse.redirect(new URL('/', request.url))
+      }
+    }
+
     return response
   } catch (err) {
     // Если GoTrue/PostgREST недоступен — НЕ выкидываем пользователя,

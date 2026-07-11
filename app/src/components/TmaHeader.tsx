@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { navItems } from '@/lib/navigation';
-import { isAdmin } from '@/lib/roles';
+import { isAdmin, isLead } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
 import { commonDictionary, dict } from '@/lib/i18n';
 
@@ -33,7 +33,11 @@ export function TmaHeader() {
   };
 
   const items = useMemo(() => {
-    return navItems.filter((item) => !item.adminOnly || isAdmin(userRole));
+    return navItems.filter((item) => {
+      if (item.adminOnly && !isAdmin(userRole)) return false;
+      if (item.leadOnly && !isLead(userRole)) return false;
+      return true;
+    });
   }, [userRole]);
 
   const activeItem = useMemo(() => {

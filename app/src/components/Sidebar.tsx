@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
-import { getRoleLabel, isAdmin, isTechnician, canAccessBillingCalendar } from '@/lib/roles';
+import { getRoleLabel, isAdmin, isTechnician, isLead, canAccessBillingCalendar } from '@/lib/roles';
 import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
 import { useUser } from '@/lib/UserProvider';
 import { commonDictionary, dict } from '@/lib/i18n';
@@ -94,6 +94,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
         {navItems.map((item) => {
           if (item.adminOnly && !isAdmin(userRole)) return null;
           if (item.technicianOrAdmin && !isTechnician(userRole)) return null;
+          if (item.leadOnly && !isLead(userRole)) return null;
           if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return null;
           if (item.navTabId && navTabVisibility[item.navTabId] === false) return null;
           if (item.requiresTool && visibleTools !== null && !visibleTools.includes(item.requiresTool)) return null;
