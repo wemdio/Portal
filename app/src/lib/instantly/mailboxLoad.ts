@@ -98,7 +98,6 @@ export type MailboxRow = {
   email: string;
   statusValue: number | null;
   status: string | null; // label_ru
-  warmupStatus: string | null; // label_ru
   dailyLimit: number; // effective (NULL → дефолт 30)
   isDefaultLimit: boolean; // лимит не выставлен явно, действует дефолт
   sent: number;
@@ -394,7 +393,7 @@ export async function buildMailboxLoad(day?: string): Promise<MailboxLoad> {
 }
 
 type DrillRow = {
-  email: string; status_value: number | null; status: string | null; warmup_status: string | null;
+  email: string; status_value: number | null; status: string | null;
   daily_limit: string; is_default_limit: boolean; sent: string; last_used: string | null;
 };
 
@@ -431,7 +430,6 @@ export async function getTagMailboxes(tagId: string, day?: string): Promise<{ as
        SELECT a.email,
               a.status AS status_value,
               ls.label_ru AS status,
-              lw.label_ru AS warmup_status,
               coalesce(a.daily_limit, $3::int) AS daily_limit,
               (a.daily_limit IS NULL) AS is_default_limit,
               coalesce(v.sent, 0) AS sent,
@@ -448,7 +446,6 @@ export async function getTagMailboxes(tagId: string, day?: string): Promise<{ as
          LIMIT 1
        ) last_send ON true
        LEFT JOIN lookup_account_status ls ON ls.value = a.status
-       LEFT JOIN lookup_warmup_status lw ON lw.value = a.warmup_status
        ORDER BY a.status = 1 DESC, sent DESC, daily_limit DESC`,
       [asOfDay, tagId, DEFAULT_DAILY_LIMIT],
     ),
@@ -461,7 +458,6 @@ export async function getTagMailboxes(tagId: string, day?: string): Promise<{ as
       email: r.email,
       statusValue: r.status_value == null ? null : Number(r.status_value),
       status: r.status,
-      warmupStatus: r.warmup_status,
       dailyLimit: num(r.daily_limit),
       isDefaultLimit: Boolean(r.is_default_limit),
       sent: num(r.sent),

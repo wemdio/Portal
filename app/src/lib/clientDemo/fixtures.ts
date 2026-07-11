@@ -831,7 +831,7 @@ export const DEMO_ONBOARDING_RESPONSE = {
       id: 'first_sequence',
       label: 'Написать первую цепочку писем',
       done: true,
-      href: '/client/parsers?tab=email-sequence',
+      href: '/client/sequences',
     },
     { id: 'first_launch', label: 'Запустить первую кампанию', done: true, href: '/client/launch' },
   ],
