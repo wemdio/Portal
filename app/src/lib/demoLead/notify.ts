@@ -86,6 +86,48 @@ function esc(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/**
+ * Сигнал «посетитель демо прогнал СВОЙ сайт через персонализацию» — это тёплый
+ * лид (человек примерил продукт на свою компанию), даже без контактов.
+ * Летит в тот же бот/чат/топик, что и остальные демо-лиды. Never throws.
+ */
+export async function sendDemoPersonalizeTelegramAlert(data: {
+  domain: string;
+  resolvedUrl?: string | null;
+  ip?: string | null;
+}): Promise<void> {
+  const token = getToken();
+  const chatId = getChatId();
+  if (!token || !chatId) return;
+
+  const lines = [
+    '🔍 <b>Демо: разбор сайта посетителя</b>',
+    '',
+    `<b>Сайт:</b> ${esc(data.resolvedUrl || data.domain)}`,
+  ];
+  if (data.ip) lines.push(`<i>ip: ${esc(data.ip)}</i>`);
+
+  const payload: Record<string, unknown> = {
+    chat_id: chatId,
+    text: lines.join('\n'),
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+  };
+  const threadId = getThreadId();
+  if (threadId) payload.message_thread_id = threadId;
+
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(TG_FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    // best-effort
+  }
+}
+
 export async function sendDemoLeadTelegramAlert(data: DemoLeadData): Promise<void> {
   const token = getToken();
   const chatId = getChatId();
