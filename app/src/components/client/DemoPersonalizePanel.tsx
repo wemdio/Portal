@@ -329,14 +329,16 @@ export function DemoPersonalizePanel() {
             Цепочка писем под вашу компанию
           </h3>
           <div className="space-y-2">
-            <DemoLetterCard letter={letterCards[0]} index={0} idPrefix="pers" defaultOpen />
-            {letterCards.length > 1 && (
+            {letterCards.slice(0, 3).map((l, i) => (
+              <DemoLetterCard key={i} letter={l} index={i} idPrefix="pers" defaultOpen={i === 0} />
+            ))}
+            {letterCards.length > 3 && (
               <div className="relative">
                 {/* inert выводит кнопки заблюренных карточек из tab-order —
                     aria-hidden без него оставлял фокусируемые элементы (WCAG 4.1.2). */}
                 <div className="space-y-2 blur-sm select-none pointer-events-none" aria-hidden inert>
-                  {letterCards.slice(1).map((l, i) => (
-                    <DemoLetterCard key={i} letter={l} index={i + 1} idPrefix="pers" />
+                  {letterCards.slice(3).map((l, i) => (
+                    <DemoLetterCard key={i} letter={l} index={i + 3} idPrefix="pers" />
                   ))}
                 </div>
                 <div className="absolute inset-0 flex items-center justify-center">
@@ -347,7 +349,7 @@ export function DemoPersonalizePanel() {
                     style={{ background: 'var(--cp-amber)', color: 'var(--cp-ink)' }}
                   >
                     <Lock size={14} aria-hidden />
-                    Показать письма 2–3 — создайте аккаунт
+                    Показать письма 4–5 — создайте аккаунт
                   </button>
                 </div>
               </div>
