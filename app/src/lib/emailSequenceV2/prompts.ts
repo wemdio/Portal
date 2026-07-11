@@ -164,6 +164,7 @@ const TASK_PROMPTS: Record<EmailSequenceV2OutputLanguage, string> = {
 - Тело письма — простым разговорным языком, короткими абзацами.
 - ОБЪЁМ (жёсткий лимит, важнее примеров, шаблона и регламента): первое письмо — не длиннее 100 слов; каждый промежуточный фоллоу-ап (все письма между первым и последним) — 40–80 слов и короче предыдущего; последнее письмо — 2–4 коротких предложения. Если примеры или регламент в материалах длиннее — всё равно соблюдай этот лимит.
 - Одно письмо — одна ключевая мысль. Не перечисляй все УТП и преимущества в одном письме — распределяй их по цепочке.
+- ЗАПРЕЩЕНЫ «прощальные»/breakup-письма. НИ ОДНО письмо (включая последнее) не должно: объявлять, что оно последнее; просить ответить «не нужно»/«не актуально»/«не интересно»; обещать «больше не буду беспокоить/отвлекать/писать»; извиняться за беспокойство; упоминать отписку. Это главный маркер массовой спам-рассылки — он мгновенно убивает доверие, даже если сами примеры/регламент так делают. Последнее письмо — это ещё один короткий полезный заход с НОВЫМ углом или ценностью и мягким живым CTA, как в настоящей 1:1-переписке между людьми (можно спросить, к кому лучше адресовать вопрос, или предложить конкретный следующий шаг).
 - Если в данных были операторы персонализации (например, {{firstName}}, {{companyName}}), вставляй их там, где уместно.
 
 Приступай к выполнению.`,
@@ -210,6 +211,7 @@ REQUIREMENTS:
 - The email body — in plain conversational language, with short paragraphs.
 - LENGTH (hard limit, takes priority over the examples, the template and the guidelines): the first email — no longer than 100 words; each intermediate follow-up (every email between the first and the last) — 40–80 words and shorter than the previous one; the last email — 2–4 short sentences. Even if the provided examples or guidelines are longer, obey this limit.
 - One email — one key idea. Do not list every USP and benefit in a single email — spread them across the sequence.
+- NO "breakup"/goodbye emails. NO email (including the last one) may: announce that it is the last; ask the recipient to reply "not interested"/"no need"; promise to "stop bothering/writing"; apologize for bothering them; mention unsubscribing. This is the number-one signal of mass spam and instantly destroys trust — even if the examples or guidelines do it. The last email is just one more short, useful touch with a NEW angle or value and a soft, human CTA, like real 1:1 correspondence between people (e.g. ask who is the right person to address, or propose a concrete next step).
 - If personalization operators were provided in the data (e.g. {{firstName}}, {{companyName}}), insert them where appropriate.
 
 Get started.`,
