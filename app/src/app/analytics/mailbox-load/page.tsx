@@ -374,7 +374,6 @@ function TagRows({ tag, expanded, drill, onToggle }: {
                     <tr className="border-b border-zinc-100 text-left text-[9px] uppercase tracking-wider text-zinc-400">
                       <th className="px-2.5 py-1.5 font-medium">Ящик</th>
                       <th className="px-2.5 py-1.5 font-medium">Статус</th>
-                      <th className="px-2.5 py-1.5 font-medium">Прогрев</th>
                       <th className="px-2.5 py-1.5 font-medium text-right">Лимит</th>
                       <th className="px-2.5 py-1.5 font-medium text-right">Отпр.</th>
                       <th className="px-2.5 py-1.5 font-medium">Утил.</th>
@@ -391,7 +390,6 @@ function TagRows({ tag, expanded, drill, onToggle }: {
                           <td className="px-2.5 py-1.5">
                             <span className={mb.statusValue === 1 ? 'text-emerald-600' : 'text-zinc-400'}>{mb.status ?? '—'}</span>
                           </td>
-                          <td className="px-2.5 py-1.5 text-zinc-500">{mb.warmupStatus ?? '—'}</td>
                           <td className="px-2.5 py-1.5 text-right tabular-nums text-zinc-600">
                             {mb.dailyLimit}
                             {mb.isDefaultLimit && <span className="text-zinc-300" title="Лимит явно не выставлен — действует дефолт воркспейса"> (дефолт)</span>}
