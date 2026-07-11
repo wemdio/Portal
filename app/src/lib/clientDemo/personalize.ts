@@ -138,6 +138,7 @@ export async function generateDemoLetters(options: {
   apiKey: string;
   briefText: string;
   model?: string;
+  signal?: AbortSignal;
 }): Promise<DemoPersonalizeLetter[]> {
   const raw = await callOpenRouterChat({
     apiKey: options.apiKey,
@@ -147,6 +148,7 @@ export async function generateDemoLetters(options: {
       { role: 'user', content: `БРИФ КОМПАНИИ:\n\n${options.briefText.slice(0, 12_000)}` },
     ],
     maxTokens: 2500,
+    signal: options.signal,
   });
   return parseLettersJson(raw);
 }

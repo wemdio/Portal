@@ -94,6 +94,7 @@ export function DemoPersonalizePanel() {
   };
 
   const runHypotheses = async (runId: string) => {
+    setError(null);
     setHypo('loading');
     try {
       const data = await callPersonalize({ runId, step: 'hypotheses' });
@@ -107,6 +108,7 @@ export function DemoPersonalizePanel() {
   };
 
   const runLetters = async (runId: string) => {
+    setError(null);
     setLetters('loading');
     try {
       const data = await callPersonalize({ runId, step: 'letters' });
@@ -160,7 +162,9 @@ export function DemoPersonalizePanel() {
             ? 'var(--cp-paper)'
             : state === 'loading'
               ? 'var(--cp-amber)'
-              : 'var(--cp-paper-faint)',
+              : state === 'error'
+                ? 'var(--cp-red)'
+                : 'var(--cp-paper-faint)',
       }}
     >
       {state === 'loading' ? (
@@ -303,7 +307,16 @@ export function DemoPersonalizePanel() {
       {hypo === 'error' && run && (
         <button
           type="button"
-          onClick={() => void runHypotheses(run.runId)}
+          onClick={() => {
+            // После успешного ретрая гипотез продолжаем цепочку: без этого
+            // разбор навсегда останавливался на 2/3 (письма — главный крючок).
+            void (async () => {
+              const ok = await runHypotheses(run.runId);
+              if (ok && (!run.letters || run.letters.length === 0)) {
+                await runLetters(run.runId);
+              }
+            })();
+          }}
           className="neu-pill mt-3 px-3 py-1.5 text-xs font-semibold"
         >
           Повторить генерацию гипотез
@@ -319,7 +332,9 @@ export function DemoPersonalizePanel() {
             <DemoLetterCard letter={letterCards[0]} index={0} idPrefix="pers" defaultOpen />
             {letterCards.length > 1 && (
               <div className="relative">
-                <div className="space-y-2 blur-sm select-none pointer-events-none" aria-hidden>
+                {/* inert выводит кнопки заблюренных карточек из tab-order —
+                    aria-hidden без него оставлял фокусируемые элементы (WCAG 4.1.2). */}
+                <div className="space-y-2 blur-sm select-none pointer-events-none" aria-hidden inert>
                   {letterCards.slice(1).map((l, i) => (
                     <DemoLetterCard key={i} letter={l} index={i + 1} idPrefix="pers" />
                   ))}

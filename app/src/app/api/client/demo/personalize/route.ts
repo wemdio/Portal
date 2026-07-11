@@ -53,6 +53,17 @@ const PER_IP_PER_DAY = Math.max(1, Number(process.env.DEMO_PERSONALIZE_PER_IP ??
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const USED_COOKIE = 'oos_demo_pers';
 
+// Таймаут LLM-шагов — как у боевого /api/client/brief/hypotheses (90с +
+// AbortController): зависший апстрим не должен держать запрос до прокси-таймаута.
+const LLM_STEP_TIMEOUT_MS = 90_000;
+
+// Per-instance лок «один прогон — одна генерация на шаг»: параллельные POST по
+// одному runId не должны звать LLM дважды (иначе дневной кап, который считает
+// только строки шага 1, перестаёт быть потолком расходов). Прод-portal — один
+// контейнер, поэтому in-memory достаточно; кросс-инстансовую гонку добивает
+// условный UPDATE (… where поле is null) ниже.
+const inFlightSteps = new Map<string, Promise<void>>();
+
 // Best-effort per-instance лимит на IP (паттерн /demo route). Сбрасывается при
 // рестарте контейнера — не страшно: жёсткий потолок держит глобальный кап.
 const WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -112,7 +123,10 @@ export async function POST(req: NextRequest) {
     return jsonError('Invalid body', 400);
   }
 
-  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+  // Последний элемент XFF — хоп, добавленный НАШИМ edge (nginx аппендит реальный
+  // IP в конец); первый элемент клиент может подделать заголовком.
+  const xff = req.headers.get('x-forwarded-for') ?? '';
+  const ip = xff.split(',').map((s) => s.trim()).filter(Boolean).pop() || 'unknown';
 
   // ── Шаги 2-3: догенерация по существующему run ─────────────────────────────
   const step = typeof body.step === 'string' ? body.step : '';
@@ -126,47 +140,85 @@ export async function POST(req: NextRequest) {
       .maybeSingle<RunRow>();
     if (error || !row) return jsonError('Прогон не найден', 404);
 
-    try {
+    if (step !== 'hypotheses' && step !== 'letters') return jsonError('Неизвестный шаг', 400);
+
+    const alreadyDone =
+      step === 'hypotheses' ? !!row.hypotheses_md : !!row.letters && row.letters.length > 0;
+    if (alreadyDone) return NextResponse.json(runPayload(row, false));
+
+    // Конкурентная генерация этого же шага уже идёт — дождаться её и отдать
+    // сохранённое, НЕ зовя LLM второй раз (иначе дневной кап, считающий только
+    // строки шага 1, перестаёт быть потолком расходов).
+    const lockKey = `${row.id}:${step}`;
+    const inFlight = inFlightSteps.get(lockKey);
+    if (inFlight) {
+      await inFlight;
+      const { data: fresh } = await supabaseAdmin
+        .from('demo_personalize_runs')
+        .select('id, domain, resolved_url, brief, hypotheses_md, letters')
+        .eq('id', row.id)
+        .maybeSingle<RunRow>();
+      if (fresh) return NextResponse.json(runPayload(fresh, false));
+      return jsonError('Прогон не найден', 404);
+    }
+
+    const briefText = briefTextOf(row);
+    if (!briefText) return jsonError('Бриф прогона пуст', 409);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), LLM_STEP_TIMEOUT_MS);
+    const job = (async () => {
       if (step === 'hypotheses') {
-        if (!row.hypotheses_md) {
-          const briefText = briefTextOf(row);
-          if (!briefText) return jsonError('Бриф прогона пуст', 409);
-          const md = await generateLeadSourceHypotheses({
+        const md = sanitizeClientHypothesesMarkdown(
+          await generateLeadSourceHypotheses({
             apiKey: OPENROUTER_BRIEF_API_KEY,
             briefText,
             model: DEMO_PERSONALIZE_MODEL,
             audience: 'client',
-          });
-          row.hypotheses_md = sanitizeClientHypothesesMarkdown(md);
-          await supabaseAdmin
-            .from('demo_personalize_runs')
-            .update({ hypotheses_md: row.hypotheses_md })
-            .eq('id', row.id);
-        }
-        return NextResponse.json(runPayload(row, false));
+            signal: controller.signal,
+          }),
+        );
+        row.hypotheses_md = md;
+        // Условный UPDATE: кросс-инстансовый двойник не перетрёт уже сохранённое.
+        await supabaseAdmin
+          .from('demo_personalize_runs')
+          .update({ hypotheses_md: md })
+          .eq('id', row.id)
+          .is('hypotheses_md', null);
+      } else {
+        const letters = await generateDemoLetters({
+          apiKey: OPENROUTER_BRIEF_API_KEY,
+          briefText,
+          signal: controller.signal,
+        });
+        row.letters = letters;
+        await supabaseAdmin
+          .from('demo_personalize_runs')
+          .update({ letters })
+          .eq('id', row.id)
+          .is('letters', null);
       }
-      if (step === 'letters') {
-        if (!row.letters || row.letters.length === 0) {
-          const briefText = briefTextOf(row);
-          if (!briefText) return jsonError('Бриф прогона пуст', 409);
-          row.letters = await generateDemoLetters({
-            apiKey: OPENROUTER_BRIEF_API_KEY,
-            briefText,
-          });
-          await supabaseAdmin
-            .from('demo_personalize_runs')
-            .update({ letters: row.letters })
-            .eq('id', row.id);
-        }
-        return NextResponse.json(runPayload(row, false));
-      }
-      return jsonError('Неизвестный шаг', 400);
+    })();
+    // Лок хранит settled-safe промис: ожидающие не падают от чужой ошибки.
+    inFlightSteps.set(
+      lockKey,
+      job.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    try {
+      await job;
+      return NextResponse.json(runPayload(row, false));
     } catch (err) {
       await logError(`demo.personalize.${step}.failed`, err, { runId, domain: row.domain });
       return jsonError(
         err instanceof Error ? err.message : 'Генерация не удалась, попробуйте ещё раз',
         502,
       );
+    } finally {
+      clearTimeout(timer);
+      inFlightSteps.delete(lockKey);
     }
   }
 
@@ -233,6 +285,19 @@ export async function POST(req: NextRequest) {
       apiKey: OPENROUTER_BRIEF_API_KEY,
       website: rawWebsite,
     });
+
+    // Пустой/дегенеративный разбор (SPA без SSR, антибот-заглушка, пустой
+    // лендинг): НЕ сохраняем и НЕ ставим куку — иначе сжигаем единственный
+    // бесплатный прогон посетителя и на 7 дней отравляем кэш домена для всех.
+    const compiledBrief = compileBriefText(
+      normalizeBriefFields(result.patch as Partial<ClientBriefFields> | null),
+    ).trim();
+    if (!compiledBrief) {
+      return jsonError(
+        'Не удалось извлечь информацию с сайта — страница почти пустая для робота. Попробуйте другую страницу, например «О компании».',
+        422,
+      );
+    }
 
     const { data: inserted, error: insErr } = await supabaseAdmin
       .from('demo_personalize_runs')
