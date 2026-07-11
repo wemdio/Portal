@@ -21,9 +21,10 @@ import { sendDemoPersonalizeTelegramAlert } from '@/lib/demoLead/notify';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-// Каждый шаг — один LLM-вызов (бриф ~ авто-заполнение, гипотезы, письма);
-// клиент зовёт шаги последовательно, так что 60с на шаг достаточно.
-export const maxDuration = 60;
+// Шаг hypotheses делает ту же работу, что /api/client/brief/hypotheses
+// (внутри analyzeBriefIcp с суб-таймаутом 45с + основная генерация) — держим
+// тот же бюджет 120с, что и у боевого роута.
+export const maxDuration = 120;
 
 /**
  * POST /api/client/demo/personalize — «проверьте на своей компании» в демо.
