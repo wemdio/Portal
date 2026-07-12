@@ -1057,7 +1057,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                               ? `rounded px-3 py-1.5 font-medium transition-colors ${briefInputMode === 'saved' ? 'bg-[var(--cp-paper)] text-[var(--cp-ink)]' : 'text-[var(--cp-paper-mute)]'}`
                               : `rounded-md px-3 py-1.5 font-medium transition-colors ${briefInputMode === 'saved' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}
                           >
-                            Бриф с портала
+                            Ваш бриф
                           </button>
                         )}
                         <button
@@ -1083,7 +1083,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
                       {briefInputMode === 'saved' && savedBriefAvailable && (
                         <div>
                           <div className="text-xs mb-2" style={ui.faint}>
-                            Используем ваш бриф с портала (<a href="/client/brief" className="underline" style={ui.mute}>страница «Бриф»</a>).
+                            Используем ваш бриф (<a href="/client/brief" className="underline" style={ui.mute}>страница «Бриф»</a>).
                           </div>
                           <textarea value={savedBriefText} readOnly rows={7} className={ui.input} style={ui.mute} />
                         </div>

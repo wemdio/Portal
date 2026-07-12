@@ -30,6 +30,10 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const DEMO_READONLY_POST_PATHS = new Set([
   '/api/client/reports',
   '/api/client/companies-search',
+  // Демо-персонализация («вставьте свой сайт»): пишет только в собственную
+  // таблицу-кэш demo_personalize_runs, клиентские данные не трогает; свои
+  // анти-абуз лимиты внутри роута.
+  '/api/client/demo/personalize',
 ]);
 
 /**

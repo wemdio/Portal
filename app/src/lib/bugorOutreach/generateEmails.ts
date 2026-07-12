@@ -43,11 +43,11 @@ Best Regards,
 ${sender.sender_name}
 ${sender.sender_calendly}
 
---- REFERENCE EMAIL 3 (breakup) ---
+--- REFERENCE EMAIL 3 (final touch) ---
 Hi!
-This is my final email, I don't want to bother you.
+One more thought I wanted to share.
 Our hypothesis for you: we can systematically help find contacts in specific segment. This would allow your client's team to focus on product development.
-If the hypothesis is incorrect or now is not the right time - just let me know 'not now,' and I'll close the ticket. If you are interested - we'd be glad to have a short call.
+If the hypothesis resonates — we'd be glad to have a short call this week.
 By the way, we are ready to work on a pay-per-lead basis. Both with you and for your clients.
 We're also open to performance-based cooperation, including pay-per-MQL and booked calls.
 Best Regards,
@@ -59,7 +59,7 @@ RULES:
 2. Each email: short paragraphs (1-3 sentences each), casual but professional tone.
 3. Step 1 (Day 0): Reference the SPECIFIC signal in words (never paste URLs/links to articles). Mention why NOW is the right time. Clear CTA for a short call.
 4. Step 2 (Day 3): Add value — explain HOW your outreach process works for their niche (AI dialer, Telegram/email/LinkedIn, targeted list building). Mention flexible pricing (pay-per-MQL, booked calls). Don't repeat Step 1. NEVER invent case studies, statistics, or client results.
-5. Step 3 (Day 7): Breakup pattern. "This is my final email." Offer a hypothesis about how you can help. Low-pressure CTA.
+5. Step 3 (Day 7): Final touch with a NEW angle. Offer a hypothesis about how you can help. NEVER announce it's the last email, never ask to reply "not interested"/"not now", never promise to stop writing, never apologize for bothering — that's the #1 mass-spam marker. Low-pressure CTA.
 6. Always end with: "Best Regards,\\n${sender.sender_name}\\n${sender.sender_calendly}"
 7. Subject lines: short (3-7 words), lowercase-friendly, no clickbait. Different for each step.
 8. DO NOT include links to news articles, press releases, or any source URLs in the email body.

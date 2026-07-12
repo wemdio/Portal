@@ -75,11 +75,10 @@ describe('client nav IA', () => {
   });
 
   it('locks the visible URL set — routes must not regress', () => {
-    // Phase 4 consolidation: «Собрать базу», «Парсеры», «Очистить базу» were
-    // merged into a single «Базы» entry that opens the /client/build hub.
-    // The legacy URLs (/client/companies-search, /client/parsers,
-    // /client/base-constructor) keep working — they're just no longer in the
-    // sidebar; the hub links to them.
+    // July 2026 IA rework: «Инструменты парсинга» removed from the sidebar
+    // (the /client/parsers page keeps working — the «Сбор базы» hub links to
+    // its tabs); «Конструктор баз» and «Цепочки писем» promoted to
+    // first-class sidebar items.
     const expectedHrefs = new Set([
       '/client',
       '/client/dashboard',
@@ -91,7 +90,8 @@ describe('client nav IA', () => {
       '/client/reports',
       '/client/tariff',
       '/client/build',
-      '/client/parsers',
+      '/client/base-constructor',
+      '/client/sequences',
       '/client/launch',
       '/client/brief',
       '/client/support',
@@ -155,22 +155,44 @@ describe('client nav IA', () => {
     expect(resolveActiveNavId('/client/support/foo')).toBe('support');
   });
 
-  it('Старт group orders items pedagogically (brief → collect & clean → write → launch)', () => {
+  it('Старт group orders items pedagogically (brief → collect → clean → write → launch)', () => {
     const start = CLIENT_NAV_GROUPS.find((g) => g.id === 'start') as ClientNavGroup;
     expect(start.items.map((i) => i.id)).toEqual([
       'brief',
       'build',
-      'parsers',
+      'base-constructor',
+      'sequences',
       'launch',
     ]);
   });
 
-  it('hub «Базы» replaces the three split items (Собрать/Очистить)', () => {
+  it('hub «Сбор базы» is the single sources entry (no separate parsers item)', () => {
     const build = allItems.find((i) => i.id === 'build');
     expect(build?.href).toBe('/client/build');
-    expect(build?.label).toBe('Базы');
+    expect(build?.label).toBe('Сбор базы');
     const ids = new Set(allItems.map((i) => i.id));
     expect(ids.has('clean')).toBe(false);
+    expect(ids.has('parsers')).toBe(false);
+  });
+
+  it('«Конструктор баз» is a first-class sidebar item (heart of base prep)', () => {
+    const constructor = allItems.find((i) => i.id === 'base-constructor');
+    expect(constructor?.href).toBe('/client/base-constructor');
+    expect(constructor?.label).toBe('Конструктор баз');
+    expect(resolveActiveNavId('/client/base-constructor')).toBe('base-constructor');
+  });
+
+  it('«Цепочки писем» is a first-class sidebar item (moved out of parsers)', () => {
+    const sequences = allItems.find((i) => i.id === 'sequences');
+    expect(sequences?.href).toBe('/client/sequences');
+    expect(sequences?.label).toBe('Цепочки писем');
+    expect(resolveActiveNavId('/client/sequences')).toBe('sequences');
+  });
+
+  it('legacy source URLs highlight «Сбор базы» (hub absorbs them)', () => {
+    expect(resolveActiveNavId('/client/build')).toBe('build');
+    expect(resolveActiveNavId('/client/companies-search')).toBe('build');
+    expect(resolveActiveNavId('/client/parsers')).toBe('build');
   });
 
   it('Мониторинг group contains tracking surfaces only', () => {
@@ -219,9 +241,4 @@ describe('client nav IA', () => {
     expect(bases?.label).toBe('Базы в кампаниях');
   });
 
-  it('Инструменты парсинга live in Старт as a standalone page', () => {
-    const parsers = allItems.find((i) => i.id === 'parsers');
-    expect(parsers?.href).toBe('/client/parsers');
-    expect(parsers?.label).toBe('Инструменты парсинга');
-  });
 });

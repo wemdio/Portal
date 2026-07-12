@@ -236,7 +236,6 @@ export default function TeamPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [resultFilter, setResultFilter] = useState<ResultFilter>('all');
   const [sortKey, setSortKey] = useState<SortKey>('fact');
-  const [showFinished, setShowFinished] = useState(false);
   const [openLeads, setOpenLeads] = useState<Set<string>>(new Set());
   const [openSpecInLead, setOpenSpecInLead] = useState<Set<string>>(new Set());
   const [openSpecs, setOpenSpecs] = useState<Set<string>>(new Set());
@@ -313,7 +312,8 @@ export default function TeamPage() {
       ]);
       if (projectsResult.error) throw projectsResult.error;
       if (profilesResult.error) throw profilesResult.error;
-      setProjects((projectsResult.data as ProjectData[]) || []);
+      // Завершённые/отменённые не участвуют нигде: считаем только в работе/тест/подготовку (+пауза).
+      setProjects(((projectsResult.data as ProjectData[]) || []).filter((p) => !isFinishedStatus(p.status)));
       setProfiles((profilesResult.data as ProfileData[]) || []);
     } catch (error) {
       void logError('team.data.fetch.failed', error);
@@ -464,13 +464,7 @@ export default function TeamPage() {
           <TeamMemberAvatar displayName={person.name} avatarUrl={nameToAvatarUrl.get(person.name)} signedUrl={avatarSignedUrls[person.name]} variant={opts.variant} />
           <div className="min-w-0">
             <p className="text-sm font-semibold text-gray-900 truncate">{person.name}</p>
-            <p className="text-xs text-gray-500">
-              {(() => {
-                const act = person.projects.filter((p) => !isFinishedStatus(p.status)).length;
-                const fin = person.projects.length - act;
-                return `${act} ${plural(act)}${fin > 0 ? ` · ${fin} заверш.` : ''}`;
-              })()}
-            </p>
+            <p className="text-xs text-gray-500">{person.projects.length} {pluralRu(person.projects.length, 'активный проект', 'активных проекта', 'активных проектов')}</p>
           </div>
         </div>
         <div className="px-2 flex justify-center">
@@ -572,8 +566,7 @@ export default function TeamPage() {
         {columnHeader('Лид')}
         {leads.map((L) => {
           const open = q ? true : openLeads.has(L.name);
-          let visibleProjects = q && !L.name.toLowerCase().includes(q) ? L.projects.filter(matchProject) : L.projects;
-          if (!showFinished) visibleProjects = visibleProjects.filter((p) => !isFinishedStatus(p.status));
+          const visibleProjects = q && !L.name.toLowerCase().includes(q) ? L.projects.filter(matchProject) : L.projects;
           const bySpec = new Map<string, ProjectData[]>();
           for (const p of visibleProjects) {
             const s = normalizeAssigneeName(p.specialist) || NO_SPEC;
@@ -590,9 +583,7 @@ export default function TeamPage() {
               })}
               {open && (
                 visibleProjects.length === 0 ? (
-                  <div className="pl-[68px] py-3 text-sm text-gray-400 italic bg-gray-50/40 border-b border-gray-100">
-                    {L.projects.length > 0 ? 'Все проекты завершены — включите «Завершённые»' : 'Нет проектов у этого лида'}
-                  </div>
+                  <div className="pl-[68px] py-3 text-sm text-gray-400 italic bg-gray-50/40 border-b border-gray-100">Нет проектов у этого лида</div>
                 ) : (
                   Array.from(bySpec.entries()).map(([sname, list]) => {
                     const key = `${L.name}||${sname}`;
@@ -626,8 +617,7 @@ export default function TeamPage() {
         {columnHeader('Специалист')}
         {specs.map((S) => {
           const open = q ? true : openSpecs.has(S.name);
-          let visibleProjects = q && !S.name.toLowerCase().includes(q) ? S.projects.filter(matchProject) : S.projects;
-          if (!showFinished) visibleProjects = visibleProjects.filter((p) => !isFinishedStatus(p.status));
+          const visibleProjects = q && !S.name.toLowerCase().includes(q) ? S.projects.filter(matchProject) : S.projects;
           return (
             <div key={S.name}>
               {capacityRow(S, {
@@ -752,7 +742,7 @@ export default function TeamPage() {
               {resultChip('missed', 'Не довели', 'bg-red-500')}
               {resultChip('work', 'В работе', 'bg-gray-400')}
               {resultChip('prep', 'Подготовка', 'bg-amber-500')}
-              {resultChip('other', 'Завершён/пауза', 'bg-gray-300')}
+              {resultChip('other', 'На паузе', 'bg-gray-300')}
             </>
           ) : (
             <>
@@ -763,17 +753,6 @@ export default function TeamPage() {
             </>
           )}
         </div>
-        {!isProjectsView && (
-          <button
-            type="button"
-            onClick={() => setShowFinished((v) => !v)}
-            className={`h-9 px-3 rounded-xl border text-sm font-medium inline-flex items-center gap-1.5 transition-colors ${showFinished ? 'border-gray-300 bg-gray-100 text-gray-900' : 'border-gray-200 bg-white text-gray-500 hover:text-gray-800'}`}
-            title="Показывать завершённые и отменённые проекты в списке"
-          >
-            <span className={`h-1.5 w-1.5 rounded-full ${showFinished ? 'bg-gray-500' : 'bg-gray-300'}`} />
-            Завершённые
-          </button>
-        )}
         <div className="flex-1" />
         <select
           value={sortKey}
