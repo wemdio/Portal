@@ -23,6 +23,7 @@ import { clientApiFetch } from '@/lib/clientFetcher';
 import { ClientSidebar } from '@/components/client/ClientSidebar';
 import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
 import { DemoBanner } from '@/components/client/DemoBanner';
+import { useDemoMode } from '@/lib/clientDemo/useDemoMode';
 import { DemoRegisterGate } from '@/components/client/DemoRegisterGate';
 import { PaymentLockedBanner } from '@/components/client/PaymentLockedBanner';
 import { ClientPortalProvider } from '@/lib/clientPortalContext';
@@ -47,6 +48,9 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement | null>(null);
+  // Демо: переключатель языка прячем — /api/portal/translate под демо read-only,
+  // перевести страницу нельзя, оверлей просто зависал бы белым экраном.
+  const isDemo = useDemoMode();
 
   // Бейдж непрочитанных сообщений поддержки и флаг BYO-почт раньше жили внутри
   // ClientNavList, который монтируется ДВАЖДЫ (десктоп-сайдбар + мобильный
@@ -250,6 +254,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
               emoji falls back to «ru» text, reading as a duplicate. The flag
               still appears inside the dropdown panel where each row gets
               full context. */}
+          {isDemo !== true && (
           <div ref={langRef} className="relative shrink-0">
             <button
               type="button"
@@ -308,6 +313,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
               </div>
             )}
           </div>
+          )}
 
           <button
             type="button"
