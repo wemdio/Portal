@@ -279,8 +279,11 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
       - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
-      # Пул прокси для ротации (JSON-массив в .env). Без него — прямое соединение
-      # с IP сервера, которое Яндекс быстро отправляет в капчу.
+      # Пулы прокси для ротации (JSON-массив в .env). YANDEXMAPS_PROXY_URLS
+      # приоритетнее — в него кладём мобильные shared прокси именно под
+      # Яндекс.Карты. PROXY_URLS — общий fallback (для других парсеров).
+      # Без обоих — прямое соединение с IP сервера, которое Яндекс банит.
+      - YANDEXMAPS_PROXY_URLS=${YANDEXMAPS_PROXY_URLS}
       - PROXY_URLS=${PROXY_URLS}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
