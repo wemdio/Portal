@@ -17,6 +17,7 @@ import {
   isYookassaConfigured,
   buildDefaultReceipt,
 } from '@/lib/yookassa';
+import { SAVE_PAYMENT_METHOD_MAX_AMOUNT } from '@/lib/billing';
 
 /**
  * Распознаёт, лежит ли в строке /v3/invoices-объект (admin вручную выставил
@@ -222,7 +223,11 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
                 ).replace(/\/+$/, '');
                 return base ? `${base}/client/tariff` : 'https://example.com/return';
               })(),
-              savePaymentMethod: true,
+              // Тот же порог, что и в ensurePendingInvoiceForTariff — при
+              // amount > лимита ЮКасса без save-флага покажет SberPay/T-Pay/
+              // Наличные и т.д., иначе редиректит на /failure (у нас нет других
+              // savable методов кроме карты, а карта режется где-то на 300k).
+              savePaymentMethod: amountNum <= SAVE_PAYMENT_METHOD_MAX_AMOUNT,
               receipt: buildDefaultReceipt({
                 customerEmail,
                 description,
