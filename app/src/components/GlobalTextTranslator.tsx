@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { authFetch } from '@/lib/authFetch';
+import { getAccessToken } from '@/lib/authFetch';
 import {
   TRANSLATABLE_TARGET_LOCALES,
   type Locale,
@@ -132,16 +132,36 @@ interface TranslateResponse {
   error?: string;
 }
 
+const TRANSLATE_TIMEOUT_MS = 20_000;
+
+/**
+ * Returns the translation map, or `null` to signal "translation is blocked —
+ * stop trying" (endpoint 403: e.g. the demo account, where /api/portal/translate
+ * is DEMO_READONLY). Without that signal the caller re-queues the still-source
+ * strings on every DOM mutation, re-arming the loading flag forever → stuck white
+ * overlay. Uses a plain token-authed fetch (NOT authFetch) so a background
+ * translation never triggers the demo "register to unlock" modal, plus a hard
+ * timeout so a hung request can't wedge the overlay either.
+ */
 async function fetchTranslations(
   strings: string[],
   targetLang: TargetLocale,
-): Promise<Record<string, string>> {
+): Promise<Record<string, string> | null> {
   if (strings.length === 0) return {};
   try {
-    const res = await authFetch('/api/portal/translate', {
+    const token = await getAccessToken();
+    const res = await fetch('/api/portal/translate', {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ target_lang: targetLang, strings }),
+      signal: AbortSignal.timeout(TRANSLATE_TIMEOUT_MS),
     });
+    if (res.status === 403) {
+      // Demo / read-only account — translation unavailable. Give up for this
+      // locale instead of looping and keeping the overlay up.
+      console.warn('[i18n] /api/portal/translate blocked (403) — staying in source language');
+      return null;
+    }
     if (!res.ok) {
       console.warn('[i18n] /api/portal/translate failed:', res.status);
       return {};
@@ -187,6 +207,9 @@ export function GlobalTextTranslator({ locale }: { locale: Locale }) {
   const pendingRef = useRef<Set<string>>(new Set());
   const debounceRef = useRef<number | null>(null);
   const inFlightCountRef = useRef(0);
+  // Set once the endpoint says translation is unavailable (403 under demo) so we
+  // stop re-queueing on every DOM mutation and never re-arm the loading overlay.
+  const disabledRef = useRef(false);
 
   // Effect re-runs on every locale change. On RU it restores originals;
   // on a target locale it performs a full DOM walk and translates.
@@ -227,6 +250,9 @@ export function GlobalTextTranslator({ locale }: { locale: Locale }) {
 
     // --- Mode B: target language. Full walk + translate. ---------------
     const targetLang = locale;
+    // Fresh locale → give translation another chance (a previous target may have
+    // hit a 403 and disabled itself).
+    disabledRef.current = false;
 
     const startPending = () => {
       inFlightCountRef.current += 1;
@@ -339,11 +365,17 @@ export function GlobalTextTranslator({ locale }: { locale: Locale }) {
     const flushPending = async () => {
       const batch = Array.from(pendingRef.current);
       pendingRef.current.clear();
-      if (batch.length === 0) return;
+      if (batch.length === 0 || disabledRef.current) return;
       startPending();
       try {
         const map = await fetchTranslations(batch, targetLang);
         if (!aliveRef.current) return;
+        // null = endpoint blocked (403 under demo): stop trying for this locale
+        // so we don't re-queue forever and keep the loading overlay up.
+        if (map === null) {
+          disabledRef.current = true;
+          return;
+        }
         // Identity-fallback for anything the API didn't return — prevents
         // the loop from re-queueing the same string forever on a failed call.
         for (const s of batch) {
@@ -444,6 +476,18 @@ export function LanguageLoadingOverlay() {
     observer.observe(html, { attributes: true, attributeFilter: [TRANSLATING_FLAG] });
     return () => observer.disconnect();
   }, []);
+
+  // Hard failsafe: the overlay must never wedge the whole UI. If the flag is
+  // still set after a generous window (hung request, missed cleanup, any bug),
+  // force it off and drop the overlay. Real passes clear it in <1–15s.
+  useEffect(() => {
+    if (!active) return;
+    const t = window.setTimeout(() => {
+      document.documentElement.removeAttribute(TRANSLATING_FLAG);
+      setActive(false);
+    }, 20_000);
+    return () => window.clearTimeout(t);
+  }, [active]);
 
   const style = useMemo<React.CSSProperties>(
     () => ({
