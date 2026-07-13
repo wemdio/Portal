@@ -262,38 +262,77 @@ export async function runYandexMapsCollectLinks(jobId: string) {
           message: `URL ${urlIndex}/${searchUrls.length}`,
         });
 
-        try {
-          const { total } = await yandexMapsCollectLinksStream(
-            { search_url, max_results: maxResults, headless, proxy: pickProxy(job, urlIndex - 1) },
-            async (ch) => {
-              if (ch.links.length > 0) {
-                const normalized = normalizeYandexOrgUrls(ch.links);
-                for (const link of normalized) {
-                  if (!allLinksSet.has(link)) {
-                    allLinksSet.add(link);
-                    allLinks.push(link);
-                  }
-                }
-                const rows = normalized.map((link) => ({ job_id: jobId, link }));
-                await supabaseAdmin!.from('yandex_maps_links').upsert(rows, { onConflict: 'job_id,link' });
+        const collectStreamCallback = async (ch: { links: string[] }) => {
+          if (ch.links.length > 0) {
+            const normalized = normalizeYandexOrgUrls(ch.links);
+            for (const link of normalized) {
+              if (!allLinksSet.has(link)) {
+                allLinksSet.add(link);
+                allLinks.push(link);
               }
-              await setJobPatch(jobId, {
-                total_links: allLinks.length,
-                processed_links: allLinks.length,
-                progress_stage: `collecting_links:${completedUrls + batch.length}/${searchUrls.length}`,
-              });
-            },
-          );
-
-          await urlSpan?.end({ links_collected: total, total_unique: allLinks.length });
-        } catch (e) {
-          await urlSpan?.fail(e);
-          if (e instanceof YandexMapsBlockedError) {
-            blockedUrls += 1;
-            void logWarn('parser.yandexmaps.collect.url_blocked', 'Collect-links blocked (captcha) for URL', { jobId, search_url }, logMeta);
-          } else {
-            void logWarn('parser.yandexmaps.collect.url_failed', 'Collect-links failed for URL', { jobId, search_url }, logMeta);
+            }
+            const rows = normalized.map((link) => ({ job_id: jobId, link }));
+            await supabaseAdmin!.from('yandex_maps_links').upsert(rows, { onConflict: 'job_id,link' });
           }
+          await setJobPatch(jobId, {
+            total_links: allLinks.length,
+            processed_links: allLinks.length,
+            progress_stage: `collecting_links:${completedUrls + batch.length}/${searchUrls.length}`,
+          });
+        };
+
+        // Ретрай URL через разные прокси при yandex_blocked. Пул + 1 запас.
+        const maxProxyRetries = Math.max(1, proxyPoolSize) + 1;
+        let success = false;
+        let lastTotal = 0;
+        let lastBlockedError: YandexMapsBlockedError | null = null;
+        let lastGenericError: unknown = null;
+        for (let attempt = 0; attempt < maxProxyRetries; attempt++) {
+          try {
+            const { total } = await yandexMapsCollectLinksStream(
+              { search_url, max_results: maxResults, headless, proxy: pickProxy(job, urlIndex - 1 + attempt) },
+              collectStreamCallback,
+            );
+            lastTotal = total;
+            success = true;
+            break;
+          } catch (e) {
+            if (e instanceof YandexMapsBlockedError) {
+              lastBlockedError = e;
+              void logWarn(
+                'parser.yandexmaps.collect.url_blocked_retry',
+                `Yandex заблокировал URL ${urlIndex}, пробуем следующий прокси`,
+                { jobId, search_url, attempt: attempt + 1, maxRetries: maxProxyRetries },
+                logMeta,
+              );
+              continue;
+            }
+            // Не-блокировочная ошибка (сеть/бекенд): не ретраим, логируем
+            // и выходим из цикла — этот URL пропущен, другие URL в batch продолжат.
+            lastGenericError = e;
+            break;
+          }
+        }
+
+        if (success) {
+          await urlSpan?.end({ links_collected: lastTotal, total_unique: allLinks.length });
+        } else if (lastBlockedError) {
+          blockedUrls += 1;
+          void logWarn(
+            'parser.yandexmaps.collect.url_blocked',
+            'Collect-links blocked across all proxies',
+            { jobId, search_url, poolSize: proxyPoolSize },
+            logMeta,
+          );
+          await urlSpan?.fail(lastBlockedError);
+        } else if (lastGenericError) {
+          void logWarn(
+            'parser.yandexmaps.collect.url_failed',
+            'Collect-links failed for URL',
+            { jobId, search_url, error: String(lastGenericError) },
+            logMeta,
+          );
+          await urlSpan?.fail(lastGenericError);
         }
       }));
 
@@ -315,7 +354,10 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     } else if (blockedUrls > 0) {
       // 0 ссылок и была блокировка => это не «пустая выдача», а капча/антибот.
       // Пишем честную причину вместо вводящего в заблуждение «Завершено».
-      const msg = `Яндекс заблокировал сбор ссылок (капча) на ${blockedUrls} из ${searchUrls.length} запросов. Прокси могли попасть под блокировку — подождите 30–60 мин или смените прокси, затем перезапустите.`;
+      const msg =
+        `Яндекс временно заблокировал наши прокси на этапе поиска ` +
+        `(${blockedUrls} из ${searchUrls.length} запросов не прошли). ` +
+        `Подождите 15–20 минут (IP прокси меняются каждые 2 минуты) и нажмите «Продолжить парсинг» — попробуем те же запросы через свежие IP.`;
       await setJobPatch(jobId, {
         status: 'failed',
         error_message: msg,
@@ -420,7 +462,13 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       logMeta,
     );
 
+    // Лимит проксей, через которые пробуем тот же чанк если ловим yandex_blocked.
+    // Даём +1 попытку сверху пула — вдруг первый попал под кратковременный бан,
+    // но следующие уже норм. Максимум N попыток на чанк = пул + 1 запас.
+    const maxProxyRetries = Math.max(1, parseProxyPoolSize) + 1;
+
     let processed = parsedCardUrls.size;
+    let consecutiveBlockedChunks = 0;
     for (let i = 0; i < chunks.length; i++) {
       const current = await getJob(jobId);
       if (current?.status === 'failed') {
@@ -435,58 +483,97 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
         message: `Чанк ${i + 1}/${chunks.length}`,
       });
 
-      try {
-        const res = await yandexMapsParseOrgs({ links: part, headless, proxy: pickProxy(job, i) });
-        const orgs = res.organizations ?? [];
-        const rows = orgs.map((o) => ({
-          job_id: jobId,
-          name: o.name || null,
-          country: o.country || null,
-          city: o.city || null,
-          address: o.address || null,
-          rating: o.rating || null,
-          reviews_count: o.reviews_count || null,
-          website: o.website || null,
-          email: o.email || null,
-          phone: o.phone || null,
-          telegram: o.telegram || null,
-          vk: o.vk || null,
-          instagram: o.instagram || null,
-          whatsapp: o.whatsapp || null,
-          card_url: o.card_url || null,
-          working_hours: o.working_hours || null,
-          categories: o.categories || null,
-        }));
+      // Ретраим тот же чанк через разные прокси — pickProxy сдвигает индекс
+      // на attempt, каждая попытка идёт через следующий IP из пула. Если
+      // все попробованные прокси заблокировались — тогда уже фейлим.
+      let success = false;
+      let lastBlockedError: YandexMapsBlockedError | null = null;
+      for (let attempt = 0; attempt < maxProxyRetries; attempt++) {
+        try {
+          const res = await yandexMapsParseOrgs({ links: part, headless, proxy: pickProxy(job, i + attempt) });
+          const orgs = res.organizations ?? [];
+          const rows = orgs.map((o) => ({
+            job_id: jobId,
+            name: o.name || null,
+            country: o.country || null,
+            city: o.city || null,
+            address: o.address || null,
+            rating: o.rating || null,
+            reviews_count: o.reviews_count || null,
+            website: o.website || null,
+            email: o.email || null,
+            phone: o.phone || null,
+            telegram: o.telegram || null,
+            vk: o.vk || null,
+            instagram: o.instagram || null,
+            whatsapp: o.whatsapp || null,
+            card_url: o.card_url || null,
+            working_hours: o.working_hours || null,
+            categories: o.categories || null,
+          }));
 
-        if (rows.length) {
-          await supabaseAdmin.from('yandex_maps_organizations').upsert(rows, { onConflict: 'job_id,card_url' });
+          if (rows.length) {
+            await supabaseAdmin.from('yandex_maps_organizations').upsert(rows, { onConflict: 'job_id,card_url' });
+          }
+
+          processed += rows.length;
+          await setJobPatch(jobId, {
+            processed_organizations: processed,
+            progress_stage: `parsing_organizations:${i + 1}/${chunks.length}`,
+          });
+
+          await partSpan?.end({ parsed: orgs.length, processed_links: processed, proxy_retries: attempt });
+          success = true;
+          break;
+        } catch (e) {
+          if (e instanceof YandexMapsBlockedError) {
+            lastBlockedError = e;
+            void logWarn(
+              'parser.yandexmaps.parse.chunk_blocked_retry',
+              `Yandex заблокировал чанк ${i + 1}, пробуем следующий прокси`,
+              { jobId, chunk: i + 1, attempt: attempt + 1, maxRetries: maxProxyRetries },
+              logMeta,
+            );
+            continue;
+          }
+          // Не-блокировочная ошибка — не смысла ретраить, пропускаем чанк.
+          void logWarn('parser.yandexmaps.parse.chunk_failed', 'Parse-orgs chunk failed', { jobId, chunk: i + 1, error: String(e) }, logMeta);
+          await partSpan?.fail(e);
+          break;
         }
+      }
 
-        // Считаем реально сохранённые организации, а не размер пачки — иначе
-        // UI показывает "4089/4089", когда Яндекс отдал пустые страницы и
-        // в БД записано сильно меньше.
-        processed += rows.length;
-        await setJobPatch(jobId, {
-          processed_organizations: processed,
-          progress_stage: `parsing_organizations:${i + 1}/${chunks.length}`,
-        });
-
-        await partSpan?.end({ parsed: orgs.length, processed_links: processed });
-      } catch (e) {
-        await partSpan?.fail(e);
-        if (e instanceof YandexMapsBlockedError) {
-          const msg = 'Яндекс временно блокирует запросы (детектит бот/капчу). Подождите 30–60 минут или смените прокси, затем перезапустите парсинг.';
+      if (success) {
+        consecutiveBlockedChunks = 0;
+      } else if (lastBlockedError) {
+        // Все прокси в пуле не смогли пропарсить этот чанк.
+        consecutiveBlockedChunks += 1;
+        await partSpan?.fail(lastBlockedError);
+        // Если 3 чанка подряд не проходят ни через один прокси — реально
+        // Яндекс банит нас во всём пуле, задачу останавливаем.
+        if (consecutiveBlockedChunks >= 3) {
+          const totalOrgs = links.length;
+          const msg =
+            `Яндекс временно заблокировал наши прокси. ` +
+            `Уже сохранено ${processed} из ${totalOrgs} организаций — они никуда не денутся. ` +
+            `Подождите 15–20 минут (IP прокси меняются каждые 2 минуты) и нажмите «Продолжить парсинг» — работа возобновится с того же места.`;
           await setJobPatch(jobId, {
             status: 'failed',
             error_message: msg,
             progress_stage: 'yandex_blocked',
             processed_organizations: processed,
+            completed_at: new Date().toISOString(),
           });
-          void logWarn('parser.yandexmaps.parse.blocked', 'Yandex anti-bot triggered', { jobId, chunk: i + 1, processed }, logMeta);
-          await trace?.fail(e);
+          void logWarn(
+            'parser.yandexmaps.parse.blocked',
+            'Yandex banned all proxies in pool',
+            { jobId, chunk: i + 1, processed, poolSize: parseProxyPoolSize },
+            logMeta,
+          );
+          await trace?.fail(lastBlockedError);
           return;
         }
-        void logWarn('parser.yandexmaps.parse.chunk_failed', 'Parse-orgs chunk failed', { jobId, chunk: i + 1 }, logMeta);
+        // Один-два чанка мимо — но остальные продолжаем.
       }
     }
 

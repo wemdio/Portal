@@ -13,8 +13,14 @@ from yandex_parser import Organization, ProxySettings, YandexBlockedError, Yande
 app = FastAPI()
 YANDEXMAPS_CONCURRENCY = int(os.environ.get("YANDEXMAPS_CONCURRENCY", "2"))
 _REQUEST_SEMAPHORE = asyncio.Semaphore(YANDEXMAPS_CONCURRENCY)
-COLLECT_TIMEOUT_SEC = int(os.environ.get("YANDEXMAPS_COLLECT_TIMEOUT_SEC", "540"))
-PARSE_TIMEOUT_SEC = int(os.environ.get("YANDEXMAPS_PARSE_TIMEOUT_SEC", "540"))
+# Таймауты — 15 мин на один URL (сбор ссылок) и 15 мин на пачку карточек.
+# Через медленный мобильный прокси (1.6 Мбит/с) один URL с 200-500 карточками
+# лениво догружает всё это 5-10 мин, плюс запас на ретраи скролла.
+COLLECT_TIMEOUT_SEC = int(os.environ.get("YANDEXMAPS_COLLECT_TIMEOUT_SEC", "900"))
+PARSE_TIMEOUT_SEC = int(os.environ.get("YANDEXMAPS_PARSE_TIMEOUT_SEC", "900"))
+# max_seconds на один URL внутри парсера — 12 мин, чуть меньше HTTP-таймаута
+# сверху, чтобы парсер успел вернуть частичный результат до 504.
+COLLECT_MAX_SECONDS_PER_URL = int(os.environ.get("YANDEXMAPS_COLLECT_MAX_SECONDS_PER_URL", "720"))
 
 
 class ProxyModel(BaseModel):
@@ -156,7 +162,7 @@ async def collect_links_stream(req: CollectLinksRequest):
       await parser.start()
       links = await asyncio.wait_for(
         parser.collect_organization_links(
-          req.search_url, req.max_results, max_seconds=480, on_links=on_links
+          req.search_url, req.max_results, max_seconds=COLLECT_MAX_SECONDS_PER_URL, on_links=on_links
         ),
         timeout=COLLECT_TIMEOUT_SEC,
       )
