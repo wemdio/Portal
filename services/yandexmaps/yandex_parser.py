@@ -331,30 +331,38 @@ class YandexMapsParser:
       self.log(f"[!] stealth_async не применился: {e}")
     try:
       try:
-        await page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
+        # 90s — первичная загрузка через медленный мобильный прокси
+        # (1.6 Мбит/с). Яндекс.Карты — тяжёлая SPA: сотни kB JS + шрифты
+        # + инициализация Redux/React + первый JSON-запрос за списком.
+        # На быстром интернете 5-10 сек, тут 20-40, а иногда до минуты.
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=90000)
       except PWTimeoutError:
-        # Медленный прокси / route blocking иногда затягивают DOMContentLoaded.
         # Не бросаем — часть карточек может быть уже в DOM.
-        self.log(f"[!] page.goto timeout 45s для {search_url}, пробуем работать с тем что есть")
+        self.log(f"[!] page.goto timeout 90s для {search_url}, пробуем работать с тем что есть")
 
       if await self._page_looks_blocked(page):
         raise YandexBlockedError("Яндекс показал капчу при загрузке страницы поиска")
 
       try:
+        # 60s ждём пока Яндекс дорендерит первую пачку карточек. React
+        # хёдрирует DOM после первого JSON-ответа с сервера — на медленных
+        # прокси это до минуты после DOMContentLoaded.
         await page.wait_for_selector(
           "[class*='search-snippet'], [class*='search-list'], [class*='search-business']",
-          timeout=10000,
+          timeout=60000,
         )
       except PWTimeoutError:
-        await asyncio.sleep(2)
-      await asyncio.sleep(1)
+        await asyncio.sleep(3)
+      await asyncio.sleep(2)
 
       sidebar = None
-      for _ in range(3):
+      # 5 попыток по 2 сек = 10 сек на поиск сайдбара — с запасом на случай,
+      # если React ещё пересобирает layout.
+      for _ in range(5):
         sidebar = await self._find_sidebar(page)
         if sidebar:
           break
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
       if not sidebar:
         if await self._page_looks_blocked(page):
@@ -399,14 +407,14 @@ class YandexMapsParser:
 
         for _ in range(3):
           await self._scroll_sidebar(sidebar)
-          # Больше времени между scroll'ами — Яндекс лениво подгружает
-          # новые карточки, скроллить слишком быстро = страница отстаёт
-          # и мы думаем, что новых карточек нет.
-          await asyncio.sleep(0.4)
+          # Скроллы внутри итерации не спешим — Яндекс лениво подгружает
+          # новые карточки, гнать быстрее = страница отстаёт.
+          await asyncio.sleep(0.6)
 
-        # Даём Яндексу дошевелиться после серии скроллов — сеть занята
-        # подгрузкой JSON'а с новыми карточками, DOM ещё пуст.
-        await asyncio.sleep(0.6)
+        # Крупная пауза после серии скроллов — сеть занята подгрузкой
+        # JSON'а с новыми карточками, DOM ещё пуст. На медленном
+        # мобильном прокси до секунды-двух.
+        await asyncio.sleep(1.5)
 
         html = await page.content()
         soup = BeautifulSoup(html, "lxml")
@@ -454,19 +462,20 @@ class YandexMapsParser:
 
           if no_new_results_count % 4 == 0:
             await self._alternative_scroll(sidebar, page)
-            await asyncio.sleep(1.2)
+            await asyncio.sleep(2.5)
 
-          # Условие выхода стало терпеливее: 25 итераций без новых
-          # карточек (было 12). На медленных прокси Яндекс думает
-          # 3-5 сек, срабатывать раньше = терять последние 30-50 карточек.
-          if at_bottom and consecutive_same_height >= 6 and no_new_results_count >= 25:
+          # Условие выхода — 40 итераций без новых карточек. На медленных
+          # прокси одна итерация ~4-5 сек = ~3 мин ожидания подгрузки
+          # перед тем как сдаться. Плюс at_bottom + одинаковая высота
+          # сайдбара 8 раз подряд — гарантия, что реально ничего не грузится.
+          if at_bottom and consecutive_same_height >= 8 and no_new_results_count >= 40:
             break
 
-          if no_new_results_count >= 12:
+          if no_new_results_count >= 15:
             await self._force_scroll_bottom(sidebar)
-            # Крупная пауза после force-scroll — Яндексу нужно время,
-            # чтобы отреагировать на "мы у самого дна, догрузи-ка ещё".
-            await asyncio.sleep(1.5)
+            # Крупная пауза после force-scroll — даём Яндексу до 3 сек
+            # отреагировать на "мы у самого дна, догрузи-ка ещё".
+            await asyncio.sleep(3.0)
         else:
           no_new_results_count = 0
           consecutive_same_height = 0
@@ -481,8 +490,9 @@ class YandexMapsParser:
           break
 
         # Пауза в конце итерации. Когда Яндекс "думает" (no_new_results_count
-        # растёт) — ждём дольше, а не наоборот. Прежде здесь было 0.8s max.
-        await asyncio.sleep(1.5 if no_new_results_count > 6 else 0.8)
+        # растёт) — ждём дольше. На медленном прокси лениво загружаемая
+        # порция карточек приходит с задержкой 2-3 сек.
+        await asyncio.sleep(2.5 if no_new_results_count > 6 else 1.2)
         scroll_attempts += 1
 
       if loop.time() >= deadline:
@@ -626,13 +636,17 @@ class YandexMapsParser:
       pass
     try:
       try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        # 60s на карточку — на медленном мобильном прокси загрузка одной
+        # карточки с рендером фото/отзывов/карты может занимать минуту.
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
       except PWTimeoutError:
         pass
       try:
-        await page.wait_for_selector("h1, [class*='title']", timeout=5000)
+        # Ждём заголовок до 30 сек — на скрине юзера иногда видно как
+        # карточка "пустая" 15-20 сек прежде чем прорендерится.
+        await page.wait_for_selector("h1, [class*='title']", timeout=30000)
       except PWTimeoutError:
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
       await self._click_show_phone(page)
       await self._expand_contacts(page)
