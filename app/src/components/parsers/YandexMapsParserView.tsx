@@ -411,6 +411,27 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
   const _isCollecting = stageStr.includes('collecting_links') || stageStr === 'links_collected';
   const isParsing = stageStr.includes('parsing_organizations');
 
+  // Antispam: после блокировки Яндексом даём прокси ~15 мин на смену IP.
+  // Пока не прошло — кнопка "Продолжить парсинг" disabled с обратным
+  // отсчётом. Иначе клиенты тыкали бы её раз в 10 сек, добивая пул.
+  const BLOCKED_COOLDOWN_MS = 15 * 60 * 1000;
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const isBlockedFailure = activeJob?.status === 'failed' && stageStr === 'yandex_blocked';
+  const failedAt = isBlockedFailure && activeJob?.completed_at ? Date.parse(activeJob.completed_at) : NaN;
+  const cooldownRemainingMs = Number.isFinite(failedAt)
+    ? Math.max(0, failedAt + BLOCKED_COOLDOWN_MS - nowMs)
+    : 0;
+  const inCooldown = cooldownRemainingMs > 0;
+  const cooldownLabel = inCooldown
+    ? `${Math.floor(cooldownRemainingMs / 60000)}:${String(Math.floor((cooldownRemainingMs % 60000) / 1000)).padStart(2, '0')}`
+    : '';
+
+  useEffect(() => {
+    if (!inCooldown) return;
+    const t = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [inCooldown]);
+
   return (
     <div className="space-y-8">
       {toast ? (
@@ -610,38 +631,53 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                             // не пересобираются заново.
                             const wasBlocked = stageStr === 'yandex_blocked';
                             const canContinueParsing = totalLinks > 0 && !isStoppedByUser(activeJob.status, activeJob.error_message);
+                            const disabledForCooldown = wasBlocked && inCooldown;
+                            const continueLabel = disabledForCooldown
+                              ? `Продолжить парсинг (через ${cooldownLabel})`
+                              : 'Продолжить парсинг';
+                            const continueTitle = disabledForCooldown
+                              ? `Прокси только что попали под блокировку Яндекса. Кнопка станет активной через ${cooldownLabel}, когда IP-адреса поменяются автоматически. Ранние повторы = новый бан.`
+                              : wasBlocked
+                                ? 'Продолжит парсинг с той организации, на которой остановились'
+                                : undefined;
                             return (
                               <>
                                 {canContinueParsing ? (
                                   <button
                                     type="button"
                                     onClick={handleParse}
-                                    disabled={jobActionId === activeJob.id}
-                                    className={clientMode ? 'ds-btn-primary inline-flex items-center justify-center disabled:opacity-40' : 'inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50'}
-                                    title={wasBlocked ? 'Продолжит парсинг с той организации, на которой остановились' : undefined}
+                                    disabled={jobActionId === activeJob.id || disabledForCooldown}
+                                    className={clientMode ? 'ds-btn-primary inline-flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed' : 'inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed'}
+                                    title={continueTitle}
                                   >
-                                    Продолжить парсинг
+                                    {continueLabel}
                                   </button>
                                 ) : (
                                   <button
                                     type="button"
                                     onClick={handleCollectLinks}
-                                    disabled={jobActionId === activeJob.id}
-                                    className={clientMode ? 'ds-btn-primary inline-flex items-center justify-center disabled:opacity-40' : 'inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50'}
+                                    disabled={jobActionId === activeJob.id || disabledForCooldown}
+                                    className={clientMode ? 'ds-btn-primary inline-flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed' : 'inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed'}
+                                    title={continueTitle}
                                   >
-                                    {clientMode ? 'Повторить' : 'Перезапустить'}
+                                    {disabledForCooldown ? `Повторить (через ${cooldownLabel})` : clientMode ? 'Повторить' : 'Перезапустить'}
                                   </button>
                                 )}
                                 {!clientMode && canContinueParsing && (
                                   <button
                                     type="button"
                                     onClick={handleCollectLinks}
-                                    disabled={jobActionId === activeJob.id}
-                                    className="inline-flex items-center justify-center rounded-lg bg-white border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 disabled:opacity-50"
-                                    title="Начать с нуля: заново собрать ссылки и всё парсить"
+                                    disabled={jobActionId === activeJob.id || disabledForCooldown}
+                                    className="inline-flex items-center justify-center rounded-lg bg-white border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title={disabledForCooldown ? continueTitle : 'Начать с нуля: заново собрать ссылки и всё парсить'}
                                   >
                                     Начать заново
                                   </button>
+                                )}
+                                {disabledForCooldown && (
+                                  <div className={clientMode ? 'text-xs px-3 py-2 rounded-md' : 'text-xs px-3 py-2 rounded-md bg-amber-50 border border-amber-200 text-amber-800'} style={clientMode ? { background: 'var(--cp-surface-elev)', border: '1px solid var(--cp-divider)', color: 'var(--cp-paper-mute)' } : undefined}>
+                                    ⏳ Прокси остывают. Активно через <span className="font-mono font-semibold">{cooldownLabel}</span>. Ранний повтор → новый бан.
+                                  </div>
                                 )}
                               </>
                             );
