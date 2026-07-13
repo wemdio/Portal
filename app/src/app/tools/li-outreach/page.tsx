@@ -674,7 +674,20 @@ export default function LiOutreachPage() {
   };
 
   const exportLeadsCsv = async () => {
-    const res = await authFetch('/api/tools/li-outreach/leads/export');
+    // Приоритет scope'а: вручную отмеченные чекбоксы > выбранный лист > всё.
+    // Раньше всегда экспортировалось всё — коллега открывал лист на 100 лидов,
+    // жал «Экспорт CSV» и получал весь пул. Теперь чекбоксы (если есть) или
+    // фильтр листа (если активен) сужают выборку до ожидаемой.
+    const params = new URLSearchParams();
+    if (selectedLeadIds.size > 0) {
+      params.set('ids', Array.from(selectedLeadIds).join(','));
+    } else if (leadListFilterId === UNLISTED_LEAD_LIST_FILTER) {
+      params.set('lead_list_id', UNLISTED_LEAD_LIST_QUERY);
+    } else if (leadListFilterId) {
+      params.set('lead_list_id', leadListFilterId);
+    }
+    const query = params.toString();
+    const res = await authFetch(`/api/tools/li-outreach/leads/export${query ? `?${query}` : ''}`);
     if (!res.ok) { alert('Ошибка экспорта'); return; }
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);

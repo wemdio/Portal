@@ -3,10 +3,12 @@ uvicorn[standard]>=0.30.0
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 # Playwright — живой, поддерживается Microsoft, релизы каждые 2 недели.
-# Auth-прокси нативно, без mitmproxy-костыля. Chromium скачивается в
-# рантайме через `playwright install` (мы этого не делаем — базовый
-# образ mcr.microsoft.com/playwright/python уже содержит всё нужное).
-playwright>=1.49.0
+# Auth-прокси нативно, без mitmproxy-костыля. Chromium встроен в базовый
+# образ mcr.microsoft.com/playwright/python:v<X>-jammy — версия playwright
+# ДОЛЖНА совпадать с тегом образа в Dockerfile, иначе pip притянет свежий
+# playwright, а Chromium в образе останется старый → BrowserType.launch:
+# "Executable doesn't exist at /ms-playwright/chromium_headless_shell-...".
+playwright==1.49.0
 # Инжектит JS-патчи в каждую страницу, стирающие следы Playwright'а
 # (navigator.webdriver, WebGL fingerprint, plugins, chrome.runtime и т.п.).
 # Аналог undetected-chromedriver для Selenium.
