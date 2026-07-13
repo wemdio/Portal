@@ -422,6 +422,52 @@ describe('pollAndQualifyReplies', () => {
     );
   });
 
+  it('passes leadCriteria=null when the project has no custom criteria', async () => {
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'no-criteria-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ leadCriteria: null }),
+    );
+  });
+
+  // Холодный кэш + блип БД: критерии НЕИЗВЕСТНЫ → письмо откладывается БЕЗ
+  // записи (иначе вердикт с дефолтными критериями осел бы навсегда через
+  // дедуп — ровно то, что чинил cce28d618). Следующий тик обработает заново.
+  it('defers the reply (no row, no AI) when criteria fetch is degraded on a cold cache', async () => {
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          { id: 'project-1', client: 'Ritso', specialist_user_id: 'specialist-1', lead_criteria: 'Контакт = лид' },
+        ],
+        profiles: [],
+        telegram_links: [],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+      // Прицельно роняем ТОЛЬКО запрос критериев (select lead_criteria) —
+      // верификация привязки (select 'id, client') работает, кампания
+      // квалифицируема, и тест реально доходит до defer-ветки.
+      errorSelects: { projects: { columnsInclude: 'lead_criteria', message: 'connection timeout (blip)' } },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'deferred-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(qualifyReply).not.toHaveBeenCalled();
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toHaveLength(0);
+  });
+
   // Кросс-клиентский доменный матч Instantly (кейс NAIS→KIRA 10.07): лид двух
   // наших клиентов написал НОВОЕ письмо на ящик клиента A (To=eaccount, поэтому
   // BCC-guard молчит), а Instantly приклеил его по домену отправителя к

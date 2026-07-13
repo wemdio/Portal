@@ -658,11 +658,21 @@ async function qualifyOneReply(
     if (fetched.ok) {
       cachedCriteria = fetched.value;
       leadCriteriaCache.set(campaignId, { value: fetched.value, fetchedAt: Date.now() });
+    } else if (criteriaEntry) {
+      // Деградация НЕ кэшируется, при протухшем кэше — stale-if-error:
+      // вчерашние критерии лучше, чем молча дефолтные на время блипа БД.
+      cachedCriteria = criteriaEntry.value;
     } else {
-      // Деградация НЕ кэшируется (следующий тик перечитает), а при протухшем
-      // кэше берём устаревшее значение: вчерашние критерии лучше, чем молча
-      // дефолтные на время блипа БД.
-      cachedCriteria = criteriaEntry ? criteriaEntry.value : fetched.value;
+      // Холодный кэш (рестарт воркера) + деградация: критерии НЕИЗВЕСТНЫ.
+      // Квалифицировать с дефолтными нельзя — вердикт запишется навсегда
+      // (дедуп по instantly_email_id), и ранний выход «запрос контакта = не
+      // лид» убил бы горячий лид кампании с кастомом. Откладываем письмо БЕЗ
+      // записи: дедуп-строки нет → следующий тик (~30с) обработает заново.
+      workerLog(
+        'warn',
+        `lead-criteria unknown for campaign ${campaignId} (cold cache + degraded fetch) — deferring reply ${reply.id ?? '?'} to next tick`,
+      );
+      return;
     }
   }
 

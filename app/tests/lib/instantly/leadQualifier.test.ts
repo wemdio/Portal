@@ -220,3 +220,86 @@ describe('getBodyText', () => {
     expect(getBodyText({ text: 'обычный текст &#1059;' } as Email['body'])).toBe('обычный текст &#1059;');
   });
 });
+
+// Пер-проектные критерии лида (ecbadde9c): кастомный текст отключает
+// детерминированный ранний выход «ответ на запрос контакта = не лид» и
+// попадает в промпт приоритетным блоком. Без критериев — поведение прежнее.
+describe('qualifyReply — пер-проектное определение лида', () => {
+  const oldFetch = global.fetch;
+  const fetchMock = jest.fn();
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+  afterAll(() => {
+    global.fetch = oldFetch;
+  });
+
+  const outboundContactRequest = {
+    id: 'out-1',
+    ue_type: 1,
+    body: { text: 'Подскажите, пожалуйста, кто у вас отвечает за 1С? Буду признательна за контакт.' },
+    timestamp_email: '2026-07-13T08:00:00Z',
+  } as Email;
+  const callInviteReply = {
+    id: 'in-1',
+    ue_type: 2,
+    body: { text: 'Можете меня набрать в 14.00-15.00.' },
+    timestamp_email: '2026-07-13T09:00:00Z',
+  } as Email;
+  const ctx: ThreadContext = {
+    replyEmail: callInviteReply,
+    threadEmails: [outboundContactRequest, callInviteReply],
+    lastOutbound: outboundContactRequest,
+  };
+
+  it('без кастомных критериев ответ на запрос контакта отсекается детерминированно, БЕЗ вызова ИИ', async () => {
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      prefetchedContext: ctx,
+    });
+    expect(res.isLead).toBe(false);
+    expect(res.reason).toContain('запрос контакта');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('с кастомными критериями ранний выход отключён, промпт содержит приоритетный блок, вердикт ИИ проходит', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{
+          finish_reason: 'stop',
+          message: {
+            content: JSON.stringify({
+              is_lead: true,
+              proposal_seen: false,
+              interest_signals: ['предложил созвониться'],
+              reason: 'Просит звонок в конкретное окно',
+              confidence: 0.9,
+              needs_review: false,
+              objection_handleable: false,
+              objection_draft: null,
+            }),
+          },
+        }],
+      }),
+    });
+    const { qualifyReply } = await import('@/lib/instantly/leadQualifier');
+    const res = await qualifyReply('camp-1', 'lead@x.ru', 'thread-1', {
+      apiKey: 'test-key',
+      briefText: '',
+      leadCriteria: 'Контакт ЛПР или предложение созвониться = лид. Развёрнутое предложение не требуется.',
+      prefetchedContext: ctx,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    const systemPrompt: string = body.messages[0].content;
+    expect(systemPrompt).toContain('ОПРЕДЕЛЕНИЕ ЛИДА ДЛЯ ЭТОГО ПРОЕКТА');
+    expect(systemPrompt).toContain('Контакт ЛПР или предложение созвониться = лид.');
+    expect(res.isLead).toBe(true);
+  });
+});
