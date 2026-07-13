@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { blockDemo } from '@/lib/auth/blockDemo';
 import { DEFAULT_LOCALE, LOCALE_COOKIE, normalizeLocale, type Locale } from '@/lib/i18n';
 
 export const dynamic = 'force-dynamic';
@@ -55,6 +56,12 @@ export async function PUT(req: NextRequest) {
   try {
     const auth = await getUser(req);
     if (!auth) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    // Демо-аккаунт ОБЩИЙ: без этого гейта любой посетитель демо записывал locale
+    // в его профиль и «переключал язык» ВСЕМ сразу (инцидент 12.07: locale=en +
+    // read-only перевод под демо = вечный белый оверлей у всех, включая /login).
+    const demo = await blockDemo(auth.supabase, auth.user.id);
+    if (demo) return demo;
 
     let body: { locale?: Locale };
     try {
