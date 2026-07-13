@@ -33,8 +33,11 @@ const MAX_QUALIFY_PER_TICK = 20;
 const PROJECT_BATCH_SIZE = 100;
 const briefCache = new Map<string, string | null>();
 // campaign_id → projects.lead_criteria привязанного проекта (кастомное
-// определение лида для ИИ). Кэш на жизнь процесса, как briefCache.
-const leadCriteriaCache = new Map<string, string | null>();
+// определение лида для ИИ). В отличие от briefCache (бриф пишется один раз),
+// критерии подкручивают итеративно — поэтому TTL: правка в настройках проекта
+// подхватывается сама в течение ~5 минут, БЕЗ редеплоя воркера.
+const LEAD_CRITERIA_TTL_MS = 5 * 60 * 1000;
+const leadCriteriaCache = new Map<string, { value: string | null; fetchedAt: number }>();
 
 /** projects.lead_criteria первого привязанного проекта кампании (или null). */
 async function fetchLeadCriteriaByCampaign(
@@ -632,10 +635,14 @@ async function qualifyOneReply(
   }
   const cachedBrief = briefCache.get(campaignId) ?? null;
 
-  if (!leadCriteriaCache.has(campaignId)) {
-    leadCriteriaCache.set(campaignId, await fetchLeadCriteriaByCampaign(db, campaignId));
+  const criteriaEntry = leadCriteriaCache.get(campaignId);
+  let cachedCriteria: string | null;
+  if (criteriaEntry && Date.now() - criteriaEntry.fetchedAt < LEAD_CRITERIA_TTL_MS) {
+    cachedCriteria = criteriaEntry.value;
+  } else {
+    cachedCriteria = await fetchLeadCriteriaByCampaign(db, campaignId);
+    leadCriteriaCache.set(campaignId, { value: cachedCriteria, fetchedAt: Date.now() });
   }
-  const cachedCriteria = leadCriteriaCache.get(campaignId) ?? null;
 
   const result = await qualifyReply(campaignId, leadEmail, reply.thread_id, {
     apiKey,
