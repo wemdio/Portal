@@ -115,7 +115,7 @@ export function YandexMapsParserForm(props: {
 }) {
   const clientMode = props.clientMode;
   const [searchUrlsText, setSearchUrlsText] = useState('');
-  const [maxResults, _setMaxResults] = useState(1000);
+  const [maxResults, setMaxResults] = useState(250);
   const [headless, _setHeadless] = useState(true);
 
   const [proxy, _setProxy] = useState<ProxyForm>({
@@ -265,6 +265,22 @@ export function YandexMapsParserForm(props: {
               className="h-44"
             />
           </div>
+        </div>
+
+        <div>
+          <label className="ds-eyebrow mb-1.5 block">организаций на 1 запрос</label>
+          <input
+            type="number"
+            min={10}
+            max={1000}
+            step={10}
+            className="ds-input w-full"
+            value={maxResults}
+            onChange={(e) => setMaxResults(Math.max(10, Math.min(1000, Number(e.target.value) || 250)))}
+          />
+          <p className="mt-1.5 text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
+            Сколько карточек собирать с каждого поискового запроса. По умолчанию 250 — золотая середина. Больше = дольше парсинг, но и больше данных.
+          </p>
         </div>
 
         <div>
@@ -431,6 +447,25 @@ export function YandexMapsParserForm(props: {
 
           </div>
         </div>
+      </div>
+
+      {/* Настройки лимита */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+        <label className="block text-sm font-medium text-gray-700 mb-1.5">
+          Организаций на 1 запрос
+        </label>
+        <input
+          type="number"
+          min={10}
+          max={5000}
+          step={10}
+          className="block w-40 rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
+          value={maxResults}
+          onChange={(e) => setMaxResults(Math.max(10, Math.min(5000, Number(e.target.value) || 250)))}
+        />
+        <p className="mt-1.5 text-xs text-gray-500">
+          Сколько карточек собирать с каждого поискового URL. По умолчанию 250. Больше = дольше парсинг и больше трафика прокси, но и больше данных.
+        </p>
       </div>
 
       {/* Settings Section */}
