@@ -32,6 +32,40 @@ const REPLY_EMAILS_PAGE_SIZE = 100;
 const MAX_QUALIFY_PER_TICK = 20;
 const PROJECT_BATCH_SIZE = 100;
 const briefCache = new Map<string, string | null>();
+// campaign_id → projects.lead_criteria привязанного проекта (кастомное
+// определение лида для ИИ). Кэш на жизнь процесса, как briefCache.
+const leadCriteriaCache = new Map<string, string | null>();
+
+/** projects.lead_criteria первого привязанного проекта кампании (или null). */
+async function fetchLeadCriteriaByCampaign(
+  instantlyDb: NonNullable<typeof supabaseAdmin>,
+  campaignId: string,
+): Promise<string | null> {
+  if (!supabaseMain) return null;
+  try {
+    const { data: legacyLinks } = await instantlyDb
+      .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+    const { data: periodLinks } = await instantlyDb
+      .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+    const projectIds = [
+      ...new Set(
+        [...(legacyLinks ?? []), ...(periodLinks ?? [])]
+          .map((l: { project_id?: string | null }) => l.project_id)
+          .filter(Boolean) as string[],
+      ),
+    ];
+    if (projectIds.length === 0) return null;
+    const { data: projects } = await supabaseMain
+      .from('projects').select('lead_criteria').in('id', projectIds);
+    for (const p of projects ?? []) {
+      const criteria = typeof p.lead_criteria === 'string' ? p.lead_criteria.trim() : '';
+      if (criteria) return criteria;
+    }
+  } catch (err) {
+    workerLog('warn', `fetchLeadCriteriaByCampaign failed for ${campaignId}`, err);
+  }
+  return null;
+}
 const campaignNameCache = new Map<string, string | null>();
 const API_KEY = () =>
   process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
@@ -598,10 +632,16 @@ async function qualifyOneReply(
   }
   const cachedBrief = briefCache.get(campaignId) ?? null;
 
+  if (!leadCriteriaCache.has(campaignId)) {
+    leadCriteriaCache.set(campaignId, await fetchLeadCriteriaByCampaign(db, campaignId));
+  }
+  const cachedCriteria = leadCriteriaCache.get(campaignId) ?? null;
+
   const result = await qualifyReply(campaignId, leadEmail, reply.thread_id, {
     apiKey,
     model: MODEL,
     briefText: cachedBrief,
+    leadCriteria: cachedCriteria,
     // Контекст уже зафетчен выше (кросс-клиентский guard) — не фетчим второй раз.
     prefetchedContext: ctx,
   }, accountId);

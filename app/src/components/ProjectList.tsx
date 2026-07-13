@@ -2791,6 +2791,24 @@ export function ProjectList() {
                 </div>
               </section>
 
+              {/* Per-project custom lead definition for the AI qualifier */}
+              <section>
+                <h3 className="text-sm font-medium text-zinc-900 mb-2">Критерии лида (ИИ)</h3>
+                <p className="text-[11px] text-zinc-400 mb-2">
+                  Своё определение лида для всех кампаний проекта — имеет приоритет над стандартным («видел развёрнутое предложение + проявил интерес»). Пусто → стандартные критерии.
+                </p>
+                <textarea
+                  value={getDraftValue(selectedProject, 'lead_criteria')}
+                  onChange={(e) => setDraftValue(selectedProject.id, 'lead_criteria', e.target.value)}
+                  onBlur={(e) => void commitProjectUpdate(selectedProject, { lead_criteria: e.target.value })}
+                  disabled={!canEdit}
+                  rows={4}
+                  placeholder={'Напр.: Кампании собирают контакты ЛПР. Лид = дали контакт ЛПР по нашему запросу ИЛИ предложили созвониться / оставили личный телефон в теле письма. Развёрнутое предложение не требуется.'}
+                  className="w-full rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs focus:border-blue-400 focus:outline-none disabled:bg-zinc-50 resize-none"
+                />
+                <p className="mt-1 text-[10px] text-zinc-400">Автоответы, отписки и письма «смена почты» отсекаются всегда, независимо от критериев.</p>
+              </section>
+
               {/* Honest campaign-insights over the analytics dataset (no AI at render) */}
               <section>
                 <InstantlyInsightsSection projectId={selectedProject.id} />

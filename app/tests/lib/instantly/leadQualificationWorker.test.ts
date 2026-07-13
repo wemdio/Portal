@@ -386,6 +386,42 @@ describe('pollAndQualifyReplies', () => {
     }
   });
 
+  // Пер-проектное определение лида (projects.lead_criteria) прокидывается в
+  // квалификацию — иначе кастомные критерии молча не работали бы.
+  it('passes the project lead_criteria into qualifyReply (and null when not set)', async () => {
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          {
+            id: 'project-1',
+            client: 'Ritso',
+            specialist_user_id: 'specialist-1',
+            lead_criteria: 'Кампании собирают контакты ЛПР: контакт или предложение созвониться = лид.',
+          },
+        ],
+        profiles: [],
+        telegram_links: [],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'criteria-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1);
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({
+        leadCriteria: 'Кампании собирают контакты ЛПР: контакт или предложение созвониться = лид.',
+      }),
+    );
+  });
+
   // Кросс-клиентский доменный матч Instantly (кейс NAIS→KIRA 10.07): лид двух
   // наших клиентов написал НОВОЕ письмо на ящик клиента A (To=eaccount, поэтому
   // BCC-guard молчит), а Instantly приклеил его по домену отправителя к

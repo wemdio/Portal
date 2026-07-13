@@ -244,12 +244,21 @@ export function isProposalMessage(text: string): boolean {
 
 // ─── AI Classification ──────────────────────────────────────────────────────
 
-function buildSystemPrompt(briefText?: string | null): string {
+function buildSystemPrompt(briefText?: string | null, leadCriteria?: string | null): string {
   const briefSection = briefText
     ? `\n\nКОНТЕКСТ ПРЕДЛОЖЕНИЯ (бриф клиента):\n---\n${briefText.slice(0, 2000)}\n---\nИспользуй этот контекст для определения возражений и генерации черновика ответа.`
     : '';
 
-  return `Ты — эксперт по квалификации лидов в B2B email-аутриче. Тебе дан контекст переписки: наше последнее исходящее письмо и ответ потенциального клиента.${briefSection}
+  // Пер-проектное определение лида (projects.lead_criteria): команда проекта
+  // сама решает, что считать лидом. Нужно контакт-запросным кампаниям (шаг 1 —
+  // «кто отвечает за X?»): дефолтный критерий «видел развёрнутое предложение»
+  // структурно глушит их горячие ответы («можете меня набрать в 14-15»).
+  // Блок ставится ПЕРЕД стандартными критериями и объявлен приоритетным.
+  const criteriaSection = leadCriteria?.trim()
+    ? `\n\nОПРЕДЕЛЕНИЕ ЛИДА ДЛЯ ЭТОГО ПРОЕКТА (задано командой проекта — при ЛЮБОМ противоречии со стандартными критериями ниже ПРИОРИТЕТ у этого определения):\n---\n${leadCriteria.trim().slice(0, 2000)}\n---`
+    : '';
+
+  return `Ты — эксперт по квалификации лидов в B2B email-аутриче. Тебе дан контекст переписки: наше последнее исходящее письмо и ответ потенциального клиента.${briefSection}${criteriaSection}
 
 ЗАДАЧА: определить категорию ответа.
 
@@ -310,6 +319,13 @@ export interface ClassifyOptions {
   model?: string;
   maxRetries?: number;
   briefText?: string | null;
+  /**
+   * Пер-проектное определение лида (projects.lead_criteria). Непусто →
+   * в промпт вставляется приоритетный блок критериев, а детерминированный
+   * ранний выход «ответ на запрос контакта = не лид» отключается (иначе он
+   * убил бы кастомное определение до вызова ИИ).
+   */
+  leadCriteria?: string | null;
   /**
    * Уже полученный контекст переписки. Если передан — qualifyReply НЕ дёргает
    * Instantly /emails за тредом, а использует его. Нужно real-time-разгребателю
@@ -591,9 +607,9 @@ export async function classifyWithAI(
   ctx: ThreadContext,
   options: ClassifyOptions,
 ): Promise<QualificationResult> {
-  const { apiKey, model = DEFAULT_MODEL, maxRetries = 2, briefText } = options;
+  const { apiKey, model = DEFAULT_MODEL, maxRetries = 2, briefText, leadCriteria } = options;
   const userMessage = buildUserMessage(ctx);
-  const systemPrompt = buildSystemPrompt(briefText);
+  const systemPrompt = buildSystemPrompt(briefText, leadCriteria);
   const maxTokens = Math.max(
     1000,
     envNumber('INSTANTLY_LEAD_QUAL_MAX_TOKENS', DEFAULT_MAX_TOKENS),
@@ -725,7 +741,11 @@ export async function qualifyReply(
     };
   }
 
-  if (ctx.lastOutbound) {
+  // При кастомном определении лида (projects.lead_criteria) ранний выход
+  // «ответ на запрос контакта = не лид» отключён: он зашивает дефолтный
+  // критерий proposal_seen и убил бы кастом до вызова ИИ (кейс ADE 13.07:
+  // «можете меня набрать в 14-15» на контакт-запросе Ritso).
+  if (ctx.lastOutbound && !aiOptions.leadCriteria?.trim()) {
     const outboundText = getBodyText(ctx.lastOutbound.body);
     const replyHasQuotes = replyText.includes('>') || /(?:On|В|от)\s+.+(?:wrote|написал|:$)/im.test(replyText);
     if (isContactRequestOnly(outboundText) && !isProposalMessage(outboundText) && !replyHasQuotes) {
