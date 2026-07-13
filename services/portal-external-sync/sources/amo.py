@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,6 +30,10 @@ import asyncpg
 import httpx
 
 from .base import SyncSource
+
+# Regex для fallback-извлечения TG-юзера из названия сделки: `@nickname от Х`.
+# Минимум 5 символов — чтобы отсеять `@x` в русских текстах и служебные @.
+TG_USERNAME_RE = re.compile(r"@([A-Za-z][A-Za-z0-9_]{4,31})\b")
 
 TOKEN = (os.environ.get("AMO_ACCESS_TOKEN") or os.environ.get("AMOCRM_TOKEN") or "").strip()
 BASE_URL = os.environ.get("AMO_BASE_URL", "").strip().rstrip("/")
@@ -78,6 +83,64 @@ def _main_contact_id(lead: dict[str, Any]) -> int | None:
 def _first_company_id(lead: dict[str, Any]) -> int | None:
     companies = ((lead.get("_embedded") or {}).get("companies")) or []
     return companies[0].get("id") if companies else None
+
+
+def _tg_from_contact(contact: dict[str, Any]) -> str | None:
+    """Ищет TG-юзера в custom_fields контакта. Три источника (в порядке приоритета):
+    1) IM-поле (field_code=IM) с enum_code=TELEGRAM.
+    2) Любое поле, где field_code содержит TG/TELEGRAM.
+    3) Любое поле, где field_name содержит Telegram/Тг/ТГ.
+    Возвращает username без ведущего @, иначе None.
+    """
+    for f in contact.get("custom_fields_values") or []:
+        code = (f.get("field_code") or "").upper()
+        name = (f.get("field_name") or "").lower()
+        values = f.get("values") or []
+        for v in values:
+            enum_code = (v.get("enum_code") or "").upper()
+            raw_val = v.get("value")
+            if not raw_val:
+                continue
+            val = str(raw_val).strip()
+            hit = (
+                (code == "IM" and enum_code == "TELEGRAM")
+                or code in ("TG", "TELEGRAM")
+                or "telegram" in name
+                or "тг" in name
+            )
+            if hit:
+                return val.lstrip("@").split("/")[-1].split("?")[0] or None
+    return None
+
+
+def _extract_website_from_lead(lead: dict[str, Any]) -> str | None:
+    """Достаёт сайт из custom-поля «Сайт», нормализует.
+    Убирает протокол, www., trailing slash, path. Полезно для матча и индексации.
+    """
+    for f in lead.get("custom_fields_values") or []:
+        if (f.get("field_name") or "").strip().lower() != "сайт":
+            continue
+        vals = f.get("values") or []
+        if not vals:
+            return None
+        raw = str(vals[0].get("value") or "").strip()
+        if not raw:
+            return None
+        s = raw.lower()
+        s = re.sub(r"^https?://", "", s)
+        s = re.sub(r"^www\.", "", s)
+        s = s.split("/", 1)[0]
+        s = s.split("?", 1)[0]
+        s = s.rstrip(".")
+        return s or None
+    return None
+
+
+def _tg_from_name(name: str | None) -> str | None:
+    if not name:
+        return None
+    m = TG_USERNAME_RE.search(name)
+    return m.group(1) if m else None
 
 
 class AmoSync(SyncSource):
@@ -206,7 +269,7 @@ class AmoSync(SyncSource):
     async def _fetch_contacts(
         self, client: httpx.AsyncClient, base: str
     ) -> dict[int, dict[str, str | None]]:
-        """{contact_id → {phone, email}}. company_name достаётся отдельно."""
+        """{contact_id → {phone, email, tg_username}}. company_name достаётся отдельно."""
         out: dict[int, dict[str, str | None]] = {}
         page = 1
         while page <= MAX_PAGES:
@@ -226,6 +289,7 @@ class AmoSync(SyncSource):
                 out[cid] = {
                     "phone": _cf_by_code(c, "PHONE"),
                     "email": _cf_by_code(c, "EMAIL"),
+                    "tg_username": _tg_from_contact(c),
                 }
             if not ((data.get("_links") or {}).get("next")):
                 break
@@ -283,6 +347,10 @@ class AmoSync(SyncSource):
         company_id = _first_company_id(lead)
         company_name = companies.get(company_id) if company_id else None
 
+        # TG-юзер: сначала из контакта, потом fallback — regex на name.
+        tg_username = (contact_row or {}).get("tg_username") or _tg_from_name(lead.get("name"))
+        website = _extract_website_from_lead(lead)
+
         return (
             lead["id"],
             lead.get("name"),
@@ -297,6 +365,8 @@ class AmoSync(SyncSource):
             contact_row["phone"] if contact_row else None,
             contact_row["email"] if contact_row else None,
             company_name,
+            tg_username,
+            website,
             _ts(lead.get("created_at")),
             _ts(lead.get("updated_at")),
             _ts(lead.get("closed_at")),
@@ -306,13 +376,16 @@ class AmoSync(SyncSource):
     # ── Upserts ───────────────────────────────────────────────────────────
 
     async def _upsert_leads(self, conn: asyncpg.Connection, rows: list[tuple]) -> None:
+        # company_name НЕ трогаем в UPDATE если AMO вернул NULL — воркер amo_enrich
+        # мог заполнить это поле с сайта; не должны его снести обратно в NULL.
         await conn.executemany(
             """INSERT INTO amo_leads (
                  amo_id, name, status_id, status_name, pipeline_id, pipeline_name,
                  amount, responsible_user_id, responsible_name,
                  ym_client_id, contact_phone, contact_email, company_name,
+                 contact_tg_username, company_website,
                  created_at, updated_at, closed_at, raw
-               ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
+               ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb)
                ON CONFLICT (amo_id) DO UPDATE SET
                  name                = EXCLUDED.name,
                  status_id           = EXCLUDED.status_id,
@@ -325,7 +398,9 @@ class AmoSync(SyncSource):
                  ym_client_id        = EXCLUDED.ym_client_id,
                  contact_phone       = EXCLUDED.contact_phone,
                  contact_email       = EXCLUDED.contact_email,
-                 company_name        = EXCLUDED.company_name,
+                 company_name        = COALESCE(EXCLUDED.company_name, amo_leads.company_name),
+                 contact_tg_username = EXCLUDED.contact_tg_username,
+                 company_website     = EXCLUDED.company_website,
                  updated_at          = EXCLUDED.updated_at,
                  closed_at           = EXCLUDED.closed_at,
                  raw                 = EXCLUDED.raw,
