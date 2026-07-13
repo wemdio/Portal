@@ -354,7 +354,10 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     } else if (blockedUrls > 0) {
       // 0 ссылок и была блокировка => это не «пустая выдача», а капча/антибот.
       // Пишем честную причину вместо вводящего в заблуждение «Завершено».
-      const msg = `Яндекс заблокировал сбор ссылок (капча) на ${blockedUrls} из ${searchUrls.length} запросов. Прокси могли попасть под блокировку — подождите 30–60 мин или смените прокси, затем перезапустите.`;
+      const msg =
+        `Яндекс временно заблокировал наши прокси на этапе поиска ` +
+        `(${blockedUrls} из ${searchUrls.length} запросов не прошли). ` +
+        `Подождите 15–20 минут (IP прокси меняются каждые 2 минуты) и нажмите «Продолжить парсинг» — попробуем те же запросы через свежие IP.`;
       await setJobPatch(jobId, {
         status: 'failed',
         error_message: msg,
@@ -549,12 +552,17 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
         // Если 3 чанка подряд не проходят ни через один прокси — реально
         // Яндекс банит нас во всём пуле, задачу останавливаем.
         if (consecutiveBlockedChunks >= 3) {
-          const msg = 'Яндекс блокирует запросы во всех прокси пула (детектит бот/капчу). Подождите 30–60 минут, смените прокси или уменьшите объём задачи.';
+          const totalOrgs = links.length;
+          const msg =
+            `Яндекс временно заблокировал наши прокси. ` +
+            `Уже сохранено ${processed} из ${totalOrgs} организаций — они никуда не денутся. ` +
+            `Подождите 15–20 минут (IP прокси меняются каждые 2 минуты) и нажмите «Продолжить парсинг» — работа возобновится с того же места.`;
           await setJobPatch(jobId, {
             status: 'failed',
             error_message: msg,
             progress_stage: 'yandex_blocked',
             processed_organizations: processed,
+            completed_at: new Date().toISOString(),
           });
           void logWarn(
             'parser.yandexmaps.parse.blocked',

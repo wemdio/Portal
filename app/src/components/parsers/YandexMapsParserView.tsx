@@ -602,28 +602,50 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                         </button>
                       ) : (
                         <>
-                          {activeJob.status === 'failed' && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={handleCollectLinks}
-                                disabled={jobActionId === activeJob.id}
-                                className={clientMode ? 'ds-btn-primary inline-flex items-center justify-center disabled:opacity-40' : 'inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50'}
-                              >
-                                {clientMode ? 'Повторить' : 'Перезапустить'}
-                              </button>
-                              {!clientMode && totalLinks > 0 && !isStoppedByUser(activeJob.status, activeJob.error_message) && (
-                                <button
-                                  type="button"
-                                  onClick={handleParse}
-                                  disabled={jobActionId === activeJob.id}
-                                  className="inline-flex items-center justify-center rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 disabled:opacity-50"
-                                >
-                                  Парсить ссылки
-                                </button>
-                              )}
-                            </>
-                          )}
+                          {activeJob.status === 'failed' && (() => {
+                            // Yandex_blocked после сбора ссылок: продолжаем с оставшимися
+                            // карточками (parse), а не запускаем сбор с нуля.
+                            // Также любой failed с уже собранными ссылками — /parse
+                            // безопаснее, потому что уже спарсенные организации
+                            // не пересобираются заново.
+                            const wasBlocked = stageStr === 'yandex_blocked';
+                            const canContinueParsing = totalLinks > 0 && !isStoppedByUser(activeJob.status, activeJob.error_message);
+                            return (
+                              <>
+                                {canContinueParsing ? (
+                                  <button
+                                    type="button"
+                                    onClick={handleParse}
+                                    disabled={jobActionId === activeJob.id}
+                                    className={clientMode ? 'ds-btn-primary inline-flex items-center justify-center disabled:opacity-40' : 'inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50'}
+                                    title={wasBlocked ? 'Продолжит парсинг с той организации, на которой остановились' : undefined}
+                                  >
+                                    Продолжить парсинг
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={handleCollectLinks}
+                                    disabled={jobActionId === activeJob.id}
+                                    className={clientMode ? 'ds-btn-primary inline-flex items-center justify-center disabled:opacity-40' : 'inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50'}
+                                  >
+                                    {clientMode ? 'Повторить' : 'Перезапустить'}
+                                  </button>
+                                )}
+                                {!clientMode && canContinueParsing && (
+                                  <button
+                                    type="button"
+                                    onClick={handleCollectLinks}
+                                    disabled={jobActionId === activeJob.id}
+                                    className="inline-flex items-center justify-center rounded-lg bg-white border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 disabled:opacity-50"
+                                    title="Начать с нуля: заново собрать ссылки и всё парсить"
+                                  >
+                                    Начать заново
+                                  </button>
+                                )}
+                              </>
+                            );
+                          })()}
                           {activeJob.status === 'pending' && (() => {
                             const pendingJobs = jobs.filter((j) => j.status === 'pending').sort((a, b) => a.created_at.localeCompare(b.created_at));
                             const posInQueue = pendingJobs.findIndex((j) => j.id === activeJob.id) + 1;
