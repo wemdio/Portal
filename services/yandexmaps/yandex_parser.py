@@ -21,9 +21,17 @@ class YandexBlockedError(Exception):
   """Yandex вернул капчу / антибот-страницу вместо результатов."""
 
 
-PARSE_MIN_DELAY_SEC = float(os.environ.get("YANDEXMAPS_PARSE_MIN_DELAY_SEC", "1.5"))
-PARSE_MAX_DELAY_SEC = float(os.environ.get("YANDEXMAPS_PARSE_MAX_DELAY_SEC", "3.0"))
-PARSE_MAX_CONSECUTIVE_EMPTY = int(os.environ.get("YANDEXMAPS_PARSE_MAX_CONSECUTIVE_EMPTY", "5"))
+# Паузы между карточками — минимум 3, максимум 6 сек. Раньше 1.5-3
+# было слишком тесно: с ротацией мобильного прокси иногда выпадал
+# медленный IP, карточка не догружалась, мы шли дальше, детектор
+# считал 5 подряд "пустых" за бан. Плюс шире окно = меньше подозрений.
+PARSE_MIN_DELAY_SEC = float(os.environ.get("YANDEXMAPS_PARSE_MIN_DELAY_SEC", "3.0"))
+PARSE_MAX_DELAY_SEC = float(os.environ.get("YANDEXMAPS_PARSE_MAX_DELAY_SEC", "6.0"))
+# Порог "яндекс блокирует" — 5 -> 12. Пять пустых карточек подряд
+# случается по естественным причинам (медленный прокси в ротации,
+# редкая карточка без имени в самом Яндексе, кратковременный
+# сетевой сбой). Двенадцать подряд = уже реально что-то не так.
+PARSE_MAX_CONSECUTIVE_EMPTY = int(os.environ.get("YANDEXMAPS_PARSE_MAX_CONSECUTIVE_EMPTY", "12"))
 
 
 # Свежий пул User-Agent'ов: Chrome 130-131 на разных ОС + мобильный Android.
