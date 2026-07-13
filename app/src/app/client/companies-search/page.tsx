@@ -208,6 +208,10 @@ export default function CompaniesSearchPage() {
   const [hasEgais, setHasEgais] = useState(false);
 
   const [includeIp, setIncludeIp] = useState(false);
+  // Показать и уже выгружавшиеся компании (seen-журнал). По умолчанию false —
+  // каждый экспорт отдаёт СЛЕДУЮЩИЙ срез базы, а не те же первые N.
+  const [includeSeen, setIncludeSeen] = useState(false);
+  const [seenStats, setSeenStats] = useState<{ seenTotal: number; lastExportedAt: string | null } | null>(null);
 
   const [calcLoading, setCalcLoading] = useState(false);
   const [calcResult, setCalcResult] = useState<{ count: number; remaining: number } | null>(null);
@@ -437,6 +441,7 @@ export default function CompaniesSearchPage() {
       hasEdo,
       hasEgais,
       includeIp,
+      includeSeen,
       innList: parsedInnList && parsedInnList.length > 0 ? parsedInnList : undefined,
     };
   };
@@ -471,8 +476,14 @@ export default function CompaniesSearchPage() {
         return;
       }
 
-      const data = (await res.json()) as { count: number; remaining: number };
+      const data = (await res.json()) as {
+        count: number;
+        remaining: number;
+        seenTotal?: number;
+        lastExportedAt?: string | null;
+      };
       setCalcResult({ count: data.count, remaining: data.remaining });
+      setSeenStats({ seenTotal: data.seenTotal ?? 0, lastExportedAt: data.lastExportedAt ?? null });
     } catch (err) {
       setCalcError(err instanceof Error ? err.message : t('Ошибка', 'Error', locale));
     } finally {
@@ -935,6 +946,35 @@ export default function CompaniesSearchPage() {
         </p>
       </section>
 
+      {/* ── 04 → Уже выгруженные ─────────────────────────────────────── */}
+      <section className="neu-card p-5 sm:p-6">
+        <p className="ds-eyebrow mb-3">
+          04<span aria-hidden> → </span>
+          {t('Уже выгруженные', 'Already exported', locale)}
+        </p>
+        <Checkbox
+          checked={includeSeen}
+          onChange={setIncludeSeen}
+          label={t(
+            'Показать компании, которые вы уже выгружали',
+            'Include companies you already exported',
+            locale,
+          )}
+          title={t(
+            'По умолчанию повторы исключаются: каждая выгрузка отдаёт следующий срез базы, чтобы вы не писали одним и тем же компаниям.',
+            'Repeats are excluded by default: each export returns the next slice of the directory so you do not email the same companies twice.',
+            locale,
+          )}
+        />
+        <p className="text-xs mt-3 leading-relaxed" style={{ color: 'var(--cp-paper-mute)' }}>
+          {t(
+            'Мы запоминаем, какие компании вы уже скачивали, и не отдаём их повторно — включите галочку, если нужен именно повтор.',
+            'We remember which companies you already downloaded and skip them — tick the box if you specifically need repeats.',
+            locale,
+          )}
+        </p>
+      </section>
+
       {/* ── Action: calculate + download (distilled inline) ──────────── */}
       <div className="flex flex-col items-center gap-4">
         <button
@@ -972,16 +1012,42 @@ export default function CompaniesSearchPage() {
               {calcResult.count > 0 && (
                 <span
                   className="ds-mono text-xs ml-2"
-                  style={{ color: 'var(--cp-paper-faint)' }}
+                  style={{ color: calcResult.count > calcResult.remaining ? 'var(--cp-amber)' : 'var(--cp-paper-faint)' }}
                 >
-                  ({t(
-                    `остаток по тарифу после скачивания: ${Math.max(0, calcResult.remaining - calcResult.count).toLocaleString('ru-RU')}`,
-                    `remaining after download: ${Math.max(0, calcResult.remaining - calcResult.count).toLocaleString('en-US')}`,
-                    locale,
-                  )})
+                  ({calcResult.count > calcResult.remaining
+                    ? t(
+                        `по остатку тарифа скачается: ${calcResult.remaining.toLocaleString('ru-RU')} из ${calcResult.count.toLocaleString('ru-RU')}`,
+                        `tariff cap: ${calcResult.remaining.toLocaleString('en-US')} of ${calcResult.count.toLocaleString('en-US')} will download`,
+                        locale,
+                      )
+                    : t(
+                        `остаток по тарифу после скачивания: ${(calcResult.remaining - calcResult.count).toLocaleString('ru-RU')}`,
+                        `remaining after download: ${(calcResult.remaining - calcResult.count).toLocaleString('en-US')}`,
+                        locale,
+                      )})
                 </span>
               )}
             </p>
+
+            {seenStats && seenStats.seenTotal > 0 && (
+              <p className="text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
+                {t(
+                  `Уже выгружено вами: ${seenStats.seenTotal.toLocaleString('ru-RU')} компаний`,
+                  `Already exported by you: ${seenStats.seenTotal.toLocaleString('en-US')} companies`,
+                  locale,
+                )}
+                {seenStats.lastExportedAt && (
+                  <>
+                    {' · '}
+                    {t('последняя выгрузка: ', 'last export: ', locale)}
+                    {new Date(seenStats.lastExportedAt).toLocaleDateString(locale === 'en' ? 'en-US' : 'ru-RU')}
+                  </>
+                )}
+                {!includeSeen && (
+                  <> {t('— повторы исключены из результата', '— repeats are excluded from the result', locale)}</>
+                )}
+              </p>
+            )}
 
             {calcResult.count > 0 && (
               <>

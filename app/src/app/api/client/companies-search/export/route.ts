@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
+import { recordSeenCompanies, extractCompanyIds } from '@/lib/companiesSearch/seenJournal';
 import {
   getClientTariffRow,
   resolveEffectiveLimits,
@@ -52,6 +53,8 @@ interface ExportFilters {
   employeesTo?: number | null;
   includeIp?: boolean;
   innList?: string[];
+  /** Включить и уже выгружавшиеся компании (по умолчанию — исключаются). */
+  includeSeen?: boolean;
 }
 
 type Row = Record<string, unknown>;
@@ -101,17 +104,28 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Дедуп по seen-журналу включён по умолчанию (клиент получает СЛЕДУЮЩИЙ
+  // срез базы, а не те же первые N каждый месяц); галочка include_seen снимает.
+  const seenOpts = body.includeSeen === true
+    ? undefined
+    : { excludeSeenForUser: result.auth.userId };
+
+  // Кап по остатку тарифа: раньше проверялось только remaining > 0 на входе,
+  // и клиент с остатком 1 мог выгрузить весь срез базы разом (списание шло
+  // постфактум в минус). Теперь файл содержит не больше remaining строк.
   const allRows: Row[] = [];
-  let offset = 0;
 
   for (;;) {
-    const { rows, error } = await searchRows(body, CHUNK_SIZE, offset);
+    const want = Math.min(CHUNK_SIZE, remaining - allRows.length);
+    if (want <= 0) break;
+    // offset = уже собранные строки: ORDER BY id и предикаты стабильны в
+    // пределах цикла, поэтому смещение по счётчику корректно.
+    const { rows, error } = await searchRows(body, want, allRows.length, seenOpts);
     if (error) return jsonError(error, 500);
     if (rows.length === 0) break;
 
     allRows.push(...rows);
-    offset += CHUNK_SIZE;
-    if (rows.length < CHUNK_SIZE) break;
+    if (rows.length < want) break;
   }
 
   if (allRows.length === 0) {
@@ -123,6 +137,9 @@ export async function POST(req: NextRequest) {
       .from('client_companies_search_exports')
       .insert({ user_id: result.auth.userId, row_count: allRows.length });
   }
+  // Помечаем выгруженное в seen-журнале (идемпотентно, дата первой выдачи
+  // сохраняется). Best-effort — файл клиент уже получает в любом случае.
+  await recordSeenCompanies(result.auth.userId, extractCompanyIds(allRows));
 
   const dateSuffix = new Date().toISOString().slice(0, 10);
 
