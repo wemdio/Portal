@@ -11,4 +11,10 @@ selenium-wire>=5.1.0
 # ветка auth-прокси уходит в fallback (парсер стучится в Яндекс с прод-IP,
 # получает пустую страницу, отдаёт 0 ссылок).
 blinker<1.7
+# pyOpenSSL>=25 убрал X509.get_extension(), а старый mitmproxy в
+# selenium-wire им пользуется — TLS-хендшейк с upstream-прокси падает
+# с "AttributeError: 'X509' object has no attribute 'get_extension'"
+# и Chrome получает net::ERR_CONNECTION_CLOSED. Все запросы через
+# auth-прокси мертвы, пока не запиним pyOpenSSL.
+pyOpenSSL<25.0
 
