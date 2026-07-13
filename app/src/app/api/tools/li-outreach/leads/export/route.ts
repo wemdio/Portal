@@ -13,6 +13,13 @@ export async function GET(req: NextRequest) {
 
     const url = new URL(req.url);
     const listId = url.searchParams.get('lead_list_id');
+    const idsParam = url.searchParams.get('ids');
+    // Ручной выбор чекбоксами имеет приоритет над фильтром листа: коллега может
+    // отфильтровать по листу, потом снять/добавить пару строк и ждать, что
+    // выгрузится именно этот набор, а не весь лист.
+    const ids = idsParam
+      ? idsParam.split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
 
     let q = supabaseAdmin
       .from('li_leads')
@@ -21,7 +28,9 @@ export async function GET(req: NextRequest) {
       .order('created_at', { ascending: false })
       .limit(10000);
 
-    if (listId) q = q.eq('lead_list_id', listId);
+    if (ids.length) q = q.in('id', ids);
+    else if (listId === '__none') q = q.is('lead_list_id', null);
+    else if (listId) q = q.eq('lead_list_id', listId);
 
     const { data, error } = await q;
     if (error) return jsonError(error.message, 500);
