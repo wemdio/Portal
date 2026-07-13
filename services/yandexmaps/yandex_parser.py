@@ -14,6 +14,7 @@ from playwright.async_api import (
   TimeoutError as PWTimeoutError,
   async_playwright,
 )
+from playwright_stealth import stealth_async
 
 
 class YandexBlockedError(Exception):
@@ -322,6 +323,12 @@ class YandexMapsParser:
     deadline = loop.time() + max_seconds
 
     page = await self._context.new_page()
+    # Stealth-патчи (navigator.webdriver, WebGL, plugins и т.п.) — до первой
+    # навигации, иначе часть fingerprint'а Яндекс успеет снять на старте.
+    try:
+      await stealth_async(page)
+    except Exception as e:
+      self.log(f"[!] stealth_async не применился: {e}")
     try:
       try:
         await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
@@ -576,6 +583,10 @@ class YandexMapsParser:
   async def parse_organization(self, url: str) -> Organization:
     org = Organization(card_url=url)
     page = await self._context.new_page()
+    try:
+      await stealth_async(page)
+    except Exception:
+      pass
     try:
       try:
         await page.goto(url, wait_until="domcontentloaded", timeout=20000)

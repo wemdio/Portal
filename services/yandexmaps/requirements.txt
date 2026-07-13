@@ -7,3 +7,7 @@ lxml>=4.9.0
 # рантайме через `playwright install` (мы этого не делаем — базовый
 # образ mcr.microsoft.com/playwright/python уже содержит всё нужное).
 playwright>=1.49.0
+# Инжектит JS-патчи в каждую страницу, стирающие следы Playwright'а
+# (navigator.webdriver, WebGL fingerprint, plugins, chrome.runtime и т.п.).
+# Аналог undetected-chromedriver для Selenium.
+playwright-stealth>=1.0.6,<2.0
