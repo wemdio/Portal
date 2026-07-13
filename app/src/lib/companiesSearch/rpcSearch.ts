@@ -19,6 +19,15 @@ function expandSectionLetters(codes: string[]): string[] {
   });
 }
 
+/**
+ * Опции seen-журнала: excludeSeenForUser — исключить из выдачи компании,
+ * уже выгружавшиеся этим клиентом (client_companies_search_seen). null/undefined —
+ * прежнее поведение (авто-пайплайн и скорер не передают ничего).
+ */
+export interface SearchSeenOptions {
+  excludeSeenForUser?: string | null;
+}
+
 function filtersToRpcParams(body: CompaniesSearchFilters) {
   let regionTokens: string[] | null = null;
   if (body.regionCodes && body.regionCodes.length > 0) {
@@ -79,9 +88,13 @@ function raceTimeout<T>(p: Promise<RpcResult<T>>): Promise<RpcResult<T>> {
 
 export async function searchCount(
   body: CompaniesSearchFilters,
+  opts?: SearchSeenOptions,
 ): Promise<{ count: number; error?: string }> {
   const admin = supabaseAdmin!;
-  const params = filtersToRpcParams(body);
+  const params = {
+    ...filtersToRpcParams(body),
+    p_exclude_user: opts?.excludeSeenForUser ?? null,
+  };
   try {
     const result = await raceTimeout<number>(
       Promise.resolve(admin.rpc('companies_directory_count_rpc', params)).then((r) => r as RpcResult<number>),
@@ -97,13 +110,19 @@ export async function searchRows(
   body: CompaniesSearchFilters,
   limit: number,
   offset: number = 0,
+  opts?: SearchSeenOptions,
 ): Promise<{ rows: Record<string, unknown>[]; error?: string }> {
   const admin = supabaseAdmin!;
   const params = filtersToRpcParams(body);
   try {
     const result = await raceTimeout<Record<string, unknown>[]>(
       Promise.resolve(
-        admin.rpc('companies_directory_fetch_rpc', { ...params, p_limit: limit, p_offset: offset }),
+        admin.rpc('companies_directory_fetch_rpc', {
+          ...params,
+          p_limit: limit,
+          p_offset: offset,
+          p_exclude_user: opts?.excludeSeenForUser ?? null,
+        }),
       ).then((r) => r as RpcResult<Record<string, unknown>[]>),
     );
     if (result.error) return { rows: [], error: result.error.message };

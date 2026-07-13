@@ -36,6 +36,19 @@ export type Row = Record<string, unknown>;
 export interface MockSupabaseSeed {
   /** Initial rows per table. */
   tables?: Record<string, Row[]>;
+  /**
+   * Таблицы, чьи запросы возвращают {data: null, error: {message}} —
+   * supabase-js НЕ бросает исключений, и коду приходится проверять error
+   * явно. Нужно для пинов деградационных веток (блип БД).
+   */
+  errorTables?: Record<string, string>;
+  /**
+   * Прицельная инъекция ошибки: только SELECT'ы данной таблицы, чья проекция
+   * содержит подстроку columnsInclude. Позволяет уронить один конкретный
+   * запрос (напр. projects.lead_criteria), не задевая другие запросы к той же
+   * таблице (напр. верификацию привязки projects.select('id, client')).
+   */
+  errorSelects?: Record<string, { columnsInclude: string; message: string }>;
 }
 
 export interface InsertCall {
@@ -224,6 +237,8 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
   }
 
   function makeBuilder(table: string): Builder {
+    let errorMessage = seed.errorTables?.[table];
+    const selectError = seed.errorSelects?.[table];
     const filters: Filter[] = [];
     const orGroups: Filter[][][] = []; // list of (DNF) constraints; each must hold
     let mode: 'select' | 'insert' | 'upsert' | 'update' | 'delete' = 'select';
@@ -292,6 +307,9 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
     const builder: Builder = {
       select: (columns) => {
         selects.push({ table, columns: columns ?? '*' });
+        if (selectError && (columns ?? '*').includes(selectError.columnsInclude)) {
+          errorMessage = selectError.message;
+        }
         return builder;
       },
       insert: (rows) => {
@@ -343,17 +361,21 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
       range: async () => flushMutation(),
 
       single: async () => {
+        if (errorMessage) return { data: null, error: { message: errorMessage } };
         const result = flushMutation();
         const first = result.data[0] ?? null;
         return { data: first, error: first ? null : { message: 'not found' } };
       },
       maybeSingle: async () => {
+        if (errorMessage) return { data: null, error: { message: errorMessage } as never };
         const result = flushMutation();
         return { data: result.data[0] ?? null, error: null };
       },
 
       then: <T>(onFulfilled?: (v: { data: Row[]; error: null; count: number }) => T) =>
-        Promise.resolve(flushMutation()).then(onFulfilled as never),
+        errorMessage
+          ? Promise.resolve({ data: null as never, error: { message: errorMessage } as never, count: 0 }).then(onFulfilled as never)
+          : Promise.resolve(flushMutation()).then(onFulfilled as never),
     };
 
     return builder;
