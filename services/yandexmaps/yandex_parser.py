@@ -399,7 +399,14 @@ class YandexMapsParser:
 
         for _ in range(3):
           await self._scroll_sidebar(sidebar)
-          await asyncio.sleep(0.15)
+          # Больше времени между scroll'ами — Яндекс лениво подгружает
+          # новые карточки, скроллить слишком быстро = страница отстаёт
+          # и мы думаем, что новых карточек нет.
+          await asyncio.sleep(0.4)
+
+        # Даём Яндексу дошевелиться после серии скроллов — сеть занята
+        # подгрузкой JSON'а с новыми карточками, DOM ещё пуст.
+        await asyncio.sleep(0.6)
 
         html = await page.content()
         soup = BeautifulSoup(html, "lxml")
@@ -447,14 +454,19 @@ class YandexMapsParser:
 
           if no_new_results_count % 4 == 0:
             await self._alternative_scroll(sidebar, page)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.2)
 
-          if at_bottom and consecutive_same_height >= 5 and no_new_results_count >= 12:
+          # Условие выхода стало терпеливее: 25 итераций без новых
+          # карточек (было 12). На медленных прокси Яндекс думает
+          # 3-5 сек, срабатывать раньше = терять последние 30-50 карточек.
+          if at_bottom and consecutive_same_height >= 6 and no_new_results_count >= 25:
             break
 
-          if no_new_results_count >= 8:
+          if no_new_results_count >= 12:
             await self._force_scroll_bottom(sidebar)
-            await asyncio.sleep(0.3)
+            # Крупная пауза после force-scroll — Яндексу нужно время,
+            # чтобы отреагировать на "мы у самого дна, догрузи-ка ещё".
+            await asyncio.sleep(1.5)
         else:
           no_new_results_count = 0
           consecutive_same_height = 0
@@ -468,7 +480,9 @@ class YandexMapsParser:
         if len(links) >= max_results:
           break
 
-        await asyncio.sleep(0.8 if no_new_results_count > 6 else 0.4)
+        # Пауза в конце итерации. Когда Яндекс "думает" (no_new_results_count
+        # растёт) — ждём дольше, а не наоборот. Прежде здесь было 0.8s max.
+        await asyncio.sleep(1.5 if no_new_results_count > 6 else 0.8)
         scroll_attempts += 1
 
       if loop.time() >= deadline:
