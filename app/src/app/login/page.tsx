@@ -310,12 +310,17 @@ export default function LoginPage() {
         )}
       </form>
 
-      <p className="mt-5 text-center text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
-        Доступ выдаёт администратор
-      </p>
+      {/* «Доступ выдаёт администратор» — только где сам-регистрация выключена
+          (внутренний портал). На signup-хостах (app.outreachos.pro) показываем
+          CTA на регистрацию, иначе две строки противоречат друг другу. */}
+      {!signupAllowed && (
+        <p className="mt-5 text-center text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
+          Доступ выдаёт администратор
+        </p>
+      )}
 
       {signupAllowed && (
-        <p className="mt-2 text-center text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+        <p className="mt-5 text-center text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
           Нет аккаунта?{' '}
           <Link href={'/signup' as Route} className="font-semibold" style={{ color: 'var(--cp-amber)' }}>
             Зарегистрироваться
