@@ -145,33 +145,24 @@ class YandexMapsParser:
     if self.progress_callback:
       self.progress_callback(current, total, message)
 
-  def _create_driver(self):
-    """Создаёт браузер на undetected-chromedriver (маскирует признаки Selenium).
-
-    Раньше был обычный selenium.webdriver + ручные патчи `navigator.webdriver`
-    и `disable-blink-features=AutomationControlled` — Яндекс всё равно палил
-    (SmartCaptcha сверяет десятки fingerprint-признаков: WebGL, Canvas,
-    навигатор.plugins, порядок TLS-хендшейка). undetected-chromedriver
-    патчит бинарь chromedriver, чтобы убрать почти все эти маркеры.
-
-    Auth-прокси (наши резидентные с логином/паролем) идут через
-    selenium-wire — он инжектит basic-auth в http-заголовок, не запуская
-    диалог браузера, который в headless-режиме недоступен.
+  def _build_chrome_options(self, extra_args: Optional[List[str]] = None) -> Options:
+    """Свежий объект Options на каждый вызов — uc не разрешает переиспользовать
+    (после первого uc.Chrome он мутирует внутренние поля и выбрасывает
+    'you cannot reuse the ChromeOptions object' при повторном использовании).
     """
-    chrome_options = Options()
-
+    opts = Options()
     if self.headless:
-      chrome_options.add_argument("--headless=new")
+      opts.add_argument("--headless=new")
 
     # Обязательные флаги для контейнерного Chromium.
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-infobars")
-    chrome_options.add_argument("--lang=ru-RU")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-infobars")
+    opts.add_argument("--lang=ru-RU")
     # Не грузим картинки на уровне Blink — экономит трафик прокси
-    # (обычно основная часть — аватарки и превью). DOM-парсинг картинки
-    # не использует, все поля берём из текста и href'ов.
-    chrome_options.add_argument("--blink-settings=imagesEnabled=false")
+    # (основная часть байт — аватарки и превью). Парсинг картинки не
+    # использует, все поля берутся из текста и href'ов.
+    opts.add_argument("--blink-settings=imagesEnabled=false")
 
     # Рандомизация UA + window-size на каждую сессию. Мобильный UA пары'ится
     # с мобильным viewport'ом — иначе противоречие в самом User-Agent-Client-Hints
@@ -179,17 +170,33 @@ class YandexMapsParser:
     ua = random.choice(USER_AGENT_POOL)
     is_mobile = "Mobile" in ua
     width, height = random.choice(WINDOW_SIZES_MOBILE if is_mobile else WINDOW_SIZES_DESKTOP)
-    chrome_options.add_argument(f"--user-agent={ua}")
-    chrome_options.add_argument(f"--window-size={width},{height}")
+    opts.add_argument(f"--user-agent={ua}")
+    opts.add_argument(f"--window-size={width},{height}")
 
     chrome_bin = (os.environ.get("CHROME_BIN") or "").strip()
     if chrome_bin:
-      chrome_options.binary_location = chrome_bin
+      opts.binary_location = chrome_bin
 
+    for arg in extra_args or []:
+      opts.add_argument(arg)
+
+    return opts
+
+  def _create_driver(self):
+    """Создаёт браузер на undetected-chromedriver (маскирует признаки Selenium).
+
+    Auth-прокси (резидентные с логином/паролем) идут через seleniumwire.uc.
+    Если auth-прокси задан, но seleniumwire не поднялся — бросаем исключение
+    вместо тихого fallback на прямое соединение с прод-IP: иначе задача
+    заканчивалась как "completed, 0 ссылок" (Яндекс на прямом IP отдаёт
+    пустую страницу, детектор блокировки не срабатывает).
+    """
+    chrome_bin = (os.environ.get("CHROME_BIN") or "").strip() or None
     # undetected-chromedriver ВСЕГДА патчит chromedriver-бинарник при старте
     # (в этом его суть — стирает маркеры автоматизации). Системный
     # /usr/bin/chromedriver в контейнере read-only / busy => "Text file busy".
-    # Копируем в /tmp один раз и патчим уже там.
+    # Копируем в /tmp с уникальным именем на каждый инстанс — иначе
+    # параллельные запросы наступают друг другу на файл.
     driver_path = self._prepare_writable_chromedriver()
     # Версия Chrome — чтобы uc не гадал (по умолчанию предполагает 108 и
     # с современным Chromium 130+ ломается на несовместимом CDP-протоколе).
@@ -198,33 +205,34 @@ class YandexMapsParser:
     if self.proxy_settings.enabled and self.proxy_settings.username:
       # Auth-прокси через seleniumwire.undetected_chromedriver — это его
       # официальная интеграция; обычный uc не умеет username:password.
-      try:
-        from seleniumwire import undetected_chromedriver as swuc
+      from seleniumwire import undetected_chromedriver as swuc
 
-        seleniumwire_options = self.proxy_settings.get_selenium_wire_options()
-        self.driver = swuc.Chrome(
-          options=chrome_options,
-          seleniumwire_options=seleniumwire_options,
-          driver_executable_path=driver_path,
-          browser_executable_path=chrome_bin or None,
-          use_subprocess=True,
-          headless=self.headless,
-          version_main=chrome_version,
-        )
-        self._apply_traffic_savings()
-        return
-      except Exception as e:
-        self.log(f"[!] seleniumwire+uc не стартовал ({e}), падаем на обычный uc без auth-прокси")
+      seleniumwire_options = self.proxy_settings.get_selenium_wire_options()
+      self.driver = swuc.Chrome(
+        options=self._build_chrome_options(),
+        seleniumwire_options=seleniumwire_options,
+        driver_executable_path=driver_path,
+        browser_executable_path=chrome_bin,
+        use_subprocess=True,
+        headless=self.headless,
+        version_main=chrome_version,
+      )
+      self._apply_traffic_savings()
+      return
 
+    # Без auth-прокси: либо прокси вообще нет, либо только host:port
+    # (без логина/пароля) — тогда прокинуть через --proxy-server флаг.
+    extra: List[str] = []
     if self.proxy_settings.enabled and self.proxy_settings.host:
-      proxy_arg = f"--proxy-server={self.proxy_settings.protocol}://{self.proxy_settings.host}:{self.proxy_settings.port}"
-      chrome_options.add_argument(proxy_arg)
+      extra.append(
+        f"--proxy-server={self.proxy_settings.protocol}://{self.proxy_settings.host}:{self.proxy_settings.port}"
+      )
 
     import undetected_chromedriver as uc
     self.driver = uc.Chrome(
-      options=chrome_options,
+      options=self._build_chrome_options(extra_args=extra),
       driver_executable_path=driver_path,
-      browser_executable_path=chrome_bin or None,
+      browser_executable_path=chrome_bin,
       use_subprocess=True,
       headless=self.headless,
       version_main=chrome_version,
@@ -232,18 +240,18 @@ class YandexMapsParser:
     self._apply_traffic_savings()
 
   def _prepare_writable_chromedriver(self) -> Optional[str]:
-    """Копирует системный chromedriver в /tmp/uc_chromedriver, чтобы uc
-    мог его пропатчить (uc всегда патчит бинарь при старте).
+    """Копирует системный chromedriver в /tmp/uc_chromedriver_<pid>_<rand>.
 
-    Кэшируется — один раз копируем, дальше используем ту же копию.
-    Возвращает None, если системного chromedriver нет вообще (тогда uc
-    попытается скачать сам через webdriver_manager).
+    uc всегда патчит бинарь при старте — а системный /usr/bin/chromedriver
+    в контейнере read-only. Плюс один общий /tmp-файл ловит "Text file busy"
+    когда несколько запусков идут параллельно (uc открывает бинарь для
+    записи, а другой процесс уже держит его открытым). Поэтому — уникальный
+    путь на каждый инстанс парсера.
+
+    Файл живёт до close() — удаляем в close() чтобы не засорять /tmp.
     """
     import shutil
-
-    dst = "/tmp/uc_chromedriver"
-    if os.path.exists(dst) and os.access(dst, os.X_OK):
-      return dst
+    import uuid
 
     src = (os.environ.get("CHROMEDRIVER_PATH") or "").strip()
     if not src or not os.path.exists(src):
@@ -255,9 +263,11 @@ class YandexMapsParser:
     if not src:
       return None
 
+    dst = f"/tmp/uc_chromedriver_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     try:
       shutil.copy2(src, dst)
       os.chmod(dst, 0o755)
+      self._chromedriver_copy = dst
       return dst
     except Exception as e:
       self.log(f"[!] Не удалось скопировать chromedriver в {dst}: {e}")
@@ -338,6 +348,16 @@ class YandexMapsParser:
       except Exception:
         pass
       self.driver = None
+    # Удаляем per-instance копию chromedriver, чтобы /tmp не разрастался
+    # (~24 МБ на каждый запуск). Не критично — на рестарте контейнера всё
+    # чистится, но в течение суток может накопиться пара ГБ.
+    copy = getattr(self, "_chromedriver_copy", None)
+    if copy and os.path.exists(copy):
+      try:
+        os.remove(copy)
+      except Exception:
+        pass
+      self._chromedriver_copy = None
 
   def generate_search_url(self, query: str, city: str = "") -> str:
     from urllib.parse import quote
