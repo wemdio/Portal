@@ -550,6 +550,54 @@ describe('pollAndQualifyReplies', () => {
     expect(String(rows[0].ai_reason)).toContain('kirill@kira-aggregator.ru');
   });
 
+  // Ящики-двойники ОДНОГО клиента (несколько lookalike-доменов — стандарт
+  // аутрича): та же персона или та же база домена ≠ «другой клиент». 13.07
+  // guard увёл живого лида Диспы (vadim@dispa-pro.ru vs vadim@dispa-pro.online)
+  // в needs_review — пин против рецидива.
+  it('does not flag same-client mailbox twins (same persona or same domain base)', async () => {
+    const cases = [
+      // Диспа: та же персона, домены dispa-pro.ru / dispa-pro.online
+      { arrived: 'vadim@dispa-pro.ru', mailed: 'vadim@dispa-pro.online' },
+      // SANDS: персона olga.sands vs olga_sands, домены sandsstudio.online / sands-studio.ru
+      { arrived: 'olga.sands@sandsstudio.online', mailed: 'olga_sands@sands-studio.ru' },
+    ];
+    for (const [i, c] of cases.entries()) {
+      jest.resetModules();
+      qualifyReply.mockClear();
+      fetchThreadContext.mockResolvedValue({
+        replyEmail: replyEmail({ id: `twin-${i}` }),
+        threadEmails: [replyEmail({ id: `twin-out-${i}`, ue_type: 1, eaccount: c.mailed })],
+        lastOutbound: replyEmail({ id: `twin-out-${i}`, ue_type: 1, eaccount: c.mailed }),
+      });
+      listEmails.mockResolvedValue({
+        items: [replyEmail({ id: `twin-${i}`, eaccount: c.arrived, to_address_email_list: c.arrived })],
+        next_starting_after: null,
+      });
+      const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+      await pollAndQualifyReplies();
+      expect(qualifyReply).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('still flags cross-client when generic locals match but domains differ (hello@ everywhere)', async () => {
+    fetchThreadContext.mockResolvedValue({
+      replyEmail: replyEmail({ id: 'generic-email' }),
+      threadEmails: [replyEmail({ id: 'generic-out', ue_type: 1, eaccount: 'hello@stratgrowthlink.online' })],
+      lastOutbound: replyEmail({ id: 'generic-out', ue_type: 1, eaccount: 'hello@stratgrowthlink.online' }),
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'generic-email', eaccount: 'hello@connectifygroup.ru', to_address_email_list: 'hello@connectifygroup.ru' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(qualifyReply).not.toHaveBeenCalled();
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows[0]?.status).toBe('needs_review');
+  });
+
   it('does not flag cross-client when the reply arrived at the same mailbox that mailed the lead', async () => {
     fetchThreadContext.mockResolvedValue({
       replyEmail: replyEmail({ id: 'same-mailbox-email' }),

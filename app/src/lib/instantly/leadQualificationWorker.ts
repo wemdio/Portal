@@ -584,6 +584,34 @@ async function qualifyOneReply(
     }
   }
 
+  // «Тот же клиент, другой ящик»: у клиента несколько lookalike-доменов
+  // (dispa-pro.ru + dispa-pro.online; sands-studio.ru + sandsstudio.online) и
+  // персональные ящики на них. Ответ, прилетевший в ящик-двойник ТОГО ЖЕ
+  // клиента — НЕ кросс-клиентский страй (13.07 guard увёл живого лида Диспы
+  // «завтра удобно пообщаться?» в needs_review). Признаки того же клиента:
+  // совпадение персоны (local-part без ./-/_; generic вроде hello/info не
+  // считаются — они у всех) или базы домена (до первой точки, без дефисов).
+  const GENERIC_LOCALS = new Set([
+    'hello', 'info', 'contact', 'sales', 'office', 'mail', 'admin', 'support',
+    'team', 'connect', 'reachout', 'outreach', 'hi', 'welcome', 'partner', 'partners',
+  ]);
+  const mailboxLocalKey = (addr: string): string | null => {
+    const key = (addr.split('@')[0] ?? '').toLowerCase().replace(/[^a-z0-9а-яё]/g, '');
+    return key && !GENERIC_LOCALS.has(key) ? key : null;
+  };
+  const mailboxDomainKey = (addr: string): string | null => {
+    const key = ((addr.split('@')[1] ?? '').split('.')[0] ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    return key || null;
+  };
+  const sameClientMailboxes = (a: string, b: string): boolean => {
+    const la = mailboxLocalKey(a);
+    const lb = mailboxLocalKey(b);
+    if (la && lb && la === lb) return true;
+    const da = mailboxDomainKey(a);
+    const db = mailboxDomainKey(b);
+    return Boolean(da && db && da === db);
+  };
+
   // Кросс-клиентский доменный матч Instantly (кейс NAIS→KIRA, 10.07): лид
   // получил рассылки ДВУХ наших клиентов и написал НОВОЕ письмо (без
   // In-Reply-To) на ящик клиента A — Instantly, не найдя тред, приклеил его по
@@ -607,7 +635,11 @@ async function qualifyOneReply(
         .filter(Boolean),
     );
     for (const m of ctx.campaignOutboundMailboxes ?? []) outboundMailboxes.add(m);
-    if (outboundMailboxes.size > 0 && !outboundMailboxes.has(ourMailbox)) {
+    if (
+      outboundMailboxes.size > 0 &&
+      !outboundMailboxes.has(ourMailbox) &&
+      ![...outboundMailboxes].some((m) => sameClientMailboxes(ourMailbox, m))
+    ) {
       const replyText = getBodyText(reply.body);
       const { error: crossUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
         {
