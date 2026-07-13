@@ -5,4 +5,10 @@ undetected-chromedriver>=3.5.5
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 selenium-wire>=5.1.0
+# selenium-wire до сих пор импортит blinker._saferef, которого нет
+# в blinker>=1.7. Без пина падаем на "No module named 'blinker._saferef'"
+# при первом же импорте seleniumwire.undetected_chromedriver — и вся
+# ветка auth-прокси уходит в fallback (парсер стучится в Яндекс с прод-IP,
+# получает пустую страницу, отдаёт 0 ссылок).
+blinker<1.7
 

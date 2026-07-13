@@ -186,15 +186,14 @@ class YandexMapsParser:
     if chrome_bin:
       chrome_options.binary_location = chrome_bin
 
-    # Путь к системному chromedriver (Debian apt: /usr/bin/chromedriver).
-    # Передаём явно, чтобы uc не пытался качать сам — в контейнере нет
-    # интернета в build-time для webdriver_manager'а.
-    driver_path = (os.environ.get("CHROMEDRIVER_PATH") or "").strip() or None
-    for candidate in ("/usr/bin/chromedriver", "/usr/local/bin/chromedriver"):
-      if driver_path:
-        break
-      if os.path.exists(candidate):
-        driver_path = candidate
+    # undetected-chromedriver ВСЕГДА патчит chromedriver-бинарник при старте
+    # (в этом его суть — стирает маркеры автоматизации). Системный
+    # /usr/bin/chromedriver в контейнере read-only / busy => "Text file busy".
+    # Копируем в /tmp один раз и патчим уже там.
+    driver_path = self._prepare_writable_chromedriver()
+    # Версия Chrome — чтобы uc не гадал (по умолчанию предполагает 108 и
+    # с современным Chromium 130+ ломается на несовместимом CDP-протоколе).
+    chrome_version = self._detect_chrome_version(chrome_bin)
 
     if self.proxy_settings.enabled and self.proxy_settings.username:
       # Auth-прокси через seleniumwire.undetected_chromedriver — это его
@@ -210,6 +209,7 @@ class YandexMapsParser:
           browser_executable_path=chrome_bin or None,
           use_subprocess=True,
           headless=self.headless,
+          version_main=chrome_version,
         )
         self._apply_traffic_savings()
         return
@@ -227,8 +227,62 @@ class YandexMapsParser:
       browser_executable_path=chrome_bin or None,
       use_subprocess=True,
       headless=self.headless,
+      version_main=chrome_version,
     )
     self._apply_traffic_savings()
+
+  def _prepare_writable_chromedriver(self) -> Optional[str]:
+    """Копирует системный chromedriver в /tmp/uc_chromedriver, чтобы uc
+    мог его пропатчить (uc всегда патчит бинарь при старте).
+
+    Кэшируется — один раз копируем, дальше используем ту же копию.
+    Возвращает None, если системного chromedriver нет вообще (тогда uc
+    попытается скачать сам через webdriver_manager).
+    """
+    import shutil
+
+    dst = "/tmp/uc_chromedriver"
+    if os.path.exists(dst) and os.access(dst, os.X_OK):
+      return dst
+
+    src = (os.environ.get("CHROMEDRIVER_PATH") or "").strip()
+    if not src or not os.path.exists(src):
+      for candidate in ("/usr/bin/chromedriver", "/usr/local/bin/chromedriver"):
+        if os.path.exists(candidate):
+          src = candidate
+          break
+
+    if not src:
+      return None
+
+    try:
+      shutil.copy2(src, dst)
+      os.chmod(dst, 0o755)
+      return dst
+    except Exception as e:
+      self.log(f"[!] Не удалось скопировать chromedriver в {dst}: {e}")
+      return src  # fallback на системный, uc может ругаться на "Text file busy"
+
+  def _detect_chrome_version(self, chrome_bin: str) -> Optional[int]:
+    """Достаёт major-версию Chrome/Chromium (например, 150) для передачи
+    в undetected_chromedriver как version_main. Иначе uc считает Chrome 108
+    и ломается на новых CDP-командах.
+    """
+    import subprocess
+
+    candidates = [chrome_bin, "/usr/bin/chromium", "/usr/bin/google-chrome", "/usr/bin/chromium-browser"]
+    for path in candidates:
+      if not path or not os.path.exists(path):
+        continue
+      try:
+        out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=5)
+        text = (out.stdout or "") + " " + (out.stderr or "")
+        m = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+        if m:
+          return int(m.group(1))
+      except Exception:
+        continue
+    return None
 
   def _apply_traffic_savings(self):
     """Через CDP блокирует запросы к тяжёлым ресурсам — тайлы карты, аватарки,
