@@ -1,20 +1,9 @@
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
-selenium>=4.15.0
-undetected-chromedriver>=3.5.5
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
-selenium-wire>=5.1.0
-# selenium-wire до сих пор импортит blinker._saferef, которого нет
-# в blinker>=1.7. Без пина падаем на "No module named 'blinker._saferef'"
-# при первом же импорте seleniumwire.undetected_chromedriver — и вся
-# ветка auth-прокси уходит в fallback (парсер стучится в Яндекс с прод-IP,
-# получает пустую страницу, отдаёт 0 ссылок).
-blinker<1.7
-# pyOpenSSL>=25 убрал X509.get_extension(), а старый mitmproxy в
-# selenium-wire им пользуется — TLS-хендшейк с upstream-прокси падает
-# с "AttributeError: 'X509' object has no attribute 'get_extension'"
-# и Chrome получает net::ERR_CONNECTION_CLOSED. Все запросы через
-# auth-прокси мертвы, пока не запиним pyOpenSSL.
-pyOpenSSL<25.0
-
+# Playwright — живой, поддерживается Microsoft, релизы каждые 2 недели.
+# Auth-прокси нативно, без mitmproxy-костыля. Chromium скачивается в
+# рантайме через `playwright install` (мы этого не делаем — базовый
+# образ mcr.microsoft.com/playwright/python уже содержит всё нужное).
+playwright>=1.49.0
