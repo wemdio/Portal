@@ -119,6 +119,12 @@ export interface ClientReplyMessageData {
   replySubject: string | null;
   replyBody: string | null;
   replyTimestamp: string | null;
+  /**
+   * true — ИИ признал ответ лидом по критериям, которые КЛИЕНТ сам задал на
+   * /client/replies («свой промпт»). Даёт бейдж в DM. Для дефолтных/проектных
+   * критериев не ставится — DM остаётся обычным уведомлением.
+   */
+  isLeadByClientCriteria?: boolean;
 }
 
 /**
@@ -138,7 +144,11 @@ export function buildClientReplyMessage(data: ClientReplyMessageData): string {
       });
 
   const lines: string[] = [];
-  lines.push('📩 <b>Новый ответ по вашей кампании</b>');
+  lines.push(
+    data.isLeadByClientCriteria
+      ? '🔥 <b>Лид по вашим критериям</b>'
+      : '📩 <b>Новый ответ по вашей кампании</b>',
+  );
   lines.push('');
 
   if (data.campaignName) lines.push(`📨 <b>Кампания:</b> ${escapeHtml(data.campaignName)}`);

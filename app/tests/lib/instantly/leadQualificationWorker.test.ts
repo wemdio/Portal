@@ -422,6 +422,81 @@ describe('pollAndQualifyReplies', () => {
     );
   });
 
+  // «Свой промпт» self-serve клиента (client_lead_criteria): кампания без
+  // проекта берёт критерии владельца из client_instantly_access.
+  it('passes the CLIENT lead criteria for a self-serve campaign (no project link)', async () => {
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          {
+            client_user_id: 'client-7',
+            resource_type: 'campaign',
+            resource_id: 'self-serve-campaign',
+            instantly_account_id: 'main',
+          },
+        ],
+        client_lead_criteria: [
+          { client_user_id: 'client-7', criteria: 'Лид = интерес к услуге или запрос цены.' },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'ss-email', campaign_id: 'self-serve-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1);
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ leadCriteria: 'Лид = интерес к услуге или запрос цены.' }),
+    );
+  });
+
+  it('project criteria beat client criteria when both exist', async () => {
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          { id: 'project-1', client: 'Acme', specialist_user_id: 'specialist-1', lead_criteria: 'ПРОЕКТНЫЕ критерии.' },
+        ],
+        profiles: [],
+        telegram_links: [],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          { project_id: 'project-1', campaign_id: 'linked-campaign', match_source: 'auto' },
+        ],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          { client_user_id: 'client-7', resource_type: 'campaign', resource_id: 'linked-campaign', instantly_account_id: 'main' },
+        ],
+        client_lead_criteria: [
+          { client_user_id: 'client-7', criteria: 'КЛИЕНТСКИЕ критерии.' },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'both-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ leadCriteria: 'ПРОЕКТНЫЕ критерии.' }),
+    );
+  });
+
   it('passes leadCriteria=null when the project has no custom criteria', async () => {
     listEmails.mockResolvedValue({
       items: [replyEmail({ id: 'no-criteria-email' })],
