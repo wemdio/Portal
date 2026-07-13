@@ -331,9 +331,11 @@ class YandexMapsParser:
       self.log(f"[!] stealth_async не применился: {e}")
     try:
       try:
-        await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
       except PWTimeoutError:
-        pass
+        # Медленный прокси / route blocking иногда затягивают DOMContentLoaded.
+        # Не бросаем — часть карточек может быть уже в DOM.
+        self.log(f"[!] page.goto timeout 45s для {search_url}, пробуем работать с тем что есть")
 
       if await self._page_looks_blocked(page):
         raise YandexBlockedError("Яндекс показал капчу при загрузке страницы поиска")
@@ -373,12 +375,28 @@ class YandexMapsParser:
       consecutive_same_height = 0
       last_reported = 0
 
+      stale_count = 0
       while (
         len(links) < max_results
         and scroll_attempts < max_scroll_attempts
         and self.is_running
         and loop.time() < deadline
       ):
+        # Яндекс.Карты — React-приложение. При подгрузке новых карточек
+        # он пересобирает DOM внутри сайдбара, старый ElementHandle
+        # становится stale (evaluate/scroll молча падает в except pass,
+        # никаких новых карточек не появляется). Переполучаем handle
+        # заново на каждой итерации — операция дешёвая (~5 мс).
+        fresh_sidebar = await self._find_sidebar(page)
+        if fresh_sidebar:
+          sidebar = fresh_sidebar
+          stale_count = 0
+        else:
+          stale_count += 1
+          if stale_count >= 5:
+            self.log(f"[!] Сайдбар не находится 5 итераций подряд, выходим")
+            break
+
         for _ in range(3):
           await self._scroll_sidebar(sidebar)
           await asyncio.sleep(0.15)
@@ -408,7 +426,12 @@ class YandexMapsParser:
           current_scroll_height = int(scroll_state.get("sh", 0) or 0)
           current_scroll_top = int(scroll_state.get("st", 0) or 0)
           client_height = int(scroll_state.get("ch", 0) or 0)
-        except Exception:
+        except Exception as e:
+          # Handle всё-таки stale (детач'нулся между fresh_sidebar
+          # и scroll'ом). Логируем — раньше молча съедалось, и в
+          # результате парсер собирал 5 карточек вместо 25.
+          if scroll_attempts < 3 or scroll_attempts % 20 == 0:
+            self.log(f"[!] sidebar.evaluate failed (attempt {scroll_attempts}): {e}")
           current_scroll_height = 0
           current_scroll_top = 0
           client_height = 0
