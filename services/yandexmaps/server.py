@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import queue
 from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -111,8 +110,9 @@ async def collect_links(req: CollectLinksRequest):
   async with _REQUEST_SEMAPHORE:
     parser = YandexMapsParser(proxy_settings=_to_proxy_settings(req.proxy), headless=req.headless)
     try:
+      await parser.start()
       links = await asyncio.wait_for(
-        asyncio.to_thread(parser.collect_organization_links, req.search_url, req.max_results),
+        parser.collect_organization_links(req.search_url, req.max_results),
         timeout=COLLECT_TIMEOUT_SEC,
       )
       return CollectLinksResponse(links=links)
@@ -124,54 +124,75 @@ async def collect_links(req: CollectLinksRequest):
     except Exception as e:
       raise HTTPException(status_code=500, detail=str(e))
     finally:
-      parser.close()
+      await parser.close()
 
 
 @app.post("/collect-links/stream")
 async def collect_links_stream(req: CollectLinksRequest):
-  """NDJSON streaming: each line is {"links": [...], "total": N} or {"done": true, "total": N}."""
+  """NDJSON streaming: каждая строка — {"links": [...], "total": N} или {"done": true, "total": N}.
+
+  Async-версия: on_links работает в том же event loop, batches
+  передаются через asyncio.Queue напрямую (без потоков и polling).
+  """
   await _REQUEST_SEMAPHORE.acquire()
 
-  link_queue: queue.Queue[dict | None] = queue.Queue()
+  # Sentinel для «сбор завершён» — нужен, чтобы generate() не крутился впустую
+  # в get(), если задача упала между двумя put'ами.
+  DONE = object()
+  link_queue: asyncio.Queue = asyncio.Queue()
 
   def on_links(batch: list[str], total: int) -> None:
-    link_queue.put({"links": batch, "total": total})
+    # on_links вызывается из await'ов внутри collect_organization_links —
+    # мы в том же event loop, put_nowait безопасен.
+    try:
+      link_queue.put_nowait({"links": batch, "total": total})
+    except Exception:
+      pass
 
   parser = YandexMapsParser(proxy_settings=_to_proxy_settings(req.proxy), headless=req.headless)
 
-  async def generate():
+  async def run_collect():
     try:
-      loop = asyncio.get_event_loop()
-      task = loop.run_in_executor(
-        None, parser.collect_organization_links, req.search_url, req.max_results, 480, on_links,
+      await parser.start()
+      links = await asyncio.wait_for(
+        parser.collect_organization_links(
+          req.search_url, req.max_results, max_seconds=480, on_links=on_links
+        ),
+        timeout=COLLECT_TIMEOUT_SEC,
       )
-
-      while True:
-        try:
-          msg = link_queue.get_nowait()
-          if msg is not None:
-            yield json.dumps(msg, ensure_ascii=False) + "\n"
-        except queue.Empty:
-          pass
-
-        if task.done():
-          while not link_queue.empty():
-            msg = link_queue.get_nowait()
-            if msg is not None:
-              yield json.dumps(msg, ensure_ascii=False) + "\n"
-          break
-
-        await asyncio.sleep(0.3)
-
-      all_links = task.result()
-      yield json.dumps({"done": True, "total": len(all_links)}, ensure_ascii=False) + "\n"
+      await link_queue.put({"__done": True, "total": len(links)})
     except YandexBlockedError as e:
-      # Помечаем блокировку отдельным флагом, чтобы воркер отличил капчу от прочих ошибок.
-      yield json.dumps({"error": f"yandex_blocked: {e}", "blocked": True}, ensure_ascii=False) + "\n"
+      await link_queue.put({"__error": f"yandex_blocked: {e}", "__blocked": True})
+    except asyncio.TimeoutError:
+      await link_queue.put({"__error": f"collect-links timed out after {COLLECT_TIMEOUT_SEC}s"})
     except Exception as e:
-      yield json.dumps({"error": str(e)}, ensure_ascii=False) + "\n"
+      await link_queue.put({"__error": str(e)})
     finally:
-      parser.close()
+      await link_queue.put(DONE)
+
+  async def generate():
+    task = asyncio.create_task(run_collect())
+    try:
+      while True:
+        msg = await link_queue.get()
+        if msg is DONE:
+          break
+        if "__error" in msg:
+          error_payload = {"error": msg["__error"]}
+          if msg.get("__blocked"):
+            error_payload["blocked"] = True
+          yield json.dumps(error_payload, ensure_ascii=False) + "\n"
+        elif "__done" in msg:
+          yield json.dumps({"done": True, "total": msg["total"]}, ensure_ascii=False) + "\n"
+        else:
+          yield json.dumps(msg, ensure_ascii=False) + "\n"
+    finally:
+      # Дожидаемся завершения task, чтобы close() случился после collect.
+      try:
+        await task
+      except Exception:
+        pass
+      await parser.close()
       _REQUEST_SEMAPHORE.release()
 
   return StreamingResponse(generate(), media_type="application/x-ndjson")
@@ -182,8 +203,9 @@ async def parse_orgs(req: ParseOrgsRequest):
   async with _REQUEST_SEMAPHORE:
     parser = YandexMapsParser(proxy_settings=_to_proxy_settings(req.proxy), headless=req.headless)
     try:
+      await parser.start()
       orgs = await asyncio.wait_for(
-        asyncio.to_thread(parser.parse_organizations_from_links, req.links),
+        parser.parse_organizations_from_links(req.links),
         timeout=PARSE_TIMEOUT_SEC,
       )
       return ParseOrgsResponse(organizations=[_org_to_model(o) for o in orgs])
@@ -195,5 +217,4 @@ async def parse_orgs(req: ParseOrgsRequest):
     except Exception as e:
       raise HTTPException(status_code=500, detail=str(e))
     finally:
-      parser.close()
-
+      await parser.close()
