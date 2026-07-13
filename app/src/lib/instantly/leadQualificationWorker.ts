@@ -32,6 +32,57 @@ const REPLY_EMAILS_PAGE_SIZE = 100;
 const MAX_QUALIFY_PER_TICK = 20;
 const PROJECT_BATCH_SIZE = 100;
 const briefCache = new Map<string, string | null>();
+// campaign_id → projects.lead_criteria привязанного проекта (кастомное
+// определение лида для ИИ). В отличие от briefCache (бриф пишется один раз),
+// критерии подкручивают итеративно — поэтому TTL: правка в настройках проекта
+// подхватывается сама в течение ~5 минут, БЕЗ редеплоя воркера.
+const LEAD_CRITERIA_TTL_MS = 5 * 60 * 1000;
+const leadCriteriaCache = new Map<string, { value: string | null; fetchedAt: number }>();
+
+/**
+ * projects.lead_criteria первого привязанного проекта кампании.
+ * `ok=false` — какой-то из запросов упал (supabase-js НЕ бросает, а возвращает
+ * {error} — try/catch его не ловит): результат нельзя кэшировать, иначе блип
+ * БД молча «выключит» кастомные критерии на TTL, реактивирует ранний выход
+ * «запрос контакта = не лид» и горячий лид навсегда осядет not_lead (дедуп).
+ */
+async function fetchLeadCriteriaByCampaign(
+  instantlyDb: NonNullable<typeof supabaseAdmin>,
+  campaignId: string,
+): Promise<{ value: string | null; ok: boolean }> {
+  if (!supabaseMain) return { value: null, ok: true };
+  let ok = true;
+  const logDegraded = (source: string, message: string | undefined) => {
+    ok = false;
+    workerLog('warn', `lead-criteria fetch degraded for campaign ${campaignId}: ${source} query failed — ${message ?? 'unknown'}`);
+  };
+
+  const { data: legacyLinks, error: legacyErr } = await instantlyDb
+    .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  if (legacyErr) logDegraded('project_instantly_campaigns', legacyErr.message);
+  const { data: periodLinks, error: periodErr } = await instantlyDb
+    .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  if (periodErr) logDegraded('project_period_instantly_campaigns', periodErr.message);
+  const projectIds = [
+    ...new Set(
+      [...(legacyLinks ?? []), ...(periodLinks ?? [])]
+        .map((l: { project_id?: string | null }) => l.project_id)
+        .filter(Boolean) as string[],
+    ),
+  ];
+  if (projectIds.length === 0) return { value: null, ok };
+
+  const { data: projects, error: projectsErr } = await supabaseMain
+    .from('projects').select('lead_criteria').in('id', projectIds);
+  if (projectsErr) logDegraded('projects.lead_criteria', projectsErr.message);
+  for (const p of projects ?? []) {
+    const criteria = typeof p.lead_criteria === 'string' ? p.lead_criteria.trim() : '';
+    // Критерии найдены — результат полноценный, даже если один из
+    // линк-запросов выше упал.
+    if (criteria) return { value: criteria, ok: true };
+  }
+  return { value: null, ok };
+}
 const campaignNameCache = new Map<string, string | null>();
 const API_KEY = () =>
   process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
@@ -598,10 +649,38 @@ async function qualifyOneReply(
   }
   const cachedBrief = briefCache.get(campaignId) ?? null;
 
+  const criteriaEntry = leadCriteriaCache.get(campaignId);
+  let cachedCriteria: string | null;
+  if (criteriaEntry && Date.now() - criteriaEntry.fetchedAt < LEAD_CRITERIA_TTL_MS) {
+    cachedCriteria = criteriaEntry.value;
+  } else {
+    const fetched = await fetchLeadCriteriaByCampaign(db, campaignId);
+    if (fetched.ok) {
+      cachedCriteria = fetched.value;
+      leadCriteriaCache.set(campaignId, { value: fetched.value, fetchedAt: Date.now() });
+    } else if (criteriaEntry) {
+      // Деградация НЕ кэшируется, при протухшем кэше — stale-if-error:
+      // вчерашние критерии лучше, чем молча дефолтные на время блипа БД.
+      cachedCriteria = criteriaEntry.value;
+    } else {
+      // Холодный кэш (рестарт воркера) + деградация: критерии НЕИЗВЕСТНЫ.
+      // Квалифицировать с дефолтными нельзя — вердикт запишется навсегда
+      // (дедуп по instantly_email_id), и ранний выход «запрос контакта = не
+      // лид» убил бы горячий лид кампании с кастомом. Откладываем письмо БЕЗ
+      // записи: дедуп-строки нет → следующий тик (~30с) обработает заново.
+      workerLog(
+        'warn',
+        `lead-criteria unknown for campaign ${campaignId} (cold cache + degraded fetch) — deferring reply ${reply.id ?? '?'} to next tick`,
+      );
+      return;
+    }
+  }
+
   const result = await qualifyReply(campaignId, leadEmail, reply.thread_id, {
     apiKey,
     model: MODEL,
     briefText: cachedBrief,
+    leadCriteria: cachedCriteria,
     // Контекст уже зафетчен выше (кросс-клиентский guard) — не фетчим второй раз.
     prefetchedContext: ctx,
   }, accountId);

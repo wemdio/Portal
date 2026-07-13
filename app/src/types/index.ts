@@ -81,6 +81,9 @@ export interface Project {
   /** Lead handoff to client (auto-передача). Empty handoff_email = disabled. */
   handoff_email?: string | null;
   handoff_legend?: string | null;
+
+  /** Кастомное определение лида для ИИ-квалификатора (все кампании проекта). Пусто = дефолтные критерии. */
+  lead_criteria?: string | null;
 }
 
 export type TaskStatus = 'pending' | 'in_progress' | 'done';
