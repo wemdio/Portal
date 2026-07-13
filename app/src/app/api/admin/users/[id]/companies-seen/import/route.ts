@@ -56,21 +56,32 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
   // ИНН → id через существующий fetch-RPC (p_inn_list): не требует новых
   // грантов на companies_directory и повторяет фильтры боевой выгрузки.
+  // Внутри пачки резолв ПАГИНИРУЕТСЯ: у одного ИНН в базе может быть
+  // несколько строк (дубли каталога), и один запрос лимитом = размеру пачки
+  // молча обрезал бы хвост. Seen-исключения здесь нет, предикат стабилен
+  // (ORDER BY id) — offset-пагинация корректна.
   const companyIds: number[] = [];
   const matchedInns = new Set<string>();
   for (let i = 0; i < inns.length; i += RESOLVE_BATCH) {
     const batch = inns.slice(i, i + RESOLVE_BATCH);
-    const { rows, error } = await searchRows(
-      { innList: batch, includeIp: true },
-      batch.length,
-    );
-    if (error) return jsonError(`Ошибка поиска по ИНН: ${error}`, 500);
-    for (const r of rows) {
-      const id = typeof r.id === 'number' ? r.id : Number(r.id);
-      if (Number.isFinite(id) && id > 0) {
-        companyIds.push(id);
-        if (typeof r.inn === 'string') matchedInns.add(r.inn);
+    let offset = 0;
+    for (;;) {
+      const { rows, error } = await searchRows(
+        { innList: batch, includeIp: true },
+        RESOLVE_BATCH,
+        offset,
+      );
+      if (error) return jsonError(`Ошибка поиска по ИНН: ${error}`, 500);
+      if (rows.length === 0) break;
+      for (const r of rows) {
+        const id = typeof r.id === 'number' ? r.id : Number(r.id);
+        if (Number.isFinite(id) && id > 0) {
+          companyIds.push(id);
+          if (typeof r.inn === 'string') matchedInns.add(r.inn);
+        }
       }
+      if (rows.length < RESOLVE_BATCH) break;
+      offset += rows.length;
     }
   }
 
