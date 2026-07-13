@@ -29,6 +29,10 @@ function isFinishedStatus(status: string | null | undefined): boolean {
   return s.includes('заверш') || s.includes('отмен');
 }
 
+function isPausedStatus(status: string | null | undefined): boolean {
+  return (status || '').toLowerCase().includes('пауз');
+}
+
 type ProfileData = Pick<UserProfile, 'id' | 'email' | 'full_name' | 'role' | 'avatar_url'>;
 
 const STORAGE_KEY_CAPACITY = 'portal:team-capacity';
@@ -208,9 +212,14 @@ function LoadBar({ fact, plan }: { fact: number; plan: number }) {
 
 function ResultBadge({ p }: { p: ProjectData }) {
   const r = deriveResult(p);
+  // KPI-вердикт перекрывает статус «На паузе» — показываем паузу отдельной припиской.
+  const pausedNote = isPausedStatus(p.status) && r.label !== 'На паузе';
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium ring-1 ring-inset ${r.badgeCls}`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${r.dotCls}`} />{r.label}
+    <span className="inline-flex items-center gap-1.5">
+      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium ring-1 ring-inset ${r.badgeCls}`}>
+        <span className={`h-1.5 w-1.5 rounded-full ${r.dotCls}`} />{r.label}
+      </span>
+      {pausedNote && <span className="text-[11px] text-gray-400 whitespace-nowrap">· на паузе</span>}
     </span>
   );
 }
@@ -464,7 +473,21 @@ export default function TeamPage() {
           <TeamMemberAvatar displayName={person.name} avatarUrl={nameToAvatarUrl.get(person.name)} signedUrl={avatarSignedUrls[person.name]} variant={opts.variant} />
           <div className="min-w-0">
             <p className="text-sm font-semibold text-gray-900 truncate">{person.name}</p>
-            <p className="text-xs text-gray-500">{person.projects.length} {pluralRu(person.projects.length, 'активный проект', 'активных проекта', 'активных проектов')}</p>
+            <p className="text-xs text-gray-500">
+              {(() => {
+                let work = 0, prep = 0, paused = 0;
+                for (const p of person.projects) {
+                  if (isWorkingStatus(p.status)) work++;
+                  else if (isPrepStatus(p.status)) prep++;
+                  else if (isPausedStatus(p.status)) paused++;
+                }
+                const parts: string[] = [];
+                if (work) parts.push(`${work} в работе`);
+                if (prep) parts.push(`${prep} в подготовке`);
+                if (paused) parts.push(`${paused} на паузе`);
+                return parts.length ? parts.join(' · ') : 'нет активных проектов';
+              })()}
+            </p>
           </div>
         </div>
         <div className="px-2 flex justify-center">
