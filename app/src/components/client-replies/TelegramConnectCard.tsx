@@ -1,13 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Send } from 'lucide-react';
+import { Send, Sparkles } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 interface TgStatus {
   bot_configured: boolean;
   linked: boolean;
   enabled: boolean;
+  leads_only?: boolean;
   telegram_username: string | null;
 }
 
@@ -22,6 +23,10 @@ interface TgStatus {
 export function TelegramConnectCard() {
   const [status, setStatus] = useState<TgStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  // «Свой промпт»: клиентские критерии лида для ИИ-разметки ответов.
+  const [criteria, setCriteria] = useState('');
+  const [criteriaOpen, setCriteriaOpen] = useState(false);
+  const [criteriaSaved, setCriteriaSaved] = useState<'idle' | 'saving' | 'saved'>('idle');
 
   const load = useCallback(async () => {
     try {
@@ -31,6 +36,38 @@ export function TelegramConnectCard() {
       /* status stays as-is; card just won't update */
     }
   }, []);
+
+  // Критерии грузим ОДИН раз на маунте — load() дёргается на каждый
+  // window-focus/тоггл, и рефетч перетирал бы несохранённый черновик
+  // клиента (фокус-листенер — часть connect-флоу, alt-tab в TG гарантирован).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const c = await clientApiFetch<{ criteria: string }>('/lead-criteria');
+        if (!cancelled) setCriteria(c.criteria ?? '');
+      } catch {
+        /* criteria block just stays empty */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const saveCriteria = useCallback(async () => {
+    setCriteriaSaved('saving');
+    try {
+      await clientApiFetch('/lead-criteria', {
+        method: 'PUT',
+        body: JSON.stringify({ criteria }),
+      });
+      setCriteriaSaved('saved');
+      setTimeout(() => setCriteriaSaved('idle'), 2000);
+    } catch {
+      setCriteriaSaved('idle');
+    }
+  }, [criteria]);
 
   useEffect(() => {
     void load();
@@ -77,6 +114,21 @@ export function TelegramConnectCard() {
     [load],
   );
 
+  const setLeadsOnly = useCallback(
+    async (leads_only: boolean) => {
+      setBusy(true);
+      try {
+        await clientApiFetch('/telegram', { method: 'PATCH', body: JSON.stringify({ leads_only }) });
+        await load();
+      } catch {
+        /* no-op */
+      } finally {
+        setBusy(false);
+      }
+    },
+    [load],
+  );
+
   const disconnect = useCallback(async () => {
     setBusy(true);
     try {
@@ -93,10 +145,8 @@ export function TelegramConnectCard() {
   if (!status || !status.bot_configured) return null;
 
   return (
-    <div
-      className="neu-card flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
-      style={{ marginBottom: '0.75rem' }}
-    >
+    <div className="neu-card flex flex-col gap-3 px-4 py-3" style={{ marginBottom: '0.75rem' }}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex items-start gap-3">
         <span
           className="neu-pill flex h-9 w-9 shrink-0 items-center justify-center"
@@ -122,6 +172,18 @@ export function TelegramConnectCard() {
       <div className="flex shrink-0 items-center gap-2">
         {status.linked ? (
           <>
+            {status.enabled && (
+              <button
+                type="button"
+                onClick={() => void setLeadsOnly(!status.leads_only)}
+                disabled={busy}
+                className="neu-pill px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+                style={{ color: status.leads_only ? 'var(--cp-text)' : 'var(--cp-text-m)' }}
+                title="Присылать только ответы, которые ИИ признал лидами (по вашим критериям, если заданы)"
+              >
+                {status.leads_only ? '🔥 Только лиды' : 'Все ответы'}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void setEnabled(!status.enabled)}
@@ -152,6 +214,52 @@ export function TelegramConnectCard() {
             <Send className="h-3.5 w-3.5" />
             Подключить Telegram
           </button>
+        )}
+      </div>
+      </div>
+
+      {/* «Свой промпт»: клиент задаёт, что считать лидом — ИИ размечает ответы
+          по этим критериям, лиды приходят в TG с пометкой 🔥. */}
+      <div>
+        <button
+          type="button"
+          onClick={() => setCriteriaOpen((v) => !v)}
+          className="inline-flex items-center gap-1.5 text-xs font-semibold"
+          style={{ color: 'var(--cp-text-m)' }}
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          Свои критерии лида {criteria.trim() ? '· заданы' : ''}
+          <span aria-hidden>{criteriaOpen ? '▾' : '▸'}</span>
+        </button>
+        {criteriaOpen && (
+          <div className="mt-2 space-y-2">
+            <p className="text-xs" style={{ color: 'var(--cp-text-l)' }}>
+              Опишите своими словами, какой ответ для вас — лид. ИИ будет размечать ответы по вашим
+              критериям, и такие уведомления придут с пометкой «🔥 Лид». Пусто — стандартные критерии.
+            </p>
+            <textarea
+              value={criteria}
+              onChange={(e) => setCriteria(e.target.value)}
+              rows={3}
+              maxLength={2000}
+              placeholder="Напр.: Лид — это ответ с интересом к услуге, запросом цены или предложением созвониться. Просьба прислать подробности тоже лид."
+              className="w-full rounded-lg px-2.5 py-1.5 text-xs"
+              style={{
+                background: 'var(--cp-bg)',
+                color: 'var(--cp-text)',
+                border: '1px solid var(--cp-border, rgba(0,0,0,0.08))',
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => void saveCriteria()}
+              disabled={criteriaSaved === 'saving'}
+              className="neu-pill px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+              style={{ color: 'var(--cp-text)' }}
+            >
+              {criteriaSaved === 'saving' ? 'Сохраняем…' : criteriaSaved === 'saved' ? 'Сохранено ✓' : 'Сохранить'}
+            </button>
+          </div>
         )}
       </div>
     </div>
