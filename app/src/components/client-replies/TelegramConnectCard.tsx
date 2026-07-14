@@ -8,6 +8,7 @@ interface TgStatus {
   bot_configured: boolean;
   linked: boolean;
   enabled: boolean;
+  leads_only?: boolean;
   telegram_username: string | null;
 }
 
@@ -101,6 +102,21 @@ export function TelegramConnectCard() {
     [load],
   );
 
+  const setLeadsOnly = useCallback(
+    async (leads_only: boolean) => {
+      setBusy(true);
+      try {
+        await clientApiFetch('/telegram', { method: 'PATCH', body: JSON.stringify({ leads_only }) });
+        await load();
+      } catch {
+        /* no-op */
+      } finally {
+        setBusy(false);
+      }
+    },
+    [load],
+  );
+
   const disconnect = useCallback(async () => {
     setBusy(true);
     try {
@@ -144,6 +160,18 @@ export function TelegramConnectCard() {
       <div className="flex shrink-0 items-center gap-2">
         {status.linked ? (
           <>
+            {status.enabled && (
+              <button
+                type="button"
+                onClick={() => void setLeadsOnly(!status.leads_only)}
+                disabled={busy}
+                className="neu-pill px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+                style={{ color: status.leads_only ? 'var(--cp-text)' : 'var(--cp-text-m)' }}
+                title="Присылать только ответы, которые ИИ признал лидами (по вашим критериям, если заданы)"
+              >
+                {status.leads_only ? '🔥 Только лиды' : 'Все ответы'}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void setEnabled(!status.enabled)}

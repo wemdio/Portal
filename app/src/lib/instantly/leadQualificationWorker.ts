@@ -889,6 +889,9 @@ async function qualifyOneReply(
       // КЛИЕНТА (self-serve «свой промпт» со страницы /client/replies); для
       // дефолтных и проектных критериев DM остаётся простым уведомлением.
       isLeadByClientCriteria: status === 'lead' && criteriaSource === 'client',
+      // Для переключателя «только лиды»: лид по ЛЮБЫМ критериям (клиентским,
+      // проектным или дефолтным).
+      isLead: status === 'lead',
     });
   }
 }
@@ -1070,6 +1073,8 @@ async function notifyClientOfReply(
     replyTimestamp: string | null;
     /** Лид по критериям, заданным самим клиентом («свой промпт») → бейдж в DM. */
     isLeadByClientCriteria?: boolean;
+    /** Лид по любым критериям — для фильтра «присылать только лидов». */
+    isLead?: boolean;
   },
 ): Promise<void> {
   try {
@@ -1125,13 +1130,23 @@ async function notifyClientOfReply(
 
     const { data: links } = await instantlyDb
       .from('client_reply_telegram_links')
-      .select('client_user_id, chat_id')
+      .select('client_user_id, chat_id, leads_only')
       .in('client_user_id', [...clientUserIds])
       .eq('enabled', true);
     if (!links?.length) return;
 
     const html = buildClientReplyMessage(data);
-    for (const link of links as { client_user_id: string; chat_id: number }[]) {
+    for (const link of links as { client_user_id: string; chat_id: number; leads_only?: boolean | null }[]) {
+      // «Только лиды»: клиент попросил не слать весь поток — пропускаем всё,
+      // что квалификатор не признал лидом (по клиентским критериям, если
+      // заданы, иначе по дефолтным).
+      if (link.leads_only && !data.isLead) {
+        workerLog(
+          'info',
+          `Client reply notify → client ${link.client_user_id}: skipped (leads_only, status not lead)`,
+        );
+        continue;
+      }
       const result = await sendClientReplyTelegram(Number(link.chat_id), html);
       workerLog(
         'info',

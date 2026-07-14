@@ -13,6 +13,7 @@ const qualifyReply = jest.fn();
 const fetchBriefByCampaign = jest.fn();
 const fetchThreadContext = jest.fn();
 const sendLeadTelegramAlert = jest.fn();
+const sendClientReplyTelegram = jest.fn();
 
 jest.mock('@/lib/supabaseInstantly', () => ({
   get supabaseInstantly() {
@@ -52,6 +53,13 @@ jest.mock('@/lib/instantly/leadTelegramAlerts', () => ({
   sendLeadTelegramAlert: (...args: unknown[]) => sendLeadTelegramAlert(...args),
 }), { virtual: true });
 
+jest.mock('@/lib/clientReplyBot/bot', () => ({
+  __esModule: true,
+  getClientRepliesBotToken: () => 'test-client-bot-token',
+  sendClientReplyTelegram: (...args: unknown[]) => sendClientReplyTelegram(...args),
+  buildClientReplyMessage: (data: unknown) => JSON.stringify(data),
+}));
+
 function replyEmail(overrides: Partial<Email>): Email {
   return {
     id: 'email-1',
@@ -77,6 +85,7 @@ describe('pollAndQualifyReplies', () => {
     getLeadsByEmail.mockReset().mockResolvedValue([]);
     getCampaign.mockReset().mockResolvedValue({ id: 'linked-campaign', name: 'Кампания Новикова' });
     sendLeadTelegramAlert.mockReset().mockResolvedValue({ sent: true, messageId: 42 });
+    sendClientReplyTelegram.mockReset().mockResolvedValue({ messageId: 7 });
     fetchBriefByCampaign.mockReset().mockResolvedValue(null);
     // null = контекст треда не восстановлен → кросс-клиентский guard скипается
     // (fail-open), тесты обычного потока не затрагиваются.
@@ -495,6 +504,87 @@ describe('pollAndQualifyReplies', () => {
     expect(qualifyReply.mock.calls[0][3]).toEqual(
       expect.objectContaining({ leadCriteria: 'ПРОЕКТНЫЕ критерии.' }),
     );
+  });
+
+  // Переключатель «только лиды»: leads_only=true режет DM для не-лидов,
+  // false (дефолт) — прежнее поведение «каждый человеческий ответ».
+  it('leads_only=true suppresses client DM for non-lead replies; default sends everything', async () => {
+    const seed = (leadsOnly: boolean) => {
+      mockInstantlyDb = createMockSupabase({
+        tables: {
+          project_instantly_campaigns: [],
+          instantly_lead_qualifications: [],
+          client_instantly_access: [
+            { client_user_id: 'client-7', resource_type: 'campaign', resource_id: 'self-serve-campaign', instantly_account_id: 'main' },
+          ],
+          client_reply_telegram_links: [
+            { client_user_id: 'client-7', chat_id: 111, enabled: true, leads_only: leadsOnly },
+          ],
+        },
+      });
+      listEmails.mockResolvedValue({
+        items: [replyEmail({ id: `lo-${leadsOnly}`, campaign_id: 'self-serve-campaign' })],
+        next_starting_after: null,
+      });
+    };
+
+    // not_lead (дефолтный мок qualifyReply) + leads_only → DM подавлен
+    seed(true);
+    let mod = await import('@/lib/instantly/leadQualificationWorker');
+    await mod.pollAndQualifyReplies();
+    expect(sendClientReplyTelegram).not.toHaveBeenCalled();
+
+    // not_lead + БЕЗ leads_only → DM уходит (прежнее поведение)
+    jest.resetModules();
+    sendClientReplyTelegram.mockClear();
+    seed(false);
+    mod = await import('@/lib/instantly/leadQualificationWorker');
+    await mod.pollAndQualifyReplies();
+    expect(sendClientReplyTelegram).toHaveBeenCalledTimes(1);
+  });
+
+  it('leads_only=true still DMs actual leads (with the client-criteria badge when their prompt decided)', async () => {
+    qualifyReply.mockResolvedValueOnce({
+      isLead: true,
+      proposalSeen: true,
+      interestSignals: ['цена'],
+      reason: 'Запросил цену',
+      confidence: 0.9,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({ id: 'lo-lead', body: { text: 'Сколько стоит?' } }),
+        threadEmails: [],
+        lastOutbound: null,
+      },
+    });
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          { client_user_id: 'client-7', resource_type: 'campaign', resource_id: 'self-serve-campaign', instantly_account_id: 'main' },
+        ],
+        client_lead_criteria: [
+          { client_user_id: 'client-7', criteria: 'Запрос цены = лид.' },
+        ],
+        client_reply_telegram_links: [
+          { client_user_id: 'client-7', chat_id: 111, enabled: true, leads_only: true },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'lo-lead', campaign_id: 'self-serve-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(sendClientReplyTelegram).toHaveBeenCalledTimes(1);
+    const html = String(sendClientReplyTelegram.mock.calls[0][1]);
+    expect(html).toContain('"isLeadByClientCriteria":true');
   });
 
   it('passes leadCriteria=null when the project has no custom criteria', async () => {

@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
 
   const { data } = await supabaseInstantly
     .from('client_reply_telegram_links')
-    .select('telegram_username, enabled')
+    .select('telegram_username, enabled, leads_only')
     .eq('client_user_id', result.auth.userId)
     .maybeSingle();
 
@@ -26,6 +26,7 @@ export async function GET(req: NextRequest) {
     bot_configured: botConfigured,
     linked: !!data,
     enabled: data?.enabled ?? false,
+    leads_only: (data as { leads_only?: boolean | null } | null)?.leads_only ?? false,
     telegram_username: data?.telegram_username ?? null,
   });
 }
@@ -45,27 +46,30 @@ export async function DELETE(req: NextRequest) {
   return NextResponse.json({ ok: true, linked: false });
 }
 
-/** Toggle notifications on/off without losing the binding. */
+/** Toggle notification settings (on/off, «только лиды») without losing the binding. */
 export async function PATCH(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
   if (!supabaseInstantly) return NextResponse.json({ error: 'Not configured' }, { status: 500 });
 
-  let body: { enabled?: boolean };
+  let body: { enabled?: boolean; leads_only?: boolean };
   try {
-    body = (await req.json()) as { enabled?: boolean };
+    body = (await req.json()) as { enabled?: boolean; leads_only?: boolean };
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
-  if (typeof body.enabled !== 'boolean') {
-    return NextResponse.json({ error: 'enabled (boolean) required' }, { status: 400 });
+  const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (typeof body.enabled === 'boolean') patch.enabled = body.enabled;
+  if (typeof body.leads_only === 'boolean') patch.leads_only = body.leads_only;
+  if (!('enabled' in patch) && !('leads_only' in patch)) {
+    return NextResponse.json({ error: 'enabled или leads_only (boolean) обязателен' }, { status: 400 });
   }
 
   const { error } = await supabaseInstantly
     .from('client_reply_telegram_links')
-    .update({ enabled: body.enabled, updated_at: new Date().toISOString() })
+    .update(patch)
     .eq('client_user_id', result.auth.userId);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  return NextResponse.json({ ok: true, enabled: body.enabled });
+  return NextResponse.json({ ok: true, ...('enabled' in patch ? { enabled: body.enabled } : {}), ...('leads_only' in patch ? { leads_only: body.leads_only } : {}) });
 }
