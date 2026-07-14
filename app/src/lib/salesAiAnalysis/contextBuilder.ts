@@ -65,7 +65,10 @@ export async function buildContext(
     .maybeSingle();
   if (error) throw new Error(`buildContext lead: ${error.message}`);
   if (!leadRow) return null;
-  const lead = leadRow as LeadRow;
+  // supabase-js в новых версиях выводит тип select-строки как GenericStringError,
+  // прямой каст (leadRow as LeadRow) TS не пропускает. Двойной каст через unknown —
+  // стандартный обход. См. https://github.com/supabase/supabase-js/issues/2504.
+  const lead = leadRow as unknown as LeadRow;
 
   const forLink: LeadForLinking = {
     id: lead.id,
