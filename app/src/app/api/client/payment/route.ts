@@ -138,7 +138,16 @@ export async function POST(req: NextRequest) {
     tariff = inserted;
   }
 
-  if (tariff.paid_at) {
+  // Renewal-кейс: клиент оплатил тариф раньше (paid_at стоит), но paid_until
+  // уже в прошлом — status='expired'. Такой клиент вправе выбрать/сменить
+  // тариф и продлиться заново. Отличаем от «подписка уже оплачена и активна»,
+  // где повторный платёж — ошибка.
+  const now = new Date();
+  const isRenewal = !!tariff.paid_at
+    && tariff.is_active === true
+    && !!tariff.paid_until
+    && new Date(tariff.paid_until) <= now;
+  if (tariff.paid_at && !isRenewal) {
     return NextResponse.json({ error: 'Подписка уже оплачена' }, { status: 400 });
   }
 
@@ -152,7 +161,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Не удалось посчитать сумму' }, { status: 400 });
   }
 
-  const now = new Date();
   const setupUntil = new Date(now);
   if (isTestShop) {
     setupUntil.setMinutes(setupUntil.getMinutes() + TEST_SETUP_MINUTES);
@@ -165,19 +173,29 @@ export async function POST(req: NextRequest) {
   // тест-магазине не поддерживается — UI его не отдаёт.
   const testPeriodMinutes = isTestShop ? (TEST_PERIOD_MINUTES_BY_PERIOD[billingPeriod] ?? null) : null;
 
+  // Renewal: клиент уже проходил прогрев в прошлый раз — setup_until не
+  // выставляем. paid_at/paid_until обнуляем, иначе applyInvoicePaidToTariff
+  // уйдёт в ветку «Renewal» и посчитает новый paid_until от старого (в
+  // прошлом), а не от now — период сразу окажется истекшим.
+  const tariffUpdate: Record<string, unknown> = {
+    tariff_type: tariffType,
+    billing_period: billingPeriod,
+    billing_amount: amount,
+    billing_mode: 'autopayment',
+    is_active: true,
+    payment_locked: true,
+    setup_until: isRenewal ? null : setupUntil.toISOString(),
+    test_period_minutes: testPeriodMinutes,
+    updated_at: now.toISOString(),
+  };
+  if (isRenewal) {
+    tariffUpdate.paid_at = null;
+    tariffUpdate.paid_until = null;
+  }
+
   const { error: updateErr } = await supabaseAdmin
     .from('client_tariffs')
-    .update({
-      tariff_type: tariffType,
-      billing_period: billingPeriod,
-      billing_amount: amount,
-      billing_mode: 'autopayment',
-      is_active: true,
-      payment_locked: true,
-      setup_until: setupUntil.toISOString(),
-      test_period_minutes: testPeriodMinutes,
-      updated_at: now.toISOString(),
-    })
+    .update(tariffUpdate)
     .eq('user_id', userId);
 
   if (updateErr) {

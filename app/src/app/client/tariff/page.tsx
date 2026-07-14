@@ -412,7 +412,12 @@ export default function ClientTariffPage() {
         </p>
       )}
 
-      {data && data.status === 'inactive' && !data.paid_at && (
+      {/* Виджет выбора тарифа показываем в двух случаях:
+          1) Новый клиент — inactive без paid_at (ещё ни разу не платил).
+          2) Истёкшая подписка — status='expired' (paid_until в прошлом), чтобы
+             клиент мог продлиться заново. Секция «02 текущий тариф» ниже
+             оставляет красную «Истёк» точку как маркер состояния. */}
+      {data && (data.status === 'expired' || (data.status === 'inactive' && !data.paid_at)) && (
         <TariffSelectionWidget isTestShop={data.is_test_shop} />
       )}
 
