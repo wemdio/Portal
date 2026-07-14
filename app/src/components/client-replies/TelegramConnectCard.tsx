@@ -35,12 +35,24 @@ export function TelegramConnectCard() {
     } catch {
       /* status stays as-is; card just won't update */
     }
-    try {
-      const c = await clientApiFetch<{ criteria: string }>('/lead-criteria');
-      setCriteria(c.criteria ?? '');
-    } catch {
-      /* criteria block just stays empty */
-    }
+  }, []);
+
+  // Критерии грузим ОДИН раз на маунте — load() дёргается на каждый
+  // window-focus/тоггл, и рефетч перетирал бы несохранённый черновик
+  // клиента (фокус-листенер — часть connect-флоу, alt-tab в TG гарантирован).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const c = await clientApiFetch<{ criteria: string }>('/lead-criteria');
+        if (!cancelled) setCriteria(c.criteria ?? '');
+      } catch {
+        /* criteria block just stays empty */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const saveCriteria = useCallback(async () => {

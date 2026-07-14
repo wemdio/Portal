@@ -466,6 +466,67 @@ describe('pollAndQualifyReplies', () => {
     );
   });
 
+  // Security-барьер (адверсариальное ревью 14.07): у управляемых («под ключ»)
+  // клиентов ТОЖЕ есть client_instantly_access — их промпт НЕ должен управлять
+  // квалификацией проектной кампании (спец-алерты, хэндофф), даже когда
+  // проектные критерии пусты.
+  it('client criteria NEVER apply to a project-linked campaign, even with empty project criteria', async () => {
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          { project_id: 'project-1', campaign_id: 'linked-campaign', match_source: 'auto' },
+        ],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          { client_user_id: 'client-7', resource_type: 'campaign', resource_id: 'linked-campaign', instantly_account_id: 'main' },
+        ],
+        client_lead_criteria: [
+          { client_user_id: 'client-7', criteria: 'ЛЮБОЙ ответ = лид.' },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'managed-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ leadCriteria: null }),
+    );
+  });
+
+  it('client criteria are skipped when the self-serve campaign is shared by multiple clients', async () => {
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          { client_user_id: 'client-A', resource_type: 'campaign', resource_id: 'shared-campaign', instantly_account_id: 'main' },
+          { client_user_id: 'client-B', resource_type: 'campaign', resource_id: 'shared-campaign', instantly_account_id: 'main' },
+        ],
+        client_lead_criteria: [
+          { client_user_id: 'client-A', criteria: 'Ничто не лид.' },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'shared-email', campaign_id: 'shared-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ leadCriteria: null }),
+    );
+  });
+
   it('project criteria beat client criteria when both exist', async () => {
     mockMainDb = createMockSupabase({
       tables: {

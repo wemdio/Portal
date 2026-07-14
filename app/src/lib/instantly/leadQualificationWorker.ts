@@ -39,7 +39,7 @@ const briefCache = new Map<string, string | null>();
 const LEAD_CRITERIA_TTL_MS = 5 * 60 * 1000;
 const leadCriteriaCache = new Map<
   string,
-  { value: string | null; source: 'project' | 'client' | null; fetchedAt: number }
+  { value: string | null; source: 'project' | 'client' | null; clientId: string | null; fetchedAt: number }
 >();
 
 /**
@@ -55,29 +55,42 @@ const leadCriteriaCache = new Map<
 async function fetchLeadCriteriaByCampaign(
   instantlyDb: NonNullable<typeof supabaseAdmin>,
   campaignId: string,
-): Promise<{ value: string | null; source: 'project' | 'client' | null; ok: boolean }> {
+): Promise<{
+  value: string | null;
+  source: 'project' | 'client' | null;
+  /** Владелец клиентских критериев — для атрибуции бейджа в DM. */
+  clientId: string | null;
+  ok: boolean;
+}> {
   let ok = true;
   const logDegraded = (source: string, message: string | undefined) => {
     ok = false;
     workerLog('warn', `lead-criteria fetch degraded for campaign ${campaignId}: ${source} query failed — ${message ?? 'unknown'}`);
   };
 
-  // 1. Проектные критерии («под ключ»).
-  if (supabaseMain) {
-    const { data: legacyLinks, error: legacyErr } = await instantlyDb
-      .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
-    if (legacyErr) logDegraded('project_instantly_campaigns', legacyErr.message);
-    const { data: periodLinks, error: periodErr } = await instantlyDb
-      .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
-    if (periodErr) logDegraded('project_period_instantly_campaigns', periodErr.message);
-    const projectIds = [
-      ...new Set(
-        [...(legacyLinks ?? []), ...(periodLinks ?? [])]
-          .map((l: { project_id?: string | null }) => l.project_id)
-          .filter(Boolean) as string[],
-      ),
-    ];
-    if (projectIds.length > 0) {
+  // 1. Проектная привязка. ВАЖНО (security, адверсариальное ревью 14.07):
+  //    привязка к проекту = кампания «под ключ», и клиентские критерии к ней
+  //    НЕ применяются НИКОГДА — даже если проектные критерии пусты. У
+  //    управляемых клиентов тоже есть client_instantly_access (так портал
+  //    даёт им видимость), и без этого барьера клиентский промпт управлял бы
+  //    квалификацией студийной кампании: спец-алертами и хэндоффом.
+  const { data: legacyLinks, error: legacyErr } = await instantlyDb
+    .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  if (legacyErr) logDegraded('project_instantly_campaigns', legacyErr.message);
+  const { data: periodLinks, error: periodErr } = await instantlyDb
+    .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  if (periodErr) logDegraded('project_period_instantly_campaigns', periodErr.message);
+  const linksDegraded = !ok;
+  const projectIds = [
+    ...new Set(
+      [...(legacyLinks ?? []), ...(periodLinks ?? [])]
+        .map((l: { project_id?: string | null }) => l.project_id)
+        .filter(Boolean) as string[],
+    ),
+  ];
+
+  if (projectIds.length > 0) {
+    if (supabaseMain) {
       const { data: projects, error: projectsErr } = await supabaseMain
         .from('projects').select('lead_criteria').in('id', projectIds);
       if (projectsErr) logDegraded('projects.lead_criteria', projectsErr.message);
@@ -85,13 +98,23 @@ async function fetchLeadCriteriaByCampaign(
         const criteria = typeof p.lead_criteria === 'string' ? p.lead_criteria.trim() : '';
         // Критерии найдены — результат полноценный, даже если один из
         // линк-запросов выше упал.
-        if (criteria) return { value: criteria, source: 'project', ok: true };
+        if (criteria) return { value: criteria, source: 'project', clientId: null, ok: true };
       }
     }
+    // Проектная кампания без проектных критериев = дефолтные. НЕ падаем в
+    // клиентский ярус.
+    return { value: null, source: null, clientId: null, ok };
   }
 
-  // 2. Критерии self-serve клиента (campaign → client_instantly_access →
-  //    client_lead_criteria). Не зависят от привязки TG.
+  // Линк-запросы деградировали → мы НЕ знаем, проектная ли это кампания.
+  // Применять клиентские критерии вслепую нельзя (могли бы захватить
+  // «под ключ»-кампанию) — отдаём деградацию, call-site отработает
+  // stale-if-error/defer.
+  if (linksDegraded) return { value: null, source: null, clientId: null, ok: false };
+
+  // 2. Чистый self-serve: критерии владельца кампании. Применяются ТОЛЬКО
+  //    когда владелец ровно один — на шаренной кампании критерии одного
+  //    клиента решали бы вердикты (и leads_only-фильтр!) другого.
   const { data: access, error: accessErr } = await instantlyDb
     .from('client_instantly_access')
     .select('client_user_id')
@@ -105,19 +128,24 @@ async function fetchLeadCriteriaByCampaign(
         .filter(Boolean) as string[],
     ),
   ];
-  if (clientIds.length > 0) {
+  if (clientIds.length === 1) {
+    const ownerId = clientIds[0];
     const { data: rows, error: criteriaErr } = await instantlyDb
       .from('client_lead_criteria')
       .select('criteria')
-      .in('client_user_id', clientIds);
+      .eq('client_user_id', ownerId)
+      .maybeSingle();
     if (criteriaErr) logDegraded('client_lead_criteria', criteriaErr.message);
-    for (const r of rows ?? []) {
-      const criteria = typeof r.criteria === 'string' ? r.criteria.trim() : '';
-      if (criteria) return { value: criteria, source: 'client', ok: true };
-    }
+    const criteria = typeof rows?.criteria === 'string' ? rows.criteria.trim() : '';
+    if (criteria) return { value: criteria, source: 'client', clientId: ownerId, ok };
+  } else if (clientIds.length > 1) {
+    workerLog(
+      'info',
+      `lead-criteria: campaign ${campaignId} shared by ${clientIds.length} clients — client criteria skipped (default rules)`,
+    );
   }
 
-  return { value: null, source: null, ok };
+  return { value: null, source: null, clientId: null, ok };
 }
 const campaignNameCache = new Map<string, string | null>();
 const API_KEY = () =>
@@ -720,20 +748,29 @@ async function qualifyOneReply(
   const criteriaEntry = leadCriteriaCache.get(campaignId);
   let cachedCriteria: string | null;
   let criteriaSource: 'project' | 'client' | null;
+  let criteriaClientId: string | null;
   if (criteriaEntry && Date.now() - criteriaEntry.fetchedAt < LEAD_CRITERIA_TTL_MS) {
     cachedCriteria = criteriaEntry.value;
     criteriaSource = criteriaEntry.source;
+    criteriaClientId = criteriaEntry.clientId;
   } else {
     const fetched = await fetchLeadCriteriaByCampaign(db, campaignId);
     if (fetched.ok) {
       cachedCriteria = fetched.value;
       criteriaSource = fetched.source;
-      leadCriteriaCache.set(campaignId, { value: fetched.value, source: fetched.source, fetchedAt: Date.now() });
+      criteriaClientId = fetched.clientId;
+      leadCriteriaCache.set(campaignId, {
+        value: fetched.value,
+        source: fetched.source,
+        clientId: fetched.clientId,
+        fetchedAt: Date.now(),
+      });
     } else if (criteriaEntry) {
       // Деградация НЕ кэшируется, при протухшем кэше — stale-if-error:
       // вчерашние критерии лучше, чем молча дефолтные на время блипа БД.
       cachedCriteria = criteriaEntry.value;
       criteriaSource = criteriaEntry.source;
+      criteriaClientId = criteriaEntry.clientId;
     } else {
       // Холодный кэш (рестарт воркера) + деградация: критерии НЕИЗВЕСТНЫ.
       // Квалифицировать с дефолтными нельзя — вердикт запишется навсегда
@@ -885,13 +922,12 @@ async function qualifyOneReply(
       replySubject: reply.subject ?? null,
       replyBody: replyText || null,
       replyTimestamp: reply.timestamp_email ?? null,
-      // Бейдж «Лид по вашим критериям» — только когда вердикт дал ПРОМПТ
-      // КЛИЕНТА (self-serve «свой промпт» со страницы /client/replies); для
-      // дефолтных и проектных критериев DM остаётся простым уведомлением.
-      isLeadByClientCriteria: status === 'lead' && criteriaSource === 'client',
       // Для переключателя «только лиды»: лид по ЛЮБЫМ критериям (клиентским,
       // проектным или дефолтным).
       isLead: status === 'lead',
+      // Атрибуция бейджа «Лид по вашим критериям»: бейдж получает ТОЛЬКО
+      // клиент, чей промпт дал вердикт (per-link в notifyClientOfReply).
+      criteriaClientUserId: status === 'lead' && criteriaSource === 'client' ? criteriaClientId : null,
     });
   }
 }
@@ -1071,10 +1107,10 @@ async function notifyClientOfReply(
     replySubject: string | null;
     replyBody: string | null;
     replyTimestamp: string | null;
-    /** Лид по критериям, заданным самим клиентом («свой промпт») → бейдж в DM. */
-    isLeadByClientCriteria?: boolean;
     /** Лид по любым критериям — для фильтра «присылать только лидов». */
     isLead?: boolean;
+    /** Чей «свой промпт» дал вердикт lead — бейдж в DM только этому клиенту. */
+    criteriaClientUserId?: string | null;
   },
 ): Promise<void> {
   try {
@@ -1135,7 +1171,6 @@ async function notifyClientOfReply(
       .eq('enabled', true);
     if (!links?.length) return;
 
-    const html = buildClientReplyMessage(data);
     for (const link of links as { client_user_id: string; chat_id: number; leads_only?: boolean | null }[]) {
       // «Только лиды»: клиент попросил не слать весь поток — пропускаем всё,
       // что квалификатор не признал лидом (по клиентским критериям, если
@@ -1147,6 +1182,13 @@ async function notifyClientOfReply(
         );
         continue;
       }
+      // Бейдж «Лид по вашим критериям» — только владельцу промпта: на
+      // шаренной кампании остальные получают обычное уведомление (иначе
+      // клиент доверял бы вердикту, который дал чужой промпт).
+      const html = buildClientReplyMessage({
+        ...data,
+        isLeadByClientCriteria: !!data.criteriaClientUserId && link.client_user_id === data.criteriaClientUserId,
+      });
       const result = await sendClientReplyTelegram(Number(link.chat_id), html);
       workerLog(
         'info',

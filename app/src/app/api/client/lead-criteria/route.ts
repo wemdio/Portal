@@ -15,11 +15,15 @@ export async function GET(req: NextRequest) {
   if ('error' in result) return result.error;
   if (!supabaseInstantly) return NextResponse.json({ criteria: '' });
 
-  const { data } = await supabaseInstantly
+  const { data, error } = await supabaseInstantly
     .from('client_lead_criteria')
     .select('criteria')
     .eq('client_user_id', result.auth.userId)
     .maybeSingle();
+  // Ошибка БД ≠ «критериев нет»: 200 с пустой строкой выглядел бы как
+  // авторитетное «не задано» — клиент пересохранил бы пустоту поверх своих
+  // настоящих критериев.
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   return NextResponse.json({ criteria: (data?.criteria as string | undefined) ?? '' });
 }
