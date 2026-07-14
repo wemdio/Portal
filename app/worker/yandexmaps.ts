@@ -7,15 +7,77 @@ const WORKER_ID = `yandexmaps-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 const running = new Set<Promise<void>>();
 
+const ZOMBIE_THRESHOLD_MINUTES = 15;
+const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
+
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
-  const { data: jobs, error } = await db
+  // Только СВЕЖИЕ running (updated_at < 5 мин назад) сбрасываем в pending —
+  // это задачи, которые прервались вместе с воркером и могут продолжиться.
+  // Всё старше 5 мин — реальные зомби (см. watchdog ниже): их сразу failed,
+  // чтобы не крутиться повторно, если они действительно упали в бесконечный
+  // retry или из-за неотвечающей БД.
+  const cutoffFresh = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const { data: fresh, error: freshErr } = await db
     .from('yandex_maps_jobs')
     .update({ status: 'pending' })
     .eq('status', 'running')
+    .gte('updated_at', cutoffFresh)
     .select('id');
-  if (error) log('warn', 'Startup recovery: yandex_maps_jobs update failed', error);
-  else if (jobs?.length) log('info', `Startup recovery: reset ${jobs.length} yandex_maps_jobs to pending`);
+  if (freshErr) log('warn', 'Startup recovery: fresh running -> pending failed', freshErr);
+  else if (fresh?.length) log('info', `Startup recovery: ${fresh.length} свежих running сброшены в pending`);
+
+  const cutoffZombie = new Date(Date.now() - ZOMBIE_THRESHOLD_MINUTES * 60 * 1000).toISOString();
+  const { data: zombies, error: zombieErr } = await db
+    .from('yandex_maps_jobs')
+    .update({
+      status: 'failed',
+      error_message: `Автоматически остановлено при старте воркера: задача была в статусе running более ${ZOMBIE_THRESHOLD_MINUTES} мин без обновлений (зомби). Слот освобождён, попробуйте перезапустить.`,
+      progress_stage: 'stuck_recovered',
+      completed_at: new Date().toISOString(),
+    })
+    .eq('status', 'running')
+    .lt('updated_at', cutoffZombie)
+    .select('id');
+  if (zombieErr) log('warn', 'Startup recovery: zombie cleanup failed', zombieErr);
+  else if (zombies?.length) log('warn', `Startup recovery: ${zombies.length} зомби переведены в failed (${ZOMBIE_THRESHOLD_MINUTES}+ мин без updates)`);
+}
+
+/**
+ * Watchdog: раз в 5 мин ищет running-задачи без обновлений > 15 мин и
+ * переводит их в failed. Отдельная async-петля, независимая от основного
+ * pollLoop — если основной loop застрял в retry supabase, watchdog всё
+ * равно ходит по timer'у setInterval и разморозит слот. Работает через
+ * тот же supabaseAdmin, но использует другую цепочку fetch — если сеть
+ * умерла полностью, оба встанут (но тогда и делать нечего).
+ */
+function startZombieWatchdog(shouldStop: () => boolean): NodeJS.Timeout {
+  const db = requireSupabaseAdmin(log);
+  const tick = async () => {
+    if (shouldStop()) return;
+    try {
+      const cutoff = new Date(Date.now() - ZOMBIE_THRESHOLD_MINUTES * 60 * 1000).toISOString();
+      const { data: zombies, error } = await db
+        .from('yandex_maps_jobs')
+        .update({
+          status: 'failed',
+          error_message: `Автоматически остановлено watchdog'ом: задача была в running более ${ZOMBIE_THRESHOLD_MINUTES} мин без обновлений (зависла). Слот освобождён. Если данные успели собраться — нажмите Продолжить парсинг.`,
+          progress_stage: 'stuck_recovered',
+          completed_at: new Date().toISOString(),
+        })
+        .eq('status', 'running')
+        .lt('updated_at', cutoff)
+        .select('id');
+      if (error) log('warn', 'Watchdog: zombie cleanup query failed', error);
+      else if (zombies?.length) log('warn', `Watchdog: ${zombies.length} зомби-задач переведены в failed`);
+    } catch (e) {
+      log('warn', 'Watchdog tick failed', e);
+    }
+  };
+  // Первый тик через 1 мин после старта — даём успеть подхватить свежие задачи.
+  const timer = setInterval(() => void tick(), WATCHDOG_INTERVAL_MS);
+  setTimeout(() => void tick(), 60_000);
+  return timer;
 }
 
 async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'parse' } | null> {
@@ -79,7 +141,14 @@ async function main(): Promise<void> {
   await startupRecovery();
   log('info', 'Startup recovery done');
 
-  await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce, realtimeTables: ['yandex_maps_jobs'] });
+  const watchdog = startZombieWatchdog(shouldStop);
+  log('info', `Zombie watchdog started (threshold=${ZOMBIE_THRESHOLD_MINUTES}min, tick=${WATCHDOG_INTERVAL_MS / 1000}s)`);
+
+  try {
+    await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce, realtimeTables: ['yandex_maps_jobs'] });
+  } finally {
+    clearInterval(watchdog);
+  }
 }
 
 main().catch((err) => {

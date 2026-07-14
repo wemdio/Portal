@@ -51,6 +51,10 @@ switch (kind) {
   case 'salescopilot':
     run('./salesCopilot');
     break;
+  case 'salesaianalysis':
+  case 'sales-ai-analysis':
+    run('./salesAiAnalysis');
+    break;
   case 'aicaller':
     run('./aiCaller');
     break;
