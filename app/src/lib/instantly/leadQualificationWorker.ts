@@ -31,6 +31,25 @@ import type { Email } from './types';
 const REPLY_EMAILS_PAGE_SIZE = 100;
 const MAX_QUALIFY_PER_TICK = 20;
 const PROJECT_BATCH_SIZE = 100;
+/**
+ * Сбой, который имеет смысл повторить: провайдер ИИ (5xx/429/перегрузка),
+ * сеть/таймаут, исчерпанные ретраи внутри classifyWithAI. Такие письма НЕ
+ * фиксируем строкой status='error' — иначе дедуп по instantly_email_id
+ * заблокирует их навсегда (инцидент 14.07: 503 + fetch failed = 2 потерянных
+ * горячих лида). Прочие ошибки (парсинг, битые данные) — постоянные, для них
+ * строка нужна: повтор их не вылечит, а видимость важна.
+ */
+const TRANSIENT_QUALIFY_ERROR_RE =
+  /\b(?:429|500|502|503|504)\b|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted|failed after retries/i;
+
+export function isTransientQualifyError(message: string): boolean {
+  return TRANSIENT_QUALIFY_ERROR_RE.test(message);
+}
+
+/** email_id → сколько раз подряд падал транзиентно (в памяти процесса). */
+const transientRetryCount = new Map<string, number>();
+const MAX_TRANSIENT_RETRIES = 5;
+
 const briefCache = new Map<string, string | null>();
 // campaign_id → projects.lead_criteria привязанного проекта (кастомное
 // определение лида для ИИ). В отличие от briefCache (бриф пишется один раз),
@@ -445,16 +464,45 @@ export async function pollAndQualifyReplies(): Promise<number> {
     if (i > 0) await new Promise((r) => setTimeout(r, interReplyDelay));
     try {
       await qualifyOneReply(db, reply, apiKey, accountByEmailId.get(reply.id ?? '') ?? 'main');
+      if (reply.id) transientRetryCount.delete(reply.id);
       processed++;
     } catch (err) {
-      workerLog('error', `Failed to qualify reply ${reply.id}`, err);
+      const message = err instanceof Error ? err.message : String(err);
+      const emailId = reply.id ?? '';
+      workerLog('error', `Failed to qualify reply ${emailId}`, err);
+
+      // Транзиентный сбой (провайдер 5xx/429, сеть, таймаут) — строку НЕ пишем.
+      // Дедуп (шаг 3a) смотрит на НАЛИЧИЕ строки, а не на статус, поэтому
+      // error-строка блокировала письмо НАВСЕГДА: одна 5-секундная икота
+      // Requesty безвозвратно теряла ответ. Инцидент 14.07 — 503 «Server
+      // Overloaded» и «fetch failed» стоили ДВУХ горячих лидов (один с уже
+      // назначенным звонком). Без строки поллер возьмёт письмо на следующем
+      // тике (~30с). Счётчик в памяти ограничивает повторы: после лимита
+      // всё-таки пишем error, чтобы сбой был виден, а не крутился вечно.
+      if (emailId && isTransientQualifyError(message)) {
+        const attempts = (transientRetryCount.get(emailId) ?? 0) + 1;
+        if (attempts < MAX_TRANSIENT_RETRIES) {
+          transientRetryCount.set(emailId, attempts);
+          workerLog(
+            'warn',
+            `Transient qualify failure for ${emailId} (${attempts}/${MAX_TRANSIENT_RETRIES}) — no row written, will retry next tick: ${message}`,
+          );
+          continue;
+        }
+        workerLog(
+          'error',
+          `Transient failures exhausted for ${emailId} (${attempts}) — writing error row for visibility`,
+        );
+        transientRetryCount.delete(emailId);
+      }
+
       await db.from('instantly_lead_qualifications').insert({
         campaign_id: reply.campaign_id ?? 'unknown',
         lead_email: reply.from_address_email ?? 'unknown',
         thread_id: reply.thread_id,
         instantly_email_id: reply.id,
         status: 'error',
-        error_message: err instanceof Error ? err.message : 'Unknown error',
+        error_message: message.slice(0, 500),
       });
     }
   }

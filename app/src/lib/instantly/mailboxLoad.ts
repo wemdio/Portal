@@ -196,12 +196,15 @@ export async function buildMailboxLoad(day?: string): Promise<MailboxLoad> {
   // 1) нагрузка по тегам за день. Потолок — по активным ящикам (status=1):
   //    ящик на паузе имеет daily_limit, но не шлёт → в знаменатель не берём.
   //    Отправки — по всем ящикам тега (факт есть факт). Маппинги дедупим.
-  const [tagRows, specRows, totalsRows, poolRows] = await Promise.all([
+  const [tagRows, specRows, totalsRows, poolRows, hiddenRows] = await Promise.all([
     datasetQuery<TagRow>(
+      // hidden теги (клиент ведётся в Coldy/Trigga, в Instantly только прогрев)
+      // исключаем — иначе вечный ложный «Простой». Список — mailbox_load_hidden_tags.
       `WITH mappings AS (
          SELECT DISTINCT tag_id, resource_id
          FROM raw_custom_tag_mappings
          WHERE resource_type = '1'
+           AND tag_id NOT IN (SELECT tag_id FROM mailbox_load_hidden_tags)
        ),
        vol AS (
          SELECT eaccount, count(*) AS sent
@@ -216,7 +219,7 @@ export async function buildMailboxLoad(day?: string): Promise<MailboxLoad> {
               coalesce(sum(v.sent), 0) AS sent
        FROM mappings m
        JOIN raw_custom_tags ct ON ct.id = m.tag_id
-       JOIN raw_accounts a ON a.email = m.resource_id
+       JOIN raw_accounts a ON a.email = m.resource_id AND a.deleted_at IS NULL
        LEFT JOIN vol v ON v.eaccount = a.email
        GROUP BY ct.id, ct.name`,
       [asOfDay, DEFAULT_DAILY_LIMIT],
@@ -244,8 +247,9 @@ export async function buildMailboxLoad(day?: string): Promise<MailboxLoad> {
        tagged AS (
          SELECT DISTINCT a.email, a.status, a.daily_limit
          FROM raw_custom_tag_mappings m
-         JOIN raw_accounts a ON a.email = m.resource_id
+         JOIN raw_accounts a ON a.email = m.resource_id AND a.deleted_at IS NULL
          WHERE m.resource_type = '1'
+           AND m.tag_id NOT IN (SELECT tag_id FROM mailbox_load_hidden_tags)
        )
        SELECT count(*) FILTER (WHERE t.status = 1) AS active_mailboxes,
               coalesce(sum(coalesce(t.daily_limit, $2::int)) FILTER (WHERE t.status = 1), 0) AS capacity,
@@ -274,12 +278,15 @@ export async function buildMailboxLoad(day?: string): Promise<MailboxLoad> {
               coalesce(sum(coalesce(a.daily_limit, $2::int)) FILTER (WHERE tk.resource_id IS NULL AND a.status = 1), 0) AS free_capacity
        FROM pool_tags pt
        JOIN mappings m ON m.tag_id = pt.id
-       JOIN raw_accounts a ON a.email = m.resource_id
+       JOIN raw_accounts a ON a.email = m.resource_id AND a.deleted_at IS NULL
        LEFT JOIN taken tk ON tk.resource_id = m.resource_id
        GROUP BY pt.id, pt.name`,
       [POOL_TAG_NAMES, DEFAULT_DAILY_LIMIT],
     ),
+    // 5) счётчик скрытых тегов — для пояснения в notes.
+    datasetQuery<{ n: string }>(`SELECT count(*) AS n FROM mailbox_load_hidden_tags`),
   ]);
+  const hiddenCount = num(hiddenRows[0]?.n);
 
   // тег → ранжированный список (специалист, клиент, #кампаний)
   const specByTag = new Map<string, { specialist: string; client: string | null; campaigns: number }[]>();
@@ -372,6 +379,9 @@ export async function buildMailboxLoad(day?: string): Promise<MailboxLoad> {
   notes.push('«Отправлено» — по всем ящикам тега, включая выключенные сейчас (статус — снимок момента, отправки — история дня).');
   notes.push('Итог считает каждый ящик один раз; суммы строк могут быть выше (ящик под 2+ тегами попадает в каждый тег).');
   notes.push('«День» — по UTC (последний полный день в датасете). Датасет обновляется ночным синком, данные не реалтайм.');
+  if (hiddenCount > 0) {
+    notes.push(`Скрыто тегов: ${hiddenCount} — клиенты ведутся в Coldy/Trigga, в Instantly их ящики только на прогреве (отправок нет).`);
+  }
   if (tags.some((t) => t.capacity > 0 && !t.specialist)) {
     notes.push('Часть тегов без привязки к специалисту (операционные пулы или новые теги) — они в группе «Не привязано».');
   }
@@ -435,7 +445,7 @@ export async function getTagMailboxes(tagId: string, day?: string): Promise<{ as
               coalesce(v.sent, 0) AS sent,
               to_char(last_send.ts AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS last_used
        FROM boxes b
-       JOIN raw_accounts a ON a.email = b.email
+       JOIN raw_accounts a ON a.email = b.email AND a.deleted_at IS NULL
        LEFT JOIN vol v ON v.eaccount = a.email
        LEFT JOIN LATERAL (
          SELECT e.timestamp_email AS ts
