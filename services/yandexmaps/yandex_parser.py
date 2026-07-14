@@ -829,7 +829,9 @@ class YandexMapsParser:
   def _normalize_org_url(self, url: str) -> str:
     if not url:
       return ""
-    url = re.sub(r"https?://yandex\.(by|kz|ua|com)", "https://yandex.ru", url)
+    # com\.tr до com: иначе для yandex.com.tr заменится только «com» и
+    # получится битый yandex.ru.tr (турецкий выход прокси → yandex.com.tr).
+    url = re.sub(r"https?://yandex\.(by|kz|ua|com\.tr|com)", "https://yandex.ru", url)
     match = re.search(r"(https://yandex\.ru/maps/org/[^/]+/\d+)", url)
     if match:
       return match.group(1) + "/"

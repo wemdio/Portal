@@ -1,4 +1,7 @@
-const YANDEX_DOMAIN_REGEX = /^https?:\/\/yandex\.(by|kz|ua|com)\b/i;
+// com\.tr ДО com: альтернация ищет по порядку, иначе для yandex.com.tr
+// матчится только «com» и получается битый «yandex.ru.tr». Актуально для
+// прокси с турецким выходом — Яндекс редиректит их на yandex.com.tr.
+const YANDEX_DOMAIN_REGEX = /^https?:\/\/yandex\.(by|kz|ua|com\.tr|com)\b/i;
 
 export function normalizeYandexOrgUrl(rawUrl: string): string {
   const input = (rawUrl ?? '').trim();
