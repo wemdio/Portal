@@ -184,7 +184,11 @@ export function YandexMapsParserForm(props: {
     return [...new Set(urls.filter(Boolean))];
   };
 
-  const MAX_SEARCH_URLS = 500;
+  // Хард-кап URL за задачу. Один URL занимает 1-12 мин через мобильный
+  // прокси, при concurrency=2 145 URL = 12+ часов на задачу и почти
+  // гарантированное зависание где-то в середине (был инцидент 14.07.2026).
+  // 50 URL = 4-8 часов max, укладываемся в разумное окно и watchdog.
+  const MAX_SEARCH_URLS = 50;
   const totalUrlCount = collectAllUrls().length;
   const canSubmit = totalUrlCount > 0;
 

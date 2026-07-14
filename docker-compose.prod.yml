@@ -294,7 +294,11 @@ services:
       # падает с "health check failed".
       yandexmaps:
         condition: service_healthy
-    stop_grace_period: 30m
+    # 60s вместо 30m: воркер не должен долго "доделывать текущую задачу"
+    # при рестарте — есть watchdog + startup_recovery, который зомби-задачи
+    # переведёт в failed автоматически. 30m делали docker restart вечным
+    # (blocking на ~30 минут), сегодня из-за этого пришлось docker kill.
+    stop_grace_period: 60s
     deploy:
       resources:
         limits:
