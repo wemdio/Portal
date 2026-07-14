@@ -521,22 +521,10 @@ export function ExpandedThread({
         </div>
       )}
 
-      {thread && thread.length > 0 ? (
-        <div className="space-y-2">
-          {thread.map((msg) => (
-            <ThreadMessageCard key={msg.id} msg={msg} />
-          ))}
-        </div>
-      ) : threadError && fallbackMessages && fallbackMessages.length > 0 ? (
-        // Тред не загрузился — показываем хотя бы последний ответ лида из уже
-        // загруженных данных списка, чтобы карточка не осталась без содержимого.
-        <div className="space-y-2">
-          {fallbackMessages.map((msg) => (
-            <ThreadMessageCard key={msg.id} msg={msg} />
-          ))}
-        </div>
-      ) : null}
-
+      {/* Действия и форма — НАД лентой: переписка идёт свежим сверху, поэтому
+          ответ — логическое продолжение верхнего (последнего) письма. Раньше
+          кнопка «Ответить» жила под всем тредом, и её приходилось искать
+          скроллом (жалоба клиента 12.07). */}
       {!threadLoading && (
         <div className="flex items-center gap-2 pt-1">
           <button
@@ -586,6 +574,22 @@ export function ExpandedThread({
           }}
         />
       )}
+
+      {thread && thread.length > 0 ? (
+        <div className="space-y-2">
+          {thread.map((msg) => (
+            <ThreadMessageCard key={msg.id} msg={msg} />
+          ))}
+        </div>
+      ) : threadError && fallbackMessages && fallbackMessages.length > 0 ? (
+        // Тред не загрузился — показываем хотя бы последний ответ лида из уже
+        // загруженных данных списка, чтобы карточка не осталась без содержимого.
+        <div className="space-y-2">
+          {fallbackMessages.map((msg) => (
+            <ThreadMessageCard key={msg.id} msg={msg} />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
