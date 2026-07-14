@@ -216,7 +216,7 @@ export async function buildMailboxLoad(day?: string): Promise<MailboxLoad> {
               coalesce(sum(v.sent), 0) AS sent
        FROM mappings m
        JOIN raw_custom_tags ct ON ct.id = m.tag_id
-       JOIN raw_accounts a ON a.email = m.resource_id
+       JOIN raw_accounts a ON a.email = m.resource_id AND a.deleted_at IS NULL
        LEFT JOIN vol v ON v.eaccount = a.email
        GROUP BY ct.id, ct.name`,
       [asOfDay, DEFAULT_DAILY_LIMIT],
@@ -244,7 +244,7 @@ export async function buildMailboxLoad(day?: string): Promise<MailboxLoad> {
        tagged AS (
          SELECT DISTINCT a.email, a.status, a.daily_limit
          FROM raw_custom_tag_mappings m
-         JOIN raw_accounts a ON a.email = m.resource_id
+         JOIN raw_accounts a ON a.email = m.resource_id AND a.deleted_at IS NULL
          WHERE m.resource_type = '1'
        )
        SELECT count(*) FILTER (WHERE t.status = 1) AS active_mailboxes,
@@ -274,7 +274,7 @@ export async function buildMailboxLoad(day?: string): Promise<MailboxLoad> {
               coalesce(sum(coalesce(a.daily_limit, $2::int)) FILTER (WHERE tk.resource_id IS NULL AND a.status = 1), 0) AS free_capacity
        FROM pool_tags pt
        JOIN mappings m ON m.tag_id = pt.id
-       JOIN raw_accounts a ON a.email = m.resource_id
+       JOIN raw_accounts a ON a.email = m.resource_id AND a.deleted_at IS NULL
        LEFT JOIN taken tk ON tk.resource_id = m.resource_id
        GROUP BY pt.id, pt.name`,
       [POOL_TAG_NAMES, DEFAULT_DAILY_LIMIT],
@@ -435,7 +435,7 @@ export async function getTagMailboxes(tagId: string, day?: string): Promise<{ as
               coalesce(v.sent, 0) AS sent,
               to_char(last_send.ts AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS last_used
        FROM boxes b
-       JOIN raw_accounts a ON a.email = b.email
+       JOIN raw_accounts a ON a.email = b.email AND a.deleted_at IS NULL
        LEFT JOIN vol v ON v.eaccount = a.email
        LEFT JOIN LATERAL (
          SELECT e.timestamp_email AS ts
