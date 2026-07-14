@@ -648,6 +648,62 @@ describe('pollAndQualifyReplies', () => {
     expect(html).toContain('"isLeadByClientCriteria":true');
   });
 
+  // Инцидент 14.07: 503 «Server Overloaded» / «fetch failed» → строка
+  // status='error' с instantly_email_id → дедуп блокировал письмо НАВСЕГДА →
+  // 2 горячих лида (один с назначенным звонком) потеряны безвозвратно.
+  // Транзиентный сбой не должен оставлять блокирующую строку.
+  it('transient AI/network failure writes NO row (so the reply is retried next tick)', async () => {
+    qualifyReply.mockRejectedValueOnce(
+      new Error('AI API 503: {"error":{"message":"Server Overloaded"}}'),
+    );
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'transient-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(0);
+    // Ключевое: строки НЕТ → на следующем тике письмо не задедуплено.
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toHaveLength(0);
+  });
+
+  it('permanent failure DOES write an error row (retry would not help; visibility matters)', async () => {
+    qualifyReply.mockRejectedValueOnce(new Error('Cannot find JSON object in AI response'));
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'permanent-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('error');
+  });
+
+  it('classifies transient vs permanent failures correctly', async () => {
+    const { isTransientQualifyError } = await import('@/lib/instantly/leadQualificationWorker');
+    for (const msg of [
+      'AI API 503: {"error":{"origin":"provider","message":"Server Overloaded"}}',
+      'Upsert failed: TypeError: fetch failed',
+      'AI API 429: rate limit exceeded',
+      'AI classification failed after retries',
+      'connect ETIMEDOUT 1.2.3.4:443',
+      'socket hang up',
+    ]) {
+      expect(isTransientQualifyError(msg)).toBe(true);
+    }
+    for (const msg of [
+      'Cannot find JSON object in AI response',
+      'Upsert failed: null value in column "campaign_id" violates not-null constraint',
+    ]) {
+      expect(isTransientQualifyError(msg)).toBe(false);
+    }
+  });
+
   it('passes leadCriteria=null when the project has no custom criteria', async () => {
     listEmails.mockResolvedValue({
       items: [replyEmail({ id: 'no-criteria-email' })],

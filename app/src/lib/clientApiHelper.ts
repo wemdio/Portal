@@ -110,6 +110,14 @@ export async function requireClientAuth(
     ),
   ]);
 
+  // Инфраструктурный сбой чтения профиля (таймаут/блип main-БД) — это НЕ
+  // «профиля нет». Без этой проверки profile=null превращал role в null, и
+  // клиент получал «Forbidden» из-за секундного блипа БД. PGRST116 («строк
+  // нет») — легитимное отсутствие профиля, идёт прежним путём (403 ниже).
+  if (profileRes.error && profileRes.error.code !== 'PGRST116') {
+    return { error: jsonError('Сервис временно недоступен — обновите страницу', 503) };
+  }
+
   const profile = profileRes.data;
 
   const role = profile?.role ?? null;
@@ -129,6 +137,14 @@ export async function requireClientAuth(
     !DEMO_READONLY_POST_PATHS.has(req.nextUrl.pathname)
   ) {
     return { error: demoReadonlyError() };
+  }
+
+  // Инфраструктурный сбой чтения прав доступа (блип instantly-БД, 20с-таймаут
+  // PostgREST). Раньше ошибка глоталась → accessRows=[] → роуты честно отвечали
+  // «данных нет», и клиент видел «Кампаний пока нет» вместо ошибки с ретраем
+  // (инцидент 15.07). Демо не режем: демо-роуты отдают фикстуры, rows не нужны.
+  if (!isDemo && rowsRes.error) {
+    return { error: jsonError('Сервис временно недоступен — обновите страницу', 503) };
   }
 
   const rows = rowsRes.data;
