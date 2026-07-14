@@ -32,6 +32,121 @@ const REPLY_EMAILS_PAGE_SIZE = 100;
 const MAX_QUALIFY_PER_TICK = 20;
 const PROJECT_BATCH_SIZE = 100;
 const briefCache = new Map<string, string | null>();
+// campaign_id → projects.lead_criteria привязанного проекта (кастомное
+// определение лида для ИИ). В отличие от briefCache (бриф пишется один раз),
+// критерии подкручивают итеративно — поэтому TTL: правка в настройках проекта
+// подхватывается сама в течение ~5 минут, БЕЗ редеплоя воркера.
+const LEAD_CRITERIA_TTL_MS = 5 * 60 * 1000;
+const leadCriteriaCache = new Map<
+  string,
+  { value: string | null; source: 'project' | 'client' | null; clientId: string | null; fetchedAt: number }
+>();
+
+/**
+ * Кастомные критерии лида для кампании: projects.lead_criteria привязанного
+ * проекта («под ключ», задаёт спец) ИЛИ client_lead_criteria владельца
+ * self-serve кампании («свой промпт» клиента со страницы /client/replies).
+ * Проектные приоритетнее. `source` нужен DM-бейджу «Лид по вашим критериям».
+ * `ok=false` — какой-то из запросов упал (supabase-js НЕ бросает, а возвращает
+ * {error} — try/catch его не ловит): результат нельзя кэшировать, иначе блип
+ * БД молча «выключит» кастомные критерии на TTL, реактивирует ранний выход
+ * «запрос контакта = не лид» и горячий лид навсегда осядет not_lead (дедуп).
+ */
+async function fetchLeadCriteriaByCampaign(
+  instantlyDb: NonNullable<typeof supabaseAdmin>,
+  campaignId: string,
+): Promise<{
+  value: string | null;
+  source: 'project' | 'client' | null;
+  /** Владелец клиентских критериев — для атрибуции бейджа в DM. */
+  clientId: string | null;
+  ok: boolean;
+}> {
+  let ok = true;
+  const logDegraded = (source: string, message: string | undefined) => {
+    ok = false;
+    workerLog('warn', `lead-criteria fetch degraded for campaign ${campaignId}: ${source} query failed — ${message ?? 'unknown'}`);
+  };
+
+  // 1. Проектная привязка. ВАЖНО (security, адверсариальное ревью 14.07):
+  //    привязка к проекту = кампания «под ключ», и клиентские критерии к ней
+  //    НЕ применяются НИКОГДА — даже если проектные критерии пусты. У
+  //    управляемых клиентов тоже есть client_instantly_access (так портал
+  //    даёт им видимость), и без этого барьера клиентский промпт управлял бы
+  //    квалификацией студийной кампании: спец-алертами и хэндоффом.
+  const { data: legacyLinks, error: legacyErr } = await instantlyDb
+    .from('project_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  if (legacyErr) logDegraded('project_instantly_campaigns', legacyErr.message);
+  const { data: periodLinks, error: periodErr } = await instantlyDb
+    .from('project_period_instantly_campaigns').select('project_id').eq('campaign_id', campaignId);
+  if (periodErr) logDegraded('project_period_instantly_campaigns', periodErr.message);
+  const linksDegraded = !ok;
+  const projectIds = [
+    ...new Set(
+      [...(legacyLinks ?? []), ...(periodLinks ?? [])]
+        .map((l: { project_id?: string | null }) => l.project_id)
+        .filter(Boolean) as string[],
+    ),
+  ];
+
+  if (projectIds.length > 0) {
+    if (supabaseMain) {
+      const { data: projects, error: projectsErr } = await supabaseMain
+        .from('projects').select('lead_criteria').in('id', projectIds);
+      if (projectsErr) logDegraded('projects.lead_criteria', projectsErr.message);
+      for (const p of projects ?? []) {
+        const criteria = typeof p.lead_criteria === 'string' ? p.lead_criteria.trim() : '';
+        // Критерии найдены — результат полноценный, даже если один из
+        // линк-запросов выше упал.
+        if (criteria) return { value: criteria, source: 'project', clientId: null, ok: true };
+      }
+    }
+    // Проектная кампания без проектных критериев = дефолтные. НЕ падаем в
+    // клиентский ярус.
+    return { value: null, source: null, clientId: null, ok };
+  }
+
+  // Линк-запросы деградировали → мы НЕ знаем, проектная ли это кампания.
+  // Применять клиентские критерии вслепую нельзя (могли бы захватить
+  // «под ключ»-кампанию) — отдаём деградацию, call-site отработает
+  // stale-if-error/defer.
+  if (linksDegraded) return { value: null, source: null, clientId: null, ok: false };
+
+  // 2. Чистый self-serve: критерии владельца кампании. Применяются ТОЛЬКО
+  //    когда владелец ровно один — на шаренной кампании критерии одного
+  //    клиента решали бы вердикты (и leads_only-фильтр!) другого.
+  const { data: access, error: accessErr } = await instantlyDb
+    .from('client_instantly_access')
+    .select('client_user_id')
+    .eq('resource_type', 'campaign')
+    .eq('resource_id', campaignId);
+  if (accessErr) logDegraded('client_instantly_access', accessErr.message);
+  const clientIds = [
+    ...new Set(
+      (access ?? [])
+        .map((a: { client_user_id?: string | null }) => a.client_user_id)
+        .filter(Boolean) as string[],
+    ),
+  ];
+  if (clientIds.length === 1) {
+    const ownerId = clientIds[0];
+    const { data: rows, error: criteriaErr } = await instantlyDb
+      .from('client_lead_criteria')
+      .select('criteria')
+      .eq('client_user_id', ownerId)
+      .maybeSingle();
+    if (criteriaErr) logDegraded('client_lead_criteria', criteriaErr.message);
+    const criteria = typeof rows?.criteria === 'string' ? rows.criteria.trim() : '';
+    if (criteria) return { value: criteria, source: 'client', clientId: ownerId, ok };
+  } else if (clientIds.length > 1) {
+    workerLog(
+      'info',
+      `lead-criteria: campaign ${campaignId} shared by ${clientIds.length} clients — client criteria skipped (default rules)`,
+    );
+  }
+
+  return { value: null, source: null, clientId: null, ok };
+}
 const campaignNameCache = new Map<string, string | null>();
 const API_KEY = () =>
   process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
@@ -533,6 +648,34 @@ async function qualifyOneReply(
     }
   }
 
+  // «Тот же клиент, другой ящик»: у клиента несколько lookalike-доменов
+  // (dispa-pro.ru + dispa-pro.online; sands-studio.ru + sandsstudio.online) и
+  // персональные ящики на них. Ответ, прилетевший в ящик-двойник ТОГО ЖЕ
+  // клиента — НЕ кросс-клиентский страй (13.07 guard увёл живого лида Диспы
+  // «завтра удобно пообщаться?» в needs_review). Признаки того же клиента:
+  // совпадение персоны (local-part без ./-/_; generic вроде hello/info не
+  // считаются — они у всех) или базы домена (до первой точки, без дефисов).
+  const GENERIC_LOCALS = new Set([
+    'hello', 'info', 'contact', 'sales', 'office', 'mail', 'admin', 'support',
+    'team', 'connect', 'reachout', 'outreach', 'hi', 'welcome', 'partner', 'partners',
+  ]);
+  const mailboxLocalKey = (addr: string): string | null => {
+    const key = (addr.split('@')[0] ?? '').toLowerCase().replace(/[^a-z0-9а-яё]/g, '');
+    return key && !GENERIC_LOCALS.has(key) ? key : null;
+  };
+  const mailboxDomainKey = (addr: string): string | null => {
+    const key = ((addr.split('@')[1] ?? '').split('.')[0] ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    return key || null;
+  };
+  const sameClientMailboxes = (a: string, b: string): boolean => {
+    const la = mailboxLocalKey(a);
+    const lb = mailboxLocalKey(b);
+    if (la && lb && la === lb) return true;
+    const da = mailboxDomainKey(a);
+    const db = mailboxDomainKey(b);
+    return Boolean(da && db && da === db);
+  };
+
   // Кросс-клиентский доменный матч Instantly (кейс NAIS→KIRA, 10.07): лид
   // получил рассылки ДВУХ наших клиентов и написал НОВОЕ письмо (без
   // In-Reply-To) на ящик клиента A — Instantly, не найдя тред, приклеил его по
@@ -556,7 +699,11 @@ async function qualifyOneReply(
         .filter(Boolean),
     );
     for (const m of ctx.campaignOutboundMailboxes ?? []) outboundMailboxes.add(m);
-    if (outboundMailboxes.size > 0 && !outboundMailboxes.has(ourMailbox)) {
+    if (
+      outboundMailboxes.size > 0 &&
+      !outboundMailboxes.has(ourMailbox) &&
+      ![...outboundMailboxes].some((m) => sameClientMailboxes(ourMailbox, m))
+    ) {
       const replyText = getBodyText(reply.body);
       const { error: crossUpsertErr } = await db.from('instantly_lead_qualifications').upsert(
         {
@@ -598,10 +745,51 @@ async function qualifyOneReply(
   }
   const cachedBrief = briefCache.get(campaignId) ?? null;
 
+  const criteriaEntry = leadCriteriaCache.get(campaignId);
+  let cachedCriteria: string | null;
+  let criteriaSource: 'project' | 'client' | null;
+  let criteriaClientId: string | null;
+  if (criteriaEntry && Date.now() - criteriaEntry.fetchedAt < LEAD_CRITERIA_TTL_MS) {
+    cachedCriteria = criteriaEntry.value;
+    criteriaSource = criteriaEntry.source;
+    criteriaClientId = criteriaEntry.clientId;
+  } else {
+    const fetched = await fetchLeadCriteriaByCampaign(db, campaignId);
+    if (fetched.ok) {
+      cachedCriteria = fetched.value;
+      criteriaSource = fetched.source;
+      criteriaClientId = fetched.clientId;
+      leadCriteriaCache.set(campaignId, {
+        value: fetched.value,
+        source: fetched.source,
+        clientId: fetched.clientId,
+        fetchedAt: Date.now(),
+      });
+    } else if (criteriaEntry) {
+      // Деградация НЕ кэшируется, при протухшем кэше — stale-if-error:
+      // вчерашние критерии лучше, чем молча дефолтные на время блипа БД.
+      cachedCriteria = criteriaEntry.value;
+      criteriaSource = criteriaEntry.source;
+      criteriaClientId = criteriaEntry.clientId;
+    } else {
+      // Холодный кэш (рестарт воркера) + деградация: критерии НЕИЗВЕСТНЫ.
+      // Квалифицировать с дефолтными нельзя — вердикт запишется навсегда
+      // (дедуп по instantly_email_id), и ранний выход «запрос контакта = не
+      // лид» убил бы горячий лид кампании с кастомом. Откладываем письмо БЕЗ
+      // записи: дедуп-строки нет → следующий тик (~30с) обработает заново.
+      workerLog(
+        'warn',
+        `lead-criteria unknown for campaign ${campaignId} (cold cache + degraded fetch) — deferring reply ${reply.id ?? '?'} to next tick`,
+      );
+      return;
+    }
+  }
+
   const result = await qualifyReply(campaignId, leadEmail, reply.thread_id, {
     apiKey,
     model: MODEL,
     briefText: cachedBrief,
+    leadCriteria: cachedCriteria,
     // Контекст уже зафетчен выше (кросс-клиентский guard) — не фетчим второй раз.
     prefetchedContext: ctx,
   }, accountId);
@@ -734,6 +922,12 @@ async function qualifyOneReply(
       replySubject: reply.subject ?? null,
       replyBody: replyText || null,
       replyTimestamp: reply.timestamp_email ?? null,
+      // Для переключателя «только лиды»: лид по ЛЮБЫМ критериям (клиентским,
+      // проектным или дефолтным).
+      isLead: status === 'lead',
+      // Атрибуция бейджа «Лид по вашим критериям»: бейдж получает ТОЛЬКО
+      // клиент, чей промпт дал вердикт (per-link в notifyClientOfReply).
+      criteriaClientUserId: status === 'lead' && criteriaSource === 'client' ? criteriaClientId : null,
     });
   }
 }
@@ -913,6 +1107,10 @@ async function notifyClientOfReply(
     replySubject: string | null;
     replyBody: string | null;
     replyTimestamp: string | null;
+    /** Лид по любым критериям — для фильтра «присылать только лидов». */
+    isLead?: boolean;
+    /** Чей «свой промпт» дал вердикт lead — бейдж в DM только этому клиенту. */
+    criteriaClientUserId?: string | null;
   },
 ): Promise<void> {
   try {
@@ -966,15 +1164,37 @@ async function notifyClientOfReply(
 
     if (clientUserIds.size === 0) return;
 
-    const { data: links } = await instantlyDb
+    const { data: links, error: linksErr } = await instantlyDb
       .from('client_reply_telegram_links')
-      .select('client_user_id, chat_id')
+      .select('client_user_id, chat_id, leads_only')
       .in('client_user_id', [...clientUserIds])
       .eq('enabled', true);
+    // Ошибку НЕ глотаем: блип instantly-БД (144) иначе молча выключил бы ВСЕ
+    // клиентские DM без следа — было бы неотличимо от «ни у кого нет привязки».
+    if (linksErr) {
+      workerLog('warn', `notifyClientOfReply: client_reply_telegram_links query failed (campaign ${campaignId}) — ${linksErr.message}`);
+      return;
+    }
     if (!links?.length) return;
 
-    const html = buildClientReplyMessage(data);
-    for (const link of links as { client_user_id: string; chat_id: number }[]) {
+    for (const link of links as { client_user_id: string; chat_id: number; leads_only?: boolean | null }[]) {
+      // «Только лиды»: клиент попросил не слать весь поток — пропускаем всё,
+      // что квалификатор не признал лидом (по клиентским критериям, если
+      // заданы, иначе по дефолтным).
+      if (link.leads_only && !data.isLead) {
+        workerLog(
+          'info',
+          `Client reply notify → client ${link.client_user_id}: skipped (leads_only, status not lead)`,
+        );
+        continue;
+      }
+      // Бейдж «Лид по вашим критериям» — только владельцу промпта: на
+      // шаренной кампании остальные получают обычное уведомление (иначе
+      // клиент доверял бы вердикту, который дал чужой промпт).
+      const html = buildClientReplyMessage({
+        ...data,
+        isLeadByClientCriteria: !!data.criteriaClientUserId && link.client_user_id === data.criteriaClientUserId,
+      });
       const result = await sendClientReplyTelegram(Number(link.chat_id), html);
       workerLog(
         'info',

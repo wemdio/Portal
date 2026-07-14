@@ -13,6 +13,7 @@ const qualifyReply = jest.fn();
 const fetchBriefByCampaign = jest.fn();
 const fetchThreadContext = jest.fn();
 const sendLeadTelegramAlert = jest.fn();
+const sendClientReplyTelegram = jest.fn();
 
 jest.mock('@/lib/supabaseInstantly', () => ({
   get supabaseInstantly() {
@@ -52,6 +53,13 @@ jest.mock('@/lib/instantly/leadTelegramAlerts', () => ({
   sendLeadTelegramAlert: (...args: unknown[]) => sendLeadTelegramAlert(...args),
 }), { virtual: true });
 
+jest.mock('@/lib/clientReplyBot/bot', () => ({
+  __esModule: true,
+  getClientRepliesBotToken: () => 'test-client-bot-token',
+  sendClientReplyTelegram: (...args: unknown[]) => sendClientReplyTelegram(...args),
+  buildClientReplyMessage: (data: unknown) => JSON.stringify(data),
+}));
+
 function replyEmail(overrides: Partial<Email>): Email {
   return {
     id: 'email-1',
@@ -77,6 +85,7 @@ describe('pollAndQualifyReplies', () => {
     getLeadsByEmail.mockReset().mockResolvedValue([]);
     getCampaign.mockReset().mockResolvedValue({ id: 'linked-campaign', name: 'Кампания Новикова' });
     sendLeadTelegramAlert.mockReset().mockResolvedValue({ sent: true, messageId: 42 });
+    sendClientReplyTelegram.mockReset().mockResolvedValue({ messageId: 7 });
     fetchBriefByCampaign.mockReset().mockResolvedValue(null);
     // null = контекст треда не восстановлен → кросс-клиентский guard скипается
     // (fail-open), тесты обычного потока не затрагиваются.
@@ -386,6 +395,305 @@ describe('pollAndQualifyReplies', () => {
     }
   });
 
+  // Пер-проектное определение лида (projects.lead_criteria) прокидывается в
+  // квалификацию — иначе кастомные критерии молча не работали бы.
+  it('passes the project lead_criteria into qualifyReply (and null when not set)', async () => {
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          {
+            id: 'project-1',
+            client: 'Ritso',
+            specialist_user_id: 'specialist-1',
+            lead_criteria: 'Кампании собирают контакты ЛПР: контакт или предложение созвониться = лид.',
+          },
+        ],
+        profiles: [],
+        telegram_links: [],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'criteria-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1);
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({
+        leadCriteria: 'Кампании собирают контакты ЛПР: контакт или предложение созвониться = лид.',
+      }),
+    );
+  });
+
+  // «Свой промпт» self-serve клиента (client_lead_criteria): кампания без
+  // проекта берёт критерии владельца из client_instantly_access.
+  it('passes the CLIENT lead criteria for a self-serve campaign (no project link)', async () => {
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          {
+            client_user_id: 'client-7',
+            resource_type: 'campaign',
+            resource_id: 'self-serve-campaign',
+            instantly_account_id: 'main',
+          },
+        ],
+        client_lead_criteria: [
+          { client_user_id: 'client-7', criteria: 'Лид = интерес к услуге или запрос цены.' },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'ss-email', campaign_id: 'self-serve-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1);
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ leadCriteria: 'Лид = интерес к услуге или запрос цены.' }),
+    );
+  });
+
+  // Security-барьер (адверсариальное ревью 14.07): у управляемых («под ключ»)
+  // клиентов ТОЖЕ есть client_instantly_access — их промпт НЕ должен управлять
+  // квалификацией проектной кампании (спец-алерты, хэндофф), даже когда
+  // проектные критерии пусты.
+  it('client criteria NEVER apply to a project-linked campaign, even with empty project criteria', async () => {
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          { project_id: 'project-1', campaign_id: 'linked-campaign', match_source: 'auto' },
+        ],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          { client_user_id: 'client-7', resource_type: 'campaign', resource_id: 'linked-campaign', instantly_account_id: 'main' },
+        ],
+        client_lead_criteria: [
+          { client_user_id: 'client-7', criteria: 'ЛЮБОЙ ответ = лид.' },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'managed-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ leadCriteria: null }),
+    );
+  });
+
+  it('client criteria are skipped when the self-serve campaign is shared by multiple clients', async () => {
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          { client_user_id: 'client-A', resource_type: 'campaign', resource_id: 'shared-campaign', instantly_account_id: 'main' },
+          { client_user_id: 'client-B', resource_type: 'campaign', resource_id: 'shared-campaign', instantly_account_id: 'main' },
+        ],
+        client_lead_criteria: [
+          { client_user_id: 'client-A', criteria: 'Ничто не лид.' },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'shared-email', campaign_id: 'shared-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ leadCriteria: null }),
+    );
+  });
+
+  it('project criteria beat client criteria when both exist', async () => {
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          { id: 'project-1', client: 'Acme', specialist_user_id: 'specialist-1', lead_criteria: 'ПРОЕКТНЫЕ критерии.' },
+        ],
+        profiles: [],
+        telegram_links: [],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          { project_id: 'project-1', campaign_id: 'linked-campaign', match_source: 'auto' },
+        ],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          { client_user_id: 'client-7', resource_type: 'campaign', resource_id: 'linked-campaign', instantly_account_id: 'main' },
+        ],
+        client_lead_criteria: [
+          { client_user_id: 'client-7', criteria: 'КЛИЕНТСКИЕ критерии.' },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'both-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ leadCriteria: 'ПРОЕКТНЫЕ критерии.' }),
+    );
+  });
+
+  // Переключатель «только лиды»: leads_only=true режет DM для не-лидов,
+  // false (дефолт) — прежнее поведение «каждый человеческий ответ».
+  it('leads_only=true suppresses client DM for non-lead replies; default sends everything', async () => {
+    const seed = (leadsOnly: boolean) => {
+      mockInstantlyDb = createMockSupabase({
+        tables: {
+          project_instantly_campaigns: [],
+          instantly_lead_qualifications: [],
+          client_instantly_access: [
+            { client_user_id: 'client-7', resource_type: 'campaign', resource_id: 'self-serve-campaign', instantly_account_id: 'main' },
+          ],
+          client_reply_telegram_links: [
+            { client_user_id: 'client-7', chat_id: 111, enabled: true, leads_only: leadsOnly },
+          ],
+        },
+      });
+      listEmails.mockResolvedValue({
+        items: [replyEmail({ id: `lo-${leadsOnly}`, campaign_id: 'self-serve-campaign' })],
+        next_starting_after: null,
+      });
+    };
+
+    // not_lead (дефолтный мок qualifyReply) + leads_only → DM подавлен
+    seed(true);
+    let mod = await import('@/lib/instantly/leadQualificationWorker');
+    await mod.pollAndQualifyReplies();
+    expect(sendClientReplyTelegram).not.toHaveBeenCalled();
+
+    // not_lead + БЕЗ leads_only → DM уходит (прежнее поведение)
+    jest.resetModules();
+    sendClientReplyTelegram.mockClear();
+    seed(false);
+    mod = await import('@/lib/instantly/leadQualificationWorker');
+    await mod.pollAndQualifyReplies();
+    expect(sendClientReplyTelegram).toHaveBeenCalledTimes(1);
+  });
+
+  it('leads_only=true still DMs actual leads (with the client-criteria badge when their prompt decided)', async () => {
+    qualifyReply.mockResolvedValueOnce({
+      isLead: true,
+      proposalSeen: true,
+      interestSignals: ['цена'],
+      reason: 'Запросил цену',
+      confidence: 0.9,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({ id: 'lo-lead', body: { text: 'Сколько стоит?' } }),
+        threadEmails: [],
+        lastOutbound: null,
+      },
+    });
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [],
+        instantly_lead_qualifications: [],
+        client_instantly_access: [
+          { client_user_id: 'client-7', resource_type: 'campaign', resource_id: 'self-serve-campaign', instantly_account_id: 'main' },
+        ],
+        client_lead_criteria: [
+          { client_user_id: 'client-7', criteria: 'Запрос цены = лид.' },
+        ],
+        client_reply_telegram_links: [
+          { client_user_id: 'client-7', chat_id: 111, enabled: true, leads_only: true },
+        ],
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'lo-lead', campaign_id: 'self-serve-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(sendClientReplyTelegram).toHaveBeenCalledTimes(1);
+    const html = String(sendClientReplyTelegram.mock.calls[0][1]);
+    expect(html).toContain('"isLeadByClientCriteria":true');
+  });
+
+  it('passes leadCriteria=null when the project has no custom criteria', async () => {
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'no-criteria-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ leadCriteria: null }),
+    );
+  });
+
+  // Холодный кэш + блип БД: критерии НЕИЗВЕСТНЫ → письмо откладывается БЕЗ
+  // записи (иначе вердикт с дефолтными критериями осел бы навсегда через
+  // дедуп — ровно то, что чинил cce28d618). Следующий тик обработает заново.
+  it('defers the reply (no row, no AI) when criteria fetch is degraded on a cold cache', async () => {
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          { id: 'project-1', client: 'Ritso', specialist_user_id: 'specialist-1', lead_criteria: 'Контакт = лид' },
+        ],
+        profiles: [],
+        telegram_links: [],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+      // Прицельно роняем ТОЛЬКО запрос критериев (select lead_criteria) —
+      // верификация привязки (select 'id, client') работает, кампания
+      // квалифицируема, и тест реально доходит до defer-ветки.
+      errorSelects: { projects: { columnsInclude: 'lead_criteria', message: 'connection timeout (blip)' } },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'deferred-email' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(qualifyReply).not.toHaveBeenCalled();
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toHaveLength(0);
+  });
+
   // Кросс-клиентский доменный матч Instantly (кейс NAIS→KIRA 10.07): лид двух
   // наших клиентов написал НОВОЕ письмо на ящик клиента A (To=eaccount, поэтому
   // BCC-guard молчит), а Instantly приклеил его по домену отправителя к
@@ -466,6 +774,54 @@ describe('pollAndQualifyReplies', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe('needs_review');
     expect(String(rows[0].ai_reason)).toContain('kirill@kira-aggregator.ru');
+  });
+
+  // Ящики-двойники ОДНОГО клиента (несколько lookalike-доменов — стандарт
+  // аутрича): та же персона или та же база домена ≠ «другой клиент». 13.07
+  // guard увёл живого лида Диспы (vadim@dispa-pro.ru vs vadim@dispa-pro.online)
+  // в needs_review — пин против рецидива.
+  it('does not flag same-client mailbox twins (same persona or same domain base)', async () => {
+    const cases = [
+      // Диспа: та же персона, домены dispa-pro.ru / dispa-pro.online
+      { arrived: 'vadim@dispa-pro.ru', mailed: 'vadim@dispa-pro.online' },
+      // SANDS: персона olga.sands vs olga_sands, домены sandsstudio.online / sands-studio.ru
+      { arrived: 'olga.sands@sandsstudio.online', mailed: 'olga_sands@sands-studio.ru' },
+    ];
+    for (const [i, c] of cases.entries()) {
+      jest.resetModules();
+      qualifyReply.mockClear();
+      fetchThreadContext.mockResolvedValue({
+        replyEmail: replyEmail({ id: `twin-${i}` }),
+        threadEmails: [replyEmail({ id: `twin-out-${i}`, ue_type: 1, eaccount: c.mailed })],
+        lastOutbound: replyEmail({ id: `twin-out-${i}`, ue_type: 1, eaccount: c.mailed }),
+      });
+      listEmails.mockResolvedValue({
+        items: [replyEmail({ id: `twin-${i}`, eaccount: c.arrived, to_address_email_list: c.arrived })],
+        next_starting_after: null,
+      });
+      const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+      await pollAndQualifyReplies();
+      expect(qualifyReply).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('still flags cross-client when generic locals match but domains differ (hello@ everywhere)', async () => {
+    fetchThreadContext.mockResolvedValue({
+      replyEmail: replyEmail({ id: 'generic-email' }),
+      threadEmails: [replyEmail({ id: 'generic-out', ue_type: 1, eaccount: 'hello@stratgrowthlink.online' })],
+      lastOutbound: replyEmail({ id: 'generic-out', ue_type: 1, eaccount: 'hello@stratgrowthlink.online' }),
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'generic-email', eaccount: 'hello@connectifygroup.ru', to_address_email_list: 'hello@connectifygroup.ru' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    await pollAndQualifyReplies();
+
+    expect(qualifyReply).not.toHaveBeenCalled();
+    const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+    expect(rows[0]?.status).toBe('needs_review');
   });
 
   it('does not flag cross-client when the reply arrived at the same mailbox that mailed the lead', async () => {

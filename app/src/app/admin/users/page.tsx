@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import type { Route } from 'next';
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole, UserProfile } from '@/types';
 import { ALL_ROLES, ROLE_LABELS, isAdmin } from '@/lib/roles';
@@ -10,7 +10,8 @@ import { useUser } from '@/lib/UserProvider';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
-import { Check, CheckCircle2, ChevronDown, ChevronUp, Loader2, MoreVertical, Plus, Power, Unlock } from 'lucide-react';
+import { Check, CheckCircle2, ChevronDown, ChevronUp, FileUp, Loader2, MoreVertical, Plus, Power, Unlock } from 'lucide-react';
+import { parseInnColumn } from '@/lib/companiesSearch/innCsv';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, ALL_NAV_TAB_IDS, NAV_TABS_CONFIG } from '@/lib/toolsRegistry';
 import { CampaignStatusLabels } from '@/lib/instantly/types';
 
@@ -366,6 +367,51 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
     }
   }, [userId, apiFetch, onFinishSetupResult, onSuccessMessage, onError]);
 
+  // ── Бэкфилл seen-журнала B2B-поиска из старой CSV-выгрузки клиента ──
+  const seenFileRef = useRef<HTMLInputElement | null>(null);
+  const [importingSeen, setImportingSeen] = useState(false);
+
+  const handleSeenImportFile = useCallback(async (file: File) => {
+    setImportingSeen(true);
+    try {
+      const text = await file.text();
+      const inns = parseInnColumn(text);
+      if (inns.length === 0) {
+        onError('В файле не найдено ни одного ИНН (нужен CSV выгрузки B2B-поиска)');
+        return;
+      }
+      const dateRaw = window.prompt(
+        `Найдено ИНН: ${inns.length}. Дата той выгрузки (ГГГГ-ММ-ДД), пусто = сегодня:`,
+        '',
+      );
+      if (dateRaw === null) return; // отмена
+      let exported_at: string | undefined;
+      if (dateRaw.trim()) {
+        const d = new Date(dateRaw.trim());
+        if (Number.isNaN(d.getTime())) {
+          onError('Некорректная дата — импорт отменён');
+          return;
+        }
+        exported_at = d.toISOString();
+      }
+      const res = await apiFetch<{ total_inns: number; matched_companies: number; unmatched_inns: number }>(
+        `/api/admin/users/${userId}/companies-seen/import`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ inns, ...(exported_at ? { exported_at } : {}) }),
+        },
+      );
+      onSuccessMessage(
+        `Выгрузка импортирована: помечено ${res.matched_companies} компаний (ИНН в файле: ${res.total_inns}, не найдено в базе: ${res.unmatched_inns})`,
+      );
+    } catch (err: unknown) {
+      onError(getErrorMessage(err));
+    } finally {
+      setImportingSeen(false);
+      if (seenFileRef.current) seenFileRef.current.value = '';
+    }
+  }, [userId, apiFetch, onSuccessMessage, onError]);
+
   const handleUnlockPayment = useCallback(async () => {
     setActivating(true);
     try {
@@ -647,6 +693,29 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
             )}
           </button>
         )}
+        <input
+          ref={seenFileRef}
+          type="file"
+          accept=".csv,.txt"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void handleSeenImportFile(f);
+          }}
+        />
+        <button
+          type="button"
+          disabled={importingSeen}
+          onClick={() => seenFileRef.current?.click()}
+          title="Бэкфилл журнала выгрузок B2B-поиска: загрузите старую CSV-выгрузку клиента — компании из неё пометятся «уже выгружены» и не попадут в повторные выгрузки"
+          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-600 shadow-sm transition-colors hover:border-gray-300 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {importingSeen ? (
+            <><Loader2 className="h-3.5 w-3.5 animate-spin" /><span>Импорт…</span></>
+          ) : (
+            <><FileUp className="h-3.5 w-3.5 shrink-0" /><span>Импорт выгрузок B2B (CSV)</span></>
+          )}
+        </button>
         {(subscriptionActive || subscriptionSetup) && paymentLocked && (
           <button
             type="button"
