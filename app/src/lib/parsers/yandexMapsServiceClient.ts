@@ -64,8 +64,12 @@ function sleep(ms: number) {
 }
 
 function getTimeoutMs() {
-  const raw = Number(process.env.YANDEXMAPS_SERVICE_TIMEOUT_MS ?? '600000');
-  return Number.isFinite(raw) && raw > 0 ? raw : 600000;
+  // 990с: обязан быть БОЛЬШЕ серверных COLLECT_TIMEOUT_SEC / PARSE_TIMEOUT_SEC
+  // (900с) — тогда сервис успевает сам завершиться и вернуть внятную ошибку.
+  // Раньше было 600с < 900с: клиент обрывал стрим первым, на стороне сервиса
+  // от этого утекал слот семафора (см. server.py) и сервис вставал намертво.
+  const raw = Number(process.env.YANDEXMAPS_SERVICE_TIMEOUT_MS ?? '990000');
+  return Number.isFinite(raw) && raw > 0 ? raw : 990000;
 }
 
 function getMaxRetries() {

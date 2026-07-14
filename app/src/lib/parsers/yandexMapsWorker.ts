@@ -240,6 +240,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     const collectConcurrency = Number(process.env.YANDEXMAPS_COLLECT_CONCURRENCY ?? '2');
     let completedUrls = 0;
     let blockedUrls = 0;
+    let failedUrls = 0;
     const proxyPoolSize = job.proxy_enabled ? 1 : getYandexMapsProxyPool().length;
     void logInfo('parser.yandexmaps.collect.proxy', 'YandexMaps collect proxy pool', { jobId, proxyPoolSize }, logMeta);
 
@@ -326,6 +327,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
           );
           await urlSpan?.fail(lastBlockedError);
         } else if (lastGenericError) {
+          failedUrls += 1;
           void logWarn(
             'parser.yandexmaps.collect.url_failed',
             'Collect-links failed for URL',
@@ -365,6 +367,21 @@ export async function runYandexMapsCollectLinks(jobId: string) {
         completed_at: new Date().toISOString(),
       });
       void logWarn('parser.yandexmaps.collect.all_blocked', 'Collect finished with 0 links due to blocking', { jobId, blockedUrls, totalUrls: searchUrls.length }, logMeta);
+    } else if (failedUrls > 0) {
+      // 0 ссылок и все (или часть) URL упали с не-блокировочной ошибкой —
+      // прокси не тянет страницу / сервис недоступен. Раньше такая задача
+      // помечалась «Завершено» с 0 ссылок, и было непонятно, что сломано.
+      const msg =
+        `Не удалось собрать ссылки: ${failedUrls} из ${searchUrls.length} поисковых запросов ` +
+        `упали с ошибкой загрузки страницы (прокси не отвечает или слишком медленный). ` +
+        `Проверьте прокси и нажмите «Продолжить парсинг».`;
+      await setJobPatch(jobId, {
+        status: 'failed',
+        error_message: msg,
+        progress_stage: 'collect_failed',
+        completed_at: new Date().toISOString(),
+      });
+      void logWarn('parser.yandexmaps.collect.all_failed', 'Collect finished with 0 links due to URL errors', { jobId, failedUrls, totalUrls: searchUrls.length }, logMeta);
     } else {
       await setJobPatch(jobId, {
         status: 'completed',

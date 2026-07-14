@@ -139,6 +139,15 @@ async def collect_links_stream(req: CollectLinksRequest):
 
   Async-версия: on_links работает в том же event loop, batches
   передаются через asyncio.Queue напрямую (без потоков и polling).
+
+  Cleanup-контракт (инцидент 14.07.2026): release семафора и закрытие
+  браузера живут в finally run_collect — отдельной task, которую обрыв
+  клиента не отменяет. Раньше cleanup был в finally generate(): когда
+  клиент отваливался (таймаут воркера 10 мин < наших 12-15 мин), Starlette
+  отменял generate(), первый же await в его finally ловил CancelledError,
+  parser.close() и release() не выполнялись. Два оборванных стрима — и оба
+  слота семафора утекли: все новые запросы вечно висели в acquire(),
+  задачи «шли» часами с 0 ссылок, а зомби-chromium жили до рестарта.
   """
   await _REQUEST_SEMAPHORE.acquire()
 
@@ -157,6 +166,12 @@ async def collect_links_stream(req: CollectLinksRequest):
 
   parser = YandexMapsParser(proxy_settings=_to_proxy_settings(req.proxy), headless=req.headless)
 
+  async def close_parser_detached():
+    try:
+      await parser.close()
+    except Exception:
+      pass
+
   async def run_collect():
     try:
       await parser.start()
@@ -174,7 +189,14 @@ async def collect_links_stream(req: CollectLinksRequest):
     except Exception as e:
       await link_queue.put({"__error": str(e)})
     finally:
-      await link_queue.put(DONE)
+      # Только синхронные вызовы: если run_collect отменили (task.cancel()
+      # из generate при обрыве клиента), любой await здесь сразу словит
+      # CancelledError и оставшиеся строки не выполнятся. release() и
+      # put_nowait синхронны — выполняются гарантированно; браузер
+      # закрываем отдельной task, её отмена нас уже не касается.
+      _REQUEST_SEMAPHORE.release()
+      link_queue.put_nowait(DONE)
+      asyncio.create_task(close_parser_detached())
 
   async def generate():
     task = asyncio.create_task(run_collect())
@@ -193,13 +215,11 @@ async def collect_links_stream(req: CollectLinksRequest):
         else:
           yield json.dumps(msg, ensure_ascii=False) + "\n"
     finally:
-      # Дожидаемся завершения task, чтобы close() случился после collect.
-      try:
-        await task
-      except Exception:
-        pass
-      await parser.close()
-      _REQUEST_SEMAPHORE.release()
+      # Мы можем быть в отменённом anyio-scope (клиент отвалился) — здесь
+      # нельзя await'ить. cancel() синхронный; cleanup сделает сам
+      # run_collect в своём finally.
+      if not task.done():
+        task.cancel()
 
   return StreamingResponse(generate(), media_type="application/x-ndjson")
 

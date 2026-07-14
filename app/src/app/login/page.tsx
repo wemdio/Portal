@@ -167,9 +167,24 @@ export default function LoginPage() {
           : typeof caughtError === 'object' && caughtError !== null && 'message' in caughtError && typeof (caughtError as { message: unknown }).message === 'string'
             ? ((caughtError as { message: string }).message)
             : 'Неизвестная ошибка при аутентификации.';
+      const errorCode =
+        typeof caughtError === 'object' && caughtError !== null && 'code' in caughtError && typeof (caughtError as { code: unknown }).code === 'string'
+          ? (caughtError as { code: string }).code
+          : '';
 
-      if (errorMessage.includes('invalid_credentials')) {
+      // GoTrue кладёт машинный код в error.code, а в message — английский
+      // текст («Invalid login credentials»). Проверяем оба.
+      if (errorCode === 'invalid_credentials' || errorMessage.includes('invalid_credentials') || /invalid login credentials/i.test(errorMessage)) {
         setError('Неверный email или пароль.');
+      } else if (
+        // Сервер авторизации недоступен/отвечает мусором (падение БД,
+        // 502/504 от гейтвея): message бывает пустым или «{}» — показывать
+        // это пользователю бессмысленно. Инцидент 14.07.2026.
+        !errorMessage.trim() ||
+        errorMessage.trim() === '{}' ||
+        /fetch failed|failed to fetch|networkerror|load failed|timeout|upstream|unavailable|bad gateway/i.test(errorMessage)
+      ) {
+        setError('Сервер временно недоступен. Подождите минуту и попробуйте ещё раз.');
       } else {
         setError(errorMessage);
       }
