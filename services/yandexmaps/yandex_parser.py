@@ -337,6 +337,7 @@ class YandexMapsParser:
       await stealth_async(page)
     except Exception as e:
       self.log(f"[!] stealth_async не применился: {e}")
+    goto_timed_out = False
     try:
       try:
         # 90s — первичная загрузка через медленный мобильный прокси
@@ -345,7 +346,13 @@ class YandexMapsParser:
         # На быстром интернете 5-10 сек, тут 20-40, а иногда до минуты.
         await page.goto(search_url, wait_until="domcontentloaded", timeout=90000)
       except PWTimeoutError:
-        # Не бросаем — часть карточек может быть уже в DOM.
+        # Не бросаем сразу — часть карточек может быть уже в DOM. Но если
+        # в итоге соберём 0 ссылок, обязаны упасть с ошибкой (см. ниже):
+        # «0 ссылок при незагрузившейся странице» — это сбой прокси/сети,
+        # а не пустая выдача. Инцидент 14.07.2026: задушенные прокси
+        # (2-11 КБ/с) давали goto timeout на каждом URL, парсер молча
+        # возвращал 0 ссылок, задачи «успешно завершались» пустыми.
+        goto_timed_out = True
         self.log(f"[!] page.goto timeout 90s для {search_url}, пробуем работать с тем что есть")
 
       if await self._page_looks_blocked(page):
@@ -379,6 +386,11 @@ class YandexMapsParser:
         soup = BeautifulSoup(html, "lxml")
         links = self._extract_links_from_soup(soup)
         result = links[:max_results]
+        if not result and goto_timed_out:
+          raise RuntimeError(
+            "page_load_timeout: страница поиска не загрузилась за 90с и ссылок не найдено — "
+            "прокси слишком медленный или недоступен"
+          )
         if on_links and result:
           on_links(result, len(result))
         return result
@@ -506,12 +518,21 @@ class YandexMapsParser:
       if loop.time() >= deadline:
         self.log(f"[!] Таймаут сбора ссылок ({max_seconds}с), собрано {len(links)}")
 
+      if not links and goto_timed_out:
+        raise RuntimeError(
+          "page_load_timeout: страница поиска не загрузилась за 90с и ссылок не найдено — "
+          "прокси слишком медленный или недоступен"
+        )
       return links[:max_results]
     except YandexBlockedError:
       raise
     except Exception as e:
       self.log(f"[X] Ошибка при сборе ссылок: {e}")
-      return links[:max_results]
+      # Частичный результат отдаём, но «0 ссылок из-за ошибки» — не успех:
+      # молчаливый return [] превращал сбой прокси в «Завершено, 0 ссыл.».
+      if links:
+        return links[:max_results]
+      raise
     finally:
       self.is_running = False
       try:
@@ -808,7 +829,9 @@ class YandexMapsParser:
   def _normalize_org_url(self, url: str) -> str:
     if not url:
       return ""
-    url = re.sub(r"https?://yandex\.(by|kz|ua|com)", "https://yandex.ru", url)
+    # com\.tr до com: иначе для yandex.com.tr заменится только «com» и
+    # получится битый yandex.ru.tr (турецкий выход прокси → yandex.com.tr).
+    url = re.sub(r"https?://yandex\.(by|kz|ua|com\.tr|com)", "https://yandex.ru", url)
     match = re.search(r"(https://yandex\.ru/maps/org/[^/]+/\d+)", url)
     if match:
       return match.group(1) + "/"

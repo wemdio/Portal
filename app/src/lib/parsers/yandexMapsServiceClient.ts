@@ -64,8 +64,12 @@ function sleep(ms: number) {
 }
 
 function getTimeoutMs() {
-  const raw = Number(process.env.YANDEXMAPS_SERVICE_TIMEOUT_MS ?? '600000');
-  return Number.isFinite(raw) && raw > 0 ? raw : 600000;
+  // 990с: обязан быть БОЛЬШЕ серверных COLLECT_TIMEOUT_SEC / PARSE_TIMEOUT_SEC
+  // (900с) — тогда сервис успевает сам завершиться и вернуть внятную ошибку.
+  // Раньше было 600с < 900с: клиент обрывал стрим первым, на стороне сервиса
+  // от этого утекал слот семафора (см. server.py) и сервис вставал намертво.
+  const raw = Number(process.env.YANDEXMAPS_SERVICE_TIMEOUT_MS ?? '990000');
+  return Number.isFinite(raw) && raw > 0 ? raw : 990000;
 }
 
 function getMaxRetries() {
@@ -164,6 +168,33 @@ export async function yandexMapsHealth(): Promise<boolean> {
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+export type ProxyCheckResult = { ok: boolean; speed_bps: number; seconds?: number; bytes?: number; error?: string };
+
+/**
+ * Замер скорости прокси через сервис (без браузера). Возвращает null, если
+ * сам чек недоступен (старый образ сервиса без /proxy-check, сетевая ошибка) —
+ * вызывающий код трактует это как «фильтровать нечем, используем весь пул».
+ */
+export async function yandexMapsProxyCheck(proxy: YandexMapsProxy, timeoutSec = 15): Promise<ProxyCheckResult | null> {
+  const url = `${getServiceUrl()}/proxy-check`;
+  try {
+    const res = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proxy, timeout_sec: timeoutSec }),
+      },
+      (timeoutSec + 10) * 1000,
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as ProxyCheckResult;
+    return typeof data?.ok === 'boolean' ? data : null;
+  } catch {
+    return null;
   }
 }
 
