@@ -5,6 +5,7 @@ from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
 
 from yandex_parser import Organization, ProxySettings, YandexBlockedError, YandexMapsParser
@@ -109,6 +110,52 @@ def _org_to_model(org: Organization) -> OrganizationModel:
 @app.get("/health")
 async def health():
   return {"ok": True}
+
+
+class ProxyCheckRequest(BaseModel):
+  proxy: Optional[ProxyModel] = None
+  timeout_sec: int = Field(default=15, ge=3, le=60)
+
+
+@app.post("/proxy-check")
+async def proxy_check(req: ProxyCheckRequest):
+  """Быстрый замер скорости прокси БЕЗ запуска браузера.
+
+  Качаем ~287 КБ статики через APIRequestContext и меряем скорость.
+  Воркер зовёт это перед задачей и выкидывает из ротации прокси, которые
+  не тянут. Инцидент 14.07.2026: shared LTE-каналы проседали до 2.7 КБ/с,
+  страница Карт не загружалась в принципе, а парсер продолжал гонять все
+  URL через мёртвые прокси и «завершал» задачи с 0 ссылок.
+
+  Семафором не гейтим: запрос дешёвый (без chromium), а гейт заставил бы
+  чек ждать за длинными collect'ами.
+  """
+  test_url = "https://code.jquery.com/jquery-3.7.1.js"  # ~287 КБ, стабильный CDN
+  proxy = _to_proxy_settings(req.proxy).to_playwright_proxy()
+  loop = asyncio.get_event_loop()
+  started = loop.time()
+  try:
+    async with async_playwright() as pw:
+      ctx = await pw.request.new_context(proxy=proxy)
+      try:
+        resp = await ctx.get(test_url, timeout=req.timeout_sec * 1000)
+        body = await resp.body()
+        elapsed = max(loop.time() - started, 0.001)
+        return {
+          "ok": bool(resp.ok) and len(body) > 0,
+          "bytes": len(body),
+          "seconds": round(elapsed, 2),
+          "speed_bps": int(len(body) / elapsed),
+        }
+      finally:
+        await ctx.dispose()
+  except Exception as e:
+    return {
+      "ok": False,
+      "error": str(e)[:200],
+      "seconds": round(loop.time() - started, 2),
+      "speed_bps": 0,
+    }
 
 
 @app.post("/collect-links", response_model=CollectLinksResponse)
