@@ -1,18 +1,20 @@
 /**
  * One-shot cron entry для Sales AI Analysis: набивает джобы в очередь.
  *
- * Запускается system-crontab'ом раз в сутки (03:00 MSK = 00:00 UTC), после
- * ночного синка external-sync (там 02:00 MSK). Не висит в памяти — грузит
- * список сделок-кандидатов через dealFilter.pickDealsForAnalysis, дедупит
- * по уже существующим open джобам (чтобы деплой не создавал дубли), инсертит
+ * Запускается system-crontab'ом раз в сутки в 06:30 MSK (= 03:30 UTC),
+ * после ночного синка external-sync (там 05:00 MSK) и с запасом на его
+ * долгие прогоны (до 15-20 мин). Не висит в памяти — грузит список
+ * сделок-кандидатов через dealFilter.pickDealsForAnalysis, дедупит по уже
+ * существующим open джобам (чтобы деплой не создавал дубли), инсертит
  * pending-джобы, выходит. Далее сам worker/salesAiAnalysis.ts (long-running)
  * их разгребает.
  *
  * Деплой:
  *   1. Добавить worker/salesAiAnalysisCron.ts в build:workers (уже сделано).
  *   2. На сервере в crontab (под пользователем приложения, не root):
- *        0 0 * * * cd /path/to/portal/app && /usr/bin/node --env-file=../.env dist/workers/salesAiAnalysisCron.js >> /var/log/portal/sales-ai-cron.log 2>&1
- *   3. Проверить: `docker exec portal-worker-sales-ai-analysis node dist/workers/salesAiAnalysisCron.js`
+ *        30 3 * * * docker exec portal-worker-sales-ai-analysis node dist/workers/salesAiAnalysisCron.js >> /var/log/portal/sales-ai-cron.log 2>&1
+ *      (03:30 UTC = 06:30 MSK. Cron на хосте держим в UTC.)
+ *   3. Ручной прогон: `docker exec portal-worker-sales-ai-analysis node dist/workers/salesAiAnalysisCron.js`
  */
 
 import { createWorkerLogger, requireSupabaseAdmin } from './_shared';
