@@ -858,7 +858,11 @@ services:
           cpus: '3'
     restart: unless-stopped
     ports:
-      - "8010:8000"
+      # ТОЛЬКО localhost: воркер ходит через docker-сеть (yandexmaps:8000),
+      # наружу порт не нужен. С "8010:8000" API парсера торчал в интернет —
+      # 14.07.2026 в логах uvicorn сканеры (GET / c внешних IP): любой мог
+      # гонять наши прокси через /collect-links без авторизации.
+      - "127.0.0.1:8010:8000"
     networks:
       - portal-network
 

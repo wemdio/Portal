@@ -5,6 +5,7 @@ from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
 
 from yandex_parser import Organization, ProxySettings, YandexBlockedError, YandexMapsParser
@@ -111,6 +112,52 @@ async def health():
   return {"ok": True}
 
 
+class ProxyCheckRequest(BaseModel):
+  proxy: Optional[ProxyModel] = None
+  timeout_sec: int = Field(default=15, ge=3, le=60)
+
+
+@app.post("/proxy-check")
+async def proxy_check(req: ProxyCheckRequest):
+  """Быстрый замер скорости прокси БЕЗ запуска браузера.
+
+  Качаем ~287 КБ статики через APIRequestContext и меряем скорость.
+  Воркер зовёт это перед задачей и выкидывает из ротации прокси, которые
+  не тянут. Инцидент 14.07.2026: shared LTE-каналы проседали до 2.7 КБ/с,
+  страница Карт не загружалась в принципе, а парсер продолжал гонять все
+  URL через мёртвые прокси и «завершал» задачи с 0 ссылок.
+
+  Семафором не гейтим: запрос дешёвый (без chromium), а гейт заставил бы
+  чек ждать за длинными collect'ами.
+  """
+  test_url = "https://code.jquery.com/jquery-3.7.1.js"  # ~287 КБ, стабильный CDN
+  proxy = _to_proxy_settings(req.proxy).to_playwright_proxy()
+  loop = asyncio.get_event_loop()
+  started = loop.time()
+  try:
+    async with async_playwright() as pw:
+      ctx = await pw.request.new_context(proxy=proxy)
+      try:
+        resp = await ctx.get(test_url, timeout=req.timeout_sec * 1000)
+        body = await resp.body()
+        elapsed = max(loop.time() - started, 0.001)
+        return {
+          "ok": bool(resp.ok) and len(body) > 0,
+          "bytes": len(body),
+          "seconds": round(elapsed, 2),
+          "speed_bps": int(len(body) / elapsed),
+        }
+      finally:
+        await ctx.dispose()
+  except Exception as e:
+    return {
+      "ok": False,
+      "error": str(e)[:200],
+      "seconds": round(loop.time() - started, 2),
+      "speed_bps": 0,
+    }
+
+
 @app.post("/collect-links", response_model=CollectLinksResponse)
 async def collect_links(req: CollectLinksRequest):
   async with _REQUEST_SEMAPHORE:
@@ -139,6 +186,15 @@ async def collect_links_stream(req: CollectLinksRequest):
 
   Async-версия: on_links работает в том же event loop, batches
   передаются через asyncio.Queue напрямую (без потоков и polling).
+
+  Cleanup-контракт (инцидент 14.07.2026): release семафора и закрытие
+  браузера живут в finally run_collect — отдельной task, которую обрыв
+  клиента не отменяет. Раньше cleanup был в finally generate(): когда
+  клиент отваливался (таймаут воркера 10 мин < наших 12-15 мин), Starlette
+  отменял generate(), первый же await в его finally ловил CancelledError,
+  parser.close() и release() не выполнялись. Два оборванных стрима — и оба
+  слота семафора утекли: все новые запросы вечно висели в acquire(),
+  задачи «шли» часами с 0 ссылок, а зомби-chromium жили до рестарта.
   """
   await _REQUEST_SEMAPHORE.acquire()
 
@@ -157,6 +213,12 @@ async def collect_links_stream(req: CollectLinksRequest):
 
   parser = YandexMapsParser(proxy_settings=_to_proxy_settings(req.proxy), headless=req.headless)
 
+  async def close_parser_detached():
+    try:
+      await parser.close()
+    except Exception:
+      pass
+
   async def run_collect():
     try:
       await parser.start()
@@ -174,7 +236,14 @@ async def collect_links_stream(req: CollectLinksRequest):
     except Exception as e:
       await link_queue.put({"__error": str(e)})
     finally:
-      await link_queue.put(DONE)
+      # Только синхронные вызовы: если run_collect отменили (task.cancel()
+      # из generate при обрыве клиента), любой await здесь сразу словит
+      # CancelledError и оставшиеся строки не выполнятся. release() и
+      # put_nowait синхронны — выполняются гарантированно; браузер
+      # закрываем отдельной task, её отмена нас уже не касается.
+      _REQUEST_SEMAPHORE.release()
+      link_queue.put_nowait(DONE)
+      asyncio.create_task(close_parser_detached())
 
   async def generate():
     task = asyncio.create_task(run_collect())
@@ -193,13 +262,11 @@ async def collect_links_stream(req: CollectLinksRequest):
         else:
           yield json.dumps(msg, ensure_ascii=False) + "\n"
     finally:
-      # Дожидаемся завершения task, чтобы close() случился после collect.
-      try:
-        await task
-      except Exception:
-        pass
-      await parser.close()
-      _REQUEST_SEMAPHORE.release()
+      # Мы можем быть в отменённом anyio-scope (клиент отвалился) — здесь
+      # нельзя await'ить. cancel() синхронный; cleanup сделает сам
+      # run_collect в своём finally.
+      if not task.done():
+        task.cancel()
 
   return StreamingResponse(generate(), media_type="application/x-ndjson")
 
