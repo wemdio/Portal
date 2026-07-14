@@ -1164,11 +1164,17 @@ async function notifyClientOfReply(
 
     if (clientUserIds.size === 0) return;
 
-    const { data: links } = await instantlyDb
+    const { data: links, error: linksErr } = await instantlyDb
       .from('client_reply_telegram_links')
       .select('client_user_id, chat_id, leads_only')
       .in('client_user_id', [...clientUserIds])
       .eq('enabled', true);
+    // Ошибку НЕ глотаем: блип instantly-БД (144) иначе молча выключил бы ВСЕ
+    // клиентские DM без следа — было бы неотличимо от «ни у кого нет привязки».
+    if (linksErr) {
+      workerLog('warn', `notifyClientOfReply: client_reply_telegram_links query failed (campaign ${campaignId}) — ${linksErr.message}`);
+      return;
+    }
     if (!links?.length) return;
 
     for (const link of links as { client_user_id: string; chat_id: number; leads_only?: boolean | null }[]) {
