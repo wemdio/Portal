@@ -58,7 +58,7 @@ describe('sanitizeClientHypothesesMarkdown', () => {
     const [hhBlock, registryBlock] = sanitized.split('\n\n### Гипотеза 2:');
 
     expect(hhBlock).not.toMatch(/ССЧ|выручк|оборот|размер компании|микро/i);
-    expect(hhBlock).toContain('HH не даёт все данные о компании');
+    expect(hhBlock).toContain('поиск по вакансиям не даёт все данные о компании');
     expect(registryBlock).toContain('ССЧ 30–300');
     expect(registryBlock).toContain('выручка 50–500 млн ₽');
   });

@@ -17,7 +17,7 @@ function parseTab(value: string | null | undefined): Tab {
 }
 
 const TABS: { tab: Tab; label: string }[] = [
-  { tab: 'hh', label: 'HH.ru парсер' },
+  { tab: 'hh', label: 'Поиск по вакансиям' },
   { tab: 'search', label: 'Поиск' },
   { tab: 'yandexmaps', label: 'Яндекс.Карты' },
 ];
@@ -81,7 +81,7 @@ export default function ClientParsersPage() {
           Инструменты парсинга
         </h1>
         <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
-          Парсеры HH.ru, поисковой выдачи и Яндекс.Карт
+          Поиск по вакансиям, поисковая выдача и Яндекс.Карты
         </p>
       </header>
 
