@@ -77,7 +77,10 @@ export async function runPipeline(
   try {
     llm = await callLLMWithSchema(messages, SalesAiAnalysisSchema, {
       model: DEFAULT_MODEL,
-      maxTokens: 4096,
+      // 27 полей + evidence на русском (BPE-токены кириллицы в 3-5× дороже
+      // латиницы) — 4096 обрубает JSON посередине. 8192 хватает с запасом,
+      // Haiku 4.5 держит output до 64K; худший case = $0.04/сделку.
+      maxTokens: 8192,
     });
   } catch (err) {
     const msg = err instanceof LLMValidationError
