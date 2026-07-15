@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
-import type { MailboxLoad, TagLoad, SpecialistLoad, MailboxRow, PoolInfo, TagStatus } from '@/lib/instantly/mailboxLoad';
+import type { MailboxLoad, TagLoad, SpecialistLoad, MailboxRow, TagStatus } from '@/lib/instantly/mailboxLoad';
 
 // ── визуальные пресеты статусов утилизации ────────────────────────────────────
 // Пороги и статус считает ТОЛЬКО сервер (classify в mailboxLoad.ts) — здесь
@@ -58,25 +58,6 @@ function SummaryTile({ label, value, sub }: { label: string; value: string; sub?
       <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">{label}</p>
       <p className="mt-1 text-xl font-semibold tabular-nums text-zinc-900">{value}</p>
       {sub && <p className="text-[11px] text-zinc-400">{sub}</p>}
-    </div>
-  );
-}
-
-function PoolCard({ pool }: { pool: PoolInfo }) {
-  const exhausted = pool.freeMailboxes === 0;
-  return (
-    <div className={`flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border px-4 py-2.5 text-xs ${
-      exhausted ? 'border-amber-200 bg-amber-50' : 'border-zinc-200 bg-white'
-    }`}>
-      <span className="font-medium text-zinc-800">Резерв «{pool.tag}»</span>
-      <span className={exhausted ? 'font-semibold text-amber-700' : 'text-zinc-600'}>
-        свободно: <b className="tabular-nums">{pool.freeMailboxes}</b> ящиков ({fmt(pool.freeCapacity)} писем/день)
-      </span>
-      <span className="text-zinc-500">
-        занято под клиентами: <b className="tabular-nums">{pool.takenMailboxes}</b> из {pool.totalMailboxes}
-      </span>
-      {exhausted && <span className="text-amber-700">⚠️ резерв исчерпан — под нового клиента нужны новые ящики</span>}
-      <span className="text-[10px] text-zinc-400">занятые ящики посчитаны в тегах своих клиентов</span>
     </div>
   );
 }
@@ -212,9 +193,6 @@ export default function MailboxLoadPage() {
           <SummaryTile label="Активных ящиков" value={fmt(t.activeMailboxes)} sub="под тегами" />
         </div>
       )}
-
-      {/* пул(ы) неименных ящиков — резерв, не клиент */}
-      {!error && data?.pool.map((p) => <PoolCard key={p.tagId} pool={p} />)}
 
       {/* view toggle */}
       <div className="flex items-center gap-1">
