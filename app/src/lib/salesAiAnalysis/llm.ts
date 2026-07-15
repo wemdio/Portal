@@ -27,9 +27,7 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
 };
 
 function getApiKey(): string {
-  const key = process.env.OPENROUTER_SALES_AI_API_KEY
-           || process.env.OPENROUTER_SALES_COPILOT_API_KEY
-           || process.env.OPENROUTER_TG_OUTREACH_API_KEY;
+  const key = process.env.OPENROUTER_SALES_AI_API_KEY;
   if (!key) throw new Error('OPENROUTER_SALES_AI_API_KEY не задан');
   return key;
 }
