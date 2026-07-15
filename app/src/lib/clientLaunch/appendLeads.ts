@@ -29,6 +29,7 @@ import {
   getClientTariffRow,
   getClientStatus,
   resolveEffectiveLimits,
+  isAwaitingFirstPayment,
 } from '@/lib/tariffs';
 import { ClientLaunchError } from './runLaunch';
 
@@ -162,6 +163,14 @@ export async function appendLeadsToClientCampaign(
   if (clientStatus !== 'active') {
     throw new ClientLaunchError(
       'Подписка не активна — пропускаем прогон',
+      403,
+    );
+  }
+  // Эскалация: неоплаченный после прогрева навсегда 'active' — режем «оформил,
+  // но не оплатил» и на этом (авто-пайплайновом) send-пути тоже.
+  if (isAwaitingFirstPayment(tariffRow)) {
+    throw new ClientLaunchError(
+      'Оформлена подписка, но оплата ещё не поступила — пропускаем прогон',
       403,
     );
   }
