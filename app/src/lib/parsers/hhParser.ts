@@ -999,20 +999,39 @@ async function fetchEmployerDetails(
   };
 }
 
-export async function partitionQuery(config: HHSearchConfig, trace?: Span | null): Promise<HHSearchConfig[]> {
+export type HhCollectionMode = 'split' | 'combined';
+
+/**
+ * Whether an OR-query (terms joined by "|") should be split into one search per
+ * term. In 'split' mode (DEFAULT — used by every existing caller incl. the
+ * Mailganer/Nash/dfyb pipelines) we split: this bypasses HH's 2000-result cap,
+ * but the union of per-term fuzzy searches over-collects vs HH's own combined
+ * count (e.g. 9.8k vs HH's exact 4.8k). In 'combined' mode we keep the whole
+ * query as HH sees it and paginate it by date instead, reproducing HH's exact
+ * result set. Pure + unit-tested so the default behavior stays locked.
+ */
+export function shouldSplitByPipe(text: string | undefined, mode: HhCollectionMode = 'split'): boolean {
+  if (mode === 'combined') return false;
+  if (!text) return false;
+  return text.split('|').map((s) => s.trim()).filter(Boolean).length > 1;
+}
+
+export async function partitionQuery(
+  config: HHSearchConfig,
+  trace?: Span | null,
+  mode: HhCollectionMode = 'split',
+): Promise<HHSearchConfig[]> {
   const normalized = normalizeSearchParams(config);
 
-  if (normalized.text?.includes('|')) {
-    const terms = normalized.text.split('|').map((s) => s.trim()).filter(Boolean);
-    if (terms.length > 1) {
-      const subConfigs = terms.map((t) => ({ ...normalized, text: t }));
-      const allParts: HHSearchConfig[] = [];
-      await mapWithConcurrency(subConfigs, PARTITION_CONCURRENCY, async (sub) => {
-        const parts = await partitionQuerySingle(sub, trace);
-        allParts.push(...parts);
-      });
-      return allParts;
-    }
+  if (shouldSplitByPipe(normalized.text, mode)) {
+    const terms = normalized.text!.split('|').map((s) => s.trim()).filter(Boolean);
+    const subConfigs = terms.map((t) => ({ ...normalized, text: t }));
+    const allParts: HHSearchConfig[] = [];
+    await mapWithConcurrency(subConfigs, PARTITION_CONCURRENCY, async (sub) => {
+      const parts = await partitionQuerySingle(sub, trace);
+      allParts.push(...parts);
+    });
+    return allParts;
   }
 
   return partitionQuerySingle(normalized, trace);
@@ -1150,6 +1169,12 @@ type FetchVacanciesOptions = {
   /** Minimum number of new vacancies to accumulate before calling onBatch. Default 1000. */
   batchFlushSize?: number;
   trace?: Span | null;
+  /**
+   * 'combined' reproduces HH's own OR-query (paginated by date) instead of the
+   * default per-term split. Opt-in; default 'split' keeps existing behavior for
+   * all current callers (auto-pipelines, dfyb, etc.).
+   */
+  collectionMode?: HhCollectionMode;
   logMeta?: {
     userId?: string | null;
     requestId?: string | null;
@@ -1233,7 +1258,7 @@ export async function fetchVacancies(
     : PARTITION_TIMEOUT_MS;
   try {
     partitions = await withTimeout(
-      partitionQuery(normalized, options?.trace),
+      partitionQuery(normalized, options?.trace, options?.collectionMode),
       partitionTimeout,
       () =>
         new HHApiError('HH partitioning timed out', {

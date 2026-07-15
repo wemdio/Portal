@@ -2635,7 +2635,7 @@ const PAIRS: Array<[string, string]> = [
   ['HH.ru Парсер', 'HH.ru Parser'],
   ['Поисковая выдача', 'Search results'],
   ['Яндекс.Карты', 'Yandex Maps'],
-  ['Открыть капчу HH.ru', 'Open HH.ru captcha'],
+  ['Открыть капчу', 'Open captcha'],
   ['Перейти', 'Go to'],
   ['Понятно', 'Got it'],
   ['Запустить', 'Start'],

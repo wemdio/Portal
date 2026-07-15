@@ -158,7 +158,7 @@ export async function applyInvoicePaidToTariff(
 
   const { data: tariff } = await supabaseAdmin
     .from('client_tariffs')
-    .select('id, billing_mode, payment_locked, paid_at, setup_until, paid_until, test_period_minutes')
+    .select('id, billing_mode, payment_locked, paid_at, setup_until, paid_until, test_period_minutes, billing_period')
     .eq('user_id', clientUserId)
     .maybeSingle();
 
@@ -167,15 +167,22 @@ export async function applyInvoicePaidToTariff(
   const now = new Date().toISOString();
   const tariffUpdate: Record<string, unknown> = {};
 
-  // QA test mode short-circuits the standard "+1 month" — the whole point is
-  // to exercise the renewal loop in minutes against the real YK shop.
+  // Длина оплаченного периода. Раньше здесь жёстко прибавлялся +1 месяц вне
+  // зависимости от billing_period — из-за чего оплата по счёту квартала/полгода/
+  // года зачисляла лишь ОДИН месяц paid_until. Теперь прибавляем полный период
+  // (BILLING_PERIOD_MONTHS). billing_period=null (ручной режим) → 1 месяц, как
+  // прежде. Совпадает с инкрементом крона (billing.ts) и admin-роута.
   const testMinutes = tariff.test_period_minutes;
+  const billingPeriod = tariff.billing_period as BillingPeriod | null | undefined;
+  const periodMonths = billingPeriod ? (BILLING_PERIOD_MONTHS[billingPeriod] ?? 1) : 1;
+  // QA-тест-режим (test_period_minutes) заменяет месяцы минутами — прогон
+  // renewal-loop в минутах против реального YK-магазина.
   const extendPaidUntil = (base: Date): Date => {
     const next = new Date(base);
     if (testMinutes && testMinutes > 0) {
       next.setMinutes(next.getMinutes() + testMinutes);
     } else {
-      next.setMonth(next.getMonth() + 1);
+      next.setMonth(next.getMonth() + periodMonths);
     }
     return next;
   };
@@ -254,7 +261,78 @@ export function isInSetupPhase(row: ClientTariffRow | null): boolean {
   return getClientStatus(row) === 'setup';
 }
 
+/**
+ * Доступ к ПОДГОТОВИТЕЛЬНЫМ инструментам портала (парсеры HH/Яндекс/Поиск/B2B,
+ * конструктор баз, генерация цепочек) = тариф ОПЛАЧЕН: 'active' ИЛИ 'setup'.
+ *
+ * В фазе setup (прогрев почт, 15 дней) клиент уже оплатил и ДОЛЖЕН готовить
+ * базы и тексты — блокируется только ЗАПУСК кампаний (см. runLaunch, там своё,
+ * более строгое правило: setup тоже режется, т.к. слать во время прогрева
+ * нельзя). Здесь режем только неоплаченных: 'inactive' / 'expired'.
+ *
+ * Единый источник правды: раньше HH/конструктор/цепочки ошибочно резали setup,
+ * Яндекс/Поиск делали верно инлайном, а B2B статус не проверял вовсе.
+ */
+export function isClientToolAccessAllowed(status: ClientStatus): boolean {
+  return status === 'active' || status === 'setup';
+}
+
+/** Сообщение отказа для неоплаченного тарифа (общий текст всех инструментов). */
+export const TOOL_ACCESS_DENIED_MESSAGE =
+  'Подписка не активна. Оплатите тариф для продолжения работы.';
+
+/**
+ * Начало ТЕКУЩЕГО расчётного периода = `paid_until − длина периода`.
+ *
+ * Это ОДИН якорь и для экрана («период с» в /client/tariff), и для всех
+ * счётчиков расхода лимитов (countClientContacts/Rows/Chains фильтруют
+ * `created_at >= periodStart`).
+ *
+ * Почему не `setup_until`: setup_until замораживается на первом месяце и НЕ
+ * двигается при продлении. Пока считали от него — после продления (а) экран
+ * показывал бы «период с <старая дата>» на 2-3 месяца, и (б) лимиты НЕ
+ * сбрасывались бы: расход продлённого клиента считался бы с самого начала
+ * подписки, а не с начала нового месяца.
+ *
+ * Безопасность: в ПЕРВОМ месяце `paid_until = setup_until + период`, поэтому
+ * `paid_until − период == setup_until` — у всех действующих клиентов значение
+ * НЕ меняется (проверено на проде: 0 расхождений). Отличается только ПОСЛЕ
+ * продления. Длину периода не знаем (ручной режим, billing_period=null) —
+ * оставляем прежнее поведение (setup_until).
+ *
+ * Инвариант «paid_until − период == setup_until» точен для дат НЕ на конце
+ * месяца. Для setup_until 29–31-го setMonth даёт overflow (Jan31+1мес=Mar3),
+ * и обратное вычитание не round-trip'ит → начало первого периода может
+ * дрейфить ВПЕРЁД на 1–3 дня. Дрейф безопасен: только месячный тариф, только
+ * первый период (self-heal со 2-го), направление всегда «мягче» — periodStart
+ * ≥ setup_until, поэтому лимит не может ошибочно заблокировать (максимум чуть
+ * щедрее). См. тест «край месяца».
+ */
 export function getBillingPeriodStart(row: ClientTariffRow | null): string {
+  const paidUntil = row?.paid_until ? new Date(row.paid_until) : null;
+  if (paidUntil && !Number.isNaN(paidUntil.getTime())) {
+    const start = new Date(paidUntil);
+    let periodKnown = false;
+    if (row?.test_period_minutes && row.test_period_minutes > 0) {
+      // Тест-магазин: период измеряется минутами, не месяцами.
+      start.setMinutes(start.getMinutes() - row.test_period_minutes);
+      periodKnown = true;
+    } else if (row?.billing_period && BILLING_PERIOD_MONTHS[row.billing_period]) {
+      start.setMonth(start.getMonth() - BILLING_PERIOD_MONTHS[row.billing_period]);
+      periodKnown = true;
+    }
+    if (periodKnown) {
+      // Страховка: начало периода не раньше setup_until (в первый месяц они
+      // равны; при дрейфе данных не даём уехать в прогрев / до старта).
+      if (row?.setup_until) {
+        const su = new Date(row.setup_until);
+        if (!Number.isNaN(su.getTime()) && start.getTime() < su.getTime()) {
+          return row.setup_until;
+        }
+      }
+      return start.toISOString();
+    }
+  }
   if (row?.setup_until) return row.setup_until;
   if (row?.paid_at) return row.paid_at;
   const now = new Date();

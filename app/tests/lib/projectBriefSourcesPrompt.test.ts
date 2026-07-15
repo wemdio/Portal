@@ -210,9 +210,9 @@ describe('renderLeadSourcesKnowledge & client-mode prompt safety', () => {
     expect(combined).toContain('понятно использовать вне портала');
     expect(combined).toContain('внешние открытые источники');
     expect(combined).toContain('Критерии сбора / как собрать базу');
-    expect(combined).toContain('поиск вакансий HH');
+    expect(combined).toContain('поиск вакансий');
     expect(combined).toContain('не через раздел «Компании»');
-    expect(combined).toContain('Для гипотез с источником HH запрещено упоминать ССЧ, выручку');
+    expect(combined).toContain('Для гипотез с источником «Поиск компаний по вакансиям» запрещено упоминать ССЧ, выручку');
     expect(combined).toContain('ни как следующий шаг');
     expect(combined).not.toContain('Конкретные фильтры/запросы');
   });
@@ -248,10 +248,16 @@ describe('renderLeadSourcesKnowledge & client-mode prompt safety', () => {
       audience: 'client',
     });
     const combined = `${system}\n${user}`;
-    const hiddenFromClient = new Set(['Crypto Payments', 'Сигналы']);
+    // «HH» в клиентском промпте переименован в нейтральное «Поиск компаний по
+    // вакансиям» (без бренда площадки) — исключаем его из проверки «по имени»
+    // и отдельно пиним, что нейтральное название есть, а бренда HH/hh.ru — нет.
+    const hiddenFromClient = new Set(['Crypto Payments', 'Сигналы', 'HH']);
     const stillRequired = REQUIRED_SOURCE_NAMES.filter((n) => !hiddenFromClient.has(n));
     for (const source of stillRequired) {
       expect(combined).toContain(source);
     }
+    expect(combined).toContain('Поиск компаний по вакансиям');
+    expect(combined).not.toContain('HeadHunter');
+    expect(combined).not.toContain('hh.ru');
   });
 });

@@ -4,7 +4,7 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import type { HHSearchConfig } from '@/lib/parsers/hhParser';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { getClientTariffUsage } from '@/lib/tariffs';
+import { getClientTariffUsage, isClientToolAccessAllowed, TOOL_ACCESS_DENIED_MESSAGE } from '@/lib/tariffs';
 import { blockDemo } from '@/lib/auth/blockDemo';
 
 export const dynamic = 'force-dynamic';
@@ -95,16 +95,11 @@ export async function POST(req: NextRequest) {
 
     if (profile?.role === 'client') {
       tariffUsage = await getClientTariffUsage(user.id);
-      if (tariffUsage.status === 'setup') {
+      // Парсер — подготовительный инструмент: доступен и в фазе прогрева (setup),
+      // блокируем только неоплаченных. Запуск кампаний режется отдельно (runLaunch).
+      if (!isClientToolAccessAllowed(tariffUsage.status)) {
         return jsonError(
-          'Ваш личный кабинет настраивается. Пожалуйста, подождите — мы скоро всё подготовим.',
-          403,
-          { request_id: requestId, tariff_usage: tariffUsage },
-        );
-      }
-      if (tariffUsage.status !== 'active') {
-        return jsonError(
-          'Подписка не активна. Оплатите тариф для продолжения работы.',
+          TOOL_ACCESS_DENIED_MESSAGE,
           403,
           { request_id: requestId, tariff_usage: tariffUsage },
         );

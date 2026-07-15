@@ -37,8 +37,8 @@ const SOURCES: readonly SourceCard[] = [
   },
   {
     href: '/client/parsers?tab=hh',
-    label: 'HH.ru',
-    description: 'Парсинг компаний по их вакансиям — отличный сигнал найма.',
+    label: 'Поиск по вакансиям',
+    description: 'Сбор компаний по их вакансиям — отличный сигнал найма.',
   },
   {
     href: '/client/parsers?tab=search',
