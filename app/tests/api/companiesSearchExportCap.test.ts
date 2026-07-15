@@ -44,6 +44,10 @@ jest.mock('@/lib/tariffs', () => ({
   resolveEffectiveLimits: jest.fn(() => ({ max_rows: mockMaxRows })),
   getBillingPeriodStart: jest.fn(() => '2026-07-01T00:00:00.000Z'),
   countClientRows: jest.fn(async () => 0),
+  // Гейт оплаты: в этих тестах тариф оплачен (active) → пропускаем.
+  getClientStatus: jest.fn(() => 'active'),
+  isClientToolAccessAllowed: jest.fn(() => true),
+  TOOL_ACCESS_DENIED_MESSAGE: 'Подписка не активна. Оплатите тариф для продолжения работы.',
 }));
 
 jest.mock('@/lib/supabaseAdmin', () => ({

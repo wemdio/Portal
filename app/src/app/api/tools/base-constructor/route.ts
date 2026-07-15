@@ -12,6 +12,8 @@ import {
   getClientStatus,
   getClientTariffUsage,
   resolveEffectiveLimits,
+  isClientToolAccessAllowed,
+  TOOL_ACCESS_DENIED_MESSAGE,
 } from '@/lib/tariffs';
 
 const admin = supabaseAdmin!;
@@ -75,15 +77,11 @@ export async function POST(req: NextRequest) {
       if (role === 'client') {
         const tariffRow = await getClientTariffRow(user.id);
         const clientStatus = getClientStatus(tariffRow);
-        if (clientStatus === 'setup') {
+        // Подготовительный инструмент: доступен в setup (прогрев почт),
+        // блокируем только неоплаченных. Запуск кампаний — отдельно (runLaunch).
+        if (!isClientToolAccessAllowed(clientStatus)) {
           return NextResponse.json(
-            { error: 'Ваш личный кабинет настраивается. Пожалуйста, подождите — мы скоро всё подготовим.' },
-            { status: 403 },
-          );
-        }
-        if (clientStatus !== 'active') {
-          return NextResponse.json(
-            { error: 'Подписка не активна. Оплатите тариф для продолжения работы.' },
+            { error: TOOL_ACCESS_DENIED_MESSAGE },
             { status: 403 },
           );
         }

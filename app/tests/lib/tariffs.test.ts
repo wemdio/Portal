@@ -6,6 +6,7 @@ import {
   TEST_PERIOD_MINUTES_BY_PERIOD,
   TEST_SETUP_MINUTES,
   getBillingPeriodStart,
+  isClientToolAccessAllowed,
 } from '@/lib/tariffs';
 import type { ClientTariffRow } from '@/lib/tariffs';
 
@@ -105,6 +106,21 @@ describe('getBillingPeriodStart — начало ТЕКУЩЕГО периода
     const out = getBillingPeriodStart(null);
     expect(typeof out).toBe('string');
     expect(Number.isNaN(new Date(out).getTime())).toBe(false);
+  });
+});
+
+describe('isClientToolAccessAllowed — оплаченные (active+setup) пускаются, неоплаченные нет', () => {
+  it('active → true', () => {
+    expect(isClientToolAccessAllowed('active')).toBe(true);
+  });
+  it('setup → true (в прогрев почт можно готовить базы/цепочки)', () => {
+    expect(isClientToolAccessAllowed('setup')).toBe(true);
+  });
+  it('inactive → false', () => {
+    expect(isClientToolAccessAllowed('inactive')).toBe(false);
+  });
+  it('expired → false', () => {
+    expect(isClientToolAccessAllowed('expired')).toBe(false);
   });
 });
 

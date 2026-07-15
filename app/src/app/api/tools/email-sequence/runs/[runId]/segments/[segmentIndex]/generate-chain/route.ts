@@ -15,6 +15,8 @@ import {
   getClientStatus,
   getClientTariffUsage,
   resolveEffectiveLimits,
+  isClientToolAccessAllowed,
+  TOOL_ACCESS_DENIED_MESSAGE,
 } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
@@ -230,11 +232,10 @@ export async function POST(
     if (profile?.role === 'client') {
       const tariffRow = await getClientTariffRow(user.id);
       const clientStatus = getClientStatus(tariffRow);
-      if (clientStatus === 'setup') {
-        return jsonError('Ваш личный кабинет настраивается. Пожалуйста, подождите — мы скоро всё подготовим.', 403);
-      }
-      if (clientStatus !== 'active') {
-        return jsonError('Подписка не активна. Оплатите тариф для продолжения работы.', 403);
+      // Генерация цепочки — подготовительный инструмент: доступна в setup
+      // (прогрев почт), режем только неоплаченных. Отправка — отдельно (runLaunch).
+      if (!isClientToolAccessAllowed(clientStatus)) {
+        return jsonError(TOOL_ACCESS_DENIED_MESSAGE, 403);
       }
       const limits = resolveEffectiveLimits(tariffRow);
       const periodStart = getBillingPeriodStart(tariffRow);
