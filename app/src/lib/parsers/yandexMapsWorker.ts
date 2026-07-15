@@ -386,10 +386,20 @@ export async function runYandexMapsCollectLinks(jobId: string) {
               );
               continue;
             }
-            // Не-блокировочная ошибка (сеть/бекенд): не ретраим, логируем
-            // и выходим из цикла — этот URL пропущен, другие URL в batch продолжат.
+            // Не-блокировочная ошибка (timeout, ECONNRESET, отвал прокси) —
+            // тоже ретраим через следующий прокси. Ловил кейс: юзер выбрал
+            // 3×3 = 9 URL, только 1 URL успел прогрузиться, остальные 8 упали
+            // page.goto timeout 90s без ретрая — итог 41 организация из 900
+            // возможных. Смена прокси может помочь: медленный/битый IP уступит
+            // место живому.
             lastGenericError = e;
-            break;
+            void logWarn(
+              'parser.yandexmaps.collect.url_error_retry',
+              `URL ${urlIndex} упал (${e instanceof Error ? e.message.slice(0, 100) : String(e).slice(0, 100)}), пробуем следующий прокси`,
+              { jobId, search_url, attempt: attempt + 1, maxRetries: maxProxyRetries },
+              logMeta,
+            );
+            continue;
           }
         }
 
@@ -652,10 +662,17 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
             );
             continue;
           }
-          // Не-блокировочная ошибка — не смысла ретраить, пропускаем чанк.
-          void logWarn('parser.yandexmaps.parse.chunk_failed', 'Parse-orgs chunk failed', { jobId, chunk: i + 1, error: String(e) }, logMeta);
-          await partSpan?.fail(e);
-          break;
+          // Не-блокировочная ошибка (timeout, сеть) — ретраим через следующий
+          // прокси. Тот же баг что на сборе: один битый IP в ротации ронял
+          // весь чанк из 15 карточек без попыток на живых прокси.
+          lastBlockedError = null;
+          void logWarn(
+            'parser.yandexmaps.parse.chunk_error_retry',
+            `Чанк ${i + 1} упал (${e instanceof Error ? e.message.slice(0, 100) : String(e).slice(0, 100)}), пробуем следующий прокси`,
+            { jobId, chunk: i + 1, attempt: attempt + 1, maxRetries: maxProxyRetries },
+            logMeta,
+          );
+          continue;
         }
       }
 
