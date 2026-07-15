@@ -277,9 +277,37 @@ export function isClientToolAccessAllowed(status: ClientStatus): boolean {
   return status === 'active' || status === 'setup';
 }
 
+/**
+ * TRUE когда клиент ОФОРМИЛ подписку, но НИ РАЗУ не оплатил — ждёт первой
+ * оплаты. Самоподписка автоплатежа (client/payment) ставит is_active=true и
+ * setup_until=+15д ещё ДО оплаты, поэтому getClientStatus даёт 'setup' (а
+ * после прогрева — навсегда 'active', т.к. paid_until пуст) — и один статус
+ * НЕ отличает «оплатил, греется» от «оформил, но не платил». Отличитель —
+ * связка payment_locked (ждём оплату) + paid_at==null (оплаты не было).
+ *
+ * Принимает как сырой tariff-row, так и usage-summary (там payment_locked
+ * вычисленный isPaymentLocked, но при paid_at==null он равен сырому флагу —
+ * autopay-авто-снятие требует непустой paid_at, — так что результат тот же).
+ *
+ * НЕ трогает: оплативших (paid_at выставлен) и админ-компы через unlock_payment
+ * (он чистит payment_locked, не ставя paid_at → здесь false). Именно поэтому
+ * гейт по payment_locked&&!paid_at, а НЕ по одному paid_at и НЕ по isPaymentLocked
+ * (последний у оплатившего автоплатёжника true весь прогрев → заблокировал бы
+ * оплативших).
+ */
+export function isAwaitingFirstPayment(
+  t: { payment_locked?: boolean | null; paid_at?: string | null } | null,
+): boolean {
+  return !!t && t.payment_locked === true && t.paid_at == null;
+}
+
 /** Сообщение отказа для неоплаченного тарифа (общий текст всех инструментов). */
 export const TOOL_ACCESS_DENIED_MESSAGE =
   'Подписка не активна. Оплатите тариф для продолжения работы.';
+
+/** Сообщение отказа, когда подписка оформлена, но ждёт первой оплаты. */
+export const AWAITING_PAYMENT_MESSAGE =
+  'Оформлена подписка, но оплата ещё не поступила. Доступ откроется после оплаты.';
 
 /**
  * Начало ТЕКУЩЕГО расчётного периода = `paid_until − длина периода`.

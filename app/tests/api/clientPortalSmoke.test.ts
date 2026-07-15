@@ -293,6 +293,13 @@ jest.mock('@/lib/tariffs', () => ({
   resolveEffectiveLimits: (row: unknown) => mockResolveEffectiveLimits(row),
   getClientStatus: (row: unknown) => mockGetClientStatus(row),
   getClientTariffUsage: (userId: string) => mockGetClientTariffUsage(userId),
+  // Гейты доступа/оплаты, которые дёргает companies-search route. Здесь тесты
+  // до них не доходят (auth падает раньше), но держим мок полным, чтобы будущий
+  // авторизованный кейс не упал на «is not a function».
+  isClientToolAccessAllowed: () => true,
+  isAwaitingFirstPayment: () => false,
+  TOOL_ACCESS_DENIED_MESSAGE: 'Подписка не активна. Оплатите тариф для продолжения работы.',
+  AWAITING_PAYMENT_MESSAGE: 'Оформлена подписка, но оплата ещё не поступила. Доступ откроется после оплаты.',
 }));
 
 // ── Companies-search regions ─────────────────────────────────────────────────

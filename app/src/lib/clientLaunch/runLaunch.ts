@@ -44,6 +44,7 @@ import {
   getClientTariffRow,
   getClientStatus,
   resolveEffectiveLimits,
+  isAwaitingFirstPayment,
 } from '@/lib/tariffs';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
 
@@ -209,6 +210,15 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
   if (clientStatus !== 'active') {
     throw new ClientLaunchError(
       'Подписка не активна. Оплатите тариф для продолжения работы.',
+      403,
+    );
+  }
+  // Защита от эскалации: неоплаченный клиент после прогрева навсегда становится
+  // 'active' (paid_until пуст → 'expired' не срабатывает), поэтому одной проверки
+  // статуса мало — режем ещё и «оформил, но не оплатил».
+  if (isAwaitingFirstPayment(tariffRow)) {
+    throw new ClientLaunchError(
+      'Оформлена подписка, но оплата ещё не поступила. Запуск станет доступен после оплаты.',
       403,
     );
   }
