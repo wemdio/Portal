@@ -158,7 +158,7 @@ export async function applyInvoicePaidToTariff(
 
   const { data: tariff } = await supabaseAdmin
     .from('client_tariffs')
-    .select('id, billing_mode, payment_locked, paid_at, setup_until, paid_until, test_period_minutes')
+    .select('id, billing_mode, payment_locked, paid_at, setup_until, paid_until, test_period_minutes, billing_period')
     .eq('user_id', clientUserId)
     .maybeSingle();
 
@@ -167,15 +167,22 @@ export async function applyInvoicePaidToTariff(
   const now = new Date().toISOString();
   const tariffUpdate: Record<string, unknown> = {};
 
-  // QA test mode short-circuits the standard "+1 month" — the whole point is
-  // to exercise the renewal loop in minutes against the real YK shop.
+  // Длина оплаченного периода. Раньше здесь жёстко прибавлялся +1 месяц вне
+  // зависимости от billing_period — из-за чего оплата по счёту квартала/полгода/
+  // года зачисляла лишь ОДИН месяц paid_until. Теперь прибавляем полный период
+  // (BILLING_PERIOD_MONTHS). billing_period=null (ручной режим) → 1 месяц, как
+  // прежде. Совпадает с инкрементом крона (billing.ts) и admin-роута.
   const testMinutes = tariff.test_period_minutes;
+  const billingPeriod = tariff.billing_period as BillingPeriod | null | undefined;
+  const periodMonths = billingPeriod ? (BILLING_PERIOD_MONTHS[billingPeriod] ?? 1) : 1;
+  // QA-тест-режим (test_period_minutes) заменяет месяцы минутами — прогон
+  // renewal-loop в минутах против реального YK-магазина.
   const extendPaidUntil = (base: Date): Date => {
     const next = new Date(base);
     if (testMinutes && testMinutes > 0) {
       next.setMinutes(next.getMinutes() + testMinutes);
     } else {
-      next.setMonth(next.getMonth() + 1);
+      next.setMonth(next.getMonth() + periodMonths);
     }
     return next;
   };
