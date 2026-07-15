@@ -13,7 +13,9 @@ import {
   getClientTariffUsage,
   resolveEffectiveLimits,
   isClientToolAccessAllowed,
+  isAwaitingFirstPayment,
   TOOL_ACCESS_DENIED_MESSAGE,
+  AWAITING_PAYMENT_MESSAGE,
 } from '@/lib/tariffs';
 
 const admin = supabaseAdmin!;
@@ -82,6 +84,12 @@ export async function POST(req: NextRequest) {
         if (!isClientToolAccessAllowed(clientStatus)) {
           return NextResponse.json(
             { error: TOOL_ACCESS_DENIED_MESSAGE },
+            { status: 403 },
+          );
+        }
+        if (isAwaitingFirstPayment(tariffRow)) {
+          return NextResponse.json(
+            { error: AWAITING_PAYMENT_MESSAGE },
             { status: 403 },
           );
         }

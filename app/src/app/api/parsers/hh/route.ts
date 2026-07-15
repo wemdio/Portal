@@ -4,7 +4,7 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import type { HHSearchConfig } from '@/lib/parsers/hhParser';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { getClientTariffUsage, isClientToolAccessAllowed, TOOL_ACCESS_DENIED_MESSAGE } from '@/lib/tariffs';
+import { getClientTariffUsage, isClientToolAccessAllowed, isAwaitingFirstPayment, TOOL_ACCESS_DENIED_MESSAGE, AWAITING_PAYMENT_MESSAGE } from '@/lib/tariffs';
 import { blockDemo } from '@/lib/auth/blockDemo';
 
 export const dynamic = 'force-dynamic';
@@ -100,6 +100,15 @@ export async function POST(req: NextRequest) {
       if (!isClientToolAccessAllowed(tariffUsage.status)) {
         return jsonError(
           TOOL_ACCESS_DENIED_MESSAGE,
+          403,
+          { request_id: requestId, tariff_usage: tariffUsage },
+        );
+      }
+      // Оформил подписку, но ещё не оплатил (payment_locked && paid_at пусто) —
+      // доступа нет до оплаты (или ручного «Снять блокировку» админом).
+      if (isAwaitingFirstPayment(tariffUsage)) {
+        return jsonError(
+          AWAITING_PAYMENT_MESSAGE,
           403,
           { request_id: requestId, tariff_usage: tariffUsage },
         );

@@ -29,6 +29,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Building2, Download, FileSpreadsheet, FileText, RotateCcw, Search, X } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
+import { clientApiFetch } from '@/lib/clientFetcher';
+import { ToolPaywallCard } from '@/components/client/ToolPaywallCard';
 import { FEDERAL_DISTRICTS, ALL_REGION_CODES } from '@/lib/companiesSearch/regions';
 import { OkvedTreeModalClient } from '@/components/client/OkvedTreeModalClient';
 import { reduceToTopCodes } from '@/lib/companiesSearch/okved2';
@@ -535,6 +537,52 @@ export default function CompaniesSearchPage() {
       setExportLoading(null);
     }
   };
+
+  // ── Тариф-гейт: читаем статус оплаты для пейволл-заглушки ──
+  const [tariffStatus, setTariffStatus] = useState<'setup' | 'active' | 'expired' | 'inactive' | null>(null);
+  const [awaitingPayment, setAwaitingPayment] = useState(false);
+  const [tariffLoading, setTariffLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await clientApiFetch<{ status?: 'setup' | 'active' | 'expired' | 'inactive'; payment_locked?: boolean; paid_at?: string | null }>('/tariff');
+        if (!cancelled) {
+          setTariffStatus(data.status ?? 'inactive');
+          setAwaitingPayment(data.payment_locked === true && !data.paid_at);
+        }
+      } catch {
+        if (!cancelled) setTariffStatus('inactive');
+      } finally {
+        if (!cancelled) setTariffLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const tariffNotPaid = tariffStatus === 'inactive' || tariffStatus === 'expired';
+
+  // ── Пейволл: тариф не оплачен / оформлен, но ждёт первой оплаты ──
+  // Серверный роут companies-search всё равно 403-ит неоплатившего (тот же
+  // isAwaitingFirstPayment), но без этой заглушки клиент заполнял бы фильтры
+  // впустую. Флаг совпадает с серверным гейтом (payment_locked && !paid_at).
+  if (!tariffLoading && (tariffNotPaid || awaitingPayment)) {
+    return (
+      <div className="max-w-6xl mx-auto space-y-6 pb-20">
+        <header>
+          <p className="ds-eyebrow mb-2">
+            <Building2 className="inline-block h-3 w-3 mr-1" aria-hidden />
+            {t('Сбор баз', 'Database collection', locale)}
+          </p>
+          <h1 className="text-xl sm:text-2xl font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
+            {t('B2B-поиск компаний', 'B2B company search', locale)}
+          </h1>
+        </header>
+        <ToolPaywallCard variant={tariffNotPaid ? 'unpaid' : 'awaiting'} />
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-6xl mx-auto space-y-6 pb-20">

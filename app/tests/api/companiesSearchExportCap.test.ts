@@ -47,7 +47,9 @@ jest.mock('@/lib/tariffs', () => ({
   // Гейт оплаты: в этих тестах тариф оплачен (active) → пропускаем.
   getClientStatus: jest.fn(() => 'active'),
   isClientToolAccessAllowed: jest.fn(() => true),
+  isAwaitingFirstPayment: jest.fn(() => false),
   TOOL_ACCESS_DENIED_MESSAGE: 'Подписка не активна. Оплатите тариф для продолжения работы.',
+  AWAITING_PAYMENT_MESSAGE: 'Оформлена подписка, но оплата ещё не поступила. Доступ откроется после оплаты.',
 }));
 
 jest.mock('@/lib/supabaseAdmin', () => ({

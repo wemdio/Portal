@@ -7,6 +7,7 @@ import {
   TEST_SETUP_MINUTES,
   getBillingPeriodStart,
   isClientToolAccessAllowed,
+  isAwaitingFirstPayment,
 } from '@/lib/tariffs';
 import type { ClientTariffRow } from '@/lib/tariffs';
 
@@ -121,6 +122,24 @@ describe('isClientToolAccessAllowed — оплаченные (active+setup) пу
   });
   it('expired → false', () => {
     expect(isClientToolAccessAllowed('expired')).toBe(false);
+  });
+});
+
+describe('isAwaitingFirstPayment — оформил, но ни разу не оплатил', () => {
+  it('payment_locked=true + paid_at=null → true (доступа нет)', () => {
+    expect(isAwaitingFirstPayment({ payment_locked: true, paid_at: null })).toBe(true);
+  });
+  it('оплатил (paid_at выставлен) → false, даже если payment_locked ещё true (прогрев автоплатежа)', () => {
+    expect(isAwaitingFirstPayment({ payment_locked: true, paid_at: '2026-06-10T00:00:00Z' })).toBe(false);
+  });
+  it('админ снял блокировку (payment_locked=false, paid_at=null, комп) → false', () => {
+    expect(isAwaitingFirstPayment({ payment_locked: false, paid_at: null })).toBe(false);
+  });
+  it('обычный оплаченный (locked=false, paid_at есть) → false', () => {
+    expect(isAwaitingFirstPayment({ payment_locked: false, paid_at: '2026-06-10T00:00:00Z' })).toBe(false);
+  });
+  it('null-строка → false (не падает)', () => {
+    expect(isAwaitingFirstPayment(null)).toBe(false);
   });
 });
 

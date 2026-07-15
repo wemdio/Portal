@@ -68,6 +68,8 @@ jest.mock('@/lib/tariffs', () => ({
   getBillingPeriodStart: (...args: unknown[]) => mockGetBillingPeriodStart(...args),
   countClientContacts: (...args: unknown[]) => mockCountClientContacts(...args),
   getClientTariffUsage: (...args: unknown[]) => mockGetClientTariffUsage(...args),
+  // Гейт «оформил, но не оплатил»: в этих тестах клиент оплачен → false.
+  isAwaitingFirstPayment: () => false,
 }));
 
 jest.mock('@/lib/loggerServer', () => ({
