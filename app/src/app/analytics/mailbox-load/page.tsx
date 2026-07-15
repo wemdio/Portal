@@ -8,14 +8,19 @@ import type { MailboxLoad, TagLoad, SpecialistLoad, MailboxRow, PoolInfo, TagSta
 // ── визуальные пресеты статусов утилизации ────────────────────────────────────
 // Пороги и статус считает ТОЛЬКО сервер (classify в mailboxLoad.ts) — здесь
 // исключительно отображение, чтобы правка порогов не расходилась по слоям.
-const STATUS_UI: Record<TagStatus, { label: string; badge: string; bar: string; row: string }> = {
-  over: { label: 'Перебор', badge: 'bg-violet-50 text-violet-700 border-violet-200', bar: 'bg-violet-500', row: '' },
-  full: { label: 'Потолок', badge: 'bg-emerald-50 text-emerald-700 border-emerald-200', bar: 'bg-emerald-500', row: '' },
-  ok: { label: 'Норма', badge: 'bg-sky-50 text-sky-700 border-sky-200', bar: 'bg-sky-500', row: '' },
-  low: { label: 'Недогруз', badge: 'bg-amber-50 text-amber-700 border-amber-200', bar: 'bg-amber-500', row: 'bg-amber-50/40' },
-  idle: { label: 'Простой', badge: 'bg-red-50 text-red-700 border-red-200', bar: 'bg-red-400', row: 'bg-red-50/50' },
-  stopped: { label: 'Ящики выключены', badge: 'bg-zinc-100 text-zinc-600 border-zinc-200', bar: 'bg-zinc-400', row: 'opacity-75' },
-  no_capacity: { label: 'Нет активных', badge: 'bg-gray-100 text-gray-500 border-gray-200', bar: 'bg-gray-300', row: 'opacity-60' },
+//
+// Тихая палитра: цветом выделяем ТОЛЬКО отклонения (простой/недогруз — тёплый,
+// перебор — фиолетовый). «Норма»/«Потолок» и технические статусы — нейтральный
+// серый, чтобы взгляд цеплялся за проблемы, а не за весь экран.
+// accent=true → отклонение (цветная пилюля + цветная полоса); false → тихий серый.
+const STATUS_UI: Record<TagStatus, { label: string; badge: string; bar: string; num: string; accent: boolean }> = {
+  idle: { label: 'Простой', badge: 'bg-red-50 text-red-700 border-red-200', bar: 'bg-red-400', num: 'text-red-600', accent: true },
+  low: { label: 'Недогруз', badge: 'bg-amber-50 text-amber-700 border-amber-200', bar: 'bg-amber-500', num: 'text-amber-600', accent: true },
+  over: { label: 'Перебор', badge: 'bg-violet-50 text-violet-700 border-violet-200', bar: 'bg-violet-400', num: 'text-violet-600', accent: true },
+  ok: { label: 'Норма', badge: 'text-zinc-400', bar: 'bg-zinc-300', num: 'text-zinc-600', accent: false },
+  full: { label: 'Потолок', badge: 'text-zinc-400', bar: 'bg-zinc-400', num: 'text-zinc-600', accent: false },
+  stopped: { label: 'Выключены', badge: 'text-zinc-400', bar: 'bg-zinc-200', num: 'text-zinc-400', accent: false },
+  no_capacity: { label: '—', badge: 'text-zinc-300', bar: 'bg-zinc-200', num: 'text-zinc-400', accent: false },
 };
 
 const fmt = (n: number) => n.toLocaleString('ru-RU');
@@ -32,17 +37,18 @@ function UtilBar({ utilization, status }: { utilization: number | null; status: 
       <div className="relative h-2 flex-1 rounded-full bg-zinc-100 overflow-hidden">
         <div className={`h-full rounded-full ${ui.bar}`} style={{ width: `${width}%` }} />
       </div>
-      <span className={`tabular-nums text-[11px] font-semibold w-9 text-right ${
-        status === 'idle' ? 'text-red-600' : status === 'over' ? 'text-violet-600' : 'text-zinc-700'
-      }`}>
+      <span className={`tabular-nums text-[11px] font-semibold w-9 text-right ${ui.num}`}>
         {pct(utilization)}
       </span>
     </div>
   );
 }
 
+// Бейдж только для отклонений — цветная пилюля. Здоровые/технические статусы —
+// тихий серый текст без рамки, чтобы не зашумлять таблицу.
 function StatusBadge({ status }: { status: TagStatus }) {
   const ui = STATUS_UI[status];
+  if (!ui.accent) return <span className={`text-[10px] font-medium ${ui.badge}`}>{ui.label}</span>;
   return <span className={`inline-block rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${ui.badge}`}>{ui.label}</span>;
 }
 
@@ -322,11 +328,10 @@ function rowKeyHandler(onToggle: () => void) {
 function TagRows({ tag, expanded, drill, onToggle }: {
   tag: TagLoad; expanded: boolean; drill: DrillState; onToggle: () => void;
 }) {
-  const ui = STATUS_UI[tag.status];
   return (
     <>
       <tr
-        className={`cursor-pointer border-b border-zinc-50 hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 ${ui.row}`}
+        className="cursor-pointer border-b border-zinc-50 hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400"
         onClick={onToggle}
         onKeyDown={rowKeyHandler(onToggle)}
         tabIndex={0}
