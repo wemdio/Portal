@@ -29,6 +29,19 @@ COLLECT_MAX_SECONDS_PER_URL = int(os.environ.get("YANDEXMAPS_COLLECT_MAX_SECONDS
 # запуска умерли с `TypeError: terminated` ровно через ~5 минут тишины.
 # Пульс шлётся из generate() независимо от состояния парсера.
 STREAM_HEARTBEAT_SEC = int(os.environ.get("YANDEXMAPS_STREAM_HEARTBEAT_SEC", "20"))
+# Режим сбора ссылок: "api" (подписанные запросы /maps/api/search — работают
+# на международной выдаче yandex.com, обходят сломанный скролл на зарубежных
+# прокси) или "scroll" (старый скролл сайдбара — только для российской
+# выдачи). По умолчанию api: на зарубежных прокси это единственное, что
+# собирает полную выдачу (см. инцидент 15.07.2026). "scroll" — фолбэк.
+COLLECT_MODE = os.environ.get("YANDEXMAPS_COLLECT_MODE", "api").strip().lower()
+
+
+def _collect_fn(parser: YandexMapsParser):
+  """Выбирает метод сбора ссылок по COLLECT_MODE."""
+  if COLLECT_MODE == "scroll":
+    return parser.collect_organization_links
+  return parser.collect_organization_links_via_api
 
 
 class ProxyModel(BaseModel):
@@ -173,7 +186,7 @@ async def collect_links(req: CollectLinksRequest):
     try:
       await parser.start()
       links = await asyncio.wait_for(
-        parser.collect_organization_links(req.search_url, req.max_results),
+        _collect_fn(parser)(req.search_url, req.max_results),
         timeout=COLLECT_TIMEOUT_SEC,
       )
       return CollectLinksResponse(links=links, intl_redirect=parser.intl_redirect_detected)
@@ -231,7 +244,7 @@ async def collect_links_stream(req: CollectLinksRequest):
     try:
       await parser.start()
       links = await asyncio.wait_for(
-        parser.collect_organization_links(
+        _collect_fn(parser)(
           req.search_url, req.max_results, max_seconds=COLLECT_MAX_SECONDS_PER_URL, on_links=on_links
         ),
         timeout=COLLECT_TIMEOUT_SEC,
