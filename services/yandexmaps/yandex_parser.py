@@ -146,6 +146,10 @@ class YandexMapsParser:
     self._browser: Optional[Browser] = None
     self._context: Optional[BrowserContext] = None
     self.is_running = False
+    # Яндекс перенаправил ru->com (зарубежный IP прокси). Международная
+    # версия отдаёт урезанную выдачу и, по наблюдениям инцидента 15.07.2026,
+    # не подгружает список при скролле — собирается только «первый экран».
+    self.intl_redirect_detected = False
 
   # ── логирование / progress ─────────────────────────────────────────
 
@@ -358,6 +362,8 @@ class YandexMapsParser:
       if await self._page_looks_blocked(page):
         raise YandexBlockedError("Яндекс показал капчу при загрузке страницы поиска")
 
+      self._detect_intl_redirect(page)
+
       try:
         # 60s ждём пока Яндекс дорендерит первую пачку карточек. React
         # хёдрирует DOM после первого JSON-ответа с сервера — на медленных
@@ -450,7 +456,11 @@ class YandexMapsParser:
         if on_links and batch:
           on_links(batch, len(links))
           last_reported = len(links)
-        elif on_links and scroll_attempts % 10 == 0 and len(links) != last_reported:
+        elif on_links and scroll_attempts % 10 == 0:
+          # Пульс шлём БЕЗ условия «число ссылок изменилось». Старое условие
+          # `len(links) != last_reported` заставляло пульс молчать ровно в
+          # застое — когда он и нужен, чтобы стрим до воркера не считался
+          # мёртвым (инцидент 15.07.2026: TypeError: terminated через 5 мин).
           on_links([], len(links))
           last_reported = len(links)
 
@@ -539,6 +549,25 @@ class YandexMapsParser:
         await page.close()
       except Exception:
         pass
+
+  def _detect_intl_redirect(self, page: Page):
+    """Фиксирует редирект yandex.ru -> yandex.com/(com.tr) на зарубежном IP.
+
+    Международная версия Карт урезает выдачу и не работает ленивая
+    подгрузка при скролле — на запрос с потенциалом 200+ организаций
+    приходит только первый экран (4-12 карточек). Полноценный фикс —
+    российские резидентные/мобильные прокси; здесь только сигналим,
+    чтобы задача не выглядела «успешной» молча (инцидент 15.07.2026)."""
+    try:
+      current_url = (page.url or "").lower()
+    except Exception:
+      return
+    if re.match(r"https?://yandex\.(com|com\.tr|eu|by|kz)/", current_url):
+      self.intl_redirect_detected = True
+      self.log(
+        f"[!] Яндекс перенаправил на {current_url.split('/maps')[0]} — зарубежный IP прокси. "
+        "Выдача будет урезана до первого экрана (ленивая подгрузка не работает)."
+      )
 
   async def _find_sidebar(self, page: Page):
     """Возвращает ElementHandle скроллящегося сайдбара, либо None."""
