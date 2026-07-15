@@ -249,7 +249,7 @@ export function TelegramConnectCard() {
 
           {/* Кого считаем лидом: правило напечатано, а не подразумевается. */}
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="text-xs font-semibold" style={{ color: 'var(--cp-text-m)' }}>
                 Кого считаем лидом
               </span>
@@ -262,20 +262,23 @@ export function TelegramConnectCard() {
               >
                 {hasCustomCriteria ? 'ваши критерии' : 'по умолчанию'}
               </span>
-              <button
-                type="button"
-                onClick={() => setCriteriaOpen((v) => !v)}
-                className="ml-auto text-xs font-semibold"
-                style={{ color: 'var(--cp-text-m)' }}
-                aria-expanded={criteriaOpen}
-              >
-                {criteriaOpen ? 'Свернуть' : hasCustomCriteria ? 'Изменить' : 'Задать свои'}
-              </button>
             </div>
 
             <p className="mt-1 max-w-[70ch] text-xs" style={{ color: 'var(--cp-text-l)' }}>
               {hasCustomCriteria ? criteria : `${DEFAULT_LEAD_RULE} ${DEFAULT_NOT_LEAD_RULE}`}
             </p>
+
+            {/* Действие — отдельной строкой, подчёркнутой ссылкой: явно
+                кликабельно и не отрывается в край. */}
+            <button
+              type="button"
+              onClick={() => setCriteriaOpen((v) => !v)}
+              className="mt-1.5 text-xs font-semibold underline underline-offset-2 hover:opacity-80"
+              style={{ color: 'var(--cp-text)' }}
+              aria-expanded={criteriaOpen}
+            >
+              {criteriaOpen ? 'Свернуть' : hasCustomCriteria ? 'Изменить критерии' : 'Задать свои критерии'}
+            </button>
 
             {criteriaOpen && (
               <div className="mt-2 space-y-2">
