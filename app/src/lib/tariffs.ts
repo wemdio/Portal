@@ -254,7 +254,58 @@ export function isInSetupPhase(row: ClientTariffRow | null): boolean {
   return getClientStatus(row) === 'setup';
 }
 
+/**
+ * Начало ТЕКУЩЕГО расчётного периода = `paid_until − длина периода`.
+ *
+ * Это ОДИН якорь и для экрана («период с» в /client/tariff), и для всех
+ * счётчиков расхода лимитов (countClientContacts/Rows/Chains фильтруют
+ * `created_at >= periodStart`).
+ *
+ * Почему не `setup_until`: setup_until замораживается на первом месяце и НЕ
+ * двигается при продлении. Пока считали от него — после продления (а) экран
+ * показывал бы «период с <старая дата>» на 2-3 месяца, и (б) лимиты НЕ
+ * сбрасывались бы: расход продлённого клиента считался бы с самого начала
+ * подписки, а не с начала нового месяца.
+ *
+ * Безопасность: в ПЕРВОМ месяце `paid_until = setup_until + период`, поэтому
+ * `paid_until − период == setup_until` — у всех действующих клиентов значение
+ * НЕ меняется (проверено на проде: 0 расхождений). Отличается только ПОСЛЕ
+ * продления. Длину периода не знаем (ручной режим, billing_period=null) —
+ * оставляем прежнее поведение (setup_until).
+ *
+ * Инвариант «paid_until − период == setup_until» точен для дат НЕ на конце
+ * месяца. Для setup_until 29–31-го setMonth даёт overflow (Jan31+1мес=Mar3),
+ * и обратное вычитание не round-trip'ит → начало первого периода может
+ * дрейфить ВПЕРЁД на 1–3 дня. Дрейф безопасен: только месячный тариф, только
+ * первый период (self-heal со 2-го), направление всегда «мягче» — periodStart
+ * ≥ setup_until, поэтому лимит не может ошибочно заблокировать (максимум чуть
+ * щедрее). См. тест «край месяца».
+ */
 export function getBillingPeriodStart(row: ClientTariffRow | null): string {
+  const paidUntil = row?.paid_until ? new Date(row.paid_until) : null;
+  if (paidUntil && !Number.isNaN(paidUntil.getTime())) {
+    const start = new Date(paidUntil);
+    let periodKnown = false;
+    if (row?.test_period_minutes && row.test_period_minutes > 0) {
+      // Тест-магазин: период измеряется минутами, не месяцами.
+      start.setMinutes(start.getMinutes() - row.test_period_minutes);
+      periodKnown = true;
+    } else if (row?.billing_period && BILLING_PERIOD_MONTHS[row.billing_period]) {
+      start.setMonth(start.getMonth() - BILLING_PERIOD_MONTHS[row.billing_period]);
+      periodKnown = true;
+    }
+    if (periodKnown) {
+      // Страховка: начало периода не раньше setup_until (в первый месяц они
+      // равны; при дрейфе данных не даём уехать в прогрев / до старта).
+      if (row?.setup_until) {
+        const su = new Date(row.setup_until);
+        if (!Number.isNaN(su.getTime()) && start.getTime() < su.getTime()) {
+          return row.setup_until;
+        }
+      }
+      return start.toISOString();
+    }
+  }
   if (row?.setup_until) return row.setup_until;
   if (row?.paid_at) return row.paid_at;
   const now = new Date();
