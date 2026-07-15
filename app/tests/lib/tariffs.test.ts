@@ -12,15 +12,15 @@ describe('BillingPeriod tables', () => {
     expect(BILLING_PERIOD_MONTHS.quarter).toBe(3);
   });
 
-  it('BILLING_PERIOD_DISCOUNT: month/quarter = 1, half_year = 0.9, year = 0.8', () => {
+  it('BILLING_PERIOD_DISCOUNT: month = 1, quarter = 0.95, half_year = 0.9, year = 0.8', () => {
     expect(BILLING_PERIOD_DISCOUNT.month).toBe(1);
-    expect(BILLING_PERIOD_DISCOUNT.quarter).toBe(1);
+    expect(BILLING_PERIOD_DISCOUNT.quarter).toBe(0.95);
     expect(BILLING_PERIOD_DISCOUNT.half_year).toBe(0.9);
     expect(BILLING_PERIOD_DISCOUNT.year).toBe(0.8);
   });
 });
 
-describe('calcBillingAmount — без скидки (1 мес, 3 мес)', () => {
+describe('calcBillingAmount — без скидки (1 мес) и со скидкой 5% (3 мес)', () => {
   it('standard, 1 мес → 40 000', () => {
     expect(calcBillingAmount('standard', 'month')).toBe(40_000);
   });
@@ -29,12 +29,12 @@ describe('calcBillingAmount — без скидки (1 мес, 3 мес)', () =>
     expect(calcBillingAmount('pro', 'month')).toBe(65_000);
   });
 
-  it('standard, 3 мес → 120 000', () => {
-    expect(calcBillingAmount('standard', 'quarter')).toBe(120_000);
+  it('standard, 3 мес → 114 000 (40k × 3 × 0.95)', () => {
+    expect(calcBillingAmount('standard', 'quarter')).toBe(114_000);
   });
 
-  it('pro, 3 мес → 195 000', () => {
-    expect(calcBillingAmount('pro', 'quarter')).toBe(195_000);
+  it('pro, 3 мес → 185 250 (65k × 3 × 0.95)', () => {
+    expect(calcBillingAmount('pro', 'quarter')).toBe(185_250);
   });
 });
 
