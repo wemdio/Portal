@@ -123,8 +123,8 @@ const startGroup: ClientNavGroup = {
       label: 'Сбор базы',
       labelEn: 'Collect contacts',
       href: '/client/build',
-      description: 'Пять источников: B2B-поиск, HH, поисковая выдача, Я.Карты, свой файл',
-      descriptionEn: 'Five sources: B2B search, HH, search results, Yandex Maps, your file',
+      description: 'Пять источников: B2B-поиск, вакансии, поисковая выдача, Я.Карты, свой файл',
+      descriptionEn: 'Five sources: B2B search, job postings, search results, Yandex Maps, your file',
     },
     {
       id: 'base-constructor',

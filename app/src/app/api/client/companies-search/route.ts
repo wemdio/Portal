@@ -9,6 +9,9 @@ import {
   resolveEffectiveLimits,
   getBillingPeriodStart,
   countClientRows,
+  getClientStatus,
+  isClientToolAccessAllowed,
+  TOOL_ACCESS_DENIED_MESSAGE,
 } from '@/lib/tariffs';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
@@ -75,6 +78,11 @@ export async function POST(req: NextRequest) {
   const limit = Math.min(Math.max(Number(body.limit) || 25, 1), MAX_LIMIT);
 
   const tariffRow = await getClientTariffRow(result.auth.userId);
+  // Серверный гейт оплаты (страничная проверка — только UI, её можно обойти
+  // прямым вызовом API). Пускаем оплаченных: active + setup; режем inactive/expired.
+  if (!isClientToolAccessAllowed(getClientStatus(tariffRow))) {
+    return jsonError(TOOL_ACCESS_DENIED_MESSAGE, 403);
+  }
   const limits = resolveEffectiveLimits(tariffRow);
   const periodStart = getBillingPeriodStart(tariffRow);
   const usedRows = await countClientRows(result.auth.userId, periodStart);

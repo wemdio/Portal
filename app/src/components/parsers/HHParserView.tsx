@@ -720,7 +720,7 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
         ]),
       ];
 
-      const title = `HH.ru #${activeJobId.slice(0, 8)}`;
+      const title = `Вакансии #${activeJobId.slice(0, 8)}`;
       const { id } = writePendingDbImport({ title, rows });
       const url = buildDatabasesImportUrl(id);
       const trimmed = companies.length > MAX_ROWS;
@@ -752,7 +752,7 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
                 rel="noopener noreferrer"
                 className="underline break-all"
               >
-                Открыть капчу HH.ru
+                Открыть капчу
               </a>
               {error.requestId ? <span className="ml-2 break-all">request_id: {error.requestId}</span> : null}
             </div>
