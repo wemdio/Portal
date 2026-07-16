@@ -24,7 +24,12 @@ export function buildQuoteHeader(src: QuoteSource): string {
   let when = '';
   if (src.timestamp) {
     const d = new Date(src.timestamp);
-    if (!Number.isNaN(d.getTime())) when = d.toLocaleString('ru-RU');
+    // timeZone обязателен: заголовок цитаты уходит ЛИДУ во внешнем письме, а TZ
+    // контейнера = UTC — без него собеседник видел время своего же письма на
+    // 3 часа раньше московского.
+    if (!Number.isNaN(d.getTime())) {
+      when = d.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
+    }
   }
   return `${[when, who].filter(Boolean).join(', ')} писал(а):`;
 }
