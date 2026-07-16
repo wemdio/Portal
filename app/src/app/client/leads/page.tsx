@@ -39,7 +39,6 @@ type ForwardedLead = {
   email_id?: string | null;
   lead_id?: string | null;
   thread_id?: string | null;
-  is_unread?: boolean;
   ai_interest_value?: number | null;
 };
 
