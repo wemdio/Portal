@@ -39,12 +39,20 @@ export async function sendLeadNotification(
   const token = getToken();
   if (!token) return { messageId: null };
 
+  // timeZone обязателен: TZ контейнера = UTC, без него дата у полуночи съезжает
+  // на день назад (ответ в 01:30 МСК 17-го = 22:30 UTC 16-го → «16 июля»).
+  // Единый ориентир — Москва, как и в клиентском DM (см. clientReplyBot/bot.ts).
   const date = data.replyTimestamp
     ? new Date(data.replyTimestamp).toLocaleDateString('ru-RU', {
         day: 'numeric',
         month: 'long',
+        timeZone: 'Europe/Moscow',
       })
-    : new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+    : new Date().toLocaleDateString('ru-RU', {
+        day: 'numeric',
+        month: 'long',
+        timeZone: 'Europe/Moscow',
+      });
 
   const lines: string[] = [];
 

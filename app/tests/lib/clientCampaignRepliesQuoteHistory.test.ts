@@ -20,6 +20,15 @@ describe('buildQuoteHeader', () => {
     expect(h).not.toContain('ivan@co.com');
   });
 
+  // Регрессия 16.07.2026: заголовок цитаты уходит ЛИДУ во внешнем письме, а TZ
+  // контейнера = UTC — без явного timeZone собеседник видел время своего же
+  // письма на 3 часа раньше московского. Тест TZ-независим.
+  it('время цитаты — в МСК, а не в поясе рантайма (UTC)', () => {
+    const h = buildQuoteHeader({ ...SRC, timestamp: '2026-07-16T09:52:36+00:00' });
+    expect(h).toContain('12:52'); // 09:52 UTC = 12:52 МСК
+    expect(h).not.toContain('09:52');
+  });
+
   it('без имени — берёт email; без обоих — «Отправитель»', () => {
     expect(buildQuoteHeader({ bodyText: 'x', fromEmail: 'a@b.com' })).toContain('a@b.com');
     expect(buildQuoteHeader({ bodyText: 'x' })).toContain('Отправитель');
