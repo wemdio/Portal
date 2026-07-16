@@ -584,6 +584,11 @@ export default function CompaniesSearchPage() {
     );
   }
 
+  // Пока статус тарифа грузится — ничего не рендерим (как на парсерах/цепочках/
+  // конструкторе), иначе форма инструмента мелькнула бы у неоплатившего до того,
+  // как резолвнется /tariff и покажется пейволл.
+  if (tariffLoading) return null;
+
   return (
     <div className="max-w-6xl mx-auto space-y-6 pb-20">
       <header className="flex items-start justify-between gap-4 flex-wrap">
