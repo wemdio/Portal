@@ -84,28 +84,63 @@ async function mapWithConcurrency<T, R>(
 }
 
 const CLEANUP_BATCH_SIZE = 5000;
+// Grace before a finished job's queue rows may be purged. The UI polls the
+// results endpoint (which reads email_validation_queue by cursor) for a while
+// AFTER a job flips to completed — deleting inline raced that read and dropped
+// unfetched results, so we only purge jobs that finished at least this long ago.
+const CLEANUP_GRACE_MS = Number(
+  process.env.EMAIL_VALIDATION_CLEANUP_GRACE_MS ?? String(60 * 60 * 1000),
+);
+const CLEANUP_JOBS_PER_PASS = 25;
 
-async function cleanupQueue(jobId: string): Promise<void> {
+/**
+ * Purge queue rows of jobs that finished long enough ago that no client is still
+ * paging their results. NEVER touches a running/pending job's rows (status
+ * filter) nor the just-finished job (grace period). Runs a bit each time a job
+ * finishes, so the table self-drains without racing the UI.
+ *
+ * (Replaces the old per-jobId inline cleanup, which (a) used `.limit()` WITHOUT
+ * an `.order()` and so failed with PostgREST PGRST109 — deleting nothing and
+ * bloating the queue to >1M rows — and (b) raced the client's result feed.)
+ */
+async function cleanupOldQueues(): Promise<void> {
   const db = supabaseAdmin;
   if (!db) return;
-  workerLog('info', `Cleaning up queue for job ${jobId}...`);
-  let totalDeleted = 0;
-  while (true) {
-    const { data, error } = await db
-      .from('email_validation_queue')
-      .delete()
-      .eq('job_id', jobId)
-      .limit(CLEANUP_BATCH_SIZE)
-      .select('id');
-    if (error) {
-      workerLog('warn', `Cleanup error for job ${jobId}`, error);
-      break;
+  try {
+    const cutoff = new Date(Date.now() - CLEANUP_GRACE_MS).toISOString();
+    const { data: oldJobs, error } = await db
+      .from('email_validation_jobs')
+      .select('id')
+      .in('status', ['completed', 'failed', 'cancelled'])
+      .lt('completed_at', cutoff)
+      .limit(CLEANUP_JOBS_PER_PASS);
+    if (error || !oldJobs || oldJobs.length === 0) return;
+
+    let totalDeleted = 0;
+    for (const job of oldJobs) {
+      while (true) {
+        const { data, error: delErr } = await db
+          .from('email_validation_queue')
+          .delete()
+          .eq('job_id', job.id)
+          .order('id') // required: PostgREST rejects a limit without an explicit order
+          .limit(CLEANUP_BATCH_SIZE)
+          .select('id');
+        if (delErr) {
+          workerLog('warn', `Cleanup error for job ${job.id}`, delErr);
+          break;
+        }
+        const deleted = data?.length ?? 0;
+        totalDeleted += deleted;
+        if (deleted < CLEANUP_BATCH_SIZE) break;
+      }
     }
-    const deleted = data?.length ?? 0;
-    totalDeleted += deleted;
-    if (deleted < CLEANUP_BATCH_SIZE) break;
+    if (totalDeleted > 0) {
+      workerLog('info', `Cleaned up ${totalDeleted} old queue items across ${oldJobs.length} finished job(s)`);
+    }
+  } catch (err) {
+    workerLog('warn', 'cleanupOldQueues failed', err);
   }
-  workerLog('info', `Cleaned up ${totalDeleted} queue items for job ${jobId}`);
 }
 
 // ─── Per-domain slot limiter ────────────────────────────────────────────────
@@ -454,7 +489,7 @@ export async function runEmailValidationJob(jobId: string) {
     });
     await trace?.end({ processed: completedCount + failedCount, success: completedCount, errors: failedCount, status: finalStatus });
 
-    await cleanupQueue(jobId);
+    await cleanupOldQueues();
 
   } catch (err) {
     workerLog('error', `Job ${jobId} CRASHED`, err);
@@ -468,7 +503,7 @@ export async function runEmailValidationJob(jobId: string) {
         error_message: err instanceof Error ? err.message : 'Worker error',
       })
       .eq('id', jobId);
-    await cleanupQueue(jobId);
+    await cleanupOldQueues();
   }
 }
 

@@ -500,7 +500,13 @@ const SITE_AVAILABILITY_RETRY_BASE_DELAY = 1200;
 const SITE_AVAILABILITY_HIGHLIGHT_DURATION = 2500;
 const EMAIL_VALIDATION_PROGRESS_INTERVAL_MS = 500;
 const EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES = 10;
-const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
+// «Зависла: нет прогресса» срабатывает, только если сервер РЕАЛЬНО стоит.
+// Прогрессом считается либо новый отрисованный результат, либо рост job.processed
+// на сервере (см. poll-циклы). Таймаут поднят выше worst-case greylist-цепочки
+// (MAX_ATTEMPTS=3 × GREYLIST_DELAY=5мин ≈ 15мин, когда хвост базы поголовно
+// greylist-ится и завершений нет несколько минут), иначе клиент ложно «зависал»
+// на greylist-тяжёлых базах и при троттлинге фоновой вкладки.
+const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 18 * 60 * 1000;
 
 const EMAIL_PROVIDER_MAP: Record<string, string> = {
   'gmail.com': 'Google', 'googlemail.com': 'Google',
@@ -6792,6 +6798,7 @@ export function DatabaseSpreadsheet() {
       let firstValErrorAt: number | null = null;
       let valBackoffMs = 2000;
       let lastProgressTime = Date.now();
+      let lastProcessed = -1;
       let token = currentToken;
 
       while (true) {
@@ -6863,6 +6870,10 @@ export function DatabaseSpreadsheet() {
 
         const processed = data.job?.processed ?? 0;
         const jobTotal = data.job?.total ?? detected.total;
+        // Прогресс СЕРВЕРА (рост processed) тоже сбрасывает stall-watchdog — иначе
+        // greylist-пауза (processed не растёт, но результаты не отрисованы) или
+        // троттлинг фоновой вкладки давали ложное «зависла».
+        if (processed > lastProcessed) { lastProgressTime = Date.now(); lastProcessed = processed; }
         setEmailValidation((prev) => ({
           ...prev,
           currentRow: Math.min(processed, jobTotal),
@@ -7008,6 +7019,7 @@ export function DatabaseSpreadsheet() {
       let firstValErrorAt: number | null = null;
       let valBackoffMs = 2000;
       let lastProgressTime = Date.now();
+      let lastProcessed = -1;
       let token = currentToken;
 
       const RESULT_LABELS: Record<string, string> = {
@@ -7092,6 +7104,10 @@ export function DatabaseSpreadsheet() {
 
         const processed = data.job?.processed ?? 0;
         const jobTotal = data.job?.total ?? total;
+        // Прогресс СЕРВЕРА (рост processed) тоже сбрасывает stall-watchdog — иначе
+        // greylist-пауза (processed не растёт, но результаты не отрисованы) или
+        // троттлинг фоновой вкладки давали ложное «зависла».
+        if (processed > lastProcessed) { lastProgressTime = Date.now(); lastProcessed = processed; }
         setEmailValidation((prev) => ({
           ...prev,
           currentRow: Math.min(processed, jobTotal),

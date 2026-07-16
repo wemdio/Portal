@@ -17,7 +17,7 @@ import type { ClientReplyThread, ThreadMessage, Recipient } from '@/lib/clientCa
 
 /**
  * The expandable lead-reply thread block. Shows the full message history
- * with «ЛИД»/«МЫ» direction tags, plus «Ответить» / «Переслать» action
+ * with «КОНТАКТ»/«МЫ» direction tags, plus «Ответить» / «Переслать» action
  * buttons that open inline forms. Used in three places:
  *
  *   - `/client/campaigns/[id]?tab=replies` (campaign Replies tab) —
@@ -94,8 +94,12 @@ function ThreadMessageCard({ msg }: { msg: ThreadMessage }) {
             aria-hidden
           />
         )}
+        {/* «КОНТАКТ», не «ЛИД»: тег направления («кто написал») на одном экране
+            со СТАТУСОМ «Лид» (квалификация) читался как «система пометила
+            лидом» — спец 16.07 приняла оранжевый тег за статус и ждала
+            ТГ-уведомление. Слово «лид» оставлено только за статусом. */}
         <span className="ds-eyebrow shrink-0" style={{ color: directionColor }}>
-          {isInbound ? 'ЛИД' : 'МЫ'}
+          {isInbound ? 'КОНТАКТ' : 'МЫ'}
         </span>
         <span
           className="text-[10px] truncate flex-1 min-w-0"
