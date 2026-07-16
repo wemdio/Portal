@@ -1,11 +1,30 @@
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { pollAndQualifyReplies, drainWebhookQueue } from '@/lib/instantly/leadQualificationWorker';
+import { pollOthersOnce } from '@/lib/instantly/othersWatchdog';
 import { createWorkerLogger, setupGracefulShutdown } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '30000');
 const DRAIN_INTERVAL_MS = Number(process.env.INSTANTLY_WEBHOOK_DRAIN_INTERVAL_MS ?? '7000');
 const DRAIN_ENABLED = ['1', 'true', 'yes', 'on'].includes(
   (process.env.INSTANTLY_WEBHOOK_DRAIN_ENABLED ?? '').toLowerCase(),
+);
+// Others-watchdog: включён по умолчанию (kill-switch INSTANTLY_OTHERS_ENABLED=0).
+// Интервал НЕ ужимать бездумно: воркспейс-лимит Instantly ~10 RPM почти целиком
+// съедает основной поллер (5 страниц × тик 30с); 15 мин = ~0.07 RPM сверху.
+// Нижний порог обязателен: пустая env ('' → Number('')=0) или '15m' (NaN)
+// превратили бы sleep в ноль — горячий цикл по Instantly API = 429-шторм
+// всему воркспейсу (класс инцидента 22.05).
+function envMs(name: string, fallback: number, min: number): number {
+  const raw = Number(process.env[name] ?? '');
+  return Number.isFinite(raw) && raw >= min ? raw : fallback;
+}
+const OTHERS_INTERVAL_MS = envMs('INSTANTLY_OTHERS_POLL_INTERVAL_MS', 900_000, 60_000);
+// Первый тик — с задержкой: на старте воркера pollLoop сразу тянет до 5 страниц
+// /emails, а холодный вотчдог — ещё ~11 страниц /accounts; вместе это пробивает
+// минутный бюджет воркспейса.
+const OTHERS_STARTUP_DELAY_MS = envMs('INSTANTLY_OTHERS_STARTUP_DELAY_MS', 90_000, 0);
+const OTHERS_ENABLED = !['0', 'false', 'no', 'off'].includes(
+  (process.env.INSTANTLY_OTHERS_ENABLED ?? '').toLowerCase(),
 );
 const WORKER_ID = `instantly-leads-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
@@ -24,6 +43,23 @@ async function pollLoop(shouldStop: () => boolean): Promise<void> {
       log('error', 'Poll cycle failed', err);
     }
     await sleep(POLL_INTERVAL_MS);
+  }
+}
+
+// Others-watchdog — редкий тик по вкладке Unibox «Others»: достаёт реальные
+// ответы лидов, которые Instantly засортировал мимо Primary (и мимо основного
+// поллера). Свой контур с СОБСТВЕННЫМ интервалом: ошибка/лимит внутри тика не
+// трогает основной пайплайн, дедуп с ним — тот же instantly_email_id.
+async function othersLoop(shouldStop: () => boolean): Promise<void> {
+  await sleep(OTHERS_STARTUP_DELAY_MS);
+  while (!shouldStop()) {
+    try {
+      const count = await pollOthersOnce();
+      if (count > 0) log('info', `Others watchdog qualified ${count} reply(s)`);
+    } catch (err) {
+      log('error', 'Others watchdog cycle failed', err);
+    }
+    await sleep(OTHERS_INTERVAL_MS);
   }
 }
 
@@ -53,6 +89,10 @@ async function main(): Promise<void> {
   const shouldStop = setupGracefulShutdown(log);
 
   const loops = [pollLoop(shouldStop)];
+  if (OTHERS_ENABLED) {
+    log('info', `Others watchdog ENABLED (every ${OTHERS_INTERVAL_MS}ms)`);
+    loops.push(othersLoop(shouldStop));
+  }
   if (DRAIN_ENABLED) {
     log('info', `Real-time webhook drain ENABLED (every ${DRAIN_INTERVAL_MS}ms)`);
     loops.push(drainLoop(shouldStop));
