@@ -1,6 +1,20 @@
 /** @jest-environment node */
 
-import { yandexMapsCollectLinks, yandexMapsParseOrgs, yandexMapsHealth } from '@/lib/parsers/yandexMapsServiceClient';
+import { yandexMapsCollectLinks, yandexMapsCollectLinksStream, yandexMapsParseOrgs, yandexMapsHealth } from '@/lib/parsers/yandexMapsServiceClient';
+import type { CollectLinksChunk } from '@/lib/parsers/yandexMapsServiceClient';
+
+function ndjsonResponse(lines: unknown[]) {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const line of lines) {
+        controller.enqueue(encoder.encode(JSON.stringify(line) + '\n'));
+      }
+      controller.close();
+    },
+  });
+  return { ok: true, status: 200, body };
+}
 
 describe('yandexMapsServiceClient', () => {
   const setFetchMock = (mock: typeof fetch) => {
@@ -41,6 +55,40 @@ describe('yandexMapsServiceClient', () => {
       text: async () => 'boom',
     });
     await expect(yandexMapsParseOrgs({ links: ['x'] })).rejects.toThrow('yandexmaps service error 500');
+  });
+
+  it('stream: heartbeat lines keep stream alive and do not pollute links', async () => {
+    const fetchMock = (globalThis as unknown as { fetch: typeof fetch }).fetch as unknown as jest.Mock;
+    fetchMock.mockResolvedValueOnce(ndjsonResponse([
+      { links: ['https://yandex.ru/maps/org/a/1/'], total: 1 },
+      { heartbeat: true, total: 1 },
+      { heartbeat: true, total: 1 },
+      { links: ['https://yandex.ru/maps/org/b/2/'], total: 2 },
+      { done: true, total: 2 },
+    ]));
+    const chunks: CollectLinksChunk[] = [];
+    const res = await yandexMapsCollectLinksStream(
+      { search_url: 'https://yandex.ru/maps/?text=x' },
+      (ch) => { chunks.push(ch); },
+    );
+    expect(res.links).toEqual(['https://yandex.ru/maps/org/a/1/', 'https://yandex.ru/maps/org/b/2/']);
+    expect(res.total).toBe(2);
+    expect(res.intlRedirect).toBe(false);
+    // heartbeat-чанки доходят до колбэка (обновляют updated_at у задачи), но с пустыми links
+    const heartbeats = chunks.filter((c) => c.heartbeat);
+    expect(heartbeats).toHaveLength(2);
+    expect(heartbeats.every((c) => c.links.length === 0)).toBe(true);
+  });
+
+  it('stream: intl_redirect flag from done line is propagated', async () => {
+    const fetchMock = (globalThis as unknown as { fetch: typeof fetch }).fetch as unknown as jest.Mock;
+    fetchMock.mockResolvedValueOnce(ndjsonResponse([
+      { links: ['https://yandex.ru/maps/org/a/1/'], total: 1 },
+      { done: true, total: 1, intl_redirect: true },
+    ]));
+    const res = await yandexMapsCollectLinksStream({ search_url: 'https://yandex.ru/maps/?text=x' }, () => {});
+    expect(res.intlRedirect).toBe(true);
+    expect(res.total).toBe(1);
   });
 
   it('retries and throws detailed error on fetch failure', async () => {

@@ -2,7 +2,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo, logWarn } from '@/lib/loggerServer';
 import { decryptJsonAes256Gcm } from '@/lib/cryptoGcm';
 import { normalizeYandexOrgUrls } from '@/lib/parsers/yandexMapsUrlUtils';
-import { YandexMapsBlockedError, yandexMapsCollectLinksStream, yandexMapsHealth, yandexMapsParseOrgs } from '@/lib/parsers/yandexMapsServiceClient';
+import { YandexMapsBlockedError, yandexMapsCollectLinksStream, yandexMapsHealth, yandexMapsParseOrgs, yandexMapsProxyCheck } from '@/lib/parsers/yandexMapsServiceClient';
 import { startTrace } from '@/lib/tracer';
 
 type ProxyCreds = { username: string; password: string };
@@ -146,15 +146,73 @@ function jobProxyOffset(jobId: string): number {
 
 /**
  * Выбор прокси для конкретной единицы работы (URL сбора / чанк парсинга).
- * Приоритет — прокси, заданный в самой задаче; иначе round-robin по пулу из env;
+ * Приоритет — прокси, заданный в самой задаче; иначе round-robin по пулу
+ * (poolOverride — уже отфильтрованный по скорости пул, см. probeProxyPool);
  * иначе прямое соединение (как раньше).
  */
-function pickProxy(job: YandexMapsJobRow, index: number): ResolvedProxy {
+function pickProxy(job: YandexMapsJobRow, index: number, poolOverride?: ResolvedProxy[]): ResolvedProxy {
   if (job.proxy_enabled) return buildProxy(job);
-  const pool = getYandexMapsProxyPool();
+  const pool = poolOverride ?? getYandexMapsProxyPool();
   if (pool.length === 0) return NO_PROXY;
   const pos = (jobProxyOffset(job.id) + index) % pool.length;
   return pool[pos]!;
+}
+
+// Минимальная скорость прокси, чтобы страница Карт (~2-4 МБ) успевала
+// загрузиться в 90-секундный goto-таймаут. 50 КБ/с — нижняя граница:
+// медленнее = гарантированный page_load_timeout и пустая задача.
+const PROXY_MIN_BPS = Number(process.env.YANDEXMAPS_PROXY_MIN_BPS ?? '50000');
+
+/**
+ * Прогоняет пул прокси из env через /proxy-check сервиса и оставляет только
+ * те, что реально тянут (>= PROXY_MIN_BPS). Инцидент 14.07.2026: shared
+ * LTE-прокси просели до 2.7-11 КБ/с, но ротация продолжала гонять через них
+ * 2/3 URL — все впустую. Возвращает:
+ * - filtered: пул живых прокси (может быть пустым — тогда вызывающий код
+ *   честно фейлит задачу);
+ * - report: строка со скоростями для сообщения пользователю;
+ * - checked: false, если сервис не поддерживает /proxy-check (старый образ)
+ *   или все чеки упали по сети — фильтровать нечем, используем весь пул.
+ */
+async function probeProxyPool(
+  jobId: string,
+  logMeta: Record<string, unknown>,
+): Promise<{ filtered: ResolvedProxy[]; report: string; checked: boolean }> {
+  const pool = getYandexMapsProxyPool();
+  if (!pool.length) return { filtered: pool, report: '', checked: false };
+
+  const checks = await Promise.all(pool.map((p) => yandexMapsProxyCheck(p)));
+  if (checks.every((c) => c === null)) {
+    void logWarn('parser.yandexmaps.proxy_check.unavailable', 'proxy-check недоступен, используем весь пул без фильтра', { jobId, poolSize: pool.length }, logMeta);
+    return { filtered: pool, report: '', checked: false };
+  }
+
+  const filtered: ResolvedProxy[] = [];
+  const parts: string[] = [];
+  pool.forEach((p, i) => {
+    const c = checks[i];
+    const kbps = c && c.ok ? Math.round(c.speed_bps / 1024) : 0;
+    const good = !!c && c.ok && c.speed_bps >= PROXY_MIN_BPS;
+    parts.push(`${p.host}:${p.port} — ${c && c.ok ? `${kbps} КБ/с` : 'не отвечает'}${good ? '' : ' ✗'}`);
+    if (good) filtered.push(p);
+  });
+  const report = parts.join('; ');
+  void logInfo(
+    'parser.yandexmaps.proxy_check.result',
+    'Proxy pool probe',
+    { jobId, total: pool.length, healthy: filtered.length, minBps: PROXY_MIN_BPS, report },
+    logMeta,
+  );
+  return { filtered, report, checked: true };
+}
+
+/** Сообщение для задачи, когда ни один прокси из пула не прошёл проверку скорости. */
+function slowProxyMessage(report: string): string {
+  return (
+    `Все прокси сейчас слишком медленные для Яндекс.Карт (нужно от ${Math.round(PROXY_MIN_BPS / 1024)} КБ/с). ` +
+    `Замер: ${report}. Shared-канал у прокси-провайдера перегружен — подождите 10-15 минут и нажмите ` +
+    `«Продолжить парсинг», либо возьмите более быстрые прокси (приватные или тариф выше 1.6 Мбит/с).`
+  );
 }
 
 export async function runYandexMapsCollectLinks(jobId: string) {
@@ -237,10 +295,32 @@ export async function runYandexMapsCollectLinks(jobId: string) {
 
     void logInfo('parser.yandexmaps.collect.start', 'YandexMaps collect-links started', { jobId, searchUrlsCount: searchUrls.length }, logMeta);
 
+    // Отфильтровываем задушенные прокси до старта — иначе ротация гоняет
+    // URL через каналы, которые физически не загрузят страницу Карт.
+    let activePool: ResolvedProxy[] | undefined;
+    if (!job.proxy_enabled && getYandexMapsProxyPool().length > 0) {
+      const probe = await probeProxyPool(jobId, logMeta);
+      if (probe.checked && probe.filtered.length === 0) {
+        const msg = slowProxyMessage(probe.report);
+        await setJobPatch(jobId, {
+          status: 'failed',
+          error_message: msg,
+          progress_stage: 'proxy_too_slow',
+          completed_at: new Date().toISOString(),
+        });
+        await trace?.fail(new Error(msg));
+        void logWarn('parser.yandexmaps.collect.proxy_too_slow', 'All proxies below speed threshold', { jobId, report: probe.report }, logMeta);
+        return;
+      }
+      activePool = probe.checked ? probe.filtered : undefined;
+    }
+
     const collectConcurrency = Number(process.env.YANDEXMAPS_COLLECT_CONCURRENCY ?? '2');
     let completedUrls = 0;
     let blockedUrls = 0;
-    const proxyPoolSize = job.proxy_enabled ? 1 : getYandexMapsProxyPool().length;
+    let failedUrls = 0;
+    let intlRedirectUrls = 0;
+    const proxyPoolSize = job.proxy_enabled ? 1 : (activePool ?? getYandexMapsProxyPool()).length;
     void logInfo('parser.yandexmaps.collect.proxy', 'YandexMaps collect proxy pool', { jobId, proxyPoolSize }, logMeta);
 
     const urlBatches = chunk(
@@ -262,38 +342,97 @@ export async function runYandexMapsCollectLinks(jobId: string) {
           message: `URL ${urlIndex}/${searchUrls.length}`,
         });
 
-        try {
-          const { total } = await yandexMapsCollectLinksStream(
-            { search_url, max_results: maxResults, headless, proxy: pickProxy(job, urlIndex - 1) },
-            async (ch) => {
-              if (ch.links.length > 0) {
-                const normalized = normalizeYandexOrgUrls(ch.links);
-                for (const link of normalized) {
-                  if (!allLinksSet.has(link)) {
-                    allLinksSet.add(link);
-                    allLinks.push(link);
-                  }
-                }
-                const rows = normalized.map((link) => ({ job_id: jobId, link }));
-                await supabaseAdmin!.from('yandex_maps_links').upsert(rows, { onConflict: 'job_id,link' });
+        const collectStreamCallback = async (ch: { links: string[] }) => {
+          if (ch.links.length > 0) {
+            const normalized = normalizeYandexOrgUrls(ch.links);
+            for (const link of normalized) {
+              if (!allLinksSet.has(link)) {
+                allLinksSet.add(link);
+                allLinks.push(link);
               }
-              await setJobPatch(jobId, {
-                total_links: allLinks.length,
-                processed_links: allLinks.length,
-                progress_stage: `collecting_links:${completedUrls + batch.length}/${searchUrls.length}`,
-              });
-            },
-          );
-
-          await urlSpan?.end({ links_collected: total, total_unique: allLinks.length });
-        } catch (e) {
-          await urlSpan?.fail(e);
-          if (e instanceof YandexMapsBlockedError) {
-            blockedUrls += 1;
-            void logWarn('parser.yandexmaps.collect.url_blocked', 'Collect-links blocked (captcha) for URL', { jobId, search_url }, logMeta);
-          } else {
-            void logWarn('parser.yandexmaps.collect.url_failed', 'Collect-links failed for URL', { jobId, search_url }, logMeta);
+            }
+            const rows = normalized.map((link) => ({ job_id: jobId, link }));
+            await supabaseAdmin!.from('yandex_maps_links').upsert(rows, { onConflict: 'job_id,link' });
           }
+          await setJobPatch(jobId, {
+            total_links: allLinks.length,
+            processed_links: allLinks.length,
+            progress_stage: `collecting_links:${completedUrls + batch.length}/${searchUrls.length}`,
+          });
+        };
+
+        // Ретрай URL через разные прокси — на ЛЮБУЮ ошибку, не только
+        // yandex_blocked. Обрыв стрима (TypeError: terminated), 500 сервиса,
+        // умерший прокси — всё это лечится следующим IP из пула, а уже
+        // собранные порции ссылок не теряются (collectStreamCallback пишет
+        // их в БД инкрементально). Пул + 1 запас.
+        const maxProxyRetries = Math.max(1, proxyPoolSize) + 1;
+        let success = false;
+        let lastTotal = 0;
+        let urlIntlRedirect = false;
+        let lastBlockedError: YandexMapsBlockedError | null = null;
+        let lastGenericError: unknown = null;
+        for (let attempt = 0; attempt < maxProxyRetries; attempt++) {
+          try {
+            const { total, intlRedirect } = await yandexMapsCollectLinksStream(
+              { search_url, max_results: maxResults, headless, proxy: pickProxy(job, urlIndex - 1 + attempt, activePool) },
+              collectStreamCallback,
+            );
+            lastTotal = total;
+            urlIntlRedirect = intlRedirect;
+            success = true;
+            break;
+          } catch (e) {
+            if (e instanceof YandexMapsBlockedError) {
+              lastBlockedError = e;
+              void logWarn(
+                'parser.yandexmaps.collect.url_blocked_retry',
+                `Yandex заблокировал URL ${urlIndex}, пробуем следующий прокси`,
+                { jobId, search_url, attempt: attempt + 1, maxRetries: maxProxyRetries },
+                logMeta,
+              );
+              continue;
+            }
+            lastGenericError = e;
+            void logWarn(
+              'parser.yandexmaps.collect.url_error_retry',
+              `URL ${urlIndex} упал (${e instanceof Error ? e.message : String(e)}), пробуем следующий прокси`,
+              { jobId, search_url, attempt: attempt + 1, maxRetries: maxProxyRetries },
+              logMeta,
+            );
+            continue;
+          }
+        }
+
+        if (success) {
+          if (urlIntlRedirect) {
+            intlRedirectUrls += 1;
+            void logWarn(
+              'parser.yandexmaps.collect.intl_redirect',
+              `Яндекс перенаправил URL ${urlIndex} на международную версию (yandex.com) — выдача урезана до первого экрана. Нужны российские прокси.`,
+              { jobId, search_url, links_collected: lastTotal },
+              logMeta,
+            );
+          }
+          await urlSpan?.end({ links_collected: lastTotal, total_unique: allLinks.length, intl_redirect: urlIntlRedirect });
+        } else if (lastBlockedError) {
+          blockedUrls += 1;
+          void logWarn(
+            'parser.yandexmaps.collect.url_blocked',
+            'Collect-links blocked across all proxies',
+            { jobId, search_url, poolSize: proxyPoolSize },
+            logMeta,
+          );
+          await urlSpan?.fail(lastBlockedError);
+        } else if (lastGenericError) {
+          failedUrls += 1;
+          void logWarn(
+            'parser.yandexmaps.collect.url_failed',
+            'Collect-links failed for URL',
+            { jobId, search_url, error: String(lastGenericError) },
+            logMeta,
+          );
+          await urlSpan?.fail(lastGenericError);
         }
       }));
 
@@ -306,8 +445,19 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       progress_stage: 'links_collected',
     });
 
-    await trace?.end({ total_unique_links: allLinks.length });
-    void logInfo('parser.yandexmaps.collect.complete', 'YandexMaps collect-links completed', { jobId, totalLinks: allLinks.length }, logMeta);
+    if (intlRedirectUrls > 0) {
+      // Сигнал «собрали 2% возможного»: зарубежные прокси -> yandex.com ->
+      // только первый экран выдачи. Задача формально завершится, но лечится
+      // это только сменой прокси на российские (см. инцидент 15.07.2026).
+      void logWarn(
+        'parser.yandexmaps.collect.intl_redirect_summary',
+        `Международная выдача yandex.com на ${intlRedirectUrls} из ${searchUrls.length} запросов — собрано только по первому экрану (~${Math.round(allLinks.length / Math.max(searchUrls.length, 1))} ссылок/запрос). Для полной выдачи нужны российские прокси.`,
+        { jobId, intlRedirectUrls, totalUrls: searchUrls.length, totalLinks: allLinks.length },
+        logMeta,
+      );
+    }
+    await trace?.end({ total_unique_links: allLinks.length, intl_redirect_urls: intlRedirectUrls });
+    void logInfo('parser.yandexmaps.collect.complete', 'YandexMaps collect-links completed', { jobId, totalLinks: allLinks.length, intlRedirectUrls }, logMeta);
 
     if (allLinks.length > 0) {
       void logInfo('parser.yandexmaps.auto_parse', 'Auto-starting parse after collect', { jobId, totalLinks: allLinks.length }, logMeta);
@@ -315,7 +465,10 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     } else if (blockedUrls > 0) {
       // 0 ссылок и была блокировка => это не «пустая выдача», а капча/антибот.
       // Пишем честную причину вместо вводящего в заблуждение «Завершено».
-      const msg = `Яндекс заблокировал сбор ссылок (капча) на ${blockedUrls} из ${searchUrls.length} запросов. Прокси могли попасть под блокировку — подождите 30–60 мин или смените прокси, затем перезапустите.`;
+      const msg =
+        `Яндекс временно заблокировал наши прокси на этапе поиска ` +
+        `(${blockedUrls} из ${searchUrls.length} запросов не прошли). ` +
+        `Подождите 15–20 минут (IP прокси меняются каждые 2 минуты) и нажмите «Продолжить парсинг» — попробуем те же запросы через свежие IP.`;
       await setJobPatch(jobId, {
         status: 'failed',
         error_message: msg,
@@ -323,6 +476,21 @@ export async function runYandexMapsCollectLinks(jobId: string) {
         completed_at: new Date().toISOString(),
       });
       void logWarn('parser.yandexmaps.collect.all_blocked', 'Collect finished with 0 links due to blocking', { jobId, blockedUrls, totalUrls: searchUrls.length }, logMeta);
+    } else if (failedUrls > 0) {
+      // 0 ссылок и все (или часть) URL упали с не-блокировочной ошибкой —
+      // прокси не тянет страницу / сервис недоступен. Раньше такая задача
+      // помечалась «Завершено» с 0 ссылок, и было непонятно, что сломано.
+      const msg =
+        `Не удалось собрать ссылки: ${failedUrls} из ${searchUrls.length} поисковых запросов ` +
+        `упали с ошибкой загрузки страницы (прокси не отвечает или слишком медленный). ` +
+        `Проверьте прокси и нажмите «Продолжить парсинг».`;
+      await setJobPatch(jobId, {
+        status: 'failed',
+        error_message: msg,
+        progress_stage: 'collect_failed',
+        completed_at: new Date().toISOString(),
+      });
+      void logWarn('parser.yandexmaps.collect.all_failed', 'Collect finished with 0 links due to URL errors', { jobId, failedUrls, totalUrls: searchUrls.length }, logMeta);
     } else {
       await setJobPatch(jobId, {
         status: 'completed',
@@ -412,7 +580,28 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
 
     const chunks = chunk(remainingLinks, 15);
 
-    const parseProxyPoolSize = job.proxy_enabled ? 1 : getYandexMapsProxyPool().length;
+    // Тот же фильтр по скорости, что и на сборе ссылок: карточки организаций
+    // легче поисковой страницы, но через 2.7 КБ/с не грузятся и они.
+    let activePool: ResolvedProxy[] | undefined;
+    if (!job.proxy_enabled && getYandexMapsProxyPool().length > 0) {
+      const probe = await probeProxyPool(jobId, logMeta);
+      if (probe.checked && probe.filtered.length === 0) {
+        const msg = slowProxyMessage(probe.report);
+        await setJobPatch(jobId, {
+          status: 'failed',
+          error_message: msg,
+          progress_stage: 'proxy_too_slow',
+          processed_organizations: parsedCardUrls.size,
+          completed_at: new Date().toISOString(),
+        });
+        await trace?.fail(new Error(msg));
+        void logWarn('parser.yandexmaps.parse.proxy_too_slow', 'All proxies below speed threshold', { jobId, report: probe.report }, logMeta);
+        return;
+      }
+      activePool = probe.checked ? probe.filtered : undefined;
+    }
+
+    const parseProxyPoolSize = job.proxy_enabled ? 1 : (activePool ?? getYandexMapsProxyPool()).length;
     void logInfo(
       'parser.yandexmaps.parse.start',
       'YandexMaps parse-orgs started',
@@ -420,7 +609,13 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       logMeta,
     );
 
+    // Лимит проксей, через которые пробуем тот же чанк если ловим yandex_blocked.
+    // Даём +1 попытку сверху пула — вдруг первый попал под кратковременный бан,
+    // но следующие уже норм. Максимум N попыток на чанк = пул + 1 запас.
+    const maxProxyRetries = Math.max(1, parseProxyPoolSize) + 1;
+
     let processed = parsedCardUrls.size;
+    let consecutiveBlockedChunks = 0;
     for (let i = 0; i < chunks.length; i++) {
       const current = await getJob(jobId);
       if (current?.status === 'failed') {
@@ -435,58 +630,97 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
         message: `Чанк ${i + 1}/${chunks.length}`,
       });
 
-      try {
-        const res = await yandexMapsParseOrgs({ links: part, headless, proxy: pickProxy(job, i) });
-        const orgs = res.organizations ?? [];
-        const rows = orgs.map((o) => ({
-          job_id: jobId,
-          name: o.name || null,
-          country: o.country || null,
-          city: o.city || null,
-          address: o.address || null,
-          rating: o.rating || null,
-          reviews_count: o.reviews_count || null,
-          website: o.website || null,
-          email: o.email || null,
-          phone: o.phone || null,
-          telegram: o.telegram || null,
-          vk: o.vk || null,
-          instagram: o.instagram || null,
-          whatsapp: o.whatsapp || null,
-          card_url: o.card_url || null,
-          working_hours: o.working_hours || null,
-          categories: o.categories || null,
-        }));
+      // Ретраим тот же чанк через разные прокси — pickProxy сдвигает индекс
+      // на attempt, каждая попытка идёт через следующий IP из пула. Если
+      // все попробованные прокси заблокировались — тогда уже фейлим.
+      let success = false;
+      let lastBlockedError: YandexMapsBlockedError | null = null;
+      for (let attempt = 0; attempt < maxProxyRetries; attempt++) {
+        try {
+          const res = await yandexMapsParseOrgs({ links: part, headless, proxy: pickProxy(job, i + attempt, activePool) });
+          const orgs = res.organizations ?? [];
+          const rows = orgs.map((o) => ({
+            job_id: jobId,
+            name: o.name || null,
+            country: o.country || null,
+            city: o.city || null,
+            address: o.address || null,
+            rating: o.rating || null,
+            reviews_count: o.reviews_count || null,
+            website: o.website || null,
+            email: o.email || null,
+            phone: o.phone || null,
+            telegram: o.telegram || null,
+            vk: o.vk || null,
+            instagram: o.instagram || null,
+            whatsapp: o.whatsapp || null,
+            card_url: o.card_url || null,
+            working_hours: o.working_hours || null,
+            categories: o.categories || null,
+          }));
 
-        if (rows.length) {
-          await supabaseAdmin.from('yandex_maps_organizations').upsert(rows, { onConflict: 'job_id,card_url' });
+          if (rows.length) {
+            await supabaseAdmin.from('yandex_maps_organizations').upsert(rows, { onConflict: 'job_id,card_url' });
+          }
+
+          processed += rows.length;
+          await setJobPatch(jobId, {
+            processed_organizations: processed,
+            progress_stage: `parsing_organizations:${i + 1}/${chunks.length}`,
+          });
+
+          await partSpan?.end({ parsed: orgs.length, processed_links: processed, proxy_retries: attempt });
+          success = true;
+          break;
+        } catch (e) {
+          if (e instanceof YandexMapsBlockedError) {
+            lastBlockedError = e;
+            void logWarn(
+              'parser.yandexmaps.parse.chunk_blocked_retry',
+              `Yandex заблокировал чанк ${i + 1}, пробуем следующий прокси`,
+              { jobId, chunk: i + 1, attempt: attempt + 1, maxRetries: maxProxyRetries },
+              logMeta,
+            );
+            continue;
+          }
+          // Не-блокировочная ошибка — не смысла ретраить, пропускаем чанк.
+          void logWarn('parser.yandexmaps.parse.chunk_failed', 'Parse-orgs chunk failed', { jobId, chunk: i + 1, error: String(e) }, logMeta);
+          await partSpan?.fail(e);
+          break;
         }
+      }
 
-        // Считаем реально сохранённые организации, а не размер пачки — иначе
-        // UI показывает "4089/4089", когда Яндекс отдал пустые страницы и
-        // в БД записано сильно меньше.
-        processed += rows.length;
-        await setJobPatch(jobId, {
-          processed_organizations: processed,
-          progress_stage: `parsing_organizations:${i + 1}/${chunks.length}`,
-        });
-
-        await partSpan?.end({ parsed: orgs.length, processed_links: processed });
-      } catch (e) {
-        await partSpan?.fail(e);
-        if (e instanceof YandexMapsBlockedError) {
-          const msg = 'Яндекс временно блокирует запросы (детектит бот/капчу). Подождите 30–60 минут или смените прокси, затем перезапустите парсинг.';
+      if (success) {
+        consecutiveBlockedChunks = 0;
+      } else if (lastBlockedError) {
+        // Все прокси в пуле не смогли пропарсить этот чанк.
+        consecutiveBlockedChunks += 1;
+        await partSpan?.fail(lastBlockedError);
+        // Если 3 чанка подряд не проходят ни через один прокси — реально
+        // Яндекс банит нас во всём пуле, задачу останавливаем.
+        if (consecutiveBlockedChunks >= 3) {
+          const totalOrgs = links.length;
+          const msg =
+            `Яндекс временно заблокировал наши прокси. ` +
+            `Уже сохранено ${processed} из ${totalOrgs} организаций — они никуда не денутся. ` +
+            `Подождите 15–20 минут (IP прокси меняются каждые 2 минуты) и нажмите «Продолжить парсинг» — работа возобновится с того же места.`;
           await setJobPatch(jobId, {
             status: 'failed',
             error_message: msg,
             progress_stage: 'yandex_blocked',
             processed_organizations: processed,
+            completed_at: new Date().toISOString(),
           });
-          void logWarn('parser.yandexmaps.parse.blocked', 'Yandex anti-bot triggered', { jobId, chunk: i + 1, processed }, logMeta);
-          await trace?.fail(e);
+          void logWarn(
+            'parser.yandexmaps.parse.blocked',
+            'Yandex banned all proxies in pool',
+            { jobId, chunk: i + 1, processed, poolSize: parseProxyPoolSize },
+            logMeta,
+          );
+          await trace?.fail(lastBlockedError);
           return;
         }
-        void logWarn('parser.yandexmaps.parse.chunk_failed', 'Parse-orgs chunk failed', { jobId, chunk: i + 1 }, logMeta);
+        // Один-два чанка мимо — но остальные продолжаем.
       }
     }
 

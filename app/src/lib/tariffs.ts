@@ -53,12 +53,12 @@ export const BILLING_PERIOD_MONTHS: Record<BillingPeriod, number> = {
 };
 
 /**
- * Скидка по периоду (множитель к итоговой сумме). 6 мес = -10%, 12 мес = -20%.
- * Месяц и квартал — без скидки. Выровнено с outreachos.pro лендингом.
+ * Скидка по периоду (множитель к итоговой сумме). 3 мес = -5%, 6 мес = -10%,
+ * 12 мес = -20%. Месяц — без скидки. Выровнено с outreachos.pro лендингом.
  */
 export const BILLING_PERIOD_DISCOUNT: Record<BillingPeriod, number> = {
   month: 1,
-  quarter: 1,
+  quarter: 0.95,
   half_year: 0.9,
   year: 0.8,
 };

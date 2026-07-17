@@ -1,3 +1,5 @@
+import { Agent as UndiciAgent } from 'undici';
+
 export type YandexMapsProxy = {
   enabled?: boolean;
   protocol?: 'http' | 'https' | 'socks5';
@@ -64,8 +66,12 @@ function sleep(ms: number) {
 }
 
 function getTimeoutMs() {
-  const raw = Number(process.env.YANDEXMAPS_SERVICE_TIMEOUT_MS ?? '600000');
-  return Number.isFinite(raw) && raw > 0 ? raw : 600000;
+  // 990с: обязан быть БОЛЬШЕ серверных COLLECT_TIMEOUT_SEC / PARSE_TIMEOUT_SEC
+  // (900с) — тогда сервис успевает сам завершиться и вернуть внятную ошибку.
+  // Раньше было 600с < 900с: клиент обрывал стрим первым, на стороне сервиса
+  // от этого утекал слот семафора (см. server.py) и сервис вставал намертво.
+  const raw = Number(process.env.YANDEXMAPS_SERVICE_TIMEOUT_MS ?? '990000');
+  return Number.isFinite(raw) && raw > 0 ? raw : 990000;
 }
 
 function getMaxRetries() {
@@ -102,11 +108,30 @@ function summarizeError(err: unknown): string {
   return parts.join(' | ') || 'unknown error';
 }
 
+/**
+ * Дефолтный undici-клиент в Node рвёт соединение через 300с тишины
+ * (bodyTimeout: стрим без единого байта 5 минут) и через 300с ожидания
+ * заголовков (headersTimeout: /parse-orgs думает до 900с прежде чем
+ * ответить). Инцидент 15.07.2026 (#790ce9bf): все 9 запросов сбора ссылок
+ * умерли с `TypeError: terminated` ровно через ~5 мин после последней
+ * порции. Отключаем оба лимита — верхнюю границу держит AbortController
+ * в fetchWithTimeout (990с).
+ */
+let longPollDispatcher: UndiciAgent | null = null;
+function getLongPollDispatcher(): UndiciAgent {
+  if (!longPollDispatcher) {
+    longPollDispatcher = new UndiciAgent({ headersTimeout: 0, bodyTimeout: 0 });
+  }
+  return longPollDispatcher;
+}
+
 async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: number) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    // `dispatcher` — undici-расширение RequestInit, в типах lib.dom его нет.
+    const initWithDispatcher = { ...init, dispatcher: getLongPollDispatcher(), signal: controller.signal } as RequestInit;
+    return await fetch(input, initWithDispatcher);
   } finally {
     clearTimeout(t);
   }
@@ -167,11 +192,48 @@ export async function yandexMapsHealth(): Promise<boolean> {
   }
 }
 
+export type ProxyCheckResult = { ok: boolean; speed_bps: number; seconds?: number; bytes?: number; error?: string };
+
+/**
+ * Замер скорости прокси через сервис (без браузера). Возвращает null, если
+ * сам чек недоступен (старый образ сервиса без /proxy-check, сетевая ошибка) —
+ * вызывающий код трактует это как «фильтровать нечем, используем весь пул».
+ */
+export async function yandexMapsProxyCheck(proxy: YandexMapsProxy, timeoutSec = 15): Promise<ProxyCheckResult | null> {
+  const url = `${getServiceUrl()}/proxy-check`;
+  try {
+    const res = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proxy, timeout_sec: timeoutSec }),
+      },
+      (timeoutSec + 10) * 1000,
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as ProxyCheckResult;
+    return typeof data?.ok === 'boolean' ? data : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function yandexMapsCollectLinks(req: CollectLinksRequest): Promise<CollectLinksResponse> {
   return await postJson<CollectLinksResponse>('/collect-links', req);
 }
 
-export type CollectLinksChunk = { links: string[]; total: number; done?: boolean; error?: string; blocked?: boolean };
+export type CollectLinksChunk = {
+  links: string[];
+  total: number;
+  done?: boolean;
+  error?: string;
+  blocked?: boolean;
+  /** Пульс сервиса: «жив, но новых ссылок нет» — просто держит стрим тёплым. */
+  heartbeat?: boolean;
+  /** Яндекс перенаправил ru->com (зарубежный прокси): выдача урезана до первого экрана. */
+  intl_redirect?: boolean;
+};
 
 /**
  * Streaming version: calls /collect-links/stream and invokes onChunk for every
@@ -180,7 +242,7 @@ export type CollectLinksChunk = { links: string[]; total: number; done?: boolean
 export async function yandexMapsCollectLinksStream(
   req: CollectLinksRequest,
   onChunk: (chunk: CollectLinksChunk) => void | Promise<void>,
-): Promise<{ links: string[]; total: number }> {
+): Promise<{ links: string[]; total: number; intlRedirect: boolean }> {
   const url = `${getServiceUrl()}/collect-links/stream`;
   const timeoutMs = getTimeoutMs();
   const res = await fetchWithTimeout(
@@ -205,6 +267,7 @@ export async function yandexMapsCollectLinksStream(
   const allLinks: string[] = [];
   const seen = new Set<string>();
   let total = 0;
+  let intlRedirect = false;
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -243,8 +306,9 @@ export async function yandexMapsCollectLinksStream(
         }
       }
       total = parsed.total ?? total;
+      if (parsed.intl_redirect) intlRedirect = true;
 
-      await onChunk({ links: parsed.links ?? [], total, done: parsed.done });
+      await onChunk({ links: parsed.links ?? [], total, done: parsed.done, heartbeat: parsed.heartbeat });
     }
 
     if (done) break;
@@ -262,11 +326,12 @@ export async function yandexMapsCollectLinksStream(
         }
       }
       total = parsed.total ?? total;
-      await onChunk({ links: parsed.links ?? [], total, done: parsed.done });
+      if (parsed.intl_redirect) intlRedirect = true;
+      await onChunk({ links: parsed.links ?? [], total, done: parsed.done, heartbeat: parsed.heartbeat });
     } catch { /* ignore trailing partial */ }
   }
 
-  return { links: allLinks, total };
+  return { links: allLinks, total, intlRedirect };
 }
 
 export async function yandexMapsParseOrgs(req: ParseOrgsRequest): Promise<ParseOrgsResponse> {

@@ -2983,18 +2983,31 @@ export function DatabaseSpreadsheet() {
 
   const handleExportXlsx = async () => {
     if (!activeTab) return;
-    const XLSX = await import('xlsx');
-    const workbook = XLSX.utils.book_new();
-    const sheet = XLSX.utils.aoa_to_sheet(activeTab.data);
-    XLSX.utils.book_append_sheet(workbook, sheet, activeTab.name || 'Sheet1');
-    const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
-    const filename = `${activeTab.name || 'таблица'}.xlsx`;
-    downloadBlob(
-      new Blob([buffer], {
-        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      }),
-      filename,
-    );
+    try {
+      const XLSX = await import('xlsx');
+      const workbook = XLSX.utils.book_new();
+      const sheet = XLSX.utils.aoa_to_sheet(activeTab.data);
+      // SheetJS требует имя листа ≤ 31 символа без символов [ ] * / \ : ?.
+      // Иначе book_append_sheet кидает, весь экспорт молча падает.
+      const rawName = activeTab.name || 'Sheet1';
+      const sheetName =
+        rawName.replace(/[\[\]\*\/\\\:\?]/g, ' ').trim().slice(0, 31) || 'Sheet1';
+      XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
+      const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+      // Имя файла: убираем символы, запрещённые в файловых системах.
+      const safeFileBase = rawName.replace(/[\\\/:*?"<>|]/g, '_').trim() || 'таблица';
+      downloadBlob(
+        new Blob([buffer], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }),
+        `${safeFileBase}.xlsx`,
+      );
+    } catch (error) {
+      void logError('spreadsheet.export.xlsx.failed', error, {
+        tabName: activeTab.name,
+        rows: activeTab.data.length,
+      });
+    }
   };
 
   const filterEntries = useMemo(

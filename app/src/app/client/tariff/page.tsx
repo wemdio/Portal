@@ -412,7 +412,12 @@ export default function ClientTariffPage() {
         </p>
       )}
 
-      {data && data.status === 'inactive' && !data.paid_at && (
+      {/* Виджет выбора тарифа показываем в двух случаях:
+          1) Новый клиент — inactive без paid_at (ещё ни разу не платил).
+          2) Истёкшая подписка — status='expired' (paid_until в прошлом), чтобы
+             клиент мог продлиться заново. Секция «02 текущий тариф» ниже
+             оставляет красную «Истёк» точку как маркер состояния. */}
+      {data && (data.status === 'expired' || (data.status === 'inactive' && !data.paid_at)) && (
         <TariffSelectionWidget isTestShop={data.is_test_shop} />
       )}
 
@@ -1025,7 +1030,7 @@ type TariffChoice = PaidTariff | 'custom';
 type PeriodKey = 'month' | 'quarter' | 'half_year' | 'year';
 
 const PERIOD_MONTHS: Record<PeriodKey, number> = { month: 1, quarter: 3, half_year: 6, year: 12 };
-const PERIOD_DISCOUNT: Record<PeriodKey, number> = { month: 1, quarter: 1, half_year: 0.9, year: 0.8 };
+const PERIOD_DISCOUNT: Record<PeriodKey, number> = { month: 1, quarter: 0.95, half_year: 0.9, year: 0.8 };
 const PERIOD_LABEL: Record<PeriodKey, string> = {
   month: '1 месяц',
   quarter: '3 месяца',
@@ -1096,9 +1101,10 @@ const TARIFF_CARDS: TariffCardSpec[] = [
 
 function TariffSelectionWidget({ isTestShop = false }: { isTestShop?: boolean }) {
   const [tariff, setTariff] = useState<TariffChoice>('pro');
-  // Дефолт — 1 месяц (минимальный entry-point). Период «3 мес»/quarter мы
-  // оставили в BillingPeriod (старые подписки могут на нём сидеть), но в UI
-  // саморегистрации не показываем — клиент выбирает 1 / 6 / 12 мес.
+  // Дефолт — 1 месяц (минимальный entry-point). В прод-магазине показываем
+  // 1 / 3 / 6 / 12 мес (см. презентацию: 3 мес — −5%, 6 мес — −10%,
+  // 12 мес — −20%). Quarter в тест-магазине не поддерживается — цены и
+  // test_period_minutes для него не заданы, поэтому там оставляем 1 / 6 / 12.
   const [period, setPeriod] = useState<PeriodKey>('month');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1167,9 +1173,14 @@ function TariffSelectionWidget({ isTestShop = false }: { isTestShop?: boolean })
         )}
       </div>
 
-      {/* Period selector */}
+      {/* Period selector. Прод-магазин: 1 / 3 / 6 / 12 мес. Тест-магазин: без
+          quarter — для него не заданы TEST_TARIFF_PRICE и test_period_minutes,
+          POST /api/client/payment вернёт 400 «не удалось посчитать сумму». */}
       <div className="mb-6 inline-flex rounded-lg p-0.5" style={{ background: 'var(--cp-surface-elev)' }}>
-        {(['month', 'half_year', 'year'] as const).map((p) => {
+        {(isTestShop
+          ? (['month', 'half_year', 'year'] as const)
+          : (['month', 'quarter', 'half_year', 'year'] as const)
+        ).map((p) => {
           const active = period === p;
           const pct = Math.round((1 - PERIOD_DISCOUNT[p]) * 100);
           return (

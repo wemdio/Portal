@@ -1,32 +1,52 @@
+import asyncio
 import os
 import random
 import re
-import time
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
+
+from bs4 import BeautifulSoup
+from playwright.async_api import (
+  Browser,
+  BrowserContext,
+  Page,
+  Playwright,
+  TimeoutError as PWTimeoutError,
+  async_playwright,
+)
+from playwright_stealth import stealth_async
 
 
 class YandexBlockedError(Exception):
-  """Raised when Yandex likely blocks the parser (captcha / anti-bot page).
-
-  Detected when we can't extract organization names from several cards in a row —
-  either the page didn't load, or Yandex served a captcha stub.
-  """
+  """Yandex вернул капчу / антибот-страницу вместо результатов."""
 
 
-PARSE_MIN_DELAY_SEC = float(os.environ.get("YANDEXMAPS_PARSE_MIN_DELAY_SEC", "1.5"))
-PARSE_MAX_DELAY_SEC = float(os.environ.get("YANDEXMAPS_PARSE_MAX_DELAY_SEC", "3.0"))
-PARSE_MAX_CONSECUTIVE_EMPTY = int(os.environ.get("YANDEXMAPS_PARSE_MAX_CONSECUTIVE_EMPTY", "5"))
+# Паузы между карточками — минимум 3, максимум 6 сек. Раньше 1.5-3
+# было слишком тесно: с ротацией мобильного прокси иногда выпадал
+# медленный IP, карточка не догружалась, мы шли дальше, детектор
+# считал 5 подряд "пустых" за бан. Плюс шире окно = меньше подозрений.
+PARSE_MIN_DELAY_SEC = float(os.environ.get("YANDEXMAPS_PARSE_MIN_DELAY_SEC", "3.0"))
+PARSE_MAX_DELAY_SEC = float(os.environ.get("YANDEXMAPS_PARSE_MAX_DELAY_SEC", "6.0"))
+# Порог "яндекс блокирует" — 5 -> 12. Пять пустых карточек подряд
+# случается по естественным причинам (медленный прокси в ротации,
+# редкая карточка без имени в самом Яндексе, кратковременный
+# сетевой сбой). Двенадцать подряд = уже реально что-то не так.
+PARSE_MAX_CONSECUTIVE_EMPTY = int(os.environ.get("YANDEXMAPS_PARSE_MAX_CONSECUTIVE_EMPTY", "12"))
 
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
+
+# Свежий пул User-Agent'ов: Chrome 130-131 на разных ОС + мобильный Android.
+# Обновлять раз в 3-6 мес — старые версии сами по себе триггерят подозрение.
+USER_AGENT_POOL = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+]
+
+WINDOW_SIZES_DESKTOP = [(1366, 768), (1440, 900), (1536, 864), (1920, 1080)]
+WINDOW_SIZES_MOBILE = [(412, 915), (390, 844), (375, 812)]
 
 
 @dataclass
@@ -58,31 +78,63 @@ class ProxySettings:
   username: str = ""
   password: str = ""
 
-  def get_proxy_url(self) -> str:
-    if not self.enabled or not self.host:
-      return ""
-    if self.username and self.password:
-      return f"{self.protocol}://{self.username}:{self.password}@{self.host}:{self.port}"
-    return f"{self.protocol}://{self.host}:{self.port}"
+  def to_playwright_proxy(self) -> Optional[dict]:
+    """Возвращает proxy-dict в формате Playwright launch(), либо None.
 
-  def get_selenium_wire_options(self) -> dict:
-    if not self.enabled:
-      return {}
-    proxy_url = self.get_proxy_url()
-    return {
-      "proxy": {
-        "http": proxy_url,
-        "https": proxy_url,
-        "verify_ssl": False,
-      }
-    }
+    В отличие от Selenium+mitmproxy — Playwright умеет auth-прокси нативно:
+    просто передаём username/password в launch(), никаких MITM-костылей."""
+    if not self.enabled or not self.host:
+      return None
+    server = f"{self.protocol}://{self.host}:{self.port}"
+    proxy: dict = {"server": server}
+    if self.username and self.password:
+      proxy["username"] = self.username
+      proxy["password"] = self.password
+    return proxy
+
+
+# Ресурсные фрагменты URL, которые блокируем на уровне сетевого роутинга.
+# Экономит ~70-80% трафика прокси и в разы ускоряет загрузку. HTML/JS/CSS
+# оставляем — Яндекс.Карты рендерят список динамически, без них DOM пустой.
+_HEAVY_URL_MARKERS = (
+  "core-renderer-tiles",
+  "/tiles",
+  "/services/tiles",
+  "tile.maps.yandex",
+  "sat.maps.yandex",
+  "vec.maps.yandex",
+  "avatars.mds.yandex",
+  "avatars.mdst.yandex",
+  "mc.yandex.ru/metrika",
+  "mc.yandex.ru/watch",
+  "mc.webvisor",
+  "an.yandex.ru",
+  "yandexadexchange.net",
+)
+_HEAVY_RESOURCE_TYPES = {"image", "media", "font"}
 
 
 class YandexMapsParser:
+  """Async-парсер Яндекс.Карт на Playwright.
+
+  Использование::
+
+      parser = YandexMapsParser(proxy_settings=..., headless=True)
+      await parser.start()
+      try:
+          links = await parser.collect_organization_links(url)
+          orgs = await parser.parse_organizations_from_links(links)
+      finally:
+          await parser.close()
+
+  Одна инстанция парсера = один browser+context, переиспользуются между
+  запросами (карточки открываются в новых page, старые закрываются).
+  """
+
   def __init__(
     self,
     proxy_settings: Optional[ProxySettings] = None,
-    headless: bool = False,
+    headless: bool = True,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     log_callback: Optional[Callable[[str], None]] = None,
   ):
@@ -90,8 +142,16 @@ class YandexMapsParser:
     self.headless = headless
     self.progress_callback = progress_callback
     self.log_callback = log_callback
-    self.driver = None
+    self._pw: Optional[Playwright] = None
+    self._browser: Optional[Browser] = None
+    self._context: Optional[BrowserContext] = None
     self.is_running = False
+    # Яндекс перенаправил ru->com (зарубежный IP прокси). Международная
+    # версия отдаёт урезанную выдачу и, по наблюдениям инцидента 15.07.2026,
+    # не подгружает список при скролле — собирается только «первый экран».
+    self.intl_redirect_detected = False
+
+  # ── логирование / progress ─────────────────────────────────────────
 
   def log(self, message: str):
     if self.log_callback:
@@ -107,19 +167,19 @@ class YandexMapsParser:
   def _make_safe_string(self, text: str) -> str:
     emoji_map = {
       "\U0001f4cc": "[PIN]",
-      "\u274c": "[X]",
-      "\u2705": "[OK]",
+      "❌": "[X]",
+      "✅": "[OK]",
       "\U0001f50d": "[SEARCH]",
-      "\u23f3": "[WAIT]",
+      "⏳": "[WAIT]",
       "\U0001f4cb": "[LIST]",
       "\U0001f504": "[SYNC]",
-      "\u26a0\ufe0f": "[!]",
-      "\u26a0": "[!]",
-      "\u23f9\ufe0f": "[STOP]",
-      "\u23f9": "[STOP]",
+      "⚠️": "[!]",
+      "⚠": "[!]",
+      "⏹️": "[STOP]",
+      "⏹": "[STOP]",
       "\U0001f680": "[START]",
-      "\u2139\ufe0f": "[i]",
-      "\u2139": "[i]",
+      "ℹ️": "[i]",
+      "ℹ": "[i]",
     }
     result = text
     for emoji, replacement in emoji_map.items():
@@ -130,94 +190,109 @@ class YandexMapsParser:
     if self.progress_callback:
       self.progress_callback(current, total, message)
 
-  def _create_driver(self):
-    chrome_options = Options()
+  # ── жизненный цикл браузера ───────────────────────────────────────
 
-    if self.headless:
-      chrome_options.add_argument("--headless=new")
+  async def start(self):
+    """Создаёт Playwright, browser и context. Идемпотентно."""
+    if self._context:
+      return
 
-    chrome_options.add_argument("--start-maximized")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--disable-infobars")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--lang=ru-RU")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
+    self._pw = await async_playwright().start()
 
-    chrome_bin = (os.environ.get("CHROME_BIN") or "").strip()
-    if chrome_bin:
-      chrome_options.binary_location = chrome_bin
+    launch_kwargs: dict = {
+      "headless": self.headless,
+      "args": [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--lang=ru-RU",
+        # Blink не грузит картинки на уровне рендера — двойная защита
+        # поверх сетевого routing'а ниже.
+        "--blink-settings=imagesEnabled=false",
+      ],
+    }
+    proxy = self.proxy_settings.to_playwright_proxy()
+    if proxy:
+      launch_kwargs["proxy"] = proxy
 
-    if self.proxy_settings.enabled and self.proxy_settings.username:
-      try:
-        from seleniumwire import webdriver as sw_webdriver
+    self._browser = await self._pw.chromium.launch(**launch_kwargs)
 
-        seleniumwire_options = self.proxy_settings.get_selenium_wire_options()
-        self.driver = sw_webdriver.Chrome(
-          service=self._get_chrome_service(),
-          options=chrome_options,
-          seleniumwire_options=seleniumwire_options,
-        )
-      except Exception:
-        self._create_simple_driver(chrome_options)
-    elif self.proxy_settings.enabled and self.proxy_settings.host:
-      proxy_arg = f"--proxy-server={self.proxy_settings.protocol}://{self.proxy_settings.host}:{self.proxy_settings.port}"
-      chrome_options.add_argument(proxy_arg)
-      self._create_simple_driver(chrome_options)
-    else:
-      self._create_simple_driver(chrome_options)
+    # Рандомизация UA + viewport — пары согласованы (мобильный UA + мобильный
+    # экран), иначе Client-Hints выдают противоречие → Яндекс палит бота.
+    ua = random.choice(USER_AGENT_POOL)
+    is_mobile = "Mobile" in ua
+    width, height = random.choice(WINDOW_SIZES_MOBILE if is_mobile else WINDOW_SIZES_DESKTOP)
 
-  def _get_chrome_service(self) -> Service:
-    env_driver = (os.environ.get("CHROMEDRIVER_PATH") or "").strip()
-    candidates = [env_driver, "/usr/bin/chromedriver", "/usr/local/bin/chromedriver"]
-    for c in candidates:
-      if c and os.path.exists(c):
-        return Service(c)
-    return Service(ChromeDriverManager().install())
+    self._context = await self._browser.new_context(
+      user_agent=ua,
+      viewport={"width": width, "height": height},
+      locale="ru-RU",
+      timezone_id="Europe/Moscow",
+      is_mobile=is_mobile,
+    )
+    # Блокируем тяжёлые ресурсы (тайлы, картинки, метрика) на уровне routing.
+    await self._context.route("**/*", self._block_heavy_route)
 
-  def _create_simple_driver(self, chrome_options: Options):
-    self.driver = webdriver.Chrome(service=self._get_chrome_service(), options=chrome_options)
+  async def _block_heavy_route(self, route: Any):
     try:
-      self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+      req = route.request
+      rt = req.resource_type
+      url = req.url.lower()
+      if rt in _HEAVY_RESOURCE_TYPES:
+        await route.abort()
+        return
+      if any(m in url for m in _HEAVY_URL_MARKERS):
+        await route.abort()
+        return
+      await route.continue_()
     except Exception:
-      pass
+      try:
+        await route.continue_()
+      except Exception:
+        pass
+
+  async def close(self):
+    if self._context:
+      try:
+        await self._context.close()
+      except Exception:
+        pass
+      self._context = None
+    if self._browser:
+      try:
+        await self._browser.close()
+      except Exception:
+        pass
+      self._browser = None
+    if self._pw:
+      try:
+        await self._pw.stop()
+      except Exception:
+        pass
+      self._pw = None
 
   def stop(self):
     self.is_running = False
     self.log("[STOP] Остановка парсера...")
 
-  def close(self):
-    if self.driver:
-      try:
-        self.driver.quit()
-      except Exception:
-        pass
-      self.driver = None
+  # ── детект блокировки ────────────────────────────────────────────
 
-  def generate_search_url(self, query: str, city: str = "") -> str:
-    from urllib.parse import quote
+  async def _page_looks_blocked(self, page: Page) -> bool:
+    """Показывает ли Яндекс капчу/антибот вместо результатов.
 
-    search_query = f"{city} {query}".strip() if city else query
-    encoded_query = quote(search_query)
-    return f"https://yandex.ru/maps/?text={encoded_query}"
-
-  def _page_looks_blocked(self) -> bool:
-    """Определяет, показал ли Яндекс капчу/антибот вместо результатов.
-
-    Проверяем и URL (редирект на showcaptcha), и содержимое страницы по
-    специфичным маркерам SmartCaptcha — чтобы не ловить ложные срабатывания.
+    Смотрим URL (редирект на showcaptcha) и HTML на специфичные маркеры
+    SmartCaptcha — избегаем ложных срабатываний на просто пустой выдаче.
     """
     try:
-      current_url = (self.driver.current_url or "").lower()
+      current_url = (page.url or "").lower()
     except Exception:
       current_url = ""
     if "showcaptcha" in current_url or "checkcaptcha" in current_url:
       return True
 
     try:
-      html = (self.driver.page_source or "").lower()
+      html = (await page.content()).lower()
     except Exception:
       return False
 
@@ -234,50 +309,316 @@ class YandexMapsParser:
     ]
     return any(m in html for m in markers)
 
-  def collect_organization_links(
+  # ── сбор ссылок из поиска ────────────────────────────────────────
+
+  def generate_search_url(self, query: str, city: str = "") -> str:
+    from urllib.parse import quote
+
+    search_query = f"{city} {query}".strip() if city else query
+    encoded_query = quote(search_query)
+    return f"https://yandex.ru/maps/?text={encoded_query}"
+
+  # ── сбор через внутренний API /maps/api/search ───────────────────
+  #
+  # Инцидент 15.07.2026 (#790ce9bf): на зарубежных прокси Яндекс редиректит
+  # на международную выдачу yandex.com, где ленивая подгрузка списка при
+  # скролле не работает — собирается только первый экран (4-12 карточек).
+  # Российских прокси у нас нет (мобильные ~200 КБ/с не тянут), значит скролл
+  # на yandex.com не починить в принципе.
+  #
+  # Решение: SPA Карт подгружает список не «скроллом» как таковым, а
+  # подписанными запросами к /maps/api/search с пагинацией (skip/results).
+  # Мы повторяем эти запросы напрямую из browser-контекста (куки/сессия
+  # общие с загруженной страницей), сами вычисляя подпись `s`. Проверено на
+  # yandex.com через зарубежный egress: «Москва Кафе» отдаёт 60-120+
+  # организаций против 5 скроллом. Ответ содержит полные данные (адрес,
+  # телефоны, сайт, соцсети, часы) — но здесь мы берём только ссылки, чтобы
+  # не менять downstream: этап парсинга карточек через зарубежные прокси
+  # работает (в инциденте 41/41 карточка распарсилась успешно).
+
+  @staticmethod
+  def _api_sign(query: dict) -> str:
+    """Подпись запроса `s` — djb2/XOR-хэш qs.stringify с case-insensitive
+    сортировкой ключей. Порт кода из бандла front-maps (модуль 79409)."""
+    from urllib.parse import quote
+
+    keys = sorted(query.keys(), key=lambda k: k.lower())
+    payload = "&".join(f"{quote(str(k), safe='')}={quote(str(query[k]), safe='')}" for k in keys)
+    h = 5381
+    for ch in payload:
+      h = ((33 * h) ^ ord(ch)) & 0xFFFFFFFF
+    return str(h)
+
+  def _extract_api_bootstrap(self, html: str) -> Optional[dict]:
+    """Достаёт sessionId / csrfToken / центр карты из конфига страницы.
+
+    Всё это Яндекс кладёт инлайном в HTML поисковой выдачи. Без sessionId и
+    центра карты /maps/api/search отвечает 500/400 (проверено)."""
+    session_match = re.search(r'"analytics":\{[^}]*?"sessionId":"([^"]+)"', html)
+    if not session_match:
+      session_match = re.search(r'"sessionId":"([^"]+)"', html)
+    csrf_match = re.search(r'"csrfToken":"([^"]+)"', html)
+    center_match = re.search(r'"mapLocation":\{"center":\[([\d.-]+),([\d.-]+)\]', html)
+    if not session_match or not center_match:
+      return None
+    lon, lat = center_match.group(1), center_match.group(2)
+    return {
+      "session_id": session_match.group(1),
+      "csrf_token": csrf_match.group(1) if csrf_match else "",
+      "ll": f"{lon},{lat}",
+    }
+
+  async def _api_search_page(
+    self, req_ctx: Any, text: str, boot: dict, skip: int, results: int
+  ) -> Optional[dict]:
+    """Один запрос страницы выдачи. Возвращает распарсенный data или None.
+
+    Клиент Яндекса при ответе с новым csrfToken повторяет запрос с ним —
+    делаем то же (одна попытка обновления токена)."""
+    csrf = boot.get("csrf_token", "")
+    for _ in range(2):
+      params = {
+        "ajax": "1",
+        "csrfToken": csrf,
+        "sessionId": boot["session_id"],
+        "text": text,
+        "lang": "ru",
+        "ll": boot["ll"],
+        "spn": "0.6,0.4",
+        "z": "11",
+        "results": str(results),
+        "skip": str(skip),
+        "origin": "maps-search-form",
+      }
+      params["s"] = self._api_sign(params)
+      from urllib.parse import urlencode
+
+      url = "https://yandex.com/maps/api/search?" + urlencode(params)
+      try:
+        resp = await req_ctx.get(url, timeout=30000)
+        body = await resp.json()
+      except Exception as e:
+        self.log(f"[!] api/search skip={skip} ошибка: {e}")
+        return None
+      # Обновление csrf: сервер вернул новый токен вместо данных.
+      if isinstance(body, dict) and "csrfToken" in body and "data" not in body:
+        csrf = body["csrfToken"]
+        continue
+      if isinstance(body, dict) and body.get("type") == "captcha":
+        raise YandexBlockedError("Яндекс показал капчу на /maps/api/search")
+      if isinstance(body, dict) and "data" in body:
+        return body["data"]
+      return None
+    return None
+
+  async def collect_organization_links_via_api(
     self,
     search_url: str,
     max_results: int = 5000,
     max_seconds: int = 480,
     on_links: Optional[Callable[[List[str], int], None]] = None,
   ) -> List[str]:
+    """Сбор ссылок организаций через внутренний API (обходит скролл).
+
+    Работает на международной выдаче yandex.com — то, что нужно на
+    зарубежных прокси. Возвращает канонические card_url yandex.ru/maps/org/…,
+    чтобы downstream (парсинг карточек, нормализация) не менялся."""
+    if not self._context:
+      await self.start()
+
     self.is_running = True
-    links: list[str] = []
-    deadline = time.monotonic() + max_seconds
+    from urllib.parse import parse_qs, urlparse
+
+    parsed = urlparse(search_url)
+    text = (parse_qs(parsed.query).get("text", [""])[0]).strip()
+    if not text:
+      # /maps/213/moscow/search/<query>/ — текст в последнем сегменте пути.
+      seg = [s for s in parsed.path.split("/") if s]
+      if len(seg) >= 2 and seg[-2] == "search":
+        from urllib.parse import unquote
+
+        text = unquote(seg[-1])
+    if not text:
+      raise RuntimeError(f"api_collect: не удалось извлечь текст запроса из {search_url}")
+
+    links: List[str] = []
+    links_set: set[str] = set()
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + max_seconds
+
+    page = await self._context.new_page()
+    try:
+      await stealth_async(page)
+    except Exception:
+      pass
+    goto_timed_out = False
+    try:
+      try:
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=90000)
+      except PWTimeoutError:
+        goto_timed_out = True
+        self.log(f"[!] page.goto timeout 90s для {search_url} (api-режим)")
+
+      if await self._page_looks_blocked(page):
+        raise YandexBlockedError("Яндекс показал капчу при загрузке страницы поиска")
+
+      self._detect_intl_redirect(page)
+
+      html = await page.content()
+      boot = self._extract_api_bootstrap(html)
+      if not boot:
+        if goto_timed_out:
+          raise RuntimeError(
+            "page_load_timeout: страница поиска не загрузилась за 90с — прокси слишком медленный"
+          )
+        raise RuntimeError("api_collect: не нашли sessionId/центр карты в конфиге страницы")
+    finally:
+      try:
+        await page.close()
+      except Exception:
+        pass
+
+    req_ctx = self._context.request
+    results_per_page = 12
+    skip = 0
+    empty_pages = 0
+    stall_pages = 0
+    max_skip = max_results + results_per_page * 3
 
     try:
-      if not self.driver:
-        self._create_driver()
+      while (
+        len(links) < max_results
+        and self.is_running
+        and loop.time() < deadline
+        and skip < max_skip
+      ):
+        data = await self._api_search_page(req_ctx, text, boot, skip, results_per_page)
+        if data is None:
+          empty_pages += 1
+          if empty_pages >= 3:
+            break
+          skip += results_per_page
+          continue
+        empty_pages = 0
 
-      self.driver.get(search_url)
-      if self._page_looks_blocked():
-        raise YandexBlockedError("Яндекс показал капчу при загрузке страницы поиска")
-      try:
-        WebDriverWait(self.driver, 10).until(
-          EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "[class*='search-snippet'], [class*='search-list'], [class*='search-business']")
-          )
-        )
-      except Exception:
-        time.sleep(2)
-
-      time.sleep(1)
-
-      sidebar_scroll = None
-      for _ in range(3):
-        sidebar_scroll = self._find_sidebar_scroll()
-        if sidebar_scroll:
+        items = data.get("items") or []
+        biz = [it for it in items if it.get("type") == "business"]
+        if not biz:
+          # Дошли до конца выдачи (Яндекс отдаёт нолики после исчерпания).
           break
-        time.sleep(1)
 
-      if not sidebar_scroll:
-        # Список организаций не загрузился — либо капча, либо пустая выдача.
-        # Разделяем: капча => понятная ошибка, иначе — честный пустой результат.
-        if self._page_looks_blocked():
+        batch: List[str] = []
+        for it in biz:
+          oid = it.get("id") or it.get("businessId")
+          seoname = it.get("seoname") or "org"
+          if not oid:
+            continue
+          card_url = f"https://yandex.ru/maps/org/{seoname}/{oid}/"
+          if card_url not in links_set:
+            links_set.add(card_url)
+            links.append(card_url)
+            batch.append(card_url)
+
+        if on_links:
+          # Пульс идёт даже при пустом batch (страница-дубль) — держим стрим.
+          on_links(batch, len(links))
+
+        if not batch:
+          stall_pages += 1
+          if stall_pages >= 3:
+            break
+        else:
+          stall_pages = 0
+
+        self.update_progress(len(links), max_results, f"Найдено: {len(links)}")
+        skip += results_per_page
+        # Мягкая пауза между страницами — не долбим API впритык.
+        await asyncio.sleep(0.4)
+
+      self.log(f"[OK] API-сбор: {len(links)} организаций по запросу «{text}»")
+      return links[:max_results]
+    finally:
+      self.is_running = False
+
+  async def collect_organization_links(
+    self,
+    search_url: str,
+    max_results: int = 5000,
+    max_seconds: int = 480,
+    on_links: Optional[Callable[[List[str], int], None]] = None,
+  ) -> List[str]:
+    if not self._context:
+      await self.start()
+
+    self.is_running = True
+    links: List[str] = []
+    links_set: set[str] = set()
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + max_seconds
+
+    page = await self._context.new_page()
+    # Stealth-патчи (navigator.webdriver, WebGL, plugins и т.п.) — до первой
+    # навигации, иначе часть fingerprint'а Яндекс успеет снять на старте.
+    try:
+      await stealth_async(page)
+    except Exception as e:
+      self.log(f"[!] stealth_async не применился: {e}")
+    goto_timed_out = False
+    try:
+      try:
+        # 90s — первичная загрузка через медленный мобильный прокси
+        # (1.6 Мбит/с). Яндекс.Карты — тяжёлая SPA: сотни kB JS + шрифты
+        # + инициализация Redux/React + первый JSON-запрос за списком.
+        # На быстром интернете 5-10 сек, тут 20-40, а иногда до минуты.
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=90000)
+      except PWTimeoutError:
+        # Не бросаем сразу — часть карточек может быть уже в DOM. Но если
+        # в итоге соберём 0 ссылок, обязаны упасть с ошибкой (см. ниже):
+        # «0 ссылок при незагрузившейся странице» — это сбой прокси/сети,
+        # а не пустая выдача. Инцидент 14.07.2026: задушенные прокси
+        # (2-11 КБ/с) давали goto timeout на каждом URL, парсер молча
+        # возвращал 0 ссылок, задачи «успешно завершались» пустыми.
+        goto_timed_out = True
+        self.log(f"[!] page.goto timeout 90s для {search_url}, пробуем работать с тем что есть")
+
+      if await self._page_looks_blocked(page):
+        raise YandexBlockedError("Яндекс показал капчу при загрузке страницы поиска")
+
+      self._detect_intl_redirect(page)
+
+      try:
+        # 60s ждём пока Яндекс дорендерит первую пачку карточек. React
+        # хёдрирует DOM после первого JSON-ответа с сервера — на медленных
+        # прокси это до минуты после DOMContentLoaded.
+        await page.wait_for_selector(
+          "[class*='search-snippet'], [class*='search-list'], [class*='search-business']",
+          timeout=60000,
+        )
+      except PWTimeoutError:
+        await asyncio.sleep(3)
+      await asyncio.sleep(2)
+
+      sidebar = None
+      # 5 попыток по 2 сек = 10 сек на поиск сайдбара — с запасом на случай,
+      # если React ещё пересобирает layout.
+      for _ in range(5):
+        sidebar = await self._find_sidebar(page)
+        if sidebar:
+          break
+        await asyncio.sleep(2)
+
+      if not sidebar:
+        if await self._page_looks_blocked(page):
           raise YandexBlockedError("Яндекс показал капчу (список организаций не загрузился)")
-        soup = BeautifulSoup(self.driver.page_source, "lxml")
+        html = await page.content()
+        soup = BeautifulSoup(html, "lxml")
         links = self._extract_links_from_soup(soup)
         result = links[:max_results]
+        if not result and goto_timed_out:
+          raise RuntimeError(
+            "page_load_timeout: страница поиска не загрузилась за 90с и ссылок не найдено — "
+            "прокси слишком медленный или недоступен"
+          )
         if on_links and result:
           on_links(result, len(result))
         return result
@@ -290,17 +631,44 @@ class YandexMapsParser:
       consecutive_same_height = 0
       last_reported = 0
 
-      links_set: set[str] = set()
+      stale_count = 0
+      while (
+        len(links) < max_results
+        and scroll_attempts < max_scroll_attempts
+        and self.is_running
+        and loop.time() < deadline
+      ):
+        # Яндекс.Карты — React-приложение. При подгрузке новых карточек
+        # он пересобирает DOM внутри сайдбара, старый ElementHandle
+        # становится stale (evaluate/scroll молча падает в except pass,
+        # никаких новых карточек не появляется). Переполучаем handle
+        # заново на каждой итерации — операция дешёвая (~5 мс).
+        fresh_sidebar = await self._find_sidebar(page)
+        if fresh_sidebar:
+          sidebar = fresh_sidebar
+          stale_count = 0
+        else:
+          stale_count += 1
+          if stale_count >= 5:
+            self.log(f"[!] Сайдбар не находится 5 итераций подряд, выходим")
+            break
 
-      while len(links) < max_results and scroll_attempts < max_scroll_attempts and self.is_running and time.monotonic() < deadline:
         for _ in range(3):
-          self._scroll_sidebar(sidebar_scroll)
-          time.sleep(0.15)
+          await self._scroll_sidebar(sidebar)
+          # Скроллы внутри итерации не спешим — Яндекс лениво подгружает
+          # новые карточки, гнать быстрее = страница отстаёт.
+          await asyncio.sleep(0.6)
 
-        soup = BeautifulSoup(self.driver.page_source, "lxml")
+        # Крупная пауза после серии скроллов — сеть занята подгрузкой
+        # JSON'а с новыми карточками, DOM ещё пуст. На медленном
+        # мобильном прокси до секунды-двух.
+        await asyncio.sleep(1.5)
+
+        html = await page.content()
+        soup = BeautifulSoup(html, "lxml")
         new_links = self._extract_links_from_soup(soup)
 
-        batch: list[str] = []
+        batch: List[str] = []
         for link in new_links:
           if link not in links_set:
             links_set.add(link)
@@ -310,15 +678,27 @@ class YandexMapsParser:
         if on_links and batch:
           on_links(batch, len(links))
           last_reported = len(links)
-        elif on_links and scroll_attempts % 10 == 0 and len(links) != last_reported:
+        elif on_links and scroll_attempts % 10 == 0:
+          # Пульс шлём БЕЗ условия «число ссылок изменилось». Старое условие
+          # `len(links) != last_reported` заставляло пульс молчать ровно в
+          # застое — когда он и нужен, чтобы стрим до воркера не считался
+          # мёртвым (инцидент 15.07.2026: TypeError: terminated через 5 мин).
           on_links([], len(links))
           last_reported = len(links)
 
         try:
-          current_scroll_height = self.driver.execute_script("return arguments[0].scrollHeight", sidebar_scroll)
-          current_scroll_top = self.driver.execute_script("return arguments[0].scrollTop", sidebar_scroll)
-          client_height = self.driver.execute_script("return arguments[0].clientHeight", sidebar_scroll)
-        except Exception:
+          scroll_state = await sidebar.evaluate(
+            "(el) => ({sh: el.scrollHeight, st: el.scrollTop, ch: el.clientHeight})"
+          )
+          current_scroll_height = int(scroll_state.get("sh", 0) or 0)
+          current_scroll_top = int(scroll_state.get("st", 0) or 0)
+          client_height = int(scroll_state.get("ch", 0) or 0)
+        except Exception as e:
+          # Handle всё-таки stale (детач'нулся между fresh_sidebar
+          # и scroll'ом). Логируем — раньше молча съедалось, и в
+          # результате парсер собирал 5 карточек вместо 25.
+          if scroll_attempts < 3 or scroll_attempts % 20 == 0:
+            self.log(f"[!] sidebar.evaluate failed (attempt {scroll_attempts}): {e}")
           current_scroll_height = 0
           current_scroll_top = 0
           client_height = 0
@@ -333,15 +713,21 @@ class YandexMapsParser:
             consecutive_same_height = 0
 
           if no_new_results_count % 4 == 0:
-            self._try_alternative_scroll(sidebar_scroll)
-            time.sleep(0.5)
+            await self._alternative_scroll(sidebar, page)
+            await asyncio.sleep(2.5)
 
-          if at_bottom and consecutive_same_height >= 5 and no_new_results_count >= 12:
+          # Условие выхода — 40 итераций без новых карточек. На медленных
+          # прокси одна итерация ~4-5 сек = ~3 мин ожидания подгрузки
+          # перед тем как сдаться. Плюс at_bottom + одинаковая высота
+          # сайдбара 8 раз подряд — гарантия, что реально ничего не грузится.
+          if at_bottom and consecutive_same_height >= 8 and no_new_results_count >= 40:
             break
 
-          if no_new_results_count >= 8:
-            self._force_scroll_to_bottom(sidebar_scroll)
-            time.sleep(0.3)
+          if no_new_results_count >= 15:
+            await self._force_scroll_bottom(sidebar)
+            # Крупная пауза после force-scroll — даём Яндексу до 3 сек
+            # отреагировать на "мы у самого дна, догрузи-ка ещё".
+            await asyncio.sleep(3.0)
         else:
           no_new_results_count = 0
           consecutive_same_height = 0
@@ -355,93 +741,292 @@ class YandexMapsParser:
         if len(links) >= max_results:
           break
 
-        time.sleep(0.8 if no_new_results_count > 6 else 0.4)
+        # Пауза в конце итерации. Когда Яндекс "думает" (no_new_results_count
+        # растёт) — ждём дольше. На медленном прокси лениво загружаемая
+        # порция карточек приходит с задержкой 2-3 сек.
+        await asyncio.sleep(2.5 if no_new_results_count > 6 else 1.2)
         scroll_attempts += 1
 
-      if time.monotonic() >= deadline:
+      if loop.time() >= deadline:
         self.log(f"[!] Таймаут сбора ссылок ({max_seconds}с), собрано {len(links)}")
 
+      if not links and goto_timed_out:
+        raise RuntimeError(
+          "page_load_timeout: страница поиска не загрузилась за 90с и ссылок не найдено — "
+          "прокси слишком медленный или недоступен"
+        )
       return links[:max_results]
     except YandexBlockedError:
       raise
     except Exception as e:
       self.log(f"[X] Ошибка при сборе ссылок: {e}")
-      return links[:max_results]
+      # Частичный результат отдаём, но «0 ссылок из-за ошибки» — не успех:
+      # молчаливый return [] превращал сбой прокси в «Завершено, 0 ссыл.».
+      if links:
+        return links[:max_results]
+      raise
+    finally:
+      self.is_running = False
+      try:
+        await page.close()
+      except Exception:
+        pass
+
+  def _detect_intl_redirect(self, page: Page):
+    """Фиксирует редирект yandex.ru -> yandex.com/(com.tr) на зарубежном IP.
+
+    Международная версия Карт урезает выдачу и не работает ленивая
+    подгрузка при скролле — на запрос с потенциалом 200+ организаций
+    приходит только первый экран (4-12 карточек). Полноценный фикс —
+    российские резидентные/мобильные прокси; здесь только сигналим,
+    чтобы задача не выглядела «успешной» молча (инцидент 15.07.2026)."""
+    try:
+      current_url = (page.url or "").lower()
+    except Exception:
+      return
+    if re.match(r"https?://yandex\.(com|com\.tr|eu|by|kz)/", current_url):
+      self.intl_redirect_detected = True
+      self.log(
+        f"[!] Яндекс перенаправил на {current_url.split('/maps')[0]} — зарубежный IP прокси. "
+        "Выдача будет урезана до первого экрана (ленивая подгрузка не работает)."
+      )
+
+  async def _find_sidebar(self, page: Page):
+    """Возвращает ElementHandle скроллящегося сайдбара, либо None."""
+    js = """
+    () => {
+      var scrollContainer = document.querySelector('.scroll__container');
+      if (scrollContainer && scrollContainer.scrollHeight > scrollContainer.clientHeight) return scrollContainer;
+      var sidebar = document.querySelector('[class*="sidebar-view__panel"]') || document.querySelector('[class*="sidebar"]');
+      if (sidebar) {
+        var scrollables = sidebar.querySelectorAll('*');
+        var bestMatch = null;
+        var maxHeight = 0;
+        for (var i = 0; i < scrollables.length; i++) {
+          var el = scrollables[i];
+          var style = window.getComputedStyle(el);
+          if ((style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflow === 'auto') && el.scrollHeight > el.clientHeight && el.clientHeight > 200) {
+            if (el.scrollHeight > maxHeight) { maxHeight = el.scrollHeight; bestMatch = el; }
+          }
+        }
+        if (bestMatch) return bestMatch;
+      }
+      var allScrolls = document.querySelectorAll('[class*="scroll"]');
+      for (var j = 0; j < allScrolls.length; j++) {
+        var s = allScrolls[j];
+        if (s.scrollHeight > s.clientHeight && s.clientHeight > 200) {
+          var rect = s.getBoundingClientRect();
+          if (rect.height > 300) return s;
+        }
+      }
+      return null;
+    }
+    """
+    try:
+      handle = await page.evaluate_handle(js)
+    except Exception:
+      return None
+    try:
+      element = handle.as_element()
+      if element is None:
+        await handle.dispose()
+        return None
+      return element
+    except Exception:
+      return None
+
+  async def _scroll_sidebar(self, element):
+    try:
+      await element.evaluate(
+        "(el) => { el.scrollTop += 2000; el.dispatchEvent(new Event('scroll', { bubbles: true })); }"
+      )
+    except Exception:
+      pass
+
+  async def _alternative_scroll(self, element, page: Page):
+    try:
+      await element.evaluate(
+        "(el) => { el.scrollTop = el.scrollHeight; el.dispatchEvent(new Event('scroll', { bubbles: true })); }"
+      )
+      await page.evaluate(
+        "() => { document.querySelectorAll('[class*=\"scroll\"], [class*=\"sidebar\"]').forEach(function(c) { if (c.scrollHeight > c.clientHeight) { c.scrollTop = c.scrollHeight; c.dispatchEvent(new Event('scroll', { bubbles: true })); } }); }"
+      )
+    except Exception:
+      pass
+
+  async def _force_scroll_bottom(self, element):
+    try:
+      await element.evaluate(
+        "(el) => { el.scrollTop = el.scrollHeight; el.dispatchEvent(new Event('scroll', { bubbles: true })); el.dispatchEvent(new WheelEvent('wheel', { deltaY: 5000 })); }"
+      )
+      await asyncio.sleep(0.5)
+    except Exception:
+      pass
+
+  # ── парсинг карточек ─────────────────────────────────────────────
+
+  async def parse_organizations_from_links(
+    self, links: List[str], max_seconds: int = 480
+  ) -> List[Organization]:
+    if not self._context:
+      await self.start()
+
+    self.is_running = True
+    organizations: List[Organization] = []
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + max_seconds
+    consecutive_empty = 0
+
+    try:
+      for i, url in enumerate(links):
+        if not self.is_running or loop.time() > deadline:
+          break
+        self.update_progress(i + 1, len(links), f"Парсинг: {i + 1}/{len(links)}")
+        org = await self.parse_organization(url)
+        if org.name:
+          organizations.append(org)
+          consecutive_empty = 0
+        else:
+          consecutive_empty += 1
+          if consecutive_empty >= PARSE_MAX_CONSECUTIVE_EMPTY:
+            self.log(
+              f"[!] {consecutive_empty} карточек подряд без данных — "
+              f"вероятно Яндекс включил антибот/капчу. Останавливаем чанк."
+            )
+            raise YandexBlockedError(
+              f"Не удалось извлечь данные из {consecutive_empty} карточек подряд. "
+              "Возможно, Яндекс временно блокирует запросы."
+            )
+        await asyncio.sleep(random.uniform(PARSE_MIN_DELAY_SEC, PARSE_MAX_DELAY_SEC))
+      return organizations
+    except YandexBlockedError:
+      raise
+    except Exception as e:
+      self.log(f"[X] Критическая ошибка: {e}")
+      return organizations
     finally:
       self.is_running = False
 
-  def _try_alternative_scroll(self, element):
+  async def parse_organization(self, url: str) -> Organization:
+    org = Organization(card_url=url)
+    page = await self._context.new_page()
     try:
-      self.driver.execute_script(
-        "arguments[0].scrollTop = arguments[0].scrollHeight; arguments[0].dispatchEvent(new Event('scroll', { bubbles: true }));",
-        element,
-      )
-      self.driver.execute_script(
-        "document.querySelectorAll('[class*=\"scroll\"], [class*=\"sidebar\"]').forEach(function(c) { if (c.scrollHeight > c.clientHeight) { c.scrollTop = c.scrollHeight; c.dispatchEvent(new Event('scroll', { bubbles: true })); } });"
-      )
+      await stealth_async(page)
     except Exception:
       pass
-
-  def _force_scroll_to_bottom(self, element):
     try:
-      self.driver.execute_script(
-        "arguments[0].scrollTop = arguments[0].scrollHeight; arguments[0].dispatchEvent(new Event('scroll', { bubbles: true })); arguments[0].dispatchEvent(new WheelEvent('wheel', { deltaY: 5000 }));",
-        element,
-      )
-      time.sleep(0.5)
-    except Exception:
-      pass
-
-  def _find_sidebar_scroll(self):
-    try:
-      result = self.driver.execute_script(
-        "var scrollContainer = document.querySelector('.scroll__container'); if (scrollContainer && scrollContainer.scrollHeight > scrollContainer.clientHeight) { return scrollContainer; } var sidebar = document.querySelector('[class*=\"sidebar-view__panel\"]') || document.querySelector('[class*=\"sidebar\"]'); if (sidebar) { var scrollables = sidebar.querySelectorAll('*'); var bestMatch = null; var maxHeight = 0; for (var i = 0; i < scrollables.length; i++) { var el = scrollables[i]; var style = window.getComputedStyle(el); if ((style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflow === 'auto') && el.scrollHeight > el.clientHeight && el.clientHeight > 200) { if (el.scrollHeight > maxHeight) { maxHeight = el.scrollHeight; bestMatch = el; } } } if (bestMatch) return bestMatch; } var allScrolls = document.querySelectorAll('[class*=\"scroll\"]'); for (var j = 0; j < allScrolls.length; j++) { var s = allScrolls[j]; if (s.scrollHeight > s.clientHeight && s.clientHeight > 200) { var rect = s.getBoundingClientRect(); if (rect.height > 300) { return s; } } } return null;"
-      )
-      if result:
-        return result
-    except Exception:
-      pass
-
-    selectors = [
-      "div.scroll__container",
-      "div[class*='scroll__container']",
-      "div.sidebar-view__panel div[class*='scroll']",
-      "div[class*='sidebar-view__panel'] > div",
-      "div[class*='sidebar'] div[class*='scroll']",
-      "div.search-list-view__list",
-      "ul.search-list-view__list",
-      "div[class*='search-list-view']",
-      "div[class*='results'] div[class*='scroll']",
-      "div.search-snippet-view",
-    ]
-
-    for selector in selectors:
       try:
-        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-        for elem in elements:
-          if elem.is_displayed():
-            scroll_height = self.driver.execute_script("return arguments[0].scrollHeight", elem)
-            client_height = self.driver.execute_script("return arguments[0].clientHeight", elem)
-            if scroll_height > client_height and client_height > 150:
-              return elem
-      except Exception:
-        continue
-    return None
-
-  def _scroll_sidebar(self, element):
-    try:
-      self.driver.execute_script(
-        "arguments[0].scrollTop += arguments[1]; arguments[0].dispatchEvent(new Event('scroll', { bubbles: true }));",
-        element,
-        2000,
-      )
-    except Exception:
+        # 60s на карточку — на медленном мобильном прокси загрузка одной
+        # карточки с рендером фото/отзывов/карты может занимать минуту.
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+      except PWTimeoutError:
+        pass
       try:
-        self.driver.execute_script(
-          "var sidebar = document.querySelector('[class*=\"sidebar\"]'); if (sidebar) { var scrollable = sidebar.querySelector('[class*=\"scroll\"]'); if (scrollable) { scrollable.scrollTop += 2000; scrollable.dispatchEvent(new Event('scroll', { bubbles: true })); } }"
-        )
+        # Ждём заголовок до 30 сек — на скрине юзера иногда видно как
+        # карточка "пустая" 15-20 сек прежде чем прорендерится.
+        await page.wait_for_selector("h1, [class*='title']", timeout=30000)
+      except PWTimeoutError:
+        await asyncio.sleep(2)
+
+      await self._click_show_phone(page)
+      await self._expand_contacts(page)
+      await asyncio.sleep(0.3)
+
+      html = await page.content()
+      soup = BeautifulSoup(html, "lxml")
+
+      org.name = self._extract_name(soup)
+      org.address, org.city, org.country = self._extract_address(soup)
+      org.rating, org.reviews_count = self._extract_rating(soup)
+      org.website = self._extract_website(soup)
+      org.phone = self._extract_phone(soup)
+      org.email = self._extract_email(soup)
+      org.telegram, org.vk, org.instagram, org.whatsapp = self._extract_social(soup)
+      org.working_hours = self._extract_working_hours(soup)
+      org.categories = self._extract_categories(soup)
+    except Exception as e:
+      self.log(f"[!] Ошибка парсинга {url}: {e}")
+    finally:
+      try:
+        await page.close()
       except Exception:
         pass
+    return org
+
+  async def _click_show_phone(self, page: Page):
+    selectors = [
+      "button[class*='phone']",
+      "div[class*='phone'] button",
+      "a[class*='phone']",
+      "[class*='show-phone']",
+      "[class*='card-phones'] button",
+      "button[class*='contact']",
+      "[data-type='phone']",
+    ]
+    for sel in selectors:
+      try:
+        buttons = await page.query_selector_all(sel)
+      except Exception:
+        continue
+      for btn in buttons:
+        try:
+          if not await btn.is_visible():
+            continue
+          text = ((await btn.text_content()) or "").lower()
+          if "телефон" in text or "показать" in text or "phone" in text or not text:
+            try:
+              await btn.click(timeout=1000)
+              return
+            except Exception:
+              continue
+        except Exception:
+          continue
+
+    # Общий фолбэк: любые кнопки с "телефон"/"показать" в тексте.
+    try:
+      buttons = await page.query_selector_all("button")
+    except Exception:
+      return
+    for btn in buttons:
+      try:
+        if not await btn.is_visible():
+          continue
+        text = ((await btn.text_content()) or "").lower()
+        if "телефон" in text or "показать" in text:
+          try:
+            await btn.click(timeout=1000)
+            return
+          except Exception:
+            continue
+      except Exception:
+        continue
+
+  async def _expand_contacts(self, page: Page):
+    selectors = [
+      "[class*='expand']",
+      "[class*='more']",
+      "button[class*='show-more']",
+      "[class*='contacts'] button",
+    ]
+    for sel in selectors:
+      try:
+        elements = await page.query_selector_all(sel)
+      except Exception:
+        continue
+      for elem in elements:
+        try:
+          if not await elem.is_visible():
+            continue
+          text = ((await elem.text_content()) or "").lower()
+          if "ещё" in text or "еще" in text or "все" in text or "more" in text:
+            try:
+              await elem.click(timeout=1000)
+            except Exception:
+              continue
+        except Exception:
+          continue
+
+  # ── extract-функции (чистый BeautifulSoup, не зависят от браузера) ──
 
   def _extract_links_from_soup(self, soup: BeautifulSoup) -> List[str]:
     found_links: set[str] = set()
@@ -495,7 +1080,9 @@ class YandexMapsParser:
   def _normalize_org_url(self, url: str) -> str:
     if not url:
       return ""
-    url = re.sub(r"https?://yandex\.(by|kz|ua|com)", "https://yandex.ru", url)
+    # com\.tr до com: иначе для yandex.com.tr заменится только «com» и
+    # получится битый yandex.ru.tr (турецкий выход прокси → yandex.com.tr).
+    url = re.sub(r"https?://yandex\.(by|kz|ua|com\.tr|com)", "https://yandex.ru", url)
     match = re.search(r"(https://yandex\.ru/maps/org/[^/]+/\d+)", url)
     if match:
       return match.group(1) + "/"
@@ -503,130 +1090,6 @@ class YandexMapsParser:
     if match:
       return match.group(1).replace("/org/", "/maps/org/") + "/"
     return url
-
-  def parse_organizations_from_links(self, links: List[str], max_seconds: int = 480) -> List[Organization]:
-    self.is_running = True
-    organizations: list[Organization] = []
-    deadline = time.monotonic() + max_seconds
-    consecutive_empty = 0
-
-    try:
-      if not self.driver:
-        self._create_driver()
-
-      for i, url in enumerate(links):
-        if not self.is_running or time.monotonic() > deadline:
-          break
-        self.update_progress(i + 1, len(links), f"Парсинг: {i + 1}/{len(links)}")
-        org = self.parse_organization(url)
-        if org.name:
-          organizations.append(org)
-          consecutive_empty = 0
-        else:
-          consecutive_empty += 1
-          if consecutive_empty >= PARSE_MAX_CONSECUTIVE_EMPTY:
-            self.log(
-              f"[!] {consecutive_empty} карточек подряд без данных — "
-              f"вероятно Яндекс включил антибот/капчу. Останавливаем чанк."
-            )
-            raise YandexBlockedError(
-              f"Не удалось извлечь данные из {consecutive_empty} карточек подряд. "
-              "Возможно, Яндекс временно блокирует запросы."
-            )
-        time.sleep(random.uniform(PARSE_MIN_DELAY_SEC, PARSE_MAX_DELAY_SEC))
-      return organizations
-    except YandexBlockedError:
-      raise
-    except Exception as e:
-      self.log(f"[X] Критическая ошибка: {e}")
-      return organizations
-    finally:
-      self.is_running = False
-
-  def parse_organization(self, url: str) -> Organization:
-    org = Organization(card_url=url)
-    try:
-      self.driver.get(url)
-      try:
-        WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "h1, [class*='title']")))
-      except TimeoutException:
-        time.sleep(1)
-
-      self._click_show_phone()
-      self._expand_contacts()
-      time.sleep(0.3)
-
-      soup = BeautifulSoup(self.driver.page_source, "lxml")
-
-      org.name = self._extract_name(soup)
-      org.address, org.city, org.country = self._extract_address(soup)
-      org.rating, org.reviews_count = self._extract_rating(soup)
-      org.website = self._extract_website(soup)
-      org.phone = self._extract_phone(soup)
-      org.email = self._extract_email(soup)
-      org.telegram, org.vk, org.instagram, org.whatsapp = self._extract_social(soup)
-      org.working_hours = self._extract_working_hours(soup)
-      org.categories = self._extract_categories(soup)
-    except Exception as e:
-      self.log(f"[!] Ошибка парсинга {url}: {e}")
-    return org
-
-  def _click_show_phone(self):
-    try:
-      phone_button_selectors = [
-        "button[class*='phone']",
-        "div[class*='phone'] button",
-        "a[class*='phone']",
-        "[class*='show-phone']",
-        "[class*='card-phones'] button",
-        "button[class*='contact']",
-        "[data-type='phone']",
-      ]
-      for selector in phone_button_selectors:
-        try:
-          buttons = self.driver.find_elements(By.CSS_SELECTOR, selector)
-          for btn in buttons:
-            if btn.is_displayed():
-              text = (btn.text or "").lower()
-              if "телефон" in text or "показать" in text or "phone" in text or btn.text == "":
-                btn.click()
-                return
-        except Exception:
-          continue
-
-      try:
-        buttons = self.driver.find_elements(By.TAG_NAME, "button")
-        for btn in buttons:
-          if btn.is_displayed():
-            text = (btn.text or "").lower()
-            if "телефон" in text or "показать" in text:
-              btn.click()
-              return
-      except Exception:
-        pass
-    except Exception:
-      pass
-
-  def _expand_contacts(self):
-    try:
-      expand_selectors = [
-        "[class*='expand']",
-        "[class*='more']",
-        "button[class*='show-more']",
-        "[class*='contacts'] button",
-      ]
-      for selector in expand_selectors:
-        try:
-          elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-          for elem in elements:
-            if elem.is_displayed():
-              text = (elem.text or "").lower()
-              if "ещё" in text or "еще" in text or "все" in text or "more" in text:
-                elem.click()
-        except Exception:
-          continue
-    except Exception:
-      pass
 
   def _extract_name(self, soup: BeautifulSoup) -> str:
     selectors = [
@@ -715,26 +1178,10 @@ class YandexMapsParser:
 
   def _extract_website(self, soup: BeautifulSoup) -> str:
     excluded_domains = [
-      "yandex.ru",
-      "yandex.by",
-      "yandex.kz",
-      "yandex.com",
-      "ya.ru",
-      "vk.com",
-      "vk.me",
-      "t.me",
-      "telegram.me",
-      "telegram.org",
-      "instagram.com",
-      "facebook.com",
-      "fb.com",
-      "wa.me",
-      "whatsapp.com",
-      "youtube.com",
-      "youtu.be",
-      "twitter.com",
-      "x.com",
-      "ok.ru",
+      "yandex.ru", "yandex.by", "yandex.kz", "yandex.com", "ya.ru",
+      "vk.com", "vk.me", "t.me", "telegram.me", "telegram.org",
+      "instagram.com", "facebook.com", "fb.com", "wa.me", "whatsapp.com",
+      "youtube.com", "youtu.be", "twitter.com", "x.com", "ok.ru",
       "odnoklassniki.ru",
     ]
 
@@ -920,4 +1367,3 @@ class YandexMapsParser:
         if text and text not in categories:
           categories.append(text)
     return ", ".join(categories[:5])
-

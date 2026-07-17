@@ -44,6 +44,26 @@ import {
 // возвращается позже — создаём новый payment с новым idempotency-suffix.
 const YK_INVOICE_VALIDITY_MS = 6 * 60 * 60 * 1000;
 
+// Порог, выше которого мы НЕ просим ЮКассу сохранить карту (save_payment_method).
+// Логика: с флагом save ЮКасса на checkout-странице показывает клиенту только
+// те методы, которые можно сохранить для повторных списаний — а это по факту
+// только «Банковская карта». У bank_card в нашем магазине эмпирический
+// лимит на разовый платёж ~300k (200k проходит, 361k — уже нет; в /v3/me
+// шоп-статус enabled, но acquirer где-то режет). Когда сумма превышает этот
+// лимит, ни один savable-метод не подходит → ЮКасса при заходе на
+// confirmation_url сразу редиректит на /checkout/payments/v2/failure и
+// клиент видит «Платёж не прошёл» без формы.
+//
+// Обход: для платежей выше порога снимаем save_payment_method — тогда ЮКасса
+// показывает весь набор (SberPay / T-Pay / Наличные и др.) и клиент оплатит.
+// Побочка — карта не сохранится, автопродление для такой подписки не сработает;
+// её надо будет продлять руками (годовые подписки — раз в 12 мес, ок).
+//
+// 250k — консервативно между 200k (карта работает, тестировали) и 361k (уже
+// нет). Если ЮКасса поднимет card-лимит по магазину — константу можно
+// увеличить или вообще выкинуть условие.
+export const SAVE_PAYMENT_METHOD_MAX_AMOUNT = 250_000;
+
 export type EnsureInvoiceReason =
   | 'admin_activate'
   | 'admin_extend'
@@ -397,7 +417,7 @@ export async function ensurePendingInvoiceForTariff(
         invoiceId: newInvoice.id,
         companyName,
         idempotencyKey: newInvoice.id,
-        savePaymentMethod: true,
+        savePaymentMethod: amount <= SAVE_PAYMENT_METHOD_MAX_AMOUNT,
         returnUrl: buildClientReturnUrl(),
         receipt: buildDefaultReceipt({
           customerEmail: receiptEmail,
