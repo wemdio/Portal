@@ -301,43 +301,93 @@ async function getDomainCampaignCandidates(
 
 // ─── Синтез тред-контекста ────────────────────────────────────────────────────
 
-async function fetchOutboundForLead(
-  campaignId: string,
-  accountId: string,
-  leadEmail: string,
-): Promise<Email[]> {
+// campaignId → недавние sent-письма кампании (для сабж-матча + контекста ИИ),
+// короткий TTL: новые отправки появляются, но темы-шаблоны стабильны.
+const campaignSentCache = new Map<string, { at: number; emails: Email[] }>();
+
+async function fetchCampaignSent(campaignId: string, accountId: string): Promise<Email[] | null> {
+  const ttl = envNumber('INSTANTLY_OTHERS_SENT_TTL_MS', 10 * 60 * 1000);
+  const cached = campaignSentCache.get(campaignId);
+  if (cached && Date.now() - cached.at < ttl) return cached.emails;
+  let emails: Email[];
   try {
     const res = await instantly.listEmails(
-      { campaign_id: campaignId, lead: leadEmail, email_type: 'sent', limit: 20 },
+      { campaign_id: campaignId, email_type: 'sent', limit: 100 },
       { accountId },
     );
-    return (res.items ?? []).filter((e) => (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3);
+    emails = (res.items ?? []).filter((e) => (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3);
   } catch (err) {
-    workerLog('warn', `outbound fetch failed for ${leadEmail} in ${campaignId}`, err);
-    return [];
+    workerLog('warn', `campaign sent fetch failed for ${campaignId} — attribution deferred`, err);
+    return null; // транзиентно: не квалифицируем этот тик, но и не дропаем
   }
+  campaignSentCache.set(campaignId, { at: Date.now(), emails });
+  return emails;
+}
+
+// Нормализация темы: срезаем ведущие Re/Fwd, нижний регистр, схлопываем
+// пробелы. «Re: RE: По вопросу…» → «по вопросу…».
+function subjectStem(s: string | undefined): string {
+  return (s ?? '')
+    .toLowerCase()
+    .replace(/^(?:\s*(?:re|fw|fwd|ре|отв|пересылаемое сообщение)\s*[:>\-]\s*)+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+// Плюс удаление персонализации «…»/"…" — тема-шаблон без имени компании.
+function subjectTemplate(s: string | undefined): string {
+  return subjectStem(s).replace(/[«"„“][^»"”]*[»"”]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+const SUBJECT_MIN_PREFIX = 15;
+
+/**
+ * Ответ считается настоящим ответом НА КАМПАНИЮ, если его тема = «Re: <тема,
+ * которую кампания реально слала>». Отличает лида (даже с чужого/личного адреса
+ * — тема ответа сохраняется) от warmup, у которого тема своя, фейковая
+ * (валидировано 17.07 на живых данных: sale1@windguard «По вопросу вентиляции»
+ * — префикс 23 с темами кампании; warmup «Стратегия НеоСтиль Опт сессия»,
+ * «Крипто-Фактор» — префикс 0). Возвращает совпавшее исходящее (контекст для
+ * ИИ) или null.
+ *
+ * Матч по (а) равенству/префиксу ШАБЛОНА без персонализации («по вопросу
+ * вентиляции» == «по вопросу вентиляции») ИЛИ (б) общему префиксу ≥15 симв.
+ * (ловит незакавыченную персонализацию — «Ищу ответственного X»).
+ */
+function matchReplyToCampaign(replySubject: string | undefined, sent: Email[]): Email | null {
+  const rs = subjectStem(replySubject);
+  if (rs.length < 6) return null; // пустая/слишком короткая тема — не доверяем
+  const rt = subjectTemplate(replySubject);
+  for (const e of sent) {
+    const ss = subjectStem(e.subject);
+    if (!ss) continue;
+    const st = subjectTemplate(e.subject);
+    if (rt.length >= 8 && st.length >= 8 && (rt === st || rt.startsWith(st) || st.startsWith(rt))) {
+      return e;
+    }
+    let i = 0;
+    while (i < rs.length && i < ss.length && rs[i] === ss[i]) i++;
+    if (i >= SUBJECT_MIN_PREFIX) return e;
+  }
+  return null;
 }
 
 /**
  * fetchThreadContext ищет ответ ВНУТРИ кампании и Others-письма не увидит
- * (у того нет campaign_id) — в лучшем случае он взял бы старый ответ лида, и
- * ИИ судил бы не то письмо. Поэтому контекст собираем сами: replyEmail = само
- * Others-письмо, исходящие — из уже сделанной пробы кампании.
+ * (у того нет campaign_id). Поэтому контекст собираем сами: replyEmail = само
+ * Others-письмо, lastOutbound = ИМЕННО то исходящее, на которое лид ответил
+ * (совпавшее по теме — точный контекст пича для ИИ), а mailbox-set — все ящики
+ * кампании (для cross-client guard в qualifyOneReply).
  */
-function buildOthersThreadContext(reply: Email, outbound: Email[]): ThreadContext {
-  const byTs = (e: Email) => new Date(e.timestamp_email ?? e.timestamp_created ?? 0).getTime();
-  const sorted = [...outbound].sort((a, b) => byTs(a) - byTs(b));
-  const replyTs = byTs(reply);
-  const before = sorted.filter((e) => byTs(e) <= replyTs);
-  const lastOutbound = (before.length > 0 ? before : sorted).at(-1) ?? null;
-
+function buildOthersThreadContext(
+  reply: Email,
+  matchedOutreach: Email | null,
+  campaignMailboxes: string[],
+): ThreadContext {
   return {
     replyEmail: reply,
-    threadEmails: [...sorted, reply],
-    lastOutbound,
-    campaignOutboundMailboxes: [
-      ...new Set(sorted.map((e) => (e.eaccount ?? '').trim().toLowerCase()).filter(Boolean)),
-    ],
+    threadEmails: matchedOutreach ? [matchedOutreach, reply] : [reply],
+    lastOutbound: matchedOutreach,
+    campaignOutboundMailboxes: campaignMailboxes,
   };
 }
 
@@ -461,36 +511,48 @@ export async function pollOthersOnce(): Promise<number> {
     }
 
     // ГЛАВНАЯ отсечка warmup (инцидент 17.07: вотчдог штамповал прогрев в лиды).
-    // Квалифицируем ТОЛЬКО если кампания реально ПИСАЛА этому отправителю.
-    // Логика: настоящий ответ на аутрич приходит от того, кому мы слали письмо;
-    // прогрев — это переписка наших ящиков с ЧУЖИМИ warmup-персонами
-    // (momlife.work и т.п.), их ответ цитирует наш домен (⇒ прошёл контент-матч),
-    // но НИ ОДНА кампания ему не писала (прогрев идёт мимо кампаний) ⇒ исходящих
-    // ноль ⇒ это не лид. То же отсекает чужие рассылки (marketing@saas), совпавшие
-    // по цитате домена. Приводит Others к паритету с основным поллером: тот
-    // квалифицирует только то, что Instantly сам привязал к кампании.
+    // Квалифицируем ТОЛЬКО если тема ответа = «Re: <тема, которую кампания реально
+    // слала>». Логика: настоящий лид, даже отвечая с чужого/личного адреса,
+    // сохраняет тему нашего письма; warmup — переписка наших ящиков с ЧУЖИМИ
+    // warmup-персонами (momlife.work) — цитирует наш домен (⇒ прошёл контент-матч),
+    // но тема у него своя, фейковая («Стратегия НеоСтиль Опт сессия»), которой
+    // кампания никогда не слала. То же отсекает чужие рассылки (marketing@saas).
+    // ВАЖНО: НЕ «слали ли отправителю» — лид отвечает с ДРУГОГО адреса (в этом
+    // весь смысл Others), проверка по адресу выкинула бы его. Проверка по ТЕМЕ
+    // работает с любого адреса.
     //
     // Проба заодно выбирает ПРАВИЛЬНУЮ кампанию: у пул-домена их несколько (в т.ч.
-    // разных клиентов), ответ относится к той, что писала. Пейсим probeDelay —
-    // на тик из warmup-бэклога проб может быть много.
+    // разных клиентов) — берём ту, чьи темы совпали. Пейсим probeDelay: на тик из
+    // warmup-бэклога проб может быть много.
     let chosen: CampaignCandidate | null = null;
-    let outbound: Email[] = [];
+    let matchedOutreach: Email | null = null;
+    let campaignMailboxes: string[] = [];
+    let sentFetchFailed = false;
     for (const cand of candidates.slice(0, MAX_CAMPAIGN_PROBES_PER_EMAIL)) {
       if (probedThisTick > 0) await sleep(probeDelay);
       probedThisTick++;
-      const out = await fetchOutboundForLead(cand.campaignId, cand.accountId, sender);
-      if (out.length > 0) {
+      const sent = await fetchCampaignSent(cand.campaignId, cand.accountId);
+      if (sent === null) {
+        sentFetchFailed = true; // транзиентный сбой fetch — не роняем в дроп
+        continue;
+      }
+      const m = matchReplyToCampaign(email.subject, sent);
+      if (m) {
         chosen = cand;
-        outbound = out;
+        matchedOutreach = m;
+        campaignMailboxes = [
+          ...new Set(sent.map((e) => (e.eaccount ?? '').trim().toLowerCase()).filter(Boolean)),
+        ];
         break;
       }
     }
     if (!chosen) {
-      // Ни одна кампания домена не писала отправителю → не квалифицируем.
-      // Строку НЕ пишем: writing not_lead на весь warmup-поток = лишние вставки,
-      // а короткий негативный кэш атрибуции + выход письма из окна сами уберут.
+      if (sentFetchFailed) continue; // не смогли проверить тему → отложить, НЕ дроп
+      // Тема не совпала ни с одной кампанией домена → это не ответ на наш аутрич
+      // (warmup / чужая рассылка). Строку НЕ пишем: not_lead на весь warmup-поток
+      // = лишние вставки, а короткий кэш атрибуции + выход письма из окна уберут.
       warmupDropped++;
-      workerLog('info', `No campaign outbound to ${sender} (cited ${citedDomain}) — warmup/non-reply, skipped`);
+      workerLog('info', `Reply subject "${email.subject ?? ''}" matches no campaign of ${citedDomain} (from ${sender}) — warmup/non-reply, skipped`);
       continue;
     }
 
@@ -499,7 +561,7 @@ export async function pollOthersOnce(): Promise<number> {
 
     const reply: Email = { ...email, campaign_id: chosen.campaignId };
     try {
-      const ctx = buildOthersThreadContext(reply, outbound);
+      const ctx = buildOthersThreadContext(reply, matchedOutreach, campaignMailboxes);
       await qualifyOneReply(db, reply, apiKey, chosen.accountId, ctx, {
         clientDmOnlyOnLead: true,
       });

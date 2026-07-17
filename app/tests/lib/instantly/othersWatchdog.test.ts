@@ -49,6 +49,17 @@ jest.mock('@/lib/instantly/leadQualifier', () => ({
 
 const OUR_DOMAINS = ['velar-vr.ru', 'mailganer.pro', 'law-russia.tech'];
 
+// Тема кампании velar-vr (по ней сверяется тема ответа). Реальный лид отвечает
+// «Re: По вопросу вентиляции «X»» — тот же шаблон.
+const CAMPAIGN_SUBJECT = 'По вопросу вентиляции «Техинсервис»';
+const SENT_MATCH: Email = {
+  id: 'out-1',
+  ue_type: 1,
+  eaccount: 'elena@velar-vr.ru',
+  subject: CAMPAIGN_SUBJECT,
+  timestamp_email: '2026-07-15T09:00:00.000Z',
+} as Email;
+
 function makeOthersEmail(overrides: Partial<Email> = {}): Email {
   return {
     id: 'others-email-1',
@@ -56,7 +67,7 @@ function makeOthersEmail(overrides: Partial<Email> = {}): Email {
     from_address_email: 'ruslan@windguard.ru',
     to_address_email_list: 'elena@velar-vr.ru',
     eaccount: 'elena@velar-vr.ru',
-    subject: 'Re: По вопросу вентиляции',
+    subject: 'Re: По вопросу вентиляции «Виндгард»',
     body: { text: 'Опросник во вложении. От кого: elena@velar-vr.ru' },
     thread_id: 'thread-1',
     timestamp_email: '2026-07-16T10:00:00.000Z',
@@ -75,6 +86,7 @@ beforeEach(() => {
   process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY = 'test-key';
   process.env.INSTANTLY_OTHERS_PAGES = '1';
   process.env.INSTANTLY_LEADS_INTER_REPLY_DELAY_MS = '1000';
+  process.env.INSTANTLY_OTHERS_PROBE_DELAY_MS = '200';
   delete process.env.INSTANTLY_OTHERS_MAX_PER_TICK;
 
   mockInstantlyDb = createMockSupabase({ tables: { instantly_lead_qualifications: [] } });
@@ -96,25 +108,14 @@ beforeEach(() => {
   );
   qualifyOneReply.mockResolvedValue(undefined);
 
-  // Дефолтный маршрут listEmails: страница Others → один кандидат; outbound —
-  // одно наше отправленное письмо.
+  // Дефолт: страница Others → один кандидат; sent любой кампании → письмо с темой,
+  // совпадающей с ответом (та же шаблон-тема «По вопросу вентиляции»).
   listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
     if (params.mode === 'emode_others') {
       return { items: [makeOthersEmail()], next_starting_after: null };
     }
     if (params.email_type === 'sent') {
-      return {
-        items: [
-          {
-            id: 'out-1',
-            ue_type: 1,
-            eaccount: 'elena@velar-vr.ru',
-            timestamp_email: '2026-07-15T09:00:00.000Z',
-            body: { text: 'Наше письмо' },
-          },
-        ],
-        next_starting_after: null,
-      };
+      return { items: [SENT_MATCH], next_starting_after: null };
     }
     return { items: [], next_starting_after: null };
   });
@@ -206,7 +207,7 @@ describe('screenOthersEmail', () => {
 });
 
 describe('pollOthersOnce', () => {
-  it('квалифицирует нового кандидата через qualifyOneReply с атрибуцией кампании', async () => {
+  it('квалифицирует ответ, чья тема совпала с темой кампании, с правильным контекстом', async () => {
     const { pollOthersOnce } = await importWatchdog();
     const processed = await pollOthersOnce();
 
@@ -217,18 +218,73 @@ describe('pollOthersOnce', () => {
     expect((reply as Email).id).toBe('others-email-1');
     expect(apiKey).toBe('test-key');
     expect(accountId).toBe('main');
-    // Контекст синтезирован: replyEmail = само Others-письмо, исходящие — из
-    // отдельного запроса по кампании.
     const context = ctx as {
       replyEmail: Email;
       lastOutbound: Email | null;
       campaignOutboundMailboxes?: string[];
     };
     expect(context.replyEmail.id).toBe('others-email-1');
+    // lastOutbound = ИМЕННО совпавшее по теме исходящее (точный контекст пича).
     expect(context.lastOutbound?.id).toBe('out-1');
     expect(context.campaignOutboundMailboxes).toContain('elena@velar-vr.ru');
-    // Others-поток шумный: DM клиенту — только при вердикте «лид».
     expect(opts).toMatchObject({ clientDmOnlyOnLead: true });
+  });
+
+  it('ЛИД С ЛИЧНОЙ ПОЧТЫ (слали на корпоративный): тема совпала → берём, адрес не важен', async () => {
+    // Ровно кейс, ради которого фича: человек отвечает с личного mail.ru, мы на
+    // этот адрес не слали — но тема ответа = тема кампании.
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return {
+          items: [
+            makeOthersEmail({
+              from_address_email: 'ivan.personal@mail.ru',
+              subject: 'Re: По вопросу вентиляции «Виндгард»',
+              body: { text: 'Интересно, давайте обсудим. От кого: elena@velar-vr.ru' },
+            }),
+          ],
+          next_starting_after: null,
+        };
+      }
+      if (params.email_type === 'sent') {
+        return { items: [SENT_MATCH], next_starting_after: null };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(1);
+    expect((qualifyOneReply.mock.calls[0][1] as Email).campaign_id).toBe('camp-velar');
+  });
+
+  it('WARMUP: цитирует наш домен, но тема ФЕЙКОВАЯ (кампания её не слала) → дроп', async () => {
+    // Инцидент 17.07: v.vasileva@momlife.work, тема «Стратегия НеоСтиль Опт сессия»
+    // — кампания velar-vr такого не слала → дроп, никакой строки.
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return {
+          items: [
+            makeOthersEmail({
+              from_address_email: 'v.vasileva@momlife.work',
+              subject: 'Re: Стратегия НеоСтиль Опт сессия',
+              body: { text: 'Да, подключусь, подготовлю KPI. С теплом, Валерия. От: elena@velar-vr.ru' },
+            }),
+          ],
+          next_starting_after: null,
+        };
+      }
+      if (params.email_type === 'sent') {
+        return { items: [SENT_MATCH], next_starting_after: null };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(0);
+    expect(qualifyOneReply).not.toHaveBeenCalled();
+    expect(mockInstantlyDb?.inserts).toHaveLength(0);
   });
 
   it('пропускает письмо, уже обработанное ранее (дедуп по instantly_email_id)', async () => {
@@ -255,7 +311,6 @@ describe('pollOthersOnce', () => {
   });
 
   it('перебирает ящики домена: первый без маппингов не ослепляет весь домен', async () => {
-    // elena@ (первый ящик velar-vr.ru) не привязан, irina@ несёт кампанию.
     getAccountCampaignMappings.mockImplementation(async (mailbox: string) =>
       mailbox === 'irina@velar-vr.ru'
         ? [{ campaign_id: 'camp-velar', status: 1, timestamp_created: '2026-07-01T00:00:00.000Z' }]
@@ -276,38 +331,7 @@ describe('pollOthersOnce', () => {
 
     expect(processed).toBe(0);
     expect(qualifyOneReply).not.toHaveBeenCalled();
-    // Ключевое: маппинги даже не дёргаются и null не кэшируется — следующий
-    // тик перепроверит с живой БД.
     expect(getAccountCampaignMappings).not.toHaveBeenCalled();
-  });
-
-  it('WARMUP: домен цитируется и атрибуцируется, но кампания отправителю НЕ писала → дроп без квалификации', async () => {
-    // Инцидент 17.07: v.vasileva@momlife.work (warmup-персона) цитирует наш
-    // рассыльный домен velar-vr.ru (там есть камп camp-velar) → прошёл
-    // контент-матч и атрибуцию. НО camp-velar ему ничего не слала (прогрев идёт
-    // мимо кампаний) → исходящих ноль → это НЕ ответ на аутрич, а прогрев.
-    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
-      if (params.mode === 'emode_others') {
-        return {
-          items: [
-            makeOthersEmail({
-              from_address_email: 'v.vasileva@momlife.work',
-              subject: 'Re: Стратегия НеоСтиль Опт сессия',
-              body: { text: 'Да, подключусь, подготовлю KPI. С теплом, Валерия. От: elena@velar-vr.ru' },
-            }),
-          ],
-          next_starting_after: null,
-        };
-      }
-      // sent → пусто: кампания этому отправителю не писала (ключевой сигнал).
-      return { items: [], next_starting_after: null };
-    });
-    const { pollOthersOnce } = await importWatchdog();
-    const processed = await pollOthersOnce();
-
-    expect(processed).toBe(0);
-    expect(qualifyOneReply).not.toHaveBeenCalled();
-    expect(mockInstantlyDb?.inserts).toHaveLength(0); // никакой строки на warmup
   });
 
   it('пропускает кампанию, не входящую в квалифицируемый набор', async () => {
@@ -319,7 +343,7 @@ describe('pollOthersOnce', () => {
     expect(qualifyOneReply).not.toHaveBeenCalled();
   });
 
-  it('выбирает кампанию по факту исходящих лиду, а не первую попавшуюся', async () => {
+  it('выбирает кампанию, чьи ТЕМЫ совпали с ответом (а не первую попавшуюся)', async () => {
     getAccountCampaignMappings.mockResolvedValue([
       { campaign_id: 'camp-new', status: 1, timestamp_created: '2026-07-10T00:00:00.000Z' },
       { campaign_id: 'camp-velar', status: 1, timestamp_created: '2026-06-01T00:00:00.000Z' },
@@ -327,15 +351,19 @@ describe('pollOthersOnce', () => {
     getCampaignsByAccountCached.mockResolvedValue(
       new Map([['main', new Set(['camp-new', 'camp-velar'])]]),
     );
-    // Исходящие этому лиду есть только в СТАРОЙ кампании.
+    // Тема ответа «По вопросу вентиляции» есть только у camp-velar; camp-new
+    // (новее, пробуется первой) слал про другое.
     listEmails.mockImplementation(
       async (params: { mode?: string; email_type?: string; campaign_id?: string }) => {
         if (params.mode === 'emode_others') {
           return { items: [makeOthersEmail()], next_starting_after: null };
         }
-        if (params.email_type === 'sent' && params.campaign_id === 'camp-velar') {
+        if (params.email_type === 'sent') {
+          if (params.campaign_id === 'camp-velar') {
+            return { items: [SENT_MATCH], next_starting_after: null };
+          }
           return {
-            items: [{ id: 'out-1', ue_type: 1, eaccount: 'elena@velar-vr.ru' }],
+            items: [{ id: 'out-x', ue_type: 1, eaccount: 'a@velar-vr.ru', subject: 'Учёт рыбы и морепродуктов' }],
             next_starting_after: null,
           };
         }
@@ -371,6 +399,26 @@ describe('pollOthersOnce', () => {
     });
   });
 
+  it('падение fetch тем кампании откладывает письмо, НЕ дропает как warmup', async () => {
+    // sent-запрос падает → тему проверить нельзя → не квалифицируем, но и не
+    // помечаем warmup (строки нет, попробуем на следующем тике).
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return { items: [makeOthersEmail()], next_starting_after: null };
+      }
+      if (params.email_type === 'sent') {
+        throw new Error('Instantly API 503');
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(0);
+    expect(qualifyOneReply).not.toHaveBeenCalled();
+    expect(mockInstantlyDb?.inserts).toHaveLength(0);
+  });
+
   it('падение дедуп-запроса откладывает тик (не рискует повторным алертом)', async () => {
     mockInstantlyDb = createMockSupabase({
       tables: { instantly_lead_qualifications: [] },
@@ -388,7 +436,6 @@ describe('pollOthersOnce', () => {
       if (params.mode === 'emode_others') {
         return {
           items: [
-            // Порядок НЕ по новизне: реализация «взять первое» провалила бы тест.
             makeOthersEmail({ id: 'older', timestamp_email: '2026-07-16T08:00:00.000Z' }),
             makeOthersEmail({ id: 'newer', timestamp_email: '2026-07-16T12:00:00.000Z' }),
           ],
@@ -396,7 +443,7 @@ describe('pollOthersOnce', () => {
         };
       }
       if (params.email_type === 'sent') {
-        return { items: [{ id: 'out-1', ue_type: 1, eaccount: 'elena@velar-vr.ru' }], next_starting_after: null };
+        return { items: [SENT_MATCH], next_starting_after: null };
       }
       return { items: [], next_starting_after: null };
     });
@@ -409,9 +456,6 @@ describe('pollOthersOnce', () => {
   });
 
   it('уже обработанное новейшее письмо НЕ затеняет раннее необработанное того же отправителя', async () => {
-    // Порядок в поллере: сначала БД-дедуп, потом схлопывание «новейшее на
-    // отправителя». Обратный порядок терял бы раннее письмо навсегда
-    // (критическая находка ревью 16.07).
     mockInstantlyDb = createMockSupabase({
       tables: { instantly_lead_qualifications: [{ instantly_email_id: 'newer' }] },
     });
@@ -426,7 +470,7 @@ describe('pollOthersOnce', () => {
         };
       }
       if (params.email_type === 'sent') {
-        return { items: [{ id: 'out-1', ue_type: 1, eaccount: 'elena@velar-vr.ru' }], next_starting_after: null };
+        return { items: [SENT_MATCH], next_starting_after: null };
       }
       return { items: [], next_starting_after: null };
     });
@@ -461,9 +505,9 @@ describe('pollOthersOnce', () => {
           next_starting_after: null,
         };
       }
-      // Обе кампании писали этому человеку → обе квалифицируются.
+      // Обе кампании слали тему, совпадающую с ответом.
       if (params.email_type === 'sent') {
-        return { items: [{ id: 'out-1', ue_type: 1, eaccount: 'elena@velar-vr.ru' }], next_starting_after: null };
+        return { items: [SENT_MATCH], next_starting_after: null };
       }
       return { items: [], next_starting_after: null };
     });
@@ -477,8 +521,6 @@ describe('pollOthersOnce', () => {
 
   it('неатрибуцируемые кандидаты НЕ съедают потолок попыток на тик', async () => {
     process.env.INSTANTLY_OTHERS_MAX_PER_TICK = '1';
-    // Новее по списку — кандидат Coldy/Trigga-домена (без кампаний), старше —
-    // реальный атрибуцируемый ответ. Кап по префиксу списка потерял бы его.
     getAccountCampaignMappings.mockImplementation(async (mailbox: string) =>
       mailbox.endsWith('velar-vr.ru')
         ? [{ campaign_id: 'camp-velar', status: 1, timestamp_created: '2026-07-01T00:00:00.000Z' }]
@@ -504,9 +546,8 @@ describe('pollOthersOnce', () => {
           next_starting_after: null,
         };
       }
-      // camp-velar реально писала реальному лиду → у него есть исходящие.
       if (params.email_type === 'sent') {
-        return { items: [{ id: 'out-1', ue_type: 1, eaccount: 'elena@velar-vr.ru' }], next_starting_after: null };
+        return { items: [SENT_MATCH], next_starting_after: null };
       }
       return { items: [], next_starting_after: null };
     });
