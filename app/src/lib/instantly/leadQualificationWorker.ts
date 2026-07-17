@@ -581,12 +581,26 @@ async function getClientPartyAddresses(
   return { addresses, domains };
 }
 
-async function qualifyOneReply(
+// Экспорт — для othersWatchdog: вкладка Others квалифицируется ТЕМ ЖЕ путём
+// (guard'ы, критерии, дедуп по instantly_email_id), различается только
+// источник письма и атрибуция кампании.
+export async function qualifyOneReply(
   db: NonNullable<typeof supabaseAdmin>,
   reply: Email,
   apiKey: string,
   accountId?: string,
   prefetchedContext?: ThreadContext | null,
+  opts?: {
+    /**
+     * DM клиенту — только при вердикте «лид». Для Others-потока (вотчдог):
+     * там письма НЕ привязаны Instantly к кампании, и «любой человеческий
+     * ответ» включает спам, цитирующий домен клиента (SEO-рассылки «ваш сайт
+     * velar-vr.ru не в топе») — слать такое клиенту как «ответ в вашей
+     * кампании» нельзя. Primary-поллер флаг не передаёт — его поведение
+     * не меняется.
+     */
+    clientDmOnlyOnLead?: boolean;
+  },
 ): Promise<void> {
   const campaignId = reply.campaign_id;
   const leadEmail =
@@ -960,7 +974,10 @@ async function qualifyOneReply(
   // (e.g. confirming a call time). Broader than the studio lead gate. Reuses the
   // qualifier's own auto/OOO rule-check (runs before AI, so noise costs no AI).
   // `inserted?.id` (new qualification) is the send-once guard. Never throws.
-  const meaningfulForClient = !!replyText && !isAutoReplyOrUnsubscribe(replyText);
+  const meaningfulForClient =
+    !!replyText &&
+    !isAutoReplyOrUnsubscribe(replyText) &&
+    (!opts?.clientDmOnlyOnLead || status === 'lead');
   if (inserted?.id && meaningfulForClient) {
     await notifyClientOfReply(db, campaignId, {
       campaignName,
@@ -988,8 +1005,10 @@ function drainEnabled(): boolean {
 }
 
 // Кэш поверхности кампаний на пару тиков, чтобы не дёргать БД каждые ~7с.
+// Экспорт — переиспользуется othersWatchdog'ом для атрибуции Others-письма
+// к квалифицируемой кампании.
 let drainCampaignCache: { at: number; byAccount: Map<string, Set<string>> } | null = null;
-async function getCampaignsByAccountCached(): Promise<Map<string, Set<string>>> {
+export async function getCampaignsByAccountCached(): Promise<Map<string, Set<string>>> {
   const ttl = envNumber('INSTANTLY_DRAIN_CAMPAIGN_TTL_MS', 30000);
   if (drainCampaignCache && Date.now() - drainCampaignCache.at < ttl) {
     return drainCampaignCache.byAccount;
