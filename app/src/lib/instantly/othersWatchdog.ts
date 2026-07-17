@@ -441,8 +441,11 @@ export async function pollOthersOnce(): Promise<number> {
   //    списку) дёшевы и не должны выдавливать реальный ответ из слотов.
   const maxPerTick = Math.max(1, envNumber('INSTANTLY_OTHERS_MAX_PER_TICK', 5));
   const interDelay = Math.max(1000, envNumber('INSTANTLY_LEADS_INTER_REPLY_DELAY_MS', 3500));
+  const probeDelay = Math.max(200, envNumber('INSTANTLY_OTHERS_PROBE_DELAY_MS', 800));
   let attempts = 0;
   let processed = 0;
+  let warmupDropped = 0;
+  let probedThisTick = 0;
   for (const { email, citedDomain } of fresh) {
     if (attempts >= maxPerTick) break;
     const sender = (email.from_address_email ?? '').toLowerCase();
@@ -457,16 +460,24 @@ export async function pollOthersOnce(): Promise<number> {
       continue;
     }
 
-    attempts++;
-    if (attempts > 1) await sleep(interDelay);
-
-    // Выбор кампании по ФАКТУ исходящих этому лиду: у домена может быть
-    // несколько кампаний (в т.ч. разных клиентов на пул-доменах), и ответ
-    // относится к той, которая ему писала. Без исходящих (контакт удалён
-    // вместе с логом) — новейшая активная как best-effort.
-    let chosen = candidates[0];
+    // ГЛАВНАЯ отсечка warmup (инцидент 17.07: вотчдог штамповал прогрев в лиды).
+    // Квалифицируем ТОЛЬКО если кампания реально ПИСАЛА этому отправителю.
+    // Логика: настоящий ответ на аутрич приходит от того, кому мы слали письмо;
+    // прогрев — это переписка наших ящиков с ЧУЖИМИ warmup-персонами
+    // (momlife.work и т.п.), их ответ цитирует наш домен (⇒ прошёл контент-матч),
+    // но НИ ОДНА кампания ему не писала (прогрев идёт мимо кампаний) ⇒ исходящих
+    // ноль ⇒ это не лид. То же отсекает чужие рассылки (marketing@saas), совпавшие
+    // по цитате домена. Приводит Others к паритету с основным поллером: тот
+    // квалифицирует только то, что Instantly сам привязал к кампании.
+    //
+    // Проба заодно выбирает ПРАВИЛЬНУЮ кампанию: у пул-домена их несколько (в т.ч.
+    // разных клиентов), ответ относится к той, что писала. Пейсим probeDelay —
+    // на тик из warmup-бэклога проб может быть много.
+    let chosen: CampaignCandidate | null = null;
     let outbound: Email[] = [];
     for (const cand of candidates.slice(0, MAX_CAMPAIGN_PROBES_PER_EMAIL)) {
+      if (probedThisTick > 0) await sleep(probeDelay);
+      probedThisTick++;
       const out = await fetchOutboundForLead(cand.campaignId, cand.accountId, sender);
       if (out.length > 0) {
         chosen = cand;
@@ -474,6 +485,17 @@ export async function pollOthersOnce(): Promise<number> {
         break;
       }
     }
+    if (!chosen) {
+      // Ни одна кампания домена не писала отправителю → не квалифицируем.
+      // Строку НЕ пишем: writing not_lead на весь warmup-поток = лишние вставки,
+      // а короткий негативный кэш атрибуции + выход письма из окна сами уберут.
+      warmupDropped++;
+      workerLog('info', `No campaign outbound to ${sender} (cited ${citedDomain}) — warmup/non-reply, skipped`);
+      continue;
+    }
+
+    attempts++;
+    if (attempts > 1) await sleep(interDelay);
 
     const reply: Email = { ...email, campaign_id: chosen.campaignId };
     try {
@@ -521,5 +543,9 @@ export async function pollOthersOnce(): Promise<number> {
     }
   }
 
+  workerLog(
+    'info',
+    `Others tick done: ${processed} qualified, ${warmupDropped} dropped (no campaign outbound = warmup/non-reply)`,
+  );
   return processed;
 }

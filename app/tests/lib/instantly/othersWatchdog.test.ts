@@ -281,6 +281,35 @@ describe('pollOthersOnce', () => {
     expect(getAccountCampaignMappings).not.toHaveBeenCalled();
   });
 
+  it('WARMUP: домен цитируется и атрибуцируется, но кампания отправителю НЕ писала → дроп без квалификации', async () => {
+    // Инцидент 17.07: v.vasileva@momlife.work (warmup-персона) цитирует наш
+    // рассыльный домен velar-vr.ru (там есть камп camp-velar) → прошёл
+    // контент-матч и атрибуцию. НО camp-velar ему ничего не слала (прогрев идёт
+    // мимо кампаний) → исходящих ноль → это НЕ ответ на аутрич, а прогрев.
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return {
+          items: [
+            makeOthersEmail({
+              from_address_email: 'v.vasileva@momlife.work',
+              subject: 'Re: Стратегия НеоСтиль Опт сессия',
+              body: { text: 'Да, подключусь, подготовлю KPI. С теплом, Валерия. От: elena@velar-vr.ru' },
+            }),
+          ],
+          next_starting_after: null,
+        };
+      }
+      // sent → пусто: кампания этому отправителю не писала (ключевой сигнал).
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(0);
+    expect(qualifyOneReply).not.toHaveBeenCalled();
+    expect(mockInstantlyDb?.inserts).toHaveLength(0); // никакой строки на warmup
+  });
+
   it('пропускает кампанию, не входящую в квалифицируемый набор', async () => {
     getCampaignsByAccountCached.mockResolvedValue(new Map([['main', new Set(['other-camp'])]]));
     const { pollOthersOnce } = await importWatchdog();
@@ -366,6 +395,9 @@ describe('pollOthersOnce', () => {
           next_starting_after: null,
         };
       }
+      if (params.email_type === 'sent') {
+        return { items: [{ id: 'out-1', ue_type: 1, eaccount: 'elena@velar-vr.ru' }], next_starting_after: null };
+      }
       return { items: [], next_starting_after: null };
     });
     const { pollOthersOnce } = await importWatchdog();
@@ -429,6 +461,10 @@ describe('pollOthersOnce', () => {
           next_starting_after: null,
         };
       }
+      // Обе кампании писали этому человеку → обе квалифицируются.
+      if (params.email_type === 'sent') {
+        return { items: [{ id: 'out-1', ue_type: 1, eaccount: 'elena@velar-vr.ru' }], next_starting_after: null };
+      }
       return { items: [], next_starting_after: null };
     });
     const { pollOthersOnce } = await importWatchdog();
@@ -467,6 +503,10 @@ describe('pollOthersOnce', () => {
           ],
           next_starting_after: null,
         };
+      }
+      // camp-velar реально писала реальному лиду → у него есть исходящие.
+      if (params.email_type === 'sent') {
+        return { items: [{ id: 'out-1', ue_type: 1, eaccount: 'elena@velar-vr.ru' }], next_starting_after: null };
       }
       return { items: [], next_starting_after: null };
     });
