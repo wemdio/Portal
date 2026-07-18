@@ -2,7 +2,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # pg_dump → S3 / Supabase Storage backup
 #
-# Usage: backup.sh <main-supabase|instantly-prod|instantly-dev>
+# Usage: backup.sh <main-supabase|instantly-prod|instantly-dev|instantly-dataset>
 #
 # Upload priority:
 #   1. S3 (via mc) — if BACKUP_S3_ENDPOINT + credentials are set
@@ -13,6 +13,7 @@
 #   portal-main/portal-main-main-supabase-<TS>.dump
 #   instantly/prod/instantly-instantly-prod-<TS>.dump
 #   instantly/dev/instantly-instantly-dev-<TS>.dump
+#   instantly/dataset/instantly-instantly-dataset-<TS>.dump
 #
 # Supabase layout (<BACKUP_BUCKET>, default db-backups):
 #   Same subpaths as S3.
@@ -22,7 +23,7 @@ set -u
 
 INSTANCE="${1:-}"
 if [ -z "$INSTANCE" ]; then
-  echo "Usage: backup.sh <main-supabase|instantly-prod|instantly-dev>" >&2
+  echo "Usage: backup.sh <main-supabase|instantly-prod|instantly-dev|instantly-dataset>" >&2
   exit 1
 fi
 
@@ -98,8 +99,18 @@ case "$INSTANCE" in
     PREFIX="instantly"
     SUBPATH="instantly/dev"
     ;;
+  instantly-dataset)
+    # Аналитический датасет (instantly_dataset, ~12 ГБ → сжатый дамп ~1.5-3 ГБ).
+    PG_CONN_URL="${INSTANTLY_DATASET_DB_URL:-}"
+    if [ -z "$PG_CONN_URL" ]; then
+      echo "[backup] INSTANTLY_DATASET_DB_URL is empty, skipping instantly-dataset backup."
+      exit 0
+    fi
+    PREFIX="instantly"
+    SUBPATH="instantly/dataset"
+    ;;
   *)
-    echo "[backup] Unknown instance: $INSTANCE (expected main-supabase, instantly-prod, instantly-dev)" >&2
+    echo "[backup] Unknown instance: $INSTANCE (expected main-supabase, instantly-prod, instantly-dev, instantly-dataset)" >&2
     exit 1
     ;;
 esac
@@ -315,7 +326,14 @@ cleanup_remote
 
 # ─── Local rotation ──────────────────────────────────────────────────────────
 
-RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
+# У instantly-dataset своя короткая локальная ротация: дамп ~1.5-3 ГБ, при
+# глобальных 7 днях локальные копии съели бы ~20 ГБ volume portal-backup-data.
+# Датасет и так перезаливается ночным синком — локально хватит 2 последних.
+if [ "$INSTANCE" = "instantly-dataset" ]; then
+  RETENTION_DAYS="${BACKUP_DATASET_RETENTION_DAYS:-2}"
+else
+  RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
+fi
 echo "[backup] Cleaning local dumps older than ${RETENTION_DAYS} days..."
 find "$DUMP_DIR" -name "${PREFIX}-${INSTANCE}-*.dump" -type f -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
 

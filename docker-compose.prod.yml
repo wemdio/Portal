@@ -1003,8 +1003,8 @@ services:
     networks:
       - portal-network
 
-  # pg_dump-бэкапы обеих БД (main + Instantly) → S3 / Supabase Storage.
-  # Cron внутри контейнера; см. services/backup/crontab.
+  # pg_dump-бэкапы БД (main + Instantly + аналитический instantly_dataset)
+  # → S3 / Supabase Storage. Cron внутри контейнера; см. services/backup/crontab.
   portal-backup:
     image: ${DOCKER_USERNAME}/portal-backup:prod
     container_name: portal-backup
@@ -1014,6 +1014,7 @@ services:
       - MAIN_SUPABASE_DATABASE_URL=${MAIN_SUPABASE_DATABASE_URL:-${DATABASE_URL:-}}
       - INSTANTLY_DATABASE_URL=${INSTANTLY_DATABASE_URL:-}
       - INSTANTLY_DEV_DATABASE_URL=${INSTANTLY_DEV_DATABASE_URL:-}
+      - INSTANTLY_DATASET_DB_URL=${INSTANTLY_DATASET_DB_URL:-}
       # S3 storage (primary): TWC S3 или любой S3-совместимый.
       - BACKUP_S3_ENDPOINT=${BACKUP_S3_ENDPOINT:-${MAIN_S3_ENDPOINT:-}}
       - BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET:-${MAIN_S3_BUCKET:-}}

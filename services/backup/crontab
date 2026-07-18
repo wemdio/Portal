@@ -15,3 +15,10 @@
 
 # Instantly local Postgres prod: 06:15 / 18:15 UTC (сдвиг 15 мин)
 15 6,18 * * * sh -c '. /etc/backup.env; /backup.sh instantly-prod' >> /var/log/cron.log 2>&1
+
+# Аналитический датасет instantly_dataset (~12 ГБ, сжатый дамп ~1.5-3 ГБ):
+# раз в сутки в 04:30 UTC (07:30 МСК) — после ночного синка (sync 00:00,
+# labelers до ~03:00 UTC) и с запасом до бэкапа main-supabase в 06:00.
+# Локальная ротация 2 дня (BACKUP_DATASET_RETENTION_DAYS), в S3 — общий
+# BACKUP_REMOTE_RETENTION_DAYS.
+30 4 * * * sh -c '. /etc/backup.env; /backup.sh instantly-dataset' >> /var/log/cron.log 2>&1

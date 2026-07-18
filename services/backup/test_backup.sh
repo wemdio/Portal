@@ -10,18 +10,24 @@
 #   проверки контрактов через PATH. Никаких новых бинарников в Docker-образе.
 #
 # Контракт backup.sh (v2 — для Portal-сервера):
-#   Аргументы: <main-supabase|instantly-prod|instantly-dev>
+#   Аргументы: <main-supabase|instantly-prod|instantly-dev|instantly-dataset>
 #
 #   Каждая ветка читает ОДНУ переменную с URL подключения (то же значение,
 #   что использует приложение в .env Portal-сервера — DRY):
-#     main-supabase   ← MAIN_SUPABASE_DATABASE_URL (fallback: DATABASE_URL)
-#     instantly-prod  ← INSTANTLY_DATABASE_URL
-#     instantly-dev   ← INSTANTLY_DEV_DATABASE_URL
+#     main-supabase     ← MAIN_SUPABASE_DATABASE_URL (fallback: DATABASE_URL)
+#     instantly-prod    ← INSTANTLY_DATABASE_URL
+#     instantly-dev     ← INSTANTLY_DEV_DATABASE_URL
+#     instantly-dataset ← INSTANTLY_DATASET_DB_URL
 #
 #   Storage layout (bucket BACKUP_SUPABASE_URL/BACKUP_SUPABASE_KEY):
 #     deploy-backups/portal-main/portal-main-main-supabase-<TS>.dump
 #     deploy-backups/instantly/prod/instantly-instantly-prod-<TS>.dump
 #     deploy-backups/instantly/dev/instantly-instantly-dev-<TS>.dump
+#     deploy-backups/instantly/dataset/instantly-instantly-dataset-<TS>.dump
+#
+#   instantly-dataset: локальная ротация 2 дня (BACKUP_DATASET_RETENTION_DAYS),
+#   НЕ глобальный BACKUP_RETENTION_DAYS — сжатый дамп ~1.5-3 ГБ, 7 копий
+#   раздули бы volume portal-backup-data на ~20 ГБ.
 #
 #   Все ветки: pg_dump --format=custom --no-owner --no-privileges.
 #   Для main-supabase дополнительно: --exclude-schema=_supavisor / _realtime /
@@ -220,6 +226,40 @@ assert_exit_code "$rc" "0" "instantly-dev exits 0"
 assert_contains "$SB/pg_dump.log" "35433/instantly" "instantly-dev uses INSTANTLY_DEV_DATABASE_URL"
 assert_contains "$SB/curl.log" "/storage/v1/object/db-backups/instantly/dev/" "instantly-dev upload path uses default db-backups bucket"
 assert_contains "$SB/curl.log" "-T " "instantly-dev uses streaming upload (-T)"
+
+echo ""
+echo "── 4b) instantly-dataset: INSTANTLY_DATASET_DB_URL → correct path + короткая локальная ротация ──"
+SB="$TMP_ROOT/t4b"; make_sandbox "$SB"
+rc="$(INSTANTLY_DATASET_DB_URL='postgresql://instantly:ds@db.example.com:35432/instantly_dataset' \
+  BACKUP_SUPABASE_URL=https://example.supabase.co BACKUP_SUPABASE_KEY=svc \
+  BACKUP_RETENTION_DAYS=7 \
+  run_backup "$SB" instantly-dataset)"
+assert_exit_code "$rc" "0" "instantly-dataset exits 0"
+assert_contains "$SB/pg_dump.log" "--dbname=postgresql://instantly:ds@db.example.com:35432/instantly_dataset" "instantly-dataset uses INSTANTLY_DATASET_DB_URL"
+assert_contains "$SB/pg_dump.log" "--format=custom" "instantly-dataset uses --format=custom"
+assert_contains "$SB/pg_dump.log" "--no-owner" "instantly-dataset uses --no-owner"
+assert_contains "$SB/curl.log" "/storage/v1/object/db-backups/instantly/dataset/" "instantly-dataset upload path uses instantly/dataset subpath"
+assert_contains "$SB/curl.log" "-T " "instantly-dataset uses streaming upload (-T)"
+# Дамп ~1.5-3 ГБ: локальная ротация у датасета своя (default 2 дня) и НЕ
+# управляется глобальным BACKUP_RETENTION_DAYS=7 — иначе 7 копий съедят ~20 ГБ.
+assert_contains "$SB/run.out" "older than 2 days" "instantly-dataset local retention defaults to 2d despite BACKUP_RETENTION_DAYS=7"
+
+SB="$TMP_ROOT/t4b2"; make_sandbox "$SB"
+rc="$(INSTANTLY_DATASET_DB_URL='postgresql://instantly:ds@db.example.com:35432/instantly_dataset' \
+  BACKUP_SUPABASE_URL=https://example.supabase.co BACKUP_SUPABASE_KEY=svc \
+  BACKUP_DATASET_RETENTION_DAYS=5 \
+  run_backup "$SB" instantly-dataset)"
+assert_contains "$SB/run.out" "older than 5 days" "BACKUP_DATASET_RETENTION_DAYS overrides dataset local retention"
+
+echo ""
+echo "── 4c) instantly-dataset: skipped when INSTANTLY_DATASET_DB_URL is empty ──"
+SB="$TMP_ROOT/t4c"; make_sandbox "$SB"
+rc="$(BACKUP_SUPABASE_URL=https://x BACKUP_SUPABASE_KEY=k \
+  run_backup "$SB" instantly-dataset)"
+assert_exit_code "$rc" "0" "instantly-dataset no-URL → exit 0 (skip)"
+assert_contains "$SB/run.out" "skipping" "instantly-dataset no-URL → skip message"
+test ! -s "$SB/pg_dump.log" && { PASS=$((PASS + 1)); echo "  ✔ instantly-dataset no-URL → no pg_dump call"; } || \
+  { FAIL=$((FAIL + 1)); echo "  ✘ instantly-dataset no-URL → pg_dump was called"; }
 
 echo ""
 echo "── 5) main-supabase: MAIN_SUPABASE_DATABASE_URL + schema filters + portal-main path ──"
