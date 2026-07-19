@@ -4,6 +4,7 @@ import {
   getClientTranslation,
   normalizeClientLocale,
   readClientLocaleCookie,
+  resolveDemoClientLocale,
 } from '@/lib/clientI18n';
 import { getPortalPageSectionTitle } from '@/lib/pageTitle';
 import { CLIENT_TRANSLATION_CATALOGS } from '@/lib/clientTranslations.generated';
@@ -31,6 +32,24 @@ describe('clientI18n', () => {
     expect(readClientLocaleCookie('x=1; outreachos-client-locale=es; y=2')).toBe('es');
     expect(readClientLocaleCookie('outreachos-client-locale=de')).toBeNull();
     expect(readClientLocaleCookie('x=1')).toBeNull();
+  });
+
+  test('opens demo in the locale persisted by the landing', () => {
+    const emptyStorage = { getItem: () => null };
+    expect(resolveDemoClientLocale(
+      emptyStorage,
+      'outreachos-client-locale=es',
+      'en-US',
+    )).toBe('es');
+  });
+
+  test('keeps an explicit demo choice ahead of cookie and browser language', () => {
+    const storage = { getItem: () => 'en' };
+    expect(resolveDemoClientLocale(
+      storage,
+      'outreachos-client-locale=es',
+      'ru-RU',
+    )).toBe('en');
   });
 
   test.each([

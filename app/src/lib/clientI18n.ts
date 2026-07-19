@@ -56,6 +56,16 @@ export function readClientLocaleCookie(cookieHeader: string): ClientLocale | nul
   return null;
 }
 
+export function resolveDemoClientLocale(
+  storage: Pick<Storage, 'getItem'>,
+  cookieHeader: string,
+  navigatorLanguage: string,
+): ClientLocale {
+  const stored = storage.getItem(CLIENT_LOCALE_STORAGE_KEY);
+  if (stored) return normalizeClientLocale(stored);
+  return readClientLocaleCookie(cookieHeader) ?? normalizeClientLocale(navigatorLanguage);
+}
+
 export function writeClientLocaleCookie(locale: ClientLocale): void {
   if (typeof document === 'undefined') return;
   const sharedDomain = window.location.hostname.endsWith('outreachos.pro')

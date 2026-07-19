@@ -15,10 +15,8 @@ import {
 } from '@/lib/i18n';
 import {
   CLIENT_LOCALES,
-  CLIENT_LOCALE_STORAGE_KEY,
-  readStoredClientLocale,
-  readClientLocaleCookie,
   normalizeClientLocale,
+  resolveDemoClientLocale,
   writeStoredClientLocale,
   writeClientLocaleCookie,
   type ClientLocale,
@@ -123,10 +121,11 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   useEffect(() => {
     if (isDemo !== true) return;
     let cancelled = false;
-    const stored = window.localStorage.getItem(CLIENT_LOCALE_STORAGE_KEY);
-    const nextLocale = stored
-      ? readStoredClientLocale(window.localStorage)
-      : readClientLocaleCookie(document.cookie) ?? normalizeClientLocale(window.navigator.language);
+    const nextLocale = resolveDemoClientLocale(
+      window.localStorage,
+      document.cookie,
+      window.navigator.language,
+    );
     queueMicrotask(() => {
       if (!cancelled) setLocale(nextLocale);
     });
