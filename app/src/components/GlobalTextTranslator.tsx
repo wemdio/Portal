@@ -7,32 +7,22 @@ import {
   type Locale,
   type TargetLocale,
 } from '@/lib/i18n';
+import { getClientTranslation, type ClientLocale } from '@/lib/clientI18n';
 
 /**
- * GlobalTextTranslator — on-the-fly UI translator.
+ * GlobalTextTranslator — DOM bridge for hardcoded portal copy.
  *
- * Source language is Russian. When the user picks a non-Russian locale, this
- * component:
- *   1. Walks the DOM and collects every text node + translatable attribute
- *      that contains Cyrillic.
- *   2. Splits collected strings into "in localStorage cache" and "missing".
- *   3. POSTs missing strings to /api/portal/translate. While the request is
- *      in flight, sets `data-portal-translating="1"` on <html> so the
- *      LanguageLoadingOverlay component can block the UI.
- *   4. Applies translations to the DOM (text nodes + attributes) and stores
- *      pristine source values on the nodes so we can restore on locale=ru.
- *   5. Installs a MutationObserver to translate any text added later
- *      (route changes, modals, lazy-loaded content). New strings outside
- *      the cache are batched and fetched on a short debounce.
+ * Source language is Russian. Client-facing EN/ES copy comes from the bundled
+ * build-time catalog, including demo mode, and never calls an external
+ * translator. The legacy employee portal locales still use the authenticated
+ * translation endpoint and local cache. Both modes retain pristine source
+ * values so RU and target locales can be switched without reloading.
  *
  * Why a runtime DOM translator and not key-based i18n? The codebase has
  * ~1500 hardcoded Russian strings spread across hundreds of components.
  * Migrating every one to a translation key would touch the entire portal.
- * The runtime approach + LLM-backed cache is good enough for the immediate
- * problem (broken English + 4 new languages on demand) and leaves the door
- * open to a proper key-based migration later — at which point this
- * component becomes the fallback for unkeyed strings, not the primary
- * mechanism.
+ * This remains a bridge for unkeyed copy while screens move toward key-based
+ * localization incrementally.
  *
  * Storage layout (localStorage):
  *   portal-i18n:v1:<lang>  →  { [source]: translated }
@@ -217,8 +207,7 @@ export function GlobalTextTranslator({ locale }: { locale: Locale }) {
     if (typeof document === 'undefined') return;
     aliveRef.current = true;
 
-    // --- Mode A: source language. Restore originals and stop. ----------
-    if (!isTargetLocale(locale)) {
+    const restoreOriginals = () => {
       const tw = document.createTreeWalker(
         document.body,
         NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
@@ -242,6 +231,15 @@ export function GlobalTextTranslator({ locale }: { locale: Locale }) {
           clearOrigAttrs(el);
         }
       }
+    };
+
+    // Always return the DOM to the Russian source before applying the next
+    // locale. Without this, EN -> ES started from English text (no Cyrillic),
+    // so the second language pass had nothing to collect.
+    restoreOriginals();
+
+    // --- Mode A: source language. Originals are already restored. ------
+    if (!isTargetLocale(locale)) {
       document.documentElement.removeAttribute(TRANSLATING_FLAG);
       return () => {
         aliveRef.current = false;
@@ -250,6 +248,8 @@ export function GlobalTextTranslator({ locale }: { locale: Locale }) {
 
     // --- Mode B: target language. Full walk + translate. ---------------
     const targetLang = locale;
+    const bundledLocale: ClientLocale | null =
+      targetLang === 'en' || targetLang === 'es' ? targetLang : null;
     // Fresh locale → give translation another chance (a previous target may have
     // hit a 403 and disabled itself).
     disabledRef.current = false;
@@ -275,9 +275,18 @@ export function GlobalTextTranslator({ locale }: { locale: Locale }) {
       if (shouldSkipTextIn(node.parentElement)) return;
       const raw = node.nodeValue;
       if (!needsTranslation(raw)) return;
-      // Save original once.
-      if (typeof getOrigText(node) !== 'string') setOrigText(node, raw!);
+      // React can reuse a Text node for a later loading/data state. If that
+      // happens, refresh the remembered source instead of re-applying the
+      // translation of the node's previous Russian value.
+      if (getOrigText(node) !== raw) setOrigText(node, raw!);
       const original = getOrigText(node)!;
+      if (bundledLocale) {
+        const local = getClientTranslation(original, bundledLocale);
+        if (local !== null) node.nodeValue = local;
+        // Unknown copy is usually client-authored data. Leave it untouched
+        // and never send it to an external translation service.
+        return;
+      }
       const cached = cache.get(original);
       if (cached !== undefined) {
         node.nodeValue = cached;
@@ -297,8 +306,13 @@ export function GlobalTextTranslator({ locale }: { locale: Locale }) {
           existing = {};
           setOrigAttrs(el, existing);
         }
-        if (!(attr in existing)) existing[attr] = v!;
+        if (existing[attr] !== v) existing[attr] = v!;
         const original = existing[attr]!;
+        if (bundledLocale) {
+          const local = getClientTranslation(original, bundledLocale);
+          if (local !== null) el.setAttribute(attr, local);
+          continue;
+        }
         const cached = cache.get(original);
         if (cached !== undefined) {
           el.setAttribute(attr, cached);
