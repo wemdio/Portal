@@ -9,13 +9,18 @@ import { supabase } from '@/lib/supabaseClient';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 import { getPortalPageSectionTitle } from '@/lib/pageTitle';
 import {
-  LOCALES,
   LOCALE_DESCRIPTORS,
   commonDictionary,
   dict,
-  normalizeLocale,
-  type Locale,
 } from '@/lib/i18n';
+import {
+  CLIENT_LOCALES,
+  normalizeClientLocale,
+  resolveDemoClientLocale,
+  writeStoredClientLocale,
+  writeClientLocaleCookie,
+  type ClientLocale,
+} from '@/lib/clientI18n';
 import { ChevronDown } from 'lucide-react';
 import { GlobalTextTranslator, LanguageLoadingOverlay } from '@/components/GlobalTextTranslator';
 import { resolveActiveNavId, CLIENT_NAV_SUPPORT, type ClientNavMode } from '@/lib/clientNav';
@@ -43,13 +48,13 @@ const jetbrainsMono = JetBrains_Mono({
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [locale, setLocale] = useState<Locale>('ru');
+  const [locale, setLocale] = useState<ClientLocale>('ru');
   const [navMode, setNavMode] = useState<ClientNavMode>('manual');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement | null>(null);
-  // Демо: переключатель языка прячем — /api/portal/translate под демо read-only,
-  // перевести страницу нельзя, оверлей просто зависал бы белым экраном.
+  // Демо использует общий профиль, поэтому его язык хранится только локально
+  // в браузере посетителя и никогда не записывается в shared demo account.
   const isDemo = useDemoMode();
 
   // Бейдж непрочитанных сообщений поддержки и флаг BYO-почт раньше жили внутри
@@ -96,10 +101,9 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
       if (cancelled) return;
 
       if (localeRes.ok) {
-        const body = (await localeRes.json()) as { locale?: Locale };
-        const nextLocale = normalizeLocale(body.locale);
+        const body = (await localeRes.json()) as { locale?: ClientLocale };
+        const nextLocale = normalizeClientLocale(body.locale);
         setLocale(nextLocale);
-        document.documentElement.lang = nextLocale;
       }
 
       if (modeRes.ok) {
@@ -115,6 +119,23 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   }, []);
 
   useEffect(() => {
+    if (isDemo !== true) return;
+    let cancelled = false;
+    const nextLocale = resolveDemoClientLocale(
+      window.localStorage,
+      document.cookie,
+      window.navigator.language,
+    );
+    queueMicrotask(() => {
+      if (!cancelled) setLocale(nextLocale);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isDemo]);
+
+  useEffect(() => {
+    document.documentElement.lang = locale;
     document.title = getPortalPageSectionTitle(pathname, locale);
   }, [locale, pathname]);
 
@@ -168,9 +189,11 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     };
   }, [pollSupportUnread]);
 
-  const persistLocale = async (nextLocale: Locale) => {
+  const persistLocale = async (nextLocale: ClientLocale) => {
     setLocale(nextLocale);
-    document.documentElement.lang = nextLocale;
+    writeStoredClientLocale(window.localStorage, nextLocale);
+    writeClientLocaleCookie(nextLocale);
+    if (isDemo === true) return;
     const { data: { session } } = await supabase.auth.getSession();
     const token = session?.access_token;
     if (!token) return;
@@ -246,15 +269,14 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
           {/* Multi-locale dropdown. Uses the same neu-pill styling as the
               old RU/EN toggle for visual continuity. The dropdown panel is
               flagged `data-i18n-skip` so the GlobalTextTranslator never
-              touches the native-language labels (e.g. "Deutsch" must stay
-              "Deutsch", not get retranslated).
+              touches the native-language labels (e.g. "Español" remains in
+              its native form instead of being translated again).
 
               Trigger shows just the locale code — the previous «{flag} {code}»
               combo rendered as «ru RU» on systems where the Russian flag
               emoji falls back to «ru» text, reading as a duplicate. The flag
               still appears inside the dropdown panel where each row gets
               full context. */}
-          {isDemo !== true && (
           <div ref={langRef} className="relative shrink-0">
             <button
               type="button"
@@ -279,7 +301,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
                   border: '1px solid var(--cp-divider-strong)',
                 }}
               >
-                {LOCALES.map((code) => {
+                {CLIENT_LOCALES.map((code) => {
                   const desc = LOCALE_DESCRIPTORS[code];
                   const isActive = code === locale;
                   return (
@@ -313,7 +335,6 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
               </div>
             )}
           </div>
-          )}
 
           <button
             type="button"
