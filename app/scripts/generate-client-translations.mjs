@@ -1,0 +1,398 @@
+#!/usr/bin/env node
+
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { extractHtmlUiSources, extractUiSources } from './i18n/catalogUtils.mjs';
+
+const currentDir = dirname(fileURLToPath(import.meta.url));
+const appRoot = join(currentDir, '..');
+const repoRoot = join(appRoot, '..');
+const outputPath = join(appRoot, 'src', 'lib', 'clientTranslations.generated.js');
+const declarationOutputPath = join(appRoot, 'src', 'lib', 'clientTranslations.generated.d.ts');
+const landingSourcePath = join(repoRoot, 'landing', 'index.html');
+const landingOutputPath = join(repoRoot, 'landing', 'translations.generated.js');
+const hasLandingSource = existsSync(landingSourcePath);
+
+const TARGETS = {
+  en: 'English',
+  es: 'Spanish',
+};
+const requested = new Set(
+  (process.argv.find((arg) => arg.startsWith('--locales='))?.split('=')[1] ?? 'en,es')
+    .split(',')
+    .filter((locale) => locale in TARGETS),
+);
+const model = process.env.PORTAL_TRANSLATE_MODEL ?? 'openai/gpt-4o-mini';
+const apiKey =
+  process.env.PORTAL_TRANSLATE_API_KEY ??
+  process.env.OPENROUTER_BRIEF_API_KEY ??
+  process.env.OPENROUTER_API_KEY ??
+  '';
+const provider =
+  process.argv.find((arg) => arg.startsWith('--provider='))?.split('=')[1] ??
+  (apiKey.startsWith('sk-or-') ? 'openrouter' : 'google');
+
+const MANUAL_OVERRIDES = {
+  en: {
+    'Кампании': 'Campaigns',
+    'ключ': 'key',
+    'поле': 'field',
+    'Смотреть демо': 'View demo',
+    'Создать аккаунт': 'Create account',
+    'Под ключ': 'Done for you',
+    'Кейсы': 'Case studies',
+    'Кейсы.': 'Results.',
+    'Тарифы': 'Pricing',
+    'Тарифы.': 'Pricing.',
+    'Войти': 'Sign in',
+    'Инфраструктура': 'The infrastructure',
+    'аутрич агентства.': 'of an outreach agency.',
+    'Теперь ваша.': 'Now it is yours.',
+    'Что внутри.': 'What is included.',
+    'Конструктор баз': 'List builder',
+    'Конструктор баз в действии.': 'See the list builder in action.',
+    'Парсеры': 'Data extractors',
+    'Мастер запуска': 'Launch wizard',
+    'Ответы и лиды': 'Replies and leads',
+    'Бриф': 'Brief',
+    'Поддержка': 'Support',
+    'Свои ящики': 'Your mailboxes',
+    'скоро': 'Soon',
+    'Базы': 'Contact lists',
+    'Запуск': 'Launch',
+    'Поток': 'Flow',
+    'Масштаб': 'Scale',
+    'чаще берут': 'Most popular',
+    'Индивидуально': 'Custom',
+    'Обсудить задачу': 'Discuss your goals',
+    'Зайдите в демо.': 'Try the demo.',
+    'Решите внутри.': 'See how it works.',
+    'писем за весну 2026': 'emails sent in spring 2026',
+    'Демо открывается без регистрации.': 'No registration required.',
+    'Каждый модуль работает как инструмент, которым вы пользуетесь сами. Менеджер нужен только чтобы настроить пресет.': 'Every module is a tool you can use directly. A manager only helps configure the initial setup.',
+    'Лимит {0} строк. В файле {1} строк.': 'Limit: {0} rows. The file contains {1} rows.',
+  },
+  es: {
+    'Кампании': 'Campañas',
+    'ключ': 'clave',
+    'поле': 'campo',
+    'Смотреть демо': 'Ver demo',
+    'Создать аккаунт': 'Crear cuenta',
+    'Под ключ': 'Servicio integral',
+    'Кейсы': 'Casos',
+    'Кейсы.': 'Resultados.',
+    'Тарифы': 'Precios',
+    'Тарифы.': 'Precios.',
+    'Войти': 'Iniciar sesión',
+    'Инфраструктура': 'La infraestructura',
+    'аутрич агентства.': 'de una agencia de outreach.',
+    'Теперь ваша.': 'Ahora es tuya.',
+    'Что внутри.': 'Qué incluye.',
+    'Конструктор баз': 'Constructor de listas',
+    'Конструктор баз в действии.': 'El constructor de listas en acción.',
+    'Парсеры': 'Extractores de datos',
+    'Мастер запуска': 'Asistente de lanzamiento',
+    'Ответы и лиды': 'Respuestas y leads',
+    'Бриф': 'Brief',
+    'Поддержка': 'Soporte',
+    'Свои ящики': 'Tus buzones',
+    'скоро': 'Próximamente',
+    'Базы': 'Listas de contactos',
+    'Запуск': 'Lanzamiento',
+    'Поток': 'Flujo',
+    'Масштаб': 'Escala',
+    'чаще берут': 'Más elegido',
+    'Индивидуально': 'A medida',
+    'Обсудить задачу': 'Hablar de tus objetivos',
+    'Зайдите в демо.': 'Prueba la demo.',
+    'Решите внутри.': 'Descubre cómo funciona.',
+    'писем за весну 2026': 'emails enviados en primavera de 2026',
+    'Демо открывается без регистрации.': 'No requiere registro.',
+    'Каждый модуль работает как инструмент, которым вы пользуетесь сами. Менеджер нужен только чтобы настроить пресет.': 'Cada módulo es una herramienta que puedes usar directamente. Un manager solo ayuda a configurar el ajuste inicial.',
+    'Лимит {0} строк. В файле {1} строк.': 'Límite: {0} filas. El archivo contiene {1} filas.',
+  },
+};
+
+const clientSources = extractUiSources({
+  roots: [
+    join(appRoot, 'src', 'app', 'client'),
+    join(appRoot, 'src', 'components', 'client'),
+    join(appRoot, 'src', 'components', 'client-brief'),
+    join(appRoot, 'src', 'components', 'client-replies'),
+    join(appRoot, 'src', 'components', 'base-constructor'),
+    join(appRoot, 'src', 'components', 'email-sequence-v2'),
+  ],
+  extraFiles: [
+    join(appRoot, 'src', 'components', 'PortalLoadingProvider.tsx'),
+    join(appRoot, 'src', 'components', 'parsers', 'HHParserView.tsx'),
+    join(appRoot, 'src', 'components', 'parsers', 'HHParserForm.tsx'),
+    join(appRoot, 'src', 'components', 'parsers', 'JobsList.tsx'),
+    join(appRoot, 'src', 'components', 'parsers', 'VacancyResults.tsx'),
+    join(appRoot, 'src', 'components', 'parsers', 'SearchParserView.tsx'),
+    join(appRoot, 'src', 'components', 'parsers', 'SearchParserForm.tsx'),
+    join(appRoot, 'src', 'components', 'parsers', 'JobStatus.tsx'),
+    join(appRoot, 'src', 'components', 'parsers', 'YandexMapsParserView.tsx'),
+    join(appRoot, 'src', 'components', 'parsers', 'YandexMapsParserForm.tsx'),
+    join(appRoot, 'src', 'lib', 'clientBrief', 'constants.ts'),
+    join(appRoot, 'src', 'lib', 'clientBrief', 'sectionProgress.ts'),
+    join(appRoot, 'src', 'lib', 'clientBrief', 'validate.ts'),
+    join(appRoot, 'src', 'lib', 'emailSequenceV2', 'valuesChips.ts'),
+    join(appRoot, 'src', 'lib', 'emailSequenceV2', 'letterDirtyGuard.ts'),
+    join(appRoot, 'src', 'lib', 'tools', 'baseConstructorClientGuard.ts'),
+    join(appRoot, 'src', 'lib', 'tools', 'baseConstructorEta.ts'),
+    join(appRoot, 'src', 'lib', 'tools', 'columnMappingWarnings.ts'),
+    join(appRoot, 'src', 'lib', 'clientLaunch', 'timezones.ts'),
+    join(appRoot, 'src', 'lib', 'legal', 'offerText.ts'),
+    join(appRoot, 'src', 'lib', 'clientNav.ts'),
+    join(appRoot, 'src', 'lib', 'i18n.ts'),
+    join(appRoot, 'src', 'lib', 'pageTitle.ts'),
+  ],
+  seedSources: Object.keys(MANUAL_OVERRIDES.en),
+});
+const landingSources = hasLandingSource
+  ? extractHtmlUiSources(readFileSync(landingSourcePath, 'utf8'))
+  : [];
+const sources = [...new Set([...clientSources, ...landingSources])]
+  .sort((left, right) => left.localeCompare(right, 'ru'));
+
+function readExistingCatalogs() {
+  const catalogs = { en: {}, es: {} };
+  const parsedCatalogs = [];
+  if (existsSync(outputPath)) {
+    const source = readFileSync(outputPath, 'utf8');
+    try {
+      const packed = source.match(/const CLIENT_TRANSLATION_CATALOGS_JSON(?:: string)? = ("[\s\S]*");/);
+      const object = source.match(/export const CLIENT_TRANSLATION_CATALOGS[^=]*=\s*(\{[\s\S]*\})(?: as const)?;/);
+      if (packed) parsedCatalogs.push(JSON.parse(JSON.parse(packed[1])));
+      else if (object) parsedCatalogs.push(JSON.parse(object[1]));
+    } catch {
+      // A malformed generated app catalog is rebuilt from the landing catalog.
+    }
+  }
+  if (hasLandingSource && existsSync(landingOutputPath)) {
+    const source = readFileSync(landingOutputPath, 'utf8');
+    const match = source.match(/window\.OUTREACHOS_LANDING_TRANSLATIONS = (\{[\s\S]*\});/);
+    if (match) {
+      try {
+        parsedCatalogs.push(JSON.parse(match[1]));
+      } catch {
+        // A malformed generated landing catalog is rebuilt from the app catalog.
+      }
+    }
+  }
+  for (const parsed of parsedCatalogs) {
+    Object.assign(catalogs.en, parsed.en ?? {});
+    Object.assign(catalogs.es, parsed.es ?? {});
+  }
+  return catalogs;
+}
+
+function parseJsonObject(content) {
+  try {
+    return JSON.parse(content);
+  } catch {
+    const match = content.match(/\{[\s\S]*\}/);
+    if (!match) return {};
+    return JSON.parse(match[0]);
+  }
+}
+
+async function translateBatchWithOpenRouter(batch, locale) {
+  const payload = Object.fromEntries(batch.map((source, index) => [String(index), source]));
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://app.outreachos.pro',
+      'X-Title': 'outreachOS static client localization',
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.1,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: [
+            `Translate Russian B2B SaaS interface copy into concise, natural ${TARGETS[locale]}.`,
+            'Return only a JSON object with the same numeric keys.',
+            'Preserve placeholders such as {0}, {1}, %s and {{count}} exactly.',
+            'Preserve punctuation, line-break intent, symbols, product names and technical tokens.',
+            'Use outreach terminology: база = contact list/database, ЦА = ICP/target audience, бриф = brief, цепочка писем = email sequence.',
+            'Never add explanations and never leave Cyrillic in the translation.',
+          ].join('\n'),
+        },
+        { role: 'user', content: JSON.stringify(payload) },
+      ],
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`OpenRouter ${response.status}: ${await response.text()}`);
+  }
+  const body = await response.json();
+  const parsed = parseJsonObject(body?.choices?.[0]?.message?.content ?? '');
+  const output = {};
+  batch.forEach((source, index) => {
+    const target = parsed[String(index)];
+    if (typeof target === 'string' && target.trim() && !/[А-Яа-яЁё]/.test(target)) {
+      output[source] = target.trim();
+    }
+  });
+  return output;
+}
+
+async function translateBatchWithGoogle(batch, locale) {
+  const marked = batch.map((source, index) => `[[I18N_${index}]] ${source}`).join('\n');
+  const params = new URLSearchParams({
+    client: 'gtx',
+    sl: 'ru',
+    tl: locale,
+    dt: 't',
+    q: marked,
+  });
+
+  let response;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    response = await fetch('https://translate.googleapis.com/translate_a/single', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      body: params,
+    });
+    if (response.ok) break;
+    if (![429, 500, 502, 503, 504].includes(response.status)) break;
+    await new Promise((resolve) => setTimeout(resolve, 500 * (2 ** attempt)));
+  }
+  if (!response?.ok) throw new Error(`Google Translate ${response?.status ?? 'no response'}`);
+
+  const body = await response.json();
+  const translated = Array.isArray(body?.[0])
+    ? body[0].map((segment) => segment?.[0] ?? '').join('')
+    : '';
+  const output = {};
+  const marker = /\[\[I18N_(\d+)\]\]\s*([\s\S]*?)(?=\n?\[\[I18N_\d+\]\]|$)/g;
+  for (const match of translated.matchAll(marker)) {
+    const index = Number(match[1]);
+    const source = batch[index];
+    const target = match[2]?.trim();
+    if (source && target && !/[А-Яа-яЁё]/.test(target)) output[source] = target;
+  }
+  return output;
+}
+
+function translateBatch(batch, locale) {
+  if (provider === 'openrouter') return translateBatchWithOpenRouter(batch, locale);
+  if (provider === 'google') return translateBatchWithGoogle(batch, locale);
+  throw new Error(`Unknown translation provider: ${provider}`);
+}
+
+async function runPool(items, worker, concurrency = 3) {
+  let cursor = 0;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+}
+
+async function translateMissing(catalog, locale) {
+  const missing = sources.filter((source) => !(source in catalog));
+  if (missing.length === 0) return;
+  if (provider === 'openrouter' && !apiKey) {
+    throw new Error('No OpenRouter key configured for missing translations');
+  }
+
+  const batches = [];
+  const batchSize = provider === 'google' ? 24 : 40;
+  for (let index = 0; index < missing.length; index += batchSize) {
+    batches.push(missing.slice(index, index + batchSize));
+  }
+  let completed = 0;
+  await runPool(batches, async (batch) => {
+    Object.assign(catalog, await translateBatch(batch, locale));
+    completed += batch.length;
+    console.log(`[${locale}] ${Math.min(completed, missing.length)}/${missing.length}`);
+  });
+
+  const unresolved = sources.filter((source) => !(source in catalog));
+  if (unresolved.length > 0) {
+    console.log(`[${locale}] retrying ${unresolved.length} unresolved strings`);
+    for (let index = 0; index < unresolved.length; index += 12) {
+      Object.assign(catalog, await translateBatch(unresolved.slice(index, index + 12), locale));
+    }
+  }
+}
+
+function writeCatalogs(catalogs) {
+  const ordered = {};
+  for (const locale of Object.keys(TARGETS)) {
+    ordered[locale] = {};
+    for (const source of clientSources) {
+      const target = catalogs[locale][source];
+      if (typeof target === 'string' && target.trim()) ordered[locale][source] = target.trim();
+    }
+  }
+  const packedCatalog = JSON.stringify(JSON.stringify(ordered));
+  const file = [
+    '// Generated by app/scripts/generate-client-translations.mjs. Do not edit by hand.',
+    `const CLIENT_TRANSLATION_CATALOGS_JSON = ${packedCatalog};`,
+    'export const CLIENT_TRANSLATION_CATALOGS = JSON.parse(CLIENT_TRANSLATION_CATALOGS_JSON);',
+    '',
+  ].join('\n');
+  writeFileSync(outputPath, file, 'utf8');
+  writeFileSync(
+    declarationOutputPath,
+    [
+      '// Generated by app/scripts/generate-client-translations.mjs. Do not edit by hand.',
+      "export declare const CLIENT_TRANSLATION_CATALOGS: Readonly<Record<'en' | 'es', Readonly<Record<string, string>>>>;",
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  const landingCatalogs = {};
+  for (const locale of Object.keys(TARGETS)) {
+    landingCatalogs[locale] = {};
+    for (const source of landingSources) {
+      const target = catalogs[locale][source];
+      if (typeof target === 'string' && target.trim()) {
+        landingCatalogs[locale][source] = target.trim();
+      }
+    }
+  }
+  if (hasLandingSource) {
+    writeFileSync(
+      landingOutputPath,
+      [
+        '/* Generated by app/scripts/generate-client-translations.mjs. */',
+        `window.OUTREACHOS_LANDING_TRANSLATIONS = ${JSON.stringify(landingCatalogs, null, 2)};`,
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+  }
+}
+
+const catalogs = readExistingCatalogs();
+Object.assign(catalogs.en, MANUAL_OVERRIDES.en);
+Object.assign(catalogs.es, MANUAL_OVERRIDES.es);
+
+for (const locale of requested) {
+  await translateMissing(catalogs[locale], locale);
+}
+writeCatalogs(catalogs);
+
+for (const locale of Object.keys(TARGETS)) {
+  const clientCount = clientSources.filter((source) => source in catalogs[locale]).length;
+  const landingCount = landingSources.filter((source) => source in catalogs[locale]).length;
+  console.log(`${locale}: client ${clientCount}/${clientSources.length}; landing ${landingCount}/${landingSources.length}`);
+  const unresolved = sources.filter((source) => !(source in catalogs[locale]));
+  if (unresolved.length > 0) {
+    console.error(`${locale}: unresolved sources:\n${unresolved.map((source) => `- ${source}`).join('\n')}`);
+    process.exitCode = 1;
+  }
+}

@@ -86,7 +86,11 @@ jest.mock('@/lib/supabaseAdmin', () => {
   return { supabaseAdmin: mock };
 });
 
-function makeReq(body: Record<string, unknown>, oosUtm?: string): NextRequest {
+function makeReq(
+  body: Record<string, unknown>,
+  oosUtm?: string,
+  clientLocale?: string,
+): NextRequest {
   const req = new Request('http://localhost/api/signup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -98,7 +102,13 @@ function makeReq(body: Record<string, unknown>, oosUtm?: string): NextRequest {
   Object.defineProperty(req, 'cookies', {
     configurable: true,
     value: {
-      get: (name: string) => (name === 'oos_utm' && oosUtm ? { name, value: oosUtm } : undefined),
+      get: (name: string) => {
+        if (name === 'oos_utm' && oosUtm) return { name, value: oosUtm };
+        if (name === 'outreachos-client-locale' && clientLocale) {
+          return { name, value: clientLocale };
+        }
+        return undefined;
+      },
     },
   });
   return req;
@@ -183,5 +193,21 @@ describe('POST /api/signup', () => {
       utm: { utm_campaign: '50%off' },
       referrer: 'https://mail.example/x',
     });
+  });
+
+  it.each([
+    ['es', 'es'],
+    ['de', 'ru'],
+  ])('persists locale cookie %s as profile locale %s', async (cookieLocale, expectedLocale) => {
+    const res = await POST(makeReq({
+      email: `${cookieLocale}@user.com`,
+      password: 'longenough123',
+      full_name: 'Locale Test',
+      company: 'OutreachOS',
+    }, undefined, cookieLocale));
+    expect(res.status).toBe(201);
+
+    const c = (supabaseAdmin as unknown as MockedAdmin).__created;
+    expect(c.profileUpdates.at(-1)?.patch).toMatchObject({ locale: expectedLocale });
   });
 });

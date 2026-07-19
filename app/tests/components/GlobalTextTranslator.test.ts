@@ -12,6 +12,9 @@
  */
 
 import { shouldSkipTextIn, shouldSkipAttrsOn } from '@/components/GlobalTextTranslator';
+import React from 'react';
+import { render, screen } from '@testing-library/react';
+import { GlobalTextTranslator } from '@/components/GlobalTextTranslator';
 
 function el(tag: string, opts: { contentEditable?: boolean; wrap?: string } = {}) {
   const node = document.createElement(tag);
@@ -92,5 +95,34 @@ describe('shouldSkipAttrsOn — own-attribute rule', () => {
 
   test('skips when element is missing', () => {
     expect(shouldSkipAttrsOn(null)).toBe(true);
+  });
+});
+
+describe('bundled client translations', () => {
+  test('switches EN -> ES -> RU without an intermediate reload', () => {
+    const surface = (locale: 'ru' | 'en' | 'es') => React.createElement(
+      React.Fragment,
+      null,
+      React.createElement(GlobalTextTranslator, { locale }),
+      React.createElement('p', null, 'Кампании'),
+    );
+    const view = render(surface('en'));
+    expect(screen.getByText('Campaigns')).toBeInTheDocument();
+
+    view.rerender(surface('es'));
+    expect(screen.getByText('Campañas')).toBeInTheDocument();
+
+    view.rerender(surface('ru'));
+    expect(screen.getByText('Кампании')).toBeInTheDocument();
+  });
+
+  test('leaves unknown client-authored text unchanged', () => {
+    render(React.createElement(
+      React.Fragment,
+      null,
+      React.createElement(GlobalTextTranslator, { locale: 'es' }),
+      React.createElement('p', null, 'Проект Альфа для Испании'),
+    ));
+    expect(screen.getByText('Проект Альфа для Испании')).toBeInTheDocument();
   });
 });
