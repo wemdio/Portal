@@ -1,0 +1,278 @@
+# Self-hosted Supabase стек main Portal DB — вариант для PROD-сервера (139.60.162.12).
+#
+# Отличия от исходной пары deploy/instantly-db (main-postgres) + deploy/main-db (сервисы):
+#   - Самодостаточный: postgres здесь же, а не в чужом compose. Своя bridge-сеть.
+#   - У КАЖДОГО контейнера жёсткий лимит памяти/CPU — на прод-сервере живёт
+#     51 контейнер приложения, стек обязан иметь потолок (суммарно ~7.3 GB лимитов,
+#     реальное потребление ~3 GB).
+#   - KONG_NGINX_WORKER_PROCESSES=2: без этого kong плодит nginx-воркеры по числу
+#     ядер хоста (32 на проде) и раздувается до ~5 GB RAM на ровном месте.
+#   - Без studio/meta (админка остаётся на 144, доступ по SSH-туннелю) и без
+#     imgproxy (приложение не использует image transformation — проверено по коду,
+#     render/image и transform-опции не встречаются).
+#   - Порты хоста те же, что на 144 (kong 35480, postgres 35434) — при переключении
+#     в конфиге приложения меняется только IP.
+#
+# Использование (на прод-сервере, каталог /opt/main-db):
+#   docker compose -p main-supabase --env-file .env up -d main-postgres   # сначала только БД
+#   bash restore.sh /root/main-restore.dump                               # восстановить дамп
+#   docker compose -p main-supabase --env-file .env up -d                 # затем весь стек
+#   bash verify.sh                                                        # проверки
+
+name: main-supabase
+
+services:
+  # ─── Postgres: ядро. Образ и команда 1-в-1 с 144 (supabase/postgres). ──────────
+  main-postgres:
+    image: supabase/postgres:15.8.1.060
+    container_name: main-postgres
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - log_min_messages=fatal
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: supabase_admin
+      POSTGRES_PASSWORD: ${MAIN_PG_PASSWORD}
+      POSTGRES_HOST: /var/run/postgresql
+      POSTGRES_PORT: "5432"
+      PGPORT: "5432"
+      PGPASSWORD: ${MAIN_PG_PASSWORD}
+      PGDATABASE: postgres
+      JWT_SECRET: ${MAIN_JWT_SECRET}
+      JWT_EXP: ${MAIN_JWT_EXP:-21600}
+    volumes:
+      - main-supabase-pg-data:/var/lib/postgresql/data
+      - ./main-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "0.0.0.0:35434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supabase_admin -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          # 4 GB (на 144 было 2): база переезжает вплотную к воркерам, запросов
+          # станет больше; главный контейнер стека душить нельзя.
+          memory: 4096M
+          cpus: '4.0'
+    networks:
+      - main-db-net
+
+  # ─── Kong: API gateway, агрегирует REST/Auth/Storage/Realtime ──────────────────
+  kong:
+    image: kong:2.8.1
+    container_name: main-kong
+    restart: unless-stopped
+    depends_on:
+      main-postgres:
+        condition: service_healthy
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      # На 144 (12 ядер) kong без этой настройки ест 1.85 GB; на 32-ядерном
+      # проде раздулся бы до ~5 GB. Двух воркеров хватает с запасом: весь
+      # трафик — внутренний, от приложения на этом же хосте.
+      KONG_NGINX_WORKER_PROCESSES: "2"
+      SUPABASE_ANON_KEY: ${MAIN_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${MAIN_SERVICE_ROLE_KEY}
+      DASHBOARD_USERNAME: ${MAIN_DASHBOARD_USERNAME:-supabase}
+      DASHBOARD_PASSWORD: ${MAIN_DASHBOARD_PASSWORD}
+    volumes:
+      - ./kong.yml:/home/kong/kong.yml:ro
+    ports:
+      - "0.0.0.0:35480:8000"
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+          cpus: '2.0'
+    networks:
+      - main-db-net
+
+  # ─── GoTrue: Supabase Auth ────────────────────────────────────────────────────
+  auth:
+    image: supabase/gotrue:v2.188.1
+    container_name: main-auth
+    restart: unless-stopped
+    depends_on:
+      main-postgres:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: ${MAIN_API_EXTERNAL_URL}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${MAIN_PG_PASSWORD}@main-postgres:5432/postgres
+      GOTRUE_SITE_URL: ${MAIN_SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: ${MAIN_ADDITIONAL_REDIRECT_URLS:-}
+      GOTRUE_DISABLE_SIGNUP: ${MAIN_DISABLE_SIGNUP:-false}
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: ${MAIN_JWT_EXP:-21600}
+      GOTRUE_JWT_SECRET: ${MAIN_JWT_SECRET}
+      # Refresh-токен в GoTrue по умолчанию бессрочный (single-use). Чтобы
+      # выкидывать тех, кто реально не заходил неделю, ставим
+      # SESSIONS_INACTIVITY_TIMEOUT = 7d. У активного пользователя refresh
+      # обновляется на каждом авто-рефреше access_token, так что неделя
+      # «без активности» означает буквально «не открывал портал 7 дней».
+      GOTRUE_SESSIONS_INACTIVITY_TIMEOUT: ${MAIN_SESSIONS_INACTIVITY_TIMEOUT:-604800s}
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${MAIN_ENABLE_EMAIL_SIGNUP:-true}
+      GOTRUE_MAILER_AUTOCONFIRM: ${MAIN_ENABLE_EMAIL_AUTOCONFIRM:-true}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${MAIN_SMTP_ADMIN_EMAIL:-}
+      GOTRUE_SMTP_HOST: ${MAIN_SMTP_HOST:-}
+      GOTRUE_SMTP_PORT: ${MAIN_SMTP_PORT:-587}
+      GOTRUE_SMTP_USER: ${MAIN_SMTP_USER:-}
+      GOTRUE_SMTP_PASS: ${MAIN_SMTP_PASS:-}
+      GOTRUE_SMTP_SENDER_NAME: ${MAIN_SMTP_SENDER_NAME:-Portal}
+      GOTRUE_MAILER_URLPATHS_INVITE: ${MAIN_MAILER_URLPATHS_INVITE:-/auth/v1/verify}
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: ${MAIN_MAILER_URLPATHS_CONFIRMATION:-/auth/v1/verify}
+      GOTRUE_MAILER_URLPATHS_RECOVERY: ${MAIN_MAILER_URLPATHS_RECOVERY:-/auth/v1/verify}
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: ${MAIN_MAILER_URLPATHS_EMAIL_CHANGE:-/auth/v1/verify}
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      GOTRUE_SMS_AUTOCONFIRM: "true"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+    networks:
+      - main-db-net
+
+  # ─── PostgREST: REST API над Postgres ─────────────────────────────────────────
+  rest:
+    image: postgrest/postgrest:v12.2.8
+    container_name: main-rest
+    restart: unless-stopped
+    depends_on:
+      main-postgres:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${MAIN_PG_PASSWORD}@main-postgres:5432/postgres
+      PGRST_DB_SCHEMAS: ${MAIN_PGRST_DB_SCHEMAS:-public,storage,graphql_public}
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${MAIN_JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${MAIN_JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: ${MAIN_JWT_EXP:-21600}
+      PGRST_DB_POOL: 30
+      PGRST_DB_POOL_ACQUISITION_TIMEOUT: 10
+    command: ["postgrest"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+    networks:
+      - main-db-net
+
+  # ─── Realtime: WebSocket для postgres_changes ─────────────────────────────────
+  realtime:
+    image: supabase/realtime:v2.34.43
+    container_name: main-realtime
+    restart: unless-stopped
+    depends_on:
+      main-postgres:
+        condition: service_healthy
+    environment:
+      PORT: "4000"
+      DB_HOST: main-postgres
+      DB_PORT: "5432"
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${MAIN_PG_PASSWORD}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: ${MAIN_REALTIME_DB_ENC_KEY}
+      API_JWT_SECRET: ${MAIN_JWT_SECRET}
+      SECRET_KEY_BASE: ${MAIN_REALTIME_SECRET_KEY_BASE}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-sSfL", "--head", "-o", "/dev/null", "-H", "Authorization: Bearer ${MAIN_ANON_KEY}", "http://localhost:4000/api/tenants/realtime-dev/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+    networks:
+      - main-db-net
+
+  # ─── Storage API: метаданные файлов; сами файлы в S3 (TWC) ────────────────────
+  # FORCE_PATH_STYLE=true обязательно для не-AWS S3 (TWC, MinIO и пр.).
+  # Image transformation выключена: приложение её не использует, imgproxy
+  # в этом стеке не поднимается.
+  storage:
+    image: supabase/storage-api:v1.13.3
+    container_name: main-storage
+    restart: unless-stopped
+    depends_on:
+      main-postgres:
+        condition: service_healthy
+    environment:
+      ANON_KEY: ${MAIN_ANON_KEY}
+      SERVICE_KEY: ${MAIN_SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      PGRST_JWT_SECRET: ${MAIN_JWT_SECRET}
+      # search_path передаётся явно через options-параметр URL — knex/pg иначе
+      # игнорируют наши ALTER ROLE ... SET search_path и делают select из public.
+      DATABASE_URL: postgres://supabase_storage_admin:${MAIN_PG_PASSWORD}@main-postgres:5432/postgres?options=-c%20search_path%3Dstorage%2Cpublic
+      DB_SEARCH_PATH: storage,public
+      FILE_SIZE_LIMIT: "${MAIN_STORAGE_FILE_SIZE_LIMIT:-524288000}"
+      STORAGE_BACKEND: s3
+      GLOBAL_S3_ENDPOINT: ${MAIN_S3_ENDPOINT}
+      GLOBAL_S3_PROTOCOL: ${MAIN_S3_PROTOCOL:-https}
+      GLOBAL_S3_FORCE_PATH_STYLE: "true"
+      AWS_DEFAULT_REGION: ${MAIN_S3_REGION}
+      AWS_ACCESS_KEY_ID: ${MAIN_S3_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${MAIN_S3_SECRET_ACCESS_KEY}
+      GLOBAL_S3_BUCKET: ${MAIN_S3_BUCKET}
+      TENANT_ID: stub
+      REGION: ${MAIN_S3_REGION}
+      ENABLE_IMAGE_TRANSFORMATION: "false"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+    networks:
+      - main-db-net
+
+volumes:
+  main-supabase-pg-data:
+
+networks:
+  main-db-net:
+    driver: bridge

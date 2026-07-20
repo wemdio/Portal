@@ -24,7 +24,7 @@
 
 ### Требования
 
-- Node.js 18+ 
+- Node.js 18+
 - npm или yarn
 - Docker и Docker Compose (для контейнерного запуска)
 
@@ -259,3 +259,6 @@ npm run test:coverage
 - **PapaParse** - парсинг CSV файлов
 - **Jest** - тестовый фреймворк
 - **React Testing Library** - тестирование React компонентов
+
+
+
