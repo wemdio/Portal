@@ -61,9 +61,15 @@ export function resolveDemoClientLocale(
   cookieHeader: string,
   navigatorLanguage: string,
 ): ClientLocale {
+  const cookieLocale = readClientLocaleCookie(cookieHeader);
+  if (cookieLocale) return cookieLocale;
   const stored = storage.getItem(CLIENT_LOCALE_STORAGE_KEY);
   if (stored) return normalizeClientLocale(stored);
-  return readClientLocaleCookie(cookieHeader) ?? normalizeClientLocale(navigatorLanguage);
+  return normalizeClientLocale(navigatorLanguage);
+}
+
+export function shouldLoadProfileClientLocale(isDemo: boolean | null): boolean {
+  return isDemo === false;
 }
 
 export function writeClientLocaleCookie(locale: ClientLocale): void {

@@ -2,6 +2,7 @@ import type { Dispatcher } from 'undici';
 import { ProxyAgent } from 'undici';
 import { logInfo, logWarn, logError } from '@/lib/loggerServer';
 import type { Span } from '@/lib/tracer';
+import { buildHhTitleOnlyQuery, getHhReportedFound, matchesHhVacancyTitle } from '@/lib/parsers/hhRelevance';
 
 export type HHSearchConfig = {
   text?: string;
@@ -20,6 +21,8 @@ export type HHSearchConfig = {
    * When false, parsing is significantly faster.
    */
   fetch_employers?: boolean;
+  /** Keep only vacancies whose title contains one of the user-entered terms. */
+  strict_title_match?: boolean;
 };
 
 export type HHVacancy = {
@@ -601,6 +604,11 @@ export function normalizeSearchParams(config: HHSearchConfig): HHSearchConfig {
   if (typeof next.text === 'string') next.text = next.text.trim();
   if (!next.text) next.text = getParamString(params, 'text') ?? '';
   if (!next.text) next.text = '';
+
+  if (next.strict_title_match) {
+    next.text = buildHhTitleOnlyQuery(next.text);
+    next.params = { ...(params ?? {}), search_field: 'name' };
+  }
 
   if (Array.isArray(next.area)) {
     const cleaned = next.area.map((a) => a.trim()).filter(Boolean);
@@ -1239,6 +1247,10 @@ export async function fetchVacancies(
   };
 
   const normalized = typeof configOrUrl === 'string' ? normalizeSearchParams(parseHhSearchUrl(configOrUrl)) : normalizeSearchParams(configOrUrl);
+  const strictTitleQuery = normalized.strict_title_match ? normalized.text ?? '' : '';
+  if (normalized.strict_title_match && !strictTitleQuery) {
+    throw new HHApiError('Strict HH title search requires at least one job title', { status: 400 });
+  }
   const shouldFetchEmployers = normalized.fetch_employers !== false;
   options?.onStage?.('partitioning');
   const partitionSpan = await options?.trace?.startChild({
@@ -1334,6 +1346,7 @@ export async function fetchVacancies(
     if (!items || items.length === 0) return;
     for (const item of items) {
       fetchedCount += 1;
+      if (strictTitleQuery && !matchesHhVacancyTitle(item.name, strictTitleQuery)) continue;
       const vacancy = mapVacancy(item);
       const existing = uniqueVacancies.get(vacancy.vacancy_id);
       if (!existing) {
@@ -1343,7 +1356,11 @@ export async function fetchVacancies(
         uniqueVacancies.set(vacancy.vacancy_id, { ...existing, ...vacancy });
       }
     }
-    reportProgress({ found: totalFound, parsed: uniqueVacancies.size, fetched: fetchedCount });
+    reportProgress({
+      found: getHhReportedFound(Boolean(normalized.strict_title_match), totalFound, uniqueVacancies.size),
+      parsed: uniqueVacancies.size,
+      fetched: fetchedCount,
+    });
   };
 
   let partitionErrors = 0;
@@ -1383,7 +1400,11 @@ export async function fetchVacancies(
         totalFound += partFoundCapped;
         registerItems(first.items);
         partitionCollected += first.items?.length ?? 0;
-        reportProgress({ found: totalFound, parsed: uniqueVacancies.size, fetched: fetchedCount });
+        reportProgress({
+          found: getHhReportedFound(Boolean(normalized.strict_title_match), totalFound, uniqueVacancies.size),
+          parsed: uniqueVacancies.size,
+          fetched: fetchedCount,
+        });
 
         const totalPages = Math.min(first.pages ?? 0, Math.ceil(FOUND_LIMIT / (part.per_page ?? 50)));
         if (partFound > FOUND_LIMIT) {
@@ -1632,7 +1653,8 @@ export async function fetchVacancies(
     }
   }
 
-  reportProgress({ found: totalFound, parsed: all.length, fetched: fetchedCount }, true);
+  const finalFound = getHhReportedFound(Boolean(normalized.strict_title_match), totalFound, all.length);
+  reportProgress({ found: finalFound, parsed: all.length, fetched: fetchedCount }, true);
   if (totalFoundRaw > totalFound) {
     void logInfo(
       'parser.hh.found.capped',
@@ -1641,6 +1663,6 @@ export async function fetchVacancies(
       options?.logMeta,
     );
   }
-  return { found: totalFound, vacancies: all };
+  return { found: finalFound, vacancies: all };
 }
 

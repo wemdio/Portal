@@ -17,6 +17,7 @@ import {
   CLIENT_LOCALES,
   normalizeClientLocale,
   resolveDemoClientLocale,
+  shouldLoadProfileClientLocale,
   writeStoredClientLocale,
   writeClientLocaleCookie,
   type ClientLocale,
@@ -84,6 +85,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   }, [langOpen]);
 
   useEffect(() => {
+    if (!shouldLoadProfileClientLocale(isDemo)) return;
     let cancelled = false;
     void (async () => {
       const { data: { session } } = await supabase.auth.getSession();
@@ -116,7 +118,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isDemo]);
 
   useEffect(() => {
     if (isDemo !== true) return;
