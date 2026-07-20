@@ -6,11 +6,32 @@ agent:
     os_image: ubuntu2204
 execution_time_limit:
   hours: 3
+
+# ─── Сборка образов: параллельные блоки + change_in + registry-кэш ────────────
+# Было: 13 образов паровозиком в одной джобе (~10 мин на каждый пуш в main).
+# Стало:
+#   - каждый образ — свой блок с change_in(): пересборка только если менялись
+#     его файлы (или сам этот yml — дефолтное поведение change_in);
+#   - блоки без зависимостей выполняются параллельно: время = самый долгий
+#     изменившийся образ, а не сумма всех;
+#   - portal/worker (самые тяжёлые) кэшируют слои в registry (:buildcache,
+#     mode=max покрывает и deps-стадию) — npm install переиспользуется, пока
+#     не менялся package-lock.json;
+#   - бонус для деплоя: непересобранный образ сохраняет digest, и docker
+#     compose не пересоздаёт его контейнер (не ждёт stop_grace воркеров).
+# ВАЖНО: новый сервис = новый блок здесь + контейнер в scheduled-deploy.yml.
+
 blocks:
   - name: Run tests
     dependencies: []
     run:
-      when: branch != 'main' AND branch != 'test'
+      # change_in: ветки, у которых текущий пуш не тронул app/, не гоняют
+      # 2-минутный прогон. branch_range принудительно сужает сравнение до
+      # диапазона именно этого пуша ($SEMAPHORE_GIT_COMMIT_RANGE = коммиты
+      # from..to последнего push). Без этого Semaphore по умолчанию берёт
+      # merge-base с main → на давно разошедшейся ветке правки в app/
+      # накопились и change_in всегда true.
+      when: "branch != 'main' AND branch != 'test' AND change_in('/app/', {default_branch: 'main', branch_range: '$SEMAPHORE_GIT_COMMIT_RANGE'})"
     task:
       secrets:
         - name: portal_secrets
@@ -25,42 +46,254 @@ blocks:
           - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json), node-modules'
           - npm install
           - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json) node_modules
+      # Две параллельные джобы вместо паровозика: сборка (самый долгий шаг,
+      # ~2-2.5 мин) идёт одновременно с линтом/типами/тестами. Время блока =
+      # самая долгая джоба, а не сумма шагов. node_modules у обеих из кэша
+      # (prologue общий). .next/cache кэшируется между прогонами — повторная
+      # сборка на ветке инкрементальная; протухание безопасно: Next сверяет
+      # содержимое по хэшам, максимум соберёт медленнее.
       jobs:
-        - name: 'Lint, typecheck, build, test, audit'
+        - name: 'Lint, typecheck, test'
           commands:
             - source /tmp/env_vars
             - cd $APP_PATH
             - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
             - npm run lint
-            - npx tsc --noEmit
-            - npm run build
+            # Инкрементальный tsc: .tsbuildinfo.ci помнит прошлый прогон,
+            # перепроверяются только изменённые файлы (−20-40с). Протухший
+            # кэш безопасен — tsc сверяет по содержимому.
+            - 'cache restore tsc-$SEMAPHORE_GIT_BRANCH,tsc-'
+            - npx tsc --noEmit --incremental --tsBuildInfoFile .tsbuildinfo.ci
+            - 'cache store tsc-$SEMAPHORE_GIT_BRANCH .tsbuildinfo.ci'
+            # npm audit переехал в ночной прогон (.semaphore/nightly-audit.yml):
+            # на каждом пуше он ходил в интернет и изредка подвисал/флапал.
             - npm test -- --watchAll=false
-            - npm audit --audit-level=critical
-  - name: Push Docker image
+        - name: 'Next build'
+          commands:
+            - source /tmp/env_vars
+            - cd $APP_PATH
+            - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
+            - 'cache restore nextjs-$SEMAPHORE_GIT_BRANCH,nextjs-'
+            - npm run build
+            - 'cache store nextjs-$SEMAPHORE_GIT_BRANCH .next/cache'
+
+  - name: Build portal
     dependencies: []
     run:
-      when: branch = 'main'
+      when: "branch = 'main' AND change_in(['/app/', '/Dockerfile'], {default_branch: 'main'})"
     task:
       secrets:
         - name: portal_secrets
       prologue:
         commands:
           - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
       jobs:
-        - name: Build and Push
+        - name: portal
           commands:
-            - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
-            - docker buildx create --use
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --build-arg NEXT_PUBLIC_RDP_WS_URL=${NEXT_PUBLIC_RDP_WS_URL} --build-arg NEXT_PUBLIC_SIGNUP_HOSTS=${NEXT_PUBLIC_SIGNUP_HOSTS} --platform linux/amd64 -f Dockerfile .'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --cache-from type=registry,ref=${DOCKER_USERNAME}/portal:buildcache --cache-to type=registry,ref=${DOCKER_USERNAME}/portal:buildcache,mode=max --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --build-arg NEXT_PUBLIC_RDP_WS_URL=${NEXT_PUBLIC_RDP_WS_URL} --build-arg NEXT_PUBLIC_SIGNUP_HOSTS=${NEXT_PUBLIC_SIGNUP_HOSTS} --platform linux/amd64 -f Dockerfile .'
+
+  - name: Build worker
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in(['/app/', '/Dockerfile.worker'], {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: worker
+          commands:
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --cache-from type=registry,ref=${DOCKER_USERNAME}/portal-worker:buildcache --cache-to type=registry,ref=${DOCKER_USERNAME}/portal-worker:buildcache,mode=max --platform linux/amd64 -f Dockerfile.worker .'
+
+  - name: Build yandexmaps
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in('/services/yandexmaps/', {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: yandexmaps
+          commands:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-yandexmaps:prod --platform linux/amd64 -f services/yandexmaps/Dockerfile services/yandexmaps'
+
+  - name: Build googleparsers
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in('/services/googleparsers/', {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: googleparsers
+          commands:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-googleparsers:prod --platform linux/amd64 -f services/googleparsers/Dockerfile services/googleparsers'
+
+  - name: Build rdp-ws
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in('/services/rdp-ws/', {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: rdp-ws
+          commands:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-rdp-ws:prod --platform linux/amd64 -f services/rdp-ws/Dockerfile services/rdp-ws'
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --platform linux/amd64 -f Dockerfile.worker .'
+
+  - name: Build health-check
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in('/services/health-check/', {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: health-check
+          commands:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-health-check:prod --platform linux/amd64 -f services/health-check/Dockerfile services/health-check'
+
+  - name: Build atmos-bot
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in('/services/atmos-bot/', {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: atmos-bot
+          commands:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-atmos-bot:prod --platform linux/amd64 -f services/atmos-bot/Dockerfile services/atmos-bot'
+
+  - name: Build transcribe-worker
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in('/services/transcribe-worker/', {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: transcribe-worker
+          commands:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-transcribe-worker:prod --platform linux/amd64 -f services/transcribe-worker/Dockerfile services/transcribe-worker'
+
+  - name: Build instantly-sync-bot
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in('/services/instantly-sync-bot/', {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: instantly-sync-bot
+          commands:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-instantly-sync-bot:prod --platform linux/amd64 -f services/instantly-sync-bot/Dockerfile services/instantly-sync-bot'
+
+  - name: Build backup
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in('/services/backup/', {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: backup
+          commands:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-backup:prod --platform linux/amd64 -f services/backup/Dockerfile services/backup'
+
+  - name: Build changelog-bot
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in('/services/changelog-bot/', {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: changelog-bot
+          commands:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-changelog-bot:prod --platform linux/amd64 -f services/changelog-bot/Dockerfile services/changelog-bot'
+
+  - name: Build polza-reports
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in('/services/polza-reports/', {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: polza-reports
+          commands:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-polza-reports:prod --platform linux/amd64 -f services/polza-reports/Dockerfile services/polza-reports'
+
+  - name: Build external-sync
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in('/services/portal-external-sync/', {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: external-sync
+          commands:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-external-sync:prod --platform linux/amd64 -f services/portal-external-sync/Dockerfile services/portal-external-sync'

@@ -11,16 +11,36 @@ import {
   buildBriefStoragePath,
   isProjectBriefPath,
 } from '@/lib/projectBriefHypotheses/storage';
+import {
+  createMainS3DownloadUrl,
+  deleteMainS3Object,
+  mainS3ObjectExists,
+  putMainS3Object,
+} from '@/lib/mainS3Server';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-// Раньше тут была генерация гипотез — теперь она вынесена в отдельный endpoint
-// (/brief/hypotheses), чтобы аплоад большого PDF (5–20 МБ) не упирался в общий
-// таймаут. Этот route отвечает только за загрузку файла + парсинг + запись в БД.
+// Загрузка идёт напрямую в TWC S3 через AWS SDK (mainS3Server), минуя Supabase
+// Storage + Kong: у Kong 60-секундный upstream timeout на storage-v1 приводил
+// к 504-м при малейшем лаге TWC (инцидент 15 июля 2026 на 5–6 МБ PDF).
 export const maxDuration = 180;
 
 const MAX_BRIEF_FILE_BYTES = 20 * 1024 * 1024;
 const SIGNED_URL_TTL_SECONDS = 5 * 60;
+
+// До перехода на прямой S3 бриф грузился через Supabase Storage, которое
+// раскладывает объекты в S3 под ключом `${TENANT_ID}/${bucket}/${path}`
+// (TENANT_ID у нас = "stub"). Новые файлы кладутся без tenant-префикса; для
+// уже залитых оставляем legacy fallback при чтении/удалении.
+const LEGACY_TENANT_PREFIX = 'stub';
+
+function s3KeyForBrief(storagePath: string): string {
+  return `${BRIEF_BUCKET}/${storagePath}`;
+}
+
+function legacyS3KeyForBrief(storagePath: string): string {
+  return `${LEGACY_TENANT_PREFIX}/${BRIEF_BUCKET}/${storagePath}`;
+}
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -76,76 +96,36 @@ async function fetchProjectRow(projectId: string) {
   return data ?? null;
 }
 
-async function deleteStorageObject(path: string | null | undefined) {
-  if (!path || !supabaseAdmin) return;
-  if (!isProjectBriefPath(path)) return;
-  try {
-    await supabaseAdmin.storage.from(BRIEF_BUCKET).remove([path]);
-  } catch (err) {
+async function deleteBriefFromS3(storagePath: string | null | undefined) {
+  if (!storagePath || !isProjectBriefPath(storagePath)) return;
+  // Удаляем оба варианта ключа — новый (bucket/path) и legacy Supabase Storage
+  // (stub/bucket/path). DeleteObject в S3 идемпотентен: если ключа нет — ок.
+  const results = await Promise.allSettled([
+    deleteMainS3Object(s3KeyForBrief(storagePath)),
+    deleteMainS3Object(legacyS3KeyForBrief(storagePath)),
+  ]);
+  const failures = results.filter(
+    (r): r is PromiseRejectedResult => r.status === 'rejected',
+  );
+  if (failures.length === results.length) {
     await logWarn('projects.brief.storage.delete_failed', 'Не удалось удалить старый бриф', {
-      path,
-      error: err instanceof Error ? err.message : String(err),
+      storagePath,
+      errors: failures.map((f) =>
+        f.reason instanceof Error ? f.reason.message : String(f.reason),
+      ),
     });
   }
 }
 
-/**
- * Заливает PDF в Supabase Storage напрямую через REST.
- *
- * Зачем не SDK: @supabase/storage-js на нашей сети до удалённого Storage VPS
- * заметно медленнее (60s vs 20s на 6 МБ) и не отдаёт читабельную диагностику
- * при abort'е. Прямой fetch с Buffer-телом стабильнее и быстрее.
- */
-async function uploadBriefToStorage(
-  storagePath: string,
-  buffer: Buffer,
-  signal?: AbortSignal,
-): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
-  const supabaseUrl =
-    process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
-  const serviceKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SERVICE_KEY ?? '';
-  if (!supabaseUrl || !serviceKey) {
-    return { ok: false, status: 500, message: 'Storage REST: missing Supabase URL or service key' };
-  }
-
-  const url = `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/${BRIEF_BUCKET}/${storagePath}`;
-
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${serviceKey}`,
-        apikey: serviceKey,
-        'Content-Type': 'application/pdf',
-        'cache-control': '3600',
-        'x-upsert': 'false',
-      },
-      // Node's undici fetch принимает Buffer (через BodyInit), но DOM-типы
-      // об этом не знают, поэтому приводим к BodyInit.
-      body: buffer as unknown as BodyInit,
-      signal,
-    });
-  } catch (err) {
-    const cause =
-      err instanceof Error && (err as { cause?: { code?: string; message?: string } }).cause;
-    const detail =
-      cause && typeof cause === 'object'
-        ? (cause as { code?: string; message?: string }).code ??
-          (cause as { code?: string; message?: string }).message ??
-          ''
-        : '';
-    const message =
-      err instanceof Error ? `${err.message}${detail ? ` (${detail})` : ''}` : 'unknown';
-    return { ok: false, status: 502, message: `Storage REST upload failed: ${message}` };
-  }
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    return { ok: false, status: res.status, message: text.slice(0, 500) || `HTTP ${res.status}` };
-  }
-  return { ok: true };
+async function resolveExistingBriefS3Key(
+  storagePath: string | null | undefined,
+): Promise<string | null> {
+  if (!storagePath || !isProjectBriefPath(storagePath)) return null;
+  const primary = s3KeyForBrief(storagePath);
+  if (await mainS3ObjectExists(primary)) return primary;
+  const legacy = legacyS3KeyForBrief(storagePath);
+  if (await mainS3ObjectExists(legacy)) return legacy;
+  return null;
 }
 
 // ─── POST: upload brief PDF (без генерации гипотез) ──────────────────────────
@@ -193,16 +173,23 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       return jsonError('Файл не является валидным PDF', 400);
     }
 
-    // ── Storage upload через raw fetch (быстрее, чем supabase-js SDK) ─────────
+    // ── S3 upload напрямую через AWS SDK (bypass Supabase Storage + Kong) ────
     const storagePath = buildBriefStoragePath({ projectId, fileName });
-    const uploadResult = await uploadBriefToStorage(storagePath, buffer);
-    if (!uploadResult.ok) {
-      await logError(
-        'projects.brief.storage.upload_failed',
-        new Error(uploadResult.message),
-        { projectId, storagePath, status: uploadResult.status },
-      );
-      return jsonError(`Ошибка загрузки в хранилище: ${uploadResult.message}`, 502);
+    const s3Key = s3KeyForBrief(storagePath);
+    try {
+      await putMainS3Object({
+        key: s3Key,
+        body: buffer,
+        contentType: 'application/pdf',
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await logError('projects.brief.storage.upload_failed', err, {
+        projectId,
+        storagePath,
+        s3Key,
+      });
+      return jsonError(`Ошибка загрузки в хранилище: ${message}`, 502);
     }
 
     // ── Extract text ───────────────────────────────────────────────────────────
@@ -212,13 +199,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       const parsed = await pdfParse(buffer);
       briefText = parsed.text?.trim() ?? '';
     } catch (err) {
-      await deleteStorageObject(storagePath);
+      await deleteBriefFromS3(storagePath);
       await logError('projects.brief.pdf.parse_failed', err, { projectId, storagePath });
       return jsonError('Не удалось извлечь текст из PDF', 422);
     }
 
     if (!briefText) {
-      await deleteStorageObject(storagePath);
+      await deleteBriefFromS3(storagePath);
       return jsonError(
         'PDF не содержит текстового слоя (возможно, это скан). Попробуйте OCR-версию документа.',
         422,
@@ -227,7 +214,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     // Drop old file (if any) AFTER successful upload to avoid losing it on a partial failure.
     if (existing.brief_file_path && existing.brief_file_path !== storagePath) {
-      await deleteStorageObject(existing.brief_file_path);
+      await deleteBriefFromS3(existing.brief_file_path);
     }
 
     const uploadedAt = new Date().toISOString();
@@ -250,7 +237,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       .eq('id', projectId);
 
     if (updateError) {
-      await deleteStorageObject(storagePath);
+      await deleteBriefFromS3(storagePath);
       await logError('projects.brief.db.update_failed', updateError, { projectId });
       return jsonError(`Ошибка сохранения в БД: ${updateError.message}`, 500);
     }
@@ -296,19 +283,36 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     if (!project) return jsonError('Project not found', 404);
     if (!project.brief_file_path) return jsonError('Brief not attached', 404);
 
-    const { data, error } = await supabaseAdmin.storage
-      .from(BRIEF_BUCKET)
-      .createSignedUrl(project.brief_file_path, SIGNED_URL_TTL_SECONDS);
-    if (error || !data) {
-      await logError('projects.brief.signed_url_failed', error ?? new Error('no signed URL'), {
+    // Пробуем новый ключ (bucket/path), потом legacy (stub/bucket/path) для
+    // брифов, залитых до перехода на прямой S3.
+    const existingKey = await resolveExistingBriefS3Key(project.brief_file_path);
+    if (!existingKey) {
+      await logError(
+        'projects.brief.signed_url_failed',
+        new Error('brief object missing in S3'),
+        { projectId, path: project.brief_file_path },
+      );
+      return jsonError('Файл брифа не найден в хранилище', 404);
+    }
+
+    let signedUrl: string;
+    try {
+      signedUrl = await createMainS3DownloadUrl({
+        key: existingKey,
+        expiresInSeconds: SIGNED_URL_TTL_SECONDS,
+        downloadFilename: project.brief_file_name ?? undefined,
+      });
+    } catch (err) {
+      await logError('projects.brief.signed_url_failed', err, {
         projectId,
         path: project.brief_file_path,
+        s3Key: existingKey,
       });
       return jsonError('Не удалось создать ссылку для скачивания', 502);
     }
 
     return NextResponse.json({
-      url: data.signedUrl,
+      url: signedUrl,
       file_name: project.brief_file_name,
       uploaded_at: project.brief_uploaded_at,
       expires_in_seconds: SIGNED_URL_TTL_SECONDS,
@@ -333,7 +337,7 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
     if (!project) return jsonError('Project not found', 404);
 
     if (project.brief_file_path) {
-      await deleteStorageObject(project.brief_file_path);
+      await deleteBriefFromS3(project.brief_file_path);
     }
 
     const now = new Date().toISOString();
