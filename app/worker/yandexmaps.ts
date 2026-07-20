@@ -2,7 +2,12 @@ import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/li
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
-const MAX_CONCURRENCY = 2;
+// MAX_CONCURRENCY поднят 2 → 4 (16.07.2026): каждая yandex-задача внутри себя
+// параллелит до 6 чанков парсинга (см. yandexMapsWorker.ts), а глобальный
+// python-семафор PARSE_CONCURRENCY (6-8) не даст переполнить сервис. Итого
+// на app-сервер держим ≤ 8 одновременных chromium-контекстов, ~2 ГБ RAM.
+// Если сервер слабее — снизить через env WORKER_YANDEXMAPS_CONCURRENCY.
+const MAX_CONCURRENCY = Number(process.env.WORKER_YANDEXMAPS_CONCURRENCY ?? '4');
 const WORKER_ID = `yandexmaps-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 const running = new Set<Promise<void>>();

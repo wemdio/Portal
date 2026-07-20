@@ -19,7 +19,7 @@ export interface DealCandidate {
 }
 
 const ACTIVE_LOOKBACK_DAYS = Number(process.env.SALES_AI_LOOKBACK_DAYS ?? 60);
-const DAILY_CAP = Number(process.env.SALES_AI_DAILY_CAP ?? 50);
+const DAILY_CAP = Number(process.env.SALES_AI_DAILY_CAP ?? 100);
 const AMO_WON_STATUS = 142;
 const AMO_LOST_STATUS = 143;
 

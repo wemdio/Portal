@@ -12,8 +12,20 @@ from yandex_parser import Organization, ProxySettings, YandexBlockedError, Yande
 
 
 app = FastAPI()
-YANDEXMAPS_CONCURRENCY = int(os.environ.get("YANDEXMAPS_CONCURRENCY", "2"))
-_REQUEST_SEMAPHORE = asyncio.Semaphore(YANDEXMAPS_CONCURRENCY)
+# Расщеплённые семафоры (16.07.2026): раньше был один _REQUEST_SEMAPHORE=2 на
+# весь сервис, гейтивший и /collect-links/stream, и /parse-orgs. Это душило
+# параллелизм на этапе парсинга карточек: даже с 5+ прокси одновременно
+# работали 2 контекста, а Node-воркер параллелил чанки в упор в потолок.
+# Теперь COLLECT_CONCURRENCY и PARSE_CONCURRENCY независимы: сбор ссылок
+# тяжелее (одна долгая страница на 5-15 мин), парсинг легче, но их много —
+# держим PARSE выше. Верхняя граница определяется RAM: один chromium ~250 МБ,
+# 8 контекстов ≈ 2 ГБ — терпимо на app-сервере.
+YANDEXMAPS_CONCURRENCY = int(os.environ.get("YANDEXMAPS_CONCURRENCY", "0"))  # legacy: если >0, задаёт оба (обратная совместимость)
+_LEGACY = YANDEXMAPS_CONCURRENCY if YANDEXMAPS_CONCURRENCY > 0 else None
+COLLECT_CONCURRENCY = _LEGACY or int(os.environ.get("YANDEXMAPS_COLLECT_CONCURRENCY", "5"))
+PARSE_CONCURRENCY = _LEGACY or int(os.environ.get("YANDEXMAPS_PARSE_CONCURRENCY", "5"))
+_COLLECT_SEMAPHORE = asyncio.Semaphore(COLLECT_CONCURRENCY)
+_PARSE_SEMAPHORE = asyncio.Semaphore(PARSE_CONCURRENCY)
 # Таймауты — 15 мин на один URL (сбор ссылок) и 15 мин на пачку карточек.
 # Через медленный мобильный прокси (1.6 Мбит/с) один URL с 200-500 карточками
 # лениво догружает всё это 5-10 мин, плюс запас на ретраи скролла.
@@ -181,7 +193,7 @@ async def proxy_check(req: ProxyCheckRequest):
 
 @app.post("/collect-links", response_model=CollectLinksResponse)
 async def collect_links(req: CollectLinksRequest):
-  async with _REQUEST_SEMAPHORE:
+  async with _COLLECT_SEMAPHORE:
     parser = YandexMapsParser(proxy_settings=_to_proxy_settings(req.proxy), headless=req.headless)
     try:
       await parser.start()
@@ -217,7 +229,7 @@ async def collect_links_stream(req: CollectLinksRequest):
   слота семафора утекли: все новые запросы вечно висели в acquire(),
   задачи «шли» часами с 0 ссылок, а зомби-chromium жили до рестарта.
   """
-  await _REQUEST_SEMAPHORE.acquire()
+  await _COLLECT_SEMAPHORE.acquire()
 
   # Sentinel для «сбор завершён» — нужен, чтобы generate() не крутился впустую
   # в get(), если задача упала между двумя put'ами.
@@ -262,7 +274,7 @@ async def collect_links_stream(req: CollectLinksRequest):
       # CancelledError и оставшиеся строки не выполнятся. release() и
       # put_nowait синхронны — выполняются гарантированно; браузер
       # закрываем отдельной task, её отмена нас уже не касается.
-      _REQUEST_SEMAPHORE.release()
+      _COLLECT_SEMAPHORE.release()
       link_queue.put_nowait(DONE)
       asyncio.create_task(close_parser_detached())
 
@@ -305,7 +317,7 @@ async def collect_links_stream(req: CollectLinksRequest):
 
 @app.post("/parse-orgs", response_model=ParseOrgsResponse)
 async def parse_orgs(req: ParseOrgsRequest):
-  async with _REQUEST_SEMAPHORE:
+  async with _PARSE_SEMAPHORE:
     parser = YandexMapsParser(proxy_settings=_to_proxy_settings(req.proxy), headless=req.headless)
     try:
       await parser.start()

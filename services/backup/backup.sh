@@ -105,21 +105,63 @@ case "$INSTANCE" in
 esac
 
 DUMP_FILE="${DUMP_DIR}/${PREFIX}-${INSTANCE}-${TS}.dump"
+
+# ─── TCP keep-alive для длинных WAN COPY ─────────────────────────────────────
+# pg_dump тянет большие таблицы (public.pdl_companies ~8.75 GB / ~19.6M строк)
+# через WAN между Portal-сервером и БД-сервером. Без keep-alive провайдерский
+# NAT/firewall рубит долгие соединения на idle-hiccup: postgres логирует
+# "connection to client lost", pg_dump падает с "server closed the connection
+# unexpectedly" (rc=1). История таких падений на COPY жирных таблиц:
+# 14.06 / 16.06 / 19.06 / 28.06 / 29.06 / 30.06 / 05.07 / 11.07 / 14.07 /
+# 18.07.2026 — раз в 3–5 дней. Ставим keep-alive: пакет раз в 60s, чтобы
+# соединение не выглядело idle. PGKEEPALIVES_* — стандартные libpq env vars,
+# применяются к connection URL. Внешнее значение переопределяет умолчания.
+export PGKEEPALIVES="${PGKEEPALIVES:-1}"
+export PGKEEPALIVES_IDLE="${PGKEEPALIVES_IDLE:-60}"
+export PGKEEPALIVES_INTERVAL="${PGKEEPALIVES_INTERVAL:-10}"
+export PGKEEPALIVES_COUNT="${PGKEEPALIVES_COUNT:-6}"
+
 echo "[backup] Starting pg_dump for ${INSTANCE} -> ${DUMP_FILE}"
 
-# shellcheck disable=SC2086
-pg_dump \
-  --dbname="$PG_CONN_URL" \
-  --format=custom \
-  --compress=6 \
-  --no-owner \
-  --no-privileges \
-  $EXTRA_PG_DUMP_OPTS \
-  --file="$DUMP_FILE"
-PG_DUMP_RC=$?
+# ─── pg_dump с ретраем ───────────────────────────────────────────────────────
+# Страховка: если keep-alive всё же не спас, ретраим полностью. pg_dump с
+# --format=custom пишет single-file монолит и не умеет продолжить с середины,
+# поэтому каждая попытка тянет всю базу заново. 3 попытки с растущей паузой
+# (30s → 60s) = ~90s overhead в худшем случае, укладывается в окно cron (6h).
+PG_DUMP_MAX_TRIES="${BACKUP_PG_DUMP_RETRIES:-3}"
+PG_DUMP_RETRY_PAUSE="${BACKUP_PG_DUMP_RETRY_PAUSE:-30}"
+PG_DUMP_RC=0
+pg_dump_attempt=1
+while [ "$pg_dump_attempt" -le "$PG_DUMP_MAX_TRIES" ]; do
+  if [ "$pg_dump_attempt" -gt 1 ]; then
+    echo "[backup] pg_dump attempt ${pg_dump_attempt}/${PG_DUMP_MAX_TRIES}"
+  fi
+  # shellcheck disable=SC2086
+  pg_dump \
+    --dbname="$PG_CONN_URL" \
+    --format=custom \
+    --compress=6 \
+    --no-owner \
+    --no-privileges \
+    $EXTRA_PG_DUMP_OPTS \
+    --file="$DUMP_FILE"
+  PG_DUMP_RC=$?
+  if [ "$PG_DUMP_RC" -eq 0 ]; then
+    break
+  fi
+  if [ "$pg_dump_attempt" -lt "$PG_DUMP_MAX_TRIES" ]; then
+    pause=$((PG_DUMP_RETRY_PAUSE * pg_dump_attempt))
+    echo "[backup] pg_dump failed (rc=${PG_DUMP_RC}), retrying in ${pause}s..." >&2
+    # --file overwrite'ит без предупреждения, но безопаснее убрать частичный
+    # дамп явно — чтобы случайный shim/bug не докинул в хвост существующего.
+    rm -f "$DUMP_FILE"
+    sleep "$pause"
+  fi
+  pg_dump_attempt=$((pg_dump_attempt + 1))
+done
 
 if [ "$PG_DUMP_RC" -ne 0 ]; then
-  msg="🚨 [backup ${INSTANCE}] pg_dump FAILED (rc=${PG_DUMP_RC})"
+  msg="🚨 [backup ${INSTANCE}] pg_dump FAILED after ${PG_DUMP_MAX_TRIES} tries (rc=${PG_DUMP_RC})"
   echo "$msg" >&2
   send_alert "$msg"
   exit 1

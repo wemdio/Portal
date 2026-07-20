@@ -97,9 +97,28 @@ for arg in "$@"; do case "$arg" in --file=*) out="${arg#--file=}" ;; esac; done
 {
   printf 'pg_dump'
   for a in "$@"; do printf ' %s' "$a"; done
+  # Логируем keep-alive env vars, чтобы тесты могли проверить, что backup.sh
+  # реально их экспортирует libpq'у (PGKEEPALIVES_* — стандартный контракт).
+  printf ' env:PGKEEPALIVES=%s' "${PGKEEPALIVES:-}"
+  printf ' env:PGKEEPALIVES_IDLE=%s' "${PGKEEPALIVES_IDLE:-}"
+  printf ' env:PGKEEPALIVES_INTERVAL=%s' "${PGKEEPALIVES_INTERVAL:-}"
+  printf ' env:PGKEEPALIVES_COUNT=%s' "${PGKEEPALIVES_COUNT:-}"
   printf '\n'
 } >> "$PGD_LOG"
 [ -n "$out" ] && : > "$out"
+
+# Симуляция «первые N попыток фейл, дальше ok» — для тестов ретрая.
+# PG_DUMP_FAIL_FIRST_N + PG_DUMP_ATTEMPT_FILE: счётчик в файле, чтобы
+# сохранялся между запусками одного sandbox'а.
+if [ -n "${PG_DUMP_FAIL_FIRST_N:-}" ] && [ -n "${PG_DUMP_ATTEMPT_FILE:-}" ]; then
+  cur=$(cat "$PG_DUMP_ATTEMPT_FILE" 2>/dev/null || echo 0)
+  cur=$((cur + 1))
+  echo "$cur" > "$PG_DUMP_ATTEMPT_FILE"
+  if [ "$cur" -le "$PG_DUMP_FAIL_FIRST_N" ]; then
+    exit "${PG_DUMP_FAIL_RC:-1}"
+  fi
+fi
+
 exit "${PG_DUMP_FAKE_RC:-0}"
 PGD
   chmod +x "$sandbox/bin/pg_dump"
@@ -263,15 +282,23 @@ test ! -s "$SB/pg_dump.log" && { PASS=$((PASS + 1)); echo "  ✔ main-supabase n
 
 echo ""
 echo "── 8) Telegram alert on pg_dump failure ──"
+# После добавления ретрая: pg_dump всегда фейлится → 3 попытки → alert с
+# "after 3 tries" (см. историю в services/backup/backup.sh — регулярные
+# "connection to client lost" на COPY жирных таблиц через WAN, backup.sh
+# теперь ретраит + шлёт TCP keep-alive).
 SB="$TMP_ROOT/t8"; make_sandbox "$SB"
 rc="$(INSTANTLY_DATABASE_URL='postgresql://i:p@h:5432/d' \
   PG_DUMP_FAKE_RC=42 \
+  BACKUP_PG_DUMP_RETRY_PAUSE=0 \
   TELEGRAM_HEALTH_BOT_TOKEN=tok TELEGRAM_HEALTH_CHAT_ID=42 \
   BACKUP_SUPABASE_URL=https://x BACKUP_SUPABASE_KEY=k \
   run_backup "$SB" instantly-prod)"
 assert_exit_code "$rc" "1" "pg_dump failure → exit 1"
 assert_contains "$SB/curl.log" "api.telegram.org/bottok/sendMessage" "pg_dump failure → Telegram sendMessage"
 assert_contains "$SB/curl.log" "chat_id=42" "Telegram alert uses TELEGRAM_HEALTH_CHAT_ID"
+pgd_calls="$(grep -c '^pg_dump' "$SB/pg_dump.log" 2>/dev/null || echo 0)"
+assert_exit_code "$pgd_calls" "3" "pg_dump failure → 3 attempts (default retry budget)"
+assert_contains "$SB/curl.log" "after 3 tries" "Telegram alert mentions retry count ('after 3 tries')"
 
 echo ""
 echo "── 9) Telegram alert on upload non-2xx ──"
@@ -394,6 +421,54 @@ EOF
 else
   echo "  (skipped: dump_env.awk not found or awk missing)"
 fi
+
+echo ""
+echo "── 14) pg_dump retry: 2 фейла + 3-я успех → exit 0 ──"
+# Регрессия под инцидент 18.07.2026: pg_dump рвётся по сети на COPY жирной
+# public.pdl_companies через WAN. Скрипт должен ретраить и восстанавливаться.
+SB="$TMP_ROOT/t14"; make_sandbox "$SB"
+rc="$(INSTANTLY_DATABASE_URL='postgresql://i:p@h:5432/d' \
+  PG_DUMP_FAIL_FIRST_N=2 PG_DUMP_FAIL_RC=1 \
+  PG_DUMP_ATTEMPT_FILE="$SB/pgd.count" \
+  BACKUP_PG_DUMP_RETRY_PAUSE=0 \
+  BACKUP_SUPABASE_URL=https://example.supabase.co BACKUP_SUPABASE_KEY=svc \
+  run_backup "$SB" instantly-prod)"
+assert_exit_code "$rc" "0" "flaky pg_dump (2 fails, then ok) → exit 0"
+pgd_calls="$(grep -c '^pg_dump' "$SB/pg_dump.log" 2>/dev/null || echo 0)"
+assert_exit_code "$pgd_calls" "3" "pg_dump called exactly 3 times (2 retries + success)"
+assert_contains "$SB/run.out" "pg_dump attempt 2/3" "log announces attempt 2/3"
+assert_contains "$SB/run.out" "pg_dump attempt 3/3" "log announces attempt 3/3"
+assert_contains "$SB/curl.log" "/storage/v1/object/db-backups/instantly/prod/" "successful retry still uploads"
+
+echo ""
+echo "── 15) TCP keep-alive: PGKEEPALIVES экспортирован для pg_dump ──"
+# Регрессия под инцидент 18.07.2026: postgres логировал "connection to client
+# lost" на COPY public.pdl_companies, потому что WAN-соединение простаивало
+# без keep-alive и провайдерский NAT его рубил. backup.sh обязан выставлять
+# PGKEEPALIVES_* до вызова pg_dump — libpq подхватит из env.
+SB="$TMP_ROOT/t15"; make_sandbox "$SB"
+rc="$(INSTANTLY_DATABASE_URL='postgresql://i:p@h:5432/d' \
+  BACKUP_SUPABASE_URL=https://x BACKUP_SUPABASE_KEY=k \
+  run_backup "$SB" instantly-prod)"
+assert_exit_code "$rc" "0" "keep-alive test exits 0"
+assert_contains "$SB/pg_dump.log" "env:PGKEEPALIVES=1" "PGKEEPALIVES=1 exported to pg_dump"
+assert_contains "$SB/pg_dump.log" "env:PGKEEPALIVES_IDLE=60" "PGKEEPALIVES_IDLE=60 exported"
+assert_contains "$SB/pg_dump.log" "env:PGKEEPALIVES_INTERVAL=10" "PGKEEPALIVES_INTERVAL=10 exported"
+assert_contains "$SB/pg_dump.log" "env:PGKEEPALIVES_COUNT=6" "PGKEEPALIVES_COUNT=6 exported"
+
+echo ""
+echo "── 16) TCP keep-alive: внешние значения PGKEEPALIVES_* переопределяют дефолты ──"
+# Операционная гибкость: если провайдер требует более агрессивный keep-alive,
+# админ может выставить PGKEEPALIVES_IDLE=30 в env — скрипт не должен его
+# затирать своим 60.
+SB="$TMP_ROOT/t16"; make_sandbox "$SB"
+rc="$(INSTANTLY_DATABASE_URL='postgresql://i:p@h:5432/d' \
+  PGKEEPALIVES_IDLE=30 PGKEEPALIVES_INTERVAL=5 \
+  BACKUP_SUPABASE_URL=https://x BACKUP_SUPABASE_KEY=k \
+  run_backup "$SB" instantly-prod)"
+assert_exit_code "$rc" "0" "keep-alive override exits 0"
+assert_contains "$SB/pg_dump.log" "env:PGKEEPALIVES_IDLE=30" "external PGKEEPALIVES_IDLE preserved"
+assert_contains "$SB/pg_dump.log" "env:PGKEEPALIVES_INTERVAL=5" "external PGKEEPALIVES_INTERVAL preserved"
 
 echo ""
 echo "═══════════════════════════════════════"

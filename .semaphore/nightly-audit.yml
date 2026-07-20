@@ -1,0 +1,33 @@
+version: v1.0
+name: Nightly npm audit
+agent:
+  machine:
+    type: e1-standard-2
+    os_image: ubuntu2204
+execution_time_limit:
+  minutes: 30
+
+# Ночной аудит зависимостей. Вынесен из пайплайна пушей (semaphore.yml):
+# там он на каждом прогоне ходил в интернет, изредка подвисал и флапал,
+# а ловит одно и то же независимо от частоты запуска.
+#
+# Подключение (один раз, в UI Semaphore): проект → Tasks → New task →
+# pipeline file = .semaphore/nightly-audit.yml, branch = main,
+# cron = "0 5 * * *" (утро по UTC, до начала рабочего дня).
+# Упавший прогон виден в Semaphore как красный Nightly npm audit.
+
+blocks:
+  - name: npm audit
+    dependencies: []
+    task:
+      secrets:
+        - name: portal_secrets
+      jobs:
+        - name: audit
+          commands:
+            - checkout
+            - sem-version node 22
+            - cd app
+            - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json), node-modules'
+            - npm install
+            - npm audit --audit-level=critical
