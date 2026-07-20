@@ -169,7 +169,12 @@ describe('writeHandlers', () => {
       await launchHhParser({ text: 'Java' }, testUser);
 
       expect(insertQuery.insert).toHaveBeenCalledWith(
-        expect.objectContaining({ user_id: 'u-test-123', parser_type: 'hh_vacancies', status: 'pending' }),
+        expect.objectContaining({
+          user_id: 'u-test-123',
+          parser_type: 'hh_vacancies',
+          status: 'pending',
+          config: expect.objectContaining({ strict_title_match: true }),
+        }),
       );
     });
 

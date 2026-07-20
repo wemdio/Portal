@@ -72,6 +72,10 @@ const MANUAL_OVERRIDES = {
     'Демо открывается без регистрации.': 'No registration required.',
     'Каждый модуль работает как инструмент, которым вы пользуетесь сами. Менеджер нужен только чтобы настроить пресет.': 'Every module is a tool you can use directly. A manager only helps configure the initial setup.',
     'Лимит {0} строк. В файле {1} строк.': 'Limit: {0} rows. The file contains {1} rows.',
+    'Орбита — розничные сети': 'Orbita: retail chains',
+    'Орбита — 3PL и фулфилмент': 'Orbita: 3PL and fulfillment',
+    'Орбита — продавцы на маркетплейсах': 'Orbita: marketplace sellers',
+    'Орбита — производственные компании': 'Orbita: manufacturing companies',
   },
   es: {
     'Кампании': 'Campañas',
@@ -111,6 +115,10 @@ const MANUAL_OVERRIDES = {
     'Демо открывается без регистрации.': 'No requiere registro.',
     'Каждый модуль работает как инструмент, которым вы пользуетесь сами. Менеджер нужен только чтобы настроить пресет.': 'Cada módulo es una herramienta que puedes usar directamente. Un manager solo ayuda a configurar el ajuste inicial.',
     'Лимит {0} строк. В файле {1} строк.': 'Límite: {0} filas. El archivo contiene {1} filas.',
+    'Орбита — розничные сети': 'Orbita: cadenas minoristas',
+    'Орбита — 3PL и фулфилмент': 'Orbita: 3PL y fulfillment',
+    'Орбита — продавцы на маркетплейсах': 'Orbita: vendedores en marketplaces',
+    'Орбита — производственные компании': 'Orbita: empresas manufactureras',
   },
 };
 

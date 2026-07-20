@@ -125,4 +125,21 @@ describe('bundled client translations', () => {
     ));
     expect(screen.getByText('Проект Альфа для Испании')).toBeInTheDocument();
   });
+
+  test('translates controlled demo campaign names without touching real client data', () => {
+    const surface = (locale: 'en' | 'es') => React.createElement(
+      React.Fragment,
+      null,
+      React.createElement(GlobalTextTranslator, { locale }),
+      React.createElement('p', null, 'Орбита — розничные сети'),
+      React.createElement('p', null, 'Орбита — производственные компании'),
+    );
+    const view = render(surface('en'));
+    expect(screen.getByText('Orbita: retail chains')).toBeInTheDocument();
+    expect(screen.getByText('Orbita: manufacturing companies')).toBeInTheDocument();
+
+    view.rerender(surface('es'));
+    expect(screen.getByText('Orbita: cadenas minoristas')).toBeInTheDocument();
+    expect(screen.getByText('Orbita: empresas manufactureras')).toBeInTheDocument();
+  });
 });
