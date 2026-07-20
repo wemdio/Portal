@@ -25,7 +25,11 @@ blocks:
   - name: Run tests
     dependencies: []
     run:
-      when: branch != 'main' AND branch != 'test'
+      # change_in: ветки, не трогавшие app/ (доки, wiki, deploy-скрипты),
+      # не гоняют 2-минутный прогон вообще. Сравнение — с точкой расхождения
+      # от main: если ветка хоть раз трогала app/, тесты бегут на каждый пуш
+      # (это правильно — код в ветке есть и должен оставаться проверенным).
+      when: "branch != 'main' AND branch != 'test' AND change_in('/app/', {default_branch: 'main'})"
     task:
       secrets:
         - name: portal_secrets
@@ -47,15 +51,21 @@ blocks:
       # сборка на ветке инкрементальная; протухание безопасно: Next сверяет
       # содержимое по хэшам, максимум соберёт медленнее.
       jobs:
-        - name: 'Lint, typecheck, test, audit'
+        - name: 'Lint, typecheck, test'
           commands:
             - source /tmp/env_vars
             - cd $APP_PATH
             - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
             - npm run lint
-            - npx tsc --noEmit
+            # Инкрементальный tsc: .tsbuildinfo.ci помнит прошлый прогон,
+            # перепроверяются только изменённые файлы (−20-40с). Протухший
+            # кэш безопасен — tsc сверяет по содержимому.
+            - 'cache restore tsc-$SEMAPHORE_GIT_BRANCH,tsc-'
+            - npx tsc --noEmit --incremental --tsBuildInfoFile .tsbuildinfo.ci
+            - 'cache store tsc-$SEMAPHORE_GIT_BRANCH .tsbuildinfo.ci'
+            # npm audit переехал в ночной прогон (.semaphore/nightly-audit.yml):
+            # на каждом пуше он ходил в интернет и изредка подвисал/флапал.
             - npm test -- --watchAll=false
-            - npm audit --audit-level=critical
         - name: 'Next build'
           commands:
             - source /tmp/env_vars
