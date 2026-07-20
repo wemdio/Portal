@@ -260,3 +260,4 @@ npm run test:coverage
 - **Jest** - тестовый фреймворк
 - **React Testing Library** - тестирование React компонентов
 
+
