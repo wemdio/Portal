@@ -24,7 +24,7 @@
 
 ### Требования
 
-- Node.js 18+ 
+- Node.js 18+
 - npm или yarn
 - Docker и Docker Compose (для контейнерного запуска)
 
