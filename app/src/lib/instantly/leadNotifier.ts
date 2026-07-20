@@ -32,6 +32,23 @@ export interface LeadNotificationData {
   aiReason: string | null;
 }
 
+/**
+ * Дата лид-алерта по Москве. Вынесена из sendLeadNotification, чтобы TZ-фикс
+ * был покрыт регрессионным тестом (сама send-функция ходит в Telegram и в
+ * тесте недостижима). timeZone обязателен: TZ контейнера = UTC, без него дата
+ * у полуночи съезжает на день назад (01:30 МСК 17-го = 22:30 UTC 16-го →
+ * «16 июля»). Битая метка → сегодняшняя дата, а не «Invalid Date» в алерте.
+ */
+export function formatLeadAlertDate(replyTimestamp: string | null, now: Date = new Date()): string {
+  const source = replyTimestamp ? new Date(replyTimestamp) : now;
+  const valid = Number.isNaN(source.getTime()) ? now : source;
+  return valid.toLocaleDateString('ru-RU', {
+    day: 'numeric',
+    month: 'long',
+    timeZone: 'Europe/Moscow',
+  });
+}
+
 export async function sendLeadNotification(
   chatId: number,
   data: LeadNotificationData,
@@ -39,12 +56,7 @@ export async function sendLeadNotification(
   const token = getToken();
   if (!token) return { messageId: null };
 
-  const date = data.replyTimestamp
-    ? new Date(data.replyTimestamp).toLocaleDateString('ru-RU', {
-        day: 'numeric',
-        month: 'long',
-      })
-    : new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+  const date = formatLeadAlertDate(data.replyTimestamp);
 
   const lines: string[] = [];
 

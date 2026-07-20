@@ -6,6 +6,7 @@ import { HHParserView } from '@/components/parsers/HHParserView';
 import { SearchParserView } from '@/components/parsers/SearchParserView';
 import { YandexMapsParserView } from '@/components/parsers/YandexMapsParserView';
 import { clientApiFetch } from '@/lib/clientFetcher';
+import { ToolPaywallCard } from '@/components/client/ToolPaywallCard';
 
 type Tab = 'hh' | 'search' | 'yandexmaps';
 
@@ -17,7 +18,7 @@ function parseTab(value: string | null | undefined): Tab {
 }
 
 const TABS: { tab: Tab; label: string }[] = [
-  { tab: 'hh', label: 'HH.ru парсер' },
+  { tab: 'hh', label: 'Поиск по вакансиям' },
   { tab: 'search', label: 'Поиск' },
   { tab: 'yandexmaps', label: 'Яндекс.Карты' },
 ];
@@ -29,6 +30,9 @@ export default function ClientParsersPage() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<Tab>(() => parseTab(searchParams?.get('tab')));
   const [tariffStatus, setTariffStatus] = useState<TariffStatus | null>(null);
+  // Оформил подписку, но первая оплата ещё не поступила (payment_locked &&
+  // paid_at пусто). Инструменты закрыты до оплаты — показываем баннер.
+  const [awaitingPayment, setAwaitingPayment] = useState(false);
   const [tariffLoading, setTariffLoading] = useState(true);
 
   // «Цепочки писем» переехали на свою страницу (IA-переработка, июль 2026) —
@@ -48,8 +52,11 @@ export default function ClientParsersPage() {
     let cancelled = false;
     void (async () => {
       try {
-        const data = await clientApiFetch<{ status?: TariffStatus }>('/tariff');
-        if (!cancelled) setTariffStatus(data.status ?? 'inactive');
+        const data = await clientApiFetch<{ status?: TariffStatus; payment_locked?: boolean; paid_at?: string | null }>('/tariff');
+        if (!cancelled) {
+          setTariffStatus(data.status ?? 'inactive');
+          setAwaitingPayment(data.payment_locked === true && !data.paid_at);
+        }
       } catch {
         if (!cancelled) setTariffStatus('inactive');
       } finally {
@@ -81,25 +88,14 @@ export default function ClientParsersPage() {
           Инструменты парсинга
         </h1>
         <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
-          Парсеры HH.ru, поисковой выдачи и Яндекс.Карт
+          Поиск по вакансиям, поисковая выдача и Яндекс.Карты
         </p>
       </header>
 
       {tariffLoading ? null : tariffNotPaid ? (
-        <div className="neu-card p-6 sm:p-8 text-center">
-          <p
-            className="text-base sm:text-lg font-semibold m-0"
-            style={{ color: 'var(--cp-paper)' }}
-          >
-            Тариф не оплачен
-          </p>
-          <p
-            className="mt-2 text-sm"
-            style={{ color: 'var(--cp-paper-mute)' }}
-          >
-            Чтобы запускать инструменты парсинга, зайдите во вкладку «Тариф» и оплатите тариф.
-          </p>
-        </div>
+        <ToolPaywallCard variant="unpaid" />
+      ) : awaitingPayment ? (
+        <ToolPaywallCard variant="awaiting" />
       ) : (
         <>
           <nav className="flex gap-1 mb-6 flex-wrap" aria-label="Инструменты">

@@ -18,6 +18,7 @@ import {
   type CancelCheckFn,
 } from './processingSteps';
 import { extractEmail, findColumnIndex } from './dfybUtils';
+import { uploadExportArtifact } from './csvExportArtifact';
 
 const admin = supabaseAdmin!;
 
@@ -167,15 +168,18 @@ export async function updateJobWithRetry(
   jobId: string,
   patch: Record<string, unknown>,
   label: string,
+  opts?: { neqStatus?: string },
 ): Promise<{ error: { message: string } | null; ms: number; attempts: number }> {
   const t0 = Date.now();
   let lastError: { message: string } | null = null;
   for (let attempt = 1; attempt <= PERSIST_MAX_ATTEMPTS; attempt += 1) {
     try {
-      const { error } = await admin
-        .from('base_constructor_jobs')
-        .update(patch)
-        .eq('id', jobId);
+      let q = admin.from('base_constructor_jobs').update(patch).eq('id', jobId);
+      // Optional status guard (e.g. neqStatus:'cancelled' on the final update):
+      // a mid-run cancel must not be overwritten back to completed. A 0-row
+      // match is not an error — the guard just makes the write a no-op.
+      if (opts?.neqStatus) q = q.neq('status', opts.neqStatus);
+      const { error } = await q;
       if (!error) return { error: null, ms: Date.now() - t0, attempts: attempt };
       lastError = { message: error.message };
     } catch (err) {
@@ -598,6 +602,28 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
     data = mergeFoundEmailColumn(data);
     const finalSanitized = sanitizeRowsForJsonb(data);
     const finalApproxBytes = JSON.stringify(finalSanitized).length;
+
+    // Precompute the .csv.gz download artifact from the rows we already hold in
+    // memory (Fix B, 2026-07-17): the download route then streams ~3MB with
+    // sub-second TTFB instead of re-pulling the ~50MB blob per request.
+    // uploadExportArtifact never throws and is timeout-bounded — a storage blip
+    // must not fail the job; on null the download route falls back to the
+    // legacy build-from-data path (and lazily backfills on first download).
+    // Heartbeat before the (up to ~30s) artifact build+upload. The final block
+    // otherwise emits no started_at bump, so autoCompleteIfStuck (2 min stale)
+    // or a stale-reclaim could early-complete/reclaim the job mid-block and race
+    // a stale artifact onto storage. Status-guarded so a mid-run cancel is not
+    // resurrected to processing.
+    await admin
+      .from('base_constructor_jobs')
+      .update({ started_at: new Date().toISOString() })
+      .eq('id', jobId)
+      .eq('status', 'processing');
+
+    const exportArtifact = await uploadExportArtifact(admin, jobId, finalSanitized);
+    if (!exportArtifact) {
+      console.warn(`[base-constructor][${jobId}] export artifact not built — download will use legacy path`);
+    }
     const { error: finalErr, ms: finalMs, attempts: finalAttempts } = await updateJobWithRetry(
       jobId,
       {
@@ -607,6 +633,9 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
         current_step: selectedSteps.length,
         current_step_key: 'done',
         current_step_progress: 100,
+        ...(exportArtifact
+          ? { export_path: exportArtifact.path, export_bytes: exportArtifact.bytes }
+          : {}),
         result_stats: {
           total_rows: body.length,
           emails_found: emailsFound,
@@ -625,6 +654,7 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
         },
       },
       'final',
+      { neqStatus: 'cancelled' },
     );
     if (finalErr) {
       console.error(

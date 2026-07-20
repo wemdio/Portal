@@ -134,14 +134,20 @@ export interface ClientReplyMessageData {
  */
 export function buildClientReplyMessage(data: ClientReplyMessageData): string {
   const dateSource = data.replyTimestamp ? new Date(data.replyTimestamp) : new Date();
+  // timeZone обязателен: воркер крутится в контейнере с TZ=UTC, и без него
+  // toLocale* рендерил время на 3 часа раньше московского — спец получала
+  // «09:52» на ответ, пришедший в 12:52 МСК (инцидент 16.07.2026). Клиенты и
+  // спецы у нас в РФ, поэтому единый ориентир — Москва, и он подписан явно,
+  // чтобы «а это в каком поясе?» больше не возникало.
   const date = Number.isNaN(dateSource.getTime())
     ? ''
-    : dateSource.toLocaleDateString('ru-RU', {
+    : `${dateSource.toLocaleDateString('ru-RU', {
         day: 'numeric',
         month: 'long',
         hour: '2-digit',
         minute: '2-digit',
-      });
+        timeZone: 'Europe/Moscow',
+      })} (МСК)`;
 
   const lines: string[] = [];
   lines.push(

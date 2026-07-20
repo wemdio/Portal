@@ -39,7 +39,6 @@ type ForwardedLead = {
   email_id?: string | null;
   lead_id?: string | null;
   thread_id?: string | null;
-  is_unread?: boolean;
   ai_interest_value?: number | null;
 };
 
@@ -316,11 +315,15 @@ function LeadCard({
 }) {
   const commentCount = lead.client_lead_comments?.[0]?.count ?? 0;
 
-  // One status per row, hierarchy: this list is leads-by-definition, so the
-  // "Лид" label always shines; unread amber upgrades the dot.
-  const dotColor = lead.is_unread ? 'var(--cp-amber)' : 'var(--cp-green)';
-  const textColor = lead.is_unread ? 'var(--cp-amber)' : 'var(--cp-green)';
-  const statusLabel = lead.is_unread ? 'Непрочитано' : 'Лид';
+  // Эта страница — список ЛИДОВ по определению (спец сама пометила их из
+  // «Ответов»). Поэтому бейдж всегда «Лид» (зелёный): подменять его на
+  // «Непрочитано» здесь бессмысленно и путало — свежий лид выглядел
+  // необработанным, хотя он уже в рабочем списке. Непрочитанность живёт во
+  // вкладке «Ответы», где она и нужна для триажа. (Правка по фидбэку спеца,
+  // обрабатывающей лиды через клиентский доступ, 15.07.2026.)
+  const dotColor = 'var(--cp-green)';
+  const textColor = 'var(--cp-green)';
+  const statusLabel = 'Лид';
 
   return (
     <button

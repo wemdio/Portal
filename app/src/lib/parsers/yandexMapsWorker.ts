@@ -326,6 +326,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     let completedUrls = 0;
     let blockedUrls = 0;
     let failedUrls = 0;
+    let intlRedirectUrls = 0;
     const proxyPoolSize = job.proxy_enabled ? 1 : (activePool ?? getYandexMapsProxyPool()).length;
     void logInfo('parser.yandexmaps.collect.proxy', 'YandexMaps collect proxy pool', { jobId, proxyPoolSize, collectConcurrency }, logMeta);
 
@@ -367,15 +368,17 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       const maxProxyRetries = Math.max(1, proxyPoolSize) + 1;
       let success = false;
       let lastTotal = 0;
+      let urlIntlRedirect = false;
       let lastBlockedError: YandexMapsBlockedError | null = null;
       let lastGenericError: unknown = null;
       for (let attempt = 0; attempt < maxProxyRetries; attempt++) {
         try {
-          const { total } = await yandexMapsCollectLinksStream(
+          const { total, intlRedirect } = await yandexMapsCollectLinksStream(
             { search_url, max_results: maxResults, headless, proxy: pickProxy(job, urlIndex - 1 + attempt, activePool) },
             collectStreamCallback,
           );
           lastTotal = total;
+          urlIntlRedirect = intlRedirect;
           success = true;
           break;
         } catch (e) {
@@ -407,7 +410,16 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       }
 
       if (success) {
-        await urlSpan?.end({ links_collected: lastTotal, total_unique: allLinks.length });
+        if (urlIntlRedirect) {
+          intlRedirectUrls += 1;
+          void logWarn(
+            'parser.yandexmaps.collect.intl_redirect',
+            `Яндекс перенаправил URL ${urlIndex} на международную версию (yandex.com) — выдача урезана до первого экрана. Нужны российские прокси.`,
+            { jobId, search_url, links_collected: lastTotal },
+            logMeta,
+          );
+        }
+        await urlSpan?.end({ links_collected: lastTotal, total_unique: allLinks.length, intl_redirect: urlIntlRedirect });
       } else if (lastBlockedError) {
         blockedUrls += 1;
         void logWarn(
@@ -465,8 +477,19 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       progress_stage: 'links_collected',
     });
 
-    await trace?.end({ total_unique_links: allLinks.length });
-    void logInfo('parser.yandexmaps.collect.complete', 'YandexMaps collect-links completed', { jobId, totalLinks: allLinks.length }, logMeta);
+    if (intlRedirectUrls > 0) {
+      // Сигнал «собрали 2% возможного»: зарубежные прокси -> yandex.com ->
+      // только первый экран выдачи. Задача формально завершится, но лечится
+      // это только сменой прокси на российские (см. инцидент 15.07.2026).
+      void logWarn(
+        'parser.yandexmaps.collect.intl_redirect_summary',
+        `Международная выдача yandex.com на ${intlRedirectUrls} из ${searchUrls.length} запросов — собрано только по первому экрану (~${Math.round(allLinks.length / Math.max(searchUrls.length, 1))} ссылок/запрос). Для полной выдачи нужны российские прокси.`,
+        { jobId, intlRedirectUrls, totalUrls: searchUrls.length, totalLinks: allLinks.length },
+        logMeta,
+      );
+    }
+    await trace?.end({ total_unique_links: allLinks.length, intl_redirect_urls: intlRedirectUrls });
+    void logInfo('parser.yandexmaps.collect.complete', 'YandexMaps collect-links completed', { jobId, totalLinks: allLinks.length, intlRedirectUrls }, logMeta);
 
     if (allLinks.length > 0) {
       void logInfo('parser.yandexmaps.auto_parse', 'Auto-starting parse after collect', { jobId, totalLinks: allLinks.length }, logMeta);

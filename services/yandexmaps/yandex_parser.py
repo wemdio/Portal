@@ -146,6 +146,10 @@ class YandexMapsParser:
     self._browser: Optional[Browser] = None
     self._context: Optional[BrowserContext] = None
     self.is_running = False
+    # Яндекс перенаправил ru->com (зарубежный IP прокси). Международная
+    # версия отдаёт урезанную выдачу и, по наблюдениям инцидента 15.07.2026,
+    # не подгружает список при скролле — собирается только «первый экран».
+    self.intl_redirect_detected = False
 
   # ── логирование / progress ─────────────────────────────────────────
 
@@ -314,6 +318,228 @@ class YandexMapsParser:
     encoded_query = quote(search_query)
     return f"https://yandex.ru/maps/?text={encoded_query}"
 
+  # ── сбор через внутренний API /maps/api/search ───────────────────
+  #
+  # Инцидент 15.07.2026 (#790ce9bf): на зарубежных прокси Яндекс редиректит
+  # на международную выдачу yandex.com, где ленивая подгрузка списка при
+  # скролле не работает — собирается только первый экран (4-12 карточек).
+  # Российских прокси у нас нет (мобильные ~200 КБ/с не тянут), значит скролл
+  # на yandex.com не починить в принципе.
+  #
+  # Решение: SPA Карт подгружает список не «скроллом» как таковым, а
+  # подписанными запросами к /maps/api/search с пагинацией (skip/results).
+  # Мы повторяем эти запросы напрямую из browser-контекста (куки/сессия
+  # общие с загруженной страницей), сами вычисляя подпись `s`. Проверено на
+  # yandex.com через зарубежный egress: «Москва Кафе» отдаёт 60-120+
+  # организаций против 5 скроллом. Ответ содержит полные данные (адрес,
+  # телефоны, сайт, соцсети, часы) — но здесь мы берём только ссылки, чтобы
+  # не менять downstream: этап парсинга карточек через зарубежные прокси
+  # работает (в инциденте 41/41 карточка распарсилась успешно).
+
+  @staticmethod
+  def _api_sign(query: dict) -> str:
+    """Подпись запроса `s` — djb2/XOR-хэш qs.stringify с case-insensitive
+    сортировкой ключей. Порт кода из бандла front-maps (модуль 79409)."""
+    from urllib.parse import quote
+
+    keys = sorted(query.keys(), key=lambda k: k.lower())
+    payload = "&".join(f"{quote(str(k), safe='')}={quote(str(query[k]), safe='')}" for k in keys)
+    h = 5381
+    for ch in payload:
+      h = ((33 * h) ^ ord(ch)) & 0xFFFFFFFF
+    return str(h)
+
+  def _extract_api_bootstrap(self, html: str) -> Optional[dict]:
+    """Достаёт sessionId / csrfToken / центр карты из конфига страницы.
+
+    Всё это Яндекс кладёт инлайном в HTML поисковой выдачи. Без sessionId и
+    центра карты /maps/api/search отвечает 500/400 (проверено)."""
+    session_match = re.search(r'"analytics":\{[^}]*?"sessionId":"([^"]+)"', html)
+    if not session_match:
+      session_match = re.search(r'"sessionId":"([^"]+)"', html)
+    csrf_match = re.search(r'"csrfToken":"([^"]+)"', html)
+    center_match = re.search(r'"mapLocation":\{"center":\[([\d.-]+),([\d.-]+)\]', html)
+    if not session_match or not center_match:
+      return None
+    lon, lat = center_match.group(1), center_match.group(2)
+    return {
+      "session_id": session_match.group(1),
+      "csrf_token": csrf_match.group(1) if csrf_match else "",
+      "ll": f"{lon},{lat}",
+    }
+
+  async def _api_search_page(
+    self, req_ctx: Any, text: str, boot: dict, skip: int, results: int
+  ) -> Optional[dict]:
+    """Один запрос страницы выдачи. Возвращает распарсенный data или None.
+
+    Клиент Яндекса при ответе с новым csrfToken повторяет запрос с ним —
+    делаем то же (одна попытка обновления токена)."""
+    csrf = boot.get("csrf_token", "")
+    for _ in range(2):
+      params = {
+        "ajax": "1",
+        "csrfToken": csrf,
+        "sessionId": boot["session_id"],
+        "text": text,
+        "lang": "ru",
+        "ll": boot["ll"],
+        "spn": "0.6,0.4",
+        "z": "11",
+        "results": str(results),
+        "skip": str(skip),
+        "origin": "maps-search-form",
+      }
+      params["s"] = self._api_sign(params)
+      from urllib.parse import urlencode
+
+      url = "https://yandex.com/maps/api/search?" + urlencode(params)
+      try:
+        resp = await req_ctx.get(url, timeout=30000)
+        body = await resp.json()
+      except Exception as e:
+        self.log(f"[!] api/search skip={skip} ошибка: {e}")
+        return None
+      # Обновление csrf: сервер вернул новый токен вместо данных.
+      if isinstance(body, dict) and "csrfToken" in body and "data" not in body:
+        csrf = body["csrfToken"]
+        continue
+      if isinstance(body, dict) and body.get("type") == "captcha":
+        raise YandexBlockedError("Яндекс показал капчу на /maps/api/search")
+      if isinstance(body, dict) and "data" in body:
+        return body["data"]
+      return None
+    return None
+
+  async def collect_organization_links_via_api(
+    self,
+    search_url: str,
+    max_results: int = 5000,
+    max_seconds: int = 480,
+    on_links: Optional[Callable[[List[str], int], None]] = None,
+  ) -> List[str]:
+    """Сбор ссылок организаций через внутренний API (обходит скролл).
+
+    Работает на международной выдаче yandex.com — то, что нужно на
+    зарубежных прокси. Возвращает канонические card_url yandex.ru/maps/org/…,
+    чтобы downstream (парсинг карточек, нормализация) не менялся."""
+    if not self._context:
+      await self.start()
+
+    self.is_running = True
+    from urllib.parse import parse_qs, urlparse
+
+    parsed = urlparse(search_url)
+    text = (parse_qs(parsed.query).get("text", [""])[0]).strip()
+    if not text:
+      # /maps/213/moscow/search/<query>/ — текст в последнем сегменте пути.
+      seg = [s for s in parsed.path.split("/") if s]
+      if len(seg) >= 2 and seg[-2] == "search":
+        from urllib.parse import unquote
+
+        text = unquote(seg[-1])
+    if not text:
+      raise RuntimeError(f"api_collect: не удалось извлечь текст запроса из {search_url}")
+
+    links: List[str] = []
+    links_set: set[str] = set()
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + max_seconds
+
+    page = await self._context.new_page()
+    try:
+      await stealth_async(page)
+    except Exception:
+      pass
+    goto_timed_out = False
+    try:
+      try:
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=90000)
+      except PWTimeoutError:
+        goto_timed_out = True
+        self.log(f"[!] page.goto timeout 90s для {search_url} (api-режим)")
+
+      if await self._page_looks_blocked(page):
+        raise YandexBlockedError("Яндекс показал капчу при загрузке страницы поиска")
+
+      self._detect_intl_redirect(page)
+
+      html = await page.content()
+      boot = self._extract_api_bootstrap(html)
+      if not boot:
+        if goto_timed_out:
+          raise RuntimeError(
+            "page_load_timeout: страница поиска не загрузилась за 90с — прокси слишком медленный"
+          )
+        raise RuntimeError("api_collect: не нашли sessionId/центр карты в конфиге страницы")
+    finally:
+      try:
+        await page.close()
+      except Exception:
+        pass
+
+    req_ctx = self._context.request
+    results_per_page = 12
+    skip = 0
+    empty_pages = 0
+    stall_pages = 0
+    max_skip = max_results + results_per_page * 3
+
+    try:
+      while (
+        len(links) < max_results
+        and self.is_running
+        and loop.time() < deadline
+        and skip < max_skip
+      ):
+        data = await self._api_search_page(req_ctx, text, boot, skip, results_per_page)
+        if data is None:
+          empty_pages += 1
+          if empty_pages >= 3:
+            break
+          skip += results_per_page
+          continue
+        empty_pages = 0
+
+        items = data.get("items") or []
+        biz = [it for it in items if it.get("type") == "business"]
+        if not biz:
+          # Дошли до конца выдачи (Яндекс отдаёт нолики после исчерпания).
+          break
+
+        batch: List[str] = []
+        for it in biz:
+          oid = it.get("id") or it.get("businessId")
+          seoname = it.get("seoname") or "org"
+          if not oid:
+            continue
+          card_url = f"https://yandex.ru/maps/org/{seoname}/{oid}/"
+          if card_url not in links_set:
+            links_set.add(card_url)
+            links.append(card_url)
+            batch.append(card_url)
+
+        if on_links:
+          # Пульс идёт даже при пустом batch (страница-дубль) — держим стрим.
+          on_links(batch, len(links))
+
+        if not batch:
+          stall_pages += 1
+          if stall_pages >= 3:
+            break
+        else:
+          stall_pages = 0
+
+        self.update_progress(len(links), max_results, f"Найдено: {len(links)}")
+        skip += results_per_page
+        # Мягкая пауза между страницами — не долбим API впритык.
+        await asyncio.sleep(0.4)
+
+      self.log(f"[OK] API-сбор: {len(links)} организаций по запросу «{text}»")
+      return links[:max_results]
+    finally:
+      self.is_running = False
+
   async def collect_organization_links(
     self,
     search_url: str,
@@ -357,6 +583,8 @@ class YandexMapsParser:
 
       if await self._page_looks_blocked(page):
         raise YandexBlockedError("Яндекс показал капчу при загрузке страницы поиска")
+
+      self._detect_intl_redirect(page)
 
       try:
         # 60s ждём пока Яндекс дорендерит первую пачку карточек. React
@@ -450,12 +678,11 @@ class YandexMapsParser:
         if on_links and batch:
           on_links(batch, len(links))
           last_reported = len(links)
-        elif on_links and scroll_attempts % 5 == 0:
-          # Безусловный keepalive: раньше слали только при len(links) != last_reported,
-          # т.е. в момент затыка (когда ссылок нет — а keepalive и нужен) молчали.
-          # Отдельный tick-таск на уровне сервера дублирует эту защиту через
-          # NDJSON-heartbeat, но пусть парсер тоже подавать сигнал жизни:
-          # чем ближе к источнику, тем лучше.
+        elif on_links and scroll_attempts % 10 == 0:
+          # Пульс шлём БЕЗ условия «число ссылок изменилось». Старое условие
+          # `len(links) != last_reported` заставляло пульс молчать ровно в
+          # застое — когда он и нужен, чтобы стрим до воркера не считался
+          # мёртвым (инцидент 15.07.2026: TypeError: terminated через 5 мин).
           on_links([], len(links))
           last_reported = len(links)
 
@@ -544,6 +771,25 @@ class YandexMapsParser:
         await page.close()
       except Exception:
         pass
+
+  def _detect_intl_redirect(self, page: Page):
+    """Фиксирует редирект yandex.ru -> yandex.com/(com.tr) на зарубежном IP.
+
+    Международная версия Карт урезает выдачу и не работает ленивая
+    подгрузка при скролле — на запрос с потенциалом 200+ организаций
+    приходит только первый экран (4-12 карточек). Полноценный фикс —
+    российские резидентные/мобильные прокси; здесь только сигналим,
+    чтобы задача не выглядела «успешной» молча (инцидент 15.07.2026)."""
+    try:
+      current_url = (page.url or "").lower()
+    except Exception:
+      return
+    if re.match(r"https?://yandex\.(com|com\.tr|eu|by|kz)/", current_url):
+      self.intl_redirect_detected = True
+      self.log(
+        f"[!] Яндекс перенаправил на {current_url.split('/maps')[0]} — зарубежный IP прокси. "
+        "Выдача будет урезана до первого экрана (ленивая подгрузка не работает)."
+      )
 
   async def _find_sidebar(self, page: Page):
     """Возвращает ElementHandle скроллящегося сайдбара, либо None."""

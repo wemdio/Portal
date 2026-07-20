@@ -479,6 +479,15 @@ export async function listEmails(
      * when you want only inbound replies.
      */
     email_type?: 'received' | 'sent' | 'manual';
+    /**
+     * Unibox tab. Instantly defaults to `emode_focused` (Primary) when the
+     * param is omitted — the "Others" tab (~97% of inbound: warmup, spam, but
+     * also SOME real replies Instantly missorted) is reachable ONLY with
+     * `mode: 'emode_others'`. NOT the response fields `is_focused`/`i_status`
+     * (passing those as query params is silently ignored; verified live
+     * 2026-07-15).
+     */
+    mode?: 'emode_focused' | 'emode_others' | 'emode_all';
   },
   requestOptions?: InstantlyRequestOptions,
 ) {

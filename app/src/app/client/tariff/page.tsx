@@ -77,7 +77,7 @@ const LIMITS: Array<{
   {
     key: 'max_rows',
     label: 'Запросы на сбор и базы',
-    hint: 'HH, Яндекс.Карты, поисковая выдача, конструктор баз',
+    hint: 'Поиск по вакансиям, Яндекс.Карты, поисковая выдача, конструктор баз',
   },
   {
     key: 'max_chains_per_month',
@@ -1030,7 +1030,7 @@ type TariffChoice = PaidTariff | 'custom';
 type PeriodKey = 'month' | 'quarter' | 'half_year' | 'year';
 
 const PERIOD_MONTHS: Record<PeriodKey, number> = { month: 1, quarter: 3, half_year: 6, year: 12 };
-const PERIOD_DISCOUNT: Record<PeriodKey, number> = { month: 1, quarter: 1, half_year: 0.9, year: 0.8 };
+const PERIOD_DISCOUNT: Record<PeriodKey, number> = { month: 1, quarter: 0.95, half_year: 0.9, year: 0.8 };
 const PERIOD_LABEL: Record<PeriodKey, string> = {
   month: '1 месяц',
   quarter: '3 месяца',
@@ -1102,7 +1102,7 @@ const TARIFF_CARDS: TariffCardSpec[] = [
 function TariffSelectionWidget({ isTestShop = false }: { isTestShop?: boolean }) {
   const [tariff, setTariff] = useState<TariffChoice>('pro');
   // Дефолт — 1 месяц (минимальный entry-point). В прод-магазине показываем
-  // 1 / 3 / 6 / 12 мес (см. презентацию: 3 мес — без скидки, 6 мес — −10%,
+  // 1 / 3 / 6 / 12 мес (см. презентацию: 3 мес — −5%, 6 мес — −10%,
   // 12 мес — −20%). Quarter в тест-магазине не поддерживается — цены и
   // test_period_minutes для него не заданы, поэтому там оставляем 1 / 6 / 12.
   const [period, setPeriod] = useState<PeriodKey>('month');

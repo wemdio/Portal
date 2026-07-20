@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { getClientTariffUsage } from '@/lib/tariffs';
+import { getClientTariffUsage, isClientToolAccessAllowed, isAwaitingFirstPayment, TOOL_ACCESS_DENIED_MESSAGE, AWAITING_PAYMENT_MESSAGE } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 
@@ -102,8 +102,11 @@ export async function POST(req: NextRequest) {
 
       if (profile?.role === 'client') {
         tariffUsage = await getClientTariffUsage(user.id);
-        if (tariffUsage.status !== 'active' && tariffUsage.status !== 'setup') {
-          return jsonError('Подписка не активна. Оплатите тариф для продолжения работы.', 403);
+        if (!isClientToolAccessAllowed(tariffUsage.status)) {
+          return jsonError(TOOL_ACCESS_DENIED_MESSAGE, 403);
+        }
+        if (isAwaitingFirstPayment(tariffUsage)) {
+          return jsonError(AWAITING_PAYMENT_MESSAGE, 403);
         }
         if (tariffUsage.usage.max_rows.remaining <= 0) {
           return jsonError('Лимит запросов по тарифу исчерпан.', 429);

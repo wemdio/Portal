@@ -130,7 +130,7 @@ export function AutoPipelineSummary() {
   const bobCount = last_run?.new_from_bob ?? 0;
   const sourceSplitLabel =
     hhCount + bobCount > 0
-      ? `HH ${hhCount.toLocaleString('ru-RU')} · база баз ${bobCount.toLocaleString('ru-RU')}`
+      ? `Вакансии ${hhCount.toLocaleString('ru-RU')} · база баз ${bobCount.toLocaleString('ru-RU')}`
       : undefined;
 
   // Status dot: зелёная если completed, серая если ни разу не было

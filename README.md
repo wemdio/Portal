@@ -259,3 +259,4 @@ npm run test:coverage
 - **PapaParse** - парсинг CSV файлов
 - **Jest** - тестовый фреймворк
 - **React Testing Library** - тестирование React компонентов
+

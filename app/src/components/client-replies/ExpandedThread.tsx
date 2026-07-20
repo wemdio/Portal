@@ -17,7 +17,7 @@ import type { ClientReplyThread, ThreadMessage, Recipient } from '@/lib/clientCa
 
 /**
  * The expandable lead-reply thread block. Shows the full message history
- * with «ЛИД»/«МЫ» direction tags, plus «Ответить» / «Переслать» action
+ * with «КОНТАКТ»/«МЫ» direction tags, plus «Ответить» / «Переслать» action
  * buttons that open inline forms. Used in three places:
  *
  *   - `/client/campaigns/[id]?tab=replies` (campaign Replies tab) —
@@ -94,8 +94,12 @@ function ThreadMessageCard({ msg }: { msg: ThreadMessage }) {
             aria-hidden
           />
         )}
+        {/* «КОНТАКТ», не «ЛИД»: тег направления («кто написал») на одном экране
+            со СТАТУСОМ «Лид» (квалификация) читался как «система пометила
+            лидом» — спец 16.07 приняла оранжевый тег за статус и ждала
+            ТГ-уведомление. Слово «лид» оставлено только за статусом. */}
         <span className="ds-eyebrow shrink-0" style={{ color: directionColor }}>
-          {isInbound ? 'ЛИД' : 'МЫ'}
+          {isInbound ? 'КОНТАКТ' : 'МЫ'}
         </span>
         <span
           className="text-[10px] truncate flex-1 min-w-0"
@@ -521,23 +525,16 @@ export function ExpandedThread({
         </div>
       )}
 
-      {thread && thread.length > 0 ? (
-        <div className="space-y-2">
-          {thread.map((msg) => (
-            <ThreadMessageCard key={msg.id} msg={msg} />
-          ))}
-        </div>
-      ) : threadError && fallbackMessages && fallbackMessages.length > 0 ? (
-        // Тред не загрузился — показываем хотя бы последний ответ лида из уже
-        // загруженных данных списка, чтобы карточка не осталась без содержимого.
-        <div className="space-y-2">
-          {fallbackMessages.map((msg) => (
-            <ThreadMessageCard key={msg.id} msg={msg} />
-          ))}
-        </div>
-      ) : null}
+      {/* Действия и форма — НАД лентой: переписка идёт свежим сверху, поэтому
+          ответ — логическое продолжение верхнего (последнего) письма. Раньше
+          кнопка «Ответить» жила под всем тредом, и её приходилось искать
+          скроллом (жалоба клиента 12.07).
 
-      {!threadLoading && (
+          Гейт — только на ПЕРВУЮ загрузку (threadLoading && !thread): при
+          рефетче (после отправки, «Повторить») лента уже отрендерена, и
+          размонтирование ряда дёргало бы её вверх на высоту кнопок и обратно.
+          Теперь ряд остаётся на месте. */}
+      {!(threadLoading && !thread) && (
         <div className="flex items-center gap-2 pt-1">
           <button
             type="button"
@@ -586,6 +583,22 @@ export function ExpandedThread({
           }}
         />
       )}
+
+      {thread && thread.length > 0 ? (
+        <div className="space-y-2">
+          {thread.map((msg) => (
+            <ThreadMessageCard key={msg.id} msg={msg} />
+          ))}
+        </div>
+      ) : threadError && fallbackMessages && fallbackMessages.length > 0 ? (
+        // Тред не загрузился — показываем хотя бы последний ответ лида из уже
+        // загруженных данных списка, чтобы карточка не осталась без содержимого.
+        <div className="space-y-2">
+          {fallbackMessages.map((msg) => (
+            <ThreadMessageCard key={msg.id} msg={msg} />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

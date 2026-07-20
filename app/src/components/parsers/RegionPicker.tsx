@@ -237,7 +237,7 @@ export function RegionPicker({ value, onChange, max = 30, clientMode }: Props) {
           {value.length === 0 && <span>· пусто → парсим всю РФ (area=113)</span>}
           {value.length > 1 && (
             <span className="text-amber-700">
-              · мульти-регион: HH объединяет через OR (вакансии из любого из выбранных городов)
+              · мульти-регион: объединяем через OR (вакансии из любого из выбранных городов)
             </span>
           )}
         </div>

@@ -34,12 +34,26 @@ PARSE_TIMEOUT_SEC = int(os.environ.get("YANDEXMAPS_PARSE_TIMEOUT_SEC", "900"))
 # max_seconds на один URL внутри парсера — 12 мин, чуть меньше HTTP-таймаута
 # сверху, чтобы парсер успел вернуть частичный результат до 504.
 COLLECT_MAX_SECONDS_PER_URL = int(os.environ.get("YANDEXMAPS_COLLECT_MAX_SECONDS_PER_URL", "720"))
-# Heartbeat интервал для NDJSON-стрима — undici body-timeout=300s рвёт сокет
-# при затыках. Ловили инциденте 15.07.2026: yandex.com отдавал 5 карточек,
-# скролл 40 итераций впустую = 3 мин тишины → все 9 URL умерли с
-# TypeError: terminated. Heartbeat каждые 25с гарантирует, что undici видит
-# трафик и держит соединение.
-COLLECT_STREAM_HEARTBEAT_SEC = float(os.environ.get("YANDEXMAPS_COLLECT_STREAM_HEARTBEAT_SEC", "25"))
+# Пульс стрима: undici в воркере рвёт соединение (bodyTimeout 300с), если по
+# стриму 5 минут не приходит НИ БАЙТА. Инцидент 15.07.2026 (#790ce9bf): на
+# международной выдаче yandex.com новые карточки перестают приходить, парсер
+# честно скроллит дальше, но в стрим ничего не пишется — все 9 запросов ночного
+# запуска умерли с `TypeError: terminated` ровно через ~5 минут тишины.
+# Пульс шлётся из generate() независимо от состояния парсера.
+STREAM_HEARTBEAT_SEC = int(os.environ.get("YANDEXMAPS_STREAM_HEARTBEAT_SEC", "20"))
+# Режим сбора ссылок: "api" (подписанные запросы /maps/api/search — работают
+# на международной выдаче yandex.com, обходят сломанный скролл на зарубежных
+# прокси) или "scroll" (старый скролл сайдбара — только для российской
+# выдачи). По умолчанию api: на зарубежных прокси это единственное, что
+# собирает полную выдачу (см. инцидент 15.07.2026). "scroll" — фолбэк.
+COLLECT_MODE = os.environ.get("YANDEXMAPS_COLLECT_MODE", "api").strip().lower()
+
+
+def _collect_fn(parser: YandexMapsParser):
+  """Выбирает метод сбора ссылок по COLLECT_MODE."""
+  if COLLECT_MODE == "scroll":
+    return parser.collect_organization_links
+  return parser.collect_organization_links_via_api
 
 
 class ProxyModel(BaseModel):
@@ -60,6 +74,7 @@ class CollectLinksRequest(BaseModel):
 
 class CollectLinksResponse(BaseModel):
   links: list[str]
+  intl_redirect: bool = False
 
 
 class ParseOrgsRequest(BaseModel):
@@ -183,10 +198,10 @@ async def collect_links(req: CollectLinksRequest):
     try:
       await parser.start()
       links = await asyncio.wait_for(
-        parser.collect_organization_links(req.search_url, req.max_results),
+        _collect_fn(parser)(req.search_url, req.max_results),
         timeout=COLLECT_TIMEOUT_SEC,
       )
-      return CollectLinksResponse(links=links)
+      return CollectLinksResponse(links=links, intl_redirect=parser.intl_redirect_detected)
     except asyncio.TimeoutError:
       parser.stop()
       raise HTTPException(status_code=504, detail=f"collect-links timed out after {COLLECT_TIMEOUT_SEC}s")
@@ -219,9 +234,6 @@ async def collect_links_stream(req: CollectLinksRequest):
   # Sentinel для «сбор завершён» — нужен, чтобы generate() не крутился впустую
   # в get(), если задача упала между двумя put'ами.
   DONE = object()
-  # Sentinel для heartbeat — generate() рендерит его в отдельную NDJSON-строку
-  # {"tick": true}, undici видит трафик и не рвёт соединение.
-  TICK = object()
   link_queue: asyncio.Queue = asyncio.Queue()
 
   def on_links(batch: list[str], total: int) -> None:
@@ -244,12 +256,12 @@ async def collect_links_stream(req: CollectLinksRequest):
     try:
       await parser.start()
       links = await asyncio.wait_for(
-        parser.collect_organization_links(
+        _collect_fn(parser)(
           req.search_url, req.max_results, max_seconds=COLLECT_MAX_SECONDS_PER_URL, on_links=on_links
         ),
         timeout=COLLECT_TIMEOUT_SEC,
       )
-      await link_queue.put({"__done": True, "total": len(links)})
+      await link_queue.put({"__done": True, "total": len(links), "__intl_redirect": parser.intl_redirect_detected})
     except YandexBlockedError as e:
       await link_queue.put({"__error": f"yandex_blocked: {e}", "__blocked": True})
     except asyncio.TimeoutError:
@@ -266,50 +278,37 @@ async def collect_links_stream(req: CollectLinksRequest):
       link_queue.put_nowait(DONE)
       asyncio.create_task(close_parser_detached())
 
-  async def heartbeat_ticker():
-    """Раз в COLLECT_STREAM_HEARTBEAT_SEC пушит TICK-сентинел.
-
-    Инцидент 15.07.2026: yandex.com отдавал 5 карточек, скролл делал 40
-    пустых итераций (~3 мин) — undici body-timeout (300s) закрывал сокет,
-    все 9 URL валились с TypeError: terminated. Собственный keepalive в
-    парсере условен ("шлём только если ссылок прибавилось") — во время
-    затыка он молчит. Тикер шлёт сигнал жизни безусловно, generate()
-    рендерит его в {"tick": true} NDJSON — undici видит трафик и держит
-    соединение.
-    """
-    try:
-      while True:
-        await asyncio.sleep(COLLECT_STREAM_HEARTBEAT_SEC)
-        link_queue.put_nowait(TICK)
-    except asyncio.CancelledError:
-      pass
-
   async def generate():
     task = asyncio.create_task(run_collect())
-    tick_task = asyncio.create_task(heartbeat_ticker())
+    last_total = 0
     try:
       while True:
-        msg = await link_queue.get()
+        try:
+          msg = await asyncio.wait_for(link_queue.get(), timeout=STREAM_HEARTBEAT_SEC)
+        except asyncio.TimeoutError:
+          # Тишина от парсера (скроллит, но новых карточек нет) — шлём пульс,
+          # чтобы undici-клиент воркера не убил стрим по body-timeout.
+          yield json.dumps({"heartbeat": True, "total": last_total}, ensure_ascii=False) + "\n"
+          continue
         if msg is DONE:
           break
-        if msg is TICK:
-          yield json.dumps({"tick": True}, ensure_ascii=False) + "\n"
-          continue
         if "__error" in msg:
           error_payload = {"error": msg["__error"]}
           if msg.get("__blocked"):
             error_payload["blocked"] = True
           yield json.dumps(error_payload, ensure_ascii=False) + "\n"
         elif "__done" in msg:
-          yield json.dumps({"done": True, "total": msg["total"]}, ensure_ascii=False) + "\n"
+          done_payload = {"done": True, "total": msg["total"]}
+          if msg.get("__intl_redirect"):
+            done_payload["intl_redirect"] = True
+          yield json.dumps(done_payload, ensure_ascii=False) + "\n"
         else:
+          last_total = int(msg.get("total") or last_total)
           yield json.dumps(msg, ensure_ascii=False) + "\n"
     finally:
       # Мы можем быть в отменённом anyio-scope (клиент отвалился) — здесь
       # нельзя await'ить. cancel() синхронный; cleanup сделает сам
       # run_collect в своём finally.
-      if not tick_task.done():
-        tick_task.cancel()
       if not task.done():
         task.cancel()
 

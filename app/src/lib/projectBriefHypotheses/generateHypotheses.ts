@@ -15,13 +15,16 @@ const DEFAULT_CATALOG_LIMIT = Number(process.env.PROJECT_HYPOTHESES_CATALOG_LIMI
 // без него (одношагово), чтобы не съесть весь бюджет запроса на шаг 2.
 const ICP_ANALYSIS_TIMEOUT_MS = Number(process.env.PROJECT_ICP_ANALYSIS_TIMEOUT_MS ?? '45000');
 
-const HH_SOURCE_RE = /^-\s*Источник\s*:\s*(?:.*\bHH\b|.*HeadHunter|.*hh\.ru)/im;
+// Ловит HH-блок и по старому бренду, и по нейтральному лейблу («…по вакансиям»):
+// клиенту источник теперь называется нейтрально (clientName), но фильтр
+// «не показывать ССЧ/выручку» обязан срабатывать на нём так же.
+const HH_SOURCE_RE = /^-\s*Источник\s*:\s*(?:.*\bHH\b|.*HeadHunter|.*hh\.ru|.*ваканси)/im;
 const CLIENT_HH_FORBIDDEN_SIZE_METRICS =
   /ССЧ|выручк|оборот|числен\w*|размер\s+(?:компани|бизнес)|микро[-\s]?\w*|крупн\w*\s+бизнес|enterprise|\d+\s*[–-]\s*\d+\s*(?:сотрудник\w*|чел\.?|человек)/i;
 const SAFE_HH_CRITERIA =
   '- Критерии сбора / как собрать базу: поиск вакансий по релевантным ролям; регионы и дата публикации; собрать список компаний-работодателей';
 const SAFE_HH_RISK =
-  '- Риски/нюансы: HH не даёт все данные о компании; перед запуском базу лучше очистить от нерелевантных работодателей.';
+  '- Риски/нюансы: поиск по вакансиям не даёт все данные о компании; перед запуском базу лучше очистить от нерелевантных работодателей.';
 
 function splitHypothesisBlocks(markdown: string): string[] {
   return markdown
@@ -60,6 +63,20 @@ function sanitizeClientHhBlock(block: string): string {
 
 export function sanitizeClientHypothesesMarkdown(markdown: string): string {
   return splitHypothesisBlocks(markdown).map(sanitizeClientHhBlock).join('\n\n').trim();
+}
+
+/**
+ * Предохранитель для КЛИЕНТСКОГО вывода: даже если модель проигнорировала
+ * нейтральный clientName и написала «HH» / «hh.ru» / «HeadHunter», заменяем
+ * на нейтральное название площадки вакансий. Порядок важен — сначала «hh.ru»
+ * целиком, потом одиночный токен HH: иначе \bHH\b съел бы «HH» из «HH.ru» и
+ * оставил висящий «.ru».
+ */
+export function scrubHhMentionsForClient(markdown: string): string {
+  return markdown
+    .replace(/HeadHunter|ХедХантер/gi, 'Поиск по вакансиям')
+    .replace(/hh\.ru/gi, 'поиск по вакансиям')
+    .replace(/\bHH\b/g, 'Поиск по вакансиям');
 }
 
 export interface GenerateLeadSourceHypothesesOptions {
@@ -144,5 +161,7 @@ export async function generateLeadSourceHypotheses(
   if (!trimmed) {
     throw new Error('AI вернул пустой ответ');
   }
-  return audience === 'client' ? sanitizeClientHypothesesMarkdown(trimmed) : trimmed;
+  return audience === 'client'
+    ? scrubHhMentionsForClient(sanitizeClientHypothesesMarkdown(trimmed))
+    : trimmed;
 }

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { sendDemoLeadTelegramAlert } from '@/lib/demoLead/notify';
+import { CLIENT_LOCALE_COOKIE, normalizeClientLocale } from '@/lib/clientI18n';
 
 export const dynamic = 'force-dynamic';
 
@@ -76,6 +77,7 @@ export async function POST(req: NextRequest) {
   const phone = (body.phone ?? '').trim();
   const telegram = (body.telegram ?? '').trim();
   const utm = readSignupUtm(req);
+  const locale = normalizeClientLocale(req.cookies.get(CLIENT_LOCALE_COOKIE)?.value);
 
   if (!email || !isEmailLike(email)) {
     return NextResponse.json({ error: 'Введите корректный email' }, { status: 400 });
@@ -122,7 +124,7 @@ export async function POST(req: NextRequest) {
     .from('profiles')
     .update({
       role: 'client',
-      locale: 'ru',
+      locale,
       full_name: fullName,
       company,
       phone: phone || null,

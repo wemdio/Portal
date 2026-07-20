@@ -5,6 +5,7 @@ import { EmailSequenceV2View } from '@/components/email-sequence-v2/EmailSequenc
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { useDemoMode } from '@/lib/clientDemo/useDemoMode';
 import { DemoSequenceExample } from '@/components/client/DemoSequenceExample';
+import { ToolPaywallCard } from '@/components/client/ToolPaywallCard';
 
 type TariffStatus = 'setup' | 'active' | 'expired' | 'inactive';
 
@@ -17,14 +18,19 @@ type TariffStatus = 'setup' | 'active' | 'expired' | 'inactive';
 export default function ClientSequencesPage() {
   const isDemo = useDemoMode();
   const [tariffStatus, setTariffStatus] = useState<TariffStatus | null>(null);
+  // Оформил подписку, но первая оплата ещё не поступила — инструмент закрыт.
+  const [awaitingPayment, setAwaitingPayment] = useState(false);
   const [tariffLoading, setTariffLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const data = await clientApiFetch<{ status?: TariffStatus }>('/tariff');
-        if (!cancelled) setTariffStatus(data.status ?? 'inactive');
+        const data = await clientApiFetch<{ status?: TariffStatus; payment_locked?: boolean; paid_at?: string | null }>('/tariff');
+        if (!cancelled) {
+          setTariffStatus(data.status ?? 'inactive');
+          setAwaitingPayment(data.payment_locked === true && !data.paid_at);
+        }
       } catch {
         if (!cancelled) setTariffStatus('inactive');
       } finally {
@@ -56,17 +62,9 @@ export default function ClientSequencesPage() {
       </header>
 
       {tariffLoading ? null : tariffNotPaid ? (
-        <div className="neu-card p-6 sm:p-8 text-center">
-          <p
-            className="text-base sm:text-lg font-semibold m-0"
-            style={{ color: 'var(--cp-paper)' }}
-          >
-            Тариф не оплачен
-          </p>
-          <p className="mt-2 text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
-            Чтобы генерировать цепочки, зайдите во вкладку «Тариф» и оплатите тариф.
-          </p>
-        </div>
+        <ToolPaywallCard variant="unpaid" />
+      ) : awaitingPayment ? (
+        <ToolPaywallCard variant="awaiting" />
       ) : isDemo === true ? (
         // Демо: read-only пример «вход → цепочка» (tools-API демо-аккаунту
         // недоступен, у живого инструмента был бы пустой список запусков).
