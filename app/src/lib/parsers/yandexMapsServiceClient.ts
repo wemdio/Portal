@@ -1,3 +1,28 @@
+import { Agent } from 'undici';
+
+// Явный undici-Agent с большим bodyTimeout (16.07.2026): у глобального Node
+// fetch дефолт body-timeout=300s, что валит NDJSON-стрим collect-links при
+// затыках выдачи Яндекса — недавний инцидент 15.07 (yandex.com отдавал 5
+// карточек, 3 мин тишины на скролле → TypeError: terminated для 9/9 URL).
+// AbortController на 990с этого не спасает — undici живёт по своим таймаутам.
+// Держим headers-timeout маленьким (60с — сервис отвечает первым байтом
+// быстро), body-timeout — таким же, как серверный COLLECT_TIMEOUT_SEC (900с).
+// Отдельный Agent, а не setGlobalDispatcher: не хотим влиять на Instantly,
+// GitHub-webhook и прочие исходящие fetch в приложении.
+let _dispatcher: Agent | null = null;
+function getDispatcher(): Agent {
+  if (_dispatcher) return _dispatcher;
+  const bodyTimeout = Number(process.env.YANDEXMAPS_SERVICE_BODY_TIMEOUT_MS ?? '990000');
+  const headersTimeout = Number(process.env.YANDEXMAPS_SERVICE_HEADERS_TIMEOUT_MS ?? '60000');
+  _dispatcher = new Agent({
+    bodyTimeout: Number.isFinite(bodyTimeout) && bodyTimeout > 0 ? bodyTimeout : 990000,
+    headersTimeout: Number.isFinite(headersTimeout) && headersTimeout > 0 ? headersTimeout : 60000,
+    keepAliveTimeout: 60_000,
+    keepAliveMaxTimeout: 120_000,
+  });
+  return _dispatcher;
+}
+
 export type YandexMapsProxy = {
   enabled?: boolean;
   protocol?: 'http' | 'https' | 'socks5';
@@ -110,7 +135,10 @@ async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: num
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    // dispatcher — undici-extension в Node fetch, не входит в стандартный
+    // RequestInit; cast сохраняет типизацию для основного init.
+    const opts = { ...init, signal: controller.signal, dispatcher: getDispatcher() } as RequestInit;
+    return await fetch(input, opts);
   } finally {
     clearTimeout(t);
   }
@@ -202,7 +230,7 @@ export async function yandexMapsCollectLinks(req: CollectLinksRequest): Promise<
   return await postJson<CollectLinksResponse>('/collect-links', req);
 }
 
-export type CollectLinksChunk = { links: string[]; total: number; done?: boolean; error?: string; blocked?: boolean };
+export type CollectLinksChunk = { links: string[]; total: number; done?: boolean; error?: string; blocked?: boolean; tick?: boolean };
 
 /**
  * Streaming version: calls /collect-links/stream and invokes onChunk for every
@@ -265,6 +293,10 @@ export async function yandexMapsCollectLinksStream(
         throw new Error(`yandexmaps stream: ${parsed.error}`);
       }
 
+      // Heartbeat-строка {"tick": true} — сервис шлёт её каждые ~25с чтобы
+      // undici не рвал body-timeout при затыках выдачи. Просто пропускаем.
+      if (parsed.tick) continue;
+
       if (parsed.links) {
         for (const link of parsed.links) {
           if (!seen.has(link)) {
@@ -284,16 +316,18 @@ export async function yandexMapsCollectLinksStream(
   if (buffer.trim()) {
     try {
       const parsed = JSON.parse(buffer.trim()) as CollectLinksChunk;
-      if (parsed.links) {
-        for (const link of parsed.links) {
-          if (!seen.has(link)) {
-            seen.add(link);
-            allLinks.push(link);
+      if (!parsed.tick) {
+        if (parsed.links) {
+          for (const link of parsed.links) {
+            if (!seen.has(link)) {
+              seen.add(link);
+              allLinks.push(link);
+            }
           }
         }
+        total = parsed.total ?? total;
+        await onChunk({ links: parsed.links ?? [], total, done: parsed.done });
       }
-      total = parsed.total ?? total;
-      await onChunk({ links: parsed.links ?? [], total, done: parsed.done });
     } catch { /* ignore trailing partial */ }
   }
 

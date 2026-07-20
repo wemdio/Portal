@@ -450,7 +450,12 @@ class YandexMapsParser:
         if on_links and batch:
           on_links(batch, len(links))
           last_reported = len(links)
-        elif on_links and scroll_attempts % 10 == 0 and len(links) != last_reported:
+        elif on_links and scroll_attempts % 5 == 0:
+          # Безусловный keepalive: раньше слали только при len(links) != last_reported,
+          # т.е. в момент затыка (когда ссылок нет — а keepalive и нужен) молчали.
+          # Отдельный tick-таск на уровне сервера дублирует эту защиту через
+          # NDJSON-heartbeat, но пусть парсер тоже подавать сигнал жизни:
+          # чем ближе к источнику, тем лучше.
           on_links([], len(links))
           last_reported = len(links)
 
