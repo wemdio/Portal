@@ -1,6 +1,6 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError, logInfo } from '@/lib/loggerServer';
-import { fetchVacancies, HHApiError, ParserJobCancelledError, withTimeout, type ParserProgressStage, type PartitionProgress } from '@/lib/parsers/hhParser';
+import { fetchVacancies, HHApiError, ParserJobCancelledError, parseHhSearchUrl, withTimeout, type ParserProgressStage, type PartitionProgress } from '@/lib/parsers/hhParser';
 import type { HHSearchConfig, HHVacancy } from '@/lib/parsers/hhParser';
 import { startTrace } from '@/lib/tracer';
 
@@ -108,14 +108,16 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
 
   const config = job.config as HHSearchConfig;
   const searchText = config.text ?? config.url ?? '';
-  const fetchParam = config.url ?? config;
-  // Manual + Telegram-agent HH parsing reproduces HH's own result set ("as on
-  // HH") by default — whatever count HH shows for the pasted URL (title-only or
-  // +description) is what we collect, instead of over-collecting via the per-term
-  // split. collection_mode:'split' is the escape hatch to the old exhaustive mode.
-  // Automated pipelines (Mailganer/Nash/OutreachOS) don't use this runner, so
-  // they are unaffected either way.
-  const collectionMode = (config as { collection_mode?: unknown }).collection_mode === 'split' ? 'split' : 'combined';
+  const strictTitleMatch = config.strict_title_match === true;
+  const fetchParam: HHSearchConfig = config.url
+    ? { ...parseHhSearchUrl(config.url), strict_title_match: strictTitleMatch }
+    : { ...config, strict_title_match: strictTitleMatch };
+  // Interactive jobs favor precision: ordinary comma-separated input becomes
+  // separate title-only HH queries, then results are checked locally as well.
+  // strict_title_match:false preserves HH's broad title/description result set.
+  const collectionMode = strictTitleMatch
+    ? 'split'
+    : (config as { collection_mode?: unknown }).collection_mode === 'split' ? 'split' : 'combined';
   const startedAt = Date.now();
   const requestId = crypto.randomUUID();
   const logMeta = { userId: job.user_id as string, requestId, route: 'hh_runner_worker' };

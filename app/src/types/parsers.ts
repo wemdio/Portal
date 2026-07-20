@@ -40,6 +40,7 @@ export interface HHSearchConfig {
    * When false, parsing is significantly faster.
    */
   fetch_employers?: boolean;
+  strict_title_match?: boolean;
 }
 
 export interface SearchParserJob {
