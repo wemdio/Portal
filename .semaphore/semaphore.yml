@@ -25,11 +25,13 @@ blocks:
   - name: Run tests
     dependencies: []
     run:
-      # change_in: ветки, не трогавшие app/ (доки, wiki, deploy-скрипты),
-      # не гоняют 2-минутный прогон вообще. Сравнение — с точкой расхождения
-      # от main: если ветка хоть раз трогала app/, тесты бегут на каждый пуш
-      # (это правильно — код в ветке есть и должен оставаться проверенным).
-      when: "branch != 'main' AND branch != 'test' AND change_in('/app/', {default_branch: 'main'})"
+      # change_in: ветки, у которых текущий пуш не тронул app/, не гоняют
+      # 2-минутный прогон. branch_range принудительно сужает сравнение до
+      # диапазона именно этого пуша ($SEMAPHORE_GIT_COMMIT_RANGE = коммиты
+      # from..to последнего push). Без этого Semaphore по умолчанию берёт
+      # merge-base с main → на давно разошедшейся ветке правки в app/
+      # накопились и change_in всегда true.
+      when: "branch != 'main' AND branch != 'test' AND change_in('/app/', {default_branch: 'main', branch_range: '$SEMAPHORE_GIT_COMMIT_RANGE'})"
     task:
       secrets:
         - name: portal_secrets
