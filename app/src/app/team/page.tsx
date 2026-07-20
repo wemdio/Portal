@@ -41,7 +41,7 @@ const LEAD_ROLES = new Set<UserRole>(['lead']);
 const NO_SPEC = '— без специалиста';
 
 type Segment = 'leads' | 'specs' | 'projects';
-type SortKey = 'fact' | 'load' | 'result' | 'name';
+type SortKey = 'projects' | 'load' | 'result' | 'name';
 type StatusFilter = 'all' | 'Перегруз' | 'Норма' | 'Свободен';
 type ResultCat = 'delivered' | 'missed' | 'prep' | 'work' | 'other';
 type ResultFilter = 'all' | ResultCat;
@@ -56,6 +56,11 @@ function isWorkingStatus(status: string | null | undefined): boolean {
 }
 function isPrepStatus(status: string | null | undefined): boolean {
   return (status || '').toLowerCase().includes('подготов');
+}
+
+/** Проекты, которые занимают ёмкость команды: уже в работе или ещё на подготовке. */
+function countsTowardCapacity(status: string | null | undefined): boolean {
+  return isWorkingStatus(status) || isPrepStatus(status);
 }
 
 /** kpi_plan / kpi_fact are free-text; pull the first number out. */
@@ -120,21 +125,21 @@ function rollup(projects: ProjectData[]): Roll {
   return r;
 }
 
-function getLoadStatus(fact: number, plan: number): { label: StatusFilter; color: string } {
-  if (plan === 0) return fact > 0
+function getLoadStatus(occupied: number, plan: number): { label: StatusFilter; color: string } {
+  if (plan === 0) return occupied > 0
     ? { label: 'Перегруз', color: 'text-red-700 bg-red-50 ring-red-600/20' }
     : { label: 'Свободен', color: 'text-emerald-700 bg-emerald-50 ring-emerald-600/20' };
-  const ratio = fact / plan;
+  const ratio = occupied / plan;
   if (ratio > 1.1) return { label: 'Перегруз', color: 'text-red-700 bg-red-50 ring-red-600/20' };
   if (ratio < 0.7) return { label: 'Свободен', color: 'text-emerald-700 bg-emerald-50 ring-emerald-600/20' };
   return { label: 'Норма', color: 'text-blue-700 bg-blue-50 ring-blue-600/20' };
 }
-function loadPercent(fact: number, plan: number): number {
-  return plan > 0 ? Math.min(100, Math.round((fact / plan) * 100)) : (fact > 0 ? 100 : 0);
+function loadPercent(occupied: number, plan: number): number {
+  return plan > 0 ? Math.round((occupied / plan) * 100) : (occupied > 0 ? Number.POSITIVE_INFINITY : 0);
 }
 
-// The shared 7-column grid for capacity rows (name / status / fact / prep / plan / load / results).
-const GRID = 'grid grid-cols-[minmax(230px,1fr)_116px_62px_78px_104px_196px_176px] items-center';
+// The shared 7-column grid (name / status / all capacity projects / prep subset / plan / load / results).
+const GRID = 'grid grid-cols-[minmax(230px,1fr)_116px_82px_78px_104px_196px_176px] items-center';
 
 function TeamMemberAvatar({
   displayName,
@@ -197,15 +202,17 @@ function RollupStrip({ roll }: { roll: Roll }) {
   );
 }
 
-function LoadBar({ fact, plan }: { fact: number; plan: number }) {
-  const pct = loadPercent(fact, plan);
-  const color = pct > 100 ? 'bg-red-500' : pct > 85 ? 'bg-amber-500' : 'bg-emerald-500';
+function LoadBar({ occupied, plan }: { occupied: number; plan: number }) {
+  const pct = loadPercent(occupied, plan);
+  const overloaded = pct > 110;
+  const color = overloaded ? 'bg-red-500' : pct > 85 ? 'bg-amber-500' : 'bg-emerald-500';
+  const label = Number.isFinite(pct) ? `${pct}%` : '>100%';
   return (
     <div className="flex items-center gap-3">
       <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
-        <div className={`h-full rounded-full transition-all duration-500 ${color}`} style={{ width: `${pct}%` }} />
+        <div className={`h-full rounded-full transition-all duration-500 ${color}`} style={{ width: `${Math.min(100, pct)}%` }} />
       </div>
-      <span className="text-xs font-medium text-gray-600 w-9 text-right tabular-nums">{pct}%</span>
+      <span className="text-xs font-medium text-gray-600 w-11 text-right tabular-nums">{label}</span>
     </div>
   );
 }
@@ -244,7 +251,7 @@ export default function TeamPage() {
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [resultFilter, setResultFilter] = useState<ResultFilter>('all');
-  const [sortKey, setSortKey] = useState<SortKey>('fact');
+  const [sortKey, setSortKey] = useState<SortKey>('projects');
   const [openLeads, setOpenLeads] = useState<Set<string>>(new Set());
   const [openSpecInLead, setOpenSpecInLead] = useState<Set<string>>(new Set());
   const [openSpecs, setOpenSpecs] = useState<Set<string>>(new Set());
@@ -355,18 +362,18 @@ export default function TeamPage() {
 
     const specStat = (name: string) => {
       const list = projBySpec.get(name) || [];
-      const fact = list.filter((p) => isWorkingStatus(p.status)).length;
+      const occupied = list.filter((p) => countsTowardCapacity(p.status)).length;
       const prep = list.filter((p) => isPrepStatus(p.status)).length;
       const plan = capacities[`specialist:${name}`] ?? DEFAULT_CAPACITY;
-      return { name, fact, prep, plan, projects: list, roll: rollup(list) };
+      return { name, occupied, prep, plan, projects: list, roll: rollup(list) };
     };
 
     const leads = Array.from(leadNames).map((name) => {
       const list = projByManager.get(name) || [];
-      const fact = list.filter((p) => isWorkingStatus(p.status)).length;
+      const occupied = list.filter((p) => countsTowardCapacity(p.status)).length;
       const prep = list.filter((p) => isPrepStatus(p.status)).length;
       const plan = capacities[`manager:${name}`] ?? DEFAULT_CAPACITY;
-      return { name, fact, prep, plan, projects: list, roll: rollup(list) };
+      return { name, occupied, prep, plan, projects: list, roll: rollup(list) };
     });
 
     const specialists = Array.from(specNames).map(specStat);
@@ -376,14 +383,19 @@ export default function TeamPage() {
 
   // ---- top KPI ----
   const kpi = useMemo(() => {
-    const active = projects.filter((p) => isWorkingStatus(p.status)).length;
+    const occupied = projects.filter((p) => countsTowardCapacity(p.status)).length;
     const totalPlan = model.specialists.reduce((s, x) => s + x.plan, 0);
-    const totalFact = model.specialists.reduce((s, x) => s + x.fact, 0);
-    const free = Math.max(0, totalPlan - totalFact);
-    const load = totalPlan > 0 ? Math.round((totalFact / totalPlan) * 100) : 0;
+    const totalOccupied = model.specialists.reduce((s, x) => s + x.occupied, 0);
+    const free = Math.max(0, totalPlan - totalOccupied);
+    const load = totalPlan > 0
+      ? Math.round((totalOccupied / totalPlan) * 100)
+      : (totalOccupied > 0 ? Number.POSITIVE_INFINITY : 0);
     const r = rollup(projects);
-    const totalLeads = projects.reduce((s, p) => s + (parseNum(p.kpi_fact) ?? 0), 0);
-    return { active, totalPlan, free, load, delivered: r.delivered, missed: r.missed, totalLeads };
+    const totalLeads = projects.reduce(
+      (sum, project) => isPrepStatus(project.status) ? sum : sum + (parseNum(project.kpi_fact) ?? 0),
+      0,
+    );
+    return { occupied, totalPlan, free, load, delivered: r.delivered, missed: r.missed, totalLeads };
   }, [projects, model.specialists]);
 
   const q = query.trim().toLowerCase();
@@ -393,14 +405,14 @@ export default function TeamPage() {
     normalizeAssigneeName(p.specialist).toLowerCase().includes(q) ||
     normalizeAssigneeName(p.manager).toLowerCase().includes(q);
 
-  const sortPeople = <T extends { name: string; fact: number; plan: number; roll: Roll }>(list: T[]): T[] => {
+  const sortPeople = <T extends { name: string; occupied: number; plan: number; roll: Roll }>(list: T[]): T[] => {
     const arr = [...list];
     arr.sort((a, b) => {
       switch (sortKey) {
         case 'name': return a.name.localeCompare(b.name, 'ru-RU');
-        case 'load': return (loadPercent(b.fact, b.plan) - loadPercent(a.fact, a.plan)) || a.name.localeCompare(b.name, 'ru-RU');
-        case 'result': return (b.roll.delivered - a.roll.delivered) || (b.roll.missed - a.roll.missed) || (b.fact - a.fact);
-        default: return (b.fact - a.fact) || a.name.localeCompare(b.name, 'ru-RU');
+        case 'load': return (loadPercent(b.occupied, b.plan) - loadPercent(a.occupied, a.plan)) || a.name.localeCompare(b.name, 'ru-RU');
+        case 'result': return (b.roll.delivered - a.roll.delivered) || (b.roll.missed - a.roll.missed) || (b.occupied - a.occupied);
+        default: return (b.occupied - a.occupied) || a.name.localeCompare(b.name, 'ru-RU');
       }
     });
     return arr;
@@ -417,10 +429,10 @@ export default function TeamPage() {
   const isProjectsView = segment === 'projects';
 
   const kpiCards = [
-    { label: 'Проектов в работе', value: kpi.active, suf: 'активных' },
-    { label: 'Всего мест', value: kpi.totalPlan, suf: 'план' },
-    { label: 'Свободно мест', value: kpi.free, suf: 'можно взять' },
-    { label: 'Общая загрузка', value: `${kpi.load}%`, suf: 'от плана' },
+    { label: 'Проектов в загрузке', value: kpi.occupied, suf: 'работа + подготовка' },
+    { label: 'Мест у специалистов', value: kpi.totalPlan, suf: 'план' },
+    { label: 'Свободно у специалистов', value: kpi.free, suf: 'можно взять' },
+    { label: 'Загрузка специалистов', value: Number.isFinite(kpi.load) ? `${kpi.load}%` : '>100%', suf: 'от плана' },
   ];
 
   const segButton = (key: Segment, label: string) => (
@@ -459,10 +471,10 @@ export default function TeamPage() {
 
   // ---- capacity row (lead in tree, or specialist in specs tab) ----
   const capacityRow = (
-    person: { name: string; fact: number; prep: number; plan: number; roll: Roll; projects: ProjectData[] },
+    person: { name: string; occupied: number; prep: number; plan: number; roll: Roll; projects: ProjectData[] },
     opts: { planKey: string; variant: 'manager' | 'specialist'; expandable: boolean; open: boolean; onToggle: () => void },
   ) => {
-    const status = getLoadStatus(person.fact, person.plan);
+    const status = getLoadStatus(person.occupied, person.plan);
     return (
       <div
         className={`${GRID} border-b border-gray-100 last:border-0 transition-colors ${opts.expandable ? 'cursor-pointer hover:bg-gray-50' : ''}`}
@@ -493,14 +505,14 @@ export default function TeamPage() {
         <div className="px-2 flex justify-center">
           <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ring-1 ring-inset ${status.color}`}>{status.label}</span>
         </div>
-        <div className="px-2 text-center"><span className="text-lg font-bold text-gray-900 tabular-nums">{person.fact}</span></div>
+        <div className="px-2 text-center"><span className="text-lg font-bold text-gray-900 tabular-nums">{person.occupied}</span></div>
         <div className="px-2 text-center"><span className={`text-sm font-medium tabular-nums ${person.prep > 0 ? 'text-gray-900' : 'text-gray-400'}`}>{person.prep}</span></div>
         <div className="px-2 flex items-center justify-center gap-2" onClick={(e) => e.stopPropagation()}>
           <button onClick={() => saveCapacity(opts.planKey, Math.max(0, person.plan - 1))} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 text-[10px] leading-none">▼</button>
           <span className="text-sm font-bold text-gray-900 w-4 text-center tabular-nums">{person.plan}</span>
           <button onClick={() => saveCapacity(opts.planKey, person.plan + 1)} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 text-[10px] leading-none">▲</button>
         </div>
-        <div className="px-2"><LoadBar fact={person.fact} plan={person.plan} /></div>
+        <div className="px-2"><LoadBar occupied={person.occupied} plan={person.plan} /></div>
         <div className="px-3"><RollupStrip roll={person.roll} /></div>
       </div>
     );
@@ -510,7 +522,7 @@ export default function TeamPage() {
   const specSubRow = (lead: string, sname: string, list: ProjectData[], open: boolean, onToggle: () => void) => {
     const isPlaceholder = sname === NO_SPEC;
     const s = model.specStat(sname);
-    const status = getLoadStatus(s.fact, s.plan);
+    const status = getLoadStatus(s.occupied, s.plan);
     const roll = isPlaceholder ? rollup(list) : s.roll;
     const dash = <span className="text-sm text-gray-300">—</span>;
     return (
@@ -537,10 +549,10 @@ export default function TeamPage() {
             <div className="px-2 flex justify-center">
               <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ring-1 ring-inset ${status.color}`}>{status.label}</span>
             </div>
-            <div className="px-2 text-center"><span className="text-base font-bold text-gray-900 tabular-nums">{s.fact}</span></div>
+            <div className="px-2 text-center"><span className="text-base font-bold text-gray-900 tabular-nums">{s.occupied}</span></div>
             <div className="px-2 text-center"><span className={`text-sm font-medium tabular-nums ${s.prep > 0 ? 'text-gray-900' : 'text-gray-400'}`}>{s.prep}</span></div>
             <div className="px-2 text-center"><span className="text-sm font-semibold text-gray-500 tabular-nums">{s.plan}</span></div>
-            <div className="px-2"><LoadBar fact={s.fact} plan={s.plan} /></div>
+            <div className="px-2"><LoadBar occupied={s.occupied} plan={s.plan} /></div>
             <div className="px-3"><RollupStrip roll={roll} /></div>
           </>
         )}
@@ -569,8 +581,8 @@ export default function TeamPage() {
     <div className={`${GRID} border-b border-gray-100 bg-gray-50/50 sticky top-0 z-10`}>
       <div className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">{firstLabel}</div>
       <div className="px-2 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Статус</div>
-      <div className="px-2 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider leading-tight">Факт<span className="block text-[10px] normal-case font-normal text-gray-400">в работе</span></div>
-      <div className="px-2 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider leading-tight">Преп<span className="block text-[10px] normal-case font-normal text-gray-400">подготовка</span></div>
+      <div className="px-2 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider leading-tight">Проекты<span className="block text-[10px] normal-case font-normal text-gray-400">всего</span></div>
+      <div className="px-2 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider leading-tight">Из них<span className="block text-[10px] normal-case font-normal text-gray-400">подготовка</span></div>
       <div className="px-2 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider leading-tight">План<span className="block text-[10px] normal-case font-normal text-gray-400">max</span></div>
       <div className="px-2 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Загрузка</div>
       <div className="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Результаты</div>
@@ -580,7 +592,7 @@ export default function TeamPage() {
   // ---- LEADS view ----
   const renderLeads = () => {
     let leads = model.leads;
-    if (statusFilter !== 'all') leads = leads.filter((L) => getLoadStatus(L.fact, L.plan).label === statusFilter);
+    if (statusFilter !== 'all') leads = leads.filter((L) => getLoadStatus(L.occupied, L.plan).label === statusFilter);
     if (q) leads = leads.filter((L) => L.name.toLowerCase().includes(q) || L.projects.some(matchProject));
     leads = sortPeople(leads);
 
@@ -631,7 +643,7 @@ export default function TeamPage() {
   // ---- SPECIALISTS view ----
   const renderSpecs = () => {
     let specs = model.specialists.filter((s) => s.projects.length > 0);
-    if (statusFilter !== 'all') specs = specs.filter((s) => getLoadStatus(s.fact, s.plan).label === statusFilter);
+    if (statusFilter !== 'all') specs = specs.filter((s) => getLoadStatus(s.occupied, s.plan).label === statusFilter);
     if (q) specs = specs.filter((s) => s.name.toLowerCase().includes(q) || s.projects.some(matchProject));
     specs = sortPeople(specs);
 
@@ -782,7 +794,7 @@ export default function TeamPage() {
           onChange={(e) => setSortKey(e.target.value as SortKey)}
           className="h-9 rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-600 focus:outline-none focus:border-blue-400"
         >
-          <option value="fact">Сортировка: по факту</option>
+          <option value="projects">Сортировка: по проектам</option>
           <option value="load">по загрузке</option>
           <option value="result">по результатам</option>
           <option value="name">по имени</option>
