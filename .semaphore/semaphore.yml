@@ -40,17 +40,30 @@ blocks:
           - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json), node-modules'
           - npm install
           - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json) node_modules
+      # Две параллельные джобы вместо паровозика: сборка (самый долгий шаг,
+      # ~2-2.5 мин) идёт одновременно с линтом/типами/тестами. Время блока =
+      # самая долгая джоба, а не сумма шагов. node_modules у обеих из кэша
+      # (prologue общий). .next/cache кэшируется между прогонами — повторная
+      # сборка на ветке инкрементальная; протухание безопасно: Next сверяет
+      # содержимое по хэшам, максимум соберёт медленнее.
       jobs:
-        - name: 'Lint, typecheck, build, test, audit'
+        - name: 'Lint, typecheck, test, audit'
           commands:
             - source /tmp/env_vars
             - cd $APP_PATH
             - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
             - npm run lint
             - npx tsc --noEmit
-            - npm run build
             - npm test -- --watchAll=false
             - npm audit --audit-level=critical
+        - name: 'Next build'
+          commands:
+            - source /tmp/env_vars
+            - cd $APP_PATH
+            - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
+            - 'cache restore nextjs-$SEMAPHORE_GIT_BRANCH,nextjs-'
+            - npm run build
+            - 'cache store nextjs-$SEMAPHORE_GIT_BRANCH .next/cache'
 
   - name: Build portal
     dependencies: []
