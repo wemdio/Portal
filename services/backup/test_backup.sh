@@ -551,6 +551,7 @@ echo "── 17) cron schedules only full production bundles ──"
 CRONTAB_FILE="$SCRIPT_DIR/crontab"
 assert_contains "$CRONTAB_FILE" "/backup.sh main-full" "cron schedules the complete main production bundle"
 assert_contains "$CRONTAB_FILE" "/backup.sh instantly-full" "cron schedules the complete Instantly production bundle"
+assert_contains "$CRONTAB_FILE" "15 6,18 * * *" "Instantly full bundle starts at 09:15 and 21:15 MSK"
 assert_not_contains "$CRONTAB_FILE" "/backup.sh instantly-dev" "cron does not back up Instantly dev"
 assert_not_contains "$CRONTAB_FILE" "/backup.sh main-supabase" "cron no longer creates the incomplete legacy main dump"
 
