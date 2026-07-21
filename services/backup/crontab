@@ -14,5 +14,5 @@
 0 6,18 * * * sh -c '. /etc/backup.env; /backup.sh main-full' >> /var/log/cron.log 2>&1
 
 # Instantly production: `instantly` + `instantly_dataset` + роли.
-# Запускаем через час после main, чтобы два тяжёлых pg_dump не конкурировали.
-0 7,19 * * * sh -c '. /etc/backup.env; /backup.sh instantly-full' >> /var/log/cron.log 2>&1
+# Запускаем через 15 минут после main: 09:15 / 21:15 МСК.
+15 6,18 * * * sh -c '. /etc/backup.env; /backup.sh instantly-full' >> /var/log/cron.log 2>&1
