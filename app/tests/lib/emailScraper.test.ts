@@ -4,6 +4,7 @@ import {
   filterJunkEmails,
   decodeHtmlEntitiesInEmail,
   extractJsonLdEmails,
+  decodeCloudflareEmail,
 } from '@/lib/enrich/emailScraper';
 
 describe('emailScraper — advanced extraction', () => {
@@ -179,6 +180,58 @@ describe('emailScraper — advanced extraction', () => {
     it('removes emails with very long local parts', () => {
       const long = 'a'.repeat(70) + '@co.com';
       expect(filterJunkEmails([long])).toEqual([]);
+    });
+  });
+
+  describe('decodeCloudflareEmail', () => {
+    // Референсные значения сгенерированы XOR-обфускацией по алгоритму CF
+    // (первый байт — ключ, дальше email XOR ключа): key=0x5a, ожидаемый email
+    // — переменная EXPECTED ниже. Собран через конкатенацию, чтобы автозамена
+    // адресов в файлах-сообщениях не искажала литерал.
+    const CF_HEX_USER_EXAMPLE = '5a2f293f281a3f223b372a363f74393537';
+    const EXPECTED = 'user' + '@' + 'example.com';
+
+    it('decodes a well-formed cfemail hex string', () => {
+      expect(decodeCloudflareEmail(CF_HEX_USER_EXAMPLE)).toBe(EXPECTED);
+    });
+
+    it('rejects empty / too-short input', () => {
+      expect(decodeCloudflareEmail('')).toBeNull();
+      expect(decodeCloudflareEmail('5a')).toBeNull();
+      expect(decodeCloudflareEmail('5a2f')).toBeNull();
+    });
+
+    it('rejects odd-length hex', () => {
+      expect(decodeCloudflareEmail('5a2f2c2b2')).toBeNull();
+    });
+
+    it('rejects non-hex characters', () => {
+      expect(decodeCloudflareEmail('5a2z2c2b')).toBeNull();
+    });
+
+    it('rejects decoded output without @ or .', () => {
+      // key=0x00 → каждый байт декодируется в самого себя. "abcdef" (без @/.)
+      expect(decodeCloudflareEmail('00616263646566')).toBeNull();
+    });
+
+    it('rejects when decoded byte is control char (bad hex/wrong key)', () => {
+      // key=0xff, следующие байты дают < 0x20 → мусор, а не email
+      expect(decodeCloudflareEmail('ff010203')).toBeNull();
+    });
+
+    it('extracts cfemail from HTML via extractEmailsFromHtmlAdvanced', () => {
+      const html =
+        '<p>Contact: <a class="__cf_email__" href="/cdn-cgi/l/email-protection" ' +
+        'data-cfemail="' + CF_HEX_USER_EXAMPLE + '">[email&#160;protected]</a></p>';
+      expect(extractEmailsFromHtmlAdvanced(html)).toContain(EXPECTED);
+    });
+
+    it('coexists with mailto: without duplication', () => {
+      const html =
+        '<a class="__cf_email__" data-cfemail="' + CF_HEX_USER_EXAMPLE + '">x</a>' +
+        '<a href="mailto:' + EXPECTED + '">also</a>';
+      const emails = extractEmailsFromHtmlAdvanced(html);
+      expect(emails.filter((e) => e === EXPECTED)).toHaveLength(1);
     });
   });
 });
