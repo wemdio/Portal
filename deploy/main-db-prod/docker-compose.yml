@@ -58,9 +58,9 @@ services:
     deploy:
       resources:
         limits:
-          # База ~25 GB: 16 GB защищают от cgroup OOM на пиках, а 8 CPU
+          # База ~25 GB: 12 GB защищают от cgroup OOM на пиках, а 8 CPU
           # исключают постоянный throttling под параллельными запросами.
-          memory: 16384M
+          memory: 12288M
           cpus: '8.0'
     networks:
       - main-db-net
