@@ -80,7 +80,7 @@ blocks:
   - name: Build portal
     dependencies: []
     run:
-      when: "branch = 'main' AND change_in(['/app/', '/Dockerfile'], {default_branch: 'main'})"
+      when: "branch = 'main' AND change_in(['/app/', '/Dockerfile', '/entrypoint.sh', '/supabase/migrations/', '/supabase/instantly-migrations/'], {default_branch: 'main'})"
     task:
       secrets:
         - name: portal_secrets

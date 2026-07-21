@@ -1,6 +1,6 @@
 /** @jest-environment node */
 
-import { placeResultToRow, newsResultToRow } from '@/../lib/parsers/googleParsersWorker';
+import { placeResultToRow, newsResultToRow, streamSse } from '@/../lib/parsers/googleParsersWorker';
 
 describe('placeResultToRow', () => {
   test('maps parser PlaceResult to google_maps_places row shape', () => {
@@ -45,5 +45,37 @@ describe('newsResultToRow', () => {
     expect(row.job_id).toBe('job-2');
     expect(row.position).toBe(3);
     expect(row.link).toBe('https://techn.com/x');
+  });
+});
+
+describe('streamSse', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  test('ignores heartbeat comments and handles CRLF frames', async () => {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(': heartbeat\n\n'));
+        controller.enqueue(encoder.encode('event: progress\r\ndata: {"currentTargetIndex":1}\r\n\r\n'));
+        controller.close();
+      },
+    });
+    global.fetch = jest.fn().mockResolvedValue(new Response(body, { status: 200 }));
+    const progress = jest.fn();
+
+    await streamSse('http://parser/run/maps', {}, { progress });
+
+    expect(progress).toHaveBeenCalledWith({ currentTargetIndex: 1 });
+  });
+
+  test('fails early on a non-success service response', async () => {
+    global.fetch = jest.fn().mockResolvedValue(new Response('bad gateway', { status: 502 }));
+
+    await expect(streamSse('http://parser/run/maps', {}, {}))
+      .rejects.toThrow('parser service returned HTTP 502');
   });
 });
