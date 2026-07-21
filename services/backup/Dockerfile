@@ -6,8 +6,9 @@ RUN apk add --no-cache curl ca-certificates \
 
 COPY backup.sh /backup.sh
 COPY entrypoint.sh /entrypoint.sh
+COPY restore-bundle.sh /restore-bundle.sh
 COPY dump_env.awk /usr/local/bin/dump_env.awk
-RUN chmod +x /backup.sh /entrypoint.sh
+RUN chmod +x /backup.sh /entrypoint.sh /restore-bundle.sh
 
 COPY crontab /etc/crontabs/root
 
