@@ -20,9 +20,9 @@ belongs to which Portal client. That map lives in the operational DBs and is que
 
 ```js
 // projects (client names + status) — main-postgres, port 35434
-//   host 144.31.54.166, user supabase_admin, db postgres
+//   host 139.60.162.12, user supabase_admin, db postgres
 //   SELECT id, client, name, status FROM projects WHERE status IN ('В работе','Тестирование');
-// campaign map — instantly DB, port 35432 (same server as the dataset)
+// campaign map — instantly DB, port 35432 (same production server as the dataset)
 //   SELECT campaign_id FROM project_instantly_campaigns WHERE project_id = $1;
 // real qualified leads — instantly DB
 //   SELECT status, created_at FROM instantly_lead_qualifications WHERE campaign_id = ANY($cids);

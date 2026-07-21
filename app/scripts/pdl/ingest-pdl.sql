@@ -9,8 +9,8 @@
 INSTALL httpfs;   LOAD httpfs;
 INSTALL postgres; LOAD postgres;
 
--- Set this to the prod main-postgres connection string (144 DB-server).
--- Example: postgresql://postgres:PASSWORD@144.31.54.166:5432/postgres
+-- Set this to the current production main-postgres connection string.
+-- Read it from the production environment; do not hard-code credentials here.
 ATTACH '${PG_CONN}' AS pg (TYPE postgres);
 
 -- OPTIONAL: confirm the real column names first (uncomment, run, then re-run insert).
