@@ -205,7 +205,7 @@ docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recr
 | Источник | Расписание (UTC) | Путь в S3 | Локальный ретеншн | S3-ретеншн |
 |----------|------------------|------------|-------------------|-------------|
 | Main production bundle | `06:00` и `18:00` | `portal-main/full/` | 7 дней | 7 дней |
-| Instantly production bundle | `07:00` и `19:00` | `instantly/full/` | 7 дней | 7 дней |
+| Instantly production bundle | `06:15` и `18:15` | `instantly/full/` | 7 дней | 7 дней |
 
 Main bundle содержит полный custom-format дамп БД `postgres`, роли, membership,
 права и хэши паролей ролей. Instantly bundle содержит две production-базы —
@@ -329,7 +329,7 @@ cd instantly-restore
 
 ```bash
 bash services/backup/test_backup.sh
-# TESTS:   passed=109  failed=0
+# TESTS:   passed=110  failed=0
 ```
 
 ### Снос старого instantly-backup на DB-сервере
