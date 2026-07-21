@@ -36,10 +36,35 @@ echo "[entrypoint] starting crond..."
 # crond в фоне; tail на лог чтобы контейнер не завершался и логи шли в stdout.
 crond -f -l 2 &
 CRON_PID=$!
-trap 'kill -TERM "$CRON_PID" 2>/dev/null || true; wait "$CRON_PID" 2>/dev/null || true' INT TERM
 
 tail -f /var/log/cron.log &
 TAIL_PID=$!
+
+backup_job_active() {
+  # Шаблон с [] не совпадает с собственной командой grep.
+  ps -o args 2>/dev/null | grep -q '[/]backup[.]sh '
+}
+
+graceful_shutdown() {
+  # Compose может пересоздать контейнер ровно между внешней проверкой процессов
+  # и `docker compose up`. Ставим crond на паузу, чтобы он не запустил новую
+  # задачу, и держим PID 1 живым до завершения текущего dump + S3 upload.
+  trap - INT TERM
+  echo "[entrypoint] shutdown requested; draining active backup job..."
+  kill -STOP "$CRON_PID" 2>/dev/null || true
+  while backup_job_active; do
+    sleep 5
+  done
+  kill -CONT "$CRON_PID" 2>/dev/null || true
+  kill -TERM "$CRON_PID" 2>/dev/null || true
+  wait "$CRON_PID" 2>/dev/null || true
+  kill -TERM "$TAIL_PID" 2>/dev/null || true
+  wait "$TAIL_PID" 2>/dev/null || true
+  echo "[entrypoint] graceful shutdown complete"
+  exit 0
+}
+
+trap graceful_shutdown INT TERM
 
 wait "$CRON_PID"
 kill -TERM "$TAIL_PID" 2>/dev/null || true

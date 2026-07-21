@@ -325,11 +325,10 @@ EOF
    ```bash
    docker volume rm instantly-db_main-pg-data 2>/dev/null || true
    ```
-4. Настроить бэкапы — `portal-backup` на Portal-сервере уже бэкапит main-supabase
-   и Instantly через `MAIN_SUPABASE_DATABASE_URL` / `INSTANTLY_DATABASE_URL`
-   (см. `docs/instantly-local-pg-cutover.md` → «Автобэкапы»). Если переезжаешь
-   на self-hosted main-postgres — поменяй `MAIN_SUPABASE_DATABASE_URL` на
-   локальный URL (`postgresql://supabase_admin:<pw>@<DB_HOST>:35434/postgres`).
+4. Настроить бэкапы — `portal-backup` запускается на DB-сервере из
+   `deploy/instantly-db/docker-compose.yml`, подключается к main и Instantly по
+   локальной Docker-сети и загружает дампы напрямую в S3 (см.
+   `docs/instantly-local-pg-cutover.md` → «Автобэкапы»).
 5. **Storage файлы**: они лежат на DB-хосте в named volume `main-supabase_main-storage-data`.
    Включить их в бэкап-сценарий (например, `tar` + upload в S3).
 

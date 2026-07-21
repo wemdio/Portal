@@ -124,6 +124,7 @@ blocks:
               # One-time Supabase → local PG copy: set INSTANTLY_SOURCE_DB_URL (pooler URL). Skipped if .supabase_import_done exists.
               # Re-run import: INSTANTLY_FORCE_SUPABASE_IMPORT=1 (removes marker). DB server must have .env (see deploy/instantly-db/.env.example).
               IDB_HOST="${INSTANTLY_DB_SSH_HOST:-}"
+              IDB_BACKUP_DEPLOYED=0
               if [ -n "$IDB_HOST" ]; then
                 IDB_USER="${INSTANTLY_DB_SSH_USER:-$USER}"
                 IDB_PASS="${INSTANTLY_DB_SSH_PASSWORD:-$SERVER_PASSWORD}"
@@ -172,15 +173,28 @@ blocks:
                 run_ssh_idb "instantly-db compose up + migrator" "set -e
                 cd ${IDB_PATH}
                 if [ ! -f .env ]; then echo \"[idb] FATAL: нет .env в ${IDB_PATH} — создай по deploy/instantly-db/.env.example\"; exit 1; fi
+                for backup_key in BACKUP_S3_ENDPOINT BACKUP_S3_BUCKET BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY BACKUP_S3_REGION; do
+                  if ! grep -Eq \"^\${backup_key}=.+\" .env; then
+                    echo \"[idb] FATAL: \${backup_key} is missing or empty in ${IDB_PATH}/.env\" >&2
+                    exit 1
+                  fi
+                done
                 printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin
                 export DOCKER_CLIENT_TIMEOUT=300
                 export COMPOSE_HTTP_TIMEOUT=300
                 sudo -n docker rm -f instantly-migrator 2>/dev/null || true
-                # Бэкапы переехали на Portal-сервер (services/backup). Гарантированно
-                # сносим старый instantly-backup, чтобы не плодить дубли дампов.
+                # Удаляем старый instantly-backup, чтобы не плодить дубли дампов.
                 sudo -n docker rm -f instantly-backup 2>/dev/null || true
                 sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env pull
                 sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env up -d --build
+                # portal-backup is profile-gated, so a normal DB deploy cannot interrupt pg_dump.
+                # Update it only while idle; start it if the container does not exist yet.
+                sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env --profile backup pull portal-backup
+                if sudo -n docker top portal-backup -eo args 2>/dev/null | grep -Fq '/backup.sh '; then
+                  echo '[idb] portal-backup: backup job active, skipping container update'
+                else
+                  sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env --profile backup up -d --no-deps portal-backup
+                fi
                 echo '[idb] waiting for instantly-migrator...'
                 mrc=\$(sudo -n docker wait instantly-migrator)
                 if [ \"\$mrc\" != \"0\" ]; then
@@ -226,6 +240,7 @@ blocks:
                   echo '[idb] supabase import done; убери INSTANTLY_SOURCE_DB_URL из CI после проверки'
                   "
                 fi
+                IDB_BACKUP_DEPLOYED=1
               else
                 echo "[scheduled] Instantly DB: INSTANTLY_DB_SSH_HOST пуст — деплой БД на отдельном сервере пропущен (только Portal + preflight по .env)"
               fi
@@ -385,11 +400,31 @@ blocks:
                   sleep 3;
                   echo \"\${cids}\" | xargs -r sudo -n docker rm -f 2>/dev/null || true;
                 };
-                echo '--- Step 4: restart portal + yandexmaps + googleparsers + transcribe-worker + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot + instantly-sync-bot + portal-external-sync + portal-backup + changelog-bot + polza-reports ---';
-                for svc in portal yandexmaps googleparsers transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot portal-external-sync portal-backup changelog-bot polza-reports; do force_rm_svc \"\$svc\"; done;
-                sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-googleparsers portal-transcribe-worker portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot portal-instantly-sync-bot portal-external-sync portal-backup portal-changelog-bot portal-polza-reports 2>/dev/null || true;
+                if [ ${IDB_BACKUP_DEPLOYED} = 1 ]; then
+                  echo '--- Retire legacy portal-backup from Portal host ---';
+                  if sudo -n docker inspect portal-backup >/dev/null 2>&1; then
+                    if sudo -n docker inspect -f '{{.State.Running}}' portal-backup 2>/dev/null | grep -qx true; then
+                      sudo -n docker update --restart=no portal-backup >/dev/null;
+                      sudo -n docker exec portal-backup sh -c ': > /etc/crontabs/root';
+                      sleep 2;
+                      if sudo -n docker top portal-backup -eo args 2>/dev/null | grep -Fq '/backup.sh '; then
+                        echo '[deploy] legacy portal-backup is busy; stopping it after the active job';
+                        sudo -n docker exec -d portal-backup sh -c 'while ps -o args 2>/dev/null | grep -q \"[/]backup[.]sh \"; do sleep 10; done; kill -TERM 1';
+                      else
+                        sudo -n docker rm -f portal-backup 2>/dev/null || true;
+                      fi;
+                    else
+                      sudo -n docker rm -f portal-backup 2>/dev/null || true;
+                    fi;
+                  fi;
+                else
+                  echo '[deploy] Instantly DB deploy was skipped; keeping legacy portal-backup untouched';
+                fi;
+                echo '--- Step 4: restart portal + yandexmaps + googleparsers + transcribe-worker + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot + instantly-sync-bot + portal-external-sync + changelog-bot + polza-reports ---';
+                for svc in portal yandexmaps googleparsers transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot portal-external-sync changelog-bot polza-reports; do force_rm_svc \"\$svc\"; done;
+                sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-googleparsers portal-transcribe-worker portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot portal-instantly-sync-bot portal-external-sync portal-changelog-bot portal-polza-reports 2>/dev/null || true;
                 wait_port_free 3000 15;
-                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps googleparsers transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot portal-external-sync portal-backup changelog-bot polza-reports;
+                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps googleparsers transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot portal-external-sync changelog-bot polza-reports;
                 echo '--- Step 4.1: verify Docker socket access inside portal ---';
                 PORTAL_GROUPS=\$(sudo -n docker inspect portal --format '{{json .HostConfig.GroupAdd}}' 2>/dev/null || echo '[]');
                 echo \"portal GroupAdd=\${PORTAL_GROUPS}\";
