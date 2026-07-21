@@ -1,11 +1,30 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { extractCoordinatesFromUrl, ensureGoogleMapsLocale } from "../shared/googleMaps";
 import { buildDedupeKey, mergeResult } from "../shared/normalize";
+import { maskProxy, shuffledUniqueProxies, toPlaywrightProxy } from "../shared/proxy";
 import type { JobError, PlaceResult, ScrapeJob, SearchTarget } from "../shared/types";
 import { enrichWebsiteContacts } from "./contactEnrichment";
 
 const RESULT_LINK_SELECTOR = 'a[href*="/maps/place/"]';
 const FEED_SELECTOR = 'div[role="feed"]';
+const PLACE_TITLE_SELECTOR = "h1.DUwDvf, h1.fontHeadlineLarge";
+const MAPS_READY_SELECTOR = `${RESULT_LINK_SELECTOR}, ${FEED_SELECTOR}, ${PLACE_TITLE_SELECTOR}`;
+const GOOGLE_CONNECTIVITY_URL = "https://www.google.com/robots.txt";
+const NAVIGATION_TIMEOUT_MS = 30_000;
+const MAPS_READY_TIMEOUT_MS = 35_000;
+const PAGE_OPERATION_TIMEOUT_MS = 10_000;
+
+type BrowserSession = {
+  browser: Browser;
+  context: BrowserContext;
+  proxy?: string;
+};
+
+type ParseTargetOutcome =
+  | { ok: true }
+  | { ok: false; retryable: boolean; message: string };
+
+class TargetLoadError extends Error {}
 
 export interface MapsRunCallbacks {
   onPlaceFound: (place: PlaceResult) => void;
@@ -40,7 +59,8 @@ export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Pr
     return;
   }
 
-  let browser: Browser | undefined;
+  let session: BrowserSession | undefined;
+  const rejectedProxies = new Set<string>();
 
   try {
     log(cb, "info", "Launching Chromium", {
@@ -48,23 +68,7 @@ export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Pr
       targets: job.targets.length
     });
     setStatus(job, cb, "running", "Запускаю Chromium");
-    const launched = await launchBrowser(job);
-    browser = launched.browser;
-    const context = await browser.newContext({
-      locale: job.settings.language,
-      viewport: { width: 1365, height: 900 },
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    });
-    // Скрываем navigator.webdriver — самый простой fingerprint,
-    // по которому Google Maps выкидывает captcha/блок.
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-    });
-    log(cb, "info", "Chromium ready", {
-      locale: job.settings.language,
-      proxy: maskProxy(launched.proxy)
-    });
+    session = await launchBrowserSession(job, cb, rejectedProxies);
 
     for (let index = 0; index < job.targets.length; index += 1) {
       if (cb.shouldStop()) break;
@@ -72,18 +76,41 @@ export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Pr
 
       const target = job.targets[index];
       setCurrentTarget(job, cb, index, `Парсю выдачу: ${target.query}`);
-      log(cb, "info", "Opening target", {
-        index,
-        total: job.targets.length,
-        url: target.url,
-        query: target.query
-      });
-      await parseTarget(context, job, cb, target);
+      while (!cb.shouldStop()) {
+        log(cb, "info", "Opening target", {
+          index,
+          total: job.targets.length,
+          url: target.url,
+          query: target.query,
+          proxy: maskProxy(session.proxy)
+        });
+        const outcome = await parseTarget(session.context, job, cb, target);
+        if (outcome.ok) break;
+
+        const canRotate = Boolean(session.proxy)
+          && rejectedProxies.size + 1 < new Set(job.settings.proxies).size;
+        if (!outcome.retryable || !canRotate) {
+          reportError(job, cb, { targetId: target.id, message: outcome.message });
+          break;
+        }
+
+        rejectedProxies.add(session.proxy!);
+        log(cb, "warn", "Google Maps did not load; rotating proxy", {
+          proxy: maskProxy(session.proxy),
+          query: target.query,
+          reason: outcome.message
+        });
+        await closeBrowserSession(session);
+        session = await launchBrowserSession(job, cb, rejectedProxies);
+      }
     }
 
     if (cb.shouldStop()) {
       log(cb, "info", "Stop requested — halting");
       setStatus(job, cb, "stopped", "Задача остановлена");
+    } else if (job.results.length === 0 && job.errors.length > 0) {
+      log(cb, "warn", "No places collected despite target errors", { errors: job.errors.length });
+      setStatus(job, cb, "failed", "Не удалось загрузить выдачу Google Maps");
     } else {
       log(cb, "info", "All targets processed", { results: job.results.length });
       setStatus(job, cb, "completed", `Готово: ${job.results.length} уникальных организаций`);
@@ -94,83 +121,133 @@ export async function runGoogleMapsJob(job: ScrapeJob, cb: MapsRunCallbacks): Pr
     setStatus(job, cb, "failed", message);
     reportError(job, cb, { message });
   } finally {
-    await browser?.close().catch(() => undefined);
+    if (session) await closeBrowserSession(session);
     log(cb, "debug", "Chromium closed");
   }
 }
 
-/**
- * Mask a proxy URL for logging — strip password so credentials never end up
- * in Supabase logs / docker stdout. "http://user:PASS@1.2.3.4:80" →
- * "http://user:***@1.2.3.4:80".
- */
-function maskProxy(proxy: string | undefined): string {
-  if (!proxy) return "none";
-  return proxy.replace(/:\/\/([^:@]+):[^@]+@/, "://$1:***@");
+async function launchBrowserSession(
+  job: ScrapeJob,
+  cb: MapsRunCallbacks,
+  rejectedProxies: Set<string>
+): Promise<BrowserSession> {
+  const configured = shuffledUniqueProxies(job.settings.proxies ?? []);
+  const candidates: Array<string | undefined> = configured.length > 0
+    ? configured.filter((proxy) => !rejectedProxies.has(proxy))
+    : [undefined];
+  let lastError = "";
+
+  for (const proxy of candidates) {
+    let browser: Browser | undefined;
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        proxy: toPlaywrightProxy(proxy),
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          "--disable-quic",
+          "--disable-http2",
+          "--no-sandbox",
+          "--disable-dev-shm-usage",
+          "--lang=ru-RU,ru,en-US,en"
+        ]
+      });
+      const locale = mapsLocale(job.settings.language, job.settings.region);
+      const context = await browser.newContext({
+        locale,
+        viewport: { width: 1365, height: 900 },
+        serviceWorkers: "block",
+        userAgent: chromiumUserAgent(browser)
+      });
+      context.setDefaultTimeout(PAGE_OPERATION_TIMEOUT_MS);
+      context.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
+      await context.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      });
+      await verifyGoogleConnectivity(context);
+      log(cb, "info", "Chromium ready", {
+        locale,
+        proxy: maskProxy(proxy),
+        chromium: browser.version()
+      });
+      return { browser, context, proxy };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      if (proxy) rejectedProxies.add(proxy);
+      log(cb, "warn", "Proxy check failed; trying another proxy", {
+        proxy: maskProxy(proxy),
+        reason: firstLine(lastError)
+      });
+      if (browser) await closeBrowser(browser);
+    }
+  }
+
+  const suffix = lastError ? `: ${firstLine(lastError)}` : "";
+  throw new Error(`Ни один прокси не смог подключиться к Google${suffix}`);
 }
 
-async function launchBrowser(job: ScrapeJob): Promise<{ browser: Browser; proxy: string | undefined }> {
-  // Из пула прокси случайно выбираем один — так последовательные джобы
-  // на прод-сервере не долбятся из одного и того же IP.
-  const pool = job.settings.proxies ?? [];
-  const proxy = pool.length > 0 ? pool[Math.floor(Math.random() * pool.length)] : undefined;
-  const browser = await chromium.launch({
-    headless: true,
-    proxy: proxy ? { server: proxy } : undefined,
-    // Скрываем telltale-флаги автоматизации, из-за которых Google быстрее
-    // отдаёт captcha или молча вешает соединение. Chromium в headless-режиме
-    // по умолчанию выставляет navigator.webdriver=true и exposes ряд других
-    // сигналов автоматизации — эти args их гасят.
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      "--disable-features=IsolateOrigins,site-per-process",
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-web-security",
-      "--lang=ru-RU,ru,en-US,en"
-    ]
-  });
-  return { browser, proxy };
-}
-
-/**
- * Navigate a page with a longer timeout and a fallback wait strategy.
- *
- * Google Maps / News are heavy pages (Maps easily 4-6MB of JS); with a slow
- * proxy or ratelimited Google response, the default 60 s `domcontentloaded`
- * wait misses. Strategy:
- *   1. `domcontentloaded` + 90 s — fires when HTML is parsed, fastest signal
- *      the page actually loaded.
- *   2. On Timeout, fall back to `commit` + 30 s — fires as soon as
- *      navigation commits (before any content loads). Good enough for the
- *      captcha-wall check downstream; if page is genuinely captcha we exit
- *      fast; if it's fine, subsequent `waitForSelector` / `networkidle`
- *      inside collectPlaceLinks will handle rendering.
- * Total worst case: ~120 s per URL before we give up.
- */
-async function gotoWithRetry(page: Page, url: string, cb: MapsRunCallbacks): Promise<void> {
+async function verifyGoogleConnectivity(context: BrowserContext): Promise<void> {
+  const page = await context.newPage();
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (!msg.includes("Timeout")) throw err;
-    log(cb, "warn", `DCL timed out, retrying with commit wait`, { url });
-    await page.goto(url, { waitUntil: "commit", timeout: 30000 });
+    const response = await page.goto(GOOGLE_CONNECTIVITY_URL, {
+      waitUntil: "commit",
+      timeout: 15_000
+    });
+    const status = response?.status() ?? 0;
+    if (status === 407) throw new Error("прокси отклонил логин или пароль (HTTP 407)");
+    if (status === 0 || status >= 400) throw new Error(`Google вернул HTTP ${status || "без ответа"}`);
+  } finally {
+    await closePage(page);
   }
 }
 
-async function parseTarget(context: BrowserContext, job: ScrapeJob, cb: MapsRunCallbacks, target: SearchTarget): Promise<void> {
+function mapsLocale(language: string, region: string): string {
+  const normalizedLanguage = (language || "ru").toLowerCase();
+  if (normalizedLanguage.includes("-")) return normalizedLanguage;
+  return `${normalizedLanguage}-${(region || "RU").toUpperCase()}`;
+}
+
+function chromiumUserAgent(browser: Browser): string {
+  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`;
+}
+
+/**
+ * Maps is a long-lived SPA and may never reach DOMContentLoaded through a slow
+ * proxy. A committed response plus a real Maps surface is the useful signal.
+ */
+async function gotoMaps(page: Page, url: string): Promise<void> {
+  const response = await page.goto(url, {
+    waitUntil: "commit",
+    timeout: NAVIGATION_TIMEOUT_MS
+  });
+  const status = response?.status() ?? 0;
+  if (status === 407) throw new TargetLoadError("Прокси отклонил логин или пароль (HTTP 407)");
+  if (status === 429) throw new TargetLoadError("Google ограничил частоту запросов (HTTP 429)");
+  if (status === 0 || status >= 400) {
+    throw new TargetLoadError(`Google Maps вернул HTTP ${status || "без ответа"}`);
+  }
+}
+
+async function parseTarget(
+  context: BrowserContext,
+  job: ScrapeJob,
+  cb: MapsRunCallbacks,
+  target: SearchTarget
+): Promise<ParseTargetOutcome> {
   const page = await context.newPage();
 
   try {
-    await gotoWithRetry(page, target.url, cb);
-    await maybeAcceptConsent(page);
+    await gotoMaps(page, target.url);
+    await waitForMapsSurface(page);
     await randomDelay(job);
 
     if (await isBlocked(page)) {
       log(cb, "error", "Captcha wall detected", { url: page.url(), query: target.query });
-      reportError(job, cb, { targetId: target.id, message: `Google вернул блокировку или captcha для ${target.query}` });
-      return;
+      return {
+        ok: false,
+        retryable: true,
+        message: `Google вернул блокировку или captcha для ${target.query}`
+      };
     }
 
     const links = await collectPlaceLinks(page, job, cb, target);
@@ -185,27 +262,38 @@ async function parseTarget(context: BrowserContext, job: ScrapeJob, cb: MapsRunC
       addResult(job, cb, result);
       await randomDelay(job);
     }
+    return { ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : `Не удалось обработать ${target.query}`;
     log(cb, "error", `Target failed: ${message}`, { query: target.query });
-    reportError(job, cb, { targetId: target.id, message });
+    return {
+      ok: false,
+      retryable: error instanceof TargetLoadError || isRetryableNavigationError(message),
+      message
+    };
   } finally {
-    await page.close().catch(() => undefined);
+    await closePage(page);
   }
 }
 
 async function collectPlaceLinks(page: Page, job: ScrapeJob, cb: MapsRunCallbacks, target: SearchTarget): Promise<string[]> {
+  if (page.url().includes("/maps/place/") && await page.locator(PLACE_TITLE_SELECTOR).first().isVisible().catch(() => false)) {
+    return [ensureGoogleMapsLocale(page.url(), job.settings.language, job.settings.region)];
+  }
+
   const links = new Set<string>();
   let stableRounds = 0;
 
-  await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => undefined);
-  await page.waitForSelector(`${RESULT_LINK_SELECTOR}, ${FEED_SELECTOR}`, { timeout: 30000 }).catch(() => undefined);
-
-  while (links.size < job.settings.limitPerQuery && stableRounds < 7 && !cb.shouldStop()) {
+  while (links.size < job.settings.limitPerQuery && stableRounds < 5 && !cb.shouldStop()) {
     await waitWhilePaused(cb);
 
     const before = links.size;
-    for (const href of await page.locator(RESULT_LINK_SELECTOR).evaluateAll((items) => items.map((item) => (item as HTMLAnchorElement).href))) {
+    const hrefs = await withDeadline(
+      page.locator(RESULT_LINK_SELECTOR).evaluateAll((items) => items.map((item) => (item as HTMLAnchorElement).href)),
+      PAGE_OPERATION_TIMEOUT_MS,
+      "Google Maps перестал отвечать при чтении выдачи"
+    );
+    for (const href of hrefs) {
       links.add(ensureGoogleMapsLocale(href, job.settings.language, job.settings.region));
     }
 
@@ -217,6 +305,10 @@ async function collectPlaceLinks(page: Page, job: ScrapeJob, cb: MapsRunCallback
     await randomDelay(job);
   }
 
+  if (links.size === 0) {
+    throw new TargetLoadError(`Выдача Google Maps для «${target.query}» открылась без карточек организаций`);
+  }
+
   return [...links];
 }
 
@@ -225,9 +317,8 @@ async function parsePlace(context: BrowserContext, job: ScrapeJob, cb: MapsRunCa
   const placeUrl = ensureGoogleMapsLocale(url, job.settings.language, job.settings.region);
 
   try {
-    await gotoWithRetry(page, placeUrl, cb);
-    await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => undefined);
-    await page.waitForSelector("h1, body", { timeout: 15000 });
+    await gotoMaps(page, placeUrl);
+    await page.waitForSelector("h1", { timeout: MAPS_READY_TIMEOUT_MS });
     await randomDelay(job);
 
     if (await isBlocked(page)) {
@@ -285,36 +376,129 @@ async function parsePlace(context: BrowserContext, job: ScrapeJob, cb: MapsRunCa
     const result = emptyResult(target, placeUrl, "error", message);
     return { ...result, dedupeKey: buildDedupeKey(result) };
   } finally {
-    await page.close().catch(() => undefined);
+    await closePage(page);
   }
 }
 
-async function maybeAcceptConsent(page: Page): Promise<void> {
-  const labels = ["Принять все", "I agree", "Accept all", "Accept"];
+async function waitForMapsSurface(page: Page): Promise<void> {
+  const deadline = Date.now() + MAPS_READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (isBlockedUrl(page.url())) {
+      throw new TargetLoadError("Google вернул captcha или страницу блокировки");
+    }
+    if (page.url().startsWith("chrome-error://")) {
+      throw new TargetLoadError("Chromium не смог открыть Google Maps");
+    }
+
+    const readyCount = await withDeadline(
+      page.locator(MAPS_READY_SELECTOR).count(),
+      PAGE_OPERATION_TIMEOUT_MS,
+      "Google Maps не отвечает после загрузки"
+    );
+    if (readyCount > 0) return;
+    if (await maybeAcceptConsent(page)) continue;
+    await page.waitForTimeout(500);
+  }
+
+  if (await isBlocked(page)) {
+    throw new TargetLoadError("Google вернул captcha или страницу блокировки");
+  }
+  const diagnostic = await pageDiagnostic(page);
+  throw new TargetLoadError(`Интерфейс Google Maps не загрузился${diagnostic ? ` (${diagnostic})` : ""}`);
+}
+
+async function maybeAcceptConsent(page: Page): Promise<boolean> {
+  const labels = ["Принять все", "Согласен", "I agree", "Accept all", "Accept"];
   for (const label of labels) {
     const button = page.getByRole("button", { name: label }).first();
     if (await button.isVisible().catch(() => false)) {
       await button.click().catch(() => undefined);
       await page.waitForTimeout(1000);
-      return;
+      return true;
     }
   }
+  return false;
 }
 
 async function isBlocked(page: Page): Promise<boolean> {
-  const url = page.url().toLowerCase();
-  if (url.includes("/sorry/") || url.includes("captcha")) return true;
+  if (isBlockedUrl(page.url())) return true;
   const body = (await page.locator("body").innerText({ timeout: 3000 }).catch(() => "")).toLowerCase();
-  return body.includes("unusual traffic") || body.includes("подозрительный трафик") || body.includes("captcha");
+  return body.includes("unusual traffic")
+    || body.includes("подозрительный трафик")
+    || body.includes("наши системы обнаружили необычный трафик")
+    || body.includes("captcha");
+}
+
+function isBlockedUrl(value: string): boolean {
+  const url = value.toLowerCase();
+  return url.includes("/sorry/") || url.includes("captcha");
 }
 
 async function scrollResults(page: Page): Promise<void> {
   const feed = page.locator(FEED_SELECTOR).first();
   if (await feed.isVisible().catch(() => false)) {
-    await feed.evaluate((node) => node.scrollTo({ top: node.scrollHeight, behavior: "instant" as ScrollBehavior })).catch(() => undefined);
+    await feed.evaluate(
+      (node) => node.scrollTo({ top: node.scrollHeight, behavior: "instant" as ScrollBehavior }),
+      { timeout: PAGE_OPERATION_TIMEOUT_MS }
+    );
   } else {
-    await page.mouse.wheel(0, 1800).catch(() => undefined);
+    await withDeadline(
+      page.mouse.wheel(0, 1800),
+      PAGE_OPERATION_TIMEOUT_MS,
+      "Google Maps перестал отвечать при прокрутке выдачи"
+    );
   }
+}
+
+async function pageDiagnostic(page: Page): Promise<string> {
+  const body = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
+  const compact = body.replace(/\s+/g, " ").trim().slice(0, 180);
+  if (compact) return compact;
+  try {
+    return new URL(page.url()).hostname || page.url().slice(0, 120);
+  } catch {
+    return page.url().slice(0, 120);
+  }
+}
+
+function isRetryableNavigationError(message: string): boolean {
+  return /timeout|timed out|net::|target page.*closed|browser.*closed|navigation/i.test(message);
+}
+
+function firstLine(value: string): string {
+  return value.split(/\r?\n/, 1)[0].slice(0, 300);
+}
+
+async function withDeadline<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new TargetLoadError(message)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function closePage(page: Page): Promise<void> {
+  await Promise.race([
+    page.close().catch(() => undefined),
+    new Promise<void>((resolve) => setTimeout(resolve, 3000))
+  ]);
+}
+
+async function closeBrowser(browser: Browser): Promise<void> {
+  await Promise.race([
+    browser.close().catch(() => undefined),
+    new Promise<void>((resolve) => setTimeout(resolve, 5000))
+  ]);
+}
+
+async function closeBrowserSession(session: BrowserSession): Promise<void> {
+  await closeBrowser(session.browser);
 }
 
 async function itemByDataId(page: Page, dataIdPrefix: string): Promise<string> {

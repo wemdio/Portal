@@ -1,4 +1,5 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { maskProxy, shuffledUniqueProxies, toPlaywrightProxy } from "../shared/proxy";
 import type { JobError, NewsJob, NewsResult, NewsTarget } from "../shared/types";
 import { fetchGoogleNewsRssResults } from "./googleNewsRss";
 
@@ -59,8 +60,7 @@ export async function runGoogleNewsJob(job: NewsJob, cb: NewsRunCallbacks): Prom
     const context = await browser.newContext({
       locale: `${job.settings.language}-${job.settings.country}`,
       viewport: { width: 1365, height: 900 },
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+      userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`
     });
     await context.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get: () => undefined });
@@ -120,24 +120,19 @@ export async function runGoogleNewsJob(job: NewsJob, cb: NewsRunCallbacks): Prom
   }
 }
 
-function maskProxy(proxy: string | undefined): string {
-  if (!proxy) return "none";
-  return proxy.replace(/:\/\/([^:@]+):[^@]+@/, "://$1:***@");
-}
-
 async function launchBrowser(job: NewsJob): Promise<{ browser: Browser; proxy: string | undefined }> {
   // Random pick из пула — см. googleMapsParser.launchBrowser.
-  const pool = job.settings.proxies ?? [];
+  const pool = shuffledUniqueProxies(job.settings.proxies ?? []);
   const proxy = pool.length > 0 ? pool[Math.floor(Math.random() * pool.length)] : undefined;
   const browser = await chromium.launch({
     headless: true,
-    proxy: proxy ? { server: proxy } : undefined,
+    proxy: toPlaywrightProxy(proxy),
     args: [
       "--disable-blink-features=AutomationControlled",
-      "--disable-features=IsolateOrigins,site-per-process",
+      "--disable-quic",
+      "--disable-http2",
       "--no-sandbox",
       "--disable-dev-shm-usage",
-      "--disable-web-security",
       "--lang=ru-RU,ru,en-US,en"
     ]
   });

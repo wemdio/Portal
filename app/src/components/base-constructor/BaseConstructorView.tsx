@@ -1730,9 +1730,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         <textarea
                           value={brief}
                           onChange={(e) => setBrief(e.target.value)}
-                          rows={4}
+                          rows={8}
                           placeholder="Опишите вашу целевую аудиторию, продукт, идеального клиента..."
-                          className={clientMode ? 'ds-input w-full resize-none' : 'w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white resize-none'}
+                          className={clientMode
+                            ? 'ds-input w-full min-h-[12rem] resize-y leading-relaxed'
+                            : 'w-full min-h-[12rem] resize-y px-3 py-2.5 text-sm leading-relaxed border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white'}
                         />
                       )}
                       <label className="mt-3 flex items-start gap-2 cursor-pointer select-none">
