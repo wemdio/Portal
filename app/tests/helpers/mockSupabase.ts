@@ -25,6 +25,7 @@
  *   - upsert(rows, { onConflict }) replaces matching rows by the comma-
  *     separated `onConflict` keys; if no match — inserts.
  *   - update(patch).eq(...) patches matching rows.
+ *   - delete().eq(...) removes only matching rows and returns them.
  *
  * Awaiting a builder: every chain is thenable, so `await db.from('t').select()`
  * returns `{ data, error: null }`. Use `.maybeSingle()` / `.single()` for the
@@ -298,6 +299,12 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         );
         tables[table] = next;
         updates.push({ table, patch: pendingUpdate, filters: filters.slice() });
+        return { data: matching, error: null, count: matching.length };
+      }
+      if (mode === 'delete') {
+        const matching = rowsForRead();
+        const matched = new Set(matching);
+        tables[table] = (tables[table] ?? []).filter((row) => !matched.has(row));
         return { data: matching, error: null, count: matching.length };
       }
       const data = rowsForRead();

@@ -45,7 +45,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   const { data: rows, error } = await supabaseInstantly
     .from('client_instantly_access')
-    .select('id, resource_type, resource_id, created_at')
+    .select('id, resource_type, resource_id, instantly_account_id, created_at')
     .eq('client_user_id', targetUserId)
     .order('created_at', { ascending: false });
 
@@ -58,8 +58,27 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 }
 
 type SetAccessBody = {
-  campaigns?: string[];
+  campaigns?: unknown;
+  baselineCampaigns?: unknown;
 };
+
+type ExistingCampaignAccess = {
+  resource_id: string;
+  instantly_account_id: string | null;
+};
+
+type CampaignCatalogRow = {
+  id: string;
+  instantly_account_id: string | null;
+};
+
+function parseCampaignIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  if (value.some((item) => typeof item !== 'string' || item.trim().length === 0)) {
+    return null;
+  }
+  return [...new Set((value as string[]).map((campaignId) => campaignId.trim()))];
+}
 
 export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const auth = await requireAdminAuth(req);
@@ -78,42 +97,164 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     return jsonError('Invalid body', 400);
   }
 
-  const campaigns = Array.isArray(body.campaigns) ? body.campaigns.filter((s): s is string => typeof s === 'string' && s.trim().length > 0) : [];
+  const campaigns = parseCampaignIds(body.campaigns);
+  if (!campaigns) {
+    return jsonError('campaigns must contain non-empty strings', 400);
+  }
 
-  const { error: delErr } = await supabaseInstantly
+  const baselineCampaigns = parseCampaignIds(body.baselineCampaigns);
+  if (!baselineCampaigns) {
+    return jsonError('baselineCampaigns must contain non-empty strings', 400);
+  }
+
+  const { data: existingData, error: readErr } = await supabaseInstantly
     .from('client_instantly_access')
-    .delete()
-    .eq('client_user_id', targetUserId);
+    .select('resource_id, instantly_account_id')
+    .eq('client_user_id', targetUserId)
+    .eq('resource_type', 'campaign');
 
-  if (delErr) {
-    await logError('admin.client-access.put.delete.failed', delErr, {}, logMeta);
+  if (readErr) {
+    await logError('admin.client-access.put.read.failed', readErr, {}, logMeta);
     return jsonError('Failed to update client access', 500);
   }
 
-  const newRows = campaigns.map((id) => ({
-    client_user_id: targetUserId,
-    resource_type: 'campaign' as const,
-    resource_id: id.trim(),
-    created_by: user.id,
-  }));
+  const existingRows = (existingData ?? []) as ExistingCampaignAccess[];
+  const existingIds = new Set(existingRows.map((row) => row.resource_id));
+  const baselineIds = new Set(baselineCampaigns);
+  const baselineMatches =
+    existingIds.size === baselineIds.size
+    && [...existingIds].every((campaignId) => baselineIds.has(campaignId));
+  if (!baselineMatches) {
+    await logAudit(
+      'admin.client-access.put.conflict',
+      'Client access changed after the admin form was loaded',
+      { current: existingIds.size, baseline: baselineIds.size },
+      logMeta,
+    );
+    return jsonError('Campaign access changed; reload and try again', 409);
+  }
 
-  if (newRows.length > 0) {
+  const desiredIds = new Set(campaigns);
+  const idsToAdd = campaigns.filter((campaignId) => !existingIds.has(campaignId));
+  const idsToRemove = existingRows
+    .map((row) => row.resource_id)
+    .filter((campaignId) => !desiredIds.has(campaignId));
+
+  let rowsToAdd: Array<{
+    client_user_id: string;
+    resource_type: 'campaign';
+    resource_id: string;
+    instantly_account_id: string;
+    created_by: string;
+  }> = [];
+
+  if (idsToAdd.length > 0) {
+    const { data: catalogData, error: catalogErr } = await supabaseInstantly
+      .from('instantly_campaign_catalog')
+      .select('id, instantly_account_id')
+      .in('id', idsToAdd);
+
+    if (catalogErr) {
+      await logError(
+        'admin.client-access.put.catalog.failed',
+        catalogErr,
+        { count: idsToAdd.length },
+        logMeta,
+      );
+      return jsonError('Failed to validate campaigns', 500);
+    }
+
+    const catalogById = new Map(
+      ((catalogData ?? []) as CampaignCatalogRow[]).map((row) => [row.id, row]),
+    );
+    const invalidIds = idsToAdd.filter((campaignId) => {
+      const accountId = catalogById.get(campaignId)?.instantly_account_id;
+      return typeof accountId !== 'string' || accountId.trim().length === 0;
+    });
+    if (invalidIds.length > 0) {
+      await logError(
+        'admin.client-access.put.catalog.missing',
+        new Error('Campaigns are missing from the Instantly catalog'),
+        { count: invalidIds.length },
+        logMeta,
+      );
+      return jsonError('One or more campaigns are unavailable', 400);
+    }
+
+    rowsToAdd = idsToAdd.map((campaignId) => ({
+      client_user_id: targetUserId,
+      resource_type: 'campaign' as const,
+      resource_id: campaignId,
+      instantly_account_id: catalogById.get(campaignId)!.instantly_account_id!.trim(),
+      created_by: user.id,
+    }));
+  }
+
+  if (rowsToAdd.length > 0) {
     const { error: insErr } = await supabaseInstantly
       .from('client_instantly_access')
-      .insert(newRows);
+      .insert(rowsToAdd);
 
     if (insErr) {
-      await logError('admin.client-access.put.insert.failed', insErr, { count: newRows.length }, logMeta);
+      await logError(
+        'admin.client-access.put.insert.failed',
+        insErr,
+        { count: rowsToAdd.length },
+        logMeta,
+      );
       return jsonError('Failed to save client access', 500);
+    }
+  }
+
+  if (idsToRemove.length > 0) {
+    const { error: delErr } = await supabaseInstantly
+      .from('client_instantly_access')
+      .delete()
+      .eq('client_user_id', targetUserId)
+      .eq('resource_type', 'campaign')
+      .in('resource_id', idsToRemove);
+
+    if (delErr) {
+      let rollbackError: unknown = null;
+      if (idsToAdd.length > 0) {
+        const { error } = await supabaseInstantly
+          .from('client_instantly_access')
+          .delete()
+          .eq('client_user_id', targetUserId)
+          .eq('resource_type', 'campaign')
+          .in('resource_id', idsToAdd);
+        rollbackError = error;
+      }
+
+      await logError(
+        'admin.client-access.put.delete.failed',
+        delErr,
+        { count: idsToRemove.length, rollbackFailed: Boolean(rollbackError) },
+        logMeta,
+      );
+      if (rollbackError) {
+        await logError(
+          'admin.client-access.put.rollback.failed',
+          rollbackError,
+          { count: idsToAdd.length },
+          logMeta,
+        );
+      }
+      return jsonError('Failed to update client access', 500);
     }
   }
 
   await logAudit(
     'admin.client-access.put.success',
     'Client access updated',
-    { campaigns: campaigns.length },
+    { campaigns: campaigns.length, added: idsToAdd.length, removed: idsToRemove.length },
     logMeta,
   );
 
-  return NextResponse.json({ ok: true, campaigns: campaigns.length });
+  return NextResponse.json({
+    ok: true,
+    campaigns: campaigns.length,
+    added: idsToAdd.length,
+    removed: idsToRemove.length,
+  });
 }
