@@ -68,6 +68,12 @@ function formatRub(n: number | null | undefined): string {
   if (n == null) return '—';
   return `${n.toLocaleString('ru-RU')} ₽`;
 }
+function haveSameIds(left: string[], right: string[]): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((id) => rightSet.has(id));
+}
+
 const LIMIT_LABELS: { key: keyof Omit<TariffData, 'tariff_type'>; label: string }[] = [
   { key: 'max_contacts', label: 'Контакты Instantly' },
   { key: 'max_rows', label: 'Строки для сбора + конструктор баз' },
@@ -938,6 +944,8 @@ export default function UsersPage() {
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
 
   const [clientCampaigns, setClientCampaigns] = useState<string[]>([]);
+  const [clientCampaignBaseline, setClientCampaignBaseline] = useState<string[]>([]);
+  const [clientAccessLoaded, setClientAccessLoaded] = useState(false);
   const [allCampaigns, setAllCampaigns] = useState<{ id: string; name: string; status: number }[]>([]);
   const [allCampaignsLoading, setAllCampaignsLoading] = useState(false);
   const [campaignSearch, setCampaignSearch] = useState('');
@@ -1132,6 +1140,10 @@ export default function UsersPage() {
   // .includes() called twice per row (×N rows × every render of the modal),
   // which is what made every keystroke or checkbox toggle feel laggy.
   const selectedCampaignSet = useMemo(() => new Set(clientCampaigns), [clientCampaigns]);
+  const clientCampaignsDirty = useMemo(
+    () => clientAccessLoaded && !haveSameIds(clientCampaigns, clientCampaignBaseline),
+    [clientAccessLoaded, clientCampaigns, clientCampaignBaseline],
+  );
 
   // Sort-then-filter pipeline memoised against the three inputs it actually
   // depends on. Without this it ran inside a JSX IIFE — recomputing on every
@@ -1177,6 +1189,9 @@ export default function UsersPage() {
     setCampaignSearch('');
     setAppliedCampaignSearch('');
     setCampaignPage(1);
+    setClientCampaigns([]);
+    setClientCampaignBaseline([]);
+    setClientAccessLoaded(false);
     try {
       const isClient = user.role === 'client';
       // Per-call catch so one failing endpoint does not blow away state derived
@@ -1193,11 +1208,17 @@ export default function UsersPage() {
         isClient
           ? apiFetch<{ rows: Array<{ resource_type: string; resource_id: string }> }>(
               `/api/admin/users/${user.id}/client-access`
-            ).catch((err) => {
+            ).then((result) => ({ ...result, loaded: true as const })).catch((err) => {
               void logError('admin.users.modal.client-access.fetch.failed', err, { targetUserId: user.id });
-              return { rows: [] as Array<{ resource_type: string; resource_id: string }> };
+              return {
+                rows: [] as Array<{ resource_type: string; resource_id: string }>,
+                loaded: false as const,
+              };
             })
-          : Promise.resolve({ rows: [] as Array<{ resource_type: string; resource_id: string }> }),
+          : Promise.resolve({
+              rows: [] as Array<{ resource_type: string; resource_id: string }>,
+              loaded: false as const,
+            }),
         isClient
           ? apiFetch<{ tariff: AdminUserTariffPayload | null }>(`/api/admin/users/${user.id}/tariff`).catch((err) => {
               void logError('admin.users.modal.tariff.fetch.failed', err, { targetUserId: user.id });
@@ -1208,6 +1229,8 @@ export default function UsersPage() {
       setToolVisibility(toolsRes.visibility ?? {});
       const campaigns = accessRes.rows.filter((r) => r.resource_type === 'campaign').map((r) => r.resource_id);
       setClientCampaigns(campaigns);
+      setClientCampaignBaseline(campaigns);
+      setClientAccessLoaded(accessRes.loaded);
       if (tariffRes.tariff) {
         setTariffType(tariffRes.tariff.tariff_type);
         setClientIsTestShop(tariffRes.tariff.is_test_shop === true);
@@ -1262,6 +1285,8 @@ export default function UsersPage() {
     } catch {
       setToolVisibility({});
       setClientCampaigns([]);
+      setClientCampaignBaseline([]);
+      setClientAccessLoaded(false);
       setTariffType('standard');
       setClientIsTestShop(false);
       setCustomLimits({ ...TARIFF_DEFAULTS.pro });
@@ -1455,10 +1480,16 @@ export default function UsersPage() {
       });
 
       if (modalRole === 'client') {
-        await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/client-access`, {
-          method: 'PUT',
-          body: JSON.stringify({ campaigns: clientCampaigns }),
-        });
+        if (clientAccessLoaded && clientCampaignsDirty) {
+          await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/client-access`, {
+            method: 'PUT',
+            body: JSON.stringify({
+              campaigns: clientCampaigns,
+              baselineCampaigns: clientCampaignBaseline,
+            }),
+          });
+          setClientCampaignBaseline([...clientCampaigns]);
+        }
         await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/tariff`, {
           method: 'PUT',
           body: JSON.stringify({
@@ -2058,10 +2089,16 @@ export default function UsersPage() {
                         <span className="text-xs text-blue-600 font-medium">{clientCampaigns.length} выбрано</span>
                       )}
                     </div>
+                    {!clientAccessLoaded && (
+                      <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        Не удалось загрузить доступы кампаний. При сохранении тарифа они не будут изменены.
+                      </p>
+                    )}
                     <div className="flex items-center gap-2">
                       <input
                         type="text"
                         value={campaignSearch}
+                        disabled={!clientAccessLoaded}
                         onChange={(e) => setCampaignSearch(e.target.value)}
                         onKeyDown={(e) => {
                           // Enter в инпуте не должен сабмитить родительскую
@@ -2073,12 +2110,13 @@ export default function UsersPage() {
                           }
                         }}
                         placeholder="Поиск кампании..."
-                        className="flex-1 min-w-0 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="flex-1 min-w-0 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-400"
                       />
                       <button
                         type="button"
                         onClick={applyCampaignSearch}
-                        className="shrink-0 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 transition-colors"
+                        disabled={!clientAccessLoaded}
+                        className="shrink-0 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         Найти
                       </button>
@@ -2099,12 +2137,13 @@ export default function UsersPage() {
                               <input
                                 type="checkbox"
                                 checked={checked}
+                                disabled={!clientAccessLoaded}
                                 onChange={() => {
                                   setClientCampaigns((prev) =>
                                     checked ? prev.filter((id) => id !== c.id) : [...prev, c.id]
                                   );
                                 }}
-                                className="mt-0.5 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 shrink-0"
+                                className="mt-0.5 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 shrink-0 disabled:cursor-not-allowed"
                               />
                               <div className="min-w-0">
                                 <p className="text-sm text-gray-800 leading-snug truncate">{c.name}</p>
