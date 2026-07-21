@@ -84,7 +84,12 @@ export function ClientMobileDrawer({ open, onClose, activeId, locale, mode }: Cl
           </button>
         </div>
 
-        <ClientNavList activeId={activeId} locale={locale} mode={mode} onItemClick={onClose} />
+        {/* Keep the second, mobile copy of the full navigation out of the DOM
+            until it is actually needed. CSS-translating the closed drawer off
+            screen still left every Link mounted. */}
+        {open && (
+          <ClientNavList activeId={activeId} locale={locale} mode={mode} onItemClick={onClose} />
+        )}
       </div>
     </>
   );

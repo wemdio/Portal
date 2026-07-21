@@ -58,10 +58,10 @@ services:
     deploy:
       resources:
         limits:
-          # 8 GB: база ~25 GB; лимит 2 GB вызвал OOM во время pg_dump, а 4 GB
-          # оставляет мало запаса для обычного трафика и параллельных запросов.
-          memory: 8192M
-          cpus: '4.0'
+          # База ~25 GB: 12 GB защищают от cgroup OOM на пиках, а 8 CPU
+          # исключают постоянный throttling под параллельными запросами.
+          memory: 12288M
+          cpus: '8.0'
     networks:
       - main-db-net
 

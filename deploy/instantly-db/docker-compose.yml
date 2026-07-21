@@ -42,7 +42,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024M
+          memory: 2048M
           cpus: '1.0'
     restart: unless-stopped
     networks:
@@ -232,10 +232,11 @@ services:
     deploy:
       resources:
         limits:
-          # Production Main DB is ~25 GB and can reach the cgroup limit during
-          # pg_dump + normal traffic. Keep this in sync with main-db-prod.
-          memory: 8192M
-          cpus: '2.0'
+          # Production Main DB is ~25 GB. 12 GB prevents cgroup OOM during
+          # backup/traffic peaks; 8 CPUs prevents query workloads from being
+          # throttled at the old 2-CPU ceiling. Keep in sync with main-db-prod.
+          memory: 12288M
+          cpus: '8.0'
     restart: unless-stopped
     networks:
       - instantly-network
@@ -278,9 +279,12 @@ services:
     profiles:
       - backup
     environment:
-      MAIN_SUPABASE_DATABASE_URL: postgresql://supabase_admin:${MAIN_PG_PASSWORD}@main-postgres:5432/postgres?sslmode=disable
-      INSTANTLY_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@instantly-postgres-prod:5432/instantly?sslmode=disable
-      INSTANTLY_DATASET_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@instantly-postgres-prod:5432/instantly_dataset?sslmode=disable
+      # После миграции 21.07.2026 на 139: main-postgres в отдельном compose-проекте
+      # (main-supabase), портал-backup в instantly-network — разные docker-сети.
+      # Ходим через host-IP:host-port (публичные 35434/35432), не через container-name.
+      MAIN_SUPABASE_DATABASE_URL: postgresql://supabase_admin:${MAIN_PG_PASSWORD}@139.60.162.12:35434/postgres?sslmode=disable
+      INSTANTLY_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@139.60.162.12:35432/instantly?sslmode=disable
+      INSTANTLY_DATASET_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@139.60.162.12:35432/instantly_dataset?sslmode=disable
       BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT}
       BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
       BACKUP_S3_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID}
