@@ -1,6 +1,7 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { WriteToolHandler } from './types';
 import { logAudit } from '@/lib/loggerServer';
+import { hasHhSearchTerms, shouldUseStrictHhTitleMatch } from '@/lib/parsers/hhRelevance';
 import { createPipeline, startPipeline } from './pipeline';
 import type { PipelineStep } from './pipeline';
 import { cleanCompanyNames } from './cleanNames';
@@ -252,8 +253,9 @@ export const launchHhParser: WriteToolHandler = async (params, user) => {
   const sb = ensureAdmin();
   const text = params.text as string | undefined;
   if (!text) return 'Поисковый запрос (text) обязателен.';
+  if (!hasHhSearchTerms(text)) return 'Укажите хотя бы одно название должности.';
 
-  const config: Record<string, unknown> = { text };
+  const config: Record<string, unknown> = { text, strict_title_match: shouldUseStrictHhTitleMatch(text) };
   if (params.area) config.area = params.area;
   if (params.salary_from) config.salary_from = params.salary_from;
   if (params.date_from) config.date_from = params.date_from;

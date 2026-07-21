@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import { Info, Play, Loader2, Briefcase } from 'lucide-react';
 import type { HHSearchConfig } from '@/types';
+import { hasHhSearchTerms, shouldUseStrictHhTitleMatch } from '@/lib/parsers/hhRelevance';
 import { RegionPicker } from './RegionPicker';
 
 type Props = {
@@ -181,6 +182,7 @@ export function HHParserForm({ onStart, busy, clientMode }: Props) {
       date_to: dateTo || undefined,
       per_page: Number.isFinite(per_page) ? per_page : undefined,
       fetch_employers: true,
+      strict_title_match: shouldUseStrictHhTitleMatch(text),
     };
   }, [area, currency, dateFrom, dateTo, perPage, salaryFrom, text]);
 
@@ -189,7 +191,7 @@ export function HHParserForm({ onStart, busy, clientMode }: Props) {
   const linkError = linkParse.error;
   const linkReady = Boolean(linkConfig && !linkError);
 
-  const canStart = mode === 'link' ? linkReady : Boolean(text.trim());
+  const canStart = mode === 'link' ? linkReady : hasHhSearchTerms(text);
   const activeConfig = useMemo(() => {
     if (mode === 'link') {
       return linkConfig ? { ...linkConfig, fetch_employers: true } : undefined;
@@ -204,6 +206,7 @@ export function HHParserForm({ onStart, busy, clientMode }: Props) {
       text,
       area: areas.length === 0 ? undefined : areas.length === 1 ? areas[0] : areas,
       fetch_employers: true,
+      strict_title_match: shouldUseStrictHhTitleMatch(text),
     }),
     [text, areas],
   );
@@ -213,7 +216,7 @@ export function HHParserForm({ onStart, busy, clientMode }: Props) {
   // non-technical client. Here: friendly fields by default, plus the link
   // option kept (clients asked for it) behind a toggle. Operators untouched.
   if (clientMode) {
-    const manualReady = Boolean(text.trim());
+    const manualReady = hasHhSearchTerms(text);
     const ready = mode === 'link' ? linkReady : manualReady;
     const cfg: HHSearchConfig | undefined =
       mode === 'link'

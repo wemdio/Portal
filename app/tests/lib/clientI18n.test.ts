@@ -5,6 +5,7 @@ import {
   normalizeClientLocale,
   readClientLocaleCookie,
   resolveDemoClientLocale,
+  shouldLoadProfileClientLocale,
 } from '@/lib/clientI18n';
 import { getPortalPageSectionTitle } from '@/lib/pageTitle';
 import { CLIENT_TRANSLATION_CATALOGS } from '@/lib/clientTranslations.generated';
@@ -43,13 +44,26 @@ describe('clientI18n', () => {
     )).toBe('es');
   });
 
-  test('keeps an explicit demo choice ahead of cookie and browser language', () => {
-    const storage = { getItem: () => 'en' };
+  test('lets the landing cookie replace a stale app locale', () => {
+    const storage = { getItem: () => 'ru' };
     expect(resolveDemoClientLocale(
       storage,
       'outreachos-client-locale=es',
-      'ru-RU',
-    )).toBe('en');
+      'en-US',
+    )).toBe('es');
+  });
+
+  test('uses app storage when there is no landing cookie', () => {
+    const storage = { getItem: () => 'en' };
+    expect(resolveDemoClientLocale(storage, '', 'ru-RU')).toBe('en');
+  });
+
+  test.each([
+    [null, false],
+    [true, false],
+    [false, true],
+  ])('loads profile locale only after non-demo mode is known: %p → %p', (isDemo, expected) => {
+    expect(shouldLoadProfileClientLocale(isDemo)).toBe(expected);
   });
 
   test.each([
@@ -76,6 +90,15 @@ describe('clientI18n', () => {
 
   test('does not translate unknown client-authored content', () => {
     expect(getClientTranslation('Проект Альфа для Испании', 'es')).toBeNull();
+  });
+
+  test.each([
+    ['Орбита — розничные сети', 'en', 'Orbita: retail chains'],
+    ['Орбита — 3PL и фулфилмент', 'en', 'Orbita: 3PL and fulfillment'],
+    ['Орбита — продавцы на маркетплейсах', 'es', 'Orbita: vendedores en marketplaces'],
+    ['Орбита — производственные компании', 'es', 'Orbita: empresas manufactureras'],
+  ] as const)('localizes controlled demo campaign name %s to %s', (source, locale, expected) => {
+    expect(getClientTranslation(source, locale)).toBe(expected);
   });
 
   test('Russian is the source locale and never produces a replacement', () => {
