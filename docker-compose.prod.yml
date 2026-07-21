@@ -1,6 +1,7 @@
 # Лимиты memory+cpus — потолки; суммы ≤90-95 % от 32 vCPU / 64 GB RAM.
 # Сервер: 2×Xeon E5-2670 (16C/32T) / 64 GB / 1 TB HDD SFF / HW RAID / 2×PSU.
 # CPU: 29.15 / 32 = 91 %; RAM: 61 184 / 65 536 = 93 %. Остаток — ОС и Docker daemon.
+# 2026-07-22: full rebuild trigger after DB migration to 139 — rebake NEXT_PUBLIC_SUPABASE_URL=https://polza-portal.ru into the client bundle.
 services:
   portal:
     image: ${DOCKER_USERNAME}/portal:prod
