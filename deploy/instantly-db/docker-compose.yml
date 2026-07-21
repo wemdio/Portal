@@ -232,10 +232,11 @@ services:
     deploy:
       resources:
         limits:
-          # Production Main DB is ~25 GB and can reach the cgroup limit during
-          # pg_dump + normal traffic. Keep this in sync with main-db-prod.
-          memory: 8192M
-          cpus: '2.0'
+          # Production Main DB is ~25 GB. 16 GB prevents cgroup OOM during
+          # backup/traffic peaks; 8 CPUs prevents query workloads from being
+          # throttled at the old 2-CPU ceiling. Keep in sync with main-db-prod.
+          memory: 16384M
+          cpus: '8.0'
     restart: unless-stopped
     networks:
       - instantly-network

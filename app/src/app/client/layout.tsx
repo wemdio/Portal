@@ -65,6 +65,8 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   // один источник правды) и раздаём в навигацию через ClientPortalProvider.
   const [supportUnread, setSupportUnread] = useState(0);
   const [mailboxesEnabled, setMailboxesEnabled] = useState(false);
+  const supportUnreadInFlightRef = useRef<Promise<void> | null>(null);
+  const supportUnreadLastStartedAtRef = useRef(0);
 
   useEffect(() => {
     if (!langOpen) return;
@@ -160,13 +162,35 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   // Непрочитанные сообщения поддержки. Источник правды — серверный COUNT
   // (/support/unread). Авторитетный refetch (а не инкремент) держит счётчик
   // верным между вкладками и при пропущенных/дублированных событиях.
-  const pollSupportUnread = useCallback(async () => {
-    try {
-      const data = await clientApiFetch<{ unread?: number }>('/support/unread');
-      setSupportUnread(typeof data.unread === 'number' ? data.unread : 0);
-    } catch {
-      /* бейдж не критичен — при ошибке просто не подсвечиваем */
+  const pollSupportUnread = useCallback((force = false): Promise<void> => {
+    // Reload/focus/visibilitychange frequently arrive together. Share an
+    // active request and suppress sequential event bursts for five seconds;
+    // clientApiFetch only deduplicates while its request is still in flight.
+    if (supportUnreadInFlightRef.current) {
+      return supportUnreadInFlightRef.current;
     }
+
+    const now = Date.now();
+    if (!force && now - supportUnreadLastStartedAtRef.current < 5_000) {
+      return Promise.resolve();
+    }
+    supportUnreadLastStartedAtRef.current = now;
+
+    const request = clientApiFetch<{ unread?: number }>('/support/unread')
+      .then((data) => {
+        setSupportUnread(typeof data.unread === 'number' ? data.unread : 0);
+      })
+      .catch(() => {
+        /* бейдж не критичен — при ошибке просто не подсвечиваем */
+      })
+      .finally(() => {
+        if (supportUnreadInFlightRef.current === request) {
+          supportUnreadInFlightRef.current = null;
+        }
+      });
+
+    supportUnreadInFlightRef.current = request;
+    return request;
   }, []);
 
   // Поллинг непрочитанных сообщений поддержки (один таймер на весь портал).
@@ -176,8 +200,10 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   // (focus + visibilitychange). Когда realtime починят — сюда вернётся подписка
   // на public.notifications, а интервал можно будет увеличить.
   useEffect(() => {
-    void pollSupportUnread();
-    const timer = setInterval(() => void pollSupportUnread(), 12_000);
+    void pollSupportUnread(true);
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') void pollSupportUnread();
+    }, 30_000);
     const onFocus = () => void pollSupportUnread();
     const onVisible = () => {
       if (document.visibilityState === 'visible') void pollSupportUnread();
