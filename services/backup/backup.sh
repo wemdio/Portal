@@ -2,7 +2,12 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # pg_dump → S3 / Supabase Storage backup
 #
-# Usage: backup.sh <main-supabase|instantly-prod|instantly-dev>
+# Automatic production targets:
+#   backup.sh main-full       — main Postgres + cluster roles in one tar
+#   backup.sh instantly-full  — instantly + instantly_dataset + roles in one tar
+#
+# Legacy/manual production-only single-database targets are kept for compatibility:
+#   main-supabase | instantly-prod | instantly-dataset
 #
 # Upload priority:
 #   1. S3 (via mc) — if BACKUP_S3_ENDPOINT + credentials are set
@@ -10,9 +15,11 @@
 #   3. Skip upload, keep local dump only
 #
 # S3 layout  (<BACKUP_S3_BUCKET>):
+#   portal-main/full/portal-main-main-full-<TS>.tar
+#   instantly/full/instantly-instantly-full-<TS>.tar
 #   portal-main/portal-main-main-supabase-<TS>.dump
 #   instantly/prod/instantly-instantly-prod-<TS>.dump
-#   instantly/dev/instantly-instantly-dev-<TS>.dump
+#   instantly/dataset/instantly-instantly-dataset-<TS>.dump
 #
 # Supabase layout (<BACKUP_BUCKET>, default db-backups):
 #   Same subpaths as S3.
@@ -22,7 +29,7 @@ set -u
 
 INSTANCE="${1:-}"
 if [ -z "$INSTANCE" ]; then
-  echo "Usage: backup.sh <main-supabase|instantly-prod|instantly-dev>" >&2
+  echo "Usage: backup.sh <main-full|instantly-full|main-supabase|instantly-prod|instantly-dataset>" >&2
   exit 1
 fi
 
@@ -54,8 +61,45 @@ PG_CONN_URL=""
 EXTRA_PG_DUMP_OPTS=""
 PREFIX=""
 SUBPATH=""
+BACKUP_MODE="single"
+FILE_EXT="dump"
+BUNDLE_DIR=""
+MC_LOG=""
+
+cleanup_temp() {
+  if [ -n "$BUNDLE_DIR" ] && [ -d "$BUNDLE_DIR" ]; then
+    rm -rf "$BUNDLE_DIR"
+  fi
+  if [ -n "$MC_LOG" ] && [ -f "$MC_LOG" ]; then
+    rm -f "$MC_LOG"
+  fi
+}
+trap cleanup_temp EXIT
+trap 'exit 130' INT TERM
 
 case "$INSTANCE" in
+  main-full)
+    PG_CONN_URL="${MAIN_SUPABASE_DATABASE_URL:-${DATABASE_URL:-}}"
+    if [ -z "$PG_CONN_URL" ]; then
+      echo "[backup] MAIN_SUPABASE_DATABASE_URL/DATABASE_URL is empty; cannot create main-full bundle." >&2
+      exit 1
+    fi
+    PREFIX="portal-main"
+    SUBPATH="portal-main/full"
+    BACKUP_MODE="main-bundle"
+    FILE_EXT="tar"
+    ;;
+  instantly-full)
+    PG_CONN_URL="${INSTANTLY_DATABASE_URL:-}"
+    if [ -z "$PG_CONN_URL" ] || [ -z "${INSTANTLY_DATASET_DATABASE_URL:-}" ]; then
+      echo "[backup] INSTANTLY_DATABASE_URL and INSTANTLY_DATASET_DATABASE_URL are both required for instantly-full." >&2
+      exit 1
+    fi
+    PREFIX="instantly"
+    SUBPATH="instantly/full"
+    BACKUP_MODE="instantly-bundle"
+    FILE_EXT="tar"
+    ;;
   main-supabase)
     PG_CONN_URL="${MAIN_SUPABASE_DATABASE_URL:-${DATABASE_URL:-}}"
     if [ -z "$PG_CONN_URL" ]; then
@@ -89,83 +133,207 @@ case "$INSTANCE" in
     PREFIX="instantly"
     SUBPATH="instantly/prod"
     ;;
-  instantly-dev)
-    PG_CONN_URL="${INSTANTLY_DEV_DATABASE_URL:-}"
+  instantly-dataset)
+    PG_CONN_URL="${INSTANTLY_DATASET_DATABASE_URL:-}"
     if [ -z "$PG_CONN_URL" ]; then
-      echo "[backup] INSTANTLY_DEV_DATABASE_URL is empty, skipping instantly-dev backup."
+      echo "[backup] INSTANTLY_DATASET_DATABASE_URL is empty, skipping instantly-dataset backup."
       exit 0
     fi
     PREFIX="instantly"
-    SUBPATH="instantly/dev"
+    SUBPATH="instantly/dataset"
     ;;
   *)
-    echo "[backup] Unknown instance: $INSTANCE (expected main-supabase, instantly-prod, instantly-dev)" >&2
+    echo "[backup] Unknown instance: $INSTANCE" >&2
     exit 1
     ;;
 esac
 
-DUMP_FILE="${DUMP_DIR}/${PREFIX}-${INSTANCE}-${TS}.dump"
+DUMP_FILE="${DUMP_DIR}/${PREFIX}-${INSTANCE}-${TS}.${FILE_EXT}"
 
-# ─── TCP keep-alive для длинных WAN COPY ─────────────────────────────────────
-# pg_dump тянет большие таблицы (public.pdl_companies ~8.75 GB / ~19.6M строк)
-# через WAN между Portal-сервером и БД-сервером. Без keep-alive провайдерский
-# NAT/firewall рубит долгие соединения на idle-hiccup: postgres логирует
-# "connection to client lost", pg_dump падает с "server closed the connection
-# unexpectedly" (rc=1). История таких падений на COPY жирных таблиц:
-# 14.06 / 16.06 / 19.06 / 28.06 / 29.06 / 30.06 / 05.07 / 11.07 / 14.07 /
-# 18.07.2026 — раз в 3–5 дней. Ставим keep-alive: пакет раз в 60s, чтобы
-# соединение не выглядело idle. PGKEEPALIVES_* — стандартные libpq env vars,
-# применяются к connection URL. Внешнее значение переопределяет умолчания.
+# ─── TCP keep-alive for long COPY operations ─────────────────────────────────
+# Production URLs are local to the DB host, but keep-alive also protects manual
+# remote runs and long copies from idle connection timeouts. External values
+# override these libpq defaults.
 export PGKEEPALIVES="${PGKEEPALIVES:-1}"
 export PGKEEPALIVES_IDLE="${PGKEEPALIVES_IDLE:-60}"
 export PGKEEPALIVES_INTERVAL="${PGKEEPALIVES_INTERVAL:-10}"
 export PGKEEPALIVES_COUNT="${PGKEEPALIVES_COUNT:-6}"
 
-echo "[backup] Starting pg_dump for ${INSTANCE} -> ${DUMP_FILE}"
+# ─── Dump helpers with retries ───────────────────────────────────────────────
 
-# ─── pg_dump с ретраем ───────────────────────────────────────────────────────
-# Страховка: если keep-alive всё же не спас, ретраим полностью. pg_dump с
-# --format=custom пишет single-file монолит и не умеет продолжить с середины,
-# поэтому каждая попытка тянет всю базу заново. 3 попытки с растущей паузой
-# (30s → 60s) = ~90s overhead в худшем случае, укладывается в окно cron (6h).
 PG_DUMP_MAX_TRIES="${BACKUP_PG_DUMP_RETRIES:-3}"
 PG_DUMP_RETRY_PAUSE="${BACKUP_PG_DUMP_RETRY_PAUSE:-30}"
-PG_DUMP_RC=0
-pg_dump_attempt=1
-while [ "$pg_dump_attempt" -le "$PG_DUMP_MAX_TRIES" ]; do
-  if [ "$pg_dump_attempt" -gt 1 ]; then
-    echo "[backup] pg_dump attempt ${pg_dump_attempt}/${PG_DUMP_MAX_TRIES}"
-  fi
-  # shellcheck disable=SC2086
-  pg_dump \
-    --dbname="$PG_CONN_URL" \
-    --format=custom \
-    --compress=6 \
-    --no-owner \
-    --no-privileges \
-    $EXTRA_PG_DUMP_OPTS \
-    --file="$DUMP_FILE"
-  PG_DUMP_RC=$?
-  if [ "$PG_DUMP_RC" -eq 0 ]; then
-    break
-  fi
-  if [ "$pg_dump_attempt" -lt "$PG_DUMP_MAX_TRIES" ]; then
-    pause=$((PG_DUMP_RETRY_PAUSE * pg_dump_attempt))
-    echo "[backup] pg_dump failed (rc=${PG_DUMP_RC}), retrying in ${pause}s..." >&2
-    # --file overwrite'ит без предупреждения, но безопаснее убрать частичный
-    # дамп явно — чтобы случайный shim/bug не докинул в хвост существующего.
-    rm -f "$DUMP_FILE"
-    sleep "$pause"
-  fi
-  pg_dump_attempt=$((pg_dump_attempt + 1))
-done
 
-if [ "$PG_DUMP_RC" -ne 0 ]; then
-  msg="🚨 [backup ${INSTANCE}] pg_dump FAILED after ${PG_DUMP_MAX_TRIES} tries (rc=${PG_DUMP_RC})"
+run_pg_dump_retry() {
+  label="$1"
+  url="$2"
+  outfile="$3"
+  preserve_ownership="$4"
+  shift 4
+
+  attempt=1
+  rc=0
+  while [ "$attempt" -le "$PG_DUMP_MAX_TRIES" ]; do
+    if [ "$attempt" -gt 1 ]; then
+      echo "[backup] pg_dump attempt ${attempt}/${PG_DUMP_MAX_TRIES} (${label})"
+    fi
+
+    if [ "$preserve_ownership" = "true" ]; then
+      pg_dump \
+        --dbname="$url" \
+        --format=custom \
+        --compress=6 \
+        "$@" \
+        --file="$outfile"
+    else
+      pg_dump \
+        --dbname="$url" \
+        --format=custom \
+        --compress=6 \
+        --no-owner \
+        --no-privileges \
+        "$@" \
+        --file="$outfile"
+    fi
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ -s "$outfile" ]; then
+      return 0
+    fi
+    if [ "$rc" -eq 0 ]; then
+      rc=1
+      echo "[backup] pg_dump produced an empty file for ${label}." >&2
+    fi
+
+    if [ "$attempt" -lt "$PG_DUMP_MAX_TRIES" ]; then
+      pause=$((PG_DUMP_RETRY_PAUSE * attempt))
+      echo "[backup] pg_dump failed for ${label} (rc=${rc}), retrying in ${pause}s..." >&2
+      rm -f "$outfile"
+      sleep "$pause"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  msg="🚨 [backup ${INSTANCE}] pg_dump FAILED for ${label} after ${PG_DUMP_MAX_TRIES} tries (rc=${rc})"
   echo "$msg" >&2
   send_alert "$msg"
-  exit 1
-fi
+  return "$rc"
+}
+
+run_globals_retry() {
+  label="$1"
+  url="$2"
+  outfile="$3"
+  without_passwords="$4"
+
+  attempt=1
+  rc=0
+  while [ "$attempt" -le "$PG_DUMP_MAX_TRIES" ]; do
+    if [ "$attempt" -gt 1 ]; then
+      echo "[backup] pg_dumpall attempt ${attempt}/${PG_DUMP_MAX_TRIES} (${label})"
+    fi
+
+    if [ "$without_passwords" = "true" ]; then
+      pg_dumpall --dbname="$url" --globals-only --no-role-passwords --file="$outfile"
+    else
+      pg_dumpall --dbname="$url" --globals-only --file="$outfile"
+    fi
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ -s "$outfile" ]; then
+      return 0
+    fi
+    if [ "$rc" -eq 0 ]; then
+      rc=1
+      echo "[backup] pg_dumpall produced an empty file for ${label}." >&2
+    fi
+
+    if [ "$attempt" -lt "$PG_DUMP_MAX_TRIES" ]; then
+      pause=$((PG_DUMP_RETRY_PAUSE * attempt))
+      echo "[backup] pg_dumpall failed for ${label} (rc=${rc}), retrying in ${pause}s..." >&2
+      rm -f "$outfile"
+      sleep "$pause"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  msg="🚨 [backup ${INSTANCE}] pg_dumpall FAILED for ${label} after ${PG_DUMP_MAX_TRIES} tries (rc=${rc})"
+  echo "$msg" >&2
+  send_alert "$msg"
+  return "$rc"
+}
+
+create_bundle() {
+  bundle_kind="$1"
+  BUNDLE_DIR=$(mktemp -d "${DUMP_DIR}/.${INSTANCE}-${TS}.XXXXXX") || return 1
+  chmod 700 "$BUNDLE_DIR" || return $?
+
+  restore_script="${BACKUP_RESTORE_SCRIPT:-/restore-bundle.sh}"
+  if [ ! -f "$restore_script" ]; then
+    echo "[backup] FATAL: restore script not found: $restore_script" >&2
+    return 1
+  fi
+  cp "$restore_script" "$BUNDLE_DIR/restore-bundle.sh" || return $?
+  chmod +x "$BUNDLE_DIR/restore-bundle.sh" || return $?
+
+  case "$bundle_kind" in
+    main)
+      run_globals_retry main-pre "$PG_CONN_URL" "$BUNDLE_DIR/main-globals-pre.sql" true || return $?
+      run_globals_retry main "$PG_CONN_URL" "$BUNDLE_DIR/main-globals.sql" false || return $?
+      run_pg_dump_retry main-postgres "$PG_CONN_URL" "$BUNDLE_DIR/main-postgres.dump" true || return $?
+      cat > "$BUNDLE_DIR/manifest.txt" <<EOF
+bundle_version=1
+bundle_type=main
+created_at_utc=${TS}
+databases=postgres
+contains_roles=true
+dev_databases_included=false
+restore=./restore-bundle.sh main main-postgres
+EOF
+      [ -s "$BUNDLE_DIR/manifest.txt" ] || return 1
+      ;;
+    instantly)
+      run_globals_retry instantly-pre "$PG_CONN_URL" "$BUNDLE_DIR/instantly-globals-pre.sql" true || return $?
+      run_globals_retry instantly "$PG_CONN_URL" "$BUNDLE_DIR/instantly-globals.sql" false || return $?
+      run_pg_dump_retry instantly "$PG_CONN_URL" "$BUNDLE_DIR/instantly.dump" true || return $?
+      run_pg_dump_retry instantly_dataset "$INSTANTLY_DATASET_DATABASE_URL" "$BUNDLE_DIR/instantly_dataset.dump" true || return $?
+      cat > "$BUNDLE_DIR/manifest.txt" <<EOF
+bundle_version=1
+bundle_type=instantly
+created_at_utc=${TS}
+databases=instantly,instantly_dataset
+contains_roles=true
+dev_databases_included=false
+restore=./restore-bundle.sh instantly instantly-postgres-prod
+EOF
+      [ -s "$BUNDLE_DIR/manifest.txt" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+
+  echo "[backup] Packing ${bundle_kind} bundle -> ${DUMP_FILE}"
+  tar -cf "$DUMP_FILE" -C "$BUNDLE_DIR" . || return $?
+  chmod 600 "$DUMP_FILE" || return $?
+  rm -rf "$BUNDLE_DIR"
+  BUNDLE_DIR=""
+}
+
+echo "[backup] Starting ${BACKUP_MODE} for ${INSTANCE} -> ${DUMP_FILE}"
+
+case "$BACKUP_MODE" in
+  main-bundle)
+    create_bundle main || exit 1
+    ;;
+  instantly-bundle)
+    create_bundle instantly || exit 1
+    ;;
+  single)
+    if [ "$INSTANCE" = "main-supabase" ]; then
+      # shellcheck disable=SC2086
+      run_pg_dump_retry "$INSTANCE" "$PG_CONN_URL" "$DUMP_FILE" false $EXTRA_PG_DUMP_OPTS || exit 1
+    else
+      run_pg_dump_retry "$INSTANCE" "$PG_CONN_URL" "$DUMP_FILE" false || exit 1
+    fi
+    ;;
+esac
 
 DUMP_SIZE=$(stat -c '%s' "$DUMP_FILE" 2>/dev/null || stat -f '%z' "$DUMP_FILE" 2>/dev/null || echo '?')
 echo "[backup] Dump complete: ${DUMP_FILE} (${DUMP_SIZE} bytes)"
@@ -183,7 +351,7 @@ BACKUP_BUCKET="${BACKUP_BUCKET:-db-backups}"
 
 upload_failed=0
 UPLOAD_BACKEND="none"
-FILENAME="${PREFIX}-${INSTANCE}-${TS}.dump"
+FILENAME="${PREFIX}-${INSTANCE}-${TS}.${FILE_EXT}"
 
 # ─── Upload: S3 via mc (primary) ─────────────────────────────────────────────
 
@@ -196,7 +364,6 @@ if [ -n "$S3_ENDPOINT" ] && [ -n "$S3_BUCKET" ] && [ -n "$S3_ACCESS_KEY" ] && [ 
   # EntityTooLarge / NoSuchBucket / RequestTimeout / quota) не попадала ни в логи
   # контейнера, ни в Telegram-алерт — оставались только "rc=1".
   MC_LOG="$(mktemp)"
-  trap 'rm -f "$MC_LOG"' EXIT INT TERM
 
   alias_rc=0
   mc alias set backup "$S3_ENDPOINT" "$S3_ACCESS_KEY" "$S3_SECRET_KEY" --api s3v4 >>"$MC_LOG" 2>&1 || alias_rc=$?
@@ -359,9 +526,9 @@ cleanup_remote
 
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 echo "[backup] Cleaning local dumps older than ${RETENTION_DAYS} days..."
-find "$DUMP_DIR" -name "${PREFIX}-${INSTANCE}-*.dump" -type f -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
+find "$DUMP_DIR" -name "${PREFIX}-${INSTANCE}-*.${FILE_EXT}" -type f -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
 
-REMAINING=$(find "$DUMP_DIR" -name "${PREFIX}-${INSTANCE}-*.dump" -type f 2>/dev/null | wc -l)
+REMAINING=$(find "$DUMP_DIR" -name "${PREFIX}-${INSTANCE}-*.${FILE_EXT}" -type f 2>/dev/null | wc -l)
 echo "[backup] Done. ${REMAINING} local dump(s) for ${INSTANCE} retained."
 
 if [ "$upload_failed" = 1 ]; then

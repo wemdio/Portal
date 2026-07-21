@@ -1003,47 +1003,6 @@ services:
     networks:
       - portal-network
 
-  # pg_dump-бэкапы обеих БД (main + Instantly) → S3 / Supabase Storage.
-  # Cron внутри контейнера; см. services/backup/crontab.
-  portal-backup:
-    image: ${DOCKER_USERNAME}/portal-backup:prod
-    container_name: portal-backup
-    env_file:
-      - .env
-    environment:
-      - MAIN_SUPABASE_DATABASE_URL=${MAIN_SUPABASE_DATABASE_URL:-${DATABASE_URL:-}}
-      - INSTANTLY_DATABASE_URL=${INSTANTLY_DATABASE_URL:-}
-      - INSTANTLY_DEV_DATABASE_URL=${INSTANTLY_DEV_DATABASE_URL:-}
-      # S3 storage (primary): TWC S3 или любой S3-совместимый.
-      - BACKUP_S3_ENDPOINT=${BACKUP_S3_ENDPOINT:-${MAIN_S3_ENDPOINT:-}}
-      - BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET:-${MAIN_S3_BUCKET:-}}
-      - BACKUP_S3_ACCESS_KEY_ID=${BACKUP_S3_ACCESS_KEY_ID:-${MAIN_S3_ACCESS_KEY_ID:-}}
-      - BACKUP_S3_SECRET_ACCESS_KEY=${BACKUP_S3_SECRET_ACCESS_KEY:-${MAIN_S3_SECRET_ACCESS_KEY:-}}
-      - BACKUP_S3_REGION=${BACKUP_S3_REGION:-${MAIN_S3_REGION:-ru-1}}
-      # Supabase Storage (fallback, если S3 не задан).
-      - BACKUP_SUPABASE_URL=${BACKUP_SUPABASE_URL:-${NEXT_PUBLIC_SUPABASE_URL:-}}
-      - BACKUP_SUPABASE_KEY=${BACKUP_SUPABASE_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}
-      - BACKUP_BUCKET=${BACKUP_BUCKET:-db-backups}
-      - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-7}
-      - BACKUP_REMOTE_RETENTION_DAYS=${BACKUP_REMOTE_RETENTION_DAYS:-7}
-      - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN:-}
-      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID:-}
-    volumes:
-      - portal-backup-data:/backups
-    deploy:
-      resources:
-        limits:
-          # 1 ГБ + 1 CPU нужны pg_dump для главной Supabase БД (несколько ГБ
-          # данных, --compress=6 жмёт в один поток). Прежний лимит 256M убивал
-          # curl OOM-ом при стриминге (даже после перехода на -T --upload-file
-          # хочется иметь запас на pg_dump + tr/sed/find в cleanup_remote).
-          # См. services/backup/backup.sh комментарий про curl/curl#18300.
-          memory: 1G
-          cpus: '1.0'
-    restart: unless-stopped
-    networks:
-      - portal-network
-
   atmos-bot:
     image: ${DOCKER_USERNAME}/portal-atmos-bot:prod
     container_name: portal-atmos-bot
@@ -1324,7 +1283,6 @@ services:
 
 volumes:
   telegram-bot-api-data:
-  portal-backup-data:
 
 networks:
   portal-network:
