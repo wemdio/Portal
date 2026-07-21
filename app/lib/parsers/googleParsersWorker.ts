@@ -180,32 +180,40 @@ async function countRows(table: string, jobId: string): Promise<number> {
   return count ?? 0;
 }
 
-async function streamSse(
+export async function streamSse(
   url: string,
   body: unknown,
   handlers: Record<string, (data: unknown) => Promise<void> | void>,
 ) {
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      accept: 'text/event-stream',
+      'content-type': 'application/json',
+    },
     body: JSON.stringify(body),
   });
+  if (!response.ok) {
+    throw new Error(`parser service returned HTTP ${response.status}`);
+  }
   if (!response.body) throw new Error('service returned empty stream');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split('\n\n');
+    const parts = buffer.split(/\r?\n\r?\n/);
     buffer = parts.pop() ?? '';
     for (const chunk of parts) {
-      const lines = chunk.split('\n');
+      const lines = chunk.split(/\r?\n/);
       const event = lines.find((l) => l.startsWith('event: '))?.slice(7) ?? 'message';
-      const dataLine = lines.find((l) => l.startsWith('data: '))?.slice(6) ?? '';
-      if (!dataLine) continue;
+      const dataLine = lines
+        .filter((l) => l.startsWith('data: '))
+        .map((l) => l.slice(6))
+        .join('\n');
+      if (!dataLine) continue; // SSE comment/heartbeat frame.
       const handler = handlers[event];
       if (handler) await handler(JSON.parse(dataLine));
     }

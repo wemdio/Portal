@@ -7,6 +7,7 @@ const fetchMock = jest.fn();
 describe('leadTelegramAlerts', () => {
   const oldFetch = global.fetch;
   const oldBotToken = process.env.CHANGELOG_BOT_TOKEN;
+  const oldFallbackChatId = process.env.CHANGELOG_CHAT_ID;
   const oldDedicatedBotToken = process.env.LEAD_ALERTS_TELEGRAM_BOT_TOKEN;
   const oldChatId = process.env.LEAD_ALERTS_TELEGRAM_CHAT_ID;
   const oldThreadId = process.env.LEAD_ALERTS_TELEGRAM_THREAD_ID;
@@ -28,6 +29,8 @@ describe('leadTelegramAlerts', () => {
     global.fetch = oldFetch;
     if (oldBotToken === undefined) delete process.env.CHANGELOG_BOT_TOKEN;
     else process.env.CHANGELOG_BOT_TOKEN = oldBotToken;
+    if (oldFallbackChatId === undefined) delete process.env.CHANGELOG_CHAT_ID;
+    else process.env.CHANGELOG_CHAT_ID = oldFallbackChatId;
     if (oldDedicatedBotToken === undefined) delete process.env.LEAD_ALERTS_TELEGRAM_BOT_TOKEN;
     else process.env.LEAD_ALERTS_TELEGRAM_BOT_TOKEN = oldDedicatedBotToken;
     if (oldChatId === undefined) delete process.env.LEAD_ALERTS_TELEGRAM_CHAT_ID;
@@ -147,6 +150,7 @@ describe('leadTelegramAlerts', () => {
 
   it('skips sending when chat id is not configured', async () => {
     delete process.env.LEAD_ALERTS_TELEGRAM_CHAT_ID;
+    delete process.env.CHANGELOG_CHAT_ID;
 
     const result = await sendLeadTelegramAlert({
       qualificationId: 'qual-3',

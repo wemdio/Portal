@@ -14,6 +14,7 @@ const app = express();
 app.use(express.json({ limit: "4mb" }));
 
 const port = Number(process.env.PORT) || 8001;
+const SSE_HEARTBEAT_MS = 15_000;
 
 type Control = { paused: boolean; stopped: boolean };
 const controls = new Map<string, Control>();
@@ -25,9 +26,17 @@ app.post("/run/maps", async (req, res) => {
   res.setHeader("content-type", "text/event-stream");
   res.setHeader("cache-control", "no-cache");
   res.setHeader("connection", "keep-alive");
+  res.setHeader("x-accel-buffering", "no");
+  res.flushHeaders();
+  res.socket?.setTimeout(0);
 
   const control: Control = { paused: false, stopped: false };
   controls.set(jobId, control);
+  const heartbeat = startSseHeartbeat(res);
+  res.on("close", () => {
+    control.stopped = true;
+    clearInterval(heartbeat);
+  });
 
   const targets = generateSearchTargets(settings);
   const job: ScrapeJob = {
@@ -46,7 +55,9 @@ app.post("/run/maps", async (req, res) => {
   };
 
   const emit = (kind: string, payload: unknown) => {
-    res.write(`event: ${kind}\ndata: ${JSON.stringify(payload)}\n\n`);
+    if (!res.destroyed && !res.writableEnded) {
+      res.write(`event: ${kind}\ndata: ${JSON.stringify(payload)}\n\n`);
+    }
   };
 
   try {
@@ -62,8 +73,9 @@ app.post("/run/maps", async (req, res) => {
   } catch (err) {
     emit("error", { message: err instanceof Error ? err.message : String(err) });
   } finally {
+    clearInterval(heartbeat);
     controls.delete(jobId);
-    res.end();
+    if (!res.destroyed && !res.writableEnded) res.end();
   }
 });
 
@@ -72,9 +84,17 @@ app.post("/run/news", async (req, res) => {
   res.setHeader("content-type", "text/event-stream");
   res.setHeader("cache-control", "no-cache");
   res.setHeader("connection", "keep-alive");
+  res.setHeader("x-accel-buffering", "no");
+  res.flushHeaders();
+  res.socket?.setTimeout(0);
 
   const control: Control = { paused: false, stopped: false };
   controls.set(jobId, control);
+  const heartbeat = startSseHeartbeat(res);
+  res.on("close", () => {
+    control.stopped = true;
+    clearInterval(heartbeat);
+  });
 
   const targets = generateNewsTargets(settings);
   const job: NewsJob = {
@@ -92,7 +112,9 @@ app.post("/run/news", async (req, res) => {
   };
 
   const emit = (kind: string, payload: unknown) => {
-    res.write(`event: ${kind}\ndata: ${JSON.stringify(payload)}\n\n`);
+    if (!res.destroyed && !res.writableEnded) {
+      res.write(`event: ${kind}\ndata: ${JSON.stringify(payload)}\n\n`);
+    }
   };
 
   try {
@@ -108,8 +130,9 @@ app.post("/run/news", async (req, res) => {
   } catch (err) {
     emit("error", { message: err instanceof Error ? err.message : String(err) });
   } finally {
+    clearInterval(heartbeat);
     controls.delete(jobId);
-    res.end();
+    if (!res.destroyed && !res.writableEnded) res.end();
   }
 });
 
@@ -123,6 +146,14 @@ app.post("/control/:jobId/:action", (req, res) => {
   else return res.status(400).json({ error: "unknown action" });
   return res.json({ ok: true });
 });
+
+function startSseHeartbeat(res: express.Response): NodeJS.Timeout {
+  const timer = setInterval(() => {
+    if (!res.destroyed && !res.writableEnded) res.write(": heartbeat\n\n");
+  }, SSE_HEARTBEAT_MS);
+  timer.unref();
+  return timer;
+}
 
 app.listen(port, "0.0.0.0", () => {
   console.log(`googleparsers service listening on :${port}`);
