@@ -45,7 +45,9 @@ async function request<T>(
   // Общий распределённый rate-limiter (workspace-wide лимит Instantly). Один раз
   // на логический вызов, ДО retry-цикла. Fail-open: при любой проблеме лимитера
   // запрос проходит как раньше. По умолчанию выключен (INSTANTLY_RATE_LIMITER_ENABLED).
-  await acquireInstantlyToken(resolveInstantlyAccountId(requestOptions?.accountId));
+  if (!requestOptions?.skipRateLimiter) {
+    await acquireInstantlyToken(resolveInstantlyAccountId(requestOptions?.accountId));
+  }
 
   const apiKey = getApiKey(requestOptions);
   const url = new URL(`${BASE_URL}${path}`);
@@ -56,10 +58,17 @@ async function request<T>(
     }
   }
 
-  for (let attempt = 0; attempt <= RATE_LIMIT_RETRIES; attempt++) {
+  const rateLimitRetries = requestOptions?.retryRateLimits === false ? 0 : RATE_LIMIT_RETRIES;
+  for (let attempt = 0; attempt <= rateLimitRetries; attempt++) {
     const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90_000);
+    const timeoutMs =
+      typeof requestOptions?.timeoutMs === 'number' &&
+      Number.isFinite(requestOptions.timeoutMs) &&
+      requestOptions.timeoutMs > 0
+        ? requestOptions.timeoutMs
+        : 90_000;
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     const init: RequestInit = { method: options.method ?? 'GET', headers, signal: controller.signal };
 
     if (options.body !== undefined) {
@@ -74,7 +83,7 @@ async function request<T>(
       clearTimeout(timeoutId);
     }
 
-    if (res.status === 429 && attempt < RATE_LIMIT_RETRIES) {
+    if (res.status === 429 && attempt < rateLimitRetries) {
       const delay = RATE_LIMIT_BASE_DELAY_MS * Math.pow(2, attempt);
       await new Promise((r) => setTimeout(r, delay));
       continue;
@@ -236,30 +245,152 @@ export async function testAccountVitals(body: { emails: string[] }, requestOptio
  */
 const LEADS_PER_REQUEST = 1000;
 
-export async function createLeads(
-  leads: LeadCreatePayload[],
-  options?: { campaign_id?: string; list_id?: string; skip_if_in_workspace?: boolean; skip_if_in_campaign?: boolean },
-  requestOptions?: InstantlyRequestOptions,
-) {
-  // До 1000 — один запрос (поведение прежнее, отдаём сырой ответ Instantly).
-  if (leads.length <= LEADS_PER_REQUEST) {
-    return request<unknown>('/leads/add', { method: 'POST', body: { leads, ...options } }, requestOptions);
+export interface BulkLeadImportCreatedLead {
+  id: string;
+  email: string;
+  index: number;
+}
+
+/**
+ * Normalized response from Instantly's bulk lead-import endpoint.
+ *
+ * `leads_uploaded` is the current API field. `uploaded` is retained as a
+ * compatibility alias because this wrapper historically returned that field
+ * when it had to split a request into 1000-row chunks.
+ */
+export interface BulkLeadImportResult {
+  status: string;
+  total_sent: number;
+  leads_uploaded: number;
+  uploaded: number;
+  in_blocklist: number;
+  blocklist_used: string | null;
+  duplicated_leads: number;
+  skipped_count: number;
+  invalid_email_count: number;
+  incomplete_count: number;
+  duplicate_email_count: number;
+  remaining_in_plan: number | null;
+  created_leads: BulkLeadImportCreatedLead[];
+}
+
+function readImportCount(raw: Record<string, unknown>, key: string): number | undefined {
+  const value = raw[key];
+  if (value === undefined || value === null || value === '') return undefined;
+  const count = Number(value);
+  return Number.isSafeInteger(count) && count >= 0 ? count : undefined;
+}
+
+function normalizeBulkLeadImportResult(
+  raw: Record<string, unknown>,
+  requested: number,
+): BulkLeadImportResult {
+  const totalSent = readImportCount(raw, 'total_sent') ?? requested;
+  const leadsUploaded =
+    readImportCount(raw, 'leads_uploaded') ??
+    readImportCount(raw, 'uploaded') ??
+    readImportCount(raw, 'created') ??
+    readImportCount(raw, 'total_uploaded');
+
+  if (leadsUploaded === undefined) {
+    throw new Error('Instantly lead import response is missing leads_uploaded');
+  }
+  if (totalSent > requested || leadsUploaded > totalSent) {
+    throw new Error('Instantly lead import response contains invalid lead counters');
   }
 
-  // Больше 1000 — бьём на чанки и шлём последовательно, суммируя счётчик
-  // загруженных лидов. Клиентский запуск кампании допускает до 10 000 строк.
-  let uploaded = 0;
+  const createdLeads = Array.isArray(raw.created_leads)
+    ? raw.created_leads.flatMap((item): BulkLeadImportCreatedLead[] => {
+        if (!item || typeof item !== 'object') return [];
+        const row = item as Record<string, unknown>;
+        const index = readImportCount(row, 'index');
+        if (typeof row.id !== 'string' || typeof row.email !== 'string' || index === undefined) return [];
+        return [{ id: row.id, email: row.email, index }];
+      })
+    : [];
+
+  const remainingInPlan = readImportCount(raw, 'remaining_in_plan');
+  return {
+    status: typeof raw.status === 'string' ? raw.status : 'success',
+    total_sent: totalSent,
+    leads_uploaded: leadsUploaded,
+    uploaded: leadsUploaded,
+    in_blocklist: readImportCount(raw, 'in_blocklist') ?? 0,
+    blocklist_used: typeof raw.blocklist_used === 'string' ? raw.blocklist_used : null,
+    duplicated_leads: readImportCount(raw, 'duplicated_leads') ?? 0,
+    skipped_count: readImportCount(raw, 'skipped_count') ?? Math.max(0, totalSent - leadsUploaded),
+    invalid_email_count: readImportCount(raw, 'invalid_email_count') ?? 0,
+    incomplete_count: readImportCount(raw, 'incomplete_count') ?? 0,
+    duplicate_email_count: readImportCount(raw, 'duplicate_email_count') ?? 0,
+    remaining_in_plan: remainingInPlan ?? null,
+    created_leads: createdLeads,
+  };
+}
+
+export async function createLeads(
+  leads: LeadCreatePayload[],
+  options?: {
+    campaign_id?: string;
+    list_id?: string;
+    skip_if_in_workspace?: boolean;
+    skip_if_in_campaign?: boolean;
+    skip_if_in_list?: boolean;
+  },
+  requestOptions?: InstantlyRequestOptions,
+): Promise<BulkLeadImportResult> {
+  // До 1000 — один запрос; ответ сразу нормализуем в тот же контракт, что и
+  // многочастный импорт.
+  if (leads.length <= LEADS_PER_REQUEST) {
+    const raw = await request<Record<string, unknown>>(
+      '/leads/add',
+      { method: 'POST', body: { leads, ...options } },
+      requestOptions,
+    );
+    return normalizeBulkLeadImportResult(raw, leads.length);
+  }
+
+  // Больше 1000 — бьём на чанки и шлём последовательно, суммируя все
+  // официальные счётчики. Любая ошибка прерывает импорт: вызывающий код не
+  // должен активировать кампанию на основании частичного/неизвестного ответа.
+  const aggregate: BulkLeadImportResult = {
+    status: 'success',
+    total_sent: 0,
+    leads_uploaded: 0,
+    uploaded: 0,
+    in_blocklist: 0,
+    blocklist_used: null,
+    duplicated_leads: 0,
+    skipped_count: 0,
+    invalid_email_count: 0,
+    incomplete_count: 0,
+    duplicate_email_count: 0,
+    remaining_in_plan: null,
+    created_leads: [],
+  };
   for (let i = 0; i < leads.length; i += LEADS_PER_REQUEST) {
     const chunk = leads.slice(i, i + LEADS_PER_REQUEST);
-    const res = await request<Record<string, unknown>>(
+    const raw = await request<Record<string, unknown>>(
       '/leads/add',
       { method: 'POST', body: { leads: chunk, ...options } },
       requestOptions,
     );
-    const n = Number(res.uploaded ?? res.created ?? res.total_uploaded ?? chunk.length);
-    uploaded += Number.isFinite(n) ? n : chunk.length;
+    const result = normalizeBulkLeadImportResult(raw, chunk.length);
+    aggregate.total_sent += result.total_sent;
+    aggregate.leads_uploaded += result.leads_uploaded;
+    aggregate.uploaded = aggregate.leads_uploaded;
+    aggregate.in_blocklist += result.in_blocklist;
+    aggregate.blocklist_used = result.blocklist_used ?? aggregate.blocklist_used;
+    aggregate.duplicated_leads += result.duplicated_leads;
+    aggregate.skipped_count += result.skipped_count;
+    aggregate.invalid_email_count += result.invalid_email_count;
+    aggregate.incomplete_count += result.incomplete_count;
+    aggregate.duplicate_email_count += result.duplicate_email_count;
+    aggregate.remaining_in_plan = result.remaining_in_plan;
+    aggregate.created_leads.push(
+      ...result.created_leads.map((lead) => ({ ...lead, index: lead.index + i })),
+    );
   }
-  return { uploaded };
+  return aggregate;
 }
 
 export async function listLeads(body: {

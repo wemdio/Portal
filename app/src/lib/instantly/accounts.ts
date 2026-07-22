@@ -20,6 +20,12 @@ export interface PublicInstantlyAccount {
 
 export interface InstantlyRequestOptions {
   accountId?: string | null;
+  /** Optional timeout for each fetch attempt; defaults to 90 seconds. */
+  timeoutMs?: number;
+  /** Internal recovery calls can bypass the shared limiter for a bounded read. */
+  skipRateLimiter?: boolean;
+  /** Defaults to true; recovery status reads disable 429 retries. */
+  retryRateLimits?: boolean;
 }
 
 type RawAccount = {
