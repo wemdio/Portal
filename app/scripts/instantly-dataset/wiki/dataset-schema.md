@@ -1,6 +1,6 @@
 # Dataset Schema
 
-База `instantly_dataset` на VPS `144.31.54.166:35432`, юзер `instantly`. ~9 GB, 23 таблицы + 6 views.
+База `instantly_dataset` на production-сервере `139.60.162.12:35432`, юзер `instantly`. ~12 GB на 18.07.2026, 23 таблицы + 6 views.
 
 Связь устройства: `raw_*` хранит сырые данные из Instantly API, `lookup_*` расшифровывает magic-numbers, `*_snap` хранит снапшоты аналитики во времени, `v_*` — pre-joined проекции для типовых запросов.
 

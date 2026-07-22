@@ -23,7 +23,7 @@ This wiki implements [Karpathy's LLM-Wiki pattern](https://gist.github.com/karpa
 │ Layer 1:  Postgres `instantly_dataset`       │
 │           raw_* tables (truth), lookup_*,    │
 │           v_* views, dataset_snapshots       │
-│           host: 144.31.54.166:35432          │
+│           host: 139.60.162.12:35432           │
 └──────────────────────────────────────────────┘
 ```
 
@@ -80,7 +80,7 @@ Full ritual: see [concepts/eval-loop.md](concepts/eval-loop.md).
 
 ## Database Quick-Reference
 
-Connection: `postgresql://instantly:<pw>@144.31.54.166:35432/instantly_dataset` (read it from `.env` → `INSTANTLY_DATASET_DB_URL`)
+Connection: `postgresql://instantly:<pw>@139.60.162.12:35432/instantly_dataset` (read it from `.env` → `INSTANTLY_DATASET_DB_URL`)
 
 **Quickest way to run SQL from a shell:**
 ```bash
