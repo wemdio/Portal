@@ -200,12 +200,7 @@ export async function appendLeadsToClientCampaign(
       instantlyRequestOptions,
     );
 
-    const accepted = Number(
-      (leadResult as { uploaded?: number; created?: number; total_uploaded?: number }).uploaded ??
-        (leadResult as { created?: number }).created ??
-        (leadResult as { total_uploaded?: number }).total_uploaded ??
-        leadsToSend.length,
-    );
+    const accepted = leadResult.leads_uploaded;
     // В skipped входят и отсев Instantly, и срез по чёрному списку.
     const skipped = Math.max(0, leadsToSend.length - accepted) + blockedCount;
 

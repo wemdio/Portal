@@ -33,7 +33,7 @@ import type {
   ClientLaunchScheduleOverride,
   ClientLaunchSequence,
 } from './types';
-import { activateCampaign, createCampaign, createLeads, updateCampaign } from '@/lib/instantly/client';
+import { activateCampaign, createCampaign, createLeads, getCampaign, updateCampaign } from '@/lib/instantly/client';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
 import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
@@ -103,6 +103,37 @@ export class ClientLaunchError extends Error {
     super(message);
     this.status = status;
     this.name = 'ClientLaunchError';
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+/**
+ * A timed-out activation is ambiguous: Instantly may have completed the
+ * mutation after our 90s client timeout. Re-read the same campaign and retry
+ * activation once only when it is still not active. This never deletes or
+ * creates a replacement campaign.
+ */
+async function activateCampaignWithTimeoutRecovery(
+  campaignId: string,
+  requestOptions: { accountId: string },
+) {
+  try {
+    return await activateCampaign(campaignId, requestOptions);
+  } catch (error) {
+    if (!isAbortError(error)) throw error;
+
+    try {
+      const current = await getCampaign(campaignId, requestOptions);
+      if (current.status === 1) return current;
+    } catch {
+      // The status read is best-effort. A single activation retry below is
+      // still safer than creating a second campaign after an ambiguous timeout.
+    }
+
+    return activateCampaign(campaignId, requestOptions);
   }
 }
 
@@ -301,28 +332,46 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
       );
     }
 
-    // 6. Грузим лидов. skip_if_in_workspace НЕ выставляем (иначе Instantly
-    //    пропустит лида, который уже есть в воркспейсе из прошлых кампаний,
-    //    и текущая кампания останется пустой). skip_if_in_campaign — да,
-    //    дедуп внутри новой кампании безвреден.
+    // 6. Грузим лидов. Все workspace-wide skip-флаги явно выключены: по
+    //    контракту Instantly `skip_if_in_campaign=true` означает «есть в ЛЮБОЙ
+    //    кампании воркспейса», а не только в текущей. Дубли внутри входной базы
+    //    уже удалены локально; Instantly отдельно сообщает duplicated_leads для
+    //    самой целевой кампании.
     const leadResult = await createLeads(
       allowedLeads,
-      { campaign_id: instantlyCampaignId, skip_if_in_campaign: true },
+      {
+        campaign_id: instantlyCampaignId,
+        skip_if_in_workspace: false,
+        skip_if_in_campaign: false,
+        skip_if_in_list: false,
+      },
       instantlyRequestOptions,
     );
 
-    const accepted = Number(
-      (leadResult as { uploaded?: number; created?: number; total_uploaded?: number }).uploaded ??
-        (leadResult as { created?: number }).created ??
-        (leadResult as { total_uploaded?: number }).total_uploaded ??
-        allowedLeads.length,
-    );
+    const accepted = leadResult.leads_uploaded;
     // В «пропущенные» входят и отсев Instantly, и срез по чёрному списку —
     // blocked_rows отдаём отдельно, чтобы UI мог объяснить причину.
     const skipped = Math.max(0, allowedLeads.length - accepted) + blockedCount;
 
+    // Сохраняем фактические счётчики сразу после импорта. Если активация ниже
+    // оборвётся, журнал всё равно покажет частичный успех вместо ложных 0/0.
+    await supabaseInstantly
+      .from('client_campaign_launches')
+      .update({ accepted_rows: accepted, skipped_rows: skipped })
+      .eq('id', launchId);
+
+    if (accepted === 0) {
+      throw new ClientLaunchError(
+        'Система рассылки не загрузила ни одного контакта. Кампания оставлена в черновиках и не активирована.',
+        500,
+      );
+    }
+
     // 7. Активируем кампанию + обновляем каталог.
-    const activatedCampaign = await activateCampaign(instantlyCampaignId, instantlyRequestOptions);
+    const activatedCampaign = await activateCampaignWithTimeoutRecovery(
+      instantlyCampaignId,
+      instantlyRequestOptions,
+    );
     await upsertInstantlyCatalogFromCampaign(activatedCampaign, instantlyAccountId);
 
     // 8. Даём клиенту доступ к ресурсу.
