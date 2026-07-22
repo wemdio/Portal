@@ -39,7 +39,7 @@ const JOB_TABLES: JobTableConfig[] = [
   { table: 'tg_outreach_jobs',        label: 'TG Аутрич',        activeStatuses: ['pending', 'running'] },
   { table: 'tg_outreach_campaigns',   label: 'TG Кампании',      activeStatuses: ['running'] },
   { table: 'email_validation_jobs',   label: 'Email валидация',  activeStatuses: ['pending', 'running'] },
-  { table: 'website_enrichment_jobs', label: 'Обогащение',       activeStatuses: ['pending', 'running'] },
+  { table: 'website_enrichment_jobs', label: 'Обогащение',       activeStatuses: ['preparing', 'pending', 'running'] },
   { table: 'brief_scoring_jobs',      label: 'Скоринг брифов',   activeStatuses: ['pending', 'running'] },
   { table: 'yandex_maps_jobs',        label: 'Яндекс Карты',     activeStatuses: ['pending', 'running'] },
   { table: 'lead_import_jobs',        label: 'Импорт лидов',     activeStatuses: ['pending', 'running'] },

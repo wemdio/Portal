@@ -11,6 +11,10 @@ import type { ExtractorKey } from '@/lib/enrich/extractors/types';
 import { startTrace } from '@/lib/tracer';
 import type { Span } from '@/lib/tracer';
 import { writeEnrichResult, type EnrichBufferStatus } from '@/lib/enrich/enrichBuffer';
+import {
+  shouldFinalizeEnrichmentJob,
+  type EnrichmentQueueCounts,
+} from '@/lib/enrich/jobLifecycle';
 
 type QueueItem = {
   id: string;
@@ -26,7 +30,7 @@ type ExtractionType = 'text' | 'email' | 'signals';
 type JobRow = {
   id: string;
   user_id: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'preparing' | 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   extraction_type: ExtractionType;
   total: number;
   processed: number;
@@ -164,24 +168,35 @@ async function acquireDomainSlot(domain: string): Promise<ReleaseFn> {
   };
 }
 
-type QueueStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'skipped';
-
-async function countQueue(jobId: string, status: QueueStatus): Promise<number> {
-  if (!supabaseAdmin) return 0;
+async function getQueueSnapshot(jobId: string): Promise<EnrichmentQueueCounts | null> {
+  if (!supabaseAdmin) return null;
   try {
-    const { count, error } = await withSupabaseTimeout(
+    const { data, error } = await withSupabaseTimeout(
       supabaseAdmin
-        .from('website_enrichment_queue')
-        .select('id', { count: 'exact', head: true })
-        .eq('job_id', jobId)
-        .eq('status', status),
-      'Таймаут запроса countQueue',
+        .rpc('get_website_enrichment_queue_counts', { p_job_id: jobId })
+        .maybeSingle<Record<keyof EnrichmentQueueCounts | 'total', number | string>>(),
+      'Таймаут запроса состояния очереди',
     );
-    if (error) return 0;
-    return count ?? 0;
+    if (error || !data) return null;
+
+    const snapshot: EnrichmentQueueCounts = {
+      pending: Number(data.pending),
+      processing: Number(data.processing),
+      completed: Number(data.completed),
+      failed: Number(data.failed),
+      skipped: Number(data.skipped),
+    };
+    if (Object.values(snapshot).some((value) => !Number.isFinite(value) || value < 0)) {
+      return null;
+    }
+    return snapshot;
   } catch {
-    return 0;
+    return null;
   }
+}
+
+function terminalQueueCount(counts: EnrichmentQueueCounts): number {
+  return counts.completed + counts.failed + counts.skipped;
 }
 
 async function getOldestProcessingUpdatedAt(jobId: string): Promise<Date | null> {
@@ -666,7 +681,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       return;
     }
 
-    if (['failed', 'cancelled'].includes(job.status)) return;
+    if (['preparing', 'failed', 'cancelled'].includes(job.status)) return;
 
     const isEmail = job.extraction_type === 'email';
     const isSignals = job.extraction_type === 'signals';
@@ -688,22 +703,32 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       jobId,
     });
 
-    let processed = job.processed ?? 0;
-    let success = job.success_count ?? 0;
-    let errors = job.error_count ?? 0;
+    let _processed = job.processed ?? 0;
+    let _success = job.success_count ?? 0;
+    let _errors = job.error_count ?? 0;
 
     if (job.status === 'completed') {
-      const [pendingCount, processingCount, completedCount, failedCount, skippedCount] = await Promise.all([
-        countQueue(jobId, 'pending'),
-        countQueue(jobId, 'processing'),
-        countQueue(jobId, 'completed'),
-        countQueue(jobId, 'failed'),
-        countQueue(jobId, 'skipped'),
-      ]);
-      if (pendingCount === 0 && processingCount === 0) return;
-      processed = completedCount + failedCount + skippedCount;
-      success = completedCount;
-      errors = failedCount + skippedCount;
+      const snapshot = await getQueueSnapshot(jobId);
+      if (!snapshot) {
+        await logError(
+          'website.enrichment.worker.queue_snapshot_failed',
+          new Error('Не удалось проверить состояние очереди завершённой задачи'),
+          { jobId },
+        );
+        return;
+      }
+      if (shouldFinalizeEnrichmentJob(job.total, snapshot)) return;
+      if (snapshot.pending === 0 && snapshot.processing === 0) {
+        await logError(
+          'website.enrichment.worker.completed_queue_incomplete',
+          new Error(`Очередь завершённой задачи неполна: ${terminalQueueCount(snapshot)}/${job.total}`),
+          { jobId },
+        );
+        return;
+      }
+      _processed = terminalQueueCount(snapshot);
+      _success = snapshot.completed;
+      _errors = snapshot.failed + snapshot.skipped;
       await withSupabaseTimeout(
         supabaseAdmin
           .from('website_enrichment_jobs')
@@ -735,6 +760,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
 
     const inflight = new Map<string, Promise<FetchResult>>();
     let consecutiveDbErrors = 0;
+    let snapshotDbErrors = 0;
     const MAX_CONSECUTIVE_DB_ERRORS = 20;
 
     // ─── Progress flush — owned by enrich-coordinator now ──────────────
@@ -831,7 +857,13 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       }
     };
 
+    let finalSnapshot: EnrichmentQueueCounts | null = null;
     while (true) {
+      if (snapshotDbErrors >= MAX_CONSECUTIVE_DB_ERRORS) {
+        throw new Error(
+          `Supabase недоступен: ${snapshotDbErrors} ошибок состояния очереди подряд, перезапускаем задачу`,
+        );
+      }
       if (consecutiveDbErrors >= MAX_CONSECUTIVE_DB_ERRORS) {
         throw new Error(`Supabase недоступен: ${consecutiveDbErrors} ошибок подряд, перезапускаем задачу`);
       }
@@ -856,6 +888,11 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       if (jobStatus?.status === 'cancelled') {
         cancelled = true;
         break;
+      }
+      if (jobStatus?.status === 'failed' || jobStatus?.status === 'preparing') {
+        if (pendingApplyTimer) clearTimeout(pendingApplyTimer);
+        await trace?.end({ status: jobStatus.status });
+        return;
       }
 
       let items: QueueItem[] | null = null;
@@ -887,13 +924,27 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
 
       const batch = (items as QueueItem[]) ?? [];
       if (batch.length === 0) {
-        const [pendingCount, processingCount] = await Promise.all([
-          countQueue(jobId, 'pending'),
-          countQueue(jobId, 'processing'),
-        ]);
-        if (pendingCount === 0 && processingCount === 0) break;
+        const snapshot = await getQueueSnapshot(jobId);
+        if (!snapshot) {
+          snapshotDbErrors += 1;
+          await sleep(2000 * Math.min(snapshotDbErrors, 5));
+          continue;
+        }
+        snapshotDbErrors = 0;
 
-        if (processingCount > 0) {
+        if (shouldFinalizeEnrichmentJob(job.total, snapshot)) {
+          finalSnapshot = snapshot;
+          break;
+        }
+
+        const activeCount = snapshot.pending + snapshot.processing;
+        if (activeCount === 0) {
+          throw new Error(
+            `Очередь задания сформирована не полностью: ${terminalQueueCount(snapshot)}/${job.total}`,
+          );
+        }
+
+        if (snapshot.processing > 0) {
           const oldestProcessing = await getOldestProcessingUpdatedAt(jobId);
           if (oldestProcessing && Date.now() - oldestProcessing.getTime() > staleProcessingMs) {
             await withSupabaseTimeout(
@@ -925,7 +976,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
                 'failed',
               );
               if (marked) {
-                errors += 1;
+                _errors += 1;
                 finalized = true;
               }
               return;
@@ -949,21 +1000,21 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
                     'failed',
                   );
                   if (markedFailed) {
-                    errors += 1;
+                    _errors += 1;
                     finalized = true;
                   }
                 }
               } else {
                 const marked = await updateQueueItem(item, result, 'failed');
                 if (marked) {
-                  errors += 1;
+                  _errors += 1;
                   finalized = true;
                 }
               }
             } else {
               const markedCompleted = await updateQueueItem(item, { text: result.text ?? '' }, 'completed');
               if (markedCompleted) {
-                success += 1;
+                _success += 1;
                 finalized = true;
               } else {
                 const markedFailed = await updateQueueItem(
@@ -972,7 +1023,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
                   'failed',
                 );
                 if (markedFailed) {
-                  errors += 1;
+                  _errors += 1;
                   finalized = true;
                 }
               }
@@ -987,13 +1038,13 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
             );
             if (marked) {
               if (!shouldRetry) {
-                errors += 1;
+                _errors += 1;
                 finalized = true;
               }
             } else {
               const markedFailed = await updateQueueItem(item, { error: errorMessage }, 'failed');
               if (markedFailed) {
-                errors += 1;
+                _errors += 1;
                 finalized = true;
               }
             }
@@ -1009,7 +1060,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
               // для своих логов «обработал N»). В БД его не пишем — это
               // делает coordinator после flush'а buffer'а. Многорепличная
               // безопасность тоже теперь у coordinator'а (он один writer).
-              processed += 1;
+              _processed += 1;
             }
             release();
           }
@@ -1044,17 +1095,27 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       ).catch(() => {});
     }
 
-    const [completedCount, failedCount, skippedCount] = await Promise.all([
-      countQueue(jobId, 'completed'),
-      countQueue(jobId, 'failed'),
-      countQueue(jobId, 'skipped'),
-    ]);
-    const processedTotal = completedCount + failedCount + skippedCount;
-    const finalSuccess = completedCount;
-    const finalErrors = failedCount + skippedCount;
+    const snapshot = finalSnapshot ?? await getQueueSnapshot(jobId);
+    if (!snapshot) {
+      if (cancelled) {
+        await trace?.end({ status: 'cancelled' });
+        return;
+      }
+      throw new Error('Не удалось получить итоговое состояние очереди');
+    }
+    if (!cancelled && !shouldFinalizeEnrichmentJob(job.total, snapshot)) {
+      throw new Error(
+        `Очередь задания не готова к завершению: ${terminalQueueCount(snapshot)}/${job.total}`,
+      );
+    }
+
+    const processedTotal = terminalQueueCount(snapshot);
+    const finalSuccess = snapshot.completed;
+    const finalErrors = snapshot.failed + snapshot.skipped;
 
     const finalStatus: JobRow['status'] = cancelled ? 'cancelled' : 'completed';
-    await withSupabaseTimeout(
+    const expectedStatus: JobRow['status'] = cancelled ? 'cancelled' : 'running';
+    const { data: finalizedJob, error: finalizeError } = await withSupabaseTimeout(
       supabaseAdmin
         .from('website_enrichment_jobs')
         .update({
@@ -1064,9 +1125,22 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
           error_count: finalErrors,
           completed_at: new Date().toISOString(),
         })
-        .eq('id', jobId),
+        .eq('id', jobId)
+        .eq('status', expectedStatus)
+        .select('id')
+        .maybeSingle<{ id: string }>(),
       'Таймаут финализации задачи',
     );
+    if (finalizeError) throw new Error(finalizeError.message);
+    if (!finalizedJob) {
+      await logInfo(
+        'website.enrichment.worker.finalize_skipped',
+        'Job status changed before finalization; preserving the newer status',
+        { jobId, expectedStatus },
+      );
+      await trace?.end({ status: 'superseded' });
+      return;
+    }
 
     await logInfo('website.enrichment.worker.completed', 'Website enrichment job completed', {
       jobId,
@@ -1118,7 +1192,8 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
             completed_at: new Date().toISOString(),
             error_message: err instanceof Error ? err.message : 'Worker error',
           })
-          .eq('id', jobId),
+          .eq('id', jobId)
+          .in('status', ['pending', 'running']),
         'Таймаут записи ошибки задачи',
       ).catch(() => {});
     }

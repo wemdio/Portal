@@ -36,7 +36,7 @@ const testUser: AgentUser = {
   telegramId: 12345,
 };
 
-function createMockQuery(resolvedValue: { data: unknown; error: unknown }) {
+function createMockQuery(resolvedValue: { data: unknown; error: unknown; count?: number }) {
   const query: Record<string, jest.Mock> = {};
   const methods = ['select', 'eq', 'single', 'maybeSingle', 'insert', 'update', 'delete', 'in', 'ilike', 'order', 'limit', 'gte', 'lt', 'not'];
   for (const m of methods) {
@@ -223,7 +223,7 @@ describe('writeHandlers', () => {
 
   describe('launchEmailSearch', () => {
     it('creates job and queue', async () => {
-      mockFrom.mockReturnValue(createMockQuery({ data: { id: 'es-1' }, error: null }));
+      mockFrom.mockReturnValue(createMockQuery({ data: { id: 'es-1' }, error: null, count: 2 }));
       const result = await launchEmailSearch({ urls: 'https://a.ru\nhttps://b.ru' }, testUser);
       expect(result).toContain('es-1');
       expect(result).toContain('2');
