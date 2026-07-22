@@ -55,10 +55,13 @@ export function mapCsvRowsToLeads(input: MapCsvRowsInput): LeadCreatePayload[] {
   }
 
   const result: LeadCreatePayload[] = [];
+  const seenEmails = new Set<string>();
 
   for (const row of rows) {
     const rawEmail = (row[emailIdx] ?? '').trim().toLowerCase();
     if (!rawEmail || !EMAIL_RE.test(rawEmail)) continue;
+    if (seenEmails.has(rawEmail)) continue;
+    seenEmails.add(rawEmail);
 
     const lead: LeadCreatePayload = { email: rawEmail };
 

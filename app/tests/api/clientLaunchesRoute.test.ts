@@ -8,9 +8,11 @@ const AUTH_USER_ID = 'client-user-1';
 let mockInstantlyDb: MockSupabaseClient = createMockSupabase();
 
 const mockCreateCampaign = jest.fn();
+const mockGetCampaign = jest.fn();
 const mockUpdateCampaign = jest.fn();
 const mockCreateLeads = jest.fn();
 const mockActivateCampaign = jest.fn();
+const mockDeleteCampaign = jest.fn();
 const mockUpsertInstantlyCatalogFromCampaign = jest.fn();
 const mockGetClientTariffRow = jest.fn();
 const mockGetClientStatus = jest.fn();
@@ -51,9 +53,11 @@ jest.mock('@/lib/clientApiHelper', () => {
 
 jest.mock('@/lib/instantly/client', () => ({
   createCampaign: (...args: unknown[]) => mockCreateCampaign(...args),
+  getCampaign: (...args: unknown[]) => mockGetCampaign(...args),
   updateCampaign: (...args: unknown[]) => mockUpdateCampaign(...args),
   createLeads: (...args: unknown[]) => mockCreateLeads(...args),
   activateCampaign: (...args: unknown[]) => mockActivateCampaign(...args),
+  deleteCampaign: (...args: unknown[]) => mockDeleteCampaign(...args),
 }));
 
 jest.mock('@/lib/tools/instantlyCampaignCatalog', () => ({
@@ -108,7 +112,7 @@ function seedDb(accountId: string | null = 'client-b') {
   });
 }
 
-function makeLaunchReq(): NextRequest {
+function makeLaunchReq(overrides: Record<string, unknown> = {}): NextRequest {
   return new Request('http://x/api/client/launches', {
     method: 'POST',
     headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
@@ -118,17 +122,38 @@ function makeLaunchReq(): NextRequest {
       headers: ['Email', 'First Name'],
       rows: [['lead@example.com', 'Ada']],
       mapping: { email: 'Email', first_name: 'First Name' },
+      ...overrides,
     }),
   }) as unknown as NextRequest;
+}
+
+function leadImportResult(overrides: Record<string, unknown> = {}) {
+  return {
+    status: 'success',
+    total_sent: 1,
+    leads_uploaded: 1,
+    in_blocklist: 0,
+    blocklist_used: null,
+    duplicated_leads: 0,
+    skipped_count: 0,
+    invalid_email_count: 0,
+    incomplete_count: 0,
+    duplicate_email_count: 0,
+    remaining_in_plan: 999,
+    created_leads: [{ id: 'lead-1', email: 'lead@example.com', index: 0 }],
+    ...overrides,
+  };
 }
 
 beforeEach(() => {
   jest.resetModules();
   seedDb();
   mockCreateCampaign.mockReset().mockResolvedValue({ id: 'cmp-new', name: 'Client B Launch', status: 0 });
+  mockGetCampaign.mockReset().mockResolvedValue({ id: 'cmp-new', name: 'Client B Launch', status: 0 });
   mockUpdateCampaign.mockReset().mockResolvedValue({ id: 'cmp-new', name: 'Client B Launch', status: 0 });
-  mockCreateLeads.mockReset().mockResolvedValue({ uploaded: 1 });
+  mockCreateLeads.mockReset().mockResolvedValue(leadImportResult());
   mockActivateCampaign.mockReset().mockResolvedValue({ id: 'cmp-new', name: 'Client B Launch', status: 1 });
+  mockDeleteCampaign.mockReset().mockResolvedValue(undefined);
   mockUpsertInstantlyCatalogFromCampaign.mockReset().mockResolvedValue(undefined);
   mockGetClientTariffRow.mockReset().mockResolvedValue({ id: 'tariff-1' });
   mockGetClientStatus.mockReset().mockReturnValue('active');
@@ -154,7 +179,12 @@ describe('POST /api/client/launches — Instantly account selection', () => {
     );
     expect(mockCreateLeads).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ email: 'lead@example.com' })]),
-      expect.objectContaining({ campaign_id: 'cmp-new', skip_if_in_campaign: true }),
+      {
+        campaign_id: 'cmp-new',
+        skip_if_in_workspace: false,
+        skip_if_in_campaign: false,
+        skip_if_in_list: false,
+      },
       { accountId: 'client-b' },
     );
     expect(mockActivateCampaign).toHaveBeenCalledWith('cmp-new', { accountId: 'client-b' });
@@ -174,6 +204,202 @@ describe('POST /api/client/launches — Instantly account selection', () => {
         }),
       ]),
     );
+  });
+
+  it('uses current Instantly counters instead of assuming every submitted lead was uploaded', async () => {
+    mockCreateLeads.mockResolvedValueOnce(leadImportResult({
+      total_sent: 2,
+      leads_uploaded: 1,
+      skipped_count: 1,
+      created_leads: [{ id: 'lead-1', email: 'first@example.com', index: 0 }],
+    }));
+    const { POST } = await import('@/app/api/client/launches/route');
+
+    const res = await POST(makeLaunchReq({
+      rows: [
+        ['first@example.com', 'First'],
+        ['second@example.com', 'Second'],
+      ],
+    }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { launch: { accepted_rows: number; skipped_rows: number } };
+    expect(body.launch.accepted_rows).toBe(1);
+    expect(body.launch.skipped_rows).toBe(1);
+  });
+
+  it('counts locally deduplicated source rows as skipped', async () => {
+    mockCreateLeads.mockResolvedValueOnce(leadImportResult({
+      total_sent: 2,
+      leads_uploaded: 2,
+      created_leads: [
+        { id: 'lead-1', email: 'duplicate@example.com', index: 0 },
+        { id: 'lead-2', email: 'unique@example.com', index: 1 },
+      ],
+    }));
+    const { POST } = await import('@/app/api/client/launches/route');
+
+    const res = await POST(makeLaunchReq({
+      rows: [
+        ['DUPLICATE@example.com', 'First row'],
+        [' duplicate@example.com ', 'Duplicate row'],
+        ['unique@example.com', 'Unique row'],
+      ],
+    }));
+
+    expect(res.status).toBe(200);
+    expect(mockCreateLeads.mock.calls[0][0]).toHaveLength(2);
+    const body = (await res.json()) as {
+      launch: { uploaded_rows: number; accepted_rows: number; skipped_rows: number };
+    };
+    expect(body.launch).toEqual(expect.objectContaining({
+      uploaded_rows: 3,
+      accepted_rows: 2,
+      skipped_rows: 1,
+    }));
+  });
+
+  it('does not activate or report success when Instantly uploads zero leads', async () => {
+    mockCreateLeads.mockResolvedValueOnce(leadImportResult({
+      leads_uploaded: 0,
+      skipped_count: 1,
+      created_leads: [],
+    }));
+    const { POST } = await import('@/app/api/client/launches/route');
+
+    const res = await POST(makeLaunchReq());
+    expect(res.status).toBe(500);
+    expect(mockActivateCampaign).not.toHaveBeenCalled();
+    expect(mockUpsertInstantlyCatalogFromCampaign).not.toHaveBeenCalled();
+    expect(mockDeleteCampaign).not.toHaveBeenCalled();
+    expect(mockInstantlyDb.upserts).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: 'client_instantly_access' }),
+    ]));
+    expect(mockInstantlyDb.updates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'client_campaign_launches',
+        patch: expect.objectContaining({ status: 'failed' }),
+      }),
+    ]));
+  });
+
+  it('recovers an ambiguous activation timeout on the same campaign without deleting it', async () => {
+    const aborted = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+    mockActivateCampaign
+      .mockRejectedValueOnce(aborted)
+      .mockResolvedValueOnce({ id: 'cmp-new', name: 'Client B Launch', status: 1 });
+    mockGetCampaign.mockResolvedValueOnce({ id: 'cmp-new', name: 'Client B Launch', status: 0 });
+    const { POST } = await import('@/app/api/client/launches/route');
+
+    const res = await POST(makeLaunchReq());
+    expect(res.status).toBe(200);
+    expect(mockGetCampaign).toHaveBeenCalledWith('cmp-new', {
+      accountId: 'client-b',
+      retryRateLimits: false,
+      skipRateLimiter: true,
+      timeoutMs: 5_000,
+    });
+    expect(mockActivateCampaign).toHaveBeenCalledTimes(2);
+    expect(mockDeleteCampaign).not.toHaveBeenCalled();
+  });
+
+  it('does not retry activation when the first status read already shows active', async () => {
+    const aborted = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+    mockActivateCampaign.mockRejectedValueOnce(aborted);
+    mockGetCampaign.mockResolvedValueOnce({
+      id: 'cmp-new',
+      name: 'Client B Launch',
+      status: 1,
+    });
+    const { POST } = await import('@/app/api/client/launches/route');
+
+    const res = await POST(makeLaunchReq());
+
+    expect(res.status).toBe(200);
+    expect(mockActivateCampaign).toHaveBeenCalledTimes(1);
+    expect(mockGetCampaign).toHaveBeenCalledTimes(1);
+    expect(mockDeleteCampaign).not.toHaveBeenCalled();
+  });
+
+  it('accepts the same campaign as active when the activation retry also times out', async () => {
+    const aborted = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+    mockActivateCampaign
+      .mockRejectedValueOnce(aborted)
+      .mockRejectedValueOnce(aborted);
+    mockGetCampaign
+      .mockResolvedValueOnce({ id: 'cmp-new', name: 'Client B Launch', status: 0 })
+      .mockResolvedValueOnce({ id: 'cmp-new', name: 'Client B Launch', status: 0 })
+      .mockResolvedValueOnce({ id: 'cmp-new', name: 'Client B Launch', status: 1 });
+    const { POST } = await import('@/app/api/client/launches/route');
+
+    const res = await POST(makeLaunchReq());
+
+    expect(res.status).toBe(200);
+    expect(mockActivateCampaign).toHaveBeenCalledTimes(2);
+    expect(mockGetCampaign).toHaveBeenCalledTimes(3);
+    for (const [, requestOptions] of mockGetCampaign.mock.calls) {
+      expect(requestOptions).toEqual({
+        accountId: 'client-b',
+        retryRateLimits: false,
+        skipRateLimiter: true,
+        timeoutMs: 5_000,
+      });
+    }
+    expect(mockDeleteCampaign).not.toHaveBeenCalled();
+  });
+
+  it('fails safely when neither activation nor bounded status polls confirm active', async () => {
+    const aborted = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+    mockActivateCampaign
+      .mockRejectedValueOnce(aborted)
+      .mockRejectedValueOnce(aborted);
+    mockGetCampaign.mockResolvedValue({ id: 'cmp-new', name: 'Client B Launch', status: 0 });
+    const { POST } = await import('@/app/api/client/launches/route');
+
+    const res = await POST(makeLaunchReq());
+
+    expect(res.status).toBe(500);
+    expect(mockActivateCampaign).toHaveBeenCalledTimes(2);
+    expect(mockGetCampaign).toHaveBeenCalledTimes(4);
+    expect(mockUpsertInstantlyCatalogFromCampaign).not.toHaveBeenCalled();
+    expect(mockDeleteCampaign).not.toHaveBeenCalled();
+    expect(mockInstantlyDb.upserts).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: 'client_instantly_access' }),
+    ]));
+    expect(mockInstantlyDb.updates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'client_campaign_launches',
+        patch: expect.objectContaining({ status: 'failed' }),
+      }),
+    ]));
+  });
+
+  it('allows the same base to be retried into a new campaign after an unrecoverable partial failure', async () => {
+    mockCreateCampaign
+      .mockResolvedValueOnce({ id: 'cmp-first', name: 'Client B Launch', status: 0 })
+      .mockResolvedValueOnce({ id: 'cmp-second', name: 'Client B Launch', status: 0 });
+    mockActivateCampaign
+      .mockRejectedValueOnce(new Error('activation failed'))
+      .mockResolvedValueOnce({ id: 'cmp-second', name: 'Client B Launch', status: 1 });
+    const { POST } = await import('@/app/api/client/launches/route');
+
+    const first = await POST(makeLaunchReq());
+    const second = await POST(makeLaunchReq());
+
+    expect(first.status).toBe(500);
+    expect(second.status).toBe(200);
+    expect(mockCreateCampaign).toHaveBeenCalledTimes(2);
+    expect(mockCreateLeads).toHaveBeenNthCalledWith(
+      2,
+      expect.arrayContaining([expect.objectContaining({ email: 'lead@example.com' })]),
+      {
+        campaign_id: 'cmp-second',
+        skip_if_in_workspace: false,
+        skip_if_in_campaign: false,
+        skip_if_in_list: false,
+      },
+      { accountId: 'client-b' },
+    );
+    expect(mockDeleteCampaign).not.toHaveBeenCalled();
   });
 
   it('repairs campaign sequences before activation when Instantly create response omits them', async () => {
