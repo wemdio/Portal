@@ -735,6 +735,7 @@ _STUCK_JOB_SPECS: list[tuple[str, str, str | None, int]] = [
      int(os.environ.get("HEALTH_STUCK_BASECON_MIN", "60"))),
 ]
 STUCK_PENDING_MINUTES = max(2, int(os.environ.get("HEALTH_STUCK_PENDING_MIN", "6")))
+STUCK_PREPARING_MINUTES = max(2, int(os.environ.get("HEALTH_STUCK_PREPARING_MIN", "15")))
 
 # job_key ("table:id") -> (progress fingerprint, loop-clock ts when first seen
 # with this fingerprint). Used to measure how long progress has been frozen.
@@ -748,7 +749,7 @@ async def check_stuck_jobs() -> list[str]:
 
     Mirrors the worker's own watchdog but lives outside the worker, so it still
     fires when the worker itself is wedged/down. One alert per stuck job; cleared
-    automatically when the job leaves pending/running.
+    automatically when the job leaves preparing/pending/running.
     """
     if not DATABASE_URL:
         return []
@@ -764,12 +765,18 @@ async def check_stuck_jobs() -> list[str]:
     try:
         for table, label, prog_col, stall_min in _STUCK_JOB_SPECS:
             prog_select = f"{prog_col}::text" if prog_col else "NULL::text"
+            age_anchor = (
+                "case when status = 'preparing' "
+                "then coalesce(preparing_heartbeat_at, created_at) else created_at end"
+                if table == "website_enrichment_jobs"
+                else "created_at"
+            )
             try:
                 rows = await conn.fetch(
                     f"SELECT id::text AS id, status, {prog_select} AS progress, "
                     f"  extract(epoch FROM (now() - coalesce(started_at, created_at)))::int AS active_secs, "
-                    f"  extract(epoch FROM (now() - created_at))::int AS age_secs "
-                    f"FROM public.{table} WHERE status IN ('pending','running')"
+                    f"  extract(epoch FROM (now() - {age_anchor}))::int AS age_secs "
+                    f"FROM public.{table} WHERE status IN ('preparing','pending','running')"
                 )
             except Exception as e:
                 print(f"[health] stuck-jobs query {table} skipped: {e}")
@@ -778,6 +785,15 @@ async def check_stuck_jobs() -> list[str]:
             for r in rows:
                 key = f"{table}:{r['id']}"
                 seen_keys.add(key)
+
+                if r["status"] == "preparing":
+                    if r["age_secs"] > STUCK_PREPARING_MINUTES * 60 and key not in _STUCK_ALERTED:
+                        _STUCK_ALERTED.add(key)
+                        problems.append(
+                            f"🟠 <b>{label}</b>: очередь формируется {r['age_secs'] // 60} мин "
+                            f"— подготовка задачи, похоже, зависла"
+                        )
+                    continue
 
                 if r["status"] == "pending":
                     # Nobody claimed it — worker down or queue backed up.
@@ -1347,7 +1363,7 @@ _JOB_TABLES: list[tuple[str, str, list[str]]] = [
     ("tg_outreach_jobs",        "TG Аутрич",         ["pending", "running"]),
     ("tg_outreach_campaigns",   "TG Кампании",       ["running"]),
     ("email_validation_jobs",   "Email валидация",   ["pending", "running"]),
-    ("website_enrichment_jobs", "Обогащение",        ["pending", "running"]),
+    ("website_enrichment_jobs", "Обогащение",        ["preparing", "pending", "running"]),
     ("brief_scoring_jobs",      "Скоринг брифов",    ["pending", "running"]),
     ("yandex_maps_jobs",        "Яндекс Карты",      ["pending", "running"]),
     ("lead_import_jobs",        "Импорт лидов",      ["pending", "running"]),

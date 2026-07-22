@@ -4,6 +4,7 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { extractNormalizedUrls, normalizeUrl } from '@/lib/enrich/websiteParser';
 import { ALL_EXTRACTOR_KEYS, ExtractorKey } from '@/lib/enrich/extractors/types';
+import { publishWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentJobPublisher';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,7 +31,7 @@ export async function GET(req: NextRequest) {
       .from('website_enrichment_jobs')
       .select('id, status, extraction_type, total, processed, created_at, spreadsheet_tab_id, result_col_index, result_col_header, result_col_index_2, result_col_header_2, extractors, extra_cols')
       .eq('user_id', user.id)
-      .in('status', ['pending', 'running']);
+      .in('status', ['preparing', 'pending', 'running']);
     if (typeFilter && ['text', 'email', 'signals'].includes(typeFilter)) {
       query = query.eq('extraction_type', typeFilter);
     }
@@ -186,7 +187,7 @@ export async function POST(req: NextRequest) {
       .select('id, status, extraction_type, total, processed, created_at')
       .eq('user_id', user.id)
       .eq('extraction_type', extractionType)
-      .in('status', ['pending', 'running'])
+      .in('status', ['preparing', 'pending', 'running'])
       .order('created_at', { ascending: false })
       .limit(1);
 
@@ -271,11 +272,10 @@ export async function POST(req: NextRequest) {
       };
     });
 
-    const { data: job, error: jobError } = await supabaseAdmin
-      .from('website_enrichment_jobs')
-      .insert({
+    const jobId = await publishWebsiteEnrichmentJob(
+      supabaseAdmin,
+      {
         user_id: user.id,
-        status: 'pending',
         extraction_type: extractionType,
         total: rows.length,
         processed: invalidCount,
@@ -289,25 +289,9 @@ export async function POST(req: NextRequest) {
         result_col_header_2: body.result_col_header_2 ?? null,
         extractors: extractorsValidated && extractorsValidated.length > 0 ? extractorsValidated : null,
         extra_cols: extraColsValidated && extraColsValidated.length > 0 ? extraColsValidated : null,
-      })
-      .select('id')
-      .single<{ id: string }>();
-
-    if (jobError || !job) {
-      return jsonError(jobError?.message ?? 'Failed to create job', 500);
-    }
-
-    const jobId = job.id;
-    const itemsToInsert = queueItems.map((item) => ({ ...item, job_id: jobId }));
-
-    const batchSize = 500;
-    for (let i = 0; i < itemsToInsert.length; i += batchSize) {
-      const batch = itemsToInsert.slice(i, i + batchSize);
-      const { error } = await supabaseAdmin.from('website_enrichment_queue').insert(batch);
-      if (error) {
-        return jsonError(error.message, 500);
-      }
-    }
+      },
+      queueItems,
+    );
 
     return NextResponse.json({
       job_id: jobId,

@@ -75,6 +75,12 @@ export interface SelectCall {
   columns: string;
 }
 
+export type MutationCall =
+  | { kind: 'insert'; table: string; rows: Row[] }
+  | { kind: 'upsert'; table: string; rows: Row[]; onConflict: string | null }
+  | { kind: 'update'; table: string; patch: Row; filters: Filter[] }
+  | { kind: 'delete'; table: string; rows: Row[] };
+
 export interface MockSupabaseClient {
   from: (table: string) => Builder;
 
@@ -87,6 +93,8 @@ export interface MockSupabaseClient {
   upserts: UpsertCall[];
   /** Recorded updates in chronological order. */
   updates: UpdateCall[];
+  /** All mutations in their actual execution order across tables. */
+  mutations: MutationCall[];
   /**
    * Recorded .select() projections in chronological order. Lets tests pin
    * WHICH columns a query asked for — e.g. «the ownership check must not
@@ -229,6 +237,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
   const inserts: InsertCall[] = [];
   const upserts: UpsertCall[] = [];
   const updates: UpdateCall[] = [];
+  const mutations: MutationCall[] = [];
   const selects: SelectCall[] = [];
   let generatedIdSeq = 1;
 
@@ -263,6 +272,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         const insertedRows = pendingInsert.map((row) => withGeneratedId(table, row));
         tables[table] = (tables[table] ?? []).concat(insertedRows);
         inserts.push({ table, rows: insertedRows });
+        mutations.push({ kind: 'insert', table, rows: insertedRows });
         return { data: insertedRows, error: null, count: insertedRows.length };
       }
       if (mode === 'upsert' && pendingUpsert) {
@@ -289,6 +299,12 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         }
         tables[table] = result;
         upserts.push({ table, rows: pendingUpsert.rows, onConflict: pendingUpsert.onConflict });
+        mutations.push({
+          kind: 'upsert',
+          table,
+          rows: pendingUpsert.rows,
+          onConflict: pendingUpsert.onConflict,
+        });
         return { data: returnedRows, error: null, count: returnedRows.length };
       }
       if (mode === 'update' && pendingUpdate) {
@@ -299,12 +315,14 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         );
         tables[table] = next;
         updates.push({ table, patch: pendingUpdate, filters: filters.slice() });
+        mutations.push({ kind: 'update', table, patch: pendingUpdate, filters: filters.slice() });
         return { data: matching, error: null, count: matching.length };
       }
       if (mode === 'delete') {
         const matching = rowsForRead();
         const matched = new Set(matching);
         tables[table] = (tables[table] ?? []).filter((row) => !matched.has(row));
+        mutations.push({ kind: 'delete', table, rows: matching });
         return { data: matching, error: null, count: matching.length };
       }
       const data = rowsForRead();
@@ -394,6 +412,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
     inserts,
     upserts,
     updates,
+    mutations,
     selects,
   };
 }

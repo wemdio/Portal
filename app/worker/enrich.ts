@@ -1,6 +1,7 @@
 import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
 import { runBriefScoringJob } from '@/lib/briefScoring/briefScoringWorker';
 import { runCryptoPaymentJob } from '@/lib/parsers/cryptoPaymentsWorker';
+import { recoverStalePreparingWebsiteEnrichmentJobs } from '@/lib/enrich/websiteEnrichmentJobPublisher';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
@@ -12,11 +13,28 @@ const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 // если на конкретной реплике мало памяти.
 const MAX_CONCURRENCY = Number(process.env.ENRICH_MAX_CONCURRENCY ?? '8');
 const STALE_JOB_MINUTES = Number(process.env.ENRICH_STALE_JOB_MINUTES ?? '10');
+const PREPARING_STALE_MINUTES = Number(process.env.ENRICH_PREPARING_STALE_MINUTES ?? '15');
 const WATCHDOG_INTERVAL_MS = 60_000;
 const WORKER_ID = `enrich-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 const running = new Set<Promise<void>>();
 const jobProgress = new Map<string, { processed: number; checkedAt: number }>();
+
+async function recoverStalePreparingJobs(): Promise<void> {
+  const db = requireSupabaseAdmin(log);
+  const cutoff = new Date(Date.now() - PREPARING_STALE_MINUTES * 60_000).toISOString();
+  try {
+    const result = await recoverStalePreparingWebsiteEnrichmentJobs(db, cutoff);
+    if (result.published || result.failed) {
+      log(
+        'warn',
+        `Recovered stale preparing website jobs: published=${result.published}, failed=${result.failed}`,
+      );
+    }
+  } catch (error) {
+    log('warn', 'Stale preparing website job recovery failed', error);
+  }
+}
 
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
@@ -28,6 +46,7 @@ async function startupRecovery(): Promise<void> {
     .select('id');
   if (error) log('warn', 'Startup recovery: website_enrichment_jobs update failed', error);
   else if (jobs?.length) log('info', `Startup recovery: reset ${jobs.length} website_enrichment_jobs to pending`);
+  await recoverStalePreparingJobs();
 
   const { data: briefJobs, error: briefError } = await db
     .from('brief_scoring_jobs')
@@ -202,6 +221,7 @@ async function pollOnce(): Promise<boolean> {
 async function watchdog(): Promise<void> {
   const db = requireSupabaseAdmin(log);
   try {
+    await recoverStalePreparingJobs();
     const { data: runningJobs } = await db
       .from('website_enrichment_jobs')
       .select('id, processed')

@@ -5,6 +5,7 @@ import type { AgentUser } from './types';
 import { exportPipelineResults } from './pipelineExport';
 import { cleanNamesForPipelineStep } from './cleanNames';
 import { deduplicateByField } from './dedup';
+import { publishWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentJobPublisher';
 
 export type StepType =
   | 'parse_hh'
@@ -449,24 +450,25 @@ async function launchStep(pipeline: Pipeline, stepIdx: number, user: AgentUser):
       const urls = await extractUrlsFromPreviousSteps(pipeline, stepIdx);
       if (urls.length === 0) throw new Error('Нет URL для обогащения — предыдущий парсер не нашёл сайтов компаний.');
 
-      const { data: job, error: jobErr } = await sb
-        .from('website_enrichment_jobs')
-        .insert({ user_id: user.userId, status: 'pending', extraction_type: 'email', total: urls.length, processed: 0, success_count: 0, error_count: 0, created_at: now })
-        .select('id')
-        .single();
-      if (jobErr) throw new Error(jobErr.message);
-
       const queue = urls.map((url, i) => ({
-        job_id: job.id, user_id: user.userId, row_index: i,
+        user_id: user.userId, row_index: i,
         url_raw: url, url_normalized: url,
-        status: 'pending', attempt_count: 0, result_text: null, last_error: null,
+        status: 'pending' as const, attempt_count: 0, result_text: null, last_error: null,
         created_at: now, updated_at: now, completed_at: null,
       }));
-      for (let i = 0; i < queue.length; i += 500) {
-        const { error } = await sb.from('website_enrichment_queue').insert(queue.slice(i, i + 500));
-        if (error) throw new Error(error.message);
-      }
-      return job.id as string;
+      return publishWebsiteEnrichmentJob(
+        sb,
+        {
+          user_id: user.userId,
+          extraction_type: 'email',
+          total: urls.length,
+          processed: 0,
+          success_count: 0,
+          error_count: 0,
+          created_at: now,
+        },
+        queue,
+      );
     }
 
     case 'validate_emails': {
