@@ -87,7 +87,15 @@ blocks:
                 exit 0
               fi
 
-              echo "[scheduled] New commits detected — pulling images and deploying."
+              if [ -n "$LAST" ] && ! git cat-file -e "${LAST}^{commit}" 2>/dev/null; then
+                echo "[scheduled] Last deployed commit is outside the checkout depth; fetching main history..."
+                git fetch --no-tags --depth=500 origin main || true
+              fi
+              . .semaphore/select-deploy-targets.sh
+              select_deploy_targets "$LAST" "$COMMIT_SHA"
+              print_deploy_plan
+
+              echo "[scheduled] New commits detected — deploying selected targets only."
 
               run_ssh "mkdir prod" \
                 "sudo -n mkdir -p /home/Portal/prod && sudo -n chown -R ${USER}:${USER} /home/Portal/prod"
@@ -124,7 +132,12 @@ blocks:
               # One-time Supabase → local PG copy: set INSTANTLY_SOURCE_DB_URL (pooler URL). Skipped if .supabase_import_done exists.
               # Re-run import: INSTANTLY_FORCE_SUPABASE_IMPORT=1 (removes marker). DB server must have .env (see deploy/instantly-db/.env.example).
               IDB_HOST="${INSTANTLY_DB_SSH_HOST:-}"
-              if [ -n "$IDB_HOST" ]; then
+              IDB_BACKUP_DEPLOYED=0
+              if [ "$DEPLOY_IDB_STACK" = 1 ] || [ "$DEPLOY_BACKUP" = 1 ]; then
+                if [ -z "$IDB_HOST" ]; then
+                  echo "[scheduled] FATAL: выбран деплой Instantly DB/backup, но INSTANTLY_DB_SSH_HOST пуст" >&2
+                  exit 1
+                fi
                 IDB_USER="${INSTANTLY_DB_SSH_USER:-$USER}"
                 IDB_PASS="${INSTANTLY_DB_SSH_PASSWORD:-$SERVER_PASSWORD}"
                 IDB_PATH="${INSTANTLY_DB_REMOTE_DIR:-/opt/instantly-db}"
@@ -172,70 +185,98 @@ blocks:
                 run_ssh_idb "instantly-db compose up + migrator" "set -e
                 cd ${IDB_PATH}
                 if [ ! -f .env ]; then echo \"[idb] FATAL: нет .env в ${IDB_PATH} — создай по deploy/instantly-db/.env.example\"; exit 1; fi
+                if [ "${DEPLOY_BACKUP}" = 1 ]; then
+                  for backup_key in BACKUP_S3_ENDPOINT BACKUP_S3_BUCKET BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY BACKUP_S3_REGION; do
+                    if ! grep -Eq \"^\${backup_key}=.+\" .env; then
+                      echo \"[idb] FATAL: \${backup_key} is missing or empty in ${IDB_PATH}/.env\" >&2
+                      exit 1
+                    fi
+                  done
+                  if sudo -n docker top portal-backup -eo args 2>/dev/null | grep -Fq '/backup.sh '; then
+                    echo '[idb] portal-backup: backup job active; postponing update so this commit is retried' >&2
+                    exit 75
+                  fi
+                fi
                 printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin
                 export DOCKER_CLIENT_TIMEOUT=300
                 export COMPOSE_HTTP_TIMEOUT=300
-                sudo -n docker rm -f instantly-migrator 2>/dev/null || true
-                # Бэкапы переехали на Portal-сервер (services/backup). Гарантированно
-                # сносим старый instantly-backup, чтобы не плодить дубли дампов.
-                sudo -n docker rm -f instantly-backup 2>/dev/null || true
-                sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env pull
-                sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env up -d --build
-                echo '[idb] waiting for instantly-migrator...'
-                mrc=\$(sudo -n docker wait instantly-migrator)
-                if [ \"\$mrc\" != \"0\" ]; then
-                  echo \"[idb] migrator exited with \$mrc\" >&2
-                  sudo -n docker logs instantly-migrator 2>&1 | tail -120 || true
-                  exit 1
+                if [ "${DEPLOY_IDB_STACK}" = 1 ]; then
+                  sudo -n docker rm -f instantly-migrator 2>/dev/null || true
+                  sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env pull
+                  sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env up -d --build
+                  echo '[idb] waiting for instantly-migrator...'
+                  mrc=\$(sudo -n docker wait instantly-migrator)
+                  if [ \"\$mrc\" != \"0\" ]; then
+                    echo \"[idb] migrator exited with \$mrc\" >&2
+                    sudo -n docker logs instantly-migrator 2>&1 | tail -120 || true
+                    exit 1
+                  fi
+                  echo '[idb] migrator OK'
                 fi
-                echo '[idb] migrator OK'
+                if [ "${DEPLOY_BACKUP}" = 1 ]; then
+                  # Удаляем старый instantly-backup, чтобы не плодить дубли дампов.
+                  sudo -n docker rm -f instantly-backup 2>/dev/null || true
+                  # portal-backup is profile-gated. Update it only while idle;
+                  # start it if the container does not exist yet.
+                  sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env --profile backup pull portal-backup
+                  sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env --profile backup up -d --no-deps portal-backup
+                fi
                 "
-                IDB_DO_IMPORT=0
-                if [ -n "${INSTANTLY_SOURCE_DB_URL:-}" ]; then
-                  if [ "${INSTANTLY_FORCE_SUPABASE_IMPORT:-}" = "1" ]; then
-                    run_ssh_idb "remove supabase import marker" "rm -f ${IDB_PATH}/.supabase_import_done" || true
-                  fi
-                  if run_ssh_idb "check supabase import marker" "test ! -f ${IDB_PATH}/.supabase_import_done"; then
-                    IDB_DO_IMPORT=1
+                if [ "$DEPLOY_IDB_STACK" = 1 ]; then
+                  IDB_DO_IMPORT=0
+                  if [ -n "${INSTANTLY_SOURCE_DB_URL:-}" ]; then
+                    if [ "${INSTANTLY_FORCE_SUPABASE_IMPORT:-}" = "1" ]; then
+                      run_ssh_idb "remove supabase import marker" "rm -f ${IDB_PATH}/.supabase_import_done" || true
+                    fi
+                    if run_ssh_idb "check supabase import marker" "test ! -f ${IDB_PATH}/.supabase_import_done"; then
+                      IDB_DO_IMPORT=1
+                    else
+                      echo "[scheduled] Instantly DB: одноразовый импорт из Supabase уже выполнен (.supabase_import_done)"
+                    fi
                   else
-                    echo "[scheduled] Instantly DB: одноразовый импорт из Supabase уже выполнен (.supabase_import_done)"
+                    echo "[scheduled] Instantly DB: INSTANTLY_SOURCE_DB_URL пуст — пропуск одноразового импорта из Supabase"
                   fi
-                else
-                  echo "[scheduled] Instantly DB: INSTANTLY_SOURCE_DB_URL пуст — пропуск одноразового импорта из Supabase"
+                  if [ "${IDB_DO_IMPORT}" = 1 ]; then
+                    IDB_IMP=$(mktemp)
+                    printf 'INSTANTLY_SOURCE_DB_URL=%s\n' "${INSTANTLY_SOURCE_DB_URL}" > "${IDB_IMP}"
+                    chmod 600 "${IDB_IMP}"
+                    run_scp_idb "sync instantly-ci-import.env" "${IDB_IMP}" "${IDB_USER}@${IDB_HOST}:${IDB_PATH}/.instantly-ci-import.env"
+                    rm -f "${IDB_IMP}"
+                    run_ssh_idb "supabase → instantly prod (one-time)" "set -e
+                    cd ${IDB_PATH}
+                    umask 077
+                    PW=\$(grep '^INSTANTLY_PROD_PG_PASSWORD=' .env | tail -1 | cut -d= -f2-)
+                    printf 'INSTANTLY_DATABASE_URL=postgresql://instantly:%s@127.0.0.1:35432/instantly\n' \"\${PW}\" > .instantly-ci-target.env
+                    chmod 600 .instantly-ci-import.env .instantly-ci-target.env 2>/dev/null || true
+                    printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin
+                    sudo -n docker pull \"${DOCKER_USERNAME}/portal:prod\"
+                    sudo -n docker run --rm --network host \\
+                      --env-file .instantly-ci-import.env \\
+                      --env-file .instantly-ci-target.env \\
+                      \"${DOCKER_USERNAME}/portal:prod\" node scripts/migrate-instantly-to-local-pg.mjs
+                    rm -f .instantly-ci-import.env .instantly-ci-target.env
+                    touch .supabase_import_done
+                    echo '[idb] supabase import done; убери INSTANTLY_SOURCE_DB_URL из CI после проверки'
+                    "
+                  fi
                 fi
-                if [ "${IDB_DO_IMPORT}" = 1 ]; then
-                  IDB_IMP=$(mktemp)
-                  printf 'INSTANTLY_SOURCE_DB_URL=%s\n' "${INSTANTLY_SOURCE_DB_URL}" > "${IDB_IMP}"
-                  chmod 600 "${IDB_IMP}"
-                  run_scp_idb "sync instantly-ci-import.env" "${IDB_IMP}" "${IDB_USER}@${IDB_HOST}:${IDB_PATH}/.instantly-ci-import.env"
-                  rm -f "${IDB_IMP}"
-                  run_ssh_idb "supabase → instantly prod (one-time)" "set -e
-                  cd ${IDB_PATH}
-                  umask 077
-                  PW=\$(grep '^INSTANTLY_PROD_PG_PASSWORD=' .env | tail -1 | cut -d= -f2-)
-                  printf 'INSTANTLY_DATABASE_URL=postgresql://instantly:%s@127.0.0.1:35432/instantly\n' \"\${PW}\" > .instantly-ci-target.env
-                  chmod 600 .instantly-ci-import.env .instantly-ci-target.env 2>/dev/null || true
-                  printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin
-                  sudo -n docker pull \"${DOCKER_USERNAME}/portal:prod\"
-                  sudo -n docker run --rm --network host \\
-                    --env-file .instantly-ci-import.env \\
-                    --env-file .instantly-ci-target.env \\
-                    \"${DOCKER_USERNAME}/portal:prod\" node scripts/migrate-instantly-to-local-pg.mjs
-                  rm -f .instantly-ci-import.env .instantly-ci-target.env
-                  touch .supabase_import_done
-                  echo '[idb] supabase import done; убери INSTANTLY_SOURCE_DB_URL из CI после проверки'
-                  "
+                if [ "$DEPLOY_BACKUP" = 1 ]; then
+                  IDB_BACKUP_DEPLOYED=1
                 fi
               else
-                echo "[scheduled] Instantly DB: INSTANTLY_DB_SSH_HOST пуст — деплой БД на отдельном сервере пропущен (только Portal + preflight по .env)"
+                echo "[scheduled] Instantly DB/backup: изменений нет — удалённый стек не трогаем"
               fi
 
-              run_scp "copy compose files" \
-                docker-compose.prod.yml drain-worker.sh deploy/nginx/50x.html ${USER}@${HOST}:/home/Portal/prod/
+              if [ "$DEPLOY_PORTAL_HOST" = 1 ] || [ "$IDB_BACKUP_DEPLOYED" = 1 ]; then
+                run_scp "copy compose files" \
+                  docker-compose.prod.yml drain-worker.sh deploy/nginx/50x.html ${USER}@${HOST}:/home/Portal/prod/
 
-              printf '%s\n' "${DOCKER_PASSWORD}" | sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_LONG} ${USER}@${HOST} \
-                "set -e;
+                printf '%s\n' "${DOCKER_PASSWORD}" | sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_LONG} ${USER}@${HOST} \
+                  "set -e;
                 cd /home/Portal/prod;
+                CORE_TARGETS='${CORE_SERVICES}';
+                WORKER_TARGETS='${WORKER_SERVICES}';
+                PORTAL_CHANGED='${DEPLOY_PORTAL}';
                 chmod +x drain-worker.sh;
                 upsert_env() {
                   key=\"\$1\";
@@ -311,44 +352,48 @@ blocks:
                 fi;
                 echo '--- Step 0.2: ensure .env permissions for portal ---';
                 fix_env_permissions;
-                echo '--- Step 1: pull new images ---';
-                sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
-                export DOCKER_CLIENT_TIMEOUT=300;
-                export COMPOSE_HTTP_TIMEOUT=300;
-                NETLABEL=\$(sudo -n docker network inspect portal_portal-network --format '{{index .Labels \"com.docker.compose.network\"}}' 2>/dev/null || true);
-                if [ -n \"\${NETLABEL+set}\" ] && [ \"\${NETLABEL}\" != 'portal-network' ]; then
-                  echo '[scheduled] removing orphaned portal_portal-network (bad labels)';
-                  sudo -n docker network rm portal_portal-network 2>/dev/null || true;
-                fi;
-                pull_attempt=1;
-                pull_max=5;
-                while [ \"\${pull_attempt}\" -le \"\${pull_max}\" ]; do
-                  echo \"[scheduled] docker compose pull: attempt \${pull_attempt}/\${pull_max}\";
-                  if sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml pull; then
-                    break;
+                if [ -n \"\${CORE_TARGETS}\" ] || [ -n \"\${WORKER_TARGETS}\" ]; then
+                  echo \"--- Step 1: pull selected images: \${CORE_TARGETS} \${WORKER_TARGETS} ---\";
+                  sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
+                  export DOCKER_CLIENT_TIMEOUT=300;
+                  export COMPOSE_HTTP_TIMEOUT=300;
+                  NETLABEL=\$(sudo -n docker network inspect portal_portal-network --format '{{index .Labels \"com.docker.compose.network\"}}' 2>/dev/null || true);
+                  if [ -n \"\${NETLABEL+set}\" ] && [ \"\${NETLABEL}\" != 'portal-network' ]; then
+                    echo '[scheduled] removing orphaned portal_portal-network (bad labels)';
+                    sudo -n docker network rm portal_portal-network 2>/dev/null || true;
                   fi;
-                  if [ \"\${pull_attempt}\" -eq \"\${pull_max}\" ]; then
-                    echo \"[scheduled] docker compose pull failed after \${pull_max} attempts\" >&2;
+                  pull_attempt=1;
+                  pull_max=5;
+                  while [ \"\${pull_attempt}\" -le \"\${pull_max}\" ]; do
+                    echo \"[scheduled] docker compose pull: attempt \${pull_attempt}/\${pull_max}\";
+                    if sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml pull \${CORE_TARGETS} \${WORKER_TARGETS}; then
+                      break;
+                    fi;
+                    if [ \"\${pull_attempt}\" -eq \"\${pull_max}\" ]; then
+                      echo \"[scheduled] docker compose pull failed after \${pull_max} attempts\" >&2;
+                      exit 1;
+                    fi;
+                    sleep_for=$((15 * pull_attempt));
+                    echo \"[scheduled] docker compose pull failed; sleeping \${sleep_for}s before retry\" >&2;
+                    sleep \"\${sleep_for}\";
+                    pull_attempt=$((pull_attempt + 1));
+                  done;
+                fi;
+                if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
+                  echo '--- Step 1.1: preflight migration check on new portal image ---';
+                  MIGRATION_OUTPUT=\"\$(sudo -n docker run --rm --network host --env-file .env ${DOCKER_USERNAME}/portal:prod node scripts/db/ensureDatabase.js 2>&1)\" || MIGRATION_RC=\$?;
+                  MIGRATION_RC=\${MIGRATION_RC:-0};
+                  if [ \"\${MIGRATION_RC}\" -ne 0 ]; then
+                    echo \"\${MIGRATION_OUTPUT}\";
+                    MIGRATION_TAIL=\"\$(printf '%s' \"\${MIGRATION_OUTPUT}\" | tail -n 20)\";
+                    ALERT=\"⚠️ DEPLOY ABORTED: migration precheck failed on new portal build (${COMMIT_SHA}). Old build remains active. Last migration error lines:\n\${MIGRATION_TAIL}\";
+                    echo \"\${ALERT}\";
+                    send_health_alert \"\${ALERT}\";
                     exit 1;
                   fi;
-                  sleep_for=$((15 * pull_attempt));
-                  echo \"[scheduled] docker compose pull failed; sleeping \${sleep_for}s before retry\" >&2;
-                  sleep \"\${sleep_for}\";
-                  pull_attempt=$((pull_attempt + 1));
-                done;
-                echo '--- Step 1.1: preflight migration check on new portal image ---';
-                MIGRATION_OUTPUT=\"\$(sudo -n docker run --rm --network host --env-file .env ${DOCKER_USERNAME}/portal:prod node scripts/db/ensureDatabase.js 2>&1)\" || MIGRATION_RC=\$?;
-                MIGRATION_RC=\${MIGRATION_RC:-0};
-                if [ \"\${MIGRATION_RC}\" -ne 0 ]; then
-                  echo \"\${MIGRATION_OUTPUT}\";
-                  MIGRATION_TAIL=\"\$(printf '%s' \"\${MIGRATION_OUTPUT}\" | tail -n 20)\";
-                  ALERT=\"⚠️ DEPLOY ABORTED: migration precheck failed on new portal build (${COMMIT_SHA}). Old build remains active. Last migration error lines:\n\${MIGRATION_TAIL}\";
-                  echo \"\${ALERT}\";
-                  send_health_alert \"\${ALERT}\";
-                  exit 1;
+                  echo '--- Step 1.2: cleanup expired tool statuses (new -> active after 7 days) ---';
+                  sudo -n docker run --rm --network host --env-file .env ${DOCKER_USERNAME}/portal:prod node scripts/db/cleanupExpiredToolStatuses.js 2>&1 || echo \"[scheduled] tool-status cleanup failed, continuing\";
                 fi;
-                echo '--- Step 1.2: cleanup expired tool statuses (new -> active after 7 days) ---';
-                sudo -n docker run --rm --network host --env-file .env ${DOCKER_USERNAME}/portal:prod node scripts/db/cleanupExpiredToolStatuses.js 2>&1 || echo \"[scheduled] tool-status cleanup failed, continuing\";
                 wait_port_free() {
                   local port=\"\$1\" max_wait=\"\${2:-30}\";
                   local i=0;
@@ -365,16 +410,20 @@ blocks:
                   sudo -n fuser -k \"\${port}/tcp\" 2>/dev/null || true;
                   sleep 2;
                 };
-                echo '--- Step 2: enable maintenance mode ---';
-                upsert_env MAINTENANCE_MODE true;
-                fix_env_permissions;
-                sudo -n docker stop portal 2>/dev/null || true;
-                sudo -n docker rm -f portal portal-portal-1 2>/dev/null || true;
-                wait_port_free 3000 15;
-                sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal;
-                maintenance_enabled=1;
-                echo '--- Step 3: drain worker ---';
-                sudo -n bash drain-worker.sh;
+                if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
+                  echo '--- Step 2: enable maintenance mode ---';
+                  upsert_env MAINTENANCE_MODE true;
+                  fix_env_permissions;
+                  sudo -n docker stop portal 2>/dev/null || true;
+                  sudo -n docker rm -f portal portal-portal-1 2>/dev/null || true;
+                  wait_port_free 3000 15;
+                  sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal;
+                  maintenance_enabled=1;
+                fi;
+                if [ -n \"\${WORKER_TARGETS}\" ]; then
+                  echo '--- Step 3: drain workers ---';
+                  sudo -n bash drain-worker.sh;
+                fi;
                 force_rm_svc() {
                   local svc=\"\$1\";
                   local cids=\$(sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q);
@@ -385,42 +434,76 @@ blocks:
                   sleep 3;
                   echo \"\${cids}\" | xargs -r sudo -n docker rm -f 2>/dev/null || true;
                 };
-                echo '--- Step 4: restart portal + yandexmaps + googleparsers + transcribe-worker + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot + instantly-sync-bot + portal-external-sync + portal-backup + changelog-bot + polza-reports ---';
-                for svc in portal yandexmaps googleparsers transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot portal-external-sync portal-backup changelog-bot polza-reports; do force_rm_svc \"\$svc\"; done;
-                sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-googleparsers portal-transcribe-worker portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot portal-instantly-sync-bot portal-external-sync portal-backup portal-changelog-bot portal-polza-reports 2>/dev/null || true;
-                wait_port_free 3000 15;
-                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps googleparsers transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot portal-external-sync portal-backup changelog-bot polza-reports;
-                echo '--- Step 4.1: verify Docker socket access inside portal ---';
-                PORTAL_GROUPS=\$(sudo -n docker inspect portal --format '{{json .HostConfig.GroupAdd}}' 2>/dev/null || echo '[]');
-                echo \"portal GroupAdd=\${PORTAL_GROUPS}\";
-                case \"\${PORTAL_GROUPS}\" in
-                  *\"\\\"\${DOCKER_GID}\\\"\"*) echo 'portal has expected DOCKER_GID in GroupAdd';;
-                  *) echo 'portal is missing expected DOCKER_GID in GroupAdd' && exit 1;;
-                esac;
-                sudo -n docker exec portal sh -lc 'id; ls -ln /var/run/docker.sock; test -S /var/run/docker.sock && test -r /var/run/docker.sock && test -w /var/run/docker.sock';
-                echo '--- Step 5: restart workers ---';
-                # worker-enrich-10 убран 2026-06-10 (см. docker-compose.prod.yml). Если возвращаешь — добавь во все три списка ниже.
-                # Старый контейнер всё ещё может крутиться на хосте после деплоя — sudo -n docker rm -f ниже его прибьёт.
-                for svc in worker-hh worker-eng-hiring worker-search worker-enrich worker-enrich-2 worker-enrich-3 worker-enrich-4 worker-enrich-5 worker-enrich-6 worker-enrich-7 worker-enrich-8 worker-enrich-9 worker-enrich-coordinator worker-yandexmaps worker-googleparsers worker-emailvalidation worker-tg-outreach worker-aicaller worker-sales-copilot worker-sales-chat-archive worker-tg-parser worker-tg-transcribe worker-instantly-leads worker-outreach worker-li-outreach worker-baseconstructor worker-baseconstructor-2 worker-baseconstructor-3 worker-bob-scorer worker-manual-scoring worker-autopipeline worker-sales-ai-analysis; do force_rm_svc \"\$svc\"; done;
-                sudo -n docker rm -f portal-worker-hh portal-worker-eng-hiring portal-worker-search portal-worker-enrich portal-worker-enrich-2 portal-worker-enrich-3 portal-worker-enrich-4 portal-worker-enrich-5 portal-worker-enrich-6 portal-worker-enrich-7 portal-worker-enrich-8 portal-worker-enrich-9 portal-worker-enrich-10 portal-worker-enrich-coordinator portal-worker-yandexmaps portal-worker-googleparsers portal-worker-emailvalidation portal-worker-tg-outreach portal-worker-aicaller portal-worker-sales-copilot portal-worker-sales-chat-archive portal-worker-tg-parser portal-worker-tg-transcribe portal-worker-instantly-leads portal-worker-outreach portal-worker-li-outreach portal-worker-baseconstructor portal-worker-baseconstructor-2 portal-worker-baseconstructor-3 portal-worker-bob-scorer portal-worker-manual-scoring portal-worker-autopipeline portal-worker-sales-ai-analysis 2>/dev/null || true;
-                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-eng-hiring worker-search worker-enrich worker-enrich-2 worker-enrich-3 worker-enrich-4 worker-enrich-5 worker-enrich-6 worker-enrich-7 worker-enrich-8 worker-enrich-9 worker-enrich-coordinator worker-yandexmaps worker-googleparsers worker-emailvalidation worker-tg-outreach worker-aicaller worker-sales-copilot worker-sales-chat-archive worker-tg-parser worker-tg-transcribe worker-instantly-leads worker-outreach worker-li-outreach worker-baseconstructor worker-baseconstructor-2 worker-baseconstructor-3 worker-bob-scorer worker-manual-scoring worker-autopipeline worker-sales-ai-analysis;
-                echo '--- Step 6: disable maintenance mode (normal path) ---';
-                echo '[scheduled] maintenance disabled after successful deploy';
-                disable_maintenance;
-                sudo -n docker image prune -f;
-                sudo -n docker volume prune -f;
+                if [ ${IDB_BACKUP_DEPLOYED} = 1 ]; then
+                  echo '--- Retire legacy portal-backup from Portal host ---';
+                  if sudo -n docker inspect portal-backup >/dev/null 2>&1; then
+                    if sudo -n docker inspect -f '{{.State.Running}}' portal-backup 2>/dev/null | grep -qx true; then
+                      sudo -n docker update --restart=no portal-backup >/dev/null;
+                      sudo -n docker exec portal-backup sh -c ': > /etc/crontabs/root';
+                      sleep 2;
+                      if sudo -n docker top portal-backup -eo args 2>/dev/null | grep -Fq '/backup.sh '; then
+                        echo '[deploy] legacy portal-backup is busy; stopping it after the active job';
+                        sudo -n docker exec -d portal-backup sh -c 'while ps -o args 2>/dev/null | grep -q \"[/]backup[.]sh \"; do sleep 10; done; kill -TERM 1';
+                      else
+                        sudo -n docker rm -f portal-backup 2>/dev/null || true;
+                      fi;
+                    else
+                      sudo -n docker rm -f portal-backup 2>/dev/null || true;
+                    fi;
+                  fi;
+                else
+                  echo '[deploy] Instantly DB deploy was skipped; keeping legacy portal-backup untouched';
+                fi;
+                if [ -n \"\${CORE_TARGETS}\" ]; then
+                  echo \"--- Step 4: restart selected services: \${CORE_TARGETS} ---\";
+                  for svc in \${CORE_TARGETS}; do force_rm_svc \"\$svc\"; done;
+                  if [ \"\${PORTAL_CHANGED}\" = 1 ]; then wait_port_free 3000 15; fi;
+                  sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate \${CORE_TARGETS};
+                fi;
+                if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
+                  echo '--- Step 4.1: verify Docker socket access inside portal ---';
+                  PORTAL_GROUPS=\$(sudo -n docker inspect portal --format '{{json .HostConfig.GroupAdd}}' 2>/dev/null || echo '[]');
+                  echo \"portal GroupAdd=\${PORTAL_GROUPS}\";
+                  case \"\${PORTAL_GROUPS}\" in
+                    *\"\\\"\${DOCKER_GID}\\\"\"*) echo 'portal has expected DOCKER_GID in GroupAdd';;
+                    *) echo 'portal is missing expected DOCKER_GID in GroupAdd' && exit 1;;
+                  esac;
+                  sudo -n docker exec portal sh -lc 'id; ls -ln /var/run/docker.sock; test -S /var/run/docker.sock && test -r /var/run/docker.sock && test -w /var/run/docker.sock';
+                fi;
+                if [ -n \"\${WORKER_TARGETS}\" ]; then
+                  echo \"--- Step 5: restart selected workers: \${WORKER_TARGETS} ---\";
+                  for svc in \${WORKER_TARGETS}; do force_rm_svc \"\$svc\"; done;
+                  sudo -n docker rm -f portal-worker-enrich-10 2>/dev/null || true;
+                  sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate \${WORKER_TARGETS};
+                fi;
+                if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
+                  echo '--- Step 6: disable maintenance mode (normal path) ---';
+                  echo '[scheduled] maintenance disabled after successful deploy';
+                  disable_maintenance;
+                fi;
+                if [ -n \"\${CORE_TARGETS}\" ] || [ -n \"\${WORKER_TARGETS}\" ]; then
+                  sudo -n docker image prune -f;
+                  sudo -n docker volume prune -f;
+                fi;
                 echo '--- Deploy complete ---'"
+              else
+                echo "[scheduled] Portal host: подходящих изменений нет — контейнеры не трогаем"
+              fi
 
-              echo "--- Waiting 15s for container to stabilize ---"
-              sleep 15
+              if [ "$DEPLOY_PORTAL_HOST" = 1 ]; then
+                echo "--- Waiting 15s for selected containers to stabilize ---"
+                sleep 15
 
-              echo "--- Docker container status ---"
-              run_ssh "docker ps" \
-                "sudo -n docker ps -a --filter name=portal --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'" || true
+                echo "--- Docker container status ---"
+                run_ssh "docker ps" \
+                  "sudo -n docker ps -a --filter name=portal --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'" || true
 
-              echo "--- Portal container logs (last 200 lines) ---"
-              run_ssh "docker logs" \
-                "sudo -n docker logs portal --tail 200 2>&1" || true
+                if [ "$DEPLOY_PORTAL" = 1 ]; then
+                  echo "--- Portal container logs (last 200 lines) ---"
+                  run_ssh "docker logs" \
+                    "sudo -n docker logs portal --tail 200 2>&1" || true
+                fi
+              fi
 
               run_ssh "write last_deploy_sha" \
                 "echo $COMMIT_SHA > /home/Portal/prod/last_deploy_sha"

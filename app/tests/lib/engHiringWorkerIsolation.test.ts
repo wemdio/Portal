@@ -48,13 +48,15 @@ describe('ENG hiring worker isolation', () => {
   it('deploys ENG hiring through its own prod compose service', () => {
     const compose = readRepoFile('docker-compose.prod.yml');
     const scheduledDeploy = readRepoFile('.semaphore/scheduled-deploy.yml');
+    const deployTargets = readRepoFile('.semaphore/select-deploy-targets.sh');
     const drainWorker = readRepoFile('drain-worker.sh');
 
     expect(compose).toContain('worker-eng-hiring:');
     expect(compose).toContain('container_name: portal-worker-eng-hiring');
     expect(compose).toContain('WORKER_KIND=enghiring');
-    expect(scheduledDeploy).toContain('worker-eng-hiring');
-    expect(scheduledDeploy).toContain('portal-worker-eng-hiring');
+    expect(scheduledDeploy).toContain('. .semaphore/select-deploy-targets.sh');
+    expect(scheduledDeploy).toContain("WORKER_TARGETS='${WORKER_SERVICES}'");
+    expect(deployTargets).toContain('worker-eng-hiring');
     expect(drainWorker).toContain('portal-worker-eng-hiring');
   });
 

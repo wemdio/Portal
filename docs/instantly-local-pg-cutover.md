@@ -3,7 +3,7 @@
 ## Архитектура
 
 Instantly DB живёт на **отдельном сервере** от Portal, в `deploy/instantly-db/docker-compose.yml`.
-Два инстанса (prod + dev) с отдельными pgAdmin и автобэкапами. На хосте используются **нестандартные порты** (не 5432/3001), чтобы не пересекаться с другими сервисами на том же сервере. Внутри Docker-сети Postgres по-прежнему на `5432`, PostgREST на `3000`.
+Два инстанса (prod + dev) с отдельными pgAdmin; автобэкапы включены только для production. На хосте используются **нестандартные порты** (не 5432/3001), чтобы не пересекаться с другими сервисами на том же сервере. Внутри Docker-сети Postgres по-прежнему на `5432`, PostgREST на `3000`.
 
 | Порт на хосте | Сервис | Кто подключается |
 |---------------|--------|------------------|
@@ -60,7 +60,7 @@ docker compose up -d
 ```
 
 Migrator автоматически применит миграции к обоим инстансам.
-Backup-контейнер начнёт делать pg_dump по расписанию (prod каждые 6ч, dev раз в сутки).
+Backup-контейнер по отдельному profile запускается Semaphore-деплоем и создаёт только два production bundle. Dev-базы не бэкапятся.
 
 ### 4. Проверка
 
@@ -81,7 +81,7 @@ curl -s http://localhost:35402/
 docker logs instantly-migrator
 
 # Backup-контейнер работает?
-docker logs instantly-backup
+docker logs portal-backup
 ```
 
 ## Env-переменные на Portal-сервере
@@ -197,114 +197,129 @@ docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recr
 
 ## Автобэкапы
 
-Сервис `portal-backup` (контейнер на **Portal-сервере**, `services/backup/`,
-образ `${DOCKER_USERNAME}/portal-backup:prod`) держит cron внутри себя и пишет
-дампы в bucket `db-backups` Supabase Storage (имя задаётся через `BACKUP_BUCKET`,
-дефолт `db-backups`). Один контейнер бэкапит и главную Supabase БД, и обе
-Instantly-копии (prod + dev) — так все дампы и алерты живут в одном месте.
+Сервис `portal-backup` запускается на **DB-сервере** из
+`deploy/instantly-db/docker-compose.yml` и использует локальную Docker-сеть.
+Автоматически создаются только production-бэкапы; dev-базы намеренно исключены.
+Каждый запуск формирует один tar-bundle и сразу загружает его в S3.
 
-| Источник | Расписание (UTC) | Путь в Storage | Локальный ретеншн | Облачный ретеншн |
-|----------|------------------|----------------|-------------------|------------------|
-| Главная Supabase БД (`main-supabase`) | каждые 6 ч в `:15` | `db-backups/portal-main/` | 7 дней | 30 дней |
-| Instantly local PG prod (`instantly-prod`) | каждые 6 ч в `:00` | `db-backups/instantly/prod/` | 7 дней | 30 дней |
-| Instantly local PG dev (`instantly-dev`) | раз в сутки в `03:00` | `db-backups/instantly/dev/` | 7 дней | 30 дней |
+| Источник | Расписание (UTC) | Путь в S3 | Локальный ретеншн | S3-ретеншн |
+|----------|------------------|------------|-------------------|-------------|
+| Main production bundle | `06:00` и `18:00` | `portal-main/full/` | 7 дней | 7 дней |
+| Instantly production bundle | `06:15` и `18:15` | `instantly/full/` | 7 дней | 7 дней |
 
-Все дампы — `pg_dump --format=custom --compress=6 --no-owner --no-privileges`.
-Для главной Supabase БД дополнительно исключаем супабейзовскую инфраструктуру
-(`_supavisor`, `_realtime`, `_analytics`, `pgsodium`, `vault`, `supabase_*`,
-`extensions`, `graphql*`, `cron`, `net`, `pgbouncer`) — это нужно, чтобы дамп
-накатывался на чистый Postgres без managed-стека (`auth`, `storage`, `public`
-сохраняются).
+Main bundle содержит полный custom-format дамп БД `postgres`, роли, membership,
+права и хэши паролей ролей. Instantly bundle содержит две production-базы —
+`instantly` и `instantly_dataset` — плюс роли и права кластера. Ownership и ACL
+в full-bundle сохраняются. В каждый архив также вложен `restore-bundle.sh`.
 
-### Параметры в `/home/Portal/prod/.env`
+Восстанавливать main bundle нужно в свежий `main-postgres` из того же Supabase
+compose: необходимые бинарники расширений предоставляет образ Supabase Postgres.
+Файлы Supabase Storage в DB-bundle не дублируются — они уже находятся в S3;
+в дампе сохраняются их метаданные из PostgreSQL.
 
-`portal-backup` берёт URL подключения к БД **те же, что использует приложение**
-(никаких параллельных PROD_PG_HOST/PASSWORD — DRY):
+### Параметры в `/opt/instantly-db/.env`
 
-- `INSTANTLY_DATABASE_URL` — уже есть (Portal сам им пользуется).
-- `INSTANTLY_DEV_DATABASE_URL` — опционально; если не задано, бэкап dev скипается.
-- `MAIN_SUPABASE_DATABASE_URL` — **SESSION pooler URL** Supabase (порт **5432**,
-  НЕ 6543 — transaction-pooler не поддерживает pg_dump). Если не задано —
-  падает обратно на `DATABASE_URL`. Бери из Supabase Dashboard → Connect →
-  Connection string → «Session pooler».
+URL подключения вручную переносить не нужно: compose собирает их из уже
+существующих `MAIN_PG_PASSWORD`, `INSTANTLY_PROD_PG_PASSWORD` и
+`INSTANTLY_DEV_PG_PASSWORD`, а хостами служат локальные контейнеры.
 
-Куда грузим (по умолчанию — основной Supabase Portal, можно отдельный):
+С Portal-сервера нужно перенести только параметры S3 и Telegram:
 
-- `BACKUP_SUPABASE_URL` (default = `NEXT_PUBLIC_SUPABASE_URL`)
-- `BACKUP_SUPABASE_KEY` (default = `SUPABASE_SERVICE_ROLE_KEY`)
-- `BACKUP_BUCKET` (default `db-backups`) — bucket для дампов в Storage
-- `BACKUP_RETENTION_DAYS` (default 7) — локальная ротация в named volume
-- `BACKUP_REMOTE_RETENTION_DAYS` (default 30) — ротация в Storage
+- `BACKUP_S3_ENDPOINT`
+- `BACKUP_S3_BUCKET`
+- `BACKUP_S3_ACCESS_KEY_ID`
+- `BACKUP_S3_SECRET_ACCESS_KEY`
+- `BACKUP_S3_REGION`
+- `TELEGRAM_HEALTH_BOT_TOKEN` / `TELEGRAM_HEALTH_CHAT_ID`
 
-Telegram-алерты используют те же `TELEGRAM_HEALTH_BOT_TOKEN` /
-`TELEGRAM_HEALTH_CHAT_ID`, что и `health-check`.
-
-Bucket `db-backups` должен существовать в проекте `BACKUP_SUPABASE_URL`:
-**Storage → New bucket → Private**, **Restrict file size = 2 GB** (или больше).
-Глобальный лимит проекта: **Storage Settings → Global file size limit ≥ 2 GB**
-(на Free поднять выше 50 МБ нельзя — нужен Pro). У `service_role` доступ есть
-автоматически без RLS-политик.
-
-История: ранее дампы лились в общий бакет `deploy-backups` (50 МБ лимит для
-конфигов), что приводило к HTTP 400 на дампах главной БД (~830 МБ). Теперь
-конфиги остались в `deploy-backups`, дампы БД — в отдельном `db-backups`.
+Ротация задаётся через `BACKUP_RETENTION_DAYS` и
+`BACKUP_REMOTE_RETENTION_DAYS`. Полный шаблон находится в
+`deploy/instantly-db/.env.example`.
 
 ### Алерты и чистка
 
 Алерт уходит в Telegram при двух событиях:
 1. `pg_dump` упал (ненулевой exit code)
-2. `curl` upload в Supabase Storage вернул не-2xx
+2. загрузка в S3 не удалась после всех повторов
 
-Текст алерта содержит `HTTP <code> rc=<curl_rc> size=<bytes>` — этого достаточно,
-чтобы отличить серверную ошибку (`HTTP 4xx`/`5xx`, `rc=0`) от сетевой/таймаута
-(`HTTP 000`, `rc=28`/`7`/...) и от OOM-kill самого curl (`HTTP=`, `rc=137`).
+После успешной загрузки скрипт удаляет из S3 дампы старше заданного срока.
+Если загрузка упала, удалённая чистка пропускается, чтобы не остаться без копии.
 
-После успешного аплоада скрипт сам чистит старые объекты в Storage через
-`POST /storage/v1/object/list/${BACKUP_BUCKET}` + `DELETE`. Чистка скипается,
-если upload упал, чтобы не остаться без копии.
+### Первый запуск / обновление
+
+Сервис вынесен в профиль `backup`, поэтому обычный `docker compose up` его не
+пересоздаёт и не может оборвать работающий `pg_dump`. При отдельном обновлении
+контейнеру даётся до четырёх часов на завершение активного дампа и загрузки в S3:
+
+Semaphore выполняет этот отдельный `pull`/`up` автоматически при каждом деплое,
+если настроен `INSTANTLY_DB_SSH_HOST`. Перед первым деплоем достаточно один раз
+добавить обязательные `BACKUP_S3_*` в `/opt/instantly-db/.env`; сам `.env` через
+CI намеренно не копируется. Команды ниже нужны только для внепланового ручного
+обновления:
+
+```bash
+cd /opt/instantly-db
+docker compose -p instantly-db --env-file .env --profile backup pull portal-backup
+docker compose -p instantly-db --env-file .env --profile backup \
+  up -d --no-deps portal-backup
+```
+
+При первом Semaphore-деплое старый контейнер на Portal-сервере выводится из
+работы автоматически. Если в нём уже идёт backup job, CI отключает старый cron,
+даёт текущей задаче завершиться и затем останавливает контейнер. Named volume со
+старыми локальными дампами специально не удаляется. Ручной эквивалент:
+
+```bash
+# Выполнять на Portal-сервере только когда старый backup job не запущен.
+if docker top portal-backup -eo args 2>/dev/null | grep -Fq '/backup.sh '; then
+  echo 'Старый backup job ещё работает — контейнер пока не удаляем'
+else
+  docker rm -f portal-backup
+fi
+```
 
 ### Ручной запуск
 
 ```bash
-# С Portal-сервера
-docker exec portal-backup /backup.sh main-supabase    # главная БД
-docker exec portal-backup /backup.sh instantly-prod   # Instantly prod
-docker exec portal-backup /backup.sh instantly-dev    # Instantly dev
+# С DB-сервера
+docker exec portal-backup /backup.sh main-full
+docker exec portal-backup /backup.sh instantly-full
 ```
 
-### Восстановление дампа на чистый Postgres
+### Восстановление production bundle
 
 ```bash
-# 1) Скачать дамп из Supabase Storage
-curl -fsSL -H "Authorization: Bearer ${BACKUP_SUPABASE_KEY}" \
-  "${BACKUP_SUPABASE_URL}/storage/v1/object/db-backups/portal-main/portal-main-main-supabase-YYYYMMDD_HHMMSS.dump" \
-  -o portal-main.dump
+# Main: скачать один tar из S3 через настроенный backup-контейнер
+docker exec portal-backup sh -c '. /etc/backup.env; \
+  mc alias set backup "$BACKUP_S3_ENDPOINT" "$BACKUP_S3_ACCESS_KEY_ID" \
+    "$BACKUP_S3_SECRET_ACCESS_KEY" --api s3v4 >/dev/null; \
+  mc cp "backup/$BACKUP_S3_BUCKET/portal-main/full/portal-main-main-full-YYYYMMDD_HHMMSS.tar" \
+    /backups/main-full.tar'
+docker cp portal-backup:/backups/main-full.tar ./main-full.tar
+mkdir main-restore && tar -xf main-full.tar -C main-restore
+cd main-restore
+./restore-bundle.sh main main-postgres
 
-# 2) Поднять чистый Postgres
-docker run -d --name pg-restore \
-  -e POSTGRES_PASSWORD=temp \
-  -p 5432:5432 \
-  postgres:17-alpine
-
-# 3) Для main-supabase ОДИН РАЗ создать расширения, которые могут встретиться
-#    в дампе (auth/storage используют pgcrypto + uuid-ossp; vector — для embedding)
-docker exec -i pg-restore psql -U postgres -d postgres <<'SQL'
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS vector;
-SQL
-
-# 4) Накатить дамп
-docker exec -i pg-restore pg_restore \
-  -U postgres -d postgres \
-  --clean --if-exists --no-owner --no-privileges \
-  --jobs=4 < portal-main.dump
-
-# Для Instantly БД расширений не нужно — там public схема и всё:
-docker exec -i instantly-postgres-prod pg_restore \
-  -U instantly -d instantly --clean --if-exists --no-owner --no-privileges \
-  < instantly-instantly-prod-YYYYMMDD_HHMMSS.dump
+# Instantly: архив содержит instantly + instantly_dataset + роли
+docker exec portal-backup sh -c '. /etc/backup.env; \
+  mc alias set backup "$BACKUP_S3_ENDPOINT" "$BACKUP_S3_ACCESS_KEY_ID" \
+    "$BACKUP_S3_SECRET_ACCESS_KEY" --api s3v4 >/dev/null; \
+  mc cp "backup/$BACKUP_S3_BUCKET/instantly/full/instantly-instantly-full-YYYYMMDD_HHMMSS.tar" \
+    /backups/instantly-full.tar'
+docker cp portal-backup:/backups/instantly-full.tar ./instantly-full.tar
+mkdir instantly-restore && tar -xf instantly-full.tar -C instantly-restore
+cd instantly-restore
+./restore-bundle.sh instantly instantly-postgres-prod
 ```
+
+Перед restore должен работать только свежий целевой PostgreSQL-контейнер;
+приложение и остальные Supabase/Instantly-сервисы запускаются после успешного
+завершения скрипта. Restore использует `postgres:17-alpine` как клиент и четыре
+параллельных job; переопределение: `RESTORE_JOBS=8`. Бандл восстанавливает хэши
+паролей ролей с исходного production-кластера, поэтому секреты подключения в
+`.env` целевого стека должны совпадать с исходными. После проверки на пустоту
+скрипт пересоздаёт только целевые production-базы через `pg_restore --create` —
+так восстанавливаются также owner, ACL и database-specific settings.
 
 ### Тесты
 
@@ -314,7 +329,7 @@ docker exec -i instantly-postgres-prod pg_restore \
 
 ```bash
 bash services/backup/test_backup.sh
-# TESTS:   passed=45  failed=0
+# TESTS:   passed=110  failed=0
 ```
 
 ### Снос старого instantly-backup на DB-сервере

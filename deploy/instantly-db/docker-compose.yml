@@ -11,7 +11,7 @@
 #   docker compose up -d
 #
 # Migrator runs once on every `up` and applies pending SQL migrations.
-# Backup container runs pg_dump on a cron schedule and uploads to Supabase Storage.
+# Backup container runs pg_dump on a cron schedule and uploads directly to S3.
 
 services:
   # ─── PROD ──────────────────────────────────────────────────────────────────────
@@ -42,7 +42,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024M
+          memory: 2048M
           cpus: '1.0'
     restart: unless-stopped
     networks:
@@ -232,8 +232,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2048M
-          cpus: '2.0'
+          # Production Main DB is ~25 GB. 12 GB prevents cgroup OOM during
+          # backup/traffic peaks; 8 CPUs prevents query workloads from being
+          # throttled at the old 2-CPU ceiling. Keep in sync with main-db-prod.
+          memory: 12288M
+          cpus: '8.0'
     restart: unless-stopped
     networks:
       - instantly-network
@@ -259,6 +262,51 @@ services:
         limits:
           memory: 256M
           cpus: '0.2'
+    restart: unless-stopped
+    networks:
+      - instantly-network
+
+  # ─── BACKUPS: local pg_dump for Main + Instantly → S3 ───────────────────
+  # The service intentionally lives on the DB host: both database URLs use
+  # Docker DNS, so pg_dump never crosses the WAN between the DB and Portal hosts.
+  # It is profile-gated because an ordinary DB deploy must not recreate the
+  # container in the middle of a running dump. Start/update it explicitly with:
+  #   docker compose -p instantly-db --env-file .env --profile backup \
+  #     up -d --no-deps portal-backup
+  portal-backup:
+    image: ${BACKUP_IMAGE:-dimakuladmed/portal-backup:prod}
+    container_name: portal-backup
+    profiles:
+      - backup
+    environment:
+      # После миграции 21.07.2026 на 139: main-postgres в отдельном compose-проекте
+      # (main-supabase), портал-backup в instantly-network — разные docker-сети.
+      # Ходим через host-IP:host-port (публичные 35434/35432), не через container-name.
+      MAIN_SUPABASE_DATABASE_URL: postgresql://supabase_admin:${MAIN_PG_PASSWORD}@139.60.162.12:35434/postgres?sslmode=disable
+      INSTANTLY_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@139.60.162.12:35432/instantly?sslmode=disable
+      INSTANTLY_DATASET_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@139.60.162.12:35432/instantly_dataset?sslmode=disable
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
+      BACKUP_S3_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID}
+      BACKUP_S3_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-ru-1}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      BACKUP_REMOTE_RETENTION_DAYS: ${BACKUP_REMOTE_RETENTION_DAYS:-7}
+      BACKUP_PG_DUMP_RETRIES: ${BACKUP_PG_DUMP_RETRIES:-3}
+      BACKUP_PG_DUMP_RETRY_PAUSE: ${BACKUP_PG_DUMP_RETRY_PAUSE:-30}
+      BACKUP_S3_UPLOAD_RETRIES: ${BACKUP_S3_UPLOAD_RETRIES:-3}
+      BACKUP_S3_UPLOAD_RETRY_PAUSE: ${BACKUP_S3_UPLOAD_RETRY_PAUSE:-15}
+      TELEGRAM_HEALTH_BOT_TOKEN: ${TELEGRAM_HEALTH_BOT_TOKEN:-}
+      TELEGRAM_HEALTH_CHAT_ID: ${TELEGRAM_HEALTH_CHAT_ID:-}
+    volumes:
+      - portal-backup-data:/backups
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    # entrypoint waits for an active dump + S3 upload before exiting.
+    stop_grace_period: 4h
     restart: unless-stopped
     networks:
       - instantly-network
@@ -295,13 +343,6 @@ services:
     networks:
       - instantly-network
 
-# ВНИМАНИЕ: бэкапы переехали на Portal-сервер (services/backup, контейнер
-# portal-backup). pg_dump/curl одинаково ходят к Postgres что с DB-, что с
-# Portal-сервера — но на Portal-сервере уже есть .env с нужными URL и Telegram
-# health-бот; держать бэкап-контейнер здесь больше нет смысла. Удаление
-# instantly-backup на самом DB-сервере делает scheduled-deploy.yml автоматически
-# (`docker rm -f instantly-backup`).
-
 volumes:
   prod-pg-data:
   prod-pgadmin-data:
@@ -309,6 +350,7 @@ volumes:
   dev-pgadmin-data:
   main-supabase-pg-data:
   main-pgadmin-data:
+  portal-backup-data:
 
 networks:
   instantly-network:

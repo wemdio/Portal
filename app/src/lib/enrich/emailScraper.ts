@@ -22,6 +22,56 @@ const BROWSER_USER_AGENT =
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// ── Proxy pool (round-robin) ───────────────────────────────────
+//
+// Тот же формат PROXY_URLS, что и websiteParser.ts, hhParser.ts и др. —
+// JSON-массив строк ["http://user:pass@ip:port", ...] или "url1,url2,url3".
+// До 2026-07-21 email-скрапер шёл напрямую с IP воркера — на 800+ сайтах
+// это заметно, потому что портал же уже покупает residential-прокси
+// (5 IP на момент внедрения) и text/INN-режим ими пользуется, а email —
+// нет. Fix: ротируем 5 IP через тот же undici.ProxyAgent-паттерн.
+type Dispatcher = import('undici').Dispatcher;
+
+let _proxyUrls: string[] | null = null;
+function getProxyUrls(): string[] {
+  if (_proxyUrls) return _proxyUrls;
+  try {
+    const raw = (process.env.PROXY_URLS ?? '').trim();
+    if (raw.startsWith('[')) {
+      _proxyUrls = (JSON.parse(raw) as string[]).map((s) => s.trim()).filter(Boolean);
+    } else {
+      _proxyUrls = raw.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean);
+    }
+  } catch {
+    _proxyUrls = [];
+  }
+  return _proxyUrls;
+}
+
+let _proxyRR = 0;
+function pickProxyUrl(): string {
+  const urls = getProxyUrls();
+  if (!urls.length) return '';
+  _proxyRR = (_proxyRR + 1) % urls.length;
+  return urls[_proxyRR];
+}
+
+const _proxyDispatchers = new Map<string, Dispatcher>();
+async function getProxyDispatcher(): Promise<Dispatcher | undefined> {
+  const url = pickProxyUrl();
+  if (!url) return undefined;
+  const existing = _proxyDispatchers.get(url);
+  if (existing) return existing;
+  try {
+    const mod = await import('undici');
+    const d = new mod.ProxyAgent(url) as unknown as Dispatcher;
+    _proxyDispatchers.set(url, d);
+    return d;
+  } catch {
+    return undefined;
+  }
+}
+
 // ── Contact / About / Team page paths ──────────────────────────
 
 const CONTACT_PATHS = [
@@ -125,6 +175,37 @@ export function decodeHtmlEntitiesInEmail(text: string): string {
     .replace(/&#x2e;/gi, '.')
     .replace(/&commat;/gi, '@')
     .replace(/&period;/gi, '.');
+}
+
+// ── Cloudflare Email Protection ────────────────────────────────
+//
+// Сайты за Cloudflare часто прячут email через feature "Email Address
+// Obfuscation": в HTML вместо адреса рендерится
+//   <a class="__cf_email__" data-cfemail="abcdef1234..."
+//      href="/cdn-cgi/l/email-protection">[email&#160;protected]</a>
+// hex-строка это email XOR-нутый одним байтом. Формат: первый байт — ключ,
+// каждый следующий байт — символ email XOR ключа.
+
+const CFEMAIL_REGEX = /data-cfemail=["']([0-9a-fA-F]+)["']/gi;
+
+export function decodeCloudflareEmail(hex: string): string | null {
+  if (!hex || hex.length < 4 || hex.length % 2 !== 0) return null;
+  if (!/^[0-9a-fA-F]+$/.test(hex)) return null;
+  try {
+    const key = parseInt(hex.slice(0, 2), 16);
+    let out = '';
+    for (let i = 2; i < hex.length; i += 2) {
+      const byte = parseInt(hex.slice(i, i + 2), 16) ^ key;
+      // сразу отсеиваем управляющие символы — чаще всего это неверная hex-строка,
+      // не email; иначе получим мусор вида "x@y"
+      if (byte < 0x20 || byte === 0x7f) return null;
+      out += String.fromCharCode(byte);
+    }
+    if (!out.includes('@') || !out.includes('.')) return null;
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 // ── Deobfuscation ──────────────────────────────────────────────
@@ -287,6 +368,13 @@ export function extractEmailsFromHtmlAdvanced(html: string): string[] {
   const dataEmailRegex = /data-(?:email|mail|e)=["']([^"']+)["']/gi;
   while ((m = dataEmailRegex.exec(html)) !== null) {
     addEmail(m[1] ?? '');
+  }
+
+  // 3b. Cloudflare Email Protection: <a data-cfemail="hex..."> ...
+  CFEMAIL_REGEX.lastIndex = 0;
+  while ((m = CFEMAIL_REGEX.exec(html)) !== null) {
+    const decoded = decodeCloudflareEmail(m[1] ?? '');
+    if (decoded) addEmail(decoded);
   }
 
   // 4. Strip scripts/styles, then extract from visible text
@@ -459,24 +547,54 @@ async function fetchPageInner(
   const onExternalAbort = () => controller.abort();
   externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
-  try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'User-Agent': BROWSER_USER_AGENT,
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-      },
-      signal: controller.signal,
-      redirect: 'follow',
-    });
+  const baseHeaders = {
+    'User-Agent': BROWSER_USER_AGENT,
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+  } as const;
+
+  const dispatcher = await getProxyDispatcher();
+
+  const doFetch = async (opts: RequestInit & { dispatcher?: Dispatcher }) => {
+    const res = await fetch(url, opts);
     if (res.status >= 400) return null;
     const contentType = res.headers.get('content-type');
     if (!isHtmlLikeContentType(contentType)) return null;
     const body = await res.arrayBuffer();
     return decodeHtml(body, contentType);
-  } catch {
-    return null;
+  };
+
+  try {
+    const fetchOpts: RequestInit & { dispatcher?: Dispatcher } = {
+      method: 'GET',
+      headers: baseHeaders,
+      signal: controller.signal,
+      redirect: 'follow',
+    };
+    if (dispatcher) fetchOpts.dispatcher = dispatcher;
+
+    try {
+      return await doFetch(fetchOpts);
+    } catch (err) {
+      // Один retry без прокси при сетевой ошибке через прокси. Если 1 из 5
+      // резидентных IP протух/дал 502 — не роняем сайт целиком, пробуем
+      // напрямую. Общий FETCH_RETRIES снаружи ловит остальные транзиенты.
+      if (!dispatcher || externalSignal?.aborted || controller.signal.aborted) {
+        return null;
+      }
+      void err;
+      const directOpts: RequestInit = {
+        method: 'GET',
+        headers: baseHeaders,
+        signal: controller.signal,
+        redirect: 'follow',
+      };
+      try {
+        return await doFetch(directOpts);
+      } catch {
+        return null;
+      }
+    }
   } finally {
     clearTimeout(timer);
     externalSignal?.removeEventListener('abort', onExternalAbort);

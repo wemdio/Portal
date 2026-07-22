@@ -61,6 +61,12 @@ function NavItemRow({
   return (
     <Link
       href={item.href as Route}
+      // The client sidebar contains links to almost every portal route. Next's
+      // production default prefetch eagerly requested an RSC payload for each
+      // one, so a single page reload produced a burst of 30+ authenticated
+      // requests (the list also exists in the mobile drawer). Navigation is
+      // still client-side; only the unsolicited background prefetch is off.
+      prefetch={false}
       onClick={onItemClick}
       title={description}
       className={`ds-nav-item flex items-center px-3 py-2 text-sm whitespace-nowrap ${active ? 'active' : ''}`}

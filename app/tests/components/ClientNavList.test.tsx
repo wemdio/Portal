@@ -4,8 +4,16 @@ import { ClientNavList } from '@/components/client/ClientNavList';
 import { ClientPortalProvider } from '@/lib/clientPortalContext';
 
 jest.mock('next/link', () => {
-  const MockLink = ({ children, href }: { children: ReactNode; href: string }) => (
-    <a href={href}>{children}</a>
+  const MockLink = ({
+    children,
+    href,
+    prefetch,
+  }: {
+    children: ReactNode;
+    href: string;
+    prefetch?: boolean;
+  }) => (
+    <a href={href} data-prefetch={String(prefetch)}>{children}</a>
   );
   MockLink.displayName = 'MockLink';
   return { __esModule: true, default: MockLink };
@@ -33,6 +41,14 @@ function renderNav(
 }
 
 describe('ClientNavList — support unread badge', () => {
+  it('disables automatic RSC prefetch for every sidebar link', () => {
+    renderNav('dashboard');
+    expect(screen.getAllByRole('link')).not.toHaveLength(0);
+    for (const link of screen.getAllByRole('link')) {
+      expect(link).toHaveAttribute('data-prefetch', 'false');
+    }
+  });
+
   it('shows the unread count next to «Поддержка» when there are unread messages', () => {
     renderNav('dashboard', { supportUnread: 3 });
     expect(screen.getByLabelText('3 новых сообщений')).toHaveTextContent('3');

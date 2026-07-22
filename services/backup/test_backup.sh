@@ -6,24 +6,25 @@
 #   bash services/backup/test_backup.sh
 #
 # Зачем самописный «фреймворк»:
-#   bats — внешняя зависимость. Здесь хватает shim-ов на pg_dump/curl и
+#   bats — внешняя зависимость. Здесь хватает shim-ов на pg_dump/pg_dumpall/curl и
 #   проверки контрактов через PATH. Никаких новых бинарников в Docker-образе.
 #
-# Контракт backup.sh (v2 — для Portal-сервера):
-#   Аргументы: <main-supabase|instantly-prod|instantly-dev>
+# Контракт backup.sh:
+#   Автоматические production-цели: main-full, instantly-full.
+#   Они создают один tar с custom dump(ами), globals и restore-скриптом.
+#   Dev-базы не поддерживаются и не могут быть запущены даже вручную.
 #
-#   Каждая ветка читает ОДНУ переменную с URL подключения (то же значение,
-#   что использует приложение в .env Portal-сервера — DRY):
+#   Legacy single-database ветки читают одну переменную с URL подключения:
 #     main-supabase   ← MAIN_SUPABASE_DATABASE_URL (fallback: DATABASE_URL)
 #     instantly-prod  ← INSTANTLY_DATABASE_URL
-#     instantly-dev   ← INSTANTLY_DEV_DATABASE_URL
+#     instantly-dataset ← INSTANTLY_DATASET_DATABASE_URL
 #
 #   Storage layout (bucket BACKUP_SUPABASE_URL/BACKUP_SUPABASE_KEY):
 #     deploy-backups/portal-main/portal-main-main-supabase-<TS>.dump
 #     deploy-backups/instantly/prod/instantly-instantly-prod-<TS>.dump
-#     deploy-backups/instantly/dev/instantly-instantly-dev-<TS>.dump
 #
-#   Все ветки: pg_dump --format=custom --no-owner --no-privileges.
+#   Legacy single-database ветки используют --no-owner --no-privileges.
+#   Full production bundles, наоборот, сохраняют ownership и ACL.
 #   Для main-supabase дополнительно: --exclude-schema=_supavisor / _realtime /
 #     _analytics / pgsodium / vault и т.д. (чтобы дамп лёг на чистый PG).
 #
@@ -105,7 +106,7 @@ for arg in "$@"; do case "$arg" in --file=*) out="${arg#--file=}" ;; esac; done
   printf ' env:PGKEEPALIVES_COUNT=%s' "${PGKEEPALIVES_COUNT:-}"
   printf '\n'
 } >> "$PGD_LOG"
-[ -n "$out" ] && : > "$out"
+[ -n "$out" ] && printf 'fake custom archive\n' > "$out"
 
 # Симуляция «первые N попыток фейл, дальше ok» — для тестов ретрая.
 # PG_DUMP_FAIL_FIRST_N + PG_DUMP_ATTEMPT_FILE: счётчик в файле, чтобы
@@ -122,6 +123,20 @@ fi
 exit "${PG_DUMP_FAKE_RC:-0}"
 PGD
   chmod +x "$sandbox/bin/pg_dump"
+
+  cat > "$sandbox/bin/pg_dumpall" <<'PGDA'
+#!/usr/bin/env bash
+out=""
+for arg in "$@"; do case "$arg" in --file=*) out="${arg#--file=}" ;; esac; done
+{
+  printf 'pg_dumpall'
+  for a in "$@"; do printf ' %s' "$a"; done
+  printf '\n'
+} >> "$PG_DUMPALL_LOG"
+[ -n "$out" ] && printf '%s\n' '-- fake globals SQL' > "$out"
+exit "${PG_DUMPALL_FAKE_RC:-0}"
+PGDA
+  chmod +x "$sandbox/bin/pg_dumpall"
 
   cat > "$sandbox/bin/curl" <<'CRL'
 #!/usr/bin/env bash
@@ -181,8 +196,10 @@ run_backup() {
   local out_file="$sandbox/run.out"
   PATH="$sandbox/bin:$PATH" \
     PGD_LOG="$sandbox/pg_dump.log" \
+    PG_DUMPALL_LOG="$sandbox/pg_dumpall.log" \
     CURL_LOG="$sandbox/curl.log" \
     DUMP_DIR="$sandbox/backups" \
+    BACKUP_RESTORE_SCRIPT="$SCRIPT_DIR/restore-bundle.sh" \
     bash "$BACKUP_SH" "$@" >"$out_file" 2>&1
   echo $?
 }
@@ -230,15 +247,74 @@ test ! -s "$SB/pg_dump.log" && { PASS=$((PASS + 1)); echo "  ✔ instantly-prod 
   { FAIL=$((FAIL + 1)); echo "  ✘ instantly-prod no-URL → pg_dump was called"; }
 
 echo ""
-echo "── 4) instantly-dev: INSTANTLY_DEV_DATABASE_URL → correct path ──"
+echo "── 4) instantly-dev is rejected: dev databases are never backed up ──"
 SB="$TMP_ROOT/t4"; make_sandbox "$SB"
 rc="$(INSTANTLY_DEV_DATABASE_URL='postgresql://instantly:dev@db.example.com:35433/instantly' \
   BACKUP_SUPABASE_URL=https://example.supabase.co BACKUP_SUPABASE_KEY=svc \
   run_backup "$SB" instantly-dev)"
-assert_exit_code "$rc" "0" "instantly-dev exits 0"
-assert_contains "$SB/pg_dump.log" "35433/instantly" "instantly-dev uses INSTANTLY_DEV_DATABASE_URL"
-assert_contains "$SB/curl.log" "/storage/v1/object/db-backups/instantly/dev/" "instantly-dev upload path uses default db-backups bucket"
-assert_contains "$SB/curl.log" "-T " "instantly-dev uses streaming upload (-T)"
+assert_exit_code "$rc" "1" "instantly-dev is not a supported backup target"
+assert_contains "$SB/run.out" "Unknown instance" "instantly-dev rejection is explicit"
+test ! -s "$SB/pg_dump.log" && { PASS=$((PASS + 1)); echo "  ✔ instantly-dev rejection → no pg_dump call"; } || \
+  { FAIL=$((FAIL + 1)); echo "  ✘ instantly-dev rejection → pg_dump was called"; }
+test ! -s "$SB/curl.log" && { PASS=$((PASS + 1)); echo "  ✔ instantly-dev rejection → no upload"; } || \
+  { FAIL=$((FAIL + 1)); echo "  ✘ instantly-dev rejection → upload was attempted"; }
+
+echo ""
+echo "── 4a) main-full: one tar contains full DB, globals and restore script ──"
+SB="$TMP_ROOT/t4a"; make_sandbox "$SB"
+rc="$(MAIN_SUPABASE_DATABASE_URL='postgresql://supabase_admin:secret@main-postgres:5432/postgres' \
+  BACKUP_SUPABASE_URL=https://example.supabase.co BACKUP_SUPABASE_KEY=svc \
+  run_backup "$SB" main-full)"
+assert_exit_code "$rc" "0" "main-full exits 0"
+assert_contains "$SB/pg_dump.log" "--dbname=postgresql://supabase_admin:secret@main-postgres:5432/postgres" "main-full dumps the production database"
+assert_not_contains "$SB/pg_dump.log" "--no-owner" "main-full preserves object owners"
+globals_calls="$(grep -c '^pg_dumpall' "$SB/pg_dumpall.log" 2>/dev/null || echo 0)"
+assert_exit_code "$globals_calls" "2" "main-full captures pre-restore and full globals"
+assert_contains "$SB/pg_dumpall.log" "--no-role-passwords" "main-full includes password-safe pre-restore globals"
+assert_contains "$SB/curl.log" "/storage/v1/object/db-backups/portal-main/full/" "main-full uploads to full S3 path"
+main_bundle="$(find "$SB/backups" -name 'portal-main-main-full-*.tar' -type f | head -1)"
+tar -tf "$main_bundle" > "$SB/bundle.list"
+assert_contains "$SB/bundle.list" "main-postgres.dump" "main bundle contains database dump"
+assert_contains "$SB/bundle.list" "main-globals.sql" "main bundle contains role passwords and grants"
+assert_contains "$SB/bundle.list" "restore-bundle.sh" "main bundle contains restore script"
+assert_contains "$SB/bundle.list" "manifest.txt" "main bundle contains manifest"
+
+echo ""
+echo "── 4b) instantly-full: one tar contains instantly + dataset + globals ──"
+SB="$TMP_ROOT/t4b"; make_sandbox "$SB"
+rc="$(INSTANTLY_DATABASE_URL='postgresql://instantly:secret@instantly-postgres-prod:5432/instantly' \
+  INSTANTLY_DATASET_DATABASE_URL='postgresql://instantly:secret@instantly-postgres-prod:5432/instantly_dataset' \
+  BACKUP_SUPABASE_URL=https://example.supabase.co BACKUP_SUPABASE_KEY=svc \
+  run_backup "$SB" instantly-full)"
+assert_exit_code "$rc" "0" "instantly-full exits 0"
+assert_contains "$SB/pg_dump.log" "/instantly" "instantly-full dumps operational DB"
+assert_contains "$SB/pg_dump.log" "/instantly_dataset" "instantly-full dumps full dataset DB"
+assert_not_contains "$SB/pg_dump.log" "--no-owner" "instantly-full preserves object owners"
+instantly_dump_calls="$(grep -c '^pg_dump' "$SB/pg_dump.log" 2>/dev/null || echo 0)"
+assert_exit_code "$instantly_dump_calls" "2" "instantly-full creates exactly two production DB dumps"
+instantly_globals_calls="$(grep -c '^pg_dumpall' "$SB/pg_dumpall.log" 2>/dev/null || echo 0)"
+assert_exit_code "$instantly_globals_calls" "2" "instantly-full captures cluster globals"
+assert_contains "$SB/curl.log" "/storage/v1/object/db-backups/instantly/full/" "instantly-full uploads to full S3 path"
+instantly_bundle="$(find "$SB/backups" -name 'instantly-instantly-full-*.tar' -type f | head -1)"
+tar -tf "$instantly_bundle" > "$SB/bundle.list"
+assert_contains "$SB/bundle.list" "instantly.dump" "Instantly bundle contains operational DB"
+assert_contains "$SB/bundle.list" "instantly_dataset.dump" "Instantly bundle contains dataset DB"
+assert_contains "$SB/bundle.list" "instantly-globals.sql" "Instantly bundle contains roles and grants"
+assert_contains "$SB/bundle.list" "restore-bundle.sh" "Instantly bundle contains restore script"
+assert_contains "$SCRIPT_DIR/restore-bundle.sh" "--create" "restore recreates databases with database-level settings and ACL"
+assert_contains "$SCRIPT_DIR/restore-bundle.sh" "--force" "restore disconnects only after the fresh-database guard"
+assert_contains "$SCRIPT_DIR/restore-bundle.sh" "unexpected error while applying" "restore rejects unexpected globals errors"
+
+echo ""
+echo "── 4c) instantly-full refuses an incomplete bundle without dataset URL ──"
+SB="$TMP_ROOT/t4c"; make_sandbox "$SB"
+rc="$(INSTANTLY_DATABASE_URL='postgresql://instantly:secret@db:5432/instantly' \
+  BACKUP_SUPABASE_URL=https://example.supabase.co BACKUP_SUPABASE_KEY=svc \
+  run_backup "$SB" instantly-full)"
+assert_exit_code "$rc" "1" "instantly-full without dataset URL fails"
+assert_contains "$SB/run.out" "INSTANTLY_DATASET_DATABASE_URL" "incomplete Instantly bundle explains missing dataset URL"
+test ! -s "$SB/pg_dump.log" && { PASS=$((PASS + 1)); echo "  ✔ incomplete Instantly bundle does not create a partial dump"; } || \
+  { FAIL=$((FAIL + 1)); echo "  ✘ incomplete Instantly bundle created a partial dump"; }
 
 echo ""
 echo "── 5) main-supabase: MAIN_SUPABASE_DATABASE_URL + schema filters + portal-main path ──"
@@ -469,6 +545,15 @@ rc="$(INSTANTLY_DATABASE_URL='postgresql://i:p@h:5432/d' \
 assert_exit_code "$rc" "0" "keep-alive override exits 0"
 assert_contains "$SB/pg_dump.log" "env:PGKEEPALIVES_IDLE=30" "external PGKEEPALIVES_IDLE preserved"
 assert_contains "$SB/pg_dump.log" "env:PGKEEPALIVES_INTERVAL=5" "external PGKEEPALIVES_INTERVAL preserved"
+
+echo ""
+echo "── 17) cron schedules only full production bundles ──"
+CRONTAB_FILE="$SCRIPT_DIR/crontab"
+assert_contains "$CRONTAB_FILE" "/backup.sh main-full" "cron schedules the complete main production bundle"
+assert_contains "$CRONTAB_FILE" "/backup.sh instantly-full" "cron schedules the complete Instantly production bundle"
+assert_contains "$CRONTAB_FILE" "15 6,18 * * *" "Instantly full bundle starts at 09:15 and 21:15 MSK"
+assert_not_contains "$CRONTAB_FILE" "/backup.sh instantly-dev" "cron does not back up Instantly dev"
+assert_not_contains "$CRONTAB_FILE" "/backup.sh main-supabase" "cron no longer creates the incomplete legacy main dump"
 
 echo ""
 echo "═══════════════════════════════════════"

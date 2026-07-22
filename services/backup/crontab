@@ -1,8 +1,8 @@
 # Cron schedule для контейнера portal-backup.
 # Все времена UTC (МСК = UTC+3).
 #
-# Расписание: 2 раза в день — 09:00 и 21:00 МСК.
-# Ротация: 7 дней × 2 = 14 снэпшотов на БД. При ~840 МБ дампе main это ~12 ГБ.
+# Два production bundle в сутки. Каждый bundle — один tar-файл с custom dump,
+# ролями/правами и restore-скриптом. Dev-базы намеренно не бэкапятся.
 #
 # ВАЖНО: каждая команда оборачивается в `sh -c`, который сначала подгружает
 # /etc/backup.env (env-снапшот, который пишет /entrypoint.sh при старте
@@ -10,8 +10,9 @@
 # /backup.sh уходит в S3 без BACKUP_S3_*/MAIN_S3_* — что даёт rc=1 без
 # понятной причины. См. services/backup/entrypoint.sh.
 
-# Главная Supabase БД (portal-main): 06:00 / 18:00 UTC
-0 6,18 * * * sh -c '. /etc/backup.env; /backup.sh main-supabase' >> /var/log/cron.log 2>&1
+# Главная production БД: 06:00 / 18:00 UTC (09:00 / 21:00 МСК)
+0 6,18 * * * sh -c '. /etc/backup.env; /backup.sh main-full' >> /var/log/cron.log 2>&1
 
-# Instantly local Postgres prod: 06:15 / 18:15 UTC (сдвиг 15 мин)
-15 6,18 * * * sh -c '. /etc/backup.env; /backup.sh instantly-prod' >> /var/log/cron.log 2>&1
+# Instantly production: `instantly` + `instantly_dataset` + роли.
+# Запускаем через 15 минут после main: 09:15 / 21:15 МСК.
+15 6,18 * * * sh -c '. /etc/backup.env; /backup.sh instantly-full' >> /var/log/cron.log 2>&1
