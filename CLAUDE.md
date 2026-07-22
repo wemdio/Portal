@@ -2,12 +2,14 @@
 
 Этот файл подгружается Claude Code автоматически в начале каждой сессии.
 
+Перед любыми действиями с Git, релизом или production обязательно прочитай и соблюдай [`AGENTS.md`](./AGENTS.md). Раздел про границы релиза и production — критический.
+
 ## Что это за репозиторий
 
-Portal — внутренний инструмент студии: Next.js app + воркеры на prod, self-hosted Supabase на DB-сервере, интеграция с Instantly для cold outreach. Инфраструктура описана в [`.env.servers`](./.env.servers) (НЕ коммитить).
+Portal — внутренний инструмент студии: Next.js app, воркеры и production-БД на prod-сервере, интеграция с Instantly для cold outreach. Инфраструктура описана в [`.env.servers`](./.env.servers) (НЕ коммитить).
 
-- Прод: `139.60.162.12` (Next.js, workers, instantly-sync-bot, qualifier и т.д.)
-- БД-сервер: `144.31.54.166` (main-postgres + два instantly-postgres + наш analytics-датасет `instantly_dataset` на том же контейнере)
+- Прод: `139.60.162.12` (Next.js, workers, main Supabase/Postgres, два instantly-postgres, analytics-датасет `instantly_dataset`, instantly-sync-bot, qualifier и т.д.)
+- Старый DB/utility-сервер: `144.31.54.166` (временные rollback-копии после переезда и вспомогательные сервисы; не использовать как текущий endpoint БД)
 
 Документация и архитектура: [README.md](./README.md), [DESIGN.md](./DESIGN.md), [PRODUCT.md](./PRODUCT.md).
 

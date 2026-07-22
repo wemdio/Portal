@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 // Перенос файлов из Supabase Cloud Storage в self-hosted Storage API.
+// Архивный migration helper: после cutover 22.07.2026 текущий production target
+// находится на 139.60.162.12. Не запускайте повторно без отдельного плана миграции.
 //
 // Метаданные (storage.buckets, storage.objects) уже перенесены через pg_dump
 // в migrate-from-supabase.sh — этот скрипт лишь копирует БИНАРНЫЕ файлы.
@@ -7,7 +9,7 @@
 // Использование:
 //   SOURCE_SUPABASE_URL=https://pwcidzaqudfkodgmesyk.supabase.co \
 //   SOURCE_SERVICE_ROLE_KEY=eyJ... \
-//   TARGET_SUPABASE_URL=http://144.31.54.166:35480 \
+//   TARGET_SUPABASE_URL=http://<target-host>:35480 \
 //   TARGET_SERVICE_ROLE_KEY=eyJ... \
 //   node deploy/main-db/migrate-storage-files.mjs
 //

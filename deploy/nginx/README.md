@@ -4,9 +4,14 @@
 Здесь лежат снапшоты для ревью и disaster recovery. Автодеплоя нет — после правок
 на сервере обновляйте снапшот руками.
 
+> После DB cutover 22.07.2026 боевой nginx проксирует Supabase API в Kong на
+> production-хосте `139.60.162.12:35480`. Трекаемые ниже `.conf` — снапшоты до
+> переезда и всё ещё содержат старый upstream; не разворачивайте их без синхронизации
+> с `/etc/nginx/sites-available/` на сервере.
+
 | Файл | Назначение |
 |---|---|
-| `polza-portal.ru.conf` | Основной портал. Проксирует `/auth\|rest\|storage\|realtime/v1/` → Kong на 144.31.54.166:35480, остальное → portal app :3000. |
+| `polza-portal.ru.conf` | Основной портал. В боевой конфигурации проксирует `/auth\|rest\|storage\|realtime/v1/` → Kong на production-хосте :35480, остальное → portal app :3000. |
 | `outreachos.pro.conf` | Тот же app под white-label доменом, конфиг зеркальный. |
 | `50x.html` | Страница ошибки 502/503/504. На сервере живёт в `/var/www/html/50x.html` (и в `/home/Portal/prod/`). |
 

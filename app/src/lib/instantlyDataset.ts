@@ -3,7 +3,7 @@ import { Pool } from 'pg';
 
 /**
  * Read-only connection to the analytics dataset DB (`instantly_dataset` on the
- * DB server, 144.31.54.166:35432). This is the studio's structured copy of all
+ * production server, 139.60.162.12:35432). This is the studio's structured copy of all
  * Instantly outreach — see wiki/CLAUDE.md. The operational `instantly` DB is
  * reached via supabaseInstantly (PostgREST); THIS is a plain Postgres we query
  * with pg, the same DB the app/scripts/instantly-dataset/* scripts use.
