@@ -110,6 +110,34 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
 
+const ACTIVATION_STATUS_POLL_DELAYS_MS = [0, 500, 1_500] as const;
+
+async function readActiveCampaign(
+  campaignId: string,
+  requestOptions: { accountId: string },
+  delaysMs: readonly number[],
+) {
+  const statusRequestOptions = {
+    ...requestOptions,
+    retryRateLimits: false,
+    skipRateLimiter: true,
+    timeoutMs: 5_000,
+  };
+  for (const delayMs of delaysMs) {
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    try {
+      const current = await getCampaign(campaignId, statusRequestOptions);
+      if (current.status === 1) return current;
+    } catch {
+      // A status read is best-effort. Try the next poll before deciding that
+      // the activation really failed.
+    }
+  }
+  return null;
+}
+
 /**
  * A timed-out activation is ambiguous: Instantly may have completed the
  * mutation after our 90s client timeout. Re-read the same campaign and retry
@@ -125,15 +153,23 @@ async function activateCampaignWithTimeoutRecovery(
   } catch (error) {
     if (!isAbortError(error)) throw error;
 
-    try {
-      const current = await getCampaign(campaignId, requestOptions);
-      if (current.status === 1) return current;
-    } catch {
-      // The status read is best-effort. A single activation retry below is
-      // still safer than creating a second campaign after an ambiguous timeout.
-    }
+    const current = await readActiveCampaign(campaignId, requestOptions, [0]);
+    if (current) return current;
 
-    return activateCampaign(campaignId, requestOptions);
+    try {
+      return await activateCampaign(campaignId, requestOptions);
+    } catch (retryError) {
+      // The retry can also time out or report "already active" after Instantly
+      // completed the mutation. Poll only this same campaign before surfacing
+      // an error; never create or delete a replacement here.
+      const activated = await readActiveCampaign(
+        campaignId,
+        requestOptions,
+        ACTIVATION_STATUS_POLL_DELAYS_MS,
+      );
+      if (activated) return activated;
+      throw retryError;
+    }
   }
 }
 
@@ -349,9 +385,11 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
     );
 
     const accepted = leadResult.leads_uploaded;
-    // В «пропущенные» входят и отсев Instantly, и срез по чёрному списку —
-    // blocked_rows отдаём отдельно, чтобы UI мог объяснить причину.
-    const skipped = Math.max(0, allowedLeads.length - accepted) + blockedCount;
+    // uploadedRows — число строк в исходной базе. Всё, что не было фактически
+    // принято Instantly (невалидные email, локальные дубли, чёрный список и
+    // отсев самого Instantly), считаем пропущенным. blocked_rows остаётся
+    // отдельным подмножеством, чтобы UI мог объяснить эту причину.
+    const skipped = Math.max(0, uploadedRows - accepted);
 
     // Сохраняем фактические счётчики сразу после импорта. Если активация ниже
     // оборвётся, журнал всё равно покажет частичный успех вместо ложных 0/0.

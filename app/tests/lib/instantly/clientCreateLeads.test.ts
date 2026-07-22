@@ -128,3 +128,40 @@ describe('createLeads - current Instantly bulk response contract', () => {
     ]);
   });
 });
+
+describe('Instantly request timeout override', () => {
+  it('aborts a status request at the caller-provided deadline', async () => {
+    fetchMock.mockImplementationOnce((_url: string, init?: RequestInit) => (
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }));
+        }, { once: true });
+      })
+    ));
+    const { getCampaign } = await import('@/lib/instantly/client');
+
+    await expect(getCampaign('cmp-1', {
+      retryRateLimits: false,
+      skipRateLimiter: true,
+      timeoutMs: 10,
+    })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a 429 when recovery requests disable rate-limit retries', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('{"error":"rate limited"}', {
+      status: 429,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    const { getCampaign, InstantlyApiError } = await import('@/lib/instantly/client');
+
+    await expect(getCampaign('cmp-1', {
+      retryRateLimits: false,
+      skipRateLimiter: true,
+      timeoutMs: 5_000,
+    })).rejects.toBeInstanceOf(InstantlyApiError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});

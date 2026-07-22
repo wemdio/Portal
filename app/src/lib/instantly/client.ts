@@ -45,7 +45,9 @@ async function request<T>(
   // Общий распределённый rate-limiter (workspace-wide лимит Instantly). Один раз
   // на логический вызов, ДО retry-цикла. Fail-open: при любой проблеме лимитера
   // запрос проходит как раньше. По умолчанию выключен (INSTANTLY_RATE_LIMITER_ENABLED).
-  await acquireInstantlyToken(resolveInstantlyAccountId(requestOptions?.accountId));
+  if (!requestOptions?.skipRateLimiter) {
+    await acquireInstantlyToken(resolveInstantlyAccountId(requestOptions?.accountId));
+  }
 
   const apiKey = getApiKey(requestOptions);
   const url = new URL(`${BASE_URL}${path}`);
@@ -56,10 +58,17 @@ async function request<T>(
     }
   }
 
-  for (let attempt = 0; attempt <= RATE_LIMIT_RETRIES; attempt++) {
+  const rateLimitRetries = requestOptions?.retryRateLimits === false ? 0 : RATE_LIMIT_RETRIES;
+  for (let attempt = 0; attempt <= rateLimitRetries; attempt++) {
     const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90_000);
+    const timeoutMs =
+      typeof requestOptions?.timeoutMs === 'number' &&
+      Number.isFinite(requestOptions.timeoutMs) &&
+      requestOptions.timeoutMs > 0
+        ? requestOptions.timeoutMs
+        : 90_000;
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     const init: RequestInit = { method: options.method ?? 'GET', headers, signal: controller.signal };
 
     if (options.body !== undefined) {
@@ -74,7 +83,7 @@ async function request<T>(
       clearTimeout(timeoutId);
     }
 
-    if (res.status === 429 && attempt < RATE_LIMIT_RETRIES) {
+    if (res.status === 429 && attempt < rateLimitRetries) {
       const delay = RATE_LIMIT_BASE_DELAY_MS * Math.pow(2, attempt);
       await new Promise((r) => setTimeout(r, delay));
       continue;
