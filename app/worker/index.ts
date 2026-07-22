@@ -13,6 +13,7 @@ import { runHHParserJob } from '@/lib/parsers/hhRunner';
 import { runSearchParserJob } from '@/lib/parsers/searchParserWorker';
 import { runYandexDirectJob } from '@/lib/parsers/yandexDirect/runner';
 import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
+import { recoverStalePreparingWebsiteEnrichmentJobs } from '@/lib/enrich/websiteEnrichmentJobPublisher';
 import { runBriefScoringJob } from '@/lib/briefScoring/briefScoringWorker';
 import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
 import { runEmailValidationJob } from '@/lib/emailValidation/emailValidationWorker';
@@ -110,6 +111,21 @@ async function startupRecovery(): Promise<void> {
     .select('id');
   if (enrichErr) log('warn', 'Startup recovery: website_enrichment_jobs update failed', enrichErr);
   else if (enrichJobs?.length) log('info', `Startup recovery: reset ${enrichJobs.length} website_enrichment_jobs to pending`);
+
+  try {
+    const preparingCutoff = new Date(
+      Date.now() - Number(process.env.ENRICH_PREPARING_STALE_MINUTES ?? '15') * 60_000,
+    ).toISOString();
+    const preparingRecovery = await recoverStalePreparingWebsiteEnrichmentJobs(db, preparingCutoff);
+    if (preparingRecovery.published || preparingRecovery.failed) {
+      log(
+        'warn',
+        `Recovered stale preparing website jobs: published=${preparingRecovery.published}, failed=${preparingRecovery.failed}`,
+      );
+    }
+  } catch (preparingError) {
+    log('warn', 'Stale preparing website job recovery failed', preparingError);
+  }
 
   // Brief scoring — сбрасываем в 'pending' (воркер сам продолжит с места остановки)
   const { data: briefJobs, error: briefErr } = await db
