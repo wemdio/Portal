@@ -90,6 +90,7 @@ services:
         limits:
           memory: 26624M
           cpus: '11'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -121,6 +122,7 @@ services:
         limits:
           memory: 3072M
           cpus: '1.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -143,6 +145,7 @@ services:
         limits:
           memory: 1536M
           cpus: '0.75'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -172,6 +175,7 @@ services:
         limits:
           memory: 3072M
           cpus: '1.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -214,6 +218,7 @@ services:
         limits:
           memory: 2048M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -265,6 +270,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -305,6 +311,7 @@ services:
         limits:
           memory: 1536M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -336,6 +343,7 @@ services:
         limits:
           memory: 1536M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -361,6 +369,7 @@ services:
         limits:
           memory: 1536M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -405,6 +414,7 @@ services:
         limits:
           memory: 1536M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -429,6 +439,7 @@ services:
         limits:
           memory: 1024M
           cpus: '0.75'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -454,6 +465,7 @@ services:
         limits:
           memory: 768M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -485,6 +497,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -507,6 +520,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -529,6 +543,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -558,6 +573,7 @@ services:
         limits:
           memory: 768M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -594,6 +610,7 @@ services:
           # + буферы archiver и lib-storage (5 MB × 4 in-flight multipart).
           memory: 1024M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -621,6 +638,7 @@ services:
         limits:
           memory: 3072M
           cpus: '2'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -651,6 +669,7 @@ services:
         limits:
           memory: 2048M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -679,6 +698,7 @@ services:
         limits:
           memory: 2048M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -702,6 +722,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -761,6 +782,7 @@ services:
           # 3 реплики x 10GB = 30GB; host 139 имеет ~56GB свободно.
           memory: 10240M
           cpus: '3'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -804,6 +826,7 @@ services:
         limits:
           memory: 256M
           cpus: '0.25'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -834,6 +857,7 @@ services:
         limits:
           memory: 4096M
           cpus: '6'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -857,6 +881,7 @@ services:
         limits:
           memory: 8192M
           cpus: '3'
+          pids: 512
     restart: unless-stopped
     ports:
       # ТОЛЬКО localhost: воркер ходит через docker-сеть (yandexmaps:8000),
@@ -892,6 +917,7 @@ services:
         limits:
           memory: 2048M
           cpus: '1.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -930,6 +956,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.3'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -959,6 +986,7 @@ services:
         limits:
           memory: 1536M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1007,6 +1035,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.25'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1038,6 +1067,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.3'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1071,6 +1101,7 @@ services:
         limits:
           memory: 256M
           cpus: '0.1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1100,6 +1131,7 @@ services:
         limits:
           memory: 768M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1112,6 +1144,7 @@ services:
         limits:
           memory: 768M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1138,6 +1171,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.3'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1162,6 +1196,7 @@ services:
         limits:
           memory: 64M
           cpus: '0.1'
+          pids: 512
     restart: unless-stopped
 
   # Background BoB scorer — long-running daemon, 24/7 прогоняет домены из
@@ -1188,6 +1223,7 @@ services:
         limits:
           memory: 512M
           cpus: "0.25"
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1217,6 +1253,7 @@ services:
         limits:
           memory: 1024M
           cpus: "0.5"
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1253,6 +1290,7 @@ services:
           # чанк-локально, но даём запас.
           memory: 3072M
           cpus: '1.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1288,6 +1326,7 @@ services:
         limits:
           memory: 256M
           cpus: '0.1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network

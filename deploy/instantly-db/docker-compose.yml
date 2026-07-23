@@ -44,6 +44,7 @@ services:
         limits:
           memory: 2048M
           cpus: '1.0'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -73,6 +74,7 @@ services:
         limits:
           memory: 128M
           cpus: '0.2'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -96,6 +98,7 @@ services:
         limits:
           memory: 256M
           cpus: '0.2'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -130,6 +133,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -157,6 +161,7 @@ services:
         limits:
           memory: 128M
           cpus: '0.1'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -180,6 +185,7 @@ services:
         limits:
           memory: 256M
           cpus: '0.2'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -233,6 +239,7 @@ services:
           # throttled at the old 2-CPU ceiling. Keep in sync with main-db-prod.
           memory: 12288M
           cpus: '8.0'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -258,6 +265,7 @@ services:
         limits:
           memory: 256M
           cpus: '0.2'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -303,6 +311,7 @@ services:
         limits:
           memory: 1G
           cpus: '1.0'
+          pids: 512
     # entrypoint waits for an active dump + S3 upload before exiting.
     stop_grace_period: 4h
     restart: unless-stopped
