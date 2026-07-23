@@ -531,6 +531,34 @@ services:
     networks:
       - portal-network
 
+  # Telegram-бот получателей пятничного отчёта. Сам отчёт запускается host cron:
+  # 0 15 * * 5 docker exec portal-worker-leads-report-bot
+  #   node dist/workers/leadsReportSummaryCron.js
+  # 15:00 UTC = 18:00 МСК.
+  worker-leads-report-bot:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-leads-report-bot
+    command: ["node", "dist/workers/leadsReportBot.js"]
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - LEADS_REPORT_TG_BOT_TOKEN=${LEADS_REPORT_TG_BOT_TOKEN}
+      - LEADS_REPORT_TG_ADMIN_IDS=${LEADS_REPORT_TG_ADMIN_IDS}
+      - LEADS_REPORT_PIPELINE_NAME=${LEADS_REPORT_PIPELINE_NAME:-Воронка - новые лиды}
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+          pids: 256
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   worker-byo-send:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-byo-send

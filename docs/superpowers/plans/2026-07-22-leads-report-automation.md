@@ -1249,7 +1249,7 @@ worker/leadsReportBot.ts (резидентный, long polling)
 worker/leadsReportSummaryCron.ts (пятница 18:00 МСК)
     ├─── lib/leadsReport/summary.ts — оркестратор
     │       ├─── lib/leadsReport/channels.ts — 5 каналов с фильтрами
-    │       ├─── lib/leadsReport/metrics.ts — SQL для (пришло / встреч было / запланировано)
+    │       ├─── lib/leadsReport/metrics.ts — расчёт (пришло / лидов / встреч было / запланировано)
     │       └─── lib/leadsReport/summaryFormatter.ts — формат сообщения
     ├─── lib/tgBot/telegramClient.ts
     └─── lib/leadsReport/subscribers.ts (читает получателей)
