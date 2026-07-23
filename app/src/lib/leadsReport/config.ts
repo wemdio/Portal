@@ -1,9 +1,24 @@
+export type ColumnKey =
+  | 'amo_url'
+  | 'amo_id_raw'
+  | 'utm_block'
+  | 'platform'
+  | 'category'
+  | 'created_at_short'
+  | 'phone'
+  | 'email'
+  | 'name'
+  | 'responsible_name'
+  | 'company_name'
+  | 'company_website'
+  | 'status_name';
+
 /** Спецификация одной колонки таблицы отчёта. */
 export type ColumnSpec = {
   /** Заголовок колонки (для документации/логов, в Sheet не пишется). */
   header: string;
   /** Ключ данных из AmoLead (см. report.ts) — как извлечь значение. */
-  key: string;
+  key: ColumnKey;
 };
 
 export type LeadsReportConfig = {
