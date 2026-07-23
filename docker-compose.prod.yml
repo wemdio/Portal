@@ -503,8 +503,8 @@ services:
       - portal-network
 
   # One-shot Google Sheets report runner. The container stays idle; host cron
-  # executes /app/workers/leadsReportCron.js daily at 08:30 MSK (05:30 UTC),
-  # after the 08:00 MSK AMO sync.
+  # executes /app/workers/leadsReportCron.js daily at 18:00 MSK (15:00 UTC),
+  # after the 17:30 MSK AMO sync.
   worker-leads-report:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-leads-report
@@ -532,9 +532,9 @@ services:
       - portal-network
 
   # Telegram-бот получателей пятничного отчёта. Сам отчёт запускается host cron:
-  # 0 15 * * 5 docker exec portal-worker-leads-report-bot
+  # 30 15 * * 5 docker exec portal-worker-leads-report-bot
   #   node dist/workers/leadsReportSummaryCron.js
-  # 15:00 UTC = 18:00 МСК.
+  # 15:30 UTC = 18:30 МСК.
   worker-leads-report-bot:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-leads-report-bot
@@ -1049,11 +1049,11 @@ services:
       - portal-network
 
   # Ежедневный синк внешних источников (Метрика / AMO / Точка / Т-Банк) в main-postgres.
-  # Расписание cron '0 5 * * *' UTC (= 8:00 МСК) через APScheduler — совпадает
-  # с утренним окном отчётности, чтобы свежие данные были готовы к 08:30 МСК.
+  # Расписание cron '30 14 * * *' UTC (= 17:30 МСК) через APScheduler, чтобы
+  # свежие данные были готовы к записи в Google Sheets в 18:00 МСК.
   #
   # На старте контейнер проверяет текущее время по МСК: если попадает в окно
-  # [8:00, 12:00) — синк запускается сразу (догоняем пропущенный cron после
+  # [17:30, 18:00) — синк запускается сразу (догоняем пропущенный cron после
   # деплоя). Вне окна — просто ждём следующего cron, не тратим API-запросы
   # на каждый рестарт в течение дня. UPSERT-таблицы делают любой повторный
   # прогон безопасным.
@@ -1070,9 +1070,9 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - SUPABASE_DB_URL=${SUPABASE_DB_URL}
-      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-0 5 * * *}  # 05:00 UTC = 8:00 МСК
-      - EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK:-8}
-      - EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK:-12}
+      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-30 14 * * *}  # 14:30 UTC = 17:30 МСК
+      - EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK:-17:30}
+      - EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK:-18:00}
       - YANDEX_METRIKA_TOKEN=${YANDEX_METRIKA_TOKEN:-}
       - YANDEX_METRIKA_COUNTER_ID=${YANDEX_METRIKA_COUNTER_ID:-62363425}
       - YANDEX_METRIKA_LOOKBACK_DAYS=${YANDEX_METRIKA_LOOKBACK_DAYS:-30}

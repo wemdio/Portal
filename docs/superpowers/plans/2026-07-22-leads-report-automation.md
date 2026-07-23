@@ -7,8 +7,8 @@
 - **Phase 2** — пятничный TG-саммари по 5 каналам продаж в личку админам и подписчикам. Егор выведен из процесса.
 
 **Architecture:**
-- **Phase 1:** один Node-скрипт-крон (`leadsReportCron.ts`), запускаемый ежедневно в 05:30 UTC (8:30 МСК) через хостовый crontab. Читает `amo_leads` через Supabase JS client после ежедневного AMO-синка в 8:00 МСК. По двум конфигам (marketing + outreach) фильтрует сделки, собирает строки, дедуплицирует по `amo_id` и делает `append` через Google Sheets API.
-- **Phase 2:** резидентный TG-бот-воркер (`leadsReportBot.ts`, long polling `getUpdates`) для команд `/start`/`/add`/`/remove`/`/list`/`/whoami` + пятничный крон (`leadsReportSummaryCron.ts`, 15:00 UTC = 18:00 МСК) — считает метрики по 5 каналам и шлёт форматированное сообщение всем админам + подписчикам.
+- **Phase 1:** один Node-скрипт-крон (`leadsReportCron.ts`), запускаемый ежедневно в 15:00 UTC (18:00 МСК) через хостовый crontab. Читает `amo_leads` через Supabase JS client после ежедневного AMO-синка в 17:30 МСК. По двум конфигам (marketing + outreach) фильтрует сделки, собирает строки, дедуплицирует по `amo_id` и делает `append` через Google Sheets API.
+- **Phase 2:** резидентный TG-бот-воркер (`leadsReportBot.ts`, long polling `getUpdates`) для команд `/start`/`/add`/`/remove`/`/list`/`/whoami` + пятничный крон (`leadsReportSummaryCron.ts`, 15:30 UTC = 18:30 МСК) — считает метрики по 5 каналам и шлёт форматированное сообщение всем админам + подписчикам.
 
 Всё пишет статистику в `external_sync_runs`.
 
@@ -995,7 +995,7 @@ git commit -m "feat(leadsReport): add report orchestrator + custom-field helper"
  * (маркетинг + аутрич) новыми лидами из amo_leads.
  *
  * Расписание задаётся в хостовом crontab на 139.60.162.12:
- *   30 5 * * * docker exec portal-worker-leads-report node dist/workers/leadsReportCron.js
+ *   0 15 * * * docker exec portal-worker-leads-report node dist/workers/leadsReportCron.js
  *
  * Спецификация: docs/superpowers/specs/2026-07-21-marketing-leads-report-automation-design.md
  * План: docs/superpowers/plans/2026-07-22-leads-report-automation.md
@@ -1187,9 +1187,9 @@ AMO_BASE_URL_HOST=polzaagency.amocrm.ru
 
 На сервере 139.60.162.12 добавить в root crontab (`crontab -e`):
 ```
-30 5 * * * docker exec portal-worker-leads-report node dist/workers/leadsReportCron.js >> /var/log/leads-report-cron.log 2>&1
+0 15 * * * docker exec portal-worker-leads-report node dist/workers/leadsReportCron.js >> /var/log/leads-report-cron.log 2>&1
 ```
-Это 05:30 UTC = 08:30 МСК, через 30 минут после ежедневного AMO-синка (08:00 МСК).
+Это 15:00 UTC = 18:00 МСК, через 30 минут после ежедневного AMO-синка (17:30 МСК).
 
 - [ ] **Step 4: Первый ручной прогон на prod**
 
@@ -1246,7 +1246,7 @@ worker/leadsReportBot.ts (резидентный, long polling)
     ├─── lib/tgBot/telegramClient.ts (fetch к api.telegram.org)
     └─── lib/leadsReport/subscribers.ts (CRUD подписчиков)
 
-worker/leadsReportSummaryCron.ts (пятница 18:00 МСК)
+worker/leadsReportSummaryCron.ts (пятница 18:30 МСК)
     ├─── lib/leadsReport/summary.ts — оркестратор
     │       ├─── lib/leadsReport/channels.ts — 5 каналов с фильтрами
     │       ├─── lib/leadsReport/metrics.ts — расчёт (пришло / лидов / встреч было / запланировано)
@@ -1981,8 +1981,8 @@ git commit -m "feat(leadsReport): add 5-channel metrics + summary formatter"
  * (пн-вс включительно) и шлёт единое сообщение всем получателям (админы + подписчики).
  *
  * Расписание: хостовый crontab на 139.60.162.12
- *   0 15 * * 5 docker exec portal-worker-leads-report-bot node dist/workers/leadsReportSummaryCron.js
- *   (пятница 15:00 UTC = 18:00 МСК)
+ *   30 15 * * 5 docker exec portal-worker-leads-report-bot node dist/workers/leadsReportSummaryCron.js
+ *   (пятница 15:30 UTC = 18:30 МСК)
  *
  * Env: LEADS_REPORT_TG_BOT_TOKEN, LEADS_REPORT_TG_ADMIN_IDS.
  */
@@ -2085,7 +2085,7 @@ Expected: exit code 0.
 
 ```bash
 git add app/worker/leadsReportSummaryCron.ts
-git commit -m "feat(leadsReport): add weekly summary cron (Fri 18:00 МСК)"
+git commit -m "feat(leadsReport): add weekly summary cron (Fri 18:30 МСК)"
 ```
 
 ---
@@ -2144,9 +2144,9 @@ ls dist/workers/leadsReportBot.js dist/workers/leadsReportSummaryCron.js
 
 На сервере 139.60.162.12 добавить в root crontab (`crontab -e`):
 ```
-0 15 * * 5 docker exec portal-worker-leads-report-bot node dist/workers/leadsReportSummaryCron.js >> /var/log/leads-report-summary.log 2>&1
+30 15 * * 5 docker exec portal-worker-leads-report-bot node dist/workers/leadsReportSummaryCron.js >> /var/log/leads-report-summary.log 2>&1
 ```
-Пятница 15:00 UTC = 18:00 МСК.
+Пятница 15:30 UTC = 18:30 МСК.
 
 - [ ] **Step 7: Первый ручной прогон + проверка**
 
