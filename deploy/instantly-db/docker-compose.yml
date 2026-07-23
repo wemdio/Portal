@@ -72,7 +72,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 128M
+          # 23.07.2026: PostgREST стабильно упирался в прежний лимит 128M
+          # (127.9 MiB, 99.91%). Оставляем запас для рабочих пиков.
+          memory: 4096M
           cpus: '0.2'
           pids: 512
     restart: unless-stopped

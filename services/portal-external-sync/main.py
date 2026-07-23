@@ -1,14 +1,14 @@
 """
-portal-external-sync — nightly sync of external data into main-postgres.
+portal-external-sync — daily sync of external data into main-postgres.
 
 Sources: Yandex Metrika, AMO CRM, Точка Банк, Т-Банк.
 
 Расписание:
-- Cron `EXTERNAL_SYNC_CRON` (default '0 2 * * *' UTC = 5:00 МСК) через APScheduler.
+- Cron `EXTERNAL_SYNC_CRON` (default '30 14 * * *' UTC = 17:30 МСК) через APScheduler.
 - На старте контейнера: если время старта попадает в окно
-  [STARTUP_WINDOW_START_MSK, STARTUP_WINDOW_END_MSK) МСК (default 3-9),
-  запускается синк сразу. Цель — при деплое в 3-5 МСК контейнер сам догонит
-  пропущенный ночной cron, но обычные рестарты в течение дня НЕ триггерят
+  [STARTUP_WINDOW_START_MSK, STARTUP_WINDOW_END_MSK) МСК (default 17:30-18:00),
+  запускается синк сразу. Цель — при деплое после 17:30 МСК контейнер сам догонит
+  пропущенный cron до запуска отчётности, но обычные рестарты в течение дня НЕ триггерят
   ненужный синк. UPSERT-таблицы делают любой повторный прогон безопасным.
 
 Attribution to projects — отдельная задача, здесь только raw pulls.
@@ -44,12 +44,12 @@ from sources.bank_tbank import BankTBankSync
 
 # ── Config ────────────────────────────────────────────────────────────────
 
-CRON = os.environ.get("EXTERNAL_SYNC_CRON", "0 2 * * *")  # 5:00 МСК
+CRON = os.environ.get("EXTERNAL_SYNC_CRON", "30 14 * * *")  # 17:30 МСК
 DATABASE_URL = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL", "")
 
 # Окно (по МСК), внутри которого рестарт контейнера триггерит синк сразу.
-STARTUP_WINDOW_START_MSK = int(os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK", "3"))
-STARTUP_WINDOW_END_MSK   = int(os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK", "9"))
+STARTUP_WINDOW_START_MSK = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK", "17:30")
+STARTUP_WINDOW_END_MSK   = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK", "18:00")
 MSK_TZ = timezone(timedelta(hours=3))
 
 SOURCES = [
@@ -91,16 +91,33 @@ async def run_all() -> None:
 
 # ── Startup window check ──────────────────────────────────────────────────
 
+def _parse_msk_time(value: str) -> tuple[int, int]:
+    """Парсит `H` / `HH` / `HH:MM` в пару (hour, minute)."""
+    parts = value.strip().split(":", 1)
+    hour = int(parts[0])
+    minute = int(parts[1]) if len(parts) == 2 else 0
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise ValueError(f"invalid MSK time: {value!r}")
+    return hour, minute
+
+
 def _in_startup_window() -> tuple[bool, str]:
     """Проверяет, попадает ли текущий момент по МСК в окно deploy-догона.
 
     Возвращает (should_run, human_reason).
     """
     now_msk = datetime.now(MSK_TZ)
-    hour = now_msk.hour
-    in_window = STARTUP_WINDOW_START_MSK <= hour < STARTUP_WINDOW_END_MSK
+    start_hour, start_minute = _parse_msk_time(STARTUP_WINDOW_START_MSK)
+    end_hour, end_minute = _parse_msk_time(STARTUP_WINDOW_END_MSK)
+    now_minutes = now_msk.hour * 60 + now_msk.minute
+    start_minutes = start_hour * 60 + start_minute
+    end_minutes = end_hour * 60 + end_minute
+    in_window = start_minutes <= now_minutes < end_minutes
     stamp = now_msk.strftime("%H:%M МСК")
-    window = f"{STARTUP_WINDOW_START_MSK:02d}:00-{STARTUP_WINDOW_END_MSK:02d}:00 МСК"
+    window = (
+        f"{start_hour:02d}:{start_minute:02d}-"
+        f"{end_hour:02d}:{end_minute:02d} МСК"
+    )
     if in_window:
         return True, f"старт в {stamp} — внутри deploy-окна {window} → синк сразу"
     return False, f"старт в {stamp} — вне deploy-окна {window} → жду cron"
