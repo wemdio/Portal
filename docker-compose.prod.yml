@@ -538,7 +538,7 @@ services:
   worker-leads-report-bot:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-leads-report-bot
-    command: ["node", "dist/workers/leadsReportBot.js"]
+    command: ["node", "/app/workers/leadsReportBot.js"]
     env_file:
       - .env
     environment:
@@ -1016,6 +1016,34 @@ services:
           memory: 512M
           cpus: '0.3'
           pids: 512
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  # Слушает docker events; если контейнер exit'нулся >= 5 раз за 10 мин —
+  # принудительно останавливает его и шлёт TG-алерт в HEALTH-чат.
+  # Защита от паттерна, дважды ронявшего сервер:
+  #   22.07.2026 postgrest healthcheck loop (15 ч → hang),
+  #   23.07.2026 21:00 MSK leads-report-bot exit loop (10 мин → hang).
+  # Требует rw-доступ к docker.sock (нужны docker update + docker stop).
+  loop-watchdog:
+    image: ${DOCKER_USERNAME}/portal-loop-watchdog:prod
+    container_name: portal-loop-watchdog
+    environment:
+      - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
+      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - WATCHDOG_WINDOW_SEC=${WATCHDOG_WINDOW_SEC:-600}
+      - WATCHDOG_THRESHOLD=${WATCHDOG_THRESHOLD:-5}
+      - WATCHDOG_SELF_NAME=portal-loop-watchdog
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.1'
+          pids: 128
     restart: unless-stopped
     networks:
       - portal-network
