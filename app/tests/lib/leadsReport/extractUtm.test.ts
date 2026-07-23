@@ -60,4 +60,60 @@ describe('extractUtm', () => {
       term: null,
     });
   });
+
+  it('не крашится на null-элементах внутри custom_fields_values', () => {
+    const raw = {
+      custom_fields_values: [
+        null,
+        { field_name: 'utm_source', values: [{ value: 'yandex' }] },
+        undefined,
+      ],
+    };
+    expect(extractUtm(raw)).toEqual({
+      source: 'yandex',
+      medium: null,
+      campaign: null,
+      content: null,
+      term: null,
+    });
+  });
+
+  it('корректно парсит query-string формат в комментарии (не жадный regex)', () => {
+    const raw = {
+      custom_fields_values: [
+        {
+          field_name: 'Комментарий',
+          values: [
+            { value: 'utm_source=yandex&utm_medium=cpc&utm_campaign=summer2026' },
+          ],
+        },
+      ],
+    };
+    expect(extractUtm(raw)).toEqual({
+      source: 'yandex',
+      medium: 'cpc',
+      campaign: 'summer2026',
+      content: null,
+      term: null,
+    });
+  });
+
+  it('добирает недостающие UTM из комментария, если Pass 1 нашёл только часть', () => {
+    const raw = {
+      custom_fields_values: [
+        { field_name: 'utm_source', values: [{ value: 'yandex' }] },
+        {
+          field_name: 'Комментарий',
+          values: [{ value: 'utm_medium: cpc\nutm_campaign: 123' }],
+        },
+      ],
+    };
+    expect(extractUtm(raw)).toEqual({
+      source: 'yandex',
+      medium: 'cpc',
+      campaign: '123',
+      content: null,
+      term: null,
+    });
+  });
 });

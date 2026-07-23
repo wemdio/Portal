@@ -7,7 +7,6 @@ export type Utm = {
 };
 
 const UTM_KEYS = ['source', 'medium', 'campaign', 'content', 'term'] as const;
-type UtmKey = (typeof UTM_KEYS)[number];
 
 const empty = (): Utm => ({
   source: null,
@@ -53,20 +52,19 @@ export function extractUtm(raw: unknown): Utm {
   }
 
   // Проход 2: fallback regex по тексту комментариев
-  if (UTM_KEYS.every((k) => result[k] === null)) {
-    for (const field of cf) {
-      const values = (field as { values?: unknown[] }).values;
-      const text = Array.isArray(values)
-        ? String(
-            (values[0] as { value?: unknown } | undefined)?.value ?? '',
-          )
-        : '';
-      if (!text) continue;
-      for (const key of UTM_KEYS) {
-        if (result[key] !== null) continue;
-        const m = new RegExp(`utm_${key}\\s*[:=]\\s*(\\S+)`, 'i').exec(text);
-        if (m) result[key] = m[1];
-      }
+  for (const field of cf) {
+    if (!field || typeof field !== 'object') continue;
+    const values = (field as { values?: unknown[] }).values;
+    const text = Array.isArray(values)
+      ? String(
+          (values[0] as { value?: unknown } | undefined)?.value ?? '',
+        )
+      : '';
+    if (!text) continue;
+    for (const key of UTM_KEYS) {
+      if (result[key] !== null) continue;
+      const m = new RegExp(`utm_${key}\\s*[:=]\\s*([^\\s&]+)`, 'i').exec(text);
+      if (m) result[key] = m[1];
     }
   }
 
