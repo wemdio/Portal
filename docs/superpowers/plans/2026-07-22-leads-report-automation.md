@@ -7,7 +7,7 @@
 - **Phase 2** — пятничный TG-саммари по 5 каналам продаж в личку админам и подписчикам. Егор выведен из процесса.
 
 **Architecture:**
-- **Phase 1:** один Node-скрипт-крон (`leadsReportCron.ts`), запускаемый ежедневно в 00:30 UTC (3:30 МСК) через хостовый crontab. Читает `amo_leads` через Supabase JS client. По двум конфигам (marketing + outreach) фильтрует сделки, собирает строки, дедуплицирует по `amo_id` и делает `append` через Google Sheets API.
+- **Phase 1:** один Node-скрипт-крон (`leadsReportCron.ts`), запускаемый ежедневно в 05:30 UTC (8:30 МСК) через хостовый crontab. Читает `amo_leads` через Supabase JS client после ежедневного AMO-синка в 8:00 МСК. По двум конфигам (marketing + outreach) фильтрует сделки, собирает строки, дедуплицирует по `amo_id` и делает `append` через Google Sheets API.
 - **Phase 2:** резидентный TG-бот-воркер (`leadsReportBot.ts`, long polling `getUpdates`) для команд `/start`/`/add`/`/remove`/`/list`/`/whoami` + пятничный крон (`leadsReportSummaryCron.ts`, 15:00 UTC = 18:00 МСК) — считает метрики по 5 каналам и шлёт форматированное сообщение всем админам + подписчикам.
 
 Всё пишет статистику в `external_sync_runs`.
@@ -995,7 +995,7 @@ git commit -m "feat(leadsReport): add report orchestrator + custom-field helper"
  * (маркетинг + аутрич) новыми лидами из amo_leads.
  *
  * Расписание задаётся в хостовом crontab на 139.60.162.12:
- *   30 0 * * * docker exec portal-worker-leads-report node dist/workers/leadsReportCron.js
+ *   30 5 * * * docker exec portal-worker-leads-report node dist/workers/leadsReportCron.js
  *
  * Спецификация: docs/superpowers/specs/2026-07-21-marketing-leads-report-automation-design.md
  * План: docs/superpowers/plans/2026-07-22-leads-report-automation.md
@@ -1187,9 +1187,9 @@ AMO_BASE_URL_HOST=polzaagency.amocrm.ru
 
 На сервере 139.60.162.12 добавить в root crontab (`crontab -e`):
 ```
-30 0 * * * docker exec portal-worker-leads-report node dist/workers/leadsReportCron.js >> /var/log/leads-report-cron.log 2>&1
+30 5 * * * docker exec portal-worker-leads-report node dist/workers/leadsReportCron.js >> /var/log/leads-report-cron.log 2>&1
 ```
-Это 00:30 UTC = 03:30 МСК, сразу после ночного AMO-синка (02:00 МСК).
+Это 05:30 UTC = 08:30 МСК, через 30 минут после ежедневного AMO-синка (08:00 МСК).
 
 - [ ] **Step 4: Первый ручной прогон на prod**
 

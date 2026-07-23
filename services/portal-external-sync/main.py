@@ -1,14 +1,14 @@
 """
-portal-external-sync — nightly sync of external data into main-postgres.
+portal-external-sync — daily sync of external data into main-postgres.
 
 Sources: Yandex Metrika, AMO CRM, Точка Банк, Т-Банк.
 
 Расписание:
-- Cron `EXTERNAL_SYNC_CRON` (default '0 2 * * *' UTC = 5:00 МСК) через APScheduler.
+- Cron `EXTERNAL_SYNC_CRON` (default '0 5 * * *' UTC = 8:00 МСК) через APScheduler.
 - На старте контейнера: если время старта попадает в окно
-  [STARTUP_WINDOW_START_MSK, STARTUP_WINDOW_END_MSK) МСК (default 3-9),
-  запускается синк сразу. Цель — при деплое в 3-5 МСК контейнер сам догонит
-  пропущенный ночной cron, но обычные рестарты в течение дня НЕ триггерят
+  [STARTUP_WINDOW_START_MSK, STARTUP_WINDOW_END_MSK) МСК (default 8-12),
+  запускается синк сразу. Цель — при деплое после 8:00 МСК контейнер сам догонит
+  пропущенный утренний cron, но обычные рестарты в течение дня НЕ триггерят
   ненужный синк. UPSERT-таблицы делают любой повторный прогон безопасным.
 
 Attribution to projects — отдельная задача, здесь только raw pulls.
@@ -44,12 +44,12 @@ from sources.bank_tbank import BankTBankSync
 
 # ── Config ────────────────────────────────────────────────────────────────
 
-CRON = os.environ.get("EXTERNAL_SYNC_CRON", "0 2 * * *")  # 5:00 МСК
+CRON = os.environ.get("EXTERNAL_SYNC_CRON", "0 5 * * *")  # 8:00 МСК
 DATABASE_URL = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL", "")
 
 # Окно (по МСК), внутри которого рестарт контейнера триггерит синк сразу.
-STARTUP_WINDOW_START_MSK = int(os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK", "3"))
-STARTUP_WINDOW_END_MSK   = int(os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK", "9"))
+STARTUP_WINDOW_START_MSK = int(os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK", "8"))
+STARTUP_WINDOW_END_MSK   = int(os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK", "12"))
 MSK_TZ = timezone(timedelta(hours=3))
 
 SOURCES = [

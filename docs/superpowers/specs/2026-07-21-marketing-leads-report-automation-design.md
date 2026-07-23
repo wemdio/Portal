@@ -22,9 +22,9 @@
 
 ## 2. Что делаем
 
-**Один ночной воркер, два конфига:**
+**Один ежедневный воркер, два конфига:**
 
-- Раз в сутки в 3:30 МСК (после того как в 2:00 отработал существующий AMO-синк `services/portal-external-sync/sources/amo.py`)
+- Раз в сутки в 8:30 МСК (после того как в 8:00 отработал AMO-синк `services/portal-external-sync/sources/amo.py`)
 - Читает `amo_leads`, применяет фильтр по каждому из двух конфигов
 - Для каждого нового лида собирает строку из данных, которые уже есть в AMO
 - Пишет через Google Sheets API в соответствующую таблицу, вкладка «Лиды»
@@ -77,7 +77,7 @@ MVP настраиваем и запускаем на тестовых копи�
 
 | Возможность | Где |
 |---|---|
-| AMO CRM ingestion | `services/portal-external-sync/sources/amo.py` → `amo_leads` + `amo_users` + `amo_statuses`. Ночной APScheduler 2:00 МСК |
+| AMO CRM ingestion | `services/portal-external-sync/sources/amo.py` → `amo_leads` + `amo_users` + `amo_statuses`. Ежедневный APScheduler 8:00 МСК |
 | Google service account | `GOOGLE_SERVICE_ACCOUNT_EMAIL`, `GOOGLE_PRIVATE_KEY` в env — уже используется в `app/src/app/api/reglament/import-google-doc/route.ts` (Drive readonly) |
 | `googleapis` npm пакет | `app/package.json:75` (v144) |
 | Воркер-паттерн | `app/worker/_shared.ts` (`pollLoop`), пример — `app/worker/salesAiAnalysis.ts` |
@@ -92,7 +92,7 @@ MVP настраиваем и запускаем на тестовых копи�
 4. **Конфиги** — `app/src/lib/leadsReport/config.ts`: два объекта (marketing, outreach) с фильтром AMO + список колонок.
 5. **Row builder** — `app/src/lib/leadsReport/rowBuilder.ts`. По конфигу собирает финальный массив ячеек.
 6. **Оркестратор** — `app/src/lib/leadsReport/report.ts`. Читает БД → строит строки → пишет в Sheet.
-7. **Cron воркер** — `app/worker/leadsReport.ts` + `leadsReportCron.ts`. Раз в сутки в 3:30 МСК, прогоняет оба конфига.
+7. **Cron воркер** — `app/worker/leadsReport.ts` + `leadsReportCron.ts`. Раз в сутки в 8:30 МСК, прогоняет оба конфига.
 8. **Мелкая миграция** — добавить `leads_report_marketing`, `leads_report_outreach` в check-constraint `external_sync_runs.source`.
 
 ## 5. Ключевые детали

@@ -503,7 +503,8 @@ services:
       - portal-network
 
   # One-shot Google Sheets report runner. The container stays idle; host cron
-  # executes /app/workers/leadsReportCron.js after the nightly AMO sync.
+  # executes /app/workers/leadsReportCron.js daily at 08:30 MSK (05:30 UTC),
+  # after the 08:00 MSK AMO sync.
   worker-leads-report:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-leads-report
@@ -1019,12 +1020,12 @@ services:
     networks:
       - portal-network
 
-  # Ночной синк внешних источников (Метрика / AMO / Точка / Т-Банк) в main-postgres.
-  # Расписание cron '0 2 * * *' UTC (= 5:00 МСК) через APScheduler — совпадает
-  # с окном деплоев в 3-5 утра МСК, чтобы свежие данные были к утреннему часу.
+  # Ежедневный синк внешних источников (Метрика / AMO / Точка / Т-Банк) в main-postgres.
+  # Расписание cron '0 5 * * *' UTC (= 8:00 МСК) через APScheduler — совпадает
+  # с утренним окном отчётности, чтобы свежие данные были готовы к 08:30 МСК.
   #
   # На старте контейнер проверяет текущее время по МСК: если попадает в окно
-  # [3:00, 9:00) — синк запускается сразу (догоняем пропущенный cron после
+  # [8:00, 12:00) — синк запускается сразу (догоняем пропущенный cron после
   # деплоя). Вне окна — просто ждём следующего cron, не тратим API-запросы
   # на каждый рестарт в течение дня. UPSERT-таблицы делают любой повторный
   # прогон безопасным.
@@ -1041,9 +1042,9 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - SUPABASE_DB_URL=${SUPABASE_DB_URL}
-      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-0 2 * * *}  # 02:00 UTC = 5:00 МСК
-      - EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK:-3}
-      - EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK:-9}
+      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-0 5 * * *}  # 05:00 UTC = 8:00 МСК
+      - EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK:-8}
+      - EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK:-12}
       - YANDEX_METRIKA_TOKEN=${YANDEX_METRIKA_TOKEN:-}
       - YANDEX_METRIKA_COUNTER_ID=${YANDEX_METRIKA_COUNTER_ID:-62363425}
       - YANDEX_METRIKA_LOOKBACK_DAYS=${YANDEX_METRIKA_LOOKBACK_DAYS:-30}
