@@ -436,7 +436,15 @@ blocks:
                 };
                 if [ ${IDB_BACKUP_DEPLOYED} = 1 ]; then
                   echo '--- Retire legacy portal-backup from Portal host ---';
-                  if sudo -n docker inspect portal-backup >/dev/null 2>&1; then
+                  # После миграции 22.07.2026 portal-backup живёт в проекте
+                  # instantly-db (/opt/instantly-db/docker-compose.yml). Retire
+                  # трогать его нельзя — иначе следующий деплой сносит рабочий
+                  # бэкап-контейнер. Пропускаем удаление, если контейнер в новом
+                  # проекте; удаляем только легаси (проект portal или другой).
+                  BKP_PROJECT=\$(sudo -n docker inspect portal-backup --format '{{index .Config.Labels \"com.docker.compose.project\"}}' 2>/dev/null || echo '');
+                  if [ \"\${BKP_PROJECT}\" = 'instantly-db' ]; then
+                    echo '[deploy] portal-backup принадлежит проекту instantly-db (новая архитектура) — не трогаем';
+                  elif sudo -n docker inspect portal-backup >/dev/null 2>&1; then
                     if sudo -n docker inspect -f '{{.State.Running}}' portal-backup 2>/dev/null | grep -qx true; then
                       sudo -n docker update --restart=no portal-backup >/dev/null;
                       sudo -n docker exec portal-backup sh -c ': > /etc/crontabs/root';
