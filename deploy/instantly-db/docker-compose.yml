@@ -61,12 +61,11 @@ services:
     depends_on:
       instantly-postgres-prod:
         condition: service_healthy
+    # 22.07.2026: postgrest/postgrest:v12.2.8 — distroless image, нет sh/wget.
+    # CMD-SHELL healthcheck падает "no such file"; сам postgrest работает и
+    # обслуживает запросы. Отключаем чтобы контейнер не был вечно unhealthy.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+      disable: true
     ports:
       - "0.0.0.0:35401:3000"
     deploy:
@@ -148,12 +147,9 @@ services:
     depends_on:
       instantly-postgres-dev:
         condition: service_healthy
+    # 22.07.2026: distroless image, см. коммент у postgrest-prod.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+      disable: true
     ports:
       - "0.0.0.0:35402:3000"
     deploy:
@@ -279,12 +275,14 @@ services:
     profiles:
       - backup
     environment:
-      # После миграции 21.07.2026 на 139: main-postgres в отдельном compose-проекте
-      # (main-supabase), портал-backup в instantly-network — разные docker-сети.
-      # Ходим через host-IP:host-port (публичные 35434/35432), не через container-name.
+      # После миграции 21.07.2026 на 139:
+      # - main-postgres в отдельном compose-проекте (main-supabase) → разные docker-сети
+      #   → ходим через host-IP:host-port (публичный 35434).
+      # - instantly-postgres-prod в этом же compose (instantly-network) → используем
+      #   container-name (139-firewall режет self-loop на host-IP:35432 из контейнера).
       MAIN_SUPABASE_DATABASE_URL: postgresql://supabase_admin:${MAIN_PG_PASSWORD}@139.60.162.12:35434/postgres?sslmode=disable
-      INSTANTLY_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@139.60.162.12:35432/instantly?sslmode=disable
-      INSTANTLY_DATASET_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@139.60.162.12:35432/instantly_dataset?sslmode=disable
+      INSTANTLY_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@instantly-postgres-prod:5432/instantly?sslmode=disable
+      INSTANTLY_DATASET_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@instantly-postgres-prod:5432/instantly_dataset?sslmode=disable
       BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT}
       BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
       BACKUP_S3_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID}
