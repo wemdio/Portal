@@ -262,7 +262,10 @@ services:
       REGION: ${MAIN_S3_REGION}
       ENABLE_IMAGE_TRANSFORMATION: "false"
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/status"]
+      # 127.0.0.1 вместо localhost: внутри контейнера localhost сначала резолвится
+      # в IPv6 (::1), а storage-api слушает только IPv4 (0.0.0.0:5000) → refused.
+      # Из-за этого healthcheck был вечно unhealthy при живом сервисе (23.07.2026).
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:5000/status"]
       interval: 10s
       timeout: 5s
       retries: 5

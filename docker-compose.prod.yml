@@ -1079,7 +1079,10 @@ services:
     image: aiogram/telegram-bot-api:latest
     container_name: portal-telegram-bot-api
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 8081 || exit 1"]
+      # 127.0.0.1 вместо localhost: внутри контейнера localhost сначала пытается
+      # IPv6 (::1), а telegram-bot-api слушает только IPv4 (0.0.0.0:8081) → refused.
+      # Из-за этого healthcheck был вечно unhealthy при живом сервисе (23.07.2026).
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8081 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
