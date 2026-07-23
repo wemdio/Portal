@@ -16,14 +16,16 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { HH_API_BASE, parseAreas } from '@/lib/parsers/hhArchive/parser';
-import { buildHhRequestHeaders } from '@/lib/parsers/hhParser';
+import { fetchWithRetry, HHApiError } from '@/lib/parsers/hhParser';
+import { logInfo, logWarn } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
 
-// Используем тот же User-Agent/Authorization-стек, что и стандартный HH-парсер,
-// то есть env HH_ACCESS_TOKEN (а не HH_OAUTH_TOKEN). HH с 2026-04-15 требует
-// OAuth для /vacancies — без токена будет 403.
-const USER_AGENT = process.env.HH_ARCHIVE_USER_AGENT;
+// Все походы на HH идут через общий fetchWithRetry: он подключён к RU-прокси
+// (PROXY_URLS), троттлит одновременные запросы (HH_MAX_CONCURRENCY) и
+// ретраит 429/403/5xx с backoff'ом. HH с 2026-04-15 требует OAuth
+// (HH_ACCESS_TOKEN) и российский IP — без прокси с прод-сервера в Торонто
+// приходит 403 либо TCP-сброс (fetch failed).
 
 function err(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -63,12 +65,10 @@ export async function POST(req: NextRequest) {
   const dateTo = typeof body.date_to === 'string' ? body.date_to : '';
   const archived = body.archived !== false; // default true
 
-  const headers = buildHhRequestHeaders(USER_AGENT);
-
-  // По одному мини-запросу на каждый search_query. Все параллельно, чтобы
-  // не ждать 30 секунд если у юзера 20 запросов. HH рейт-лимит на 20
-  // одновременных запросов спокойно держит (это не парсинг, это 1 запрос
-  // с per_page=1 = микро-payload).
+  // Всё через общий fetchWithRetry — глобальный throttle кэпит одновременные
+  // запросы (HH_MAX_CONCURRENCY, дефолт 2), так что Promise.all тут = de-facto
+  // очередь на 2 запроса за раз с задержкой. Ретраев мало (2 попытки),
+  // чтобы preview не залипал при недоступности прокси/HH.
   const perQuery = await Promise.all(
     queries.map(async (q) => {
       const params = new URLSearchParams();
@@ -81,19 +81,48 @@ export async function POST(req: NextRequest) {
       if (archived) params.set('archived', 'true');
       if (dateFrom) params.set('date_from', dateFrom);
       if (dateTo) params.set('date_to', dateTo);
+      const url = `${HH_API_BASE}?${params.toString()}`;
       try {
-        const res = await fetch(`${HH_API_BASE}?${params.toString()}`, { headers });
-        if (!res.ok) {
-          return { query: q, found: 0, error: `HH ${res.status}` };
-        }
-        const json = (await res.json()) as { found?: number };
-        return { query: q, found: Number(json.found ?? 0), error: null };
+        const json = await fetchWithRetry<{ found?: number }>(url, {
+          maxRetries: 2,
+          timeoutMs: 15_000,
+        });
+        const found = Number(json.found ?? 0);
+        // Диагностический лог: чтобы после деплоя видеть в prod-логах,
+        // возвращает ли HH API реальные числа с `archived=true` или молча
+        // отдаёт 0 (тогда `archived` на api.hh.ru не поддерживается и надо
+        // будет переходить на скрейп hh.ru/search/vacancy).
+        void logInfo(
+          'parser.hh_archive.preview.query',
+          'HH archive preview query',
+          {
+            userId: user.id,
+            query: q,
+            area,
+            date_from: dateFrom,
+            date_to: dateTo,
+            archived,
+            found,
+          },
+        );
+        return { query: q, found, error: null };
       } catch (e) {
-        return {
-          query: q,
-          found: 0,
-          error: e instanceof Error ? e.message : 'fetch failed',
-        };
+        const message = e instanceof HHApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : 'fetch failed';
+        void logWarn(
+          'parser.hh_archive.preview.query.failed',
+          'HH archive preview query failed',
+          {
+            userId: user.id,
+            query: q,
+            error: message,
+            status: e instanceof HHApiError ? e.status : undefined,
+          },
+        );
+        return { query: q, found: 0, error: message };
       }
     }),
   );
