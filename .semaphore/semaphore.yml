@@ -179,6 +179,23 @@ blocks:
           commands:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-health-check:prod --platform linux/amd64 -f services/health-check/Dockerfile services/health-check'
 
+  - name: Build loop-watchdog
+    dependencies: []
+    run:
+      when: "branch = 'main' AND change_in('/services/loop-watchdog/', {default_branch: 'main'})"
+    task:
+      secrets:
+        - name: portal_secrets
+      prologue:
+        commands:
+          - checkout
+          - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+          - docker buildx create --use
+      jobs:
+        - name: loop-watchdog
+          commands:
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-loop-watchdog:prod --platform linux/amd64 -f services/loop-watchdog/Dockerfile services/loop-watchdog'
+
   - name: Build atmos-bot
     dependencies: []
     run:
