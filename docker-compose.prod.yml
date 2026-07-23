@@ -724,7 +724,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2048M
+          # 23.07.2026: воркер достигал прежнего лимита 2 GiB при обработке
+          # нескольких видео параллельно. Лимит не резервирует память заранее.
+          memory: 8192M
           cpus: '1'
           pids: 512
     restart: unless-stopped
