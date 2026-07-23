@@ -538,7 +538,7 @@ services:
   worker-leads-report-bot:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-leads-report-bot
-    command: ["node", "dist/workers/leadsReportBot.js"]
+    command: ["node", "/app/workers/leadsReportBot.js"]
     env_file:
       - .env
     environment:
