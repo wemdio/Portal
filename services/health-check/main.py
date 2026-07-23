@@ -104,6 +104,15 @@ S3_BUCKET = os.environ.get("S3_BUCKET", "")
 DISK_TOTAL_GB = float(os.environ.get("HEALTH_DISK_TOTAL_GB", "50"))
 DISK_WARN_GB = float(os.environ.get("HEALTH_DISK_WARN_GB", "45"))
 
+# ── Per-container resource watchdog ──────────────────────────────────────────
+# Alert when a container uses >= HEALTH_CONTAINER_USAGE_PCT of ITS OWN cgroup
+# memory limit or CPU quota. Container name is included so the operator can
+# jump straight to it. Requires read-only access to /var/run/docker.sock.
+# Signal is per-cycle without dedup — set threshold to a value where sustained
+# breach genuinely needs a look (default 80). Set to 0 to disable the check.
+HEALTH_CONTAINER_USAGE_PCT = int(os.environ.get("HEALTH_CONTAINER_USAGE_PCT", "80"))
+DOCKER_SOCK_PATH = os.environ.get("DOCKER_SOCK", "/var/run/docker.sock")
+
 PROXY_URLS: list[str] = []
 
 LAST_HEALTH_CHECK_TS = 0.0
@@ -681,6 +690,119 @@ async def check_server() -> tuple[bool, str]:
     return False, f"Сервер {SERVER_IP} не отвечает ни на одном порту (80/443/22)"
 
 
+async def check_container_resources() -> list[str]:
+    """Warn when a container passes HEALTH_CONTAINER_USAGE_PCT of its own
+    cgroup memory limit or CPU quota. Each warning is one line naming the
+    container, its current usage, and its limit — so the operator can jump
+    to `docker stats <name>` on the host immediately.
+
+    Docker SDK calls are blocking, so we run the sync body in a worker
+    thread to keep the event loop responsive. Containers without an explicit
+    limit are skipped: reporting them against host RAM/CPU would drown out
+    real signal from services we actually sized.
+    """
+    if HEALTH_CONTAINER_USAGE_PCT <= 0:
+        return []
+    try:
+        import docker  # lazy import: bot must still boot without the socket
+    except Exception as e:
+        print(f"[health] docker sdk not available: {e}")
+        return []
+
+    def _sync() -> list[str]:
+        warnings: list[str] = []
+        try:
+            client = docker.DockerClient(base_url=f"unix://{DOCKER_SOCK_PATH}", timeout=15)
+        except Exception as e:
+            print(f"[health] docker connect error: {e}")
+            return warnings
+        try:
+            host_mem = int((client.info() or {}).get("MemTotal") or 0)
+        except Exception:
+            host_mem = 0
+        try:
+            containers = client.containers.list()
+        except Exception as e:
+            print(f"[health] docker list error: {e}")
+            return warnings
+
+        for c in containers:
+            try:
+                stats = c.stats(stream=False)
+            except Exception:
+                continue
+            # ── Memory ────────────────────────────────────────────────────
+            mem = stats.get("memory_stats") or {}
+            usage = int(mem.get("usage") or 0)
+            # Exclude page cache to match `docker stats` display — postgres etc.
+            # would otherwise trip the threshold on shared_buffers reads.
+            inner = mem.get("stats") or {}
+            cache = int(inner.get("inactive_file") or inner.get("cache") or 0)
+            usage_real = max(0, usage - cache)
+            limit = int(mem.get("limit") or 0)
+            # Docker reports host RAM when no cgroup limit is set. Treat >=90%
+            # of host RAM as "unlimited" and skip — otherwise every unlimited
+            # container looks 80% loaded once the box gets moderately used.
+            has_limit = limit > 0 and (host_mem == 0 or limit < host_mem * 0.9)
+            if has_limit and usage_real > 0:
+                pct = usage_real / limit * 100
+                if pct >= HEALTH_CONTAINER_USAGE_PCT:
+                    warnings.append(
+                        f"🟡 <b>{c.name}</b> memory: "
+                        f"{_fmt_bytes(usage_real)} / {_fmt_bytes(limit)} "
+                        f"({pct:.0f}%)"
+                    )
+            # ── CPU ──────────────────────────────────────────────────────
+            # precpu_stats is the previous internal sample kept by dockerd, so
+            # a single /stats?stream=false call already carries a valid delta
+            # for long-running containers. First-frame case (delta<=0) is
+            # skipped, so a freshly-started container won't false-alarm.
+            cpu = stats.get("cpu_stats") or {}
+            pre = stats.get("precpu_stats") or {}
+            cur_total = int((cpu.get("cpu_usage") or {}).get("total_usage") or 0)
+            pre_total = int((pre.get("cpu_usage") or {}).get("total_usage") or 0)
+            cur_sys = int(cpu.get("system_cpu_usage") or 0)
+            pre_sys = int(pre.get("system_cpu_usage") or 0)
+            online = int(cpu.get("online_cpus") or 0)
+            cpu_delta = cur_total - pre_total
+            sys_delta = cur_sys - pre_sys
+            if cpu_delta <= 0 or sys_delta <= 0 or online <= 0:
+                continue
+            cores_used = cpu_delta / sys_delta * online  # e.g. 1.4 = 140% of 1 core
+            cpu_limit_cores: float | None = None
+            try:
+                host_cfg = c.attrs.get("HostConfig") or {}
+                quota = int(host_cfg.get("CpuQuota") or 0)
+                period = int(host_cfg.get("CpuPeriod") or 100000)
+                if quota > 0 and period > 0:
+                    cpu_limit_cores = quota / period
+            except Exception:
+                pass
+            if cpu_limit_cores and cpu_limit_cores > 0:
+                pct = cores_used / cpu_limit_cores * 100
+                if pct >= HEALTH_CONTAINER_USAGE_PCT:
+                    warnings.append(
+                        f"🟡 <b>{c.name}</b> CPU: "
+                        f"{cores_used:.2f} / {cpu_limit_cores:.1f} cores "
+                        f"({pct:.0f}%)"
+                    )
+        return warnings
+
+    try:
+        result = await asyncio.to_thread(_sync)
+    except Exception as e:
+        print(f"[health] container check error: {e}")
+        return []
+    if not result:
+        return []
+    result.insert(
+        0,
+        f"🟡 <b>Контейнеры на проде выше {HEALTH_CONTAINER_USAGE_PCT}% лимита</b>",
+    )
+    result.append("Зайди на 139 и проверь: <code>docker stats --no-stream</code>")
+    return result
+
+
 # ── Consecutive-failure tracking ─────────────────────────────────────────────
 
 def _track(key: str, failed: bool) -> tuple[bool, bool]:
@@ -983,6 +1105,14 @@ async def _run_health_check_inner():
         problems.extend(await check_stuck_jobs())
     except Exception as e:
         print(f"[health] stuck-jobs check error: {e}")
+
+    # Per-container memory/CPU watchdog. Added 23.07.2026 after main-rest OOM
+    # (512M limit filled in ~1 min under portal+workers bulk POST/GET burst)
+    # slipped past health-check unnoticed. Now surfaces before the OOM.
+    try:
+        problems.extend(await check_container_resources())
+    except Exception as e:
+        print(f"[health] container resources check error: {e}")
 
     if problems:
         header = f"⚠️ <b>HEALTH CHECK</b>  —  {_now_msk()}\n"

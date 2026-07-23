@@ -915,9 +915,16 @@ services:
       - S3_BUCKET=${S3_BUCKET}
       - HEALTH_DISK_TOTAL_GB=${HEALTH_DISK_TOTAL_GB:-50}
       - HEALTH_DISK_WARN_GB=${HEALTH_DISK_WARN_GB:-45}
+      # Порог для нового per-container watchdog (см. check_container_resources
+      # в main.py). Кидает жёлтый алерт когда контейнер съел >= X% cgroup-лимита
+      # по памяти ИЛИ CPU-quota. 0 отключает проверку.
+      - HEALTH_CONTAINER_USAGE_PCT=${HEALTH_CONTAINER_USAGE_PCT:-80}
     # Резолв публичного хоста в IP хоста, чтобы проверять именно https://polza-portal.ru с того же сервера
     extra_hosts:
       - "polza-portal.ru:host-gateway"
+    volumes:
+      # Read-only docker socket для per-container watchdog (memory/CPU vs limit).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     deploy:
       resources:
         limits:

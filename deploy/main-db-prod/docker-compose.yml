@@ -182,8 +182,12 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
-          cpus: '1.0'
+          # 22.07.2026: OOM после миграции — портал+воркеры пакетно шлют bulk
+          # POST/GET (mailganer_domain_scores, instantly_activity_events) → PostgREST
+          # резервирует буферы под каждый и упирается в лимит. Поднимаем с 512M до 5G,
+          # CPU с 1 до 2 (параллельно обслуживать больше запросов, снизить очередь).
+          memory: 5120M
+          cpus: '2.0'
     networks:
       - main-db-net
 
