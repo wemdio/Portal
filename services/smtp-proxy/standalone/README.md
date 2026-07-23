@@ -6,7 +6,7 @@ Same HTTP contract, same SMTP-probe behaviour, same response shape.
 
 ## Why this exists
 
-The primary probe proxies (on the DB host `144.31.54.166`, ports `3100`/`3101`)
+The primary probe proxies (on the utility/former DB host `144.31.54.166`, ports `3100`/`3101`)
 run the **Node** version via Docker. Some probe hosts have **no Node and no
 Docker** — e.g. the Timeweb RU probe IP `89.19.209.252` (a small telephony VPS).
 This script gives us a 3rd egress IP there using only the box's stock `python3`

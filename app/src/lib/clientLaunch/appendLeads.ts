@@ -46,8 +46,10 @@ export interface AppendLeadsToClientCampaignInput {
    */
   contextLabel?: string;
   /**
-   * Instantly-флаг skip_if_in_campaign. По умолчанию true — как для клиентских
-   * запусков (не дублировать лид в кампании при ежедневном доборе).
+   * Instantly-флаг skip_if_in_campaign. По умолчанию true для старых
+   * auto-pipeline вызовов, которым нужна идемпотентность при ежедневном доборе.
+   * Первичный клиентский запуск передаёт false явно, чтобы контакт из другой
+   * кампании того же воркспейса мог попасть в новую кампанию.
    *
    * ВАЖНО: вопреки названию, у Instantly этот флаг работает НА ВЕСЬ ВОРКСПЕЙС —
    * лид отсеивается, если он есть в ЛЮБОЙ кампании, включая чужие клиентские
@@ -200,12 +202,7 @@ export async function appendLeadsToClientCampaign(
       instantlyRequestOptions,
     );
 
-    const accepted = Number(
-      (leadResult as { uploaded?: number; created?: number; total_uploaded?: number }).uploaded ??
-        (leadResult as { created?: number }).created ??
-        (leadResult as { total_uploaded?: number }).total_uploaded ??
-        leadsToSend.length,
-    );
+    const accepted = leadResult.leads_uploaded;
     // В skipped входят и отсев Instantly, и срез по чёрному списку.
     const skipped = Math.max(0, leadsToSend.length - accepted) + blockedCount;
 

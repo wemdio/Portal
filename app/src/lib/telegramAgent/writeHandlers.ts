@@ -6,6 +6,7 @@ import { createPipeline, startPipeline } from './pipeline';
 import type { PipelineStep } from './pipeline';
 import { cleanCompanyNames } from './cleanNames';
 import { deduplicateByField } from './dedup';
+import { publishWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentJobPublisher';
 
 function ensureAdmin() {
   if (!supabaseAdmin) throw new Error('Supabase admin not configured');
@@ -367,30 +368,12 @@ export const launchEmailSearch: WriteToolHandler = async (params, user) => {
 
   const now = new Date().toISOString();
 
-  const { data: job, error: jobErr } = await sb
-    .from('website_enrichment_jobs')
-    .insert({
-      user_id: user.userId,
-      status: 'pending',
-      extraction_type: 'email',
-      total: urls.length,
-      processed: 0,
-      success_count: 0,
-      error_count: 0,
-      created_at: now,
-    })
-    .select('id')
-    .single();
-
-  if (jobErr || !job) return `Ошибка: ${jobErr?.message ?? 'Не удалось создать задачу'}`;
-
   const queueItems = urls.map((url, i) => ({
-    job_id: job.id,
     user_id: user.userId,
     row_index: i,
     url_raw: url,
     url_normalized: url,
-    status: 'pending',
+    status: 'pending' as const,
     attempt_count: 0,
     result_text: null,
     last_error: null,
@@ -399,16 +382,29 @@ export const launchEmailSearch: WriteToolHandler = async (params, user) => {
     completed_at: null,
   }));
 
-  const batchSize = 500;
-  for (let i = 0; i < queueItems.length; i += batchSize) {
-    const { error } = await sb.from('website_enrichment_queue').insert(queueItems.slice(i, i + batchSize));
-    if (error) return `Ошибка записи очереди: ${error.message}`;
+  let jobId: string;
+  try {
+    jobId = await publishWebsiteEnrichmentJob(
+      sb,
+      {
+        user_id: user.userId,
+        extraction_type: 'email',
+        total: urls.length,
+        processed: 0,
+        success_count: 0,
+        error_count: 0,
+        created_at: now,
+      },
+      queueItems,
+    );
+  } catch (error) {
+    return `Ошибка: ${error instanceof Error ? error.message : 'Не удалось создать задачу'}`;
   }
 
   await logAudit('telegram-agent.write.email-search-launch', `Email search launched: ${urls.length} URLs`, {
-    jobId: job.id, urlCount: urls.length, userId: user.userId, userName: user.fullName,
+    jobId, urlCount: urls.length, userId: user.userId, userName: user.fullName,
   });
-  return `Поиск email запущен (ID: ${job.id}). Сайтов: ${urls.length}.`;
+  return `Поиск email запущен (ID: ${jobId}). Сайтов: ${urls.length}.`;
 };
 
 export const launchEmailValidation: WriteToolHandler = async (params, user) => {

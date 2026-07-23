@@ -718,6 +718,24 @@ describe('mapCsvRowsToLeads', () => {
     expect(leads[0].email).toBe('alice@acme.com');
   });
 
+  it('deduplicates email addresses case-insensitively before tariff counting and upload', () => {
+    const leads = mapCsvRowsToLeads({
+      headers: ['Email', 'First Name'],
+      rows: [
+        ['DUPLICATE@EXAMPLE.COM', 'First row wins'],
+        [' duplicate@example.com ', 'Second row'],
+        ['unique@example.com', 'Unique'],
+      ],
+      mapping: { email: 'Email', first_name: 'First Name' },
+    });
+
+    expect(leads.map((lead) => lead.email)).toEqual([
+      'duplicate@example.com',
+      'unique@example.com',
+    ]);
+    expect(leads[0].first_name).toBe('First row wins');
+  });
+
   it('returns empty when email column is missing from headers', () => {
     const leads = mapCsvRowsToLeads({
       headers: ['Name'],

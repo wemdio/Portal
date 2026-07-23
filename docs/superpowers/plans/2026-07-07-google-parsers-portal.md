@@ -1,5 +1,9 @@
 # Google Maps + Google News Parsers — Implementation Plan
 
+> Infrastructure note: this plan predates the DB cutover. Since 2026-07-22, the
+> production database host is `139.60.162.12`; references to `144.31.54.166`
+> below describe the environment in which the plan was written.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Port the standalone `google-maps-news-parsers` tool (React+Express+Playwright) into the portal as two new tabs on `/parsers`, replicating the Yandex Maps pattern (Supabase-backed jobs, docker worker, Playwright service).

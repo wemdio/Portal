@@ -15,7 +15,7 @@ into `public.pdl_companies`.
 ## Steps (run once, on a box with disk + network + access to prod Postgres)
 
 1. **Apply the migration** (creates `pdl_companies` + RLS):
-   `supabase/migrations/20260609_0001_create_pdl_companies.sql` → on the 144 DB.
+   `supabase/migrations/20260609_0001_create_pdl_companies.sql` → в текущую production main-БД.
 
 2. **Install DuckDB** (single binary): https://duckdb.org/docs/installation/
    ```bash
@@ -24,7 +24,7 @@ into `public.pdl_companies`.
 
 3. **Run the ingest**, passing the prod Postgres connection string:
    ```bash
-   PG_CONN='postgresql://postgres:PASSWORD@144.31.54.166:5432/postgres'
+   PG_CONN='<current production DATABASE_URL>'
    sed "s|\${PG_CONN}|$PG_CONN|" ingest-pdl.sql | ./duckdb
    ```
    DuckDB streams the Parquet from HuggingFace, filters EU/US + has-website,
