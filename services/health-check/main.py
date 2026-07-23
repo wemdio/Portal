@@ -113,6 +113,29 @@ DISK_WARN_GB = float(os.environ.get("HEALTH_DISK_WARN_GB", "45"))
 HEALTH_CONTAINER_USAGE_PCT = int(os.environ.get("HEALTH_CONTAINER_USAGE_PCT", "80"))
 DOCKER_SOCK_PATH = os.environ.get("DOCKER_SOCK", "/var/run/docker.sock")
 
+# ── Broken-healthcheck / pids-limit watchdog ─────────────────────────────────
+# Added 23.07.2026 after server hang caused by 15h of failed-exec loop from a
+# broken healthcheck on distroless postgrest containers. 700 error lines per
+# minute in dockerd, millions of closed FIFOs, PID/FD leak, hang.
+#
+# What we watch:
+# 1) Any container whose Health.FailingStreak >= HEALTH_CONTAINER_FAILING_STREAK
+#    for HEALTH_CONTAINER_FAILING_STREAK_ALERT_MIN minutes — that is a *broken*
+#    healthcheck, not a sick service (a sick service either self-heals or trips
+#    the deadman alert). We include the healthcheck command, the last error
+#    line, and a hint about the most common cause matching the error text.
+# 2) Any container whose pids usage exceeds HEALTH_CONTAINER_PIDS_PCT of its
+#    cgroup pids limit — early warning for the fork-bomb scenario that killed
+#    the box today. Silent when no pids limit is set on the container.
+#
+# Dedup per (container_id, container_created_at): one alert per broken container
+# per lifetime. Recreating the container (force-recreate) clears the dedup key.
+HEALTH_CONTAINER_FAILING_STREAK = int(os.environ.get("HEALTH_CONTAINER_FAILING_STREAK", "20"))
+HEALTH_CONTAINER_PIDS_PCT = int(os.environ.get("HEALTH_CONTAINER_PIDS_PCT", "80"))
+# In-memory dedup: alert once per (container_id, created_at). Cleared for
+# containers that disappeared on the next scan so the set doesn't grow forever.
+_CONTAINER_HEALTH_ALERTED: set[str] = set()
+
 PROXY_URLS: list[str] = []
 
 LAST_HEALTH_CHECK_TS = 0.0
@@ -803,6 +826,170 @@ async def check_container_resources() -> list[str]:
     return result
 
 
+def _healthcheck_hint(last_output: str) -> str:
+    """Return a short probable-cause hint for a healthcheck failure log line."""
+    if not last_output:
+        return ""
+    lo = last_output.lower()
+    if "no such file" in lo and "/bin/sh" in lo:
+        return (
+            "\n💡 <b>Причина:</b> образ distroless — в нём нет /bin/sh, тест "
+            "не может запуститься.\n"
+            "<b>Фикс:</b> в compose поставить <code>healthcheck: disable: true</code> "
+            "и <code>docker compose up -d --force-recreate &lt;service&gt;</code>."
+        )
+    if "no such file" in lo:
+        return (
+            "\n💡 <b>Причина:</b> утилита из теста отсутствует в образе (curl/wget/nc не установлены).\n"
+            "<b>Фикс:</b> заменить тест на встроенный бинарь или ставить утилиту в Dockerfile."
+        )
+    if "connection refused" in lo:
+        return (
+            "\n💡 <b>Вероятная причина:</b> healthcheck идёт на <code>localhost</code>, "
+            "который резолвится в IPv6 (::1), а сервис слушает только IPv4 (0.0.0.0).\n"
+            "<b>Фикс:</b> в тесте заменить <code>localhost</code> → <code>127.0.0.1</code>. "
+            "После правки compose нужен <code>--force-recreate</code>."
+        )
+    if "timeout" in lo or "timed out" in lo:
+        return (
+            "\n💡 <b>Возможные причины:</b> сервис отвечает медленно или в стрессе. "
+            "Поднять <code>timeout</code>/<code>start_period</code> в healthcheck, "
+            "проверить нагрузку и логи сервиса."
+        )
+    if "404" in lo or "not found" in lo:
+        return (
+            "\n💡 <b>Причина:</b> endpoint отсутствует. Поменяй путь в тесте "
+            "(например, <code>/health</code> → <code>/status</code>) — актуальный "
+            "путь смотри в документации образа."
+        )
+    return ""
+
+
+async def check_container_healthchecks() -> list[str]:
+    """Warn about containers whose healthcheck is stuck failing (broken test)
+    or whose pids usage nears the cgroup limit (fork-bomb risk).
+
+    Runs on the same 15-min health cycle as the rest. Alerts are deduped per
+    (container_id, created_at) — one message per broken container per lifetime.
+    Recreating the container clears the dedup key, so a genuine re-alert fires
+    after a force-recreate that didn't actually fix the root cause.
+    """
+    if HEALTH_CONTAINER_FAILING_STREAK <= 0 and HEALTH_CONTAINER_PIDS_PCT <= 0:
+        return []
+    try:
+        import docker  # lazy import — bot must still boot without the socket
+    except Exception as e:
+        print(f"[health] docker sdk not available: {e}")
+        return []
+
+    def _sync() -> list[str]:
+        warnings: list[str] = []
+        try:
+            client = docker.DockerClient(base_url=f"unix://{DOCKER_SOCK_PATH}", timeout=15)
+        except Exception as e:
+            print(f"[health] docker connect error: {e}")
+            return warnings
+        try:
+            containers = client.containers.list()
+        except Exception as e:
+            print(f"[health] docker list error: {e}")
+            return warnings
+
+        seen_keys: set[str] = set()
+        for c in containers:
+            try:
+                attrs = c.attrs
+            except Exception:
+                continue
+
+            state = attrs.get("State") or {}
+            health = state.get("Health") or {}
+            streak = int(health.get("FailingStreak") or 0)
+            hc_status = (health.get("Status") or "").lower()
+            created_at = attrs.get("Created", "")
+            dedup_key = f"{c.id}:{created_at}"
+            seen_keys.add(dedup_key)
+
+            # ── Broken healthcheck ────────────────────────────────────────
+            # Both conditions needed: streak >= threshold AND Health.Status
+            # is "unhealthy". A container inside its start_period may show
+            # a big FailingStreak but still resolve — we wait for docker to
+            # decide before alerting.
+            if (
+                HEALTH_CONTAINER_FAILING_STREAK > 0
+                and streak >= HEALTH_CONTAINER_FAILING_STREAK
+                and hc_status == "unhealthy"
+                and dedup_key not in _CONTAINER_HEALTH_ALERTED
+            ):
+                _CONTAINER_HEALTH_ALERTED.add(dedup_key)
+                log = health.get("Log") or []
+                last_output = ""
+                if log:
+                    last_output = (log[-1].get("Output") or "").strip()
+                last_snippet = last_output.replace("\n", " ")[:300] or "no log"
+
+                hc = (attrs.get("Config") or {}).get("Healthcheck") or {}
+                test_list = hc.get("Test") or []
+                if isinstance(test_list, list):
+                    test_str = " ".join(str(x) for x in test_list)[:200]
+                else:
+                    test_str = str(test_list)[:200]
+
+                image = (attrs.get("Config") or {}).get("Image", "?")
+                hint = _healthcheck_hint(last_output)
+
+                warnings.append(
+                    f"🟠 <b>{c.name}</b> — сломан healthcheck "
+                    f"(провалов подряд: {streak})\n"
+                    f"Образ: <code>{image}</code>\n"
+                    f"Тест: <code>{test_str or 'not defined'}</code>\n"
+                    f"Последняя ошибка: <code>{last_snippet}</code>"
+                    f"{hint}"
+                )
+
+            # ── Pids usage nearing limit ─────────────────────────────────
+            if HEALTH_CONTAINER_PIDS_PCT > 0:
+                try:
+                    stats = c.stats(stream=False)
+                    pids = stats.get("pids_stats") or {}
+                    current = int(pids.get("current") or 0)
+                    limit = int(pids.get("limit") or 0)
+                except Exception:
+                    current, limit = 0, 0
+                if limit > 0 and current > 0:
+                    pct = current / limit * 100
+                    if pct >= HEALTH_CONTAINER_PIDS_PCT:
+                        warnings.append(
+                            f"🟡 <b>{c.name}</b> pids: {current} / {limit} ({pct:.0f}%) "
+                            f"— близко к cgroup-лимиту, возможен fork-loop"
+                        )
+
+        # Prune dedup keys for containers that no longer exist so the set
+        # doesn't accumulate indefinitely (recreate → new key → re-alert).
+        stale = [k for k in _CONTAINER_HEALTH_ALERTED if k not in seen_keys]
+        for k in stale:
+            _CONTAINER_HEALTH_ALERTED.discard(k)
+
+        return warnings
+
+    try:
+        result = await asyncio.to_thread(_sync)
+    except Exception as e:
+        print(f"[health] container healthcheck check error: {e}")
+        return []
+    if not result:
+        return []
+    result.insert(
+        0,
+        "⚠️ <b>Проблемы контейнеров: healthcheck / pids</b>",
+    )
+    result.append(
+        "На 139 глянь <code>docker ps --filter health=unhealthy</code> "
+        "и <code>docker inspect &lt;name&gt;</code>."
+    )
+    return result
+
+
 # ── Consecutive-failure tracking ─────────────────────────────────────────────
 
 def _track(key: str, failed: bool) -> tuple[bool, bool]:
@@ -1113,6 +1300,15 @@ async def _run_health_check_inner():
         problems.extend(await check_container_resources())
     except Exception as e:
         print(f"[health] container resources check error: {e}")
+
+    # Broken-healthcheck / pids-usage watchdog. Added 23.07.2026 after a broken
+    # healthcheck on postgrest containers spawned failed exec every ~30s for
+    # 15h, leaking closed FIFOs in dockerd, exhausting FDs and hanging the box.
+    # Now catches the pattern in <15 min via a single Telegram alert.
+    try:
+        problems.extend(await check_container_healthchecks())
+    except Exception as e:
+        print(f"[health] container healthcheck check error: {e}")
 
     if problems:
         header = f"⚠️ <b>HEALTH CHECK</b>  —  {_now_msk()}\n"
