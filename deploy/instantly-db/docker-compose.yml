@@ -98,7 +98,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 1G
           cpus: '0.2'
           pids: 512
     restart: unless-stopped
@@ -185,7 +185,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 1G
           cpus: '0.2'
           pids: 512
     restart: unless-stopped
@@ -265,7 +265,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 1G
           cpus: '0.2'
           pids: 512
     restart: unless-stopped
