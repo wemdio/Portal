@@ -3,7 +3,10 @@ import {
   mapPlatform,
   mapCategory,
 } from '@/lib/leadsReport/platformMapper';
-import type { LeadsReportConfig } from '@/lib/leadsReport/config';
+import type {
+  ColumnKey,
+  LeadsReportConfig,
+} from '@/lib/leadsReport/config';
 
 export type AmoLead = {
   amo_id: number;
@@ -39,7 +42,7 @@ export function buildRow(
   const utm = extractUtm(lead.raw);
   const platform = mapPlatform(utm);
 
-  const values: Record<string, string> = {
+  const values: Record<ColumnKey, string> = {
     amo_url: `https://${amoHost}/leads/detail/${lead.amo_id}`,
     amo_id_raw: String(lead.amo_id),
     utm_block: formatUtmBlock(lead.raw),
@@ -55,5 +58,5 @@ export function buildRow(
     status_name: lead.status_name ?? '',
   };
 
-  return config.columns.map((col) => values[col.key] ?? '');
+  return config.columns.map((col) => values[col.key]);
 }
