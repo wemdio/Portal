@@ -35,3 +35,28 @@ Portal — внутренний инструмент студии: Next.js app, 
 - Не коммитить `.env*` файлы — там креды.
 - Не дёргать Instantly /emails API больше 10 RPM пока `portal-worker-instantly-leads` контейнер запущен на prod — общий workspace rate limit, [инцидент 22 мая в `wiki/log.md`](./wiki/log.md).
 - Не модифицировать `query_log` строки post-hoc для подкрутки метрик loop'a. Loop работает только если данные честные.
+
+## Правило: после правки compose обязателен `--force-recreate`
+
+**Любая правка `docker-compose*.yml`** (`docker-compose.prod.yml`, `deploy/main-db-prod/docker-compose.yml`, `deploy/instantly-db/docker-compose.yml`) требует **явного** пересоздания затронутых сервисов:
+
+```bash
+docker compose -p <project> -f <file> up -d --force-recreate --no-deps <service1> <service2>
+```
+
+Без `--force-recreate` Docker хранит конфигурацию контейнера в собственной БД с момента `create` и при рестарте берёт её оттуда, а не читает compose. Правки лежат мёртвым грузом до пересоздания.
+
+**Особенно критично для полей** `healthcheck`, `deploy.resources.limits`, `restart` — compose diff-detection иногда их пропускает.
+
+**Прецедент 23.07.2026:** правка `healthcheck: disable: true` для двух distroless postgrest контейнеров была сделана 22.07, но `--force-recreate` не запустили → 15 часов loop failed exec → миллионы closed FIFO в dockerd → hang сервера. Post-mortem — коммит `f4cc524e`.
+
+## Post-mortem от 23.07.2026 — что защищает от повторения
+
+Уровни защиты, применённые после hang'а сервера:
+
+1. **`/etc/docker/daemon.json` на 139** — log rotation (50 MB × 3 файла на контейнер) + `live-restore: true` (рестарт docker без падения контейнеров) + `nofile: 1M`.
+2. **`/etc/systemd/journald.conf` на 139** — `SystemMaxUse=10G`, `RateLimitBurst=10000/30s` — journal не съест диск, спам-контейнер обрезается на уровне журнала.
+3. **`services/health-check/main.py`** — TG-алерт при broken healthcheck (Health.Status=unhealthy + FailingStreak ≥ 20) с типом причины + pids ≥ 80% cgroup-лимита.
+4. **compose fixes**: `localhost` → `127.0.0.1` в healthcheck main-storage и portal-telegram-bot-api (IPv6 fallback → refused при IPv4-only сервисе).
+
+TODO: pids-лимит `pids: 512` во все compose-сервисы (защита от fork-bomb на cgroup-уровне) — отдельный PR.
