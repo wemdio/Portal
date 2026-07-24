@@ -1,18 +1,41 @@
 const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * Отчётное окно: последние 7 суток до момента запуска.
- * При штатном пятничном cron 17:00 МСК это ровно пт 17:00 → пт 17:00 —
- * «неделя от отчёта до отчёта», как договорились с продажами.
+ * Отчётное окно продаж: [прошлая пятница 17:16:00 МСК, эта пятница 17:15:59.999 МСК].
+ * Штатный cron запускается в пятницу в 17:10 МСК — окно закрывается через
+ * 5 минут после запуска, но SQL всё равно ловит все сделки с датой ≤ 17:15
+ * (сделки после 17:15 попадут в отчёт следующей недели). Ровно 7 суток
+ * от отчёта до отчёта.
+ *
+ * Правило `end`: ближайшая ПЯТНИЦА 17:15:59.999 МСК на этой календарной неделе
+ * (не в будущем через воскресенье). Если сегодня пт — сегодня 17:15;
+ * если пн-чт — прошедшая пятница; если сб-вс — прошедшая пятница.
  */
 export function currentMskWeekWindow(now: Date): {
   start: Date;
   end: Date;
 } {
-  const end = new Date(now);
-  const start = new Date(end.getTime() - WEEK_MS);
-  return { start, end };
+  const nowMsk = new Date(now.getTime() + MSK_OFFSET_MS);
+  const dow = nowMsk.getUTCDay(); // 0 = вс, 5 = пт
+  // Сколько дней назад ближайшая пятница (сегодня если пт).
+  const daysBackToFriday = dow === 5 ? 0 : (dow - 5 + 7) % 7;
+
+  const endMskMs = Date.UTC(
+    nowMsk.getUTCFullYear(),
+    nowMsk.getUTCMonth(),
+    nowMsk.getUTCDate() - daysBackToFriday,
+    17, 15, 59, 999,
+  );
+  const startMskMs = Date.UTC(
+    nowMsk.getUTCFullYear(),
+    nowMsk.getUTCMonth(),
+    nowMsk.getUTCDate() - daysBackToFriday - 7,
+    17, 16, 0, 0,
+  );
+  return {
+    start: new Date(startMskMs - MSK_OFFSET_MS),
+    end: new Date(endMskMs - MSK_OFFSET_MS),
+  };
 }
 
 export function shortMskDate(date: Date): string {

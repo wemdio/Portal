@@ -115,11 +115,15 @@ export function computeMetricsFromRows(
       typeof lead.status_id === 'number' ? lead.status_id : Number.NaN;
     const statusSort = thresholds.sortByStatusId.get(statusId);
 
+    // «Пришло» — сделки, созданные в окне отчёта.
     if (createdInWindow) bucket.arrived += 1;
+    // Все остальные метрики учитывают сделки с активностью в окне (updated_at),
+    // включая backlog из прошлых недель, у которых менеджер двинул статус
+    // именно на этой неделе. См. договорённость от 2026-07-24.
     if (!updatedInWindow) continue;
 
-    // По бизнес-правилу лидом считается «Квалифицированный лид» и любой этап ниже,
-    // включая успешно и неуспешно закрытые сделки.
+    // По бизнес-правилу лидом считается «Квалифицированный лид» и любой этап
+    // ниже по воронке, включая успешно и неуспешно закрытые сделки.
     if (statusSort !== undefined && statusSort >= thresholds.qualifiedSort) {
       bucket.qualifiedLeads += 1;
     }
@@ -164,6 +168,9 @@ export async function computeAllChannelMetrics(
   const startIso = start.toISOString();
   const endIso = end.toISOString();
 
+  // Тянем сделки с активностью в окне отчёта: либо созданные в окне, либо
+  // получившие обновление статуса в окне (backlog-сделки, что двинулись
+  // именно на этой неделе). Всё остальное фильтруем уже в памяти.
   const { data: leadsData, error: leadsError } = await db
     .from('amo_leads')
     .select(
