@@ -109,18 +109,19 @@ export function computeMetricsFromRows(
     const bucket = metrics.get(channel);
     if (!bucket) continue;
 
-    const createdInWindow = isInWindow(lead.created_at, start, end);
-    const updatedInWindow = isInWindow(lead.updated_at, start, end);
+    // Все метрики считаются ТОЛЬКО по сделкам, ПРИШЕДШИМ на этой неделе
+    // (created_at в окне). «Лидов» / «Встречи» — это доля из свежих лидов,
+    // что успели пройти квалификацию/встречу к моменту отчёта. Старые
+    // backlog-сделки с апдейтом на этой неделе не считаются: иначе массовые
+    // обновления полей (например протачивание кастомного поля «Контур»
+    // сразу многим сделкам) раздуют цифры и они станут несопоставимы
+    // с прошлыми отчётами продаж (Егор, 2026-07-24).
+    if (!isInWindow(lead.created_at, start, end)) continue;
+    bucket.arrived += 1;
+
     const statusId =
       typeof lead.status_id === 'number' ? lead.status_id : Number.NaN;
     const statusSort = thresholds.sortByStatusId.get(statusId);
-
-    // «Пришло» — сделки, созданные в окне отчёта.
-    if (createdInWindow) bucket.arrived += 1;
-    // Все остальные метрики учитывают сделки с активностью в окне (updated_at),
-    // включая backlog из прошлых недель, у которых менеджер двинул статус
-    // именно на этой неделе. См. договорённость от 2026-07-24.
-    if (!updatedInWindow) continue;
 
     // По бизнес-правилу лидом считается «Квалифицированный лид» и любой этап
     // ниже по воронке, включая успешно и неуспешно закрытые сделки.
@@ -168,19 +169,18 @@ export async function computeAllChannelMetrics(
   const startIso = start.toISOString();
   const endIso = end.toISOString();
 
-  // Тянем сделки с активностью в окне отчёта: либо созданные в окне, либо
-  // получившие обновление статуса в окне (backlog-сделки, что двинулись
-  // именно на этой неделе). Всё остальное фильтруем уже в памяти.
+  // Тянем сделки, созданные в окне отчёта. Текущий status_id/status_name
+  // отражает актуальное состояние на момент запроса — этого достаточно,
+  // чтобы отфильтровать по «Квалифицированный лид» / «Назначена встреча» /
+  // «Встреча проведена + КП отправлено».
   const { data: leadsData, error: leadsError } = await db
     .from('amo_leads')
     .select(
       'pipeline_id, status_id, status_name, created_at, updated_at, raw',
     )
     .eq('pipeline_id', thresholds.pipelineId)
-    .or(
-      `and(created_at.gte.${startIso},created_at.lt.${endIso}),` +
-        `and(updated_at.gte.${startIso},updated_at.lt.${endIso})`,
-    );
+    .gte('created_at', startIso)
+    .lt('created_at', endIso);
   if (leadsError) throw leadsError;
 
   return computeMetricsFromRows(
