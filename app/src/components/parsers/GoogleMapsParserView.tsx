@@ -334,7 +334,7 @@ export function GoogleMapsParserView() {
   const handleExportCsv = useCallback(() => downloadExport('csv'), [downloadExport]);
   const handleExportJson = useCallback(() => downloadExport('json'), [downloadExport]);
 
-  const handleAddToDatabases = useCallback(() => {
+  const handleAddToDatabases = useCallback(async () => {
     try {
       if (!activeJobId) {
         setToast({ tone: 'error', message: 'Сначала выберите запуск' });
@@ -355,7 +355,7 @@ export function GoogleMapsParserView() {
         p.category ?? '',
       ]);
       const title = `Google Maps #${activeJobId.slice(0, 8)}`;
-      const { id } = writePendingDbImport({ title, rows: [headerRow, ...rows] });
+      const { id } = await writePendingDbImport({ title, rows: [headerRow, ...rows] });
       setToast({
         tone: 'success',
         message: `Добавлено в «Базы» (${rows.length})`,
