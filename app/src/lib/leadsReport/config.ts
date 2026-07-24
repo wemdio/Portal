@@ -11,7 +11,8 @@ export type ColumnKey =
   | 'responsible_name'
   | 'company_name'
   | 'company_website'
-  | 'status_name';
+  | 'status_name'
+  | 'empty';
 
 /** Спецификация одной колонки таблицы отчёта. */
 export type ColumnSpec = {
@@ -64,15 +65,30 @@ export const outreachConfig: LeadsReportConfig = {
   sheetName: 'Лиды',
   amoSourceFilter: { equals: 'Email Outreach' },
   syncSource: 'leads_report_outreach',
+  // Порядок и позиции колонок 1:1 соответствуют боевому листу «Лиды»
+  // (см. образец «Polza Ru Outreach.xlsx»): ручные колонки менеджера
+  // (Оффер / Сфера деятельности / Ком-й / Из какой кампании / Статус /
+  // Дата последнего контакта / Качество лида / Кто обрабатывает лид)
+  // скрипт оставляет пустыми — заполнит менеджер вручную. AMO id
+  // пишется в служебный столбец P (сейчас пустой) и используется для
+  // дедупа при следующих запусках cron.
   columns: [
-    { header: 'Имя', key: 'name' },
-    { header: 'Контакт', key: 'phone' },
-    { header: 'Email', key: 'email' },
-    { header: 'Организация', key: 'company_name' },
-    { header: 'Сайт', key: 'company_website' },
-    { header: 'Дата передачи лида', key: 'created_at_short' },
-    { header: 'Статус', key: 'status_name' },
-    AMO_ID_COLUMN,
+    { header: 'Оффер', key: 'empty' },                    // A
+    { header: 'Сфера деятельности', key: 'empty' },       // B
+    { header: 'Имя', key: 'name' },                       // C
+    { header: 'Контакт', key: 'phone' },                  // D
+    { header: 'Ком-й', key: 'empty' },                    // E
+    { header: 'Email', key: 'email' },                    // F
+    { header: 'Организация', key: 'company_name' },       // G
+    { header: 'Сайт', key: 'company_website' },           // H
+    { header: 'Дата передачи лида', key: 'created_at_short' }, // I
+    { header: 'Из какой кампании', key: 'empty' },        // J
+    { header: '@dropdown', key: 'empty' },                // K
+    { header: 'Статус', key: 'empty' },                   // L
+    { header: 'Дата последнего контакта', key: 'empty' }, // M
+    { header: 'Качество лида', key: 'empty' },            // N
+    { header: 'Кто обрабатывает лид', key: 'empty' },     // O
+    AMO_ID_COLUMN,                                         // P
   ],
 };
 

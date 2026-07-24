@@ -56,6 +56,7 @@ export function buildRow(
     company_name: lead.company_name ?? '',
     company_website: lead.company_website ?? '',
     status_name: lead.status_name ?? '',
+    empty: '',
   };
 
   return config.columns.map((col) => values[col.key]);
