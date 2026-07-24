@@ -357,7 +357,7 @@ export function EngHiringParserView() {
           'eng_hiring',
         ]),
       ];
-      const { id } = writePendingDbImport({ title: `ENG hiring #${activeJobId.slice(0, 8)}`, rows });
+      const { id } = await writePendingDbImport({ title: `ENG hiring #${activeJobId.slice(0, 8)}`, rows });
       const trimmed = items.length > MAX_DB_ROWS;
       setToast({
         tone: 'success',

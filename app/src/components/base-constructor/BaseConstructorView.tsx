@@ -840,9 +840,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   /* ─── Load to spreadsheet ─── */
 
-  function loadToSpreadsheet(rows: string[][]) {
+  async function loadToSpreadsheet(rows: string[][]) {
     try {
-      const { id } = writePendingDbImport({
+      const { id } = await writePendingDbImport({
         title: `Конструктор ${new Date().toLocaleDateString('ru-RU')}`,
         rows,
       });
@@ -865,7 +865,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     try {
       const rows = await ensureFullData(activeJob.id);
       if (!rows) { setError('Не удалось загрузить данные'); return; }
-      loadToSpreadsheet(rows);
+      await loadToSpreadsheet(rows);
     } finally {
       setLoadingFull(false);
     }

@@ -332,7 +332,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     return () => window.clearTimeout(t);
   }, [toast]);
 
-  const addToDatabase = useCallback(() => {
+  const addToDatabase = useCallback(async () => {
     try {
       if (!activeJobId) {
         setToast({ tone: 'error', message: 'Сначала выберите запуск' });
@@ -384,7 +384,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
       ];
 
       const title = `Яндекс.Карты #${activeJobId.slice(0, 8)}`;
-      const { id } = writePendingDbImport({ title, rows });
+      const { id } = await writePendingDbImport({ title, rows });
       const url = buildDatabasesImportUrl(id);
       setToast({ tone: 'success', message: 'Добавлено в “Базы”. Можете перейти и проверить импорт.', href: url });
     } catch (e) {

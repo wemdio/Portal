@@ -218,7 +218,7 @@ export default function DoneForYouPage() {
 
   /* ─── Load to spreadsheet ─── */
 
-  function loadToSpreadsheet() {
+  async function loadToSpreadsheet() {
     if (!jobData) return;
     try {
       const raw = localStorage.getItem('database-spreadsheet-state');
@@ -232,7 +232,7 @@ export default function DoneForYouPage() {
       });
       state.activeTabId = tabId;
       localStorage.setItem('database-spreadsheet-state', JSON.stringify(state));
-      const { id } = writePendingDbImport({
+      const { id } = await writePendingDbImport({
         title: `DFY ${new Date().toLocaleDateString('ru-RU')}`,
         rows: jobData,
       });

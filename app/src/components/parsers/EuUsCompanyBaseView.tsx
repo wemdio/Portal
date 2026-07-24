@@ -209,7 +209,7 @@ export function EuUsCompanyBaseView() {
         return;
       }
       const dbRows: string[][] = [EXPORT_HEADER, ...rows.slice(0, MAX_DB_ROWS).map(exportRow)];
-      const { id } = writePendingDbImport({ title: 'EU/US база компаний', rows: dbRows });
+      const { id } = await writePendingDbImport({ title: 'EU/US база компаний', rows: dbRows });
       setToast({ tone: 'success', message: `Добавлено в «Базы» (${Math.min(rows.length, MAX_DB_ROWS)})`, href: buildDatabasesImportUrl(id) });
     } catch (e) {
       setToast({ tone: 'error', message: e instanceof Error ? e.message : 'Ошибка' });
