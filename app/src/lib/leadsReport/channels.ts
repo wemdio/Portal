@@ -24,13 +24,21 @@ const normalize = (value: string | null): string =>
   (value ?? '').trim().toLocaleLowerCase('ru-RU').replaceAll('ё', 'е');
 
 /**
- * Возвращает ровно один канал для сделки.
+ * Возвращает канал сделки — либо один из пяти известных, либо `null`
+ * если ни одно правило не сработало (сделка не считается в отчёт).
  *
- * В живой AMO партнёрский источник называется «Партнер», а SMM размечен
- * преимущественно через utm_medium=smm. Алиасы оставлены, чтобы отчёт не
- * сломался при переименовании значений в AMO.
+ * Приоритет:
+ *   1. Явный маркер «Контур» = «Маркетинг» — эти сделки команда вручную
+ *      помечает как маркетинговые. Раньше «маркетинг» был мусорным fallback,
+ *      куда падали 1399 сделок без «Источник» — теперь только явный маркер.
+ *   2. Остальные 4 канала — по кастомному полю «Источник» AMO
+ *      (алиасы оставлены на случай переименования значений).
+ *   3. Если ни одно правило не сработало — `null`, сделка пропускается.
  */
-export function detectSummaryChannel(raw: unknown): SummaryChannelName {
+export function detectSummaryChannel(raw: unknown): SummaryChannelName | null {
+  const kontur = normalize(extractCustomField(raw, 'Контур'));
+  if (kontur === 'маркетинг') return 'marketing';
+
   const source = normalize(extractCustomField(raw, 'Источник'));
   const utmMedium = normalize(extractCustomField(raw, 'utm_medium'));
 
@@ -38,5 +46,6 @@ export function detectSummaryChannel(raw: unknown): SummaryChannelName {
   if (['партнер', 'партнерка'].includes(source)) return 'partners';
   if (['email outreach', 'аутрич'].includes(source)) return 'outreach';
   if (['smm', 'смм'].includes(source) || utmMedium === 'smm') return 'smm';
-  return 'marketing';
+
+  return null;
 }

@@ -27,10 +27,15 @@ export type LeadsReportConfig = {
   spreadsheetId: string;
   /** Имя вкладки, куда пишем поток лидов. */
   sheetName: string;
-  /** Источник, который засчитывается как этот отчёт. Инвертирующий флаг — для маркетинга. */
-  amoSourceFilter:
-    | { equals: string }
-    | { notEquals: string };
+  /**
+   * Фильтр сделок по кастомному полю AMO.
+   * Например: fieldName='Контур' + equals='Маркетинг' — только сделки,
+   * которые команда явно пометила как маркетинговые.
+   */
+  amoFieldFilter: {
+    fieldName: string;
+    match: { equals: string } | { notEquals: string };
+  };
   /** Список колонок в порядке слева-направо. Последняя всегда `amo_id` (служебная, для дедупа). */
   columns: ColumnSpec[];
   /** Логический источник для external_sync_runs. */
@@ -43,7 +48,15 @@ export const marketingConfig: LeadsReportConfig = {
   name: 'marketing',
   spreadsheetId: process.env.LEADS_REPORT_MARKETING_SHEET_ID ?? '',
   sheetName: 'Лиды маркетинг',
-  amoSourceFilter: { notEquals: 'Email Outreach' },
+  // Маркетинговая сделка — та, что команда явно отметила в AMO полем
+  // «Контур» = «Маркетинг». Раньше правило было notEquals «Email Outreach»,
+  // из-за чего в маркетинг падали 1399 сделок без явного источника и весь
+  // «мусор». С 2026-07-24 маркетинг помечается вручную и попадает в отчёт
+  // только по явному маркеру.
+  amoFieldFilter: {
+    fieldName: 'Контур',
+    match: { equals: 'Маркетинг' },
+  },
   syncSource: 'leads_report_marketing',
   // Порядок колонок 1:1 с боевой таблицей «Учет проектов внутреннее» → лист «Лиды маркетинг».
   // Ручные колонки менеджера (Дата последнего контакта, Качество лида, На чем остановились,
@@ -71,7 +84,10 @@ export const outreachConfig: LeadsReportConfig = {
   name: 'outreach',
   spreadsheetId: process.env.LEADS_REPORT_OUTREACH_SHEET_ID ?? '',
   sheetName: 'Лиды',
-  amoSourceFilter: { equals: 'Email Outreach' },
+  amoFieldFilter: {
+    fieldName: 'Источник',
+    match: { equals: 'Email Outreach' },
+  },
   syncSource: 'leads_report_outreach',
   // Порядок и позиции колонок 1:1 соответствуют боевому листу «Лиды»
   // (см. образец «Polza Ru Outreach.xlsx»): ручные колонки менеджера

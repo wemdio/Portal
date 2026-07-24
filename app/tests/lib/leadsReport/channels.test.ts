@@ -13,7 +13,11 @@ function raw(fields: Record<string, string>): unknown {
 }
 
 describe('detectSummaryChannel', () => {
-  it.each<[Record<string, string>, SummaryChannelName]>([
+  it.each<[Record<string, string>, SummaryChannelName | null]>([
+    // Явный маркер маркетинга через новое поле «Контур» — приоритет над всем.
+    [{ Контур: 'Маркетинг' }, 'marketing'],
+    [{ Контур: 'Маркетинг', Источник: 'Email Outreach' }, 'marketing'],
+    // Остальные каналы — по «Источник» как раньше.
     [{ Источник: 'Telegram Outreach' }, 'tg_outreach'],
     [{ Источник: 'Партнер' }, 'partners'],
     [{ Источник: 'Партнёрка' }, 'partners'],
@@ -21,7 +25,10 @@ describe('detectSummaryChannel', () => {
     [{ Источник: 'Аутрич' }, 'outreach'],
     [{ Источник: 'SMM' }, 'smm'],
     [{ Источник: 'Сайт', utm_medium: 'smm' }, 'smm'],
-    [{ Источник: 'Сайт' }, 'marketing'],
+    // Без «Контур»=«Маркетинг» и без известного источника — сделка не считается.
+    [{ Источник: 'Сайт' }, null],
+    [{ Источник: 'Лидскан' }, null],
+    [{}, null],
   ])('classifies %p as %s', (fields, expected) => {
     expect(detectSummaryChannel(raw(fields))).toBe(expected);
   });
