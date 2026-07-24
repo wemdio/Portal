@@ -1151,7 +1151,12 @@ export async function stepValidateEmails(
     if (affected) for (const cell of affected) applyCellStatus(cell);
     done++;
     if (done % 5 === 0 || done === toValidate.length) {
-      await onProgress(Math.round((done / toValidate.length) * 100));
+      // Кэп 99, НЕ 100: дальше ещё возможен отложенный второй проход и фильтр.
+      // progress=100 до реального конца шага даёт stuck-reaper'у
+      // (autoCompleteIfStuck: для последнего шага порог 2 мин) завершить джоб
+      // с нефильтрованным checkpoint'ом, пока шаг спит/допроверяет unknown.
+      // Финальный onProgress(100) — в конце шага после фильтра.
+      await onProgress(Math.min(99, Math.round((done / toValidate.length) * 100)));
     }
     if (onCheckpoint && (done % checkpointEvery === 0 || done === toValidate.length)) {
       await onCheckpoint([newHeader, ...newBody]);
@@ -1189,15 +1194,25 @@ export async function stepValidateEmails(
       const chunk = Math.min(1000, waitMs - waited);
       await sleep(chunk);
       waited += chunk;
+      // Heartbeat раз в ~30с: updateJobProgress бампает started_at (джоб жив
+      // для stale-detector'а), а прогресс остаётся 99 (см. кэп выше) — иначе
+      // пауза до 5 мин после progress=100 давала stuck-reaper'у завершить джоб
+      // с нефильтрованными данными.
+      if (waited % 30_000 < 1000) await onProgress(99);
       // Проверяем отмену раз в секунду, чтобы задача не висела в паузе.
       if (isCancelled && await isCancelled()) throw new Error('Отменено');
     }
+    let retryDone = 0;
     await processInPool(retryable, VALIDATION_CONCURRENCY, async (email) => {
       if (isCancelled && await isCancelled()) { cancelled = true; return; }
       const r = await runProbe(email); // свежая проба, мимо memo
       results.set(email, r);
       const affected = cellByEmail.get(email);
       if (affected) for (const cell of affected) applyCellStatus(cell);
+      // Heartbeat и в самом пуле: на больших retry-списках пул идёт минуты,
+      // молчание здесь — то же окно для stuck-reaper'а, что и пауза выше.
+      retryDone++;
+      if (retryDone % 10 === 0) await onProgress(99);
     });
     if (cancelled || (isCancelled && await isCancelled())) {
       throw new Error('Отменено');

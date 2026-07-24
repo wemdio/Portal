@@ -223,7 +223,12 @@ describe('stepValidateEmails — отмена и второй проход', () 
         ['Email'],
         ['grey@x.ru'],
       ];
-      const promise = stepValidateEmails(data, noopProgress, undefined, {
+      // Пины против stuck-reaper регресса: до финала шага прогресс НЕ должен
+      // достигать 100 (autoCompleteIfStuck завершает джоб на progress>=100),
+      // а во время паузы идут heartbeat-прогрессы 99 (джоб «жив»).
+      const progressCalls: number[] = [];
+      const progress = async (p: number) => { progressCalls.push(p); };
+      const promise = stepValidateEmails(data, progress, undefined, {
         validateTarget: 'original',
       });
       // Даём основному пулу завершиться (микротаски), чтобы шаг дошёл до паузы.
@@ -235,6 +240,11 @@ describe('stepValidateEmails — отмена и второй проход', () 
       expect(validateEmail).toHaveBeenCalledTimes(2);
       expect(out).toHaveLength(2);
       expect(out[1][1]).toBe('ok');
+      // Прогресс: 100 — только последним вызовом (после фильтра), до того максимум 99.
+      expect(progressCalls[progressCalls.length - 1]).toBe(100);
+      expect(Math.max(...progressCalls.slice(0, -1))).toBeLessThanOrEqual(99);
+      // Heartbeat 99 во время 5-минутной паузы был (stale-detector видит живой джоб).
+      expect(progressCalls.filter((p) => p === 99).length).toBeGreaterThan(0);
     } finally {
       jest.useRealTimers();
     }

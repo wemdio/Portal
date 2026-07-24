@@ -11,7 +11,10 @@ const SMTP_PROBE_PORT = Number(process.env.SMTP_PROBE_PORT ?? '25');
 // Не задан → ОС выбирает адрес сама (поведение как раньше).
 const SMTP_PROBE_LOCAL_ADDRESS = process.env.SMTP_PROBE_LOCAL_ADDRESS?.trim() || undefined;
 
-const DEFAULT_HELO_DOMAIN = process.env.EMAIL_VALIDATION_HELO_DOMAIN ?? os.hostname();
+// trim+||: переменная может быть задана, но ПУСТАЯ (compose подставляет '',
+// когда host-var не задана) — иначе EHLO уходит пустым и строгие MX режут
+// все пробы этого инстанса (501).
+const DEFAULT_HELO_DOMAIN = process.env.EMAIL_VALIDATION_HELO_DOMAIN?.trim() || os.hostname();
 
 type SmtpResponse = { code: number; text: string };
 
@@ -193,7 +196,7 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
   const timeout = req.timeout ?? SMTP_CONNECT_TIMEOUT_MS;
   const result: SmtpCheckResult = { code: 0, exists: null, isCatchAll: null, greylist: false };
 
-  const heloDomain = req.heloDomain ?? DEFAULT_HELO_DOMAIN;
+  const heloDomain = req.heloDomain?.trim() || DEFAULT_HELO_DOMAIN;
   // Default to the RFC 5321 null sender `<>` for the probe envelope. EHLO still
   // uses heloDomain (must match the proxy's PTR), but the MAIL FROM is `<>` so
   // receivers that do sender-callback verification (Exim/cPanel "verify =
@@ -352,11 +355,13 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
   // inside the worker's 25s HTTP timeout. Failure here just leaves
   // isCatchAll=null (как раньше).
   const remainingMs = SMTP_CHECK_DEADLINE_MS - (Date.now() - startedAt);
+  // Минимальный бюджет 500мс: с меньшим остатком проба стартует с заведомо
+  // мёртвым per-stage таймаутом (1-2мс) — чистый мусор, а не попытка.
   if (
     req.checkCatchAll &&
     result.exists === true &&
     result.isCatchAll === null &&
-    remainingMs > 0
+    remainingMs >= 500
   ) {
     const domain = req.email.split('@')[1];
     if (domain) {

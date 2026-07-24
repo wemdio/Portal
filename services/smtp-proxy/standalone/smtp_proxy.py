@@ -32,7 +32,11 @@ COMMAND_TIMEOUT = 8.0
 # Общий дедлайн всей проверки (сек): воркер обрывает HTTP-вызов к прокси на 25s,
 # ответ позже дедлайна никто не получит — опциональные фазы (in-session catch-all
 # и retry на свежем коннекте) после него не стартуют.
-CHECK_DEADLINE = float(os.environ.get("SMTP_CHECK_DEADLINE_MS", "21000")) / 1000.0
+# float('')/мусор в env ронял бы процесс на импорте — деградируем в дефолт.
+try:
+    CHECK_DEADLINE = float(os.environ.get("SMTP_CHECK_DEADLINE_MS") or "21000") / 1000.0
+except ValueError:
+    CHECK_DEADLINE = 21.0
 # Per-stage таймаут retry-пробы на свежем коннекте (минимум с остатком бюджета).
 CATCHALL_RETRY_TIMEOUT = 5.0
 
@@ -268,8 +272,10 @@ def smtp_check(req):
     # Fresh-connection catch-all retry (parity with smtp.ts): ограничен общим
     # дедлайном, per-stage таймаут — min(CATCHALL_RETRY_TIMEOUT, остаток бюджета).
     remaining = CHECK_DEADLINE - (time.time() - started)
+    # Минимальный бюджет 0.5с (parity со smtp.ts): с меньшим остатком проба
+    # стартует с заведомо мёртвым per-stage таймаутом — мусор, а не попытка.
     if (req.get("checkCatchAll") and result["exists"] is True
-            and result["isCatchAll"] is None and remaining > 0):
+            and result["isCatchAll"] is None and remaining >= 0.5):
         domain = email.split("@")[1] if "@" in email else ""
         if domain:
             ccode = _fresh_probe(mx, helo, mail_from, _random_local(domain),

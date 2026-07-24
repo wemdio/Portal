@@ -544,6 +544,11 @@ export async function validateEmail(
 
   const needCatchAllCheck = domainInfo.isCatchAll === null;
   let smtpResult: SmtpCheckResult | null = null;
+  // Первый подтверждённый exists=true: backup-MX со протухшей таблицей ящиков
+  // может ответить 550 на живой адрес — такому contradictory-ответу НЕЛЬЗЯ
+  // перебивать уже подтверждённый primary (иначе stale backup-MX убивает живой
+  // лид, которого старый однопроходный цикл сохранял).
+  let firstOkResult: SmtpCheckResult | null = null;
 
   const mxHostsToTry = domainInfo.mxHosts.slice(0, 3);
   for (let mxIndex = 0; mxIndex < mxHostsToTry.length; mxIndex += 1) {
@@ -556,13 +561,27 @@ export async function validateEmail(
       if (smtpResult.isCatchAll !== null && domainInfo.isCatchAll === null) {
         domainInfo.isCatchAll = smtpResult.isCatchAll;
       }
+      // Backup-MX отверг ящик, который предыдущий MX уже подтвердил: стоп,
+      // вердикт остаётся за подтвердившим (catch-all при этом может остаться
+      // неопределённым → честный catch_all_undetermined, а не invalid).
+      if (smtpResult.exists === false && firstOkResult) {
+        smtpResult = firstOkResult;
+        break;
+      }
+      if (smtpResult.exists === true && !firstOkResult) {
+        firstOkResult = smtpResult;
+      }
       // Ящик подтверждён, но catch-all этого MX не определён: у следующего MX
       // домена random-проба может дать ответ — пробуем его с checkCatchAll=true,
       // чтобы не оставлять адрес в catch_all_undetermined, пока есть MX.
+      // Для freemail (FREE_PROVIDERS) не ходим дальше: вердикт 'ok' при
+      // неопределённом catch-all уже обеспечен freemail-trust ниже, лишние
+      // пробы на каждый адрес домена не нужны.
       if (
         smtpResult.exists === true &&
         domainInfo.isCatchAll === null &&
         needCatchAllCheck &&
+        !freeFlag &&
         mxIndex < mxHostsToTry.length - 1
       ) {
         continue;
@@ -665,25 +684,30 @@ export async function validateEmail(
     // A 5xx at RCPT is usually a genuine "user unknown" → invalid. But some
     // hosts return 5xx for policy/rate-limit reasons; those we keep as
     // 'unknown' (couldn't verify) rather than deleting a possibly-valid lead.
-    if (classifyRcpt5xx(smtpResult.smtpText, email) === 'unknown') {
+    // Квота («550 5.2.2 mailbox full») — НЕ user unknown и НЕ policy-ретрай:
+    // пропускаем классификатор и уходим в терминальный over_quota ниже.
+    if (!RCPT_QUOTA_RE.test(smtpResult.smtpText ?? '')) {
+      if (classifyRcpt5xx(smtpResult.smtpText, email) === 'unknown') {
+        return {
+          result: 'unknown', quality: 'risky',
+          is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: false,
+          did_you_mean: didYouMean, mx_found: mxFound, smtp_code: smtpResult.code,
+          details: { ...details, step: 'smtp_5xx_policy', smtp_text: smtpResult.smtpText },
+          error: `Сервер отклонил по политике/лимиту (${smtpResult.code})`,
+        };
+      }
       return {
-        result: 'unknown', quality: 'risky',
+        result: 'invalid', quality: 'bad',
         is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: false,
         did_you_mean: didYouMean, mx_found: mxFound, smtp_code: smtpResult.code,
-        details: { ...details, step: 'smtp_5xx_policy', smtp_text: smtpResult.smtpText },
-        error: `Сервер отклонил по политике/лимиту (${smtpResult.code})`,
+        details: { ...details, step: 'smtp_invalid' },
       };
     }
-    return {
-      result: 'invalid', quality: 'bad',
-      is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: false,
-      did_you_mean: didYouMean, mx_found: mxFound, smtp_code: smtpResult.code,
-      details: { ...details, step: 'smtp_invalid' },
-    };
   }
 
-  // Переполненный ящик / превышенная квота (452 или «mailbox full»/«over quota»
-  // при exists===null): ящик, скорее всего, ЖИВ, но сейчас не принимает почту.
+  // Переполненный ящик / превышенная квота (452 при exists===null, либо
+  // «mailbox full»/«over quota» текст — в т.ч. 5xx при exists===false): ящик,
+  // скорее всего, ЖИВ, но сейчас не принимает почту.
   // ТЕРМИНАЛЬНЫЙ unknown (step 'over_quota'): текст ошибки намеренно БЕЗ
   // «временн»/greylist-токенов — воркер НЕ должен ретраить (квота за минуты
   // ретрая не рассосётся), но и удалять адрес как invalid нельзя.

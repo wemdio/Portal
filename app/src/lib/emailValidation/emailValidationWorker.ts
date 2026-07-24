@@ -612,9 +612,15 @@ export async function runEmailValidationJob(jobId: string) {
           const release = await acquireDomainSlot(domain);
 
           try {
-            // attempt_count инкрементится при claim: '>=', чтобы строка,
-            // исчерпавшая попытки, не уходила на лишний прогон валидации.
-            if (item.attempt_count >= MAX_ATTEMPTS) {
+            // attempt_count инкрементится при claim. Гард именно '>', НЕ '>=':
+            // classifyRetry сам перестаёт рекьюить на attempts >= MAX_ATTEMPTS,
+            // поэтому claim с attempt_count === MAX_ATTEMPTS — это ПОСЛЕДНЯЯ
+            // реальная проба (после неё вердикт completed/unknown), а не
+            // terminal-fail без пробы. Жёсткий fail здесь — только для строк,
+            // которые пережили лишний claim через crash/stale-reset (те жгут
+            // attempt_count без валидации): и то даём им пробу, пока счётчик
+            // не превысил лимит.
+            if (item.attempt_count > MAX_ATTEMPTS) {
               await updateQueueItemResult(item, null, 'failed', `Превышено число попыток (${MAX_ATTEMPTS})`);
               errors += 1;
               processed += 1;

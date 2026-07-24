@@ -261,3 +261,69 @@ describe('validateEmail: IDN-домен (почта.рф)', () => {
     expect(body.email).toBe(`user@${puny}`);
   });
 });
+
+
+describe('validateEmail: contradictory-MX — backup-MX НЕ перебивает подтверждённый primary', () => {
+  const twoMxCache = (domain: string) => new Map<string, DomainInfo>([[domain, {
+    domain,
+    mxHosts: [`mx1.${domain}`, `mx2.${domain}`],
+    mxFound: true,
+    isCatchAll: null,
+    isDisposable: false,
+    checkedAt: new Date(),
+  }]]);
+
+  it('MX1 250-подтвердил, MX2 (stale backup) 550 → НЕ invalid (catch_all_undetermined)', async () => {
+    fetchMock.mockImplementation(async (_url: unknown, init: unknown) => {
+      const body = JSON.parse((init as { body: string }).body) as { mxHost: string };
+      if (body.mxHost === 'mx1.corp.ru') {
+        return { ok: true, json: async () => ({ code: 250, exists: true, isCatchAll: null, greylist: false }) };
+      }
+      // Протухший backup без таблицы ящиков отвечает 550 на живой адрес
+      return { ok: true, json: async () => ({ code: 550, exists: false, isCatchAll: null, greylist: false, smtpText: '550 5.1.1 No such user' }) };
+    });
+    const res = await validateEmail('user@corp.ru', twoMxCache('corp.ru'));
+    expect(res.result).not.toBe('invalid'); // живой лид не удаляется
+    expect(res.result).toBe('unknown');
+    expect(res.details.step).toBe('catch_all_undetermined');
+  });
+
+  it('MX1 250 + catch-all=null, MX2 550 но конклюзивно по random-пробе (isCatchAll=false) → ok', async () => {
+    fetchMock.mockImplementation(async (_url: unknown, init: unknown) => {
+      const body = JSON.parse((init as { body: string }).body) as { mxHost: string };
+      if (body.mxHost === 'mx1.corp.ru') {
+        return { ok: true, json: async () => ({ code: 250, exists: true, isCatchAll: null, greylist: false }) };
+      }
+      return { ok: true, json: async () => ({ code: 550, exists: false, isCatchAll: false, greylist: false, smtpText: '550 5.1.1 No such user' }) };
+    });
+    const res = await validateEmail('user@corp.ru', twoMxCache('corp.ru'));
+    expect(res.result).toBe('ok'); // первый MX подтвердил ящик, домен честный (isCatchAll=false)
+  });
+});
+
+describe('validateEmail: freemail НЕ ходит на следующий MX за catch-all', () => {
+  it('rambler.ru (FREE_PROVIDERS): exists=true + catch-all=null → ok, одна проба', async () => {
+    const cache = new Map<string, DomainInfo>([['rambler.ru', {
+      domain: 'rambler.ru',
+      mxHosts: ['mx1.rambler.ru', 'mx2.rambler.ru'],
+      mxFound: true,
+      isCatchAll: null,
+      isDisposable: false,
+      checkedAt: new Date(),
+    }]]);
+    smtpReply({ code: 250, exists: true, isCatchAll: null, greylist: false });
+    const res = await validateEmail('user@rambler.ru', cache);
+    expect(res.result).toBe('ok'); // freemail-trust
+    expect(fetchMock).toHaveBeenCalledTimes(1); // MX2 не дёргаем — лишние пробы не нужны
+  });
+});
+
+describe('validateEmail: квота по 5xx → терминальный over_quota (не policy-ретрай)', () => {
+  it('552 5.2.2 mailbox full → unknown со step over_quota', async () => {
+    smtpReply({ code: 552, exists: false, isCatchAll: false, greylist: false, smtpText: '552 5.2.2 Mailbox full' });
+    const res = await validateEmail('user@corp.ru', cacheWith('corp.ru', false));
+    expect(res.result).toBe('unknown');
+    expect(res.details.step).toBe('over_quota');
+    expect(res.error).not.toMatch(/временн|greylist/i); // воркер не должен ретраить
+  });
+});
