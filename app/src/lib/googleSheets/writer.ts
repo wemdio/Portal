@@ -51,10 +51,13 @@ export async function appendRows(
   const endCol = String.fromCharCode('A'.charCodeAt(0) + numCols - 1);
   const targetRange = `${sheetName}!A${startRow}:${endCol}${endRow}`;
 
+  // valueInputOption='USER_ENTERED' — Google Sheets парсит значения как если
+  // бы пользователь ввёл в ячейку (даты в русском формате DD.MM.YYYY становятся
+  // датами, http://... — кликабельными ссылками), а не пишет их как raw-строки.
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range: targetRange,
-    valueInputOption: 'RAW',
+    valueInputOption: 'USER_ENTERED',
     requestBody: { values: rows as (string | number | null)[][] },
   });
 }
