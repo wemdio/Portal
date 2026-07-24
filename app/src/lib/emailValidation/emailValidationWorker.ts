@@ -44,13 +44,12 @@ type JobRow = {
 
 const WORKER_CONCURRENCY = Number(process.env.EMAIL_VALIDATION_CONCURRENCY ?? '20');
 const WORKER_BATCH_SIZE = Number(process.env.EMAIL_VALIDATION_BATCH_SIZE ?? '100');
-const MAX_ATTEMPTS = Number(process.env.EMAIL_VALIDATION_MAX_ATTEMPTS ?? '3');
+export const MAX_ATTEMPTS = Number(process.env.EMAIL_VALIDATION_MAX_ATTEMPTS ?? '3');
 const STALE_PROCESSING_MINUTES = Number(process.env.EMAIL_VALIDATION_STALE_MINUTES ?? '5');
 const DOMAIN_CONCURRENCY = Number(process.env.EMAIL_VALIDATION_DOMAIN_CONCURRENCY ?? '3');
 const DOMAIN_CACHE_TTL_MS = Number(process.env.EMAIL_VALIDATION_DOMAIN_CACHE_TTL_MS ?? String(24 * 60 * 60 * 1000));
 const JOB_PROGRESS_FLUSH_INTERVAL = Number(process.env.EMAIL_VALIDATION_PROGRESS_FLUSH_MS ?? '2000');
 const SUPABASE_QUERY_TIMEOUT_MS = 30_000;
-const GREYLIST_DELAY_MS = Number(process.env.EMAIL_VALIDATION_GREYLIST_DELAY_MS ?? String(5 * 60 * 1000));
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -171,40 +170,117 @@ async function acquireDomainSlot(domain: string): Promise<() => void> {
 
 // ─── Domain cache persistence ───────────────────────────────────────────────
 
-async function loadDomainCache(jobId: string): Promise<Map<string, DomainInfo>> {
+/**
+ * Сигнатура полей записи кэша, релевантных для upsert'а (checkedAt НЕ входит —
+ * validateEmail мутирует isCatchAll in-place, не трогая checkedAt). Сравнение
+ * со снапшотом, снятым при загрузке, показывает, какие записи реально созданы
+ * или изменены за прогон: ТОЛЬКО их и апсертим. Раньше saveDomainCache
+ * переписывал expires_at ВСЕХ загруженных строк — TTL «отмывался» на каждом
+ * джобе и записи жили вечно (TTL laundering).
+ */
+export function domainInfoSignature(d: DomainInfo): string {
+  return JSON.stringify([d.mxHosts, d.mxFound, d.isCatchAll, d.isDisposable]);
+}
+
+/** Записи кэша, созданные или изменённые за прогон (новые + отличающиеся от снапшота). */
+export function filterDirtyCacheEntries(
+  cache: Map<string, DomainInfo>,
+  snapshot: Map<string, string>,
+): DomainInfo[] {
+  return Array.from(cache.values()).filter(
+    (d) => snapshot.get(d.domain) !== domainInfoSignature(d),
+  );
+}
+
+// Distinct-домены очереди джоба (узкая колонка, постранично — страница не
+// должна превышать PostgREST max-rows, иначе хвост молча обрежется).
+async function loadJobDomains(jobId: string): Promise<string[]> {
+  if (!supabaseAdmin) return [];
+  const domains = new Set<string>();
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from('email_validation_queue')
+        .select('email_normalized')
+        .eq('job_id', jobId)
+        .order('row_index')
+        .range(from, from + PAGE - 1);
+      if (error) {
+        await logError('email.validation.worker.job_domains_load_failed', error, { jobId });
+        break;
+      }
+      const rows = data ?? [];
+      for (const r of rows) {
+        const d = String((r as { email_normalized?: string }).email_normalized ?? '').split('@')[1];
+        if (d) domains.add(d);
+      }
+      if (rows.length < PAGE) break;
+    } catch (err) {
+      await logError('email.validation.worker.job_domains_load_failed', err, { jobId });
+      break;
+    }
+  }
+  return Array.from(domains);
+}
+
+/**
+ * Грузим кэш ТОЛЬКО для доменов этого джоба (чанки .in() по несколько сотен),
+ * а не первые 10000 строк без ORDER BY, как раньше. Возвращает кэш и снапшот
+ * сигнатур загруженных записей — для dirty-фильтра в saveDomainCache.
+ */
+async function loadDomainCache(
+  jobId: string,
+  domains: string[],
+): Promise<{ cache: Map<string, DomainInfo>; snapshot: Map<string, string> }> {
   const cache = new Map<string, DomainInfo>();
-  if (!supabaseAdmin) return cache;
+  const snapshot = new Map<string, string>();
+  if (!supabaseAdmin || domains.length === 0) return { cache, snapshot };
 
-  try {
-    const { data } = await supabaseAdmin
-      .from('email_validation_domain_cache')
-      .select('domain, mx_hosts, mx_found, is_catch_all, is_disposable, checked_at, expires_at')
-      .gt('expires_at', new Date().toISOString())
-      .limit(10000);
-
-    if (data) {
-      for (const row of data) {
-        cache.set(row.domain, {
+  const CHUNK = 300;
+  for (let i = 0; i < domains.length; i += CHUNK) {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from('email_validation_domain_cache')
+        .select('domain, mx_hosts, mx_found, is_catch_all, is_disposable, checked_at, expires_at')
+        .in('domain', domains.slice(i, i + CHUNK))
+        .gt('expires_at', new Date().toISOString());
+      if (error) {
+        await logError('email.validation.worker.domain_cache_load_failed', error, { jobId });
+        continue;
+      }
+      for (const row of data ?? []) {
+        const info: DomainInfo = {
           domain: row.domain,
           mxHosts: row.mx_hosts ?? [],
           mxFound: row.mx_found ?? false,
           isCatchAll: row.is_catch_all,
           isDisposable: row.is_disposable ?? false,
           checkedAt: new Date(row.checked_at),
-        });
+        };
+        cache.set(row.domain, info);
+        snapshot.set(row.domain, domainInfoSignature(info));
       }
+    } catch (err) {
+      await logError('email.validation.worker.domain_cache_load_failed', err, { jobId });
     }
-  } catch (err) {
-    await logError('email.validation.worker.domain_cache_load_failed', err, { jobId });
   }
 
-  return cache;
+  return { cache, snapshot };
 }
 
-async function saveDomainCache(domainCache: Map<string, DomainInfo>): Promise<void> {
+async function saveDomainCache(
+  domainCache: Map<string, DomainInfo>,
+  snapshot: Map<string, string>,
+): Promise<void> {
   if (!supabaseAdmin || domainCache.size === 0) return;
 
-  const rows = Array.from(domainCache.values()).map((d) => ({
+  // Апсертим только созданные/изменённые за прогон записи; нетронутые строки
+  // сохраняют исходные checked_at/expires_at (см. domainInfoSignature).
+  const dirty = filterDirtyCacheEntries(domainCache, snapshot);
+  if (dirty.length === 0) return;
+
+  const rows = dirty.map((d) => ({
     domain: d.domain,
     mx_hosts: d.mxHosts,
     mx_found: d.mxFound,
@@ -220,8 +296,8 @@ async function saveDomainCache(domainCache: Map<string, DomainInfo>): Promise<vo
       await supabaseAdmin
         .from('email_validation_domain_cache')
         .upsert(rows.slice(i, i + batchSize), { onConflict: 'domain' });
-    } catch {
-      // Non-critical
+    } catch (err) {
+      workerLog('warn', `Domain cache upsert failed (batch ${i / batchSize + 1})`, err);
     }
   }
 }
@@ -245,23 +321,152 @@ async function countQueue(jobId: string, status: QueueStatus): Promise<number> {
   } catch { return 0; }
 }
 
-function isGreylistError(error: string | undefined): boolean {
-  if (!error) return false;
-  const lower = error.toLowerCase();
-  return lower.includes('greylist') || lower.includes('временн') || lower.includes('450') || lower.includes('451');
+const EMPTY_BATCH_POLL_MS = 600;
+// Кэп сна до ближайшего retry_after: дольше — задержали бы проверку отмены
+// джоба и сброс зависших processing-строк.
+const RETRY_WAIT_CAP_MS = 60_000;
+
+/**
+ * Миллисекунды до ближайшего отложенного ретрая джоба (один дешёвый запрос).
+ * Нет отложенных — возвращаем обычный poll-интервал.
+ */
+async function msUntilNextRetry(jobId: string): Promise<number> {
+  if (!supabaseAdmin) return EMPTY_BATCH_POLL_MS;
+  try {
+    const { data } = await withTimeout(
+      supabaseAdmin
+        .from('email_validation_queue')
+        .select('retry_after')
+        .eq('job_id', jobId)
+        .eq('status', 'pending')
+        .not('retry_after', 'is', null)
+        .gt('retry_after', new Date().toISOString())
+        .order('retry_after', { ascending: true })
+        .limit(1),
+      'Таймаут msUntilNextRetry',
+    );
+    const next = (data?.[0] as { retry_after?: string } | undefined)?.retry_after;
+    if (!next) return EMPTY_BATCH_POLL_MS;
+    const ms = new Date(next).getTime() - Date.now();
+    return Math.min(Math.max(ms, EMPTY_BATCH_POLL_MS), RETRY_WAIT_CAP_MS);
+  } catch {
+    return EMPTY_BATCH_POLL_MS;
+  }
 }
 
-function shouldRetry(error: string | undefined, attempts: number): boolean {
-  if (attempts >= MAX_ATTEMPTS) return false;
-  if (!error) return false;
-  const retryable = [
-    'greylist', 'timeout', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED',
-    'EHOSTUNREACH', 'ENETUNREACH', 'временн', '450', '451',
-    'dns lookup failed', // transient MX-undetermined (not greylist) → re-queue
-    'prox', 'fetch failed', 'aborted', // proxy down/restarting → re-queue, not terminal
-  ];
-  const lower = error.toLowerCase();
-  return retryable.some((k) => lower.includes(k.toLowerCase()));
+// ─── Таксономия ретраев ─────────────────────────────────────────────────────
+
+/** Класс ретрая — определяет расписание задержки retry_after. */
+export type RetryClass = 'greylist' | 'dns' | 'transport' | 'proxy' | 'policy_5xx';
+
+// Расписания задержек по классам (минуты, индекс = номеру попытки; за пределами
+// списка берётся последнее значение).
+const GREYLIST_SCHEDULE_MIN = [5, 15, 30];
+const DNS_SCHEDULE_MIN = [5, 15];
+const TRANSPORT_SCHEDULE_MIN = [2, 10];
+const PROXY_SCHEDULE_MIN = [1, 5];
+// smtp_5xx_policy: одна отложенная попытка через 30–60 минут, затем терминально.
+const POLICY_5XX_DELAY_MIN = 45;
+// Клэмп подсказки «try again in N …» из SMTP-текста.
+const GREYLIST_HINT_MIN_MS = 60_000;
+const GREYLIST_HINT_MAX_MS = 45 * 60_000;
+
+/** Парсим «try again in N seconds/minutes» из текста SMTP-ответа (greylist). */
+export function parseGreylistHintMs(smtpText: string | undefined): number | null {
+  if (!smtpText) return null;
+  const m = /try again in\s+(\d+)\s*(seconds?|secs?|minutes?|mins?)/i.exec(smtpText);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return /^min/i.test(m[2]) ? n * 60_000 : n * 1000;
+}
+
+const PROXY_ERROR_RE = /prox|fetch failed|aborted/i;
+const TRANSPORT_ERROR_RE = /timeout|etimedout|econnreset|econnrefused|ehostunreach|enetunreach/i;
+
+/**
+ * Классификатор ретрая: в первую очередь по структурированным полям
+ * (details.step + smtp_text), для старых строк без details и исключений —
+ * консервативный фолбэк по тексту ошибки. null = терминально, не ретраим.
+ *
+ * attempts — сколько попыток УЖЕ сделано (attempt_count инкрементится при claim,
+ * т.е. первая обработка приходит с attempts=1).
+ */
+export function classifyRetry(
+  error: string | undefined,
+  details: Record<string, unknown> | undefined,
+  attempts: number,
+): RetryClass | null {
+  if (attempts >= MAX_ATTEMPTS) return null;
+
+  const step = typeof details?.step === 'string' ? details.step : null;
+
+  // over_quota — лимит проверок исчерпан: терминально, НЕ ретраим.
+  if (step === 'over_quota') return null;
+  // smtp_5xx_policy — политика/рейт-лимит на RCPT: ОДНА отложенная попытка.
+  if (step === 'smtp_5xx_policy') return attempts < 2 ? 'policy_5xx' : null;
+
+  if (step === 'greylist') return 'greylist';
+  if (step === 'mx') {
+    // Только транзиентный DNS-сбой (MX undetermined); «нет MX» — терминальный
+    // invalid и сюда не доходит, но на всякий случай проверяем текст.
+    const mxErr = `${error ?? ''} ${String(details?.error ?? '')}`;
+    return /dns/i.test(mxErr) ? 'dns' : null;
+  }
+  // Ни один MX не ответил на connect / catch-all проба временно сбойнула.
+  if (step === 'smtp' || step === 'catch_all_undetermined') return 'transport';
+  // Прокси упал/перезапускается — короткий ретрай независимо от шага.
+  if (PROXY_ERROR_RE.test(error ?? '')) return 'proxy';
+
+  // ── Фолбэк по тексту ошибки (старые строки без details, исключения) ──
+  const lower = (error ?? '').toLowerCase();
+  if (!lower) return null;
+  if (lower.includes('greylist') || lower.includes('временн')) return 'greylist';
+  if (/\b45[01]\b/.test(lower) || lower.includes('4.7.1')) return 'greylist';
+  if (lower.includes('dns lookup failed')) return 'dns';
+  if (TRANSPORT_ERROR_RE.test(lower)) return 'transport';
+  return null;
+}
+
+export function shouldRetry(
+  error: string | undefined,
+  attempts: number,
+  details?: Record<string, unknown>,
+): boolean {
+  return classifyRetry(error, details, attempts) !== null;
+}
+
+function pickScheduleMin(schedule: number[], attempts: number): number {
+  return schedule[Math.min(Math.max(attempts - 1, 0), schedule.length - 1)];
+}
+
+// ±10% джиттер, чтобы отложенные ретраи не выстроились в одну секунду.
+function withJitter(ms: number): number {
+  return Math.round(ms * (0.9 + Math.random() * 0.2));
+}
+
+/**
+ * Задержка retry_after для класса ретрая с эскалацией по номеру попытки.
+ * Для greylist сначала пробуем подсказку «try again in N» из smtp_text
+ * (клэмп [1 мин, 45 мин]); без неё — расписание 5→15→30 мин.
+ */
+export function retryDelayMs(cls: RetryClass, attempts: number, smtpText?: string): number {
+  let base: number;
+  if (cls === 'greylist') {
+    const hint = parseGreylistHintMs(smtpText);
+    base = hint !== null
+      ? Math.min(Math.max(hint, GREYLIST_HINT_MIN_MS), GREYLIST_HINT_MAX_MS)
+      : pickScheduleMin(GREYLIST_SCHEDULE_MIN, attempts) * 60_000;
+  } else if (cls === 'dns') {
+    base = pickScheduleMin(DNS_SCHEDULE_MIN, attempts) * 60_000;
+  } else if (cls === 'transport') {
+    base = pickScheduleMin(TRANSPORT_SCHEDULE_MIN, attempts) * 60_000;
+  } else if (cls === 'proxy') {
+    base = pickScheduleMin(PROXY_SCHEDULE_MIN, attempts) * 60_000;
+  } else {
+    base = POLICY_5XX_DELAY_MIN * 60_000;
+  }
+  return withJitter(base);
 }
 
 // ─── Main worker function ───────────────────────────────────────────────────
@@ -337,8 +542,9 @@ export async function runEmailValidationJob(jobId: string) {
       p_minutes: STALE_PROCESSING_MINUTES,
     });
 
-    // Load domain cache
-    const domainCache = await loadDomainCache(jobId);
+    // Load domain cache (только домены этого джоба + снапшот для dirty-upsert'а)
+    const jobDomains = await loadJobDomains(jobId);
+    const { cache: domainCache, snapshot: domainCacheSnapshot } = await loadDomainCache(jobId, jobDomains);
     let lastProgressFlush = Date.now();
 
     // Periodic progress flush to avoid hammering DB
@@ -391,7 +597,9 @@ export async function runEmailValidationJob(jobId: string) {
           });
         }
 
-        await sleep(600);
+        // Если остались только отложенные (retry_after в будущем) — спим до
+        // ближайшего, а не долбим claim каждые 600мс впустую.
+        await sleep(await msUntilNextRetry(jobId));
         continue;
       }
 
@@ -404,7 +612,9 @@ export async function runEmailValidationJob(jobId: string) {
           const release = await acquireDomainSlot(domain);
 
           try {
-            if (item.attempt_count > MAX_ATTEMPTS) {
+            // attempt_count инкрементится при claim: '>=', чтобы строка,
+            // исчерпавшая попытки, не уходила на лишний прогон валидации.
+            if (item.attempt_count >= MAX_ATTEMPTS) {
               await updateQueueItemResult(item, null, 'failed', `Превышено число попыток (${MAX_ATTEMPTS})`);
               errors += 1;
               processed += 1;
@@ -413,13 +623,19 @@ export async function runEmailValidationJob(jobId: string) {
 
             const result = await validateEmail(item.email_normalized, domainCache);
 
-            if (result.error && result.result === 'unknown' && shouldRetry(result.error, item.attempt_count)) {
-              const greylist = isGreylistError(result.error);
-              if (greylist) {
-                workerLog('info', `Greylisting detected for ${item.email_normalized}, retry in ${GREYLIST_DELAY_MS / 1000}s`);
+            if (result.error && result.result === 'unknown') {
+              const cls = classifyRetry(result.error, result.details, item.attempt_count);
+              if (cls) {
+                const smtpText = typeof result.details?.smtp_text === 'string'
+                  ? result.details.smtp_text
+                  : undefined;
+                const delayMs = retryDelayMs(cls, item.attempt_count, smtpText);
+                if (cls === 'greylist') {
+                  workerLog('info', `Greylisting detected for ${item.email_normalized}, retry in ${Math.round(delayMs / 1000)}s`);
+                }
+                await requeueItem(item, delayMs);
+                return;
               }
-              await requeueItem(item, greylist);
-              return;
             }
 
             await updateQueueItemResult(item, result, 'completed', null);
@@ -431,8 +647,9 @@ export async function runEmailValidationJob(jobId: string) {
             processed += 1;
           } catch (err) {
             const msg = err instanceof Error ? err.message : 'Ошибка валидации';
-            if (shouldRetry(msg, item.attempt_count)) {
-              await requeueItem(item, isGreylistError(msg));
+            const cls = classifyRetry(msg, undefined, item.attempt_count);
+            if (cls) {
+              await requeueItem(item, retryDelayMs(cls, item.attempt_count));
             } else {
               await updateQueueItemResult(item, null, 'failed', msg);
               errors += 1;
@@ -480,8 +697,8 @@ export async function runEmailValidationJob(jobId: string) {
       })
       .eq('id', jobId);
 
-    // Persist domain cache for future jobs
-    await saveDomainCache(domainCache);
+    // Persist domain cache for future jobs (только изменённые за прогон записи)
+    await saveDomainCache(domainCache, domainCacheSnapshot);
 
     workerLog('info', `Job ${jobId} FINISHED: status=${finalStatus}, completed=${completedCount}, failed=${failedCount}`);
     await logInfo('email.validation.worker.completed', 'Email validation job completed', {
@@ -554,19 +771,21 @@ async function updateQueueItemResult(
   }
 }
 
-async function requeueItem(item: QueueItem, greylist = false): Promise<void> {
+async function requeueItem(item: QueueItem, delayMs: number): Promise<void> {
   if (!supabaseAdmin) return;
   try {
     const now = new Date().toISOString();
-    const update: Record<string, unknown> = { status: 'pending', updated_at: now };
-    if (greylist) {
-      update.retry_after = new Date(Date.now() + GREYLIST_DELAY_MS).toISOString();
-    }
+    // retry_after ставится при КАЖДОМ рекьюе: класс ретрая уже решил задержку,
+    // немедленного повтора быть не должно.
     await supabaseAdmin
       .from('email_validation_queue')
-      .update(update)
+      .update({
+        status: 'pending',
+        updated_at: now,
+        retry_after: new Date(Date.now() + delayMs).toISOString(),
+      })
       .eq('id', item.id);
-  } catch {
-    // Non-critical
+  } catch (err) {
+    workerLog('warn', `Requeue failed for ${item.email_normalized} (${item.id})`, err);
   }
 }
