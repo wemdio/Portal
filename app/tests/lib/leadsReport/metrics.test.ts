@@ -33,11 +33,13 @@ function lead(
   fields: Record<string, string>,
   statusId: number,
   statusName: string,
+  opts: { name?: string | null } = {},
 ): AmoLeadMetricRow {
   return {
     pipeline_id: 1,
     status_id: statusId,
     status_name: statusName,
+    name: opts.name ?? 'Сделка',
     created_at: '2026-07-20T10:00:00.000Z',
     updated_at: '2026-07-23T10:00:00.000Z',
     raw: {
@@ -106,5 +108,30 @@ describe('computeMetricsFromRows', () => {
           item.meetingsScheduled === 0,
       ),
     ).toBe(true);
+  });
+
+  it('лид-магниты (имя начинается с «Бот:») попадают в «Пришло» только когда прошли квалификацию', () => {
+    const result = computeMetricsFromRows(
+      SUMMARY_CHANNELS,
+      statuses,
+      [
+        // Обычные маркетинговые (не лид-магниты): обе в «Пришло», одна в «Лидов».
+        lead({ Контур: 'Маркетинг' }, 10, 'Новый лид', { name: 'Иванов Иван' }),
+        lead({ Контур: 'Маркетинг' }, 20, 'Квалифицированный лид', { name: 'Петров Пётр' }),
+        // Лид-магниты (name «Бот:...»): один НЕ квал → не в «Пришло»; один квал → в «Пришло» и в «Лидов».
+        lead({ Контур: 'Маркетинг' }, 10, 'Новый лид', { name: 'Бот: Amir' }),
+        lead({ Контур: 'Маркетинг' }, 20, 'Квалифицированный лид', { name: 'Бот: Светлана' }),
+      ],
+      new Date('2026-07-19T21:00:00.000Z'),
+      new Date('2026-07-24T15:00:00.000Z'),
+    );
+
+    const marketing = result.find((r) => r.channel.name === 'marketing');
+    // Ожидаем: 2 обычные + 1 лид-магнит-квал = 3 в arrived; лид-магнит без квала (Amir) не считаем.
+    // Квалифицированных всего 2 (Петров + Бот: Светлана).
+    expect(marketing).toMatchObject({
+      arrived: 3,
+      qualifiedLeads: 2,
+    });
   });
 });
