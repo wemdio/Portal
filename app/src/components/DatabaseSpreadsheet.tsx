@@ -502,11 +502,12 @@ const EMAIL_VALIDATION_PROGRESS_INTERVAL_MS = 500;
 const EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES = 10;
 // «Зависла: нет прогресса» срабатывает, только если сервер РЕАЛЬНО стоит.
 // Прогрессом считается либо новый отрисованный результат, либо рост job.processed
-// на сервере (см. poll-циклы). Таймаут поднят выше worst-case greylist-цепочки
-// (MAX_ATTEMPTS=3 × GREYLIST_DELAY=5мин ≈ 15мин, когда хвост базы поголовно
-// greylist-ится и завершений нет несколько минут), иначе клиент ложно «зависал»
+// на сервере (см. poll-циклы). Таймаут поднят выше worst-case хвоста отложенных
+// ретраев воркера: самый длинный класс — smtp_5xx_policy (одна попытка через
+// 45мин × jitter 1.1 + сама проба ≈ 50мин, когда хвост базы поголовно уходит в
+// policy/greylist и завершений нет десятки минут), иначе клиент ложно «зависал»
 // на greylist-тяжёлых базах и при троттлинге фоновой вкладки.
-const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 18 * 60 * 1000;
+const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 60 * 60 * 1000;
 
 const EMAIL_PROVIDER_MAP: Record<string, string> = {
   'gmail.com': 'Google', 'googlemail.com': 'Google',

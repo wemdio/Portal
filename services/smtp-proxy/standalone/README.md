@@ -44,7 +44,8 @@ GET  /health -> {"status":"ok"}
 Env: `SMTP_PROXY_API_KEY` (required), `PORT` (default 3100),
 `EMAIL_VALIDATION_HELO_DOMAIN` (HELO name — must have valid FCrDNS on the probe
 IP), `EMAIL_VALIDATION_MAIL_FROM` (default `<>` null sender),
-`SMTP_PROBE_LOCAL_ADDRESS` (optional egress bind), `SMTP_PROBE_PORT` (default 25).
+`SMTP_PROBE_LOCAL_ADDRESS` (optional egress bind), `SMTP_PROBE_PORT` (default 25),
+`SMTP_CHECK_DEADLINE_MS` (overall per-check deadline, default 21000).
 
 ## Deploy (systemd, as done for 89.19.209.252)
 

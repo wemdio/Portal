@@ -16,6 +16,7 @@ import {
   getPreferredSiteUrl,
   processInPool,
   extractEmail,
+  extractEmails,
 } from './dfybUtils';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
@@ -976,6 +977,12 @@ export async function stepValidateEmails(
   // колонку. Имена префиксуем явно чтобы юзер в финальном экспорте понимал
   // что относится к чему: «Email Статус» для original, «Найденный Email Статус»
   // для found.
+  //
+  // Идемпотентность: пара «… Статус»/«… Провайдер» могла остаться от прошлого
+  // запуска шага (resume после падения воркера или повторная загрузка готового
+  // экспорта в конструктор). Тогда переиспользуем существующие колонки и НЕ
+  // добавляем вторую одинаковую пару — иначе каждый re-run плодил дубли
+  // колонок и гонял полную ре-валидацию.
   const newHeader = [...header];
   const newBody = body.map((row) => [...row]);
   const meta: { srcIdx: number; statusIdx: number; providerIdx: number; label: string }[] = [];
@@ -983,69 +990,235 @@ export async function stepValidateEmails(
     const srcLabel = header[idx];
     const statusName = `${srcLabel} Статус`;
     const providerName = `${srcLabel} Провайдер`;
-    const statusIdx = newHeader.length;
-    newHeader.push(statusName);
-    const providerIdx = newHeader.length;
-    newHeader.push(providerName);
-    for (const row of newBody) { row.push(''); row.push(''); }
+    let statusIdx = newHeader.findIndex((h) => h.trim() === statusName);
+    if (statusIdx < 0) {
+      statusIdx = newHeader.length;
+      newHeader.push(statusName);
+      for (const row of newBody) row.push('');
+    }
+    let providerIdx = newHeader.findIndex((h) => h.trim() === providerName);
+    if (providerIdx < 0) {
+      providerIdx = newHeader.length;
+      newHeader.push(providerName);
+      for (const row of newBody) row.push('');
+    }
     meta.push({ srcIdx: idx, statusIdx, providerIdx, label: srcLabel });
   }
+  // «Рваные» строки (короче header'а) добиваем пустыми ячейками, чтобы записи
+  // по переиспользованным индексам не уходили в «дырки» массива.
+  for (const row of newBody) {
+    while (row.length < newHeader.length) row.push('');
+  }
 
-  // Собираем плоский список (rowIdx, sourceIdx, email) для общего пула с
-  // concurrency=10. Это лучше чем валидировать колонки последовательно —
-  // на «both» получим 2x скорость и общий domainCache для catch-all/free
-  // лукапов.
-  type ValidationItem = {
+  // Собираем ячейки для валидации. Мульти-email ячейка («a@x.ru, b@y.ru»)
+  // валидируется по КАЖДОМУ адресу через extractEmails; в колонку «… Статус»
+  // пишем статус ЛУЧШЕГО адреса. Плоский список уникальных адресов идёт в
+  // общий пул с concurrency=10 — это лучше чем валидировать колонки
+  // последовательно: на «both» получаем 2x скорость и общий domainCache
+  // для catch-all/free лукапов.
+  //
+  // Идемпотентность (resume после падения / повторная загрузка экспорта):
+  // строки, у которых в переиспользованной колонке «… Статус» уже стоит
+  // финальный вердикт (ok/invalid/disposable/catch_all), ПРОПУСКАЕМ —
+  // повторная SMTP-проба ничего не даст. Перепроверяем только ''/unknown/error.
+  const CONCLUSIVE_STATUSES = new Set(['ok', 'invalid', 'disposable', 'catch_all']);
+  type CellToValidate = {
     rowIdx: number;
     srcIdx: number;
-    email: string;
     statusIdx: number;
     providerIdx: number;
+    emails: string[];
   };
-  const toValidate: ValidationItem[] = [];
+  const cells: CellToValidate[] = [];
+  const uniqueEmails = new Set<string>();
   for (let r = 0; r < newBody.length; r += 1) {
     for (const m of meta) {
-      const email = extractEmail(newBody[r][m.srcIdx] || '');
-      if (email) {
-        toValidate.push({
-          rowIdx: r,
-          srcIdx: m.srcIdx,
-          email,
-          statusIdx: m.statusIdx,
-          providerIdx: m.providerIdx,
-        });
-      }
+      const emails = extractEmails(newBody[r][m.srcIdx] || '');
+      if (emails.length === 0) continue;
+      const prevStatus = (newBody[r][m.statusIdx] || '').trim();
+      if (CONCLUSIVE_STATUSES.has(prevStatus)) continue;
+      cells.push({ rowIdx: r, srcIdx: m.srcIdx, statusIdx: m.statusIdx, providerIdx: m.providerIdx, emails });
+      for (const e of emails) uniqueEmails.add(e);
     }
   }
 
-  if (toValidate.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
+  if (cells.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 
+  // Ранг статусов для выбора «лучшего» адреса в ячейке:
+  // ok > catch_all > unknown > error > invalid > disposable.
+  const STATUS_RANK: Record<string, number> = {
+    ok: 5,
+    catch_all: 4,
+    unknown: 3,
+    error: 2,
+    invalid: 1,
+    disposable: 0,
+  };
+  const statusRank = (s: string): number => STATUS_RANK[s] ?? -1;
+
+  type ProbeResult = { result: string; is_free: boolean; is_catch_all: boolean; errorText: string };
+  const results = new Map<string, ProbeResult>();
   const domainCache = new Map<string, DomainInfo>();
+
+  const runProbe = async (email: string): Promise<ProbeResult> => {
+    try {
+      const r = await validateEmail(email, domainCache);
+      return { result: r.result, is_free: r.is_free, is_catch_all: r.is_catch_all, errorText: r.error || '' };
+    } catch (err) {
+      return {
+        result: 'error',
+        is_free: false,
+        is_catch_all: false,
+        errorText: err instanceof Error ? err.message : String(err || ''),
+      };
+    }
+  };
+
+  // Мемоизация на уровне адреса: дубли email'а в базе (в т.ч. летящие
+  // одновременно в пуле) дают ОДНУ SMTP-пробу — все ячейки с этим адресом
+  // получают общий вердикт.
+  const inflight = new Map<string, Promise<ProbeResult>>();
+  const probe = (email: string): Promise<ProbeResult> => {
+    const existing = inflight.get(email);
+    if (existing) return existing;
+    const p = runProbe(email);
+    inflight.set(email, p);
+    return p;
+  };
+
+  // Обратный индекс адрес → ячейки: по завершении пробы обновляем статус
+  // всех ячеек с этим адресом (нужно для checkpoint'ов и второго прохода).
+  const cellByEmail = new Map<string, CellToValidate[]>();
+  for (const cell of cells) {
+    for (const e of cell.emails) {
+      const arr = cellByEmail.get(e);
+      if (arr) arr.push(cell);
+      else cellByEmail.set(e, [cell]);
+    }
+  }
+
+  // Пишет в «… Статус»/«… Провайдер» статус лучшего из УЖЕ проверенных
+  // адресов ячейки. Пока не проверен ни один — ничего не пишет.
+  const applyCellStatus = (cell: CellToValidate) => {
+    let bestEmail = '';
+    let best: ProbeResult | null = null;
+    for (const e of cell.emails) {
+      const r = results.get(e);
+      if (!r) continue;
+      if (!best || statusRank(r.result) > statusRank(best.result)) {
+        best = r;
+        bestEmail = e;
+      }
+    }
+    if (!best) return;
+    newBody[cell.rowIdx][cell.statusIdx] = best.result;
+    const domain = bestEmail.split('@')[1] || '';
+    newBody[cell.rowIdx][cell.providerIdx] = best.is_free ? 'free' : best.is_catch_all ? 'catch-all' : domain;
+  };
+
+  // Round-robin по доменам: группируем адреса по домену и интерливим,
+  // чтобы 10 одновременных проб пула не уперлись бурстом в один
+  // корпоративный MX (rate-limit → временный блок → лишние unknown).
+  const byDomain = new Map<string, string[]>();
+  for (const e of uniqueEmails) {
+    const d = e.split('@')[1] || '';
+    const arr = byDomain.get(d);
+    if (arr) arr.push(e);
+    else byDomain.set(d, [e]);
+  }
+  const toValidate: string[] = [];
+  while (toValidate.length < uniqueEmails.size) {
+    for (const arr of byDomain.values()) {
+      const next = arr.shift();
+      if (next !== undefined) toValidate.push(next);
+    }
+  }
+
   let done = 0;
   // checkpoint каждые 250 валидаций. Validate медленнее scrape'а (SMTP+DNS
   // round-trip может быть 1-3s), так что 250 ≈ 5-10 мин работы — окно
   // потенциальной потери прогресса на redeploy не больше.
   const checkpointEvery = 250;
   const onCheckpoint = options?.onCheckpoint;
+  let cancelled = false;
+  const mainPassStartedAt = Date.now();
 
-  await processInPool(toValidate, VALIDATION_CONCURRENCY, async (item) => {
-    if (isCancelled && await isCancelled()) return;
-    try {
-      const result = await validateEmail(item.email, domainCache);
-      newBody[item.rowIdx][item.statusIdx] = result.result;
-      const domain = item.email.split('@')[1] || '';
-      newBody[item.rowIdx][item.providerIdx] = result.is_free ? 'free' : result.is_catch_all ? 'catch-all' : domain;
-    } catch {
-      newBody[item.rowIdx][item.statusIdx] = 'error';
-    }
+  await processInPool(toValidate, VALIDATION_CONCURRENCY, async (email) => {
+    if (isCancelled && await isCancelled()) { cancelled = true; return; }
+    const r = await probe(email);
+    results.set(email, r);
+    const affected = cellByEmail.get(email);
+    if (affected) for (const cell of affected) applyCellStatus(cell);
     done++;
     if (done % 5 === 0 || done === toValidate.length) {
-      await onProgress(Math.round((done / toValidate.length) * 100));
+      // Кэп 99, НЕ 100: дальше ещё возможен отложенный второй проход и фильтр.
+      // progress=100 до реального конца шага даёт stuck-reaper'у
+      // (autoCompleteIfStuck: для последнего шага порог 2 мин) завершить джоб
+      // с нефильтрованным checkpoint'ом, пока шаг спит/допроверяет unknown.
+      // Финальный onProgress(100) — в конце шага после фильтра.
+      await onProgress(Math.min(99, Math.round((done / toValidate.length) * 100)));
     }
     if (onCheckpoint && (done % checkpointEvery === 0 || done === toValidate.length)) {
       await onCheckpoint([newHeader, ...newBody]);
     }
   });
+
+  // Отмена посреди шага: НЕ отдаём полу-валидированную матрицу в фильтр —
+  // строки со статусом '' (пробы не успели отработать) были бы выкинуты как
+  // «без email». Бросаем 'Отменено' как остальные шаги: worker фиксирует
+  // cancelled, а resume продолжит с checkpoint'а (идемпотентность выше).
+  if (cancelled || (isCancelled && await isCancelled())) {
+    throw new Error('Отменено');
+  }
+
+  // Отложенный второй проход: адреса, чей ответ выглядит «временным»
+  // (greylisting, таймаут, DNS, прокси), перепроверяем один раз после паузы —
+  // greylist обычно отпускает повторную пробу через несколько минут.
+  // Локальный предикат (worker не импортируем): статус unknown/error И текст
+  // ошибки похож на временную проблему.
+  const RETRYABLE_ERROR_RE = /временн|greylist|timeout|dns|prox/i;
+  const SECOND_PASS_DELAY_MS = 5 * 60 * 1000;
+  const retryable = toValidate.filter((e) => {
+    const r = results.get(e);
+    if (!r || (r.result !== 'unknown' && r.result !== 'error')) return false;
+    return RETRYABLE_ERROR_RE.test(r.errorText);
+  });
+  if (retryable.length > 0 && !(isCancelled && await isCancelled())) {
+    // Пауза нужна только если основной проход отработал быстро: на больших
+    // базах 5 минут и так набегает за пулом. Ждём только остаток (hard cap
+    // 5 мин), чтобы маленькие базы не стопорились надолго.
+    const elapsed = Date.now() - mainPassStartedAt;
+    const waitMs = Math.min(SECOND_PASS_DELAY_MS, Math.max(0, SECOND_PASS_DELAY_MS - elapsed));
+    let waited = 0;
+    while (waited < waitMs) {
+      const chunk = Math.min(1000, waitMs - waited);
+      await sleep(chunk);
+      waited += chunk;
+      // Heartbeat раз в ~30с: updateJobProgress бампает started_at (джоб жив
+      // для stale-detector'а), а прогресс остаётся 99 (см. кэп выше) — иначе
+      // пауза до 5 мин после progress=100 давала stuck-reaper'у завершить джоб
+      // с нефильтрованными данными.
+      if (waited % 30_000 < 1000) await onProgress(99);
+      // Проверяем отмену раз в секунду, чтобы задача не висела в паузе.
+      if (isCancelled && await isCancelled()) throw new Error('Отменено');
+    }
+    let retryDone = 0;
+    await processInPool(retryable, VALIDATION_CONCURRENCY, async (email) => {
+      if (isCancelled && await isCancelled()) { cancelled = true; return; }
+      const r = await runProbe(email); // свежая проба, мимо memo
+      results.set(email, r);
+      const affected = cellByEmail.get(email);
+      if (affected) for (const cell of affected) applyCellStatus(cell);
+      // Heartbeat и в самом пуле: на больших retry-списках пул идёт минуты,
+      // молчание здесь — то же окно для stuck-reaper'а, что и пауза выше.
+      retryDone++;
+      if (retryDone % 10 === 0) await onProgress(99);
+    });
+    if (cancelled || (isCancelled && await isCancelled())) {
+      throw new Error('Отменено');
+    }
+    if (onCheckpoint) await onCheckpoint([newHeader, ...newBody]);
+  }
 
   // Фильтрация: строка остаётся ЕСЛИ хотя бы в одной из валидируемых колонок
   // email прошёл (ok/catch_all) ЛИБО его не удалось проверить (unknown/error
@@ -1058,24 +1231,48 @@ export async function stepValidateEmails(
   // (unknown/error) НЕ обнуляем — он скорее всего валиден, а статус виден в
   // колонке «… Статус». Это касается ТОЛЬКО валидируемых колонок — другие
   // остаются как есть.
+  //
+  // Мульти-email ячейки этого запуска чистим ПОАДРЕСНО: выкидываем только
+  // плохие адреса, живые склеиваем обратно через ', ' (см. ниже).
   const VALID_STATUSES = new Set(['ok', 'catch_all']);
   // «Не удалось проверить»: greylist, отказ/таймаут соединения, блок IP-пробы,
   // неоднозначный SMTP-ответ (validateEmail → 'unknown') или исключение
   // валидатора (→ 'error'). НЕ «подтверждённо мёртвый».
   const UNVERIFIABLE_STATUSES = new Set(['unknown', 'error']);
-  const filtered = newBody.filter((row) => {
+  // Ячейки, валидировавшиеся в ЭТОМ запуске (по ним есть пер-адресные
+  // вердикты в results). Пропущенные по идемпотентности ячейки чистим
+  // по-старому целиком — пер-адресных вердиктов по ним у нас нет.
+  const cellByRowCol = new Map<string, CellToValidate>();
+  for (const cell of cells) cellByRowCol.set(`${cell.rowIdx}:${cell.srcIdx}`, cell);
+  const filtered = newBody.filter((row, r) => {
     let anyValid = false;
     let anyUnverifiable = false;
     for (const m of meta) {
-      const status = row[m.statusIdx];
+      const status = (row[m.statusIdx] || '').trim();
       if (status === '') continue; // пустой email в этой колонке — не учитываем
-      if (VALID_STATUSES.has(status)) {
+      const isValid = VALID_STATUSES.has(status);
+      const isUnverifiable = keepUnverifiable && UNVERIFIABLE_STATUSES.has(status);
+      if (isValid) {
         anyValid = true;
-      } else if (keepUnverifiable && UNVERIFIABLE_STATUSES.has(status)) {
-        // Не удалось проверить — оставляем email как есть (статус виден в
-        // колонке «… Статус»), src-ячейку НЕ чистим.
+      } else if (isUnverifiable) {
+        // Не удалось проверить — статус виден в колонке «… Статус»,
+        // плохие адреса из ячейки всё равно выкинем ниже.
         anyUnverifiable = true;
-      } else {
+      }
+      const cell = cellByRowCol.get(`${r}:${m.srcIdx}`);
+      if (cell) {
+        // Мульти-email ячейка этого запуска: удаляем ТОЛЬКО плохие адреса
+        // (подтверждённо мёртвые — всегда; unknown/error — при
+        // keepUnverifiable=false), живых склеиваем через ', '.
+        const survivors = cell.emails.filter((e) => {
+          const st = results.get(e)?.result ?? 'error';
+          const bad = st === 'invalid' || st === 'disposable'
+            || (!keepUnverifiable && UNVERIFIABLE_STATUSES.has(st));
+          return !bad;
+        });
+        if (survivors.length === 0) row[m.srcIdx] = '';
+        else if (survivors.length < cell.emails.length) row[m.srcIdx] = survivors.join(', ');
+      } else if (!isValid && !isUnverifiable) {
         // Подтверждённо плохой (invalid/disposable) — или unknown/error при
         // keepUnverifiable=false — чистим src-ячейку чтобы потомки (export,
         // merge) не видели заведомо плохой email.
@@ -1088,7 +1285,7 @@ export async function stepValidateEmails(
     // Legacy-режим (dropRowsWithoutEmail=false) — сохраняем строку. Раньше
     // legacy-поведение было хардкодом и давало 74% мусорных строк на выходе
     // (см. job polza@polza.ru 8b188038-…: 1795 пустых строк из 2418).
-    const hadAnyEmail = meta.some((m) => row[m.statusIdx] !== '');
+    const hadAnyEmail = meta.some((m) => (row[m.statusIdx] || '').trim() !== '');
     if (!hadAnyEmail) return !dropRowsWithoutEmail;
     return anyValid || anyUnverifiable;
   });
