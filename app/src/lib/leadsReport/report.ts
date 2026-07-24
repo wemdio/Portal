@@ -4,8 +4,6 @@ import type { LeadsReportConfig } from '@/lib/leadsReport/config';
 import { extractCustomField } from '@/lib/leadsReport/extractCustomField';
 import { buildRow, type AmoLead } from '@/lib/leadsReport/rowBuilder';
 
-const SOURCE_FIELD_NAME = 'Источник';
-
 export type ReportRunResult = {
   fetchedFromDb: number;
   matchedFilter: number;
@@ -24,12 +22,12 @@ function amoIdColumnLetter(config: LeadsReportConfig): string {
   return String.fromCharCode('A'.charCodeAt(0) + index);
 }
 
-/** Проверяет соответствие сделки фильтру конфига по custom-полю «Источник». */
+/** Проверяет соответствие сделки фильтру конфига по указанному кастомному полю AMO. */
 function matchesFilter(lead: AmoLead, config: LeadsReportConfig): boolean {
-  const source = extractCustomField(lead.raw, SOURCE_FIELD_NAME) ?? '';
-  const filter = config.amoSourceFilter;
-  if ('equals' in filter) return source === filter.equals;
-  return source !== filter.notEquals;
+  const value = extractCustomField(lead.raw, config.amoFieldFilter.fieldName) ?? '';
+  const filter = config.amoFieldFilter.match;
+  if ('equals' in filter) return value === filter.equals;
+  return value !== filter.notEquals;
 }
 
 /**

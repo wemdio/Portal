@@ -13,7 +13,7 @@ jest.mock('@/lib/googleSheets/writer', () => ({
 const mockedAppendRows = jest.mocked(appendRows);
 const mockedReadColumn = jest.mocked(readColumn);
 
-function lead(amoId: number, source: string): AmoLead {
+function lead(amoId: number, fields: Record<string, string>): AmoLead {
   return {
     amo_id: amoId,
     name: `Lead ${amoId}`,
@@ -25,9 +25,12 @@ function lead(amoId: number, source: string): AmoLead {
     responsible_name: null,
     created_at: '2026-07-20T10:00:00Z',
     raw: {
-      custom_fields_values: [
-        { field_name: 'Источник', values: [{ value: source }] },
-      ],
+      custom_fields_values: Object.entries(fields).map(
+        ([field_name, value]) => ({
+          field_name,
+          values: [{ value }],
+        }),
+      ),
     },
   };
 }
@@ -65,7 +68,7 @@ describe('runReport', () => {
     jest.clearAllMocks();
   });
 
-  it('фильтрует по источнику, дедуплицирует и дописывает только свежие строки', async () => {
+  it('фильтрует по маркеру «Контур»=«Маркетинг», дедуплицирует и дописывает только свежие строки', async () => {
     const config = {
       ...marketingConfig,
       spreadsheetId: 'sheet-id',
@@ -74,9 +77,10 @@ describe('runReport', () => {
 
     const result = await runReport(
       dbReturning([
-        lead(1, 'Website'),
-        lead(2, 'Website'),
-        lead(3, 'Email Outreach'),
+        lead(1, { Контур: 'Маркетинг' }),
+        lead(2, { Контур: 'Маркетинг' }),
+        lead(3, { Источник: 'Email Outreach' }),
+        lead(4, { Источник: 'Сайт' }),
       ]),
       config,
       { sinceDays: 30, amoHost: 'polzaagency.amocrm.ru' },
@@ -87,7 +91,7 @@ describe('runReport', () => {
     expect(mockedAppendRows.mock.calls[0][2]).toHaveLength(1);
     expect(mockedAppendRows.mock.calls[0][2][0].at(-1)).toBe('1');
     expect(result).toEqual({
-      fetchedFromDb: 3,
+      fetchedFromDb: 4,
       matchedFilter: 2,
       skippedDedup: 1,
       appended: 1,

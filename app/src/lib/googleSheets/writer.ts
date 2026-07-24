@@ -13,7 +13,20 @@ export async function readColumn(
   return rows.map((r) => (r[0] ?? '').toString());
 }
 
-/** Дописывает строки в конец листа. Каждая row — массив ячеек. */
+/**
+ * Дописывает строки в конец листа. Каждая row — массив ячеек.
+ *
+ * Ранее использовался `spreadsheets.values.append` с `range='SheetName!A1'`,
+ * который полагался на table-detection Google Sheets API. Это ломалось на
+ * листах, где столбец A не заполняется в реальных строках (например «Оффер»
+ * — ручная колонка, часто пустая): API не находил «таблицу» и вписывал
+ * начиная с самого верха, поверх пустых строк над данными.
+ *
+ * Теперь читаем `A:Z` листа, находим реальную последнюю занятую строку по
+ * любой колонке и пишем через `values.update` в явный диапазон
+ * `A<lastRow+1>:<endCol><lastRow+N>`. Это надёжно независимо от того,
+ * какие колонки в существующих строках заполнены.
+ */
 export async function appendRows(
   spreadsheetId: string,
   sheetName: string,
@@ -21,11 +34,27 @@ export async function appendRows(
 ): Promise<void> {
   if (rows.length === 0) return;
   const sheets = getSheetsClient();
-  await sheets.spreadsheets.values.append({
+
+  const resp = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${sheetName}!A1`,
+    range: `${sheetName}!A:Z`,
+  });
+  const lastRow = (resp.data.values ?? []).length;
+  const startRow = lastRow + 1;
+  const endRow = startRow + rows.length - 1;
+  const numCols = rows[0]?.length ?? 0;
+  if (numCols === 0 || numCols > 26) {
+    throw new Error(
+      `appendRows: unsupported row width ${numCols} for sheet ${sheetName}`,
+    );
+  }
+  const endCol = String.fromCharCode('A'.charCodeAt(0) + numCols - 1);
+  const targetRange = `${sheetName}!A${startRow}:${endCol}${endRow}`;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: targetRange,
     valueInputOption: 'RAW',
-    insertDataOption: 'INSERT_ROWS',
     requestBody: { values: rows as (string | number | null)[][] },
   });
 }
