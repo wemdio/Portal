@@ -63,7 +63,7 @@ export type HeModelKind = 'research' | 'chain' | 'bulk';
 
 const HE_MODEL_DEFAULTS: Record<HeModelKind, string> = {
   research: 'anthropic/claude-opus-5',
-  chain: 'openai/gpt-5.2',
+  chain: 'anthropic/claude-opus-5',
   bulk: 'anthropic/claude-sonnet-4-6',
 };
 
