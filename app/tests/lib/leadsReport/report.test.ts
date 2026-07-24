@@ -82,7 +82,7 @@ describe('runReport', () => {
       { sinceDays: 30, amoHost: 'polzaagency.amocrm.ru' },
     );
 
-    expect(mockedReadColumn).toHaveBeenCalledWith('sheet-id', 'Лиды', 'J');
+    expect(mockedReadColumn).toHaveBeenCalledWith('sheet-id', 'Лиды маркетинг', 'J');
     expect(mockedAppendRows).toHaveBeenCalledTimes(1);
     expect(mockedAppendRows.mock.calls[0][2]).toHaveLength(1);
     expect(mockedAppendRows.mock.calls[0][2][0].at(-1)).toBe('1');

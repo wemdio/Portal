@@ -42,7 +42,7 @@ const AMO_ID_COLUMN: ColumnSpec = { header: 'AMO id', key: 'amo_id_raw' };
 export const marketingConfig: LeadsReportConfig = {
   name: 'marketing',
   spreadsheetId: process.env.LEADS_REPORT_MARKETING_SHEET_ID ?? '',
-  sheetName: 'Лиды',
+  sheetName: 'Лиды маркетинг',
   amoSourceFilter: { notEquals: 'Email Outreach' },
   syncSource: 'leads_report_marketing',
   columns: [
