@@ -24,7 +24,12 @@ let validateEmail: (email: string, cache: Map<string, DomainInfo>) => Promise<Va
 const fetchMock = jest.fn();
 
 beforeAll(async () => {
-  process.env.SMTP_PROXY_URL = 'http://smtp-proxy.test:3100';
+  // Явно задаём множественную форму и убираем одиночную: validator читает
+  // SMTP_PROXY_URLS при загрузке модуля, а SMTP_PROXY_URL из окружения воркера
+  // мог бы перетянуть конфиг на чужой прокси (изоляция как в
+  // emailValidationProxyFailover.test.ts).
+  process.env.SMTP_PROXY_URLS = 'http://smtp-proxy.test:3100';
+  delete process.env.SMTP_PROXY_URL;
   global.fetch = fetchMock as unknown as typeof fetch;
   ({ validateEmail } = await import('@/lib/emailValidation/validator'));
 });

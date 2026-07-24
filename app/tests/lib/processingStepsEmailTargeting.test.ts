@@ -248,7 +248,10 @@ describe('stepValidateEmails', () => {
     // Row 4 (оба ОК): оба сохранены.
     expect(out[3][0]).toBe('orig-ok@a.ru');
     expect(out[3][1]).toBe('found-ok@b.ru');
-    expect(validateEmail).toHaveBeenCalledTimes(8); // 4 строки × 2 колонки
+    // Мемоизация: 4 строки × 2 колонки = 8 ячеек, но адреса в них повторяются
+    // (orig-ok/orig-bad/found-ok/found-bad) → одна SMTP-проба на УНИКАЛЬНЫЙ
+    // адрес, итого 4 вызова. Вердикты по ячейкам от этого не меняются.
+    expect(validateEmail).toHaveBeenCalledTimes(4);
   });
 
   it('validateTarget="both" с одной колонкой деградирует до single-column поведения', async () => {

@@ -19,6 +19,28 @@ export function extractEmail(value: string): string | null {
   return match ? match[0].trim().toLowerCase() : null;
 }
 
+const EMAIL_REGEX_GLOBAL = new RegExp(EMAIL_REGEX.source, 'gi');
+
+/**
+ * Все email'ы из ячейки (мульти-email ячейки вида «a@x.ru, b@y.ru»).
+ * Дубликаты внутри ячейки схлопываются, порядок первого появления сохраняется.
+ * extractEmail (первый match) оставлен нетронутым для обратной совместимости.
+ */
+export function extractEmails(value: string): string[] {
+  const matches = value.match(EMAIL_REGEX_GLOBAL);
+  if (!matches) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of matches) {
+    const email = m.trim().toLowerCase();
+    if (!seen.has(email)) {
+      seen.add(email);
+      out.push(email);
+    }
+  }
+  return out;
+}
+
 export function detectEmailColumns(data: string[][]): number[] {
   if (data.length === 0) return [];
   const firstRow = data[0];
