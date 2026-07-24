@@ -109,16 +109,20 @@ export default function HabrCareerPage() {
     }
   }, [companies]);
 
-  const addToDatabase = useCallback(() => {
+  const addToDatabase = useCallback(async () => {
     if (companies.length === 0) return;
-    const headerRow = COLUMNS.map((c) => c.replace(/_/g, ' '));
-    const dataRows = companies.map((c) =>
-      COLUMNS.map((col) => String(c[col] ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' '))
-    );
-    const title = `Habr Career ${new Date().toISOString().slice(0, 10)}`;
-    const { id } = writePendingDbImport({ title, rows: [headerRow, ...dataRows] });
-    const url = buildDatabasesImportUrl(id);
-    window.open(url, '_blank');
+    try {
+      const headerRow = COLUMNS.map((c) => c.replace(/_/g, ' '));
+      const dataRows = companies.map((c) =>
+        COLUMNS.map((col) => String(c[col] ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' '))
+      );
+      const title = `Habr Career ${new Date().toISOString().slice(0, 10)}`;
+      const { id } = await writePendingDbImport({ title, rows: [headerRow, ...dataRows] });
+      const url = buildDatabasesImportUrl(id);
+      window.open(url, '_blank');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка добавления в базу');
+    }
   }, [companies]);
 
   const exportExcel = useCallback(async () => {

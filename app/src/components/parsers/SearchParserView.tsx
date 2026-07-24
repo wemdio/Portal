@@ -33,19 +33,6 @@ function tsvCell(value: unknown) {
 
 // Note: the search parser stores/displays only company leads (source pages are used internally but not shown as results).
 
-function escapeHtml(value: unknown) {
-  const text = String(value ?? '')
-    .replaceAll('\t', ' ')
-    .replaceAll('\n', ' ')
-    .replaceAll('\r', ' ');
-  return text
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
-}
-
 function exportRow(r: Lead) {
   return [
     r.company_name ?? '',
@@ -130,23 +117,8 @@ async function writeTextToClipboard(text: string) {
   throw new Error('Clipboard API недоступен');
 }
 
-function buildExcelHtml(items: Lead[]) {
-  const header = exportHeader
-    .map((h) => `<th style="border:1px solid #d1d5db;padding:4px 6px;white-space:nowrap;">${escapeHtml(h)}</th>`)
-    .join('');
-  const body = items
-    .map((item) => {
-      const cells = exportRow(item)
-        .map((cell) => `<td style="border:1px solid #d1d5db;padding:4px 6px;white-space:nowrap;">${escapeHtml(cell)}</td>`)
-        .join('');
-      return `<tr>${cells}</tr>`;
-    })
-    .join('');
-  return `<!DOCTYPE html><html><head><meta charset="utf-8" /></head><body><table style="border-collapse:collapse;"><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></body></html>`;
-}
-
-function downloadBlob(content: string, mime: string, filename: string) {
-  const blob = new Blob([content], { type: mime });
+function downloadBlob(content: Blob | ArrayBuffer | string, mime: string, filename: string) {
+  const blob = content instanceof Blob ? content : new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -595,10 +567,18 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
     downloadBlob(csv, 'text/csv;charset=utf-8', getExportFilename('csv'));
   };
 
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
     if (companyLeads.length === 0) return;
-    const html = buildExcelHtml(companyLeads);
-    downloadBlob(html, 'application/vnd.ms-excel;charset=utf-8', getExportFilename('xls'));
+    try {
+      const XLSX = await import('xlsx');
+      const worksheet = XLSX.utils.aoa_to_sheet([exportHeader, ...companyLeads.map(exportRow)]);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Компании');
+      const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
+      downloadBlob(excelBuffer, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', getExportFilename('xlsx'));
+    } catch (e) {
+      setToast({ tone: 'error', message: e instanceof Error ? e.message : 'Ошибка экспорта Excel' });
+    }
   };
 
   const handleCopy = useCallback(async () => {
@@ -654,7 +634,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
     return () => window.clearTimeout(t);
   }, [toast]);
 
-  const addToDatabase = useCallback(() => {
+  const addToDatabase = useCallback(async () => {
     try {
       if (companyLeads.length === 0) {
         setToast({ tone: 'error', message: 'Нет компаний для добавления' });
@@ -673,7 +653,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
       ];
 
       const title = `Поиск ${activeJobId ? `#${activeJobId.slice(0, 8)}` : ''}`.trim() || 'Поиск';
-      const { id } = writePendingDbImport({ title, rows });
+      const { id } = await writePendingDbImport({ title, rows });
       const url = buildDatabasesImportUrl(id);
       setToast({ tone: 'success', message: 'Добавлено в “Базы”. Можете перейти и проверить импорт.', href: url });
     } catch (e) {

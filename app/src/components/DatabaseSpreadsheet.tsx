@@ -2816,45 +2816,47 @@ export function DatabaseSpreadsheet() {
       }
     };
 
-    try {
-      const payload = readPendingDbImport(importId);
-      if (!payload) {
-        showCopyNotice('Импорт не найден (возможно, устарел или был очищен браузером)', 'error');
+    (async () => {
+      try {
+        const payload = await readPendingDbImport(importId);
+        if (!payload) {
+          showCopyNotice('Импорт не найден (возможно, устарел или был очищен браузером)', 'error');
+          cleanUrl();
+          return;
+        }
+
+        const MAX_ROWS = 10_000;
+        const MAX_COLS = 80;
+
+        const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
+        const limitedRows = rawRows.slice(0, MAX_ROWS).map((row) => {
+          const cells = Array.isArray(row) ? row : [];
+          return cells.slice(0, MAX_COLS).map((cell) => String(cell ?? ''));
+        });
+
+        if (limitedRows.length === 0) {
+          showCopyNotice('Импорт пустой (0 строк)', 'error');
+          await deletePendingDbImport(importId);
+          cleanUrl();
+          return;
+        }
+
+        applyRowsToNewTab(limitedRows, `${payload.title || 'import'}.csv`);
+        const trimmed = limitedRows.length < rawRows.length;
+        showCopyNotice(
+          trimmed
+            ? `Импортировано: ${limitedRows.length} строк (обрезано до лимита)`
+            : `Импортировано: ${limitedRows.length} строк`,
+          'success',
+        );
+
+        await deletePendingDbImport(importId);
         cleanUrl();
-        return;
-      }
-
-      const MAX_ROWS = 10_000;
-      const MAX_COLS = 80;
-
-      const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
-      const limitedRows = rawRows.slice(0, MAX_ROWS).map((row) => {
-        const cells = Array.isArray(row) ? row : [];
-        return cells.slice(0, MAX_COLS).map((cell) => String(cell ?? ''));
-      });
-
-      if (limitedRows.length === 0) {
-        showCopyNotice('Импорт пустой (0 строк)', 'error');
-        deletePendingDbImport(importId);
+      } catch (e) {
+        showCopyNotice(e instanceof Error ? e.message : 'Ошибка импорта', 'error');
         cleanUrl();
-        return;
       }
-
-      applyRowsToNewTab(limitedRows, `${payload.title || 'import'}.csv`);
-      const trimmed = limitedRows.length < rawRows.length;
-      showCopyNotice(
-        trimmed
-          ? `Импортировано: ${limitedRows.length} строк (обрезано до лимита)`
-          : `Импортировано: ${limitedRows.length} строк`,
-        'success',
-      );
-
-      deletePendingDbImport(importId);
-      cleanUrl();
-    } catch (e) {
-      showCopyNotice(e instanceof Error ? e.message : 'Ошибка импорта', 'error');
-      cleanUrl();
-    }
+    })();
   }, [importId, isHydrated, applyRowsToNewTab, showCopyNotice]);
 
   useEffect(() => {

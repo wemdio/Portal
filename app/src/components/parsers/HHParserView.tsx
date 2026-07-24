@@ -106,19 +106,6 @@ function tsvCell(value: unknown) {
     .replaceAll('\r', ' ');
 }
 
-function escapeHtml(value: unknown) {
-  const text = String(value ?? '')
-    .replaceAll('\t', ' ')
-    .replaceAll('\n', ' ')
-    .replaceAll('\r', ' ');
-  return text
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
-}
-
 function buildCsv(items: HHVacancyRow[]) {
   const lines = [exportHeader.join(',')];
   for (const item of items) {
@@ -135,21 +122,6 @@ function buildTsv(items: HHVacancyRow[]) {
     lines.push(row.join('\t'));
   }
   return lines.join('\n');
-}
-
-function buildExcelHtml(items: HHVacancyRow[]) {
-  const header = exportHeader
-    .map((h) => `<th style="border:1px solid #d1d5db;padding:4px 6px;white-space:nowrap;">${escapeHtml(h)}</th>`)
-    .join('');
-  const body = items
-    .map((item) => {
-      const cells = exportRow(item)
-        .map((cell) => `<td style="border:1px solid #d1d5db;padding:4px 6px;white-space:nowrap;">${escapeHtml(cell)}</td>`)
-        .join('');
-      return `<tr>${cells}</tr>`;
-    })
-    .join('');
-  return `<!DOCTYPE html><html><head><meta charset="utf-8" /></head><body><table style="border-collapse:collapse;"><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></body></html>`;
 }
 
 async function writeTextToClipboard(text: string) {
@@ -206,8 +178,8 @@ async function writeTextToClipboard(text: string) {
   throw new Error('Clipboard API недоступен');
 }
 
-function downloadBlob(content: string, mime: string, filename: string) {
-  const blob = new Blob([content], { type: mime });
+function downloadBlob(content: Blob | ArrayBuffer | string, mime: string, filename: string) {
+  const blob = content instanceof Blob ? content : new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -605,9 +577,13 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
       }
       setExportProgress(`Excel: формируем файл (${items.length} строк)`);
       await waitForBrowserPaint();
-      const html = buildExcelHtml(items);
+      const XLSX = await import('xlsx');
+      const worksheet = XLSX.utils.aoa_to_sheet([exportHeader, ...items.map(exportRow)]);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Вакансии');
+      const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
       setExportProgress('Excel: запускаем скачивание');
-      downloadBlob(html, 'application/vnd.ms-excel;charset=utf-8', `hh_results_${activeJobId ?? 'job'}.xls`);
+      downloadBlob(excelBuffer, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', `hh_results_${activeJobId ?? 'job'}.xlsx`);
       setToast({ tone: 'success', message: `Excel: скачано ${items.length} строк` });
     } catch (e: unknown) {
       setError(toUiError(e, 'Ошибка экспорта Excel'));
@@ -721,7 +697,7 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
       ];
 
       const title = `Вакансии #${activeJobId.slice(0, 8)}`;
-      const { id } = writePendingDbImport({ title, rows });
+      const { id } = await writePendingDbImport({ title, rows });
       const url = buildDatabasesImportUrl(id);
       const trimmed = companies.length > MAX_ROWS;
       setToast({
