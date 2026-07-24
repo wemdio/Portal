@@ -45,17 +45,25 @@ export const marketingConfig: LeadsReportConfig = {
   sheetName: 'Лиды маркетинг',
   amoSourceFilter: { notEquals: 'Email Outreach' },
   syncSource: 'leads_report_marketing',
+  // Порядок колонок 1:1 с боевой таблицей «Учет проектов внутреннее» → лист «Лиды маркетинг».
+  // Ручные колонки менеджера (Дата последнего контакта, Качество лида, На чем остановились,
+  // и числовая метрика в L) — оставляем пустыми: заполнит менеджер вручную. AMO id пишется
+  // в служебный столбец N (пустой в шапке), скрипт использует его для дедупа.
   columns: [
-    { header: 'Ссылка на лид в амо', key: 'amo_url' },
-    { header: 'UTM', key: 'utm_block' },
-    { header: 'Площадка', key: 'platform' },
-    { header: 'Дата', key: 'created_at_short' },
-    { header: 'Телефон', key: 'phone' },
-    { header: 'email', key: 'email' },
-    { header: 'Имя', key: 'name' },
-    { header: 'Кто обрабатывает лид', key: 'responsible_name' },
-    { header: 'источник для...', key: 'category' },
-    AMO_ID_COLUMN,
+    { header: 'Ссылка на лид в амо', key: 'amo_url' },                    // A
+    { header: 'UTM', key: 'utm_block' },                                   // B
+    { header: 'Площадка', key: 'platform' },                               // C
+    { header: 'Дата', key: 'created_at_short' },                           // D
+    { header: 'Телефон', key: 'phone' },                                   // E
+    { header: 'email', key: 'email' },                                     // F
+    { header: 'Имя', key: 'name' },                                        // G
+    { header: 'Дата последнего контакта', key: 'empty' },                  // H
+    { header: 'Качество лида', key: 'empty' },                             // I
+    { header: 'Кто обрабатывает лид', key: 'responsible_name' },           // J
+    { header: 'На чем остановились', key: 'empty' },                       // K
+    { header: 'метрика', key: 'empty' },                                   // L
+    { header: 'источник для отчета по маркетингу', key: 'category' },      // M
+    AMO_ID_COLUMN,                                                          // N
   ],
 };
 

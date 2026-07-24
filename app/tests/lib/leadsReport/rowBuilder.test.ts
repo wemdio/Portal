@@ -20,19 +20,23 @@ const baseLead: AmoLead = {
 };
 
 describe('buildRow', () => {
-  it('маркетинг: заполняет все ожидаемые колонки', () => {
+  it('маркетинг: заполняет 9 автоматических колонок под структуру «Лиды маркетинг», ручные оставляет пустыми, AMO id пишет в позицию N (index 13)', () => {
     const row = buildRow(baseLead, marketingConfig, 'polzaagency.amocrm.ru');
     expect(row).toEqual([
-      'https://polzaagency.amocrm.ru/leads/detail/12345',
-      'UTM source: yandex\nUTM medium: cpc',
-      'Я.Директ',
-      '2026-07-01',
-      '79001234567',
-      'ivan@example.com',
-      'Иванов Иван',
-      'Софья',
-      'Лиды Директ',
-      '12345',
+      'https://polzaagency.amocrm.ru/leads/detail/12345', // A: Ссылка на лид в амо
+      'UTM source: yandex\nUTM medium: cpc',              // B: UTM
+      'Я.Директ',                                          // C: Площадка
+      '2026-07-01',                                        // D: Дата
+      '79001234567',                                       // E: Телефон
+      'ivan@example.com',                                  // F: email
+      'Иванов Иван',                                       // G: Имя
+      '',                                                  // H: Дата последнего контакта (ручная)
+      '',                                                  // I: Качество лида (ручная)
+      'Софья',                                             // J: Кто обрабатывает лид
+      '',                                                  // K: На чем остановились (ручная)
+      '',                                                  // L: метрика (ручная)
+      'Лиды Директ',                                       // M: источник для отчета по маркетингу
+      '12345',                                             // N: AMO id
     ]);
   });
 
