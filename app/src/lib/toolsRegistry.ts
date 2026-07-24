@@ -53,6 +53,7 @@ export const ALL_TOOL_IDS = [
   'reputation-finder',
   'our-bases',
   'sales-chat-analyzer',
+  'hypothesis-engine',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -373,6 +374,15 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     href: '/tools/sales-chat-analyzer',
     accentColor: 'emerald',
   },
+  'hypothesis-engine': {
+    id: 'hypothesis-engine',
+    title: 'Движок вертикалей',
+    title_en: 'Hypothesis Engine',
+    description: 'Сайт клиента → вертикали рынка с доказательствами и %, цепочки писем, вокабуляр и шаблон 85/15 под базу.',
+    description_en: 'Client site → market verticals with evidence and potential, email chains, vocab matrix, and an 85/15 template for the uploaded base.',
+    href: '/tools/hypothesis-engine',
+    accentColor: 'emerald',
+  },
 };
 
 export interface ToolGroup {
@@ -385,7 +395,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Аутрич',
     label_en: 'Outreach',
-    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'sales-hypotheses', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
+    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'sales-hypotheses', 'hypothesis-engine', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
   },
   {
     label: 'Базы и данные',
