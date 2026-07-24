@@ -24,10 +24,25 @@ export type AmoLeadMetricRow = {
   pipeline_id: number | null;
   status_id: number | null;
   status_name: string | null;
+  name: string | null;
   created_at: string | null;
   updated_at: string | null;
   raw: unknown;
 };
+
+/**
+ * Признак «лид-магнит»: сделка автоматически создана TG-ботом «Polza Site
+ * Feedback» — имя всегда с префиксом «Бот:» (см. Telegram-канал заявок).
+ * Такие сделки составляют почти весь Маркетинг-канал; для них Егор просит
+ * считать «Пришло» только когда лид прошёл квалификацию, а не все подряд
+ * (лид-магниты создают много слабых заявок «через магнит» — они всплывают
+ * в «Пришло» и раздувают воронку).
+ */
+const LEAD_MAGNET_NAME_PREFIX = 'Бот:';
+
+function isLeadMagnet(name: string | null): boolean {
+  return typeof name === 'string' && name.trimStart().startsWith(LEAD_MAGNET_NAME_PREFIX);
+}
 
 export type ChannelMetrics = {
   channel: ChannelSummaryConfig;
@@ -117,15 +132,23 @@ export function computeMetricsFromRows(
     // сразу многим сделкам) раздуют цифры и они станут несопоставимы
     // с прошлыми отчётами продаж (Егор, 2026-07-24).
     if (!isInWindow(lead.created_at, start, end)) continue;
-    bucket.arrived += 1;
 
     const statusId =
       typeof lead.status_id === 'number' ? lead.status_id : Number.NaN;
     const statusSort = thresholds.sortByStatusId.get(statusId);
+    const qualified = statusSort !== undefined && statusSort >= thresholds.qualifiedSort;
+
+    // Лид-магниты («Бот:...») попадают в «Пришло» только когда прошли
+    // квалификацию — иначе они раздувают воронку, ведь бот создаёт много
+    // слабых заявок «через магнит» (см. Егор, 2026-07-24). Все остальные
+    // сделки считаем в «Пришло» безусловно.
+    if (!isLeadMagnet(lead.name) || qualified) {
+      bucket.arrived += 1;
+    }
 
     // По бизнес-правилу лидом считается «Квалифицированный лид» и любой этап
     // ниже по воронке, включая успешно и неуспешно закрытые сделки.
-    if (statusSort !== undefined && statusSort >= thresholds.qualifiedSort) {
+    if (qualified) {
       bucket.qualifiedLeads += 1;
     }
 
@@ -176,7 +199,7 @@ export async function computeAllChannelMetrics(
   const { data: leadsData, error: leadsError } = await db
     .from('amo_leads')
     .select(
-      'pipeline_id, status_id, status_name, created_at, updated_at, raw',
+      'pipeline_id, status_id, status_name, name, created_at, updated_at, raw',
     )
     .eq('pipeline_id', thresholds.pipelineId)
     .gte('created_at', startIso)
