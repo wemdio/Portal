@@ -104,7 +104,9 @@ export function computeMetricsFromRows(
 
   for (const lead of leads) {
     if (lead.pipeline_id !== thresholds.pipelineId) continue;
-    const bucket = metrics.get(detectSummaryChannel(lead.raw));
+    const channel = detectSummaryChannel(lead.raw);
+    if (!channel) continue;
+    const bucket = metrics.get(channel);
     if (!bucket) continue;
 
     const createdInWindow = isInWindow(lead.created_at, start, end);
