@@ -44,6 +44,7 @@ services:
         limits:
           memory: 2048M
           cpus: '1.0'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -61,19 +62,21 @@ services:
     depends_on:
       instantly-postgres-prod:
         condition: service_healthy
+    # 22.07.2026: postgrest/postgrest:v12.2.8 — distroless image, нет sh/wget.
+    # CMD-SHELL healthcheck падает "no such file"; сам postgrest работает и
+    # обслуживает запросы. Отключаем чтобы контейнер не был вечно unhealthy.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+      disable: true
     ports:
       - "0.0.0.0:35401:3000"
     deploy:
       resources:
         limits:
-          memory: 128M
+          # 23.07.2026: PostgREST стабильно упирался в прежний лимит 128M
+          # (127.9 MiB, 99.91%). Оставляем запас для рабочих пиков.
+          memory: 4096M
           cpus: '0.2'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -95,8 +98,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 1G
           cpus: '0.2'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -131,6 +135,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -148,12 +153,9 @@ services:
     depends_on:
       instantly-postgres-dev:
         condition: service_healthy
+    # 22.07.2026: distroless image, см. коммент у postgrest-prod.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+      disable: true
     ports:
       - "0.0.0.0:35402:3000"
     deploy:
@@ -161,6 +163,7 @@ services:
         limits:
           memory: 128M
           cpus: '0.1'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -182,8 +185,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 1G
           cpus: '0.2'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -237,6 +241,7 @@ services:
           # throttled at the old 2-CPU ceiling. Keep in sync with main-db-prod.
           memory: 12288M
           cpus: '8.0'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -260,8 +265,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 1G
           cpus: '0.2'
+          pids: 512
     restart: unless-stopped
     networks:
       - instantly-network
@@ -279,12 +285,14 @@ services:
     profiles:
       - backup
     environment:
-      # После миграции 21.07.2026 на 139: main-postgres в отдельном compose-проекте
-      # (main-supabase), портал-backup в instantly-network — разные docker-сети.
-      # Ходим через host-IP:host-port (публичные 35434/35432), не через container-name.
+      # После миграции 21.07.2026 на 139:
+      # - main-postgres в отдельном compose-проекте (main-supabase) → разные docker-сети
+      #   → ходим через host-IP:host-port (публичный 35434).
+      # - instantly-postgres-prod в этом же compose (instantly-network) → используем
+      #   container-name (139-firewall режет self-loop на host-IP:35432 из контейнера).
       MAIN_SUPABASE_DATABASE_URL: postgresql://supabase_admin:${MAIN_PG_PASSWORD}@139.60.162.12:35434/postgres?sslmode=disable
-      INSTANTLY_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@139.60.162.12:35432/instantly?sslmode=disable
-      INSTANTLY_DATASET_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@139.60.162.12:35432/instantly_dataset?sslmode=disable
+      INSTANTLY_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@instantly-postgres-prod:5432/instantly?sslmode=disable
+      INSTANTLY_DATASET_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@instantly-postgres-prod:5432/instantly_dataset?sslmode=disable
       BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT}
       BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
       BACKUP_S3_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID}
@@ -305,6 +313,7 @@ services:
         limits:
           memory: 1G
           cpus: '1.0'
+          pids: 512
     # entrypoint waits for an active dump + S3 upload before exiting.
     stop_grace_period: 4h
     restart: unless-stopped

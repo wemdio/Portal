@@ -90,6 +90,7 @@ services:
         limits:
           memory: 26624M
           cpus: '11'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -121,6 +122,7 @@ services:
         limits:
           memory: 3072M
           cpus: '1.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -143,6 +145,7 @@ services:
         limits:
           memory: 1536M
           cpus: '0.75'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -172,6 +175,7 @@ services:
         limits:
           memory: 3072M
           cpus: '1.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -214,6 +218,7 @@ services:
         limits:
           memory: 2048M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -265,6 +270,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -305,6 +311,7 @@ services:
         limits:
           memory: 1536M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -336,6 +343,7 @@ services:
         limits:
           memory: 1536M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -361,6 +369,7 @@ services:
         limits:
           memory: 1536M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -405,6 +414,7 @@ services:
         limits:
           memory: 1536M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -429,6 +439,7 @@ services:
         limits:
           memory: 1024M
           cpus: '0.75'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -454,6 +465,7 @@ services:
         limits:
           memory: 768M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -485,6 +497,64 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
+          pids: 512
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  # One-shot Google Sheets report runner. The container stays idle; host cron
+  # executes /app/workers/leadsReportCron.js daily at 17:00 MSK (14:00 UTC),
+  # after the 17:30 MSK AMO sync.
+  worker-leads-report:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-leads-report
+    command: ["sleep", "infinity"]
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - LEADS_REPORT_MARKETING_SHEET_ID=${LEADS_REPORT_MARKETING_SHEET_ID}
+      - LEADS_REPORT_OUTREACH_SHEET_ID=${LEADS_REPORT_OUTREACH_SHEET_ID}
+      - LEADS_REPORT_SINCE_DAYS=${LEADS_REPORT_SINCE_DAYS:-30}
+      - AMO_BASE_URL_HOST=${AMO_BASE_URL_HOST:-polzaagency.amocrm.ru}
+      - GOOGLE_SERVICE_ACCOUNT_EMAIL=${GOOGLE_SERVICE_ACCOUNT_EMAIL}
+      - GOOGLE_PRIVATE_KEY=${GOOGLE_PRIVATE_KEY}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.25'
+          pids: 512
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  # Telegram-бот получателей пятничного отчёта. Сам отчёт запускается host cron:
+  # 0 14 * * 5 docker exec portal-worker-leads-report-bot
+  #   node /app/workers/leadsReportSummaryCron.js
+  # 14:00 UTC = 17:00 МСК пятница.
+  worker-leads-report-bot:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-leads-report-bot
+    command: ["node", "/app/workers/leadsReportBot.js"]
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - LEADS_REPORT_TG_BOT_TOKEN=${LEADS_REPORT_TG_BOT_TOKEN}
+      - LEADS_REPORT_TG_ADMIN_IDS=${LEADS_REPORT_TG_ADMIN_IDS}
+      - LEADS_REPORT_PIPELINE_NAME=${LEADS_REPORT_PIPELINE_NAME:-Воронка - новые лиды}
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+          pids: 256
     restart: unless-stopped
     networks:
       - portal-network
@@ -531,6 +601,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -553,6 +624,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -582,6 +654,7 @@ services:
         limits:
           memory: 768M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -618,6 +691,7 @@ services:
           # + буферы archiver и lib-storage (5 MB × 4 in-flight multipart).
           memory: 1024M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -645,6 +719,7 @@ services:
         limits:
           memory: 3072M
           cpus: '2'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -673,8 +748,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2048M
+          # 23.07.2026: воркер достигал прежнего лимита 2 GiB при обработке
+          # нескольких видео параллельно. Лимит не резервирует память заранее.
+          memory: 8192M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -703,6 +781,7 @@ services:
         limits:
           memory: 2048M
           cpus: '1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -726,6 +805,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -785,6 +865,7 @@ services:
           # 3 реплики x 10GB = 30GB; host 139 имеет ~56GB свободно.
           memory: 10240M
           cpus: '3'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -828,6 +909,7 @@ services:
         limits:
           memory: 256M
           cpus: '0.25'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -858,6 +940,7 @@ services:
         limits:
           memory: 4096M
           cpus: '6'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -881,6 +964,7 @@ services:
         limits:
           memory: 8192M
           cpus: '3'
+          pids: 512
     restart: unless-stopped
     ports:
       # ТОЛЬКО localhost: воркер ходит через docker-сеть (yandexmaps:8000),
@@ -916,6 +1000,7 @@ services:
         limits:
           memory: 2048M
           cpus: '1.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -939,14 +1024,50 @@ services:
       - S3_BUCKET=${S3_BUCKET}
       - HEALTH_DISK_TOTAL_GB=${HEALTH_DISK_TOTAL_GB:-50}
       - HEALTH_DISK_WARN_GB=${HEALTH_DISK_WARN_GB:-45}
+      # Порог для нового per-container watchdog (см. check_container_resources
+      # в main.py). Кидает жёлтый алерт когда контейнер съел >= X% cgroup-лимита
+      # по памяти ИЛИ CPU-quota. 0 отключает проверку.
+      - HEALTH_CONTAINER_USAGE_PCT=${HEALTH_CONTAINER_USAGE_PCT:-80}
     # Резолв публичного хоста в IP хоста, чтобы проверять именно https://polza-portal.ru с того же сервера
     extra_hosts:
       - "polza-portal.ru:host-gateway"
+    volumes:
+      # Read-only docker socket для per-container watchdog (memory/CPU vs limit).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     deploy:
       resources:
         limits:
           memory: 512M
           cpus: '0.3'
+          pids: 512
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  # Слушает docker events; если контейнер exit'нулся >= 5 раз за 10 мин —
+  # принудительно останавливает его и шлёт TG-алерт в HEALTH-чат.
+  # Защита от паттерна, дважды ронявшего сервер:
+  #   22.07.2026 postgrest healthcheck loop (15 ч → hang),
+  #   23.07.2026 21:00 MSK leads-report-bot exit loop (10 мин → hang).
+  # Требует rw-доступ к docker.sock (нужны docker update + docker stop).
+  loop-watchdog:
+    image: ${DOCKER_USERNAME}/portal-loop-watchdog:prod
+    container_name: portal-loop-watchdog
+    environment:
+      - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
+      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - WATCHDOG_WINDOW_SEC=${WATCHDOG_WINDOW_SEC:-600}
+      - WATCHDOG_THRESHOLD=${WATCHDOG_THRESHOLD:-5}
+      - WATCHDOG_SELF_NAME=portal-loop-watchdog
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.1'
+          pids: 128
     restart: unless-stopped
     networks:
       - portal-network
@@ -976,16 +1097,17 @@ services:
         limits:
           memory: 1536M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
 
-  # Ночной синк внешних источников (Метрика / AMO / Точка / Т-Банк) в main-postgres.
-  # Расписание cron '0 2 * * *' UTC (= 5:00 МСК) через APScheduler — совпадает
-  # с окном деплоев в 3-5 утра МСК, чтобы свежие данные были к утреннему часу.
+  # Ежедневный синк внешних источников (Метрика / AMO / Точка / Т-Банк) в main-postgres.
+  # Расписание cron '30 14 * * *' UTC (= 17:30 МСК) через APScheduler, чтобы
+  # свежие данные были готовы к записи в Google Sheets в 17:00 МСК.
   #
   # На старте контейнер проверяет текущее время по МСК: если попадает в окно
-  # [3:00, 9:00) — синк запускается сразу (догоняем пропущенный cron после
+  # [17:30, 18:00) — синк запускается сразу (догоняем пропущенный cron после
   # деплоя). Вне окна — просто ждём следующего cron, не тратим API-запросы
   # на каждый рестарт в течение дня. UPSERT-таблицы делают любой повторный
   # прогон безопасным.
@@ -1002,9 +1124,12 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - SUPABASE_DB_URL=${SUPABASE_DB_URL}
-      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-0 2 * * *}  # 02:00 UTC = 5:00 МСК
-      - EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK:-3}
-      - EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK:-9}
+      # Пайплайн отчётов: sync 16:30 МСК → запись в Google Sheets и TG-summary
+      # Егору в 17:00 МСК пт. Между sync и репортами 30 минут — успевает
+      # подтянуть свежие сделки из AMO до формирования отчёта.
+      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-30 13 * * *}  # 13:30 UTC = 16:30 МСК
+      - EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK:-16:30}
+      - EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK:-17:00}
       - YANDEX_METRIKA_TOKEN=${YANDEX_METRIKA_TOKEN:-}
       - YANDEX_METRIKA_COUNTER_ID=${YANDEX_METRIKA_COUNTER_ID:-62363425}
       - YANDEX_METRIKA_LOOKBACK_DAYS=${YANDEX_METRIKA_LOOKBACK_DAYS:-30}
@@ -1024,6 +1149,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.25'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1055,6 +1181,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.3'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1088,6 +1215,7 @@ services:
         limits:
           memory: 256M
           cpus: '0.1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1096,7 +1224,10 @@ services:
     image: aiogram/telegram-bot-api:latest
     container_name: portal-telegram-bot-api
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 8081 || exit 1"]
+      # 127.0.0.1 вместо localhost: внутри контейнера localhost сначала пытается
+      # IPv6 (::1), а telegram-bot-api слушает только IPv4 (0.0.0.0:8081) → refused.
+      # Из-за этого healthcheck был вечно unhealthy при живом сервисе (23.07.2026).
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8081 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -1114,6 +1245,7 @@ services:
         limits:
           memory: 768M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1126,6 +1258,7 @@ services:
         limits:
           memory: 768M
           cpus: '0.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1152,6 +1285,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.3'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1176,6 +1310,7 @@ services:
         limits:
           memory: 64M
           cpus: '0.1'
+          pids: 512
     restart: unless-stopped
 
   # Background BoB scorer — long-running daemon, 24/7 прогоняет домены из
@@ -1202,6 +1337,7 @@ services:
         limits:
           memory: 512M
           cpus: "0.25"
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1231,6 +1367,7 @@ services:
         limits:
           memory: 1024M
           cpus: "0.5"
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1267,6 +1404,7 @@ services:
           # чанк-локально, но даём запас.
           memory: 3072M
           cpus: '1.5'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network
@@ -1302,6 +1440,7 @@ services:
         limits:
           memory: 256M
           cpus: '0.1'
+          pids: 512
     restart: unless-stopped
     networks:
       - portal-network

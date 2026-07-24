@@ -17,7 +17,7 @@
  *      пула до 1 RPS на токен. На сам лимит 2000 не влияет.
  */
 
-import { buildHhRequestHeaders } from '@/lib/parsers/hhParser';
+import { buildHhRequestHeaders, fetchWithRetry, HHApiError } from '@/lib/parsers/hhParser';
 
 export const HH_API_BASE = 'https://api.hh.ru/vacancies';
 export const HH_API_PAGE_SIZE = 100;
@@ -132,30 +132,42 @@ export function buildSearchUrl(
 }
 
 /**
- * GET к HH API c автоматическими ретраями на 429/5xx.
+ * GET к HH API. Делегирует в общий `fetchWithRetry` из hhParser.ts, чтобы
+ * попадать в тот же RU-прокси-пул (PROXY_URLS/ProxyAgent), троттлинг и
+ * ретраи, что и стандартный HH-парсер. Без прокси HH с зарубежного IP
+ * рвёт TCP-соединение (fetch failed) или отдаёт 403 — прод-сервер стоит
+ * в Торонто, из-за чего архивный парсер до этой правки почти всегда падал.
  *
- * Ретраи только для transient ошибок:
- *   - 429 Too Many Requests → ждём Retry-After, затем повторяем
- *   - 5xx Server Error      → экспоненциальный backoff (2s/4s/8s)
- *   - network errors        → то же
+ * Ретраи в `fetchWithRetry`: 429 (Retry-After), 403, 5xx, network errors —
+ * с экспоненциальным backoff и глобальным лимитом одновременных запросов.
+ * По умолчанию берёт HH_MAX_RETRIES (5) — параметр `maxRetries` тут ниже
+ * для быстрой отдачи в preview-endpoint.
  *
- * НЕ ретраим 4xx (кроме 429) — они не починятся от повтора (403, 404, 400).
+ * `oauthToken`-override сохранён для CLI/тестов, где мы явно хотим
+ * пропустить прокси-стек и отправить свой Bearer напрямую.
  */
 export async function fetchHHJson(
   url: string,
   config: Pick<HHParseConfig, 'userAgent' | 'oauthToken'>,
-  signal?: AbortSignal,
+  _signal?: AbortSignal,
   maxRetries: number = 3,
 ): Promise<HHRawResponse> {
-  // Используем тот же auth-стек что и стандартный HH-парсер: env-переменная
-  // HH_ACCESS_TOKEN (установлена на проде), default UA.
+  if (!config.oauthToken) {
+    const json = await fetchWithRetry<HHRawResponse>(url, { maxRetries });
+    if (json.errors?.length) {
+      throw new Error(`HH API returned errors: ${JSON.stringify(json.errors)}`);
+    }
+    return json;
+  }
+
+  // Override-путь (CLI/тесты): прямой fetch без прокси, с явным токеном.
   const headers = buildHhRequestHeaders(config.userAgent);
-  if (config.oauthToken) headers.Authorization = `Bearer ${config.oauthToken}`;
+  headers.Authorization = `Bearer ${config.oauthToken}`;
 
   let lastErr: Error | null = null;
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     try {
-      const res = await fetch(url, { headers, signal });
+      const res = await fetch(url, { headers, signal: _signal });
       if (res.ok) {
         const json = (await res.json()) as HHRawResponse;
         if (json.errors?.length) {
@@ -163,8 +175,6 @@ export async function fetchHHJson(
         }
         return json;
       }
-
-      // Retryable codes
       if (res.status === 429 || res.status >= 500) {
         const retryAfter = Number(res.headers.get('retry-after') ?? '0');
         const backoff =
@@ -175,12 +185,9 @@ export async function fetchHHJson(
           continue;
         }
       }
-
-      // Non-retryable (4xx кроме 429) — сразу throw без ретраев.
       const body = await res.text().catch(() => '');
       throw new Error(`HH API ${res.status}: ${body.slice(0, 200)}`);
     } catch (e) {
-      // network error (TypeError, AbortError, etc.) — ретраим
       if (e instanceof Error && (e.name === 'AbortError' || (e as { status?: number }).status)) {
         throw e;
       }
@@ -258,20 +265,35 @@ export function extractVacancies(response: HHRawResponse): HHVacancy[] {
 export async function fetchEmployerSite(
   employerId: string,
   config: Pick<HHParseConfig, 'userAgent' | 'oauthToken'>,
-  signal?: AbortSignal,
+  _signal?: AbortSignal,
 ): Promise<string | null> {
-  const headers = buildHhRequestHeaders(config.userAgent);
-  if (config.oauthToken) headers.Authorization = `Bearer ${config.oauthToken}`;
+  const url = `https://api.hh.ru/employers/${employerId}`;
 
-  const res = await fetch(`https://api.hh.ru/employers/${employerId}`, { headers, signal });
-  if (res.status === 404) return null; // employer удалён → не валим всё
+  if (!config.oauthToken) {
+    // Через общий стек: прокси + ретраи + троттлинг. 404 (удалённый работодатель)
+    // приходит как HHApiError, аккуратно превращаем в null — не валим весь job.
+    try {
+      const json = await fetchWithRetry<{ site_url?: string | null }>(url, { maxRetries: 2 });
+      const siteUrl = (json.site_url ?? '').trim();
+      return siteUrl || null;
+    } catch (e) {
+      if (e instanceof HHApiError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  // Override-путь (CLI/тесты): прямой fetch без прокси.
+  const headers = buildHhRequestHeaders(config.userAgent);
+  headers.Authorization = `Bearer ${config.oauthToken}`;
+  const res = await fetch(url, { headers, signal: _signal });
+  if (res.status === 404) return null;
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`HH employer API ${res.status}: ${body.slice(0, 120)}`);
   }
   const json = (await res.json()) as { site_url?: string | null };
-  const url = (json.site_url ?? '').trim();
-  return url || null;
+  const siteUrl = (json.site_url ?? '').trim();
+  return siteUrl || null;
 }
 
 /** Утилита sleep — для requestDelayMs. */
