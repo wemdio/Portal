@@ -26,6 +26,9 @@ interface RequestyResponse {
 type ModelPrices = { in: number; out: number };
 const MODEL_PRICES: Record<string, ModelPrices> = {
   // Ресёрч/синтез (site_profile, hypotheses, evidence, clustering)
+  // opus-5: прайс Requesty уточнить после первых прогонов, пока = opus-4-8
+  'claude-opus-5':                  { in: 5.0, out: 25.0 },
+  'anthropic/claude-opus-5':        { in: 5.0, out: 25.0 },
   'claude-opus-4-8':                { in: 5.0, out: 25.0 },
   'anthropic/claude-opus-4-8':      { in: 5.0, out: 25.0 },
   // Bulk: vocab, brand_cloud-классификация, base_analyze
@@ -59,7 +62,7 @@ function estimateCost(model: string, promptTokens: number, completionTokens: num
 export type HeModelKind = 'research' | 'chain' | 'bulk';
 
 const HE_MODEL_DEFAULTS: Record<HeModelKind, string> = {
-  research: 'anthropic/claude-opus-4-8',
+  research: 'anthropic/claude-opus-5',
   chain: 'openai/gpt-5.2',
   bulk: 'anthropic/claude-sonnet-4-6',
 };
