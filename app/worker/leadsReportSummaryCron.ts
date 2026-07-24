@@ -2,9 +2,9 @@
  * Пятничный отчёт продаж по пяти каналам.
  *
  * Host crontab:
- *   10 14 * * 5 docker exec portal-worker-leads-report-bot \
+ *   0 14 * * 5 docker exec portal-worker-leads-report-bot \
  *     node /app/workers/leadsReportSummaryCron.js
- *   14:10 UTC = 17:10 МСК пятница.
+ *   14:00 UTC = 17:00 МСК пятница.
  */
 import {
   createWorkerLogger,

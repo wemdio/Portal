@@ -4,12 +4,12 @@ portal-external-sync — daily sync of external data into main-postgres.
 Sources: Yandex Metrika, AMO CRM, Точка Банк, Т-Банк.
 
 Расписание:
-- Cron `EXTERNAL_SYNC_CRON` (default '45 13 * * *' UTC = 16:45 МСК) через APScheduler.
+- Cron `EXTERNAL_SYNC_CRON` (default '30 13 * * *' UTC = 16:30 МСК) через APScheduler.
 - Catchup на старте контейнера: если текущее время (МСК) уже позже
-  STARTUP_WINDOW_START_MSK (default 16:45), но в external_sync_runs нет ни
+  STARTUP_WINDOW_START_MSK (default 16:30), но в external_sync_runs нет ни
   одного запуска за сегодня после этой отметки — sync запускается сразу.
-  Так деплой в 17:00-19:00 (или в любое время после 16:45) сам догоняет
-  пропущенный cron до отчёта продаж в 17:10, обычные рестарты до 16:45
+  Так деплой в 16:30+ (или в любое время после cron сегодня) сам догоняет
+  пропущенный sync до отчёта продаж в 17:00, обычные рестарты до 16:30
   ничего не триггерят. UPSERT-таблицы делают повторный прогон безопасным.
 
 Attribution to projects — отдельная задача, здесь только raw pulls.
@@ -45,16 +45,16 @@ from sources.bank_tbank import BankTBankSync
 
 # ── Config ────────────────────────────────────────────────────────────────
 
-CRON = os.environ.get("EXTERNAL_SYNC_CRON", "45 13 * * *")  # 16:45 МСК
+CRON = os.environ.get("EXTERNAL_SYNC_CRON", "30 13 * * *")  # 16:30 МСК
 DATABASE_URL = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL", "")
 
 # Отметка (по МСК), после которой рестарт контейнера считает нужным
 # «догнать» пропущенный cron сегодняшнего дня. Обычно совпадает с временем
-# самого cron (16:45). EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK оставлен только
+# самого cron (16:30). EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK оставлен только
 # ради обратной совместимости имени; catchup работает по проверке БД, а не
 # по окну — «был ли уже сегодня запуск после STARTUP_MSK».
-STARTUP_WINDOW_START_MSK = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK", "16:45")
-STARTUP_WINDOW_END_MSK   = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK", "17:10")  # unused, kept for env compatibility
+STARTUP_WINDOW_START_MSK = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK", "16:30")
+STARTUP_WINDOW_END_MSK   = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK", "17:00")  # unused, kept for env compatibility
 MSK_TZ = timezone(timedelta(hours=3))
 
 SOURCES = [
