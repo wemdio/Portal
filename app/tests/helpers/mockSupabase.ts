@@ -133,7 +133,7 @@ interface Builder {
   limit: (...args: unknown[]) => Builder;
   range: (...args: unknown[]) => Promise<{ data: Row[]; error: null; count: number }>;
 
-  single: () => Promise<{ data: Row | null; error: { message: string } | null }>;
+  single: () => Promise<{ data: Row | null; error: { message: string; code?: string } | null }>;
   maybeSingle: () => Promise<{ data: Row | null; error: null }>;
 
   then: <T>(
@@ -389,7 +389,8 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         if (errorMessage) return { data: null, error: { message: errorMessage } };
         const result = flushMutation();
         const first = result.data[0] ?? null;
-        return { data: first, error: first ? null : { message: 'not found' } };
+        // Как у настоящего PostgREST: 0 строк на .single() → PGRST116.
+        return { data: first, error: first ? null : { message: 'not found', code: 'PGRST116' } };
       },
       maybeSingle: async () => {
         if (errorMessage) return { data: null, error: { message: errorMessage } as never };

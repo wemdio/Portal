@@ -55,6 +55,10 @@ switch (kind) {
   case 'sales-ai-analysis':
     run('./salesAiAnalysis');
     break;
+  case 'hypothesisengine':
+  case 'hypothesis-engine':
+    run('./hypothesisEngine');
+    break;
   case 'aicaller':
     run('./aiCaller');
     break;
