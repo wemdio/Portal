@@ -4,12 +4,13 @@ portal-external-sync — daily sync of external data into main-postgres.
 Sources: Yandex Metrika, AMO CRM, Точка Банк, Т-Банк.
 
 Расписание:
-- Cron `EXTERNAL_SYNC_CRON` (default '30 14 * * *' UTC = 17:30 МСК) через APScheduler.
-- На старте контейнера: если время старта попадает в окно
-  [STARTUP_WINDOW_START_MSK, STARTUP_WINDOW_END_MSK) МСК (default 17:30-18:00),
-  запускается синк сразу. Цель — при деплое после 17:30 МСК контейнер сам догонит
-  пропущенный cron до запуска отчётности, но обычные рестарты в течение дня НЕ триггерят
-  ненужный синк. UPSERT-таблицы делают любой повторный прогон безопасным.
+- Cron `EXTERNAL_SYNC_CRON` (default '30 13 * * *' UTC = 16:30 МСК) через APScheduler.
+- Catchup на старте контейнера: если текущее время (МСК) уже позже
+  STARTUP_WINDOW_START_MSK (default 16:30), но в external_sync_runs нет ни
+  одного запуска за сегодня после этой отметки — sync запускается сразу.
+  Так деплой в 16:30+ (или в любое время после cron сегодня) сам догоняет
+  пропущенный sync до отчёта продаж в 17:00, обычные рестарты до 16:30
+  ничего не триггерят. UPSERT-таблицы делают повторный прогон безопасным.
 
 Attribution to projects — отдельная задача, здесь только raw pulls.
 Логи по прогонам — таблица external_sync_runs.
@@ -44,12 +45,16 @@ from sources.bank_tbank import BankTBankSync
 
 # ── Config ────────────────────────────────────────────────────────────────
 
-CRON = os.environ.get("EXTERNAL_SYNC_CRON", "30 14 * * *")  # 17:30 МСК
+CRON = os.environ.get("EXTERNAL_SYNC_CRON", "30 13 * * *")  # 16:30 МСК
 DATABASE_URL = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL", "")
 
-# Окно (по МСК), внутри которого рестарт контейнера триггерит синк сразу.
-STARTUP_WINDOW_START_MSK = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK", "17:30")
-STARTUP_WINDOW_END_MSK   = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK", "18:00")
+# Отметка (по МСК), после которой рестарт контейнера считает нужным
+# «догнать» пропущенный cron сегодняшнего дня. Обычно совпадает с временем
+# самого cron (16:30). EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK оставлен только
+# ради обратной совместимости имени; catchup работает по проверке БД, а не
+# по окну — «был ли уже сегодня запуск после STARTUP_MSK».
+STARTUP_WINDOW_START_MSK = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK", "16:30")
+STARTUP_WINDOW_END_MSK   = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK", "17:00")  # unused, kept for env compatibility
 MSK_TZ = timezone(timedelta(hours=3))
 
 SOURCES = [
@@ -89,7 +94,7 @@ async def run_all() -> None:
         print("[main] cycle finished", flush=True)
 
 
-# ── Startup window check ──────────────────────────────────────────────────
+# ── Startup catchup check ─────────────────────────────────────────────────
 
 def _parse_msk_time(value: str) -> tuple[int, int]:
     """Парсит `H` / `HH` / `HH:MM` в пару (hour, minute)."""
@@ -101,34 +106,67 @@ def _parse_msk_time(value: str) -> tuple[int, int]:
     return hour, minute
 
 
-def _in_startup_window() -> tuple[bool, str]:
-    """Проверяет, попадает ли текущий момент по МСК в окно deploy-догона.
+async def _should_catchup_on_startup() -> bool:
+    """Правило catchup: если сейчас (по МСК) уже позже STARTUP_MSK и в
+    external_sync_runs за сегодня после этой отметки нет ни одного запуска —
+    возвращаем True (нужно догнать пропущенный cron сразу на старте).
 
-    Возвращает (should_run, human_reason).
+    Так деплой/рестарт в любое время после 16:45 автоматически даст свежий
+    sync до отчёта продаж в 17:10; обычные рестарты до 16:45 ничего не делают.
     """
     now_msk = datetime.now(MSK_TZ)
     start_hour, start_minute = _parse_msk_time(STARTUP_WINDOW_START_MSK)
-    end_hour, end_minute = _parse_msk_time(STARTUP_WINDOW_END_MSK)
-    now_minutes = now_msk.hour * 60 + now_msk.minute
-    start_minutes = start_hour * 60 + start_minute
-    end_minutes = end_hour * 60 + end_minute
-    in_window = start_minutes <= now_minutes < end_minutes
-    stamp = now_msk.strftime("%H:%M МСК")
-    window = (
-        f"{start_hour:02d}:{start_minute:02d}-"
-        f"{end_hour:02d}:{end_minute:02d} МСК"
+    scheduled_today_msk = now_msk.replace(
+        hour=start_hour, minute=start_minute, second=0, microsecond=0,
     )
-    if in_window:
-        return True, f"старт в {stamp} — внутри deploy-окна {window} → синк сразу"
-    return False, f"старт в {stamp} — вне deploy-окна {window} → жду cron"
+    stamp = now_msk.strftime("%H:%M МСК")
+
+    if now_msk < scheduled_today_msk:
+        print(
+            f"[main] catchup: {stamp} — до расписанного sync "
+            f"{STARTUP_WINDOW_START_MSK} МСК → жду cron",
+            flush=True,
+        )
+        return False
+
+    if not DATABASE_URL:
+        print("[main] catchup: DATABASE_URL пуст — проверка БД пропущена", flush=True)
+        return False
+
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        scheduled_today_utc = scheduled_today_msk.astimezone(timezone.utc)
+        row = await conn.fetchrow(
+            "SELECT MAX(started_at) AS last_run "
+            "FROM external_sync_runs "
+            "WHERE started_at >= $1",
+            scheduled_today_utc,
+        )
+    finally:
+        await conn.close()
+
+    last_run = row["last_run"] if row else None
+    if last_run is not None:
+        last_msk = last_run.astimezone(MSK_TZ).strftime("%H:%M МСК")
+        print(
+            f"[main] catchup: {stamp} — sync за сегодня уже был в {last_msk} "
+            f"→ жду следующего cron",
+            flush=True,
+        )
+        return False
+
+    print(
+        f"[main] catchup: {stamp} после {STARTUP_WINDOW_START_MSK} МСК, "
+        f"а sync за сегодня ещё не было → догоняю сразу",
+        flush=True,
+    )
+    return True
 
 
 # ── Entry ─────────────────────────────────────────────────────────────────
 
 async def main() -> None:
-    should_run, reason = _in_startup_window()
     print(f"portal-external-sync starting; cron='{CRON}'", flush=True)
-    print(f"[main] {reason}", flush=True)
 
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -140,7 +178,7 @@ async def main() -> None:
     )
     scheduler.start()
 
-    if should_run:
+    if await _should_catchup_on_startup():
         await run_all()
 
     # Держим event loop живым; APScheduler крутится в фоне.
