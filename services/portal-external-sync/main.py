@@ -4,12 +4,12 @@ portal-external-sync — daily sync of external data into main-postgres.
 Sources: Yandex Metrika, AMO CRM, Точка Банк, Т-Банк.
 
 Расписание:
-- Cron `EXTERNAL_SYNC_CRON` (default '30 14 * * *' UTC = 17:30 МСК) через APScheduler.
+- Cron `EXTERNAL_SYNC_CRON` (default '30 13 * * *' UTC = 16:30 МСК) через APScheduler.
 - На старте контейнера: если время старта попадает в окно
-  [STARTUP_WINDOW_START_MSK, STARTUP_WINDOW_END_MSK) МСК (default 17:30-18:00),
-  запускается синк сразу. Цель — при деплое после 17:30 МСК контейнер сам догонит
-  пропущенный cron до запуска отчётности, но обычные рестарты в течение дня НЕ триггерят
-  ненужный синк. UPSERT-таблицы делают любой повторный прогон безопасным.
+  [STARTUP_WINDOW_START_MSK, STARTUP_WINDOW_END_MSK) МСК (default 16:30-17:00),
+  запускается синк сразу. Цель — при деплое после 16:30 МСК контейнер сам догонит
+  пропущенный cron до запуска отчётности в 17:00, но обычные рестарты в течение дня
+  НЕ триггерят ненужный синк. UPSERT-таблицы делают любой повторный прогон безопасным.
 
 Attribution to projects — отдельная задача, здесь только raw pulls.
 Логи по прогонам — таблица external_sync_runs.
@@ -44,12 +44,12 @@ from sources.bank_tbank import BankTBankSync
 
 # ── Config ────────────────────────────────────────────────────────────────
 
-CRON = os.environ.get("EXTERNAL_SYNC_CRON", "30 14 * * *")  # 17:30 МСК
+CRON = os.environ.get("EXTERNAL_SYNC_CRON", "30 13 * * *")  # 16:30 МСК
 DATABASE_URL = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL", "")
 
 # Окно (по МСК), внутри которого рестарт контейнера триггерит синк сразу.
-STARTUP_WINDOW_START_MSK = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK", "17:30")
-STARTUP_WINDOW_END_MSK   = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK", "18:00")
+STARTUP_WINDOW_START_MSK = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK", "16:30")
+STARTUP_WINDOW_END_MSK   = os.environ.get("EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK", "17:00")
 MSK_TZ = timezone(timedelta(hours=3))
 
 SOURCES = [

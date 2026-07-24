@@ -4,10 +4,11 @@ import {
 } from '@/lib/leadsReport/weekWindow';
 
 describe('currentMskWeekWindow', () => {
-  it('строит окно с понедельника 00:00 МСК до пятницы 18:30 МСК', () => {
-    const now = new Date('2026-07-24T15:30:00.000Z');
+  it('окно = последние 7 суток до момента запуска (штатный cron пт 17:00 МСК → неделя пт-пт)', () => {
+    // 14:00 UTC = 17:00 МСК пятница
+    const now = new Date('2026-07-24T14:00:00.000Z');
     expect(currentMskWeekWindow(now)).toEqual({
-      start: new Date('2026-07-19T21:00:00.000Z'),
+      start: new Date('2026-07-17T14:00:00.000Z'),
       end: now,
     });
     expect(shortMskDate(now)).toBe('24.07');
