@@ -11,7 +11,8 @@ export type ColumnKey =
   | 'responsible_name'
   | 'company_name'
   | 'company_website'
-  | 'status_name';
+  | 'status_name'
+  | 'empty';
 
 /** Спецификация одной колонки таблицы отчёта. */
 export type ColumnSpec = {
@@ -41,20 +42,28 @@ const AMO_ID_COLUMN: ColumnSpec = { header: 'AMO id', key: 'amo_id_raw' };
 export const marketingConfig: LeadsReportConfig = {
   name: 'marketing',
   spreadsheetId: process.env.LEADS_REPORT_MARKETING_SHEET_ID ?? '',
-  sheetName: 'Лиды',
+  sheetName: 'Лиды маркетинг',
   amoSourceFilter: { notEquals: 'Email Outreach' },
   syncSource: 'leads_report_marketing',
+  // Порядок колонок 1:1 с боевой таблицей «Учет проектов внутреннее» → лист «Лиды маркетинг».
+  // Ручные колонки менеджера (Дата последнего контакта, Качество лида, На чем остановились,
+  // и числовая метрика в L) — оставляем пустыми: заполнит менеджер вручную. AMO id пишется
+  // в служебный столбец N (пустой в шапке), скрипт использует его для дедупа.
   columns: [
-    { header: 'Ссылка на лид в амо', key: 'amo_url' },
-    { header: 'UTM', key: 'utm_block' },
-    { header: 'Площадка', key: 'platform' },
-    { header: 'Дата', key: 'created_at_short' },
-    { header: 'Телефон', key: 'phone' },
-    { header: 'email', key: 'email' },
-    { header: 'Имя', key: 'name' },
-    { header: 'Кто обрабатывает лид', key: 'responsible_name' },
-    { header: 'источник для...', key: 'category' },
-    AMO_ID_COLUMN,
+    { header: 'Ссылка на лид в амо', key: 'amo_url' },                    // A
+    { header: 'UTM', key: 'utm_block' },                                   // B
+    { header: 'Площадка', key: 'platform' },                               // C
+    { header: 'Дата', key: 'created_at_short' },                           // D
+    { header: 'Телефон', key: 'phone' },                                   // E
+    { header: 'email', key: 'email' },                                     // F
+    { header: 'Имя', key: 'name' },                                        // G
+    { header: 'Дата последнего контакта', key: 'empty' },                  // H
+    { header: 'Качество лида', key: 'empty' },                             // I
+    { header: 'Кто обрабатывает лид', key: 'responsible_name' },           // J
+    { header: 'На чем остановились', key: 'empty' },                       // K
+    { header: 'метрика', key: 'empty' },                                   // L
+    { header: 'источник для отчета по маркетингу', key: 'category' },      // M
+    AMO_ID_COLUMN,                                                          // N
   ],
 };
 
@@ -64,15 +73,30 @@ export const outreachConfig: LeadsReportConfig = {
   sheetName: 'Лиды',
   amoSourceFilter: { equals: 'Email Outreach' },
   syncSource: 'leads_report_outreach',
+  // Порядок и позиции колонок 1:1 соответствуют боевому листу «Лиды»
+  // (см. образец «Polza Ru Outreach.xlsx»): ручные колонки менеджера
+  // (Оффер / Сфера деятельности / Ком-й / Из какой кампании / Статус /
+  // Дата последнего контакта / Качество лида / Кто обрабатывает лид)
+  // скрипт оставляет пустыми — заполнит менеджер вручную. AMO id
+  // пишется в служебный столбец P (сейчас пустой) и используется для
+  // дедупа при следующих запусках cron.
   columns: [
-    { header: 'Имя', key: 'name' },
-    { header: 'Контакт', key: 'phone' },
-    { header: 'Email', key: 'email' },
-    { header: 'Организация', key: 'company_name' },
-    { header: 'Сайт', key: 'company_website' },
-    { header: 'Дата передачи лида', key: 'created_at_short' },
-    { header: 'Статус', key: 'status_name' },
-    AMO_ID_COLUMN,
+    { header: 'Оффер', key: 'empty' },                    // A
+    { header: 'Сфера деятельности', key: 'empty' },       // B
+    { header: 'Имя', key: 'name' },                       // C
+    { header: 'Контакт', key: 'phone' },                  // D
+    { header: 'Ком-й', key: 'empty' },                    // E
+    { header: 'Email', key: 'email' },                    // F
+    { header: 'Организация', key: 'company_name' },       // G
+    { header: 'Сайт', key: 'company_website' },           // H
+    { header: 'Дата передачи лида', key: 'created_at_short' }, // I
+    { header: 'Из какой кампании', key: 'empty' },        // J
+    { header: '@dropdown', key: 'empty' },                // K
+    { header: 'Статус', key: 'empty' },                   // L
+    { header: 'Дата последнего контакта', key: 'empty' }, // M
+    { header: 'Качество лида', key: 'empty' },            // N
+    { header: 'Кто обрабатывает лид', key: 'empty' },     // O
+    AMO_ID_COLUMN,                                         // P
   ],
 };
 
