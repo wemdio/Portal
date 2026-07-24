@@ -13,7 +13,8 @@ verdict logic keys on {code, exists, isCatchAll, greylist, smtpText}.
 
 Env: SMTP_PROXY_API_KEY (required), PORT (default 3100),
      EMAIL_VALIDATION_HELO_DOMAIN (HELO name), EMAIL_VALIDATION_MAIL_FROM (default ''),
-     SMTP_PROBE_LOCAL_ADDRESS (optional egress bind).
+     SMTP_PROBE_LOCAL_ADDRESS (optional egress bind),
+     SMTP_CHECK_DEADLINE_MS (overall per-check deadline, default 21000).
 """
 import os, sys, json, socket, time, hmac, re, errno
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,7 +29,11 @@ PROBE_PORT = int(os.environ.get("SMTP_PROBE_PORT", "25"))
 
 CONNECT_TIMEOUT = 8.0
 COMMAND_TIMEOUT = 8.0
-CATCHALL_RETRY_BUDGET = 12.0
+# Общий дедлайн всей проверки (сек): воркер обрывает HTTP-вызов к прокси на 25s,
+# ответ позже дедлайна никто не получит — опциональные фазы (in-session catch-all
+# и retry на свежем коннекте) после него не стартуют.
+CHECK_DEADLINE = float(os.environ.get("SMTP_CHECK_DEADLINE_MS", "21000")) / 1000.0
+# Per-stage таймаут retry-пробы на свежем коннекте (минимум с остатком бюджета).
 CATCHALL_RETRY_TIMEOUT = 5.0
 
 if not API_KEY:
@@ -65,11 +70,41 @@ def _cmd(sock, line, timeout):
 
 def _connect(mx, timeout):
     src = (LOCAL_ADDR, 0) if LOCAL_ADDR else None
-    return socket.create_connection((mx, PROBE_PORT), timeout=timeout, source_address=src)
+    # Только IPv4 (parity с family:4 в smtp.ts): PTR/HELO настроены под IPv4
+    # egress'а, а AAAA-выбор на VPS без IPv6 убивал пробу с ENETUNREACH.
+    last_err = None
+    for family, socktype, proto, _, sa in socket.getaddrinfo(
+            mx, PROBE_PORT, socket.AF_INET, socket.SOCK_STREAM):
+        s = socket.socket(family, socktype, proto)
+        s.settimeout(timeout)
+        try:
+            if src:
+                s.bind(src)
+            s.connect(sa)
+            return s
+        except OSError as e:
+            last_err = e
+            s.close()
+    if last_err is not None:
+        raise last_err
+    raise OSError("no IPv4 address for %s" % mx)
 
 
 def _random_local(domain):
     return "verify-check-%d-%s@%s" % (int(time.time() * 1000), os.urandom(4).hex(), domain)
+
+
+def _quit_and_close(s):
+    """QUIT — fire-and-forget (parity с quitAndDestroy в smtp.ts): ответ не ждём
+    (это до 3s чистой задержки на пробу), пишем QUIT и сразу закрываем сокет."""
+    try:
+        s.sendall(b"QUIT\r\n")
+    except Exception:
+        pass
+    try:
+        s.close()
+    except Exception:
+        pass
 
 
 def _fresh_probe(mx, helo, mail_from, recipient, timeout):
@@ -89,10 +124,7 @@ def _fresh_probe(mx, helo, mail_from, recipient, timeout):
         if code != 250:
             return None
         code, text = _cmd(s, "RCPT TO:<%s>" % recipient, timeout)
-        try:
-            _cmd(s, "QUIT", 1.5)
-        except Exception:
-            pass
+        _quit_and_close(s)
         return code
     except Exception:
         return None
@@ -127,27 +159,58 @@ def smtp_check(req):
         except socket.timeout:
             result["error"] = "SMTP connect timeout"
             return result
-        code, _ = _read_reply(s, COMMAND_TIMEOUT)
+        code, text = _read_reply(s, COMMAND_TIMEOUT)
         if code != 220:
+            # 4xx на баннере — greylisting (MX временно отклоняет новый egress-IP):
+            # сигнал greylist, а не transport-ошибка — воркер не устраивает
+            # failover-шторм, а делает отложенный retry с того же IP (affinity).
+            # 5xx на этих стадиях — блок egress/anti-probe, остаётся ошибкой.
+            if 400 <= code < 500:
+                result["code"] = code
+                result["greylist"] = True
+                result["smtpText"] = text
+                return result
             result["error"] = "Unexpected greeting: %d" % code
             return result
-        code, _ = _cmd(s, "EHLO " + helo, COMMAND_TIMEOUT)
+        code, text = _cmd(s, "EHLO " + helo, COMMAND_TIMEOUT)
         if code != 250:
-            code, _ = _cmd(s, "HELO " + helo, COMMAND_TIMEOUT)
+            code, text = _cmd(s, "HELO " + helo, COMMAND_TIMEOUT)
             if code != 250:
+                # 4xx на EHLO/HELO — greylist (см. выше); 5xx — блок egress, ошибка.
+                if 400 <= code < 500:
+                    result["code"] = code
+                    result["greylist"] = True
+                    result["smtpText"] = text
+                    return result
                 result["error"] = "EHLO/HELO rejected: %d" % code
                 return result
-        code, _ = _cmd(s, "MAIL FROM:<%s>" % mail_from, COMMAND_TIMEOUT)
+        code, text = _cmd(s, "MAIL FROM:<%s>" % mail_from, COMMAND_TIMEOUT)
         if code != 250:
+            # 4xx на MAIL FROM — greylist (см. выше); 5xx — блок egress, ошибка.
+            if 400 <= code < 500:
+                result["code"] = code
+                result["greylist"] = True
+                result["smtpText"] = text
+                return result
             result["error"] = "MAIL FROM rejected: %d" % code
             return result
         code, text = _cmd(s, "RCPT TO:<%s>" % email, COMMAND_TIMEOUT)
         result["code"] = code
         result["smtpText"] = text
-        if code == 250:
+        if code in (250, 251):
             result["exists"] = True
+        elif code == 252:
+            # 252 — сервер принимает получателя, но не подтверждает его
+            # существование (Cannot VRFY): честный catch_all, а не 'ok'.
+            result["exists"] = True
+            result["isCatchAll"] = True
         elif 550 <= code <= 559:
             result["exists"] = False
+        elif code == 452:
+            # 452 (over quota / insufficient storage) — НЕ greylist: временный
+            # отказ по квоте самого ящика, а не по IP. Классификацию квоты
+            # по smtpText делает валидатор.
+            result["exists"] = None
         elif 450 <= code <= 459:
             result["greylist"] = True
             result["exists"] = None
@@ -155,21 +218,30 @@ def smtp_check(req):
             result["greylist"] = True
             result["exists"] = None
 
-        if req.get("checkCatchAll") and result["exists"] is True:
-            domain = email.split("@")[1] if "@" in email else ""
-            rnd = _random_local(domain)
-            _cmd(s, "RSET", COMMAND_TIMEOUT)
-            _cmd(s, "MAIL FROM:<%s>" % mail_from, COMMAND_TIMEOUT)
-            ccode, _ = _cmd(s, "RCPT TO:<%s>" % rnd, COMMAND_TIMEOUT)
-            if ccode == 250:
-                result["isCatchAll"] = True
-            elif 550 <= ccode <= 559:
-                result["isCatchAll"] = False
+        # Вторая транзакция (catch-all) стартует, только если до общего дедлайна
+        # есть бюджет: после него воркер ответ уже не ждёт, а exists важнее
+        # уточнения isCatchAll. При 252 isCatchAll уже известен — не пробуем снова.
+        if (req.get("checkCatchAll") and result["exists"] is True
+                and result["isCatchAll"] is None
+                and time.time() - started < CHECK_DEADLINE):
+            # Отдельный try/except: сбой RSET/второй транзакции НЕ должен ставить
+            # result["error"] — exists уже известен, и stale error протекал бы в
+            # details валидатора. Остаётся isCatchAll=None, ниже — retry на
+            # свежем коннекте.
+            try:
+                domain = email.split("@")[1] if "@" in email else ""
+                rnd = _random_local(domain)
+                _cmd(s, "RSET", COMMAND_TIMEOUT)
+                _cmd(s, "MAIL FROM:<%s>" % mail_from, COMMAND_TIMEOUT)
+                ccode, _ = _cmd(s, "RCPT TO:<%s>" % rnd, COMMAND_TIMEOUT)
+                if ccode == 250:
+                    result["isCatchAll"] = True
+                elif 550 <= ccode <= 559:
+                    result["isCatchAll"] = False
+            except Exception:
+                pass
 
-        try:
-            _cmd(s, "QUIT", 3.0)
-        except Exception:
-            pass
+        _quit_and_close(s)
     except socket.timeout:
         result["error"] = "SMTP timeout waiting for reply"
     except ConnectionRefusedError:
@@ -193,13 +265,15 @@ def smtp_check(req):
             except Exception:
                 pass
 
-    # Fresh-connection catch-all retry (parity with smtp.ts)
+    # Fresh-connection catch-all retry (parity with smtp.ts): ограничен общим
+    # дедлайном, per-stage таймаут — min(CATCHALL_RETRY_TIMEOUT, остаток бюджета).
+    remaining = CHECK_DEADLINE - (time.time() - started)
     if (req.get("checkCatchAll") and result["exists"] is True
-            and result["isCatchAll"] is None
-            and time.time() - started < CATCHALL_RETRY_BUDGET):
+            and result["isCatchAll"] is None and remaining > 0):
         domain = email.split("@")[1] if "@" in email else ""
         if domain:
-            ccode = _fresh_probe(mx, helo, mail_from, _random_local(domain), CATCHALL_RETRY_TIMEOUT)
+            ccode = _fresh_probe(mx, helo, mail_from, _random_local(domain),
+                                 min(CATCHALL_RETRY_TIMEOUT, remaining))
             if ccode == 250:
                 result["isCatchAll"] = True
             elif ccode is not None and 550 <= ccode <= 559:

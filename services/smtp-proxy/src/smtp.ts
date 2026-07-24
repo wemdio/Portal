@@ -87,6 +87,18 @@ function waitForGreeting(socket: net.Socket, timeoutMs: number): Promise<SmtpRes
   return readSmtpReply(socket, timeoutMs, 'greeting');
 }
 
+// QUIT — fire-and-forget: ответ сервера не ждём (это до 3s чистой задержки на
+// каждую пробу), просто пишем QUIT и сразу закрываем сокет. No-op 'error'
+// обязателен: EPIPE/ECONNRESET на уже мёртвом сокете без обработчика дал бы
+// unhandled 'error' на EventEmitter и уронил процесс.
+function quitAndDestroy(socket: net.Socket): void {
+  try {
+    socket.once('error', () => {});
+    socket.write('QUIT\r\n');
+    socket.destroy();
+  } catch { /* сокет уже закрыт — некритично */ }
+}
+
 export interface SmtpCheckRequest {
   email: string;
   mxHost: string;
@@ -113,10 +125,13 @@ function randomProbeAddress(domain: string): string {
   return `verify-check-${Date.now()}-${Math.random().toString(36).substring(2, 10)}@${domain}`;
 }
 
-// Fresh-connection catch-all retry: only start it if the main session finished
-// fast enough — the worker aborts the whole HTTP call at 25s, so a retry that
-// starts late never delivers its answer and only ties up the proxy.
-const CATCHALL_RETRY_BUDGET_MS = 12_000;
+// Общий дедлайн всей SMTP-проверки: воркер обрывает HTTP-вызов к прокси на 25s,
+// поэтому ответ позже дедлайна всё равно никто не получит. Опциональные фазы
+// (in-session catch-all и retry на свежем коннекте) после дедлайна не стартуют —
+// уже полученный ответ (exists) важнее уточнения isCatchAll.
+const SMTP_CHECK_DEADLINE_MS = Number(process.env.SMTP_CHECK_DEADLINE_MS ?? '21000');
+// Per-stage таймаут retry-пробы на свежем коннекте; дополнительно ограничивается
+// остатком бюджета до дедлайна (min(5000, remaining)).
 const CATCHALL_RETRY_TIMEOUT_MS = 5_000;
 
 /**
@@ -139,7 +154,9 @@ async function probeOnFreshConnection(
     socket = await new Promise<net.Socket>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('SMTP connect timeout')), timeout);
       const s = net.createConnection(
-        { host: mxHost, port: SMTP_PROBE_PORT, timeout, localAddress: SMTP_PROBE_LOCAL_ADDRESS },
+        // family:4 — PTR/HELO настроены под IPv4 egress'а; выбор AAAA на VPS
+        // без IPv6 убивал пробу с ENETUNREACH.
+        { host: mxHost, port: SMTP_PROBE_PORT, timeout, localAddress: SMTP_PROBE_LOCAL_ADDRESS, family: 4 },
         () => {
           clearTimeout(timer);
           resolve(s);
@@ -160,11 +177,7 @@ async function probeOnFreshConnection(
     const mailFrom = await smtpCommand(socket, `MAIL FROM:<${heloFrom}>`, timeout);
     if (mailFrom.code !== 250) return null;
     const rcpt = await smtpCommand(socket, `RCPT TO:<${recipient}>`, timeout);
-    try {
-      await smtpCommand(socket, 'QUIT', 1500);
-    } catch {
-      // QUIT timeout is non-critical
-    }
+    quitAndDestroy(socket);
     return rcpt;
   } catch {
     return null;
@@ -203,7 +216,9 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
     socket = await new Promise<net.Socket>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('SMTP connect timeout')), timeout);
       const s = net.createConnection(
-        { host: req.mxHost, port: SMTP_PROBE_PORT, timeout, localAddress: SMTP_PROBE_LOCAL_ADDRESS },
+        // family:4 — PTR/HELO настроены под IPv4 egress'а; выбор AAAA на VPS
+        // без IPv6 убивал пробу с ENETUNREACH.
+        { host: req.mxHost, port: SMTP_PROBE_PORT, timeout, localAddress: SMTP_PROBE_LOCAL_ADDRESS, family: 4 },
         () => {
           clearTimeout(timer);
           resolve(s);
@@ -217,6 +232,16 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
 
     const greeting = await waitForGreeting(socket, SMTP_COMMAND_TIMEOUT_MS);
     if (greeting.code !== 220) {
+      // 4xx на баннере — greylisting (MX временно отклоняет новый egress-IP):
+      // отдаём сигнал greylist, а не transport-ошибку — воркер не устраивает
+      // failover-шторм, а делает отложенный retry с того же IP (affinity).
+      // 5xx на этих стадиях — блок egress/anti-probe, остаётся ошибкой.
+      if (greeting.code >= 400 && greeting.code < 500) {
+        result.code = greeting.code;
+        result.greylist = true;
+        result.smtpText = greeting.text;
+        return result;
+      }
       result.error = `Unexpected greeting: ${greeting.code}`;
       return result;
     }
@@ -225,6 +250,13 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
     if (ehloResp.code !== 250) {
       const heloResp = await smtpCommand(socket, `HELO ${heloDomain}`, SMTP_COMMAND_TIMEOUT_MS);
       if (heloResp.code !== 250) {
+        // 4xx на EHLO/HELO — greylist (см. выше); 5xx — блок egress, ошибка.
+        if (heloResp.code >= 400 && heloResp.code < 500) {
+          result.code = heloResp.code;
+          result.greylist = true;
+          result.smtpText = heloResp.text;
+          return result;
+        }
         result.error = `EHLO/HELO rejected: ${heloResp.code}`;
         return result;
       }
@@ -232,6 +264,13 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
 
     const mailFrom = await smtpCommand(socket, `MAIL FROM:<${heloFrom}>`, SMTP_COMMAND_TIMEOUT_MS);
     if (mailFrom.code !== 250) {
+      // 4xx на MAIL FROM — greylist (см. выше); 5xx — блок egress, ошибка.
+      if (mailFrom.code >= 400 && mailFrom.code < 500) {
+        result.code = mailFrom.code;
+        result.greylist = true;
+        result.smtpText = mailFrom.text;
+        return result;
+      }
       result.error = `MAIL FROM rejected: ${mailFrom.code}`;
       return result;
     }
@@ -240,10 +279,20 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
     result.code = rcptTo.code;
     result.smtpText = rcptTo.text;
 
-    if (rcptTo.code === 250) {
+    if (rcptTo.code === 250 || rcptTo.code === 251) {
       result.exists = true;
+    } else if (rcptTo.code === 252) {
+      // 252 — сервер принимает получателя, но не подтверждает его существование
+      // (Cannot VRFY): это честный catch_all, а не подтверждённый 'ok'.
+      result.exists = true;
+      result.isCatchAll = true;
     } else if (rcptTo.code >= 550 && rcptTo.code <= 559) {
       result.exists = false;
+    } else if (rcptTo.code === 452) {
+      // 452 (over quota / insufficient storage) — НЕ greylist: временный отказ
+      // по квоте самого ящика, а не по IP. Классификацию квоты по smtpText
+      // делает валидатор.
+      result.exists = null;
     } else if (rcptTo.code >= 450 && rcptTo.code <= 459) {
       result.greylist = true;
       result.exists = null;
@@ -252,26 +301,38 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
       result.exists = null;
     }
 
-    if (req.checkCatchAll && result.exists === true) {
-      const domain = req.email.split('@')[1];
-      const randomEmail = randomProbeAddress(domain);
+    // Вторая транзакция (catch-all) стартует, только если до общего дедлайна
+    // ещё есть бюджет: после него воркер ответ уже не ждёт, а exists важнее
+    // уточнения isCatchAll. При 252 isCatchAll уже известен — не пробуем снова.
+    if (
+      req.checkCatchAll &&
+      result.exists === true &&
+      result.isCatchAll === null &&
+      Date.now() - startedAt < SMTP_CHECK_DEADLINE_MS
+    ) {
+      // Отдельный try/catch: сбой RSET/второй транзакции НЕ должен ставить
+      // result.error — exists уже известен, и stale error протекал бы в details
+      // валидатора. Просто остаётся isCatchAll=null, и ниже сработает retry
+      // на свежем коннекте.
+      try {
+        const domain = req.email.split('@')[1];
+        const randomEmail = randomProbeAddress(domain);
 
-      await smtpCommand(socket, 'RSET', SMTP_COMMAND_TIMEOUT_MS);
-      await smtpCommand(socket, `MAIL FROM:<${heloFrom}>`, SMTP_COMMAND_TIMEOUT_MS);
-      const catchAllRcpt = await smtpCommand(socket, `RCPT TO:<${randomEmail}>`, SMTP_COMMAND_TIMEOUT_MS);
+        await smtpCommand(socket, 'RSET', SMTP_COMMAND_TIMEOUT_MS);
+        await smtpCommand(socket, `MAIL FROM:<${heloFrom}>`, SMTP_COMMAND_TIMEOUT_MS);
+        const catchAllRcpt = await smtpCommand(socket, `RCPT TO:<${randomEmail}>`, SMTP_COMMAND_TIMEOUT_MS);
 
-      if (catchAllRcpt.code === 250) {
-        result.isCatchAll = true;
-      } else if (catchAllRcpt.code >= 550 && catchAllRcpt.code <= 559) {
-        result.isCatchAll = false;
+        if (catchAllRcpt.code === 250) {
+          result.isCatchAll = true;
+        } else if (catchAllRcpt.code >= 550 && catchAllRcpt.code <= 559) {
+          result.isCatchAll = false;
+        }
+      } catch {
+        // некритично — см. комментарий выше
       }
     }
 
-    try {
-      await smtpCommand(socket, 'QUIT', 3000);
-    } catch {
-      // QUIT timeout is non-critical
-    }
+    quitAndDestroy(socket);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'SMTP error';
     result.error = msg;
@@ -287,18 +348,22 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
 
   // In-session catch-all probe came back inconclusive (4xx/503 on the second
   // transaction, or the session died after RCPT) → one retry on a FRESH
-  // connection, budget-bounded so the whole request stays inside the worker's
-  // 25s HTTP timeout. Failure here just leaves isCatchAll=null (как раньше).
+  // connection, bounded by the overall deadline so the whole request stays
+  // inside the worker's 25s HTTP timeout. Failure here just leaves
+  // isCatchAll=null (как раньше).
+  const remainingMs = SMTP_CHECK_DEADLINE_MS - (Date.now() - startedAt);
   if (
     req.checkCatchAll &&
     result.exists === true &&
     result.isCatchAll === null &&
-    Date.now() - startedAt < CATCHALL_RETRY_BUDGET_MS
+    remainingMs > 0
   ) {
     const domain = req.email.split('@')[1];
     if (domain) {
+      // Per-stage таймаут свежей пробы — не больше остатка бюджета до дедлайна.
       const rcpt = await probeOnFreshConnection(
-        req.mxHost, heloDomain, heloFrom, randomProbeAddress(domain), CATCHALL_RETRY_TIMEOUT_MS,
+        req.mxHost, heloDomain, heloFrom, randomProbeAddress(domain),
+        Math.min(CATCHALL_RETRY_TIMEOUT_MS, remainingMs),
       );
       if (rcpt) {
         if (rcpt.code === 250) result.isCatchAll = true;

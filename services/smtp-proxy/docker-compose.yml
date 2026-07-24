@@ -4,6 +4,11 @@ services:
     container_name: smtp-proxy
     environment:
       - SMTP_PROXY_API_KEY=${SMTP_PROXY_API_KEY}
+      # HELO-имя SMTP-пробы. ДОЛЖНО быть FQDN с выровненным FCrDNS (A ↔ PTR)
+      # на egress-IP именно этого инстанса — у каждого прокси своё значение.
+      # Без него контейнер шлёт HELO с container-ID, который строгие
+      # корпоративные шлюзы отклоняют.
+      - EMAIL_VALIDATION_HELO_DOMAIN=${EMAIL_VALIDATION_HELO_DOMAIN}
       - PORT=3100
     ports:
       - "80:3100"
