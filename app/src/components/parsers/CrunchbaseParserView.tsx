@@ -229,7 +229,7 @@ export function CrunchbaseParserView() {
         return;
       }
       const dbRows: string[][] = [EXPORT_HEADER as unknown as string[], ...rows.slice(0, MAX_DB_ROWS).map(exportRow)];
-      const { id } = writePendingDbImport({ title: 'Crunchbase · стартапы и раунды', rows: dbRows });
+      const { id } = await writePendingDbImport({ title: 'Crunchbase · стартапы и раунды', rows: dbRows });
       setToast({ tone: 'success', message: `Добавлено в «Базы» (${Math.min(rows.length, MAX_DB_ROWS)})`, href: buildDatabasesImportUrl(id) });
     } catch (e) {
       setToast({ tone: 'error', message: e instanceof Error ? e.message : 'Ошибка' });

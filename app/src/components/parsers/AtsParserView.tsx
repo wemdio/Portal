@@ -329,7 +329,7 @@ export function AtsParserView() {
           'ats',
         ]),
       ];
-      const { id } = writePendingDbImport({ title: `ATS #${activeJobId.slice(0, 8)}`, rows });
+      const { id } = await writePendingDbImport({ title: `ATS #${activeJobId.slice(0, 8)}`, rows });
       const url = buildDatabasesImportUrl(id);
       const trimmed = items.length > MAX_DB_ROWS;
       setToast({

@@ -83,6 +83,7 @@ const ROLE_PREFIXES = new Set([
   'undisclosed-recipients','unsubscribe','usenet','uucp','webmaster','www','hello',
   'contact','enquiry','enquiries','feedback','help','jobs','media','press','remove',
   'request','service','subscribe','all','everyone','staff','team','general',
+  'zakupki','tender','zakaz','opt','priemnaya',
 ]);
 
 export function isRole(local: string): boolean {
@@ -100,7 +101,9 @@ const FREE_PROVIDERS = new Set([
   'msn.com','aol.com','aol.co.uk','protonmail.com','protonmail.ch','proton.me',
   'icloud.com','me.com','mac.com','zoho.com','zohomail.com',
   'mail.ru','bk.ru','inbox.ru','list.ru','internet.ru',
+  'pochta.ru','ngs.ru','e1.ru','mail15.com',
   'yandex.ru','yandex.com','yandex.ua','yandex.by','ya.ru',
+  'yandex.kz','yandex.uz','yandex.com.tr',
   'rambler.ru','lenta.ru','autorambler.ru','myrambler.ru','ro.ru',
   'gmx.com','gmx.de','gmx.net','gmx.at','gmx.ch',
   'web.de','t-online.de','freenet.de','arcor.de',

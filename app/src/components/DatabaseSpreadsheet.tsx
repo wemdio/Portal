@@ -502,11 +502,12 @@ const EMAIL_VALIDATION_PROGRESS_INTERVAL_MS = 500;
 const EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES = 10;
 // «Зависла: нет прогресса» срабатывает, только если сервер РЕАЛЬНО стоит.
 // Прогрессом считается либо новый отрисованный результат, либо рост job.processed
-// на сервере (см. poll-циклы). Таймаут поднят выше worst-case greylist-цепочки
-// (MAX_ATTEMPTS=3 × GREYLIST_DELAY=5мин ≈ 15мин, когда хвост базы поголовно
-// greylist-ится и завершений нет несколько минут), иначе клиент ложно «зависал»
+// на сервере (см. poll-циклы). Таймаут поднят выше worst-case хвоста отложенных
+// ретраев воркера: самый длинный класс — smtp_5xx_policy (одна попытка через
+// 45мин × jitter 1.1 + сама проба ≈ 50мин, когда хвост базы поголовно уходит в
+// policy/greylist и завершений нет десятки минут), иначе клиент ложно «зависал»
 // на greylist-тяжёлых базах и при троттлинге фоновой вкладки.
-const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 18 * 60 * 1000;
+const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 60 * 60 * 1000;
 
 const EMAIL_PROVIDER_MAP: Record<string, string> = {
   'gmail.com': 'Google', 'googlemail.com': 'Google',
@@ -2815,45 +2816,47 @@ export function DatabaseSpreadsheet() {
       }
     };
 
-    try {
-      const payload = readPendingDbImport(importId);
-      if (!payload) {
-        showCopyNotice('Импорт не найден (возможно, устарел или был очищен браузером)', 'error');
+    (async () => {
+      try {
+        const payload = await readPendingDbImport(importId);
+        if (!payload) {
+          showCopyNotice('Импорт не найден (возможно, устарел или был очищен браузером)', 'error');
+          cleanUrl();
+          return;
+        }
+
+        const MAX_ROWS = 10_000;
+        const MAX_COLS = 80;
+
+        const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
+        const limitedRows = rawRows.slice(0, MAX_ROWS).map((row) => {
+          const cells = Array.isArray(row) ? row : [];
+          return cells.slice(0, MAX_COLS).map((cell) => String(cell ?? ''));
+        });
+
+        if (limitedRows.length === 0) {
+          showCopyNotice('Импорт пустой (0 строк)', 'error');
+          await deletePendingDbImport(importId);
+          cleanUrl();
+          return;
+        }
+
+        applyRowsToNewTab(limitedRows, `${payload.title || 'import'}.csv`);
+        const trimmed = limitedRows.length < rawRows.length;
+        showCopyNotice(
+          trimmed
+            ? `Импортировано: ${limitedRows.length} строк (обрезано до лимита)`
+            : `Импортировано: ${limitedRows.length} строк`,
+          'success',
+        );
+
+        await deletePendingDbImport(importId);
         cleanUrl();
-        return;
-      }
-
-      const MAX_ROWS = 10_000;
-      const MAX_COLS = 80;
-
-      const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
-      const limitedRows = rawRows.slice(0, MAX_ROWS).map((row) => {
-        const cells = Array.isArray(row) ? row : [];
-        return cells.slice(0, MAX_COLS).map((cell) => String(cell ?? ''));
-      });
-
-      if (limitedRows.length === 0) {
-        showCopyNotice('Импорт пустой (0 строк)', 'error');
-        deletePendingDbImport(importId);
+      } catch (e) {
+        showCopyNotice(e instanceof Error ? e.message : 'Ошибка импорта', 'error');
         cleanUrl();
-        return;
       }
-
-      applyRowsToNewTab(limitedRows, `${payload.title || 'import'}.csv`);
-      const trimmed = limitedRows.length < rawRows.length;
-      showCopyNotice(
-        trimmed
-          ? `Импортировано: ${limitedRows.length} строк (обрезано до лимита)`
-          : `Импортировано: ${limitedRows.length} строк`,
-        'success',
-      );
-
-      deletePendingDbImport(importId);
-      cleanUrl();
-    } catch (e) {
-      showCopyNotice(e instanceof Error ? e.message : 'Ошибка импорта', 'error');
-      cleanUrl();
-    }
+    })();
   }, [importId, isHydrated, applyRowsToNewTab, showCopyNotice]);
 
   useEffect(() => {

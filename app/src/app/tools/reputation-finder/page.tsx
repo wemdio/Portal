@@ -378,7 +378,7 @@ export default function ReputationFinderPage() {
 
       const rows = [data.header, ...data.rows];
       const title = `Reputation #${activeJobId.slice(0, 8)}`;
-      const { id } = writePendingDbImport({ title, rows });
+      const { id } = await writePendingDbImport({ title, rows });
       const url = buildDatabasesImportUrl(id);
       setToast({ tone: 'success', message: `Экспортировано ${data.total} лидов в "Базы".`, href: url });
     } catch {

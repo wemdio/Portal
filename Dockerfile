@@ -50,6 +50,7 @@ ENV NODE_OPTIONS="--max-old-space-size=4096"
 
 # Build Next.js application
 RUN npm run build
+RUN npm run build:sbis-importer
 
 # Stage 3: Runner
 FROM node:22-alpine AS runner
@@ -71,6 +72,7 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=deps /app/node_modules ./node_modules
 COPY app/scripts ./scripts
+COPY --from=builder --chown=nextjs:nodejs /app/dist/scripts/apply-sbis-directory-plan.cjs ./scripts/apply-sbis-directory-plan.cjs
 COPY supabase/migrations ./supabase/migrations
 COPY supabase/instantly-migrations ./supabase/instantly-migrations
 

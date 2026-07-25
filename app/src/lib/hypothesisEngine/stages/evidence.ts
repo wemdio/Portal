@@ -1,0 +1,178 @@
+/**
+ * Стадия evidence — проход (b): верификация каждого кандидата реальными
+ * источниками. Для каждого кандидата: 2–4 таргетированных Serper-запроса,
+ * фетч топ-1–2 источников, LLM-вердикт keep/merge/drop + массив доказательств
+ * (claim + quote + URL только из найденного) + перекалиброванный %.
+ * Принятые гипотезы пишутся в he_hypotheses (status='proposed').
+ *
+ * Устойчивость: сбой поиска → тонкие доказательства, стадия завершается;
+ * сбой фетча источника → источник пропускается; сбой LLM по одному
+ * кандидату → кандидат отбрасывается с reason='stage_error', остальные
+ * продолжаются.
+ */
+
+import { callLLMWithSchema, getHeModel } from '../llm';
+import {
+  HeEvidenceVerdictSchema,
+  type HeHypothesisCandidate,
+  type HeSiteProfileOutput,
+} from '../schemas';
+import { buildEvidenceMessages } from '../prompts/evidence';
+import type { HeEvidenceItem, HeHypothesisTier, HeJob } from '../types';
+import { resolveFetchText, resolveSearch } from './io';
+import {
+  addUsage,
+  latestDoneJobResult,
+  newUsage,
+  readProject,
+  readSiteProfile,
+  stageLog,
+  truncate,
+  type HeStageContext,
+  type HeStageResult,
+} from './shared';
+
+const MAX_QUERIES_PER_CANDIDATE = 3;
+const MAX_SEARCH_ITEMS = 8;
+const MAX_SOURCES_TO_FETCH = 2;
+const SOURCE_EXCERPT = 1500;
+const MAX_EVIDENCE_PER_HYPOTHESIS = 6;
+
+interface AcceptedHypothesis {
+  tier: HeHypothesisTier;
+  title: string;
+  description: string;
+  evidence: HeEvidenceItem[];
+  potential_pct: number;
+}
+
+function normTitle(t: string): string {
+  return t.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
+  const usage = newUsage();
+  const project = await readProject(ctx.supabase, job.project_id);
+  const profile = readSiteProfile<HeSiteProfileOutput>(project);
+  const search = resolveSearch(ctx);
+  const fetchText = resolveFetchText(ctx);
+
+  const hypothesesResult = await latestDoneJobResult<{ candidates?: HeHypothesisCandidate[] }>(
+    ctx.supabase,
+    job.project_id,
+    'hypotheses',
+  );
+  const candidates = hypothesesResult?.candidates ?? [];
+  if (!candidates.length) {
+    throw new Error('Нет кандидатов: сначала выполните стадию hypotheses');
+  }
+  const allTitles = candidates.map((c) => c.title);
+
+  const accepted: AcceptedHypothesis[] = [];
+  let merged = 0;
+  let dropped = 0;
+
+  for (const candidate of candidates) {
+    stageLog(ctx, `[evidence] «${candidate.title}»…`);
+
+    // 1) Поиск по запросам кандидата (2–4), дедуп ссылок, best-effort.
+    const queries = (candidate.search_queries.length ? candidate.search_queries : [`${candidate.title} рынок объём`])
+      .slice(0, MAX_QUERIES_PER_CANDIDATE);
+    const seenLinks = new Set<string>();
+    const searchResults: Array<{ title: string; link: string; snippet?: string }> = [];
+    for (const q of queries) {
+      try {
+        for (const item of await search(q)) {
+          if (seenLinks.has(item.link) || searchResults.length >= MAX_SEARCH_ITEMS) continue;
+          seenLinks.add(item.link);
+          searchResults.push(item);
+        }
+      } catch (e) {
+        stageLog(ctx, `[evidence] поиск «${q}» упал: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    // 2) Фетч топ-1–2 источников; сбойные пропускаем.
+    const sources: Array<{ url: string; text: string }> = [];
+    for (const item of searchResults.slice(0, MAX_SOURCES_TO_FETCH)) {
+      try {
+        sources.push({ url: item.link, text: truncate(await fetchText(item.link), SOURCE_EXCERPT) });
+      } catch {
+        stageLog(ctx, `[evidence] фетч ${item.link} пропущен`);
+      }
+    }
+
+    // 3) LLM-вердикт. Сбой по одному кандидату → drop с reason='stage_error'.
+    try {
+      const llm = await callLLMWithSchema(
+        buildEvidenceMessages({ candidate, profile, allCandidateTitles: allTitles, sources, searchResults }),
+        HeEvidenceVerdictSchema,
+        { model: getHeModel('research'), maxTokens: 4096 },
+      );
+      addUsage(usage, llm);
+      const v = llm.data;
+
+      if (v.verdict === 'drop') {
+        dropped += 1;
+        stageLog(ctx, `[evidence] drop: ${v.reason}`);
+        continue;
+      }
+
+      if (v.verdict === 'merge' && v.merge_with_title) {
+        const target = accepted.find((a) => normTitle(a.title) === normTitle(v.merge_with_title as string));
+        if (target) {
+          target.evidence = [...target.evidence, ...v.evidence].slice(0, MAX_EVIDENCE_PER_HYPOTHESIS);
+          target.potential_pct = Math.max(target.potential_pct, v.potential_pct);
+          merged += 1;
+          continue;
+        }
+        // Цель мержа не найдена среди принятых — трактуем как keep.
+        stageLog(ctx, `[evidence] merge-цель «${v.merge_with_title}» не найдена, keep`);
+      }
+
+      accepted.push({
+        tier: candidate.tier,
+        title: candidate.title,
+        description: candidate.description,
+        evidence: v.evidence.slice(0, MAX_EVIDENCE_PER_HYPOTHESIS),
+        potential_pct: v.potential_pct,
+      });
+    } catch (e) {
+      dropped += 1;
+      stageLog(ctx, `[evidence] stage_error по «${candidate.title}»: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // 4) Идемпотентная перезапись: сносим прошлые предложенные (ещё не
+  //    кластеризованные) гипотезы проекта, вставляем свежие.
+  const { error: delError } = await ctx.supabase
+    .from('he_hypotheses')
+    .delete()
+    .eq('project_id', job.project_id)
+    .is('vertical_id', null)
+    .eq('status', 'proposed');
+  if (delError) throw new Error(`he_hypotheses cleanup: ${delError.message}`);
+
+  if (accepted.length) {
+    const rows = accepted.map((a) => ({
+      project_id: job.project_id,
+      tier: a.tier,
+      title: a.title,
+      description: a.description,
+      evidence: a.evidence,
+      potential_pct: a.potential_pct,
+      status: 'proposed',
+    }));
+    const { error: insError } = await ctx.supabase.from('he_hypotheses').insert(rows);
+    if (insError) throw new Error(`he_hypotheses insert: ${insError.message}`);
+  }
+
+  const result = {
+    total_candidates: candidates.length,
+    kept: accepted.length,
+    merged,
+    dropped,
+  };
+  stageLog(ctx, `[evidence] итог: ${JSON.stringify(result)}`);
+  return { result, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
+}

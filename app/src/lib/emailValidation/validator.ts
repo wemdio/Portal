@@ -9,6 +9,7 @@
  */
 
 import * as dns from 'dns';
+import { domainToASCII } from 'url';
 import {
   checkSyntax,
   isDisposable,
@@ -105,23 +106,39 @@ export async function lookupMX(
     }
     if (attempt < MX_LOOKUP_MAX_ATTEMPTS) await dnsSleep(MX_LOOKUP_BACKOFF_MS * attempt);
   }
+  // Ретраи пиннутого резолвера (8.8.8.8/1.1.1.1) исчерпаны. Последний шанс —
+  // ОС-резолвер (системные DNS): пиннутые серверы могут резаться сетью/
+  // фаерволом VPS, а системный резолвер отвечает. Один раз за lookup, прежде
+  // чем признать MX неопределённым.
+  try {
+    const records = await dns.promises.resolveMx(domain);
+    if (records && records.length > 0) {
+      const hosts = deliverableMxHosts(records);
+      if (hosts.length > 0) return { mxHosts: hosts, found: true, lookupFailed: false };
+      return { mxHosts: [], found: false, lookupFailed: false };
+    }
+    // Нет MX → implicit MX = A-запись домена (RFC 5321 §5.1).
+    const a = await dns.promises.resolve4(domain);
+    return a && a.length > 0
+      ? { mxHosts: [domain], found: true, lookupFailed: false }
+      : { mxHosts: [], found: false, lookupFailed: false };
+  } catch (err) {
+    if (isHardDnsError((err as NodeJS.ErrnoException).code)) {
+      // Авторитетный «нет MX» от ОС-DNS: подтверждаем отсутствие implicit-A.
+      try {
+        const a = await dns.promises.resolve4(domain);
+        if (a && a.length > 0) return { mxHosts: [domain], found: true, lookupFailed: false };
+        return { mxHosts: [], found: false, lookupFailed: false };
+      } catch (aErr) {
+        if (isHardDnsError((aErr as NodeJS.ErrnoException).code)) {
+          return { mxHosts: [], found: false, lookupFailed: false };
+        }
+      }
+    }
+  }
   // Retries exhausted on a transient failure: MX status undetermined. Caller must
   // treat this as 'unknown' (retryable), NOT 'invalid', and must NOT cache it.
   return { mxHosts: [], found: false, lookupFailed: true };
-}
-
-export async function checkDomain(domain: string): Promise<boolean> {
-  try {
-    await dnsResolver.resolve4(domain);
-    return true;
-  } catch {
-    try {
-      await dnsResolver.resolve6(domain);
-      return true;
-    } catch {
-      return false;
-    }
-  }
 }
 
 // ─── 7. SMTP Verification ──────────────────────────────────────────────────
@@ -199,8 +216,10 @@ function markEgressBlocked(mxHost: string, url: string): void {
 // first-contact and the greylist counter never satisfies, so the address stays
 // 'unknown' forever. Remember which IP greylisted an MX and try THAT IP first on
 // the next probe, so the delayed retry lands on the same IP and clears.
+// TTL 90 минут: должен перекрывать весь график greylist-ретраев воркера
+// (5/15/30 мин), иначе поздний ретрай уйдёт с другого IP и greylist не снимется.
 const SMTP_GREYLIST_AFFINITY_TTL_MS = Number(
-  process.env.SMTP_GREYLIST_AFFINITY_TTL_MS ?? String(30 * 60 * 1000),
+  process.env.SMTP_GREYLIST_AFFINITY_TTL_MS ?? String(90 * 60 * 1000),
 );
 const mxGreylistAffinity = new Map<string, { url: string; expiry: number }>();
 
@@ -253,9 +272,10 @@ function proxyTryOrder(mxHost: string): string[] {
 /**
  * True when the proxy answered us but could NOT complete an SMTP conversation
  * with the recipient's MX — connect timeout / refused / reset / host
- * unreachable, or the MX rejected US at greeting/EHLO/MAIL FROM. These are
- * almost always properties of the *egress IP* (the MX blocks that specific
- * probe IP), so the SAME probe from a DIFFERENT proxy/IP may well succeed —
+ * unreachable, the proxy's own DNS failed to resolve the MX (getaddrinfo /
+ * EAI_AGAIN / ENOTFOUND), or the MX rejected US at greeting/EHLO/MAIL FROM.
+ * These are almost always properties of the *egress IP* (or the proxy's DNS),
+ * so the SAME probe from a DIFFERENT proxy/IP may well succeed —
  * worth a failover retry.
  *
  * A greylist 4xx, or any 2xx/5xx at RCPT, is a REAL answer about the mailbox
@@ -267,7 +287,7 @@ function isInconclusiveTransport(r: SmtpCheckResult): boolean {
   if (r.exists !== null || r.isCatchAll !== null || r.greylist) return false;
   const e = (r.error ?? '').toLowerCase();
   if (!e) return false;
-  return /timeout|econnrefused|econnreset|ehostunreach|enetunreach|closed before|connect|unexpected greeting|ehlo\/helo rejected|mail from rejected/.test(e);
+  return /timeout|econnrefused|econnreset|ehostunreach|enetunreach|closed before|connect|unexpected greeting|ehlo\/helo rejected|mail from rejected|getaddrinfo|eai_again|enotfound/.test(e);
 }
 
 async function smtpVerifyViaProxy(
@@ -367,13 +387,28 @@ export async function smtpVerify(
 // Must be checked BEFORE user-unknown, because these replies often also carry a
 // 5.1.1 code that would otherwise be read as "user unknown".
 const RCPT_ANTIPROBE_RE =
-  /(backscatter|sender.?(verif|callout|callback|address.?verif)|call.?back|un.?authenticat|not.?authenticat|authentication.?(fail|requir)|\bspf\b|\bdkim\b|\bdmarc\b|relay(ing)?.?(denied|access)|reverse.?dns|missing.?ptr|no.?ptr)/i;
+  /(backscatter|sender.?(verif|callout|callback|address.?verif|reject)|call.?back|un.?authenticat|not.?authenticat|authentication.?(fail|requir)|\bspf\b|\bdkim\b|\bdmarc\b|relay(ing)?.?(denied|access)|reverse.?dns|missing.?ptr|no.?ptr|bad.?outbound|outbound.?sender)/i;
 // "user unknown" signals → the mailbox genuinely does not exist (invalid).
+// Числовой код сужен до 5.1.1/5.1.10 — реальных «recipient not found»: голое
+// 5.1.x ловило и репутационные 5.1.0/5.1.8 (sender rejected, bad outbound
+// sender), которые про НАШУ пробу, а не про ящик.
 const RCPT_USER_UNKNOWN_RE =
-  /(no.?such.?(user|recipient|mailbox|address)|user.?unknown|unknown.?(user|recipient)|user.?not.?found|recipient.?(not.?found|rejected)|mailbox.?(unavailable|not.?found|disabled)|address.?(unknown|rejected)|does.?n.?.?t.?exist|not.?exist|invalid.?(recipient|mailbox|address)|5\.1\.[0-9]|нет.?такого|не.?существ|пользовател)/i;
+  /(no.?such.?(user|recipient|mailbox|address)|user.?unknown|unknown.?(user|recipient)|user.?not.?found|recipient.?not.?found|mailbox.?(not.?found|disabled)|address.?unknown|does.?n.?.?t.?exist|not.?exist|invalid.?(recipient|mailbox|address)|5\.1\.(?:1|10)(?![0-9])|нет.?такого|не.?существ|пользовател)/i;
+// «Мягкие» user-unknown формулировки: Exchange Online и др. пишут
+// "550 5.4.1 Recipient address rejected: Access denied" про ПОЛИТИКУ, а не про
+// отсутствие ящика. Считаем их «user unknown» ТОЛЬКО когда рядом нет policy-слов.
+const RCPT_USER_UNKNOWN_SOFT_RE =
+  /(recipient.?rejected|mailbox.?unavailable|address.?rejected)/i;
+const RCPT_POLICY_WORDS_RE = /(access.?denied|policy|denied)/i;
+// Переполненный ящик / квота: ящик ЖИВ, просто не принимает почту сейчас —
+// это не «user unknown». Проверяется ДО user-unknown.
+const RCPT_QUOTA_RE =
+  /(mailbox.?full|over.?quota|quota.?exceed|insufficient.?storage)/i;
 // policy / rate-limit / temporary signals → we can't trust the 5xx as "dead".
+// Кириллические токены — русскоязычные MTA (Яндекс, Mail.ru, корп. Exchange RU):
+// "550 Слишком много соединений с вашего IP" и т.п.
 const RCPT_POLICY_BLOCK_RE =
-  /(rate.?limit|too.?many|try.?again|temporar|greylist|deferred|throttl|reputation|black.?list|blocked|spam|policy|denied|not.?allowed|service.?unavailable|5\.7\.[0-9])/i;
+  /(rate.?limit|too.?many|try.?again|temporar|greylist|deferred|throttl|reputation|black.?list|blocked|spam|policy|denied|not.?allowed|service.?unavailable|5\.7\.[0-9]|слишком|много|превыш|лимит|повтор|позже|отклонен|спам|заблокир|чёрн|черн)/i;
 
 /**
  * Decide whether a 5xx RCPT reply means the mailbox doesn't exist ('invalid')
@@ -383,14 +418,19 @@ const RCPT_POLICY_BLOCK_RE =
  * does NOT also say the user is unknown (e.g. Yandex "550 5.7.1 No such user!"
  * stays invalid). Falls back to 'invalid' when no reply text is available
  * (older proxy build), preserving previous behaviour.
+ *
+ * `probedEmail` — адрес, который мы проверяли: MTA часто эхом возвращает его в
+ * тексте ответа, и токены из localpart/домена (spf@…, x@dmarc.io) не должны
+ * срабатывать как анти-пробные SPF/DKIM/DMARC-сигналы. Эхо вырезается и в
+ * <скобках>, и в «голом» виде (без скобок) перед проверкой RCPT_ANTIPROBE_RE.
  */
-export function classifyRcpt5xx(text: string | undefined): 'invalid' | 'unknown' {
+export function classifyRcpt5xx(text: string | undefined, probedEmail?: string): 'invalid' | 'unknown' {
   const t = (text ?? '').trim();
   if (!t) return 'invalid';
-  // Anti-probe rejection (backscatter / sender-verify / auth / relay-denied):
-  // the server rejected our probe, not the mailbox. Checked FIRST so its 5.1.1
-  // code isn't mistaken for "user unknown". A live mailbox can get this, so we
-  // must NOT call it invalid — it's unverifiable.
+  // Anti-probe rejection (backscatter / sender-verify / sender-reject / auth /
+  // relay-denied): the server rejected our probe, not the mailbox. Checked FIRST
+  // so its 5.1.1 code isn't mistaken for "user unknown". A live mailbox can get
+  // this, so we must NOT call it invalid — it's unverifiable.
   //
   // Strip the echoed <recipient@domain> first: most MTAs echo the probed address
   // in the reply, so a genuinely-dead role/monitoring mailbox like <spf@…>,
@@ -398,9 +438,19 @@ export function classifyRcpt5xx(text: string | undefined): 'invalid' | 'unknown'
   // SPF/DKIM/DMARC tokens and wrongly survive as 'unknown' — the dangerous
   // direction (dead address kept → bounce). Real anti-probe phrasing
   // ("Backscatter Protection", "SPF check failed") lives OUTSIDE the brackets.
-  const antiprobeText = t.replace(/<[^>]*>/g, ' ');
+  let antiprobeText = t.replace(/<[^>]*>/g, ' ');
+  if (probedEmail) {
+    // «Голое» эхо без скобок: '550 5.1.1 spf@acme.com: User unknown'.
+    const escaped = probedEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    antiprobeText = antiprobeText.replace(new RegExp(escaped, 'gi'), ' ');
+  }
   if (RCPT_ANTIPROBE_RE.test(antiprobeText)) return 'unknown';
+  // Квота/переполнение — ящик жив, 5xx тут не «user unknown».
+  if (RCPT_QUOTA_RE.test(t)) return 'unknown';
   if (RCPT_USER_UNKNOWN_RE.test(t)) return 'invalid';
+  // «Мягкие» формулировки — invalid только без policy-слов рядом
+  // ("Recipient address rejected: Access denied" — политика, не мёртвый ящик).
+  if (RCPT_USER_UNKNOWN_SOFT_RE.test(t) && !RCPT_POLICY_WORDS_RE.test(t)) return 'invalid';
   if (RCPT_POLICY_BLOCK_RE.test(t)) return 'unknown';
   return 'invalid';
 }
@@ -411,7 +461,19 @@ export async function validateEmail(
   rawEmail: string,
   domainCache: Map<string, DomainInfo>,
 ): Promise<ValidationResult> {
-  const email = rawEmail.trim().toLowerCase();
+  let email = rawEmail.trim().toLowerCase();
+  // IDN-домены (почта.рф → xn--80a1acny.xn--p1ai): syntax/MX/SMTP идут по
+  // punycode-форме домена, иначе такие адреса падали на проверке синтаксиса.
+  // Нормализованный адрес воркер хранит как введён — ValidationResult его
+  // не возвращает, поэтому конвертация чисто внутренняя.
+  const atIdx0 = email.lastIndexOf('@');
+  if (atIdx0 > 0) {
+    const rawDomain = email.substring(atIdx0 + 1);
+    const asciiDomain = domainToASCII(rawDomain);
+    if (asciiDomain && asciiDomain !== rawDomain) {
+      email = `${email.substring(0, atIdx0)}@${asciiDomain}`;
+    }
+  }
   const details: Record<string, unknown> = {};
 
   const syntax = checkSyntax(email);
@@ -482,8 +544,15 @@ export async function validateEmail(
 
   const needCatchAllCheck = domainInfo.isCatchAll === null;
   let smtpResult: SmtpCheckResult | null = null;
+  // Первый подтверждённый exists=true: backup-MX со протухшей таблицей ящиков
+  // может ответить 550 на живой адрес — такому contradictory-ответу НЕЛЬЗЯ
+  // перебивать уже подтверждённый primary (иначе stale backup-MX убивает живой
+  // лид, которого старый однопроходный цикл сохранял).
+  let firstOkResult: SmtpCheckResult | null = null;
 
-  for (const mxHost of domainInfo.mxHosts.slice(0, 3)) {
+  const mxHostsToTry = domainInfo.mxHosts.slice(0, 3);
+  for (let mxIndex = 0; mxIndex < mxHostsToTry.length; mxIndex += 1) {
+    const mxHost = mxHostsToTry[mxIndex];
     try {
       smtpResult = await smtpVerify(email, mxHost, {
         checkCatchAll: needCatchAllCheck,
@@ -491,6 +560,31 @@ export async function validateEmail(
       });
       if (smtpResult.isCatchAll !== null && domainInfo.isCatchAll === null) {
         domainInfo.isCatchAll = smtpResult.isCatchAll;
+      }
+      // Backup-MX отверг ящик, который предыдущий MX уже подтвердил: стоп,
+      // вердикт остаётся за подтвердившим (catch-all при этом может остаться
+      // неопределённым → честный catch_all_undetermined, а не invalid).
+      if (smtpResult.exists === false && firstOkResult) {
+        smtpResult = firstOkResult;
+        break;
+      }
+      if (smtpResult.exists === true && !firstOkResult) {
+        firstOkResult = smtpResult;
+      }
+      // Ящик подтверждён, но catch-all этого MX не определён: у следующего MX
+      // домена random-проба может дать ответ — пробуем его с checkCatchAll=true,
+      // чтобы не оставлять адрес в catch_all_undetermined, пока есть MX.
+      // Для freemail (FREE_PROVIDERS) не ходим дальше: вердикт 'ok' при
+      // неопределённом catch-all уже обеспечен freemail-trust ниже, лишние
+      // пробы на каждый адрес домена не нужны.
+      if (
+        smtpResult.exists === true &&
+        domainInfo.isCatchAll === null &&
+        needCatchAllCheck &&
+        !freeFlag &&
+        mxIndex < mxHostsToTry.length - 1
+      ) {
+        continue;
       }
       if (smtpResult.exists !== null || smtpResult.isCatchAll !== null) break;
       if (smtpResult.greylist) break;
@@ -525,7 +619,7 @@ export async function validateEmail(
       result: 'unknown', quality: 'risky',
       is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: isCatchAll,
       did_you_mean: didYouMean, mx_found: mxFound, smtp_code: smtpResult.code,
-      details: { ...details, step: 'greylist' },
+      details: { ...details, step: 'greylist', smtp_text: smtpResult.smtpText },
       error: 'Сервер ответил временным отказом (greylisting)',
     };
   }
@@ -548,6 +642,20 @@ export async function validateEmail(
     // queue-воркере (shouldRetry ищет «временн»); после исчерпания попыток
     // адрес остаётся 'unknown'/risky, а не 'ok'.
     if (domainInfo.isCatchAll === null) {
+      // Исключение — кураторский freemail (FREE_PROVIDERS, точное совпадение):
+      // крупные провайдеры (mail.ru, gmail.com, yandex.ru…) не отвечают на
+      // random-пробу по принципиальным причинам (анти-энумерация), поэтому
+      // catch-all там не определим В ПРИНЦИПЕ, а RCPT-подтверждение ящика —
+      // достаточный сигнал. Typo-squat домены (maail.ru, eandex.ru) в
+      // FREE_PROVIDERS НЕ входят и по-прежнему уходят в unknown ниже.
+      if (freeFlag) {
+        return {
+          result: 'ok', quality: 'good',
+          is_free: true, is_role: roleFlag, is_disposable: false, is_catch_all: false,
+          did_you_mean: didYouMean, mx_found: mxFound, smtp_code: smtpResult.code,
+          details: { ...details, step: 'smtp_ok' },
+        };
+      }
       return {
         result: 'unknown', quality: 'risky',
         is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: false,
@@ -576,20 +684,40 @@ export async function validateEmail(
     // A 5xx at RCPT is usually a genuine "user unknown" → invalid. But some
     // hosts return 5xx for policy/rate-limit reasons; those we keep as
     // 'unknown' (couldn't verify) rather than deleting a possibly-valid lead.
-    if (classifyRcpt5xx(smtpResult.smtpText) === 'unknown') {
+    // Квота («550 5.2.2 mailbox full») — НЕ user unknown и НЕ policy-ретрай:
+    // пропускаем классификатор и уходим в терминальный over_quota ниже.
+    if (!RCPT_QUOTA_RE.test(smtpResult.smtpText ?? '')) {
+      if (classifyRcpt5xx(smtpResult.smtpText, email) === 'unknown') {
+        return {
+          result: 'unknown', quality: 'risky',
+          is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: false,
+          did_you_mean: didYouMean, mx_found: mxFound, smtp_code: smtpResult.code,
+          details: { ...details, step: 'smtp_5xx_policy', smtp_text: smtpResult.smtpText },
+          error: `Сервер отклонил по политике/лимиту (${smtpResult.code})`,
+        };
+      }
       return {
-        result: 'unknown', quality: 'risky',
+        result: 'invalid', quality: 'bad',
         is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: false,
         did_you_mean: didYouMean, mx_found: mxFound, smtp_code: smtpResult.code,
-        details: { ...details, step: 'smtp_5xx_policy', smtp_text: smtpResult.smtpText },
-        error: `Сервер отклонил по политике/лимиту (${smtpResult.code})`,
+        details: { ...details, step: 'smtp_invalid' },
       };
     }
+  }
+
+  // Переполненный ящик / превышенная квота (452 при exists===null, либо
+  // «mailbox full»/«over quota» текст — в т.ч. 5xx при exists===false): ящик,
+  // скорее всего, ЖИВ, но сейчас не принимает почту.
+  // ТЕРМИНАЛЬНЫЙ unknown (step 'over_quota'): текст ошибки намеренно БЕЗ
+  // «временн»/greylist-токенов — воркер НЕ должен ретраить (квота за минуты
+  // ретрая не рассосётся), но и удалять адрес как invalid нельзя.
+  if (smtpResult.code === 452 || RCPT_QUOTA_RE.test(smtpResult.smtpText ?? '')) {
     return {
-      result: 'invalid', quality: 'bad',
-      is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: false,
+      result: 'unknown', quality: 'risky',
+      is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: isCatchAll,
       did_you_mean: didYouMean, mx_found: mxFound, smtp_code: smtpResult.code,
-      details: { ...details, step: 'smtp_invalid' },
+      details: { ...details, step: 'over_quota', smtp_text: smtpResult.smtpText },
+      error: `Ящик переполнен или превышена квота (${smtpResult.code})`,
     };
   }
 
