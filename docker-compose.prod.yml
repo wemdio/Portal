@@ -914,7 +914,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4096M
+          # 25.07.2026: 4 GiB упирался в 88% под MAX_CONCURRENT=4 (4 копии
+          # faster-whisper держат каждая буфер аудио + активации). Health-check
+          # алерты 🟡 memory 88% шли раз в 15 мин. Поднято до 6 GiB — запас
+          # без OOM-риска, сервер имеет ресурс.
+          memory: 6144M
           cpus: '6'
           pids: 512
     restart: unless-stopped
