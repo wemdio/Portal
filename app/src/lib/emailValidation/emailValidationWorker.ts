@@ -333,7 +333,12 @@ const RETRY_WAIT_CAP_MS = 60_000;
 // Дефолт 25 мин покрывает greylist-расписание (пробы на 0/5/20 мин) и клэмп
 // hint-подсказок (20 мин × джиттер 1.1 = 22 мин < 25). Флор 5 мин — защита
 // от EMAIL_VALIDATION_TAIL_CAP_MIN=0, который убил бы все ретраи мгновенно.
-const TAIL_CAP_MS = Math.max(5, Number(process.env.EMAIL_VALIDATION_TAIL_CAP_MIN ?? '25')) * 60_000;
+// NaN-вход ('abc' и т.п.) без гарда дал бы NaN-кап = тихое ОТКЛЮЧЕНИЕ кэпа.
+const TAIL_CAP_MINUTES_PARSED = Number(process.env.EMAIL_VALIDATION_TAIL_CAP_MIN ?? '25');
+export const TAIL_CAP_MS = Math.max(
+  5,
+  Number.isFinite(TAIL_CAP_MINUTES_PARSED) && TAIL_CAP_MINUTES_PARSED > 0 ? TAIL_CAP_MINUTES_PARSED : 25,
+) * 60_000;
 
 /**
  * Миллисекунды до ближайшего отложенного ретрая джоба (один дешёвый запрос).
@@ -379,7 +384,7 @@ const PROXY_SCHEDULE_MIN = [1, 5];
 // (TAIL_CAP, дефолт 25 мин, см. ниже) с учётом джиттера ×1.1 — иначе ретрай
 // будет финализирован таймаутом раньше, чем наступит его время.
 const GREYLIST_HINT_MIN_MS = 60_000;
-const GREYLIST_HINT_MAX_MS = 20 * 60_000;
+export const GREYLIST_HINT_MAX_MS = 20 * 60_000;
 
 /** Парсим «try again in N seconds/minutes» из текста SMTP-ответа (greylist). */
 export function parseGreylistHintMs(smtpText: string | undefined): number | null {
@@ -462,7 +467,8 @@ function withJitter(ms: number): number {
 /**
  * Задержка retry_after для класса ретрая с эскалацией по номеру попытки.
  * Для greylist сначала пробуем подсказку «try again in N» из smtp_text
- * (клэмп [1 мин, 45 мин]); без неё — расписание 5→15→30 мин.
+ * (клэмп [1 мин, 20 мин] — верх подобран под TAIL_CAP, см. выше); без неё —
+ * расписание 5→15→30 мин.
  */
 export function retryDelayMs(cls: RetryClass, attempts: number, smtpText?: string): number {
   let base: number;
@@ -853,8 +859,12 @@ async function finalizeDeferredTail(jobId: string): Promise<number> {
     .not('result', 'is', null)
     .select('id');
   if (error2) {
+    // 0, а не partial: первый UPDATE мог уже закрыть часть строк — вернём
+    // fallbackCount, и caller сделает break с вечными pending-строками
+    // (их вердикты не попадут в results и будут стёрты cleanup'ом). Оба
+    // UPDATE'а идемпотентны — пусть следующая итерация повторит целиком.
     workerLog('warn', `finalizeDeferredTail: verdict update failed for job ${jobId}`, error2);
-    return fallbackCount;
+    return 0;
   }
   return fallbackCount + (data2?.length ?? 0);
 }

@@ -6999,41 +6999,64 @@ export function DatabaseSpreadsheet() {
       if (!hasFillable) return;
 
       let filled = 0;
-      const newData = activeTab.data.map((row, rowIdx) => {
-        const extended = [...row];
-        while (extended.length <= detailsColIndex) extended.push('');
-        if (rowIdx === 0) {
-          if (colsMissing) {
-            extended[resultColIndex] = 'Результат (email)';
-            extended[qualityColIndex] = 'Качество';
-            extended[providerColIndex] = 'Провайдер';
-            extended[detailsColIndex] = 'Детали';
-          }
-          return extended;
-        }
-        const email = String(row[emailSourceCol] ?? '').trim().toLowerCase();
-        if (!email) return extended;
-        const r = byEmail.get(email);
-        if (!r) return extended;
-        // Только пустые ячейки результата — существующие вердикты не трогаем.
-        if (!colsMissing && String(extended[resultColIndex]).trim()) return extended;
-        if (!String(extended[providerColIndex]).trim()) extended[providerColIndex] = getEmailProvider(email);
-        extended[resultColIndex] = r.result ? (RESULT_LABELS[r.result] || r.result) : (r.last_error ?? 'Ошибка');
-        extended[qualityColIndex] = r.quality ? (QUALITY_LABELS[r.quality] || r.quality) : '';
-        const detailParts: string[] = [];
-        if (r.is_free) detailParts.push('Free');
-        if (r.is_role) detailParts.push('Role');
-        if (r.is_disposable) detailParts.push('Disposable');
-        if (r.is_catch_all) detailParts.push('Catch-All');
-        if (r.did_you_mean) detailParts.push(`→ ${r.did_you_mean}`);
-        if (r.last_error && (r.status === 'failed' || r.result === 'unknown')) detailParts.push(r.last_error);
-        extended[detailsColIndex] = detailParts.join('; ');
-        filled += 1;
-        return extended;
-      });
+      setTabs((prev) =>
+        prev.map((t) => {
+          if (t.id !== activeTab.id) return t;
+          // Пишем в ЖИВОЕ состояние вкладки, а не снапшот на момент открытия
+          // модалки: пока шли fetch'и, пользователь мог править ячейки или
+          // запустить новую валидацию (её polling пишет в те же колонки).
+          // Индексы колонок — тоже от живого header'а.
+          const liveHeader = t.data[0] ?? [];
+          let liveResultCol = liveHeader.findIndex((h) => String(h).startsWith('Результат ('));
+          const liveColsMissing = liveResultCol < 0;
+          if (liveColsMissing) liveResultCol = liveHeader.length;
+          const liveQualityCol = liveResultCol + 1;
+          const liveProviderCol = liveResultCol + 2;
+          const liveDetailsCol = liveResultCol + 3;
 
-      setTabs((prev) => prev.map((t) => (t.id === activeTab.id ? { ...t, data: newData } : t)));
-      setLastAction({ message: `Валидация почт: подтянуто ${filled} результатов из последней задачи`, time: Date.now() });
+          let touched = false;
+          const data = t.data.map((row, rowIdx) => {
+            const extended = [...row];
+            while (extended.length <= liveDetailsCol) extended.push('');
+            if (rowIdx === 0) {
+              if (liveColsMissing) {
+                extended[liveResultCol] = 'Результат (email)';
+                extended[liveQualityCol] = 'Качество';
+                extended[liveProviderCol] = 'Провайдер';
+                extended[liveDetailsCol] = 'Детали';
+                touched = true;
+              }
+              return extended;
+            }
+            const email = String(row[emailSourceCol] ?? '').trim().toLowerCase();
+            if (!email) return extended;
+            const r = byEmail.get(email);
+            if (!r) return extended;
+            // Ключевая защита от гонок: ячейка пуста в ЖИВОМ состоянии?
+            // Polling новой валидации и правки пользователя перезаписывают нас
+            // (мы — никого), зато и мы не затираем их.
+            if (String(extended[liveResultCol]).trim()) return extended;
+            if (!String(extended[liveProviderCol]).trim()) extended[liveProviderCol] = getEmailProvider(email);
+            extended[liveResultCol] = r.result ? (RESULT_LABELS[r.result] || r.result) : (r.last_error ?? 'Ошибка');
+            extended[liveQualityCol] = r.quality ? (QUALITY_LABELS[r.quality] || r.quality) : '';
+            const detailParts: string[] = [];
+            if (r.is_free) detailParts.push('Free');
+            if (r.is_role) detailParts.push('Role');
+            if (r.is_disposable) detailParts.push('Disposable');
+            if (r.is_catch_all) detailParts.push('Catch-All');
+            if (r.did_you_mean) detailParts.push(`→ ${r.did_you_mean}`);
+            if (r.last_error && (r.status === 'failed' || r.result === 'unknown')) detailParts.push(r.last_error);
+            extended[liveDetailsCol] = detailParts.join('; ');
+            filled += 1;
+            touched = true;
+            return extended;
+          });
+          return touched ? { ...t, data } : t;
+        }),
+      );
+      if (filled > 0) {
+        setLastAction({ message: `Валидация почт: подтянуто ${filled} результатов из последней задачи`, time: Date.now() });
+      }
     } catch { /* фоновая автоматика — ошибки глушим */ }
   };
 

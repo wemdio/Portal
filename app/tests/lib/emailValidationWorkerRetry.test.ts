@@ -17,6 +17,8 @@ import {
   filterDirtyCacheEntries,
   domainInfoSignature,
   MAX_ATTEMPTS,
+  TAIL_CAP_MS,
+  GREYLIST_HINT_MAX_MS,
 } from '@/lib/emailValidation/emailValidationWorker';
 import type { DomainInfo } from '@/lib/emailValidation/shared';
 
@@ -226,5 +228,18 @@ describe('filterDirtyCacheEntries: dirty-set доменного кэша (фик
       ['b.ru', domainInfoSignature(b)],
     ]);
     expect(filterDirtyCacheEntries(new Map([['a.ru', a], ['b.ru', b]]), snapshot)).toEqual([]);
+  });
+});
+
+describe('инвариант: hinted greylist-ретрай всегда успевает до кэпа хвоста', () => {
+  it('GREYLIST_HINT_MAX × джиттер 1.1 < TAIL_CAP', () => {
+    // Если этот инвариант сломается (подняли hint-клэмп или опустили кэп),
+    // hinted-ретрай будет финализирован таймаутом хвоста ДО своего срока.
+    expect(GREYLIST_HINT_MAX_MS * 1.1).toBeLessThan(TAIL_CAP_MS);
+  });
+
+  it('TAIL_CAP_MS конечен и ≥ 5 минут (защита от мусорного env)', () => {
+    expect(Number.isFinite(TAIL_CAP_MS)).toBe(true);
+    expect(TAIL_CAP_MS).toBeGreaterThanOrEqual(5 * 60_000);
   });
 });
