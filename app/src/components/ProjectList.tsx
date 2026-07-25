@@ -1649,18 +1649,22 @@ export function ProjectList() {
     <div className={isTma ? 'space-y-4' : 'flex flex-1 min-h-0 flex-col gap-4'}>
       {/* Header + Controls — single row */}
       <div className={isTma ? 'flex flex-col gap-3' : 'flex flex-wrap items-center gap-2'}>
-        <h1 className={`${isTma ? 'text-xl' : 'text-lg'} font-semibold tracking-tight text-zinc-900 mr-auto`}>
+        <h1 className={`${isTma ? 'text-xl' : 'text-lg'} font-semibold tracking-tight text-zinc-900`}>
           {locale === 'en' ? 'Projects' : 'Проекты'}
         </h1>
 
-        {/* Search */}
-        <div className="relative">
+        {/* Search — растягивается на всё свободное пространство между
+            заголовком «Проекты» и правой группой фильтров. Раньше был
+            w-44 фиксированный, а h1 имел mr-auto, из-за чего между
+            заголовком и полем поиска зияла пустота. Теперь h1 сразу
+            слева, поиск — flex-1, фильтры/кнопки прижаты вправо. */}
+        <div className="relative flex-1 min-w-[180px]">
           <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
           <input
             type="text"
-            className="w-44 rounded-xl border border-zinc-200/80 bg-white py-2 pl-8 pr-3 text-xs text-zinc-900 placeholder-zinc-400 focus:ring-2 focus:ring-zinc-200 focus:border-transparent outline-none transition-all shadow-sm hover:shadow-md"
+            className="w-full rounded-xl border border-zinc-200/80 bg-white py-2 pl-8 pr-3 text-xs text-zinc-900 placeholder-zinc-400 focus:ring-2 focus:ring-zinc-200 focus:border-transparent outline-none transition-all shadow-sm hover:shadow-md"
             placeholder={locale === 'en' ? 'Search...' : 'Поиск...'}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
