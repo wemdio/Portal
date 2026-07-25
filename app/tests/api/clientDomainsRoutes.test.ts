@@ -272,6 +272,43 @@ describe('POST /api/client/domains/suggestions', () => {
     expect(json.suggested.length).toBe(6);
     expect(mockCheck).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps only still-offered picks for unconfirmed rows', async () => {
+    seedSelectionRow({ selected: ['acme.ru', 'zzz-gone.ru'], status: 'suggested' });
+    const { POST } = await import('@/app/api/client/domains/suggestions/route');
+    const res = await POST(
+      makeReq(SUGGESTIONS_URL, { method: 'POST', body: { brand: 'acme', offset: 0 } }),
+    );
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    // acme.ru входит в новую порцию, zzz-gone.ru — нет.
+    expect(json.selected).toEqual(['acme.ru']);
+    expect(json.status).toBe('suggested');
+  });
+
+  it('does NOT touch a confirmed selection: status and selected stay as they were', async () => {
+    // Клиент подтвердил набор, менеджер уведомлён. «Ещё варианты» обновляет
+    // suggested, но подтверждённый выбор обязан пережить регенерацию —
+    // менеджер может уже покупать этот список.
+    seedSelectionRow({
+      selected: ['acme.ru', 'acme-hq.ru', 'acme.online'],
+      status: 'selected',
+    });
+    const { POST } = await import('@/app/api/client/domains/suggestions/route');
+    const res = await POST(
+      makeReq(SUGGESTIONS_URL, { method: 'POST', body: { brand: 'acme', offset: 1 } }),
+    );
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.status).toBe('selected');
+    expect(json.selected).toEqual(['acme.ru', 'acme-hq.ru', 'acme.online']);
+
+    const stored = tableRows('client_domain_selections').find(
+      (r) => r.client_user_id === 'client-A',
+    );
+    expect(stored?.status).toBe('selected');
+    expect(stored?.selected).toEqual(['acme.ru', 'acme-hq.ru', 'acme.online']);
+  });
 });
 
 // ── PUT selection ────────────────────────────────────────────────────────────
@@ -330,6 +367,45 @@ describe('PUT /api/client/domains/selection', () => {
       }),
     );
     expect(res.status).toBe(400);
+  });
+
+  it('400 on case/whitespace duplicates (normalized before dedup)', async () => {
+    // ['acme.ru', 'ACME.ru ', 'acme-hq.ru'] после trim/lowercase — это ДВА
+    // домена, а не три: без нормализации до dedup проверка «ровно 3»
+    // обходилась бы.
+    seedSelectionRow();
+    const { PUT } = await import('@/app/api/client/domains/selection/route');
+    const res = await PUT(
+      makeReq(SELECTION_URL, {
+        method: 'PUT',
+        body: { selected: ['acme.ru', 'ACME.ru ', 'acme-hq.ru'] },
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('409 when stored required_count is invalid', async () => {
+    seedSelectionRow({ required_count: 0 });
+    const { PUT } = await import('@/app/api/client/domains/selection/route');
+    const res = await PUT(
+      makeReq(SELECTION_URL, { method: 'PUT', body: { selected: [] } }),
+    );
+    expect(res.status).toBe(409);
+  });
+
+  it('200 even when the manager notification fails (selection already saved)', async () => {
+    seedSelectionRow();
+    mockNotify.mockRejectedValueOnce(new Error('notifications db down'));
+    const { PUT } = await import('@/app/api/client/domains/selection/route');
+    const res = await PUT(
+      makeReq(SELECTION_URL, {
+        method: 'PUT',
+        body: { selected: ['acme.ru', 'acme-hq.ru', 'acme.online'] },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.status).toBe('selected');
   });
 
   it('200 on a valid full set: stores selection, notifies managers, invalidates cache', async () => {

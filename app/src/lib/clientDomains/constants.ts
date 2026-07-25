@@ -10,12 +10,24 @@
  * .tech/.site) — the client may pick any N of the offered domains.
  */
 
-import type { TariffLimits, TariffType } from '@/lib/tariffs';
+import type { TariffLimits } from '@/lib/tariffs';
 
-/** Domains to buy per plan. Custom/unknown plans fall back to max_domains. */
-export const DOMAINS_REQUIRED_PER_PLAN: Record<'standard' | 'pro', number> = {
+/**
+ * Domains to buy per plan. Custom/unknown plans fall back to max_domains.
+ *
+ * Ключи намеренно ДВУЯЗЫЧНЫЕ и параметр — string, а не TariffType: на ветке
+ * Sergey enum тарифов старый ('standard'|'pro'|'custom'), на test/main после
+ * рефактора — новый ('Запуск'|'Поток'|'Масштаб', LEGACY-маппинг там:
+ * standard↔Запуск, pro↔Поток). Жёсткая типизация под enum ломала сборку при
+ * мёрдже ветки в test (CI Semaphore, 2026-07-25). Строковый параметр с
+ * двуязычной мапой компилируется и корректно работает в ОБОИХ мирах;
+ * неизвестные значения по-прежнему уходят в лимиты тарифа.
+ */
+export const DOMAINS_REQUIRED_PER_PLAN: Record<string, number> = {
   standard: 3,
+  'Запуск': 3,
   pro: 6,
+  'Поток': 6,
 };
 
 /** How many variants we offer per required domain (offer 2N, client picks N). */
@@ -33,10 +45,10 @@ export const RU_SHARE = 2 / 3;
 const FALLBACK_REQUIRED = 3;
 
 export function getRequiredDomainCount(
-  tariffType: TariffType,
+  tariffType: string,
   limits: TariffLimits,
 ): number {
-  if (tariffType === 'standard' || tariffType === 'pro') {
+  if (tariffType in DOMAINS_REQUIRED_PER_PLAN) {
     return DOMAINS_REQUIRED_PER_PLAN[tariffType];
   }
   const fromLimits = Number(limits.max_domains);

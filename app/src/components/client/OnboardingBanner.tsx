@@ -82,7 +82,7 @@ export function OnboardingBanner() {
           className="text-xs mt-0.5"
           style={{ color: 'var(--cp-paper-mute)' }}
         >
-          На дашборде есть пошаговый онбординг — за 6 шагов запустите первую кампанию.
+          На дашборде есть пошаговый онбординг — за 7 шагов запустите первую кампанию.
         </p>
       </div>
       {/* CTA bumped from `text-xs px-3 py-1.5` to `text-sm px-4 py-2` for
