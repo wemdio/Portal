@@ -13,6 +13,7 @@ import {
   downloadFileByFileId,
   downloadFileByFileIdToPath,
   downloadMtprotoDocToPath,
+  getForumTopicsMtproto,
   type MtprotoDocumentRef,
 } from '@/lib/tgMtprotoDownload';
 import fs from 'node:fs/promises';
@@ -654,6 +655,62 @@ export async function processVideoMessage(
   });
 
   return { status: 'completed', text };
+}
+
+/**
+ * Auto-upsert every forum topic Telegram knows about for `chatId` into
+ * `tg_bot_chats`, using the topic title from MTProto. Best-effort: swallows
+ * MTProto errors, no-ops when no user MTProto session is configured.
+ *
+ * Why: transcripts get `topic_id = msg.message_thread_id` written on every
+ * insert, but `tg_bot_chats` only had a row for the topics that a user
+ * manually registered via /chats/add. Any topic no-one registered surfaced
+ * in the UI as the fallback label `<chat> · topic <id>` — visually broken
+ * even though the transcript itself was fine. This helper closes that gap.
+ *
+ * Runs at the start of every scan job (cheap — one MTProto call returns the
+ * full topic list), and lazily from the webhook when a message arrives in
+ * an unnamed topic. Also updates `topic_name` when Telegram side renamed it.
+ */
+export async function syncForumTopicsFromApi(chatId: number): Promise<void> {
+  if (!supabaseAdmin) return;
+  if (!isUserMtprotoAvailable()) return;
+
+  let topics: Awaited<ReturnType<typeof getForumTopicsMtproto>>;
+  try {
+    topics = await getForumTopicsMtproto(chatId);
+  } catch (err) {
+    // Don't spam logs — some chats aren't forums, MTProto session may be
+    // temporarily unavailable, etc. Auto-upsert is best-effort.
+    console.warn(`[tg-transcribe] syncForumTopicsFromApi(${chatId}) failed:`, err);
+    return;
+  }
+  if (topics.length === 0) return;
+
+  // Preserve chat-level chat_type. Fall back to 'supergroup' — forum chats
+  // are always supergroups in Telegram.
+  let chatType = 'supergroup';
+  try {
+    const { data: chatRow } = await supabaseAdmin
+      .from('tg_bot_chats')
+      .select('chat_type')
+      .eq('chat_id', chatId)
+      .eq('topic_id', 0)
+      .maybeSingle();
+    if (chatRow && typeof (chatRow as { chat_type?: unknown }).chat_type === 'string') {
+      chatType = (chatRow as { chat_type: string }).chat_type;
+    }
+  } catch {
+    // best-effort — supergroup is a safe default
+  }
+
+  for (const t of topics) {
+    // upsertBotChat with title='' preserves any user-curated title on the
+    // row (e.g. "Продажи Polza → Звонки" set via /chats/add). is_forum=true
+    // and topicName ensures the row displays as "<chat> → <topic>" not
+    // "<chat> · topic N".
+    await upsertBotChat(chatId, '', chatType, undefined, true, t.id, t.title);
+  }
 }
 
 export async function upsertBotChat(

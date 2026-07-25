@@ -14,8 +14,17 @@ import { Check, CheckCircle2, ChevronDown, ChevronUp, FileUp, Loader2, MoreVerti
 import { parseInnColumn } from '@/lib/companiesSearch/innCsv';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, ALL_NAV_TAB_IDS, NAV_TABS_CONFIG } from '@/lib/toolsRegistry';
 import { CampaignStatusLabels } from '@/lib/instantly/types';
+import {
+  TARIFF_LABELS_RU,
+  TARIFF_DEFAULTS,
+  BILLING_PERIOD_LABELS,
+  TARIFF_LAUNCH,
+  TARIFF_FLOW,
+  TARIFF_SCALE,
+  calcBillingAmount,
+} from '@/lib/tariffPricing';
+import type { TariffType, PaidTariffType, BillingPeriod } from '@/lib/tariffPricing';
 
-type TariffType = 'standard' | 'pro' | 'custom';
 type TariffData = {
   tariff_type: TariffType;
   max_contacts: number | null;
@@ -32,37 +41,24 @@ type AdminUserTariffPayload = TariffData & {
   setup_until?: string | null;
   billing_mode?: 'invoice' | 'autopayment' | null;
   payment_locked?: boolean;
-  billing_period?: 'month' | 'half_year' | 'year' | null;
+  billing_period?: BillingPeriod | null;
   billing_amount?: number | null;
   /** Персистентный флаг "клиент работает с тестовым магазином ЮКассы".
    *  Управляется отдельным блоком в админ-модалке, переключает отображение
    *  цен в клиентском ЛК и креды при создании счёта. */
   is_test_shop?: boolean;
 };
-const TARIFF_DEFAULTS: Record<'standard' | 'pro', Omit<TariffData, 'tariff_type'>> = {
-  standard: { max_contacts: 10_000, max_rows: 20_000, max_chains_per_month: 10, max_domains: 4, max_emails: 16 },
-  pro: { max_contacts: 20_000, max_rows: 40_000, max_chains_per_month: 20, max_domains: 8, max_emails: 32 },
-};
-const TARIFF_LABELS: Record<TariffType, string> = { standard: 'Стандарт', pro: 'Про', custom: 'Custom' };
+const TARIFF_LABELS = TARIFF_LABELS_RU;
 
 // Клиентская пагинация списка кампаний в action-модалке. В DOM держим только
 // 10 строк за раз — у клиентов бывает 200+ кампаний, и рендер всех чекбоксов
 // заметно лагает при каждом keystroke / toggle (см. также useMemo ниже).
 const CAMPAIGNS_PER_PAGE = 10;
 
-// Mirror lib/tariffs.ts (which is server-only). Keep in sync with that file.
-const TARIFF_MONTHLY_PRICE: Record<'standard' | 'pro', number> = { standard: 40_000, pro: 80_000 };
-const BILLING_PERIOD_MONTHS: Record<'month' | 'half_year' | 'year', number> = { month: 1, half_year: 6, year: 12 };
-const BILLING_PERIOD_LABELS: Record<'month' | 'half_year' | 'year', string> = {
-  month: 'Месяц',
-  half_year: 'Полгода',
-  year: 'Год',
-};
-
-function calcTariffAmount(tariff: TariffType, period: 'month' | 'half_year' | 'year'): number | null {
-  if (tariff === 'custom') return null;
-  return TARIFF_MONTHLY_PRICE[tariff] * BILLING_PERIOD_MONTHS[period];
-}
+// Цены, скидки и лейблы — из общего lib/tariffPricing.ts (он без server-only,
+// поэтому доступен и здесь, и на сервере). Раньше здесь лежала копия с
+// комментарием «keep in sync», и расхождение показало бы админу одни цифры,
+// а клиенту в ЛК — другие.
 
 function formatRub(n: number | null | undefined): string {
   if (n == null) return '—';
@@ -237,7 +233,7 @@ type SubscriptionPanelProps = {
   setupUntil: string | null;
   billingMode: 'invoice' | 'autopayment' | null;
   paymentLocked: boolean;
-  billingPeriod: 'month' | 'half_year' | 'year' | null;
+  billingPeriod: BillingPeriod | null;
   billingAmount: number | null;
   /** Префилл локального toggle "магазин ЮКасса" из персистентного флага на
    *  профиле клиента. Админ всё ещё может одноразово переопределить для
@@ -248,14 +244,14 @@ type SubscriptionPanelProps = {
     setup_until?: string | null;
     billing_mode?: 'invoice' | 'autopayment' | null;
     payment_locked?: boolean;
-    billing_period?: 'month' | 'half_year' | 'year' | null;
+    billing_period?: BillingPeriod | null;
     billing_amount?: number | null;
   }) => void;
   onExtendResult: (res: {
     paid_until?: string | null;
     billing_mode?: 'invoice' | 'autopayment' | null;
     payment_locked?: boolean;
-    billing_period?: 'month' | 'half_year' | 'year' | null;
+    billing_period?: BillingPeriod | null;
     billing_amount?: number | null;
   }) => void;
   onFinishSetupResult: (res: { paid_until?: string | null; setup_until?: string | null }) => void;
@@ -287,7 +283,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
   onSuccessMessage,
 }: SubscriptionPanelProps) {
   const [activateBillingMode, setActivateBillingMode] = useState<'invoice' | 'autopayment' | 'manual'>('manual');
-  const [activatePeriod, setActivatePeriod] = useState<'month' | 'half_year' | 'year'>('month');
+  const [activatePeriod, setActivatePeriod] = useState<BillingPeriod>('month');
   const [activateCustomAmount, setActivateCustomAmount] = useState('');
   const [activating, setActivating] = useState(false);
   const [showExtendForm, setShowExtendForm] = useState(false);
@@ -300,7 +296,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
 
   const handleActivate = useCallback(async () => {
     // Test mode + Custom both require a manual amount input.
-    const needsManualAmount = useTestPeriod || tariffType === 'custom';
+    const needsManualAmount = useTestPeriod || tariffType === TARIFF_SCALE;
     if (needsManualAmount) {
       const n = Number(activateCustomAmount.replace(',', '.'));
       if (!Number.isFinite(n) || n <= 0) {
@@ -341,7 +337,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
         setup_until: res.setup_until ?? null,
         billing_mode: (res.billing_mode as 'invoice' | 'autopayment' | null) ?? null,
         payment_locked: res.payment_locked ?? false,
-        billing_period: (res.billing_period as 'month' | 'half_year' | 'year' | null) ?? null,
+        billing_period: (res.billing_period as BillingPeriod | null) ?? null,
         billing_amount: res.billing_amount ?? null,
       });
       // Autopayment path also tries to auto-create a YooKassa invoice on the
@@ -452,7 +448,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
   }, [userId, apiFetch, onDeactivateSuccess, onSuccessMessage, onError]);
 
   const handleExtend = useCallback(async () => {
-    if (tariffType === 'custom') {
+    if (tariffType === TARIFF_SCALE) {
       const n = Number(activateCustomAmount.replace(',', '.'));
       if (!Number.isFinite(n) || n <= 0) {
         onError('Укажите сумму за период для тарифа Custom');
@@ -462,7 +458,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
     setActivating(true);
     try {
       const bm = activateBillingMode === 'manual' ? null : activateBillingMode;
-      const customAmt = tariffType === 'custom' ? Number(activateCustomAmount.replace(',', '.')) : undefined;
+      const customAmt = tariffType === TARIFF_SCALE ? Number(activateCustomAmount.replace(',', '.')) : undefined;
       const res = await apiFetch<{
         ok: true; paid_until?: string;
         billing_mode?: string; payment_locked?: boolean;
@@ -483,7 +479,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
         paid_until: res.paid_until ?? null,
         billing_mode: (res.billing_mode as 'invoice' | 'autopayment' | null) ?? null,
         payment_locked: res.payment_locked ?? false,
-        billing_period: (res.billing_period as 'month' | 'half_year' | 'year' | null) ?? null,
+        billing_period: (res.billing_period as BillingPeriod | null) ?? null,
         billing_amount: res.billing_amount ?? null,
       });
       setShowExtendForm(false);
@@ -543,8 +539,8 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
             <div className="min-[520px]:col-span-2">
               <p className="mb-1.5 text-[11px] font-medium text-gray-700">Период оплаты</p>
               <div className="flex gap-1.5">
-                {(['month', 'half_year', 'year'] as const).map((p) => {
-                  const amt = calcTariffAmount(tariffType, p);
+                {(['month', 'quarter', 'half_year', 'year'] as const).map((p) => {
+                  const amt = calcBillingAmount(tariffType, p);
                   return (
                     <button
                       key={p}
@@ -558,7 +554,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
                     >
                       <div>{BILLING_PERIOD_LABELS[p]}</div>
                       <div className={`mt-0.5 text-[10px] tabular-nums ${!useTestPeriod && activatePeriod === p ? 'text-emerald-50' : 'text-gray-500'}`}>
-                        {tariffType === 'custom' ? 'индивид.' : formatRub(amt)}
+                        {tariffType === TARIFF_SCALE ? 'индивид.' : formatRub(amt)}
                       </div>
                     </button>
                   );
@@ -605,7 +601,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
                   </div>
                 </div>
               )}
-              {!useTestPeriod && tariffType === 'custom' && (
+              {!useTestPeriod && tariffType === TARIFF_SCALE && (
                 <div className="mt-2">
                   <label className="block text-[11px] font-medium text-gray-700 mb-1">Сумма за период (₽)</label>
                   <input
@@ -779,7 +775,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
           </p>
           <div className="flex gap-1.5">
             {(['month', 'half_year', 'year'] as const).map((p) => {
-              const amt = calcTariffAmount(tariffType, p);
+              const amt = calcBillingAmount(tariffType, p);
               return (
                 <button
                   key={p}
@@ -793,13 +789,13 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
                 >
                   <div>{BILLING_PERIOD_LABELS[p]}</div>
                   <div className={`mt-0.5 text-[10px] tabular-nums ${activatePeriod === p ? 'text-indigo-50' : 'text-gray-500'}`}>
-                    {tariffType === 'custom' ? 'индивид.' : formatRub(amt)}
+                    {tariffType === TARIFF_SCALE ? 'индивид.' : formatRub(amt)}
                   </div>
                 </button>
               );
             })}
           </div>
-          {tariffType === 'custom' && (
+          {tariffType === TARIFF_SCALE && (
             <div className="mt-2">
               <label className="block text-[11px] font-medium text-gray-700 mb-1">Сумма за период (₽)</label>
               <input
@@ -958,14 +954,14 @@ export default function UsersPage() {
   // модалки и при сабмите нового поискового запроса.
   const [campaignPage, setCampaignPage] = useState(1);
 
-  const [tariffType, setTariffType] = useState<TariffType>('standard');
+  const [tariffType, setTariffType] = useState<TariffType>(TARIFF_LAUNCH);
   // Персистентный флаг "клиент в тест-магазине". Меняется отдельным блоком
   // «Магазин ЮКасса клиента» рядом с тарифом; сохраняется через PUT /tariff
   // вместе с тарифом по «Сохранить изменения». Префиллит локальный toggle в
   // SubscriptionPanel, чтобы активация/продление по умолчанию шли в нужный
   // магазин.
   const [clientIsTestShop, setClientIsTestShop] = useState(false);
-  const [customLimits, setCustomLimits] = useState<Omit<TariffData, 'tariff_type'>>({ ...TARIFF_DEFAULTS.pro });
+  const [customLimits, setCustomLimits] = useState<Omit<TariffData, 'tariff_type'>>({ ...TARIFF_DEFAULTS[TARIFF_FLOW] });
   const [subscriptionActive, setSubscriptionActive] = useState(false);
   const [subscriptionSetup, setSubscriptionSetup] = useState(false);
   const [paidUntil, setPaidUntil] = useState<string | null>(null);
@@ -975,7 +971,7 @@ export default function UsersPage() {
   // activateBillingMode / activatePeriod / activateCustomAmount / showExtendForm
   // / activating moved into <SubscriptionPanel>'s own state — typing in the
   // amount field or toggling the period chips no longer re-renders the parent.
-  const [billingPeriod, setBillingPeriod] = useState<'month' | 'half_year' | 'year' | null>(null);
+  const [billingPeriod, setBillingPeriod] = useState<BillingPeriod | null>(null);
   const [billingAmount, setBillingAmount] = useState<number | null>(null);
 
   type SortColumn = 'name' | 'email' | 'role';
@@ -1235,11 +1231,11 @@ export default function UsersPage() {
         setTariffType(tariffRes.tariff.tariff_type);
         setClientIsTestShop(tariffRes.tariff.is_test_shop === true);
         setCustomLimits({
-          max_contacts: tariffRes.tariff.max_contacts ?? TARIFF_DEFAULTS.pro.max_contacts,
-          max_rows: tariffRes.tariff.max_rows ?? TARIFF_DEFAULTS.pro.max_rows,
-          max_chains_per_month: tariffRes.tariff.max_chains_per_month ?? TARIFF_DEFAULTS.pro.max_chains_per_month,
-          max_domains: tariffRes.tariff.max_domains ?? TARIFF_DEFAULTS.pro.max_domains,
-          max_emails: tariffRes.tariff.max_emails ?? TARIFF_DEFAULTS.pro.max_emails,
+          max_contacts: tariffRes.tariff.max_contacts ?? TARIFF_DEFAULTS[TARIFF_FLOW].max_contacts,
+          max_rows: tariffRes.tariff.max_rows ?? TARIFF_DEFAULTS[TARIFF_FLOW].max_rows,
+          max_chains_per_month: tariffRes.tariff.max_chains_per_month ?? TARIFF_DEFAULTS[TARIFF_FLOW].max_chains_per_month,
+          max_domains: tariffRes.tariff.max_domains ?? TARIFF_DEFAULTS[TARIFF_FLOW].max_domains,
+          max_emails: tariffRes.tariff.max_emails ?? TARIFF_DEFAULTS[TARIFF_FLOW].max_emails,
         });
         const now = new Date();
         const isActive = tariffRes.tariff.is_active === true;
@@ -1257,12 +1253,12 @@ export default function UsersPage() {
         setSetupUntil(tariffRes.tariff.setup_until ?? null);
         setBillingMode((tariffRes.tariff.billing_mode as 'invoice' | 'autopayment' | null) ?? null);
         setPaymentLocked(tariffRes.tariff.payment_locked ?? false);
-        setBillingPeriod((tariffRes.tariff.billing_period as 'month' | 'half_year' | 'year' | null) ?? null);
+        setBillingPeriod((tariffRes.tariff.billing_period as BillingPeriod | null) ?? null);
         setBillingAmount(tariffRes.tariff.billing_amount ?? null);
       } else {
-        setTariffType('standard');
+        setTariffType(TARIFF_LAUNCH);
         setClientIsTestShop(false);
-        setCustomLimits({ ...TARIFF_DEFAULTS.pro });
+        setCustomLimits({ ...TARIFF_DEFAULTS[TARIFF_FLOW] });
         setSubscriptionActive(false);
         setSubscriptionSetup(false);
         setPaidUntil(null);
@@ -1287,9 +1283,9 @@ export default function UsersPage() {
       setClientCampaigns([]);
       setClientCampaignBaseline([]);
       setClientAccessLoaded(false);
-      setTariffType('standard');
+      setTariffType(TARIFF_LAUNCH);
       setClientIsTestShop(false);
-      setCustomLimits({ ...TARIFF_DEFAULTS.pro });
+      setCustomLimits({ ...TARIFF_DEFAULTS[TARIFF_FLOW] });
       setSubscriptionActive(false);
       setSubscriptionSetup(false);
       setPaidUntil(null);
@@ -1314,7 +1310,7 @@ export default function UsersPage() {
   const handleActivateResult = useCallback((res: {
     paid_until?: string | null; setup_until?: string | null;
     billing_mode?: 'invoice' | 'autopayment' | null; payment_locked?: boolean;
-    billing_period?: 'month' | 'half_year' | 'year' | null; billing_amount?: number | null;
+    billing_period?: BillingPeriod | null; billing_amount?: number | null;
   }) => {
     setSubscriptionSetup(true);
     setSubscriptionActive(false);
@@ -1329,7 +1325,7 @@ export default function UsersPage() {
   const handleExtendResult = useCallback((res: {
     paid_until?: string | null;
     billing_mode?: 'invoice' | 'autopayment' | null; payment_locked?: boolean;
-    billing_period?: 'month' | 'half_year' | 'year' | null; billing_amount?: number | null;
+    billing_period?: BillingPeriod | null; billing_amount?: number | null;
   }) => {
     setPaidUntil(res.paid_until ?? null);
     setBillingMode(res.billing_mode ?? null);
@@ -1495,7 +1491,7 @@ export default function UsersPage() {
           body: JSON.stringify({
             tariff_type: tariffType,
             is_test_shop: clientIsTestShop,
-            ...(tariffType === 'custom' ? customLimits : {}),
+            ...(tariffType === TARIFF_SCALE ? customLimits : {}),
           }),
         });
       }
@@ -1827,7 +1823,7 @@ export default function UsersPage() {
             }}
           >
             <div
-              className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col"
+              className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col"
               style={{
                 position: 'fixed',
                 left: modalFlyIn ? '50%' : `${origin.x}px`,
@@ -1883,9 +1879,17 @@ export default function UsersPage() {
                   </select>
                 </div>
                 <div className="space-y-5">
-                  <div>
-                    <h4 className="text-sm font-medium text-gray-900 mb-3">Отображение инструментов</h4>
-                    <ul className="space-y-2">
+                  {/* Раскрывающийся блок «Отображение инструментов»: раньше
+                      был всегда открыт и занимал полмодалки, хотя настраивают
+                      его редко. Теперь свёрнут по дефолту — заголовок +
+                      chevron, клик раскрывает. `<details>` без React-стейта
+                      = меньше кода, состояние живёт в DOM. */}
+                  <details className="group rounded-lg border border-gray-200 bg-gray-50/50">
+                    <summary className="cursor-pointer list-none flex items-center justify-between gap-3 px-3 py-2.5 hover:bg-gray-100 transition-colors rounded-lg">
+                      <h4 className="text-sm font-medium text-gray-900 m-0">Отображение инструментов</h4>
+                      <span className="text-gray-400 text-xs transition-transform group-open:rotate-90" aria-hidden>▶</span>
+                    </summary>
+                    <ul className="space-y-2 px-3 pb-3 pt-1">
                       {ALL_TOOL_IDS.map((toolId) => (
                         <li key={toolId} className="flex items-center justify-between gap-4">
                           <span className="text-sm text-gray-700">{TOOLS_CONFIG[toolId].title}</span>
@@ -1912,7 +1916,7 @@ export default function UsersPage() {
                         </li>
                       ))}
                     </ul>
-                  </div>
+                  </details>
                   <div>
                     <h4 className="text-sm font-medium text-gray-900 mb-1">Отображение вкладок в Header-е</h4>
                     <p className="text-xs text-gray-500 mb-3">Управляет дополнительными пунктами навигации для данного пользователя</p>
@@ -1990,19 +1994,19 @@ export default function UsersPage() {
                     <div>
                       <h4 className="text-sm font-medium text-gray-900 mb-2">Тариф клиента</h4>
                       <div className="flex gap-2">
-                        {(['standard', 'pro', 'custom'] as TariffType[]).map((t) => (
+                        {([TARIFF_LAUNCH, TARIFF_FLOW, TARIFF_SCALE] as TariffType[]).map((t) => (
                           <button
                             key={t}
                             type="button"
                             onClick={() => {
                               setTariffType(t);
-                              if (t === 'custom') setCustomLimits({ ...TARIFF_DEFAULTS.pro });
+                              if (t === TARIFF_SCALE) setCustomLimits({ ...TARIFF_DEFAULTS[TARIFF_FLOW] });
                             }}
                             className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
                               tariffType === t
-                                ? t === 'pro'
+                                ? t === TARIFF_FLOW
                                   ? 'bg-violet-600 text-white border-violet-600'
-                                  : t === 'custom'
+                                  : t === TARIFF_SCALE
                                     ? 'bg-zinc-800 text-white border-zinc-800'
                                     : 'bg-blue-600 text-white border-blue-600'
                                 : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
@@ -2012,19 +2016,19 @@ export default function UsersPage() {
                           </button>
                         ))}
                       </div>
-                      {tariffType !== 'custom' && (
+                      {tariffType !== TARIFF_SCALE && (
                         <div className="mt-3 rounded-lg border border-gray-100 bg-gray-50 overflow-hidden">
                           {LIMIT_LABELS.map(({ key, label }) => (
                             <div key={key} className="flex items-center justify-between px-3 py-1.5 border-b border-gray-100 last:border-b-0">
                               <span className="text-xs text-gray-600">{label}</span>
                               <span className="text-xs font-semibold text-gray-800 tabular-nums">
-                                {(TARIFF_DEFAULTS[tariffType as 'standard' | 'pro'][key] ?? 0).toLocaleString('ru-RU')}
+                                {(TARIFF_DEFAULTS[tariffType as PaidTariffType][key] ?? 0).toLocaleString('ru-RU')}
                               </span>
                             </div>
                           ))}
                         </div>
                       )}
-                      {tariffType === 'custom' && (
+                      {tariffType === TARIFF_SCALE && (
                         <div className="mt-3 space-y-2">
                           {LIMIT_LABELS.map(({ key, label }) => (
                             <div key={key} className="flex items-center gap-3">
@@ -2188,57 +2192,61 @@ export default function UsersPage() {
                   </div>
                 )}
               </div>
-              <div className="pl-4 pr-5 py-5 border-t border-gray-200 bg-gray-50 flex flex-wrap items-center justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-2">
+              {/* Одна строка кнопок в порядке: Пресет запуска кампаний,
+                  Бриф клиента, Удалить пользователя, Сменить пароль,
+                  Сохранить изменения. Раньше «Сохранить» была отдельной
+                  колонкой справа (justify-between) — теперь все в ряд с
+                  «Сохранить» справа за счёт ml-auto. flex-wrap оставлен
+                  как fallback для узких экранов. */}
+              <div className="pl-4 pr-5 py-5 border-t border-gray-200 bg-gray-50 flex flex-wrap items-center gap-2">
+                {modalRole === 'client' && actionModalUserId && (
+                  <>
+                    <Link
+                      href={`/admin/clients/${actionModalUserId}/preset` as Route}
+                      className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg text-sm hover:bg-blue-50"
+                    >
+                      Пресет запуска кампаний
+                    </Link>
+                    <Link
+                      href={`/admin/clients/${actionModalUserId}/brief` as Route}
+                      className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg text-sm hover:bg-blue-50"
+                    >
+                      Бриф клиента
+                    </Link>
+                  </>
+                )}
+                {actionModalUserId !== currentUserId && (
                   <button
                     type="button"
                     onClick={() => {
                       setActionModalUserId(null);
                       setModalFlyIn(false);
-                      setError('');
-                      setResettingUserId(actionModalUserId);
-                      setNewPassword('');
-                      setRevealPassword(false);
+                      setDeletingUserId(actionModalUserId);
                     }}
-                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                    className="px-3 py-2 border border-red-200 text-red-700 rounded-lg text-sm hover:bg-red-50"
                   >
-                    Сменить пароль
+                    Удалить пользователя
                   </button>
-                  {modalRole === 'client' && actionModalUserId && (
-                    <>
-                      <Link
-                        href={`/admin/clients/${actionModalUserId}/preset` as Route}
-                        className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg text-sm hover:bg-blue-50"
-                      >
-                        Пресет запуска кампаний
-                      </Link>
-                      <Link
-                        href={`/admin/clients/${actionModalUserId}/brief` as Route}
-                        className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg text-sm hover:bg-blue-50"
-                      >
-                        Бриф клиента
-                      </Link>
-                    </>
-                  )}
-                  {actionModalUserId !== currentUserId && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActionModalUserId(null);
-                        setModalFlyIn(false);
-                        setDeletingUserId(actionModalUserId);
-                      }}
-                      className="px-3 py-2 border border-red-200 text-red-700 rounded-lg text-sm hover:bg-red-50"
-                    >
-                      Удалить пользователя
-                    </button>
-                  )}
-                </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActionModalUserId(null);
+                    setModalFlyIn(false);
+                    setError('');
+                    setResettingUserId(actionModalUserId);
+                    setNewPassword('');
+                    setRevealPassword(false);
+                  }}
+                  className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                >
+                  Сменить пароль
+                </button>
                 <button
                   type="button"
                   onClick={handleSaveAllChanges}
                   disabled={saving || !modalRole}
-                  className="px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium text-sm"
+                  className="ml-auto px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium text-sm"
                 >
                   {saving ? 'Сохранение...' : 'Сохранить изменения'}
                 </button>

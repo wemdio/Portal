@@ -340,47 +340,73 @@ export function YandexMapsParserForm(props: {
 
   return (
     <form onSubmit={onSubmit} className="space-y-6">
-      {/* URL Search Section */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="p-5 border-b border-gray-100 bg-gray-50/50">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-                <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
-                  <Globe className="h-3.5 w-3.5" />
+      {/* URL Search + Настройки лимита — в одном ряду.
+          На lg (1024+) URL поиска занимает основную ширину, лимит —
+          компактная колонка справа (280px). Ниже lg — стакаются
+          вертикально. items-start чтобы карточки не растягивались до
+          равной высоты. */}
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px] gap-6 items-start">
+        {/* URL Search Section */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="p-5 border-b border-gray-100 bg-gray-50/50">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
+                    <Globe className="h-3.5 w-3.5" />
+                  </span>
+                  {clientMode ? 'Поиск по городам и категориям' : 'URL поиска'}
+                </h3>
+                <p className="text-sm text-gray-500 mt-1">
+                  {clientMode
+                    ? 'Выберите города и категории бизнеса — соберём организации с Яндекс.Карт. Можно и вставить ссылки на поиск вручную.'
+                    : 'Добавьте ссылки на поиск в Яндекс.Картах вручную или сгенерируйте их по городам и рубрикам.'}
+                </p>
+              </div>
+              <div className="flex flex-col items-end gap-1">
+                <span className="inline-flex items-center rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-700/10">
+                  {searchUrls.length} {clientMode ? 'запросов' : 'URL'}
                 </span>
-                {clientMode ? 'Поиск по городам и категориям' : 'URL поиска'}
-              </h3>
-              <p className="text-sm text-gray-500 mt-1">
-                {clientMode
-                  ? 'Выберите города и категории бизнеса — соберём организации с Яндекс.Карт. Можно и вставить ссылки на поиск вручную.'
-                  : 'Добавьте ссылки на поиск в Яндекс.Картах вручную или сгенерируйте их по городам и рубрикам.'}
-              </p>
-            </div>
-            <div className="flex flex-col items-end gap-1">
-              <span className="inline-flex items-center rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-700/10">
-                {searchUrls.length} {clientMode ? 'запросов' : 'URL'}
-              </span>
-              <button
-                type="button"
-                onClick={() => setShowHowItWorks(true)}
-                className="mt-1 inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 border border-amber-200 hover:bg-amber-100 hover:border-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-1"
-              >
-                <Info className="h-3.5 w-3.5 mr-1" />
-                <span>{clientMode ? 'Как это работает' : 'Как работает парсер'}</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setShowHowItWorks(true)}
+                  className="mt-1 inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 border border-amber-200 hover:bg-amber-100 hover:border-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-1"
+                >
+                  <Info className="h-3.5 w-3.5 mr-1" />
+                  <span>{clientMode ? 'Как это работает' : 'Как работает парсер'}</span>
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-        
-        <div className="p-5 space-y-5">
-          <textarea
-            className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none text-sm font-mono min-h-[120px] p-3"
-            placeholder="https://yandex.ru/maps/?text=Москва%20Кафе"
-            value={searchUrlsText}
-            onChange={(e) => setSearchUrlsText(e.target.value)}
-          />
 
+          <div className="p-5 space-y-5">
+            <textarea
+              className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none text-sm font-mono min-h-[120px] p-3"
+              placeholder="https://yandex.ru/maps/?text=Москва%20Кафе"
+              value={searchUrlsText}
+              onChange={(e) => setSearchUrlsText(e.target.value)}
+            />
+
+          </div>
+        </div>
+
+        {/* Настройки лимита — теперь в правой колонке рядом с URL поиска */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+          <label className="block text-sm font-medium text-gray-700 mb-1.5">
+            Организаций на 1 запрос
+          </label>
+          <input
+            type="number"
+            min={10}
+            max={5000}
+            step={10}
+            className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
+            value={maxResults}
+            onChange={(e) => setMaxResults(Math.max(10, Math.min(5000, Number(e.target.value) || 250)))}
+          />
+          <p className="mt-1.5 text-xs text-gray-500">
+            Сколько карточек собирать с каждого поискового URL. По умолчанию 250. Больше = дольше парсинг и больше трафика прокси, но и больше данных.
+          </p>
         </div>
       </div>
 
@@ -451,25 +477,6 @@ export function YandexMapsParserForm(props: {
 
           </div>
         </div>
-      </div>
-
-      {/* Настройки лимита */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-        <label className="block text-sm font-medium text-gray-700 mb-1.5">
-          Организаций на 1 запрос
-        </label>
-        <input
-          type="number"
-          min={10}
-          max={5000}
-          step={10}
-          className="block w-40 rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
-          value={maxResults}
-          onChange={(e) => setMaxResults(Math.max(10, Math.min(5000, Number(e.target.value) || 250)))}
-        />
-        <p className="mt-1.5 text-xs text-gray-500">
-          Сколько карточек собирать с каждого поискового URL. По умолчанию 250. Больше = дольше парсинг и больше трафика прокси, но и больше данных.
-        </p>
       </div>
 
       {/* Settings Section */}

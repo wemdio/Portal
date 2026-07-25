@@ -11,7 +11,6 @@ import { UserProvider, useUser } from '@/lib/UserProvider';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 import { PortalDocumentTitle } from '@/components/PortalDocumentTitle';
 import { GlobalTextTranslator, LanguageLoadingOverlay } from '@/components/GlobalTextTranslator';
-import { ToolsAssistant } from '@/components/ToolsAssistant';
 import { dict, commonDictionary, normalizeLocale, type Locale } from '@/lib/i18n';
 
 const MD_BREAKPOINT = 768;
@@ -170,10 +169,6 @@ export function LayoutShell({
         </main>
       </div>
     </div>
-    {/* Плавающий помощник по инструментам — только для авторизованного портала.
-        Прячем на чужих/гостевых/служебных страницах, где /api/tools-assistant
-        всё равно вернёт 401. */}
-    {!isTma && !hideNav && pathname !== '/login' && pathname !== '/signup' && <ToolsAssistant />}
     </PortalLoadingProvider>
     </UserProvider>
     </>

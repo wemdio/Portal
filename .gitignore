@@ -156,6 +156,14 @@ app/payload_batch_*.json
 /projects-emergency.html
 /openclaw_*.txt
 /leads-outreach-agency.csv
+
+# Выгрузки клиентских баз в корне (валидация email, парсинг, ручные срезы).
+# Кладутся разово и НЕ должны попадать в историю: это контактные данные
+# клиентов, а из git такое вычищается только rewrite'ом всей ветки. Прецеденты
+# — companies_5000.xlsx / companies_10000.xlsx выше, «Все инструменты.ру_база_
+# валидация.xlsx». Нужен файл в репо — добавляй явным `git add -f` осознанно.
+/*.xlsx
+
 docs/research/
 *.idbi*.jpg
 "idbi*"

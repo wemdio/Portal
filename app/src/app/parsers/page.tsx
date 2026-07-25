@@ -21,7 +21,12 @@ export default function ParsersPage() {
   const [activeTab, setActiveTab] = useState<Tab>('hh');
 
   return (
-    <div className="space-y-6">
+    // zoom: 0.85 — глобальный «браузерный» масштаб только для страницы
+    // парсеров. Уменьшает шрифты, отступы, поля ввода, иконки, ссылки в
+    // истории и таблицу результатов пропорционально — без правки десятков
+    // подкомпонентов. Клики/фокус попадают в те же места (в отличие от
+    // transform:scale — layout не ломается).
+    <div className="space-y-6" style={{ zoom: 0.85 }}>
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Парсеры</h1>
         <p className="text-sm text-gray-500 mt-1">Инструменты для сбора данных</p>

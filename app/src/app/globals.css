@@ -2388,37 +2388,6 @@ body:has(.client-portal) {
 }
 
 /* ============================================================================
-   Portal AI widget — невидимая ручка ресайза в левом верхнем углу.
-   Без визуальной плашки в обычном состоянии; при наведении подсвечивается
-   тонкий L-уголок (top + left линии), чтобы было понятно что можно тянуть.
-   ============================================================================ */
-.tools-assistant__resize-handle {
-  background: transparent;
-  position: absolute;
-}
-.tools-assistant__resize-handle::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-  top: 4px;
-  width: 12px;
-  height: 12px;
-  border-top: 2px solid rgb(161 161 170);
-  border-left: 2px solid rgb(161 161 170);
-  border-top-left-radius: 6px;
-  opacity: 0;
-  transition: opacity 140ms ease;
-  pointer-events: none;
-}
-.tools-assistant__resize-handle:hover::before {
-  opacity: 0.85;
-}
-/* В тёмной теме сама линия чуть светлее, чтобы видно было на shadow-2xl фоне. */
-html[data-portal-theme='dark']:has(.portal-shell) .tools-assistant__resize-handle::before {
-  border-color: rgb(212 212 216);
-}
-
-/* ============================================================================
    PORTAL DARK THEME (для основного контура спецов — НЕ для /client)
 
    Активируется через html[data-portal-theme='dark'] (ставит ранний скрипт в
@@ -2957,24 +2926,6 @@ html[data-portal-theme='dark'] [role='dialog'] .text-zinc-600 {
 html[data-portal-theme='dark'] [role='dialog'] .border-gray-200,
 html[data-portal-theme='dark'] [role='dialog'] .border-zinc-200 {
   border-color: var(--pd-divider) !important;
-}
-
-/* === Portal AI floating widget (вне portal-shell, fixed-позиционирование) === */
-html[data-portal-theme='dark'] body > div.fixed.bottom-5.right-5 {
-  color: var(--pd-text);
-}
-html[data-portal-theme='dark'] body > div.fixed.bottom-5.right-5 > div {
-  background-color: var(--pd-surface) !important;
-  border-color: var(--pd-divider) !important;
-}
-html[data-portal-theme='dark'] body > div.fixed.bottom-5.right-5 .bg-zinc-100 {
-  background-color: var(--pd-surface-elev) !important;
-  color: var(--pd-text);
-}
-html[data-portal-theme='dark'] body > div.fixed.bottom-5.right-5 textarea {
-  background-color: var(--pd-surface-elev) !important;
-  color: var(--pd-text);
-  border-color: var(--pd-divider-strong) !important;
 }
 
 /* === Selection-цвет в тёмной теме === */

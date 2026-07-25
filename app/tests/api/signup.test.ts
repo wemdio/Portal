@@ -164,7 +164,7 @@ describe('POST /api/signup', () => {
     });
 
     expect(c.tariffs.length).toBeGreaterThanOrEqual(1);
-    expect(c.tariffs.at(-1)).toMatchObject({ user_id: 'user-123', is_active: false, tariff_type: 'standard' });
+    expect(c.tariffs.at(-1)).toMatchObject({ user_id: 'user-123', is_active: false, tariff_type: 'Запуск' });
   });
 
   it('captures UTM from the oos_utm cookie → profiles.signup_utm + register alert', async () => {
