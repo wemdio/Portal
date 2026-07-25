@@ -325,6 +325,15 @@ const EMPTY_BATCH_POLL_MS = 600;
 // Кэп сна до ближайшего retry_after: дольше — задержали бы проверку отмены
 // джоба и сброс зависших processing-строк.
 const RETRY_WAIT_CAP_MS = 60_000;
+// Кэп хвоста джоба: когда вся активная работа сделана и остались только
+// отложенные ретраи, джоб НЕ ждёт их дольше этого времени — оставшиеся строки
+// финализируются текущим вердиктом (он сохраняется при каждом рекьюе).
+// Иначе хвост из greylist 5/15/30 мин держит джоб «running» на 89% почти час
+// (инцидент 2026-07-25: 445 строк, 51 deferred → 50+ мин wall-clock).
+// Дефолт 25 мин покрывает greylist-расписание (пробы на 0/5/20 мин) и клэмп
+// hint-подсказок (20 мин × джиттер 1.1 = 22 мин < 25). Флор 5 мин — защита
+// от EMAIL_VALIDATION_TAIL_CAP_MIN=0, который убил бы все ретраи мгновенно.
+const TAIL_CAP_MS = Math.max(5, Number(process.env.EMAIL_VALIDATION_TAIL_CAP_MIN ?? '25')) * 60_000;
 
 /**
  * Миллисекунды до ближайшего отложенного ретрая джоба (один дешёвый запрос).
@@ -357,7 +366,7 @@ async function msUntilNextRetry(jobId: string): Promise<number> {
 // ─── Таксономия ретраев ─────────────────────────────────────────────────────
 
 /** Класс ретрая — определяет расписание задержки retry_after. */
-export type RetryClass = 'greylist' | 'dns' | 'transport' | 'proxy' | 'policy_5xx';
+export type RetryClass = 'greylist' | 'dns' | 'transport' | 'proxy';
 
 // Расписания задержек по классам (минуты, индекс = номеру попытки; за пределами
 // списка берётся последнее значение).
@@ -365,11 +374,12 @@ const GREYLIST_SCHEDULE_MIN = [5, 15, 30];
 const DNS_SCHEDULE_MIN = [5, 15];
 const TRANSPORT_SCHEDULE_MIN = [2, 10];
 const PROXY_SCHEDULE_MIN = [1, 5];
-// smtp_5xx_policy: одна отложенная попытка через 30–60 минут, затем терминально.
-const POLICY_5XX_DELAY_MIN = 45;
-// Клэмп подсказки «try again in N …» из SMTP-текста.
+// Клэмп подсказки «try again in N …» из SMTP-текста. Верхний предел — 20 мин,
+// а не 45: hinted-ретрай должен успеть сработать ДО таймаута хвоста джоба
+// (TAIL_CAP, дефолт 25 мин, см. ниже) с учётом джиттера ×1.1 — иначе ретрай
+// будет финализирован таймаутом раньше, чем наступит его время.
 const GREYLIST_HINT_MIN_MS = 60_000;
-const GREYLIST_HINT_MAX_MS = 45 * 60_000;
+const GREYLIST_HINT_MAX_MS = 20 * 60_000;
 
 /** Парсим «try again in N seconds/minutes» из текста SMTP-ответа (greylist). */
 export function parseGreylistHintMs(smtpText: string | undefined): number | null {
@@ -403,8 +413,12 @@ export function classifyRetry(
 
   // over_quota — лимит проверок исчерпан: терминально, НЕ ретраим.
   if (step === 'over_quota') return null;
-  // smtp_5xx_policy — политика/рейт-лимит на RCPT: ОДНА отложенная попытка.
-  if (step === 'smtp_5xx_policy') return attempts < 2 ? 'policy_5xx' : null;
+  // smtp_5xx_policy — анти-проба/рейт-лимит на RCPT: ТЕРМИНАЛЬНО. Продовая
+  // выборка (33/69 — Backscatter Protection, relay-denied, sender-rep) — это
+  // постоянные отказы: отложенная попытка через 45 мин не конвертирует, но
+  // держит весь джоб заложником хвоста (инцидент 2026-07-25: джоб 445 строк
+  // висел 50+ мин на 89%). Честный unknown сразу лучше позднего такого же.
+  if (step === 'smtp_5xx_policy') return null;
 
   if (step === 'greylist') return 'greylist';
   if (step === 'mx') {
@@ -464,7 +478,8 @@ export function retryDelayMs(cls: RetryClass, attempts: number, smtpText?: strin
   } else if (cls === 'proxy') {
     base = pickScheduleMin(PROXY_SCHEDULE_MIN, attempts) * 60_000;
   } else {
-    base = POLICY_5XX_DELAY_MIN * 60_000;
+    // exhaustive: RetryClass покрыт ветками выше
+    base = TRANSPORT_SCHEDULE_MIN[0] * 60_000;
   }
   return withJitter(base);
 }
@@ -559,6 +574,10 @@ export async function runEmailValidationJob(jobId: string) {
     };
 
     // ── Main processing loop ────────────────────────────────────────────
+    // Таймер хвоста: стартует, когда claim впервые вернул пусто при оставшихся
+    // ТОЛЬКО отложенных (pending с retry_after в будущем) — т.е. вся активная
+    // работа кончилась. Сбрасывается, пока есть processing (работа в полёте).
+    let tailStartedAt: number | null = null;
     while (true) {
       // Check for cancellation
       const { data: jobStatus } = await db
@@ -591,10 +610,28 @@ export async function runEmailValidationJob(jobId: string) {
 
         // Reset stale items if they exist
         if (processingCount > 0) {
+          tailStartedAt = null; // работа ещё в полёте — не хвост
           await db.rpc('reset_stale_email_validation_items', {
             p_job_id: jobId,
             p_minutes: STALE_PROCESSING_MINUTES,
           });
+        } else {
+          // batch пуст + pending>0 + processing=0 → остались только отложенные.
+          // Джоб НЕ ждёт их дольше TAIL_CAP: финализируем текущим вердиктом
+          // (сохранён при рекьюе) и закрываемся — иначе хвост держит джоб
+          // «running» на ~89% десятки минут.
+          tailStartedAt ??= Date.now();
+          if (Date.now() - tailStartedAt > TAIL_CAP_MS) {
+            const finalized = await finalizeDeferredTail(jobId);
+            if (finalized > 0) {
+              workerLog('info', `Job ${jobId}: tail cap ${TAIL_CAP_MS / 60000}min — finalized ${finalized} deferred rows with stored verdicts`);
+              break;
+            }
+            // 0 при ошибке UPDATE (транзиентный сбой БД): НЕ break — иначе джоб
+            // закроется 'completed' с вечными pending-строками. Пробуем снова
+            // на следующей итерации (таймер хвоста уже за пределами кэпа).
+            workerLog('warn', `Job ${jobId}: tail cap reached but finalize failed — retrying next cycle`);
+          }
         }
 
         // Если остались только отложенные (retry_after в будущем) — спим до
@@ -602,6 +639,7 @@ export async function runEmailValidationJob(jobId: string) {
         await sleep(await msUntilNextRetry(jobId));
         continue;
       }
+      tailStartedAt = null; // claim вернул работу — хвост закончился
 
       // Process batch with concurrency
       await mapWithConcurrency(
@@ -639,7 +677,7 @@ export async function runEmailValidationJob(jobId: string) {
                 if (cls === 'greylist') {
                   workerLog('info', `Greylisting detected for ${item.email_normalized}, retry in ${Math.round(delayMs / 1000)}s`);
                 }
-                await requeueItem(item, delayMs);
+                await requeueItem(item, delayMs, result);
                 return;
               }
             }
@@ -777,18 +815,73 @@ async function updateQueueItemResult(
   }
 }
 
-async function requeueItem(item: QueueItem, delayMs: number): Promise<void> {
+/**
+ * Таймаут хвоста джоба: все отложенные (pending) строки финализируются
+ * текущим вердиктом (он сохранён при рекьюе). Для строк без вердикта
+ * (рекью от старого кода) подставляем unknown/risky — как терминальный
+ * непроверяемый исход. Возвращает число финализированных строк.
+ * Счётчики джоба пересчитываются финализацией по таблице — см. конец job.
+ */
+async function finalizeDeferredTail(jobId: string): Promise<number> {
+  if (!supabaseAdmin) return 0;
+  const now = new Date().toISOString();
+  const { data, error } = await supabaseAdmin
+    .from('email_validation_queue')
+    .update({
+      status: 'completed',
+      result: 'unknown',
+      quality: 'risky',
+      last_error: 'Хвост джоба: отложенная повторная проверка прервана по таймауту',
+      updated_at: now,
+      completed_at: now,
+    })
+    .eq('job_id', jobId)
+    .eq('status', 'pending')
+    .is('result', null)
+    .select('id');
+  if (error) {
+    workerLog('warn', `finalizeDeferredTail: fallback update failed for job ${jobId}`, error);
+    return 0;
+  }
+  const fallbackCount = data?.length ?? 0;
+  // Строки с сохранённым вердиктом — просто закрываем (вердикт уже на месте).
+  const { data: data2, error: error2 } = await supabaseAdmin
+    .from('email_validation_queue')
+    .update({ status: 'completed', updated_at: now, completed_at: now })
+    .eq('job_id', jobId)
+    .eq('status', 'pending')
+    .not('result', 'is', null)
+    .select('id');
+  if (error2) {
+    workerLog('warn', `finalizeDeferredTail: verdict update failed for job ${jobId}`, error2);
+    return fallbackCount;
+  }
+  return fallbackCount + (data2?.length ?? 0);
+}
+
+async function requeueItem(item: QueueItem, delayMs: number, result?: ValidationResult): Promise<void> {
   if (!supabaseAdmin) return;
   try {
     const now = new Date().toISOString();
     // retry_after ставится при КАЖДОМ рекьюе: класс ретрая уже решил задержку,
     // немедленного повтора быть не должно.
+    // Вердикт последней пробы сохраняем СРАЗУ (result/quality/details/last_error):
+    // если хвост джоба будет финализирован по таймауту (TAIL_CAP) или воркер
+    // умрёт, строка не останется «пустой» — у неё уже есть честный unknown.
     await supabaseAdmin
       .from('email_validation_queue')
       .update({
         status: 'pending',
         updated_at: now,
         retry_after: new Date(Date.now() + delayMs).toISOString(),
+        ...(result
+          ? {
+              result: result.result,
+              quality: result.quality,
+              details: result.details ?? null,
+              last_error: result.error ?? null,
+            }
+          : {}),
       })
       .eq('id', item.id);
   } catch (err) {

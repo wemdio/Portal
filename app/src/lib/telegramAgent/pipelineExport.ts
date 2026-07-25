@@ -85,6 +85,10 @@ async function loadValidationMap(validateJobId: string): Promise<Map<string, { r
     .from('email_validation_queue')
     .select('email_normalized, result, quality')
     .eq('job_id', validateJobId)
+    // Только финальные строки: с 2026-07 requeueItem сохраняет предварительный
+    // вердикт и на PENDING (отложенных) строках — они не должны попадать в
+    // экспорт как окончательные.
+    .in('status', ['completed', 'failed'])
     .not('result', 'is', null);
 
   for (const row of data ?? []) {
