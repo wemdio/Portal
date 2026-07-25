@@ -2,14 +2,14 @@
  * Backend logic for the /client/dashboard onboarding checklist.
  *
  * Pure-ish function: takes a userId + two supabase clients (public schema +
- * instantly schema) and returns the 6-item progress structure that matches
+ * instantly schema) and returns the 7-item progress structure that matches
  * Phase 0 of the May 2026 UX redesign.
  *
  * Keeping this OUTSIDE the route handler so it's testable without involving
  * Next.js request lifecycle or the cache wrapper. The route file imports this
  * and wraps the call in `cached()` for a short TTL.
  *
- * Performance: 5 small queries to the database in parallel (most return 0-1
+ * Performance: 7 small queries to the database in parallel (most return 0-1
  * rows). On a warm connection this is < 50ms total, well below the 15s cache
  * TTL we set in the route handler.
  */
@@ -139,22 +139,28 @@ export async function computeOnboardingStatus(
   const briefFields = (briefRes.data?.fields ?? null) as BriefFieldsShape | null;
   const briefDone = hasMinimalBriefContent(briefFields);
 
-  // ── Domains ──────────────────────────────────────────────────────────
-  // Шаг закрыт, когда клиент подтвердил ПОЛНЫЙ набор: selected непустой и
-  // по размеру равен required_count (3/6 в зависимости от тарифа).
-  const domainsRow = domainsRes.data as { selected?: unknown; required_count?: unknown } | null;
-  const domainsSelected = Array.isArray(domainsRow?.selected)
-    ? (domainsRow!.selected as unknown[]).filter((d) => typeof d === 'string' && d.trim())
-    : [];
-  const domainsRequired = Number(domainsRow?.required_count) || 0;
-  const domainsDone = domainsRequired > 0 && domainsSelected.length === domainsRequired;
-
   // ── Preset ───────────────────────────────────────────────────────────
   const presetRow = presetRes.data as { email_account_ids?: unknown } | null;
   const presetEmailIds = Array.isArray(presetRow?.email_account_ids)
     ? (presetRow!.email_account_ids as unknown[])
     : [];
   const presetDone = presetEmailIds.length > 0;
+
+  // ── Domains ──────────────────────────────────────────────────────────
+  // Шаг закрыт, когда клиент подтвердил ПОЛНЫЙ набор: selected непустой и
+  // по размеру равен required_count (3/6 в зависимости от тарифа).
+  //
+  // ВАЖНО: клиенты, онбордженные ДО появления этого шага (у них уже есть
+  // пресет с email_account_ids — менеджер купил домены вручную), шаг
+  // засчитываем автоматически. Иначе у всех существующих клиентов чеклист
+  // «ожил» бы с требованием выбрать новые домены.
+  const domainsRow = domainsRes.data as { selected?: unknown; required_count?: unknown } | null;
+  const domainsSelected = Array.isArray(domainsRow?.selected)
+    ? (domainsRow!.selected as unknown[]).filter((d) => typeof d === 'string' && d.trim())
+    : [];
+  const domainsRequired = Number(domainsRow?.required_count) || 0;
+  const domainsDone =
+    presetDone || (domainsRequired > 0 && domainsSelected.length === domainsRequired);
 
   // ── first_base / first_clean (from base_constructor_jobs) ────────────
   const jobs = (jobsRes.data ?? []) as { status?: unknown }[];

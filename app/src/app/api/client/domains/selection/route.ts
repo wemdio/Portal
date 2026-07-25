@@ -59,7 +59,11 @@ export async function PUT(req: NextRequest) {
   ) {
     return jsonError('selected должен быть массивом доменов', 400);
   }
-  const selected = [...new Set(rawSelected as string[])].map((d) => d.trim().toLowerCase());
+  // Нормализация ДО dedup: иначе ['acme.ru', 'ACME.ru '] засчитывалось бы
+  // как два разных домена и обходило проверку «ровно N».
+  const selected = [
+    ...new Set((rawSelected as string[]).map((d) => d.trim().toLowerCase())),
+  ];
 
   try {
     const { data: rowData } = await supabaseInstantly
@@ -73,6 +77,10 @@ export async function PUT(req: NextRequest) {
     }
 
     const requiredCount = row.required_count ?? 0;
+    if (requiredCount <= 0) {
+      // Строка в неконсистентном состоянии — не принимаем никакой выбор.
+      return jsonError('Сначала получите варианты доменов', 409);
+    }
     if (selected.length !== requiredCount) {
       return jsonError(`Нужно выбрать ровно ${requiredCount} доменов`, 400);
     }
@@ -120,31 +128,35 @@ export async function PUT(req: NextRequest) {
 
     // ── Manager notification (bell fanout + Telegram) ──────────────────
     // Non-blocking: the selection is already saved, a notification failure
-    // must not fail the client's request.
+    // must not fail the client's request — hence the dedicated try/catch.
     if (supabaseAdmin) {
-      const { data: profile } = await supabaseAdmin
-        .from('profiles')
-        .select('full_name, email')
-        .eq('id', userId)
-        .maybeSingle();
+      try {
+        const { data: profile } = await supabaseAdmin
+          .from('profiles')
+          .select('full_name, email')
+          .eq('id', userId)
+          .maybeSingle();
 
-      const clientDisplayName =
-        (profile?.full_name as string | null)?.trim() ||
-        (profile?.email as string | null) ||
-        'клиент';
+        const clientDisplayName =
+          (profile?.full_name as string | null)?.trim() ||
+          (profile?.email as string | null) ||
+          'клиент';
 
-      await notifyManagersOfDomainSelection({
-        db: supabaseAdmin,
-        clientUserId: userId,
-        clientDisplayName,
-        domains: selected,
-      });
+        await notifyManagersOfDomainSelection({
+          db: supabaseAdmin,
+          clientUserId: userId,
+          clientDisplayName,
+          domains: selected,
+        });
 
-      void sendDomainSelectionTelegramAlert({
-        clientDisplayName,
-        domains: selected,
-        clientUserId: userId,
-      });
+        void sendDomainSelectionTelegramAlert({
+          clientDisplayName,
+          domains: selected,
+          clientUserId: userId,
+        });
+      } catch (notifyErr) {
+        await logError('client.domains.selection.notify.failed', notifyErr, { userId });
+      }
     }
 
     return NextResponse.json({

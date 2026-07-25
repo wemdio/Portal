@@ -20,6 +20,9 @@ import 'server-only';
 
 const REGRU_API = 'https://api.reg.ru/api/regru2';
 
+/** Hard timeout for a single reg.ru call — a hung API must not hang the route. */
+const REGRU_FETCH_TIMEOUT_MS = 10_000;
+
 export interface RegruAccount {
   name: string;
   username: string;
@@ -70,6 +73,7 @@ export async function callRegruApi<TAnswer = unknown>(
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.toString(),
+    signal: AbortSignal.timeout(REGRU_FETCH_TIMEOUT_MS),
   });
 
   if (!res.ok) {
@@ -118,8 +122,15 @@ export async function checkDomainsAvailable(
     creds,
   );
 
+  // A successful envelope without the domains array is a malformed answer,
+  // NOT "all taken" — treat it as an API failure instead of persisting an
+  // empty offer to the client.
+  if (!Array.isArray(answer?.domains)) {
+    throw new Error(`Reg.ru (${creds.name}): domain/check returned no domains array`);
+  }
+
   const availability: Record<string, boolean> = {};
-  for (const item of answer?.domains ?? []) {
+  for (const item of answer.domains) {
     if (typeof item.dname !== 'string') continue;
     availability[item.dname.toLowerCase()] = item.result === 'Available';
   }

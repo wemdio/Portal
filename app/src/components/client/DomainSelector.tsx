@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Check, Loader2, RefreshCw } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
+import { mergePickedDomains } from '@/lib/clientDomains/mergePicks';
 
 interface SuggestedDomain {
   domain: string;
@@ -99,7 +100,10 @@ export function DomainSelector({
         });
         const next = normalizeState(res);
         setState(next);
-        setPicked(new Set(next.selected));
+        // Мержим, а не заменяем: локальные (ещё не подтверждённые) галочки
+        // переживают «Показать ещё варианты», если домен есть в новой
+        // подборке и свободен.
+        setPicked((prev) => mergePickedDomains(prev, next.selected, next.suggested));
       } catch (err) {
         setError(errorMessage(err, 'Не удалось подобрать домены. Попробуйте ещё раз.'));
       } finally {
