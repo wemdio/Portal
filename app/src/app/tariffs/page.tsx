@@ -11,7 +11,7 @@ function fmt(n: number) {
 const tiers = [
   {
     id: 'standard',
-    name: 'Стандарт',
+    name: 'Запуск',
     price: '40 000',
     period: '/ мес',
     description: 'Для старта аутрич-кампаний и работы с базами',
@@ -26,7 +26,7 @@ const tiers = [
   },
   {
     id: 'pro',
-    name: 'Про',
+    name: 'Поток',
     price: '80 000',
     period: '/ мес',
     popular: true,
@@ -42,7 +42,7 @@ const tiers = [
   },
   {
     id: 'custom',
-    name: 'Custom',
+    name: 'Масштаб',
     price: null,
     description: 'Индивидуальные лимиты под ваш объём',
     accent: 'zinc',
@@ -198,9 +198,9 @@ export default function TariffsPage() {
             <thead>
               <tr className="border-b border-zinc-100">
                 <th className="py-2.5 pr-4 text-left font-medium text-zinc-500 w-[200px]">Лимит</th>
-                <th className="py-2.5 px-4 text-center font-medium text-blue-600">Стандарт</th>
-                <th className="py-2.5 px-4 text-center font-medium text-violet-600">Про</th>
-                <th className="py-2.5 px-4 text-center font-medium text-zinc-500">Custom</th>
+                <th className="py-2.5 px-4 text-center font-medium text-blue-600">Запуск</th>
+                <th className="py-2.5 px-4 text-center font-medium text-violet-600">Поток</th>
+                <th className="py-2.5 px-4 text-center font-medium text-zinc-500">Масштаб</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-50">

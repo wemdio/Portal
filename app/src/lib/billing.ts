@@ -128,10 +128,12 @@ export function mapYookassaErrorRu(reason: string | null | undefined): string {
 
 /* ─── Helpers ─── */
 
+// Названия тарифов совпадают с лендингом outreachos.pro. DB-enum остаётся
+// standard/pro/custom — переименование только на уровне UI/квитанций.
 const TARIFF_LABELS_RU: Record<TariffType, string> = {
-  standard: 'Стандарт',
-  pro: 'Про',
-  custom: 'Индивидуальный',
+  standard: 'Запуск',
+  pro: 'Поток',
+  custom: 'Масштаб',
 };
 
 /** Single, universal payment description shown on YooKassa form, fiscal
