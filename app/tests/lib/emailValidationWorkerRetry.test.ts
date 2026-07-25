@@ -17,6 +17,8 @@ import {
   filterDirtyCacheEntries,
   domainInfoSignature,
   MAX_ATTEMPTS,
+  TAIL_CAP_MS,
+  GREYLIST_HINT_MAX_MS,
 } from '@/lib/emailValidation/emailValidationWorker';
 import type { DomainInfo } from '@/lib/emailValidation/shared';
 
@@ -38,15 +40,13 @@ describe('classifyRetry: маппинг details.step → класс ретрая
     expect(shouldRetry('Превышена квота проверок', 1, { step: 'over_quota' })).toBe(false);
   });
 
-  it('step=smtp_5xx_policy → одна отложенная попытка, затем терминально', () => {
+  it('step=smtp_5xx_policy → терминально СРАЗУ (анти-проба постоянна, не держим джоб)', () => {
     const err = 'Сервер отклонил по политике/лимиту (554)';
     const details = { step: 'smtp_5xx_policy', smtp_text: '554 Transaction failed, spam policy' };
-    expect(classifyRetry(err, details, 1)).toBe('policy_5xx');
-    // Вторая неудача — терминально (проверяем, только если лимит попыток не
-    // меньше: иначе терминальность даёт общий MAX_ATTEMPTS-гард).
-    if (MAX_ATTEMPTS > 2) {
-      expect(classifyRetry(err, details, 2)).toBeNull();
-    }
+    // Продовая выборка: Backscatter/relay-denied/sender-rep не снимаются задержкой —
+    // отложенный ретрай не конвертирует, но держит джоб заложником хвоста.
+    expect(classifyRetry(err, details, 1)).toBeNull();
+    expect(shouldRetry(err, 1, details)).toBe(false);
   });
 
   it('step=mx с DNS-ошибкой → dns-ретрай', () => {
@@ -138,8 +138,10 @@ describe('retryDelayMs: задержки по классам с эскалаци
     expectDelay(retryDelayMs('greylist', 1, '450 4.7.1 Greylisted, try again in 30 seconds'), 1 * MIN);
   });
 
-  it('greylist: подсказка 120 минут клэмпится сверху до 45 минут', () => {
-    expectDelay(retryDelayMs('greylist', 1, '450 4.7.1 try again in 120 minutes'), 45 * MIN);
+  it('greylist: подсказка 120 минут клэмпится сверху до 20 минут (под кэп хвоста)', () => {
+    // Верхний клэмп 20 мин × джиттер 1.1 = 22 мин < TAIL_CAP (25 мин дефолт) —
+    // hinted-ретрай должен успеть сработать до таймаута хвоста джоба.
+    expectDelay(retryDelayMs('greylist', 1, '450 4.7.1 try again in 120 minutes'), 20 * MIN);
   });
 
   it('greylist без подсказки: расписание 5→15→30 минут по попыткам', () => {
@@ -165,12 +167,6 @@ describe('retryDelayMs: задержки по классам с эскалаци
     expectDelay(retryDelayMs('proxy', 1), 1 * MIN);
     expectDelay(retryDelayMs('proxy', 2), 5 * MIN);
     expectDelay(retryDelayMs('proxy', 9), 5 * MIN);
-  });
-
-  it('policy_5xx: одна попытка в окне 30–60 минут', () => {
-    const d = retryDelayMs('policy_5xx', 1);
-    expect(d).toBeGreaterThanOrEqual(30 * MIN);
-    expect(d).toBeLessThanOrEqual(60 * MIN);
   });
 });
 
@@ -232,5 +228,18 @@ describe('filterDirtyCacheEntries: dirty-set доменного кэша (фик
       ['b.ru', domainInfoSignature(b)],
     ]);
     expect(filterDirtyCacheEntries(new Map([['a.ru', a], ['b.ru', b]]), snapshot)).toEqual([]);
+  });
+});
+
+describe('инвариант: hinted greylist-ретрай всегда успевает до кэпа хвоста', () => {
+  it('GREYLIST_HINT_MAX × джиттер 1.1 < TAIL_CAP', () => {
+    // Если этот инвариант сломается (подняли hint-клэмп или опустили кэп),
+    // hinted-ретрай будет финализирован таймаутом хвоста ДО своего срока.
+    expect(GREYLIST_HINT_MAX_MS * 1.1).toBeLessThan(TAIL_CAP_MS);
+  });
+
+  it('TAIL_CAP_MS конечен и ≥ 5 минут (защита от мусорного env)', () => {
+    expect(Number.isFinite(TAIL_CAP_MS)).toBe(true);
+    expect(TAIL_CAP_MS).toBeGreaterThanOrEqual(5 * 60_000);
   });
 });

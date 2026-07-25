@@ -99,7 +99,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       vertical_id: verticalId,
       language,
       letters,
-      status: 'done',
+      status: 'ready',
       tokens_used: usage.tokensUsed,
       cost_usd: usage.costUsd,
     })

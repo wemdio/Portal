@@ -24,11 +24,40 @@ export async function GET(req: NextRequest) {
     .limit(1);
 
   const job = (data ?? [])[0];
-  if (!job) return NextResponse.json({ active_job: null });
+
+  // Последняя завершённая задача — для бэкфилла результатов: если UI умер
+  // посреди polling'а (закрытая вкладка, старый watchdog «зависла»), вердикты,
+  // записанные воркером после отвала, можно подтянуть в таблицу заново.
+  const { data: completed } = await supabaseAdmin
+    .from('email_validation_jobs')
+    .select('id, status, total, processed, success_count, error_count, completed_at')
+    .eq('user_id', user.id)
+    .eq('status', 'completed')
+    .order('completed_at', { ascending: false })
+    .limit(1);
+
+  const lastCompleted = (completed ?? [])[0] ?? null;
+
+  if (!job) {
+    return NextResponse.json({
+      active_job: null,
+      last_completed_job: lastCompleted
+        ? {
+            id: lastCompleted.id,
+            total: lastCompleted.total,
+            processed: lastCompleted.processed,
+            success_count: lastCompleted.success_count,
+            error_count: lastCompleted.error_count,
+            completed_at: lastCompleted.completed_at,
+          }
+        : null,
+    });
+  }
 
   const progress = job.total > 0 ? Math.round((job.processed / job.total) * 100) : 0;
   return NextResponse.json({
     active_job: { id: job.id, status: job.status, total: job.total, processed: job.processed, progress },
+    last_completed_job: null,
   });
 }
 

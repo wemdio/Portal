@@ -1072,6 +1072,20 @@ async def check_stuck_jobs() -> list[str]:
         print(f"[health] stuck-jobs connect error: {_normalize_network_error(e)}")
         return []
     try:
+        # Валидация почт: джобы, у которых оставшиеся строки ждут отложенных
+        # ретраев (pending + retry_after в будущем). Для них «замороженный»
+        # processed — штатное ожидание greylist/DNS-ретраев, а не зависание.
+        deferred_emailval_jobs: set[str] = set()
+        try:
+            drows = await conn.fetch(
+                "SELECT DISTINCT job_id::text AS job_id "
+                "FROM public.email_validation_queue "
+                "WHERE status = 'pending' AND retry_after > now()"
+            )
+            deferred_emailval_jobs = {r["job_id"] for r in drows}
+        except Exception as e:
+            print(f"[health] email-validation deferred query skipped: {e}")
+
         for table, label, prog_col, stall_min in _STUCK_JOB_SPECS:
             prog_select = f"{prog_col}::text" if prog_col else "NULL::text"
             age_anchor = (
@@ -1132,6 +1146,16 @@ async def check_stuck_jobs() -> list[str]:
                     _STUCK_TRACKER[key] = (fp, loop_now)
                     _STUCK_ALERTED.discard(key)
                 elif (loop_now - prev[1]) > stall_min * 60 and key not in _STUCK_ALERTED:
+                    # Валидация почт: «замороженный» processed — НОРМА, когда
+                    # оставшаяся очередь ждёт отложенных ретраев (greylist
+                    # 5/15/30 мин, хвост до ~25 мин): строки pending с
+                    # retry_after в будущем. Это ожидание, не зависание —
+                    # сбрасываем таймер и не алертим. Когда отложенные
+                    # закончатся, подавление снимается само; просроченный
+                    # retry_after (воркер лёг и не клеймит) — алертит как раньше.
+                    if table == "email_validation_jobs" and r["id"] in deferred_emailval_jobs:
+                        _STUCK_TRACKER[key] = (fp, loop_now)
+                        continue
                     _STUCK_ALERTED.add(key)
                     problems.append(
                         f"🔴 <b>{label}</b>: прогресс застрял на {fp} ≥{stall_min} мин — "

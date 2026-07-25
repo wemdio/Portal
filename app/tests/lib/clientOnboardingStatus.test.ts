@@ -4,13 +4,15 @@
  * Tests for computeOnboardingStatus — the pure backend logic that powers
  * the /client/dashboard onboarding checklist (Phase 3).
  *
- * The function returns 6 progress items in fixed order:
- *   brief → preset → first_base → first_clean → first_sequence → first_launch
+ * The function returns 7 progress items in fixed order:
+ *   brief → domains → preset → first_base → first_clean → first_sequence → first_launch
  *
  * Sources of truth (matches Phase 0 design doc):
  *   brief:          instantly schema → client_briefs.fields (any of the
  *                   three core fields: company_description, product_description,
  *                   target_audience must be non-empty)
+ *   domains:        instantly schema → client_domain_selections row with
+ *                   selected[] non-empty and its size === required_count
  *   preset:         instantly schema → client_campaign_presets row exists with
  *                   email_account_ids[].length > 0; if row exists with empty
  *                   array, blocked_reason mentions the manager
@@ -111,10 +113,11 @@ function callStatus() {
 }
 
 describe('computeOnboardingStatus', () => {
-  it('all empty: returns 6 items, all done=false, complete=false, next=brief', async () => {
+  it('all empty: returns 7 items, all done=false, complete=false, next=brief', async () => {
     const res = await callStatus();
     expect(res.items.map((i) => i.id)).toEqual([
       'brief',
+      'domains',
       'preset',
       'first_base',
       'first_clean',
@@ -126,7 +129,7 @@ describe('computeOnboardingStatus', () => {
     expect(res.next_id).toBe('brief');
   });
 
-  it('only brief filled: brief done, next=preset', async () => {
+  it('only brief filled: brief done, next=domains', async () => {
     state.rowsByTable.client_briefs = [
       {
         client_user_id: USER_ID,
@@ -135,9 +138,26 @@ describe('computeOnboardingStatus', () => {
     ];
     const res = await callStatus();
     expect(res.items.find((i) => i.id === 'brief')?.done).toBe(true);
-    expect(res.items.find((i) => i.id === 'preset')?.done).toBe(false);
-    expect(res.next_id).toBe('preset');
+    expect(res.items.find((i) => i.id === 'domains')?.done).toBe(false);
+    expect(res.next_id).toBe('domains');
     expect(res.complete).toBe(false);
+  });
+
+  it('domains: selected size === required_count → done=true, otherwise false', async () => {
+    // Неполный набор: 2 из 3 — шаг не закрыт.
+    state.rowsByTable.client_domain_selections = [
+      { client_user_id: USER_ID, selected: ['a.ru', 'b.ru'], required_count: 3 },
+    ];
+    const res = await callStatus();
+    expect(res.items.find((i) => i.id === 'domains')?.done).toBe(false);
+
+    // Полный набор — закрыт.
+    state.rowsByTable.client_domain_selections = [
+      { client_user_id: USER_ID, selected: ['a.ru', 'b.ru', 'c.online'], required_count: 3 },
+    ];
+    const res2 = await callStatus();
+    expect(res2.items.find((i) => i.id === 'domains')?.done).toBe(true);
+    expect(res2.items.find((i) => i.id === 'domains')?.href).toBeNull();
   });
 
   it('brief row exists but ALL core fields empty → done=false', async () => {
@@ -242,9 +262,12 @@ describe('computeOnboardingStatus', () => {
     expect(res2.items.find((i) => i.id === 'first_launch')?.done).toBe(true);
   });
 
-  it('all 6 done → complete=true, next_id=null', async () => {
+  it('all 7 done → complete=true, next_id=null', async () => {
     state.rowsByTable.client_briefs = [
       { client_user_id: USER_ID, fields: { product_description: 'X', company_description: '', target_audience: '' } },
+    ];
+    state.rowsByTable.client_domain_selections = [
+      { client_user_id: USER_ID, selected: ['a.ru', 'b.ru', 'c.online'], required_count: 3 },
     ];
     state.rowsByTable.client_campaign_presets = [
       { client_user_id: USER_ID, email_account_ids: ['acc-1'] },

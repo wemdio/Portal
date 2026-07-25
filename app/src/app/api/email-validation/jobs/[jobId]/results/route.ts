@@ -35,7 +35,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ jobI
 
     let query = supabaseAdmin
       .from('email_validation_queue')
-      .select('id, row_index, result, quality, is_free, is_role, is_disposable, is_catch_all, did_you_mean, mx_found, smtp_code, status, last_error, updated_at')
+      .select('id, row_index, email_normalized, result, quality, is_free, is_role, is_disposable, is_catch_all, did_you_mean, mx_found, smtp_code, status, last_error, updated_at')
       .eq('job_id', jobId)
       .in('status', ['completed', 'failed'])
       .order('updated_at', { ascending: true })

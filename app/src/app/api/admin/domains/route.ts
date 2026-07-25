@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { callRegruApi, getRegruAccounts } from '@/lib/regru/client';
+import type { RegruAccount } from '@/lib/regru/client';
 
 export const dynamic = 'force-dynamic';
-
-const REGRU_API = 'https://api.reg.ru/api/regru2';
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -21,12 +21,6 @@ async function requireAdmin(req: NextRequest) {
   return { user, profile };
 }
 
-interface RegruAccount {
-  name: string;
-  username: string;
-  password: string;
-}
-
 export interface RegruDomain {
   dname: string;
   service_id: string;
@@ -37,51 +31,13 @@ export interface RegruDomain {
   account: string;
 }
 
-function getAccounts(): RegruAccount[] {
-  const accounts: RegruAccount[] = [];
-
-  const u1 = process.env.REGRU_USERNAME;
-  const p1 = process.env.REGRU_PASSWORD;
-  if (u1 && p1) accounts.push({ name: u1, username: u1, password: p1 });
-
-  const u2 = process.env.REGRU_USERNAME_2;
-  const p2 = process.env.REGRU_PASSWORD_2;
-  if (u2 && p2) accounts.push({ name: u2, username: u2, password: p2 });
-
-  return accounts;
-}
-
 async function fetchDomainsForAccount(account: RegruAccount): Promise<RegruDomain[]> {
-  const params = new URLSearchParams({
-    username: account.username,
-    password: account.password,
-    input_format: 'json',
-    input_data: JSON.stringify({ servtype: 'domain' }),
-    output_content_type: 'plain',
-  });
-
-  const res = await fetch(`${REGRU_API}/service/get_list`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString(),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Reg.ru API (${account.name}): HTTP ${res.status}`);
-  }
-
-  const data = await res.json() as {
-    result: string;
-    error_code?: string;
-    error_text?: string;
-    answer?: { services?: Omit<RegruDomain, 'account'>[] };
-  };
-
-  if (data.result !== 'success') {
-    throw new Error(`Reg.ru (${account.name}): ${data.error_text ?? data.error_code ?? 'API error'}`);
-  }
-
-  return (data.answer?.services ?? []).map((d) => ({ ...d, account: account.name }));
+  const answer = await callRegruApi<{ services?: Omit<RegruDomain, 'account'>[] }>(
+    'service/get_list',
+    { servtype: 'domain' },
+    account,
+  );
+  return (answer?.services ?? []).map((d) => ({ ...d, account: account.name }));
 }
 
 /**
@@ -92,7 +48,7 @@ export async function GET(req: NextRequest) {
   const auth = await requireAdmin(req);
   if ('error' in auth) return auth.error;
 
-  const accounts = getAccounts();
+  const accounts = getRegruAccounts();
   if (accounts.length === 0) {
     return jsonError('No Reg.ru accounts configured. Set REGRU_ACCOUNTS or REGRU_USERNAME/REGRU_PASSWORD.', 500);
   }
