@@ -300,6 +300,8 @@ jest.mock('@/lib/tariffs', () => ({
   isAwaitingFirstPayment: () => false,
   TOOL_ACCESS_DENIED_MESSAGE: 'Подписка не активна. Оплатите тариф для продолжения работы.',
   AWAITING_PAYMENT_MESSAGE: 'Оформлена подписка, но оплата ещё не поступила. Доступ откроется после оплаты.',
+  // Константа прогрева — используется checkStatus для таймера почт.
+  SETUP_DAYS: 15,
 }));
 
 // ── Companies-search regions ─────────────────────────────────────────────────

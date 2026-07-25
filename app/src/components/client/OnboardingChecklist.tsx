@@ -43,6 +43,34 @@ interface OnboardingResponse {
   items: ChecklistItem[];
   complete: boolean;
   next_id: ChecklistItem['id'] | null;
+  /** Estimated mailbox-readiness date for the preset-step countdown. */
+  mail_ready_at: string | null;
+}
+
+function formatReadyDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('ru-RU', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  });
+}
+
+/**
+ * Countdown caption for the preset step (replaces the old "написать
+ * менеджеру в чат" detour — domains are agreed in-product now, so the chat
+ * is no longer part of onboarding).
+ */
+function mailReadyText(mailReadyAt: string | null): string {
+  const tail = 'Собирать и чистить базы, писать цепочки можно уже сейчас.';
+  const ms = mailReadyAt ? Date.parse(mailReadyAt) : NaN;
+  if (!Number.isFinite(ms)) {
+    return `Менеджер настраивает и прогревает почты. ${tail}`;
+  }
+  const daysLeft = Math.ceil((ms - Date.now()) / 86400000);
+  if (daysLeft <= 0) {
+    return `Прогрев по сроку уже завершён — менеджер подключает почты к вашему пресету. ${tail}`;
+  }
+  return `Почты настраиваются и прогреваются: запускать кампании можно будет с ${formatReadyDate(mailReadyAt!)} (осталось ~${daysLeft} дн.). ${tail}`;
 }
 
 export function OnboardingChecklist() {
@@ -183,6 +211,7 @@ export function OnboardingChecklist() {
             item={item}
             stepNumber={idx + 1}
             isNext={data.next_id === item.id}
+            mailReadyAt={data.mail_ready_at}
             onChanged={load}
           />
         ))}
@@ -195,11 +224,13 @@ function ChecklistRow({
   item,
   stepNumber,
   isNext,
+  mailReadyAt,
   onChanged,
 }: {
   item: ChecklistItem;
   stepNumber: number;
   isNext: boolean;
+  mailReadyAt?: string | null;
   onChanged?: () => void;
 }) {
   // Editorial state vocabulary — one accent (amber) on the next-step row only:
@@ -226,16 +257,14 @@ function ChecklistRow({
       ? 'var(--cp-paper-faint)'
       : 'var(--cp-paper-mute)';
 
+  // Шаг preset больше не ведёт в чат: домены согласуются в продукте, а про
+  // ожидание почт рассказывает таймер (mailReadyText). Чат-CTA убран.
   const presetNeedsManager = item.id === 'preset' && !item.done;
-  const displayHref = item.href ?? (presetNeedsManager ? '/client/support' : null);
+  const displayHref = item.href;
   const displayReason = presetNeedsManager
     ? 'Менеджер создает email-аккаунты, прогревает почты и подключает их к вашему пресету. Имя отправителя он возьмет из поля «От чьего лица ведём диалог» в брифе, заполните его, если еще не заполнили.'
     : item.blocked_reason;
-  const actionLabel = presetNeedsManager
-    ? 'Написать менеджеру в чат →'
-    : isNext && displayHref
-      ? 'Сделать сейчас →'
-      : null;
+  const actionLabel = isNext && displayHref ? 'Сделать сейчас →' : null;
 
   const Wrapper: React.ElementType = displayHref ? Link : 'div';
   const wrapperProps = displayHref
@@ -300,6 +329,11 @@ function ChecklistRow({
         {!item.done && displayReason && (
           <p className="text-[11px] mt-1" style={{ color: 'var(--cp-text-m)' }}>
             {displayReason}
+          </p>
+        )}
+        {presetNeedsManager && (
+          <p className="text-[11px] mt-1 font-semibold" style={{ color: 'var(--cp-amber)' }}>
+            {mailReadyText(mailReadyAt ?? null)}
           </p>
         )}
         {item.id === 'domains' && (isNext || item.done) && (
