@@ -45,6 +45,37 @@ import {
   type ProjectPaceInput,
 } from '@/lib/projects/paceCalculator';
 
+/**
+ * Колонки списка проектов. Раньше был select('*') — все 50 полей, 2.5 МБ JSON
+ * на 136 проектов. Что выкинуто и почему:
+ *   - brief_text (≈0.9 МБ) — не читается в этом файле вообще;
+ *   - description / region / payment_method / payment_amount / client_user_id — тоже;
+ *   - brief_* и lead_source_hypotheses_* (≈0.6 МБ) — нужны ТОЛЬКО боковой панели
+ *     открытого проекта, поэтому грузятся отдельным запросом на 1 строку
+ *     (см. panelBrief ниже), а не на все 136 сразу.
+ * Итог: 2.5 МБ → ≈216 КБ. Добавляешь поле в таблицу/панель — добавь и сюда.
+ *
+ * Одной строкой, а не массивом с .join(): supabase-js разбирает список колонок
+ * на уровне типов, и только строковый литерал даёт типизированный результат
+ * (с .join() тип схлопывается в GenericStringError и каст к Project[] падает).
+ */
+const PROJECT_LIST_COLUMNS =
+  'id, created_at, updated_at, name, client, status, project_type, lead_source, work_format, budget, margin, contract_date, contract_link, handoff_link, handoff_email, handoff_legend, launch_date, deadline, payment_date, kpi_plan, kpi_fact, contacts_obligation, contacts_done, contacts_done_synced_at, specialist, specialist_user_id, manager, weekly_tasks, subtasks, materials_links, comment_elvira, comment_anya, comments, client_feedback, hypotheses, hypotheses_result, lead_criteria';
+
+/** Поля брифа/гипотез — грузятся лениво для выбранного проекта. */
+type PanelBrief = {
+  brief_file_path?: string | null;
+  brief_file_name?: string | null;
+  brief_uploaded_at?: string | null;
+  lead_source_hypotheses?: string | null;
+  lead_source_hypotheses_generated_at?: string | null;
+  lead_source_hypotheses_error?: string | null;
+  lead_source_hypotheses_stale?: boolean | null;
+};
+
+const PANEL_BRIEF_COLUMNS =
+  'brief_file_path, brief_file_name, brief_uploaded_at, lead_source_hypotheses, lead_source_hypotheses_generated_at, lead_source_hypotheses_error, lead_source_hypotheses_stale';
+
 type ViewMode = 'table' | 'cards' | 'kanban';
 
 type ProjectPeriod = {
@@ -693,7 +724,15 @@ export function ProjectList() {
   const [panelLinkedCampaigns, setPanelLinkedCampaigns] = useState<{ campaign_id: string; campaign_name: string; match_source: string }[]>([]);
   const [panelAllCampaigns, setPanelAllCampaigns] = useState<{ id: string; name: string }[]>([]);
   const [panelPeriods, setPanelPeriods] = useState<ProjectPeriod[]>([]);
+  const [panelBrief, setPanelBrief] = useState<PanelBrief>({});
+  // Первый расчёт темпа — сразу, последующие — с дебаунсом (см. эффект ниже).
+  const paceFirstRunRef = useRef(true);
   const [activePeriodsByProjectId, setActivePeriodsByProjectId] = useState<Map<string, ProjectPeriod>>(new Map());
+  // Загрузились ли активные периоды. Нужен именно флаг, а не проверка на пустую
+  // Map: активных периодов легитимно может не быть ни одного, и без флага расчёт
+  // темпа стартовал бы дважды — сначала со пустыми периодами (все проекты
+  // считаются legacy → лишние ~8.4к строк истории в мусор), потом заново.
+  const [periodsLoaded, setPeriodsLoaded] = useState(false);
   const [creatingPeriod, setCreatingPeriod] = useState(false);
   const [periodFormProject, setPeriodFormProject] = useState<Project | null>(null);
   const [periodForm, setPeriodForm] = useState<PeriodFormState | null>(null);
@@ -758,29 +797,41 @@ export function ProjectList() {
       setPaceByProjectId(new Map());
       return;
     }
+    // Ждём периоды: без них все проекты считаются legacy и запрос истории
+    // уезжает впустую, чтобы через мгновение уехать заново уже с периодами.
+    if (!periodsLoaded) return;
     let cancelled = false;
-    const inputs: ProjectPaceInput[] = projects.map((p) => ({
-      projectId: p.id,
-      periodId: activePeriodsByProjectId.get(p.id)?.id ?? null,
-      contactsObligation: parseInt(p.contacts_obligation ?? '0', 10) || 0,
-      contactsDone: parseInt(p.contacts_done ?? '0', 10) || 0,
-      kpiPlan: parseInt(p.kpi_plan ?? '0', 10) || 0,
-      kpiFact: parseInt(p.kpi_fact ?? '0', 10) || 0,
-      deadline: p.deadline ?? null,
-    }));
-    void loadAllProjectsPace(supabase, inputs)
-      .then((result) => {
-        if (!cancelled) setPaceByProjectId(result);
-      })
-      .catch(() => {
-        // graceful: tooltip всё равно работает on-hover, индикатор просто не покажется
-        if (!cancelled) setPaceByProjectId(new Map());
-      });
+    // paceInputsKey включает мутабельные KPI/контакты (это осознанно — иконка
+    // риска должна обновляться сразу после правки). Но каждый клик по стрелке
+    // ▲ перекачивал всю 90-дневную историю (~0.9 МБ), поэтому серию быстрых
+    // кликов схлопываем в один запрос. Первый прогон — без задержки.
+    const delay = paceFirstRunRef.current ? 0 : 600;
+    const timer = setTimeout(() => {
+      paceFirstRunRef.current = false;
+      const inputs: ProjectPaceInput[] = projects.map((p) => ({
+        projectId: p.id,
+        periodId: activePeriodsByProjectId.get(p.id)?.id ?? null,
+        contactsObligation: parseInt(p.contacts_obligation ?? '0', 10) || 0,
+        contactsDone: parseInt(p.contacts_done ?? '0', 10) || 0,
+        kpiPlan: parseInt(p.kpi_plan ?? '0', 10) || 0,
+        kpiFact: parseInt(p.kpi_fact ?? '0', 10) || 0,
+        deadline: p.deadline ?? null,
+      }));
+      void loadAllProjectsPace(supabase, inputs)
+        .then((result) => {
+          if (!cancelled) setPaceByProjectId(result);
+        })
+        .catch(() => {
+          // graceful: tooltip всё равно работает on-hover, индикатор просто не покажется
+          if (!cancelled) setPaceByProjectId(new Map());
+        });
+    }, delay);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paceInputsKey]);
+  }, [paceInputsKey, periodsLoaded]);
 
   useEffect(() => {
     const interval = setInterval(() => void fetchSignedAvatars(), 30 * 60 * 1000);
@@ -827,9 +878,11 @@ export function ProjectList() {
       void fetchPanelPeriods(selectedProjectId);
       void fetchPanelCampaigns(selectedProjectId);
       void fetchPanelAllCampaigns();
+      void fetchPanelBrief(selectedProjectId);
     } else {
       setPanelPeriods([]);
       setPanelLinkedCampaigns([]);
+      setPanelBrief({});
       setShowPanelCampaignPicker(false);
       setPanelCampaignSearch('');
     }
@@ -840,9 +893,11 @@ export function ProjectList() {
   useEffect(() => {
     if (projects.length === 0) {
       setActivePeriodsByProjectId(new Map());
+      setPeriodsLoaded(false);
       return;
     }
     let cancelled = false;
+    setPeriodsLoaded(false);
     void supabase
       .from('project_periods')
       .select('id, project_id, name, status, period_start, period_end, contacts_done, contacts_obligation, kpi_plan, deadline, budget, margin, payment_date')
@@ -852,9 +907,13 @@ export function ProjectList() {
         if (cancelled) return;
         if (error || !data) {
           setActivePeriodsByProjectId(new Map());
+          // Всё равно разблокируем расчёт темпа — иначе при сбое запроса
+          // периодов индикаторы риска не появятся вообще.
+          setPeriodsLoaded(true);
           return;
         }
         setActivePeriodsByProjectId(new Map((data as ProjectPeriod[]).map((p) => [p.project_id, p])));
+        setPeriodsLoaded(true);
       });
     return () => {
       cancelled = true;
@@ -862,14 +921,32 @@ export function ProjectList() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectIdsKey]);
 
+  // Бриф и ИИ-гипотезы одного открытого проекта. Отдельным запросом, потому что
+  // на все 136 проектов эти поля весили ≈0.6 МБ, а видит их только боковая панель.
+  async function fetchPanelBrief(projectId: string) {
+    try {
+      const { data, error } = await supabase
+        .from('projects')
+        .select(PANEL_BRIEF_COLUMNS)
+        .eq('id', projectId)
+        .single();
+      if (error) throw error;
+      setPanelBrief((data ?? {}) as PanelBrief);
+    } catch (error) {
+      // Не критично: панель покажет пустой бриф вместо срыва всего рендера.
+      void logError('projects.panel.brief.fetch.failed', error);
+      setPanelBrief({});
+    }
+  }
+
   async function fetchProjects() {
     try {
       setLoading(true);
       const { data, error } = await supabase
         .from('projects')
-        .select('*')
+        .select(PROJECT_LIST_COLUMNS)
         .order('created_at', { ascending: false });
-      
+
       if (error) throw error;
       if (data) setProjects(data as Project[]);
     } catch (error) {
@@ -2818,22 +2895,12 @@ export function ProjectList() {
               <section>
                 <ProjectBriefSection
                   projectId={selectedProject.id}
-                  brief={{
-                    brief_file_path: selectedProject.brief_file_path,
-                    brief_file_name: selectedProject.brief_file_name,
-                    brief_uploaded_at: selectedProject.brief_uploaded_at,
-                    lead_source_hypotheses: selectedProject.lead_source_hypotheses,
-                    lead_source_hypotheses_generated_at: selectedProject.lead_source_hypotheses_generated_at,
-                    lead_source_hypotheses_error: selectedProject.lead_source_hypotheses_error,
-                    lead_source_hypotheses_stale: selectedProject.lead_source_hypotheses_stale,
-                  }}
+                  brief={panelBrief}
                   canEdit={canEdit}
                   onChange={(next) => {
-                    setProjects((prev) =>
-                      prev.map((item) =>
-                        item.id === selectedProject.id ? { ...item, ...next } : item,
-                      ),
-                    );
+                    // Эти поля больше не живут в списке проектов (грузятся лениво
+                    // для открытого проекта) — обновляем локальный стейт панели.
+                    setPanelBrief((prev) => ({ ...prev, ...next }));
                   }}
                 />
               </section>

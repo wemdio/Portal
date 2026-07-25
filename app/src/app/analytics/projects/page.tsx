@@ -22,6 +22,12 @@ const STATUS_CONFIG: Record<string, { label: string; className: string }> = {
   'completed': { label: 'Завершен', className: 'bg-gray-100 text-gray-600 border-gray-200' },
 };
 
+// Ровно те поля, которые читает эта страница (плюс name/status — обязательные в
+// типе Project). Держать список рядом с рендером: добавил колонку в разметку —
+// добавь сюда, иначе поле приедет undefined.
+const PROJECT_ANALYTICS_COLUMNS =
+  'id, name, client, status, specialist, manager, deadline, contacts_done, contacts_obligation, kpi_plan, kpi_fact, budget, contract_link, handoff_link, hypotheses, weekly_tasks';
+
 const splitTasks = (value: string | null | undefined) => {
   if (!value) return [];
   return value
@@ -229,7 +235,12 @@ export default function ProjectsAnalyticsPage() {
   useEffect(() => {
     const fetchProjects = async () => {
       try {
-        const { data, error } = await supabase.from('projects').select('*');
+        // Только колонки, которые реально читает страница. select('*') тянул
+        // все 50 полей = 2.5 МБ JSON на 136 проектов, из них ~2.4 МБ — brief_text
+        // и lead_source_hypotheses, которые здесь не отображаются нигде.
+        const { data, error } = await supabase
+          .from('projects')
+          .select(PROJECT_ANALYTICS_COLUMNS);
         if (error) throw error;
         setProjects((data ?? []) as Project[]);
       } catch (error) {
