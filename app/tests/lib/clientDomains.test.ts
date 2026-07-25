@@ -13,8 +13,14 @@
 import { extractBrand } from '@/lib/clientDomains/extractBrand';
 import { generateCandidates } from '@/lib/clientDomains/generateCandidates';
 import { suggestDomains } from '@/lib/clientDomains/suggestDomains';
+import { mergePickedDomains } from '@/lib/clientDomains/mergePicks';
+import type { SuggestedDomain } from '@/lib/clientDomains/constants';
 
 const NOW = new Date('2026-07-25T12:00:00.000Z');
+
+function offer(domain: string, available = true): SuggestedDomain {
+  return { domain, tld: domain.split('.').pop() ?? 'ru', available, checked_at: NOW.toISOString() } as SuggestedDomain;
+}
 
 function allAvailable(dnames: string[]): Promise<Record<string, boolean>> {
   return Promise.resolve(Object.fromEntries(dnames.map((d) => [d, true])));
@@ -181,5 +187,47 @@ describe('suggestDomains', () => {
     });
     expect(check).toHaveBeenCalledTimes(1);
     expect(check.mock.calls[0][0].length).toBe(12 * 4);
+  });
+});
+
+describe('mergePickedDomains', () => {
+  it('keeps unconfirmed picks that are still offered and available', () => {
+    const merged = mergePickedDomains(
+      ['acme.ru', 'acme-hq.ru'],
+      [],
+      [offer('acme.ru'), offer('acme-hq.ru'), offer('acme.online')],
+    );
+    expect([...merged].sort()).toEqual(['acme-hq.ru', 'acme.ru']);
+  });
+
+  it('drops picks that disappeared from the new batch', () => {
+    const merged = mergePickedDomains(
+      ['acme.ru', 'gone.ru'],
+      [],
+      [offer('acme.ru')],
+    );
+    expect([...merged]).toEqual(['acme.ru']);
+  });
+
+  it('drops picks that are still offered but no longer available', () => {
+    const merged = mergePickedDomains(
+      ['acme.ru', 'acme-hq.ru'],
+      [],
+      [offer('acme.ru'), offer('acme-hq.ru', false)],
+    );
+    expect([...merged]).toEqual(['acme.ru']);
+  });
+
+  it('merges server-confirmed selections the same way', () => {
+    const merged = mergePickedDomains(
+      ['acme.ru'],
+      ['acme.online', 'dropped.online'],
+      [offer('acme.ru'), offer('acme.online')],
+    );
+    expect([...merged].sort()).toEqual(['acme.online', 'acme.ru']);
+  });
+
+  it('empty batch → empty picks', () => {
+    expect(mergePickedDomains(['acme.ru'], ['acme.online'], []).size).toBe(0);
   });
 });

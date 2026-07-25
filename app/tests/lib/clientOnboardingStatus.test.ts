@@ -160,6 +160,17 @@ describe('computeOnboardingStatus', () => {
     expect(res2.items.find((i) => i.id === 'domains')?.href).toBeNull();
   });
 
+  it('domains: preset already configured (legacy onboarding) → done=true even without a selections row', async () => {
+    // Клиенты, онбордженные ДО появления шага domains: менеджер уже купил
+    // домены вручную (пресет с email_account_ids), строки в
+    // client_domain_selections нет. Шаг не должен «оживать» для них.
+    state.rowsByTable.client_campaign_presets = [
+      { client_user_id: USER_ID, email_account_ids: ['acc-1', 'acc-2'] },
+    ];
+    const res = await callStatus();
+    expect(res.items.find((i) => i.id === 'domains')?.done).toBe(true);
+  });
+
   it('brief row exists but ALL core fields empty → done=false', async () => {
     state.rowsByTable.client_briefs = [
       {

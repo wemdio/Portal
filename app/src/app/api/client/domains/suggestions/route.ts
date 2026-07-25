@@ -75,10 +75,15 @@ async function loadBriefWebsite(userId: string): Promise<string | null> {
 }
 
 /**
- * Generate a fresh batch and persist it. Existing selection is kept only for
- * domains still present in the new batch. Throws on reg.ru/API failures —
+ * Generate a fresh batch and persist it. Throws on reg.ru/API failures —
  * callers translate that into a 502 with a retry hint (we never offer
  * unchecked domains).
+ *
+ * A CONFIRMED selection (status='selected') is never touched: the manager
+ * was already notified and may be buying that list right now. The client
+ * re-confirms a new set explicitly via PUT /selection, which re-notifies.
+ * For unconfirmed rows the kept picks are those still present in the new
+ * batch.
  */
 async function generateAndStore(
   userId: string,
@@ -92,10 +97,16 @@ async function generateAndStore(
 
   const suggested = await suggestDomains(brand, { requiredCount, offset });
 
+  const isConfirmed = existing?.status === 'selected';
   const offered = new Set(suggested.map((s) => s.domain));
-  const selected = (existing?.selected ?? []).filter((d) => offered.has(d));
-  const status =
-    selected.length === requiredCount && requiredCount > 0 ? 'selected' : 'suggested';
+  const selected = isConfirmed
+    ? (existing?.selected ?? [])
+    : (existing?.selected ?? []).filter((d) => offered.has(d));
+  const status = isConfirmed
+    ? 'selected'
+    : selected.length === requiredCount && requiredCount > 0
+      ? 'selected'
+      : 'suggested';
 
   const row: SelectionRow = {
     brand,
