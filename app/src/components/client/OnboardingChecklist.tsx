@@ -3,15 +3,19 @@
 /**
  * Persistent setup checklist shown on /client/dashboard.
  *
- * Six steps in fixed order: brief → preset → first base → first clean →
- * first sequence → first launch. Each row carries an editorial eyebrow
- * ("01 → "); the next not-done row additionally gets surface-elev
- * background + 1px amber border, an amber "следующий" eyebrow tail, an
- * amber Clock ring, and an explicit amber "Сделать сейчас →" call-out
- * — so a brand-new user (Olga) sees at a single glance where to click
- * without scanning. Done rows demote to paper-faint with a smaller check.
+ * Seven steps in fixed order: brief → domains → preset → first base →
+ * first clean → first sequence → first launch. Each row carries an
+ * editorial eyebrow ("01 → "); the next not-done row additionally gets
+ * surface-elev background + 1px amber border, an amber "следующий" eyebrow
+ * tail, an amber Clock ring, and an explicit amber "Сделать сейчас →"
+ * call-out — so a brand-new user (Olga) sees at a single glance where to
+ * click without scanning. Done rows demote to paper-faint with a smaller
+ * check.
  *
- * When all six are done the widget collapses to a slim "Setup complete ✓"
+ * The "domains" step has no href: its card expands inline with
+ * DomainSelector (the client picks N of the offered domains right here).
+ *
+ * When all seven are done the widget collapses to a slim "Setup complete ✓"
  * badge with a chevron to expand for review.
  *
  * Status is fetched from /api/client/onboarding/status on mount and on
@@ -25,9 +29,10 @@ import { usePathname } from 'next/navigation';
 import type { Route } from 'next';
 import { AlertCircle, Check, ChevronDown, Clock, Loader2, RefreshCw } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
+import { DomainSelector } from './DomainSelector';
 
 interface ChecklistItem {
-  id: 'brief' | 'preset' | 'first_base' | 'first_clean' | 'first_sequence' | 'first_launch';
+  id: 'brief' | 'domains' | 'preset' | 'first_base' | 'first_clean' | 'first_sequence' | 'first_launch';
   label: string;
   done: boolean;
   href: string | null;
@@ -79,7 +84,7 @@ export function OnboardingChecklist() {
     () => data?.items.filter((i) => i.done).length ?? 0,
     [data],
   );
-  const total = data?.items.length ?? 6;
+  const total = data?.items.length ?? 7;
 
   if (loading && !data) {
     return (
@@ -178,6 +183,7 @@ export function OnboardingChecklist() {
             item={item}
             stepNumber={idx + 1}
             isNext={data.next_id === item.id}
+            onChanged={load}
           />
         ))}
       </div>
@@ -189,10 +195,12 @@ function ChecklistRow({
   item,
   stepNumber,
   isNext,
+  onChanged,
 }: {
   item: ChecklistItem;
   stepNumber: number;
   isNext: boolean;
+  onChanged?: () => void;
 }) {
   // Editorial state vocabulary — one accent (amber) on the next-step row only:
   //   - next : surface-elev background, 1px amber border, amber Clock ring,
@@ -293,6 +301,9 @@ function ChecklistRow({
           <p className="text-[11px] mt-1" style={{ color: 'var(--cp-text-m)' }}>
             {displayReason}
           </p>
+        )}
+        {item.id === 'domains' && (isNext || item.done) && (
+          <DomainSelector done={item.done} onChanged={onChanged} />
         )}
       </div>
     </Wrapper>

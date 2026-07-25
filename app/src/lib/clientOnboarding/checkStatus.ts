@@ -18,6 +18,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 export type OnboardingStepId =
   | 'brief'
+  | 'domains'
   | 'preset'
   | 'first_base'
   | 'first_clean'
@@ -51,6 +52,7 @@ export interface OnboardingStatusDeps {
 
 const STEP_ORDER: readonly OnboardingStepId[] = [
   'brief',
+  'domains',
   'preset',
   'first_base',
   'first_clean',
@@ -92,11 +94,16 @@ export async function computeOnboardingStatus(
 ): Promise<OnboardingStatusResponse> {
   const { supabaseAdmin, supabaseInstantly } = deps;
 
-  // All six queries run in parallel — none depend on each other's output.
-  const [briefRes, presetRes, jobsRes, launchesRes, sequencesRes, sequencesV2Res] = await Promise.all([
+  // All seven queries run in parallel — none depend on each other's output.
+  const [briefRes, domainsRes, presetRes, jobsRes, launchesRes, sequencesRes, sequencesV2Res] = await Promise.all([
     supabaseInstantly
       .from('client_briefs')
       .select('fields')
+      .eq('client_user_id', userId)
+      .maybeSingle(),
+    supabaseInstantly
+      .from('client_domain_selections')
+      .select('selected, required_count')
       .eq('client_user_id', userId)
       .maybeSingle(),
     supabaseInstantly
@@ -131,6 +138,16 @@ export async function computeOnboardingStatus(
   // ── Brief ────────────────────────────────────────────────────────────
   const briefFields = (briefRes.data?.fields ?? null) as BriefFieldsShape | null;
   const briefDone = hasMinimalBriefContent(briefFields);
+
+  // ── Domains ──────────────────────────────────────────────────────────
+  // Шаг закрыт, когда клиент подтвердил ПОЛНЫЙ набор: selected непустой и
+  // по размеру равен required_count (3/6 в зависимости от тарифа).
+  const domainsRow = domainsRes.data as { selected?: unknown; required_count?: unknown } | null;
+  const domainsSelected = Array.isArray(domainsRow?.selected)
+    ? (domainsRow!.selected as unknown[]).filter((d) => typeof d === 'string' && d.trim())
+    : [];
+  const domainsRequired = Number(domainsRow?.required_count) || 0;
+  const domainsDone = domainsRequired > 0 && domainsSelected.length === domainsRequired;
 
   // ── Preset ───────────────────────────────────────────────────────────
   const presetRow = presetRes.data as { email_account_ids?: unknown } | null;
@@ -174,6 +191,14 @@ export async function computeOnboardingStatus(
       label: 'Заполнить бриф',
       done: briefDone,
       href: '/client/brief',
+    },
+    {
+      // Действие инлайн: чеклист раскрывает DomainSelector прямо в карточке
+      // шага, поэтому href=null и без blocked_reason.
+      id: 'domains',
+      label: 'Выбрать домены для рассылки',
+      done: domainsDone,
+      href: null,
     },
     presetDone
       ? {
