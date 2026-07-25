@@ -14,7 +14,7 @@ import type { ClientTariffRow } from '@/lib/tariffs';
 /** Минимальная строка тарифа для тестов getBillingPeriodStart. */
 function row(patch: Partial<ClientTariffRow>): ClientTariffRow {
   return {
-    id: 't', user_id: 'u', tariff_type: 'standard',
+    id: 't', user_id: 'u', tariff_type: 'Запуск',
     max_contacts: null, max_rows: null, max_chains_per_month: null,
     max_domains: null, max_emails: null,
     paid_at: null, paid_until: null, setup_until: null,
@@ -158,83 +158,83 @@ describe('BillingPeriod tables', () => {
 
 describe('calcBillingAmount — без скидки (1 мес) и со скидкой 5% (3 мес)', () => {
   it('standard, 1 мес → 40 000', () => {
-    expect(calcBillingAmount('standard', 'month')).toBe(40_000);
+    expect(calcBillingAmount('Запуск', 'month')).toBe(40_000);
   });
 
   it('pro, 1 мес → 65 000 (выровнено с лендингом outreachos.pro)', () => {
-    expect(calcBillingAmount('pro', 'month')).toBe(65_000);
+    expect(calcBillingAmount('Поток', 'month')).toBe(65_000);
   });
 
   it('standard, 3 мес → 114 000 (40k × 3 × 0.95)', () => {
-    expect(calcBillingAmount('standard', 'quarter')).toBe(114_000);
+    expect(calcBillingAmount('Запуск', 'quarter')).toBe(114_000);
   });
 
   it('pro, 3 мес → 185 250 (65k × 3 × 0.95)', () => {
-    expect(calcBillingAmount('pro', 'quarter')).toBe(185_250);
+    expect(calcBillingAmount('Поток', 'quarter')).toBe(185_250);
   });
 });
 
 describe('calcBillingAmount — со скидкой (6 мес = -10%, 12 мес = -20%)', () => {
   it('standard, 6 мес → 216 000 (40k × 6 × 0.9)', () => {
-    expect(calcBillingAmount('standard', 'half_year')).toBe(216_000);
+    expect(calcBillingAmount('Запуск', 'half_year')).toBe(216_000);
   });
 
   it('pro, 6 мес → 351 000 (65k × 6 × 0.9)', () => {
-    expect(calcBillingAmount('pro', 'half_year')).toBe(351_000);
+    expect(calcBillingAmount('Поток', 'half_year')).toBe(351_000);
   });
 
   it('standard, 12 мес → 384 000 (40k × 12 × 0.8)', () => {
-    expect(calcBillingAmount('standard', 'year')).toBe(384_000);
+    expect(calcBillingAmount('Запуск', 'year')).toBe(384_000);
   });
 
   it('pro, 12 мес → 624 000 (65k × 12 × 0.8)', () => {
-    expect(calcBillingAmount('pro', 'year')).toBe(624_000);
+    expect(calcBillingAmount('Поток', 'year')).toBe(624_000);
   });
 });
 
 describe('calcBillingAmount — custom', () => {
   it('возвращает null (сумма проставляется вручную)', () => {
-    expect(calcBillingAmount('custom', 'month')).toBeNull();
-    expect(calcBillingAmount('custom', 'year')).toBeNull();
+    expect(calcBillingAmount('Масштаб', 'month')).toBeNull();
+    expect(calcBillingAmount('Масштаб', 'year')).toBeNull();
   });
 });
 
 describe('calcBillingAmount — тестовый магазин (isTestShop=true)', () => {
   it('standard: 10/15/20 ₽ для month/half_year/year', () => {
-    expect(calcBillingAmount('standard', 'month', true)).toBe(10);
-    expect(calcBillingAmount('standard', 'half_year', true)).toBe(15);
-    expect(calcBillingAmount('standard', 'year', true)).toBe(20);
+    expect(calcBillingAmount('Запуск', 'month', true)).toBe(10);
+    expect(calcBillingAmount('Запуск', 'half_year', true)).toBe(15);
+    expect(calcBillingAmount('Запуск', 'year', true)).toBe(20);
   });
 
   it('pro: 11/16/21 ₽ для month/half_year/year', () => {
-    expect(calcBillingAmount('pro', 'month', true)).toBe(11);
-    expect(calcBillingAmount('pro', 'half_year', true)).toBe(16);
-    expect(calcBillingAmount('pro', 'year', true)).toBe(21);
+    expect(calcBillingAmount('Поток', 'month', true)).toBe(11);
+    expect(calcBillingAmount('Поток', 'half_year', true)).toBe(16);
+    expect(calcBillingAmount('Поток', 'year', true)).toBe(21);
   });
 
   it('quarter в тест-магазине не поддержан → null (в админ-UI его нет)', () => {
-    expect(calcBillingAmount('standard', 'quarter', true)).toBeNull();
-    expect(calcBillingAmount('pro', 'quarter', true)).toBeNull();
+    expect(calcBillingAmount('Запуск', 'quarter', true)).toBeNull();
+    expect(calcBillingAmount('Поток', 'quarter', true)).toBeNull();
   });
 
   it('custom игнорирует isTestShop, всегда null', () => {
-    expect(calcBillingAmount('custom', 'month', true)).toBeNull();
-    expect(calcBillingAmount('custom', 'year', true)).toBeNull();
+    expect(calcBillingAmount('Масштаб', 'month', true)).toBeNull();
+    expect(calcBillingAmount('Масштаб', 'year', true)).toBeNull();
   });
 
   it('isTestShop=false (дефолт) даёт прод-цены без изменений', () => {
-    expect(calcBillingAmount('standard', 'month', false)).toBe(40_000);
-    expect(calcBillingAmount('pro', 'year', false)).toBe(624_000);
+    expect(calcBillingAmount('Запуск', 'month', false)).toBe(40_000);
+    expect(calcBillingAmount('Поток', 'year', false)).toBe(624_000);
   });
 });
 
 describe('Test-shop константы', () => {
-  it('TEST_TARIFF_PRICE.standard = { month: 10, half_year: 15, year: 20 }', () => {
-    expect(TEST_TARIFF_PRICE.standard).toEqual({ month: 10, half_year: 15, year: 20 });
+  it('TEST_TARIFF_PRICE[Запуск] = { month: 10, half_year: 15, year: 20 }', () => {
+    expect(TEST_TARIFF_PRICE['Запуск']).toEqual({ month: 10, half_year: 15, year: 20 });
   });
 
-  it('TEST_TARIFF_PRICE.pro = { month: 11, half_year: 16, year: 21 }', () => {
-    expect(TEST_TARIFF_PRICE.pro).toEqual({ month: 11, half_year: 16, year: 21 });
+  it('TEST_TARIFF_PRICE[Поток] = { month: 11, half_year: 16, year: 21 }', () => {
+    expect(TEST_TARIFF_PRICE['Поток']).toEqual({ month: 11, half_year: 16, year: 21 });
   });
 
   it('TEST_PERIOD_MINUTES_BY_PERIOD: month=10, half_year=15, year=20', () => {

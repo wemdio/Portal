@@ -38,7 +38,11 @@ import {
   BILLING_PERIOD_LABELS,
   TARIFF_MONTHLY_PRICE,
   TEST_TARIFF_PRICE,
+  TARIFF_LAUNCH,
+  TARIFF_FLOW,
+  TARIFF_SCALE,
 } from '@/lib/tariffPricing';
+import type { TariffType, PaidTariffType } from '@/lib/tariffPricing';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 type LimitKey = 'max_contacts' | 'max_rows' | 'max_chains_per_month' | 'max_domains' | 'max_emails';
@@ -50,7 +54,7 @@ type LimitUsage = {
 };
 
 type TariffResponse = {
-  tariff_type: 'standard' | 'pro' | 'custom';
+  tariff_type: TariffType;
   status: 'setup' | 'active' | 'expired' | 'inactive';
   paid_at: string | null;
   paid_until: string | null;
@@ -64,7 +68,7 @@ type TariffResponse = {
   /** Mapped russian text from the last failed YooKassa payment attempt. */
   last_payment_error: string | null;
   /** Клиент переведён админом в режим тест-магазина — показываем тестовые
-   *  цены (10/15/20 ₽ Стандарт, 11/16/21 ₽ Про), оплата идёт через тестовые
+   *  цены (10/15/20 ₽ Запуск, 11/16/21 ₽ Поток), оплата идёт через тестовые
    *  креды ЮКассы. */
   is_test_shop: boolean;
   usage: Record<LimitKey, LimitUsage>;
@@ -92,9 +96,8 @@ const LIMITS: Array<{
   },
 ];
 
-// Названия тарифов совпадают с лендингом outreachos.pro:
-// standard=Запуск, pro=Поток, custom=Масштаб. DB-enum остаётся
-// standard/pro/custom — переименование только на уровне UI.
+// Названия тарифов = значения в БД (Запуск/Поток/Масштаб), маппинг оставлен
+// как шов на случай локализации. См. lib/tariffPricing.ts.
 const TARIFF_LABELS = TARIFF_LABELS_RU;
 
 const STATUS_LABELS: Record<TariffResponse['status'], string> = {
@@ -435,7 +438,7 @@ export default function ClientTariffPage() {
                 <p className="ds-eyebrow mb-2">02<span aria-hidden> → </span>текущий тариф</p>
                 <div className="flex items-center gap-3 flex-wrap">
                   {/* Когда клиент только зарегистрировался и status='inactive' (нет
-                      paid_at) — показывать дефолтный tariff_type='standard' было
+                      paid_at) — показывать дефолтный tariff_type=Запуск было
                       бы враньём: подписки нет. Пишем «Нет тарифа» в красном. */}
                   {data.status === 'inactive' && !data.paid_at ? (
                     <h2
@@ -1026,8 +1029,8 @@ function LimitRow({
   );
 }
 
-type PaidTariff = 'standard' | 'pro';
-type TariffChoice = PaidTariff | 'custom';
+type PaidTariff = PaidTariffType;
+type TariffChoice = TariffType;
 type PeriodKey = 'month' | 'quarter' | 'half_year' | 'year';
 
 const PERIOD_MONTHS: Record<PeriodKey, number> = { month: 1, quarter: 3, half_year: 6, year: 12 };
@@ -1050,7 +1053,7 @@ interface TariffCardSpec {
 
 const TARIFF_CARDS: TariffCardSpec[] = [
   {
-    id: 'standard',
+    id: TARIFF_LAUNCH,
     label: 'Запуск',
     summary: 'Запустить outbound и выйти на первые встречи.',
     features: [
@@ -1062,7 +1065,7 @@ const TARIFF_CARDS: TariffCardSpec[] = [
     included: '10 000 контактов, 16 почт',
   },
   {
-    id: 'pro',
+    id: TARIFF_FLOW,
     label: 'Поток',
     badge: 'чаще берут',
     summary: 'Больше объёма и плотное сопровождение для предсказуемого потока встреч.',
@@ -1075,7 +1078,7 @@ const TARIFF_CARDS: TariffCardSpec[] = [
     included: '20 000 контактов, 32 почты',
   },
   {
-    id: 'custom',
+    id: TARIFF_SCALE,
     label: 'Масштаб',
     summary: 'Для команд с большими объёмами и своих аутрич-отделов.',
     features: [
@@ -1090,7 +1093,7 @@ const TARIFF_CARDS: TariffCardSpec[] = [
 ];
 
 function TariffSelectionWidget({ isTestShop = false }: { isTestShop?: boolean }) {
-  const [tariff, setTariff] = useState<TariffChoice>('pro');
+  const [tariff, setTariff] = useState<TariffChoice>(TARIFF_FLOW);
   // Дефолт — 1 месяц (минимальный entry-point). В прод-магазине показываем
   // 1 / 3 / 6 / 12 мес (см. презентацию: 3 мес — −5%, 6 мес — −10%,
   // 12 мес — −20%). Quarter в тест-магазине не поддерживается — цены и
@@ -1099,9 +1102,9 @@ function TariffSelectionWidget({ isTestShop = false }: { isTestShop?: boolean })
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const isPaid = tariff !== 'custom';
+  const isPaid = tariff !== TARIFF_SCALE;
   // В тест-магазине total = фиксированная цена за период (10/15/20 ₽ для
-  // Стандарт, 11/16/21 ₽ для Про). Месячная цифра — для красоты деления.
+  // Запуска, 11/16/21 ₽ для Потока). Месячная цифра — для красоты деления.
   const testTotal = isPaid ? (TEST_TOTAL_PRICE[tariff as PaidTariff][period] ?? null) : null;
   const monthly = !isPaid
     ? null
@@ -1205,7 +1208,7 @@ function TariffSelectionWidget({ isTestShop = false }: { isTestShop?: boolean })
           // В тест-магазине берём фиксированную цену за период из TEST_TOTAL_PRICE
           // и обратно вычисляем «/мес» для отображения — иначе клиент видел бы
           // тестовый и боевой ценник одновременно.
-          const cardTotal = card.id === 'custom'
+          const cardTotal = card.id === TARIFF_SCALE
             ? null
             : isTestShop
               ? (TEST_TOTAL_PRICE[card.id as PaidTariff][period] ?? null)

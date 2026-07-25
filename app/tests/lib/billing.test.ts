@@ -57,7 +57,7 @@ describe('mapYookassaErrorRu', () => {
 
 describe('__internal.resolveBillingAmount', () => {
   const base = {
-    tariff_type: 'standard' as const,
+    tariff_type: 'Запуск' as const,
     billing_period: 'month' as const,
     billing_amount: null as number | null,
   };
@@ -70,12 +70,12 @@ describe('__internal.resolveBillingAmount', () => {
     // billing_amount=0 is technically a "set" value but cannot represent a real
     // charge — treat as unset so we don't accidentally try to charge ₽0.
     const amount = __internal.resolveBillingAmount({ ...base, billing_amount: 0 });
-    expect(amount).toBe(__internal.TARIFF_MONTHLY_PRICE.standard * __internal.BILLING_PERIOD_MONTHS.month);
+    expect(amount).toBe(__internal.TARIFF_MONTHLY_PRICE['Запуск'] * __internal.BILLING_PERIOD_MONTHS.month);
   });
 
   it('falls back to monthly price when billing_period is null', () => {
     expect(__internal.resolveBillingAmount({ ...base, billing_period: null })).toBe(
-      __internal.TARIFF_MONTHLY_PRICE.standard,
+      __internal.TARIFF_MONTHLY_PRICE['Запуск'],
     );
   });
 
@@ -84,21 +84,21 @@ describe('__internal.resolveBillingAmount', () => {
     // resolveBillingAmount fallback'ит на calcBillingAmount, который применяет
     // скидку.
     expect(__internal.resolveBillingAmount({ ...base, billing_period: 'half_year' })).toBe(
-      Math.round(__internal.TARIFF_MONTHLY_PRICE.standard * 6 * 0.9),
+      Math.round(__internal.TARIFF_MONTHLY_PRICE['Запуск'] * 6 * 0.9),
     );
   });
 
   it('applies 20% discount for year on pro (65k × 12 × 0.8 = 624 000)', () => {
     expect(
-      __internal.resolveBillingAmount({ ...base, tariff_type: 'pro', billing_period: 'year' }),
-    ).toBe(Math.round(__internal.TARIFF_MONTHLY_PRICE.pro * 12 * 0.8));
+      __internal.resolveBillingAmount({ ...base, tariff_type: 'Поток', billing_period: 'year' }),
+    ).toBe(Math.round(__internal.TARIFF_MONTHLY_PRICE['Поток'] * 12 * 0.8));
   });
 
   it('returns null for custom tariff without explicit billing_amount', () => {
     // Custom tariffs have no default price — admin must set the amount.
     // Caller is expected to treat null as "ask admin", not as ₽0.
     expect(
-      __internal.resolveBillingAmount({ ...base, tariff_type: 'custom', billing_amount: null }),
+      __internal.resolveBillingAmount({ ...base, tariff_type: 'Масштаб', billing_amount: null }),
     ).toBeNull();
   });
 });
@@ -167,16 +167,16 @@ describe('__internal.buildDescription', () => {
   // that matters is that what the customer sees on the YooKassa form is
   // stable, short, and brand-consistent.
   it('returns "Подписка на Portal" regardless of inputs', () => {
-    expect(__internal.buildDescription('standard', 'month', 'ООО Ромашка', 'admin_activate')).toBe(
+    expect(__internal.buildDescription('Запуск', 'month', 'ООО Ромашка', 'admin_activate')).toBe(
       'Подписка на Portal',
     );
-    expect(__internal.buildDescription('pro', 'year', 'Acme', 'client_self')).toBe(
+    expect(__internal.buildDescription('Поток', 'year', 'Acme', 'client_self')).toBe(
       'Подписка на Portal',
     );
-    expect(__internal.buildDescription('custom', 'half_year', 'Anything', 'cron_renew')).toBe(
+    expect(__internal.buildDescription('Масштаб', 'half_year', 'Anything', 'cron_renew')).toBe(
       'Подписка на Portal',
     );
-    expect(__internal.buildDescription('standard', null, '', 'admin_extend')).toBe(
+    expect(__internal.buildDescription('Запуск', null, '', 'admin_extend')).toBe(
       'Подписка на Portal',
     );
   });

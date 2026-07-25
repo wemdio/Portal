@@ -3,6 +3,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { sendDemoLeadTelegramAlert } from '@/lib/demoLead/notify';
 import { CLIENT_LOCALE_COOKIE, normalizeClientLocale } from '@/lib/clientI18n';
+import { TARIFF_LAUNCH } from '@/lib/tariffPricing';
 
 export const dynamic = 'force-dynamic';
 
@@ -141,7 +142,7 @@ export async function POST(req: NextRequest) {
     .from('client_tariffs')
     .insert({
       user_id: userId,
-      tariff_type: 'standard',
+      tariff_type: TARIFF_LAUNCH,
       is_active: false,
       payment_locked: false,
     });

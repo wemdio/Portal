@@ -6,6 +6,10 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 // страницы (админка, ЛК, счёта). Реэкспортим их отсюда, чтобы существующие
 // серверные импорты `from '@/lib/tariffs'` продолжали работать без правок.
 import {
+  TARIFF_LAUNCH,
+  TARIFF_FLOW,
+  TARIFF_SCALE,
+  normalizeTariffType,
   TARIFF_LABELS_RU,
   BILLING_PERIOD_LABELS,
   TARIFF_DEFAULTS,
@@ -18,9 +22,13 @@ import {
   TEST_SETUP_MINUTES,
   calcBillingAmount,
 } from '@/lib/tariffPricing';
-import type { TariffType, BillingMode, BillingPeriod, TariffLimits } from '@/lib/tariffPricing';
+import type { TariffType, PaidTariffType, BillingMode, BillingPeriod, TariffLimits } from '@/lib/tariffPricing';
 
 export {
+  TARIFF_LAUNCH,
+  TARIFF_FLOW,
+  TARIFF_SCALE,
+  normalizeTariffType,
   TARIFF_LABELS_RU,
   BILLING_PERIOD_LABELS,
   TARIFF_DEFAULTS,
@@ -33,7 +41,7 @@ export {
   TEST_SETUP_MINUTES,
   calcBillingAmount,
 };
-export type { TariffType, BillingMode, BillingPeriod, TariffLimits };
+export type { TariffType, PaidTariffType, BillingMode, BillingPeriod, TariffLimits };
 
 export type ClientTariffRow = {
   id: string;
@@ -355,19 +363,20 @@ function usageBucket(limit: number, used: number): LimitUsage {
 }
 
 export function resolveEffectiveLimits(row: ClientTariffRow | null): TariffLimits {
-  if (!row) return TARIFF_DEFAULTS.standard;
+  if (!row) return TARIFF_DEFAULTS[TARIFF_LAUNCH];
 
-  const base = row.tariff_type === 'pro'
-    ? TARIFF_DEFAULTS.pro
-    : TARIFF_DEFAULTS.standard;
+  const flowDefaults = TARIFF_DEFAULTS[TARIFF_FLOW];
+  const base = row.tariff_type === TARIFF_FLOW
+    ? flowDefaults
+    : TARIFF_DEFAULTS[TARIFF_LAUNCH];
 
-  if (row.tariff_type === 'custom') {
+  if (row.tariff_type === TARIFF_SCALE) {
     return {
-      max_contacts: row.max_contacts ?? TARIFF_DEFAULTS.pro.max_contacts,
-      max_rows: row.max_rows ?? TARIFF_DEFAULTS.pro.max_rows,
-      max_chains_per_month: row.max_chains_per_month ?? TARIFF_DEFAULTS.pro.max_chains_per_month,
-      max_domains: row.max_domains ?? TARIFF_DEFAULTS.pro.max_domains,
-      max_emails: row.max_emails ?? TARIFF_DEFAULTS.pro.max_emails,
+      max_contacts: row.max_contacts ?? flowDefaults.max_contacts,
+      max_rows: row.max_rows ?? flowDefaults.max_rows,
+      max_chains_per_month: row.max_chains_per_month ?? flowDefaults.max_chains_per_month,
+      max_domains: row.max_domains ?? flowDefaults.max_domains,
+      max_emails: row.max_emails ?? flowDefaults.max_emails,
     };
   }
 
@@ -399,7 +408,7 @@ export async function getSubscriptionStatus(userId: string): Promise<Subscriptio
   const row = await getClientTariffRow(userId);
   return {
     status: getClientStatus(row),
-    tariff_type: row?.tariff_type ?? 'standard',
+    tariff_type: row?.tariff_type ?? TARIFF_LAUNCH,
     limits: resolveEffectiveLimits(row),
     paid_at: row?.paid_at ?? null,
     paid_until: row?.paid_until ?? null,
@@ -524,7 +533,7 @@ export async function getClientTariffUsage(userId: string): Promise<ClientTariff
 
   return {
     status: getClientStatus(row),
-    tariff_type: row?.tariff_type ?? 'standard',
+    tariff_type: row?.tariff_type ?? TARIFF_LAUNCH,
     limits,
     paid_at: row?.paid_at ?? null,
     paid_until: row?.paid_until ?? null,

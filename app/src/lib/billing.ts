@@ -13,6 +13,7 @@ import {
   BILLING_PERIOD_MONTHS,
   TARIFF_MONTHLY_PRICE,
   TARIFF_LABELS_RU,
+  TARIFF_SCALE,
   calcBillingAmount,
   type BillingPeriod,
   type ClientTariffRow,
@@ -168,7 +169,7 @@ function pickReceiptEmail(profile: { email: string | null } | null): string | nu
  * subscriptions whose billing_amount/billing_period weren't recorded, we
  * recompute from calcBillingAmount. isTestShop is passed in from the caller
  * (admin path uses the incoming request flag, cron path uses the stored
- * row.is_test_shop) so test-store prices (10/15/20₽ basic, 11/16/21₽ pro)
+ * row.is_test_shop) so test-store prices (10/15/20₽ Запуск, 11/16/21₽ Поток)
  * land for test subscriptions instead of prod 40k/65k rates. Returns null
  * for custom tariffs without explicit amount.
  */
@@ -179,7 +180,7 @@ function resolveBillingAmount(
   if (tariff.billing_amount && tariff.billing_amount > 0) {
     return Number(tariff.billing_amount);
   }
-  if (tariff.tariff_type === 'custom') return null;
+  if (tariff.tariff_type === TARIFF_SCALE) return null;
   const period = (tariff.billing_period as BillingPeriod | null) ?? 'month';
   return calcBillingAmount(tariff.tariff_type, period, isTestShop);
 }

@@ -18,9 +18,12 @@ import {
   TARIFF_LABELS_RU,
   TARIFF_DEFAULTS,
   BILLING_PERIOD_LABELS,
+  TARIFF_LAUNCH,
+  TARIFF_FLOW,
+  TARIFF_SCALE,
   calcBillingAmount,
 } from '@/lib/tariffPricing';
-import type { TariffType, BillingPeriod } from '@/lib/tariffPricing';
+import type { TariffType, PaidTariffType, BillingPeriod } from '@/lib/tariffPricing';
 
 type TariffData = {
   tariff_type: TariffType;
@@ -293,7 +296,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
 
   const handleActivate = useCallback(async () => {
     // Test mode + Custom both require a manual amount input.
-    const needsManualAmount = useTestPeriod || tariffType === 'custom';
+    const needsManualAmount = useTestPeriod || tariffType === TARIFF_SCALE;
     if (needsManualAmount) {
       const n = Number(activateCustomAmount.replace(',', '.'));
       if (!Number.isFinite(n) || n <= 0) {
@@ -445,7 +448,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
   }, [userId, apiFetch, onDeactivateSuccess, onSuccessMessage, onError]);
 
   const handleExtend = useCallback(async () => {
-    if (tariffType === 'custom') {
+    if (tariffType === TARIFF_SCALE) {
       const n = Number(activateCustomAmount.replace(',', '.'));
       if (!Number.isFinite(n) || n <= 0) {
         onError('Укажите сумму за период для тарифа Custom');
@@ -455,7 +458,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
     setActivating(true);
     try {
       const bm = activateBillingMode === 'manual' ? null : activateBillingMode;
-      const customAmt = tariffType === 'custom' ? Number(activateCustomAmount.replace(',', '.')) : undefined;
+      const customAmt = tariffType === TARIFF_SCALE ? Number(activateCustomAmount.replace(',', '.')) : undefined;
       const res = await apiFetch<{
         ok: true; paid_until?: string;
         billing_mode?: string; payment_locked?: boolean;
@@ -551,7 +554,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
                     >
                       <div>{BILLING_PERIOD_LABELS[p]}</div>
                       <div className={`mt-0.5 text-[10px] tabular-nums ${!useTestPeriod && activatePeriod === p ? 'text-emerald-50' : 'text-gray-500'}`}>
-                        {tariffType === 'custom' ? 'индивид.' : formatRub(amt)}
+                        {tariffType === TARIFF_SCALE ? 'индивид.' : formatRub(amt)}
                       </div>
                     </button>
                   );
@@ -598,7 +601,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
                   </div>
                 </div>
               )}
-              {!useTestPeriod && tariffType === 'custom' && (
+              {!useTestPeriod && tariffType === TARIFF_SCALE && (
                 <div className="mt-2">
                   <label className="block text-[11px] font-medium text-gray-700 mb-1">Сумма за период (₽)</label>
                   <input
@@ -786,13 +789,13 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
                 >
                   <div>{BILLING_PERIOD_LABELS[p]}</div>
                   <div className={`mt-0.5 text-[10px] tabular-nums ${activatePeriod === p ? 'text-indigo-50' : 'text-gray-500'}`}>
-                    {tariffType === 'custom' ? 'индивид.' : formatRub(amt)}
+                    {tariffType === TARIFF_SCALE ? 'индивид.' : formatRub(amt)}
                   </div>
                 </button>
               );
             })}
           </div>
-          {tariffType === 'custom' && (
+          {tariffType === TARIFF_SCALE && (
             <div className="mt-2">
               <label className="block text-[11px] font-medium text-gray-700 mb-1">Сумма за период (₽)</label>
               <input
@@ -951,14 +954,14 @@ export default function UsersPage() {
   // модалки и при сабмите нового поискового запроса.
   const [campaignPage, setCampaignPage] = useState(1);
 
-  const [tariffType, setTariffType] = useState<TariffType>('standard');
+  const [tariffType, setTariffType] = useState<TariffType>(TARIFF_LAUNCH);
   // Персистентный флаг "клиент в тест-магазине". Меняется отдельным блоком
   // «Магазин ЮКасса клиента» рядом с тарифом; сохраняется через PUT /tariff
   // вместе с тарифом по «Сохранить изменения». Префиллит локальный toggle в
   // SubscriptionPanel, чтобы активация/продление по умолчанию шли в нужный
   // магазин.
   const [clientIsTestShop, setClientIsTestShop] = useState(false);
-  const [customLimits, setCustomLimits] = useState<Omit<TariffData, 'tariff_type'>>({ ...TARIFF_DEFAULTS.pro });
+  const [customLimits, setCustomLimits] = useState<Omit<TariffData, 'tariff_type'>>({ ...TARIFF_DEFAULTS[TARIFF_FLOW] });
   const [subscriptionActive, setSubscriptionActive] = useState(false);
   const [subscriptionSetup, setSubscriptionSetup] = useState(false);
   const [paidUntil, setPaidUntil] = useState<string | null>(null);
@@ -1228,11 +1231,11 @@ export default function UsersPage() {
         setTariffType(tariffRes.tariff.tariff_type);
         setClientIsTestShop(tariffRes.tariff.is_test_shop === true);
         setCustomLimits({
-          max_contacts: tariffRes.tariff.max_contacts ?? TARIFF_DEFAULTS.pro.max_contacts,
-          max_rows: tariffRes.tariff.max_rows ?? TARIFF_DEFAULTS.pro.max_rows,
-          max_chains_per_month: tariffRes.tariff.max_chains_per_month ?? TARIFF_DEFAULTS.pro.max_chains_per_month,
-          max_domains: tariffRes.tariff.max_domains ?? TARIFF_DEFAULTS.pro.max_domains,
-          max_emails: tariffRes.tariff.max_emails ?? TARIFF_DEFAULTS.pro.max_emails,
+          max_contacts: tariffRes.tariff.max_contacts ?? TARIFF_DEFAULTS[TARIFF_FLOW].max_contacts,
+          max_rows: tariffRes.tariff.max_rows ?? TARIFF_DEFAULTS[TARIFF_FLOW].max_rows,
+          max_chains_per_month: tariffRes.tariff.max_chains_per_month ?? TARIFF_DEFAULTS[TARIFF_FLOW].max_chains_per_month,
+          max_domains: tariffRes.tariff.max_domains ?? TARIFF_DEFAULTS[TARIFF_FLOW].max_domains,
+          max_emails: tariffRes.tariff.max_emails ?? TARIFF_DEFAULTS[TARIFF_FLOW].max_emails,
         });
         const now = new Date();
         const isActive = tariffRes.tariff.is_active === true;
@@ -1253,9 +1256,9 @@ export default function UsersPage() {
         setBillingPeriod((tariffRes.tariff.billing_period as BillingPeriod | null) ?? null);
         setBillingAmount(tariffRes.tariff.billing_amount ?? null);
       } else {
-        setTariffType('standard');
+        setTariffType(TARIFF_LAUNCH);
         setClientIsTestShop(false);
-        setCustomLimits({ ...TARIFF_DEFAULTS.pro });
+        setCustomLimits({ ...TARIFF_DEFAULTS[TARIFF_FLOW] });
         setSubscriptionActive(false);
         setSubscriptionSetup(false);
         setPaidUntil(null);
@@ -1280,9 +1283,9 @@ export default function UsersPage() {
       setClientCampaigns([]);
       setClientCampaignBaseline([]);
       setClientAccessLoaded(false);
-      setTariffType('standard');
+      setTariffType(TARIFF_LAUNCH);
       setClientIsTestShop(false);
-      setCustomLimits({ ...TARIFF_DEFAULTS.pro });
+      setCustomLimits({ ...TARIFF_DEFAULTS[TARIFF_FLOW] });
       setSubscriptionActive(false);
       setSubscriptionSetup(false);
       setPaidUntil(null);
@@ -1488,7 +1491,7 @@ export default function UsersPage() {
           body: JSON.stringify({
             tariff_type: tariffType,
             is_test_shop: clientIsTestShop,
-            ...(tariffType === 'custom' ? customLimits : {}),
+            ...(tariffType === TARIFF_SCALE ? customLimits : {}),
           }),
         });
       }
@@ -1991,19 +1994,19 @@ export default function UsersPage() {
                     <div>
                       <h4 className="text-sm font-medium text-gray-900 mb-2">Тариф клиента</h4>
                       <div className="flex gap-2">
-                        {(['standard', 'pro', 'custom'] as TariffType[]).map((t) => (
+                        {([TARIFF_LAUNCH, TARIFF_FLOW, TARIFF_SCALE] as TariffType[]).map((t) => (
                           <button
                             key={t}
                             type="button"
                             onClick={() => {
                               setTariffType(t);
-                              if (t === 'custom') setCustomLimits({ ...TARIFF_DEFAULTS.pro });
+                              if (t === TARIFF_SCALE) setCustomLimits({ ...TARIFF_DEFAULTS[TARIFF_FLOW] });
                             }}
                             className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
                               tariffType === t
-                                ? t === 'pro'
+                                ? t === TARIFF_FLOW
                                   ? 'bg-violet-600 text-white border-violet-600'
-                                  : t === 'custom'
+                                  : t === TARIFF_SCALE
                                     ? 'bg-zinc-800 text-white border-zinc-800'
                                     : 'bg-blue-600 text-white border-blue-600'
                                 : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
@@ -2013,19 +2016,19 @@ export default function UsersPage() {
                           </button>
                         ))}
                       </div>
-                      {tariffType !== 'custom' && (
+                      {tariffType !== TARIFF_SCALE && (
                         <div className="mt-3 rounded-lg border border-gray-100 bg-gray-50 overflow-hidden">
                           {LIMIT_LABELS.map(({ key, label }) => (
                             <div key={key} className="flex items-center justify-between px-3 py-1.5 border-b border-gray-100 last:border-b-0">
                               <span className="text-xs text-gray-600">{label}</span>
                               <span className="text-xs font-semibold text-gray-800 tabular-nums">
-                                {(TARIFF_DEFAULTS[tariffType as 'standard' | 'pro'][key] ?? 0).toLocaleString('ru-RU')}
+                                {(TARIFF_DEFAULTS[tariffType as PaidTariffType][key] ?? 0).toLocaleString('ru-RU')}
                               </span>
                             </div>
                           ))}
                         </div>
                       )}
-                      {tariffType === 'custom' && (
+                      {tariffType === TARIFF_SCALE && (
                         <div className="mt-3 space-y-2">
                           {LIMIT_LABELS.map(({ key, label }) => (
                             <div key={key} className="flex items-center gap-3">

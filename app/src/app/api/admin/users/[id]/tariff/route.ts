@@ -13,6 +13,9 @@ import {
   BILLING_PERIOD_MONTHS,
   TEST_PERIOD_MINUTES_BY_PERIOD,
   TEST_SETUP_MINUTES,
+  normalizeTariffType,
+  TARIFF_LAUNCH,
+  TARIFF_SCALE,
 } from '@/lib/tariffs';
 import { ensurePendingInvoiceForTariff } from '@/lib/billing';
 
@@ -65,7 +68,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   return NextResponse.json({ tariff: data ?? null });
 }
 
-const VALID_TYPES = new Set<string>(['standard', 'pro', 'custom']);
+// Валидация входа идёт через normalizeTariffType — он принимает и текущие
+// значения тарифа, и прежние (standard/pro/custom), которые ещё могут прийти
+// из открытой вкладки админки со старым JS сразу после деплоя.
 const VALID_PERIODS = new Set<string>(['month', 'half_year', 'year']);
 
 type TariffBody = {
@@ -99,7 +104,7 @@ function normalisePeriodAndAmount(
     return { period: null, amount: null, error: 'Invalid billing_period' };
   }
   const period = body.billing_period as BillingPeriod;
-  if (tariffType === 'custom') {
+  if (tariffType === TARIFF_SCALE) {
     const manual = Number(body.billing_amount);
     if (!Number.isFinite(manual) || manual <= 0) {
       return { period, amount: null, error: 'billing_amount required for custom tariff' };
@@ -162,13 +167,11 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     const billingMode = body.billing_mode ?? null;
     const paymentLocked = billingMode !== null;
 
-    const tariffType = typeof body.tariff_type === 'string' && VALID_TYPES.has(body.tariff_type)
-      ? (body.tariff_type as TariffType)
-      : 'standard';
+    const tariffType = normalizeTariffType(body.tariff_type) ?? TARIFF_LAUNCH;
 
     // QA test mode — replaces the 15-day setup phase + monthly period with a
     // short minutes-based period so the autopay cron loop can be exercised in
-    // minutes against the real YK shop. Treats every tariff like 'custom'
+    // minutes against the real YK shop. Treats every tariff like Масштаб
     // (admin must supply billing_amount) so we don't price-distort the test.
     const testMinutes = body.test_minutes != null && Number.isFinite(Number(body.test_minutes))
       ? Math.floor(Number(body.test_minutes))
@@ -321,9 +324,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     if (!existingForExtend) return jsonError('Subscription not found', 404);
     if (!existingForExtend.is_active) return jsonError('Subscription is not active', 400);
 
-    const tariffType = typeof body.tariff_type === 'string' && VALID_TYPES.has(body.tariff_type)
-      ? (body.tariff_type as TariffType)
-      : 'standard';
+    const tariffType = normalizeTariffType(body.tariff_type) ?? TARIFF_LAUNCH;
 
     const billingMode = body.billing_mode ?? null;
     const paymentLocked = billingMode !== null;
@@ -493,11 +494,9 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     return NextResponse.json({ ok: true, action: 'deactivate' });
   }
 
-  const tariffType = typeof body.tariff_type === 'string' && VALID_TYPES.has(body.tariff_type)
-    ? (body.tariff_type as TariffType)
-    : 'standard';
+  const tariffType = normalizeTariffType(body.tariff_type) ?? TARIFF_LAUNCH;
 
-  const isCustom = tariffType === 'custom';
+  const isCustom = tariffType === TARIFF_SCALE;
   // Персистентный флаг "клиент работает с тестовым магазином". Шлётся отдельно
   // из админ-модалки (блок «Магазин ЮКасса клиента»), отдельно от активации/
   // продления. Если поле не пришло в body — текущее значение в БД не трогаем.
