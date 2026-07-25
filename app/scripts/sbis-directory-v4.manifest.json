@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "plan": "sbis-directory-v4",
+  "target": {
+    "host": "139.60.162.12",
+    "port": 35434,
+    "database": "postgres"
+  },
+  "sources": [
+    {
+      "sourceFile": "Компании (1).xlsx",
+      "sha256": "82137400e43f746127f44d43662db72dbd67395a60d2dc5a6997b57776e76d31",
+      "inputRows": 18787,
+      "uniqueInns": 18528
+    },
+    {
+      "sourceFile": "Компании (2).xlsx",
+      "sha256": "8e8d117433ecb3d7d3063fb5aeca0ae889fc7f89f71df9f48f8435b199b7c36c",
+      "inputRows": 100000,
+      "uniqueInns": 100000
+    }
+  ],
+  "artifacts": {
+    "summary.json": {
+      "sha256": "adee59032e81ebf69083d31676bfc0002a684e3222aa26698a75d635e83e897f"
+    },
+    "inserts.jsonl": {
+      "sha256": "87b29b2de874922ca57609fd4c1b0817072c1cf7defd3670c36752546a516ad6",
+      "rows": 110041
+    },
+    "updates.jsonl": {
+      "sha256": "c6fc70cd8f4be673d81fef9a4a58775b9524aa291845bd4ea9203f8ce3d8899e",
+      "rows": 21
+    },
+    "rejected.jsonl": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "rows": 0
+    }
+  },
+  "expected": {
+    "inputRows": 118787,
+    "uniqueIncomingInns": 110278,
+    "inserts": 110041,
+    "updates": 21,
+    "skipped": 12,
+    "rejectedRows": 0,
+    "approximateOkvedCounts": {
+      "62.0": 94511,
+      "46.51": 15530
+    }
+  }
+}
