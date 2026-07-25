@@ -14,8 +14,14 @@ import { Check, CheckCircle2, ChevronDown, ChevronUp, FileUp, Loader2, MoreVerti
 import { parseInnColumn } from '@/lib/companiesSearch/innCsv';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, ALL_NAV_TAB_IDS, NAV_TABS_CONFIG } from '@/lib/toolsRegistry';
 import { CampaignStatusLabels } from '@/lib/instantly/types';
+import {
+  TARIFF_LABELS_RU,
+  TARIFF_DEFAULTS,
+  BILLING_PERIOD_LABELS,
+  calcBillingAmount,
+} from '@/lib/tariffPricing';
+import type { TariffType, BillingPeriod } from '@/lib/tariffPricing';
 
-type TariffType = 'standard' | 'pro' | 'custom';
 type TariffData = {
   tariff_type: TariffType;
   max_contacts: number | null;
@@ -39,39 +45,17 @@ type AdminUserTariffPayload = TariffData & {
    *  цен в клиентском ЛК и креды при создании счёта. */
   is_test_shop?: boolean;
 };
-const TARIFF_DEFAULTS: Record<'standard' | 'pro', Omit<TariffData, 'tariff_type'>> = {
-  standard: { max_contacts: 10_000, max_rows: 20_000, max_chains_per_month: 10, max_domains: 4, max_emails: 16 },
-  pro: { max_contacts: 20_000, max_rows: 40_000, max_chains_per_month: 20, max_domains: 8, max_emails: 32 },
-};
-// Названия тарифов совпадают с лендингом outreachos.pro. DB-enum остаётся
-// standard/pro/custom — переименование только на уровне UI.
-const TARIFF_LABELS: Record<TariffType, string> = { standard: 'Запуск', pro: 'Поток', custom: 'Масштаб' };
+const TARIFF_LABELS = TARIFF_LABELS_RU;
 
 // Клиентская пагинация списка кампаний в action-модалке. В DOM держим только
 // 10 строк за раз — у клиентов бывает 200+ кампаний, и рендер всех чекбоксов
 // заметно лагает при каждом keystroke / toggle (см. также useMemo ниже).
 const CAMPAIGNS_PER_PAGE = 10;
 
-// Mirror lib/tariffs.ts (which is server-only). Keep in sync with that file.
-// Цены и скидки должны совпадать 1-в-1 с lib/tariffs.ts — иначе админ увидит
-// одни цифры, клиент в ЛК — другие.
-type BillingPeriod = 'month' | 'quarter' | 'half_year' | 'year';
-const TARIFF_MONTHLY_PRICE: Record<'standard' | 'pro', number> = { standard: 40_000, pro: 65_000 };
-const BILLING_PERIOD_MONTHS: Record<BillingPeriod, number> = { month: 1, quarter: 3, half_year: 6, year: 12 };
-// 3 мес = -5%, 6 мес = -10%, 12 мес = -20%. Месяц — без скидки.
-const BILLING_PERIOD_DISCOUNT: Record<BillingPeriod, number> = { month: 1, quarter: 0.95, half_year: 0.9, year: 0.8 };
-const BILLING_PERIOD_LABELS: Record<BillingPeriod, string> = {
-  month: '1 месяц',
-  quarter: '3 месяца',
-  half_year: '6 месяцев',
-  year: '12 месяцев',
-};
-
-function calcTariffAmount(tariff: TariffType, period: BillingPeriod): number | null {
-  if (tariff === 'custom') return null;
-  const base = TARIFF_MONTHLY_PRICE[tariff] * BILLING_PERIOD_MONTHS[period];
-  return Math.round(base * BILLING_PERIOD_DISCOUNT[period]);
-}
+// Цены, скидки и лейблы — из общего lib/tariffPricing.ts (он без server-only,
+// поэтому доступен и здесь, и на сервере). Раньше здесь лежала копия с
+// комментарием «keep in sync», и расхождение показало бы админу одни цифры,
+// а клиенту в ЛК — другие.
 
 function formatRub(n: number | null | undefined): string {
   if (n == null) return '—';
@@ -553,7 +537,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
               <p className="mb-1.5 text-[11px] font-medium text-gray-700">Период оплаты</p>
               <div className="flex gap-1.5">
                 {(['month', 'quarter', 'half_year', 'year'] as const).map((p) => {
-                  const amt = calcTariffAmount(tariffType, p);
+                  const amt = calcBillingAmount(tariffType, p);
                   return (
                     <button
                       key={p}
@@ -788,7 +772,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
           </p>
           <div className="flex gap-1.5">
             {(['month', 'half_year', 'year'] as const).map((p) => {
-              const amt = calcTariffAmount(tariffType, p);
+              const amt = calcBillingAmount(tariffType, p);
               return (
                 <button
                   key={p}

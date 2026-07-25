@@ -33,6 +33,12 @@ import {
   Unlink,
   Zap,
 } from 'lucide-react';
+import {
+  TARIFF_LABELS_RU,
+  BILLING_PERIOD_LABELS,
+  TARIFF_MONTHLY_PRICE,
+  TEST_TARIFF_PRICE,
+} from '@/lib/tariffPricing';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 type LimitKey = 'max_contacts' | 'max_rows' | 'max_chains_per_month' | 'max_domains' | 'max_emails';
@@ -89,11 +95,7 @@ const LIMITS: Array<{
 // Названия тарифов совпадают с лендингом outreachos.pro:
 // standard=Запуск, pro=Поток, custom=Масштаб. DB-enum остаётся
 // standard/pro/custom — переименование только на уровне UI.
-const TARIFF_LABELS: Record<TariffResponse['tariff_type'], string> = {
-  standard: 'Запуск',
-  pro: 'Поток',
-  custom: 'Масштаб',
-};
+const TARIFF_LABELS = TARIFF_LABELS_RU;
 
 const STATUS_LABELS: Record<TariffResponse['status'], string> = {
   setup: 'Настройка',
@@ -1030,23 +1032,12 @@ type PeriodKey = 'month' | 'quarter' | 'half_year' | 'year';
 
 const PERIOD_MONTHS: Record<PeriodKey, number> = { month: 1, quarter: 3, half_year: 6, year: 12 };
 const PERIOD_DISCOUNT: Record<PeriodKey, number> = { month: 1, quarter: 0.95, half_year: 0.9, year: 0.8 };
-const PERIOD_LABEL: Record<PeriodKey, string> = {
-  month: '1 месяц',
-  quarter: '3 месяца',
-  half_year: '6 месяцев',
-  year: '12 месяцев',
-};
-const MONTHLY_BASE: Record<PaidTariff, number> = { standard: 40_000, pro: 65_000 };
-
-// Зеркало lib/tariffs.ts → TEST_TARIFF_PRICE. Когда админ переводит клиента в
-// режим тест-магазина (профиль клиента на /admin/users), здесь показываются
-// фиксированные тестовые цены вместо боевых. Quarter в тест-магазине не
-// поддерживается — webhook возвращает null при попытке, поэтому в UI просто
-// не показываем сумму для этого периода.
-const TEST_TOTAL_PRICE: Record<PaidTariff, Partial<Record<PeriodKey, number>>> = {
-  standard: { month: 10, half_year: 15, year: 20 },
-  pro:      { month: 11, half_year: 16, year: 21 },
-};
+// Периоды, боевые и тестовые цены — из общего lib/tariffPricing.ts. Раньше все
+// три были скопированы здесь (последнее — с явной пометкой «Зеркало
+// lib/tariffs.ts»), и клиент в ЛК мог увидеть не то, что выставит счёт.
+const PERIOD_LABEL = BILLING_PERIOD_LABELS;
+const MONTHLY_BASE = TARIFF_MONTHLY_PRICE;
+const TEST_TOTAL_PRICE = TEST_TARIFF_PRICE;
 
 interface TariffCardSpec {
   id: TariffChoice;

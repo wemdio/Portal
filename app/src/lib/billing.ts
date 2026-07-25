@@ -12,6 +12,7 @@ import {
 import {
   BILLING_PERIOD_MONTHS,
   TARIFF_MONTHLY_PRICE,
+  TARIFF_LABELS_RU,
   calcBillingAmount,
   type BillingPeriod,
   type ClientTariffRow,
@@ -127,14 +128,6 @@ export function mapYookassaErrorRu(reason: string | null | undefined): string {
 }
 
 /* ─── Helpers ─── */
-
-// Названия тарифов совпадают с лендингом outreachos.pro. DB-enum остаётся
-// standard/pro/custom — переименование только на уровне UI/квитанций.
-const TARIFF_LABELS_RU: Record<TariffType, string> = {
-  standard: 'Запуск',
-  pro: 'Поток',
-  custom: 'Масштаб',
-};
 
 /** Single, universal payment description shown on YooKassa form, fiscal
  *  receipt and admin /invoices view. Kept intentionally short — operators

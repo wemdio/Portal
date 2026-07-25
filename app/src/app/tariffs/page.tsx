@@ -1,5 +1,5 @@
 import { Check, Sparkle, Crown, Headset, Users, Database, Link2, Mail, Zap } from 'lucide-react';
-import { TARIFF_DEFAULTS } from '@/lib/tariffs';
+import { TARIFF_DEFAULTS, TARIFF_LABELS_RU } from '@/lib/tariffs';
 
 const S = TARIFF_DEFAULTS.standard;
 const P = TARIFF_DEFAULTS.pro;
@@ -11,7 +11,7 @@ function fmt(n: number) {
 const tiers = [
   {
     id: 'standard',
-    name: 'Запуск',
+    name: TARIFF_LABELS_RU.standard,
     price: '40 000',
     period: '/ мес',
     description: 'Для старта аутрич-кампаний и работы с базами',
@@ -26,7 +26,7 @@ const tiers = [
   },
   {
     id: 'pro',
-    name: 'Поток',
+    name: TARIFF_LABELS_RU.pro,
     price: '80 000',
     period: '/ мес',
     popular: true,
@@ -42,7 +42,7 @@ const tiers = [
   },
   {
     id: 'custom',
-    name: 'Масштаб',
+    name: TARIFF_LABELS_RU.custom,
     price: null,
     description: 'Индивидуальные лимиты под ваш объём',
     accent: 'zinc',
@@ -198,9 +198,9 @@ export default function TariffsPage() {
             <thead>
               <tr className="border-b border-zinc-100">
                 <th className="py-2.5 pr-4 text-left font-medium text-zinc-500 w-[200px]">Лимит</th>
-                <th className="py-2.5 px-4 text-center font-medium text-blue-600">Запуск</th>
-                <th className="py-2.5 px-4 text-center font-medium text-violet-600">Поток</th>
-                <th className="py-2.5 px-4 text-center font-medium text-zinc-500">Масштаб</th>
+                <th className="py-2.5 px-4 text-center font-medium text-blue-600">{TARIFF_LABELS_RU.standard}</th>
+                <th className="py-2.5 px-4 text-center font-medium text-violet-600">{TARIFF_LABELS_RU.pro}</th>
+                <th className="py-2.5 px-4 text-center font-medium text-zinc-500">{TARIFF_LABELS_RU.custom}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-50">
