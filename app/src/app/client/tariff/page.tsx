@@ -654,14 +654,12 @@ export default function ClientTariffPage() {
               <p className="ds-eyebrow mb-3">02c<span aria-hidden> → </span>продление</p>
               <div className="space-y-3">
                 <div>
-                  <h3
-                    className="text-base font-bold m-0"
-                    style={{ color: 'var(--cp-paper)' }}
-                  >
-                    Продление
-                  </h3>
+                  {/* Заголовок «Продление» убрали — eyebrow «02c → продление»
+                      выше уже отбивает секцию, дублирование лишнее. Первая
+                      строка теперь — сам факт «до какой даты оплачено»,
+                      набрана муут-цветом как и раньше, но без h3-шапки. */}
                   <p
-                    className="mt-1 text-sm"
+                    className="text-sm m-0"
                     style={{ color: 'var(--cp-paper-mute)' }}
                   >
                     Период оплачен до{' '}
@@ -672,9 +670,9 @@ export default function ClientTariffPage() {
                   </p>
                   <p
                     className="mt-1 text-sm"
-                    style={{ color: 'var(--cp-paper-mute)' }}
+                    style={{ color: 'var(--cp-red)' }}
                   >
-                    <span className="font-semibold" style={{ color: 'var(--cp-paper)' }}>Важно!</span>{' '}
+                    <span className="font-semibold">Важно!</span>{' '}
                     При включённом автопродлении списание выполняется за 1–3 дня до этой даты.
                   </p>
                 </div>
