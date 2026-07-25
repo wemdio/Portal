@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Движок вертикалей — как устроена система</title>
+<style>
+:root {
+  --bg:#0b0d10; --panel:#14181e; --border:#262d36; --text:#e7ebf0; --muted:#98a2b0;
+  --green:#34d399; --amber:#fbbf24; --blue:#60a5fa; --red:#f87171; --violet:#a78bfa;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.55; margin: 0;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+.slide { margin: 56px 0; }
+.kicker { text-transform: uppercase; letter-spacing: .12em; font-size: 12px; color: var(--blue); margin: 0 0 6px; }
+h2 { font-size: 30px; margin: 0 0 10px; }
+.lead { color: var(--muted); font-size: 17px; max-width: 860px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+@media (max-width: 900px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 600; border: 1px solid transparent; }
+.b-green { color: var(--green); border-color: var(--green); background: rgba(52,211,153,.08); }
+.b-amber { color: var(--amber); border-color: var(--amber); background: rgba(251,191,36,.08); }
+.b-gray { color: var(--muted); border-color: var(--border); }
+.b-blue { color: var(--blue); border-color: var(--blue); background: rgba(96,165,250,.08); }
+.b-red { color: var(--red); border-color: var(--red); background: rgba(248,113,113,.08); }
+.b-violet { color: var(--violet); border-color: var(--violet); background: rgba(167,139,250,.08); }
+.chip { display: inline-block; padding: 3px 10px; margin: 2px 4px 2px 0; border: 1px solid var(--border); border-radius: 8px; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+.num { font-size: 36px; font-weight: 700; color: var(--green); line-height: 1.1; }
+.num-label { color: var(--muted); font-size: 13px; }
+.flow { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; }
+.flow .step { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.flow .arrow { align-self: center; color: var(--muted); font-size: 18px; }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.tbl th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: .06em; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+table.tbl td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.muted { color: var(--muted); } .small { font-size: 13px; }
+.ok { color: var(--green); } .warn { color: var(--amber); } .bad { color: var(--red); }
+blockquote.quote { margin: 10px 0; padding: 10px 14px; border-left: 3px solid var(--blue); color: var(--muted); background: rgba(96,165,250,.06); border-radius: 0 8px 8px 0; }
+a { color: var(--blue); }
+.topnav {
+  position: sticky; top: 0; z-index: 10;
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  background: rgba(11,13,16,.85); border-bottom: 1px solid var(--border);
+}
+.topnav .wrap { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; padding-top: 10px; padding-bottom: 10px; }
+.topnav .brand { font-weight: 700; font-size: 15px; }
+.topnav nav { display: flex; gap: 14px; flex-wrap: wrap; }
+.topnav nav a { color: var(--muted); text-decoration: none; font-size: 13.5px; }
+.topnav nav a:hover { color: var(--text); }
+.hero { padding: 48px 0 8px; }
+.hero h1 { font-size: 38px; margin: 0 0 8px; }
+.hero .sub { color: var(--muted); font-size: 14px; margin: 0 0 12px; }
+footer.site { border-top: 1px solid var(--border); margin-top: 56px; padding: 20px 0 40px; }
+</style>
+</head>
+<body>
+
+<header class="topnav">
+  <div class="wrap">
+    <span class="brand">Движок вертикалей</span>
+    <nav>
+      <a href="#sec-why">Зачем</a>
+      <a href="#sec-map">Карта</a>
+      <a href="#sec-pipeline">Пайплайн</a>
+      <a href="#sec-tiers">Тиры и %</a>
+      <a href="#sec-chains">Цепочки</a>
+      <a href="#sec-vocab">Вокабуляр</a>
+      <a href="#sec-template">Шаблон 85/15</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <header class="hero">
+    <h1>Движок вертикалей — как устроена система</h1>
+    <p class="sub">Внутренний инструмент аутрича · /tools/hypothesis-engine · июль 2026</p>
+    <p class="lead">Путь от сайта клиента до ранжированных вертикалей, гипотез с доказательствами, цепочек писем и шаблонов 85/15 — одним конвейером.</p>
+  </header>
+
+<style>
+#sec-why .vs-wrap { display: grid; grid-template-columns: 1fr 40px 1fr; gap: 14px; align-items: stretch; margin-top: 18px; }
+#sec-why .vs-col { display: flex; flex-direction: column; gap: 10px; }
+#sec-why .vs-head { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); text-align: center; }
+#sec-why .vs-mid { display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--muted); font-size: 13px; border: 1px dashed var(--border); border-radius: 999px; }
+#sec-why .mini { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 13.5px; line-height: 1.45; flex: 1; }
+#sec-why .mini b { color: var(--text); }
+#sec-why .mini.bad-side b { color: var(--red); }
+#sec-why .mini.good-side b { color: var(--green); }
+#sec-why .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 18px; }
+</style>
+<section id="sec-why" class="slide">
+  <p class="kicker">Зачем это</p>
+  <h2>Проблема: гипотезы упираются в людей</h2>
+  <p class="lead">Поиск вертикалей для аутрича — это работа, которую человек физически не дожимает: быстро придумывается десяток очевидных гипотез, а дальше начинается зона, куда люди не доходят никогда.</p>
+
+  <div class="vs-wrap">
+    <div class="vs-col">
+      <div class="vs-head">Как это делает человек</div>
+      <div class="mini bad-side"><b>~10 гипотез — и стена.</b> Команда быстро накидывает очевидное, но каждая следующая гипотеза требует геометрически растущего энтузиазма, которого ни у кого нет. +10/+20/+30 за пределами очевидного люди не достигают.</div>
+      <div class="mini bad-side"><b>Недели и месяцы на один шаблон.</b> Заставить специалиста (зарплата $3–12k/мес) написать один системный, продуманный шаблон аутрича — это недели-месяцы пинганья, а на выходе всё равно посредственно.</div>
+      <div class="mini bad-side"><b>Хаос названий в каждой отрасли.</b> Gambling — это iGaming, Real Money Gaming, Betting, eSports; ЛПР — «Head of VIP». Этот словарь человек учит за счёт бизнеса.</div>
+    </div>
+    <div class="vs-mid">VS</div>
+    <div class="vs-col">
+      <div class="vs-head">Что даёт движок</div>
+      <div class="mini good-side"><b>Мгновенная широта.</b> Модель фактически прочитала весь интернет: выдаёт 25–40 гипотез с тирингом T1/T2/T3, включая те, до которых человек не дойдёт никогда.</div>
+      <div class="mini good-side"><b>Глубокое исследование за минуты.</b> Сотни источников за один прогон, связи, которые человек не удержит в голове — с опытом 680+ клиентских бизнесов, заложенным в подход.</div>
+      <div class="mini good-side"><b>Бренд-клауд конкурентов.</b> Находит типы клиентов, о которых никто не догадывался, и классифицирует каждую сущность: anomaly / noise / potential.</div>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="card"><div class="num">10 <span class="muted">vs</span> 25–40</div><div class="num-label">гипотез: человек vs движок</div></div>
+    <div class="card"><div class="num">недели <span class="muted">vs</span> минуты</div><div class="num-label">исследование и шаблон</div></div>
+    <div class="card"><div class="num">680+</div><div class="num-label">бизнесов опыта заложено в подход</div></div>
+  </div>
+</section>
+
+<style>
+#sec-map .flow { flex-wrap: wrap; row-gap: 14px; }
+#sec-map .flow .step { flex: 1 1 21%; min-width: 150px; }
+#sec-map .flow .arrow { flex: 0 0 auto; align-self: center; }
+#sec-map .io { display: block; margin-top: 6px; font-size: 11px; line-height: 1.35; color: var(--muted); }
+#sec-map .map-cards { margin-top: 22px; }
+#sec-map .map-cards .card h3 { margin: 0 0 10px; font-size: 14px; }
+#sec-map .kv { display: flex; flex-direction: column; gap: 7px; font-size: 12.5px; }
+#sec-map .kv .row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+#sec-map .kv .row.wrap { flex-wrap: wrap; justify-content: flex-start; }
+</style>
+<section id="sec-map" class="slide">
+  <p class="kicker">Движок вертикалей · обзор</p>
+  <h2>Карта системы за 60 секунд</h2>
+  <p class="lead">Один конвейер закрывает путь от сайта клиента до готового шаблона письма под конкретную базу. Восемь узлов, два входа: URL сайта и CSV специалиста.</p>
+
+  <div class="flow">
+    <div class="step"><b>Сайт клиента</b><span class="io">вход: URL сайта</span></div>
+    <div class="arrow">→</div>
+    <div class="step"><b>Research · 6 стадий</b><span class="io">выход: 25–40 гипотез с доказательствами</span></div>
+    <div class="arrow">→</div>
+    <div class="step"><b>Вертикали с %</b><span class="io">выход: кластеры гипотез, ранжированные по потенциалу</span></div>
+    <div class="arrow">→</div>
+    <div class="step"><b>Цепочка писем</b><span class="io">выход: серия писем RU / EN / PL</span></div>
+    <div class="arrow">→</div>
+    <div class="step"><b>Вокабуляр</b><span class="io">выход: синонимы ниш × должности + запросы для HH / LinkedIn / Maps</span></div>
+    <div class="arrow">→</div>
+    <div class="step"><b>База специалиста</b><span class="io">вход: CSV/XLSX до 10 000 строк, парсинг в браузере</span></div>
+    <div class="arrow">→</div>
+    <div class="step"><b>Анализ базы</b><span class="io">выход: профиль лидов конкретной базы</span></div>
+    <div class="arrow">→</div>
+    <div class="step"><b>Шаблон 85/15</b><span class="io">выход: ~85% фикс. блок гипотезы + ~15% под базу</span></div>
+  </div>
+
+  <div class="grid3 map-cards">
+    <div class="card">
+      <h3>Где живёт</h3>
+      <div class="kv">
+        <div class="row wrap"><span class="chip">/tools/hypothesis-engine</span></div>
+        <div class="row"><span class="muted">Раздел «Аутрич» на странице инструментов</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Модели</h3>
+      <div class="kv">
+        <div class="row"><span class="muted">research</span><span class="chip">claude-opus-5</span></div>
+        <div class="row"><span class="muted">chain</span><span class="chip">claude-opus-5</span></div>
+        <div class="row"><span class="muted">bulk</span><span class="chip">claude-sonnet-4-6</span></div>
+        <div class="row"><span class="muted">все вызовы — через Requesty</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Учёт</h3>
+      <div class="kv">
+        <div class="row wrap"><span class="chip">tokens_used</span><span class="chip">cost_usd</span></div>
+        <div class="row"><span class="muted">на каждую джобу и проект — виден реальный ценник гипотезы</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+#sec-pipeline .stage-card { position: relative; padding-top: 14px; }
+#sec-pipeline .stage-num {
+  position: absolute; top: -14px; left: 14px;
+  width: 30px; height: 30px; border-radius: 8px;
+  background: var(--panel); border: 1px solid var(--border);
+  color: var(--blue); font-weight: 700; font-size: 15px;
+  display: flex; align-items: center; justify-content: center;
+}
+#sec-pipeline .stage-title { display: flex; align-items: baseline; gap: 8px; margin: 2px 0 6px; }
+#sec-pipeline .stage-title code { color: var(--blue); font-size: 15px; }
+#sec-pipeline .stage-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+#sec-pipeline .meta-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+#sec-pipeline .writes { display: flex; gap: 6px; align-items: baseline; margin-top: 6px; font-size: 12.5px; }
+#sec-pipeline .writes code { color: var(--green); }
+#sec-pipeline .pipe-note { margin-top: 18px; }
+</style>
+<section id="sec-pipeline" class="slide">
+  <p class="kicker">Research · 6 стадий</p>
+  <h2>Пайплайн исследования: от URL до ранжированных вертикалей</h2>
+  <p class="lead">Шесть последовательных стадий: сайт клиента превращается в профиль, профиль — в 25–40 гипотез-кандидатов, кандидаты верифицируются реальными источниками и схлопываются в вертикали. Каждая стадия — отдельный job с учётом токенов и стоимости.</p>
+
+  <div class="grid3" style="gap:22px; margin-top:24px;">
+    <div class="card stage-card">
+      <div class="stage-num">1</div>
+      <div class="stage-title"><code>site_profile</code> <span class="badge b-blue">research · opus-5</span></div>
+      <p class="small">SSRF-guarded фетч сайта → LLM-профиль: продукт, УТП (3–7), price_tier, цикл сделки, ЦА, кейсы, гео.</p>
+      <div class="writes"><span class="meta-label">Источник</span> сайт клиента</div>
+      <div class="writes"><span class="meta-label">Пишет</span> <code>he_projects.brief</code> <span class="muted">(статус → researching)</span></div>
+    </div>
+
+    <div class="card stage-card">
+      <div class="stage-num">2</div>
+      <div class="stage-title"><code>competitors</code> <span class="badge b-blue">research · opus-5</span></div>
+      <p class="small">4 Serper-запроса («конкуренты / аналоги / competitors / vs») → LLM отбирает до 8 прямых конкурентов RU + международных; их главные страницы скачиваются (excerpt 1500 симв.).</p>
+      <div class="writes"><span class="meta-label">Источник</span> Serper + фетч homepage</div>
+      <div class="writes"><span class="meta-label">Пишет</span> <code>job.result</code></div>
+    </div>
+
+    <div class="card stage-card">
+      <div class="stage-num">3</div>
+      <div class="stage-title"><code>brand_cloud</code> <span class="badge b-violet">bulk · sonnet-4-6</span></div>
+      <p class="small">По клиенту и до 5 конкурентам извлекает типы клиентов из кейсов, логотипов, отзывов, прессы. LLM классифицирует каждую сущность: аномалия / шум / потенциал + %.</p>
+      <div class="writes"><span class="meta-label">Источник</span> главная + кейс-страницы + Serper</div>
+      <div class="writes"><span class="meta-label">Пишет</span> <code>job.result</code></div>
+    </div>
+
+    <div class="card stage-card">
+      <div class="stage-num">4</div>
+      <div class="stage-title"><code>hypotheses</code> <span class="badge b-blue">research · opus-5</span></div>
+      <p class="small">Мгновенный проход без интернета из «генетической памяти» модели: 25–40 кандидатов с жёсткими квотами — T2 ≥ 8, T3 ≥ 8. URL на этом шаге запрещены: кандидаты ждут верификации.</p>
+      <div class="writes"><span class="meta-label">Источник</span> профиль + brand cloud + конкуренты</div>
+      <div class="writes"><span class="meta-label">Пишет</span> <code>job.result.candidates</code></div>
+    </div>
+
+    <div class="card stage-card">
+      <div class="stage-num">5</div>
+      <div class="stage-title"><code>evidence</code> <span class="badge b-blue">research · opus-5</span></div>
+      <p class="small">На каждого кандидата: ≤3 таргетированных Serper-запроса, фетч топ-2 источников, вердикт keep / merge / drop с перекалиброванным %. Железное правило: цитировать только реально найденные URL, дословные цитаты, честный drop лучше натянутого доказательства.</p>
+      <div class="writes"><span class="meta-label">Источник</span> Serper + фетч источников</div>
+      <div class="writes"><span class="meta-label">Пишет</span> <code>he_hypotheses</code> <span class="muted">(status = proposed, ≤6 доказательств)</span></div>
+    </div>
+
+    <div class="card stage-card">
+      <div class="stage-num">6</div>
+      <div class="stage-title"><code>clustering</code> <span class="badge b-blue">research · opus-5</span></div>
+      <p class="small">LLM решает слияния, детерминированная pure-функция применяет их: синонимы схлопываются в одну вертикаль (все банки/платежи → финтех), % суммируется с капом 100, ранжирование по убыванию. Нераспределённое → вертикали-одиночки, ничего не теряется.</p>
+      <div class="writes"><span class="meta-label">Источник</span> <span class="muted">he_hypotheses проекта</span></div>
+      <div class="writes"><span class="meta-label">Пишет</span> <code>he_verticals</code> + <code>he_hypotheses.vertical_id</code> <span class="muted">(статус → researched)</span></div>
+    </div>
+  </div>
+
+  <div class="flow pipe-note">
+    <div class="step">URL сайта</div>
+    <div class="arrow">→</div>
+    <div class="step">Профиль</div>
+    <div class="arrow">→</div>
+    <div class="step">≤8 конкурентов</div>
+    <div class="arrow">→</div>
+    <div class="step">Brand cloud</div>
+    <div class="arrow">→</div>
+    <div class="step">25–40 кандидатов</div>
+    <div class="arrow">→</div>
+    <div class="step">keep/merge/drop</div>
+    <div class="arrow">→</div>
+    <div class="step">Вертикали rank 1…N</div>
+  </div>
+  <p class="muted small" style="margin-top:10px;">Первый реальный прогон (polzaagency.ru): 38 гипотез → 15 вертикалей.</p>
+</section>
+
+<style>
+#sec-tiers .tier-card { position: relative; padding-left: 14px; }
+#sec-tiers .tier-card::before { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 3px; border-radius: 2px; }
+#sec-tiers .tier-t1::before { background: var(--green); }
+#sec-tiers .tier-t2::before { background: var(--amber); }
+#sec-tiers .tier-t3::before { background: var(--violet); }
+#sec-tiers .tier-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+#sec-tiers .tier-head .cnt { margin-left: auto; }
+#sec-tiers .moves { margin: 8px 0 0; padding: 0; list-style: none; }
+#sec-tiers .moves li { padding: 3px 0 3px 16px; position: relative; }
+#sec-tiers .moves li::before { content: "→"; position: absolute; left: 0; color: var(--violet); }
+#sec-tiers .pct-flow { display: flex; align-items: stretch; gap: 8px; margin: 10px 0; }
+#sec-tiers .pct-flow .pf { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+#sec-tiers .pct-flow .pf b { display: block; font-size: 12px; margin-bottom: 2px; }
+#sec-tiers .hyp-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; margin-top: 8px; }
+#sec-tiers .hyp-row .pct { font-weight: 700; font-size: 18px; color: var(--green); }
+#sec-tiers .hyp-row .ev { margin-left: auto; white-space: nowrap; }
+#sec-tiers .chips-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+#sec-tiers .case-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+</style>
+<section id="sec-tiers" class="slide">
+  <p class="kicker">Стадия hypotheses · 25–40 кандидатов</p>
+  <h2>Тиры T1/T2/T3 и что значит %</h2>
+  <p class="lead">Модель обязана выйти за пределы очевидных ЦА: жёсткий минимум на смежные и неочевидные сегменты прописан в промпте. Процент — это калиброванный потенциал сегмента, а не оценка качества самой гипотезы.</p>
+
+  <div class="grid2">
+    <div>
+      <div class="card tier-card tier-t1">
+        <div class="tier-head"><span class="badge b-green">T1 · очевидные</span><span class="chip cnt">5–10 шт.</span></div>
+        <div class="small">Прямые ЦА, которых команда клиента назовёт за один день. Нужны для полноты картины — <span class="muted">но это не ценность инструмента</span>.</div>
+      </div>
+      <div class="card tier-card tier-t2" style="margin-top:10px">
+        <div class="tier-head"><span class="badge b-amber">T2 · смежные</span><span class="chip cnt">минимум 8</span></div>
+        <div class="small">Перенос продукта на соседние ниши, роли и бизнес-модели — одна логическая догадка от текущих клиентов.</div>
+      </div>
+      <div class="card tier-card tier-t3" style="margin-top:10px">
+        <div class="tier-head"><span class="badge b-violet">T3 · неочевидные</span><span class="chip cnt">минимум 8</span></div>
+        <div class="small">Потребность реальна, но связь с продуктом видна только эксперту. Генерируются именованными ходами:</div>
+        <ul class="moves small muted">
+          <li>косвенная боль — та же боль под другим названием</li>
+          <li>замещающее поведение — «решают сейчас в Excel / руками / аутсорсом»</li>
+          <li>регуляторный драйвер и свежий тренд 2024–2026</li>
+          <li>«странный» сегмент, который команда отмела бы</li>
+        </ul>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="tier-head"><span class="badge b-blue">Что значит %</span></div>
+        <div class="pct-flow">
+          <div class="pf"><b>1. До верификации</b><span class="small muted">независимая экспертная оценка 0–100; сумма по всем ≠ 100</span></div>
+          <div class="pf"><b>2. Evidence-проход</b><span class="small muted">перекалибровка по фактам: подтверждённые поднимаем, голословные режем или drop</span></div>
+          <div class="pf"><b>3. Итог</b><span class="small muted">калиброванный потенциал сегмента с цитатами и URL</span></div>
+        </div>
+        <blockquote class="quote small">T3 на 30% может быть стратегически ценнее T1 на 90%: пустой канал против того, куда пишут все.</blockquote>
+        <div class="small muted" style="margin-top:8px">% — не «вероятность, что гипотеза хорошая». Финальное решение всегда за человеком: accept / reject по каждой гипотезе.</div>
+      </div>
+
+      <div class="card" style="margin-top:10px">
+        <div class="case-head">
+          <span class="badge b-gray">Первый прогон · polzaagency.ru</span>
+          <span class="small muted">38 гипотез → 15 вертикалей</span>
+        </div>
+        <div class="tier-head" style="margin-top:10px"><b>Вертикаль «HR-услуги и HR-tech»</b><span class="badge b-green cnt" style="margin-left:auto">100%</span></div>
+        <div class="chips-row">
+          <span class="chip">кадровые агентства</span>
+          <span class="chip">рекрутинг</span>
+          <span class="chip">массовый подбор</span>
+          <span class="chip">аутстаффинг персонала</span>
+          <span class="chip">HR-tech</span>
+          <span class="chip">LMS</span>
+          <span class="chip">платформы оценки и тестирования</span>
+          <span class="chip">корпоративное обучение</span>
+          <span class="chip">L&amp;D-провайдеры</span>
+        </div>
+        <div class="hyp-row"><span class="badge b-green">T1</span><span class="small">Кадровые агентства и аутстаффинг персонала</span><span class="pct">76%</span><span class="ev small muted">доказательства: 4</span></div>
+        <div class="hyp-row"><span class="badge b-green">T1</span><span class="small">HR-tech и корпоративное обучение</span><span class="pct">68%</span><span class="ev small muted">доказательства: 4</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+#sec-chains .cols { display: grid; grid-template-columns: 1.05fr 1fr; gap: 16px; align-items: stretch; }
+#sec-chains .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 16px; margin-top: 12px; }
+#sec-chains .pipe { display: grid; gap: 8px; margin: 12px 0; }
+#sec-chains .pipe .pstep { display: flex; gap: 10px; align-items: baseline; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+#sec-chains .pipe .pstep .n { color: var(--blue); font-weight: 700; font-family: monospace; }
+#sec-chains .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+#sec-chains .skel .step small { display: block; color: var(--muted); margin-top: 4px; }
+</style>
+
+<section id="sec-chains" class="slide">
+  <p class="kicker">Цепочки писем</p>
+  <h2>Регламент на данных, а не на вкусе</h2>
+  <p class="lead">Каждая вертикаль получает готовую цепочку из 4 писем (3–5). Правила написания дистиллированы из анализа 1&nbsp;700 реальных кампаний и 3,66 млн отправлений в Instantly — и инжектятся прямо в system-промпт каждой генерации.</p>
+
+  <div class="cols">
+    <div class="card">
+      <strong>Регламент: 1&nbsp;700 кампаний · 3&nbsp;656&nbsp;661 письмо</strong>
+      <div class="stats">
+        <div><div class="num">58,2%</div><div class="num-label">open rate, baseline</div></div>
+        <div><div class="num">1,03%</div><div class="num-label">reply rate, baseline</div></div>
+        <div><div class="num ok">+117%</div><div class="num-label">reply при {{var}} в теме (1,72% vs 0,79%)</div></div>
+        <div><div class="num">&lt;50</div><div class="num-label">слов в теле — лучший reply: 2,8% против 0,6% у 100–149 слов</div></div>
+        <div><div class="num">2–4</div><div class="num-label">шага — оптимум цепочки; шаг 5+ даёт 0,3% reply</div></div>
+        <div><div class="num bad">−63%</div><div class="num-label">reply у писем с цифрами и процентами в теле</div></div>
+      </div>
+      <p class="small muted" style="margin-top:12px">Также в регламенте: вопрос в теме +54% reply · {{var}} в теле +44% · CTA «созвон на 15 минут?» −37% · timeline-хуки цифрами −29% · breakup-письма запрещены.</p>
+    </div>
+
+    <div class="card">
+      <strong>Как генерируется — одной кнопкой</strong>
+      <div class="pipe">
+        <div class="pstep"><span class="n">1</span><span><b>system</b> — регламент (всегда в контексте, важнее любых шаблонов)</span></div>
+        <div class="pstep"><span class="n">2</span><span><b>user</b> — материалы: бриф клиента + вертикаль + гипотезы с доказательствами</span></div>
+        <div class="pstep"><span class="n">3</span><span><b>assistant</b> — праймер-ack: «материалы изучены, жду команду»</span></div>
+        <div class="pstep"><span class="n">4</span><span><b>user</b> — задача на целевом языке → парсинг маркерами <span class="chip">---LETTER N---</span></span></div>
+      </div>
+      <div class="chips">
+        <span class="chip">anthropic/claude-opus-5</span>
+        <span class="chip">RU · EN · PL</span>
+        <span class="chip">Тема: / Subject: / Temat:</span>
+      </div>
+      <p class="small muted">Кнопка «Цепочка писем» + селектор языка на карточке вертикали. Результат хранится как letters jsonb: <span class="chip">[{subject, body, wait_days, variants[]}]</span></p>
+    </div>
+  </div>
+
+  <div class="card skel" style="margin-top:16px">
+    <strong>Скелет цепочки</strong> <span class="muted small">— лесенка wait_days = [0, 2, 3, 4, …], каждое следующее письмо короче</span>
+    <div class="flow" style="margin-top:10px">
+      <div class="step">Шаг 1 · день 0<small>Тема 3–4 слова, тело до 100 слов; лучший угол + самое сильное доказательство</small></div>
+      <div class="arrow">→</div>
+      <div class="step">Шаг 2 · +2 дня<small>Новый угол, 40–80 слов — короче первого, не «напоминаю о себе»</small></div>
+      <div class="arrow">→</div>
+      <div class="step">Шаг 3 · +3 дня<small>2–4 коротких предложения, мягкий CTA: уточнить, к кому обратиться</small></div>
+    </div>
+  </div>
+</section>
+
+<style>
+#sec-vocab .vocab-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+#sec-vocab .vocab-note { display: flex; gap: 10px; align-items: center; }
+#sec-vocab .qgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+#sec-vocab .qsrc { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 6px; }
+#sec-vocab .qitem { font-family: monospace; font-size: 12px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; margin-bottom: 5px; }
+#sec-vocab .vhead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+</style>
+<section id="sec-vocab" class="slide">
+  <p class="kicker">Этап после кластеризации</p>
+  <h2>Вокабуляр сегмента: как на самом деле называются компании и должности</h2>
+  <p class="lead">Названия в каждой отрасли свои. Целишься в «Gambling» — искать надо iGaming, Real Money Gaming, Betting, Sportsbook. А ЛПР там может называться «Head of VIP». Вокабуляр собирает эту матрицу целиком — то, что руками собирается неделю, — одним кликом по вертикали.</p>
+
+  <div class="vocab-grid">
+    <div class="card">
+      <div class="vhead"><strong>Типы компаний</strong><span class="badge b-gray">пример: гемблинг-ниша</span></div>
+      <table class="tbl">
+        <thead><tr><th>Термин</th><th>Вид</th><th>Гео</th><th>Комментарий</th></tr></thead>
+        <tbody>
+          <tr><td>Gambling</td><td><span class="chip">canonical</span></td><td>глобально</td><td>самый широкий зонтик</td></tr>
+          <tr><td>iGaming</td><td><span class="chip">synonym</span></td><td>EU/CIS</td><td>отраслевой стандарт, так пишут о себе сами</td></tr>
+          <tr><td>Real Money Gaming (RMG)</td><td><span class="chip">synonym</span></td><td>US/UK</td><td>«ложный друг»: в юрконтексте ≠ gambling</td></tr>
+          <tr><td>Zakłady bukmacherskie</td><td><span class="chip">geo_variant</span></td><td>PL</td><td>букмекер по-польски, RU-оператора не найдёт</td></tr>
+          <tr><td>eSports betting</td><td><span class="chip">adjacent</span></td><td>глобально</td><td>та же выдача и те же ЛПР</td></tr>
+          <tr><td>Sportsbook</td><td><span class="chip">slang</span></td><td>EN</td><td>индустриальный сленг букмекерского продукта</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="vhead"><strong>Должности ЛПР</strong><span class="badge b-gray">пример</span></div>
+      <table class="tbl">
+        <thead><tr><th>Должность</th><th>Seniority</th><th>Функция</th><th>Варианты написания</th></tr></thead>
+        <tbody>
+          <tr><td>Head of VIP</td><td>Head</td><td>удержание ключевых игроков</td><td>VIP Manager, Head of VIP Relations</td></tr>
+          <tr><td>Retention Manager</td><td>Middle</td><td>ретеншн, реактивация</td><td>CRM Manager, Retention Lead</td></tr>
+          <tr><td>CMO</td><td>C-level</td><td>маркетинг</td><td>Chief Marketing Officer, Marketing Director</td></tr>
+          <tr><td>Country Manager</td><td>Head</td><td>развитие рынка</td><td>Regional Manager, Head of Region</td></tr>
+          <tr><td>Affiliate Manager</td><td>Middle</td><td>партнёрский трафик</td><td>Affiliate Lead, Head of Affiliates</td></tr>
+          <tr><td>Коммерческий директор</td><td>C-level</td><td>продажи</td><td>Commercial Director, Директор по развитию</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="vhead"><strong>Готовые поисковые запросы под источники сбора баз</strong><span class="badge b-blue">генерируются на каждую вертикаль</span></div>
+    <div class="qgrid">
+      <div>
+        <div class="qsrc">HH</div>
+        <div class="qitem">iGaming менеджер по работе с клиентами</div>
+        <div class="qitem">«букмекер» вакансии маркетинг</div>
+      </div>
+      <div>
+        <div class="qsrc">LinkedIn</div>
+        <div class="qitem">title:"Head of VIP" AND gambling</div>
+        <div class="qitem">title:"Retention Manager" AND iGaming</div>
+      </div>
+      <div>
+        <div class="qsrc">Яндекс.Карты</div>
+        <div class="qitem">рубрика «Букмекерская контора»</div>
+        <div class="qitem">«казино» + город</div>
+      </div>
+      <div>
+        <div class="qsrc">Реестры</div>
+        <div class="qitem">ОКВЭД 92 — азартные игры и пари</div>
+        <div class="qitem">ключевые слова названия «бет», «гейминг»</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="vocab-note" style="margin-top:12px">
+    <span class="badge b-green">верификация</span>
+    <span class="small muted">Топ-3 канонических термина и синонима проверяются живым поиском (Serper): термин без единого результата помечается «поиском не подтверждён» — специалист видит и снимает его сам, молча ничего не доверяется.</span>
+    <span class="badge b-violet">модель</span>
+    <span class="small muted">claude-sonnet-4-6, один клик «Вокабуляр» на вертикаль: 8–20 типов компаний, 10–25 должностей, 8–15 запросов.</span>
+  </div>
+</section>
+
+<style>
+#sec-template .bar { display: flex; height: 34px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); margin: 10px 0 6px; }
+#sec-template .bar85 { width: 85%; background: linear-gradient(90deg, rgba(96,165,250,.35), rgba(96,165,250,.55)); display: flex; align-items: center; padding: 0 12px; font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; }
+#sec-template .bar15 { flex: 1; background: linear-gradient(90deg, rgba(52,211,153,.35), rgba(52,211,153,.55)); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; }
+#sec-template .bar-labels { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+#sec-template ol.steps { margin: 8px 0 0; padding: 0; list-style: none; counter-reset: st; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; }
+#sec-template ol.steps li { counter-increment: st; position: relative; padding: 6px 8px 6px 34px; font-size: 13px; line-height: 1.35; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,.02); }
+#sec-template ol.steps li::before { content: counter(st); position: absolute; left: 8px; top: 7px; width: 18px; height: 18px; border-radius: 50%; background: var(--blue); color: #0b0d10; font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+#sec-template ol.steps b { color: var(--text); }
+#sec-template .hl-op { color: var(--amber); font-family: ui-monospace, monospace; }
+</style>
+<section id="sec-template" class="slide">
+  <p class="kicker">Финал · база → шаблон 85/15</p>
+  <h2>База превращает цепочку вертикали в готовый шаблон</h2>
+  <p class="lead">Специалист загружает свою лид-базу (CSV/XLSX, до 10 000 строк, парсинг прямо в браузере) под выбранную вертикаль — и получает финальные письма: костяк уровня гипотезы плюс дописка под то, что реально видно в строках этой базы.</p>
+
+  <div class="card">
+    <div class="bar"><div class="bar85">~85% — fixed block (общий для всех лидов)</div><div class="bar15">~15%</div></div>
+    <div class="bar-labels"><span>боли сегмента, оффер, доказательства, структура писем — из цепочки вертикали</span><span>углы/примеры под сегменты ЭТОЙ базы</span></div>
+  </div>
+
+  <div class="grid3" style="margin-top:10px">
+    <div class="card">
+      <p><span class="badge b-blue">base_analyze</span></p>
+      <p class="small">Профиль базы: распределения <b>гео / индустрий / типов компаний / должностей</b> (топ-5 + «Прочее»), 2–6 notable-сегментов, честные <span class="muted">data_quality_notes</span> и 3–6 рекомендованных углов подачи. Модель: sonnet-4-6.</p>
+    </div>
+    <div class="card">
+      <p><span class="badge b-violet">template</span></p>
+      <p class="small">Два прохода opus-5: план 85/15 (fixed_block + segment_additions с привязкой к письмам), затем финальные 3–6 писем по регламенту цепочки. Дописки вплетаются в текст, а не абзацем «кстати».</p>
+    </div>
+    <div class="card">
+      <p><span class="badge b-green">операторы</span></p>
+      <p class="small"><span class="hl-op">{{firstName}}</span>, <span class="hl-op">{{companyName}}</span> и др. маппятся на реальные колонки базы (точное совпадение → синонимы → подстрока), 1–2 на письмо. Несопоставленное честно показывается как <span class="warn">«несопоставлено»</span>. Экспорт: в буфер / JSON.</p>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:10px">
+    <p class="small" style="margin-bottom:2px"><b>Порядок работы в UI</b> <span class="muted">/tools/hypothesis-engine</span></p>
+    <ol class="steps">
+      <li><b>Создать проект</b> — указать сайт клиента</li>
+      <li><b>«Запустить исследование»</b> — степпер из 6 стадий</li>
+      <li><b>Разметить гипотезы</b> — галочка / крестик</li>
+      <li><b>На вертикали:</b> «Вокабуляр» + «Цепочка писем» (RU/EN/PL)</li>
+      <li><b>Вкладка «Базы»:</b> загрузить CSV/XLSX под вертикаль</li>
+      <li><b>«Собрать шаблон»</b> — проверить подсвеченные <span class="hl-op">{{операторы}}</span> и маппинг колонок → экспорт</li>
+    </ol>
+    <p class="small muted" style="margin-top:8px">Важно: персональная строка на каждого лида — отдельный существующий шаг конструктора баз. Движок дописывает на уровне базы (15%), не на уровне лида.</p>
+  </div>
+</section>
+
+  <footer class="site">
+    <p class="muted small">Собрано из кода app/src/lib/hypothesisEngine · модели: research/chain = claude-opus-5, bulk = claude-sonnet-4-6 · учёт стоимости в he_projects.cost_usd</p>
+  </footer>
+
+</div>
+
+</body>
+</html>
