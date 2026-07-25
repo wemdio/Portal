@@ -255,7 +255,7 @@ export async function computeOnboardingStatus(
         }
       : {
           id: 'preset',
-          label: 'Менеджер настроил пресет',
+          label: 'Менеджер настраивает пресет',
           done: false,
           href: null,
           blocked_reason: presetRow
