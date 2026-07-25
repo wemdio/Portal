@@ -1,10 +1,10 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
-  ChevronLeft, Loader2, Search, Mail, Flame, Tag, Plus, X, Check,
+  ChevronLeft, Loader2, Search, Mail, Flame, Tag, Plus, Check, ChevronDown,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Account, CustomTag } from '@/lib/instantly/types';
@@ -135,6 +135,152 @@ function TagDropdown({
   );
 }
 
+/**
+ * Фильтр по тегам в шапке списка почт. Раньше висел «облаком» из ~100 чипов —
+ * стал бесполезен: ряды перескакивали при ресайзе, одну кнопку из массы найти
+ * сложно, выбрать несколько нельзя. Один кастомный поповер: поиск сверху,
+ * скролл со всеми тегами и чек-боксами, «Сбросить». Семантика OR — почта
+ * попадает в список, если у неё есть ХОТЬ ОДИН из выбранных тегов.
+ */
+function TagFilterDropdown({
+  allTags,
+  selectedIds,
+  onChange,
+  tagColorMap,
+}: {
+  allTags: CustomTag[];
+  selectedIds: Set<string>;
+  onChange: (next: Set<string>) => void;
+  tagColorMap: Map<string, number>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const ref = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false);
+    }
+    if (open) {
+      document.addEventListener('mousedown', handleClick);
+      document.addEventListener('keydown', handleKey);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (open) setTimeout(() => inputRef.current?.focus(), 10);
+  }, [open]);
+
+  const toggle = (id: string) => {
+    const next = new Set(selectedIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange(next);
+  };
+
+  const clear = () => {
+    onChange(new Set());
+    setQuery('');
+  };
+
+  const q = query.trim().toLowerCase();
+  const filteredTags = q
+    ? allTags.filter((t) => t.name.toLowerCase().includes(q))
+    : allTags;
+  const selectedCount = selectedIds.size;
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm transition-colors ${
+          selectedCount > 0
+            ? 'border-zinc-900 bg-zinc-900 text-white hover:bg-zinc-800'
+            : 'border-zinc-200 bg-white text-zinc-700 hover:border-zinc-400'
+        }`}
+      >
+        <Tag className="h-3.5 w-3.5" />
+        {selectedCount > 0 ? `Теги: ${selectedCount}` : 'Фильтр по тегам'}
+        <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 top-full z-30 mt-1 w-[360px] rounded-xl border border-zinc-200 bg-white shadow-xl">
+          <div className="border-b border-zinc-100 p-2">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
+              <input
+                ref={inputRef}
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Поиск тега..."
+                className="w-full rounded-md border border-zinc-200 bg-white py-1.5 pl-8 pr-2 text-sm focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400"
+              />
+            </div>
+          </div>
+          <div className="max-h-72 overflow-y-auto p-1">
+            {filteredTags.length === 0 ? (
+              <div className="px-3 py-6 text-center text-xs text-zinc-400">
+                {q ? 'Ничего не найдено' : 'Нет тегов'}
+              </div>
+            ) : (
+              filteredTags.map((t) => {
+                const assigned = selectedIds.has(t.id);
+                const colorIdx = tagColorMap.get(t.id) ?? 0;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => toggle(t.id)}
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-zinc-50 transition-colors"
+                  >
+                    <span
+                      className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                        assigned ? 'border-zinc-900 bg-zinc-900' : 'border-zinc-300'
+                      }`}
+                    >
+                      {assigned && <Check className="h-3 w-3 text-white" />}
+                    </span>
+                    <span
+                      className={`truncate rounded-full border px-2 py-0.5 text-xs font-medium ${tagColor(colorIdx)}`}
+                    >
+                      {t.name}
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+          {selectedCount > 0 && (
+            <div className="flex items-center justify-between border-t border-zinc-100 p-2 text-xs">
+              <span className="text-zinc-500">Выбрано: {selectedCount}</span>
+              <button
+                type="button"
+                onClick={clear}
+                className="rounded-md px-2 py-1 font-medium text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 transition-colors"
+              >
+                Сбросить
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const PAGE_SIZE = 30;
+
 export default function AccountsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [allTags, setAllTags] = useState<CustomTag[]>([]);
@@ -142,7 +288,8 @@ export default function AccountsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
-  const [filterTagId, setFilterTagId] = useState<string | null>(null);
+  const [filterTagIds, setFilterTagIds] = useState<Set<string>>(() => new Set());
+  const [page, setPage] = useState(1);
   const [warmupAction, setWarmupAction] = useState<string | null>(null);
 
   const tagColorMap = React.useMemo(() => {
@@ -181,17 +328,36 @@ export default function AccountsPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  const filtered = accounts.filter((a) => {
-    if (filterTagId) {
-      const tags = accountTagsMap.get(a.email);
-      if (!tags || !tags.has(filterTagId)) return false;
-    }
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return a.email.toLowerCase().includes(q) ||
-      (a.first_name ?? '').toLowerCase().includes(q) ||
-      (a.last_name ?? '').toLowerCase().includes(q);
-  });
+  const filtered = useMemo(() => {
+    const tagIds = filterTagIds;
+    const hasTagFilter = tagIds.size > 0;
+    const q = search.trim().toLowerCase();
+    return accounts.filter((a) => {
+      if (hasTagFilter) {
+        const tags = accountTagsMap.get(a.email);
+        if (!tags) return false;
+        // OR: почта попадает, если у неё есть ХОТЬ ОДИН из выбранных тегов.
+        let matches = false;
+        for (const id of tagIds) {
+          if (tags.has(id)) { matches = true; break; }
+        }
+        if (!matches) return false;
+      }
+      if (!q) return true;
+      return a.email.toLowerCase().includes(q) ||
+        (a.first_name ?? '').toLowerCase().includes(q) ||
+        (a.last_name ?? '').toLowerCase().includes(q);
+    });
+  }, [accounts, accountTagsMap, filterTagIds, search]);
+
+  // При смене фильтра/поиска отматываем на первую страницу — иначе, отфильтровав
+  // 1158 → 12 почт, можно застрять на пустой странице 5 без единой строки.
+  useEffect(() => { setPage(1); }, [search, filterTagIds]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const pageStart = (currentPage - 1) * PAGE_SIZE;
+  const pageItems = filtered.slice(pageStart, pageStart + PAGE_SIZE);
 
   const handleWarmup = useCallback(async (email: string, action: 'enable' | 'disable') => {
     setWarmupAction(email);
@@ -280,27 +446,12 @@ export default function AccountsPage() {
           />
         </div>
         {allTags.length > 0 && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Tag className="h-3.5 w-3.5 text-zinc-400" />
-            {allTags.map((t, i) => (
-              <button
-                key={t.id}
-                onClick={() => setFilterTagId(filterTagId === t.id ? null : t.id)}
-                className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-all ${
-                  filterTagId === t.id
-                    ? 'ring-2 ring-zinc-900 ring-offset-1 ' + tagColor(i)
-                    : tagColor(i) + ' opacity-70 hover:opacity-100'
-                }`}
-              >
-                {t.name}
-              </button>
-            ))}
-            {filterTagId && (
-              <button onClick={() => setFilterTagId(null)} className="ml-1 rounded-full p-1 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100">
-                <X className="h-3 w-3" />
-              </button>
-            )}
-          </div>
+          <TagFilterDropdown
+            allTags={allTags}
+            selectedIds={filterTagIds}
+            onChange={setFilterTagIds}
+            tagColorMap={tagColorMap}
+          />
         )}
       </div>
 
@@ -315,7 +466,7 @@ export default function AccountsPage() {
       ) : filtered.length === 0 ? (
         <div className="rounded-xl border border-zinc-200 bg-white py-16 text-center">
           <Mail className="mx-auto h-8 w-8 text-zinc-300" />
-          <p className="mt-3 text-sm text-zinc-500">{search || filterTagId ? 'Ничего не найдено' : 'Нет аккаунтов'}</p>
+          <p className="mt-3 text-sm text-zinc-500">{search || filterTagIds.size > 0 ? 'Ничего не найдено' : 'Нет аккаунтов'}</p>
         </div>
       ) : (
         <div className="rounded-xl border border-zinc-200 bg-white overflow-hidden">
@@ -335,7 +486,7 @@ export default function AccountsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-50">
-                {filtered.map((a) => {
+                {pageItems.map((a) => {
                   const acctTags = accountTagsMap.get(a.email) ?? new Set<string>();
                   return (
                     <tr key={a.email} className="hover:bg-zinc-50">
@@ -403,9 +554,103 @@ export default function AccountsPage() {
               </tbody>
             </table>
           </div>
-          <div className="border-t border-zinc-100 px-4 py-3 text-xs text-zinc-400">
-            {filtered.length} из {accounts.length} аккаунтов
-          </div>
+          <PaginationBar
+            currentPage={currentPage}
+            totalPages={totalPages}
+            totalItems={filtered.length}
+            allItems={accounts.length}
+            pageSize={PAGE_SIZE}
+            onPageChange={setPage}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Пагинация в едином стиле для accounts (30/страница) и campaigns (20/страница).
+ * Умеет схлопывать ряд номеров при большом количестве страниц: показывает
+ * первую, последнюю, текущую и ±1 соседей, между — «…». Иначе на 40+ страницах
+ * ряд номеров сам становится проблемой.
+ */
+function PaginationBar({
+  currentPage,
+  totalPages,
+  totalItems,
+  allItems,
+  pageSize,
+  onPageChange,
+}: {
+  currentPage: number;
+  totalPages: number;
+  totalItems: number;
+  allItems: number;
+  pageSize: number;
+  onPageChange: (page: number) => void;
+}) {
+  const from = totalItems === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const to = Math.min(currentPage * pageSize, totalItems);
+  const canPrev = currentPage > 1;
+  const canNext = currentPage < totalPages;
+
+  const pageNumbers: (number | 'gap')[] = [];
+  if (totalPages <= 7) {
+    for (let i = 1; i <= totalPages; i++) pageNumbers.push(i);
+  } else {
+    const push = (n: number) => {
+      if (pageNumbers[pageNumbers.length - 1] !== n) pageNumbers.push(n);
+    };
+    push(1);
+    if (currentPage > 3) pageNumbers.push('gap');
+    for (let i = Math.max(2, currentPage - 1); i <= Math.min(totalPages - 1, currentPage + 1); i++) push(i);
+    if (currentPage < totalPages - 2) pageNumbers.push('gap');
+    push(totalPages);
+  }
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 px-4 py-3 text-xs text-zinc-500">
+      <span>
+        {totalItems === allItems
+          ? <>{from}–{to} из {totalItems}</>
+          : <>{from}–{to} из {totalItems} (всего {allItems})</>}
+      </span>
+      {totalPages > 1 && (
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => onPageChange(currentPage - 1)}
+            disabled={!canPrev}
+            className="rounded-md px-2 py-1 text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-600 transition-colors"
+          >
+            ‹
+          </button>
+          {pageNumbers.map((n, idx) =>
+            n === 'gap' ? (
+              <span key={`gap-${idx}`} className="px-1 text-zinc-400">…</span>
+            ) : (
+              <button
+                key={n}
+                type="button"
+                onClick={() => onPageChange(n)}
+                className={`min-w-[28px] rounded-md px-2 py-1 font-medium transition-colors ${
+                  n === currentPage
+                    ? 'bg-zinc-900 text-white'
+                    : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'
+                }`}
+              >
+                {n}
+              </button>
+            ),
+          )}
+          <button
+            type="button"
+            onClick={() => onPageChange(currentPage + 1)}
+            disabled={!canNext}
+            className="rounded-md px-2 py-1 text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-600 transition-colors"
+          >
+            ›
+          </button>
         </div>
       )}
     </div>
