@@ -86,10 +86,13 @@ const LIMITS: Array<{
   },
 ];
 
+// Названия тарифов совпадают с лендингом outreachos.pro:
+// standard=Запуск, pro=Поток, custom=Масштаб. DB-enum остаётся
+// standard/pro/custom — переименование только на уровне UI.
 const TARIFF_LABELS: Record<TariffResponse['tariff_type'], string> = {
-  standard: 'Standard',
-  pro: 'Pro',
-  custom: 'Индивидуальный',
+  standard: 'Запуск',
+  pro: 'Поток',
+  custom: 'Масштаб',
 };
 
 const STATUS_LABELS: Record<TariffResponse['status'], string> = {
@@ -643,14 +646,14 @@ export default function ClientTariffPage() {
           {/* ── 02c → Автопродление (distilled per re-critique) ───────── */}
           {data.billing_mode === 'autopayment' && (
             <section className="neu-card p-5 sm:p-6">
-              <p className="ds-eyebrow mb-3">02c<span aria-hidden> → </span>автопродление</p>
+              <p className="ds-eyebrow mb-3">02c<span aria-hidden> → </span>продление</p>
               <div className="space-y-3">
                 <div>
                   <h3
                     className="text-base font-bold m-0"
                     style={{ color: 'var(--cp-paper)' }}
                   >
-                    Автопродление
+                    Продление
                   </h3>
                   <p
                     className="mt-1 text-sm"
@@ -660,26 +663,22 @@ export default function ClientTariffPage() {
                     <span className="ds-mono" style={{ color: 'var(--cp-paper)' }}>
                       {formatDate(data.paid_until)}
                     </span>
-                    . При включённом автопродлении списание выполняется за 1–3 дня до этой даты.
+                    .
+                  </p>
+                  <p
+                    className="mt-1 text-sm"
+                    style={{ color: 'var(--cp-paper-mute)' }}
+                  >
+                    <span className="font-semibold" style={{ color: 'var(--cp-paper)' }}>Важно!</span>{' '}
+                    При включённом автопродлении списание выполняется за 1–3 дня до этой даты.
                   </p>
                 </div>
 
-                {/* dl → eyebrow + value rows. Tightens the densest section on
-                    the page (re-critique P1-NEW). */}
+                {/* dl → eyebrow + value rows. Строку «карта» убрали по
+                    просьбе клиента — «не привязана (появится после оплаты)»
+                    только пугает; статус карты и так виден по кнопке
+                    «Отвязать карту» ниже (disabled когда карты нет). */}
                 <div className="flex flex-col gap-1 text-xs">
-                  <div className="flex items-baseline gap-3">
-                    <span
-                      className="ds-eyebrow shrink-0"
-                      style={{ minWidth: '14ch' }}
-                    >
-                      карта
-                    </span>
-                    <span style={{ color: 'var(--cp-paper)' }}>
-                      {data.payment_method_saved
-                        ? 'привязана'
-                        : 'не привязана (появится после оплаты)'}
-                    </span>
-                  </div>
                   <div className="flex items-baseline gap-3">
                     <span
                       className="ds-eyebrow shrink-0"
@@ -742,7 +741,7 @@ export default function ClientTariffPage() {
                   >
                     {data.payment_method_saved
                       ? 'Карта удалится из нашей системы, автопродление отключится. Оплаченный период сохраняется.'
-                      : 'Карта появится здесь после первой оплаты — там же будет возможность отвязать её одной кнопкой.'}
+                      : 'Отключить автопродление'}
                   </p>
                 </div>
               </div>
