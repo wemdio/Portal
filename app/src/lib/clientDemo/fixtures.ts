@@ -838,6 +838,8 @@ export const DEMO_ONBOARDING_RESPONSE = {
   ],
   complete: true,
   next_id: null,
+  // Онбординг пройден — таймер готовности почт не нужен.
+  mail_ready_at: null,
 };
 
 // Демо-состояние шага «Выбрать домены»: выбор уже подтверждён, селектор

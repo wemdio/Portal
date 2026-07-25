@@ -261,8 +261,7 @@ export function DomainSelector({
   return (
     <div className="mt-3">
       <p className="text-[11px] mb-2" style={{ color: 'var(--cp-text-m)' }}>
-        Менеджер купит и настроит эти домены для ваших почтовых ящиков. Рекомендуем
-        взять побольше .ru — они стабильнее и дешевле.
+        Менеджер купит и настроит эти домены для ваших почтовых ящиков.
       </p>
 
       {sorted.length === 0 ? (

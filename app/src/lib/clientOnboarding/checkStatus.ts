@@ -9,12 +9,13 @@
  * Next.js request lifecycle or the cache wrapper. The route file imports this
  * and wraps the call in `cached()` for a short TTL.
  *
- * Performance: 7 small queries to the database in parallel (most return 0-1
+ * Performance: 8 small queries to the database in parallel (most return 0-1
  * rows). On a warm connection this is < 50ms total, well below the 15s cache
  * TTL we set in the route handler.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { SETUP_DAYS } from '@/lib/tariffs';
 
 export type OnboardingStepId =
   | 'brief'
@@ -41,6 +42,12 @@ export interface OnboardingStatusResponse {
   complete: boolean;
   /** Id of the first not-done item the user should tackle next, or null when complete. */
   next_id: OnboardingStepId | null;
+  /**
+   * Estimated mailbox-readiness date for the preset-step countdown, or null
+   * when the preset is already configured (nothing to count down to) or when
+   * neither the setup window nor a confirmed domain selection is known.
+   */
+  mail_ready_at: string | null;
 }
 
 export interface OnboardingStatusDeps {
@@ -94,8 +101,8 @@ export async function computeOnboardingStatus(
 ): Promise<OnboardingStatusResponse> {
   const { supabaseAdmin, supabaseInstantly } = deps;
 
-  // All seven queries run in parallel — none depend on each other's output.
-  const [briefRes, domainsRes, presetRes, jobsRes, launchesRes, sequencesRes, sequencesV2Res] = await Promise.all([
+  // All eight queries run in parallel — none depend on each other's output.
+  const [briefRes, domainsRes, presetRes, jobsRes, launchesRes, sequencesRes, sequencesV2Res, tariffRes] = await Promise.all([
     supabaseInstantly
       .from('client_briefs')
       .select('fields')
@@ -103,7 +110,7 @@ export async function computeOnboardingStatus(
       .maybeSingle(),
     supabaseInstantly
       .from('client_domain_selections')
-      .select('selected, required_count')
+      .select('selected, required_count, status, updated_at')
       .eq('client_user_id', userId)
       .maybeSingle(),
     supabaseInstantly
@@ -133,6 +140,12 @@ export async function computeOnboardingStatus(
       .from('email_sequence_v2_runs')
       .select('status')
       .eq('user_id', userId),
+    // setup-окно (15 дней с регистрации) — для таймера готовности почт.
+    supabaseAdmin
+      .from('client_tariffs')
+      .select('setup_until')
+      .eq('user_id', userId)
+      .maybeSingle(),
   ]);
 
   // ── Brief ────────────────────────────────────────────────────────────
@@ -154,13 +167,40 @@ export async function computeOnboardingStatus(
   // пресет с email_account_ids — менеджер купил домены вручную), шаг
   // засчитываем автоматически. Иначе у всех существующих клиентов чеклист
   // «ожил» бы с требованием выбрать новые домены.
-  const domainsRow = domainsRes.data as { selected?: unknown; required_count?: unknown } | null;
+  const domainsRow = domainsRes.data as {
+    selected?: unknown;
+    required_count?: unknown;
+    status?: unknown;
+    updated_at?: unknown;
+  } | null;
   const domainsSelected = Array.isArray(domainsRow?.selected)
     ? (domainsRow!.selected as unknown[]).filter((d) => typeof d === 'string' && d.trim())
     : [];
   const domainsRequired = Number(domainsRow?.required_count) || 0;
   const domainsDone =
     presetDone || (domainsRequired > 0 && domainsSelected.length === domainsRequired);
+
+  // ── Таймер готовности почт (для UI шага preset) ──────────────────────
+  // Запуск кампаний закрыт двумя вещами: системным setup-окном (SETUP_DAYS
+  // с регистрации, client_tariffs.setup_until) и фактическим прогревом почт,
+  // который менеджер начинает после подтверждения доменов клиентом. Берём
+  // max() из известных дат — «точно готово не раньше». null, когда пресет
+  // уже настроен (считать нечего) или неизвестны обе даты.
+  let mailReadyAt: string | null = null;
+  if (!presetDone) {
+    const candidates: number[] = [];
+    const setupUntilRaw = (tariffRes.data as { setup_until?: unknown } | null)?.setup_until;
+    const setupUntilMs = typeof setupUntilRaw === 'string' ? Date.parse(setupUntilRaw) : NaN;
+    if (Number.isFinite(setupUntilMs)) candidates.push(setupUntilMs);
+    const selectedAtMs =
+      domainsRow?.status === 'selected' && typeof domainsRow.updated_at === 'string'
+        ? Date.parse(domainsRow.updated_at)
+        : NaN;
+    if (Number.isFinite(selectedAtMs)) {
+      candidates.push(selectedAtMs + SETUP_DAYS * 24 * 60 * 60 * 1000);
+    }
+    if (candidates.length > 0) mailReadyAt = new Date(Math.max(...candidates)).toISOString();
+  }
 
   // ── first_base / first_clean (from base_constructor_jobs) ────────────
   const jobs = (jobsRes.data ?? []) as { status?: unknown }[];
@@ -219,8 +259,8 @@ export async function computeOnboardingStatus(
           done: false,
           href: null,
           blocked_reason: presetRow
-            ? 'Пресет создан, но у вас не привязаны email-аккаунты. Обратитесь к менеджеру.'
-            : 'Менеджер ещё не настроил ваш пресет. Обратитесь к менеджеру.',
+            ? 'Пресет создан, менеджер подключает к нему email-аккаунты.'
+            : 'Менеджер создаёт и прогревает почтовые ящики для ваших кампаний.',
         },
     {
       id: 'first_base',
@@ -263,5 +303,5 @@ export async function computeOnboardingStatus(
     }
   }
 
-  return { items, complete, next_id };
+  return { items, complete, next_id, mail_ready_at: mailReadyAt };
 }

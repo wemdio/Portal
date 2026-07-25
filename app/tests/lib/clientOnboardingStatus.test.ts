@@ -30,6 +30,10 @@
 
 import { computeOnboardingStatus } from '@/lib/clientOnboarding/checkStatus';
 
+// checkStatus берёт SETUP_DAYS из tariffs — мокаем модуль целиком, чтобы не
+// тянуть server-only supabaseAdmin-окружение в чистый юнит-тест.
+jest.mock('@/lib/tariffs', () => ({ SETUP_DAYS: 15 }));
+
 const USER_ID = 'user-A';
 
 interface ChainState {
@@ -318,5 +322,66 @@ describe('computeOnboardingStatus', () => {
     // July 2026 IA rework: «Цепочки писем» — своя страница (была табом парсеров).
     expect(itemHref('first_sequence')).toBe('/client/sequences');
     expect(itemHref('first_launch')).toBe('/client/launch');
+  });
+
+  // ── mail_ready_at (таймер готовности почт для шага preset) ────────────
+
+  it('mail_ready_at: null when nothing is known (no tariff row, no selection)', async () => {
+    const res = await callStatus();
+    expect(res.mail_ready_at).toBeNull();
+  });
+
+  it('mail_ready_at: setup_until only → equals setup_until', async () => {
+    state.rowsByTable.client_tariffs = [
+      { user_id: USER_ID, setup_until: '2026-08-10T00:00:00.000Z' },
+    ];
+    const res = await callStatus();
+    expect(res.mail_ready_at).toBe('2026-08-10T00:00:00.000Z');
+  });
+
+  it('mail_ready_at: confirmed selection later than setup window → selection + 15d wins', async () => {
+    state.rowsByTable.client_tariffs = [
+      { user_id: USER_ID, setup_until: '2026-08-10T00:00:00.000Z' },
+    ];
+    state.rowsByTable.client_domain_selections = [
+      {
+        client_user_id: USER_ID,
+        selected: ['a.ru', 'b.ru', 'c.online'],
+        required_count: 3,
+        status: 'selected',
+        updated_at: '2026-08-01T00:00:00.000Z',
+      },
+    ];
+    const res = await callStatus();
+    // 2026-08-01 + 15 дней = 2026-08-16 > setup_until 2026-08-10
+    expect(res.mail_ready_at).toBe('2026-08-16T00:00:00.000Z');
+  });
+
+  it('mail_ready_at: setup window later than selection + 15d → setup_until wins', async () => {
+    state.rowsByTable.client_tariffs = [
+      { user_id: USER_ID, setup_until: '2026-09-10T00:00:00.000Z' },
+    ];
+    state.rowsByTable.client_domain_selections = [
+      {
+        client_user_id: USER_ID,
+        selected: ['a.ru', 'b.ru', 'c.online'],
+        required_count: 3,
+        status: 'selected',
+        updated_at: '2026-08-01T00:00:00.000Z',
+      },
+    ];
+    const res = await callStatus();
+    expect(res.mail_ready_at).toBe('2026-09-10T00:00:00.000Z');
+  });
+
+  it('mail_ready_at: preset already configured → null (nothing to count down to)', async () => {
+    state.rowsByTable.client_campaign_presets = [
+      { client_user_id: USER_ID, email_account_ids: ['acc-1'] },
+    ];
+    state.rowsByTable.client_tariffs = [
+      { user_id: USER_ID, setup_until: '2026-08-10T00:00:00.000Z' },
+    ];
+    const res = await callStatus();
+    expect(res.mail_ready_at).toBeNull();
   });
 });
