@@ -32,7 +32,7 @@ type AdminUserTariffPayload = TariffData & {
   setup_until?: string | null;
   billing_mode?: 'invoice' | 'autopayment' | null;
   payment_locked?: boolean;
-  billing_period?: 'month' | 'half_year' | 'year' | null;
+  billing_period?: BillingPeriod | null;
   billing_amount?: number | null;
   /** Персистентный флаг "клиент работает с тестовым магазином ЮКассы".
    *  Управляется отдельным блоком в админ-модалке, переключает отображение
@@ -43,7 +43,9 @@ const TARIFF_DEFAULTS: Record<'standard' | 'pro', Omit<TariffData, 'tariff_type'
   standard: { max_contacts: 10_000, max_rows: 20_000, max_chains_per_month: 10, max_domains: 4, max_emails: 16 },
   pro: { max_contacts: 20_000, max_rows: 40_000, max_chains_per_month: 20, max_domains: 8, max_emails: 32 },
 };
-const TARIFF_LABELS: Record<TariffType, string> = { standard: 'Стандарт', pro: 'Про', custom: 'Custom' };
+// Названия тарифов совпадают с лендингом outreachos.pro. DB-enum остаётся
+// standard/pro/custom — переименование только на уровне UI.
+const TARIFF_LABELS: Record<TariffType, string> = { standard: 'Запуск', pro: 'Поток', custom: 'Масштаб' };
 
 // Клиентская пагинация списка кампаний в action-модалке. В DOM держим только
 // 10 строк за раз — у клиентов бывает 200+ кампаний, и рендер всех чекбоксов
@@ -51,17 +53,24 @@ const TARIFF_LABELS: Record<TariffType, string> = { standard: 'Стандарт'
 const CAMPAIGNS_PER_PAGE = 10;
 
 // Mirror lib/tariffs.ts (which is server-only). Keep in sync with that file.
-const TARIFF_MONTHLY_PRICE: Record<'standard' | 'pro', number> = { standard: 40_000, pro: 80_000 };
-const BILLING_PERIOD_MONTHS: Record<'month' | 'half_year' | 'year', number> = { month: 1, half_year: 6, year: 12 };
-const BILLING_PERIOD_LABELS: Record<'month' | 'half_year' | 'year', string> = {
-  month: 'Месяц',
-  half_year: 'Полгода',
-  year: 'Год',
+// Цены и скидки должны совпадать 1-в-1 с lib/tariffs.ts — иначе админ увидит
+// одни цифры, клиент в ЛК — другие.
+type BillingPeriod = 'month' | 'quarter' | 'half_year' | 'year';
+const TARIFF_MONTHLY_PRICE: Record<'standard' | 'pro', number> = { standard: 40_000, pro: 65_000 };
+const BILLING_PERIOD_MONTHS: Record<BillingPeriod, number> = { month: 1, quarter: 3, half_year: 6, year: 12 };
+// 3 мес = -5%, 6 мес = -10%, 12 мес = -20%. Месяц — без скидки.
+const BILLING_PERIOD_DISCOUNT: Record<BillingPeriod, number> = { month: 1, quarter: 0.95, half_year: 0.9, year: 0.8 };
+const BILLING_PERIOD_LABELS: Record<BillingPeriod, string> = {
+  month: '1 месяц',
+  quarter: '3 месяца',
+  half_year: '6 месяцев',
+  year: '12 месяцев',
 };
 
-function calcTariffAmount(tariff: TariffType, period: 'month' | 'half_year' | 'year'): number | null {
+function calcTariffAmount(tariff: TariffType, period: BillingPeriod): number | null {
   if (tariff === 'custom') return null;
-  return TARIFF_MONTHLY_PRICE[tariff] * BILLING_PERIOD_MONTHS[period];
+  const base = TARIFF_MONTHLY_PRICE[tariff] * BILLING_PERIOD_MONTHS[period];
+  return Math.round(base * BILLING_PERIOD_DISCOUNT[period]);
 }
 
 function formatRub(n: number | null | undefined): string {
@@ -237,7 +246,7 @@ type SubscriptionPanelProps = {
   setupUntil: string | null;
   billingMode: 'invoice' | 'autopayment' | null;
   paymentLocked: boolean;
-  billingPeriod: 'month' | 'half_year' | 'year' | null;
+  billingPeriod: BillingPeriod | null;
   billingAmount: number | null;
   /** Префилл локального toggle "магазин ЮКасса" из персистентного флага на
    *  профиле клиента. Админ всё ещё может одноразово переопределить для
@@ -248,14 +257,14 @@ type SubscriptionPanelProps = {
     setup_until?: string | null;
     billing_mode?: 'invoice' | 'autopayment' | null;
     payment_locked?: boolean;
-    billing_period?: 'month' | 'half_year' | 'year' | null;
+    billing_period?: BillingPeriod | null;
     billing_amount?: number | null;
   }) => void;
   onExtendResult: (res: {
     paid_until?: string | null;
     billing_mode?: 'invoice' | 'autopayment' | null;
     payment_locked?: boolean;
-    billing_period?: 'month' | 'half_year' | 'year' | null;
+    billing_period?: BillingPeriod | null;
     billing_amount?: number | null;
   }) => void;
   onFinishSetupResult: (res: { paid_until?: string | null; setup_until?: string | null }) => void;
@@ -287,7 +296,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
   onSuccessMessage,
 }: SubscriptionPanelProps) {
   const [activateBillingMode, setActivateBillingMode] = useState<'invoice' | 'autopayment' | 'manual'>('manual');
-  const [activatePeriod, setActivatePeriod] = useState<'month' | 'half_year' | 'year'>('month');
+  const [activatePeriod, setActivatePeriod] = useState<BillingPeriod>('month');
   const [activateCustomAmount, setActivateCustomAmount] = useState('');
   const [activating, setActivating] = useState(false);
   const [showExtendForm, setShowExtendForm] = useState(false);
@@ -341,7 +350,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
         setup_until: res.setup_until ?? null,
         billing_mode: (res.billing_mode as 'invoice' | 'autopayment' | null) ?? null,
         payment_locked: res.payment_locked ?? false,
-        billing_period: (res.billing_period as 'month' | 'half_year' | 'year' | null) ?? null,
+        billing_period: (res.billing_period as BillingPeriod | null) ?? null,
         billing_amount: res.billing_amount ?? null,
       });
       // Autopayment path also tries to auto-create a YooKassa invoice on the
@@ -483,7 +492,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
         paid_until: res.paid_until ?? null,
         billing_mode: (res.billing_mode as 'invoice' | 'autopayment' | null) ?? null,
         payment_locked: res.payment_locked ?? false,
-        billing_period: (res.billing_period as 'month' | 'half_year' | 'year' | null) ?? null,
+        billing_period: (res.billing_period as BillingPeriod | null) ?? null,
         billing_amount: res.billing_amount ?? null,
       });
       setShowExtendForm(false);
@@ -543,7 +552,7 @@ const SubscriptionPanel = memo(function SubscriptionPanel({
             <div className="min-[520px]:col-span-2">
               <p className="mb-1.5 text-[11px] font-medium text-gray-700">Период оплаты</p>
               <div className="flex gap-1.5">
-                {(['month', 'half_year', 'year'] as const).map((p) => {
+                {(['month', 'quarter', 'half_year', 'year'] as const).map((p) => {
                   const amt = calcTariffAmount(tariffType, p);
                   return (
                     <button
@@ -975,7 +984,7 @@ export default function UsersPage() {
   // activateBillingMode / activatePeriod / activateCustomAmount / showExtendForm
   // / activating moved into <SubscriptionPanel>'s own state — typing in the
   // amount field or toggling the period chips no longer re-renders the parent.
-  const [billingPeriod, setBillingPeriod] = useState<'month' | 'half_year' | 'year' | null>(null);
+  const [billingPeriod, setBillingPeriod] = useState<BillingPeriod | null>(null);
   const [billingAmount, setBillingAmount] = useState<number | null>(null);
 
   type SortColumn = 'name' | 'email' | 'role';
@@ -1257,7 +1266,7 @@ export default function UsersPage() {
         setSetupUntil(tariffRes.tariff.setup_until ?? null);
         setBillingMode((tariffRes.tariff.billing_mode as 'invoice' | 'autopayment' | null) ?? null);
         setPaymentLocked(tariffRes.tariff.payment_locked ?? false);
-        setBillingPeriod((tariffRes.tariff.billing_period as 'month' | 'half_year' | 'year' | null) ?? null);
+        setBillingPeriod((tariffRes.tariff.billing_period as BillingPeriod | null) ?? null);
         setBillingAmount(tariffRes.tariff.billing_amount ?? null);
       } else {
         setTariffType('standard');
@@ -1314,7 +1323,7 @@ export default function UsersPage() {
   const handleActivateResult = useCallback((res: {
     paid_until?: string | null; setup_until?: string | null;
     billing_mode?: 'invoice' | 'autopayment' | null; payment_locked?: boolean;
-    billing_period?: 'month' | 'half_year' | 'year' | null; billing_amount?: number | null;
+    billing_period?: BillingPeriod | null; billing_amount?: number | null;
   }) => {
     setSubscriptionSetup(true);
     setSubscriptionActive(false);
@@ -1329,7 +1338,7 @@ export default function UsersPage() {
   const handleExtendResult = useCallback((res: {
     paid_until?: string | null;
     billing_mode?: 'invoice' | 'autopayment' | null; payment_locked?: boolean;
-    billing_period?: 'month' | 'half_year' | 'year' | null; billing_amount?: number | null;
+    billing_period?: BillingPeriod | null; billing_amount?: number | null;
   }) => {
     setPaidUntil(res.paid_until ?? null);
     setBillingMode(res.billing_mode ?? null);
@@ -1827,7 +1836,7 @@ export default function UsersPage() {
             }}
           >
             <div
-              className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col"
+              className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col"
               style={{
                 position: 'fixed',
                 left: modalFlyIn ? '50%' : `${origin.x}px`,
@@ -1883,9 +1892,17 @@ export default function UsersPage() {
                   </select>
                 </div>
                 <div className="space-y-5">
-                  <div>
-                    <h4 className="text-sm font-medium text-gray-900 mb-3">Отображение инструментов</h4>
-                    <ul className="space-y-2">
+                  {/* Раскрывающийся блок «Отображение инструментов»: раньше
+                      был всегда открыт и занимал полмодалки, хотя настраивают
+                      его редко. Теперь свёрнут по дефолту — заголовок +
+                      chevron, клик раскрывает. `<details>` без React-стейта
+                      = меньше кода, состояние живёт в DOM. */}
+                  <details className="group rounded-lg border border-gray-200 bg-gray-50/50">
+                    <summary className="cursor-pointer list-none flex items-center justify-between gap-3 px-3 py-2.5 hover:bg-gray-100 transition-colors rounded-lg">
+                      <h4 className="text-sm font-medium text-gray-900 m-0">Отображение инструментов</h4>
+                      <span className="text-gray-400 text-xs transition-transform group-open:rotate-90" aria-hidden>▶</span>
+                    </summary>
+                    <ul className="space-y-2 px-3 pb-3 pt-1">
                       {ALL_TOOL_IDS.map((toolId) => (
                         <li key={toolId} className="flex items-center justify-between gap-4">
                           <span className="text-sm text-gray-700">{TOOLS_CONFIG[toolId].title}</span>
@@ -1912,7 +1929,7 @@ export default function UsersPage() {
                         </li>
                       ))}
                     </ul>
-                  </div>
+                  </details>
                   <div>
                     <h4 className="text-sm font-medium text-gray-900 mb-1">Отображение вкладок в Header-е</h4>
                     <p className="text-xs text-gray-500 mb-3">Управляет дополнительными пунктами навигации для данного пользователя</p>
@@ -2188,57 +2205,61 @@ export default function UsersPage() {
                   </div>
                 )}
               </div>
-              <div className="pl-4 pr-5 py-5 border-t border-gray-200 bg-gray-50 flex flex-wrap items-center justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-2">
+              {/* Одна строка кнопок в порядке: Пресет запуска кампаний,
+                  Бриф клиента, Удалить пользователя, Сменить пароль,
+                  Сохранить изменения. Раньше «Сохранить» была отдельной
+                  колонкой справа (justify-between) — теперь все в ряд с
+                  «Сохранить» справа за счёт ml-auto. flex-wrap оставлен
+                  как fallback для узких экранов. */}
+              <div className="pl-4 pr-5 py-5 border-t border-gray-200 bg-gray-50 flex flex-wrap items-center gap-2">
+                {modalRole === 'client' && actionModalUserId && (
+                  <>
+                    <Link
+                      href={`/admin/clients/${actionModalUserId}/preset` as Route}
+                      className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg text-sm hover:bg-blue-50"
+                    >
+                      Пресет запуска кампаний
+                    </Link>
+                    <Link
+                      href={`/admin/clients/${actionModalUserId}/brief` as Route}
+                      className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg text-sm hover:bg-blue-50"
+                    >
+                      Бриф клиента
+                    </Link>
+                  </>
+                )}
+                {actionModalUserId !== currentUserId && (
                   <button
                     type="button"
                     onClick={() => {
                       setActionModalUserId(null);
                       setModalFlyIn(false);
-                      setError('');
-                      setResettingUserId(actionModalUserId);
-                      setNewPassword('');
-                      setRevealPassword(false);
+                      setDeletingUserId(actionModalUserId);
                     }}
-                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                    className="px-3 py-2 border border-red-200 text-red-700 rounded-lg text-sm hover:bg-red-50"
                   >
-                    Сменить пароль
+                    Удалить пользователя
                   </button>
-                  {modalRole === 'client' && actionModalUserId && (
-                    <>
-                      <Link
-                        href={`/admin/clients/${actionModalUserId}/preset` as Route}
-                        className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg text-sm hover:bg-blue-50"
-                      >
-                        Пресет запуска кампаний
-                      </Link>
-                      <Link
-                        href={`/admin/clients/${actionModalUserId}/brief` as Route}
-                        className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg text-sm hover:bg-blue-50"
-                      >
-                        Бриф клиента
-                      </Link>
-                    </>
-                  )}
-                  {actionModalUserId !== currentUserId && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActionModalUserId(null);
-                        setModalFlyIn(false);
-                        setDeletingUserId(actionModalUserId);
-                      }}
-                      className="px-3 py-2 border border-red-200 text-red-700 rounded-lg text-sm hover:bg-red-50"
-                    >
-                      Удалить пользователя
-                    </button>
-                  )}
-                </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActionModalUserId(null);
+                    setModalFlyIn(false);
+                    setError('');
+                    setResettingUserId(actionModalUserId);
+                    setNewPassword('');
+                    setRevealPassword(false);
+                  }}
+                  className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                >
+                  Сменить пароль
+                </button>
                 <button
                   type="button"
                   onClick={handleSaveAllChanges}
                   disabled={saving || !modalRole}
-                  className="px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium text-sm"
+                  className="ml-auto px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium text-sm"
                 >
                   {saving ? 'Сохранение...' : 'Сохранить изменения'}
                 </button>
