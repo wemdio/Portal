@@ -16,6 +16,7 @@ import type { NextRequest } from 'next/server';
 import {
   DEMO_CAMPAIGNS_RESPONSE,
   DEMO_ONBOARDING_RESPONSE,
+  DEMO_DOMAINS_SUGGESTIONS_RESPONSE,
   DEMO_BRIEF_RESPONSE,
   DEMO_BRIEF_HYPOTHESES_RESPONSE,
   DEMO_BASES_RESPONSE,
@@ -60,6 +61,8 @@ export async function serveClientDemo(req: NextRequest): Promise<NextResponse> {
       return json(DEMO_CAMPAIGNS_RESPONSE);
     case '/onboarding/status':
       return json(DEMO_ONBOARDING_RESPONSE);
+    case '/domains/suggestions':
+      return json(DEMO_DOMAINS_SUGGESTIONS_RESPONSE);
     case '/brief':
       return json(DEMO_BRIEF_RESPONSE);
     case '/brief/hypotheses':
