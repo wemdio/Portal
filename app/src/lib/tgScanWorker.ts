@@ -4,6 +4,7 @@ import {
   tgApiBase,
   ensureTgApiReady,
   upsertBotChat,
+  syncForumTopicsFromApi,
   type TgMessage,
   type VideoInfo,
   processVideoMessage,
@@ -392,6 +393,13 @@ export async function runTgScanJob(jobId: string): Promise<void> {
       );
     }
     const isForumChat = chatInfo?.is_forum ?? false;
+
+    // Fill topic_name на все ветки чата, чтобы транскрипты, у которых
+    // topic_id есть, но в tg_bot_chats — нет, перестали выглядеть как
+    // «<chat> · topic N». Один MTProto-вызов на скан, ошибки глотаем.
+    if (isForumChat) {
+      void syncForumTopicsFromApi(chatId);
+    }
 
     // Load already-processed messages. Filter by topic when the job is
     // topic-scoped, otherwise alreadyProcessed.has() could false-positive

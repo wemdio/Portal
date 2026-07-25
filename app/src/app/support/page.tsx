@@ -248,12 +248,15 @@ export default function AdminSupportPage() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-3 sm:gap-4">
-        {/* Thread list */}
-        <aside className="rounded-2xl border border-gray-200 bg-white overflow-hidden">
-          <div className="px-3 py-2 border-b border-gray-100 text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+        {/* Thread list — на десктопе фиксированная высота 70vh (совпадает с
+            правой панелью), внутренний список скроллится. На мобильном
+            (single column) высота по контенту, чтобы список не занимал
+            пол-экрана без нужды. */}
+        <aside className="rounded-2xl border border-gray-200 bg-white overflow-hidden flex flex-col lg:h-[70vh]">
+          <div className="px-3 py-2 border-b border-gray-100 text-[11px] font-semibold uppercase tracking-wider text-gray-500 shrink-0">
             {locale === 'en' ? 'Conversations' : 'Диалоги'} · {threads.length}
           </div>
-          <div className="divide-y divide-gray-100 max-h-[70vh] overflow-y-auto">
+          <div className="divide-y divide-gray-100 flex-1 overflow-y-auto max-h-[70vh] lg:max-h-none">
             {loadingList ? (
               <div className="flex items-center justify-center py-12">
                 <Loader2 className="h-4 w-4 text-gray-400 animate-spin" />
@@ -316,8 +319,14 @@ export default function AdminSupportPage() {
           </div>
         </aside>
 
-        {/* Detail */}
-        <section className="rounded-2xl border border-gray-200 bg-white flex flex-col" style={{ minHeight: '70vh' }}>
+        {/* Detail — фиксированная высота 70vh (совпадает с левой панелью).
+            Раньше был minHeight: контейнер рос вместе с перепиской и вся
+            страница уезжала вниз, приходилось скроллить окно, чтобы дойти
+            до поля ввода. Теперь скроллится только область сообщений. */}
+        <section
+          className="rounded-2xl border border-gray-200 bg-white flex flex-col lg:h-[70vh]"
+          style={{ minHeight: '70vh' }}
+        >
           {!selectedId ? (
             <div className="flex-1 flex items-center justify-center text-sm text-gray-500 py-12">
               {locale === 'en'

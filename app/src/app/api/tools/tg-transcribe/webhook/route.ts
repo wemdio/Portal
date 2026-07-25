@@ -7,6 +7,7 @@ import {
   type TgMessage,
   extractVideoInfo,
   upsertBotChat,
+  syncForumTopicsFromApi,
 } from '@/lib/tgTranscribe';
 
 export const dynamic = 'force-dynamic';
@@ -33,6 +34,23 @@ export async function POST(req: NextRequest) {
 
         await upsertBotChat(msg.chat.id, msg.chat.title ?? '', msg.chat.type ?? 'group', msg.message_id);
         if (supabaseAdmin && msg.message_thread_id != null && msg.message_thread_id !== 0) {
+          // Проверяем — если строки (chat_id, topic_id) ещё нет или у неё
+          // нет topic_name, дёргаем MTProto и подтягиваем имена всех веток
+          // чата. Fire-and-forget: webhook не ждёт TG API, транскрипт всё
+          // равно сохранится с topic_id.
+          try {
+            const { data: topicRow } = await supabaseAdmin
+              .from('tg_bot_chats')
+              .select('topic_name')
+              .eq('chat_id', msg.chat.id)
+              .eq('topic_id', msg.message_thread_id)
+              .maybeSingle();
+            if (!topicRow || !topicRow.topic_name) {
+              void syncForumTopicsFromApi(msg.chat.id);
+            }
+          } catch {
+            // ignore — best-effort topic sync
+          }
           try {
             await supabaseAdmin
               .from('tg_bot_chats')

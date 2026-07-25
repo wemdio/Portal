@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { authFetch, authFetchJson } from '@/lib/authFetch';
+import { normalizeTariffType, TARIFF_LAUNCH } from '@/lib/tariffPricing';
 import {
   Plus, RefreshCw, ExternalLink, Copy, Check,
   TrendingUp, Clock, CheckCircle2, XCircle, Loader2,
@@ -359,7 +360,7 @@ function CreateModal({ onClose, onCreated }: CreateModalProps) {
 
           {selectedTariff && selectedTariff.is_active && (() => {
             const fmt = (d: Date) => d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
-            const tariffLabel = selectedTariff.tariff_type === 'pro' ? 'Про' : selectedTariff.tariff_type === 'custom' ? 'Custom' : 'Стандарт';
+            const tariffLabel = normalizeTariffType(selectedTariff.tariff_type) ?? TARIFF_LAUNCH;
             const periodLabel = selectedTariff.billing_period ? BILLING_PERIOD_LABEL[selectedTariff.billing_period] : null;
             const currentPaidUntil = selectedTariff.paid_until ? new Date(selectedTariff.paid_until) : null;
             return (

@@ -14,24 +14,32 @@ import { useUser } from '@/lib/UserProvider';
 import type { Campaign, Account } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels, AccountStatus, WarmupStatus } from '@/lib/instantly/types';
 
-type DashboardStats = {
+type CampaignStats = {
   totalCampaigns: number;
   activeCampaigns: number;
   pausedCampaigns: number;
   draftCampaigns: number;
   completedCampaigns: number;
+};
+
+type AccountStats = {
   totalAccounts: number;
   activeAccounts: number;
   warmupActive: number;
 };
 
-function computeStats(campaigns: Campaign[], accounts: Account[]): DashboardStats {
+function computeCampaignStats(campaigns: Campaign[]): CampaignStats {
   return {
     totalCampaigns: campaigns.length,
     activeCampaigns: campaigns.filter((c) => c.status === CampaignStatus.Active).length,
     pausedCampaigns: campaigns.filter((c) => c.status === CampaignStatus.Paused).length,
     draftCampaigns: campaigns.filter((c) => c.status === CampaignStatus.Draft).length,
     completedCampaigns: campaigns.filter((c) => c.status === CampaignStatus.Completed).length,
+  };
+}
+
+function computeAccountStats(accounts: Account[]): AccountStats {
+  return {
     totalAccounts: accounts.length,
     activeAccounts: accounts.filter((a) => a.status === AccountStatus.Active).length,
     warmupActive: accounts.filter((a) => a.warmup_status === WarmupStatus.Active).length,
@@ -65,7 +73,7 @@ function StatCard({ label, value, icon: Icon, href, color, loading: isLoading }:
   );
 
   if (href) {
-    return <Link href={href as Route}>{inner}</Link>;
+    return <Link href={href as Route} prefetch={false}>{inner}</Link>;
   }
   return inner;
 }
@@ -84,40 +92,61 @@ const NAV_LINKS: { label: string; href: string; icon: React.ElementType; desc: s
 
 export default function InstantlyDashboard() {
   const [loading, setLoading] = useState(true);
-  const [statsLoading, setStatsLoading] = useState(true);
+  const [campaignStatsLoading, setCampaignStatsLoading] = useState(true);
+  const [accountStatsLoading, setAccountStatsLoading] = useState(true);
   const [error, setError] = useState('');
-  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [campaignStats, setCampaignStats] = useState<CampaignStats | null>(null);
+  const [accountStats, setAccountStats] = useState<AccountStats | null>(null);
   const [recentCampaigns, setRecentCampaigns] = useState<Campaign[]>([]);
   const { userRole } = useUser();
   const userIsAdmin = isAdmin(userRole);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setStatsLoading(true);
-    setError('');
+  // Раньше грузили /campaigns?limit=100 (для recent 5), потом ещё раз
+  // /campaigns?limit=all (для статистики) — второй запрос перекрывал первый,
+  // сеть тратилась дважды. Кампании отдаёт локальный instantly_campaign_catalog
+  // — там уже все ~470 строк за один DB-запрос, отсортированные по created_at.
+  // Из этого одного ответа берём и recent 5 (top), и counts по статусам.
+  //
+  // Аккаунты отделяем в отдельный Promise: /accounts?limit=all — это НЕ local
+  // DB, а реальная пагинация Instantly API (~12 сек на 1200 аккаунтов), и
+  // раньше именно она блокировала показ статистики кампаний. Теперь карточки
+  // кампаний зажигаются сразу, а «Аккаунты» подтягивается своим темпом.
+  const loadCampaigns = useCallback(async () => {
     try {
-      const quickData = await instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=100');
-      const quickCampaigns = quickData.items ?? [];
-      const sorted = [...quickCampaigns].sort(
+      const data = await instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=all');
+      const items = data.items ?? [];
+      const sorted = [...items].sort(
         (a, b) => new Date(b.timestamp_created ?? 0).getTime() - new Date(a.timestamp_created ?? 0).getTime(),
       );
       setRecentCampaigns(sorted.slice(0, 5));
-      setLoading(false);
-
-      const [allCampData, accData] = await Promise.all([
-        instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=all'),
-        instantlyFetch<{ items: Account[] }>('/accounts?limit=all'),
-      ]);
-      setStats(computeStats(allCampData.items ?? [], accData.items ?? []));
+      setCampaignStats(computeCampaignStats(items));
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка загрузки');
+      setError((prev) => prev || (err instanceof Error ? err.message : 'Ошибка загрузки'));
     } finally {
       setLoading(false);
-      setStatsLoading(false);
+      setCampaignStatsLoading(false);
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  const loadAccounts = useCallback(async () => {
+    try {
+      const data = await instantlyFetch<{ items: Account[] }>('/accounts?limit=all');
+      setAccountStats(computeAccountStats(data.items ?? []));
+    } catch (err) {
+      setError((prev) => prev || (err instanceof Error ? err.message : 'Ошибка загрузки'));
+    } finally {
+      setAccountStatsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    setLoading(true);
+    setCampaignStatsLoading(true);
+    setAccountStatsLoading(true);
+    setError('');
+    void loadCampaigns();
+    void loadAccounts();
+  }, [loadCampaigns, loadAccounts]);
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
@@ -128,6 +157,7 @@ export default function InstantlyDashboard() {
         </div>
         <Link
           href={'/instantly/campaigns/new' as Route}
+          prefetch={false}
           className="inline-flex items-center gap-2 rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-800"
         >
           <Send className="h-4 w-4" />
@@ -148,15 +178,16 @@ export default function InstantlyDashboard() {
       ) : (
         <>
           <div className="mb-8 grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <StatCard label="Активные кампании" value={stats?.activeCampaigns ?? null} icon={Activity} href="/instantly/campaigns" color="bg-emerald-50 text-emerald-600" loading={statsLoading} />
-            <StatCard label="На паузе" value={stats?.pausedCampaigns ?? null} icon={Pause} href="/instantly/campaigns" color="bg-amber-50 text-amber-600" loading={statsLoading} />
-            <StatCard label="Черновики" value={stats?.draftCampaigns ?? null} icon={FileText} color="bg-zinc-100 text-zinc-600" loading={statsLoading} />
-            <StatCard label="Аккаунты" value={stats?.totalAccounts ?? null} icon={Mail} href="/instantly/accounts" color="bg-blue-50 text-blue-600" loading={statsLoading} />
+            <StatCard label="Активные кампании" value={campaignStats?.activeCampaigns ?? null} icon={Activity} href="/instantly/campaigns" color="bg-emerald-50 text-emerald-600" loading={campaignStatsLoading} />
+            <StatCard label="На паузе" value={campaignStats?.pausedCampaigns ?? null} icon={Pause} href="/instantly/campaigns" color="bg-amber-50 text-amber-600" loading={campaignStatsLoading} />
+            <StatCard label="Черновики" value={campaignStats?.draftCampaigns ?? null} icon={FileText} color="bg-zinc-100 text-zinc-600" loading={campaignStatsLoading} />
+            <StatCard label="Аккаунты" value={accountStats?.totalAccounts ?? null} icon={Mail} href="/instantly/accounts" color="bg-blue-50 text-blue-600" loading={accountStatsLoading} />
           </div>
 
           <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Link
               href={'/tools/bugor-outreach' as Route}
+              prefetch={false}
               className="group flex items-center gap-4 rounded-xl border border-zinc-200 bg-white px-5 py-4 transition-all hover:shadow-md hover:border-blue-200"
             >
               <div className="rounded-lg bg-blue-50 p-3">
@@ -170,6 +201,7 @@ export default function InstantlyDashboard() {
             </Link>
             <Link
               href={'/tools/nash-outreach' as Route}
+              prefetch={false}
               className="group flex items-center gap-4 rounded-xl border border-zinc-200 bg-white px-5 py-4 transition-all hover:shadow-md hover:border-emerald-200"
             >
               <div className="rounded-lg bg-emerald-50 p-3">
@@ -187,7 +219,7 @@ export default function InstantlyDashboard() {
             <div className="rounded-xl border border-zinc-200 bg-white">
               <div className="flex items-center justify-between border-b border-zinc-100 px-5 py-4">
                 <h2 className="text-sm font-semibold text-zinc-900">Последние кампании</h2>
-                <Link href={'/instantly/campaigns' as Route} className="text-xs font-medium text-zinc-500 hover:text-zinc-900 transition-colors">
+                <Link href={'/instantly/campaigns' as Route} prefetch={false} className="text-xs font-medium text-zinc-500 hover:text-zinc-900 transition-colors">
                   Все кампании
                 </Link>
               </div>
@@ -199,6 +231,7 @@ export default function InstantlyDashboard() {
                     <Link
                       key={c.id}
                       href={`/instantly/campaigns/${c.id}` as Route}
+                      prefetch={false}
                       className="flex items-center justify-between px-5 py-3 hover:bg-zinc-50 transition-colors"
                     >
                       <div className="min-w-0 flex-1">
@@ -230,6 +263,7 @@ export default function InstantlyDashboard() {
                   <Link
                     key={link.href}
                     href={link.href as Route}
+                    prefetch={false}
                     className="flex items-center gap-4 px-5 py-3.5 hover:bg-zinc-50 transition-colors"
                   >
                     <div className="rounded-lg bg-zinc-100 p-2">

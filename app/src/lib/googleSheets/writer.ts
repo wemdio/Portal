@@ -35,9 +35,12 @@ export async function appendRows(
   if (rows.length === 0) return;
   const sheets = getSheetsClient();
 
+  // Читаем очень широкий диапазон, чтобы гарантированно поймать max используемую
+  // строку даже если у ручных строк данные в столбцах после Z (AA, AB, ...).
+  const scanRange = `${sheetName}!A:AZ`;
   const resp = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${sheetName}!A:Z`,
+    range: scanRange,
   });
   const lastRow = (resp.data.values ?? []).length;
   const startRow = lastRow + 1;
@@ -51,10 +54,19 @@ export async function appendRows(
   const endCol = String.fromCharCode('A'.charCodeAt(0) + numCols - 1);
   const targetRange = `${sheetName}!A${startRow}:${endCol}${endRow}`;
 
+  // Логируем в stdout — при разборе неверных вставок сразу видно куда именно
+  // пошла запись и какой был detected lastRow.
+  console.log(
+    `[sheets.appendRows] sheet="${sheetName}" scan=${scanRange} lastRow=${lastRow} → writing ${rows.length} rows to ${targetRange}`,
+  );
+
+  // valueInputOption='USER_ENTERED' — Google Sheets парсит значения как если
+  // бы пользователь ввёл в ячейку (даты в русском формате DD.MM.YYYY становятся
+  // датами, http://... — кликабельными ссылками), а не пишет их как raw-строки.
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range: targetRange,
-    valueInputOption: 'RAW',
+    valueInputOption: 'USER_ENTERED',
     requestBody: { values: rows as (string | number | null)[][] },
   });
 }

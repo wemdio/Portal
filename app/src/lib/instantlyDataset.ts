@@ -19,7 +19,11 @@ function getPool(): Pool | null {
   if (!pool) {
     pool = new Pool({
       connectionString,
-      max: 3,
+      // Дашборд «Нагрузка почт» пускает 4 запроса через Promise.all — при max: 3
+      // один из них гарантированно ждал освобождения коннекта на каждой загрузке,
+      // а при двух одновременных пользователях всё вставало в очередь по 3.
+      // 10 — с запасом под параллельные страницы и всё ещё скромно для Postgres.
+      max: 10,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 8_000,
       // statement-level guard: insight queries are scoped by campaign_id and

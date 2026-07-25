@@ -45,7 +45,13 @@ export function detectSummaryChannel(raw: unknown): SummaryChannelName | null {
   if (source === 'telegram outreach') return 'tg_outreach';
   if (['партнер', 'партнерка'].includes(source)) return 'partners';
   if (['email outreach', 'аутрич'].includes(source)) return 'outreach';
-  if (['smm', 'смм'].includes(source) || utmMedium === 'smm') return 'smm';
+  // SMM: явное «SMM»/utm_medium=smm либо контент-канал «Личный бренд (инст/ютуб)»
+  // (согласовано с Никитой 2026-07-24).
+  if (
+    ['smm', 'смм'].includes(source)
+    || utmMedium === 'smm'
+    || source === 'личный бренд (инст /ютуб)'
+  ) return 'smm';
 
   return null;
 }

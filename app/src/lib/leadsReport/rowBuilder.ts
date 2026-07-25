@@ -33,6 +33,15 @@ function formatUtmBlock(raw: unknown): string {
   return lines.join('\n');
 }
 
+/** ISO-строку `2026-07-01T10:15:00Z` в русский формат `01.07.2026`. */
+function formatMskDate(iso: string | null): string {
+  if (!iso) return '';
+  const yyyyMmDd = iso.slice(0, 10); // '2026-07-01'
+  const [yyyy, mm, dd] = yyyyMmDd.split('-');
+  if (!yyyy || !mm || !dd) return '';
+  return `${dd}.${mm}.${yyyy}`;
+}
+
 /** Собирает строку для листа по конфигу — массив ячеек в порядке колонок. */
 export function buildRow(
   lead: AmoLead,
@@ -48,7 +57,7 @@ export function buildRow(
     utm_block: formatUtmBlock(lead.raw),
     platform,
     category: mapCategory(platform),
-    created_at_short: lead.created_at ? lead.created_at.slice(0, 10) : '',
+    created_at_short: formatMskDate(lead.created_at),
     phone: lead.contact_phone ?? '',
     email: lead.contact_email ?? '',
     name: lead.name ?? '',

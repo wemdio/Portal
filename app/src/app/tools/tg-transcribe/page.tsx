@@ -307,6 +307,153 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
   );
 }
 
+// Multi-select dropdown with checkbox rows. Button shows a compact summary
+// ("Все" / "N выбрано" / имя выбранного) and opens a searchable checklist.
+// Empty set = "все" (no filter).
+function MultiSelectDropdown({
+  label,
+  icon,
+  options,
+  selected,
+  onChange,
+  emptyLabel,
+  width = 'w-72',
+}: {
+  label: string;
+  icon: React.ReactNode;
+  options: { value: string; label: string; count?: number }[];
+  selected: Set<string>;
+  onChange: (next: Set<string>) => void;
+  emptyLabel: string;
+  width?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [open]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? options.filter((o) => o.label.toLowerCase().includes(q))
+    : options;
+
+  const toggleOne = (v: string) => {
+    const next = new Set(selected);
+    if (next.has(v)) next.delete(v);
+    else next.add(v);
+    onChange(next);
+  };
+
+  const summary =
+    selected.size === 0
+      ? emptyLabel
+      : selected.size === 1
+        ? options.find((o) => o.value === Array.from(selected)[0])?.label ??
+          `${selected.size} выбрано`
+        : `${selected.size} выбрано`;
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={[
+          'inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition border max-w-xs',
+          selected.size > 0
+            ? 'bg-indigo-50 text-indigo-700 border-indigo-300 hover:bg-indigo-100'
+            : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
+        ].join(' ')}
+      >
+        {icon}
+        <span className="truncate">
+          {label}: <span className="font-semibold">{summary}</span>
+        </span>
+        <ChevronDown
+          className={`h-3.5 w-3.5 shrink-0 transition ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
+      {open && (
+        <div
+          className={`absolute z-40 mt-1 ${width} rounded-xl border border-gray-200 bg-white shadow-lg p-2`}
+        >
+          <div className="flex items-center gap-2 px-1 pb-2 border-b border-gray-100 mb-1">
+            <div className="relative flex-1">
+              <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400 pointer-events-none" />
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Найти…"
+                className="w-full rounded-md border border-gray-200 pl-6 pr-2 py-1 text-xs outline-none focus:border-indigo-400"
+              />
+            </div>
+            {selected.size > 0 && (
+              <button
+                type="button"
+                onClick={() => onChange(new Set())}
+                className="text-[11px] text-gray-500 hover:text-gray-800 shrink-0"
+              >
+                Сброс
+              </button>
+            )}
+          </div>
+          <ul className="max-h-64 overflow-auto space-y-0.5">
+            {filtered.length === 0 && (
+              <li className="text-[11px] text-gray-400 text-center py-2">
+                Ничего не найдено
+              </li>
+            )}
+            {filtered.map((o) => {
+              const checked = selected.has(o.value);
+              return (
+                <li key={o.value}>
+                  <button
+                    type="button"
+                    onClick={() => toggleOne(o.value)}
+                    className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-left text-xs hover:bg-indigo-50 transition cursor-pointer"
+                  >
+                    <span
+                      className={[
+                        'h-3.5 w-3.5 shrink-0 rounded border flex items-center justify-center transition',
+                        checked
+                          ? 'bg-indigo-600 border-indigo-600'
+                          : 'bg-white border-gray-300',
+                      ].join(' ')}
+                    >
+                      {checked && <Check className="h-2.5 w-2.5 text-white" />}
+                    </span>
+                    <span className="flex-1 truncate text-gray-700">{o.label}</span>
+                    {o.count != null && (
+                      <span className="text-[10px] text-gray-400 shrink-0">
+                        {o.count.toLocaleString('ru-RU')}
+                      </span>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StopConfirmDialog({
   open,
   onConfirm,
@@ -380,8 +527,10 @@ function StopConfirmDialog({
 
 export default function TgTranscribePage() {
   const [allItems, setAllItems] = useState<TranscriptItem[]>([]);
-  const [activeSender, setActiveSender] = useState<string | null>(null);
-  const [activeChat, setActiveChat] = useState<{ chatId: number; topicId: number } | null>(null);
+  // Multi-select filters. Empty set = «все» (не фильтруем). Key for chat is
+  // `${chatId}:${topicId ?? 0}` — совпадает с ключом в transcribedChats.
+  const [selectedChatKeys, setSelectedChatKeys] = useState<Set<string>>(new Set());
+  const [selectedSenders, setSelectedSenders] = useState<Set<string>>(new Set());
   const [transcribedChats, setTranscribedChats] = useState<TranscribedChat[]>([]);
   const [sortOrder, setSortOrder] = useState<'created_at' | 'message_date'>('created_at');
   const [searchQuery, setSearchQuery] = useState('');
@@ -737,18 +886,13 @@ export default function TgTranscribePage() {
 
   const fetchAllItems = useCallback(async (
     sort: 'created_at' | 'message_date' = 'created_at',
-    chatFilter: { chatId: number; topicId: number } | null = null,
   ) => {
     setLoading(true);
     try {
-      // limit=all: the server returns EVERY completed transcript (previews
-      // only, ~0.5 KB per row), so search and the sender filter see the whole
-      // history — the old newest-200 window made anything older unfindable.
+      // limit=all: сервер возвращает превью всех completed транскриптов
+      // (~0.5 KB на строку). Фильтр по чатам/авторам теперь multi-select и
+      // применяется на клиенте, поэтому серверный chatId/topicId больше не нужен.
       const params = new URLSearchParams({ limit: 'all', sort });
-      if (chatFilter) {
-        params.set('chatId', String(chatFilter.chatId));
-        params.set('topicId', String(chatFilter.topicId));
-      }
       const res = await authFetch(`/api/tools/tg-transcribe?${params}`);
       if (!res.ok) { setAllItems([]); return; }
       const json = (await res.json()) as { items: TranscriptItem[] };
@@ -772,20 +916,31 @@ export default function TgTranscribePage() {
     }
   }, []);
 
+  // Первый уровень фильтрации: только по выбранным чатам. Из этого множества
+  // строится список авторов в дропдауне «Автор» — так пункты автоматически
+  // сужаются под выбранные чаты.
+  const chatFilteredItems = React.useMemo(() => {
+    if (selectedChatKeys.size === 0) return allItems;
+    return allItems.filter((i) =>
+      selectedChatKeys.has(`${i.tg_chat_id}:${i.topic_id ?? 0}`),
+    );
+  }, [allItems, selectedChatKeys]);
+
   const senders = React.useMemo(() => {
-    const names = new Set<string>();
-    for (const item of allItems) {
-      if (item.sender_name) names.add(item.sender_name);
+    const counts = new Map<string, number>();
+    for (const item of chatFilteredItems) {
+      if (!item.sender_name) continue;
+      counts.set(item.sender_name, (counts.get(item.sender_name) ?? 0) + 1);
     }
-    return Array.from(names).sort((a, b) => a.localeCompare(b, 'ru'));
-  }, [allItems]);
+    return Array.from(counts.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+  }, [chatFilteredItems]);
 
   const filteredItems = React.useMemo(() => {
-    // allItems holds the ENTIRE history (limit=all, chat-scoped server-side
-    // when a chat is selected), so filtering here really covers everything.
-    let result = allItems;
-    if (activeSender) {
-      result = result.filter((i) => i.sender_name === activeSender);
+    let result = chatFilteredItems;
+    if (selectedSenders.size > 0) {
+      result = result.filter((i) => selectedSenders.has(i.sender_name));
     }
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
@@ -796,7 +951,7 @@ export default function TgTranscribePage() {
       );
     }
     return result;
-  }, [allItems, activeSender, searchQuery]);
+  }, [chatFilteredItems, selectedSenders, searchQuery]);
 
   const total = filteredItems.length;
   const items = React.useMemo(
@@ -805,8 +960,28 @@ export default function TgTranscribePage() {
   );
 
   useEffect(() => {
-    void fetchAllItems(sortOrder, activeChat);
-  }, [fetchAllItems, sortOrder, activeChat]);
+    void fetchAllItems(sortOrder);
+  }, [fetchAllItems, sortOrder]);
+
+  // Reset pagination и раскрытую карточку при смене любого фильтра.
+  useEffect(() => {
+    setPage(0);
+    setExpandedId(null);
+  }, [selectedChatKeys, selectedSenders]);
+
+  // Если выбранный автор пропал из-за сужения по чатам — убираем его,
+  // чтобы counter «N выбрано» не показывал устаревшее число.
+  useEffect(() => {
+    if (selectedSenders.size === 0) return;
+    const available = new Set(senders.map((s) => s.name));
+    let changed = false;
+    const next = new Set<string>();
+    for (const s of selectedSenders) {
+      if (available.has(s)) next.add(s);
+      else changed = true;
+    }
+    if (changed) setSelectedSenders(next);
+  }, [senders, selectedSenders]);
 
   // Mount-only fetches for sidebar data that doesn't depend on sort/filter.
   useEffect(() => {
@@ -823,28 +998,16 @@ export default function TgTranscribePage() {
       prevJobRef.current = activeJob.id;
       if (activeJob.completed > prevCompletedRef.current) {
         prevCompletedRef.current = activeJob.completed;
-        void fetchAllItems(sortOrder, activeChat);
+        void fetchAllItems(sortOrder);
         void fetchTranscribedChats();
       }
     } else if (prevJobRef.current && scanResult) {
       prevCompletedRef.current = 0;
-      void fetchAllItems(sortOrder, activeChat);
+      void fetchAllItems(sortOrder);
       void fetchTranscribedChats();
       prevJobRef.current = null;
     }
-  }, [activeJob, scanResult, fetchAllItems, fetchTranscribedChats, sortOrder, activeChat]);
-
-  const handleSenderChange = (sender: string | null) => {
-    setActiveSender(sender);
-    setPage(0);
-    setExpandedId(null);
-  };
-
-  const handleChatChange = (chat: { chatId: number; topicId: number } | null) => {
-    setActiveChat(chat);
-    setPage(0);
-    setExpandedId(null);
-  };
+  }, [activeJob, scanResult, fetchAllItems, fetchTranscribedChats, sortOrder]);
 
   const handleSortChange = (sort: 'created_at' | 'message_date') => {
     if (sort === sortOrder) return;
@@ -1359,88 +1522,38 @@ export default function TgTranscribePage() {
           )}
         </div>
 
-        {/* Chat filter row */}
-        {transcribedChats.length > 0 && (
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="flex items-center gap-1.5 text-xs text-gray-500 mr-1">
-              <MessageSquare className="h-3.5 w-3.5" />
-              Чат:
-            </div>
-            <button
-              type="button"
-              onClick={() => handleChatChange(null)}
-              className={[
-                'rounded-full px-3 py-1 text-xs font-medium transition border',
-                activeChat === null
-                  ? 'bg-indigo-600 text-white border-indigo-600'
-                  : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
-              ].join(' ')}
-            >
-              Все
-            </button>
-            {transcribedChats.map((c) => {
-              const isActive =
-                activeChat?.chatId === c.chatId && activeChat?.topicId === c.topicId;
-              return (
-                <button
-                  key={`${c.chatId}:${c.topicId}`}
-                  type="button"
-                  onClick={() => handleChatChange({ chatId: c.chatId, topicId: c.topicId })}
-                  className={[
-                    'rounded-full px-3 py-1 text-xs font-medium transition border',
-                    isActive
-                      ? 'bg-indigo-600 text-white border-indigo-600'
-                      : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
-                  ].join(' ')}
-                  title={`${c.count} ${pluralizeRu(c.count, 'запись', 'записи', 'записей')}`}
-                >
-                  {c.displayName}
-                  <span className="ml-1.5 text-[10px] opacity-70">{c.count}</span>
-                </button>
-              );
-            })}
-          </div>
-        )}
+        {/* Filters row: два дропдауна с чекбоксами + сортировка. */}
+        <div className="flex items-center gap-3 flex-wrap">
+          {transcribedChats.length > 0 && (
+            <MultiSelectDropdown
+              label="Чат"
+              icon={<MessageSquare className="h-3.5 w-3.5" />}
+              emptyLabel="Все"
+              width="w-80"
+              options={transcribedChats.map((c) => ({
+                value: `${c.chatId}:${c.topicId}`,
+                label: c.displayName,
+                count: c.count,
+              }))}
+              selected={selectedChatKeys}
+              onChange={setSelectedChatKeys}
+            />
+          )}
 
-        {/* Filters row */}
-        <div className="flex items-start gap-4 flex-wrap">
-          {/* Sender filter tabs */}
-          <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
-            <div className="flex items-center gap-1.5 text-xs text-gray-500 mr-1">
-              <Users className="h-3.5 w-3.5" />
-              Автор:
-            </div>
-            <button
-              type="button"
-              onClick={() => handleSenderChange(null)}
-              className={[
-                'rounded-full px-3 py-1 text-xs font-medium transition border',
-                activeSender === null
-                  ? 'bg-indigo-600 text-white border-indigo-600'
-                  : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
-              ].join(' ')}
-            >
-              Все
-            </button>
-            {senders.map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => handleSenderChange(s)}
-                className={[
-                  'rounded-full px-3 py-1 text-xs font-medium transition border',
-                  activeSender === s
-                    ? 'bg-indigo-600 text-white border-indigo-600'
-                    : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
-                ].join(' ')}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
+          <MultiSelectDropdown
+            label="Автор"
+            icon={<Users className="h-3.5 w-3.5" />}
+            emptyLabel="Все"
+            options={senders.map((s) => ({
+              value: s.name,
+              label: s.name,
+              count: s.count,
+            }))}
+            selected={selectedSenders}
+            onChange={setSelectedSenders}
+          />
 
-          {/* Sort toggle */}
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="ml-auto flex items-center gap-1.5 shrink-0">
             <div className="flex items-center gap-1 text-xs text-gray-500 mr-0.5">
               <ArrowUpDown className="h-3.5 w-3.5" />
               Сортировка:
@@ -1495,24 +1608,19 @@ export default function TgTranscribePage() {
 
         {/* Empty state */}
         {!loading && items.length === 0 && (() => {
-          const activeChatLabel = activeChat
-            ? transcribedChats.find(
-                (c) => c.chatId === activeChat.chatId && c.topicId === activeChat.topicId,
-              )?.displayName ?? 'выбранном чате'
-            : null;
+          const anyFilter =
+            selectedChatKeys.size > 0 ||
+            selectedSenders.size > 0 ||
+            searchQuery.trim() !== '';
           return (
             <div className="rounded-2xl border border-gray-200 bg-white/90 p-8 text-center">
               <Video className="mx-auto h-10 w-10 text-gray-300 mb-3" />
               <p className="text-sm text-gray-500">
                 {searchQuery.trim()
                   ? `Ничего не найдено по запросу «${searchQuery.trim()}».`
-                  : activeSender && activeChatLabel
-                    ? `Нет транскрибаций от ${activeSender} в чате «${activeChatLabel}».`
-                    : activeSender
-                      ? `Нет транскрибаций от ${activeSender}.`
-                      : activeChatLabel
-                        ? `В чате «${activeChatLabel}» пока нет транскрибаций среди последних 200 записей.`
-                        : 'Пока нет транскрибаций. Добавьте бота в ТГ-группу и отправьте видео.'}
+                  : anyFilter
+                    ? 'Нет транскрибаций по выбранным фильтрам.'
+                    : 'Пока нет транскрибаций. Добавьте бота в ТГ-группу и отправьте видео.'}
               </p>
             </div>
           );
