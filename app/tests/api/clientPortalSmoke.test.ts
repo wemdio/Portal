@@ -367,7 +367,7 @@ beforeEach(() => {
   });
   mockGetClientStatus.mockReset().mockReturnValue('active');
   mockGetClientTariffUsage.mockReset().mockResolvedValue({
-    tariff_type: 'standard',
+    tariff_type: 'Запуск',
     status: 'active',
     paid_at: null,
     paid_until: null,
@@ -659,7 +659,7 @@ describe('Client Portal — empty new-user state', () => {
       status: string;
       limits: Record<string, number>;
     };
-    expect(body.tariff_type).toBe('standard');
+    expect(body.tariff_type).toBe('Запуск');
     expect(body.status).toBe('active');
     expect(body.limits).toBeDefined();
   });

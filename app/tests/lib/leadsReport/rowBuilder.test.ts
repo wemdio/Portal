@@ -26,7 +26,7 @@ describe('buildRow', () => {
       'https://polzaagency.amocrm.ru/leads/detail/12345', // A: Ссылка на лид в амо
       'UTM source: yandex\nUTM medium: cpc',              // B: UTM
       'Я.Директ',                                          // C: Площадка
-      '2026-07-01',                                        // D: Дата
+      '01.07.2026',                                        // D: Дата
       '79001234567',                                       // E: Телефон
       'ivan@example.com',                                  // F: email
       'Иванов Иван',                                       // G: Имя
@@ -52,7 +52,7 @@ describe('buildRow', () => {
       'ivan@example.com', // F: Email
       'ООО Ромашка',   // G: Организация
       'romashka.ru',   // H: Сайт
-      '2026-07-01',    // I: Дата передачи лида
+      '01.07.2026',    // I: Дата передачи лида
       '',              // J: Из какой кампании (ручная)
       '',              // K: @dropdown
       '',              // L: Статус (ручная)

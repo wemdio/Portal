@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { calcBillingAmount, isPaymentLocked, SETUP_DAYS, TEST_PERIOD_MINUTES_BY_PERIOD, TEST_SETUP_MINUTES } from '@/lib/tariffs';
+import { calcBillingAmount, isPaymentLocked, SETUP_DAYS, TEST_PERIOD_MINUTES_BY_PERIOD, TEST_SETUP_MINUTES,
+  normalizeTariffType, TARIFF_LAUNCH, TARIFF_FLOW } from '@/lib/tariffs';
 import type { BillingPeriod, ClientTariffRow } from '@/lib/tariffs';
 import { ensurePendingInvoiceForTariff } from '@/lib/billing';
 import { cancelYookassaPayment, isYookassaConfigured } from '@/lib/yookassa';
@@ -73,7 +74,7 @@ export async function GET(req: NextRequest) {
  * POST /api/client/payment — клиент впервые выбирает тариф и платит.
  *
  * Тело:
- *   { tariff_type: 'standard' | 'pro', billing_period: 'month'|'quarter'|'half_year'|'year' }
+ *   { tariff_type: 'Запуск' | 'Поток', billing_period: 'month'|'quarter'|'half_year'|'year' }
  *
  * Логика:
  *   1. Грузим client_tariffs. Если paid_at уже set — отказ (уже оплачена).
@@ -97,9 +98,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Невалидный JSON' }, { status: 400 });
   }
 
-  const tariffType = body.tariff_type;
+  // normalizeTariffType принимает и текущие значения, и прежние
+  // (standard/pro/custom). Это не «на всякий случай»: после деплоя у клиента
+  // может быть открыта вкладка со старым JS, которая пришлёт 'standard' —
+  // без нормализации он бы получил «Неподдерживаемый тариф» вместо оплаты.
+  const tariffType = normalizeTariffType(body.tariff_type);
   const billingPeriod = body.billing_period as BillingPeriod | undefined;
-  if (tariffType !== 'standard' && tariffType !== 'pro') {
+  if (tariffType !== TARIFF_LAUNCH && tariffType !== TARIFF_FLOW) {
     return NextResponse.json({ error: 'Неподдерживаемый тариф' }, { status: 400 });
   }
   if (!billingPeriod || !['month', 'quarter', 'half_year', 'year'].includes(billingPeriod)) {
@@ -123,7 +128,7 @@ export async function POST(req: NextRequest) {
       .from('client_tariffs')
       .insert({
         user_id: userId,
-        tariff_type: 'standard',
+        tariff_type: TARIFF_LAUNCH,
         is_active: false,
         payment_locked: false,
       })

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 
 /* ═══════════════════════════════════════════
@@ -132,6 +132,46 @@ export default function PaymentsPageView() {
     project_id: '',
     comment: '',
   });
+
+  // Combobox для поля «Проект»: пользователь вводит текст, снизу выпадает
+  // отфильтрованный список. Поиск по client + name. Пустой ввод = «Без проекта».
+  const [projectQuery, setProjectQuery] = useState('');
+  const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
+  const projectComboRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!projectDropdownOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (projectComboRef.current && !projectComboRef.current.contains(e.target as Node)) {
+        setProjectDropdownOpen(false);
+      }
+    };
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setProjectDropdownOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [projectDropdownOpen]);
+
+  const selectedProject = useMemo(
+    () => (form.project_id ? projects.find((p) => p.id === form.project_id) ?? null : null),
+    [form.project_id, projects],
+  );
+  const selectedProjectLabel = selectedProject
+    ? `${selectedProject.client} — ${selectedProject.name}`
+    : '';
+
+  const filteredProjects = useMemo(() => {
+    const q = projectQuery.trim().toLowerCase();
+    if (!q) return projects;
+    return projects.filter((p) =>
+      `${p.client} ${p.name}`.toLowerCase().includes(q),
+    );
+  }, [projects, projectQuery]);
 
   /* ─── Auth ─── */
 
@@ -383,23 +423,89 @@ export default function PaymentsPageView() {
                     />
                   </div>
 
-                  {/* Project (optional) */}
+                  {/* Project (optional) — searchable combobox. Пустой ввод = «Без проекта». */}
                   <div>
                     <label className="block text-sm font-semibold text-gray-700 mb-1.5">
                       Проект <span className="text-gray-400 font-normal">(необязательно)</span>
                     </label>
-                    <select
-                      value={form.project_id}
-                      onChange={(e) => setForm((f) => ({ ...f, project_id: e.target.value }))}
-                      className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white"
-                    >
-                      <option value="">Без проекта</option>
-                      {projects.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.client} — {p.name}
-                        </option>
-                      ))}
-                    </select>
+                    <div ref={projectComboRef} className="relative">
+                      <input
+                        type="text"
+                        value={projectDropdownOpen ? projectQuery : selectedProjectLabel}
+                        onFocus={() => {
+                          setProjectQuery('');
+                          setProjectDropdownOpen(true);
+                        }}
+                        onChange={(e) => {
+                          setProjectQuery(e.target.value);
+                          if (!projectDropdownOpen) setProjectDropdownOpen(true);
+                        }}
+                        placeholder="Без проекта — начните вводить название или клиента"
+                        className="w-full px-3 py-2.5 pr-9 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white"
+                        autoComplete="off"
+                      />
+                      {form.project_id && !projectDropdownOpen && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setForm((f) => ({ ...f, project_id: '' }));
+                            setProjectQuery('');
+                          }}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 text-lg leading-none px-1"
+                          title="Убрать проект"
+                          aria-label="Убрать проект"
+                        >
+                          ×
+                        </button>
+                      )}
+                      {projectDropdownOpen && (
+                        <div className="absolute z-30 mt-1 w-full rounded-xl border border-gray-200 bg-white shadow-lg max-h-72 overflow-auto">
+                          <button
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              setForm((f) => ({ ...f, project_id: '' }));
+                              setProjectQuery('');
+                              setProjectDropdownOpen(false);
+                            }}
+                            className={`w-full text-left px-3 py-2 text-sm border-b border-gray-100 ${
+                              !form.project_id
+                                ? 'bg-blue-50 text-blue-700'
+                                : 'text-gray-500 hover:bg-gray-50'
+                            }`}
+                          >
+                            Без проекта
+                          </button>
+                          {filteredProjects.length === 0 ? (
+                            <div className="px-3 py-3 text-sm text-gray-400 text-center">
+                              Ничего не найдено
+                            </div>
+                          ) : (
+                            filteredProjects.map((p) => (
+                              <button
+                                key={p.id}
+                                type="button"
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => {
+                                  setForm((f) => ({ ...f, project_id: p.id }));
+                                  setProjectQuery('');
+                                  setProjectDropdownOpen(false);
+                                }}
+                                className={`w-full text-left px-3 py-2 text-sm ${
+                                  form.project_id === p.id
+                                    ? 'bg-blue-50 text-blue-700'
+                                    : 'hover:bg-gray-50'
+                                }`}
+                              >
+                                <span className="text-gray-500">{p.client}</span>
+                                <span className="text-gray-300 mx-1.5">—</span>
+                                <span className="text-gray-800">{p.name}</span>
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {/* Comment */}

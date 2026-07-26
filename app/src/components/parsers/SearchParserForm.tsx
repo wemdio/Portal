@@ -484,113 +484,122 @@ export function SearchParserForm({ onStart, busy, clientMode }: Props) {
       </div>
 
       <div className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Запросы вручную (один на строку или через запятую)
-          </label>
-          <textarea
-            value={queriesText}
-            onChange={(e) => setQueriesText(e.target.value)}
-            placeholder={clientMode
-              ? 'производители мебели, Москва\nоптовые поставщики упаковки\nстудии веб-дизайна B2B'
-              : 'веб-студия B2B портфолио site:ru\ndigital агентство корпоративные сайты B2B\nагентство разработки сайтов для производственных компаний'}
-            className="w-full min-h-[12rem] resize-y rounded-lg border border-gray-300 py-2 px-3 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none font-mono placeholder:font-sans"
-          />
-          <p className="text-xs text-gray-500 mt-1">
-            Вставьте список запросов: каждый с новой строки или через запятую. Пустые строки игнорируются.
-          </p>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Бриф / Описание целевой аудитории (для генерации запросов)
-          </label>
-          {/* Source switcher: «Сохранённый» (из /client/brief) vs «Свой».
-              Отображается только когда сохранённый бриф доступен —
-              иначе скрываем чтобы не запутывать. */}
-          {savedBriefAvailable && (
-            <div className="mb-2 flex gap-1 rounded-lg bg-gray-100 p-1 text-xs w-fit">
-              <button
-                type="button"
-                onClick={() => setBriefSource('saved')}
-                className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
-                  briefSource === 'saved'
-                    ? 'bg-white text-gray-900 shadow-sm'
-                    : 'text-gray-600 hover:text-gray-900'
-                }`}
-              >
-                Из сохранённого брифа
-              </button>
-              <button
-                type="button"
-                onClick={() => setBriefSource('custom')}
-                className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
-                  briefSource === 'custom'
-                    ? 'bg-white text-gray-900 shadow-sm'
-                    : 'text-gray-600 hover:text-gray-900'
-                }`}
-              >
-                Свой
-              </button>
-            </div>
-          )}
-
-          {briefSource === 'saved' && savedBriefAvailable ? (
-            <>
-              <textarea
-                value={savedBriefText}
-                readOnly
-                className="w-full min-h-[8rem] resize-y rounded-lg border border-gray-200 bg-gray-50 py-3 px-3 pb-4 text-sm text-gray-700"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                Подгружен ваш бриф со{' '}
-                <a href="/client/brief" className="underline">страницы «Бриф»</a>.
-                Чтобы изменить — отредактируйте там, или переключитесь на «Свой».
-              </p>
-            </>
-          ) : (
-            <textarea
-              value={brief}
-              onChange={(e) => setBrief(e.target.value)}
-              className="w-full min-h-[8rem] resize-y rounded-lg border border-gray-300 py-3 px-3 pb-4 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none"
-              placeholder="Вставьте описание компании..."
-            />
-          )}
-
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/pdf"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void handlePdfUpload(file);
-              }}
-            />
-            {/* PDF-загрузку прячем в saved-mode: там бриф ридонли,
-                загрузка туда не положит ничего. */}
-            {briefSource === 'custom' && (
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={pdfUploading}
-                className="inline-flex items-center rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-400 hover:shadow-sm disabled:opacity-50"
-              >
-                {pdfUploading ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" /> : null}
-                Загрузить PDF бриф
-              </button>
+        {/* Бриф + Запросы вручную — два блока в одном ряду на десктопе.
+            На мобильном (<lg) стакаются вертикально: бриф сверху, запросы снизу.
+            items-start — колонки не растягиваются на равную высоту, каждая
+            колонка ровно по своему контенту (кнопки под брифом → колонка
+            слева будет чуть выше, это ок). */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+          {/* LEFT: Бриф + кнопки Загрузить PDF / Сгенерировать запросы */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Бриф / Описание целевой аудитории (для генерации запросов)
+            </label>
+            {/* Source switcher: «Сохранённый» (из /client/brief) vs «Свой».
+                Отображается только когда сохранённый бриф доступен —
+                иначе скрываем чтобы не запутывать. */}
+            {savedBriefAvailable && (
+              <div className="mb-2 flex gap-1 rounded-lg bg-gray-100 p-1 text-xs w-fit">
+                <button
+                  type="button"
+                  onClick={() => setBriefSource('saved')}
+                  className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
+                    briefSource === 'saved'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Из сохранённого брифа
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBriefSource('custom')}
+                  className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
+                    briefSource === 'custom'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Свой
+                </button>
+              </div>
             )}
-            <button
-              type="button"
-              onClick={() => void handleGenerateQueries()}
-              disabled={generatingQueries || !effectiveBrief.trim()}
-              className="inline-flex items-center rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-medium text-violet-800 hover:bg-violet-100 hover:border-violet-300 disabled:opacity-50"
-            >
-              {generatingQueries ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-2" />}
-              Сгенерировать запросы
-            </button>
-            {pdfStatus ? <span className="text-xs text-emerald-600">{pdfStatus}</span> : null}
+
+            {briefSource === 'saved' && savedBriefAvailable ? (
+              <>
+                <textarea
+                  value={savedBriefText}
+                  readOnly
+                  className="w-full min-h-[10rem] resize-y rounded-lg border border-gray-200 bg-gray-50 py-3 px-3 pb-4 text-sm text-gray-700"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Подгружен ваш бриф со{' '}
+                  <a href="/client/brief" className="underline">страницы «Бриф»</a>.
+                  Чтобы изменить — отредактируйте там, или переключитесь на «Свой».
+                </p>
+              </>
+            ) : (
+              <textarea
+                value={brief}
+                onChange={(e) => setBrief(e.target.value)}
+                className="w-full min-h-[10rem] resize-y rounded-lg border border-gray-300 py-3 px-3 pb-4 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none"
+                placeholder="Вставьте описание компании..."
+              />
+            )}
+
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/pdf"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void handlePdfUpload(file);
+                }}
+              />
+              {/* PDF-загрузку прячем в saved-mode: там бриф ридонли,
+                  загрузка туда не положит ничего. */}
+              {briefSource === 'custom' && (
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={pdfUploading}
+                  className="inline-flex items-center rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-400 hover:shadow-sm disabled:opacity-50"
+                >
+                  {pdfUploading ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" /> : null}
+                  Загрузить PDF бриф
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void handleGenerateQueries()}
+                disabled={generatingQueries || !effectiveBrief.trim()}
+                className="inline-flex items-center rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-medium text-violet-800 hover:bg-violet-100 hover:border-violet-300 disabled:opacity-50"
+              >
+                {generatingQueries ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-2" />}
+                Сгенерировать запросы
+              </button>
+              {pdfStatus ? <span className="text-xs text-emerald-600">{pdfStatus}</span> : null}
+            </div>
+          </div>
+
+          {/* RIGHT: Запросы вручную */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Запросы вручную (один на строку или через запятую)
+            </label>
+            <textarea
+              value={queriesText}
+              onChange={(e) => setQueriesText(e.target.value)}
+              placeholder={clientMode
+                ? 'производители мебели, Москва\nоптовые поставщики упаковки\nстудии веб-дизайна B2B'
+                : 'веб-студия B2B портфолио site:ru\ndigital агентство корпоративные сайты B2B\nагентство разработки сайтов для производственных компаний'}
+              className="w-full min-h-[10rem] resize-y rounded-lg border border-gray-300 py-2 px-3 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none font-mono placeholder:font-sans"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Вставьте список запросов: каждый с новой строки или через запятую. Пустые строки игнорируются.
+            </p>
           </div>
         </div>
 

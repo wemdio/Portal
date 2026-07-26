@@ -33,6 +33,16 @@ import {
   Unlink,
   Zap,
 } from 'lucide-react';
+import {
+  TARIFF_LABELS_RU,
+  BILLING_PERIOD_LABELS,
+  TARIFF_MONTHLY_PRICE,
+  TEST_TARIFF_PRICE,
+  TARIFF_LAUNCH,
+  TARIFF_FLOW,
+  TARIFF_SCALE,
+} from '@/lib/tariffPricing';
+import type { TariffType, PaidTariffType } from '@/lib/tariffPricing';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 type LimitKey = 'max_contacts' | 'max_rows' | 'max_chains_per_month' | 'max_domains' | 'max_emails';
@@ -44,7 +54,7 @@ type LimitUsage = {
 };
 
 type TariffResponse = {
-  tariff_type: 'standard' | 'pro' | 'custom';
+  tariff_type: TariffType;
   status: 'setup' | 'active' | 'expired' | 'inactive';
   paid_at: string | null;
   paid_until: string | null;
@@ -58,7 +68,7 @@ type TariffResponse = {
   /** Mapped russian text from the last failed YooKassa payment attempt. */
   last_payment_error: string | null;
   /** Клиент переведён админом в режим тест-магазина — показываем тестовые
-   *  цены (10/15/20 ₽ Стандарт, 11/16/21 ₽ Про), оплата идёт через тестовые
+   *  цены (10/15/20 ₽ Запуск, 11/16/21 ₽ Поток), оплата идёт через тестовые
    *  креды ЮКассы. */
   is_test_shop: boolean;
   usage: Record<LimitKey, LimitUsage>;
@@ -86,11 +96,9 @@ const LIMITS: Array<{
   },
 ];
 
-const TARIFF_LABELS: Record<TariffResponse['tariff_type'], string> = {
-  standard: 'Standard',
-  pro: 'Pro',
-  custom: 'Индивидуальный',
-};
+// Названия тарифов = значения в БД (Запуск/Поток/Масштаб), маппинг оставлен
+// как шов на случай локализации. См. lib/tariffPricing.ts.
+const TARIFF_LABELS = TARIFF_LABELS_RU;
 
 const STATUS_LABELS: Record<TariffResponse['status'], string> = {
   setup: 'Настройка',
@@ -430,7 +438,7 @@ export default function ClientTariffPage() {
                 <p className="ds-eyebrow mb-2">02<span aria-hidden> → </span>текущий тариф</p>
                 <div className="flex items-center gap-3 flex-wrap">
                   {/* Когда клиент только зарегистрировался и status='inactive' (нет
-                      paid_at) — показывать дефолтный tariff_type='standard' было
+                      paid_at) — показывать дефолтный tariff_type=Запуск было
                       бы враньём: подписки нет. Пишем «Нет тарифа» в красном. */}
                   {data.status === 'inactive' && !data.paid_at ? (
                     <h2
@@ -643,43 +651,37 @@ export default function ClientTariffPage() {
           {/* ── 02c → Автопродление (distilled per re-critique) ───────── */}
           {data.billing_mode === 'autopayment' && (
             <section className="neu-card p-5 sm:p-6">
-              <p className="ds-eyebrow mb-3">02c<span aria-hidden> → </span>автопродление</p>
+              <p className="ds-eyebrow mb-3">02c<span aria-hidden> → </span>продление</p>
               <div className="space-y-3">
                 <div>
-                  <h3
-                    className="text-base font-bold m-0"
-                    style={{ color: 'var(--cp-paper)' }}
-                  >
-                    Автопродление
-                  </h3>
+                  {/* Заголовок «Продление» убрали — eyebrow «02c → продление»
+                      выше уже отбивает секцию, дублирование лишнее. Первая
+                      строка теперь — сам факт «до какой даты оплачено»,
+                      набрана муут-цветом как и раньше, но без h3-шапки. */}
                   <p
-                    className="mt-1 text-sm"
+                    className="text-sm m-0"
                     style={{ color: 'var(--cp-paper-mute)' }}
                   >
                     Период оплачен до{' '}
                     <span className="ds-mono" style={{ color: 'var(--cp-paper)' }}>
                       {formatDate(data.paid_until)}
                     </span>
-                    . При включённом автопродлении списание выполняется за 1–3 дня до этой даты.
+                    .
+                  </p>
+                  <p
+                    className="mt-1 text-sm"
+                    style={{ color: 'var(--cp-red)' }}
+                  >
+                    <span className="font-semibold">Важно!</span>{' '}
+                    При включённом автопродлении списание выполняется за 1–3 дня до этой даты.
                   </p>
                 </div>
 
-                {/* dl → eyebrow + value rows. Tightens the densest section on
-                    the page (re-critique P1-NEW). */}
+                {/* dl → eyebrow + value rows. Строку «карта» убрали по
+                    просьбе клиента — «не привязана (появится после оплаты)»
+                    только пугает; статус карты и так виден по кнопке
+                    «Отвязать карту» ниже (disabled когда карты нет). */}
                 <div className="flex flex-col gap-1 text-xs">
-                  <div className="flex items-baseline gap-3">
-                    <span
-                      className="ds-eyebrow shrink-0"
-                      style={{ minWidth: '14ch' }}
-                    >
-                      карта
-                    </span>
-                    <span style={{ color: 'var(--cp-paper)' }}>
-                      {data.payment_method_saved
-                        ? 'привязана'
-                        : 'не привязана (появится после оплаты)'}
-                    </span>
-                  </div>
                   <div className="flex items-baseline gap-3">
                     <span
                       className="ds-eyebrow shrink-0"
@@ -742,7 +744,7 @@ export default function ClientTariffPage() {
                   >
                     {data.payment_method_saved
                       ? 'Карта удалится из нашей системы, автопродление отключится. Оплаченный период сохраняется.'
-                      : 'Карта появится здесь после первой оплаты — там же будет возможность отвязать её одной кнопкой.'}
+                      : 'Отключить автопродление'}
                   </p>
                 </div>
               </div>
@@ -1025,29 +1027,18 @@ function LimitRow({
   );
 }
 
-type PaidTariff = 'standard' | 'pro';
-type TariffChoice = PaidTariff | 'custom';
+type PaidTariff = PaidTariffType;
+type TariffChoice = TariffType;
 type PeriodKey = 'month' | 'quarter' | 'half_year' | 'year';
 
 const PERIOD_MONTHS: Record<PeriodKey, number> = { month: 1, quarter: 3, half_year: 6, year: 12 };
 const PERIOD_DISCOUNT: Record<PeriodKey, number> = { month: 1, quarter: 0.95, half_year: 0.9, year: 0.8 };
-const PERIOD_LABEL: Record<PeriodKey, string> = {
-  month: '1 месяц',
-  quarter: '3 месяца',
-  half_year: '6 месяцев',
-  year: '12 месяцев',
-};
-const MONTHLY_BASE: Record<PaidTariff, number> = { standard: 40_000, pro: 65_000 };
-
-// Зеркало lib/tariffs.ts → TEST_TARIFF_PRICE. Когда админ переводит клиента в
-// режим тест-магазина (профиль клиента на /admin/users), здесь показываются
-// фиксированные тестовые цены вместо боевых. Quarter в тест-магазине не
-// поддерживается — webhook возвращает null при попытке, поэтому в UI просто
-// не показываем сумму для этого периода.
-const TEST_TOTAL_PRICE: Record<PaidTariff, Partial<Record<PeriodKey, number>>> = {
-  standard: { month: 10, half_year: 15, year: 20 },
-  pro:      { month: 11, half_year: 16, year: 21 },
-};
+// Периоды, боевые и тестовые цены — из общего lib/tariffPricing.ts. Раньше все
+// три были скопированы здесь (последнее — с явной пометкой «Зеркало
+// lib/tariffs.ts»), и клиент в ЛК мог увидеть не то, что выставит счёт.
+const PERIOD_LABEL = BILLING_PERIOD_LABELS;
+const MONTHLY_BASE = TARIFF_MONTHLY_PRICE;
+const TEST_TOTAL_PRICE = TEST_TARIFF_PRICE;
 
 interface TariffCardSpec {
   id: TariffChoice;
@@ -1060,7 +1051,7 @@ interface TariffCardSpec {
 
 const TARIFF_CARDS: TariffCardSpec[] = [
   {
-    id: 'standard',
+    id: TARIFF_LAUNCH,
     label: 'Запуск',
     summary: 'Запустить outbound и выйти на первые встречи.',
     features: [
@@ -1072,7 +1063,7 @@ const TARIFF_CARDS: TariffCardSpec[] = [
     included: '10 000 контактов, 16 почт',
   },
   {
-    id: 'pro',
+    id: TARIFF_FLOW,
     label: 'Поток',
     badge: 'чаще берут',
     summary: 'Больше объёма и плотное сопровождение для предсказуемого потока встреч.',
@@ -1085,7 +1076,7 @@ const TARIFF_CARDS: TariffCardSpec[] = [
     included: '20 000 контактов, 32 почты',
   },
   {
-    id: 'custom',
+    id: TARIFF_SCALE,
     label: 'Масштаб',
     summary: 'Для команд с большими объёмами и своих аутрич-отделов.',
     features: [
@@ -1100,7 +1091,7 @@ const TARIFF_CARDS: TariffCardSpec[] = [
 ];
 
 function TariffSelectionWidget({ isTestShop = false }: { isTestShop?: boolean }) {
-  const [tariff, setTariff] = useState<TariffChoice>('pro');
+  const [tariff, setTariff] = useState<TariffChoice>(TARIFF_FLOW);
   // Дефолт — 1 месяц (минимальный entry-point). В прод-магазине показываем
   // 1 / 3 / 6 / 12 мес (см. презентацию: 3 мес — −5%, 6 мес — −10%,
   // 12 мес — −20%). Quarter в тест-магазине не поддерживается — цены и
@@ -1109,9 +1100,9 @@ function TariffSelectionWidget({ isTestShop = false }: { isTestShop?: boolean })
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const isPaid = tariff !== 'custom';
+  const isPaid = tariff !== TARIFF_SCALE;
   // В тест-магазине total = фиксированная цена за период (10/15/20 ₽ для
-  // Стандарт, 11/16/21 ₽ для Про). Месячная цифра — для красоты деления.
+  // Запуска, 11/16/21 ₽ для Потока). Месячная цифра — для красоты деления.
   const testTotal = isPaid ? (TEST_TOTAL_PRICE[tariff as PaidTariff][period] ?? null) : null;
   const monthly = !isPaid
     ? null
@@ -1215,7 +1206,7 @@ function TariffSelectionWidget({ isTestShop = false }: { isTestShop?: boolean })
           // В тест-магазине берём фиксированную цену за период из TEST_TOTAL_PRICE
           // и обратно вычисляем «/мес» для отображения — иначе клиент видел бы
           // тестовый и боевой ценник одновременно.
-          const cardTotal = card.id === 'custom'
+          const cardTotal = card.id === TARIFF_SCALE
             ? null
             : isTestShop
               ? (TEST_TOTAL_PRICE[card.id as PaidTariff][period] ?? null)

@@ -36,7 +36,7 @@ function sortNewest(items: Campaign[]): Campaign[] {
   });
 }
 
-const VISIBLE_STEP = 100;
+const PAGE_SIZE = 20;
 
 export default function CampaignsPage() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
@@ -46,7 +46,7 @@ export default function CampaignsPage() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<number | undefined>(undefined);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [visibleCount, setVisibleCount] = useState(VISIBLE_STEP);
+  const [page, setPage] = useState(1);
   const abortRef = useRef(false);
 
   useEffect(() => {
@@ -102,8 +102,14 @@ export default function CampaignsPage() {
     return true;
   });
 
-  const visible = filtered.slice(0, visibleCount);
-  const hasMore = visibleCount < filtered.length;
+  // При смене фильтра/поиска возвращаемся на первую страницу — чтобы после
+  // сужения списка не остаться на пустой странице 10 без единой кампании.
+  useEffect(() => { setPage(1); }, [search, statusFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const pageStart = (currentPage - 1) * PAGE_SIZE;
+  const visible = filtered.slice(pageStart, pageStart + PAGE_SIZE);
 
   const handleAction = useCallback(async (id: string, action: 'activate' | 'pause') => {
     setActionLoading(id);
@@ -242,25 +248,111 @@ export default function CampaignsPage() {
               </div>
             ))}
           </div>
-          <div className="border-t border-zinc-100 px-5 py-3 flex items-center justify-between">
-            <span className="text-xs text-zinc-400 inline-flex items-center gap-1.5">
-              {visible.length} из {filtered.length} кампаний
-              {loadingRest && (
-                <>
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  <span>подгружаем остальные…</span>
-                </>
-              )}
-            </span>
-            {hasMore && (
+          <CampaignsPaginationBar
+            currentPage={currentPage}
+            totalPages={totalPages}
+            totalItems={filtered.length}
+            allItems={campaigns.length}
+            pageSize={PAGE_SIZE}
+            loadingRest={loadingRest}
+            onPageChange={setPage}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Пагинация в стиле accounts/page.tsx: номер текущей страницы + первая/последняя
+ * + ±1 соседей, между «…». На узком списке (≤7 страниц) показываем все номера.
+ * Также подсвечиваем «подгружаем остальные…» пока идёт фоновая догрузка кампаний.
+ */
+function CampaignsPaginationBar({
+  currentPage,
+  totalPages,
+  totalItems,
+  allItems,
+  pageSize,
+  loadingRest,
+  onPageChange,
+}: {
+  currentPage: number;
+  totalPages: number;
+  totalItems: number;
+  allItems: number;
+  pageSize: number;
+  loadingRest: boolean;
+  onPageChange: (page: number) => void;
+}) {
+  const from = totalItems === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const to = Math.min(currentPage * pageSize, totalItems);
+  const canPrev = currentPage > 1;
+  const canNext = currentPage < totalPages;
+
+  const pageNumbers: (number | 'gap')[] = [];
+  if (totalPages <= 7) {
+    for (let i = 1; i <= totalPages; i++) pageNumbers.push(i);
+  } else {
+    const push = (n: number) => {
+      if (pageNumbers[pageNumbers.length - 1] !== n) pageNumbers.push(n);
+    };
+    push(1);
+    if (currentPage > 3) pageNumbers.push('gap');
+    for (let i = Math.max(2, currentPage - 1); i <= Math.min(totalPages - 1, currentPage + 1); i++) push(i);
+    if (currentPage < totalPages - 2) pageNumbers.push('gap');
+    push(totalPages);
+  }
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 px-5 py-3 text-xs text-zinc-500">
+      <span className="inline-flex items-center gap-1.5">
+        {totalItems === allItems
+          ? <>{from}–{to} из {totalItems} кампаний</>
+          : <>{from}–{to} из {totalItems} (всего {allItems})</>}
+        {loadingRest && (
+          <>
+            <Loader2 className="h-3 w-3 animate-spin" />
+            <span>подгружаем остальные…</span>
+          </>
+        )}
+      </span>
+      {totalPages > 1 && (
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => onPageChange(currentPage - 1)}
+            disabled={!canPrev}
+            className="rounded-md px-2 py-1 text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-600 transition-colors"
+          >
+            ‹
+          </button>
+          {pageNumbers.map((n, idx) =>
+            n === 'gap' ? (
+              <span key={`gap-${idx}`} className="px-1 text-zinc-400">…</span>
+            ) : (
               <button
-                onClick={() => setVisibleCount((v) => v + VISIBLE_STEP)}
-                className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 transition-colors"
+                key={n}
+                type="button"
+                onClick={() => onPageChange(n)}
+                className={`min-w-[28px] rounded-md px-2 py-1 font-medium transition-colors ${
+                  n === currentPage
+                    ? 'bg-zinc-900 text-white'
+                    : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'
+                }`}
               >
-                Ещё {Math.min(VISIBLE_STEP, filtered.length - visibleCount)}
+                {n}
               </button>
-            )}
-          </div>
+            ),
+          )}
+          <button
+            type="button"
+            onClick={() => onPageChange(currentPage + 1)}
+            disabled={!canNext}
+            className="rounded-md px-2 py-1 text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-600 transition-colors"
+          >
+            ›
+          </button>
         </div>
       )}
     </div>
