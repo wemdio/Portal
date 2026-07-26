@@ -311,7 +311,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          # 1G триггерил 90% алерт после каждого дампа: контейнер пакует 4 ГБ
+          # main-supabase + 1.8 ГБ instantly в tar и льёт в S3 → page cache
+          # (active_file) держится в memory.current ещё несколько часов. Поднято
+          # до 2G, чтобы пиковый RSS pg_dump + буферы aws s3 cp не сжигали лимит.
+          memory: 2G
           cpus: '1.0'
           pids: 512
     # entrypoint waits for an active dump + S3 upload before exiting.

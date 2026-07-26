@@ -757,11 +757,17 @@ async def check_container_resources() -> list[str]:
             # ── Memory ────────────────────────────────────────────────────
             mem = stats.get("memory_stats") or {}
             usage = int(mem.get("usage") or 0)
-            # Exclude page cache to match `docker stats` display — postgres etc.
-            # would otherwise trip the threshold on shared_buffers reads.
+            # Exclude ALL reclaimable page cache — inactive_file + active_file
+            # на cgroup v2, cache на v1. Раньше вычитали только inactive_file и
+            # получали ложные 90%-алерты у portal-backup после дампа: свежие
+            # записи tar сидят в active_file несколько часов и не попадали под
+            # вычет. postgres shared_buffers тоже уходит в active_file — так что
+            # это заодно чинит и его false-positives.
             inner = mem.get("stats") or {}
-            cache = int(inner.get("inactive_file") or inner.get("cache") or 0)
-            usage_real = max(0, usage - cache)
+            file_cache = int(inner.get("inactive_file") or 0) + int(inner.get("active_file") or 0)
+            if file_cache == 0:
+                file_cache = int(inner.get("cache") or 0)
+            usage_real = max(0, usage - file_cache)
             limit = int(mem.get("limit") or 0)
             # Docker reports host RAM when no cgroup limit is set. Treat >=90%
             # of host RAM as "unlimited" and skip — otherwise every unlimited
