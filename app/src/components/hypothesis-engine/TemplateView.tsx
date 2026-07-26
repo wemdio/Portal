@@ -18,6 +18,9 @@ function templateToText(t: HeTemplate): string {
     parts.push(
       `\n--- ПИСЬМО ${idx + 1}${wait} ---\nТема: ${letter.subject ?? ''}\n\n${letter.body}`,
     );
+    (letter.segment_variants ?? []).forEach((v) => {
+      parts.push(`\n[Вариант для сегмента: ${v.when}]\n${v.text}`);
+    });
   });
   return parts.join('\n');
 }
@@ -49,34 +52,40 @@ export function TemplateView({ template }: { template: HeTemplate }) {
 
   return (
     <div className="space-y-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <FileText className="h-4 w-4 text-gray-400" aria-hidden />
-          <p className="text-sm font-semibold text-gray-800">Шаблон 85/15</p>
-          {template.status === 'ready' ? <Badge tone="emerald">Готов</Badge> : <Badge tone="amber">Черновик</Badge>}
+      <div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <FileText className="h-4 w-4 text-gray-400" aria-hidden />
+            <p className="text-sm font-semibold text-gray-800">Шаблон 85/15</p>
+            {template.status === 'ready' ? <Badge tone="emerald">Готов</Badge> : <Badge tone="amber">Черновик</Badge>}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleCopy}
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50"
+            >
+              {copied ? (
+                <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden />
+              ) : (
+                <Copy className="h-3.5 w-3.5" aria-hidden />
+              )}
+              {copied ? 'Скопировано' : 'Скопировать'}
+            </button>
+            <button
+              type="button"
+              onClick={handleDownload}
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50"
+            >
+              <Download className="h-3.5 w-3.5" aria-hidden />
+              Скачать JSON
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleCopy}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50"
-          >
-            {copied ? (
-              <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden />
-            ) : (
-              <Copy className="h-3.5 w-3.5" aria-hidden />
-            )}
-            {copied ? 'Скопировано' : 'Скопировать'}
-          </button>
-          <button
-            type="button"
-            onClick={handleDownload}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50"
-          >
-            <Download className="h-3.5 w-3.5" aria-hidden />
-            Скачать JSON
-          </button>
-        </div>
+        <p className="mt-1 text-xs text-gray-400">
+          Боевой шаблон: цепочка вертикали, адаптированная под загруженную базу. В рассылку идёт этот
+          текст.
+        </p>
       </div>
 
       {/* Фиксированный блок */}
@@ -114,6 +123,26 @@ export function TemplateView({ template }: { template: HeTemplate }) {
                 text={letter.body}
                 className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700"
               />
+              {letter.segment_variants?.length ? (
+                <div className="mt-3 space-y-2">
+                  {letter.segment_variants.map((v, vi) => (
+                    <details
+                      key={`${v.when}-${vi}`}
+                      className="rounded-lg border border-violet-200 bg-violet-50/40"
+                    >
+                      <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold text-violet-700">
+                        Вариант для сегмента: {v.when}
+                      </summary>
+                      <div className="border-t border-violet-100 px-3 py-2">
+                        <OperatorText
+                          text={v.text}
+                          className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700"
+                        />
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              ) : null}
             </li>
           ))}
         </ol>

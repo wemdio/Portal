@@ -66,11 +66,30 @@ describe('hypothesisEngine schemas — валидные payload', () => {
   });
 
   it('vocab: kind дефолтится в synonym, optional-поля отсутствуют', () => {
-    const r = HeVocabSchema.safeParse({ company_types: [{ term: 'iGaming' }], job_titles: [{ title: 'Head of VIP' }] });
+    const r = HeVocabSchema.safeParse({
+      company_types: [{ term: 'iGaming' }],
+      job_titles: [{ title: 'Коммерческий директор', audience_side: 'buyer' }],
+      search_queries: [{ source: 'Registry', query: 'ОКВЭД 62.01 — Разработка компьютерного программного обеспечения' }],
+    });
     expect(r.success).toBe(true);
     if (r.success) {
       expect(r.data.company_types[0].kind).toBe('synonym');
       expect(r.data.job_titles[0].alt_names).toBeUndefined();
+      expect(r.data.search_queries[0].notes).toBeUndefined();
+    }
+  });
+
+  it('vocab: обе стороны аудитории buyer/campaign_target проходят', () => {
+    const r = HeVocabSchema.safeParse({
+      job_titles: [
+        { title: 'Собственник', audience_side: 'buyer' },
+        { title: 'HRD', audience_side: 'campaign_target', alt_names: ['HR Director', 'Директор по персоналу'] },
+      ],
+    });
+    expect(r.success).toBe(true);
+    if (r.success) {
+      expect(r.data.job_titles[0].audience_side).toBe('buyer');
+      expect(r.data.job_titles[1].audience_side).toBe('campaign_target');
     }
   });
 
@@ -127,6 +146,11 @@ describe('hypothesisEngine schemas — невалидные payload', () => {
 
   it('vocab: неизвестный kind отклоняется', () => {
     expect(HeVocabSchema.safeParse({ company_types: [{ term: 'X', kind: 'weird' }] }).success).toBe(false);
+  });
+
+  it('vocab: должность без audience_side или с левым значением отклоняется', () => {
+    expect(HeVocabSchema.safeParse({ job_titles: [{ title: 'HRD' }] }).success).toBe(false);
+    expect(HeVocabSchema.safeParse({ job_titles: [{ title: 'HRD', audience_side: 'lead' }] }).success).toBe(false);
   });
 
   it('base analysis: share_pct >100 отклоняется', () => {

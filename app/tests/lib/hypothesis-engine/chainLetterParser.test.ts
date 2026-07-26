@@ -27,13 +27,13 @@ describe('chain letterParser integration', () => {
 
 Подскажите, кто у вас смотрит в сторону платёжной инфраструктуры?`;
 
-  it('RU-цепочка из 3 писем парсится в HeChainLetter с wait_days 0/2/3', () => {
+  it('RU-цепочка из 3 писем парсится в HeChainLetter с wait_days 0/3/7', () => {
     const parsed = parseLettersFromModelOutput(sampleRu);
     expect(parsed).toHaveLength(3);
 
     const letters = parsedToChainLetters(parsed);
     expect(letters).toHaveLength(3);
-    expect(letters.map((l) => l.wait_days)).toEqual([0, 2, 3]);
+    expect(letters.map((l) => l.wait_days)).toEqual([0, 3, 7]);
     expect(letters[0].subject).toBe('Платёжный стек под iGaming');
     expect(letters[0].body).toContain('болит эквайринг');
     expect(letters[2].subject).toBe('К кому обратиться?');
@@ -57,7 +57,7 @@ Body three.`;
     const letters = parsedToChainLetters(parseLettersFromModelOutput(sampleEn));
     expect(letters).toHaveLength(3);
     expect(letters[0].subject).toBe('Payment stack for iGaming');
-    expect(letters.map((l) => l.wait_days)).toEqual([0, 2, 3]);
+    expect(letters.map((l) => l.wait_days)).toEqual([0, 3, 7]);
   });
 
   it('wait_days не выходит за пределы лесенки при 6 письмах', () => {

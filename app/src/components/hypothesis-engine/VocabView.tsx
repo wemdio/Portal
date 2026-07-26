@@ -35,9 +35,15 @@ export function VocabView({ vocab }: { vocab: HeVocab }) {
 
   return (
     <div className="space-y-5 rounded-xl border border-gray-200 bg-gray-50/50 p-4">
-      <div className="flex items-center gap-2">
-        <BookOpen className="h-4 w-4 text-gray-400" aria-hidden />
-        <p className="text-sm font-semibold text-gray-800">Вокабуляр вертикали</p>
+      <div>
+        <div className="flex items-center gap-2">
+          <BookOpen className="h-4 w-4 text-gray-400" aria-hidden />
+          <p className="text-sm font-semibold text-gray-800">Вокабуляр вертикали</p>
+        </div>
+        <p className="mt-1 text-xs text-gray-400">
+          Технический слой для сбора базы: по этим терминам ищем компании и должности в
+          HH/LinkedIn/картах/реестрах. В текстах писем не используется.
+        </p>
       </div>
 
       {/* Типы компаний */}

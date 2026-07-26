@@ -14,12 +14,18 @@ export function ChainView({ chain, error }: { chain: HeChain; error?: string | n
   const failed = chain.status === 'failed';
   return (
     <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <Mail className="h-4 w-4 text-gray-400" aria-hidden />
-        <p className="text-sm font-semibold text-gray-800">Цепочка писем</p>
-        <Badge tone="blue">{LANG_LABEL[chain.language] ?? chain.language.toUpperCase()}</Badge>
-        {chain.status === 'ready' || chain.status === 'done' ? <Badge tone="emerald">Готово</Badge> : null}
-        {failed ? <Badge tone="red">Ошибка</Badge> : null}
+      <div className="mb-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Mail className="h-4 w-4 text-gray-400" aria-hidden />
+          <p className="text-sm font-semibold text-gray-800">Цепочка писем</p>
+          <Badge tone="blue">{LANG_LABEL[chain.language] ?? chain.language.toUpperCase()}</Badge>
+          {chain.status === 'ready' || chain.status === 'done' ? <Badge tone="emerald">Готово</Badge> : null}
+          {failed ? <Badge tone="red">Ошибка</Badge> : null}
+        </div>
+        <p className="mt-1 text-xs text-gray-400">
+          Мастер-черновик цепочки под вертикаль. В рассылку не идёт — служит основой для боевого
+          шаблона под базу.
+        </p>
       </div>
 
       {failed ? (
