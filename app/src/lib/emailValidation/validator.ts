@@ -290,6 +290,17 @@ function isInconclusiveTransport(r: SmtpCheckResult): boolean {
   return /timeout|econnrefused|econnreset|ehostunreach|enetunreach|closed before|connect|unexpected greeting|ehlo\/helo rejected|mail from rejected|getaddrinfo|eai_again|enotfound/.test(e);
 }
 
+/**
+ * 4xx-тексты, означающие отказ по свойствам НАШЕГО egress (IP/envelope), а не
+ * настоящий greylisting получателя: FCrDNS/PTR-проверки («cannot find your
+ * hostname», «Client host rejected», rdns/ptr), репутационные и блэклистные
+ * отказы. Такой 4xx никогда не снимется ретраем с того же IP — его надо
+ * фейловерить на другой egress. Отсутствие здесь «try again/greylist» — ок:
+ * для сомнительных текстов остаётся безопасный greylist-путь (см. вызов).
+ */
+const RCPT_4XX_EGRESS_RE =
+  /(cannot find your (host)?name|client host rejected|unknown (client|host)|reverse.?dns|missing.?ptr|no.?ptr|ptr.?record|\brdns\b|fcrdns|helo.?(command|name)?.?reject|reputation|spamhaus|barracuda|block.?list)/i;
+
 async function smtpVerifyViaProxy(
   email: string,
   mxHost: string,
@@ -337,6 +348,21 @@ async function smtpVerifyViaProxy(
       // Definitive answer (mailbox exists/catch-all/greylist, or a plain
       // all-null with no transport error) → return immediately.
       if (!isInconclusiveTransport(result)) {
+        // 4xx про НАШ egress (FCrDNS/PTR/hostname/reputation) — это НЕ
+        // greylisting: сервер режет саму пробу с этого IP, и ретрай с того
+        // же IP никогда не пройдёт. Фейловерим на другой egress вместо
+        // greylist-affinity (реальная регрессия 2026-07-25: mx2.isource.ru
+        // «450 4.7.25 Client host rejected: cannot find your hostname»
+        // убивал все пробы через IP без PTR, хотя третий egress давал 250).
+        if (result.greylist && RCPT_4XX_EGRESS_RE.test(result.smtpText ?? '')) {
+          markEgressBlocked(mxHost, baseUrl);
+          lastInconclusive = {
+            ...result,
+            error: `Egress rejected by MX policy (4xx): ${result.smtpText ?? result.code}`,
+          };
+          lastError = lastInconclusive.error;
+          continue;
+        }
         // Greylisted → pin this IP for the MX so the delayed retry returns from
         // the same egress and clears the greylist (see mxGreylistAffinity).
         if (result.greylist) markGreylistAffinity(mxHost, baseUrl);

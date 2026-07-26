@@ -85,6 +85,7 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
       company_types: companyTypes,
       job_titles: vocab.job_titles,
       search_queries: vocab.search_queries,
+      status: 'ready',
     })
     .select('id')
     .single();

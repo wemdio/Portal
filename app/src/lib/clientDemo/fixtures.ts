@@ -824,6 +824,7 @@ export const DEMO_BRIEF_HYPOTHESES_RESPONSE = {
 export const DEMO_ONBOARDING_RESPONSE = {
   items: [
     { id: 'brief', label: 'Заполнить бриф', done: true, href: '/client/brief' },
+    { id: 'domains', label: 'Выбрать домены для рассылки', done: true, href: null },
     { id: 'preset', label: 'Менеджер настроил пресет', done: true, href: null },
     { id: 'first_base', label: 'Собрать первую базу', done: true, href: '/client/build' },
     { id: 'first_clean', label: 'Очистить первую базу', done: true, href: '/client/base-constructor' },
@@ -837,6 +838,27 @@ export const DEMO_ONBOARDING_RESPONSE = {
   ],
   complete: true,
   next_id: null,
+  // Онбординг пройден — таймер готовности почт не нужен.
+  mail_ready_at: null,
+};
+
+// Демо-состояние шага «Выбрать домены»: выбор уже подтверждён, селектор
+// показывает компактный список. Мутации (PUT selection) демо режет
+// централизованно — поэтому статуса 'suggested' в витрине не бывает.
+
+export const DEMO_DOMAINS_SUGGESTIONS_RESPONSE = {
+  brand: 'orbita',
+  suggested: [
+    { domain: 'orbita.ru', tld: 'ru', available: true, checked_at: '2026-04-03T09:00:00.000Z' },
+    { domain: 'orbita-hq.ru', tld: 'ru', available: true, checked_at: '2026-04-03T09:00:00.000Z' },
+    { domain: 'orbita-team.ru', tld: 'ru', available: true, checked_at: '2026-04-03T09:00:00.000Z' },
+    { domain: 'orbita.online', tld: 'online', available: true, checked_at: '2026-04-03T09:00:00.000Z' },
+    { domain: 'orbita-group.online', tld: 'online', available: true, checked_at: '2026-04-03T09:00:00.000Z' },
+    { domain: 'orbita-pro.tech', tld: 'tech', available: true, checked_at: '2026-04-03T09:00:00.000Z' },
+  ],
+  selected: ['orbita-hq.ru', 'orbita-team.ru', 'orbita.online'],
+  required_count: 3,
+  status: 'selected',
 };
 
 // ─── Базы кампаний ───────────────────────────────────────────────────────────

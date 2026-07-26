@@ -13,9 +13,10 @@ export const dynamic = 'force-dynamic';
 /**
  * Onboarding checklist for /client/dashboard.
  *
- * Returns a 6-step progress object (see computeOnboardingStatus). Wrapped in
- * a 15-second TTL cache because the dashboard polls this on mount and we
- * don't want a cold-tap on the database every page navigation.
+ * Returns a 7-step progress object (see computeOnboardingStatus) plus
+ * `mail_ready_at` — the mailbox-readiness date the preset step counts down
+ * to. Wrapped in a 15-second TTL cache because the dashboard polls this on
+ * mount and we don't want a cold-tap on the database every page navigation.
  *
  * staleMs=0 → no stale-while-revalidate. Onboarding state changes on user
  * action (saving brief, launching campaign), and we want clients to see

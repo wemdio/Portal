@@ -300,6 +300,8 @@ jest.mock('@/lib/tariffs', () => ({
   isAwaitingFirstPayment: () => false,
   TOOL_ACCESS_DENIED_MESSAGE: 'Подписка не активна. Оплатите тариф для продолжения работы.',
   AWAITING_PAYMENT_MESSAGE: 'Оформлена подписка, но оплата ещё не поступила. Доступ откроется после оплаты.',
+  // Константа прогрева — используется checkStatus для таймера почт.
+  SETUP_DAYS: 15,
 }));
 
 // ── Companies-search regions ─────────────────────────────────────────────────
@@ -609,7 +611,7 @@ describe('Client Portal — auth boundary on every endpoint', () => {
 // ────────────────────────────────────────────────────────────────────────────
 
 describe('Client Portal — empty new-user state', () => {
-  it('GET /onboarding/status returns 6 items, all done=false, next_id=brief', async () => {
+  it('GET /onboarding/status returns 7 items, all done=false, next_id=brief', async () => {
     const { GET } = await import('@/app/api/client/onboarding/status/route');
     const res = await GET(makeReq('http://x/api/client/onboarding/status'));
     expect((res as Response).status).toBe(200);
@@ -618,9 +620,9 @@ describe('Client Portal — empty new-user state', () => {
       complete: boolean;
       next_id: string | null;
     };
-    expect(body.items).toHaveLength(6);
+    expect(body.items).toHaveLength(7);
     expect(body.items.map((i) => i.id)).toEqual([
-      'brief', 'preset', 'first_base', 'first_clean', 'first_sequence', 'first_launch',
+      'brief', 'domains', 'preset', 'first_base', 'first_clean', 'first_sequence', 'first_launch',
     ]);
     expect(body.items.every((i) => !i.done)).toBe(true);
     expect(body.complete).toBe(false);

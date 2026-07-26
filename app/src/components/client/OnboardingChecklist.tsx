@@ -3,15 +3,19 @@
 /**
  * Persistent setup checklist shown on /client/dashboard.
  *
- * Six steps in fixed order: brief → preset → first base → first clean →
- * first sequence → first launch. Each row carries an editorial eyebrow
- * ("01 → "); the next not-done row additionally gets surface-elev
- * background + 1px amber border, an amber "следующий" eyebrow tail, an
- * amber Clock ring, and an explicit amber "Сделать сейчас →" call-out
- * — so a brand-new user (Olga) sees at a single glance where to click
- * without scanning. Done rows demote to paper-faint with a smaller check.
+ * Seven steps in fixed order: brief → domains → preset → first base →
+ * first clean → first sequence → first launch. Each row carries an
+ * editorial eyebrow ("01 → "); the next not-done row additionally gets
+ * surface-elev background + 1px amber border, an amber "следующий" eyebrow
+ * tail, an amber Clock ring, and an explicit amber "Сделать сейчас →"
+ * call-out — so a brand-new user (Olga) sees at a single glance where to
+ * click without scanning. Done rows demote to paper-faint with a smaller
+ * check.
  *
- * When all six are done the widget collapses to a slim "Setup complete ✓"
+ * The "domains" step has no href: its card expands inline with
+ * DomainSelector (the client picks N of the offered domains right here).
+ *
+ * When all seven are done the widget collapses to a slim "Setup complete ✓"
  * badge with a chevron to expand for review.
  *
  * Status is fetched from /api/client/onboarding/status on mount and on
@@ -25,9 +29,10 @@ import { usePathname } from 'next/navigation';
 import type { Route } from 'next';
 import { AlertCircle, Check, ChevronDown, Clock, Loader2, RefreshCw } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
+import { DomainSelector } from './DomainSelector';
 
 interface ChecklistItem {
-  id: 'brief' | 'preset' | 'first_base' | 'first_clean' | 'first_sequence' | 'first_launch';
+  id: 'brief' | 'domains' | 'preset' | 'first_base' | 'first_clean' | 'first_sequence' | 'first_launch';
   label: string;
   done: boolean;
   href: string | null;
@@ -38,6 +43,34 @@ interface OnboardingResponse {
   items: ChecklistItem[];
   complete: boolean;
   next_id: ChecklistItem['id'] | null;
+  /** Estimated mailbox-readiness date for the preset-step countdown. */
+  mail_ready_at: string | null;
+}
+
+function formatReadyDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('ru-RU', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  });
+}
+
+/**
+ * Countdown caption for the preset step (replaces the old "написать
+ * менеджеру в чат" detour — domains are agreed in-product now, so the chat
+ * is no longer part of onboarding).
+ */
+function mailReadyText(mailReadyAt: string | null): string {
+  const tail = 'Собирать и чистить базы, писать цепочки можно уже сейчас.';
+  const ms = mailReadyAt ? Date.parse(mailReadyAt) : NaN;
+  if (!Number.isFinite(ms)) {
+    return `Менеджер настраивает и прогревает почты. ${tail}`;
+  }
+  const daysLeft = Math.ceil((ms - Date.now()) / 86400000);
+  if (daysLeft <= 0) {
+    return `Прогрев по сроку уже завершён — менеджер подключает почты к вашему пресету. ${tail}`;
+  }
+  return `Почты настраиваются и прогреваются: запускать кампании можно будет с ${formatReadyDate(mailReadyAt!)} (осталось ~${daysLeft} дн.). ${tail}`;
 }
 
 export function OnboardingChecklist() {
@@ -79,7 +112,7 @@ export function OnboardingChecklist() {
     () => data?.items.filter((i) => i.done).length ?? 0,
     [data],
   );
-  const total = data?.items.length ?? 6;
+  const total = data?.items.length ?? 7;
 
   if (loading && !data) {
     return (
@@ -178,6 +211,8 @@ export function OnboardingChecklist() {
             item={item}
             stepNumber={idx + 1}
             isNext={data.next_id === item.id}
+            mailReadyAt={data.mail_ready_at}
+            onChanged={load}
           />
         ))}
       </div>
@@ -189,10 +224,14 @@ function ChecklistRow({
   item,
   stepNumber,
   isNext,
+  mailReadyAt,
+  onChanged,
 }: {
   item: ChecklistItem;
   stepNumber: number;
   isNext: boolean;
+  mailReadyAt?: string | null;
+  onChanged?: () => void;
 }) {
   // Editorial state vocabulary — one accent (amber) on the next-step row only:
   //   - next : surface-elev background, 1px amber border, amber Clock ring,
@@ -218,16 +257,14 @@ function ChecklistRow({
       ? 'var(--cp-paper-faint)'
       : 'var(--cp-paper-mute)';
 
+  // Шаг preset больше не ведёт в чат: домены согласуются в продукте, а про
+  // ожидание почт рассказывает таймер (mailReadyText). Чат-CTA убран.
   const presetNeedsManager = item.id === 'preset' && !item.done;
-  const displayHref = item.href ?? (presetNeedsManager ? '/client/support' : null);
+  const displayHref = item.href;
   const displayReason = presetNeedsManager
     ? 'Менеджер создает email-аккаунты, прогревает почты и подключает их к вашему пресету. Имя отправителя он возьмет из поля «От чьего лица ведём диалог» в брифе, заполните его, если еще не заполнили.'
     : item.blocked_reason;
-  const actionLabel = presetNeedsManager
-    ? 'Написать менеджеру в чат →'
-    : isNext && displayHref
-      ? 'Сделать сейчас →'
-      : null;
+  const actionLabel = isNext && displayHref ? 'Сделать сейчас →' : null;
 
   const Wrapper: React.ElementType = displayHref ? Link : 'div';
   const wrapperProps = displayHref
@@ -293,6 +330,14 @@ function ChecklistRow({
           <p className="text-[11px] mt-1" style={{ color: 'var(--cp-text-m)' }}>
             {displayReason}
           </p>
+        )}
+        {presetNeedsManager && (
+          <p className="text-[11px] mt-1 font-semibold" style={{ color: 'var(--cp-amber)' }}>
+            {mailReadyText(mailReadyAt ?? null)}
+          </p>
+        )}
+        {item.id === 'domains' && (isNext || item.done) && (
+          <DomainSelector done={item.done} onChanged={onChanged} />
         )}
       </div>
     </Wrapper>

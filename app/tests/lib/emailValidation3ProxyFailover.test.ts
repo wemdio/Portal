@@ -62,3 +62,47 @@ describe('3 probe-IP: failover-каскад + память слепых', () => 
     expect(fetchMock).toHaveBeenCalledTimes(3); // покрытие не теряем — пробуем всё
   });
 });
+
+describe('4xx про egress (FCrDNS/PTR) — failover, а не greylist-affinity', () => {
+  const FCRDNS_GREY = {
+    code: 450, exists: null, isCatchAll: null, greylist: true,
+    smtpText: '450 4.7.25 Client host rejected: cannot find your hostname, [144.31.54.166]',
+  };
+  const TRUE_GREY = {
+    code: 450, exists: null, isCatchAll: null, greylist: true,
+    smtpText: '450 4.7.1 Greylisted, try again in 900 seconds',
+  };
+
+  it('proxy-a FCrDNS-режется, proxy-b рабочий → ok через failover, без affinity-петли', async () => {
+    // Реальный кейс 2026-07-25 (mx2.isource.ru): IP без PTR получает 450 FCrDNS,
+    // другой egress даёт 250. Старый greylist-путь прибивал пробу к слепому IP.
+    fetchMock.mockImplementation((url) =>
+      json(String(url).includes('proxy-a') ? FCRDNS_GREY : OK));
+
+    const r1 = await validateEmail('u1@corp.ru', cacheWith('corp.ru'));
+    expect(r1.result).toBe('ok');
+    expect(fetchMock).toHaveBeenCalledTimes(2); // a (4xx egress) → b (250)
+
+    // proxy-a помечен слепым к этому MX: следующая проба стартует с proxy-b
+    fetchMock.mockClear();
+    const r2 = await validateEmail('u2@corp.ru', cacheWith('corp.ru'));
+    expect(r2.result).toBe('ok');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('proxy-b');
+  });
+
+  it('настоящий greylist (try again) → greylist unknown, failover НЕ делаем (1 вызов)', async () => {
+    fetchMock.mockImplementation(() => json(TRUE_GREY));
+    const res = await validateEmail('u@corp.ru', cacheWith('corp.ru'));
+    expect(res.result).toBe('unknown');
+    expect(res.details.step).toBe('greylist');
+    expect(fetchMock).toHaveBeenCalledTimes(1); // affinity + отложенный ретрай, не каскад
+  });
+
+  it('FCrDNS на всех egress → unknown (greylist-ветка), все egress испробованы', async () => {
+    fetchMock.mockImplementation(() => json(FCRDNS_GREY));
+    const res = await validateEmail('u@corp.ru', cacheWith('corp.ru'));
+    expect(res.result).toBe('unknown');
+    expect(fetchMock).toHaveBeenCalledTimes(3); // покрытие не теряем
+  });
+});

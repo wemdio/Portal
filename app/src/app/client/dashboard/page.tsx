@@ -96,7 +96,7 @@ interface RepliesResponse {
 }
 
 interface OnboardingItem {
-  id: 'brief' | 'preset' | 'first_base' | 'first_clean' | 'first_sequence' | 'first_launch';
+  id: 'brief' | 'domains' | 'preset' | 'first_base' | 'first_clean' | 'first_sequence' | 'first_launch';
   label: string;
   done: boolean;
   href: string | null;

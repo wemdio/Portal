@@ -251,6 +251,10 @@ type EmailValidationState = {
   error: string | null;
   jobId: string | null;
   detectedJob: { id: string; total: number; processed: number; progress: number } | null;
+  lastCompletedJob: {
+    id: string; total: number; processed: number;
+    success_count: number; error_count: number; completed_at: string | null;
+  } | null;
 };
 
 type DadataFieldOption = {
@@ -1573,6 +1577,7 @@ export function DatabaseSpreadsheet() {
     error: null,
     jobId: null,
     detectedJob: null,
+    lastCompletedJob: null,
   });
   const emailValidationAbortRef = useRef<AbortController | null>(null);
   const [dadataEnrichment, setDadataEnrichment] = useState<DadataEnrichmentState>({
@@ -6697,15 +6702,27 @@ export function DatabaseSpreadsheet() {
   // ── Email Validation (Валидация почт) ──────────────────────────────
 
   const openEmailValidationModal = async () => {
-    setEmailValidation((prev) => ({ ...prev, isOpen: true, sourceCol: 0, error: null, detectedJob: null }));
+    setEmailValidation((prev) => ({ ...prev, isOpen: true, sourceCol: 0, error: null, detectedJob: null, lastCompletedJob: null }));
     const token = await getFreshToken();
     if (!token) return;
     try {
       const res = await fetch('/api/email-validation/jobs', { headers: { Authorization: `Bearer ${token}` } });
       if (res.ok) {
-        const data = await res.json() as { active_job?: { id: string; total: number; processed: number; progress: number } | null };
+        const data = await res.json() as {
+          active_job?: { id: string; total: number; processed: number; progress: number } | null;
+          last_completed_job?: {
+            id: string; total: number; processed: number;
+            success_count: number; error_count: number; completed_at: string | null;
+          } | null;
+        };
         if (data.active_job) {
           setEmailValidation((prev) => ({ ...prev, detectedJob: data.active_job! }));
+        } else if (data.last_completed_job) {
+          setEmailValidation((prev) => ({ ...prev, lastCompletedJob: data.last_completed_job! }));
+          // Автобэкфилл: доливаем недостающие вердикты в фоне (тихо, только
+          // пустые ячейки). Активной валидации нет — джоб завершён, и возможны
+          // строки, чьи вердикты polling не донёс до таблицы.
+          void runEmailValidationBackfill(data.last_completed_job);
         }
       }
     } catch { /* ignore */ }
@@ -6908,6 +6925,139 @@ export function DatabaseSpreadsheet() {
         setLastAction({ message: `Валидация почт: ошибка — ${errorMsg}`, time: Date.now() });
       }
     }
+  };
+
+  // Автобэкфилл: при открытии модалки валидации подтягивает вердикты ПОСЛЕДНЕЙ
+  // завершённой задачи в строки, где результат пуст. Нужен на случай, когда
+  // polling умер раньше джоба (закрытая вкладка, обрыв сети, старый watchdog
+  // «зависла»): воркер вердикты довёл, а таблица осталась с пустыми строками.
+  // Консервативно: только ПУСТЫЕ ячейки (ничего не перезаписывает), матч по
+  // email (устойчиво к сортировке/правкам), без совпадений — молча ничего
+  // не делает (даже колонки не добавляет).
+  const runEmailValidationBackfill = async (
+    job: NonNullable<EmailValidationState['lastCompletedJob']>,
+  ) => {
+    if (!activeTab) return;
+    const token = await getFreshToken();
+    if (!token) return;
+    try {
+      type ResultRow = {
+        row_index: number; email_normalized: string | null; result: string | null; quality: string | null;
+        is_free: boolean; is_role: boolean; is_disposable: boolean; is_catch_all: boolean;
+        did_you_mean: string | null; status: string; last_error: string | null;
+      };
+      const PAGE_LIMIT = 2000;
+      const byEmail = new Map<string, ResultRow>();
+      let cursor: string | null = null;
+      for (;;) {
+        const res = await fetch(
+          `/api/email-validation/jobs/${job.id}/results?cursor=${encodeURIComponent(cursor ?? '')}&limit=${PAGE_LIMIT}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (!res.ok) return; // тихий фолбэк: это фоновая автоматика, не блокируем UI
+        const data = await res.json() as { results?: ResultRow[]; next_cursor?: string | null };
+        const pageRows = data.results ?? [];
+        for (const r of pageRows) {
+          const em = (r.email_normalized ?? '').toLowerCase();
+          if (em) byEmail.set(em, r);
+        }
+        if (pageRows.length < PAGE_LIMIT || data.next_cursor === cursor) break;
+        cursor = data.next_cursor ?? null;
+      }
+      if (byEmail.size === 0) return;
+
+      const headerRow = activeTab.data[0] ?? [];
+      const emailSourceCol = headerRow.findIndex((h) => {
+        const label = String(h).toLowerCase();
+        return label.includes('email') || label.includes('почт') || label.includes('e-mail');
+      });
+      if (emailSourceCol < 0) return;
+
+      let resultColIndex = headerRow.findIndex((h) => String(h).startsWith('Результат ('));
+      const colsMissing = resultColIndex < 0;
+      if (colsMissing) resultColIndex = headerRow.length;
+      const qualityColIndex = resultColIndex + 1;
+      const providerColIndex = resultColIndex + 2;
+      const detailsColIndex = resultColIndex + 3;
+
+      const RESULT_LABELS: Record<string, string> = {
+        ok: 'OK', invalid: 'Невалидный', disposable: 'Одноразовый',
+        catch_all: 'Catch-All', unknown: 'Неизвестно',
+      };
+      const QUALITY_LABELS: Record<string, string> = {
+        good: 'Хороший', bad: 'Плохой', risky: 'Рискованный',
+      };
+
+      // Сначала считаем совпадения по ПУСТЫМ ячейкам результата — без них
+      // таблицу вообще не трогаем (чужая вкладка, другая база и т.п.).
+      const hasFillable = activeTab.data.some((row, rowIdx) => {
+        if (rowIdx === 0) return false;
+        const email = String(row[emailSourceCol] ?? '').trim().toLowerCase();
+        if (!email || !byEmail.has(email)) return false;
+        return colsMissing || !String(row[resultColIndex] ?? '').trim();
+      });
+      if (!hasFillable) return;
+
+      let filled = 0;
+      setTabs((prev) =>
+        prev.map((t) => {
+          if (t.id !== activeTab.id) return t;
+          // Пишем в ЖИВОЕ состояние вкладки, а не снапшот на момент открытия
+          // модалки: пока шли fetch'и, пользователь мог править ячейки или
+          // запустить новую валидацию (её polling пишет в те же колонки).
+          // Индексы колонок — тоже от живого header'а.
+          const liveHeader = t.data[0] ?? [];
+          let liveResultCol = liveHeader.findIndex((h) => String(h).startsWith('Результат ('));
+          const liveColsMissing = liveResultCol < 0;
+          if (liveColsMissing) liveResultCol = liveHeader.length;
+          const liveQualityCol = liveResultCol + 1;
+          const liveProviderCol = liveResultCol + 2;
+          const liveDetailsCol = liveResultCol + 3;
+
+          let touched = false;
+          const data = t.data.map((row, rowIdx) => {
+            const extended = [...row];
+            while (extended.length <= liveDetailsCol) extended.push('');
+            if (rowIdx === 0) {
+              if (liveColsMissing) {
+                extended[liveResultCol] = 'Результат (email)';
+                extended[liveQualityCol] = 'Качество';
+                extended[liveProviderCol] = 'Провайдер';
+                extended[liveDetailsCol] = 'Детали';
+                touched = true;
+              }
+              return extended;
+            }
+            const email = String(row[emailSourceCol] ?? '').trim().toLowerCase();
+            if (!email) return extended;
+            const r = byEmail.get(email);
+            if (!r) return extended;
+            // Ключевая защита от гонок: ячейка пуста в ЖИВОМ состоянии?
+            // Polling новой валидации и правки пользователя перезаписывают нас
+            // (мы — никого), зато и мы не затираем их.
+            if (String(extended[liveResultCol]).trim()) return extended;
+            if (!String(extended[liveProviderCol]).trim()) extended[liveProviderCol] = getEmailProvider(email);
+            extended[liveResultCol] = r.result ? (RESULT_LABELS[r.result] || r.result) : (r.last_error ?? 'Ошибка');
+            extended[liveQualityCol] = r.quality ? (QUALITY_LABELS[r.quality] || r.quality) : '';
+            const detailParts: string[] = [];
+            if (r.is_free) detailParts.push('Free');
+            if (r.is_role) detailParts.push('Role');
+            if (r.is_disposable) detailParts.push('Disposable');
+            if (r.is_catch_all) detailParts.push('Catch-All');
+            if (r.did_you_mean) detailParts.push(`→ ${r.did_you_mean}`);
+            if (r.last_error && (r.status === 'failed' || r.result === 'unknown')) detailParts.push(r.last_error);
+            extended[liveDetailsCol] = detailParts.join('; ');
+            filled += 1;
+            touched = true;
+            return extended;
+          });
+          return touched ? { ...t, data } : t;
+        }),
+      );
+      if (filled > 0) {
+        setLastAction({ message: `Валидация почт: подтянуто ${filled} результатов из последней задачи`, time: Date.now() });
+      }
+    } catch { /* фоновая автоматика — ошибки глушим */ }
   };
 
   const handleStartEmailValidation = async () => {
