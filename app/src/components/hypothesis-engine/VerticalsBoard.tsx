@@ -214,6 +214,7 @@ function VerticalCard({
             type="button"
             onClick={() => onRunChain(vertical.id, language)}
             disabled={chainBusy}
+            title="Сначала черновик; боевой шаблон собирается во вкладке „Базы“"
             className="inline-flex h-9 items-center gap-1.5 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {chainBusy ? (

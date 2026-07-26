@@ -1,8 +1,9 @@
 /**
  * Стадия vocab: вертикаль → LLM-матрица вокабуляра (типы компаний ×
- * должности × поисковые запросы) + best-effort Serper-верификация топовых
- * терминов (термин без единого результата помечается в notes). Пишется
- * в he_vocab.
+ * должности с разметкой buyer/campaign_target × поисковые запросы) +
+ * best-effort Serper-верификация топовых терминов и запросов к
+ * реестрам/каталогам (термин/запрос без единого результата помечается
+ * в notes). Пишется в he_vocab.
  */
 
 import { callLLMWithSchema, getHeModel } from '../llm';
@@ -20,6 +21,7 @@ import {
 } from './shared';
 
 const TERMS_TO_VERIFY = 3;
+const REGISTRY_QUERIES_TO_VERIFY = 2;
 
 export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
@@ -40,6 +42,7 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
   if (hError) throw new Error(`he_hypotheses read: ${hError.message}`);
   const hypotheses = (hyps ?? []) as Array<Pick<HeHypothesis, 'title' | 'description'>>;
 
+  const model = getHeModel('bulk');
   const llm = await callLLMWithSchema(
     buildVocabMessages({
       verticalName: vertical.name,
@@ -48,7 +51,7 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
       hypotheses,
     }),
     HeVocabSchema,
-    { model: getHeModel('bulk'), maxTokens: 8192 },
+    { model, maxTokens: 8192 },
   );
   addUsage(usage, llm);
   const vocab = llm.data;
@@ -78,14 +81,39 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
     }
   }
 
+  // То же для запросов к реестрам/каталогам: код или источник, который поиск
+  // не находит вообще, помечаем в notes — специалист увидит и снимет.
+  const searchQueries = [...vocab.search_queries];
+  const queryIdxs = searchQueries
+    .map((q, i) => ({ q, i }))
+    .filter(({ q }) => /registry|catalog/i.test(q.source))
+    .slice(0, REGISTRY_QUERIES_TO_VERIFY)
+    .map(({ i }) => i);
+  for (const i of queryIdxs) {
+    const q = searchQueries[i];
+    try {
+      const items = await search(q.query);
+      if (!items.length) {
+        searchQueries[i] = {
+          ...q,
+          notes: q.notes ? `${q.notes}; поиском не подтверждён` : 'поиском не подтверждён',
+        };
+        stageLog(ctx, `[vocab] запрос «${q.query}» (${q.source}) не подтверждён поиском`);
+      }
+    } catch {
+      // Поиск упал — пропускаем верификацию молча.
+    }
+  }
+
   const { data: inserted, error: insError } = await ctx.supabase
     .from('he_vocab')
     .insert({
       vertical_id: verticalId,
       company_types: companyTypes,
       job_titles: vocab.job_titles,
-      search_queries: vocab.search_queries,
+      search_queries: searchQueries,
       status: 'ready',
+      llm_model: model,
     })
     .select('id')
     .single();
@@ -96,7 +124,7 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
       vocab_id: (inserted as { id: string }).id,
       company_types: companyTypes,
       job_titles: vocab.job_titles,
-      search_queries: vocab.search_queries,
+      search_queries: searchQueries,
     },
     tokensUsed: usage.tokensUsed,
     costUsd: usage.costUsd,

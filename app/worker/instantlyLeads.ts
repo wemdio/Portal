@@ -21,8 +21,12 @@ const OTHERS_ENABLED = ['1', 'true', 'yes', 'on'].includes(
 // Нижний порог обязателен: пустая env ('' → Number('')=0) или '15m' (NaN)
 // превратили бы sleep в ноль — горячий цикл по Instantly API = 429-шторм
 // всему воркспейсу (класс инцидента 22.05).
+// Пустая/отсутствующая env = «не задано» (NaN → fallback), а не 0: Number('')=0
+// проходил бы порог min:0 у стартовой задержки и молча отменял её — первый тик
+// вотчдога стартовал бы синхронно с первым тиком поллера (находка ревью 25.07).
 function envMs(name: string, fallback: number, min: number): number {
-  const raw = Number(process.env[name] ?? '');
+  const env = process.env[name];
+  const raw = env === undefined || env === '' ? NaN : Number(env);
   return Number.isFinite(raw) && raw >= min ? raw : fallback;
 }
 const OTHERS_INTERVAL_MS = envMs('INSTANTLY_OTHERS_POLL_INTERVAL_MS', 900_000, 60_000);

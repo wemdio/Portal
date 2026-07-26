@@ -20,7 +20,7 @@ import {
 } from './shared';
 
 /** Паузы в днях после предыдущего письма по индексу письма (0-based). */
-export const CHAIN_WAIT_DAYS = [0, 2, 3, 4, 4, 5];
+export const CHAIN_WAIT_DAYS = [0, 3, 7, 12, 16, 21];
 
 /** ParsedLetter[] letterParser → HeChainLetter[] с лесенкой wait_days. */
 export function parsedToChainLetters(parsed: ParsedLetter[]): HeChainLetter[] {
@@ -56,6 +56,8 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   if (hError) throw new Error(`he_hypotheses read: ${hError.message}`);
   const hypotheses = (hyps ?? []) as HeHypothesis[];
 
+  const brief = (project.brief ?? {}) as Record<string, unknown>;
+
   const messages = buildChainMessages({
     language,
     verticalName: vertical.name,
@@ -67,7 +69,8 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       potential_pct: h.potential_pct,
       evidence: (Array.isArray(h.evidence) ? h.evidence : []) as HeEvidenceItem[],
     })),
-    briefText: JSON.stringify(project.brief ?? {}),
+    briefText: JSON.stringify(brief),
+    offerOverride: typeof brief.offer_override === 'string' ? brief.offer_override : undefined,
     operatorsHint: typeof job.payload?.operators_hint === 'string' ? job.payload.operators_hint : undefined,
   });
 
@@ -100,6 +103,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       language,
       letters,
       status: 'ready',
+      llm_model: model,
       tokens_used: usage.tokensUsed,
       cost_usd: usage.costUsd,
     })
