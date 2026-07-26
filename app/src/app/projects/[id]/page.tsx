@@ -13,6 +13,7 @@ import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/project
 import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 import { InstantlyInsightsSection } from '@/components/projects/InstantlyInsightsSection';
 import { SERVICE_OPTIONS } from '@/lib/projectServices';
+import { BOARD_COLUMN_LABELS } from '@/lib/leadBoard/boardColumns';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика', 'Партнер'];
@@ -146,6 +147,10 @@ export default function ProjectPage() {
   const [allCampaigns, setAllCampaigns] = useState<{ id: string; name: string }[]>([]);
   const [campaignSearch, setCampaignSearch] = useState('');
   const [showCampaignPicker, setShowCampaignPicker] = useState(false);
+  const [leadBoard, setLeadBoard] = useState<{ link: string; columnConfig: { key: string; visible: boolean }[] } | null>(null);
+  const [leadBoardError, setLeadBoardError] = useState('');
+  const [boardSaving, setBoardSaving] = useState(false);
+  const [boardMessage, setBoardMessage] = useState('');
 
   const canEdit = canEditProjects(userRole);
 
@@ -156,6 +161,7 @@ export default function ProjectPage() {
       void fetchClientUsers();
       void fetchLinkedCampaigns();
       void fetchAllCampaigns();
+      void fetchLeadBoard();
     }
   }, [id]);
 
@@ -245,6 +251,79 @@ export default function ProjectPage() {
       });
       setLinkedCampaigns((prev) => prev.filter((c) => c.campaign_id !== campaignId));
     } catch { /* non-critical */ }
+  }
+
+  async function fetchLeadBoard() {
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`/api/projects/${id}/lead-board`, { headers });
+      if (!res.ok) {
+        // Явный error-state, а не вечная «Загрузка…»: в т.ч. пока миграция
+        // project_lead_board ещё не применена (GET лениво создаёт доску → 500).
+        setLeadBoardError(`не удалось загрузить ссылку (HTTP ${res.status})`);
+        return;
+      }
+      const json = await res.json() as { link: string; columnConfig: { key: string; visible: boolean }[] };
+      setLeadBoardError('');
+      setLeadBoard(json);
+    } catch {
+      setLeadBoardError('ошибка загрузки ссылки');
+    }
+  }
+
+  async function toggleBoardColumn(key: string) {
+    if (!leadBoard) return;
+    const next = leadBoard.columnConfig.map((c) => (c.key === key ? { ...c, visible: !c.visible } : c));
+    setLeadBoard({ ...leadBoard, columnConfig: next });
+    setBoardSaving(true);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`/api/projects/${id}/lead-board`, {
+        method: 'PATCH',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ columnConfig: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setBoardMessage('Колонки сохранены');
+      setTimeout(() => setBoardMessage(''), 3000);
+    } catch {
+      void fetchLeadBoard(); // откат оптимистичного обновления
+    } finally {
+      setBoardSaving(false);
+    }
+  }
+
+  async function regenerateBoardLink() {
+    if (!window.confirm('Перегенерировать ссылку? Старая перестанет работать (в том числе в старых TG-карточках и у клиента, если он её сохранил).')) return;
+    setBoardSaving(true);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`/api/projects/${id}/lead-board`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'regenerate' }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json() as { link: string };
+      setLeadBoard((prev) => (prev ? { ...prev, link: json.link } : prev));
+      setBoardMessage('Ссылка перегенерирована');
+      setTimeout(() => setBoardMessage(''), 3000);
+    } catch {
+      setBoardMessage('Ошибка перегенерации ссылки');
+    } finally {
+      setBoardSaving(false);
+    }
+  }
+
+  async function copyBoardLink() {
+    if (!leadBoard) return;
+    try {
+      await navigator.clipboard.writeText(leadBoard.link);
+      setBoardMessage('Ссылка скопирована');
+      setTimeout(() => setBoardMessage(''), 3000);
+    } catch {
+      setBoardMessage('Не удалось скопировать — выделите ссылку вручную');
+    }
   }
 
   async function fetchProject(projectId: string) {
@@ -1152,6 +1231,77 @@ export default function ProjectPage() {
                     </div>
                   )}
                 </div>
+              )}
+            </div>
+          </SectionCard>
+
+          {/* Гостевая таблица лидов: постоянная ссылка + видимость колонок */}
+          <SectionCard title="Таблица лидов (гостевая ссылка)">
+            <div className="space-y-3">
+              {!leadBoard ? (
+                <p className={`text-sm ${leadBoardError ? 'text-amber-600' : 'text-gray-400'}`}>
+                  {leadBoardError || 'Загрузка…'}
+                </p>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={leadBoard.link}
+                      onFocus={(e) => e.target.select()}
+                      className="w-full rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void copyBoardLink()}
+                      className="shrink-0 rounded-md border border-gray-200 px-3 py-2 text-xs text-gray-700 hover:bg-gray-50 transition-colors"
+                    >
+                      Копировать
+                    </button>
+                    <a
+                      href={leadBoard.link}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="shrink-0 rounded-md border border-gray-200 px-3 py-2 text-xs text-blue-600 hover:bg-blue-50 transition-colors"
+                    >
+                      Открыть
+                    </a>
+                  </div>
+                  <p className="text-xs text-gray-400">
+                    Постоянная ссылка: все лиды проекта + обратная связь клиента (качество,
+                    комментарий, «взяли в работу»). Автоматически добавляется в TG-карточки
+                    новых лидов; клиенту её пересылает специалист.
+                  </p>
+                  <div>
+                    <p className="mb-1 text-xs uppercase tracking-wide text-gray-400">Колонки таблицы</p>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                      {leadBoard.columnConfig.map((c) => (
+                        <label key={c.key} className="flex items-center gap-2 text-sm text-gray-700">
+                          <input
+                            type="checkbox"
+                            checked={c.visible}
+                            disabled={!canEdit || boardSaving}
+                            onChange={() => void toggleBoardColumn(c.key)}
+                            className="accent-blue-600"
+                          />
+                          {BOARD_COLUMN_LABELS[c.key] ?? c.key}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  {canEdit && (
+                    <button
+                      type="button"
+                      onClick={() => void regenerateBoardLink()}
+                      disabled={boardSaving}
+                      className="text-xs text-red-600 hover:text-red-700 transition-colors disabled:opacity-50"
+                    >
+                      Перегенерировать ссылку (старая перестанет работать)
+                    </button>
+                  )}
+                  {boardMessage && <p className="text-xs text-emerald-600">{boardMessage}</p>}
+                </>
               )}
             </div>
           </SectionCard>

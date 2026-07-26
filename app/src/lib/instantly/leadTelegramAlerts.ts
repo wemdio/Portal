@@ -19,6 +19,8 @@ export interface LeadTelegramAlertData {
   replySubject: string | null;
   replyPreview: string | null;
   aiReason: string | null;
+  /** Гостевая таблица лидов проекта (/leads-board/...). null — строки нет. */
+  boardLink?: string | null;
 }
 
 interface TgSendResult {
@@ -124,6 +126,11 @@ function buildMessage(data: LeadTelegramAlertData): string {
   if (data.aiReason) {
     lines.push('');
     lines.push(`<b>AI:</b> ${escapeHtml(data.aiReason)}`);
+  }
+
+  if (data.boardLink) {
+    lines.push('');
+    lines.push(`📋 <a href="${escapeHtml(data.boardLink)}">Все лиды проекта</a>`);
   }
 
   lines.push('');
