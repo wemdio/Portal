@@ -20,12 +20,18 @@ import type { Email } from './types';
  * доменам, чьи кампании крутятся во внешних платформах (Coldy/Trigga) — их
  * там уже разбирают, и сюда их тащить НЕЛЬЗЯ (задублируем спецам).
  *
- * Как: редкий тик (дефолт 15 мин, ~0.07 RPM — воркспейс-лимит 10 RPM общий,
- * основной поллер сам ест до ~10 вызовов/мин, поэтому частить нельзя) →
- * дешёвые локальные фильтры → атрибуция к кампании через
- * account-campaign-mappings → существующий qualifyOneReply (guard'ы,
- * критерии, дедуп, алерты). ИИ видит только выживших после фильтров
+ * Как: редкий тик (дефолт 15 мин) → дешёвые локальные фильтры → атрибуция к
+ * кампании через account-campaign-mappings → существующий qualifyOneReply
+ * (guard'ы, критерии, дедуп, алерты). ИИ видит только выживших после фильтров
  * (единицы в день), не весь поток.
+ *
+ * Нагрузка на Instantly API (воркспейс-лимит ~10 RPM, основной поллер сам ест
+ * до ~10 вызовов/мин — поэтому всё зажато дважды): 2 страницы Others на тик
+ * (~0.07 RPM, пейс 2с) + ~11 страниц /accounts раз в 12ч (пейс 2с) + пробы
+ * атрибуции/тем — ВСЕ через единый бюджет с пейсингом 800мс
+ * (INSTANTLY_OTHERS_PROBE_BUDGET, дефолт 25 вызовов/тик ≈ ≤1.7 RPM среднего
+ * даже в warmup-волну; исчерпание = отложить на следующий тик, не дроп).
+ * Типичный тик: 4-8 проб.
  *
  * Фильтр (валидирован замером, см. wiki-память instantly-others-tab-unreachable):
  *  1. отправитель НЕ с нашего рассыльного домена (иначе это внутренний прогрев);
@@ -58,11 +64,40 @@ function workerLog(level: 'info' | 'warn' | 'error', msg: string, extra?: unknow
 }
 
 function envNumber(name: string, fallback: number): number {
-  const raw = Number(process.env[name] ?? String(fallback));
+  const env = process.env[name];
+  // Пустая строка = «не задано»: Number('')=0 молча обнулял бы TTL/задержки
+  // (TTL=0 = кэш фактически выключен, перефетч каждый тик).
+  const raw = env === undefined || env === '' ? fallback : Number(env);
   return Number.isFinite(raw) ? raw : fallback;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Бюджет + пейсер Instantly-проб на тик (маппинги атрибуции + sent-пробы тем).
+ * Воркспейс-лимит ~10 RPM почти целиком ест основной поллер, а warmup-волна без
+ * бюджета давала бёрст в сотни вызовов за тик (до 4 маппингов на новый домен +
+ * до 3 sent-проб на письмо × сотня кандидатов) → 429 обоим контурам (гипотеза
+ * инцидента 20.07). take() = false при исчерпании — вызывающий код ОТКЛАДЫВАЕТ
+ * работу на следующий тик (null), не дропает и не пишет негативный кэш.
+ */
+function makeProbeMeter(budget: number, delayMs: number) {
+  let used = 0;
+  return {
+    /** Первая проба тика без паузы, дальше — delayMs между любыми двумя пробами. */
+    async take(): Promise<boolean> {
+      if (used >= budget) return false;
+      if (used > 0) await sleep(delayMs);
+      used++;
+      return true;
+    },
+    exhausted(): boolean {
+      return used >= budget;
+    },
+  };
+}
+
+type ProbeMeter = ReturnType<typeof makeProbeMeter>;
 
 const API_KEY = () =>
   process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
@@ -239,6 +274,7 @@ function parseMappingItems(raw: unknown): MappingItem[] {
 async function getDomainCampaignCandidates(
   citedDomain: string,
   mailboxesByDomain: Map<string, string[]>,
+  meter: ProbeMeter,
 ): Promise<CampaignCandidate[] | null> {
   const cached = domainCandidatesCache.get(citedDomain);
   if (cached && Date.now() - cached.at < cached.ttl) return cached.value;
@@ -260,6 +296,9 @@ async function getDomainCampaignCandidates(
   let probed = 0;
   for (const mailbox of mailboxes) {
     if (probed >= MAX_MAILBOX_PROBES_PER_DOMAIN) break;
+    // Бюджет/пейсинг маппинг-проб: warmup-волна без них давала десятки
+    // неспейсенных вызовов подряд. Исчерпание — отложить, НЕ кэшировать.
+    if (!(await meter.take())) return null;
     probed++;
     let items: MappingItem[] = [];
     try {
@@ -305,23 +344,66 @@ async function getDomainCampaignCandidates(
 // короткий TTL: новые отправки появляются, но темы-шаблоны стабильны.
 const campaignSentCache = new Map<string, { at: number; emails: Email[] }>();
 
-async function fetchCampaignSent(campaignId: string, accountId: string): Promise<Email[] | null> {
+/**
+ * Подметание + кап кэша sent-писем. TTL проверяется только при чтении, а одна
+ * запись — до 100 ПОЛНЫХ писем с html (десятки КБ): бездонный Map за недели
+ * аптайма = сотни МБ в heap. Воркер — общий с основным поллером процесс, его
+ * OOM уронил бы оба контура (HIGH-находка swarm-ревью 25.07).
+ */
+function pruneCampaignSentCache(ttl: number): void {
+  const now = Date.now();
+  for (const [id, entry] of campaignSentCache) {
+    if (now - entry.at >= ttl) campaignSentCache.delete(id);
+  }
+  const cap = Math.max(1, envNumber('INSTANTLY_OTHERS_SENT_CACHE_MAX', 50));
+  if (campaignSentCache.size <= cap) return;
+  const byAge = [...campaignSentCache.entries()].sort((a, b) => a[1].at - b[1].at);
+  for (const [id] of byAge.slice(0, campaignSentCache.size - cap)) {
+    campaignSentCache.delete(id);
+  }
+}
+
+async function fetchCampaignSent(
+  campaignId: string,
+  accountId: string,
+  meter: ProbeMeter,
+): Promise<Email[] | null> {
   const ttl = envNumber('INSTANTLY_OTHERS_SENT_TTL_MS', 10 * 60 * 1000);
   const cached = campaignSentCache.get(campaignId);
   if (cached && Date.now() - cached.at < ttl) return cached.emails;
-  let emails: Email[];
-  try {
-    const res = await instantly.listEmails(
-      { campaign_id: campaignId, email_type: 'sent', limit: 100 },
-      { accountId },
-    );
-    emails = (res.items ?? []).filter((e) => (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3);
-  } catch (err) {
-    workerLog('warn', `campaign sent fetch failed for ${campaignId} — attribution deferred`, err);
-    return null; // транзиентно: не квалифицируем этот тик, но и не дропаем
+  for (let attempt = 0; attempt < 2; attempt++) {
+    // Пейсинг (в т.ч. перед ретраем-на-пусто) и бюджет тика — в meter;
+    // исчерпание бюджета = отложить (null), не дропать.
+    if (!(await meter.take())) return null;
+    let items: Email[];
+    let rawCount = 0;
+    try {
+      const res = await instantly.listEmails(
+        { campaign_id: campaignId, email_type: 'sent', limit: 100 },
+        { accountId },
+      );
+      rawCount = (res.items ?? []).length;
+      items = (res.items ?? []).filter((e) => (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3);
+    } catch (err) {
+      workerLog('warn', `campaign sent fetch failed for ${campaignId} — attribution deferred`, err);
+      return null; // транзиентно: не квалифицируем этот тик, но и не дропаем
+    }
+    if (items.length > 0 || rawCount > 0) {
+      // Сначала вставка, ПОТОМ подметание: иначе кап срабатывал бы с лагом на
+      // одну запись (prune видит кэш без текущей вставки).
+      campaignSentCache.set(campaignId, { at: Date.now(), emails: items });
+      pruneCampaignSentCache(ttl);
+      return items;
+    }
+    // Известный флап Instantly: /emails под нагрузкой отдаёт пусто (тот же урок,
+    // что с search=<email>). Один ретрай; пустой результат НЕ кэшируем — иначе
+    // 10 минут слепоты по кампании = молча дропнутые реальные ответы (находка
+    // ревью 25.07). Следующий тик перепроверит.
+    if (attempt === 0) {
+      workerLog('info', `campaign sent fetch returned empty for ${campaignId} — retrying once (possible API flap)`);
+    }
   }
-  campaignSentCache.set(campaignId, { at: Date.now(), emails });
-  return emails;
+  return [];
 }
 
 // Нормализация темы: срезаем ведущие Re/Fwd, нижний регистр, схлопываем
@@ -339,6 +421,13 @@ function subjectTemplate(s: string | undefined): string {
 }
 
 const SUBJECT_MIN_PREFIX = 15;
+// Общий префикс должен покрывать ≥70% меньшей темы И заканчиваться на границе
+// слова: «Коммерческое предложение для ООО X» и «Коммерческое предложение —
+// оптовым клиентам» делят 26 символов чистого клише, а «Стратегия роста продаж»
+// и «стратегия роста промо» — 19 символов с обрывом посреди слова. Обе пары —
+// типичные warmup-коллизии (MEDIUM-находки swarm-ревью 25.07).
+const SUBJECT_PREFIX_MIN_COVERAGE = 0.7;
+const WORD_CHAR_RE = /[0-9a-zа-яё]/i;
 
 /**
  * Ответ считается настоящим ответом НА КАМПАНИЮ, если его тема = «Re: <тема,
@@ -349,9 +438,20 @@ const SUBJECT_MIN_PREFIX = 15;
  * «Крипто-Фактор» — префикс 0). Возвращает совпавшее исходящее (контекст для
  * ИИ) или null.
  *
- * Матч по (а) равенству/префиксу ШАБЛОНА без персонализации («по вопросу
- * вентиляции» == «по вопросу вентиляции») ИЛИ (б) общему префиксу ≥15 симв.
- * (ловит незакавыченную персонализацию — «Ищу ответственного X»).
+ * Матч (по убыванию силы сигнала):
+ *  (а) равенство ШАБЛОНОВ без персонализации «…» (оба ≥8 симв.) — «по вопросу
+ *      вентиляции» == «по вопросу вентиляции»;
+ *  (б) вложенность шаблонов, но только если меньший ≥15 симв. — ловит
+ *      НЕзакавыченную персонализацию («предложение для ромашки» начинается с
+ *      шаблона «предложение для»). Порог 15 отсекает короткие generic-темы
+ *      («Re: Добрый день!» ≠ «Добрый день»): с порогом 8 warmup с деловым
+ *      клише проходил бы;
+ *  (в) общий префикс ≥15 симв. с покрытием ≥70% меньшей темы и концом на
+ *      границе слова (см. константы выше).
+ *
+ * Остаточный принятый риск: warmup-тема, почти дословно повторяющая длинный
+ * generic-шаблон кампании, пройдёт — дальше решает ИИ (алерт при вердикте
+ * «лид»; DM клиенту зажат clientDmOnlyOnLead).
  */
 function matchReplyToCampaign(replySubject: string | undefined, sent: Email[]): Email | null {
   const rs = subjectStem(replySubject);
@@ -361,12 +461,21 @@ function matchReplyToCampaign(replySubject: string | undefined, sent: Email[]): 
     const ss = subjectStem(e.subject);
     if (!ss) continue;
     const st = subjectTemplate(e.subject);
-    if (rt.length >= 8 && st.length >= 8 && (rt === st || rt.startsWith(st) || st.startsWith(rt))) {
-      return e;
-    }
+    const minTemplate = Math.min(rt.length, st.length);
+    if (rt === st && minTemplate >= 8) return e;
+    if (minTemplate >= SUBJECT_MIN_PREFIX && (rt.startsWith(st) || st.startsWith(rt))) return e;
     let i = 0;
     while (i < rs.length && i < ss.length && rs[i] === ss[i]) i++;
-    if (i >= SUBJECT_MIN_PREFIX) return e;
+    if (
+      i >= SUBJECT_MIN_PREFIX &&
+      i >= SUBJECT_PREFIX_MIN_COVERAGE * Math.min(rs.length, ss.length) &&
+      (i === rs.length ||
+        i === ss.length ||
+        !WORD_CHAR_RE.test(rs[i] ?? '') ||
+        !WORD_CHAR_RE.test(ss[i] ?? ''))
+    ) {
+      return e;
+    }
   }
   return null;
 }
@@ -492,15 +601,24 @@ export async function pollOthersOnce(): Promise<number> {
   const maxPerTick = Math.max(1, envNumber('INSTANTLY_OTHERS_MAX_PER_TICK', 5));
   const interDelay = Math.max(1000, envNumber('INSTANTLY_LEADS_INTER_REPLY_DELAY_MS', 3500));
   const probeDelay = Math.max(200, envNumber('INSTANTLY_OTHERS_PROBE_DELAY_MS', 800));
+  // Бюджет Instantly-проб на тик (INSTANTLY_OTHERS_PROBE_BUDGET): типичный тик
+  // ест ~4-8 вызовов, warmup-волна без потолка дала бы сотни поверх ~10 RPM
+  // основного поллера. Исчерпание = отложить остаток на следующий тик: письма
+  // в окне сканирования его переживут, негативные кэши по ним не пишутся.
+  const probeBudget = Math.max(1, envNumber('INSTANTLY_OTHERS_PROBE_BUDGET', 25));
+  const meter = makeProbeMeter(probeBudget, probeDelay);
   let attempts = 0;
   let processed = 0;
   let warmupDropped = 0;
-  let probedThisTick = 0;
   for (const { email, citedDomain } of fresh) {
     if (attempts >= maxPerTick) break;
+    if (meter.exhausted()) {
+      workerLog('info', `probe budget (${probeBudget}/tick) exhausted — remaining candidate(s) deferred to next tick`);
+      break;
+    }
     const sender = (email.from_address_email ?? '').toLowerCase();
 
-    const candidates = await getDomainCampaignCandidates(citedDomain, mailboxesByDomain);
+    const candidates = await getDomainCampaignCandidates(citedDomain, mailboxesByDomain, meter);
     if (candidates === null) continue; // деградация — перепроверим на следующем тике
     if (candidates.length === 0) {
       // Домен без квалифицируемой кампании = Coldy/Trigga-прогрев или ещё не
@@ -522,16 +640,13 @@ export async function pollOthersOnce(): Promise<number> {
     // работает с любого адреса.
     //
     // Проба заодно выбирает ПРАВИЛЬНУЮ кампанию: у пул-домена их несколько (в т.ч.
-    // разных клиентов) — берём ту, чьи темы совпали. Пейсим probeDelay: на тик из
-    // warmup-бэклога проб может быть много.
+    // разных клиентов) — берём ту, чьи темы совпали. Пейсинг/бюджет проб — в meter.
     let chosen: CampaignCandidate | null = null;
     let matchedOutreach: Email | null = null;
     let campaignMailboxes: string[] = [];
     let sentFetchFailed = false;
     for (const cand of candidates.slice(0, MAX_CAMPAIGN_PROBES_PER_EMAIL)) {
-      if (probedThisTick > 0) await sleep(probeDelay);
-      probedThisTick++;
-      const sent = await fetchCampaignSent(cand.campaignId, cand.accountId);
+      const sent = await fetchCampaignSent(cand.campaignId, cand.accountId, meter);
       if (sent === null) {
         sentFetchFailed = true; // транзиентный сбой fetch — не роняем в дроп
         continue;
@@ -607,7 +722,7 @@ export async function pollOthersOnce(): Promise<number> {
 
   workerLog(
     'info',
-    `Others tick done: ${processed} qualified, ${warmupDropped} dropped (no campaign outbound = warmup/non-reply)`,
+    `Others tick done: ${processed} qualified, ${warmupDropped} dropped (subject matches no campaign = warmup/non-reply)`,
   );
   return processed;
 }
