@@ -41,6 +41,11 @@ export interface HeProjectCreateResponse {
   error?: string;
 }
 
+export interface HeProjectResponse {
+  project?: HeProject;
+  error?: string;
+}
+
 export interface HeProjectDetailResponse {
   project?: HeProject;
   hypotheses?: HeHypothesis[];
@@ -83,6 +88,13 @@ export function hePost<T>(url: string, body?: unknown): Promise<{ ok: boolean; s
   return heCall<T>(url, {
     method: 'POST',
     body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+export function hePatch<T>(url: string, body: unknown): Promise<{ ok: boolean; status: number; data: T }> {
+  return heCall<T>(url, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
   });
 }
 

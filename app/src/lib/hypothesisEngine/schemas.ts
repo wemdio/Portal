@@ -134,6 +134,12 @@ export const HeVocabSchema = z.object({
     .array(
       z.object({
         title: z.string(),
+        /**
+         * Сторона аудитории (обязательна):
+         * buyer — ЛПР компаний вертикали (кому агентство продаёт);
+         * campaign_target — цели будущих кампаний клиентов вертикали.
+         */
+        audience_side: z.enum(['buyer', 'campaign_target']),
         seniority: z.string().optional(),
         function: z.string().optional(),
         geo: z.string().optional(),
@@ -147,6 +153,8 @@ export const HeVocabSchema = z.object({
         source: z.string(),
         query: z.string(),
         purpose: z.string().optional(),
+        /** Служебная пометка (напр. «поиском не подтверждён» после верификации). */
+        notes: z.string().optional(),
       }),
     )
     .default([]),
@@ -172,6 +180,18 @@ export type HeBaseAnalysisOutput = z.infer<typeof HeBaseAnalysisSchema>;
 
 /* ─────────────────────── template (план 85/15) ─────────────────────── */
 
+/**
+ * Условный сегментный вариант письма (~15% дописки под базу). Основной текст
+ * письма — дефолт для всей базы; вариант идёт ТОЛЬКО лидам сегмента `when`.
+ */
+export const HeSegmentVariantSchema = z.object({
+  /** Человекочитаемое условие сегмента, отсылающее к анализу базы (напр. «компании вне Москвы/СПб»). */
+  when: z.string(),
+  /** Текст письма для этого сегмента. */
+  text: z.string(),
+});
+export type HeSegmentVariantOutput = z.infer<typeof HeSegmentVariantSchema>;
+
 export const HeTemplatePlanSchema = z.object({
   /** Фиксированный (~85%) смысловой костяк цепочки под гипотезу. */
   fixed_block: z.string(),
@@ -191,13 +211,26 @@ export const HeTemplatePlanSchema = z.object({
       }),
     )
     .default([]),
-  /** ~15%: дописки под конкретную загруженную базу (сегментные углы/примеры). */
+  /**
+   * Legacy-поле ранних прогонов (безусловные дописки). Сохранено для
+   * обратной совместимости схемы; новые планы несут дописки в
+   * `letters[].segment_variants` (условные, отдельно от основного текста).
+   */
   segment_additions: z
     .array(
       z.object({
         letter_index: z.number().int().min(1),
         addition: z.string(),
         why: z.string().default(''),
+      }),
+    )
+    .default([]),
+  /** ~15%: условные сегментные варианты по письмам (основной текст — дефолт). */
+  letters: z
+    .array(
+      z.object({
+        letter_index: z.number().int().min(1),
+        segment_variants: z.array(HeSegmentVariantSchema).default([]),
       }),
     )
     .default([]),

@@ -8,16 +8,18 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, FlaskConical, Globe, Loader2, Play } from 'lucide-react';
+import { ArrowLeft, Check, FlaskConical, Globe, Loader2, Play } from 'lucide-react';
 import type { HeHypothesisStatus } from '@/lib/hypothesisEngine/types';
 import {
   HE_API,
   heCall,
+  hePatch,
   hePost,
   type HeBaseCreateResponse,
   type HeHypothesisResponse,
   type HeJobResponse,
   type HeProjectDetailResponse,
+  type HeProjectResponse,
 } from './api';
 import { ResearchStepper } from './ResearchStepper';
 import { VerticalsBoard } from './VerticalsBoard';
@@ -50,6 +52,11 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
 
   const [researchStarting, setResearchStarting] = useState(false);
   const [hypBusyId, setHypBusyId] = useState<string | null>(null);
+
+  // Редактируемый оффер: черновик textarea + индикатор «Сохранено».
+  const [offerDraft, setOfferDraft] = useState('');
+  const [offerSaving, setOfferSaving] = useState(false);
+  const [offerSaved, setOfferSaved] = useState(false);
 
   const load = useCallback(
     async (opts?: { silent?: boolean }) => {
@@ -84,6 +91,8 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   }, [hasActiveJobs, load]);
 
   const project = detail?.project;
+  const briefOffer = project?.brief?.offer_override;
+  const savedOffer = typeof briefOffer === 'string' ? briefOffer : '';
   const researchRunning =
     researchStarting ||
     project?.status === 'researching' ||
@@ -92,6 +101,12 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
         (j.status === 'pending' || j.status === 'running') &&
         ['site_profile', 'competitors', 'brand_cloud', 'hypotheses', 'evidence', 'clustering'].includes(j.stage),
     );
+
+  // Подтягиваем сохранённый оффер в черновик. Ввод пользователя не затирается:
+  // эффект пересрабатывает только при смене значения на сервере.
+  useEffect(() => {
+    setOfferDraft(savedOffer);
+  }, [savedOffer]);
 
   const runResearch = useCallback(async () => {
     if (researchRunning) return;
@@ -165,6 +180,27 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
     [],
   );
 
+  const saveOffer = useCallback(async () => {
+    if (offerSaving) return;
+    setActionError('');
+    setOfferSaving(true);
+    try {
+      const { ok, data } = await hePatch<HeProjectResponse>(`${HE_API}/projects/${projectId}`, {
+        offer_override: offerDraft,
+      });
+      if (ok && data.project) {
+        const updated = data.project;
+        setDetail((prev) => (prev ? { ...prev, project: updated } : prev));
+        setOfferSaved(true);
+        setTimeout(() => setOfferSaved(false), 2000);
+      } else {
+        setActionError(data.error || 'Не удалось сохранить оффер');
+      }
+    } finally {
+      setOfferSaving(false);
+    }
+  }, [projectId, offerDraft, offerSaving]);
+
   const uploadBase = useCallback(
     async (payload: BaseUploadPayload) => {
       const { ok, data } = await hePost<HeBaseCreateResponse>(`${HE_API}/projects/${projectId}/bases`, payload);
@@ -236,6 +272,43 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
           {project?.status === 'researched' ? 'Перезапустить исследование' : 'Запустить исследование'}
         </button>
       </div>
+
+      {/* Оффер — уточняет генерацию цепочек; пустое значение снимает переопределение */}
+      {project ? (
+        <div className="rounded-xl border border-gray-200 bg-white p-3">
+          <label
+            htmlFor="he-offer-override"
+            className="text-xs font-semibold uppercase tracking-widest text-gray-400"
+          >
+            Оффер (необязательно)
+          </label>
+          <textarea
+            id="he-offer-override"
+            rows={2}
+            value={offerDraft}
+            onChange={(e) => setOfferDraft(e.target.value)}
+            placeholder="Например: 3–5 встреч в месяц с HRD крупных работодателей, тест за 2 недели"
+            className="mt-1.5 w-full resize-y rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-800 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+          />
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void saveOffer()}
+              disabled={offerSaving || offerDraft.trim() === savedOffer}
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {offerSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
+              Сохранить
+            </button>
+            {offerSaved ? (
+              <span className="inline-flex items-center gap-1 text-xs text-emerald-600">
+                <Check className="h-3.5 w-3.5" aria-hidden />
+                Сохранено
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       {errorMsg && <StatusBox tone="error">{errorMsg}</StatusBox>}
       {actionError && <StatusBox tone="error">{actionError}</StatusBox>}

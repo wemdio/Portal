@@ -23,6 +23,8 @@ export interface ClusterHypothesisInput {
   title: string;
   potential_pct: number;
   description?: string;
+  /** Тир гипотезы (1–3) — используется только в тай-брейке ранжирования. */
+  tier?: number;
 }
 
 export interface AppliedVertical {
@@ -58,8 +60,13 @@ function uniquePush(list: string[], values: string[]): string[] {
  *  - решения с одинаковым именем вертикали сливаются в одну;
  *  - решения без единого совпавшего member_title отбрасываются;
  *  - нераспределённые гипотезы становятся вертикалями-одиночками;
- *  - potential_pct вертикали = сумма % участников, capped 100;
- *  - rank — по убыванию potential_pct (1 = лучшая).
+ *  - potential_pct вертикали считается детерминированно в коде (LLM его не
+ *    задаёт): min(95, max(% участников) + 2 × (число участников − 1)) —
+ *    max плюс небольшой бонус за ширину; кап 95 делает плато невозможным;
+ *  - rank — по убыванию potential_pct (1 = лучшая); тай-брейки: больше
+ *    участников → наличие более низкого тира → имя.
+ *  Отклонённые гипотезы сюда не попадают: стадия evidence пишет в
+ *  he_hypotheses только принятые, поэтому функция работает со всем входом.
  */
 export function applyClusteringDecisions(
   hypotheses: ClusterHypothesisInput[],
@@ -123,12 +130,31 @@ export function applyClusteringDecisions(
     });
   }
 
+  // Детерминированный %: max участников + 2 п.п. за каждого дополнительного,
+  // кап 95 — плато и вырожденное ранжирование исключены.
   for (const g of groups) {
-    const sum = g.members.reduce((acc, m) => acc + (Number.isFinite(m.potential_pct) ? m.potential_pct : 0), 0);
-    g.potential_pct = Math.min(100, sum);
+    const maxPct = g.members.reduce(
+      (acc, m) => Math.max(acc, Number.isFinite(m.potential_pct) ? m.potential_pct : 0),
+      0,
+    );
+    g.potential_pct = Math.min(95, maxPct + 2 * (g.members.length - 1));
   }
 
-  groups.sort((a, b) => b.potential_pct - a.potential_pct || a.name.localeCompare(b.name));
+  // Лучший (минимальный) тир среди участников — для тай-брейка ранжирования.
+  const minTier = (g: MutableGroup): number =>
+    g.members.reduce(
+      (acc, m) =>
+        Math.min(acc, typeof m.tier === 'number' && Number.isFinite(m.tier) ? m.tier : Number.POSITIVE_INFINITY),
+      Number.POSITIVE_INFINITY,
+    );
+
+  groups.sort(
+    (a, b) =>
+      b.potential_pct - a.potential_pct ||
+      b.members.length - a.members.length ||
+      minTier(a) - minTier(b) ||
+      a.name.localeCompare(b.name),
+  );
   groups.forEach((g, i) => {
     g.rank = i + 1;
   });

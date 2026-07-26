@@ -116,3 +116,60 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     },
   );
 }
+
+// PATCH — точечное обновление проекта. Пока поддерживается только
+// offer_override: пользовательская формулировка оффера, которая ложится в
+// he_projects.brief.offer_override и уточняет генерацию цепочек. Пустая
+// (или состоящая из пробелов) строка удаляет ключ из brief, остальные
+// ключи brief не трогаем — мержим поверх текущего значения.
+export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  return withToolTrace(
+    { request: req, operation: 'tools.hypothesis-engine.projects.patch' },
+    async () => {
+      const authed = await requireInternalToolAuth(req);
+      if ('error' in authed) return authed.error;
+      if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
+
+      const { id } = await params;
+      if (!id) return jsonError('Missing id', 400);
+
+      let body: { offer_override?: unknown };
+      try {
+        body = (await req.json()) as { offer_override?: unknown };
+      } catch {
+        return jsonError('Invalid body', 400);
+      }
+
+      if (typeof body?.offer_override !== 'string') {
+        return jsonError('offer_override должен быть строкой', 400);
+      }
+
+      const { data: current, error: loadErr } = await supabaseAdmin
+        .from('he_projects')
+        .select('brief')
+        .eq('id', id)
+        .single();
+      if (loadErr) {
+        return jsonError(
+          loadErr.code === 'PGRST116' ? 'Проект не найден' : loadErr.message,
+          loadErr.code === 'PGRST116' ? 404 : 500,
+        );
+      }
+
+      const brief = { ...((current?.brief as Record<string, unknown> | null) ?? {}) };
+      const offer = body.offer_override.trim();
+      if (offer) brief.offer_override = offer;
+      else delete brief.offer_override;
+
+      const { data: project, error } = await supabaseAdmin
+        .from('he_projects')
+        .update({ brief })
+        .eq('id', id)
+        .select()
+        .single();
+      if (error) return jsonError(error.message, 500);
+
+      return NextResponse.json({ project });
+    },
+  );
+}
