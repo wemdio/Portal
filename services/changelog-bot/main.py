@@ -181,15 +181,37 @@ def _parse_next_link(link_header: str) -> str | None:
     return None
 
 
+def _is_noise_merge(first_line: str) -> bool:
+    """Merge-коммиты веток — не несут смысла для дайджеста и жрут слоты
+    из MAX_MESSAGES + токены (`Merge pull request #NNN from wemdio/test`,
+    `Merge branch 'test' into main` и т.п.). Настоящие изменения уже лежат
+    отдельными коммитами в списке — их фичи модель и опишет.
+    Промпт и так велит их игнорировать, но пока они в user_content, они
+    оттесняют реальные коммиты за границу лимита."""
+    low = first_line.lower()
+    return (
+        low.startswith("merge pull request ")
+        or low.startswith("merge branch ")
+        or low.startswith("merge remote-tracking branch ")
+    )
+
+
 def _extract_commit_info(commits: list[dict[str, Any]]) -> list[str]:
-    messages = []
+    messages: list[str] = []
+    skipped_merges = 0
     for c in commits:
         msg: str = c.get("commit", {}).get("message", "").strip()
         if not msg:
             continue
         first_line = msg.splitlines()[0].strip()
-        if first_line:
-            messages.append(first_line)
+        if not first_line:
+            continue
+        if _is_noise_merge(first_line):
+            skipped_merges += 1
+            continue
+        messages.append(first_line)
+    if skipped_merges:
+        print(f"[changelog] Skipped {skipped_merges} merge-only commits (branch/PR merges)", flush=True)
     return messages
 
 
@@ -269,7 +291,7 @@ SYSTEM_PROMPT = """\
 """
 
 
-MAX_MESSAGES = 400
+MAX_MESSAGES = 2000
 MAX_USER_CONTENT_CHARS = 400_000
 
 
