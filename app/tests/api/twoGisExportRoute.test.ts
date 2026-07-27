@@ -79,6 +79,39 @@ describe('2GIS export routes', () => {
     );
   });
 
+  it('uses the same normalized grouped rubric selections for export tickets', async () => {
+    const { POST } = await import('@/app/api/tools/2gis-parser/export/route');
+    const response = await POST(
+      postRequest({
+        filters: {
+          rubricGroups: [
+            { category: ' Еда ', mode: 'all' },
+            {
+              category: 'Услуги',
+              mode: 'some',
+              subcategories: [' Ремонт ', 'Ремонт'],
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockCreateTicket).toHaveBeenCalledWith(
+      'staff-1',
+      expect.objectContaining({
+        rubricGroups: [
+          { category: 'Еда', mode: 'all' },
+          {
+            category: 'Услуги',
+            mode: 'some',
+            subcategories: ['Ремонт'],
+          },
+        ],
+      }),
+    );
+  });
+
   it('requires internal authentication before creating a ticket', async () => {
     const { NextResponse } = await import('next/server');
     mockRequireInternalToolAuth.mockResolvedValue({

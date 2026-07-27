@@ -7,21 +7,29 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Download, Loader2, RotateCcw, Search } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronRight,
+  Download,
+  Loader2,
+  RotateCcw,
+  Search,
+} from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import {
   TWO_GIS_EXPORT_LIMIT_MESSAGE,
   TWO_GIS_MAX_EXPORT_ROWS,
+  TWO_GIS_MAX_FILTER_VALUES,
 } from '@/lib/twoGis/types';
 import type {
   TwoGisCard,
   TwoGisFacet,
   TwoGisFacets,
   TwoGisFilters,
+  TwoGisRubricGroup,
 } from '@/lib/twoGis/types';
 
 const PREVIEW_LIMIT = 100;
-const MAX_FILTER_VALUES = 200;
 const MAX_VISIBLE_FACET_OPTIONS = 100;
 const FACETS_MEMORY_TTL_MS = 5 * 60 * 1000;
 
@@ -40,8 +48,7 @@ type SearchResponse = {
 const EMPTY_FILTERS: Required<Pick<
   TwoGisFilters,
   | 'cities'
-  | 'categories'
-  | 'subcategories'
+  | 'rubricGroups'
   | 'name'
   | 'hasPhone'
   | 'hasEmail'
@@ -50,8 +57,7 @@ const EMPTY_FILTERS: Required<Pick<
   | 'hasInstagram'
 >> = {
   cities: [],
-  categories: [],
-  subcategories: [],
+  rubricGroups: [],
   name: '',
   hasPhone: false,
   hasEmail: false,
@@ -115,6 +121,16 @@ function cloneFilters(filters: TwoGisFilters): TwoGisFilters {
     cities: filters.cities ? [...filters.cities] : undefined,
     categories: filters.categories ? [...filters.categories] : undefined,
     subcategories: filters.subcategories ? [...filters.subcategories] : undefined,
+    rubricGroups: filters.rubricGroups?.map((group) =>
+      group.mode === 'all'
+        ? { ...group }
+        : group.mode === 'some'
+          ? { ...group, subcategories: [...group.subcategories] }
+          : {
+            ...group,
+            excludedSubcategories: [...group.excludedSubcategories],
+          },
+    ),
   };
 }
 
@@ -157,7 +173,10 @@ function FacetChecklist({
 
   const toggleOption = (value: string, checked: boolean) => {
     if (checked) {
-      if (values.includes(value) || values.length >= MAX_FILTER_VALUES) return;
+      if (
+        values.includes(value)
+        || values.length >= TWO_GIS_MAX_FILTER_VALUES
+      ) return;
       onChange([...values, value]);
       return;
     }
@@ -229,7 +248,8 @@ function FacetChecklist({
           <div className="divide-y divide-gray-100">
             {visibleOptions.map((option) => {
               const checked = values.includes(option.value);
-              const reachedLimit = !checked && values.length >= MAX_FILTER_VALUES;
+              const reachedLimit =
+                !checked && values.length >= TWO_GIS_MAX_FILTER_VALUES;
               return (
                 <label
                   key={option.value}
@@ -263,11 +283,542 @@ function FacetChecklist({
         )}
       </div>
       <p id={descriptionId} className="mt-1.5 text-xs leading-4 text-gray-500">
-        {values.length >= MAX_FILTER_VALUES
-          ? 'Выбрано максимум 200 значений. Снимите один пункт, чтобы выбрать другой.'
+        {values.length >= TWO_GIS_MAX_FILTER_VALUES
+          ? `Выбрано максимум ${TWO_GIS_MAX_FILTER_VALUES} значений. Снимите один пункт, чтобы выбрать другой.`
           : loading
             ? 'Справочник загружается. Остальные фильтры уже доступны.'
             : `Без выбора: все. Показано ${visibleOptions.length} из ${options.length}.`}
+      </p>
+    </section>
+  );
+}
+
+type RubricTreeOption = {
+  category: string;
+  count: number;
+  subcategories: TwoGisFacet[];
+};
+
+function selectedRubricCount(groups: TwoGisRubricGroup[]) {
+  return groups.reduce(
+    (total, group) =>
+      total + (
+        group.mode === 'all'
+          ? 1
+          : group.mode === 'some'
+            ? group.subcategories.length
+            : 1 + group.excludedSubcategories.length
+      ),
+    0,
+  );
+}
+
+function formatRussianCount(
+  count: number,
+  forms: [string, string, string],
+) {
+  const lastTwoDigits = count % 100;
+  const lastDigit = count % 10;
+  const form =
+    lastTwoDigits >= 11 && lastTwoDigits <= 14
+      ? forms[2]
+      : lastDigit === 1
+        ? forms[0]
+        : lastDigit >= 2 && lastDigit <= 4
+          ? forms[1]
+          : forms[2];
+  return `${count} ${form}`;
+}
+
+function RubricTreeChecklist({
+  values,
+  options,
+  onChange,
+  disabled,
+  loading,
+}: {
+  values: TwoGisRubricGroup[];
+  options: RubricTreeOption[];
+  onChange: (values: TwoGisRubricGroup[]) => void;
+  disabled?: boolean;
+  loading?: boolean;
+}) {
+  const labelId = useId();
+  const listId = useId();
+  const descriptionId = useId();
+  const [query, setQuery] = useState('');
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [limitReached, setLimitReached] = useState(false);
+  const normalizedQuery = query.trim().toLocaleLowerCase('ru');
+  const selectedByCategory = useMemo(
+    () => new Map(values.map((group) => [group.category, group])),
+    [values],
+  );
+  const selectionSize = selectedRubricCount(values);
+  const wholeCategoryCount = values.filter(
+    (group) => group.mode !== 'some',
+  ).length;
+  const partialRubricCount = values.reduce(
+    (total, group) =>
+      total + (group.mode === 'some' ? group.subcategories.length : 0),
+    0,
+  );
+  const excludedRubricCount = values.reduce(
+    (total, group) =>
+      total + (
+        group.mode === 'allExcept'
+          ? group.excludedSubcategories.length
+          : 0
+      ),
+    0,
+  );
+  const summary = [
+    wholeCategoryCount > 0
+      ? formatRussianCount(wholeCategoryCount, [
+        'раздел',
+        'раздела',
+        'разделов',
+      ])
+      : null,
+    partialRubricCount > 0
+      ? formatRussianCount(partialRubricCount, [
+        'рубрика',
+        'рубрики',
+        'рубрик',
+      ])
+      : null,
+    excludedRubricCount > 0
+      ? formatRussianCount(excludedRubricCount, [
+        'исключение',
+        'исключения',
+        'исключений',
+      ])
+      : null,
+  ].filter(Boolean).join(', ');
+
+  const visibleOptions = useMemo(() => {
+    if (!normalizedQuery) return options;
+    return options.filter(
+      (option) =>
+        option.category.toLocaleLowerCase('ru').includes(normalizedQuery)
+        || option.subcategories.some((subcategory) =>
+          subcategory.value.toLocaleLowerCase('ru').includes(normalizedQuery),
+        ),
+    );
+  }, [normalizedQuery, options]);
+
+  const canonicalize = (
+    nextValues: TwoGisRubricGroup[],
+  ): TwoGisRubricGroup[] => {
+    const nextByCategory = new Map(
+      nextValues.map((group) => [group.category, group]),
+    );
+    const knownCategories = new Set(options.map((option) => option.category));
+    const canonical: TwoGisRubricGroup[] = [];
+    for (const option of options) {
+      const selected = nextByCategory.get(option.category);
+      if (!selected) continue;
+      if (selected.mode === 'all') {
+        canonical.push(selected);
+        continue;
+      }
+      const selectedNames = new Set(
+        selected.mode === 'some'
+          ? selected.subcategories
+          : selected.excludedSubcategories,
+      );
+      const knownNames = new Set(
+        option.subcategories.map((subcategory) => subcategory.value),
+      );
+      const orderedNames = [
+        ...option.subcategories
+          .map((subcategory) => subcategory.value)
+          .filter((subcategory) => selectedNames.has(subcategory)),
+        ...(selected.mode === 'some'
+          ? selected.subcategories
+          : selected.excludedSubcategories
+        ).filter((subcategory) => !knownNames.has(subcategory)),
+      ];
+      canonical.push(
+        selected.mode === 'some'
+          ? {
+            ...selected,
+            subcategories: orderedNames,
+          }
+          : {
+            ...selected,
+            excludedSubcategories: orderedNames,
+          },
+      );
+    }
+    canonical.push(
+      ...nextValues.filter((group) => !knownCategories.has(group.category)),
+    );
+    return canonical;
+  };
+
+  const replaceCategorySelection = (
+    category: string,
+    nextGroup: TwoGisRubricGroup | null,
+  ) => {
+    const candidate = values.filter((group) => group.category !== category);
+    if (nextGroup) candidate.push(nextGroup);
+    const canonical = canonicalize(candidate);
+    if (selectedRubricCount(canonical) > TWO_GIS_MAX_FILTER_VALUES) {
+      setLimitReached(true);
+      return;
+    }
+    setLimitReached(false);
+    onChange(canonical);
+  };
+
+  const childSelectionAfterToggle = (
+    option: RubricTreeOption,
+    subcategory: string,
+    checked: boolean,
+  ): TwoGisRubricGroup | null => {
+    const current = selectedByCategory.get(option.category);
+    const allSubcategories = option.subcategories.map((item) => item.value);
+    if (current?.mode === 'all' && !checked) {
+      return {
+        category: option.category,
+        mode: 'allExcept',
+        excludedSubcategories: [subcategory],
+      };
+    }
+    if (current?.mode === 'allExcept') {
+      const excludedSubcategories = checked
+        ? current.excludedSubcategories.filter(
+          (value) => value !== subcategory,
+        )
+        : [
+          ...new Set([
+            ...current.excludedSubcategories,
+            subcategory,
+          ]),
+        ];
+      return excludedSubcategories.length === 0
+        ? { category: option.category, mode: 'all' }
+        : {
+          category: option.category,
+          mode: 'allExcept',
+          excludedSubcategories,
+        };
+    }
+    const selectedSubcategories =
+      current?.mode === 'some' ? current.subcategories : [];
+    const nextSubcategories = checked
+      ? [...new Set([...selectedSubcategories, subcategory])]
+      : selectedSubcategories.filter((value) => value !== subcategory);
+
+    if (nextSubcategories.length === 0) return null;
+    if (
+      allSubcategories.length > 0
+      && allSubcategories.every((value) => nextSubcategories.includes(value))
+    ) {
+      return { category: option.category, mode: 'all' };
+    }
+    return {
+      category: option.category,
+      mode: 'some',
+      subcategories: nextSubcategories,
+    };
+  };
+
+  const toggleCategory = (category: string) => {
+    const current = selectedByCategory.get(category);
+    replaceCategorySelection(
+      category,
+      current?.mode === 'all'
+        ? null
+        : { category, mode: 'all' },
+    );
+  };
+
+  const clearSelection = () => {
+    setLimitReached(false);
+    onChange([]);
+  };
+
+  return (
+    <section aria-labelledby={labelId}>
+      <div className="mb-2 flex min-h-6 items-center justify-between gap-3">
+        <h3 id={labelId} className="text-sm font-semibold text-gray-900">
+          Разделы и рубрики 2GIS
+        </h3>
+        {values.length > 0 ? (
+          <div className="flex items-center gap-2">
+            <span className="text-xs tabular-nums text-gray-500">
+              Выбрано: {summary}
+            </span>
+            <button
+              type="button"
+              onClick={clearSelection}
+              disabled={disabled}
+              aria-label="Очистить: Разделы и рубрики 2GIS"
+              className="rounded-md px-1.5 py-1 text-xs font-medium text-gray-600 hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Очистить
+            </button>
+          </div>
+        ) : null}
+      </div>
+      <input
+        type="search"
+        value={query}
+        onChange={(event) => setQuery(event.currentTarget.value)}
+        disabled={disabled || loading}
+        aria-label="Поиск: Разделы и рубрики 2GIS"
+        aria-controls={listId}
+        placeholder="Найти раздел или рубрику"
+        className="mb-2 min-h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none placeholder:text-gray-400 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 disabled:cursor-wait disabled:bg-gray-100"
+      />
+      <div
+        id={listId}
+        role="group"
+        aria-labelledby={labelId}
+        aria-describedby={descriptionId}
+        aria-busy={loading || undefined}
+        className="h-[420px] overflow-y-auto rounded-lg border border-gray-300 bg-white"
+      >
+        {loading ? (
+          <div
+            role="status"
+            className="flex h-full flex-col justify-center gap-3 px-4 py-4 text-sm text-gray-500"
+          >
+            <span>Загружаем список</span>
+            {[84, 68, 90, 76, 82].map((width) => (
+              <span key={width} className="flex items-center gap-3" aria-hidden="true">
+                <span className="h-[18px] w-[18px] rounded border border-gray-300 bg-gray-100" />
+                <span
+                  className="h-3 rounded bg-gray-100"
+                  style={{ width: `${width}%` }}
+                />
+              </span>
+            ))}
+          </div>
+        ) : visibleOptions.length === 0 ? (
+          <div className="flex h-full items-center justify-center px-4 text-center text-sm text-gray-500">
+            {normalizedQuery
+              ? 'По вашему запросу ничего нет'
+              : 'Нет доступных разделов и рубрик'}
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-200">
+            {visibleOptions.map((option) => {
+              const selected = selectedByCategory.get(option.category);
+              const parentChecked = selected?.mode === 'all';
+              const parentMixed =
+                selected !== undefined && selected.mode !== 'all';
+              const categoryMatches =
+                normalizedQuery.length > 0
+                && option.category
+                  .toLocaleLowerCase('ru')
+                  .includes(normalizedQuery);
+              const searchMatchesChildren =
+                normalizedQuery.length > 0
+                && option.subcategories.some((subcategory) =>
+                  subcategory.value
+                    .toLocaleLowerCase('ru')
+                    .includes(normalizedQuery),
+                );
+              const searchExpanded = categoryMatches || searchMatchesChildren;
+              const expanded =
+                expandedCategories.has(option.category) || searchExpanded;
+              const selectedSubcategories = new Set(
+                selected?.mode === 'some'
+                  ? selected.subcategories
+                  : selected?.mode === 'allExcept'
+                    ? selected.excludedSubcategories
+                    : [],
+              );
+              const childCandidates = normalizedQuery
+                ? categoryMatches
+                  ? option.subcategories
+                  : option.subcategories.filter((subcategory) =>
+                    subcategory.value
+                      .toLocaleLowerCase('ru')
+                      .includes(normalizedQuery),
+                  )
+                : [
+                  ...option.subcategories.filter((subcategory) =>
+                    selectedSubcategories.has(subcategory.value),
+                  ),
+                  ...option.subcategories.filter((subcategory) =>
+                    !selectedSubcategories.has(subcategory.value),
+                  ),
+                ];
+              const visibleSubcategories = expanded
+                ? childCandidates.slice(0, MAX_VISIBLE_FACET_OPTIONS)
+                : [];
+              const parentAtLimit =
+                !selected && selectionSize >= TWO_GIS_MAX_FILTER_VALUES;
+
+              return (
+                <div key={option.category}>
+                  <div
+                    className={`flex min-h-12 items-center gap-1.5 px-2 py-2 transition-colors ${
+                      selected ? 'bg-gray-100' : 'hover:bg-gray-50'
+                    }`}
+                  >
+                    {option.subcategories.length > 0 && normalizedQuery ? (
+                      <span
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center text-gray-500"
+                        aria-hidden="true"
+                      >
+                        <ChevronDown className="h-4 w-4" />
+                      </span>
+                    ) : option.subcategories.length > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedCategories((current) => {
+                            const next = new Set(current);
+                            if (next.has(option.category)) {
+                              next.delete(option.category);
+                            } else {
+                              next.add(option.category);
+                            }
+                            return next;
+                          })
+                        }
+                        aria-expanded={expanded}
+                        aria-label={`${expanded ? 'Свернуть' : 'Развернуть'}: ${option.category}`}
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-gray-500 hover:bg-gray-200 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                      >
+                        {expanded
+                          ? <ChevronDown className="h-4 w-4" />
+                          : <ChevronRight className="h-4 w-4" />}
+                      </button>
+                    ) : (
+                      <span className="h-8 w-8 shrink-0" aria-hidden="true" />
+                    )}
+                    <label className={`flex min-w-0 flex-1 items-center gap-3 ${
+                      parentAtLimit || disabled
+                        ? 'cursor-not-allowed opacity-50'
+                        : 'cursor-pointer'
+                    }`}>
+                      <input
+                        type="checkbox"
+                        checked={parentChecked}
+                        aria-checked={parentMixed ? 'mixed' : parentChecked}
+                        ref={(input) => {
+                          if (input) input.indeterminate = parentMixed;
+                        }}
+                        disabled={disabled || parentAtLimit}
+                        onChange={() => toggleCategory(option.category)}
+                        aria-label={option.category}
+                        className="h-[18px] w-[18px] shrink-0 rounded border-gray-300 accent-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                      />
+                      <span className="min-w-0 flex-1 text-sm font-medium leading-5 text-gray-800">
+                        {option.category}
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        className="shrink-0 text-xs tabular-nums text-gray-500"
+                      >
+                        {option.count.toLocaleString('ru-RU')}
+                      </span>
+                    </label>
+                  </div>
+                  {expanded ? (
+                    <div className="border-t border-gray-100 bg-white">
+                      {visibleSubcategories.map((subcategory) => {
+                        const childChecked =
+                          selected?.mode === 'all'
+                          || (
+                            selected?.mode === 'some'
+                            && selected.subcategories.includes(
+                              subcategory.value,
+                            )
+                          )
+                          || (
+                            selected?.mode === 'allExcept'
+                            && !selected.excludedSubcategories.includes(
+                              subcategory.value,
+                            )
+                          );
+                        const candidate = childSelectionAfterToggle(
+                          option,
+                          subcategory.value,
+                          !childChecked,
+                        );
+                        const candidateValues = values.filter(
+                          (group) => group.category !== option.category,
+                        );
+                        if (candidate) candidateValues.push(candidate);
+                        const childAtLimit =
+                          selectedRubricCount(candidateValues)
+                          > TWO_GIS_MAX_FILTER_VALUES;
+                        return (
+                          <label
+                            key={`${option.category}\u0000${subcategory.value}`}
+                            className={`flex min-h-11 items-center gap-3 border-t border-gray-100 py-2.5 pl-12 pr-3 text-sm transition-colors ${
+                              childChecked ? 'bg-gray-50' : 'hover:bg-gray-50'
+                            } ${
+                              childAtLimit || disabled
+                                ? 'cursor-not-allowed opacity-50'
+                                : 'cursor-pointer'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={childChecked}
+                              disabled={disabled || childAtLimit}
+                              onChange={(event) =>
+                                replaceCategorySelection(
+                                  option.category,
+                                  childSelectionAfterToggle(
+                                    option,
+                                    subcategory.value,
+                                    event.currentTarget.checked,
+                                  ),
+                                )
+                              }
+                              aria-label={`${option.category} → ${subcategory.value}`}
+                              className="h-[18px] w-[18px] shrink-0 rounded border-gray-300 accent-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                            />
+                            <span className="min-w-0 flex-1 leading-5 text-gray-700">
+                              {subcategory.value}
+                            </span>
+                            <span
+                              aria-hidden="true"
+                              className="shrink-0 text-xs tabular-nums text-gray-500"
+                            >
+                              {subcategory.count.toLocaleString('ru-RU')}
+                            </span>
+                          </label>
+                        );
+                      })}
+                      {visibleSubcategories.length === 0 ? (
+                        <div className="px-12 py-3 text-xs text-gray-500">
+                          В этом разделе нет рубрик
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      <p
+        id={descriptionId}
+        role={limitReached ? 'alert' : undefined}
+        className={`mt-1.5 text-xs leading-4 ${
+          limitReached || selectionSize >= TWO_GIS_MAX_FILTER_VALUES
+            ? 'text-amber-700'
+            : 'text-gray-500'
+        }`}
+      >
+        {limitReached || selectionSize >= TWO_GIS_MAX_FILTER_VALUES
+          ? `Можно выбрать максимум ${TWO_GIS_MAX_FILTER_VALUES} разделов и рубрик. Целый раздел считается одним выбором.`
+          : values.length > 0
+            ? 'Целый раздел включает все его рубрики; отдельные снятые рубрики исключаются.'
+            : 'Без выбора: все разделы и рубрики.'}
       </p>
     </section>
   );
@@ -347,28 +898,48 @@ export function TwoGisParserView() {
     };
   }, [facetsAttempt]);
 
-  const subcategoryOptions = useMemo(() => {
-    const all = facets?.subcategories ?? [];
-    const selected = new Set(filters.categories);
-    const counts = new Map<string, number>();
-    for (const item of all) {
-      if (selected.size > 0 && !selected.has(item.category)) continue;
-      counts.set(item.value, (counts.get(item.value) ?? 0) + item.count);
+  const rubricOptions = useMemo<RubricTreeOption[]>(() => {
+    const optionsByCategory = new Map<string, RubricTreeOption>();
+    for (const category of facets?.categories ?? []) {
+      optionsByCategory.set(category.value, {
+        category: category.value,
+        count: category.count,
+        subcategories: [],
+      });
     }
-    return [...counts.entries()]
-      .map(([value, optionCount]) => ({ value, count: optionCount }))
-      .sort(
+    for (const subcategory of facets?.subcategories ?? []) {
+      const option = optionsByCategory.get(subcategory.category) ?? {
+        category: subcategory.category,
+        count: 0,
+        subcategories: [],
+      };
+      const existing = option.subcategories.find(
+        (item) => item.value === subcategory.value,
+      );
+      if (existing) {
+        existing.count += subcategory.count;
+      } else {
+        option.subcategories.push({
+          value: subcategory.value,
+          count: subcategory.count,
+        });
+      }
+      optionsByCategory.set(subcategory.category, option);
+    }
+    return [...optionsByCategory.values()].map((option) => ({
+      ...option,
+      subcategories: option.subcategories.sort(
         (left, right) =>
           right.count - left.count
           || left.value.localeCompare(right.value, 'ru'),
-      );
-  }, [facets, filters.categories]);
+      ),
+    }));
+  }, [facets]);
 
   const requestFilters = useMemo<TwoGisFilters>(
     () => ({
       cities: filters.cities,
-      categories: filters.categories,
-      subcategories: filters.subcategories,
+      rubricGroups: filters.rubricGroups,
       name: filters.name,
       hasPhone: filters.hasPhone,
       hasEmail: filters.hasEmail,
@@ -568,32 +1139,10 @@ export function TwoGisParserView() {
               disabled={!facets}
               loading={loadingFacets}
             />
-            <FacetChecklist
-              label="Категории"
-              values={filters.categories}
-              options={facets?.categories ?? []}
-              onChange={(value) => {
-                setFilters((current) => ({
-                  ...current,
-                  categories: value,
-                  subcategories: current.subcategories.filter((subcategory) =>
-                    (facets?.subcategories ?? []).some(
-                      (item) =>
-                        item.value === subcategory
-                        && (value.length === 0 || value.includes(item.category)),
-                    ),
-                  ),
-                }));
-                invalidateResults();
-              }}
-              disabled={!facets}
-              loading={loadingFacets}
-            />
-            <FacetChecklist
-              label="Подкатегории"
-              values={filters.subcategories}
-              options={subcategoryOptions}
-              onChange={(value) => updateFilter('subcategories', value)}
+            <RubricTreeChecklist
+              values={filters.rubricGroups}
+              options={rubricOptions}
+              onChange={(value) => updateFilter('rubricGroups', value)}
               disabled={!facets}
               loading={loadingFacets}
             />
