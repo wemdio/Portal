@@ -60,6 +60,13 @@ export interface HhAutoParserConfig {
   limit?: number;
   /** Optional logger for observability. */
   log?: (msg: string) => void;
+  /**
+   * Если задан — по пути в HH парсер отдаёт сырые items наружу через callback,
+   * а вызывающий код (autoPipelineRunner) складирует их в `hh_vacancies`
+   * с этим job_id. Так поток Mailganer (~10-30К вакансий/день) начинает
+   * копиться в общем архиве, из которого потом ищет парсер «HH архив».
+   */
+  onVacancies?: (batch: HhArchiveSinkVacancy[]) => Promise<void>;
 }
 
 export interface HhEmployer {
@@ -194,9 +201,33 @@ async function fetchJson<T>(url: string): Promise<T | null> {
 interface HhVacancyResponse {
   found?: number;
   items?: Array<{
+    id?: string;
     name?: string;
+    alternate_url?: string;
+    area?: { name?: string };
+    salary?: { from?: number | null; to?: number | null; currency?: string | null };
+    // HH ввёл salary_range как основное поле с 2026, salary оставили для legacy.
+    salary_range?: { from?: number | null; to?: number | null; currency?: string | null };
+    published_at?: string;
     employer?: { id?: string; name?: string; alternate_url?: string };
   }>;
+}
+
+/**
+ * Одна вакансия из /vacancies в формате `hh_vacancies` (для складирования).
+ * Экспортируем — используется коллбэком в autoPipelineRunner (sinkJobId).
+ */
+export interface HhArchiveSinkVacancy {
+  vacancy_id: string;
+  name: string;
+  url: string;
+  salary_from: number | null;
+  salary_to: number | null;
+  salary_currency: string | null;
+  company_name: string;
+  company_url: string | null;
+  area: string;
+  published_at: string | null;
 }
 
 interface HhEmployerResponse {
@@ -236,6 +267,7 @@ function formatDateFrom(d: Date): string {
 async function searchVacancyPages(
   params: URLSearchParams,
   log: (m: string) => void,
+  onVacancies?: (batch: HhArchiveSinkVacancy[]) => Promise<void>,
 ): Promise<Map<string, CandidateEmployer>> {
   const employers = new Map<string, CandidateEmployer>();
   let page = 0;
@@ -248,6 +280,8 @@ async function searchVacancyPages(
     const data = await fetchJson<HhVacancyResponse>(url);
     if (!data || !data.items || data.items.length === 0) break;
 
+    const sinkBatch: HhArchiveSinkVacancy[] = [];
+
     for (const vac of data.items) {
       const emp = vac.employer;
       if (!emp?.id || !emp.name) continue;
@@ -258,6 +292,35 @@ async function searchVacancyPages(
           hhUrl: emp.alternate_url ?? null,
           vacancyTitle: vac.name ?? '',
         });
+      }
+
+      // Если задан sink — собираем сырую вакансию для складирования в
+      // hh_vacancies. `salary_range` — новое имя поля (HH 2026), `salary` —
+      // старое; берём то, что пришло.
+      if (onVacancies && vac.id && vac.name) {
+        const sal = vac.salary_range ?? vac.salary ?? null;
+        sinkBatch.push({
+          vacancy_id: vac.id,
+          name: vac.name,
+          url: vac.alternate_url ?? `https://hh.ru/vacancy/${vac.id}`,
+          salary_from: sal?.from ?? null,
+          salary_to: sal?.to ?? null,
+          salary_currency: sal?.currency ?? null,
+          company_name: emp.name,
+          company_url: emp.alternate_url ?? null,
+          area: vac.area?.name ?? '',
+          published_at: vac.published_at ?? null,
+        });
+      }
+    }
+
+    if (onVacancies && sinkBatch.length > 0) {
+      // Not-blocking — если складирование упадёт, парсер продолжает работать
+      // (для клиента результат важнее, чем полнота архива).
+      try {
+        await onVacancies(sinkBatch);
+      } catch (e) {
+        log(`  sink upsert error (${e instanceof Error ? e.message : String(e)}) — продолжаем без складирования`);
       }
     }
 
@@ -324,7 +387,7 @@ export async function findNewHhEmployers(
   const candidates = new Map<string, CandidateEmployer>();
   for (let i = 0; i < queries.length; i++) {
     log(`HH: query ${i + 1}/${queries.length}: ${queries[i].toString()}`);
-    const part = await searchVacancyPages(queries[i], log);
+    const part = await searchVacancyPages(queries[i], log, config.onVacancies);
     for (const [id, emp] of part) {
       if (!candidates.has(id)) candidates.set(id, emp);
     }

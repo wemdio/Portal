@@ -1,56 +1,28 @@
 /**
- * HH Archive Job Runner — оркестратор: читает конфиг job'а из БД,
- * прогоняет parser.ts по всем (query × chunk × page), пишет результаты
- * в hh_archive_results, обновляет прогресс.
+ * HH Archive Job Runner — оркестратор: читает конфиг job'а из БД, ищет
+ * подходящие вакансии в локальном архиве `hh_vacancies`, пишет результаты
+ * в `hh_archive_results`, обновляет прогресс.
  *
  * Запускается из `app/worker/hh.ts` (общий HH-воркер).
  *
- * Защита от перегруза:
- *   * Если в каком-то чанке `found > 2000` — пишем warning в errors_count,
- *     но не падаем (берём первые 2000, остальное — потеря, юзер видит
- *     в UI и переключает chunk_strategy на более узкое).
- *   * Hard stop при saved_total >= max_results — даже если HH вернул больше.
- *   * cancelled check между итерациями (если юзер нажал «отменить»).
+ * До 27.07.2026: ходил в api.hh.ru и рекурсивно партиционировал даты, чтобы
+ * обойти лимит 2000 на запрос. Проблема — HH API отдаёт только последние
+ * ~60 дней, поэтому за 2023-2025 всегда возвращал 0 (см. инцидент
+ * 27.07.2026). Теперь ищем локально в накопленной истории `hh_vacancies`
+ * (обычный парсер спецов + auto-pipeline Mailganer льют туда всё, что
+ * парсят). Плюс: работает мгновенно, без прокси и rate-limit; минус:
+ * граница снизу — самая старая запись в hh_vacancies (~04.02.2026).
+ *
+ * Логика упростилась радикально:
+ *   1. Для каждого search_query — SELECT из hh_vacancies с фильтрами.
+ *   2. Дедуп по vacancy_id между разными query.
+ *   3. Batch-INSERT в hh_archive_results.
+ *   4. cancelled-check между query'ями (юзер мог нажать «отменить»).
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import {
-  HH_API_RESULTS_HARD_CAP,
-  HH_API_MAX_PAGE,
-  buildSearchUrl,
-  chunkDateRange,
-  extractVacancies,
-  fetchEmployerSite,
-  fetchHHJson,
-  sleep,
-  splitDateRangeHalf,
-  type ChunkStrategy,
-  type HHParseConfig,
-  type HHRawResponse,
-} from './parser';
-
-/** Максимальная глубина рекурсивного разбиения чанка. На monthly старте даёт
- *  ≈ 30 / 2^MAX_SPLIT_DEPTH дней минимальный чанк. 5 = ~1 день. */
-const MAX_SPLIT_DEPTH = 5;
-
-/** Задержка между запросами к /employers/{id}. Чуть короче чем для /vacancies
- *  (там per_page=100, дороже; здесь маленький JSON). 700мс ≈ 1.4 RPS. */
-const EMPLOYER_REQUEST_DELAY_MS = Number(
-  process.env.HH_ARCHIVE_EMPLOYER_DELAY_MS ?? '700',
-);
-
-// User-Agent: можно переопределить через HH_ARCHIVE_USER_AGENT, иначе
-// используем общий default из hhParser.ts (через buildHhRequestHeaders в
-// fetchHHJson). Передаём undefined → подхватится дефолт.
-const DEFAULT_USER_AGENT = process.env.HH_ARCHIVE_USER_AGENT;
-
-// OAuth-токен берётся в fetchHHJson через buildHhRequestHeaders из
-// HH_ACCESS_TOKEN (тот же, что использует стандартный парсер). Старое имя
-// HH_OAUTH_TOKEN поддерживаем как override только для тестов.
-const OAUTH_TOKEN_OVERRIDE = process.env.HH_OAUTH_TOKEN || undefined;
-
-/** Базовая задержка между запросами. Можно поднять через env если ловим 429. */
-const REQUEST_DELAY_MS = Number(process.env.HH_ARCHIVE_REQUEST_DELAY_MS ?? '1500');
+import { parseAreas } from './parser';
+import { fetchVacanciesLocal, type LocalVacancyRow } from './localSearch';
 
 interface HHArchiveJobRow {
   id: string;
@@ -60,7 +32,7 @@ interface HHArchiveJobRow {
   date_from: string;
   date_to: string;
   archived: boolean;
-  chunk_strategy: ChunkStrategy;
+  chunk_strategy: string;
   max_results: number;
   status: string;
 }
@@ -79,13 +51,59 @@ async function updateJob(
   jobId: string,
   patch: Record<string, unknown>,
 ): Promise<void> {
-  // Heartbeat-стиль: каждый update bumps updated_at через trigger.
   const { error } = await db.from('hh_archive_jobs').update(patch).eq('id', jobId);
   if (error) console.error(`[hh-archive][${jobId}] updateJob failed:`, error.message);
 }
 
+/**
+ * Достаёт employer_id из ссылки типа `https://hh.ru/employer/12345`.
+ * Обычный HH-парсер сохраняет company_url именно в таком виде. Если ссылка
+ * не в формате /employer/N — возвращаем пустую строку (в hh_archive_results
+ * employer_id NOT NULL DEFAULT ''), это ок для последующей выгрузки.
+ */
+function extractEmployerId(companyUrl: string | null | undefined): string {
+  if (!companyUrl) return '';
+  const match = companyUrl.match(/\/employer\/(\d+)/);
+  return match ? match[1] : '';
+}
+
+async function insertBatch(
+  db: SupabaseClient,
+  jobId: string,
+  query: string,
+  rows: LocalVacancyRow[],
+): Promise<number> {
+  if (rows.length === 0) return 0;
+  const payload = rows.map((v) => ({
+    job_id: jobId,
+    vacancy_id: v.vacancy_id,
+    title: v.name ?? '',
+    company: v.company_name ?? '',
+    company_site_url: v.company_site_url ?? '',
+    area: v.area ?? '',
+    employer_id: extractEmployerId(v.company_url),
+    published_at: v.published_at,
+    // archived_at у нас в hh_vacancies не хранится — фиксируем момент,
+    // когда мы вытащили запись в архив.
+    archived_at: null,
+    raw_query: query,
+  }));
+
+  // ON CONFLICT DO NOTHING имитируем через upsert по уникальному (job_id, vacancy_id).
+  // Дубли между разными query внутри одного job'а — нормально: юзер видит
+  // «какой query нашёл эту вакансию», но в архив её пишем один раз.
+  const { error } = await db
+    .from('hh_archive_results')
+    .upsert(payload, { onConflict: 'job_id,vacancy_id', ignoreDuplicates: true });
+  if (error) {
+    console.error(`[hh-archive][${jobId}] insertBatch error:`, error.message);
+    return 0;
+  }
+  return payload.length;
+}
+
 export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promise<void> {
-  console.log(`[hh-archive][${jobId}] starting`);
+  console.log(`[hh-archive][${jobId}] starting (local-search mode)`);
 
   const { data: job, error } = await db
     .from('hh_archive_jobs')
@@ -98,129 +116,33 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
     return;
   }
 
-  // Зафиксируем max_results в локальной const, чтобы TS не терял narrowing
-  // в closure processChunkRecursive (через await TS забывает что job != null).
   const maxResults = job.max_results;
+  const areaIds = parseAreas(job.area || '113');
+  const queries = Array.isArray(job.search_queries) ? job.search_queries : [];
 
   await updateJob(db, jobId, {
     status: 'processing',
     started_at: new Date().toISOString(),
     errors_count: 0,
     error_message: null,
+    total_chunks: queries.length,
+    processed_chunks: 0,
+    found_total: 0,
+    saved_total: 0,
   });
 
-  const config: HHParseConfig = {
-    searchQueries: Array.isArray(job.search_queries) ? job.search_queries : [],
-    area: job.area || '113',
-    dateFrom: job.date_from,
-    dateTo: job.date_to,
-    archived: job.archived,
-    chunkStrategy: job.chunk_strategy,
-    userAgent: DEFAULT_USER_AGENT ?? '',
-    oauthToken: OAUTH_TOKEN_OVERRIDE,
-    requestDelayMs: REQUEST_DELAY_MS,
-  };
-
-  const dateChunks = chunkDateRange(config.dateFrom, config.dateTo, config.chunkStrategy);
-  const totalChunks = dateChunks.length * config.searchQueries.length;
-  console.log(
-    `[hh-archive][${jobId}] ${config.searchQueries.length} queries × ${dateChunks.length} chunks = ${totalChunks} requests minimum`,
-  );
-
-  await updateJob(db, jobId, { total_chunks: totalChunks });
-
-  // Глобальный набор vacancy_id чтобы не сохранять дубли в одном job'е.
-  // По месту вставки в БД ON CONFLICT не используем — он есть в схеме как
-  // UNIQUE(job_id, vacancy_id), но дедуп в JS дешевле чем roundtrip к БД.
+  // Глобальный дедуп между разными query — одна вакансия могла подпасть
+  // под несколько ключевиков, в архив пишем один раз (тем query'ем, что
+  // нашёл её первым).
   const seenVacancyIds = new Set<string>();
-  let foundTotal = 0;
   let savedTotal = 0;
+  let foundTotal = 0;
   let errorsCount = 0;
-  let processedChunks = 0;
-
-  /**
-   * Обработка одного чанка с рекурсивным разбиением.
-   * Если HH репортит `found > 2000` И мы ещё не достигли MAX_SPLIT_DEPTH —
-   * режем чанк пополам по дате и рекурсивно обрабатываем половинки.
-   * Иначе пагинируем все доступные страницы (макс 19 × 100 = 1900 items).
-   *
-   * Side-effects на outer let: foundTotal, errorsCount, seenVacancyIds.
-   */
-  async function processChunkRecursive(
-    query: string,
-    from: string,
-    to: string,
-    depth: number,
-  ): Promise<void> {
-    if (seenVacancyIds.size >= maxResults) return;
-    if (await isCancelled(db, jobId)) return;
-
-    // Стр. 0 — узнаём found / pages
-    let firstResp: HHRawResponse;
-    try {
-      firstResp = await fetchHHJson(buildSearchUrl(config, query, 0, from, to), config);
-    } catch (e) {
-      errorsCount += 1;
-      console.error(
-        `[hh-archive][${jobId}] chunk failed ${query}/${from}..${to} (depth=${depth}):`,
-        (e as Error).message,
-      );
-      return;
-    }
-
-    const found = firstResp.found ?? 0;
-
-    // Если over-cap и есть куда разбивать → recurse.
-    if (found > HH_API_RESULTS_HARD_CAP && depth < MAX_SPLIT_DEPTH && from !== to) {
-      const halves = splitDateRangeHalf(from, to);
-      if (halves.length === 2) {
-        console.log(
-          `[hh-archive][${jobId}] split ${query}/${from}..${to}: found=${found} > 2000, depth=${depth} → halves`,
-        );
-        await sleep(REQUEST_DELAY_MS);
-        await processChunkRecursive(query, halves[0].from, halves[0].to, depth + 1);
-        if (seenVacancyIds.size >= maxResults) return;
-        await sleep(REQUEST_DELAY_MS);
-        await processChunkRecursive(query, halves[1].from, halves[1].to, depth + 1);
-        return;
-      }
-    }
-
-    // Лист рекурсии. Если по-прежнему found > 2000 — accept loss.
-    foundTotal += Math.min(found, HH_API_RESULTS_HARD_CAP);
-    if (found > HH_API_RESULTS_HARD_CAP) {
-      console.warn(
-        `[hh-archive][${jobId}] LEAF ${query}/${from}..${to}: found=${found} > 2000, losing ${found - HH_API_RESULTS_HARD_CAP} (depth=${depth} → дальше не дробится)`,
-      );
-    }
-
-    // Сохраняем page 0
-    await persistVacancies(db, jobId, query, firstResp, seenVacancyIds);
-
-    const pagesAvailable = Math.min(firstResp.pages ?? 0, HH_API_MAX_PAGE + 1);
-    for (let page = 1; page < pagesAvailable; page += 1) {
-      if (seenVacancyIds.size >= maxResults) return;
-      if (await isCancelled(db, jobId)) return;
-      await sleep(REQUEST_DELAY_MS);
-      try {
-        const resp = await fetchHHJson(buildSearchUrl(config, query, page, from, to), config);
-        await persistVacancies(db, jobId, query, resp, seenVacancyIds);
-      } catch (e) {
-        errorsCount += 1;
-        console.error(
-          `[hh-archive][${jobId}] page ${page} failed ${query}/${from}..${to}:`,
-          (e as Error).message,
-        );
-      }
-    }
-  }
 
   try {
-    for (const query of config.searchQueries) {
+    for (let i = 0; i < queries.length; i += 1) {
       if (savedTotal >= maxResults) {
-        console.log(
-          `[hh-archive][${jobId}] hit max_results=${maxResults}, stopping`,
-        );
+        console.log(`[hh-archive][${jobId}] hit max_results=${maxResults}, stopping`);
         break;
       }
       if (await isCancelled(db, jobId)) {
@@ -228,38 +150,51 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
         return;
       }
 
-      for (const { from, to } of dateChunks) {
-        if (savedTotal >= maxResults) break;
-        if (await isCancelled(db, jobId)) return;
+      const query = queries[i];
+      const remaining = maxResults - savedTotal;
 
-        processedChunks += 1;
-
-        // Рекурсивно обрабатываем чанк: если found > 2000 → режем пополам.
-        // Это устраняет основной источник потерь от HH-лимита 2000/запрос.
-        await processChunkRecursive(query, from, to, 0);
-
-        savedTotal = seenVacancyIds.size;
-        await updateJob(db, jobId, {
-          processed_chunks: processedChunks,
-          found_total: foundTotal,
-          saved_total: savedTotal,
-          errors_count: errorsCount,
-        });
-
-        await sleep(REQUEST_DELAY_MS);
+      let rows: LocalVacancyRow[];
+      try {
+        rows = await fetchVacanciesLocal(
+          {
+            query,
+            areaIds,
+            dateFrom: job.date_from,
+            dateTo: job.date_to,
+          },
+          // С запасом: часть отвалится дедупом с ранее набранными query.
+          Math.min(remaining * 2, remaining + 5000),
+        );
+      } catch (e) {
+        errorsCount += 1;
+        console.error(`[hh-archive][${jobId}] query "${query}" failed:`, (e as Error).message);
+        rows = [];
       }
-    }
 
-    // Перед завершением — обогащаем сайт компании (HH search не отдаёт
-    // employer.site_url, надо отдельно дёрнуть /employers/{id}).
-    // Долгий шаг (1500 уник работодателей ≈ 20 мин при 700мс delay),
-    // но без него column company_site_url остаётся пустым.
-    if (!(await isCancelled(db, jobId))) {
-      const enriched = await enrichEmployerSites(db, jobId, config);
+      foundTotal += rows.length;
+
+      // Дедуп против уже сохранённых из предыдущих query.
+      const fresh: LocalVacancyRow[] = [];
+      for (const r of rows) {
+        if (seenVacancyIds.has(r.vacancy_id)) continue;
+        seenVacancyIds.add(r.vacancy_id);
+        fresh.push(r);
+        if (savedTotal + fresh.length >= maxResults) break;
+      }
+
+      const insertedCount = await insertBatch(db, jobId, query, fresh);
+      savedTotal += insertedCount;
+
+      await updateJob(db, jobId, {
+        processed_chunks: i + 1,
+        found_total: foundTotal,
+        saved_total: savedTotal,
+        errors_count: errorsCount,
+      });
+
       console.log(
-        `[hh-archive][${jobId}] employer enrichment: ${enriched.updated}/${enriched.total} got sites (${enriched.errors} errors)`,
+        `[hh-archive][${jobId}] query ${i + 1}/${queries.length} "${query}": found=${rows.length}, saved+=${insertedCount}, total_saved=${savedTotal}`,
       );
-      errorsCount += enriched.errors;
     }
 
     await updateJob(db, jobId, {
@@ -268,7 +203,7 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
       found_total: foundTotal,
       saved_total: savedTotal,
       errors_count: errorsCount,
-      processed_chunks: processedChunks,
+      processed_chunks: queries.length,
     });
     console.log(
       `[hh-archive][${jobId}] completed: saved ${savedTotal}/${foundTotal} (${errorsCount} errors)`,
@@ -283,122 +218,5 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
       saved_total: savedTotal,
       errors_count: errorsCount + 1,
     });
-  }
-}
-
-/**
- * Пост-обработка: для каждого уникального employer_id из этого job'а
- * дёргает /employers/{id}, обновляет company_site_url во ВСЕХ строках
- * этого employer в текущем job.
- *
- * Долгий шаг (1500 уник × 700ms ≈ 17 мин). Идёт последовательно —
- * параллелить страшнее: на HH общий rate-limit, а воркер уже занят этим
- * job-slot'ом, спешить некуда.
- *
- * Не валит job целиком при отдельных 403/404/500 — лучше сохранить часть
- * сайтов, чем отказаться от всех.
- */
-async function enrichEmployerSites(
-  db: SupabaseClient,
-  jobId: string,
-  config: HHParseConfig,
-): Promise<{ updated: number; total: number; errors: number }> {
-  // Берём уникальные employer_id из этого job'а, у которых сайт ещё не
-  // подтянут. Limit 50000 (упёрлись бы и в max_results).
-  const { data: rows, error } = await db
-    .from('hh_archive_results')
-    .select('employer_id')
-    .eq('job_id', jobId)
-    .or('company_site_url.is.null,company_site_url.eq.')
-    .not('employer_id', 'is', null)
-    .neq('employer_id', '')
-    .limit(50000);
-  if (error) {
-    console.error(`[hh-archive][${jobId}] enrich: select failed:`, error.message);
-    return { updated: 0, total: 0, errors: 1 };
-  }
-
-  const uniqueIds = Array.from(
-    new Set((rows ?? []).map((r) => String(r.employer_id)).filter(Boolean)),
-  );
-  if (uniqueIds.length === 0) return { updated: 0, total: 0, errors: 0 };
-
-  console.log(`[hh-archive][${jobId}] enriching ${uniqueIds.length} unique employers...`);
-  let updated = 0;
-  let errors = 0;
-
-  for (let i = 0; i < uniqueIds.length; i += 1) {
-    if (await isCancelled(db, jobId)) {
-      console.log(`[hh-archive][${jobId}] enrichment cancelled at ${i}/${uniqueIds.length}`);
-      break;
-    }
-    const employerId = uniqueIds[i];
-    try {
-      const site = await fetchEmployerSite(employerId, config);
-      if (site) {
-        const { error: updErr } = await db
-          .from('hh_archive_results')
-          .update({ company_site_url: site })
-          .eq('job_id', jobId)
-          .eq('employer_id', employerId);
-        if (updErr) {
-          errors += 1;
-          console.warn(`[hh-archive][${jobId}] employer ${employerId} UPDATE failed:`, updErr.message);
-        } else {
-          updated += 1;
-        }
-      }
-    } catch (e) {
-      errors += 1;
-      console.warn(`[hh-archive][${jobId}] employer ${employerId} fetch failed:`, (e as Error).message);
-    }
-
-    // Heartbeat каждые 50 — иначе startup-recovery решит, что воркер мёртв.
-    if ((i + 1) % 50 === 0) {
-      await updateJob(db, jobId, { /* updated_at bumps via trigger */ });
-      console.log(`[hh-archive][${jobId}] enriched ${i + 1}/${uniqueIds.length} (${updated} with sites)`);
-    }
-
-    await sleep(EMPLOYER_REQUEST_DELAY_MS);
-  }
-
-  return { updated, total: uniqueIds.length, errors };
-}
-
-async function persistVacancies(
-  db: SupabaseClient,
-  jobId: string,
-  query: string,
-  response: HHRawResponse,
-  seen: Set<string>,
-): Promise<void> {
-  const vacs = extractVacancies(response);
-  const rows = vacs
-    .filter((v) => v.vacancyId && !seen.has(v.vacancyId))
-    .map((v) => {
-      seen.add(v.vacancyId);
-      return {
-        job_id: jobId,
-        vacancy_id: v.vacancyId,
-        title: v.title,
-        company: v.company,
-        company_site_url: v.companySiteUrl,
-        area: v.area,
-        employer_id: v.employerId,
-        published_at: v.publishedAt,
-        archived_at: v.archivedAt,
-        raw_query: query,
-      };
-    });
-  if (rows.length === 0) return;
-
-  // ON CONFLICT DO NOTHING на уровне БД (UNIQUE(job_id, vacancy_id) уже есть)
-  const { error } = await db.from('hh_archive_results').insert(rows);
-  if (error) {
-    // 23505 — duplicate key (если 2 чанка перекрылись по дате — нормально).
-    // Остальное — реальная проблема, логируем но не валим job.
-    if (!error.message.includes('duplicate')) {
-      console.error(`[hh-archive][${jobId}] persistVacancies error:`, error.message);
-    }
   }
 }
