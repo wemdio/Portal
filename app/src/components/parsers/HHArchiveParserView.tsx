@@ -394,8 +394,8 @@ export function HHArchiveParserView() {
               </div>
               <div className="text-xs text-blue-700">{preview.note}</div>
               <div className="text-xs text-gray-600">
-                ℹ Это до дедупа по vacancy_id (одна вакансия может лежать в нескольких job'ах
-                обычного парсера и в sink'e auto-pipeline). После дедупа реально выгрузится меньше.
+                ℹ Это до дедупа по vacancy_id (одна вакансия может лежать в нескольких job&#39;ах
+                обычного парсера и в sink&#39;e auto-pipeline). После дедупа реально выгрузится меньше.
               </div>
               {outOfRange && (
                 <div className="text-xs text-amber-800 font-medium">
