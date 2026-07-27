@@ -14,7 +14,7 @@ Changelog-bot: ежедневный дайджест обновлений пор
   GITHUB_TOKEN             — Personal Access Token (для приватного репо)
   GITHUB_REPO              — owner/repo  (default: wemdio/Portal)
   REQUESTY_CHANGELOG_API_KEY   — ключ Requesty для AI-саммари
-  CHANGELOG_OPENROUTER_MODEL  — модель (default: google/gemini-2.0-flash-001)
+  CHANGELOG_OPENROUTER_MODEL  — модель (default: google/gemini-2.5-flash, 1M токенов контекста)
   CHANGELOG_THREAD_ID      — ID топика в супергруппе (опционально, для отправки в тред)
   CHANGELOG_RUN_NOW        — если "1", запустить дайджест сразу при старте (для теста)
   DATABASE_URL             — Postgres URL (опционально, для хранения истории саммари)
@@ -22,6 +22,7 @@ Changelog-bot: ежедневный дайджест обновлений пор
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import sys
@@ -50,7 +51,7 @@ CHAT_ID = os.environ.get("CHANGELOG_CHAT_ID", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "wemdio/Portal")
 OPENROUTER_API_KEY = os.environ.get("REQUESTY_CHANGELOG_API_KEY", "")
-AI_MODEL = os.environ.get("CHANGELOG_OPENROUTER_MODEL", "anthropic/claude-sonnet-4-5")
+AI_MODEL = os.environ.get("CHANGELOG_OPENROUTER_MODEL", "google/gemini-2.5-flash")
 THREAD_ID = os.environ.get("CHANGELOG_THREAD_ID", "")
 RUN_NOW = os.environ.get("CHANGELOG_RUN_NOW", "") == "1"
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL", "")
@@ -264,14 +265,50 @@ SYSTEM_PROMPT = """\
 """
 
 
-async def summarize_with_ai(messages: list[str], period: str = "за прошедшие сутки") -> str:
+MAX_MESSAGES = 400
+MAX_USER_CONTENT_CHARS = 400_000
+
+
+async def summarize_with_ai(
+    messages: list[str],
+    period: str = "за прошедшие сутки",
+    model_override: str | None = None,
+) -> str:
     if not messages:
         return ""
 
-    user_content = f"Период: {period}\n\nСписок коммит-сообщений:\n" + "\n".join(f"- {m}" for m in messages)
+    original_count = len(messages)
+    truncated_count = 0
+    if original_count > MAX_MESSAGES:
+        messages = messages[:MAX_MESSAGES]
+        truncated_count = original_count - MAX_MESSAGES
+        print(
+            f"[changelog] Too many messages ({original_count}) — capped at {MAX_MESSAGES}, dropped {truncated_count}",
+            flush=True,
+        )
 
+    tail = f"\n- …и ещё {truncated_count} коммитов не показаны" if truncated_count else ""
+    user_content = (
+        f"Период: {period}\n\nСписок коммит-сообщений:\n"
+        + "\n".join(f"- {m}" for m in messages)
+        + tail
+    )
+
+    if len(user_content) > MAX_USER_CONTENT_CHARS:
+        cut = MAX_USER_CONTENT_CHARS
+        newline = user_content.rfind("\n", 0, cut)
+        if newline > 0:
+            cut = newline
+        print(
+            f"[changelog] user_content too long ({len(user_content)} chars) — truncating to {cut}",
+            flush=True,
+        )
+        user_content = user_content[:cut] + "\n- …остальные коммиты обрезаны (слишком много)"
+
+    model = model_override or AI_MODEL
+    print(f"[changelog] AI model: {model}, input chars: {len(user_content)}", flush=True)
     payload = {
-        "model": AI_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
@@ -356,19 +393,32 @@ async def send_message(text: str) -> bool:
 
 # ── Core job ──────────────────────────────────────────────────────────────────
 
-async def run_digest() -> None:
+async def run_digest(
+    *,
+    force: bool = False,
+    days_override: int | None = None,
+    model_override: str | None = None,
+    skip_already_sent_check: bool = False,
+) -> None:
     now_msk = datetime.now(MSK)
     weekday = now_msk.weekday()
     print(f"[changelog] run_digest triggered: {now_msk.strftime('%d.%m.%Y %H:%M MSK')} weekday={weekday}", flush=True)
 
-    if weekday >= 5:
+    if weekday >= 5 and not force:
         print("[changelog] Weekend — skip.", flush=True)
         return
 
-    since_utc, until_utc = _compute_window(now_msk)
+    if days_override is not None:
+        until_utc = datetime.now(timezone.utc)
+        since_utc = until_utc - timedelta(days=days_override)
+        period_label = f"за последние {days_override} дн."
+    else:
+        since_utc, until_utc = _compute_window(now_msk)
+        period_label = "за прошедшие выходные и пятницу" if weekday == 0 else "за прошедшие сутки"
+
     print(f"[changelog] Window: {since_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} → {until_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}", flush=True)
 
-    if not RUN_NOW and await already_sent(since_utc, until_utc):
+    if not RUN_NOW and not skip_already_sent_check and await already_sent(since_utc, until_utc):
         print("[changelog] Digest for this window already sent — skipping.", flush=True)
         return
 
@@ -388,8 +438,7 @@ async def run_digest() -> None:
         print("[changelog] No meaningful commit messages — skip.", flush=True)
         return
 
-    period_label = "за прошедшие выходные и пятницу" if weekday == 0 else "за прошедшие сутки"
-    summary = await summarize_with_ai(messages, period=period_label)
+    summary = await summarize_with_ai(messages, period=period_label, model_override=model_override)
 
     if not summary or not summary.strip():
         print("[changelog] AI returned empty summary — nothing to send.", flush=True)
@@ -454,6 +503,41 @@ async def _run_catchup() -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Portal changelog bot")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run digest immediately and exit (no scheduler, no health server, bypasses weekend check).",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Override window: last N days back from now (only with --once).",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Override AI model id (e.g. google/gemini-2.0-flash-001 for 1M-token context).",
+    )
+    return parser.parse_args()
+
+
+async def run_once(days: int | None, model: str | None) -> None:
+    _require("CHANGELOG_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
+    _require("CHANGELOG_CHAT_ID", CHAT_ID)
+    _require("REQUESTY_CHANGELOG_API_KEY", OPENROUTER_API_KEY)
+    await ensure_table()
+    await run_digest(
+        force=True,
+        days_override=days,
+        model_override=model,
+        skip_already_sent_check=True,
+    )
+
+
 async def main() -> None:
     _require("CHANGELOG_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
     _require("CHANGELOG_CHAT_ID", CHAT_ID)
@@ -490,4 +574,8 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    args = _parse_args()
+    if args.once:
+        asyncio.run(run_once(days=args.days, model=args.model))
+    else:
+        asyncio.run(main())
