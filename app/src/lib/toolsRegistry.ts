@@ -51,6 +51,7 @@ export const ALL_TOOL_IDS = [
   'nash-outreach',
   'event-outreach',
   'reputation-finder',
+  '2gis-parser',
   'our-bases',
   'sales-chat-analyzer',
   'hypothesis-engine',
@@ -352,6 +353,18 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     badge: 'Beta',
     badgeVariant: 'amber',
   },
+  '2gis-parser': {
+    id: '2gis-parser',
+    title: '2GIS Парсер',
+    title_en: '2GIS Parser',
+    description: 'Поиск и CSV-выгрузка организаций 2GIS по городам, рубрикам и наличию контактов.',
+    description_en: 'Search and export 2GIS organizations by city, category, and available contacts.',
+    href: '/tools/2gis-parser',
+    accentColor: 'blue',
+    badge: 'Новое',
+    badge_en: 'New',
+    badgeVariant: 'emerald',
+  },
   'our-bases': {
     id: 'our-bases',
     title: 'Наша база баз',
@@ -401,7 +414,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Парсеры и поиск лидов',
     label_en: 'Parsers and lead search',
-    toolIds: ['parsers', 'habr-career', 'tg-parser', 'cis-lead-finder', 'reputation-finder'],
+    toolIds: ['parsers', '2gis-parser', 'habr-career', 'tg-parser', 'cis-lead-finder', 'reputation-finder'],
   },
   {
     label: 'Утилиты',

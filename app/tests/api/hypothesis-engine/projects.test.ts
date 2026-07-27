@@ -42,6 +42,7 @@ jest.mock('@/lib/loggerServer', () => ({
 }));
 
 import { GET, POST } from '@/app/api/tools/hypothesis-engine/projects/route';
+import { PATCH } from '@/app/api/tools/hypothesis-engine/projects/[id]/route';
 
 function makeReq(body?: unknown, method = 'POST'): NextRequest {
   return new Request('http://x/api/tools/hypothesis-engine/projects', {
@@ -50,6 +51,16 @@ function makeReq(body?: unknown, method = 'POST'): NextRequest {
     ...(method !== 'GET' ? { body: JSON.stringify(body) } : {}),
   }) as unknown as NextRequest;
 }
+
+function makePatchReq(body: unknown): NextRequest {
+  return new Request('http://x/api/tools/hypothesis-engine/projects/p1', {
+    method: 'PATCH',
+    headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  }) as unknown as NextRequest;
+}
+
+const patchParams = { params: Promise.resolve({ id: 'p1' }) };
 
 beforeEach(() => {
   mockDb = createMockSupabase({ tables: { he_projects: [], he_verticals: [] } });
@@ -130,5 +141,70 @@ describe('GET /api/tools/hypothesis-engine/projects', () => {
     };
     const byId = Object.fromEntries(body.projects.map((p) => [p.id, p.vertical_count]));
     expect(byId).toEqual({ p1: 0, p2: 2 });
+  });
+});
+
+describe('PATCH /api/tools/hypothesis-engine/projects/[id] — validation', () => {
+  it('returns 400 when offer_override is missing', async () => {
+    const res = await PATCH(makePatchReq({}), patchParams);
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when offer_override is not a string', async () => {
+    const res = await PATCH(makePatchReq({ offer_override: 42 }), patchParams);
+    expect(res.status).toBe(400);
+    expect(mockDb.updates).toHaveLength(0);
+  });
+});
+
+describe('PATCH /api/tools/hypothesis-engine/projects/[id] — offer_override', () => {
+  it('merges offer_override into the existing brief without clobbering other keys', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_projects: [
+          {
+            id: 'p1',
+            name: 'One',
+            website_url: 'https://one.example/',
+            status: 'draft',
+            brief: { site_profile: { usp: 'seo' } },
+          },
+        ],
+      },
+    });
+
+    const res = await PATCH(makePatchReq({ offer_override: '3–5 встреч в месяц с HRD' }), patchParams);
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as { project: { id: string } };
+    expect(body.project.id).toBe('p1');
+
+    expect(mockDb.getRows('he_projects')[0].brief).toEqual({
+      site_profile: { usp: 'seo' },
+      offer_override: '3–5 встреч в месяц с HRD',
+    });
+  });
+
+  it('removes offer_override from brief on an empty string', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_projects: [
+          {
+            id: 'p1',
+            name: 'One',
+            website_url: 'https://one.example/',
+            status: 'draft',
+            brief: { site_profile: { usp: 'seo' }, offer_override: 'старый оффер' },
+          },
+        ],
+      },
+    });
+
+    const res = await PATCH(makePatchReq({ offer_override: '' }), patchParams);
+    expect(res.status).toBe(200);
+
+    const brief = mockDb.getRows('he_projects')[0].brief as Record<string, unknown>;
+    expect(brief).toEqual({ site_profile: { usp: 'seo' } });
+    expect(brief).not.toHaveProperty('offer_override');
   });
 });

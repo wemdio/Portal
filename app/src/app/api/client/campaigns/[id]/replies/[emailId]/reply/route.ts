@@ -4,6 +4,7 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { getEmail, listEmails, replyToEmail } from '@/lib/instantly/client';
 import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
+import { isForeignEmail, isInboundEmail, resolveClientMailboxes } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
 import { computeReplyAllCc, mergeCcLists } from '@/lib/clientCampaignReplies/participants';
 import { validateReplyInput } from '@/lib/clientCampaignReplies/validate';
 import { textToReplyHtml } from '@/lib/clientCampaignReplies/bodyHtml';
@@ -60,6 +61,17 @@ export async function POST(
     const original = await getEmail(emailId, instantlyRequestOptions);
     if (!original || original.campaign_id !== campaignId) {
       return jsonError('Письмо не относится к кампании', 404);
+    }
+
+    // Чужое входящее (получено ящиком ДРУГОГО клиента воркспейса, см.
+    // foreignMailboxFilter): отвечать на него нельзя — findEaccountForReply
+    // взял бы eaccount этого письма, и ответ ушёл бы С ЧУЖОГО ЯЩИКА, а его
+    // содержимое (цитата) уехало бы лиду. Тот же 404, что для чужой кампании.
+    if (isInboundEmail(original)) {
+      const mailboxes = await resolveClientMailboxes(userId, campaignId, instantlyRequestOptions.accountId);
+      if (isForeignEmail(original, mailboxes)) {
+        return jsonError('Письмо не относится к кампании', 404);
+      }
     }
 
     let eaccount = findEaccountForReply({ originalEmail: original, threadEmails: [] });
@@ -126,7 +138,9 @@ export async function POST(
       userId,
     });
 
-    return NextResponse.json({ ok: true, eaccount });
+    // eaccount в ответ не отдаём: он клиенту не нужен, а для гипотетического
+    // чужого письма это был бы адрес чужого ящика.
+    return NextResponse.json({ ok: true });
   } catch (err) {
     await logError('client.campaign.replies.reply.failed', err, { campaignId, emailId, userId });
     return jsonError(err instanceof Error ? err.message : 'Не удалось отправить ответ', 502);

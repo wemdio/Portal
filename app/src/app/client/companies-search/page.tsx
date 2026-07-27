@@ -1269,7 +1269,7 @@ function RegionsModal({
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder={t('Быстрый поиск', 'Quick search', locale)}
-              className="ds-input w-full pl-9 text-sm"
+              className="ds-input has-leading-icon w-full text-sm"
             />
           </div>
         </div>

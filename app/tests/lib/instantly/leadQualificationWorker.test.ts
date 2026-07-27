@@ -255,6 +255,122 @@ describe('pollAndQualifyReplies', () => {
     }));
   });
 
+  it('writes a lead-board row for a newly qualified lead (auto columns, enrichment, step from thread)', async () => {
+    process.env.GUEST_TOKEN_SECRET = 'test-board-secret';
+    getLeadsByEmail.mockResolvedValueOnce([
+      {
+        first_name: 'Иван',
+        last_name: 'Петров',
+        company_name: 'ACME',
+        phone: '+7 900 111-22-33',
+        website: 'acme.ru',
+      },
+    ]);
+    qualifyReply.mockResolvedValueOnce({
+      isLead: true,
+      proposalSeen: true,
+      interestSignals: ['asked_for_call'],
+      reason: 'Просит созвон',
+      confidence: 0.92,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({ id: 'lead-email', body: { text: 'Давайте созвонимся' } }),
+        threadEmails: [
+          replyEmail({ id: 'out-1', ue_type: 1 }),
+          replyEmail({ id: 'out-2', ue_type: 1 }),
+          replyEmail({ id: 'lead-email', ue_type: 2 }),
+        ],
+        lastOutbound: replyEmail({ id: 'out-2', ue_type: 1 }),
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'lead-email', campaign_id: 'linked-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1);
+    // Доска создана лениво при первом лиде проекта
+    const boards = mockInstantlyDb!.getRows('project_lead_boards');
+    expect(boards).toHaveLength(1);
+    expect(boards[0].project_id).toBe('project-1');
+    // Авто-строка: все колонки из обогащения + шаг = числу наших исходящих в треде
+    const boardRows = mockInstantlyDb!.getRows('project_lead_board_rows');
+    expect(boardRows).toHaveLength(1);
+    const qualification = mockInstantlyDb!.getRows('instantly_lead_qualifications')[0];
+    expect(boardRows[0]).toEqual(
+      expect.objectContaining({
+        project_id: 'project-1',
+        qualification_id: qualification.id,
+        campaign_id: 'linked-campaign',
+        campaign_name: 'Кампания Новикова',
+        lead_email: 'lead@example.com',
+        lead_name: 'Иван Петров',
+        company_name: 'ACME',
+        phone: '+7 900 111-22-33',
+        website: 'acme.ru',
+        request_text: 'Давайте созвонимся',
+        step_number: 2,
+        reply_timestamp: '2026-05-13T12:00:00Z',
+      }),
+    );
+    // Клиентские колонки воркером не пишутся
+    expect(boardRows[0]).not.toHaveProperty('quality');
+    expect(boardRows[0]).not.toHaveProperty('comment');
+    expect(boardRows[0]).not.toHaveProperty('taken');
+    // Ссылка на доску ушла в TG-алерт
+    expect(sendLeadTelegramAlert).toHaveBeenCalledWith(
+      expect.objectContaining({ boardLink: expect.stringMatching(/\/leads-board\/lb_/) }),
+    );
+  });
+
+  it('board failure (DB error on board tables) does not break qualification or alert — warn only', async () => {
+    // Ground rule: код едет раньше миграции / блик БД доски — money path цел.
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          { project_id: 'project-1', campaign_id: 'linked-campaign', match_source: 'auto' },
+        ],
+        instantly_lead_qualifications: [],
+      },
+      errorTables: { project_lead_boards: 'boom' },
+    });
+    qualifyReply.mockResolvedValueOnce({
+      isLead: true,
+      proposalSeen: true,
+      interestSignals: ['asked_for_call'],
+      reason: 'Просит созвон',
+      confidence: 0.92,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({ id: 'lead-email', body: { text: 'Давайте созвонимся' } }),
+        threadEmails: [],
+        lastOutbound: null,
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'lead-email', campaign_id: 'linked-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1); // квалификация записана
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toHaveLength(1);
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1); // алерт ушёл — без строки ссылки
+    expect(sendLeadTelegramAlert).toHaveBeenCalledWith(
+      expect.objectContaining({ boardLink: null }),
+    );
+    expect(mockInstantlyDb!.getRows('project_lead_board_rows')).toHaveLength(0);
+  });
+
   // Пост-handoff эхо (кейс «Умные Новации» 10.07.2026): после передачи лида
   // клиент отвечает лиду со своей почты, наш ящик в копии → Instantly кладёт
   // письмо в кампанию как received, ИИ честно читает «просит встречу» → ложный

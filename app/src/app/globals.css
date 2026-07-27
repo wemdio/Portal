@@ -1529,6 +1529,16 @@ body:has(.client-portal) {
   border-color: var(--cp-paper);
 }
 
+/* Icon-carrying inputs: pl-9/pr-9 utilities lose to the .client-portal .ds-input
+   rule above on specificity (0,2,0 vs 0,1,0), so text overlaps the icon.
+   Dedicated modifiers keep the padding. */
+.client-portal .ds-input.has-leading-icon {
+  padding-left: 36px;
+}
+.client-portal .ds-input.has-trailing-icon {
+  padding-right: 36px;
+}
+
 /* Dense results table — brings client parser result grids to base-constructor /
    VacancyResults density without per-cell utilities. Apply as a clientMode-only
    class on the <table>; operators (outside .client-portal) are unaffected. */

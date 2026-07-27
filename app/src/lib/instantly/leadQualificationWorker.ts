@@ -20,6 +20,12 @@ import { getEmailRecipients } from '@/lib/clientCampaignReplies/participants';
 import { generateHandoffReply } from './handoffGenerator';
 import { signHandoffCallback } from './handoffCallback';
 import {
+  resolveBoardProjectId,
+  getOrCreateBoard,
+  getBoardLinkForProject,
+  upsertBoardRow,
+} from './leadBoardWriter';
+import {
   handoffBotToken,
   handoffChatId,
   handoffThreadId,
@@ -860,6 +866,10 @@ export async function qualifyOneReply(
 
   let leadName: string | undefined;
   let companyName: string | undefined;
+  // Телефон/сайт — для авто-строки гостевой таблицы лидов (в саму квалификацию
+  // не пишутся: у instantly_lead_qualifications таких колонок нет).
+  let leadPhone: string | undefined;
+  let leadWebsite: string | undefined;
   try {
     const leads = await instantly.getLeadsByEmail({ email: leadEmail, campaign_id: campaignId }, { accountId });
     const lead = leads?.[0];
@@ -867,6 +877,8 @@ export async function qualifyOneReply(
       leadName =
         [lead.first_name, lead.last_name].filter(Boolean).join(' ') || undefined;
       companyName = lead.company_name ?? undefined;
+      leadPhone = lead.phone?.trim() || undefined;
+      leadWebsite = lead.website?.trim() || undefined;
     }
   } catch {
     // lead metadata is optional enrichment
@@ -935,6 +947,46 @@ export async function qualifyOneReply(
     'info',
     `Classified ${leadEmail} in campaign ${campaignId}: ${status}${result.objectionHandleable ? ' [objection]' : ''} (confidence: ${result.confidence.toFixed(2)})${inserted?.id ? '' : ' [dedup-skip]'}`,
   );
+
+  // Гостевая таблица лидов проекта (lead board): авто-строка при каждом новом
+  // лиде project-linked кампании. Неудача НЕ роняет квалификацию/алерт —
+  // логируем и едем дальше.
+  if (status === 'lead' && inserted?.id) {
+    try {
+      const boardProjectId = await resolveBoardProjectId(db, campaignId);
+      if (boardProjectId) {
+        await getOrCreateBoard(db, boardProjectId);
+        // Шаг — тот же счёт, что ИИ видит в промпте («шаг N кампании»): наши
+        // исходящие (ue_type=1) в треде. Имя — фолбэк на заголовок письма,
+        // когда Instantly Lead API его не вернул.
+        const stepNumber = result.threadContext
+          ? result.threadContext.threadEmails.filter((e) => (e.ue_type ?? 1) === 1).length
+          : null;
+        let fromName: string | null = null;
+        const fromArr = reply.from_address_json;
+        if (Array.isArray(fromArr) && fromArr.length > 0) {
+          const n = fromArr[0]?.name;
+          if (typeof n === 'string' && n.trim().length > 0) fromName = n.trim();
+        }
+        await upsertBoardRow(db, {
+          qualificationId: inserted.id,
+          projectId: boardProjectId,
+          campaignId,
+          campaignName,
+          leadEmail,
+          leadName: leadName ?? fromName,
+          companyName: companyName ?? null,
+          phone: leadPhone ?? null,
+          website: leadWebsite ?? null,
+          requestText: replyText || null,
+          stepNumber,
+          replyTimestamp: reply.timestamp_email ?? null,
+        });
+      }
+    } catch (err) {
+      workerLog('warn', `lead board row upsert failed for ${leadEmail} (campaign ${campaignId}): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   if (status === 'lead' && inserted?.id && supabaseMain) {
     await notifySpecialistsAboutLead(
@@ -1308,8 +1360,11 @@ async function notifySpecialistsAboutLead(
       .eq('campaign_id', campaignId);
 
     const links = [...(periodLinks ?? []), ...(legacyLinks ?? [])];
+    let boardLink: string | null = null;
     if (links?.length) {
       const projectIds = links.map((l: { project_id: string }) => l.project_id);
+      // Ссылка на гостевую таблицу лидов проекта — в каждой карточке (never throws).
+      boardLink = await getBoardLinkForProject(instantlyDb, projectIds[0]);
       const { data: projects } = await supabaseMain
         .from('projects')
         .select('specialist_user_id, specialist, client')
@@ -1409,6 +1464,7 @@ async function notifySpecialistsAboutLead(
       replySubject,
       replyPreview,
       aiReason,
+      boardLink,
     });
 
     // Персистим исход TG-отправки: раньше сбой уходил только в stdout-warn и
@@ -1449,6 +1505,7 @@ async function sendTelegramLeadAlertForSpecialists(data: {
   replySubject: string | null;
   replyPreview: string | null;
   aiReason: string | null;
+  boardLink: string | null;
 }): Promise<{ sent: boolean; messageId: number | null; error: string | null }> {
   if (!supabaseMain) return { sent: false, messageId: null, error: 'supabaseMain not configured' };
 
@@ -1499,6 +1556,7 @@ async function sendTelegramLeadAlertForSpecialists(data: {
       replySubject: data.replySubject,
       replyPreview: data.replyPreview,
       aiReason: data.aiReason,
+      boardLink: data.boardLink,
     });
 
     if (!result.sent) {
@@ -1615,6 +1673,7 @@ async function maybePostLeadHandoff(opts: {
       workerLog('warn', 'Handoff: LEAD_ALERTS bot token/chat missing — skip post');
       return;
     }
+    const boardLink = await getBoardLinkForProject(instantlyDb, projectIds[0]);
     const contactLabel = opts.leadName ? `${opts.leadName} (${opts.leadEmail})` : opts.leadEmail;
     const text = [
       '<b>🤝 Передача лида клиенту</b>',
@@ -1626,6 +1685,7 @@ async function maybePostLeadHandoff(opts: {
       '<b>Уйдёт лиду:</b>',
       `<pre>${escapeHtml(draft.slice(0, 1500))}</pre>`,
       '',
+      boardLink ? `📋 <a href="${escapeHtml(boardLink)}">Все лиды проекта</a>` : '',
       'Нажмите «Передать клиенту» — письмо уйдёт лиду, клиент в копии. Нажать может только ответственный.',
     ].filter(Boolean).join('\n');
 

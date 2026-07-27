@@ -170,6 +170,11 @@ export interface HeChainLetter {
   /** Пауза в днях после предыдущего письма (у первого — 0). */
   wait_days: number;
   variants?: string[];
+  /**
+   * Условные сегментные варианты тела (только финальные шаблоны he_templates):
+   * основной body — дефолт для всей базы, вариант идёт только лидам сегмента.
+   */
+  segment_variants?: HeSegmentVariant[];
 }
 
 export interface HeCompanyType {
@@ -231,16 +236,37 @@ export interface HeSegmentAddition {
   why?: string;
 }
 
+/**
+ * Условный сегментный вариант письма (~15% дописки под базу): подменяет/дополняет
+ * основной текст ТОЛЬКО для лидов сегмента `when`. Основной текст — дефолт.
+ */
+export interface HeSegmentVariant {
+  /** Человекочитаемое условие сегмента из анализа базы (напр. «компании вне Москвы/СПб»). */
+  when: string;
+  /** Текст письма для этого сегмента. */
+  text: string;
+}
+
+/** Сегментные варианты одного письма (1-based letter_index). */
+export interface HeLetterSegmentVariants {
+  letter_index: number;
+  segment_variants: HeSegmentVariant[];
+}
+
 /** Маппинг оператора {{var}} на колонку базы (matched=false — колонки нет). */
 export interface HeOperatorMapping {
   operator: string;
   column: string | null;
   matched: boolean;
+  /** Текст подстановки при пустой ячейке (из плана; обязателен для unmatched). */
+  fallback?: string;
 }
 
 export interface HePersonalizationPlan {
   letters: HeLetterPersonalization[];
   additions: HeSegmentAddition[];
+  /** ~15%: условные сегментные варианты по письмам (основной текст — дефолт). */
+  segment_variants?: HeLetterSegmentVariants[];
   /** Фактический маппинг операторов финальных писем на колонки базы. */
   operator_mapping?: HeOperatorMapping[];
 }

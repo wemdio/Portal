@@ -173,4 +173,46 @@ describe('leadTelegramAlerts', () => {
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('includes the project lead-board link when boardLink is provided', async () => {
+    await sendLeadTelegramAlert({
+      qualificationId: 'qual-5',
+      campaignId: 'campaign-5',
+      leadEmail: 'lead5@example.com',
+      leadName: null,
+      companyName: null,
+      campaignName: null,
+      clientName: null,
+      specialistMentions: [],
+      replySubject: null,
+      replyPreview: null,
+      aiReason: null,
+      boardLink: 'https://app.outreachos.pro/leads-board/lb_x.sig',
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.text).toContain(
+      '📋 <a href="https://app.outreachos.pro/leads-board/lb_x.sig">Все лиды проекта</a>',
+    );
+  });
+
+  it('omits the lead-board link line when boardLink is null/absent', async () => {
+    await sendLeadTelegramAlert({
+      qualificationId: 'qual-6',
+      campaignId: 'campaign-6',
+      leadEmail: 'lead6@example.com',
+      leadName: null,
+      companyName: null,
+      campaignName: null,
+      clientName: null,
+      specialistMentions: [],
+      replySubject: null,
+      replyPreview: null,
+      aiReason: null,
+      boardLink: null,
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.text).not.toContain('Все лиды проекта');
+  });
 });

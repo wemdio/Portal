@@ -4,6 +4,7 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { forwardEmail, getEmail, listEmails } from '@/lib/instantly/client';
 import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
+import { isForeignEmail, isInboundEmail, resolveClientMailboxes } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
 import { validateForwardInput } from '@/lib/clientCampaignReplies/validate';
 import { logAudit, logError } from '@/lib/loggerServer';
 
@@ -57,6 +58,17 @@ export async function POST(
       return jsonError('Письмо не относится к кампании', 404);
     }
 
+    // Чужое входящее (получено ящиком ДРУГОГО клиента воркспейса, см.
+    // foreignMailboxFilter): пересылать его нельзя — include_original_body
+    // отправил бы содержимое чужой корреспонденции на произвольный адрес,
+    // а eaccount письма — чужой ящик — стал бы отправителем.
+    if (isInboundEmail(original)) {
+      const mailboxes = await resolveClientMailboxes(userId, campaignId, instantlyRequestOptions.accountId);
+      if (isForeignEmail(original, mailboxes)) {
+        return jsonError('Письмо не относится к кампании', 404);
+      }
+    }
+
     let eaccount = findEaccountForReply({ originalEmail: original, threadEmails: [] });
     if (!eaccount && original.thread_id && original.lead) {
       const thread = await listEmails({ campaign_id: campaignId, lead_id: original.lead, limit: 100 }, instantlyRequestOptions);
@@ -85,7 +97,9 @@ export async function POST(
       userId,
     });
 
-    return NextResponse.json({ ok: true, eaccount, to_email: validation.to_email });
+    // eaccount в ответ не отдаём: клиенту он не нужен, а для чужого
+    // письма это был бы адрес чужого ящика.
+    return NextResponse.json({ ok: true, to_email: validation.to_email });
   } catch (err) {
     await logError('client.campaign.replies.forward.failed', err, { campaignId, emailId, userId });
     return jsonError(err instanceof Error ? err.message : 'Не удалось переслать письмо', 502);

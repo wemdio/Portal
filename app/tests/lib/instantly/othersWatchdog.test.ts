@@ -88,6 +88,9 @@ beforeEach(() => {
   process.env.INSTANTLY_LEADS_INTER_REPLY_DELAY_MS = '1000';
   process.env.INSTANTLY_OTHERS_PROBE_DELAY_MS = '200';
   delete process.env.INSTANTLY_OTHERS_MAX_PER_TICK;
+  delete process.env.INSTANTLY_OTHERS_SENT_TTL_MS;
+  delete process.env.INSTANTLY_OTHERS_SENT_CACHE_MAX;
+  delete process.env.INSTANTLY_OTHERS_PROBE_BUDGET;
 
   mockInstantlyDb = createMockSupabase({ tables: { instantly_lead_qualifications: [] } });
 
@@ -558,5 +561,516 @@ describe('pollOthersOnce', () => {
 
     expect(processed).toBe(1);
     expect((qualifyOneReply.mock.calls[0][1] as Email).id).toBe('real-reply');
+  });
+
+  // ── Ужесточение сабж-матча (swarm-ревью 25.07): коллизии generic-тем ──────
+
+  it('WARMUP-КОЛЛИЗИЯ клише: префикс 25 «Коммерческое предложение…» < 70% темы → дроп', async () => {
+    // Две несвязанные темы с общим generic-началом: 25 общих символов проходили
+    // старый порог ≥15, но это чистое клише — покрытие меньшей темы лишь 62%.
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return {
+          items: [
+            makeOthersEmail({
+              from_address_email: 'warmup-persona@bm-technology.ru',
+              subject: 'Re: Коммерческое предложение для ООО Ромашка',
+            }),
+          ],
+          next_starting_after: null,
+        };
+      }
+      if (params.email_type === 'sent') {
+        return {
+          items: [
+            { id: 'out-kp', ue_type: 1, eaccount: 'elena@velar-vr.ru', subject: 'Коммерческое предложение — оптовым клиентам' },
+          ],
+          next_starting_after: null,
+        };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(0);
+    expect(qualifyOneReply).not.toHaveBeenCalled();
+    expect(mockInstantlyDb?.inserts).toHaveLength(0);
+  });
+
+  it('WARMUP-КОЛЛИЗИЯ короткого шаблона: «Re: Добрый день!» ≠ «Добрый день» → дроп', async () => {
+    // Вложенность шаблонов теперь требует меньший ≥15 симв.: короткие generic-
+    // приветствия больше не матчатся (старый порог 8 пропускал).
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return {
+          items: [makeOthersEmail({ subject: 'Re: Добрый день!' })],
+          next_starting_after: null,
+        };
+      }
+      if (params.email_type === 'sent') {
+        return {
+          items: [{ id: 'out-dd', ue_type: 1, eaccount: 'elena@velar-vr.ru', subject: 'Добрый день' }],
+          next_starting_after: null,
+        };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(0);
+    expect(qualifyOneReply).not.toHaveBeenCalled();
+  });
+
+  it('префикс-матч с покрытием ≥70% и границей слова — легитимный ответ берётся', async () => {
+    // Лид слегка переформулировал хвост темы; общая часть ≥70% и обрыв на
+    // не-букве → матч должен сохраниться (ужесточение не убило recall здесь).
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return {
+          items: [
+            makeOthersEmail({ subject: 'Re: Поставка металлопроката: цены, сроки, наличие' }),
+          ],
+          next_starting_after: null,
+        };
+      }
+      if (params.email_type === 'sent') {
+        return {
+          items: [
+            { id: 'out-pm', ue_type: 1, eaccount: 'elena@velar-vr.ru', subject: 'Поставка металлопроката: цены и сроки' },
+          ],
+          next_starting_after: null,
+        };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(1);
+    expect((qualifyOneReply.mock.calls[0][1] as Email).campaign_id).toBe('camp-velar');
+  });
+
+  it('WARMUP-КОЛЛИЗИЯ: префикс ≥70%, но обрыв ПОСРЕДИ СЛОВА → дроп', async () => {
+    // «Автоматизация отдела продаж» vs «автоматизация отдела промо-рассылок»:
+    // 24 общих символа (≥70% от 27), но расходятся буква-в-букву — типичная
+    // warmup-коллизия на деловом клише.
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return {
+          items: [
+            makeOthersEmail({
+              from_address_email: 'persona@future-group.ru',
+              subject: 'Re: Автоматизация отдела промо-рассылок',
+            }),
+          ],
+          next_starting_after: null,
+        };
+      }
+      if (params.email_type === 'sent') {
+        return {
+          items: [
+            { id: 'out-au', ue_type: 1, eaccount: 'elena@velar-vr.ru', subject: 'Автоматизация отдела продаж' },
+          ],
+          next_starting_after: null,
+        };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(0);
+    expect(qualifyOneReply).not.toHaveBeenCalled();
+  });
+
+  // ── fetchCampaignSent: флап пустых ответов Instantly ──────────────────────
+
+  it('флап Instantly (пусто sent) → один ретрай, реальный лид НЕ теряется', async () => {
+    let sentCalls = 0;
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return { items: [makeOthersEmail()], next_starting_after: null };
+      }
+      if (params.email_type === 'sent') {
+        sentCalls++;
+        return sentCalls === 1
+          ? { items: [], next_starting_after: null } // флап
+          : { items: [SENT_MATCH], next_starting_after: null };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(1);
+    expect(sentCalls).toBe(2);
+  });
+
+  it('пустой sent дважды НЕ кэшируется: следующий тик перепроверяет (нет 10-мин слепоты)', async () => {
+    let sentCalls = 0;
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return { items: [makeOthersEmail()], next_starting_after: null };
+      }
+      if (params.email_type === 'sent') {
+        sentCalls++;
+        return { items: [], next_starting_after: null };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    expect(await pollOthersOnce()).toBe(0); // два пустых → warmup-дроп, строки нет
+    expect(qualifyOneReply).not.toHaveBeenCalled();
+    expect(await pollOthersOnce()).toBe(0); // второй тик — sent перезапрошен заново
+    expect(sentCalls).toBe(4); // 2 тика × (попытка + ретрай)
+  });
+
+  it('кэш sent-тем с капом вытесняет самую старую запись (защита от OOM-разрастания)', async () => {
+    process.env.INSTANTLY_OTHERS_SENT_CACHE_MAX = '1';
+    getAccountCampaignMappings.mockImplementation(async (mailbox: string) =>
+      mailbox.endsWith('velar-vr.ru')
+        ? [{ campaign_id: 'camp-velar', status: 1, timestamp_created: '2026-07-01T00:00:00.000Z' }]
+        : [{ campaign_id: 'camp-law', status: 1, timestamp_created: '2026-07-01T00:00:00.000Z' }],
+    );
+    getCampaignsByAccountCached.mockResolvedValue(
+      new Map([['main', new Set(['camp-velar', 'camp-law'])]]),
+    );
+    let othersCalls = 0;
+    const sentCalls: string[] = [];
+    listEmails.mockImplementation(
+      async (params: { mode?: string; email_type?: string; campaign_id?: string }) => {
+        if (params.mode === 'emode_others') {
+          othersCalls++;
+          // Тики 1 и 3 — письмо на velar, тик 2 — на law.
+          return othersCalls % 2 === 1
+            ? { items: [makeOthersEmail()], next_starting_after: null }
+            : {
+                items: [
+                  makeOthersEmail({
+                    id: 'reply-law',
+                    body: { text: 'Ответ. От: aleksandr@law-russia.tech' },
+                  }),
+                ],
+                next_starting_after: null,
+              };
+        }
+        if (params.email_type === 'sent') {
+          sentCalls.push(params.campaign_id ?? '');
+          return { items: [SENT_MATCH], next_starting_after: null };
+        }
+        return { items: [], next_starting_after: null };
+      },
+    );
+    const { pollOthersOnce } = await importWatchdog();
+    expect(await pollOthersOnce()).toBe(1); // кэш {camp-velar}
+    expect(await pollOthersOnce()).toBe(1); // camp-law вытесняет camp-velar (кап=1)
+    expect(await pollOthersOnce()).toBe(1); // camp-velar вытеснен → перезапрос
+    expect(sentCalls.filter((id) => id === 'camp-velar')).toHaveLength(2);
+    expect(sentCalls.filter((id) => id === 'camp-law')).toHaveLength(1);
+  });
+
+  it('пустая env INSTANTLY_OTHERS_SENT_TTL_MS = дефолтный TTL, а не «кэш выключен»', async () => {
+    process.env.INSTANTLY_OTHERS_SENT_TTL_MS = '';
+    let sentCalls = 0;
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return { items: [makeOthersEmail()], next_starting_after: null };
+      }
+      if (params.email_type === 'sent') {
+        sentCalls++;
+        return { items: [SENT_MATCH], next_starting_after: null };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    expect(await pollOthersOnce()).toBe(1);
+    expect(await pollOthersOnce()).toBe(1);
+    // TTL не обнулился: второй тик отработал по кэшу, без перезапроса sent.
+    expect(sentCalls).toBe(1);
+  });
+
+  // ── Бюджет проб на тик (нагрузка на Instantly API) ────────────────────────
+
+  it('бюджет проб на тик: исчерпание откладывает кандидатов на следующий тик (не дроп)', async () => {
+    // Два кандидата, бюджет 2: mappings(velar) + sent(camp-velar) съедают тик,
+    // law откладывается. Следующий тик: velar обслуживается из кэшей (0 проб),
+    // law доезжает. Никто не дропнут, строк неписаных нет.
+    process.env.INSTANTLY_OTHERS_PROBE_BUDGET = '2';
+    getAccountCampaignMappings.mockImplementation(async (mailbox: string) =>
+      mailbox.endsWith('velar-vr.ru')
+        ? [{ campaign_id: 'camp-velar', status: 1, timestamp_created: '2026-07-01T00:00:00.000Z' }]
+        : [{ campaign_id: 'camp-law', status: 1, timestamp_created: '2026-07-01T00:00:00.000Z' }],
+    );
+    getCampaignsByAccountCached.mockResolvedValue(
+      new Map([['main', new Set(['camp-velar', 'camp-law'])]]),
+    );
+    const sentCalls: string[] = [];
+    listEmails.mockImplementation(
+      async (params: { mode?: string; email_type?: string; campaign_id?: string }) => {
+        if (params.mode === 'emode_others') {
+          return {
+            items: [
+              makeOthersEmail({ id: 'reply-velar', body: { text: 'Ответ. От: elena@velar-vr.ru' } }),
+              makeOthersEmail({
+                id: 'reply-law',
+                body: { text: 'Ответ. От: aleksandr@law-russia.tech' },
+                timestamp_email: '2026-07-16T09:00:00.000Z',
+              }),
+            ],
+            next_starting_after: null,
+          };
+        }
+        if (params.email_type === 'sent') {
+          sentCalls.push(params.campaign_id ?? '');
+          return { items: [SENT_MATCH], next_starting_after: null };
+        }
+        return { items: [], next_starting_after: null };
+      },
+    );
+    const { pollOthersOnce } = await importWatchdog();
+
+    expect(await pollOthersOnce()).toBe(1); // бюджет 2 исчерпан на velar, law отложен
+    expect(sentCalls).toEqual(['camp-velar']);
+    expect(getAccountCampaignMappings).toHaveBeenCalledTimes(1);
+    expect(mockInstantlyDb?.inserts).toHaveLength(0);
+
+    expect(await pollOthersOnce()).toBe(2); // velar — из кэшей (0 проб), law доехал
+    expect(sentCalls).toEqual(['camp-velar', 'camp-law']);
+  });
+
+  // ── v2/v3: eaccount-приоритет, сигналы тела, 5 проб ───────────────────────
+
+  it('eaccount-ПРИОРИТЕТ: кампания на 5-м ящике домена — ответ пришёл на него, он и пробуется первым', async () => {
+    // Диагноз валидации v1: атрибуция шла по первым 4 ящикам пагинации →
+    // кампания на 5+ ящике была перманентной слепой зоной.
+    listAccounts.mockResolvedValue({
+      items: [
+        { email: 'm1@velar-vr.ru' },
+        { email: 'm2@velar-vr.ru' },
+        { email: 'm3@velar-vr.ru' },
+        { email: 'm4@velar-vr.ru' },
+        { email: 'elena@velar-vr.ru' }, // 5-й, на него пришёл ответ (eaccount)
+      ],
+      next_starting_after: null,
+    });
+    getAccountCampaignMappings.mockImplementation(async (mailbox: string) =>
+      mailbox === 'elena@velar-vr.ru'
+        ? [{ campaign_id: 'camp-velar', status: 1, timestamp_created: '2026-07-01T00:00:00.000Z' }]
+        : [],
+    );
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(1);
+    // eaccount пробуется ПЕРВЫМ, несмотря на 5-е место в пагинации
+    expect(getAccountCampaignMappings).toHaveBeenCalledTimes(1);
+    expect(getAccountCampaignMappings.mock.calls[0][0]).toBe('elena@velar-vr.ru');
+  });
+
+  it('кэш атрибуции изолирован по eaccount: две кампании на разных ящиках одного домена не затеняют друг друга', async () => {
+    getAccountCampaignMappings.mockImplementation(async (mailbox: string) => {
+      if (mailbox === 'elena@velar-vr.ru') {
+        return [{ campaign_id: 'camp-elena', status: 1, timestamp_created: '2026-07-01T00:00:00.000Z' }];
+      }
+      if (mailbox === 'irina@velar-vr.ru') {
+        return [{ campaign_id: 'camp-irina', status: 1, timestamp_created: '2026-07-01T00:00:00.000Z' }];
+      }
+      return [];
+    });
+    getCampaignsByAccountCached.mockResolvedValue(
+      new Map([['main', new Set(['camp-elena', 'camp-irina'])]]),
+    );
+    listEmails.mockImplementation(
+      async (params: { mode?: string; email_type?: string; campaign_id?: string }) => {
+        if (params.mode === 'emode_others') {
+          return {
+            items: [
+              makeOthersEmail({
+                id: 'reply-elena',
+                eaccount: 'elena@velar-vr.ru',
+                subject: 'Re: Тема для Елены',
+                timestamp_email: '2026-07-16T12:00:00.000Z',
+              }),
+              makeOthersEmail({
+                id: 'reply-irina',
+                from_address_email: 'marina@corp2.ru',
+                eaccount: 'irina@velar-vr.ru',
+                subject: 'Re: Тема для Ирины',
+                timestamp_email: '2026-07-16T09:00:00.000Z',
+              }),
+            ],
+            next_starting_after: null,
+          };
+        }
+        if (params.email_type === 'sent') {
+          const subject = params.campaign_id === 'camp-elena' ? 'Тема для Елены' : 'Тема для Ирины';
+          return {
+            items: [{ id: `out-${params.campaign_id}`, ue_type: 1, eaccount: 'x@velar-vr.ru', subject }],
+            next_starting_after: null,
+          };
+        }
+        return { items: [], next_starting_after: null };
+      },
+    );
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(2);
+    const byReply = new Map(
+      qualifyOneReply.mock.calls.map((c) => [
+        (c[1] as Email).id,
+        (c[1] as Email).campaign_id,
+      ]),
+    );
+    expect(byReply.get('reply-elena')).toBe('camp-elena');
+    expect(byReply.get('reply-irina')).toBe('camp-irina');
+  });
+
+  it('сигнал (г): ПУСТАЯ тема, но тема кампании дословно в теле → берём', async () => {
+    // Диагноз v1: лид с пустой темой (личная почта) терялся.
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return {
+          items: [
+            makeOthersEmail({
+              from_address_email: 'ivan.personal@yandex.ru',
+              subject: '',
+              body: { text: 'Здравствуйте! Давайте обсудим. Речь шла о: По вопросу вентиляции склад Казань. От кого: elena@velar-vr.ru' },
+            }),
+          ],
+          next_starting_after: null,
+        };
+      }
+      if (params.email_type === 'sent') {
+        return {
+          items: [{ id: 'out-k', ue_type: 1, eaccount: 'elena@velar-vr.ru', subject: 'По вопросу вентиляции склад Казань' }],
+          next_starting_after: null,
+        };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(1);
+    expect((qualifyOneReply.mock.calls[0][1] as Email).campaign_id).toBe('camp-velar');
+  });
+
+  it('сигнал (д): ручной тред с НОВОЙ темой — берём по цитате тела ≥40 с `>`-префиксами', async () => {
+    // Диагноз v1: ручные треды ломают цепочку тем. Почтовик кавычит оригинал
+    // построчно — нормализация срезает `>`.
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return {
+          items: [
+            makeOthersEmail({
+              subject: 'Отчёт по логистике за июль',
+              body: {
+                text: 'Спасибо, актуально, дайте цену.\n> Добрый день! Пишу вам по вопросу вентиляции производственных помещений.\nОт кого: elena@velar-vr.ru',
+              },
+            }),
+          ],
+          next_starting_after: null,
+        };
+      }
+      if (params.email_type === 'sent') {
+        return {
+          items: [
+            {
+              id: 'out-b',
+              ue_type: 1,
+              eaccount: 'elena@velar-vr.ru',
+              subject: 'По вопросу вентиляции «Техинсервис»',
+              body: { text: 'Добрый день! Пишу вам по вопросу вентиляции производственных помещений.' },
+            },
+          ],
+          next_starting_after: null,
+        };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(1);
+    // lastOutbound — именно то исходящее, чья цитата в теле
+    const ctx = qualifyOneReply.mock.calls[0][4] as { lastOutbound: Email | null };
+    expect(ctx.lastOutbound?.id).toBe('out-b');
+  });
+
+  it('сигнал (д)-негатив: цитата тела короче 40 символов → дроп', async () => {
+    listEmails.mockImplementation(async (params: { mode?: string; email_type?: string }) => {
+      if (params.mode === 'emode_others') {
+        return {
+          items: [
+            makeOthersEmail({
+              subject: 'Совсем другая тема',
+              body: { text: '> Привет! Как дела?\nМимо. От: elena@velar-vr.ru' },
+            }),
+          ],
+          next_starting_after: null,
+        };
+      }
+      if (params.email_type === 'sent') {
+        return {
+          items: [
+            {
+              id: 'out-s',
+              ue_type: 1,
+              eaccount: 'elena@velar-vr.ru',
+              subject: 'По вопросу вентиляции «Техинсервис»',
+              body: { text: 'Привет! Как дела?' },
+            },
+          ],
+          next_starting_after: null,
+        };
+      }
+      return { items: [], next_starting_after: null };
+    });
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(0);
+    expect(qualifyOneReply).not.toHaveBeenCalled();
+  });
+
+  it('проба до 5 кампаний: совпадение только у пятой → берётся она', async () => {
+    getAccountCampaignMappings.mockResolvedValue([
+      { campaign_id: 'camp-1', status: 1, timestamp_created: '2026-07-05T00:00:00.000Z' },
+      { campaign_id: 'camp-2', status: 1, timestamp_created: '2026-07-04T00:00:00.000Z' },
+      { campaign_id: 'camp-3', status: 1, timestamp_created: '2026-07-03T00:00:00.000Z' },
+      { campaign_id: 'camp-4', status: 1, timestamp_created: '2026-07-02T00:00:00.000Z' },
+      { campaign_id: 'camp-5', status: 1, timestamp_created: '2026-07-01T00:00:00.000Z' },
+    ]);
+    getCampaignsByAccountCached.mockResolvedValue(
+      new Map([['main', new Set(['camp-1', 'camp-2', 'camp-3', 'camp-4', 'camp-5'])]]),
+    );
+    const sentCalls: string[] = [];
+    listEmails.mockImplementation(
+      async (params: { mode?: string; email_type?: string; campaign_id?: string }) => {
+        if (params.mode === 'emode_others') {
+          return { items: [makeOthersEmail()], next_starting_after: null };
+        }
+        if (params.email_type === 'sent') {
+          sentCalls.push(params.campaign_id ?? '');
+          if (params.campaign_id === 'camp-5') {
+            return { items: [SENT_MATCH], next_starting_after: null };
+          }
+          return {
+            items: [{ id: `out-${params.campaign_id}`, ue_type: 1, eaccount: 'a@velar-vr.ru', subject: 'Учёт рыбы и морепродуктов' }],
+            next_starting_after: null,
+          };
+        }
+        return { items: [], next_starting_after: null };
+      },
+    );
+    const { pollOthersOnce } = await importWatchdog();
+    const processed = await pollOthersOnce();
+
+    expect(processed).toBe(1);
+    expect((qualifyOneReply.mock.calls[0][1] as Email).campaign_id).toBe('camp-5');
+    expect(sentCalls).toEqual(['camp-1', 'camp-2', 'camp-3', 'camp-4', 'camp-5']);
   });
 });

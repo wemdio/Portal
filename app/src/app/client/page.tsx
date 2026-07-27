@@ -491,7 +491,7 @@ function CampaignsPageContent() {
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
                 placeholder="Поиск по названию кампании"
-                className="ds-input w-full pl-9 pr-9 py-1.5 text-xs"
+                className="ds-input has-leading-icon has-trailing-icon w-full py-1.5 text-xs"
                 style={{ color: 'var(--cp-paper)' }}
                 aria-label="Поиск по кампаниям"
               />
