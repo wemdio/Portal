@@ -65,7 +65,12 @@ const TASK_PROMPTS: Record<HeChainLanguage, string> = {
 
 Напиши цепочку из 4 писем (допустимо 3–5) для холодной рассылки по вертикали, описанной в материалах выше. Клиент — аутрич-агентство: продаём аутрич как услугу, письма идут лицам, принимающим решения, в целевой вертикали.
 
-ШАГ 0 — ОФФЕР. Прежде чем писать, сформулируй про себя оффер одной фразой: что продаём и в каких единицах (встречи/лиды/тест), кому, на каком горизонте. Если в материалах есть блок «ОФФЕР КЛИЕНТА (offer_override)» — это готовая авторитетная формулировка: используй её дословно, не перепридумывай. Оффер обязан явно звучать в письме 1: получатель сразу должен понять, зачем пишут и что предлагают. Цифры и сроки в тексте самих писем — только по правилам регламента.
+ШАГ 0 — ОФФЕР (обязательная структура). Прежде чем писать, сформулируй про себя оффер из четырёх частей — в терминах самой вертикали:
+1. УСЛУГА ПРОСТЫМИ СЛОВАМИ: кто клиент — одна фраза, понятная постороннему («email-аутрич под ключ», «кадровое агентство по массовому подбору»), из брифа/профиля сайта; если в материалах есть блок «ОФФЕР КЛИЕНТА (offer_override)» — используй его формулировку дословно, не перепридумывай. Размытые ярлыки («внешняя команда», «партнёр по росту») запрещены.
+2. РЕЗУЛЬТАТ ДЛЯ ПОЛУЧАТЕЛЯ: что получает бизнес получателя, в его единицах — встречи/лиды/сделки с названными целевыми ролями за период («3–5 встреч в месяц с директорами по логистике грузовладельцев»). Выгода — это то, что приобретает получатель, а НЕ процесс отправителя: «пишем письма», «занимаемся аутричем» как выгода запрещены.
+3. СТАРТ: первый шаг с низким порогом входа («тест 2 недели на узком сегменте»).
+4. ДОКАЗАТЕЛЬСТВО: один кейс (реальное имя — только из материалов), назначенный ровно в ОДНО письмо цепочки.
+Оффер (пп. 1–2) обязан явно звучать в письме 1: получатель сразу должен понять, кто пишет, что предлагают и что он с этого имеет. Цифры и сроки в тексте самих писем — только по правилам регламента.
 
 Как использовать материалы:
 - Вертикаль и её синонимы — это ЦА: пиши так, будто понимаешь их индустрию изнутри (их термины, их боли, их метрики).
@@ -75,16 +80,21 @@ const TASK_PROMPTS: Record<HeChainLanguage, string> = {
 - Первое письмо — самое сильное: лучший угол + лучшее доказательство. Фоллоу-апы — новые углы, а не «пинг».
 
 Обязательная конструкция цепочки:
-- Письмо 1: (а) мостик релевантности — почему пишем именно этой компании: наблюдаемый сигнал или факт о её сегменте, а НЕ голая категоризация вроде «Вы продаёте в X»; (б) оффер; (в) один мягкий CTA.
-- Хотя бы в одном письме цепочки — один конкретный кейс/доказательный факт (имя клиента и/или конкретный результат), взятый ТОЛЬКО из материалов. Если подходящего кейса в материалах нет — пиши безымянно; выдумывать названия запрещено.
+- Письмо 1 (обязательный скелет): (1) мостик релевантности — одна строка: наблюдаемый факт о сегменте получателя, почему пишем именно ему, а НЕ голая категоризация вроде «Вы продаёте в X»; (2) «Мы — {УСЛУГА ПРОСТЫМИ СЛОВАМИ}»; (3) «{РЕЗУЛЬТАТ ДЛЯ ПОЛУЧАТЕЛЯ}»; (4) один мягкий CTA. Тест 5 секунд: незнакомец после письма 1 мгновенно отвечает — кто это, что мне продают, чем это выгодно мне; не проходит — перепиши. Описания процесса отправителя («собираем сигналы», «пишем под контекст») в письме 1 запрещены — процессу место в письмах 2+.
+- Конкретный кейс/доказательный факт (имя клиента и/или конкретный результат) — ТОЛЬКО из материалов и ровно в ОДНОМ письме цепочки: одно и то же название кейса/клиента не может появляться больше чем в одном письме. Если подходящего кейса в материалах нет — пиши безымянно; выдумывать названия запрещено.
 - Просьба направить к нужному человеку («к кому лучше обратиться?») — только в последнем письме, один раз на всю цепочку.
 ${'{{OPERATORS_HINT}}'}
+ПРИМЕР — как нельзя и как надо (пример структуры, а не текст для копирования):
+ПЛОХО: «Polza пишет холодные письма за компанию, которая продаёт сложный продукт другому бизнесу, и доводит до разговора с ЛПР. Работаем как внешняя команда — с Диасофт, BPMSoft и Первой Формой. Прислать пример цепочки под {{company}}?»
+Почему плохо: услуга не названа простыми словами, клиент описан через вложенные придаточные, выгоды получателя нет — только механика отправителя.
+ХОРОШО: «Мы — Polza, email-аутрич под ключ для B2B. Приводим 3–5 встреч в месяц с ЛПР компаний, которым вы продаёте — ваших будущих клиентов. Первый шаг — тест на узком сегменте за 2 недели. Так работаем с Диасофт и BPMSoft. Прислать пример цепочки под {{company}}?»
 ЖЁСТКИЕ САМОПРОВЕРКИ ПЕРЕД ВЫДАЧЕЙ (не выполнено — перепиши):
 - Посчитай слова в каждом теле: > 50 — сократи и пересчитай; письмо 1 — ≤ 45 слов.
 - В КАЖДОЙ теме есть {{var}}; в каждом теле — ровно один {{var}}.
 - В каждом письме — ровно один CTA.
 - Нет непроверяемых утверждений о получателе или его рынке: такие мысли оформляй вопросом или фактом из материалов.
 - Нет стоп-фраз из регламента («обсудить исходящие», «к вам или в коммерческий», «спрос неровный», «у многих»).
+- Перечитай каждое письмо вслух: согласование падежей и родов должно быть идеальным (пример ошибки: «на постоянной работой» → «на постоянной работе»).
 
 ЯЗЫК: вся цепочка строго на русском. Бренды и устоявшиеся термины индустрии — в оригинале.
 
@@ -110,6 +120,19 @@ How to use the materials:
 - The hypotheses and evidence are your source of specifics: market facts, third-party cases, regulatory drivers. Rely on them, but do NOT cite URLs in the emails and do not overload them with numbers (see the regulations).
 - The client brief is the offer and USPs. One email — one idea/one USP; spread them across the sequence.
 - The first email is the strongest: best angle + best proof. Follow-ups bring new angles, not "just bumping this".
+
+STEP 0 — THE OFFER (mandatory structure). Before writing, formulate the offer in four parts — in the vertical's own terms:
+1. THE SERVICE IN PLAIN WORDS: what the client is — one phrase a stranger understands ("done-for-you B2B email outreach", "a staffing agency for mass hiring"), from the brief/site profile; if the materials contain the "ОФФЕР КЛИЕНТА (offer_override)" block — use its wording verbatim, do not reinvent it. Vague labels ("an external team", "a growth partner") are banned.
+2. THE RECIPIENT'S OUTCOME: what the recipient's business gains, in the recipient's units — meetings/leads/deals with named target roles per period ("3–5 meetings a month with logistics directors at shippers"). The benefit is what the recipient gains, NEVER the sender's process: "we write emails", "we do outreach" as the benefit are banned.
+3. THE START: a low-commitment first step ("a 2-week test on a narrow segment").
+4. PROOF: one case (a real name from the materials only), assigned to exactly ONE email of the sequence.
+The offer (parts 1–2) must be explicit in email 1: the recipient must instantly understand who is writing, what is offered, and what they get out of it. Numbers and timelines inside the emails themselves follow the regulations only.
+
+Mandatory sequence construction:
+- Email 1 (mandatory skeleton): (1) a one-line relevance bridge — an observable fact about the recipient's segment, why we write to them, NOT bare categorization like "You sell into X"; (2) "We are {THE SERVICE IN PLAIN WORDS}"; (3) "{THE RECIPIENT'S OUTCOME}"; (4) one soft CTA. The 5-second test: after email 1 a stranger instantly answers — who are they, what do they sell me, why is it good for me; if it fails — rewrite. Self-centered process descriptions ("we collect signals", "we write to context") are banned from email 1 — process belongs to emails 2+.
+- A specific case/proof (client name and/or concrete result) — from the materials ONLY and in exactly ONE email of the sequence: the same named case/client may not appear in more than one email. If no suitable case exists in the materials — write without names; inventing names is forbidden.
+
+FINAL SELF-CHECK: read every email aloud — grammar and agreement must be flawless.
 ${'{{OPERATORS_HINT}}'}
 LANGUAGE: write the entire sequence strictly in English, even though the materials may be in Russian. Convey the meaning, do not translate word for word.
 
@@ -135,6 +158,19 @@ Jak używać materiałów:
 - Hipotezy i dowody to źródło konkretów: fakty rynkowe, case studies, czynniki regulacyjne. Opieraj się na nich, ale NIE cytuj URL-i w mailach i nie przeciążaj liczbami (patrz regulamin).
 - Brief klienta to oferta i USP. Jeden mail — jedna myśl/jeden USP; rozłóż je na całą sekwencję.
 - Pierwszy mail jest najsilniejszy: najlepszy kąt + najlepszy dowód. Follow-upy wnoszą nowe kąty, nie "przypominam o sobie".
+
+KROK 0 — OFERTA (obowiązkowa struktura). Zanim zaczniesz pisać, sformułuj dla siebie ofertę w czterech częściach — w terminologii samego pionu:
+1. USŁUGA PROSTYMI SŁOWAMI: kim jest klient — jedna fraza zrozumiała dla osoby postronnej („email outreach pod klucz dla B2B", „agencja pracy od rekrutacji masowej"), z briefu/profilu strony; jeśli w materiałach jest blok „ОФФЕР КЛИЕНТА (offer_override)" — użyj jego sformułowania dosłownie, nie wymyślaj na nowo. Ogólnikowe etykiety („zewnętrzny zespół", „partner wzrostu") są zakazane.
+2. REZULTAT DLA ODBIORCY: co zyskuje biznes odbiorcy, w jego jednostkach — spotkania/leady/transakcje z wymienionymi rolami docelowymi w danym okresie („3–5 spotkań miesięcznie z dyrektorami ds. logistyki u nadawców"). Korzyścią jest zysk odbiorcy, a NIE proces nadawcy: „piszemy maile", „zajmujemy się outreachem" jako korzyść są zakazane.
+3. START: pierwszy krok o niskim progu wejścia („2-tygodniowy test na wąskim segmencie").
+4. DOWÓD: jeden case (prawdziwa nazwa — wyłącznie z materiałów), przypisany do DOKŁADNIE JEDNEGO maila sekwencji.
+Oferta (punkty 1–2) musi brzmieć wprost w mailu 1: odbiorca musi od razu zrozumieć, kto pisze, co się mu oferuje i co on z tego ma. Liczby i terminy w treści samych maili — wyłącznie według zasad regulaminu.
+
+Obowiązkowa konstrukcja sekwencji:
+- Mail 1 (obowiązkowy szkielet): (1) jednolinijkowy pomost trafności — obserwowalny fakt o segmencie odbiorcy, dlaczego piszemy właśnie do niego, a NIE goła kategoryzacja w stylu „Sprzedajecie do X"; (2) „Jesteśmy {USŁUGA PROSTYMI SŁOWAMI}"; (3) „{REZULTAT DLA ODBIORCY}"; (4) jeden miękki CTA. Test 5 sekund: obca osoba po mailu 1 natychmiast odpowiada — kim są, co mi sprzedają, dlaczego to dla mnie dobre; jeśli nie przechodzi — napisz od nowa. Autocentryczne opisy procesu nadawcy („zbieramy sygnały", „piszemy pod kontekst") są zakazane w mailu 1 — proces należy do maili 2+.
+- Konkretny case/fakt dowodowy (nazwa klienta i/lub konkretny wynik) — WYŁĄCZNIE z materiałów i w DOKŁADNIE JEDNYM mailu sekwencji: ta sama nazwa case'u/klienta nie może pojawić się w więcej niż jednym mailu. Jeśli w materiałach nie ma odpowiedniego case'u — pisz bez nazw; wymyślanie nazw jest zakazane.
+
+OSTATECZNA SAMOKONTROLA: przeczytaj każdy mail na głos — odmiana przypadków i rodzajów musi być bezbłędna.
 ${'{{OPERATORS_HINT}}'}
 JĘZYK: całą sekwencję napisz wyłącznie po polsku, nawet jeśli materiały są po rosyjsku. Przekazuj sens, nie tłumacz słowo w słowo.
 
