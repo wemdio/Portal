@@ -47,7 +47,7 @@ import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
-import { findNewHhEmployers, deriveDomain, type HhEmployer } from './hhAutoParser';
+import { findNewHhEmployers, deriveDomain, type HhEmployer, type HhArchiveSinkVacancy } from './hhAutoParser';
 import { getOrFetchScore, emptyCacheStats } from './mailganerScoreCache';
 import { resolveMailganerScoringConcurrency } from './mailganerScoringThrottle';
 import { validateEmailForAutoPipeline, type AutoPipelineEmailValidation } from './autoPipelineEmailValidation';
@@ -247,6 +247,50 @@ async function loadSeenDomains(clientUserId: string): Promise<Set<string>> {
  * не заденет легитимный текущий прогон, но поймает любой брошенный.
  * Вызывается в начале runAutoPipelineForClient (до startRunRow).
  */
+/**
+ * Возвращает id единственной sink-`parser_jobs` записи для клиента —
+ * общего «мешка» для HH-вакансий, которые auto-pipeline перечисляет по
+ * пути. Создаётся один раз при первом прогоне и переиспользуется вечно;
+ * `hh_vacancies` дедупит через UNIQUE(job_id, vacancy_id), так что
+ * повторные upsert'ы одной и той же вакансии в разные дни не плодят
+ * дубли. Возвращает `null`, если БД недоступна или INSERT упал — в этом
+ * случае колбэк складирования не будет передан парсеру, но клиентский
+ * прогон продолжится без сбоя.
+ */
+async function ensureArchiveSinkJob(clientUserId: string): Promise<string | null> {
+  if (!supabaseAdmin) return null;
+  try {
+    const { data: existing } = await supabaseAdmin
+      .from('parser_jobs')
+      .select('id')
+      .eq('user_id', clientUserId)
+      .eq('parser_type', 'hh_vacancies_autopipeline')
+      .limit(1)
+      .maybeSingle();
+    if (existing && (existing as { id?: string }).id) {
+      return (existing as { id: string }).id;
+    }
+    const { data: created, error } = await supabaseAdmin
+      .from('parser_jobs')
+      .insert({
+        user_id: clientUserId,
+        parser_type: 'hh_vacancies_autopipeline',
+        status: 'running',
+        config: { source: 'auto_pipeline_sink' },
+      })
+      .select('id')
+      .single();
+    if (error || !created) {
+      console.warn(`[auto-pipeline] ensureArchiveSinkJob insert failed for ${clientUserId}:`, error?.message);
+      return null;
+    }
+    return (created as { id: string }).id;
+  } catch (e) {
+    console.warn(`[auto-pipeline] ensureArchiveSinkJob threw for ${clientUserId}:`, e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
 async function closeStaleRuns(clientUserId: string, staleMinutes = 8): Promise<void> {
   if (!supabaseAdmin) return;
   // Живой прогон бьёт heartbeat_at раз в ~90с. Мёртвый (OOM/SIGKILL/редеплой
@@ -805,6 +849,39 @@ export async function runAutoPipelineForClient(
     const since = new Date(Date.now() - config.hh_date_window_hours * 60 * 60 * 1000);
     const excludePatterns = buildExcludePatterns(config.hh_extra_exclude_patterns ?? []);
 
+    // Sink parser_job: чтобы вакансии, которые auto-pipeline перечисляет
+    // по пути в HH API, копились в общем `hh_vacancies` и попадали в
+    // архивный поиск («HH архив» после инцидента 27.07.2026 ищет локально,
+    // а не в HH). Один job на клиента навсегда — переиспользуем через
+    // upsert по (job_id, vacancy_id), дубли не пишутся. Ошибка создания
+    // sink НЕ валит парсер: колбэк просто не будет передан.
+    const sinkJobId = await ensureArchiveSinkJob(clientUserId);
+    const onVacancies = sinkJobId
+      ? async (batch: HhArchiveSinkVacancy[]) => {
+          if (!supabaseAdmin || batch.length === 0) return;
+          const rows = batch.map((v) => ({
+            job_id: sinkJobId,
+            vacancy_id: v.vacancy_id,
+            name: v.name,
+            url: v.url,
+            salary_from: v.salary_from,
+            salary_to: v.salary_to,
+            salary_currency: v.salary_currency,
+            company_name: v.company_name,
+            company_url: v.company_url,
+            area: v.area,
+            industries: [] as string[],
+            published_at: v.published_at,
+          }));
+          const { error: upErr } = await supabaseAdmin
+            .from('hh_vacancies')
+            .upsert(rows, { onConflict: 'job_id,vacancy_id' });
+          if (upErr) {
+            console.warn('[auto-pipeline] hh_vacancies sink upsert failed:', upErr.message);
+          }
+        }
+      : undefined;
+
     const employers = await findNewHhEmployers({
       since,
       excludePatterns,
@@ -815,6 +892,7 @@ export async function runAutoPipelineForClient(
       industries: config.industries.length > 0 ? config.industries : undefined,
       limit: config.daily_limit ?? 1000,
       log: (m) => void logAudit('auto-pipeline.hh', m, logCtx),
+      onVacancies,
     });
 
     // 3. Дедуп HH-результатов по hh_employer_id.
