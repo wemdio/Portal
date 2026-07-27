@@ -35,6 +35,10 @@ export interface ChainPromptHypothesis {
   description: string;
   potential_pct: number;
   evidence: HeEvidenceItem[];
+  /** Тир гипотезы (1 — очевидные ЦА, 2 — смежные, 3 — неочевидные рынки). */
+  tier?: number;
+  /** true — гипотеза подтверждена специалистом (status='accepted'), приоритет. */
+  confirmed?: boolean;
 }
 
 export interface ChainPromptInput {
@@ -80,7 +84,7 @@ const TASK_PROMPTS: Record<HeChainLanguage, string> = {
 Как использовать материалы:
 - Вертикаль и её синонимы — это ЦА: пиши так, будто понимаешь их индустрию изнутри (их термины, их боли, их метрики).
 - Покрывай вертикаль ЦЕЛИКОМ: если в описании вертикали перечислены суб-сегменты, формулировки должны быть нейтральными и подходить каждому из них. Запрещено молча сужать цепочку до одного суб-сегмента или перескакивать на другую аудиторию в середине цепочки.
-- Гипотезы и доказательства — источник конкретики: рыночные факты, чужие кейсы, регуляторные драйверы. Опирайся на них, но НЕ цитируй URL в письмах и не грузи цифрами (см. регламент).
+- Гипотезы и доказательства — ПЕРВИЧНЫЙ источник болей, углов и конкретики: рыночные факты, чужие кейсы, регуляторные драйверы. Гипотезы с пометкой «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» подтверждены человеком — они в приоритете. Не вводи рыночные углы и боли, противоречащие списку гипотез; отклонённые специалистом гипотезы в материалах просто отсутствуют — не упоминай их существование. Опирайся на список, но НЕ цитируй URL в письмах и не грузи цифрами (см. регламент).
 - Бриф клиента — оффер и УТП. Одно письмо — одна мысль/одно УТП, распредели их по цепочке.
 - Первое письмо — самое сильное: лучший угол + лучшее доказательство. Фоллоу-апы — новые углы, а не «пинг».
 
@@ -123,7 +127,7 @@ Write a sequence of 4 emails (3–5 is acceptable) for a cold campaign targeting
 
 How to use the materials:
 - The vertical and its synonyms are the audience: write as if you know their industry from the inside (their terms, their pains, their metrics).
-- The hypotheses and evidence are your source of specifics: market facts, third-party cases, regulatory drivers. Rely on them, but do NOT cite URLs in the emails and do not overload them with numbers (see the regulations).
+- The hypotheses list is the PRIMARY source of pains, angles and specifics: market facts, third-party cases, regulatory drivers. Items marked "✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ" are human-confirmed and take priority. Do not introduce market angles or pains that contradict the list; rejected hypotheses are simply absent from the materials — never mention their existence. Rely on the list, but do NOT cite URLs in the emails and do not overload them with numbers (see the regulations).
 - The client brief is the offer and USPs. One email — one idea/one USP; spread them across the sequence.
 - The first email is the strongest: best angle + best proof. Follow-ups bring new angles, not "just bumping this".
 
@@ -167,7 +171,7 @@ Napisz sekwencję 4 maili (dopuszczalne 3–5) do zimnej kampanii pod pion opisa
 
 Jak używać materiałów:
 - Pion i jego synonimy to grupa docelowa: pisz tak, jakbyś znał ich branżę od środka (ich terminy, ich bóle, ich metryki).
-- Hipotezy i dowody to źródło konkretów: fakty rynkowe, case studies, czynniki regulacyjne. Opieraj się na nich, ale NIE cytuj URL-i w mailach i nie przeciążaj liczbami (patrz regulamin).
+- Lista hipotez to PIERWSZE źródło bólów, kątów i konkretów: fakty rynkowe, case studies, czynniki regulacyjne. Pozycje oznaczone «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» zostały potwierdzone przez człowieka — mają priorytet. Nie wprowadzaj kątów rynkowych ani bólów sprzecznych z listą; odrzucone hipotezy są po prostu nieobecne w materiałach — nigdy nie wspominaj o ich istnieniu. Opieraj się na liście, ale NIE cytuj URL-i w mailach i nie przeciążaj liczbami (patrz regulamin).
 - Brief klienta to oferta i USP. Jeden mail — jedna myśl/jeden USP; rozłóż je na całą sekwencję.
 - Pierwszy mail jest najsilniejszy: najlepszy kąt + najlepszy dowód. Follow-upy wnoszą nowe kąty, nie "przypominam o sobie".
 
@@ -217,7 +221,9 @@ function renderHypotheses(hypotheses: ChainPromptHypothesis[]): string {
         .slice(0, 3)
         .map((e) => `    • ${e.claim} — «${e.quote}»`)
         .join('\n');
-      return `- [${h.potential_pct}%] ${h.title}\n  ${h.description}${ev ? `\n  Доказательства:\n${ev}` : ''}`;
+      const tier = h.tier != null ? `tier ${h.tier} · ` : '';
+      const badge = h.confirmed ? '✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ — ' : '';
+      return `- [${tier}${h.potential_pct}%] ${badge}${h.title}\n  ${h.description}${ev ? `\n  Доказательства:\n${ev}` : ''}`;
     })
     .join('\n');
 }
@@ -242,7 +248,7 @@ ${offer}ВЕРТИКАЛЬ: ${input.verticalName}
 ${input.verticalSummary}
 Синонимы вертикали (как ещё называют этот сегмент): ${input.synonyms.join(', ') || '—'}
 
-ГИПОТЕЗЫ ВЕРТИКАЛИ С ДОКАЗАТЕЛЬСТВАМИ:
+ГИПОТЕЗЫ ВЕРТИКАЛИ С ДОКАЗАТЕЛЬСТВАМИ (ПЕРВИЧНЫЙ источник болей, углов и доказательств; пометка «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» — гипотеза подтверждена человеком и в приоритете):
 ${renderHypotheses(input.hypotheses)}
 
 ${operators}Держи всё это в контексте.`;

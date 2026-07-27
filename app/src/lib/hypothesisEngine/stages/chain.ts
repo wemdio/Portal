@@ -3,6 +3,8 @@
  * Промпт-архитектура emailSequenceV2 (материалы → праймер → задача) +
  * CHAIN_REGULATIONS; ответ парсится маркерами ---LETTER N--- через
  * letterParser. Языки: ru/en/pl (job.payload.language).
+ * Разметка специалиста (he_hypotheses.status) учитывается через
+ * selectPromptHypotheses: rejected исключаются, accepted — первыми.
  */
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
@@ -31,6 +33,34 @@ export function parsedToChainLetters(parsed: ParsedLetter[]): HeChainLetter[] {
   }));
 }
 
+/**
+ * Разметка специалиста (he_hypotheses.status: proposed/accepted/rejected) →
+ * список гипотез для промпта генерационных стадий (chain/vocab/template):
+ *  - status='rejected' исключается из входа целиком;
+ *  - status='accepted' идут первыми (порядок внутри групп — как во входном
+ *    массиве, т.е. у chain по potential_pct desc; сортировка стабильная);
+ *  - если ВСЕ гипотезы вертикали отклонены — откат к полному списку без
+ *    разметки (fallbackUsed=true, стадия пишет заметку в лог): генерация не
+ *    должна идти на пустом входе;
+ *  - строк без status (legacy) считаем proposed; пустой вход → пустой список
+ *    (поведение legacy-проектов без гипотез не меняется).
+ */
+export interface PromptHypothesesSelection<T> {
+  list: T[];
+  /** true — все гипотезы отклонены, вернули полный список как есть. */
+  fallbackUsed: boolean;
+}
+
+export function selectPromptHypotheses<T extends { status?: string | null }>(
+  rows: T[],
+): PromptHypothesesSelection<T> {
+  if (!rows.length) return { list: [], fallbackUsed: false };
+  const usable = rows.filter((r) => r.status !== 'rejected');
+  if (!usable.length) return { list: rows, fallbackUsed: true };
+  const rank = (r: T) => (r.status === 'accepted' ? 0 : 1);
+  return { list: [...usable].sort((a, b) => rank(a) - rank(b)), fallbackUsed: false };
+}
+
 const RETRY_HINT = `Ты вернул слишком мало писем или нарушил формат. Нужно 3–5 писем, каждое блоком «---LETTER N---» + строка темы. Верни цепочку заново, целиком, без пояснений.`;
 
 export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
@@ -51,10 +81,16 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   const { data: hyps, error: hError } = await ctx.supabase
     .from('he_hypotheses')
     .select('*')
+    .eq('project_id', job.project_id)
     .eq('vertical_id', verticalId)
     .order('potential_pct', { ascending: false });
   if (hError) throw new Error(`he_hypotheses read: ${hError.message}`);
-  const hypotheses = (hyps ?? []) as HeHypothesis[];
+  // Разметка специалиста: rejected уходят из промпта, accepted — первыми.
+  const selection = selectPromptHypotheses((hyps ?? []) as HeHypothesis[]);
+  if (selection.fallbackUsed) {
+    stageLog(ctx, '[chain] все гипотезы вертикали отклонены специалистом — используем полный список без разметки');
+  }
+  const hypotheses = selection.list;
 
   const brief = (project.brief ?? {}) as Record<string, unknown>;
 
@@ -67,6 +103,8 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       title: h.title,
       description: h.description,
       potential_pct: h.potential_pct,
+      tier: h.tier,
+      confirmed: h.status === 'accepted',
       evidence: (Array.isArray(h.evidence) ? h.evidence : []) as HeEvidenceItem[],
     })),
     briefText: JSON.stringify(brief),
