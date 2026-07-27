@@ -21,9 +21,12 @@ import {
   monthlySheetName,
   type SalesReportMetricKey,
 } from '@/lib/salesReport/sheetSchema';
+import { ensureMonthlySheet } from '@/lib/salesReport/sheetProvisioner';
 import { writeFactCells, type CellUpdate } from '@/lib/salesReport/writer';
 
 const WORKER_ID = 'sales-report-cron';
+const TEMPLATE_SHEET_NAME =
+  process.env.SALES_REPORT_TEMPLATE_SHEET_NAME ?? 'ШАБЛОН';
 
 async function main(): Promise<void> {
   const log = createWorkerLogger(WORKER_ID);
@@ -34,18 +37,44 @@ async function main(): Promise<void> {
   }
 
   const db = requireSupabaseAdmin(log);
-  const sheetName = monthlySheetName(new Date());
+  const now = new Date();
+  const mskNow = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+  const sheetName = monthlySheetName(now);
   log('info', 'starting', { sheet: sheetName });
+
+  try {
+    const provision = await ensureMonthlySheet(
+      spreadsheetId,
+      sheetName,
+      mskNow.getUTCFullYear(),
+      mskNow.getUTCMonth(),
+      TEMPLATE_SHEET_NAME,
+    );
+    if (provision.created) {
+      log('info', 'monthly sheet CREATED from template', {
+        sheet: sheetName,
+        template: TEMPLATE_SHEET_NAME,
+        dates_written: provision.datesWritten ?? 0,
+      });
+    }
+  } catch (e) {
+    log('error', 'cannot ensure monthly sheet', {
+      sheet: sheetName,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    process.exit(2);
+    return;
+  }
 
   let schema;
   try {
     schema = await loadSheetSchema(spreadsheetId, sheetName);
   } catch (e) {
-    log('error', 'cannot load sheet schema — is the tab created for this month?', {
+    log('error', 'cannot load sheet schema after ensuring the tab exists', {
       sheet: sheetName,
       error: e instanceof Error ? e.message : String(e),
     });
-    process.exit(2);
+    process.exit(3);
     return;
   }
 
