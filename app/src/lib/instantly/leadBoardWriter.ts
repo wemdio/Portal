@@ -15,6 +15,10 @@ type InstantlyDb = NonNullable<typeof supabaseInstantly>;
 export interface BoardColumnConfigEntry {
   key: string;
   visible: boolean;
+  /** Кастомная колонка: лейбл из конфига (builtin берут из BOARD_COLUMN_LABELS). */
+  label?: string;
+  /** Признак кастомной колонки (значения лидов — в rows.custom[key]). */
+  custom?: boolean;
 }
 
 /** Базовый набор (скриншот Asti Group) — зеркало DEFAULT в миграции 20260726_0001. */
@@ -42,7 +46,16 @@ export function parseColumnConfig(raw: unknown): BoardColumnConfigEntry[] {
       typeof item === 'object' &&
       typeof (item as { key?: unknown }).key === 'string'
     ) {
-      out.push({ key: (item as { key: string }).key, visible: (item as { visible?: unknown }).visible !== false });
+      const it = item as { key: string; visible?: unknown; label?: unknown; custom?: unknown };
+      const entry: BoardColumnConfigEntry = {
+        key: it.key,
+        visible: it.visible !== false,
+      };
+      // Кастомные колонки: лейбл/флаг сохраняем (иначе при чтении конфига
+      // из БД они терялись бы и кастомная колонка превращалась в безымянную).
+      if (typeof it.label === 'string' && it.label) entry.label = it.label;
+      if (it.custom === true) entry.custom = true;
+      out.push(entry);
     }
   }
   return out.length > 0 ? out : DEFAULT_COLUMN_CONFIG;

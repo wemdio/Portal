@@ -35,6 +35,7 @@ export function LayoutShell({
   const pathname = usePathname();
   const isSpreadsheetPage = pathname === '/tools/databases';
   const isRdpPage = pathname === '/tools/rdp';
+  const isTwoGisParserPage = pathname === '/tools/2gis-parser';
   const isGuestReviewPage = pathname.startsWith('/review/');
   const isMaintenancePage = pathname === '/maintenance';
   const isTma = useIsTma();
@@ -72,7 +73,12 @@ export function LayoutShell({
       pathname === '/finance' ||
       pathname === '/payments' ||
       pathname === '/billing-calendar' ||
-      (pathname.startsWith('/tools') && !isSpreadsheetPage && !isRdpPage) ||
+      (
+        pathname.startsWith('/tools')
+        && !isSpreadsheetPage
+        && !isRdpPage
+        && !isTwoGisParserPage
+      ) ||
       pathname.startsWith('/admin')
     );
   const mainOverflowClass = !isTma && (isSpreadsheetPage || isGuestReviewPage) ? 'overflow-hidden' : 'overflow-y-auto';

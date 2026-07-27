@@ -336,7 +336,7 @@ export function OkvedTreeModalClient({ selected, onChange, onClose, locale = 'ru
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder={t('Быстрый поиск', 'Quick search', locale)}
-              className="ds-input w-full pl-9 pr-3 py-2 text-sm"
+              className="ds-input has-leading-icon w-full pr-3 py-2 text-sm"
               style={{ color: 'var(--cp-paper)' }}
             />
           </div>

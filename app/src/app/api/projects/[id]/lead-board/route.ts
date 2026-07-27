@@ -1,13 +1,9 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import {
-  getOrCreateBoard,
-  DEFAULT_COLUMN_CONFIG,
-  type BoardColumnConfigEntry,
-} from '@/lib/instantly/leadBoardWriter';
+import { getOrCreateBoard } from '@/lib/instantly/leadBoardWriter';
 import { createBoardToken, boardTokenSecret, boardUrl } from '@/lib/leadBoard/boardToken';
-import { BOARD_COLUMN_LABELS } from '@/lib/leadBoard/boardColumns';
+import { normalizeColumnConfig } from '@/lib/leadBoard/columnConfig';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,34 +14,12 @@ export const dynamic = 'force-dynamic';
  *
  * GET   — { link, columnConfig } (доска создаётся лениво при первом запросе);
  * POST  — { action: 'regenerate' } → новый токен, старые ссылки умирают;
- * PATCH — { columnConfig } → сохранить видимость колонок (нормализуется по
- *         базовому набору: неизвестные ключи — 400, порядок — как в дефолте).
+ * PATCH — { columnConfig } → сохранить видимость/кастомные колонки
+ *         (нормализация — lib/leadBoard/columnConfig).
  */
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
-}
-
-function normalizeConfig(raw: unknown): { config?: BoardColumnConfigEntry[]; error?: string } {
-  if (!Array.isArray(raw)) return { error: 'columnConfig must be an array' };
-  const allowed = new Set(Object.keys(BOARD_COLUMN_LABELS));
-  const byKey = new Map<string, boolean>();
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') return { error: 'columnConfig entries must be objects' };
-    const key = (item as { key?: unknown }).key;
-    if (typeof key !== 'string' || !allowed.has(key)) {
-      return { error: `unknown column key: ${String(key)}` };
-    }
-    byKey.set(key, (item as { visible?: unknown }).visible !== false);
-  }
-  const config = DEFAULT_COLUMN_CONFIG.map((d) => ({
-    key: d.key,
-    visible: byKey.get(d.key) ?? d.visible,
-  }));
-  if (!config.some((c) => c.visible)) {
-    return { error: 'at least one column must stay visible' };
-  }
-  return { config };
 }
 
 export async function GET(
@@ -105,7 +79,7 @@ export async function PATCH(
     return jsonError('Invalid JSON', 400);
   }
   if (body === null || typeof body !== 'object') return jsonError('Invalid JSON', 400);
-  const n = normalizeConfig(body.columnConfig);
+  const n = normalizeColumnConfig(body.columnConfig);
   if (n.error) return jsonError(n.error, 400);
 
   const db = supabaseInstantly;

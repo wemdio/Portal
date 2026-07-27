@@ -1,6 +1,9 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { TwoGisParserView } from '@/components/twoGis/TwoGisParserView';
+import {
+  clearTwoGisFacetsMemoryCache,
+  TwoGisParserView,
+} from '@/components/twoGis/TwoGisParserView';
 
 const mockAuthFetch = jest.fn();
 jest.mock('@/lib/authFetch', () => ({
@@ -17,13 +20,24 @@ function jsonResponse(body: unknown, status = 200) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  window.sessionStorage.clear();
+  clearTwoGisFacetsMemoryCache();
   jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
   mockAuthFetch.mockImplementation(async (url: string) => {
     if (url.endsWith('/facets')) {
       return jsonResponse({
-        cities: [{ value: 'Москва', count: 10 }],
-        categories: [{ value: 'Еда', count: 10 }],
-        subcategories: [{ value: 'Кафе', category: 'Еда', count: 10 }],
+        cities: [
+          { value: 'Москва', count: 10 },
+          { value: 'Казань', count: 8 },
+        ],
+        categories: [
+          { value: 'Еда', count: 10 },
+          { value: 'Услуги', count: 8 },
+        ],
+        subcategories: [
+          { value: 'Кафе', category: 'Еда', count: 10 },
+          { value: 'Ремонт', category: 'Услуги', count: 8 },
+        ],
         snapshot: { scope: 'Россия', date: '2026-07-26', rows: 4284927 },
       });
     }
@@ -64,9 +78,12 @@ describe('<TwoGisParserView />', () => {
 
     expect(await screen.findByText(/4\s284\s927/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /выгрузить csv/i })).toBeDisabled();
-    await user.selectOptions(screen.getByLabelText('Города'), 'Москва');
-    await user.selectOptions(screen.getByLabelText('Категории'), 'Еда');
-    await user.selectOptions(screen.getByLabelText('Подкатегории'), 'Кафе');
+    await user.click(screen.getByRole('checkbox', { name: 'Москва' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Казань' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Еда' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Услуги' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Кафе' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Ремонт' }));
     await user.click(screen.getByRole('checkbox', { name: 'Есть телефон' }));
     await user.click(screen.getByRole('button', { name: /показать/i }));
 
@@ -85,9 +102,9 @@ describe('<TwoGisParserView />', () => {
     );
     expect(JSON.parse(searchCall?.[1]?.body as string)).toEqual({
       filters: expect.objectContaining({
-        cities: ['Москва'],
-        categories: ['Еда'],
-        subcategories: ['Кафе'],
+        cities: ['Москва', 'Казань'],
+        categories: ['Еда', 'Услуги'],
+        subcategories: ['Кафе', 'Ремонт'],
         hasPhone: true,
       }),
       limit: 100,
@@ -100,6 +117,52 @@ describe('<TwoGisParserView />', () => {
         expect.objectContaining({ method: 'POST' }),
       ),
     );
+  });
+
+  it('renders the stable filter UI while facet values are still loading', async () => {
+    let resolveFacets: ((response: Response) => void) | undefined;
+    mockAuthFetch.mockImplementation(
+      (url: string) => {
+        if (!url.endsWith('/facets')) {
+          throw new Error(`Unexpected URL: ${url}`);
+        }
+        return new Promise<Response>((resolve) => {
+          resolveFacets = resolve;
+        });
+      },
+    );
+
+    render(<TwoGisParserView />);
+
+    expect(screen.getByRole('heading', { name: 'Фильтры' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Поиск: Города')).toBeDisabled();
+    expect(screen.getByLabelText('Поиск: Категории')).toBeDisabled();
+    expect(screen.getByLabelText('Поиск: Подкатегории')).toBeDisabled();
+    expect(screen.getAllByText('Загружаем список')).toHaveLength(3);
+    expect(screen.getByRole('button', { name: /показать/i })).toBeDisabled();
+
+    resolveFacets?.(jsonResponse({
+      cities: [{ value: 'Москва', count: 10 }],
+      categories: [{ value: 'Еда', count: 10 }],
+      subcategories: [{ value: 'Кафе', category: 'Еда', count: 10 }],
+      snapshot: { scope: 'Россия', date: '2026-07-26', rows: 4284927 },
+    }));
+
+    expect(await screen.findByRole('checkbox', { name: 'Москва' })).toBeEnabled();
+  });
+
+  it('reuses facet values when the tool is reopened in the same browser session', async () => {
+    const firstRender = render(<TwoGisParserView />);
+    expect(await screen.findByRole('checkbox', { name: 'Москва' })).toBeEnabled();
+    firstRender.unmount();
+
+    render(<TwoGisParserView />);
+    expect(screen.getByRole('checkbox', { name: 'Москва' })).toBeEnabled();
+
+    const facetCalls = mockAuthFetch.mock.calls.filter(([url]) =>
+      String(url).endsWith('/facets'),
+    );
+    expect(facetCalls).toHaveLength(1);
   });
 
   it('invalidates stale results when filters change', async () => {
@@ -181,7 +244,7 @@ describe('<TwoGisParserView />', () => {
     expect(screen.getByRole('button', { name: /сбросить фильтры/i })).toBeInTheDocument();
   });
 
-  it('searches large facet lists locally and keeps the select DOM bounded', async () => {
+  it('searches large facet lists locally and keeps the checkbox DOM bounded', async () => {
     const cities = Array.from({ length: 250 }, (_, index) => ({
       value: `Город ${String(index).padStart(3, '0')}`,
       count: 250 - index,
@@ -202,11 +265,11 @@ describe('<TwoGisParserView />', () => {
     render(<TwoGisParserView />);
     await screen.findByText(/4\s284\s927/);
 
-    const citySelect = screen.getByLabelText('Города');
-    expect(within(citySelect).getAllByRole('option')).toHaveLength(100);
+    const cityGroup = screen.getByRole('group', { name: 'Города' });
+    expect(within(cityGroup).getAllByRole('checkbox')).toHaveLength(100);
 
     await user.type(screen.getByLabelText('Поиск: Города'), 'Город 249');
-    expect(within(citySelect).getByRole('option', { name: /Город 249/ })).toBeInTheDocument();
-    expect(within(citySelect).queryByRole('option', { name: /Город 000/ })).not.toBeInTheDocument();
+    expect(within(cityGroup).getByRole('checkbox', { name: 'Город 249' })).toBeInTheDocument();
+    expect(within(cityGroup).queryByRole('checkbox', { name: 'Город 000' })).not.toBeInTheDocument();
   });
 });
