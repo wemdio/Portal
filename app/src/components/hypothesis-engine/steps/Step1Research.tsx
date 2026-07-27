@@ -9,9 +9,9 @@
  */
 
 import { useRef, useState, type JSX } from 'react';
-import { AlertCircle, Check, CheckCircle2, FlaskConical, Play, XCircle } from 'lucide-react';
+import { Check, CheckCircle2, FlaskConical, Play, XCircle } from 'lucide-react';
 import type { HeStage } from '@/lib/hypothesisEngine/types';
-import { Spinner } from '../ui';
+import { Spinner, StatusBox } from '../ui';
 import type { HeJobSummary, HeProjectDetailResponse } from '../api';
 
 /** line — строка в чек-листе прогресса; name — короткое имя для сообщения об ошибке. */
@@ -62,13 +62,13 @@ export function Step1Research({
 
   if (running) {
     return (
-      <section className="mx-auto max-w-xl rounded-xl border border-gray-800 bg-gray-900 p-6">
-        <h2 className="mb-4 text-base font-semibold text-gray-100">Идёт исследование…</h2>
+      <section className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white p-6">
+        <h2 className="mb-4 text-base font-semibold text-gray-900">Идёт исследование…</h2>
         <StageChecklist jobs={jobs} running />
         {failedStages.length > 0 ? (
           <FailureNote failedStages={failedStages} jobs={jobs} busy={busy} onRetry={onStartResearch} />
         ) : null}
-        <p className="mt-4 text-xs text-gray-500">
+        <p className="mt-4 text-xs text-gray-400">
           Это займёт несколько минут, страницу можно не держать открытой.
         </p>
       </section>
@@ -77,8 +77,8 @@ export function Step1Research({
 
   if (failed) {
     return (
-      <section className="mx-auto max-w-xl rounded-xl border border-gray-800 bg-gray-900 p-6">
-        <h2 className="mb-4 text-base font-semibold text-gray-100">Исследование остановилось</h2>
+      <section className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white p-6">
+        <h2 className="mb-4 text-base font-semibold text-gray-900">Исследование остановилось</h2>
         <StageChecklist jobs={jobs} running={false} />
         <FailureNote
           failedStages={failedStages}
@@ -93,12 +93,12 @@ export function Step1Research({
 
   if (done) {
     return (
-      <section className="mx-auto max-w-xl rounded-xl border border-gray-800 bg-gray-900 p-6">
-        <div className="flex items-start gap-3 rounded-xl border border-emerald-900/60 bg-emerald-950/40 px-4 py-3">
-          <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-400" aria-hidden />
+      <section className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white p-6">
+        <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+          <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-500" aria-hidden />
           <div>
-            <p className="text-sm font-semibold text-emerald-200">Исследование готово</p>
-            <p className="mt-0.5 text-sm text-emerald-200/70">
+            <p className="text-sm font-semibold text-emerald-800">Исследование готово</p>
+            <p className="mt-0.5 text-sm text-emerald-700">
               Вертикали собраны — переходим к выбору направления.
             </p>
           </div>
@@ -116,7 +116,7 @@ export function Step1Research({
                 onStartResearch();
               }
             }}
-            className="text-xs font-medium text-gray-500 underline decoration-dotted underline-offset-4 transition hover:text-gray-300 disabled:opacity-50"
+            className="text-xs font-medium text-gray-400 underline decoration-dotted underline-offset-4 transition hover:text-gray-600 disabled:opacity-50"
           >
             Перезапустить исследование
           </button>
@@ -142,12 +142,12 @@ function NotStarted({
   onSaveOffer: (v: string) => Promise<void> | void;
 }) {
   return (
-    <section className="mx-auto max-w-xl rounded-xl border border-gray-800 bg-gray-900 px-6 py-10 text-center">
-      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-950/60 text-emerald-400">
+    <section className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white px-6 py-10 text-center">
+      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
         <FlaskConical className="h-6 w-6" aria-hidden />
       </div>
-      <h2 className="mt-4 text-lg font-semibold text-gray-100">Исследование рынка</h2>
-      <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-gray-400">
+      <h2 className="mt-4 text-lg font-semibold text-gray-900">Исследование рынка</h2>
+      <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-gray-600">
         Движок изучит сайт, найдёт конкурентов и их клиентов, соберёт 25–40 гипотез рынков с доказательствами
         и сложит их в вертикали. Обычно 10–20 минут.
       </p>
@@ -155,7 +155,7 @@ function NotStarted({
         type="button"
         onClick={onStartResearch}
         disabled={busy}
-        className="mt-6 inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-6 py-3 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+        className="mt-6 inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {busy ? <Spinner className="h-4 w-4" /> : <Play className="h-4 w-4" aria-hidden />}
         Запустить исследование
@@ -192,11 +192,11 @@ function OfferBlock({
   };
 
   return (
-    <div className="mt-8 rounded-xl border border-gray-800 bg-gray-950/50 p-4 text-left">
-      <label htmlFor="he-step1-offer" className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+    <div className="mt-8 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
+      <label htmlFor="he-step1-offer" className="text-xs font-semibold uppercase tracking-widest text-gray-400">
         Оффер (необязательно)
       </label>
-      <p className="mt-1 text-xs leading-relaxed text-gray-500">
+      <p className="mt-1 text-xs leading-relaxed text-gray-400">
         Как именно продаём: кому, что и в какие сроки — движок использует эту формулировку в письмах
       </p>
       <textarea
@@ -209,19 +209,19 @@ function OfferBlock({
           setSaved(false);
         }}
         placeholder="Например: 3–5 встреч в месяц с HRD крупных работодателей, тест за 2 недели"
-        className="mt-2 w-full resize-y rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-200 placeholder:text-gray-600 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-900/60"
+        className="mt-2 w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
       />
       <div className="mt-2 flex items-center gap-2">
         <button
           type="button"
           onClick={() => void handleSave()}
           disabled={saving || !dirty}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-700 bg-gray-900 px-3 py-1.5 text-xs font-medium text-gray-300 transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
-        {saved ? <span className="text-xs text-emerald-400">Сохранено ✓</span> : null}
+        {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
       </div>
     </div>
   );
@@ -262,23 +262,23 @@ function StageChecklist({ jobs, running }: { jobs: HeJobSummary[]; running: bool
             key={stage}
             className={`flex items-center gap-2.5 text-sm ${
               state === 'current'
-                ? 'font-medium text-emerald-300'
+                ? 'font-medium text-blue-700'
                 : state === 'done'
-                  ? 'text-gray-300'
+                  ? 'text-gray-600'
                   : state === 'failed'
-                    ? 'text-red-300'
-                    : 'text-gray-500'
+                    ? 'text-red-600'
+                    : 'text-gray-400'
             }`}
           >
             <span className="flex h-4 w-4 shrink-0 items-center justify-center">
               {state === 'done' ? (
-                <Check className="h-4 w-4 text-emerald-400" aria-hidden />
+                <Check className="h-4 w-4 text-emerald-500" aria-hidden />
               ) : state === 'current' ? (
-                <Spinner className="h-4 w-4 text-emerald-400" />
+                <Spinner className="h-4 w-4 text-blue-500" />
               ) : state === 'failed' ? (
-                <XCircle className="h-4 w-4 text-red-400" aria-hidden />
+                <XCircle className="h-4 w-4 text-red-500" aria-hidden />
               ) : (
-                <span className="h-1.5 w-1.5 rounded-full bg-gray-700" aria-hidden />
+                <span className="h-1.5 w-1.5 rounded-full bg-gray-300" aria-hidden />
               )}
             </span>
             {line}
@@ -308,32 +308,19 @@ function FailureNote({
       {failedStages.map(({ stage, name }) => {
         const job = latestJobOf(jobs, stage);
         return (
-          <div
-            key={stage}
-            role="alert"
-            className="flex items-start gap-2.5 rounded-xl border border-red-900/60 bg-red-950/40 px-4 py-3 text-sm text-red-200"
-          >
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-            <span>
-              Стадия „{name}“ не удалась: {job?.error || 'неизвестная ошибка'}
-            </span>
-          </div>
+          <StatusBox key={stage} tone="error">
+            Стадия „{name}“ не удалась: {job?.error || 'неизвестная ошибка'}
+          </StatusBox>
         );
       })}
       {failedStages.length === 0 && projectError ? (
-        <div
-          role="alert"
-          className="flex items-start gap-2.5 rounded-xl border border-red-900/60 bg-red-950/40 px-4 py-3 text-sm text-red-200"
-        >
-          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-          <span>Исследование не удалось: {projectError}</span>
-        </div>
+        <StatusBox tone="error">Исследование не удалось: {projectError}</StatusBox>
       ) : null}
       <button
         type="button"
         onClick={onRetry}
         disabled={busy}
-        className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {busy ? <Spinner className="h-4 w-4" /> : null}
         Попробовать снова
