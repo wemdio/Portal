@@ -1,31 +1,24 @@
 /**
  * POST /api/parsers/hh-archive/preview
  *
- * Pre-flight estimate: дёргает HH API с per_page=1 для каждого
- * search_query + первый чанк по дате, чтобы показать юзеру сколько
- * вакансий найдётся ДО запуска тяжёлого парсинга.
+ * Pre-flight estimate: для каждого search_query считаем, сколько подходящих
+ * вакансий уже лежит в `hh_vacancies` — БЕЗ похода в HH API. Юзер видит
+ * реальные цифры и решает: запускать job или сузить фильтры.
  *
- * Зачем: главная защита от «упс, выбрал всю РФ за 5 лет и запустил».
- * Юзер видит «найдено 8 234 вакансий — продолжить?» и сам решает
- * (либо сужает фильтры, либо разрешает большой прогон).
- *
- * Тратит ~N мини-API-запросов (per_page=1, дёшево) — для каждого
- * search_query один запрос. Безопасно для rate limit.
+ * Раньше preview ходил в api.hh.ru — но HH API отдаёт только последние
+ * ~60 дней. Любые запросы за более старые периоды возвращали 0, что
+ * выглядело как «парсер сломан» (см. инцидент 27.07.2026). Теперь ищем
+ * локально; за периоды до `oldest_available` — плашка в UI честно
+ * говорит «данных нет, парсинга не было». См. hhArchive/localSearch.ts.
  */
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
-import { HH_API_BASE, parseAreas } from '@/lib/parsers/hhArchive/parser';
-import { fetchWithRetry, HHApiError } from '@/lib/parsers/hhParser';
+import { parseAreas } from '@/lib/parsers/hhArchive/parser';
+import { countVacanciesLocal, getOldestVacancyDate } from '@/lib/parsers/hhArchive/localSearch';
 import { logInfo, logWarn } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
-
-// Все походы на HH идут через общий fetchWithRetry: он подключён к RU-прокси
-// (PROXY_URLS), троттлит одновременные запросы (HH_MAX_CONCURRENCY) и
-// ретраит 429/403/5xx с backoff'ом. HH с 2026-04-15 требует OAuth
-// (HH_ACCESS_TOKEN) и российский IP — без прокси с прод-сервера в Торонто
-// приходит 403 либо TCP-сброс (fetch failed).
 
 function err(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -36,6 +29,9 @@ interface PreviewRequest {
   area?: unknown;
   date_from?: unknown;
   date_to?: unknown;
+  // `archived` больше не читаем: локальный архив хранит и открытые, и закрытые
+  // вакансии, отдельного статуса у нас нет. Поле принимаем для совместимости
+  // со старым фронтом, но игнорируем.
   archived?: unknown;
 }
 
@@ -63,78 +59,47 @@ export async function POST(req: NextRequest) {
   const area = typeof body.area === 'string' && body.area ? body.area : '113';
   const dateFrom = typeof body.date_from === 'string' ? body.date_from : '';
   const dateTo = typeof body.date_to === 'string' ? body.date_to : '';
-  const archived = body.archived !== false; // default true
+  const areaIds = parseAreas(area);
 
-  // Всё через общий fetchWithRetry — глобальный throttle кэпит одновременные
-  // запросы (HH_MAX_CONCURRENCY, дефолт 2), так что Promise.all тут = de-facto
-  // очередь на 2 запроса за раз с задержкой. Ретраев мало (2 попытки),
-  // чтобы preview не залипал при недоступности прокси/HH.
   const perQuery = await Promise.all(
     queries.map(async (q) => {
-      const params = new URLSearchParams();
-      params.set('text', q);
-      params.set('per_page', '1');
-      params.set('page', '0');
-      const areas = parseAreas(area);
-      if (areas.length === 0) params.append('area', '113');
-      else for (const a of areas) params.append('area', a);
-      if (archived) params.set('archived', 'true');
-      if (dateFrom) params.set('date_from', dateFrom);
-      if (dateTo) params.set('date_to', dateTo);
-      const url = `${HH_API_BASE}?${params.toString()}`;
       try {
-        const json = await fetchWithRetry<{ found?: number }>(url, {
-          maxRetries: 2,
-          timeoutMs: 15_000,
+        const found = await countVacanciesLocal({
+          query: q,
+          areaIds,
+          dateFrom: dateFrom || undefined,
+          dateTo: dateTo || undefined,
         });
-        const found = Number(json.found ?? 0);
-        // Диагностический лог: чтобы после деплоя видеть в prod-логах,
-        // возвращает ли HH API реальные числа с `archived=true` или молча
-        // отдаёт 0 (тогда `archived` на api.hh.ru не поддерживается и надо
-        // будет переходить на скрейп hh.ru/search/vacancy).
         void logInfo(
           'parser.hh_archive.preview.query',
-          'HH archive preview query',
-          {
-            userId: user.id,
-            query: q,
-            area,
-            date_from: dateFrom,
-            date_to: dateTo,
-            archived,
-            found,
-          },
+          'HH archive local-count',
+          { userId: user.id, query: q, area, date_from: dateFrom, date_to: dateTo, found },
         );
         return { query: q, found, error: null };
       } catch (e) {
-        const message = e instanceof HHApiError
-          ? e.message
-          : e instanceof Error
-            ? e.message
-            : 'fetch failed';
+        const message = e instanceof Error ? e.message : 'count failed';
         void logWarn(
           'parser.hh_archive.preview.query.failed',
-          'HH archive preview query failed',
-          {
-            userId: user.id,
-            query: q,
-            error: message,
-            status: e instanceof HHApiError ? e.status : undefined,
-          },
+          'HH archive local-count failed',
+          { userId: user.id, query: q, error: message },
         );
         return { query: q, found: 0, error: message };
       }
     }),
   );
 
-  // Cумма НЕ равна реальному размеру выгрузки — пересечения по vacancy_id
-  // между запросами не учтены. Но это нормально для estimation: лучше
-  // показать «верхнюю границу» юзеру, чем недооценить и упереться в cap.
   const totalEstimated = perQuery.reduce((s, r) => s + r.found, 0);
+
+  // Дата самой старой записи — фронт покажет плашку «данные с ...».
+  // Fire-and-forget, ошибка не валит preview.
+  const oldestAvailable = await getOldestVacancyDate().catch(() => null);
 
   return NextResponse.json({
     total_estimated: totalEstimated,
     per_query: perQuery,
-    note: 'Сумма по запросам без учёта пересечений. Фактически выгрузится меньше или равно этому числу.',
+    oldest_available: oldestAvailable,
+    note:
+      'Поиск идёт по локальному архиву `hh_vacancies` (то, что обычный парсер спецов + auto-pipeline уже собрали). ' +
+      'За периоды до oldest_available данных нет — HH API не хранит вакансии старше ~60 дней.',
   });
 }

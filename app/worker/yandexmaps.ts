@@ -1,5 +1,14 @@
 import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
-import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
+import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep, startWorkerHeartbeat } from './_shared';
+
+/**
+ * Heartbeat-файл: обновляется каждые 30с независимым setInterval-тиком.
+ * Docker healthcheck читает mtime и флипает контейнер в unhealthy, если он
+ * не обновлялся > 300с — autoheal тогда перезапускает воркер. Ловит именно
+ * event-loop hang (инцидент 27.07.2026: воркер дважды за день замерз на
+ * 1-5 часов без падения процесса, watchdog в том же loop'е тоже мёртв).
+ */
+const HEARTBEAT_PATH = process.env.YANDEXMAPS_WORKER_HEARTBEAT_PATH ?? '/tmp/yandexmaps-worker-heartbeat';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 // MAX_CONCURRENCY поднят 2 → 4 (16.07.2026): каждая yandex-задача внутри себя
@@ -142,6 +151,9 @@ async function main(): Promise<void> {
   requireSupabaseAdmin(log);
   const shouldStop = setupGracefulShutdown(log);
 
+  const heartbeat = startWorkerHeartbeat(HEARTBEAT_PATH);
+  log('info', `Heartbeat ticker started → ${HEARTBEAT_PATH} (every 30s)`);
+
   log('info', 'Running startup recovery...');
   await startupRecovery();
   log('info', 'Startup recovery done');
@@ -153,6 +165,7 @@ async function main(): Promise<void> {
     await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce, realtimeTables: ['yandex_maps_jobs'] });
   } finally {
     clearInterval(watchdog);
+    clearInterval(heartbeat);
   }
 }
 
