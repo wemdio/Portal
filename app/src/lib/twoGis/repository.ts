@@ -17,6 +17,7 @@ import type {
   TwoGisFacets,
   TwoGisFilters,
 } from './types';
+import { TWO_GIS_MAX_EXPORT_ROWS } from './types';
 
 const EXPORT_TICKET_TTL_MINUTES = 15;
 
@@ -92,7 +93,11 @@ function hashTicket(token: string): string {
 export async function createTwoGisExportTicket(
   userId: string,
   filters: TwoGisFilters,
-): Promise<{ token: string; rowCount: number } | null> {
+): Promise<
+  | { token: string; rowCount: number }
+  | { limited: true; rowCount: number; maxRows: number }
+  | null
+> {
   const token = randomBytes(32).toString('base64url');
   const tokenHash = hashTicket(token);
   const normalizedFilters = normalizeTwoGisFilters(filters);
@@ -117,6 +122,15 @@ export async function createTwoGisExportTicket(
       await client.query('COMMIT');
       transactionOpen = false;
       return null;
+    }
+    if (rowCount > TWO_GIS_MAX_EXPORT_ROWS) {
+      await client.query('COMMIT');
+      transactionOpen = false;
+      return {
+        limited: true,
+        rowCount,
+        maxRows: TWO_GIS_MAX_EXPORT_ROWS,
+      };
     }
 
     const snapshot = await client.query<{ id: string | number }>(

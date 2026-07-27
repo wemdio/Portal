@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { isTwoGisDatasetConfigured } from '@/lib/twoGisDataset';
 import { createTwoGisExportTicket } from '@/lib/twoGis/repository';
+import { TWO_GIS_EXPORT_LIMIT_MESSAGE } from '@/lib/twoGis/types';
 import {
   parseTwoGisFilters,
   readJsonObject,
@@ -35,6 +36,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { error: 'No data for the selected filters' },
         { status: 404 },
+      );
+    }
+    if ('limited' in prepared) {
+      return NextResponse.json(
+        {
+          error: TWO_GIS_EXPORT_LIMIT_MESSAGE,
+          code: 'EXPORT_ROW_LIMIT',
+          rowCount: prepared.rowCount,
+          maxRows: prepared.maxRows,
+        },
+        { status: 413 },
       );
     }
 
