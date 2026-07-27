@@ -38,7 +38,7 @@ const CARD = {
 
 function createTicketClient(rowCount: number) {
   return {
-    query: jest.fn(async (sql: string) => {
+    query: jest.fn(async (sql: string, _params?: unknown[]) => {
       if (/count\(\*\)/i.test(sql)) {
         return { rows: [{ count: String(rowCount) }] };
       }
