@@ -1,4 +1,5 @@
 import { normalizeTwoGisFilters } from '@/lib/twoGis/query';
+import { TWO_GIS_MAX_FILTER_VALUES } from '@/lib/twoGis/types';
 
 const ARRAY_FILTER_KEYS = ['cities', 'categories', 'subcategories'] as const;
 const BOOLEAN_FILTER_KEYS = [
@@ -12,9 +13,9 @@ const ALLOWED_FILTER_KEYS = new Set<string>([
   ...ARRAY_FILTER_KEYS,
   ...BOOLEAN_FILTER_KEYS,
   'name',
+  'rubricGroups',
 ]);
 
-const MAX_FILTER_VALUES = 200;
 const MAX_FILTER_VALUE_LENGTH = 300;
 
 export class TwoGisRequestError extends Error {}
@@ -54,7 +55,7 @@ export function parseTwoGisFilters(
     if (candidate === undefined) continue;
     if (
       !Array.isArray(candidate)
-      || candidate.length > MAX_FILTER_VALUES
+      || candidate.length > TWO_GIS_MAX_FILTER_VALUES
       || candidate.some(
         (item) =>
           typeof item !== 'string'
@@ -64,6 +65,125 @@ export function parseTwoGisFilters(
       throw new TwoGisRequestError(
         `${key} must be an array of short strings`,
       );
+    }
+  }
+
+  const rubricGroups = value.rubricGroups;
+  if (rubricGroups !== undefined) {
+    if (!Array.isArray(rubricGroups)) {
+      throw new TwoGisRequestError('rubricGroups must be an array');
+    }
+    if (rubricGroups.length > TWO_GIS_MAX_FILTER_VALUES) {
+      throw new TwoGisRequestError(
+        `rubricGroups cannot contain more than ${TWO_GIS_MAX_FILTER_VALUES} selections`,
+      );
+    }
+    if (value.categories !== undefined || value.subcategories !== undefined) {
+      throw new TwoGisRequestError(
+        'rubricGroups cannot be combined with categories or subcategories',
+      );
+    }
+
+    let selectionCount = 0;
+    const categories = new Set<string>();
+    for (const group of rubricGroups) {
+      if (!isRecord(group)) {
+        throw new TwoGisRequestError('rubricGroups must contain objects');
+      }
+      let allowedKeys: Set<string>;
+      if (group.mode === 'all') {
+        allowedKeys = new Set(['category', 'mode']);
+      } else if (group.mode === 'some') {
+        allowedKeys = new Set(['category', 'mode', 'subcategories']);
+      } else if (group.mode === 'allExcept') {
+        allowedKeys = new Set([
+          'category',
+          'mode',
+          'excludedSubcategories',
+        ]);
+      } else {
+        throw new TwoGisRequestError(
+          'rubricGroups mode must be all, some or allExcept',
+        );
+      }
+      if (Object.keys(group).some((key) => !allowedKeys.has(key))) {
+        throw new TwoGisRequestError('rubricGroups contains unsupported fields');
+      }
+      if (
+        typeof group.category !== 'string'
+        || !group.category.trim()
+        || group.category.length > MAX_FILTER_VALUE_LENGTH
+      ) {
+        throw new TwoGisRequestError(
+          'rubricGroups must contain short strings',
+        );
+      }
+      const normalizedCategory = group.category.trim();
+      if (categories.has(normalizedCategory)) {
+        throw new TwoGisRequestError(
+          'rubricGroups must contain unique categories',
+        );
+      }
+      categories.add(normalizedCategory);
+
+      if (group.mode === 'all') {
+        selectionCount += 1;
+      } else if (group.mode === 'some') {
+        if (
+          Array.isArray(group.subcategories)
+          && group.subcategories.length > TWO_GIS_MAX_FILTER_VALUES
+        ) {
+          throw new TwoGisRequestError(
+            `rubricGroups cannot contain more than ${TWO_GIS_MAX_FILTER_VALUES} selections`,
+          );
+        }
+        if (
+          !Array.isArray(group.subcategories)
+          || group.subcategories.length === 0
+          || group.subcategories.some(
+            (item) =>
+              typeof item !== 'string'
+              || !item.trim()
+              || item.length > MAX_FILTER_VALUE_LENGTH,
+          )
+        ) {
+          throw new TwoGisRequestError(
+            'rubricGroups must contain arrays of short strings',
+          );
+        }
+        selectionCount += group.subcategories.length;
+      } else if (group.mode === 'allExcept') {
+        if (
+          Array.isArray(group.excludedSubcategories)
+          && group.excludedSubcategories.length
+            > TWO_GIS_MAX_FILTER_VALUES - 1
+        ) {
+          throw new TwoGisRequestError(
+            `rubricGroups cannot contain more than ${TWO_GIS_MAX_FILTER_VALUES} selections`,
+          );
+        }
+        if (
+          !Array.isArray(group.excludedSubcategories)
+          || group.excludedSubcategories.length === 0
+          || group.excludedSubcategories.some(
+            (item) =>
+              typeof item !== 'string'
+              || !item.trim()
+              || item.length > MAX_FILTER_VALUE_LENGTH,
+          )
+        ) {
+          throw new TwoGisRequestError(
+            'rubricGroups must contain arrays of short strings',
+          );
+        }
+        selectionCount += 1 + group.excludedSubcategories.length;
+      }
+
+      if (selectionCount > TWO_GIS_MAX_FILTER_VALUES) {
+        throw new TwoGisRequestError(
+          `rubricGroups cannot contain more than ${TWO_GIS_MAX_FILTER_VALUES} selections`,
+        );
+      }
     }
   }
 

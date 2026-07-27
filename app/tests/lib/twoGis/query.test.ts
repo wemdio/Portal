@@ -86,4 +86,92 @@ describe('2GIS query core', () => {
     expect(query.text).toMatch(/card_id\s*=\s*cards\.id/i);
     expect(query.params).toContainEqual(['Стоматологии']);
   });
+
+  it('unites whole categories and exact category/subcategory pairs', () => {
+    const query = buildTwoGisCountQuery(
+      normalizeTwoGisFilters({
+        rubricGroups: [
+          { category: 'Еда', mode: 'all' },
+          {
+            category: 'Услуги',
+            mode: 'some',
+            subcategories: ['Ремонт', 'Кафе'],
+          },
+        ],
+      }),
+    );
+
+    expect(query.text).toMatch(/category_card\.category\s*=\s*ANY/i);
+    expect(query.text).toMatch(/public\.card_subcategories/i);
+    expect(query.text).toMatch(/card_subcategor(?:y|ies)\.category/i);
+    expect(query.text).toMatch(/card_subcategor(?:y|ies)\.value/i);
+    expect(query.text).toMatch(/JOIN\s*\(/i);
+    expect(query.text).toMatch(/\sUNION\s/i);
+    expect(query.text).not.toMatch(/cards\.category[\s\S]*OR\s+EXISTS/i);
+    expect(query.params).toContainEqual(['Еда']);
+    expect(query.params).toContainEqual(['Услуги', 'Услуги']);
+    expect(query.params).toContainEqual(['Ремонт', 'Кафе']);
+  });
+
+  it('keeps same-named subcategories scoped to their parent category', () => {
+    const query = buildTwoGisCountQuery(
+      normalizeTwoGisFilters({
+        rubricGroups: [
+          {
+            category: 'Еда',
+            mode: 'some',
+            subcategories: ['Кафе'],
+          },
+          {
+            category: 'Услуги',
+            mode: 'some',
+            subcategories: ['Кафе'],
+          },
+        ],
+      }),
+    );
+
+    expect(query.params).toContainEqual(['Еда', 'Услуги']);
+    expect(query.params).toContainEqual(['Кафе', 'Кафе']);
+    expect(query.text).toMatch(/category[\s\S]*value/i);
+  });
+
+  it('represents a whole category with exclusions without expanding every sibling', () => {
+    const query = buildTwoGisCountQuery(
+      normalizeTwoGisFilters({
+        rubricGroups: [
+          {
+            category: 'Еда',
+            mode: 'allExcept',
+            excludedSubcategories: ['Бары', 'Кафе'],
+          },
+        ],
+      }),
+    );
+
+    expect(query.text).toMatch(/\sEXCEPT\s/i);
+    expect(query.params).toContainEqual(['Еда']);
+    expect(query.params).toContainEqual(['Еда', 'Еда']);
+    expect(query.params).toContainEqual(['Бары', 'Кафе']);
+  });
+
+  it('keeps a multi-rubric card when one of its rubrics remains selected', () => {
+    const query = buildTwoGisCountQuery(
+      normalizeTwoGisFilters({
+        rubricGroups: [
+          {
+            category: 'Еда',
+            mode: 'allExcept',
+            excludedSubcategories: ['Кафе'],
+          },
+        ],
+      }),
+    );
+
+    expect(query.text).toMatch(/allowed_card_subcategory/i);
+    expect(query.text).toMatch(/LEFT JOIN unnest/i);
+    expect(query.text).toMatch(
+      /excluded_rubric_for_allowed\.value IS NULL/i,
+    );
+  });
 });
