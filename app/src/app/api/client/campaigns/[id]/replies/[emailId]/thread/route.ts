@@ -6,10 +6,11 @@ import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAc
 import { getEmail, listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToThreadMessage } from '@/lib/clientCampaignReplies/mapEmail';
 import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
+import { partitionForeignEmails, resolveClientMailboxes } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
 import { computeReplyAllRecipients } from '@/lib/clientCampaignReplies/participants';
 import { recordEmailRead } from '@/lib/clientCampaignReplies/clientEmailReads';
 import type { ClientReplyThread } from '@/lib/clientCampaignReplies/types';
-import { logError } from '@/lib/loggerServer';
+import { logError, logInfo } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
 
@@ -89,7 +90,30 @@ export async function GET(
     // Свежие сверху (tb - ta) — как в юнибоксе Instantly: последний шаг переписки
     // наверху, прокручиваешь вниз к началу диалога. Так верх ленты совпадает с
     // закреплённым блоком «ответ лида» в /replies (тоже последний шаг).
-    const messages = candidates.map(mapInstantlyEmailToThreadMessage).sort((a, b) => {
+    //
+    // Кросс-клиентская гигиена: входящие, полученные ящиком ДРУГОГО клиента
+    // воркспейса (Instantly клеит входящее к кампании по адресу отправителя, не
+    // проверяя получателя), из треда выкидываем — это чужая корреспонденция.
+    // Исходящие не фильтруем: они ушли с ящиков кампании по определению.
+    const mailboxes = await resolveClientMailboxes(userId, campaignId, instantlyRequestOptions.accountId);
+    const inbound = candidates.filter((e) => e.ue_type === 2);
+    const { visible: visibleInbound, hidden: hiddenInbound } = partitionForeignEmails(inbound, mailboxes);
+    if (hiddenInbound.length > 0) {
+      await logInfo('client.replies.foreign_mailbox_hidden', `Скрыты письма треда, полученные чужими ящиками: ${hiddenInbound.length}`, {
+        campaignId,
+        userId,
+        hidden: hiddenInbound.slice(0, 20).map((e) => ({ id: e.id, eaccount: e.eaccount ?? null })),
+      });
+    }
+    if (hiddenInbound.some((e) => e.id === original.id)) {
+      // Само запрошенное письмо — чужое: отдаём тот же 404, что и для чужой
+      // кампании, чтобы по прямой ссылке нельзя было подсмотреть скрытое.
+      return jsonError('Письмо не относится к кампании', 404);
+    }
+    const visibleIds = new Set(visibleInbound.map((e) => e.id));
+    const visibleCandidates = candidates.filter((e) => e.ue_type !== 2 || visibleIds.has(e.id));
+
+    const messages = visibleCandidates.map(mapInstantlyEmailToThreadMessage).sort((a, b) => {
       const ta = a.timestamp ? Date.parse(a.timestamp) : 0;
       const tb = b.timestamp ? Date.parse(b.timestamp) : 0;
       return tb - ta;
