@@ -1217,8 +1217,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: '0.1'
+          memory: 1G
+          cpus: '1'
           pids: 512
     restart: unless-stopped
     networks:
