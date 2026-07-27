@@ -37,6 +37,16 @@ export function normalizeMailbox(value: string | null | undefined): string | nul
 }
 
 /**
+ * Входящее ли письмо: всё, что не исходящее (ue_type 1 = наше письмо, 3 = наш
+ * ответ лиду). Намеренно НЕ `ue_type === 2`: у части писем Instantly не отдаёт
+ * ue_type, и такое входящее при проверке «=== 2» ускользало бы от фильтра —
+ * неопределённость должна проверяться, а не показываться молча.
+ */
+export function isInboundEmail(email: { ue_type?: number }): boolean {
+  return email.ue_type !== 1 && email.ue_type !== 3;
+}
+
+/**
  * Чистая функция разбиения: какие письма видимы, какие скрыты как чужие.
  * pool === null означает «принадлежность определить не удалось» → всё видимо
  * (fail-open). Письма без eaccount тоже видимы (нечего проверять).
@@ -60,17 +70,37 @@ export function partitionForeignEmails<T extends { eaccount?: string | null }>(
 }
 
 /**
+ * Одиночная проверка «письмо чужое» — для write-роутов (reply/forward), где
+ * фильтровать список не нужно, а надо решить судьбу одного письма.
+ * Семантика как у partitionForeignEmails: неопределённость → НЕ чужое.
+ */
+export function isForeignEmail(
+  email: { eaccount?: string | null },
+  mailboxes: ReadonlySet<string> | null,
+): boolean {
+  return partitionForeignEmails([email], mailboxes).hidden.length === 1;
+}
+
+/**
  * Сендеры кампании из Instantly (email_list). Кэшируем — горячие роуты
  * ответов не должны плодить getCampaign на каждый запрос (лимит Instantly
- * ~10-15 RPM на весь воркспейс). При ошибке API — пустое множество (фильтр
- * тогда опирается только на пул клиента из БД).
+ * ~10-15 RPM на весь воркспейс).
+ *
+ * Возвращает null, если список ПОЛУЧИТЬ НЕ УДАЛОСЬ (ошибка API): это не то же
+ * самое, что пустой список. Ошибку в fetcher'е пробрасываем наружу, чтобы
+ * cached() не сохранял отрицательный результат (на холодном пути cached при
+ * reject'е удаляет запись — следующий запрос честно ретраит). Иначе секундный
+ * 429 кэшировался бы как «у кампании нет сендеров» на 15 минут, и фильтр всё
+ * это время резал бы по одному только пулу клиента — то есть молча скрывал
+ * живые ответы на ящиках, которые есть в email_list, но не в пресетах
+ * (ревью 27.07, кейс Mailganer: пул 8 ящиков из ~30 реальных).
  */
 export async function getCampaignSenders(
   campaignId: string,
   accountId?: string | null,
-): Promise<Set<string>> {
-  return cached(`campaign-senders:${accountId ?? 'main'}:${campaignId}`, async () => {
-    try {
+): Promise<Set<string> | null> {
+  try {
+    return await cached(`campaign-senders:${accountId ?? 'main'}:${campaignId}`, async () => {
       const campaign = await getCampaign(campaignId, accountId ? { accountId } : undefined);
       const list = Array.isArray(campaign?.email_list) ? campaign.email_list : [];
       return new Set(
@@ -78,14 +108,14 @@ export async function getCampaignSenders(
           .map((e) => normalizeMailbox(typeof e === 'string' ? e : null))
           .filter((e): e is string => Boolean(e)),
       );
-    } catch (err) {
-      await logWarn('client.replies.campaign_senders_failed', 'Не удалось получить сендеров кампании', {
-        campaignId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return new Set<string>();
-    }
-  }, CAMPAIGN_SENDERS_TTL_MS);
+    }, CAMPAIGN_SENDERS_TTL_MS);
+  } catch (err) {
+    await logWarn('client.replies.campaign_senders_failed', 'Не удалось получить сендеров кампании — фильтр чужих ящиков на этом запросе fail-open', {
+      campaignId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 /**
@@ -128,8 +158,11 @@ export async function getClientMailboxPool(userId: string): Promise<Set<string>>
 
 /**
  * Объединённое множество «ящики клиента» для фильтрации ответов кампании.
- * Возвращает null, когда определить принадлежность не удалось вообще
- * (ни email_list, ни пула) — сигнал fail-open для partitionForeignEmails.
+ * Возвращает null, когда определить принадлежность не удалось (сбой Instantly
+ * API) ИЛИ когда данных нет вообще (ни email_list, ни пула) — сигнал
+ * fail-open для partitionForeignEmails. При сбои API fail-open делаем ДАЖЕ
+ * при непустом пуле: пул без email_list неполон (в пресеты попадают не все
+ * ящики кампании), и резать по нему = молча скрывать живые ответы.
  */
 export async function resolveClientMailboxes(
   userId: string,
@@ -140,6 +173,7 @@ export async function resolveClientMailboxes(
     getCampaignSenders(campaignId, accountId),
     getClientMailboxPool(userId),
   ]);
+  if (senders === null) return null;
   const union = new Set<string>([...senders, ...pool]);
   return union.size > 0 ? union : null;
 }

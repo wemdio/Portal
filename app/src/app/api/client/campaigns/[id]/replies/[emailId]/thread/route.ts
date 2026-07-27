@@ -6,7 +6,7 @@ import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAc
 import { getEmail, listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToThreadMessage } from '@/lib/clientCampaignReplies/mapEmail';
 import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
-import { partitionForeignEmails, resolveClientMailboxes } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
+import { partitionForeignEmails, resolveClientMailboxes, isInboundEmail } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
 import { computeReplyAllRecipients } from '@/lib/clientCampaignReplies/participants';
 import { recordEmailRead } from '@/lib/clientCampaignReplies/clientEmailReads';
 import type { ClientReplyThread } from '@/lib/clientCampaignReplies/types';
@@ -96,7 +96,9 @@ export async function GET(
     // проверяя получателя), из треда выкидываем — это чужая корреспонденция.
     // Исходящие не фильтруем: они ушли с ящиков кампании по определению.
     const mailboxes = await resolveClientMailboxes(userId, campaignId, instantlyRequestOptions.accountId);
-    const inbound = candidates.filter((e) => e.ue_type === 2);
+    // Входящие = «не исходящие» (ue_type 1/3 — наши): проверка `=== 2`
+    // пропускала бы входящие без ue_type мимо фильтра.
+    const inbound = candidates.filter((e) => isInboundEmail(e));
     const { visible: visibleInbound, hidden: hiddenInbound } = partitionForeignEmails(inbound, mailboxes);
     if (hiddenInbound.length > 0) {
       await logInfo('client.replies.foreign_mailbox_hidden', `Скрыты письма треда, полученные чужими ящиками: ${hiddenInbound.length}`, {
@@ -111,7 +113,7 @@ export async function GET(
       return jsonError('Письмо не относится к кампании', 404);
     }
     const visibleIds = new Set(visibleInbound.map((e) => e.id));
-    const visibleCandidates = candidates.filter((e) => e.ue_type !== 2 || visibleIds.has(e.id));
+    const visibleCandidates = candidates.filter((e) => !isInboundEmail(e) || visibleIds.has(e.id));
 
     const messages = visibleCandidates.map(mapInstantlyEmailToThreadMessage).sort((a, b) => {
       const ta = a.timestamp ? Date.parse(a.timestamp) : 0;
