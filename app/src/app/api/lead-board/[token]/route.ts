@@ -2,17 +2,17 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import { verifyBoardToken, boardTokenSecret } from '@/lib/leadBoard/boardToken';
 import { isLeadQuality, LEAD_QUALITY_OPTIONS } from '@/lib/leadBoard/leadQuality';
-import { parseColumnConfig, type BoardColumnConfigEntry } from '@/lib/instantly/leadBoardWriter';
+import { resolveBoard } from '@/lib/leadBoard/boardResolver';
+import { parseImportDate } from '@/lib/leadBoard/importLeads';
 
 export const dynamic = 'force-dynamic';
 
 /**
  * Публичный API гостевой таблицы лидов проекта (/leads-board/<token>).
  * Авторизация — сам токен (capability): HMAC-подпись + равенство сохранённому
- * в project_lead_boards.token (не совпал = отозван). Путь allowlist'нут в
- * middleware (isPublicApiPath), сессии тут нет и не надо.
+ * в project_lead_boards.token, общий резолвер — lib/leadBoard/boardResolver.
+ * Путь allowlist'нут в middleware (isPublicApiPath), сессии тут нет и не надо.
  *
  * GET   — доска: проект, конфиг колонок, ряды (≤500, свежие первые), статистика.
  * PATCH — правка ТОЛЬКО клиентских колонок (quality/comment/taken) одного ряда;
@@ -21,35 +21,6 @@ export const dynamic = 'force-dynamic';
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
-}
-
-interface ResolvedBoard {
-  projectId: string;
-  columnConfig: BoardColumnConfigEntry[];
-}
-
-async function resolveBoard(
-  token: string,
-): Promise<{ board?: ResolvedBoard; error?: NextResponse }> {
-  if (!supabaseInstantly) return { error: jsonError('Server misconfigured', 500) };
-  const db = supabaseInstantly;
-  const secret = boardTokenSecret();
-  if (!secret) return { error: jsonError('Server misconfigured', 500) };
-
-  const projectId = verifyBoardToken(token, secret);
-  if (!projectId) return { error: jsonError('Invalid token', 401) };
-
-  const { data, error } = await db
-    .from('project_lead_boards')
-    .select('token, column_config')
-    .eq('project_id', projectId)
-    .maybeSingle();
-  if (error) return { error: jsonError(error.message, 500) };
-  // Токен обязан совпасть с сохранённым: иначе он отозван (регенерирован).
-  if (!data || (data.token as string) !== token) {
-    return { error: jsonError('Token invalid or revoked', 401) };
-  }
-  return { board: { projectId, columnConfig: parseColumnConfig(data.column_config) } };
 }
 
 export async function GET(
@@ -67,7 +38,7 @@ export async function GET(
   const { data: rows, error: rowsErr } = await db
     .from('project_lead_board_rows')
     .select(
-      'id, lead_email, lead_name, company_name, phone, website, request_text, campaign_name, step_number, reply_timestamp, quality, comment, taken',
+      'id, lead_email, lead_name, company_name, phone, website, request_text, campaign_name, step_number, reply_timestamp, quality, comment, taken, custom',
     )
     .eq('project_id', projectId)
     .order('reply_timestamp', { ascending: false })
@@ -110,8 +81,24 @@ export async function GET(
   });
 }
 
-/** Клиентские (editable) колонки. Всё остальное в PATCH — 400, а не тихий игнор. */
-const EDITABLE = ['quality', 'comment', 'taken'] as const;
+/** Editable поля. Всё вне списка (+rowId) в PATCH — 400, а не тихий игнор. */
+const EDITABLE = [
+  'quality', 'comment', 'taken',
+  'lead_email', 'lead_name', 'company_name', 'phone', 'website', 'campaign_name',
+  'request_text', 'step_number', 'reply_timestamp',
+  'custom',
+] as const;
+
+/** Текстовые поля и их лимиты (null = очистить). */
+const TEXT_FIELDS: Record<string, number> = {
+  lead_email: 500,
+  lead_name: 200,
+  company_name: 200,
+  phone: 200,
+  website: 300,
+  campaign_name: 200,
+  request_text: 5000,
+};
 
 export async function PATCH(
   req: NextRequest,
@@ -122,7 +109,7 @@ export async function PATCH(
   const token = (await ctx.params).token;
   const r = await resolveBoard(token);
   if (r.error) return r.error;
-  const { projectId } = r.board!;
+  const { projectId, columnConfig } = r.board!;
   const db = supabaseInstantly!;
 
   let body: Record<string, unknown>;
@@ -138,9 +125,19 @@ export async function PATCH(
   if (!rowId) return jsonError('rowId is required', 400);
   for (const key of Object.keys(body)) {
     if (key !== 'rowId' && !(EDITABLE as readonly string[]).includes(key)) {
-      return jsonError(`field "${key}" is not editable (allowed: quality, comment, taken)`, 400);
+      return jsonError(`field "${key}" is not editable`, 400);
     }
   }
+
+  // Строка нужна и для 404, и для merge кастомных полей.
+  const { data: row, error: rowErr } = await db
+    .from('project_lead_board_rows')
+    .select('id, custom')
+    .eq('id', rowId)
+    .eq('project_id', projectId) // чужой ряд этим токеном не правится
+    .maybeSingle();
+  if (rowErr) return jsonError(rowErr.message, 500);
+  if (!row) return jsonError('Row not found', 404);
 
   const patch: Record<string, unknown> = {};
   if ('quality' in body) {
@@ -162,8 +159,53 @@ export async function PATCH(
     if (typeof body.taken !== 'boolean') return jsonError('taken must be a boolean', 400);
     patch.taken = body.taken;
   }
+  for (const [field, maxLen] of Object.entries(TEXT_FIELDS)) {
+    if (!(field in body)) continue;
+    const v = body[field];
+    if (v !== null && typeof v !== 'string') return jsonError(`${field} must be a string`, 400);
+    patch[field] = typeof v === 'string' ? v.slice(0, maxLen) : null;
+  }
+  if ('step_number' in body) {
+    if (body.step_number === null) {
+      patch.step_number = null;
+    } else if (
+      typeof body.step_number === 'number' &&
+      Number.isInteger(body.step_number) &&
+      body.step_number >= 1 &&
+      body.step_number <= 99
+    ) {
+      patch.step_number = body.step_number;
+    } else {
+      return jsonError('step_number must be an integer 1..99 or null', 400);
+    }
+  }
+  if ('reply_timestamp' in body) {
+    if (body.reply_timestamp === null) {
+      patch.reply_timestamp = null;
+    } else if (typeof body.reply_timestamp === 'string') {
+      const iso = parseImportDate(body.reply_timestamp);
+      if (!iso) return jsonError('reply_timestamp: unparseable date (dd.mm.yyyy / yyyy-mm-dd)', 400);
+      patch.reply_timestamp = iso;
+    } else {
+      return jsonError('reply_timestamp must be a string or null', 400);
+    }
+  }
+  if ('custom' in body) {
+    if (!body.custom || typeof body.custom !== 'object' || Array.isArray(body.custom)) {
+      return jsonError('custom must be an object {columnKey: value}', 400);
+    }
+    const customKeys = new Set(columnConfig.filter((c) => c.custom).map((c) => c.key));
+    const merged: Record<string, unknown> = { ...((row.custom as Record<string, unknown> | null) ?? {}) };
+    for (const [k, v] of Object.entries(body.custom as Record<string, unknown>)) {
+      if (!customKeys.has(k)) return jsonError(`unknown custom column: ${k}`, 400);
+      if (v === null) delete merged[k];
+      else if (typeof v === 'string') merged[k] = v.slice(0, 500);
+      else return jsonError('custom values must be strings or null', 400);
+    }
+    patch.custom = merged;
+  }
   if (Object.keys(patch).length === 0) {
-    return jsonError('nothing to update (allowed: quality, comment, taken)', 400);
+    return jsonError('nothing to update', 400);
   }
   patch.updated_at = new Date().toISOString();
 
@@ -171,11 +213,65 @@ export async function PATCH(
     .from('project_lead_board_rows')
     .update(patch)
     .eq('id', rowId)
-    .eq('project_id', projectId) // чужой ряд этим токеном не правится
-    .select('id, quality, comment, taken, updated_at')
+    .eq('project_id', projectId)
+    .select('id, quality, comment, taken, custom, updated_at')
     .maybeSingle();
   if (error) return jsonError(error.message, 500);
-  if (!data) return jsonError('Row not found', 404);
 
   return NextResponse.json({ ok: true, row: data });
+}
+
+/** Добавить пустую строку (спец заполняет ячейки через PATCH). */
+export async function POST(
+  _req: NextRequest,
+  ctx: { params: Promise<{ token: string }> },
+) {
+  const token = (await ctx.params).token;
+  const r = await resolveBoard(token);
+  if (r.error) return r.error;
+  const { projectId } = r.board!;
+  const db = supabaseInstantly!;
+
+  const { data, error } = await db
+    .from('project_lead_board_rows')
+    .insert({ project_id: projectId })
+    .select('id')
+    .maybeSingle();
+  if (error) return jsonError(error.message, 500);
+  if (!data) return jsonError('insert returned no row', 500);
+
+  return NextResponse.json({ ok: true, id: (data as { id: string }).id });
+}
+
+/** Удалить строку (мусор/дубль). Скоуп по проекту токена. */
+export async function DELETE(
+  req: NextRequest,
+  ctx: { params: Promise<{ token: string }> },
+) {
+  const token = (await ctx.params).token;
+  const r = await resolveBoard(token);
+  if (r.error) return r.error;
+  const { projectId } = r.board!;
+  const db = supabaseInstantly!;
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return jsonError('Invalid JSON', 400);
+  }
+  if (body === null || typeof body !== 'object') return jsonError('Invalid JSON', 400);
+  const rowId = typeof body.rowId === 'string' ? body.rowId : '';
+  if (!rowId) return jsonError('rowId is required', 400);
+
+  const { data, error } = await db
+    .from('project_lead_board_rows')
+    .delete()
+    .eq('id', rowId)
+    .eq('project_id', projectId) // чужой ряд этим токеном не удаляется
+    .select('id');
+  if (error) return jsonError(error.message, 500);
+  if (!data || data.length === 0) return jsonError('Row not found', 404);
+
+  return NextResponse.json({ ok: true });
 }

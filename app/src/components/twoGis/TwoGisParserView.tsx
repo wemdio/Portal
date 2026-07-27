@@ -6,7 +6,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type ChangeEvent,
 } from 'react';
 import { Download, Loader2, RotateCcw, Search } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
@@ -20,6 +19,13 @@ import type {
 const PREVIEW_LIMIT = 100;
 const MAX_FILTER_VALUES = 200;
 const MAX_VISIBLE_FACET_OPTIONS = 100;
+const FACETS_MEMORY_TTL_MS = 5 * 60 * 1000;
+
+let facetsMemoryCache: {
+  data: TwoGisFacets;
+  storedAt: number;
+} | null = null;
+let facetsRequest: Promise<TwoGisFacets> | null = null;
 
 type SearchResponse = {
   count: number;
@@ -65,8 +71,38 @@ async function readJson<T>(response: Response): Promise<T> {
   return body as T;
 }
 
-function selectedValues(event: ChangeEvent<HTMLSelectElement>): string[] {
-  return Array.from(event.currentTarget.selectedOptions, (option) => option.value);
+function readTwoGisFacetsMemoryCache(): TwoGisFacets | null {
+  if (
+    facetsMemoryCache
+    && Date.now() - facetsMemoryCache.storedAt < FACETS_MEMORY_TTL_MS
+  ) {
+    return facetsMemoryCache.data;
+  }
+  facetsMemoryCache = null;
+  return null;
+}
+
+async function loadTwoGisFacets(): Promise<TwoGisFacets> {
+  const cached = readTwoGisFacetsMemoryCache();
+  if (cached) return cached;
+
+  if (!facetsRequest) {
+    facetsRequest = authFetch('/api/tools/2gis-parser/facets')
+      .then((response) => readJson<TwoGisFacets>(response))
+      .then((data) => {
+        facetsMemoryCache = { data, storedAt: Date.now() };
+        return data;
+      })
+      .finally(() => {
+        facetsRequest = null;
+      });
+  }
+  return facetsRequest;
+}
+
+export function clearTwoGisFacetsMemoryCache() {
+  facetsMemoryCache = null;
+  facetsRequest = null;
 }
 
 function cloneFilters(filters: TwoGisFilters): TwoGisFilters {
@@ -78,19 +114,23 @@ function cloneFilters(filters: TwoGisFilters): TwoGisFilters {
   };
 }
 
-function MultiSelect({
+function FacetChecklist({
   label,
   values,
   options,
   onChange,
   disabled,
+  loading,
 }: {
   label: string;
   values: string[];
   options: TwoGisFacet[];
   onChange: (values: string[]) => void;
   disabled?: boolean;
+  loading?: boolean;
 }) {
+  const labelId = useId();
+  const listId = useId();
   const descriptionId = useId();
   const [query, setQuery] = useState('');
   const visibleOptions = useMemo(() => {
@@ -111,48 +151,121 @@ function MultiSelect({
     ];
   }, [options, query, values]);
 
+  const toggleOption = (value: string, checked: boolean) => {
+    if (checked) {
+      if (values.includes(value) || values.length >= MAX_FILTER_VALUES) return;
+      onChange([...values, value]);
+      return;
+    }
+    onChange(values.filter((selectedValue) => selectedValue !== value));
+  };
+
   return (
-    <label className="block">
-      <span className="mb-1.5 flex items-center justify-between text-sm font-medium text-gray-800">
-        <span>{label}</span>
+    <section aria-labelledby={labelId}>
+      <div className="mb-2 flex min-h-6 items-center justify-between gap-3">
+        <h3 id={labelId} className="text-sm font-semibold text-gray-900">
+          {label}
+        </h3>
         {values.length > 0 ? (
-          <span className="text-xs font-normal tabular-nums text-gray-500">
-            выбрано: {values.length}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-xs tabular-nums text-gray-500">
+              Выбрано: {values.length}
+            </span>
+            <button
+              type="button"
+              onClick={() => onChange([])}
+              disabled={disabled}
+              aria-label={`Очистить: ${label}`}
+              className="rounded-md px-1.5 py-1 text-xs font-medium text-gray-600 hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Очистить
+            </button>
+          </div>
         ) : null}
-      </span>
+      </div>
       <input
         type="search"
         value={query}
         onChange={(event) => setQuery(event.currentTarget.value)}
-        disabled={disabled}
+        disabled={disabled || loading}
         aria-label={`Поиск: ${label}`}
+        aria-controls={listId}
         placeholder="Найти в списке"
-        className="mb-1.5 w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm outline-none placeholder:text-gray-400 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/10 disabled:bg-gray-100"
+        className="mb-2 min-h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none placeholder:text-gray-400 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 disabled:cursor-wait disabled:bg-gray-100"
       />
-      <select
-        aria-label={label}
+      <div
+        id={listId}
+        role="group"
+        aria-labelledby={labelId}
         aria-describedby={descriptionId}
-        multiple
-        value={values}
-        onChange={(event) =>
-          onChange(selectedValues(event).slice(0, MAX_FILTER_VALUES))
-        }
-        disabled={disabled}
-        className="min-h-28 w-full rounded-lg border border-gray-300 bg-white px-2 py-2 text-sm text-gray-800 outline-none transition focus:border-gray-900 focus:ring-2 focus:ring-gray-900/10 disabled:bg-gray-100"
+        aria-busy={loading || undefined}
+        className="h-56 overflow-y-auto rounded-lg border border-gray-300 bg-white"
       >
-        {visibleOptions.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.value} ({option.count.toLocaleString('ru-RU')})
-          </option>
-        ))}
-      </select>
-      <span id={descriptionId} className="mt-1 block text-xs text-gray-500">
+        {loading ? (
+          <div
+            role="status"
+            className="flex h-full flex-col justify-center gap-3 px-4 py-4 text-sm text-gray-500"
+          >
+            <span>Загружаем список</span>
+            {[72, 88, 64, 80].map((width) => (
+              <span key={width} className="flex items-center gap-3" aria-hidden="true">
+                <span className="h-[18px] w-[18px] rounded border border-gray-300 bg-gray-100" />
+                <span
+                  className="h-3 rounded bg-gray-100"
+                  style={{ width: `${width}%` }}
+                />
+              </span>
+            ))}
+          </div>
+        ) : visibleOptions.length === 0 ? (
+          <div className="flex h-full items-center justify-center px-4 text-center text-sm text-gray-500">
+            {query.trim() ? 'По вашему запросу ничего нет' : 'Нет доступных значений'}
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-100">
+            {visibleOptions.map((option) => {
+              const checked = values.includes(option.value);
+              const reachedLimit = !checked && values.length >= MAX_FILTER_VALUES;
+              return (
+                <label
+                  key={option.value}
+                  className={`flex min-h-11 cursor-pointer items-center gap-3 px-3 py-2.5 text-sm transition-colors ${
+                    checked ? 'bg-gray-100' : 'hover:bg-gray-50'
+                  } ${reachedLimit || disabled ? 'cursor-not-allowed opacity-50' : ''}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={disabled || reachedLimit}
+                    onChange={(event) =>
+                      toggleOption(option.value, event.currentTarget.checked)
+                    }
+                    aria-label={option.value}
+                    className="h-[18px] w-[18px] shrink-0 rounded border-gray-300 accent-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                  />
+                  <span className="min-w-0 flex-1 leading-5 text-gray-800">
+                    {option.value}
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className="shrink-0 text-xs tabular-nums text-gray-500"
+                  >
+                    {option.count.toLocaleString('ru-RU')}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      <p id={descriptionId} className="mt-1.5 text-xs leading-4 text-gray-500">
         {values.length >= MAX_FILTER_VALUES
-          ? 'Достигнут лимит: 200 значений. Пустой выбор означает «все».'
-          : `Пустой выбор означает «все». До 200 значений; показано ${visibleOptions.length} из ${options.length}.`}
-      </span>
-    </label>
+          ? 'Выбрано максимум 200 значений. Снимите один пункт, чтобы выбрать другой.'
+          : loading
+            ? 'Справочник загружается. Остальные фильтры уже доступны.'
+            : `Без выбора: все. Показано ${visibleOptions.length} из ${options.length}.`}
+      </p>
+    </section>
   );
 }
 
@@ -166,12 +279,12 @@ function ContactToggle({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex min-h-9 cursor-pointer items-center gap-2 rounded-md px-1 text-sm text-gray-700 hover:bg-gray-50">
+    <label className="flex min-h-10 cursor-pointer items-center gap-2.5 rounded-md px-1.5 text-sm text-gray-700 hover:bg-gray-50">
       <input
         type="checkbox"
         checked={checked}
         onChange={(event) => onChange(event.currentTarget.checked)}
-        className="h-4 w-4 rounded border-gray-300 accent-gray-900"
+        className="h-[18px] w-[18px] shrink-0 rounded border-gray-300 accent-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
       />
       {label}
     </label>
@@ -179,13 +292,21 @@ function ContactToggle({
 }
 
 export function TwoGisParserView() {
-  const [facets, setFacets] = useState<TwoGisFacets | null>(null);
+  const [cachedFacetsAtMount] = useState<TwoGisFacets | null>(
+    readTwoGisFacetsMemoryCache,
+  );
+  const facetsRef = useRef<TwoGisFacets | null>(cachedFacetsAtMount);
+  const [facets, setFacets] = useState<TwoGisFacets | null>(
+    cachedFacetsAtMount,
+  );
   const [filters, setFilters] = useState({ ...EMPTY_FILTERS });
   const [rows, setRows] = useState<TwoGisCard[]>([]);
   const [count, setCount] = useState<number | null>(null);
   const [searched, setSearched] = useState(false);
   const [searchedFilters, setSearchedFilters] = useState<TwoGisFilters | null>(null);
-  const [loadingFacets, setLoadingFacets] = useState(true);
+  const [loadingFacets, setLoadingFacets] = useState(
+    cachedFacetsAtMount === null,
+  );
   const [facetsAttempt, setFacetsAttempt] = useState(0);
   const [searching, setSearching] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -197,17 +318,21 @@ export function TwoGisParserView() {
     let cancelled = false;
     void (async () => {
       try {
-        const response = await authFetch('/api/tools/2gis-parser/facets');
-        const data = await readJson<TwoGisFacets>(response);
-        if (!cancelled) setFacets(data);
+        const data = await loadTwoGisFacets();
+        if (!cancelled) {
+          facetsRef.current = data;
+          setFacets(data);
+        }
       } catch (requestError) {
         if (!cancelled) {
-          setFacets(null);
-          setError(
-            requestError instanceof Error
-              ? requestError.message
-              : 'Не удалось загрузить фильтры 2GIS',
-          );
+          if (!facetsRef.current) {
+            setFacets(null);
+            setError(
+              requestError instanceof Error
+                ? requestError.message
+                : 'Не удалось загрузить фильтры 2GIS',
+            );
+          }
         }
       } finally {
         if (!cancelled) setLoadingFacets(false);
@@ -348,10 +473,10 @@ export function TwoGisParserView() {
   };
 
   return (
-    <div className="mx-auto max-w-[1500px] space-y-6 text-left">
+    <div className="mx-auto max-w-[1700px] space-y-6 text-left">
       <header className="flex flex-col gap-3 border-b border-gray-200 pb-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-gray-950">2GIS Парсер</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-gray-900">2GIS Парсер</h1>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-gray-600">
             Выберите города и рубрики, проверьте результат и выгрузите исходные данные 2GIS.
           </p>
@@ -365,7 +490,15 @@ export function TwoGisParserView() {
               {facets.snapshot.scope}, снимок {new Date(`${facets.snapshot.date}T00:00:00`).toLocaleDateString('ru-RU')}
             </div>
           </div>
-        ) : null}
+        ) : (
+          <div
+            aria-hidden="true"
+            className="w-48 space-y-2 lg:text-right"
+          >
+            <div className="ml-auto h-4 w-32 animate-pulse rounded bg-gray-200" />
+            <div className="ml-auto h-3 w-48 animate-pulse rounded bg-gray-100" />
+          </div>
+        )}
       </header>
 
       {error ? (
@@ -383,125 +516,127 @@ export function TwoGisParserView() {
         </div>
       ) : null}
 
-      <div className="grid gap-6 lg:grid-cols-[330px_minmax(0,1fr)]">
-        <aside className="self-start rounded-xl border border-gray-200 bg-white p-5">
+      <div className="grid gap-8 xl:grid-cols-[420px_minmax(0,1fr)]">
+        <aside className="self-start rounded-xl border border-gray-200 bg-white p-6">
           <div className="mb-5 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-gray-950">Фильтры</h2>
+            <h2 className="text-base font-semibold text-gray-900">Фильтры</h2>
             <button
               type="button"
               onClick={resetFilters}
-              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-100 hover:text-gray-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+              className="inline-flex min-h-9 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
             >
               <RotateCcw className="h-3.5 w-3.5" />
               Сбросить
             </button>
           </div>
 
-          {loadingFacets ? (
-            <div className="flex min-h-40 items-center justify-center gap-2 text-sm text-gray-500">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Загружаем справочники
-            </div>
-          ) : !facets ? (
-            <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-              <p>Справочники 2GIS не загрузились. Поиск и экспорт пока недоступны.</p>
-              <button
-                type="button"
-                onClick={() => {
-                  setLoadingFacets(true);
-                  setError(null);
-                  setFacetsAttempt((attempt) => attempt + 1);
-                }}
-                className="mt-3 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-amber-100"
-              >
-                Повторить
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-5">
-              <MultiSelect
-                label="Города"
-                values={filters.cities}
-                options={facets?.cities ?? []}
-                onChange={(value) => updateFilter('cities', value)}
-              />
-              <MultiSelect
-                label="Категории"
-                values={filters.categories}
-                options={facets?.categories ?? []}
-                onChange={(value) => {
-                  setFilters((current) => ({
-                    ...current,
-                    categories: value,
-                    subcategories: current.subcategories.filter((subcategory) =>
-                      (facets?.subcategories ?? []).some(
-                        (item) =>
-                          item.value === subcategory
-                          && (value.length === 0 || value.includes(item.category)),
-                      ),
-                    ),
-                  }));
-                  invalidateResults();
-                }}
-              />
-              <MultiSelect
-                label="Подкатегории"
-                values={filters.subcategories}
-                options={subcategoryOptions}
-                onChange={(value) => updateFilter('subcategories', value)}
-              />
-
-              <label className="block">
-                <span className="mb-1.5 block text-sm font-medium text-gray-800">
-                  Название содержит
-                </span>
-                <input
-                  value={filters.name}
-                  onChange={(event) => updateFilter('name', event.currentTarget.value)}
-                  placeholder="Например, стоматология"
-                  minLength={3}
-                  aria-describedby="two-gis-name-hint"
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition placeholder:text-gray-400 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/10"
-                />
-                <span
-                  id="two-gis-name-hint"
-                  className={`mt-1 block text-xs ${nameTooShort ? 'text-amber-700' : 'text-gray-500'}`}
+          <div className="space-y-6">
+            {!loadingFacets && !facets ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                <p>Справочники 2GIS не загрузились. Поиск и экспорт пока недоступны.</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearTwoGisFacetsMemoryCache();
+                    setLoadingFacets(true);
+                    setError(null);
+                    setFacetsAttempt((attempt) => attempt + 1);
+                  }}
+                  className="mt-3 min-h-10 rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-medium hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-700"
                 >
-                  Минимум 3 символа
-                </span>
-              </label>
+                  Повторить
+                </button>
+              </div>
+            ) : null}
 
-              <fieldset>
-                <legend className="mb-1 text-sm font-medium text-gray-800">Контакты</legend>
-                <div className="grid grid-cols-2 gap-x-2">
-                  <ContactToggle label="Есть телефон" checked={filters.hasPhone} onChange={(value) => updateFilter('hasPhone', value)} />
-                  <ContactToggle label="Есть email" checked={filters.hasEmail} onChange={(value) => updateFilter('hasEmail', value)} />
-                  <ContactToggle label="Есть сайт" checked={filters.hasWebsite} onChange={(value) => updateFilter('hasWebsite', value)} />
-                  <ContactToggle label="Есть VK" checked={filters.hasVkontakte} onChange={(value) => updateFilter('hasVkontakte', value)} />
-                  <ContactToggle label="Есть Instagram" checked={filters.hasInstagram} onChange={(value) => updateFilter('hasInstagram', value)} />
-                </div>
-              </fieldset>
+            <FacetChecklist
+              label="Города"
+              values={filters.cities}
+              options={facets?.cities ?? []}
+              onChange={(value) => updateFilter('cities', value)}
+              disabled={!facets}
+              loading={loadingFacets}
+            />
+            <FacetChecklist
+              label="Категории"
+              values={filters.categories}
+              options={facets?.categories ?? []}
+              onChange={(value) => {
+                setFilters((current) => ({
+                  ...current,
+                  categories: value,
+                  subcategories: current.subcategories.filter((subcategory) =>
+                    (facets?.subcategories ?? []).some(
+                      (item) =>
+                        item.value === subcategory
+                        && (value.length === 0 || value.includes(item.category)),
+                    ),
+                  ),
+                }));
+                invalidateResults();
+              }}
+              disabled={!facets}
+              loading={loadingFacets}
+            />
+            <FacetChecklist
+              label="Подкатегории"
+              values={filters.subcategories}
+              options={subcategoryOptions}
+              onChange={(value) => updateFilter('subcategories', value)}
+              disabled={!facets}
+              loading={loadingFacets}
+            />
 
-              <button
-                type="button"
-                onClick={() => void runSearch()}
-                disabled={searching || !facets || nameTooShort}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-gray-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium text-gray-800">
+                Название содержит
+              </span>
+              <input
+                value={filters.name}
+                onChange={(event) => updateFilter('name', event.currentTarget.value)}
+                placeholder="Например, стоматология"
+                minLength={3}
+                aria-describedby="two-gis-name-hint"
+                className="min-h-10 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition placeholder:text-gray-400 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20"
+              />
+              <span
+                id="two-gis-name-hint"
+                className={`mt-1 block text-xs ${nameTooShort ? 'text-amber-700' : 'text-gray-500'}`}
               >
-                {searching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-                {searching ? 'Ищем' : 'Показать'}
-              </button>
-            </div>
-          )}
+                Минимум 3 символа
+              </span>
+            </label>
+
+            <fieldset>
+              <legend className="mb-1.5 text-sm font-medium text-gray-800">Контакты</legend>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                <ContactToggle label="Есть телефон" checked={filters.hasPhone} onChange={(value) => updateFilter('hasPhone', value)} />
+                <ContactToggle label="Есть email" checked={filters.hasEmail} onChange={(value) => updateFilter('hasEmail', value)} />
+                <ContactToggle label="Есть сайт" checked={filters.hasWebsite} onChange={(value) => updateFilter('hasWebsite', value)} />
+                <ContactToggle label="Есть VK" checked={filters.hasVkontakte} onChange={(value) => updateFilter('hasVkontakte', value)} />
+                <ContactToggle label="Есть Instagram" checked={filters.hasInstagram} onChange={(value) => updateFilter('hasInstagram', value)} />
+              </div>
+            </fieldset>
+
+            <button
+              type="button"
+              onClick={() => void runSearch()}
+              disabled={searching || !facets || nameTooShort}
+              className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {searching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+              {searching ? 'Ищем' : 'Показать'}
+            </button>
+          </div>
         </aside>
 
         <main className="min-w-0">
           <div className="mb-3 flex min-h-10 flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-base font-semibold text-gray-950">Результат</h2>
+              <h2 className="text-base font-semibold text-gray-900">Результат</h2>
               {count !== null ? (
                 <p className="mt-0.5 text-sm text-gray-600">
-                  Найдено: <strong className="font-semibold text-gray-950">{count.toLocaleString('ru-RU')}</strong>
+                  Найдено: <strong className="font-semibold text-gray-900">{count.toLocaleString('ru-RU')}</strong>
                   {count > rows.length ? `, показаны первые ${rows.length}` : ''}
                 </p>
               ) : (
@@ -555,7 +690,7 @@ export function TwoGisParserView() {
                   <tbody className="divide-y divide-gray-100">
                     {rows.map((row) => (
                       <tr key={row.id} className="align-top hover:bg-gray-50/70">
-                        <td className="max-w-72 px-4 py-3 font-medium text-gray-950">{row.name}</td>
+                        <td className="max-w-72 px-4 py-3 font-medium text-gray-900">{row.name}</td>
                         <td className="max-w-72 px-4 py-3 text-gray-700">
                           <div>{row.city_name}</div>
                           <div className="mt-0.5 text-xs text-gray-500">{row.geometry_name}</div>
