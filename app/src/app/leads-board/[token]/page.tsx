@@ -128,7 +128,7 @@ function RequestCell({ text, onSave }: { text: string | null; onSave: (v: string
     );
   }
   return (
-    <div className="max-w-md">
+    <div className="max-w-2xl">
       {text ? (
         <div className={`whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--cp-paper-mute)] ${expanded ? '' : 'line-clamp-4'}`}>
           {text}
@@ -354,8 +354,8 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-[var(--cp-divider)] px-6 py-5">
-        <div className="max-w-[1400px] mx-auto">
+      <header className="border-b border-[var(--cp-divider)] px-4 md:px-6 py-5">
+        <div>
           <div className="ds-mono text-[11px] tracking-[0.02em] text-[var(--cp-paper-faint)]">
             Гостевая таблица{data.project.client ? ` · ${data.project.client}` : ''}
           </div>
@@ -365,7 +365,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
           <p className="mt-1 text-[13px] text-[var(--cp-paper-mute)]">
             Новые лиды появляются автоматически, правки сохраняются сразу.
           </p>
-          <div className="mt-4 flex items-center gap-2">
+          <div className="mt-4 flex flex-wrap items-center gap-2">
             <input
               ref={fileInputRef}
               type="file"
@@ -392,7 +392,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
           </div>
           {showColPanel && (
             <div className="mt-3 rounded-lg bg-[var(--cp-surface-rest)] p-4">
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2">
                 {data.columnConfig.map((c) => (
                   <div key={c.key} className="flex items-center gap-2 min-w-0">
                     <input
@@ -449,7 +449,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
       </header>
 
       {importResult && (
-        <div className="max-w-[1400px] mx-auto w-full px-6 mt-4">
+        <div className="w-full px-3 md:px-6 mt-4">
           <div className="rounded-lg bg-[var(--cp-surface-rest)] px-4 py-3 text-[13px] text-[var(--cp-paper-mute)]">
             <div className="flex items-start justify-between gap-3">
               <span>
@@ -488,8 +488,8 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
         </div>
       )}
 
-      <main className="px-6 py-5">
-        <div className="max-w-[1400px] mx-auto">
+      <main className="px-3 md:px-6 py-5">
+        <div>
           {rows.length === 0 ? (
             <div className="rounded-lg bg-[var(--cp-surface-rest)] px-5 py-10 text-center">
               <p className="text-[13px] text-[var(--cp-paper-mute)]">
@@ -500,8 +500,26 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
               </p>
             </div>
           ) : (
-            <div className="rounded-lg bg-[var(--cp-surface-rest)] overflow-hidden">
-              <table className="w-full text-[13px]">
+            <>
+              <style>{`
+                /* Липкая первая колонка при горизонтальном скролле карточки:
+                   идентификатор строки не уезжает за край. */
+                .lb-table td:first-child, .lb-table th:first-child {
+                  position: sticky;
+                  left: 0;
+                  z-index: 10;
+                  background: var(--cp-surface-rest);
+                  min-width: 130px;
+                }
+                .lb-table thead th:first-child { z-index: 20; }
+                .lb-table tbody tr:hover td:first-child { background: var(--cp-surface-elev); }
+                /* Тонкий скроллбар карточки, чтобы было видно, что есть куда листать */
+                .lb-scroll::-webkit-scrollbar { height: 8px; }
+                .lb-scroll::-webkit-scrollbar-thumb { background: var(--cp-divider-strong); border-radius: 4px; }
+                .lb-scroll::-webkit-scrollbar-track { background: transparent; }
+              `}</style>
+            <div className="lb-scroll rounded-lg bg-[var(--cp-surface-rest)] overflow-x-auto">
+              <table className="lb-table w-full text-[13px]">
                 <thead>
                   <tr>
                     {visibleColumns.map((c) => (
@@ -717,6 +735,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                 </tbody>
               </table>
             </div>
+            </>
           )}
         </div>
       </main>
