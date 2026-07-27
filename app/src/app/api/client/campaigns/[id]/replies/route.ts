@@ -6,6 +6,7 @@ import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAc
 import { listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import { getReadEmailIds } from '@/lib/clientCampaignReplies/clientEmailReads';
+import { filterForeignEmails, resolveClientMailboxes } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
 import type { ClientRepliesPage } from '@/lib/clientCampaignReplies/types';
 import { logError } from '@/lib/loggerServer';
 
@@ -43,6 +44,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   const search = url.searchParams.get('search')?.trim() || undefined;
 
   try {
+    const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
     const data = await listEmails({
       campaign_id: campaignId,
       // Instantly v2 фильтрует по `email_type`, а не `ue_type` (ue_type —
@@ -53,11 +55,17 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       limit,
       starting_after: startingAfter,
       search,
-    }, {
-      accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
-    });
+    }, { accountId });
 
-    const items = (data.items ?? []).map(mapInstantlyEmailToReply);
+    // Кросс-клиентская гигиена: Instantly клеит входящее к кампании по адресу
+    // отправителя, не проверяя получателя — письма, пришедшие на ящик ДРУГОГО
+    // клиента воркспейса, всплывают в ответах этой кампании. Показываем только
+    // письма, полученные ящиками этого клиента (email_list кампании ∪ пул из
+    // пресетов/запусков); чужие скрываем (см. foreignMailboxFilter).
+    const mailboxes = await resolveClientMailboxes(userId, campaignId, accountId);
+    const visible = await filterForeignEmails(data.items ?? [], mailboxes, { campaignId, userId });
+
+    const items = visible.map(mapInstantlyEmailToReply);
     // «NEW»-бейдж берём из НАШЕЙ персональной прочитанности (client_email_reads),
     // а не из общего флага Instantly: портал больше не вызывает markThreadAsRead,
     // поэтому is_unread из Instantly здесь иначе залипал бы навсегда (как и в

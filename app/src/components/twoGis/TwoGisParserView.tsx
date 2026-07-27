@@ -9,6 +9,10 @@ import {
 } from 'react';
 import { Download, Loader2, RotateCcw, Search } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
+import {
+  TWO_GIS_EXPORT_LIMIT_MESSAGE,
+  TWO_GIS_MAX_EXPORT_ROWS,
+} from '@/lib/twoGis/types';
 import type {
   TwoGisCard,
   TwoGisFacet,
@@ -376,6 +380,8 @@ export function TwoGisParserView() {
   );
   const normalizedNameLength = filters.name.trim().length;
   const nameTooShort = normalizedNameLength > 0 && normalizedNameLength < 3;
+  const exportTooLarge =
+    count !== null && count > TWO_GIS_MAX_EXPORT_ROWS;
 
   const invalidateResults = () => {
     searchVersion.current += 1;
@@ -429,7 +435,12 @@ export function TwoGisParserView() {
   };
 
   const startExport = async () => {
-    if (!searchedFilters || count === null || count === 0) return;
+    if (
+      !searchedFilters
+      || count === null
+      || count === 0
+      || count > TWO_GIS_MAX_EXPORT_ROWS
+    ) return;
     const filtersSnapshot = cloneFilters(searchedFilters);
     setExporting(true);
     setError(null);
@@ -643,22 +654,37 @@ export function TwoGisParserView() {
                 <p className="mt-0.5 text-sm text-gray-500">Задайте фильтры и запустите поиск.</p>
               )}
             </div>
-            <button
-              type="button"
-              onClick={() => void startExport()}
-              disabled={
-                exporting
-                || loadingFacets
-                || !facets
-                || !searchedFilters
-                || count === null
-                || count === 0
-              }
-              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-800 transition hover:border-gray-400 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              {exporting ? 'Готовим CSV' : 'Выгрузить CSV'}
-            </button>
+            <div className="flex max-w-sm flex-col items-start gap-1.5 sm:items-end">
+              <button
+                type="button"
+                onClick={() => void startExport()}
+                aria-describedby={
+                  exportTooLarge ? 'two-gis-export-limit' : undefined
+                }
+                disabled={
+                  exporting
+                  || loadingFacets
+                  || !facets
+                  || !searchedFilters
+                  || count === null
+                  || count === 0
+                  || exportTooLarge
+                }
+                className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-800 transition hover:border-gray-400 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                {exporting ? 'Готовим CSV' : 'Выгрузить CSV'}
+              </button>
+              {exportTooLarge ? (
+                <p
+                  id="two-gis-export-limit"
+                  role="status"
+                  className="text-xs leading-5 text-amber-700 sm:text-right"
+                >
+                  {TWO_GIS_EXPORT_LIMIT_MESSAGE}
+                </p>
+              ) : null}
+            </div>
           </div>
 
           {searched && rows.length === 0 ? (

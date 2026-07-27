@@ -98,6 +98,24 @@ describe('2GIS export routes', () => {
     expect(mockCreateTicket).toHaveBeenCalledTimes(1);
   });
 
+  it('returns 413 when more than 500,000 rows match the export', async () => {
+    mockCreateTicket.mockResolvedValue({
+      limited: true,
+      rowCount: 500_001,
+      maxRows: 500_000,
+    });
+    const { POST } = await import('@/app/api/tools/2gis-parser/export/route');
+    const response = await POST(postRequest({ filters: {} }));
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({
+      error: 'Экспорт доступен до 500 000 строк. Уточните фильтры.',
+      code: 'EXPORT_ROW_LIMIT',
+      rowCount: 500_001,
+      maxRows: 500_000,
+    });
+  });
+
   it('streams an exact UTF-8 semicolon CSV without buffering all rows', async () => {
     const { GET } = await import('@/app/api/tools/2gis-parser/export/[token]/route');
     const response = await GET(

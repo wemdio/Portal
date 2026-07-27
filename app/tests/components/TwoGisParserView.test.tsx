@@ -6,6 +6,8 @@ import {
 } from '@/components/twoGis/TwoGisParserView';
 
 const mockAuthFetch = jest.fn();
+let mockSearchCount = 1;
+
 jest.mock('@/lib/authFetch', () => ({
   authFetch: (...args: unknown[]) => mockAuthFetch(...args),
 }));
@@ -23,6 +25,7 @@ beforeEach(() => {
   window.sessionStorage.clear();
   clearTwoGisFacetsMemoryCache();
   jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  mockSearchCount = 1;
   mockAuthFetch.mockImplementation(async (url: string) => {
     if (url.endsWith('/facets')) {
       return jsonResponse({
@@ -43,7 +46,7 @@ beforeEach(() => {
     }
     if (url.endsWith('/search')) {
       return jsonResponse({
-        count: 1,
+        count: mockSearchCount,
         rows: [
           {
             id: '4504127908669251',
@@ -117,6 +120,23 @@ describe('<TwoGisParserView />', () => {
         expect.objectContaining({ method: 'POST' }),
       ),
     );
+  });
+
+  it('blocks CSV export when the result exceeds 500,000 rows', async () => {
+    mockSearchCount = 500_001;
+    const user = userEvent.setup();
+    render(<TwoGisParserView />);
+
+    await screen.findByRole('checkbox', { name: 'Москва' });
+    await user.click(screen.getByRole('button', { name: /показать/i }));
+
+    expect(
+      await screen.findByText(/экспорт доступен до 500\s000 строк/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /выгрузить csv/i })).toBeDisabled();
+    expect(
+      mockAuthFetch.mock.calls.some(([url]) => String(url).endsWith('/export')),
+    ).toBe(false);
   });
 
   it('renders the stable filter UI while facet values are still loading', async () => {

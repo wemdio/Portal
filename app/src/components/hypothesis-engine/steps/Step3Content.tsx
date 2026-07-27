@@ -266,9 +266,11 @@ export function Step3Content(props: {
         ) : null}
 
         {vocab ? (
-          <div className="mt-4 grid gap-4 xl:grid-cols-3">
+          <div className="mt-4 grid gap-4 xl:grid-cols-2">
+            <div className="xl:col-span-2">
+              <JobTitlesCard jobTitles={(vocab.job_titles ?? []) as JobTitleRow[]} />
+            </div>
             <CompanyTypesCard companyTypes={vocab.company_types ?? []} />
-            <JobTitlesCard jobTitles={(vocab.job_titles ?? []) as JobTitleRow[]} />
             <QueriesCard queries={vocab.search_queries ?? []} />
           </div>
         ) : null}

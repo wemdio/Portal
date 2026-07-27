@@ -36,6 +36,24 @@ const CARD = {
   subcategory: 'Кафе',
 };
 
+function createTicketClient(rowCount: number) {
+  return {
+    query: jest.fn(async (sql: string, _params?: unknown[]) => {
+      if (/count\(\*\)/i.test(sql)) {
+        return { rows: [{ count: String(rowCount) }] };
+      }
+      if (/from public\.dataset_snapshots/i.test(sql)) {
+        return { rows: [{ id: '42' }] };
+      }
+      if (/insert into public\.export_tickets/i.test(sql)) {
+        return { rows: [{ token_hash: 'stored' }] };
+      }
+      return { rows: [] };
+    }),
+    release: jest.fn(),
+  };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockDatasetQuery.mockResolvedValue([{ token_hash: 'stored' }]);
@@ -43,19 +61,7 @@ beforeEach(() => {
 
 describe('2GIS repository export boundary', () => {
   it('counts and binds the ticket to one snapshot under the same shared lock', async () => {
-    const client = {
-      query: jest.fn(async (sql: string, _params?: unknown[]) => {
-        if (/count\(\*\)/i.test(sql)) return { rows: [{ count: '10' }] };
-        if (/from public\.dataset_snapshots/i.test(sql)) {
-          return { rows: [{ id: '42' }] };
-        }
-        if (/insert into public\.export_tickets/i.test(sql)) {
-          return { rows: [{ token_hash: 'stored' }] };
-        }
-        return { rows: [] };
-      }),
-      release: jest.fn(),
-    };
+    const client = createTicketClient(10);
     mockDatasetConnect.mockResolvedValue(client);
 
     const prepared = await createTwoGisExportTicket(
@@ -84,13 +90,7 @@ describe('2GIS repository export boundary', () => {
   });
 
   it('does not create a ticket when the current snapshot has no matching rows', async () => {
-    const client = {
-      query: jest.fn(async (sql: string) => {
-        if (/count\(\*\)/i.test(sql)) return { rows: [{ count: '0' }] };
-        return { rows: [] };
-      }),
-      release: jest.fn(),
-    };
+    const client = createTicketClient(0);
     mockDatasetConnect.mockResolvedValue(client);
 
     await expect(
@@ -98,6 +98,42 @@ describe('2GIS repository export boundary', () => {
     ).resolves.toBeNull();
     expect(client.query.mock.calls.some(([sql]) =>
       /insert into public\.export_tickets/i.test(sql),
+    )).toBe(false);
+    expect(client.query).toHaveBeenCalledWith('COMMIT');
+  });
+
+  it('allows an export of exactly 500,000 rows', async () => {
+    const client = createTicketClient(500_000);
+    mockDatasetConnect.mockResolvedValue(client);
+
+    await expect(
+      createTwoGisExportTicket('staff-1', {}),
+    ).resolves.toEqual({
+      token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      rowCount: 500_000,
+    });
+    expect(client.query.mock.calls.some(([sql]) =>
+      /insert into public\.export_tickets/i.test(sql),
+    )).toBe(true);
+    expect(client.query).toHaveBeenCalledWith('COMMIT');
+  });
+
+  it('does not create a ticket when more than 500,000 rows match', async () => {
+    const client = createTicketClient(500_001);
+    mockDatasetConnect.mockResolvedValue(client);
+
+    await expect(
+      createTwoGisExportTicket('staff-1', {}),
+    ).resolves.toEqual({
+      limited: true,
+      rowCount: 500_001,
+      maxRows: 500_000,
+    });
+    expect(client.query.mock.calls.some(([sql]) =>
+      /insert into public\.export_tickets/i.test(sql),
+    )).toBe(false);
+    expect(client.query.mock.calls.some(([sql]) =>
+      /from public\.dataset_snapshots/i.test(sql),
     )).toBe(false);
     expect(client.query).toHaveBeenCalledWith('COMMIT');
   });
