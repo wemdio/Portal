@@ -55,7 +55,7 @@ import type { Email } from './types';
 const OTHERS_PAGE_SIZE = 100;
 const MAX_TRANSIENT_RETRIES = 5;
 const MAX_MAILBOX_PROBES_PER_DOMAIN = 4;
-const MAX_CAMPAIGN_PROBES_PER_EMAIL = 3;
+const MAX_CAMPAIGN_PROBES_PER_EMAIL = 5;
 
 function workerLog(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
   const line = `[instantly-others][${level.toUpperCase()}] ${msg}`;
@@ -275,12 +275,26 @@ async function getDomainCampaignCandidates(
   citedDomain: string,
   mailboxesByDomain: Map<string, string[]>,
   meter: ProbeMeter,
+  eaccount?: string | null,
 ): Promise<CampaignCandidate[] | null> {
-  const cached = domainCandidatesCache.get(citedDomain);
+  // Ключ кэша включает eaccount: позитивная атрибуция идёт eaccount-первой и
+  // точна для этого ящика; без этого кандидаты кампании одного ящика домена
+  // затеняли бы кампанию другого (сабж-матч мимо → ложный дроп).
+  const cacheKey = eaccount ? `${citedDomain}::${eaccount}` : citedDomain;
+  const cached = domainCandidatesCache.get(cacheKey);
   if (cached && Date.now() - cached.at < cached.ttl) return cached.value;
 
   const mailboxes = mailboxesByDomain.get(citedDomain) ?? [];
   if (mailboxes.length === 0) return [];
+
+  // eaccount-приоритет (диагноз валидации v1 17.07: 3 упущенных лида): ящик,
+  // ПОЛУЧИВШИЙ ответ, пробуем первым — именно он слал кампанию, на которую
+  // ответили. Без этого атрибуция шла по первым 4 ящикам пагинации и мазала
+  // мимо (кампания живёт на 5+ ящике домена = перманентная слепая зона).
+  const recipient = (eaccount ?? '').trim().toLowerCase();
+  const ordered = recipient && mailboxes.includes(recipient)
+    ? [recipient, ...mailboxes.filter((m) => m !== recipient)]
+    : mailboxes;
 
   const qualifiable = await getCampaignsByAccountCached();
   const surfaceEmpty = ![...qualifiable.values()].some((s) => s.size > 0);
@@ -294,7 +308,7 @@ async function getDomainCampaignCandidates(
   const candidates: CampaignCandidate[] = [];
   const seen = new Set<string>();
   let probed = 0;
-  for (const mailbox of mailboxes) {
+  for (const mailbox of ordered) {
     if (probed >= MAX_MAILBOX_PROBES_PER_DOMAIN) break;
     // Бюджет/пейсинг маппинг-проб: warmup-волна без них давала десятки
     // неспейсенных вызовов подряд. Исчерпание — отложить, НЕ кэшировать.
@@ -330,7 +344,7 @@ async function getDomainCampaignCandidates(
 
   const negativeTtl = envNumber('INSTANTLY_OTHERS_NEGATIVE_TTL_MS', 15 * 60 * 1000);
   const positiveTtl = envNumber('INSTANTLY_OTHERS_MAPPING_TTL_MS', 6 * 60 * 60 * 1000);
-  domainCandidatesCache.set(citedDomain, {
+  domainCandidatesCache.set(cacheKey, {
     at: Date.now(),
     ttl: candidates.length > 0 ? positiveTtl : negativeTtl,
     value: candidates,
@@ -431,50 +445,89 @@ const WORD_CHAR_RE = /[0-9a-zа-яё]/i;
 
 /**
  * Ответ считается настоящим ответом НА КАМПАНИЮ, если его тема = «Re: <тема,
- * которую кампания реально слала>». Отличает лида (даже с чужого/личного адреса
- * — тема ответа сохраняется) от warmup, у которого тема своя, фейковая
- * (валидировано 17.07 на живых данных: sale1@windguard «По вопросу вентиляции»
- * — префикс 23 с темами кампании; warmup «Стратегия НеоСтиль Опт сессия»,
- * «Крипто-Фактор» — префикс 0). Возвращает совпавшее исходящее (контекст для
- * ИИ) или null.
+ * которую кампания реально слала>» ИЛИ в теле ответа находится тема/текст нашего
+ * исходящего. Отличает лида (даже с чужого/личного адреса) от warmup, у которого
+ * тема своя, фейковая (валидировано 17.07 на живых данных: sale1@windguard
+ * «По вопросу вентиляции» — префикс 23 с темами кампании; warmup «Стратегия
+ * НеоСтиль Опт сессия», «Крипто-Фактор» — префикс 0). Возвращает совпавшее
+ * исходящее (контекст для ИИ) или null.
  *
  * Матч (по убыванию силы сигнала):
- *  (а) равенство ШАБЛОНОВ без персонализации «…» (оба ≥8 симв.) — «по вопросу
- *      вентиляции» == «по вопросу вентиляции»;
- *  (б) вложенность шаблонов, но только если меньший ≥15 симв. — ловит
- *      НЕзакавыченную персонализацию («предложение для ромашки» начинается с
- *      шаблона «предложение для»). Порог 15 отсекает короткие generic-темы
- *      («Re: Добрый день!» ≠ «Добрый день»): с порогом 8 warmup с деловым
- *      клише проходил бы;
+ *  (а) равенство ШАБЛОНОВ без персонализации «…» (оба ≥8 симв.);
+ *  (б) вложенность шаблонов, меньший ≥15 симв. — НЕзакавыченная персонализация;
+ *      порог 15 отсекает короткие generic-темы («Re: Добрый день!» ≠ «Добрый день»);
  *  (в) общий префикс ≥15 симв. с покрытием ≥70% меньшей темы и концом на
- *      границе слова (см. константы выше).
+ *      границе слова (отсекает коллизии generic-клише);
+ *  (г) тема кампании дословно В ТЕЛЕ ответа (≥12 симв.) — спасает пустую или
+ *      сбитую вручную тему (диагноз валидации v1 17.07: лиды с пустой темой);
+ *  (д) цитата исходящего в теле ответа: нормализованное тело целиком или любая
+ *      его строка ≥40 симв. — ручной тред с НОВОЙ темой узнаётся по контенту
+ *      (диагноз v1: ручные треды ломали цепочку тем).
  *
  * Остаточный принятый риск: warmup-тема, почти дословно повторяющая длинный
  * generic-шаблон кампании, пройдёт — дальше решает ИИ (алерт при вердикте
  * «лид»; DM клиенту зажат clientDmOnlyOnLead).
  */
-function matchReplyToCampaign(replySubject: string | undefined, sent: Email[]): Email | null {
+
+const SUBJECT_IN_BODY_MIN = 12;
+const BODY_QUOTE_MIN = 40;
+
+// Нормализация текста тела для матчей: срезаем `>`-цитирование построчно,
+// нижний регистр, все пробельные последовательности в один пробел — почтовики
+// кавычат оригинал построчно («> …»), из-за чего дословное включение цитаты
+// ломалось (диагноз v1: чистка `>` при нормализации).
+function normalizeBodyForMatch(s: string): string {
+  return s
+    .split('\n')
+    .map((line) => line.replace(/^\s*>+\s?/, ''))
+    .join(' ')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function matchReplyToCampaign(
+  replySubject: string | undefined,
+  replyBodyText: string,
+  sent: Email[],
+): Email | null {
   const rs = subjectStem(replySubject);
-  if (rs.length < 6) return null; // пустая/слишком короткая тема — не доверяем
   const rt = subjectTemplate(replySubject);
+  const bodyNorm = normalizeBodyForMatch(replyBodyText);
   for (const e of sent) {
     const ss = subjectStem(e.subject);
-    if (!ss) continue;
-    const st = subjectTemplate(e.subject);
-    const minTemplate = Math.min(rt.length, st.length);
-    if (rt === st && minTemplate >= 8) return e;
-    if (minTemplate >= SUBJECT_MIN_PREFIX && (rt.startsWith(st) || st.startsWith(rt))) return e;
-    let i = 0;
-    while (i < rs.length && i < ss.length && rs[i] === ss[i]) i++;
-    if (
-      i >= SUBJECT_MIN_PREFIX &&
-      i >= SUBJECT_PREFIX_MIN_COVERAGE * Math.min(rs.length, ss.length) &&
-      (i === rs.length ||
-        i === ss.length ||
-        !WORD_CHAR_RE.test(rs[i] ?? '') ||
-        !WORD_CHAR_RE.test(ss[i] ?? ''))
-    ) {
-      return e;
+    if (ss) {
+      if (rs.length >= 6) {
+        const st = subjectTemplate(e.subject);
+        const minTemplate = Math.min(rt.length, st.length);
+        if (rt === st && minTemplate >= 8) return e;
+        if (minTemplate >= SUBJECT_MIN_PREFIX && (rt.startsWith(st) || st.startsWith(rt))) return e;
+        let i = 0;
+        while (i < rs.length && i < ss.length && rs[i] === ss[i]) i++;
+        if (
+          i >= SUBJECT_MIN_PREFIX &&
+          i >= SUBJECT_PREFIX_MIN_COVERAGE * Math.min(rs.length, ss.length) &&
+          (i === rs.length ||
+            i === ss.length ||
+            !WORD_CHAR_RE.test(rs[i] ?? '') ||
+            !WORD_CHAR_RE.test(ss[i] ?? ''))
+        ) {
+          return e;
+        }
+      }
+      // (г) тема кампании дословно в теле ответа — пустая/сбитая тема не мешает.
+      if (ss.length >= SUBJECT_IN_BODY_MIN && bodyNorm.includes(ss)) return e;
+    }
+    // (д) цитата исходящего в теле ответа: тело целиком (короткие письма) или
+    // любая его строка ≥40 симв., процитированная в ответе.
+    const sentBody = getBodyText(e.body);
+    const sentBodyNorm = normalizeBodyForMatch(sentBody);
+    if (sentBodyNorm.length >= BODY_QUOTE_MIN) {
+      if (bodyNorm.includes(sentBodyNorm)) return e;
+      for (const line of sentBody.split('\n')) {
+        const ln = normalizeBodyForMatch(line);
+        if (ln.length >= BODY_QUOTE_MIN && bodyNorm.includes(ln)) return e;
+      }
     }
   }
   return null;
@@ -618,7 +671,12 @@ export async function pollOthersOnce(): Promise<number> {
     }
     const sender = (email.from_address_email ?? '').toLowerCase();
 
-    const candidates = await getDomainCampaignCandidates(citedDomain, mailboxesByDomain, meter);
+    const candidates = await getDomainCampaignCandidates(
+      citedDomain,
+      mailboxesByDomain,
+      meter,
+      (email.eaccount ?? '').trim().toLowerCase() || null,
+    );
     if (candidates === null) continue; // деградация — перепроверим на следующем тике
     if (candidates.length === 0) {
       // Домен без квалифицируемой кампании = Coldy/Trigga-прогрев или ещё не
@@ -651,7 +709,7 @@ export async function pollOthersOnce(): Promise<number> {
         sentFetchFailed = true; // транзиентный сбой fetch — не роняем в дроп
         continue;
       }
-      const m = matchReplyToCampaign(email.subject, sent);
+      const m = matchReplyToCampaign(email.subject, getBodyText(email.body), sent);
       if (m) {
         chosen = cand;
         matchedOutreach = m;
@@ -726,3 +784,13 @@ export async function pollOthersOnce(): Promise<number> {
   );
   return processed;
 }
+
+// Внутренности для read-only валидации на живых данных
+// (app/scripts/others-watchdog-validate.ts) и для тестов. Не расширять без нужды.
+export const _private = {
+  makeProbeMeter,
+  getOurAccountsInfo,
+  getDomainCampaignCandidates,
+  fetchCampaignSent,
+  matchReplyToCampaign,
+};
