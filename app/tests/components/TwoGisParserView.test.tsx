@@ -39,7 +39,9 @@ beforeEach(() => {
         ],
         subcategories: [
           { value: 'Кафе', category: 'Еда', count: 10 },
+          { value: 'Рестораны', category: 'Еда', count: 6 },
           { value: 'Ремонт', category: 'Услуги', count: 8 },
+          { value: 'Кафе', category: 'Услуги', count: 2 },
         ],
         snapshot: { scope: 'Россия', date: '2026-07-26', rows: 4284927 },
       });
@@ -84,9 +86,15 @@ describe('<TwoGisParserView />', () => {
     await user.click(screen.getByRole('checkbox', { name: 'Москва' }));
     await user.click(screen.getByRole('checkbox', { name: 'Казань' }));
     await user.click(screen.getByRole('checkbox', { name: 'Еда' }));
-    await user.click(screen.getByRole('checkbox', { name: 'Услуги' }));
-    await user.click(screen.getByRole('checkbox', { name: 'Кафе' }));
-    await user.click(screen.getByRole('checkbox', { name: 'Ремонт' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Развернуть: Услуги' }),
+    );
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Услуги → Ремонт' }),
+    );
+    expect(
+      screen.getByRole('checkbox', { name: 'Услуги' }),
+    ).toBePartiallyChecked();
     await user.click(screen.getByRole('checkbox', { name: 'Есть телефон' }));
     await user.click(screen.getByRole('button', { name: /показать/i }));
 
@@ -106,8 +114,14 @@ describe('<TwoGisParserView />', () => {
     expect(JSON.parse(searchCall?.[1]?.body as string)).toEqual({
       filters: expect.objectContaining({
         cities: ['Москва', 'Казань'],
-        categories: ['Еда', 'Услуги'],
-        subcategories: ['Кафе', 'Ремонт'],
+        rubricGroups: [
+          { category: 'Еда', mode: 'all' },
+          {
+            category: 'Услуги',
+            mode: 'some',
+            subcategories: ['Ремонт'],
+          },
+        ],
         hasPhone: true,
       }),
       limit: 100,
@@ -156,9 +170,10 @@ describe('<TwoGisParserView />', () => {
 
     expect(screen.getByRole('heading', { name: 'Фильтры' })).toBeInTheDocument();
     expect(screen.getByLabelText('Поиск: Города')).toBeDisabled();
-    expect(screen.getByLabelText('Поиск: Категории')).toBeDisabled();
-    expect(screen.getByLabelText('Поиск: Подкатегории')).toBeDisabled();
-    expect(screen.getAllByText('Загружаем список')).toHaveLength(3);
+    expect(
+      screen.getByLabelText('Поиск: Разделы и рубрики 2GIS'),
+    ).toBeDisabled();
+    expect(screen.getAllByText('Загружаем список')).toHaveLength(2);
     expect(screen.getByRole('button', { name: /показать/i })).toBeDisabled();
 
     resolveFacets?.(jsonResponse({
@@ -169,6 +184,139 @@ describe('<TwoGisParserView />', () => {
     }));
 
     expect(await screen.findByRole('checkbox', { name: 'Москва' })).toBeEnabled();
+  });
+
+  it('supports checked, mixed and unchecked category states', async () => {
+    const user = userEvent.setup();
+    render(<TwoGisParserView />);
+    await screen.findByRole('checkbox', { name: 'Еда' });
+
+    await user.click(
+      screen.getByRole('button', { name: 'Развернуть: Еда' }),
+    );
+    const category = screen.getByRole('checkbox', { name: 'Еда' });
+    const cafe = screen.getByRole('checkbox', { name: 'Еда → Кафе' });
+    const restaurants = screen.getByRole('checkbox', {
+      name: 'Еда → Рестораны',
+    });
+
+    await user.click(category);
+    expect(category).toBeChecked();
+    expect(cafe).toBeChecked();
+    expect(restaurants).toBeChecked();
+
+    await user.click(cafe);
+    expect(category).toBePartiallyChecked();
+    expect(cafe).not.toBeChecked();
+    expect(restaurants).toBeChecked();
+
+    await user.click(screen.getByRole('button', { name: /показать/i }));
+    await screen.findByText('Кафе Волна');
+    const partialSearchCall = mockAuthFetch.mock.calls.findLast(([url]) =>
+      String(url).endsWith('/search'),
+    );
+    expect(JSON.parse(partialSearchCall?.[1]?.body as string)).toEqual(
+      expect.objectContaining({
+        filters: expect.objectContaining({
+          rubricGroups: [
+            {
+              category: 'Еда',
+              mode: 'allExcept',
+              excludedSubcategories: ['Кафе'],
+            },
+          ],
+        }),
+      }),
+    );
+
+    await user.click(category);
+    expect(category).toBeChecked();
+    expect(cafe).toBeChecked();
+    expect(restaurants).toBeChecked();
+
+    await user.click(category);
+    expect(category).not.toBeChecked();
+    expect(cafe).not.toBeChecked();
+    expect(restaurants).not.toBeChecked();
+  });
+
+  it('can exclude one rubric from a category with more than 200 children', async () => {
+    const largeSubcategoryList = Array.from(
+      { length: 205 },
+      (_, index) => ({
+        value: `Рубрика ${String(index).padStart(3, '0')}`,
+        category: 'Большой раздел',
+        count: 205 - index,
+      }),
+    );
+    mockAuthFetch.mockImplementation(async (url: string) => {
+      if (url.endsWith('/facets')) {
+        return jsonResponse({
+          cities: [],
+          categories: [{ value: 'Большой раздел', count: 1_000 }],
+          subcategories: largeSubcategoryList,
+          snapshot: { scope: 'Россия', date: '2026-07-26', rows: 4284927 },
+        });
+      }
+      return jsonResponse({ count: 1, rows: [], nextCursor: null });
+    });
+
+    const user = userEvent.setup();
+    render(<TwoGisParserView />);
+    const category = await screen.findByRole('checkbox', {
+      name: 'Большой раздел',
+    });
+    await user.click(category);
+    await user.click(
+      screen.getByRole('button', { name: 'Развернуть: Большой раздел' }),
+    );
+
+    const firstRubric = screen.getByRole('checkbox', {
+      name: 'Большой раздел → Рубрика 000',
+    });
+    expect(firstRubric).toBeEnabled();
+    await user.click(firstRubric);
+
+    expect(category).toBePartiallyChecked();
+    expect(firstRubric).not.toBeChecked();
+    expect(
+      screen.getByText(/целый раздел включает все его рубрики/i),
+    ).toBeInTheDocument();
+  });
+
+  it('searches category and rubric names without losing hidden selections', async () => {
+    const user = userEvent.setup();
+    render(<TwoGisParserView />);
+    await screen.findByRole('checkbox', { name: 'Еда' });
+
+    await user.click(
+      screen.getByRole('button', { name: 'Развернуть: Еда' }),
+    );
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Еда → Рестораны' }),
+    );
+
+    const search = screen.getByLabelText('Поиск: Разделы и рубрики 2GIS');
+    await user.type(search, 'ремонт');
+
+    expect(
+      screen.getByRole('checkbox', { name: 'Услуги → Ремонт' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Свернуть: Услуги' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('checkbox', { name: 'Еда → Рестораны' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/выбрано: 1 рубрика/i)).toBeInTheDocument();
+
+    await user.clear(search);
+    expect(
+      screen.getByRole('button', { name: 'Развернуть: Услуги' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('checkbox', { name: 'Еда → Рестораны' }),
+    ).toBeChecked();
   });
 
   it('reuses facet values when the tool is reopened in the same browser session', async () => {
@@ -193,7 +341,7 @@ describe('<TwoGisParserView />', () => {
     expect(await screen.findByText('Кафе Волна')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /выгрузить csv/i })).toBeEnabled();
 
-    await user.click(screen.getByRole('checkbox', { name: 'Есть email' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Еда' }));
 
     expect(screen.queryByText('Кафе Волна')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /выгрузить csv/i })).toBeDisabled();

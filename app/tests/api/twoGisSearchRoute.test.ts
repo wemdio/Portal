@@ -81,6 +81,42 @@ describe('POST /api/tools/2gis-parser/search', () => {
     );
   });
 
+  it('passes normalized grouped rubric selections to preview queries', async () => {
+    const { POST } = await import('@/app/api/tools/2gis-parser/search/route');
+    const response = await POST(
+      request({
+        filters: {
+          rubricGroups: [
+            { category: ' Еда ', mode: 'all' },
+            {
+              category: 'Услуги',
+              mode: 'some',
+              subcategories: [' Ремонт ', 'Ремонт'],
+            },
+          ],
+        },
+        limit: 100,
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const expected = [
+      { category: 'Еда', mode: 'all' },
+      {
+        category: 'Услуги',
+        mode: 'some',
+        subcategories: ['Ремонт'],
+      },
+    ];
+    expect(mockCount).toHaveBeenCalledWith(
+      expect.objectContaining({ rubricGroups: expected }),
+    );
+    expect(mockSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ rubricGroups: expected }),
+      expect.objectContaining({ limit: 100 }),
+    );
+  });
+
   it('rejects malformed filter payloads', async () => {
     const { POST } = await import('@/app/api/tools/2gis-parser/search/route');
     const response = await POST(request({ filters: { cities: 'Москва' } }));
