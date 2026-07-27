@@ -21,6 +21,27 @@ export type AmoLead = {
   raw: unknown;
 };
 
+/**
+ * Возвращает то, что записать в колонку «Имя».
+ *
+ * AMO хранит контакт отдельной сущностью и `amo_leads.name` — это ИМЯ САМОЙ
+ * СДЕЛКИ, а не контакта. Приоритет (сверху вниз):
+ *   1. «Бот: <имя>»      → «<имя>» (TG-бот кладёт реальное имя после префикса)
+ *   2. «Сделка #NNN»     → ссылка на сделку в AMO (менеджер откроет по клику,
+ *                          там уже есть контакт с именем)
+ *   3. Всё остальное     → как есть, в т.ч. «Заявка: <домен>», компании,
+ *                          заранее заполненные имена — их не переделываем.
+ *   4. Пустое имя        → тоже ссылка на сделку.
+ */
+function pickNameColumn(dealName: string | null, amoUrl: string): string {
+  const trimmed = (dealName ?? '').trim();
+  if (!trimmed) return amoUrl;
+  const botMatch = /^Бот:\s*(.+)$/i.exec(trimmed);
+  if (botMatch) return botMatch[1].trim();
+  if (/^Сделка\s*#/i.test(trimmed)) return amoUrl;
+  return trimmed;
+}
+
 /** Форматирует UTM в многострочный текстовый блок (как у Максима сейчас). */
 function formatUtmBlock(raw: unknown): string {
   const utm = extractUtm(raw);
@@ -51,8 +72,9 @@ export function buildRow(
   const utm = extractUtm(lead.raw);
   const platform = mapPlatform(utm);
 
+  const amoUrl = `https://${amoHost}/leads/detail/${lead.amo_id}`;
   const values: Record<ColumnKey, string> = {
-    amo_url: `https://${amoHost}/leads/detail/${lead.amo_id}`,
+    amo_url: amoUrl,
     amo_id_raw: String(lead.amo_id),
     utm_block: formatUtmBlock(lead.raw),
     platform,
@@ -60,7 +82,7 @@ export function buildRow(
     created_at_short: formatMskDate(lead.created_at),
     phone: lead.contact_phone ?? '',
     email: lead.contact_email ?? '',
-    name: lead.name ?? '',
+    name: pickNameColumn(lead.name, amoUrl),
     responsible_name: lead.responsible_name ?? '',
     company_name: lead.company_name ?? '',
     company_website: lead.company_website ?? '',
