@@ -651,6 +651,34 @@ export async function forwardEmail(body: {
   return request<Email>('/emails/forward', { method: 'POST', body }, requestOptions);
 }
 
+/**
+ * Тест-эндпоинт (POST /emails/test). Единственный в v2 способ отправить НОВОЕ
+ * письмо (compose-эндпоинта нет): нужен для handoff по Others-письмам, которые
+ * не принадлежат кампании — reply и forward на них отвечают 400 «not part of
+ * an Instantly campaign» (проверено живьём 27.07). Минусы: без сущности в
+ * Unibox и без cc (копию кладём в to_address_email_list). Лимит 10/мин/воркспейс.
+ */
+export async function sendTestEmail(body: {
+  eaccount: string;
+  to_address_email_list: string;
+  subject: string;
+  body: { html: string };
+}, requestOptions?: InstantlyRequestOptions): Promise<{ status?: string; error?: string }> {
+  // У тест-эндпоинта ошибки приходят HTTP 200 с телом {error: 'ACC_*'} — обычный
+  // request() считает это успехом (бросает только !res.ok). Проверяем payload
+  // сами, иначе webhook пометил бы передачу 'sent' при неотправленном письме
+  // (MEDIUM-находка swarm-ревью 27.07).
+  const res = await request<{ status?: string; error?: string }>(
+    '/emails/test',
+    { method: 'POST', body },
+    requestOptions,
+  );
+  if (res && typeof res === 'object' && res.error) {
+    throw new InstantlyApiError(`Instantly test email rejected: ${res.error}`, 400);
+  }
+  return res;
+}
+
 export async function getUnreadCount(requestOptions?: InstantlyRequestOptions) {
   return request<{ count: number }>('/emails/unread/count', {}, requestOptions);
 }
