@@ -156,17 +156,39 @@ export async function POST(req: NextRequest) {
   }
 
   // Send: reply into the lead's thread with the client + thread participants in CC.
+  // Others-письма не принадлежат кампании: Instantly отказывает и reply, и forward
+  // (400 «not part of an Instantly campaign» — подтверждено живьём 27.07). Для них
+  // fallback — тест-эндпоинт (POST /emails/test): единственный в v2 способ отправить
+  // новое письмо. Лид и клиент идут в To (cc там нет; видимость адресов та же, что
+  // у cc). Плата: без сущности в Unibox — треда в интерфейсе не будет.
+  let sentViaTest = false;
   try {
-    await instantly.replyToEmail({
-      reply_to_uuid: pending.reply_to_uuid as string,
-      eaccount: pending.eaccount as string,
-      subject: buildReplySubject((qual?.reply_subject as string | null) ?? null),
-      // HTML с <br> сохраняет переносы строк: Instantly шлёт тело как HTML-письмо,
-      // и text-only с \n схлопывается «простынёй» (жалоба спеца на Чизмоле —
-      // история переписки уходила одной строкой). text — plain-text fallback.
-      body: { html: textToReplyHtml(bodyText), text: bodyText },
-      ...(ccList.length ? { cc_address_email_list: ccList.join(', ') } : {}),
-    });
+    const replySubject = buildReplySubject((qual?.reply_subject as string | null) ?? null);
+    const replyHtml = textToReplyHtml(bodyText);
+    try {
+      await instantly.replyToEmail({
+        reply_to_uuid: pending.reply_to_uuid as string,
+        eaccount: pending.eaccount as string,
+        subject: replySubject,
+        // HTML с <br> сохраняет переносы строк: Instantly шлёт тело как HTML-письмо,
+        // и text-only с \n схлопывается «простынёй» (жалоба спеца на Чизмоле —
+        // история переписки уходила одной строкой). text — plain-text fallback.
+        body: { html: replyHtml, text: bodyText },
+        ...(ccList.length ? { cc_address_email_list: ccList.join(', ') } : {}),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const leadEmail = ((qual?.lead_email as string | null) ?? '').trim();
+      if (!msg.includes('not part of an Instantly campaign') || !leadEmail) throw err;
+      await instantly.sendTestEmail({
+        eaccount: pending.eaccount as string,
+        // Дедуп: при патологическом client_email == lead_email To не дублируется.
+        to_address_email_list: [...new Set([leadEmail, ...ccList])].join(', '),
+        subject: replySubject,
+        body: { html: replyHtml },
+      });
+      sentViaTest = true;
+    }
   } catch (err) {
     await instDb
       .from('instantly_pending_handoffs')
@@ -197,7 +219,7 @@ export async function POST(req: NextRequest) {
       reply_timestamp: qual?.reply_timestamp ?? null,
       status: 'lead',
       ai_reason: qual?.ai_reason ?? null,
-      forwarded_via: 'handoff-auto',
+      forwarded_via: sentViaTest ? 'handoff-auto-test' : 'handoff-auto',
       client_email: pending.client_email,
     });
   } catch {
@@ -210,7 +232,7 @@ export async function POST(req: NextRequest) {
       token,
       chatId,
       messageId,
-      `✅ <b>Передано клиенту</b> — ${pending.client_email}\n(лиду ушёл ответ, клиент в копии${replyAllCc.length ? ` + участники переписки: ${replyAllCc.join(', ')}` : ''})`,
+      `✅ <b>Передано клиенту</b> — ${pending.client_email}\n(лиду ушёл ответ, клиент в копии${replyAllCc.length ? ` + участники переписки: ${replyAllCc.join(', ')}` : ''}${sentViaTest ? '; отдельным письмом — Others-адресат вне кампании, треда в Unibox не будет' : ''})`,
     );
   }
   await answerCallback(token, cq.id, 'Передано клиенту ✅');
