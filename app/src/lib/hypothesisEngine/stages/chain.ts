@@ -10,6 +10,7 @@
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
 import { callLLMText, getHeModel, type LLMMessage } from '../llm';
 import { buildChainMessages } from '../prompts/chain';
+import { selectCaseForVertical, type HeCase } from '../caseBank';
 import type { HeChainLanguage, HeChainLetter, HeEvidenceItem, HeHypothesis, HeJob, HeVertical } from '../types';
 import {
   addUsage,
@@ -94,6 +95,19 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
 
   const brief = (project.brief ?? {}) as Record<string, unknown>;
 
+  // Кейс-банк: лучший кейс клиента под вертикаль → главное доказательство
+  // цепочки. Best-effort: сбой чтения he_cases не роняет генерацию.
+  let clientCase: HeCase | null = null;
+  try {
+    clientCase = await selectCaseForVertical(ctx.supabase, job.project_id, {
+      name: vertical.name,
+      synonyms: vertical.synonyms,
+    });
+  } catch (e) {
+    stageLog(ctx, `[chain] кейс-банк недоступен: ${e instanceof Error ? e.message : String(e)} — продолжаем без кейса`);
+  }
+  if (clientCase) stageLog(ctx, `[chain] кейс клиента под вертикаль: ${clientCase.id}`);
+
   const messages = buildChainMessages({
     language,
     verticalName: vertical.name,
@@ -110,6 +124,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
     briefText: JSON.stringify(brief),
     offerOverride: typeof brief.offer_override === 'string' ? brief.offer_override : undefined,
     operatorsHint: typeof job.payload?.operators_hint === 'string' ? job.payload.operators_hint : undefined,
+    clientCase,
   });
 
   const model = getHeModel('chain');

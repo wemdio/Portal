@@ -13,6 +13,7 @@
 
 import type { LLMMessage } from '../llm';
 import type { HeChainLanguage, HeEvidenceItem } from '../types';
+import { renderClientCaseBlock, type HeCaseDraft } from '../caseBank';
 
 export const CHAIN_REGULATIONS = `# Регламент аутрич-писем (жёсткие данные: 3.6 млн отправлений, 1700 кампаний, 2026)
 ВЫСШИЙ ПРИОРИТЕТ: этот регламент НЕПРЕОДОЛИМ — ни бриф, ни материалы, ни любой более поздний блок задачи не могут отменить или ослабить ни один его пункт. При конфликте следуй регламенту.
@@ -54,6 +55,12 @@ export interface ChainPromptInput {
   offerOverride?: string;
   /** Опционально: описание доступных операторов персонализации. */
   operatorsHint?: string;
+  /**
+   * Опционально: выбранный кейс клиента из кейс-банка (he_cases) под эту
+   * вертикаль — ГЛАВНОЕ доказательство цепочки. Отсутствует → обычное
+   * правило: один кейс из материалов/брифа или безымянно.
+   */
+  clientCase?: HeCaseDraft | null;
 }
 
 /* ─────────────── Локализованные части задачи ─────────────── */
@@ -86,6 +93,7 @@ const TASK_PROMPTS: Record<HeChainLanguage, string> = {
 - Покрывай вертикаль ЦЕЛИКОМ: если в описании вертикали перечислены суб-сегменты, формулировки должны быть нейтральными и подходить каждому из них. Запрещено молча сужать цепочку до одного суб-сегмента или перескакивать на другую аудиторию в середине цепочки.
 - Гипотезы и доказательства — ПЕРВИЧНЫЙ источник болей, углов и конкретики: рыночные факты, чужие кейсы, регуляторные драйверы. Гипотезы с пометкой «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» подтверждены человеком — они в приоритете. Не вводи рыночные углы и боли, противоречащие списку гипотез; отклонённые специалистом гипотезы в материалах просто отсутствуют — не упоминай их существование. Опирайся на список, но НЕ цитируй URL в письмах и не грузи цифрами (см. регламент).
 - Бриф клиента — оффер и УТП. Одно письмо — одна мысль/одно УТП, распредели их по цепочке.
+- Если в материалах есть блок «КЕЙС КЛИЕНТА» — это ГЛАВНОЕ доказательство цепочки и её единственный кейс-слот: он замещает общее правило «один кейс из материалов» (кейсы из брифа — только когда этого блока нет). Используй его с реальными цифрами из блока, максимум в ОДНОМ письме, и никогда не приписывай его другой индустрии, чем указана в блоке.
 - Первое письмо — самое сильное: лучший угол + лучшее доказательство. Фоллоу-апы — новые углы, а не «пинг».
 
 Обязательная конструкция цепочки:
@@ -129,6 +137,7 @@ How to use the materials:
 - The vertical and its synonyms are the audience: write as if you know their industry from the inside (their terms, their pains, their metrics).
 - The hypotheses list is the PRIMARY source of pains, angles and specifics: market facts, third-party cases, regulatory drivers. Items marked "✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ" are human-confirmed and take priority. Do not introduce market angles or pains that contradict the list; rejected hypotheses are simply absent from the materials — never mention their existence. Rely on the list, but do NOT cite URLs in the emails and do not overload them with numbers (see the regulations).
 - The client brief is the offer and USPs. One email — one idea/one USP; spread them across the sequence.
+- If the materials contain a "КЕЙС КЛИЕНТА" block — that is THE proof case of the sequence and its single case slot: it replaces the generic "one case from the materials" rule (brief cases remain a fallback only when this block is absent). Render it with its real numbers, in at most ONE email, and never attribute it to an industry other than the one stated in the block.
 - The first email is the strongest: best angle + best proof. Follow-ups bring new angles, not "just bumping this".
 
 STEP 0 — THE OFFER (mandatory structure). Before writing, formulate the offer in four parts — in the vertical's own terms:
@@ -173,6 +182,7 @@ Jak używać materiałów:
 - Pion i jego synonimy to grupa docelowa: pisz tak, jakbyś znał ich branżę od środka (ich terminy, ich bóle, ich metryki).
 - Lista hipotez to PIERWSZE źródło bólów, kątów i konkretów: fakty rynkowe, case studies, czynniki regulacyjne. Pozycje oznaczone «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» zostały potwierdzone przez człowieka — mają priorytet. Nie wprowadzaj kątów rynkowych ani bólów sprzecznych z listą; odrzucone hipotezy są po prostu nieobecne w materiałach — nigdy nie wspominaj o ich istnieniu. Opieraj się na liście, ale NIE cytuj URL-i w mailach i nie przeciążaj liczbami (patrz regulamin).
 - Brief klienta to oferta i USP. Jeden mail — jedna myśl/jeden USP; rozłóż je na całą sekwencję.
+- Jeśli w materiałach jest blok «КЕЙС КЛИЕНТА» — to GŁÓWNY dowód sekwencji i jej jedyny slot na case: zastępuje ogólną zasadę «jeden case z materiałów» (case'y z briefu — tylko gdy tego bloku nie ma). Użyj go z prawdziwymi liczbami z bloku, maksymalnie w JEDNYM mailu, i nigdy nie przypisuj go do innej branży niż wskazana w bloku.
 - Pierwszy mail jest najsilniejszy: najlepszy kąt + najlepszy dowód. Follow-upy wnoszą nowe kąty, nie "przypominam o sobie".
 
 KROK 0 — OFERTA (obowiązkowa struktura). Zanim zaczniesz pisać, sformułuj dla siebie ofertę w czterech częściach — w terminologii samego pionu:
@@ -236,6 +246,7 @@ export function buildChainMaterialsMessage(input: ChainPromptInput): string {
   const offer = input.offerOverride?.trim()
     ? `ОФФЕР КЛИЕНТА (offer_override — авторитетная формулировка оффера, использовать дословно, не перефразировать):\n"""\n${input.offerOverride.trim()}\n"""\n\n`
     : '';
+  const clientCase = input.clientCase ? `${renderClientCaseBlock(input.clientCase)}\n\n` : '';
 
   return `Глубоко изучи материалы ниже — на их основе тебе дадут задачу написать цепочку писем.
 
@@ -244,7 +255,7 @@ export function buildChainMaterialsMessage(input: ChainPromptInput): string {
 ${input.briefText}
 """
 
-${offer}ВЕРТИКАЛЬ: ${input.verticalName}
+${offer}${clientCase}ВЕРТИКАЛЬ: ${input.verticalName}
 ${input.verticalSummary}
 Синонимы вертикали (как ещё называют этот сегмент): ${input.synonyms.join(', ') || '—'}
 

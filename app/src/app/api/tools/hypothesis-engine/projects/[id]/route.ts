@@ -15,10 +15,15 @@ function jsonError(message: string, status: number) {
 // Без data/sample_rows — это тяжёлые jsonb-поля, деталка проекта их не тянет.
 const BASE_LIST_COLUMNS = 'id, vertical_id, filename, row_count, status, analysis, created_at';
 const JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at';
+// Досье вертикалей: data — объективные счётчики сегмента, нужна на карточке.
+const DOSSIER_LIST_COLUMNS = 'id, vertical_id, status, data, error';
+// Банк кейсов: БЕЗ text — полный текст кейса тяжёлый, списку хватает карточки.
+const CASE_LIST_COLUMNS = 'id, source, filename, industry, client_type, task, metrics, result, created_at';
 
 // GET — деталка проекта: гипотезы, вертикали, цепочки, вокабуляр, базы,
-// шаблоны и последние jobs. Чейн/вокаб/шаблоны привязаны к вертикалям/базам,
-// поэтому догружаются второй волной по id вертикалей.
+// шаблоны, досье вертикалей, банк кейсов и последние jobs. Чейн/вокаб/шаблоны
+// привязаны к вертикалям/базам, поэтому догружаются второй волной по id
+// вертикалей; досье и кейсы имеют project_id и идут первой волной.
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.projects.detail' },
@@ -42,7 +47,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         );
       }
 
-      const [hypothesesRes, verticalsRes, basesRes, jobsRes] = await Promise.all([
+      const [hypothesesRes, verticalsRes, basesRes, jobsRes, dossiersRes, casesRes] = await Promise.all([
         supabaseAdmin
           .from('he_hypotheses')
           .select('*')
@@ -65,9 +70,19 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           .eq('project_id', id)
           .order('created_at', { ascending: false })
           .limit(30),
+        supabaseAdmin
+          .from('he_vertical_dossiers')
+          .select(DOSSIER_LIST_COLUMNS)
+          .eq('project_id', id)
+          .order('created_at', { ascending: false }),
+        supabaseAdmin
+          .from('he_cases')
+          .select(CASE_LIST_COLUMNS)
+          .eq('project_id', id)
+          .order('created_at', { ascending: false }),
       ]);
 
-      for (const res of [hypothesesRes, verticalsRes, basesRes, jobsRes]) {
+      for (const res of [hypothesesRes, verticalsRes, basesRes, jobsRes, dossiersRes, casesRes]) {
         if (res.error) return jsonError(res.error.message, 500);
       }
 
@@ -112,6 +127,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         bases: basesRes.data ?? [],
         templates,
         jobs: jobsRes.data ?? [],
+        dossiers: dossiersRes.data ?? [],
+        cases: casesRes.data ?? [],
       });
     },
   );

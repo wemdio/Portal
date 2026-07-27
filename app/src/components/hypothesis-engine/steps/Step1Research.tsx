@@ -9,10 +9,19 @@
  */
 
 import { useRef, useState, type JSX } from 'react';
-import { Check, CheckCircle2, FlaskConical, Play, XCircle } from 'lucide-react';
+import { Check, CheckCircle2, FlaskConical, Play, Trash2, XCircle } from 'lucide-react';
 import type { HeStage } from '@/lib/hypothesisEngine/types';
-import { Spinner, StatusBox } from '../ui';
-import type { HeJobSummary, HeProjectDetailResponse } from '../api';
+import { Badge, Spinner, StatusBox } from '../ui';
+import {
+  HE_API,
+  heDelete,
+  hePost,
+  type HeCaseCreateResponse,
+  type HeCaseDeleteResponse,
+  type HeCaseEntry,
+  type HeJobSummary,
+  type HeProjectDetailResponse,
+} from '../api';
 
 /** line — строка в чек-листе прогресса; name — короткое имя для сообщения об ошибке. */
 const RESEARCH_STAGES: Array<{ stage: HeStage; line: string; name: string }> = [
@@ -41,6 +50,10 @@ export interface Step1ResearchProps {
   onStartResearch: () => void;
   offerValue: string;
   onSaveOffer: (v: string) => Promise<void> | void;
+  /** Банк кейсов клиента (сайт + ручные загрузки). */
+  cases?: HeCaseEntry[];
+  /** Колбэк после добавления/удаления кейса — обычно тихая перезагрузка деталей. */
+  onCasesChanged?: () => void;
 }
 
 export function Step1Research({
@@ -50,6 +63,8 @@ export function Step1Research({
   onStartResearch,
   offerValue,
   onSaveOffer,
+  cases,
+  onCasesChanged,
 }: Step1ResearchProps): JSX.Element {
   const status = project?.status;
   const researchJobs = jobs.filter((j) => RESEARCH_STAGE_SET.has(j.stage));
@@ -125,7 +140,17 @@ export function Step1Research({
     );
   }
 
-  return <NotStarted busy={busy} onStartResearch={onStartResearch} offerValue={offerValue} onSaveOffer={onSaveOffer} />;
+  return (
+    <NotStarted
+      busy={busy}
+      onStartResearch={onStartResearch}
+      offerValue={offerValue}
+      onSaveOffer={onSaveOffer}
+      projectId={project?.id ?? null}
+      cases={cases ?? []}
+      onCasesChanged={onCasesChanged}
+    />
+  );
 }
 
 /* ─────────────────────────── Состояния ─────────────────────────── */
@@ -135,11 +160,17 @@ function NotStarted({
   onStartResearch,
   offerValue,
   onSaveOffer,
+  projectId,
+  cases,
+  onCasesChanged,
 }: {
   busy: boolean;
   onStartResearch: () => void;
   offerValue: string;
   onSaveOffer: (v: string) => Promise<void> | void;
+  projectId: string | null;
+  cases: HeCaseEntry[];
+  onCasesChanged?: () => void;
 }) {
   return (
     <section className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white px-6 py-10 text-center">
@@ -161,6 +192,7 @@ function NotStarted({
         Запустить исследование
       </button>
       <OfferBlock offerValue={offerValue} onSaveOffer={onSaveOffer} />
+      <CasesBlock projectId={projectId} cases={cases} onCasesChanged={onCasesChanged} />
     </section>
   );
 }
@@ -224,6 +256,145 @@ function OfferBlock({
         {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
       </div>
     </div>
+  );
+}
+
+/** Банк кейсов клиента: список (сайт/файл) + ручное добавление текста из PDF/презентации. */
+function CasesBlock({
+  projectId,
+  cases,
+  onCasesChanged,
+}: {
+  projectId: string | null;
+  cases: HeCaseEntry[];
+  onCasesChanged?: () => void;
+}) {
+  const [text, setText] = useState('');
+  const [filename, setFilename] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [error, setError] = useState('');
+
+  const handleAdd = async () => {
+    const value = text.trim();
+    if (!projectId || !value || saving) return;
+    setSaving(true);
+    setError('');
+    try {
+      const { ok, data } = await hePost<HeCaseCreateResponse>(`${HE_API}/projects/${projectId}/cases`, {
+        text: value,
+        filename: filename.trim() || undefined,
+      });
+      if (!ok) {
+        setError(data.error || 'Не удалось добавить кейс');
+        return;
+      }
+      setText('');
+      setFilename('');
+      onCasesChanged?.();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!projectId || deletingId) return;
+    if (!window.confirm('Удалить этот кейс?')) return;
+    setDeletingId(id);
+    setError('');
+    try {
+      const { ok, data } = await heDelete<HeCaseDeleteResponse>(`${HE_API}/projects/${projectId}/cases`, { id });
+      if (!ok) {
+        setError(data.error || 'Не удалось удалить кейс');
+        return;
+      }
+      onCasesChanged?.();
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  return (
+    <details className="group mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
+      <summary className="flex cursor-pointer select-none items-center gap-2 text-xs font-semibold uppercase tracking-widest text-gray-400 transition hover:text-gray-600">
+        Кейсы клиента ({cases.length})
+      </summary>
+      <p className="mt-2 text-xs leading-relaxed text-gray-400">
+        Кейсы с сайта собираются автоматически. Можно добавить вручную — текст из PDF/презентации;
+        используются как доказательство в письмах.
+      </p>
+
+      {cases.length > 0 ? (
+        <ul className="mt-3 space-y-2">
+          {cases.map((c) => (
+            <li
+              key={c.id}
+              className="flex items-start gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge tone={c.source === 'site' ? 'blue' : 'violet'}>
+                    {c.source === 'site' ? 'сайт' : 'файл'}
+                  </Badge>
+                  {c.industry ? <span className="text-xs font-medium text-gray-700">{c.industry}</span> : null}
+                  {c.client_type ? <span className="text-xs text-gray-400">{c.client_type}</span> : null}
+                  {c.filename ? <span className="truncate text-[11px] text-gray-400">{c.filename}</span> : null}
+                </div>
+                {c.result ? <p className="mt-1 line-clamp-2 text-xs text-gray-600">{c.result}</p> : null}
+              </div>
+              {c.source === 'upload' ? (
+                <button
+                  type="button"
+                  onClick={() => void handleDelete(c.id)}
+                  disabled={deletingId === c.id}
+                  title="Удалить кейс"
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-400 transition hover:border-red-200 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {deletingId === c.id ? (
+                    <Spinner className="h-3.5 w-3.5" />
+                  ) : (
+                    <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                  )}
+                </button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-3 text-xs text-gray-400">Кейсов пока нет.</p>
+      )}
+
+      <div className="mt-3">
+        <textarea
+          rows={3}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Вставьте текст кейса…"
+          aria-label="Текст кейса"
+          className="w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+        />
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            value={filename}
+            onChange={(e) => setFilename(e.target.value)}
+            placeholder="Имя файла (необязательно)"
+            aria-label="Имя файла"
+            className="h-8 min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-3 text-xs text-gray-800 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+          />
+          <button
+            type="button"
+            onClick={() => void handleAdd()}
+            disabled={saving || !text.trim()}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
+            Добавить кейс
+          </button>
+        </div>
+        {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
+      </div>
+    </details>
   );
 }
 

@@ -19,6 +19,7 @@ import {
   type HeTemplatePlanOutput,
 } from '../schemas';
 import { buildTemplateLettersMessages, buildTemplatePlanMessages } from '../prompts/template';
+import { selectCaseForVertical, type HeCase } from '../caseBank';
 import type {
   HeBase,
   HeChain,
@@ -402,6 +403,19 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const chainLetters = (Array.isArray(chain.letters) ? chain.letters : []) as HeChainLetter[];
   if (!chainLetters.length) throw new Error('he_chains.letters пуст — перегенерируйте цепочку');
 
+  // Кейс-банк: лучший кейс клиента под вертикаль → главное доказательство
+  // fixed_block/писем. Best-effort: сбой чтения he_cases не роняет генерацию.
+  let clientCase: HeCase | null = null;
+  try {
+    clientCase = await selectCaseForVertical(ctx.supabase, job.project_id, {
+      name: vertical.name,
+      synonyms: vertical.synonyms,
+    });
+  } catch (e) {
+    stageLog(ctx, `[template] кейс-банк недоступен: ${e instanceof Error ? e.message : String(e)} — продолжаем без кейса`);
+  }
+  if (clientCase) stageLog(ctx, `[template] кейс клиента под вертикаль: ${clientCase.id}`);
+
   const columns = Array.isArray(base.columns) ? base.columns : [];
 
   // Шаг 1: план 85/15.
@@ -413,6 +427,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       baseAnalysis: analysis,
       columns,
       hypotheses,
+      clientCase,
     }),
     HeTemplatePlanSchema,
     { model: getHeModel('chain'), maxTokens: 8192 },
@@ -428,6 +443,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     verticalName: vertical.name,
     chainLetters,
     baseAnalysis: analysis,
+    clientCase,
   });
 
   /** Сырой ответ модели → письма с приклеенными сегментными вариантами. */
