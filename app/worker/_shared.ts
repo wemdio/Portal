@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
@@ -32,6 +33,53 @@ export function setupGracefulShutdown(log: WorkerLogger) {
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Пишет monotonic timestamp в heartbeat-файл. Внешний docker healthcheck
+ * читает mtime этого файла и флипает контейнер в unhealthy, если он не
+ * обновлялся дольше порога — autoheal перезапускает.
+ *
+ * Кладём на отдельный setInterval (см. `startWorkerHeartbeat` ниже), а не
+ * внутрь основного pollLoop: если основной цикл застрял (deadlock,
+ * бесконечный retry, hung fetch к БД без abort), setInterval callback
+ * не выполнится, файл протухнет, healthcheck его увидит.
+ *
+ * ВАЖНО: работает только пока жив node.js event loop. Если весь event
+ * loop замер (микрозадачная гонка / hung syscall) — heartbeat не тикает,
+ * и это как раз тот сигнал, который нам нужен для рестарта.
+ */
+export function writeHeartbeat(path: string): void {
+  try {
+    fs.writeFileSync(path, Date.now().toString());
+  } catch {
+    /* if /tmp is broken we can't do anything useful here */
+  }
+}
+
+/**
+ * Заводит независимый heartbeat-тикер для воркера. Возвращает id таймера,
+ * чтобы вызывающая сторона могла остановить его при graceful shutdown.
+ *
+ * Прецедент: `worker/tgOutreach.ts` + `_recvLoop` hang'и на 35 часов до
+ * добавления такого heartbeat (см. коммент в tgOutreach.ts). Инцидент
+ * 27.07.2026 повторил тот же паттерн уже на yandexmaps-воркере: node.js
+ * процесс жив (Up), но event loop мёртв (CPU 0.03%, 5+ часов молчания),
+ * задачи не подхватываются. Healthcheck на heartbeat + autoheal ловит это
+ * за 5 минут вместо 5+ часов до ручного `docker restart`.
+ *
+ * Дефолт интервал — 30с; healthcheck обычно ставится с порогом 300с
+ * (10× запас), чтобы GC-паузы и мимолётные скачки не флипали unhealthy.
+ */
+export function startWorkerHeartbeat(
+  filePath: string,
+  intervalMs = 30_000,
+): NodeJS.Timeout {
+  writeHeartbeat(filePath);
+  const timer = setInterval(() => writeHeartbeat(filePath), intervalMs);
+  // Не блокируем graceful shutdown таймером.
+  if (typeof timer.unref === 'function') timer.unref();
+  return timer;
 }
 
 const FALLBACK_POLL_MS = 30_000;
