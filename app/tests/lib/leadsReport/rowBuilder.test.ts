@@ -69,4 +69,29 @@ describe('buildRow', () => {
     expect(row[3]).toBe(''); // D: Контакт
     expect(row[5]).toBe(''); // F: Email
   });
+
+  describe('выбор значения для колонки «Имя»', () => {
+    const AMO_URL = 'https://polzaagency.amocrm.ru/leads/detail/12345';
+
+    it.each<[string | null, string]>([
+      // 1) осмысленное имя / компания / заявка с доменом — как есть
+      ['Иванов Иван', 'Иванов Иван'],
+      ['ООО Ромашка', 'ООО Ромашка'],
+      ['Заявка: denvic.tech', 'Заявка: denvic.tech'],
+      // 2) «Бот: <имя>» — берём часть после префикса
+      ['Бот: Максим Чеботарев', 'Максим Чеботарев'],
+      ['Бот: Amir', 'Amir'],
+      // 3) «Сделка #NNN» — ссылка на сделку в AMO
+      ['Сделка #12345', AMO_URL],
+      ['Сделка # 12345', AMO_URL],
+      // 4) пусто/null — тоже ссылка (лучше, чем пустая клетка)
+      [null, AMO_URL],
+      ['', AMO_URL],
+      ['   ', AMO_URL],
+    ])('name=%p → «Имя»=%p', (dealName, expected) => {
+      const lead: AmoLead = { ...baseLead, name: dealName };
+      const row = buildRow(lead, outreachConfig, 'polzaagency.amocrm.ru');
+      expect(row[2]).toBe(expected); // C: Имя
+    });
+  });
 });
