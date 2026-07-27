@@ -9,10 +9,11 @@ import { listEmails } from '@/lib/instantly/client';
 import { InstantlyApiError } from '@/lib/instantly/errors';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import { getReadEmailIds, getRepliedEmailIds, getAnsweredLeadKeys } from '@/lib/clientCampaignReplies/clientEmailReads';
+import { partitionForeignEmails, resolveClientMailboxes } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
 import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
 import { cached } from '@/lib/clientCache';
 import { withDeadline } from '@/lib/withDeadline';
-import { logError } from '@/lib/loggerServer';
+import { logError, logInfo } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
 
@@ -68,6 +69,12 @@ type LeadListItem = {
   lead_entry_id?: string | null;
   is_answered?: boolean;
   message_count?: number;
+  /**
+   * ТОЛЬКО для внутренней фильтрации чужих ящиков (см. readReplyItems): ящик,
+   * принявший письмо. В ответ клиенту НЕ отдаём — у фантомных писем это ящик
+   * другого клиента, который мы как раз скрываем.
+   */
+  eaccount?: string | null;
 };
 
 type SyncedLeadRow = {
@@ -204,6 +211,7 @@ async function readReplyItems(
   campaignIds: string[],
   campaignNames: Map<string, string>,
   accessRows: ClientAccessRow[],
+  userId: string,
 ): Promise<{ items: LeadListItem[]; failures: number }> {
   const settled = await Promise.allSettled(
     campaignIds.map((campaignId) => {
@@ -274,6 +282,9 @@ async function readReplyItems(
                 thread_id: reply.thread_id,
                 is_unread: reply.is_unread,
                 ai_interest_value: reply.ai_interest_value,
+                // См. комментарий у поля в LeadListItem: только для пост-фильтра
+                // чужих ящиков ниже, из кэша клонируется, в ответ не уходит.
+                eaccount: email.eaccount ?? null,
               } satisfies LeadListItem;
             });
           }),
@@ -302,7 +313,49 @@ async function readReplyItems(
     });
   }
 
-  return { items, failures };
+  // Кросс-клиентская гигиена — ПОСЛЕ кэша и ПОД конкретного юзера: кэш общий
+  // на (аккаунт, кампания), а принадлежность ящиков — свойство клиента.
+  // Instantly клеит входящее к кампании по адресу отправителя, не проверяя
+  // получателя — письма, пришедшие на ящик ДРУГОГО клиента воркспейса,
+  // всплывают в ответах этой кампании (живой кейс 26.07: warmup-письмо лида
+  // на aleksey@it-ls.ru отобразилось в треде OutreachOS). Показываем только
+  // письма, полученные ящиками этого клиента; чужие скрываем и логируем.
+  const presentCampaignIds = [...new Set(items.map((it) => it.campaign_id).filter(Boolean))];
+  const mailboxSets = new Map<string, Set<string> | null>();
+  await Promise.all(
+    presentCampaignIds.map(async (campaignId) => {
+      const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
+      mailboxSets.set(campaignId, await resolveClientMailboxes(userId, campaignId, accountId));
+    }),
+  );
+  const visibleItems: LeadListItem[] = [];
+  const hiddenByCampaign = new Map<string, { count: number; samples: Array<{ id?: string | null; eaccount?: string | null }> }>();
+  for (const item of items) {
+    const mailboxes = mailboxSets.get(item.campaign_id) ?? null;
+    const { visible, hidden } = partitionForeignEmails([item], mailboxes);
+    if (visible.length > 0) {
+      // eaccount — внутреннее поле фильтрации, в ответ клиенту не отдаём.
+      delete item.eaccount;
+      visibleItems.push(item);
+    } else if (hidden.length > 0) {
+      const agg = hiddenByCampaign.get(item.campaign_id) ?? { count: 0, samples: [] };
+      agg.count += 1;
+      if (agg.samples.length < 5) agg.samples.push({ id: item.email_id, eaccount: item.eaccount });
+      hiddenByCampaign.set(item.campaign_id, agg);
+    }
+  }
+  if (hiddenByCampaign.size > 0) {
+    await logInfo('client.replies.foreign_mailbox_hidden', 'Скрыты ответы, полученные чужими ящиками', {
+      userId,
+      campaigns: [...hiddenByCampaign.entries()].map(([campaignId, agg]) => ({
+        campaignId,
+        count: agg.count,
+        samples: agg.samples,
+      })),
+    });
+  }
+
+  return { items: visibleItems, failures };
 }
 
 /**
@@ -453,6 +506,7 @@ export async function GET(req: NextRequest) {
     allowedCampaignIds,
     campaignNames,
     accessRows,
+    userId,
   );
 
   if (
