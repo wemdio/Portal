@@ -265,8 +265,21 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
       });
       if (ok && data.hypothesis) {
         const updated = data.hypothesis;
+        const updatedVerticals = data.verticals;
         setDetail((prev) =>
-          prev ? { ...prev, hypotheses: (prev.hypotheses ?? []).map((h) => (h.id === id ? updated : h)) } : prev,
+          prev
+            ? {
+                ...prev,
+                hypotheses: (prev.hypotheses ?? []).map((h) => (h.id === id ? updated : h)),
+                // Доска вертикалей сразу отражает пересчёт pct/rank по разметке.
+                verticals: updatedVerticals
+                  ? (prev.verticals ?? []).map((v) => {
+                      const nv = updatedVerticals.find((x) => x.id === v.id);
+                      return nv ? { ...v, potential_pct: nv.potential_pct, rank: nv.rank } : v;
+                    })
+                  : prev.verticals,
+              }
+            : prev,
         );
       } else {
         setActionError(data.error || 'Не удалось обновить гипотезу');

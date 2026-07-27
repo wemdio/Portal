@@ -40,6 +40,21 @@ function normKey(s: string): string {
   return s.toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Детерминированный % вертикали по % её участников:
+ * max участников + 2 п.п. за каждого дополнительного, кап 95 —
+ * плато и вырожденное ранжирование исключены. Нефинитные значения = 0.
+ * Используется и при кластеризации, и при пересчёте после ручной
+ * разметки гипотез (см. reviewRecompute.ts).
+ */
+export function computeVerticalPct(memberPcts: number[]): number {
+  const maxPct = memberPcts.reduce(
+    (acc, p) => Math.max(acc, Number.isFinite(p) ? p : 0),
+    0,
+  );
+  return Math.min(95, maxPct + 2 * (memberPcts.length - 1));
+}
+
 function uniquePush(list: string[], values: string[]): string[] {
   const seen = new Set(list.map(normKey));
   const out = [...list];
@@ -133,11 +148,7 @@ export function applyClusteringDecisions(
   // Детерминированный %: max участников + 2 п.п. за каждого дополнительного,
   // кап 95 — плато и вырожденное ранжирование исключены.
   for (const g of groups) {
-    const maxPct = g.members.reduce(
-      (acc, m) => Math.max(acc, Number.isFinite(m.potential_pct) ? m.potential_pct : 0),
-      0,
-    );
-    g.potential_pct = Math.min(95, maxPct + 2 * (g.members.length - 1));
+    g.potential_pct = computeVerticalPct(g.members.map((m) => m.potential_pct));
   }
 
   // Лучший (минимальный) тир среди участников — для тай-брейка ранжирования.

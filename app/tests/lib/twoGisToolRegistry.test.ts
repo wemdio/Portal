@@ -9,6 +9,9 @@ describe('2GIS parser tool registration', () => {
         href: '/tools/2gis-parser',
       }),
     );
+    expect(TOOLS_CONFIG['2gis-parser'].badge).toBeUndefined();
+    expect(TOOLS_CONFIG['2gis-parser'].badge_en).toBeUndefined();
+    expect(TOOLS_CONFIG['2gis-parser'].badgeVariant).toBeUndefined();
 
     const parsers = TOOL_GROUPS.find((group) => group.label === 'Парсеры и поиск лидов');
     const databases = TOOL_GROUPS.find((group) => group.label === 'Базы и данные');

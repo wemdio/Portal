@@ -361,9 +361,6 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description_en: 'Search and export 2GIS organizations by city, category, and available contacts.',
     href: '/tools/2gis-parser',
     accentColor: 'blue',
-    badge: 'Новое',
-    badge_en: 'New',
-    badgeVariant: 'emerald',
   },
   'our-bases': {
     id: 'our-bases',

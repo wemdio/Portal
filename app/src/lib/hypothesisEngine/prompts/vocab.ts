@@ -49,13 +49,15 @@ const SYSTEM = `Ты — head of lead research в агентстве Polza, сп
 ТРЕБОВАНИЯ:
 - Полнота важнее осторожности: 8–20 company_types, 10–25 job_titles (из них минимум 8 с audience_side="buyer"), 8–15 search_queries.
 - Должности стороны А подбирай под ЛПР именно этой вертикали, а не универсальный «CEO/CTO»-набор.
+- Список гипотез вертикали (в материалах) — ПЕРВИЧНЫЙ источник контекста сегментов: матрица обязана покрывать гипотезы с пометкой «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» (подтверждены человеком) в первую очередь и не должна вводить сегменты/боли, противоречащие списку. Отклонённые специалистом гипотезы в материалах просто отсутствуют — не упоминай их существование.
 - Отвечай строго на русском (сами термины — на языке оригинала), ТОЛЬКО JSON.`;
 
 export interface VocabPromptInput {
   verticalName: string;
   verticalSummary: string;
   synonyms: string[];
-  hypotheses: Array<{ title: string; description: string }>;
+  /** Гипотезы вертикали; confirmed=true — подтверждена специалистом (приоритет). */
+  hypotheses: Array<{ title: string; description: string; tier?: number; confirmed?: boolean }>;
 }
 
 export function buildVocabMessages(input: VocabPromptInput): LLMMessage[] {
@@ -63,8 +65,8 @@ export function buildVocabMessages(input: VocabPromptInput): LLMMessage[] {
 ${input.verticalSummary}
 Синонимы вертикали: ${input.synonyms.join(', ') || '—'}
 
-ГИПОТЕЗЫ ВЕРТИКАЛИ (контекст сегментов):
-${input.hypotheses.map((h) => `- ${h.title}: ${h.description}`).join('\n')}
+ГИПОТЕЗЫ ВЕРТИКАЛИ (ПЕРВИЧНЫЙ источник контекста сегментов; «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» — подтверждены человеком, в приоритете):
+${input.hypotheses.map((h) => `- ${h.tier != null ? `[tier ${h.tier}] ` : ''}${h.confirmed ? '✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ — ' : ''}${h.title}: ${h.description}`).join('\n')}
 
 Построй полную матрицу вокабуляра. Верни ТОЛЬКО JSON:
 {

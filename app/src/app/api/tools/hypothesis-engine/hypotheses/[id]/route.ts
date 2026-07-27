@@ -3,6 +3,11 @@ import type { NextRequest } from 'next/server';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { logError } from '@/lib/loggerServer';
+import {
+  recomputeProjectVerticalPcts,
+  type RecomputedVertical,
+} from '@/lib/hypothesisEngine/reviewRecompute';
 import type { HeHypothesisStatus } from '@/lib/hypothesisEngine/types';
 
 export const dynamic = 'force-dynamic';
@@ -51,7 +56,20 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         );
       }
 
-      return NextResponse.json({ hypothesis });
+      // Статус сохранён — пересчитываем % и rank вертикалей проекта под
+      // разметку, чтобы доска обновилась сразу. Ошибка пересчёта не маскирует
+      // успешный PATCH: доска просто подтянет актуальные данные позже.
+      let verticals: RecomputedVertical[] | null = null;
+      try {
+        verticals = await recomputeProjectVerticalPcts(
+          supabaseAdmin,
+          (hypothesis as { project_id: string }).project_id,
+        );
+      } catch (recomputeError) {
+        await logError('hypothesis-engine.hypotheses.recompute', recomputeError);
+      }
+
+      return NextResponse.json({ hypothesis, verticals });
     },
   );
 }

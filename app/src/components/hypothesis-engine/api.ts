@@ -66,6 +66,8 @@ export interface HeJobResponse {
 
 export interface HeHypothesisResponse {
   hypothesis?: HeHypothesis;
+  /** Пересчитанные после разметки вертикали проекта (id + новые pct/rank). */
+  verticals?: Array<{ id: string; potential_pct: number; rank: number }> | null;
   error?: string;
 }
 
