@@ -314,7 +314,6 @@ async def summarize_with_ai(
             {"role": "user", "content": user_content},
         ],
         "temperature": 0.3,
-        "max_tokens": 8000,
     }
 
     try:
