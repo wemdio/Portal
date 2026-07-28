@@ -24,6 +24,7 @@ import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { findNewHhEmployers, deriveDomain, type HhEmployer } from '@/lib/jobs/hhAutoParser';
+import { ensureArchiveSinkJob, buildHhArchiveSinkCallback, getUserIdByEmail } from '@/lib/parsers/hhArchiveSink';
 import { appendLeadsToClientCampaign, fetchExistingCampaignEmails } from '@/lib/clientLaunch/appendLeads';
 import { loadOutreachOsConfig } from './config';
 import { buildExcludePatterns } from './excludePatterns';
@@ -113,6 +114,16 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
 
   try {
     // 3. HH-парс + ICP-фильтр.
+    // Sink в общий hh_vacancies (см. lib/parsers/hhArchiveSink.ts). Пайплайн
+    // общий для агентства, per-client user_id нет — используем служебного
+    // outreachos@test.ru как «владельца» sink parser_job. Если у него в
+    // profiles email не совпадает или юзер удалён — sinkJobId=null, парсер
+    // отдаёт данные только клиенту (сохранённое поведение).
+    const outreachosSinkOwnerEmail = process.env.OUTREACHOS_SINK_OWNER_EMAIL ?? 'outreachos@test.ru';
+    const sinkOwnerId = await getUserIdByEmail(outreachosSinkOwnerEmail);
+    const sinkJobId = sinkOwnerId ? await ensureArchiveSinkJob(sinkOwnerId) : null;
+    const onVacancies = buildHhArchiveSinkCallback(sinkJobId);
+
     const since = new Date(Date.now() - config.window_hours * 3600_000);
     const employers = await findNewHhEmployers({
       since,
@@ -122,6 +133,7 @@ export async function runOutreachOsDailyPipeline(log: Logger = () => {}): Promis
       maxEmployees: config.max_employees ?? undefined,
       limit: config.daily_limit,
       log: (m) => log(`[hh] ${m}`),
+      onVacancies,
     });
     log(`HH вернул ${employers.length} работодателей (после ICP-фильтра)`);
 
