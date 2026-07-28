@@ -62,6 +62,7 @@ type LeadRow = {
   amount: number | null;
   created_at: string | null;
   updated_at: string | null;
+  closed_at: string | null;
   raw: unknown;
 };
 
@@ -162,7 +163,12 @@ export function computeSalesReportBlockFromRows(
     if (statusSort >= thresholds.invoiceSentSort) result.invoicesSent += 1;
     if (statusSort >= thresholds.contractSort) result.contracts += 1;
 
-    if (statusId === WON_STATUS_ID) {
+    // Оплата — сделка ЗАКРЫТА в статус «Успешно реализовано» именно в окне
+    // отчёта. Смотрим на closed_at (момент фактической оплаты), а не на
+    // updated_at — иначе в отчёт попадают старые сделки, у которых менеджер
+    // просто добавил комментарий или сдвинул поле, и Сумма оплат раздувается
+    // (389% плана вместо реальных 80%).
+    if (statusId === WON_STATUS_ID && isInWindow(lead.closed_at, start, end)) {
       result.paymentsReceived += 1;
       result.revenue += Number.isFinite(Number(lead.amount)) ? Number(lead.amount) : 0;
     }
@@ -199,11 +205,12 @@ export async function computeSalesReportBlock(
   const endIso = end.toISOString();
   const { data: leadsData, error: leadsError } = await db
     .from('amo_leads')
-    .select('status_id, status_name, amount, created_at, updated_at, raw')
+    .select('status_id, status_name, amount, created_at, updated_at, closed_at, raw')
     .eq('pipeline_id', pipelineId)
     .or(
       `and(created_at.gte.${startIso},created_at.lt.${endIso}),` +
-        `and(updated_at.gte.${startIso},updated_at.lt.${endIso})`,
+        `and(updated_at.gte.${startIso},updated_at.lt.${endIso}),` +
+        `and(closed_at.gte.${startIso},closed_at.lt.${endIso})`,
     );
   if (leadsError) throw leadsError;
 
