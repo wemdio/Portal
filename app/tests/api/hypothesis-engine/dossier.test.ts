@@ -11,6 +11,8 @@
  *   GET /api/tools/hypothesis-engine/projects/[id]
  *     200 -> response now also carries `dossiers` (he_vertical_dossiers without
  *            tokens/model) and `cases` (he_cases WITHOUT the heavy text field).
+ *     200 -> jobs rows include `payload` (payload.vertical_id), so the client
+ *            can scope a dossier job to its vertical card.
  */
 
 import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
@@ -214,6 +216,39 @@ describe('GET projects/[id] — dossiers and cases', () => {
 
     expect(body.cases.map((c) => c.id)).toEqual(['c1']);
     expect(body.cases[0].metrics).toEqual({ reply_pct: 12 });
+  });
+
+  it('jobs list carries payload so dossier jobs can be scoped to a vertical', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_projects: [{ id: 'p1', name: 'P', website_url: 'https://x.example/', status: 'researched' }],
+        he_verticals: [{ id: 'v1', project_id: 'p1', name: 'HR-агентства', rank: 1 }],
+        he_jobs: [
+          {
+            id: 'j1',
+            project_id: 'p1',
+            stage: 'dossier',
+            status: 'running',
+            payload: { vertical_id: 'v1' },
+            started_at: '2026-07-27T00:00:00Z',
+            created_at: '2026-07-27T00:00:00Z',
+          },
+        ],
+      },
+    });
+
+    const res = await GET(makeGetReq(), projectParams);
+    expect(res.status).toBe(200);
+
+    // Клиент фильтрует dossier-джобы по payload.vertical_id — колонка обязана
+    // быть в проекции, иначе чужая джоба покажет busy/error на этой карточке.
+    const jobsSelect = mockDb.selects.find((s) => s.table === 'he_jobs');
+    expect(jobsSelect?.columns).toContain('payload');
+
+    const body = (await res.json()) as {
+      jobs: Array<{ id: string; stage: string; payload?: { vertical_id?: string } | null }>;
+    };
+    expect(body.jobs.find((j) => j.id === 'j1')?.payload?.vertical_id).toBe('v1');
   });
 
   it('asks for dossier/case list columns only — no heavy fields (cases without text)', async () => {

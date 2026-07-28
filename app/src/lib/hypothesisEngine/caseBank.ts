@@ -4,7 +4,7 @@
  *
  * Источники кейсов (колонка source):
  *  - 'site'   — извлечены стадией site_profile из текста сайта клиента
- *               (replace-on-rerun: стадия сносит старые site-кейсы проекта);
+ *               (refresh атомарный: insert новых → delete устаревших site-строк);
  *  - 'upload' — вставлены специалистом текстом через API
  *               (POST projects/[id]/cases); сайт-стадия их никогда не трогает.
  *
@@ -14,7 +14,9 @@
  *  - structureCaseText — LLM-структуризация вставленного текста кейса
  *    (общий хелпер для API-роута загрузки; модель getHeModel('bulk'));
  *  - scoreCaseForVertical / selectCaseForVertical — подбор кейса под вертикаль
- *    (токен-оверлап названия+синонимов вертикали по industry/client_type/task);
+ *    (взвешенный токен-оверлап названия+синонимов вертикали по полям
+ *    industry/client_type/task, порог MIN_CASE_SCORE, tie-break upload);
+ *  - normalizeCaseText — нормализация текста кейса для дедупа;
  *  - renderClientCaseBlock — блок «КЕЙС КЛИЕНТА …» для промптов chain/template.
  */
 
@@ -22,27 +24,16 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 
 import { callLLMWithSchema, getHeModel, type LLMMessage } from './llm';
+import type { HeCase } from './types';
 
 /* ─────────────────────────── Типы ─────────────────────────── */
 
-export type HeCaseSource = 'site' | 'upload';
-
-/** Строка he_cases (миграция создаётся параллельно этому коду). */
-export interface HeCase {
-  id: string;
-  project_id: string;
-  source: HeCaseSource;
-  filename: string | null;
-  industry: string;
-  client_type: string;
-  task: string;
-  /** Свободный json: найденные в кейсе конкретные цифры/метрики. */
-  metrics: Record<string, unknown>;
-  result: string;
-  /** 2–3 предложения — краткое содержание кейса. */
-  text: string;
-  created_at: string;
-}
+/**
+ * Строка he_cases — единственный источник правды в types.ts (DB-аккуратный:
+ * nullable-поля + updated_at). Ре-экспорт сохраняет существующие импорты
+ * (stages/chain и stages/template берут HeCase отсюда).
+ */
+export type { HeCase } from './types';
 
 /* ─────────────────── LLM-структуризация кейса ─────────────────── */
 
@@ -59,7 +50,21 @@ export const heCaseDraftSchema = z.object({
   result: z.string().default(''),
   text: z.string(),
 });
-export type HeCaseDraft = z.infer<typeof heCaseDraftSchema>;
+
+/**
+ * Черновик кейса на границе промптов/рендера. Поля nullable: тип покрывает и
+ * выход heCaseDraftSchema (LLM-драфт, пустые строки — z.infer сюда assignable),
+ * и строку he_cases (null из БД) — stages/chain и stages/template передают в
+ * промпты HeCase напрямую. renderClientCaseBlock отрабатывает пустые/null.
+ */
+export interface HeCaseDraft {
+  industry: string | null;
+  client_type: string | null;
+  task: string | null;
+  metrics: Record<string, unknown>;
+  result: string | null;
+  text: string | null;
+}
 
 const CASE_STRUCTURING_SYSTEM = `Ты — аналитик B2B-кейсов агентства Polza. Из сырого текста кейса (вставка из PDF/документа/письма) ты достаёшь структуру для кейс-банка: она пойдёт в письма как доказательство, поэтому точность критична.
 
@@ -108,10 +113,16 @@ export async function structureCaseText(rawText: string): Promise<HeCaseDraft> {
 
 /* ─────────────────── Подбор кейса под вертикаль ─────────────────── */
 
-/** Стоп-слова, не несущие смысла при токен-оверлапе (ru/en предлоги/союзы). */
+/**
+ * Стоп-слова при токен-оверлапе: ru/en предлоги/союзы + доменно-общие слова
+ * («продажи», «услуги», «доставка», …) — они есть в кейсах любой индустрии
+ * и не отличают одну вертикаль от другой, поэтому в скор не входят.
+ */
 const STOP_TOKENS = new Set([
   'и', 'в', 'во', 'на', 'с', 'со', 'по', 'для', 'от', 'до', 'из', 'за', 'у', 'о', 'об', 'к',
   'the', 'of', 'and', 'in', 'on', 'for', 'to', 'a', 'an', 'or', 'at',
+  'продажи', 'услуги', 'клиенты', 'бизнес', 'лиды', 'заявки', 'компания', 'компании',
+  'рынок', 'рост', 'доставка', 'работа', 'проект', 'решение', 'продукт',
 ]);
 
 function tokenize(text: string): string[] {
@@ -119,6 +130,15 @@ function tokenize(text: string): string[] {
     .toLowerCase()
     .split(/[^a-zа-яё0-9]+/i)
     .filter((t) => t.length >= 2 && !STOP_TOKENS.has(t));
+}
+
+/**
+ * Нормализация текста кейса для дедупа: lowercase + схлопывание пробельных
+ * последовательностей. Один и тот же кейс с главной страницы и /cases
+ * после нормализации совпадает.
+ */
+export function normalizeCaseText(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
 export interface CaseScoreTarget {
@@ -132,31 +152,49 @@ export interface VerticalScoreInput {
   synonyms?: string[] | null;
 }
 
+/** Веса полей кейса: индустрия — самый сильный сигнал, задача — самый слабый. */
+const FIELD_WEIGHTS = { industry: 3, client_type: 2, task: 1 } as const;
+
 /**
- * Скор релевантности кейса вертикали: число уникальных токенов названия
- * вертикали + синонимов, встречающихся в industry/client_type/task кейса
- * (lowercase, токены ≥2 символов, без стоп-слов). 0 — кейс не релевантен.
+ * Порог отбора: взвешенный скор ≥ 3 — хотя бы одно попадание в industry
+ * или несколько попаданий в слабые поля (client_type + task, три task).
+ * Одного generic-попадания в task недостаточно, чтобы кейс стал proof'ом цепочки.
+ */
+export const MIN_CASE_SCORE = 3;
+
+/**
+ * Скор релевантности кейса вертикали: по каждому уникальному токену названия
+ * вертикали + синонимов суммируются веса полей, где токен встретился
+ * (industry 3 / client_type 2 / task 1; lowercase, токены ≥2 символов, без
+ * стоп-слов). 0 — кейс не релевантен.
  */
 export function scoreCaseForVertical(target: CaseScoreTarget, vertical: VerticalScoreInput): number {
   const verticalTokens = new Set(
     tokenize([vertical.name, ...(vertical.synonyms ?? [])].filter(Boolean).join(' ')),
   );
   if (!verticalTokens.size) return 0;
-  const caseTokens = new Set(
-    tokenize([target.industry ?? '', target.client_type ?? '', target.task ?? ''].join(' ')),
-  );
+  const fieldTokens: Array<[number, Set<string>]> = [
+    [FIELD_WEIGHTS.industry, new Set(tokenize(target.industry ?? ''))],
+    [FIELD_WEIGHTS.client_type, new Set(tokenize(target.client_type ?? ''))],
+    [FIELD_WEIGHTS.task, new Set(tokenize(target.task ?? ''))],
+  ];
   let score = 0;
   for (const token of verticalTokens) {
-    if (caseTokens.has(token)) score++;
+    for (const [weight, tokens] of fieldTokens) {
+      if (tokens.has(token)) score += weight;
+    }
   }
   return score;
 }
 
 /**
- * Лучший кейс проекта под вертикаль: max score, минимум 1; при равенстве —
- * самый ранний по created_at (запрос отсортирован по возрастанию). null, если
- * релевантных кейсов нет (в промпты тогда ничего не инжектится — fallback на
- * кейсы из брифа, см. промпты chain/template).
+ * Лучший кейс проекта под вертикаль: max взвешенный скор, минимум
+ * MIN_CASE_SCORE. Tie-break при равном скоре: source='upload' (ручная
+ * загрузка важнее извлечения с сайта), затем самый ранний created_at —
+ * запрос отсортирован по возрастанию, поэтому при равенстве скора и
+ * источника первый встреченный и есть самый ранний. null, если релевантных
+ * кейсов нет (в промпты тогда ничего не инжектится — fallback на кейсы из
+ * брифа, см. промпты chain/template).
  */
 export async function selectCaseForVertical(
   supabase: SupabaseClient,
@@ -174,12 +212,14 @@ export async function selectCaseForVertical(
   let bestScore = 0;
   for (const row of (data ?? []) as HeCase[]) {
     const score = scoreCaseForVertical(row, vertical);
-    if (score > bestScore) {
+    const uploadWinsTie =
+      best !== null && score === bestScore && row.source === 'upload' && best.source !== 'upload';
+    if (score > bestScore || uploadWinsTie) {
       best = row;
       bestScore = score;
     }
   }
-  return bestScore >= 1 ? best : null;
+  return best !== null && bestScore >= MIN_CASE_SCORE ? best : null;
 }
 
 /* ─────────────────── Рендер блока для промптов ─────────────────── */

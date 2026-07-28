@@ -125,7 +125,13 @@ export function Step3Content(props: {
     }
     return found;
   }, [dossiers, vertical.id]);
-  const dossierJob = useMemo(() => latestStageJob(jobs, 'dossier'), [jobs]);
+  // Джоба досье привязана к вертикали через payload.vertical_id: без фильтра
+  // чужая dossier-джоба показывала бы busy/error на карточке этой вертикали.
+  // Джобы без payload (старые строки) вертикали не соответствуют.
+  const dossierJob = useMemo(
+    () => latestStageJob(jobs.filter((j) => j.payload?.vertical_id === vertical.id), 'dossier'),
+    [jobs, vertical.id],
+  );
   // Дедупликация: кнопка выключена, пока джоба досье pending/running (или строка ещё draft).
   const dossierBusy = jobActive(dossierJob) || dossier?.status === 'draft';
   const dossierFailed = !dossierBusy && (dossierJob?.status === 'failed' || dossier?.status === 'failed');
@@ -480,6 +486,7 @@ function DossierDatasetCard({ data }: { data: HeDossierData }) {
         {ds.campaigns.toLocaleString('ru-RU')} кампаний · {ds.sent.toLocaleString('ru-RU')} отправлено ·{' '}
         {ds.replies.toLocaleString('ru-RU')} ответов
       </p>
+      {ds.note ? <p className="mt-1 text-[11px] text-gray-400">{ds.note}</p> : null}
       {ds.matched_segments.length > 0 ? (
         <div className="mt-2 flex flex-wrap gap-1">
           {ds.matched_segments.map((seg) => (

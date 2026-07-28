@@ -25,11 +25,15 @@ export type HeBaseSummary = Pick<
   'id' | 'vertical_id' | 'filename' | 'row_count' | 'status' | 'analysis' | 'created_at'
 >;
 
-/** Усечённая строка джобы (без payload/result/tokens). */
+/** Усечённая строка джобы (без result/tokens). */
 export type HeJobSummary = Pick<
   HeJob,
   'id' | 'stage' | 'status' | 'error' | 'attempts' | 'started_at'
-> & { finished_at: string | null };
+> & {
+  finished_at: string | null;
+  /** Вход стадии: фильтрация джоб по вертикали (payload.vertical_id). */
+  payload?: { vertical_id?: string } | null;
+};
 
 /* ── Досье вертикали ── */
 
@@ -90,7 +94,8 @@ export interface HeCaseEntry {
   industry: string | null;
   client_type: string | null;
   task: string | null;
-  metrics: string | null;
+  /** Структурированные метрики результата (he_cases.metrics — jsonb). */
+  metrics: Record<string, unknown> | null;
   result: string | null;
   created_at: string;
 }

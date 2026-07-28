@@ -11,12 +11,17 @@ import { datasetQuery, isDatasetConfigured } from '@/lib/instantlyDataset';
  *    logistics_transport, medical_pharma, it_software_saas, ...). Матчим термины
  *    вертикали по этой колонке, а не по имени кампании (regex по имени течёт,
  *    см. комментарий в 010_campaign_segment.sql);
- *  - raw_campaign_analytics_overview_snap (последний снапшот через v_latest_snapshot)
- *    — lifetime-агрегаты Instantly per campaign. Тот же семейный источник, что и
- *    baseline open 58.2% / reply 1.03% из docs/research/instantly-email-patterns.md,
+ *  - raw_campaign_analytics_overview_snap — lifetime-агрегаты Instantly per
+ *    campaign. Берём per-campaign DISTINCT ON по всем ok-снапшотам (каноника
+ *    012_canonical_metrics.sql): ночные снапшоты partial (только кампании,
+ *    активные этой ночью), полный refresh — по воскресеньям, поэтому пин
+ *    к v_latest_snapshot занижал sent/replies в 10–100 раз и занулял reply_pct
+ *    у data-rich вертикалей. Тот же семейный источник, что и baseline
+ *    open 58.2% / reply 1.03% из docs/research/instantly-email-patterns.md,
  *    поэтому reply_pct сегмента сравним с baseline_pct. raw_emails (3.66M строк)
  *    сознательно НЕ сканируем — есть предагрегаты;
- *  - raw_campaign_steps × raw_campaign_step_analytics_snap — темы/паттерны шагов.
+ *  - raw_campaign_steps × raw_campaign_step_analytics_snap — темы/паттерны шагов
+ *    (та же DISTINCT ON-дедупликация, по (campaign_id, step_n, variant_n)).
  *    Пулинг внутри сегмента — эвристика для калибровки, НЕ доказательство A/B
  *    (within-campaign честность — отдельная mv_subject_ab_within_campaign).
  *
@@ -56,39 +61,64 @@ export interface HeWinnerPattern {
 /* ─────────────────────────── SQL ─────────────────────────── */
 
 /**
- * Агрегат по совпавшим сегментам: lifetime sent/replies из последнего
- * overview-снапшота. Кампании без строки в последнем снапшоте дают 0 отправок,
+ * Per-campaign «последнее известное состояние»: DISTINCT ON по кампании поверх
+ * всех ok-снапшотов (каноника 012_canonical_metrics.sql). Ночные снапшоты
+ * partial, поэтому суммировать надо по этой дедуп-выборке, а не по одному
+ * «последнему» снапшоту — иначе sent/replies занижаются в 10–100 раз.
+ */
+const SQL_LATEST_OVERVIEW = `
+WITH latest AS (
+  SELECT DISTINCT ON (o.campaign_id)
+         o.campaign_id, o.emails_sent_count, o.reply_count
+  FROM raw_campaign_analytics_overview_snap o
+  JOIN dataset_snapshots ds ON ds.id = o.snapshot_id AND ds.ok
+  ORDER BY o.campaign_id, ds.started_at DESC
+)`;
+
+/**
+ * Агрегат по совпавшим сегментам: lifetime sent/replies из per-campaign latest.
+ * Кампании сегмента без ни одной ok-строки в overview-снапшотах дают 0 отправок,
  * но считаются в campaigns (LEFT JOIN).
  */
-const SQL_SEGMENT_AGG = `
+const SQL_SEGMENT_AGG = `${SQL_LATEST_OVERVIEW}
 SELECT s.segment,
        count(*)::int AS campaigns,
-       COALESCE(sum(o.emails_sent_count), 0)::bigint AS sent,
-       COALESCE(sum(o.reply_count), 0)::bigint AS replies
+       COALESCE(sum(l.emails_sent_count), 0)::bigint AS sent,
+       COALESCE(sum(l.reply_count), 0)::bigint AS replies
 FROM dim_campaign_segment s
-LEFT JOIN raw_campaign_analytics_overview_snap o
-       ON o.campaign_id = s.campaign_id
-      AND o.snapshot_id = (SELECT id FROM v_latest_snapshot)
+LEFT JOIN latest l ON l.campaign_id = s.campaign_id
 WHERE s.segment ~* $1
 GROUP BY s.segment
 ORDER BY sent DESC`;
 
-/** Dataset-wide baseline: все кампании последнего снапшота (как baseline 1.03% в research-доке). */
-const SQL_BASELINE = `
-SELECT COALESCE(sum(o.emails_sent_count), 0)::bigint AS sent,
-       COALESCE(sum(o.reply_count), 0)::bigint AS replies
-FROM raw_campaign_analytics_overview_snap o
-WHERE o.snapshot_id = (SELECT id FROM v_latest_snapshot)`;
+/** Dataset-wide baseline: сумма per-campaign latest по всему датасету (baseline 1.03% из research-дока). */
+const SQL_BASELINE = `${SQL_LATEST_OVERVIEW}
+SELECT COALESCE(sum(l.emails_sent_count), 0)::bigint AS sent,
+       COALESCE(sum(l.reply_count), 0)::bigint AS replies
+FROM latest l`;
+
+/**
+ * Step-level «последнее известное состояние»: одна строка на (кампания, шаг,
+ * вариант) — самая свежая из ok-снапшотов. Агрегаты тем/паттернов считаем
+ * только из этой дедуп-выборки.
+ */
+const SQL_LATEST_STEP = `
+WITH latest_step AS (
+  SELECT DISTINCT ON (a.campaign_id, a.step_n, a.variant_n)
+         a.campaign_id, a.step_n, a.variant_n, a.sent, a.unique_replies
+  FROM raw_campaign_step_analytics_snap a
+  JOIN dataset_snapshots ds ON ds.id = a.snapshot_id AND ds.ok
+  ORDER BY a.campaign_id, a.step_n, a.variant_n, ds.started_at DESC
+)`;
 
 /** Топ-темы сегмента: пулинг по нормализованной теме, гейт по объёму, сортировка по reply rate. */
-const SQL_TOP_SUBJECTS = `
+const SQL_TOP_SUBJECTS = `${SQL_LATEST_STEP}
 SELECT min(btrim(st.subject)) AS subject
 FROM raw_campaign_steps st
-JOIN raw_campaign_step_analytics_snap a
+JOIN latest_step a
      ON a.campaign_id = st.campaign_id
     AND a.step_n = st.step_n
     AND a.variant_n = st.variant_n
-    AND a.snapshot_id = (SELECT id FROM v_latest_snapshot)
 WHERE st.campaign_id IN (SELECT campaign_id FROM dim_campaign_segment WHERE segment ~* $1)
   AND st.subject IS NOT NULL
   AND btrim(st.subject) <> ''
@@ -102,7 +132,7 @@ LIMIT ${TOP_SUBJECTS_LIMIT}`;
  * Winner-паттерны: тема шага, а если темы нет — первые 120 символов тела
  * (body-паттерн). $1 = null снимает сегментный фильтр (весь датасет).
  */
-const SQL_WINNER_PATTERNS = `
+const SQL_WINNER_PATTERNS = `${SQL_LATEST_STEP}
 SELECT t.pattern,
        sum(t.sent)::bigint AS sent,
        sum(t.replies)::bigint AS replies
@@ -111,11 +141,10 @@ FROM (
          COALESCE(a.sent, 0) AS sent,
          COALESCE(a.unique_replies, 0) AS replies
   FROM raw_campaign_steps st
-  JOIN raw_campaign_step_analytics_snap a
+  JOIN latest_step a
        ON a.campaign_id = st.campaign_id
       AND a.step_n = st.step_n
       AND a.variant_n = st.variant_n
-      AND a.snapshot_id = (SELECT id FROM v_latest_snapshot)
   WHERE ($1::text IS NULL OR st.campaign_id IN (SELECT campaign_id FROM dim_campaign_segment WHERE segment ~* $1))
 ) t
 WHERE t.pattern IS NOT NULL
@@ -192,6 +221,76 @@ function errMsg(e: unknown): string {
   return (e instanceof Error ? e.message : String(e)).slice(0, 120);
 }
 
+/* ─────────────── маппинг вертикаль → метки сегментов ─────────────── */
+
+/**
+ * Метки dim_campaign_segment — 14 английских макро-сегментов (авторазметка
+ * кампаний). Наши вертикали названы по-русски и точнее, поэтому прямой
+ * текстовый матч почти всегда пуст. Словарь ниже маппит RU/EN ключи
+ * вертикали на эти метки; если сработал — матчим по меткам, иначе
+ * откатываемся на свободный текстовый матч по терминам вертикали.
+ *
+ * Маркеры в ключах (см. keywordHit):
+ *  '=слово' — полная граница слова независимо от длины: '=салон' ловит
+ *    «салон красоты», но НЕ «автосалоны»; '=персонал' не ловит «персональные»;
+ *  '^стем'  — префикс-стем, граница только слева: '^фарм' ловит «фармацевтика»,
+ *    '^агро' — «агропромышленный», '^банки' — «банки/банкиры/банкинг»;
+ *  без маркера — ≤4 символов полная граница ('hr' не срабатывает на «охрана»),
+ *    >4 — подстрока ('логистик' ловит «логистика/логистический»).
+ */
+const SEGMENT_LABEL_KEYWORDS: Record<string, string[]> = {
+  it_software_saas: ['software', 'saas', 'разработк', 'вендор', 'интегратор', 'программн', 'ит-', 'it-'],
+  logistics_transport: ['логистик', 'склад', 'вэд', 'экспедиц', 'транспорт', 'грузоперевоз', 'фулфилмент', 'logistics', '3pl'],
+  education_hr: ['кадров', 'рекрут', 'аутстафф', 'обучен', '=персонал', 'hr', 'подбор персонала'],
+  manufacturing_industrial: ['производств', 'промышленн', 'завод', 'оборудован', 'станк', 'manufactur', 'индустри'],
+  construction_realestate: ['строительств', 'стройк', 'девелоп', 'недвижим', 'смр', 'realestate', 'construction'],
+  retail_ecommerce: ['ритейл', 'ecommerce', 'e-com', 'маркетплейс', 'селлер', 'торговл', 'розниц', 'retail'],
+  food_horeca: ['horeca', 'fmcg', 'ресторан', 'пищев', 'продукты питания'],
+  medical_pharma: ['медицин', '^фарм', 'клиник', 'медтех', 'medical', 'pharma'],
+  marketing_media_events: ['маркетинг', 'реклам', '=медиа', 'ивент', 'mice', 'digital'],
+  finance_legal: ['финанс', 'бухгалтер', 'юридичес', 'лизинг', 'факторинг', 'страхов', 'банк', '^банки', '^банков', 'финтех', 'fintech', 'legal', 'm&a'],
+  beauty_wellness: ['beauty', '=салон', 'велнес', 'wellness', 'спа', 'косметолог'],
+  auto: ['автобизнес', 'автодилер', 'спецтехник', 'дилер', 'auto'],
+  agriculture: ['^агро', 'сельхоз', 'фермер', 'agricultur'],
+  other_unclear: [],
+};
+
+/**
+ * Матч одного ключа (маркеры '='/'^' описаны над словарём). Короткие ключи
+ * без маркера (≤4 символов) матчатся только по полной границе слова.
+ */
+function keywordHit(haystack: string, rawKeyword: string): boolean {
+  let keyword = rawKeyword;
+  let mode: 'auto' | 'word' | 'stem' = 'auto';
+  if (keyword.startsWith('=')) {
+    mode = 'word';
+    keyword = keyword.slice(1);
+  } else if (keyword.startsWith('^')) {
+    mode = 'stem';
+    keyword = keyword.slice(1);
+  }
+  if (!keyword) return false;
+  if (mode === 'stem') {
+    const re = new RegExp(`(^|[^a-zа-яё0-9])${escapeRegex(keyword)}`, 'i');
+    return re.test(haystack);
+  }
+  if (mode === 'word' || keyword.length <= 4) {
+    const re = new RegExp(`(^|[^a-zа-яё0-9])${escapeRegex(keyword)}([^a-zа-яё0-9]|$)`, 'i');
+    return re.test(haystack);
+  }
+  return haystack.includes(keyword);
+}
+
+/** Метки датасета, соответствующие терминам вертикали (может быть несколько). */
+export function matchSegmentLabels(terms: string[]): string[] {
+  const haystack = terms.join(' ').toLowerCase();
+  const labels: string[] = [];
+  for (const [label, keywords] of Object.entries(SEGMENT_LABEL_KEYWORDS)) {
+    if (keywords.some((k) => keywordHit(haystack, k))) labels.push(label);
+  }
+  return labels;
+}
+
 /* ─────────────────────────── API ─────────────────────────── */
 
 export async function getSegmentStats(verticalName: string, synonyms: string[]): Promise<HeDatasetStats> {
@@ -212,13 +311,17 @@ export async function getSegmentStats(verticalName: string, synonyms: string[]):
   if (!terms.length) {
     return { ...stats, note: 'не заданы термины вертикали для матчинга сегментов датасета' };
   }
-  const segRe = boundaryRegex(terms);
+  // Сначала пробуем маппинг на 14 макро-меток датасета (вертикали у нас
+  // русские и точнее меток); если словарь молчит — свободный текстовый матч.
+  const mappedLabels = matchSegmentLabels(terms);
+  const segRe = boundaryRegex(mappedLabels.length ? mappedLabels : terms);
 
   // Сегменты и baseline независимы — считаем параллельно, падаем по отдельности.
-  let segErr = 'unknown error';
+  // pg-ошибки могут содержать host:port и внутренние детали подключения — наружу
+  // отдаём generic-note, сырой текст ошибки только в серверный лог.
   const [segRows, baseRows] = await Promise.all([
     datasetQuery<SegmentAggRow>(SQL_SEGMENT_AGG, [segRe]).catch((e) => {
-      segErr = errMsg(e);
+      console.error('[datasetStats] segment query failed:', errMsg(e));
       return null;
     }),
     datasetQuery<TotalRow>(SQL_BASELINE).catch(() => null),
@@ -228,7 +331,7 @@ export async function getSegmentStats(verticalName: string, synonyms: string[]):
     stats.baseline_pct = gatedPct(num(baseRows[0].replies), num(baseRows[0].sent));
   }
   if (segRows === null) {
-    return { ...stats, note: `датасет недоступен: ${segErr}` };
+    return { ...stats, note: 'датасет временно недоступен' };
   }
   if (baseRows === null) {
     stats.note = 'baseline не посчитался (запрос к датасету упал)';

@@ -6,7 +6,8 @@
  *    счётчик, что подставляет объёмы в гипотезы «Нашей базы компаний»
  *    (searchCount → companies_directory_count_rpc), фильтр по ОКВЭД-2;
  *  - hh_vacancies_total / hh_vacancies_sample — открытые вакансии hh.ru
- *    по названию вертикали и топовой целевой должности (публичный API);
+ *    по названию вертикали и топовой целевой должности (через боевой путь
+ *    hh-парсера: прокси-пул + HH_ACCESS_TOKEN, fetchWithRetry);
  *  - signals — детерминированные болевые сигналы по выборке вакансий.
  *
  * Все внешние вызовы fail-safe: ошибка/таймаут → null, исключений наружу нет.
@@ -17,6 +18,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 import { reduceToTopCodes } from '@/lib/companiesSearch/okved2';
 import { searchCount } from '@/lib/companiesSearch/rpcSearch';
+import { fetchWithRetry } from '@/lib/parsers/hhParser';
 import {
   getAllowedCompanyBaseIndustryCategories,
   type CompanyBaseIndustryCategory,
@@ -174,39 +176,52 @@ async function countSegmentCompanies(
 const HH_API_URL = 'https://api.hh.ru/vacancies';
 const HH_TIMEOUT_MS = 10_000;
 const HH_SAMPLE_LIMIT = 10;
-const HH_USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
 interface HhVacanciesPage {
   found: number;
   names: string[];
 }
 
-/** Один запрос к публичному API hh.ru. Никогда не бросает: ошибка → null. */
+/**
+ * Один запрос к api.hh.ru. Продакшен-путь — fetchWithRetry из hhParser:
+ * тот же прокси-пул, OAuth-токен (HH_ACCESS_TOKEN) и UA, что у боевого
+ * HH-парсера (прямой доступ к api.hh.ru с ДЦ-IP hh сейчас режет 403).
+ * deps.fetchImpl — только для тестов (прямой fetch). Никогда не бросает.
+ */
 async function fetchHhVacancies(
   query: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: typeof fetch,
 ): Promise<HhVacanciesPage | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), HH_TIMEOUT_MS);
+  const url = `${HH_API_URL}?text=${encodeURIComponent(query)}&per_page=${HH_SAMPLE_LIMIT}`;
   try {
-    const url = `${HH_API_URL}?text=${encodeURIComponent(query)}&per_page=${HH_SAMPLE_LIMIT}`;
-    const res = await fetchImpl(url, {
-      headers: { 'User-Agent': HH_USER_AGENT, Accept: 'application/json' },
-      signal: controller.signal,
+    if (fetchImpl) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), HH_TIMEOUT_MS);
+      try {
+        const res = await fetchImpl(url, { signal: controller.signal });
+        if (!res.ok) return null;
+        const json = (await res.json()) as { found?: unknown; items?: Array<{ name?: unknown }> };
+        return parseHhPage(json);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    const json = await fetchWithRetry<{ found?: unknown; items?: Array<{ name?: unknown }> }>(url, {
+      maxRetries: 2,
+      timeoutMs: HH_TIMEOUT_MS,
     });
-    if (!res.ok) return null;
-    const json = (await res.json()) as { found?: unknown; items?: Array<{ name?: unknown }> };
-    if (typeof json.found !== 'number' || !Number.isFinite(json.found)) return null;
-    const names = (Array.isArray(json.items) ? json.items : [])
-      .map((item) => (typeof item?.name === 'string' ? item.name.trim() : ''))
-      .filter(Boolean);
-    return { found: json.found, names };
+    return parseHhPage(json);
   } catch {
     return null;
-  } finally {
-    clearTimeout(timer);
   }
+}
+
+function parseHhPage(json: { found?: unknown; items?: Array<{ name?: unknown }> }): HhVacanciesPage | null {
+  if (typeof json.found !== 'number' || !Number.isFinite(json.found)) return null;
+  const names = (Array.isArray(json.items) ? json.items : [])
+    .map((item) => (typeof item?.name === 'string' ? item.name.trim() : ''))
+    .filter(Boolean);
+  return { found: json.found, names };
 }
 
 /* ────────────────────────── Сигналы ────────────────────────── */

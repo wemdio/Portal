@@ -227,6 +227,12 @@ export interface HeCompanyType {
 
 export interface HeJobTitle {
   title: string;
+  /**
+   * Сторона аудитории (vocab-схема пишет всегда; в старых записях поля нет):
+   * buyer — ЛПР компаний вертикали (кому агентство продаёт);
+   * campaign_target — цели будущих кампаний клиентов вертикали.
+   */
+  audience_side?: 'buyer' | 'campaign_target';
   seniority?: string;
   function?: string;
   geo?: string;

@@ -36,6 +36,16 @@ const ROLE_TITLES_CAP = 5;
 /** Гипотез вертикали в контекст интерпретации (топ по potential_pct). */
 const TOP_HYPOTHESES = 2;
 
+/**
+ * Структурный guard: audience_side есть только в новых строках вокабуляра
+ * (schemas.ts: 'buyer' | 'campaign_target'); в легаси-строках поля нет.
+ * types.ts намеренно не расширяем — поле опционально и живёт только в jsonb.
+ */
+function audienceSideOf(t: HeJobTitle): string | undefined {
+  const raw = (t as HeJobTitle & { audience_side?: unknown }).audience_side;
+  return typeof raw === 'string' ? raw : undefined;
+}
+
 /* ─────────────────────── LLM-интерпретация ─────────────────────── */
 
 /**
@@ -61,7 +71,8 @@ function buildDossierMessages(input: {
   synonyms: string[];
   counters: HeDossierCounters;
   datasetStats: HeDatasetStats;
-  topHypotheses: Array<{ title: string; potential_pct: number }>;
+  /** Только заголовки — potential_pct в контекст не инжектим (анти-галлюцинации). */
+  topHypotheses: string[];
 }): LLMMessage[] {
   const system = [
     'Ты — аналитик B2B-аутрича. По объективным счётчикам сегмента и статистике датасета',
@@ -124,7 +135,16 @@ export async function runDossierStage(job: HeJob, ctx: HeStageContext): Promise<
   if (vocabError) {
     stageLog(ctx, `[dossier] he_vocab read: ${vocabError.message} — продолжаем без должностей`);
   } else if (Array.isArray(vocabRow?.job_titles)) {
-    roleTitles = (vocabRow.job_titles as HeJobTitle[])
+    // Для hh-счётчиков релевантнее роли покупателя: buyer-first, строки без
+    // audience_side (легаси) — следом, прочие аудитории в конец; кап 5.
+    const titles = vocabRow.job_titles as HeJobTitle[];
+    const audienceRank = (t: HeJobTitle): number => {
+      const side = audienceSideOf(t);
+      return side === 'buyer' ? 0 : side === undefined ? 1 : 2;
+    };
+    roleTitles = titles
+      .slice()
+      .sort((a, b) => audienceRank(a) - audienceRank(b))
       .map((t) => t.title)
       .filter(Boolean)
       .slice(0, ROLE_TITLES_CAP);
@@ -132,7 +152,9 @@ export async function runDossierStage(job: HeJob, ctx: HeStageContext): Promise<
 
   const synonyms = Array.isArray(vertical.synonyms) ? vertical.synonyms : [];
 
-  // Топ-2 гипотезы вертикали — только title/pct, контекст для интерпретации.
+  // Топ-2 гипотезы вертикали (порядок по potential_pct). В LLM-контекст уходят
+  // ТОЛЬКО заголовки: pct не инжектим, чтобы модель не цитировала его в обход
+  // правила «только числа из counters/dataset_stats».
   const { data: hypRows, error: hError } = await ctx.supabase
     .from('he_hypotheses')
     .select('title, potential_pct')
@@ -141,7 +163,9 @@ export async function runDossierStage(job: HeJob, ctx: HeStageContext): Promise<
     .order('potential_pct', { ascending: false })
     .limit(TOP_HYPOTHESES);
   if (hError) throw new Error(`he_hypotheses read: ${hError.message}`);
-  const topHypotheses = (hypRows ?? []) as Array<{ title: string; potential_pct: number }>;
+  const topHypotheses = (hypRows ?? [])
+    .map((row) => (row as { title?: unknown }).title)
+    .filter((t): t is string => typeof t === 'string' && t.length > 0);
 
   // Источник 1: счётчики dossierData (директория + hh.ru + сигналы).
   let counters: HeDossierCounters | null = null;
@@ -172,32 +196,9 @@ export async function runDossierStage(job: HeJob, ctx: HeStageContext): Promise<
     stageLog(ctx, `[dossier] getSegmentStats упал: ${datasetStatsError}`);
   }
 
-  // Оба источника недоступны — досье failed с заметкой, job падает.
-  if (!counters && !datasetStats) {
-    const note =
-      `Оба источника досье недоступны: counters — ${countersError ?? 'нет данных'}; ` +
-      `dataset_stats — ${datasetStatsError ?? 'нет данных'}`;
-    const { error: upError } = await ctx.supabase
-      .from('he_vertical_dossiers')
-      .upsert(
-        {
-          vertical_id: verticalId,
-          project_id: job.project_id,
-          status: 'failed',
-          data: { error: note, computed_at: new Date().toISOString() },
-          error: note,
-          llm_model: null,
-          tokens_used: 0,
-          cost_usd: 0,
-        },
-        { onConflict: 'vertical_id' },
-      );
-    if (upError) stageLog(ctx, `[dossier] he_vertical_dossiers upsert (failed): ${upError.message}`);
-    throw new Error(note);
-  }
-
   // Null-объекты вместо null: форма data всегда совпадает с HeDossierData,
-  // причина деградации фиксируется в note/companies_note.
+  // причина деградации фиксируется в note/companies_note. Строим ДО ветки
+  // both-failed — failed-строка пишет тот же полный null-shape.
   const countersSafe: HeDossierCounters = counters ?? {
     companies_total: null,
     companies_note: `Счётчики недоступны: ${countersError ?? 'ошибка'}`,
@@ -215,6 +216,38 @@ export async function runDossierStage(job: HeJob, ctx: HeStageContext): Promise<
     top_subjects: [],
     note: `Статистика датасета недоступна: ${datasetStatsError ?? 'ошибка'}`,
   };
+
+  // Оба источника недоступны — досье failed с заметкой, job падает. data
+  // пишем полным null-объектом (interpretation: null), чтобы форма строки
+  // не зависела от статуса.
+  if (!counters && !datasetStats) {
+    const note =
+      `Оба источника досье недоступны: counters — ${countersError ?? 'нет данных'}; ` +
+      `dataset_stats — ${datasetStatsError ?? 'нет данных'}`;
+    const { error: upError } = await ctx.supabase
+      .from('he_vertical_dossiers')
+      .upsert(
+        {
+          vertical_id: verticalId,
+          project_id: job.project_id,
+          status: 'failed',
+          data: {
+            counters: countersSafe,
+            dataset_stats: datasetStatsSafe,
+            interpretation: null,
+            error: note,
+            computed_at: new Date().toISOString(),
+          },
+          error: note,
+          llm_model: null,
+          tokens_used: 0,
+          cost_usd: 0,
+        },
+        { onConflict: 'vertical_id' },
+      );
+    if (upError) stageLog(ctx, `[dossier] he_vertical_dossiers upsert (failed): ${upError.message}`);
+    throw new Error(note);
+  }
 
   const model = getHeModel('bulk');
   const llm = await callLLMWithSchema(
