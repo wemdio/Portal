@@ -12,13 +12,25 @@
  * per-lead присутствует только как операторы {{var}}, замапленные на колонки
  * базы. Варианты хранятся ОТДЕЛЬНО от основного текста: основной текст письма
  * — дефолт для всей базы, вариант идёт только лидам сегмента.
+ *
+ * Проход 2 (критик/рерайт финальных писем) — template-фасад над общими
+ * билдерами chain: buildTemplateCriticMessages / buildTemplateRewriteMessages.
+ * Опциональные инжекты (styleExample / winnerPatterns) принимают все
+ * сборщики этого файла — см. HePromptInjections в ./chain.
  */
 
 import type { LLMMessage } from '../llm';
 import type { HeBaseAnalysisOutput, HeTemplatePlanOutput } from '../schemas';
 import type { HeChainLanguage, HeChainLetter } from '../types';
 import { renderClientCaseBlock, type HeCaseDraft } from '../caseBank';
-import { CHAIN_REGULATIONS } from './chain';
+import {
+  CHAIN_REGULATIONS,
+  buildChainCriticMessages,
+  buildChainRewriteMessages,
+  renderStyleExampleBlock,
+  renderWinnerPatternsBlock,
+  type HePromptInjections,
+} from './chain';
 
 /* ─────────────────────── Шаг 1: план 85/15 ─────────────────────── */
 
@@ -46,7 +58,7 @@ ${CHAIN_REGULATIONS}
 - В теме письма используй только операторы, у которых есть реальная колонка базы: fallback в теме невозможен.
 - Отвечай строго на русском, ТОЛЬКО JSON.`;
 
-export interface TemplatePlanPromptInput {
+export interface TemplatePlanPromptInput extends HePromptInjections {
   verticalName: string;
   verticalSummary: string;
   /** Исходная цепочка вертикали (уже с wait_days). */
@@ -81,10 +93,12 @@ ${input.hypotheses.map((h) => `- ${h.tier != null ? `[tier ${h.tier}] ` : ''}${h
 `
     : '';
   const clientCaseBlock = input.clientCase ? `${renderClientCaseBlock(input.clientCase)}\n\n` : '';
+  const styleBlock = renderStyleExampleBlock(input.styleExample);
+  const winnersBlock = renderWinnerPatternsBlock(input.winnerPatterns);
   const user = `ВЕРТИКАЛЬ: ${input.verticalName}
 ${input.verticalSummary}
 
-${hypothesesBlock}${clientCaseBlock}ИСХОДНАЯ ЦЕПОЧКА ВЕРТИКАЛИ (базовый костяк):
+${hypothesesBlock}${clientCaseBlock}${styleBlock}${winnersBlock}ИСХОДНАЯ ЦЕПОЧКА ВЕРТИКАЛИ (базовый костяк):
 ${renderChainLetters(input.chainLetters)}
 
 АНАЛИЗ ЗАГРУЖЕННОЙ БАЗЫ:
@@ -191,7 +205,7 @@ Temat: <temat maila 2>
 ...i tak dalej do ostatniego maila. Blok „---SEGMENT: ...---” dodawaj TYLKO jeśli plan przewiduje wariant segmentowy dla tego maila, zaraz po odpowiednim mailu (jeden blok na wariant). Żadnych wyjaśnień przed/po blokach. Znaczników „---LETTER N---”, „---SEGMENT: ...---” i słowa "Temat:" nie zmieniaj. Pisz po polsku.`,
 };
 
-export interface TemplateLettersPromptInput {
+export interface TemplateLettersPromptInput extends HePromptInjections {
   language: HeChainLanguage;
   plan: HeTemplatePlanOutput;
   verticalName: string;
@@ -229,7 +243,7 @@ FIXED BLOCK (~85%, обязательный костяк):
 ${input.plan.fixed_block}
 """
 ${input.clientCase ? `\n${renderClientCaseBlock(input.clientCase)}\n` : ''}
-СЕГМЕНТНЫЕ ВАРИАНТЫ (~15%, условные — для каждого отдельный блок ---SEGMENT: <when>--- после письма; в основной текст НЕ включать):
+${renderStyleExampleBlock(input.styleExample)}${renderWinnerPatternsBlock(input.winnerPatterns)}СЕГМЕНТНЫЕ ВАРИАНТЫ (~15%, условные — для каждого отдельный блок ---SEGMENT: <when>--- после письма; в основной текст НЕ включать):
 ${variants || '(нет)'}${legacyAdditions ? `\nДополнительные углы из плана (тоже только в сегментные варианты, не в основной текст):\n${legacyAdditions}` : ''}
 
 ОПЕРАТОРЫ ПЕРСОНАЛИЗАЦИИ (вставлять как есть, формат {{var}}):
@@ -248,4 +262,58 @@ ${renderChainLetters(input.chainLetters)}
     { role: 'assistant', content: 'План и регламент в контексте. Пишу финальные письма строго по плану.' },
     { role: 'user', content: LETTERS_TASK[lang] },
   ];
+}
+
+/* ─────────────── Проход 2: критик и рерайт финальных писем ─────────────── */
+
+/**
+ * Финальные письма шаблона — та же цепочка {subject, body}, поэтому проход 2
+ * переиспользует общие билдеры chain (скептичный ЛПР вертикали + рерайт
+ * только отмеченных писем, маркеры ---LETTER N--- для letterParser). Типы
+ * продублированы с template-неймингом, чтобы стадия template не тянула
+ * chain-терминологию.
+ */
+
+/** Одна реальная проблема письма (letter_index — 1-based номер в цепочке). */
+export interface HeTemplateCriticIssue {
+  letter_index: number;
+  problem: string;
+  fix: string;
+}
+
+/** Вердикт критика по финальным письмам: одна строка + список проблем. */
+export interface HeTemplateCritique {
+  verdict: string;
+  issues: HeTemplateCriticIssue[];
+}
+
+/**
+ * Сообщения критик-прохода для финальных писем шаблона.
+ * Ответ — JSON HeTemplateCritique (вызов через callLLMWithSchema).
+ */
+export function buildTemplateCriticMessages(input: {
+  verticalName: string;
+  verticalSummary?: string | null;
+  letters: Array<{ subject: string; body: string }>;
+  language: 'ru' | 'en' | 'pl';
+  styleExample?: string | null;
+  winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
+}): LLMMessage[] {
+  return buildChainCriticMessages(input);
+}
+
+/**
+ * Сообщения рерайт-прохода для финальных писем шаблона: переписываются
+ * только письма из issues критики, остальные возвращаются дословно; вывод —
+ * маркерами ---LETTER N--- (парсит letterParser).
+ */
+export function buildTemplateRewriteMessages(input: {
+  verticalName: string;
+  letters: Array<{ subject: string; body: string }>;
+  critique: HeTemplateCritique;
+  language: 'ru' | 'en' | 'pl';
+  styleExample?: string | null;
+  winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
+}): LLMMessage[] {
+  return buildChainRewriteMessages(input);
 }

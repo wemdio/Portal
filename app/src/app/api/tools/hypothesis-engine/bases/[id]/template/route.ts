@@ -84,6 +84,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 }
 
 // GET — последний шаблон по базе (404, если генерации ещё не было).
+// Дополнительно отдаёт sample_rows базы (первые 5, серверный кап — для
+// клиентского превью писем по лидам) и columns; data базы не отдаём.
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.template.get' },
@@ -105,7 +107,25 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
       const template = (data ?? [])[0];
       if (!template) return jsonError('Шаблон ещё не сгенерирован', 404);
-      return NextResponse.json({ template });
+
+      // Строки базы для превью — лёгкие (sample_rows ≤ 30 в БД, отдаём ≤ 5);
+      // ошибка чтения базы не должна ронять выдачу шаблона.
+      let columns: string[] = [];
+      let sampleRows: Array<Record<string, unknown>> = [];
+      const { data: baseRow } = await supabaseAdmin
+        .from('he_bases')
+        .select('columns, sample_rows')
+        .eq('id', id)
+        .single();
+      const base = baseRow as { columns?: unknown; sample_rows?: unknown } | null;
+      if (Array.isArray(base?.columns)) {
+        columns = base.columns.filter((c): c is string => typeof c === 'string');
+      }
+      if (Array.isArray(base?.sample_rows)) {
+        sampleRows = (base.sample_rows as Array<Record<string, unknown>>).slice(0, 5);
+      }
+
+      return NextResponse.json({ template, columns, sample_rows: sampleRows });
     },
   );
 }

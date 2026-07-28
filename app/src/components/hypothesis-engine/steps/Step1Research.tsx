@@ -2,7 +2,7 @@
 
 /**
  * Шаг 1 мастера «Движка вертикалей» — «Исследование».
- * Три состояния: пустое (объяснение + запуск + оффер), прогресс по стадиям
+ * Три состояния: пустое (объяснение + запуск + оффер + эталон стиля), прогресс по стадиям
  * research-пайплайна человеческими формулировками (без технических деталей)
  * и компактное «готово». Навигация между шагами — забота оболочки (ProjectDetail).
  * Питается от массива jobs проекта: состояние стадии = статус её последней джобы.
@@ -15,12 +15,14 @@ import { Badge, Spinner, StatusBox } from '../ui';
 import {
   HE_API,
   heDelete,
+  hePatch,
   hePost,
   type HeCaseCreateResponse,
   type HeCaseDeleteResponse,
   type HeCaseEntry,
   type HeJobSummary,
   type HeProjectDetailResponse,
+  type HeProjectResponse,
 } from '../api';
 
 /** line — строка в чек-листе прогресса; name — короткое имя для сообщения об ошибке. */
@@ -50,6 +52,10 @@ export interface Step1ResearchProps {
   onStartResearch: () => void;
   offerValue: string;
   onSaveOffer: (v: string) => Promise<void> | void;
+  /** Эталон стиля (brief.style_override). Если не передан — читаем из project.brief. */
+  styleValue?: string;
+  /** Колбэк после сохранения эталона стиля — обычно тихая перезагрузка деталей. */
+  onStyleSaved?: () => void;
   /** Банк кейсов клиента (сайт + ручные загрузки). */
   cases?: HeCaseEntry[];
   /** Колбэк после добавления/удаления кейса — обычно тихая перезагрузка деталей. */
@@ -63,10 +69,16 @@ export function Step1Research({
   onStartResearch,
   offerValue,
   onSaveOffer,
+  styleValue,
+  onStyleSaved,
   cases,
   onCasesChanged,
 }: Step1ResearchProps): JSX.Element {
   const status = project?.status;
+  // Эталон стиля: приоритет у пропа, иначе — напрямую из brief проекта
+  // (ProjectDetail может не передавать styleValue).
+  const briefStyle = project?.brief?.style_override;
+  const resolvedStyleValue = styleValue ?? (typeof briefStyle === 'string' ? briefStyle : '');
   const researchJobs = jobs.filter((j) => RESEARCH_STAGE_SET.has(j.stage));
   const hasActiveResearch = researchJobs.some((j) => j.status === 'pending' || j.status === 'running');
   const failedStages = RESEARCH_STAGES.filter(({ stage }) => latestJobOf(jobs, stage)?.status === 'failed');
@@ -146,6 +158,8 @@ export function Step1Research({
       onStartResearch={onStartResearch}
       offerValue={offerValue}
       onSaveOffer={onSaveOffer}
+      styleValue={resolvedStyleValue}
+      onStyleSaved={onStyleSaved}
       projectId={project?.id ?? null}
       cases={cases ?? []}
       onCasesChanged={onCasesChanged}
@@ -160,6 +174,8 @@ function NotStarted({
   onStartResearch,
   offerValue,
   onSaveOffer,
+  styleValue,
+  onStyleSaved,
   projectId,
   cases,
   onCasesChanged,
@@ -168,6 +184,8 @@ function NotStarted({
   onStartResearch: () => void;
   offerValue: string;
   onSaveOffer: (v: string) => Promise<void> | void;
+  styleValue: string;
+  onStyleSaved?: () => void;
   projectId: string | null;
   cases: HeCaseEntry[];
   onCasesChanged?: () => void;
@@ -192,6 +210,7 @@ function NotStarted({
         Запустить исследование
       </button>
       <OfferBlock offerValue={offerValue} onSaveOffer={onSaveOffer} />
+      <StyleBlock projectId={projectId} styleValue={styleValue} onSaved={onStyleSaved} />
       <CasesBlock projectId={projectId} cases={cases} onCasesChanged={onCasesChanged} />
     </section>
   );
@@ -255,6 +274,81 @@ function OfferBlock({
         </button>
         {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
       </div>
+    </div>
+  );
+}
+
+/** Эталон стиля: 1–2 «идеальных» письма, чью манеру имитирует генерация. Сохраняет сам через PATCH. */
+function StyleBlock({
+  projectId,
+  styleValue,
+  onSaved,
+}: {
+  projectId: string | null;
+  styleValue: string;
+  onSaved?: () => void;
+}) {
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleSave = async () => {
+    if (saving || !projectId) return;
+    setSaving(true);
+    setError('');
+    try {
+      const { ok, data } = await hePatch<HeProjectResponse>(`${HE_API}/projects/${projectId}`, {
+        style_override: taRef.current?.value ?? '',
+      });
+      if (!ok) {
+        setError(data.error || 'Не удалось сохранить эталон стиля');
+        return;
+      }
+      setSaved(true);
+      setDirty(false);
+      window.setTimeout(() => setSaved(false), 2000);
+      onSaved?.();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50/50 p-4 text-left">
+      <label htmlFor="he-step1-style" className="text-xs font-semibold uppercase tracking-widest text-gray-400">
+        Эталон стиля (необязательно)
+      </label>
+      <p className="mt-1 text-xs leading-relaxed text-gray-400">
+        Вставьте 1–2 письма, которые считаете идеальными. Движок будет писать в этой манере — факты и имена не
+        копирует.
+      </p>
+      <textarea
+        id="he-step1-style"
+        ref={taRef}
+        rows={4}
+        defaultValue={styleValue}
+        onChange={() => {
+          setDirty(true);
+          setSaved(false);
+        }}
+        placeholder="Пример письма, которое нравится…"
+        className="mt-2 w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+      />
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void handleSave()}
+          disabled={saving || !dirty}
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
+          Сохранить
+        </button>
+        {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
+      </div>
+      {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
     </div>
   );
 }
