@@ -19,19 +19,32 @@ const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const MAX_CONCURRENCY = Number(process.env.WORKER_YANDEXMAPS_CONCURRENCY ?? '4');
 const WORKER_ID = `yandexmaps-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
-const running = new Set<Promise<void>>();
+// Map jobId → Promise: держим jobId, чтобы при graceful shutdown (SIGTERM
+// от docker compose --force-recreate) успеть пометить свои running-задачи
+// как pending до exit. Без этого задача остаётся в running, updated_at
+// стареет, watchdog добивает её как зомби вместо восстановления новым
+// процессом.
+const runningJobs = new Map<string, Promise<void>>();
 
 const ZOMBIE_THRESHOLD_MINUTES = 15;
 const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
+// Окно «свежих» running при startupRecovery: раньше было 5 мин, но реальные
+// production-деплои через scheduled-deploy занимают 3-10 мин (образ pull +
+// force-recreate + healthcheck warmup). Задачи с updated_at 5-15 мин назад
+// оставались в running между shutdown и startup → в дыру попадали, watchdog
+// потом добивал вместо восстановления. 30 мин с запасом покрывает любой
+// нормальный деплой; всё старше — реально зомби (см. cutoffZombie ниже).
+const RECOVERY_FRESH_WINDOW_MINUTES = Number(process.env.YANDEXMAPS_RECOVERY_FRESH_WINDOW_MINUTES ?? '30');
 
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
-  // Только СВЕЖИЕ running (updated_at < 5 мин назад) сбрасываем в pending —
-  // это задачи, которые прервались вместе с воркером и могут продолжиться.
-  // Всё старше 5 мин — реальные зомби (см. watchdog ниже): их сразу failed,
-  // чтобы не крутиться повторно, если они действительно упали в бесконечный
-  // retry или из-за неотвечающей БД.
-  const cutoffFresh = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  // СВЕЖИЕ running (updated_at < RECOVERY_FRESH_WINDOW_MINUTES назад) →
+  // pending. У нас всегда только один worker-yandexmaps на весь prod (нет
+  // horizontal scale), значит на момент startup любая running-задача точно
+  // осиротела от предыдущего процесса. Прошлое поведение (окно 5 мин)
+  // не покрывало деплои >5 мин — задачи Глеба слетали в failed через
+  // watchdog вместо продолжения.
+  const cutoffFresh = new Date(Date.now() - RECOVERY_FRESH_WINDOW_MINUTES * 60 * 1000).toISOString();
   const { data: fresh, error: freshErr } = await db
     .from('yandex_maps_jobs')
     .update({ status: 'pending' })
@@ -39,7 +52,7 @@ async function startupRecovery(): Promise<void> {
     .gte('updated_at', cutoffFresh)
     .select('id');
   if (freshErr) log('warn', 'Startup recovery: fresh running -> pending failed', freshErr);
-  else if (fresh?.length) log('info', `Startup recovery: ${fresh.length} свежих running сброшены в pending`);
+  else if (fresh?.length) log('info', `Startup recovery: ${fresh.length} свежих running сброшены в pending (окно ${RECOVERY_FRESH_WINDOW_MINUTES} мин)`);
 
   const cutoffZombie = new Date(Date.now() - ZOMBIE_THRESHOLD_MINUTES * 60 * 1000).toISOString();
   const { data: zombies, error: zombieErr } = await db
@@ -126,7 +139,7 @@ async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'p
 }
 
 async function pollOnce(): Promise<boolean> {
-  if (running.size >= MAX_CONCURRENCY) {
+  if (runningJobs.size >= MAX_CONCURRENCY) {
     await sleep(500);
     return true;
   }
@@ -141,8 +154,8 @@ async function pollOnce(): Promise<boolean> {
       await runYandexMapsParseOrganizations(job.id);
     }
   })();
-  running.add(task);
-  void task.finally(() => running.delete(task));
+  runningJobs.set(job.id, task);
+  void task.finally(() => runningJobs.delete(job.id));
   return true;
 }
 
@@ -166,6 +179,24 @@ async function main(): Promise<void> {
   } finally {
     clearInterval(watchdog);
     clearInterval(heartbeat);
+    // Graceful requeue: помечаем свои running-задачи как pending, чтобы
+    // следующий процесс (после docker restart / --force-recreate) сразу их
+    // подхватил через startupRecovery без ожидания 15-мин watchdog'а и без
+    // риска зафейлиться. Держим общий тайм-аут 5с — если БД не отвечает,
+    // всё равно выходим (deploy не должен блокироваться).
+    if (runningJobs.size > 0) {
+      const jobIds = Array.from(runningJobs.keys());
+      log('info', `Graceful requeue: ${jobIds.length} running задач → pending (${jobIds.join(', ')})`);
+      try {
+        const db = requireSupabaseAdmin(log);
+        await Promise.race([
+          db.from('yandex_maps_jobs').update({ status: 'pending' }).in('id', jobIds).eq('status', 'running'),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+      } catch (e) {
+        log('warn', 'Graceful requeue failed', e);
+      }
+    }
   }
 }
 
