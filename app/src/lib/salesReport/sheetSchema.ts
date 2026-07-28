@@ -83,31 +83,76 @@ export type SheetSchema = {
   totalsBlock: MetricRow[];        // ИТОГО ПО ОТДЕЛУ
 };
 
-function parseSheetDate(v: unknown): Date | null {
+/**
+ * Разбирает имя листа «Июль 2026» и возвращает {year: 2026, month: 6}.
+ * Нужно, чтобы правильно распарсить даты вида «01.07» (без года) в шапке —
+ * год берётся из имени листа, а не гадаем.
+ */
+function parseSheetNameForContext(
+  sheetName: string,
+): { year: number; monthIndex: number } | null {
+  const RU = [
+    'январь', 'февраль', 'март', 'апрель', 'май', 'июнь',
+    'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь',
+  ];
+  const m = sheetName.trim().match(/^(\S+)\s+(\d{4})$/);
+  if (!m) return null;
+  const lower = m[1].toLocaleLowerCase('ru-RU');
+  const monthIndex = RU.findIndex((name) => name.startsWith(lower) || lower.startsWith(name));
+  if (monthIndex < 0) return null;
+  return { year: Number(m[2]), monthIndex };
+}
+
+/**
+ * Парсит значение даты из шапки листа. Поддерживает:
+ *  - Excel serial number (число дней с 1899-12-30) — если Google API вернул число;
+ *  - строку «DD.MM.YYYY» — полный русский формат;
+ *  - строку «DD.MM» (без года) — год берётся из ctx.year (обычно из имени листа);
+ *  - ISO «YYYY-MM-DD» — на случай кастомного формата ячейки.
+ *
+ * Нативный `new Date(s)` намеренно НЕ используется как fallback: он слишком
+ * либеральный и на короткие строки типа «01», «07» возвращает даты годов
+ * 2001-2007 — из-за этого первый прогон salesReportCron посчитал июль
+ * как несуществующие окна и записал 90 нулей.
+ */
+function parseSheetDate(
+  v: unknown,
+  ctx?: { year: number },
+): Date | null {
   if (v == null || v === '') return null;
   if (v instanceof Date) return v;
-  // Excel serial number (days since 1899-12-30 — Excel-совместимая эпоха).
-  // Google Sheets возвращает даты в этом формате при valueRenderOption=UNFORMATTED_VALUE
-  // либо dateTimeRenderOption=SERIAL_NUMBER.
   if (typeof v === 'number' && Number.isFinite(v) && v > 25000 && v < 100000) {
     const EPOCH_MS = Date.UTC(1899, 11, 30);
     return new Date(EPOCH_MS + Math.round(v) * 86_400_000);
   }
   if (typeof v === 'string') {
     const s = v.trim();
-    // Русский формат DD.MM.YYYY (native JavaScript Date такое не распарсит).
-    const ruMatch = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(s);
-    if (ruMatch) {
-      const day = Number(ruMatch[1]);
-      const month = Number(ruMatch[2]);
-      const year = Number(ruMatch[3]);
+    const ruFull = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(s);
+    if (ruFull) {
+      const day = Number(ruFull[1]);
+      const month = Number(ruFull[2]);
+      const year = Number(ruFull[3]);
       if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
         return new Date(Date.UTC(year, month - 1, day));
       }
     }
-    // ISO / другой формат, native parser
-    const parsed = new Date(s);
-    if (!Number.isNaN(parsed.getTime())) return parsed;
+    const ruShort = /^(\d{1,2})\.(\d{1,2})$/.exec(s);
+    if (ruShort && ctx) {
+      const day = Number(ruShort[1]);
+      const month = Number(ruShort[2]);
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        return new Date(Date.UTC(ctx.year, month - 1, day));
+      }
+    }
+    const iso = /^(\d{4})-(\d{2})-(\d{2})(?:[T\s]|$)/.exec(s);
+    if (iso) {
+      const year = Number(iso[1]);
+      const month = Number(iso[2]);
+      const day = Number(iso[3]);
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        return new Date(Date.UTC(year, month - 1, day));
+      }
+    }
   }
   return null;
 }
@@ -150,6 +195,11 @@ export async function loadSheetSchema(
   }
   const r1 = rows[0] ?? [];
   const r2 = rows[1] ?? [];
+  // Год берём из имени листа («Июль 2026» → 2026), нужен для парсинга дат
+  // в шапке вида «01.07» без указания года. Если имя листа нестандартное —
+  // fallback на текущий год (лучше чем 2001 из new Date("01.07")).
+  const nameCtx = parseSheetNameForContext(sheetName);
+  const parseCtx = { year: nameCtx?.year ?? new Date().getUTCFullYear() };
 
   // 1. Находим блоки: индекс колонки, содержащей 'МЕСЯЦ' или '[ N ] НЕДЕЛЯ'.
   type Block = { label: string; startCol: number };
@@ -184,7 +234,7 @@ export async function loadSheetSchema(
     // Собираем даты для этого блока (в r1, между заголовком блока и следующим).
     const dates: Date[] = [];
     for (let c = block.startCol; c < nextStart; c++) {
-      const d = parseSheetDate(r1[c - 1]);
+      const d = parseSheetDate(r1[c - 1], parseCtx);
       if (d) dates.push(d);
     }
 
@@ -199,7 +249,7 @@ export async function loadSheetSchema(
       // МЕСЯЦ: собираем даты из ВСЕХ остальных блоков (недельных).
       const allDates: Date[] = [];
       for (let c = 0; c < r1.length; c++) {
-        const d = parseSheetDate(r1[c]);
+        const d = parseSheetDate(r1[c], parseCtx);
         if (d) allDates.push(d);
       }
       if (allDates.length === 0) {
