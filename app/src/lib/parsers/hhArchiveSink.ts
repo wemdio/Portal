@@ -105,7 +105,7 @@ export function buildHhArchiveSinkCallback(
  * нет client_user_id в контексте (пайплайн общий для агентства, не per-client).
  * Кэшируется в модульной scope: email OutreachOS сервисного юзера не меняется.
  */
-let cachedUserIds: Map<string, string> = new Map();
+const cachedUserIds: Map<string, string> = new Map();
 
 export async function getUserIdByEmail(email: string): Promise<string | null> {
   const cached = cachedUserIds.get(email);
