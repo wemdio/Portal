@@ -35,6 +35,7 @@ export const CHAIN_REGULATIONS = `# Регламент аутрич-писем (
 - Одно письмо — одна мысль; каждое следующее — новый угол, а не «напоминаю о себе».
 - Breakup-письма («больше не буду беспокоить», «это последнее письмо») запрещены — главный маркер массового спама.
 - Названия компаний и клиентов — ТОЛЬКО из предоставленных материалов. Выдуманное имя недопустимо: если подходящего кейса во входных данных нет, пиши безымянно («провайдер массового подбора», «ритейлер из топ-10»).
+- Одно и то же название клиента/кейса — максимум в одном письме цепочки; повтор в следующих письмах — маркер шаблона.
 - Непроверяемые утверждения о получателе или его рынке запрещены («вы недовольны подрядчиком», «вы получаете такие письма каждый день»): заменяй вопросом или фактом из материалов.
 - Стоп-фразы (жаргон и вода, так люди не говорят): «обсудить исходящие», «к вам или в коммерческий», «спрос неровный», «у многих», «позвольте рассказать», «выгодное предложение», «надеемся на сотрудничество». Пиши так, как живой человек пишет коллеге.`;
 
@@ -371,7 +372,9 @@ ${CHAIN_REGULATIONS}
 - Рекламный тон или клише: «лидер», «лучший», «эффективный», «поток заявок», «гарантируем», «выгодно», «бесплатно», «команда профессионалов», «индивидуальный подход» и подобные; письмо читается как лендинг, а не как сообщение от человека человеку.
 - Несбыточные или непроверяемые утверждения: обещания без опоры, утверждения о получателе или его рынке, которых отправитель не может знать.
 - Логические уязвимости — всё, до чего скептик может доебаться: триггер не стыкуется с оффером, довод не следует из факта, CTA не связан с текстом письма, внутренние противоречия.
-- Нарушения регламента выше: тело > 50 слов (письмо 1 > 45 — посчитай слова честно), нет {{var}} в теме, не ровно один {{var}} в теле, два и более CTA/вопросительных знаков, цифры в теме или теле, timeline-обещания, breakup-фразы, просьба о звонке/встрече, fallback-подстановка не в именительном падеже.
+- Нарушения регламента выше: тело > 50 слов (письмо 1 > 45 — посчитай слова честно), нет {{var}} в теме, не ровно один {{var}} в теле, не ровно один CTA (в том числе ноль), цифры в теме или теле, timeline-обещания, breakup-фразы, просьба о звонке/встрече, fallback-подстановка не в именительном падеже.
+- В письме 1 CTA не гибридный (нет реферальной ветки).
+- Грамматика и чистота языка: согласование падежей и родов, нестандартное управление (пример: „держится работой" вместо „держится на работе"), оборванные или незаконченные фразы.
 - Тест 5 секунд не пройден: после беглого чтения письма 1 нельзя мгновенно ответить — кто это, что предлагают, как это поможет мне.
 
 КАЛИБРОВКА — НЕ ПРИДИРАЙСЯ:
@@ -457,7 +460,7 @@ const REWRITE_ACK: Record<HeChainLanguage, string> = {
 };
 
 const REWRITE_TASK: Record<HeChainLanguage, string> = {
-  ru: `Перепиши цепочку по критике выше: закрой каждый issue, не отмеченные письма верни дословно. Верни цепочку ЦЕЛИКОМ — все письма по порядку, и переписанные, и нетронутые.
+  ru: `Перепиши цепочку по критике выше: закрой каждый issue, не отмеченные письма верни дословно. Верни цепочку ЦЕЛИКОМ — все письма по порядку, и переписанные, и нетронутые. Сегментные варианты писем не трогаем — они восстанавливаются отдельно, их не выводи.
 
 ФОРМАТ ВЫВОДА (ОБЯЗАТЕЛЕН — иначе ответ не пройдёт парсинг):
 ---LETTER 1---
@@ -471,7 +474,7 @@ const REWRITE_TASK: Record<HeChainLanguage, string> = {
 <тело письма 2>
 
 ...и так далее до последнего письма. Никаких пояснений до/после блоков. Маркеры «---LETTER N---» и слово «Тема:» не меняй. Пиши на русском.`,
-  en: `Rewrite the sequence per the critique above: close every issue, return unflagged emails verbatim. Return the WHOLE sequence — all emails in order, rewritten and untouched alike.
+  en: `Rewrite the sequence per the critique above: close every issue, return unflagged emails verbatim. Return the WHOLE sequence — all emails in order, rewritten and untouched alike. Leave segment variants alone — they are restored separately; do not output them.
 
 OUTPUT FORMAT (MANDATORY — otherwise the response will fail parsing):
 ---LETTER 1---
@@ -485,7 +488,7 @@ Subject: <subject of email 2>
 <body of email 2>
 
 ...and so on through the last email. No explanations before/after the blocks. Keep the "---LETTER N---" markers and the word "Subject:" exactly as shown. Write in English.`,
-  pl: `Przepisz sekwencję według krytyki powyżej: zamknij każdy issue, nieoflagowane maile zwróć dosłownie. Zwróć CAŁĄ sekwencję — wszystkie maile po kolei, i przepisane, i nietknięte.
+  pl: `Przepisz sekwencję według krytyki powyżej: zamknij każdy issue, nieoflagowane maile zwróć dosłownie. Zwróć CAŁĄ sekwencję — wszystkie maile po kolei, i przepisane, i nietknięte. Wariantów segmentowych nie ruszamy — są odtwarzane osobno, nie wypisuj ich.
 
 FORMAT ODPOWIEDZI (OBOWIĄZKOWY — inaczej odpowiedź nie przejdzie parsowania):
 ---LETTER 1---

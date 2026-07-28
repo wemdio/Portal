@@ -1,6 +1,7 @@
 /** @jest-environment node */
 
 import {
+  OPERATOR_RE,
   renderTemplatePreview,
   tokenizePreviewText,
 } from '@/lib/hypothesisEngine/renderPreview';
@@ -8,6 +9,8 @@ import type { HeOperatorMapping } from '@/lib/hypothesisEngine/types';
 
 const MAPPING: HeOperatorMapping[] = [
   { operator: 'firstName', column: 'Имя', matched: true },
+  // Fallback у matched-маппинга — проверка, что ветка «matched+empty→fallback»
+  // удалена: боевой пайплайн fallback сюда не ставит, превью его игнорирует.
   { operator: 'companyName', column: 'Компания', matched: true, fallback: 'ваша компания' },
   { operator: 'city', column: null, matched: false },
 ];
@@ -47,9 +50,10 @@ describe('renderTemplatePreview — подстановка', () => {
     expect(lead.subject).toBe('Анна, идея для ООО Ромашка');
     expect(lead.body).toBe('Здравствуйте, Анна! Видели ООО Ромашка в {{city}}. С уважением, Анна.');
     expect(lead.wait_days).toBe(0);
+    expect(lead.emptyVars).toEqual([]);
   });
 
-  it('unmatched-оператор остаётся как есть и записывается в unresolved (один раз)', () => {
+  it('unmatched без fallback остаётся как есть и записывается в unresolved (один раз)', () => {
     const result = renderTemplatePreview({
       letters: LETTERS,
       operatorMapping: MAPPING,
@@ -57,6 +61,30 @@ describe('renderTemplatePreview — подстановка', () => {
       columns: [],
     });
     expect(result.rows[0].letters[0].unresolved).toEqual(['city']);
+    expect(result.rows[0].letters[0].emptyVars).toEqual([]);
+  });
+
+  it('unmatched с fallback → подставляется fallback (токен kind=fallback), без unresolved', () => {
+    const mapping: HeOperatorMapping[] = [
+      { operator: 'city', column: null, matched: false, fallback: 'в вашем городе' },
+    ];
+    const result = renderTemplatePreview({
+      letters: [{ subject: 'Тема', body: 'Пишем компаниям {{city}}.', wait_days: 0 }],
+      operatorMapping: mapping,
+      rows: [{}],
+      columns: [],
+    });
+    const lead = result.rows[0].letters[0];
+    expect(lead.body).toBe('Пишем компаниям в вашем городе.');
+    expect(lead.unresolved).toEqual([]);
+    expect(lead.emptyVars).toEqual([]);
+
+    const { tokens } = tokenizePreviewText('Пишем компаниям {{city}}.', mapping, {});
+    expect(tokens).toEqual([
+      { text: 'Пишем компаниям ', kind: 'text' },
+      { text: 'в вашем городе', kind: 'fallback', operator: 'city' },
+      { text: '.', kind: 'text' },
+    ]);
   });
 
   it('оператор вне маппинга → как есть + unresolved', () => {
@@ -69,9 +97,10 @@ describe('renderTemplatePreview — подстановка', () => {
     const lead = result.rows[0].letters[0];
     expect(lead.body).toBe('Привет, {{unknownVar}}!');
     expect(lead.unresolved).toEqual(['unknownVar']);
+    expect(lead.emptyVars).toEqual([]);
   });
 
-  it('пустая ячейка → fallback matched-маппинга, без unresolved', () => {
+  it('matched + пустая ячейка → пустая строка + emptyVars (fallback matched-маппинга игнорируется)', () => {
     const result = renderTemplatePreview({
       letters: LETTERS,
       operatorMapping: MAPPING,
@@ -79,12 +108,13 @@ describe('renderTemplatePreview — подстановка', () => {
       columns: ['Имя', 'Компания'],
     });
     const lead = result.rows[0].letters[0];
-    expect(lead.subject).toBe('Иван, идея для ваша компания');
-    expect(lead.body).not.toContain('{{companyName}}');
+    expect(lead.subject).toBe('Иван, идея для ');
+    expect(lead.body).toBe('Здравствуйте, Иван! Видели  в {{city}}. С уважением, Иван.');
     expect(lead.unresolved).toEqual(['city']);
+    expect(lead.emptyVars).toEqual(['companyName']);
   });
 
-  it('пустая ячейка без fallback → оператор остаётся + unresolved', () => {
+  it('matched + пустая ячейка без fallback → пустая строка, НЕ unresolved', () => {
     const mapping: HeOperatorMapping[] = [{ operator: 'firstName', column: 'Имя', matched: true }];
     const result = renderTemplatePreview({
       letters: [{ subject: '{{firstName}}', body: 'Привет, {{firstName}}!', wait_days: 0 }],
@@ -93,9 +123,23 @@ describe('renderTemplatePreview — подстановка', () => {
       columns: ['Имя'],
     });
     const lead = result.rows[0].letters[0];
-    expect(lead.subject).toBe('{{firstName}}');
-    expect(lead.body).toBe('Привет, {{firstName}}!');
-    expect(lead.unresolved).toEqual(['firstName']);
+    expect(lead.subject).toBe('');
+    expect(lead.body).toBe('Привет, !');
+    expect(lead.unresolved).toEqual([]);
+    expect(lead.emptyVars).toEqual(['firstName']);
+  });
+
+  it('emptyVars собирается из subject и body с регистронезависимым дедупом', () => {
+    const mapping: HeOperatorMapping[] = [{ operator: 'firstName', column: 'Имя', matched: true }];
+    const result = renderTemplatePreview({
+      letters: [{ subject: '{{firstName}}', body: '{{FirstName}} и {{FIRSTNAME}}', wait_days: 0 }],
+      operatorMapping: mapping,
+      rows: [{ 'Имя': ' ' }],
+      columns: ['Имя'],
+    });
+    const lead = result.rows[0].letters[0];
+    expect(lead.emptyVars).toEqual(['firstName']);
+    expect(lead.unresolved).toEqual([]);
   });
 
   it('unresolved собирается из subject и body с дедупликацией', () => {
@@ -106,6 +150,16 @@ describe('renderTemplatePreview — подстановка', () => {
       columns: [],
     });
     expect(result.rows[0].letters[0].unresolved).toEqual(['a', 'b', 'c']);
+  });
+
+  it('unresolved дедуплицируется регистронезависимо (сохраняется первое написание)', () => {
+    const result = renderTemplatePreview({
+      letters: [{ subject: '{{City}} и {{city}}', body: '{{CITY}} и {{other}}', wait_days: 0 }],
+      operatorMapping: [],
+      rows: [{}],
+      columns: [],
+    });
+    expect(result.rows[0].letters[0].unresolved).toEqual(['City', 'other']);
   });
 
   it('нестроковые значения ячеек строкифицируются', () => {
@@ -156,6 +210,58 @@ describe('renderTemplatePreview — rowLabel', () => {
     expect(result.rows[0].rowLabel).toBe('ООО Только Колонка');
   });
 
+  it('подпись берётся из matched-маппинга — русскоязычная колонка «Название компании»', () => {
+    const mapping: HeOperatorMapping[] = [
+      { operator: 'CompanyName', column: 'Название компании', matched: true },
+    ];
+    const result = renderTemplatePreview({
+      letters,
+      operatorMapping: mapping,
+      rows: [{ 'Название компании': 'ООО Реестр' }],
+      columns: ['Название компании'],
+    });
+    expect(result.rows[0].rowLabel).toBe('ООО Реестр');
+  });
+
+  it('маппинг (company) важнее LABEL_COLUMNS', () => {
+    const mapping: HeOperatorMapping[] = [
+      { operator: 'company', column: 'Org', matched: true },
+    ];
+    const result = renderTemplatePreview({
+      letters,
+      operatorMapping: mapping,
+      rows: [{ Org: 'АО Из Маппинга', company: 'Из Колонки' }],
+      columns: ['Org'],
+    });
+    expect(result.rows[0].rowLabel).toBe('АО Из Маппинга');
+  });
+
+  it('пустая ячейка в колонке из маппинга → фолбэк на LABEL_COLUMNS', () => {
+    const mapping: HeOperatorMapping[] = [
+      { operator: 'companyName', column: 'Название компании', matched: true },
+    ];
+    const result = renderTemplatePreview({
+      letters,
+      operatorMapping: mapping,
+      rows: [{ 'Название компании': '  ', 'Компания': 'ООО Фолбэк' }],
+      columns: ['Название компании', 'Компания'],
+    });
+    expect(result.rows[0].rowLabel).toBe('ООО Фолбэк');
+  });
+
+  it('unmatched-маппинг на companyName подпись не даёт', () => {
+    const mapping: HeOperatorMapping[] = [
+      { operator: 'companyName', column: null, matched: false, fallback: 'ваша компания' },
+    ];
+    const result = renderTemplatePreview({
+      letters,
+      operatorMapping: mapping,
+      rows: [{ 'Имя': 'Пётр' }],
+      columns: ['Имя'],
+    });
+    expect(result.rows[0].rowLabel).toBe('Лид 1');
+  });
+
   it('без колонок-кандидатов → «Лид N»', () => {
     const result = renderTemplatePreview({ letters, operatorMapping: [], rows: [{ 'Имя': 'Пётр' }, {}], columns: [] });
     expect(result.rows[0].rowLabel).toBe('Лид 1');
@@ -184,7 +290,7 @@ describe('renderTemplatePreview — maxRows', () => {
 
 describe('tokenizePreviewText — токены для UI-подсветки', () => {
   it('подставленные значения → kind=value, неразрешённые → kind=unresolved с маркером', () => {
-    const { tokens, unresolved } = tokenizePreviewText(
+    const { tokens, unresolved, emptyVars } = tokenizePreviewText(
       'Привет, {{firstName}} из {{city}}!',
       MAPPING,
       { 'Имя': 'Анна' },
@@ -197,9 +303,36 @@ describe('tokenizePreviewText — токены для UI-подсветки', ()
       { text: '!', kind: 'text' },
     ]);
     expect(unresolved).toEqual(['city']);
+    expect(emptyVars).toEqual([]);
+  });
+
+  it('matched + пустая ячейка → токен value с пустым текстом + emptyVars', () => {
+    const { tokens, unresolved, emptyVars } = tokenizePreviewText(
+      '{{firstName}}!',
+      [{ operator: 'firstName', column: 'Имя', matched: true }],
+      { 'Имя': '  ' },
+    );
+    expect(tokens).toEqual([
+      { text: '', kind: 'value', operator: 'firstName' },
+      { text: '!', kind: 'text' },
+    ]);
+    expect(unresolved).toEqual([]);
+    expect(emptyVars).toEqual(['firstName']);
+  });
+
+  it('unresolved внутри одного текста дедуплицируется регистронезависимо', () => {
+    const { unresolved } = tokenizePreviewText('{{City}} и {{city}} и {{CITY}}', [], {});
+    expect(unresolved).toEqual(['City']);
   });
 
   it('пустой текст → пустые токены', () => {
-    expect(tokenizePreviewText('', MAPPING, {})).toEqual({ tokens: [], unresolved: [] });
+    expect(tokenizePreviewText('', MAPPING, {})).toEqual({ tokens: [], unresolved: [], emptyVars: [] });
+  });
+
+  it('OPERATOR_RE — тот же строгий регексп, что и в боевой экстракции', () => {
+    expect(OPERATOR_RE.source).toBe('\\{\\{\\s*([A-Za-zА-Яа-яЁё0-9_.-]+)\\s*\\}\\}');
+    expect('{{ firstName }}'.match(OPERATOR_RE)).toEqual(['{{ firstName }}']);
+    // Пробел внутри имени — не оператор (старый UI-регексп [^{}]+ такое ловил).
+    expect('{{some thing}}'.match(OPERATOR_RE)).toBeNull();
   });
 });

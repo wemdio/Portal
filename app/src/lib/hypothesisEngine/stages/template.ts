@@ -531,11 +531,12 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   }
 
   // Шаг 2c: критик-луп — одна оценка финальных писем той же моделью, что и
-  // генерация (getHeModel('chain')), + максимум один rewrite по её замечаниям
-  // (парсинг — тем же buildLetters, сегментные варианты сохраняются). Без
-  // цикла; сбой критика, нечитаемый или урезанный rewrite → остаются исходные
+  // генерация (getHeModel('chain')), + максимум один rewrite по её замечаниям.
+  // Rewrite не содержит ---SEGMENT--- блоков: сегментные варианты после его
+  // принятия восстанавливаются из исходных писем по индексу. Без цикла; сбой
+  // критика, нечитаемый, урезанный или раздутый rewrite → остаются исходные
   // письма. Операторы (шаг 3) считаются уже по финальному тексту.
-  let critiqueInfo: { verdict: string; issues_count: number } | null = null;
+  let critiqueInfo: { verdict: string; issues_count: number; rewritten: boolean } | null = null;
   try {
     const criticLetters = letters.map((l) => ({ subject: l.subject ?? '', body: l.body }));
     const critique = await callLLMWithSchema(
@@ -544,28 +545,47 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         verticalSummary: vertical.summary ?? '',
         letters: criticLetters,
         language,
+        styleExample,
+        winnerPatterns,
       }),
       HeChainCritiqueSchema,
       { model, maxTokens: 2048 },
     );
     addUsage(usage, critique);
-    critiqueInfo = { verdict: critique.data.verdict, issues_count: critique.data.issues.length };
+    // letter_index вне 1..letters.length — галлюцинация критика: отбрасываем
+    // такие issue до решения о рерайте, чтобы не переписывать по фантомам.
+    const issues = critique.data.issues.filter(
+      (i) => i.letter_index >= 1 && i.letter_index <= letters.length,
+    );
+    critiqueInfo = { verdict: critique.data.verdict, issues_count: issues.length, rewritten: false };
 
-    if (critique.data.issues.length > 0) {
+    if (issues.length > 0) {
       const rewrite = await callLLMText(
         buildTemplateRewriteMessages({
           verticalName: vertical.name,
           letters: criticLetters,
-          critique: critique.data,
+          critique: { ...critique.data, issues },
           language,
+          styleExample,
+          winnerPatterns,
         }),
         { model, maxTokens: 6144 },
       );
       addUsage(usage, rewrite);
       const rebuilt = buildLetters(rewrite.text);
-      if (rebuilt.parsed.length >= letters.length) {
+      // Принимаем rewrite только при точном совпадении числа писем: иначе
+      // ломаются лесенка wait_days и индексация сегментных вариантов.
+      if (rebuilt.parsed.length === letters.length) {
         llm = rewrite;
-        ({ parsed, letters } = rebuilt);
+        parsed = rebuilt.parsed;
+        // Рерайт выводит только тему+тело (---SEGMENT--- блоков в нём нет):
+        // варианты восстанавливаем детерминированно из исходных писем.
+        const originalLetters = letters;
+        letters = rebuilt.letters.map((l, i) => {
+          const sv = originalLetters[i]?.segment_variants;
+          return sv?.length ? { ...l, segment_variants: sv } : l;
+        });
+        critiqueInfo.rewritten = true;
       } else {
         stageLog(ctx, `[template] rewrite критика: ${rebuilt.parsed.length} писем вместо ${letters.length} — оставляем исходные`);
       }

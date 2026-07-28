@@ -118,6 +118,10 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   const hypotheses = selection.list;
 
   const brief = (project.brief ?? {}) as Record<string, unknown>;
+  // style_override/offer_override попадают в промпт отдельными блоками
+  // (styleExample / offerOverride) — из JSON-снапшота брифа их вырезаем,
+  // чтобы не дублировать длинные тексты в материалах.
+  const { style_override: _s, offer_override: _o, ...briefRest } = brief;
 
   // Кейс-банк: лучший кейс клиента под вертикаль → главное доказательство
   // цепочки. Best-effort: сбой чтения he_cases не роняет генерацию.
@@ -161,7 +165,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       confirmed: h.status === 'accepted',
       evidence: (Array.isArray(h.evidence) ? h.evidence : []) as HeEvidenceItem[],
     })),
-    briefText: JSON.stringify(brief),
+    briefText: JSON.stringify(briefRest),
     offerOverride: typeof brief.offer_override === 'string' ? brief.offer_override : undefined,
     operatorsHint: typeof job.payload?.operators_hint === 'string' ? job.payload.operators_hint : undefined,
     clientCase,
@@ -193,9 +197,9 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
 
   // Критик-луп: одна оценка цепочки той же моделью, что и генерация
   // (getHeModel('chain')), + максимум один rewrite по её замечаниям. Без
-  // цикла. Сбой критика, а также нечитаемый или урезанный rewrite →
+  // цикла. Сбой критика, а также нечитаемый, урезанный или раздутый rewrite →
   // остаются исходные письма (стадию это не валит).
-  let critiqueInfo: { verdict: string; issues_count: number } | null = null;
+  let critiqueInfo: { verdict: string; issues_count: number; rewritten: boolean } | null = null;
   try {
     const criticLetters = letters.map((l) => ({ subject: l.subject ?? '', body: l.body }));
     const critique = await callLLMWithSchema(
@@ -204,27 +208,39 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
         verticalSummary: vertical.summary ?? '',
         letters: criticLetters,
         language,
+        styleExample,
+        winnerPatterns,
       }),
       HeChainCritiqueSchema,
       { model, maxTokens: 2048 },
     );
     addUsage(usage, critique);
-    critiqueInfo = { verdict: critique.data.verdict, issues_count: critique.data.issues.length };
+    // letter_index вне 1..letters.length — галлюцинация критика: отбрасываем
+    // такие issue до решения о рерайте, чтобы не переписывать по фантомам.
+    const issues = critique.data.issues.filter(
+      (i) => i.letter_index >= 1 && i.letter_index <= letters.length,
+    );
+    critiqueInfo = { verdict: critique.data.verdict, issues_count: issues.length, rewritten: false };
 
-    if (critique.data.issues.length > 0) {
+    if (issues.length > 0) {
       const rewrite = await callLLMText(
         buildChainRewriteMessages({
           verticalName: vertical.name,
           letters: criticLetters,
-          critique: critique.data,
+          critique: { ...critique.data, issues },
           language,
+          styleExample,
+          winnerPatterns,
         }),
         { model, maxTokens: 6144 },
       );
       addUsage(usage, rewrite);
       const rewritten = parseLettersFromModelOutput(rewrite.text);
-      if (rewritten.length >= letters.length) {
+      // Принимаем rewrite только при точном совпадении числа писем: иначе
+      // ломаются лесенка wait_days и индексация писем.
+      if (rewritten.length === letters.length) {
         letters = parsedToChainLetters(rewritten.slice(0, 6));
+        critiqueInfo.rewritten = true;
       } else {
         stageLog(ctx, `[chain] rewrite критика: ${rewritten.length} писем вместо ${letters.length} — оставляем исходные`);
       }

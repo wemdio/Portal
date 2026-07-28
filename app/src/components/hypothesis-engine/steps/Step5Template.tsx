@@ -54,9 +54,23 @@ interface HeTemplateGetResponse {
   error?: string;
 }
 
+/** Дедуп имён операторов по lowercase-ключу, сохраняет первое написание. */
+function dedupOperatorNames(names: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const name of names) {
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
+}
+
 /**
  * Подсветка превью: подставленные значения — янтарные (зеркально OperatorText,
- * где янтарным был сам {{operator}}), неразрешённые операторы — красные.
+ * где янтарным был сам {{operator}}), запасной текст unmatched-операторов —
+ * фиолетовый, неразрешённые операторы — красные.
  */
 function PreviewTokens({ tokens, className }: { tokens: HePreviewToken[]; className?: string }) {
   return (
@@ -64,6 +78,14 @@ function PreviewTokens({ tokens, className }: { tokens: HePreviewToken[]; classN
       {tokens.map((t, i) =>
         t.kind === 'value' ? (
           <mark key={i} className="rounded bg-amber-100 px-0.5 text-amber-800">
+            {t.text}
+          </mark>
+        ) : t.kind === 'fallback' ? (
+          <mark
+            key={i}
+            title="Запасной текст: колонки нет"
+            className="rounded bg-violet-100 px-0.5 text-violet-800"
+          >
             {t.text}
           </mark>
         ) : t.kind === 'unresolved' ? (
@@ -150,7 +172,8 @@ function TemplateLeadPreview({ template, baseId }: { template: HeTemplate; baseI
           <div className="space-y-3">
             {preview.rows.map((leadRow, leadIdx) => {
               const rawRow = sample.rows[leadIdx] ?? {};
-              const unresolved = [...new Set(leadRow.letters.flatMap((l) => l.unresolved))];
+              const unresolved = dedupOperatorNames(leadRow.letters.flatMap((l) => l.unresolved));
+              const emptyVars = dedupOperatorNames(leadRow.letters.flatMap((l) => l.emptyVars));
               return (
                 <div key={leadIdx} className="rounded-lg border border-gray-200 bg-white p-3">
                   <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-gray-700">
@@ -198,6 +221,12 @@ function TemplateLeadPreview({ template, baseId }: { template: HeTemplate; baseI
                   {unresolved.length > 0 ? (
                     <p className="mt-2 text-[11px] text-red-500">
                       Не подставлено: {unresolved.map((u) => `{{${u}}}`).join(', ')}
+                    </p>
+                  ) : null}
+                  {emptyVars.length > 0 ? (
+                    <p className="mt-1 text-[11px] text-gray-400">
+                      Пустые значения у этого лида: {emptyVars.map((u) => `{{${u}}}`).join(', ')} —
+                      в письме будет пустая строка
                     </p>
                   ) : null}
                 </div>

@@ -6,17 +6,28 @@
  * выбираются автоматически: их `when` — человекочитаемое условие, поэтому
  * превью всегда рендерит дефолтный body, а варианты показываются в UI отдельно.
  *
- * Правила подстановки:
+ * Правила подстановки (зеркалят рендер Instantly):
  *  - matched-маппинг: берём значение row[column] (строкифицированное, trimmed);
- *  - пустое/отсутствующее значение → fallback маппинга, если он задан;
- *  - иначе оператор остаётся как есть ({{var}}) и записывается в unresolved;
- *  - unmatched-операторы (и операторы вне маппинга) → как есть + unresolved.
+ *  - matched + пустая/отсутствующая ячейка → пустая строка: Instantly рендерит
+ *    существующую пустую переменную как '', никогда — как литерал {{var}}.
+ *    Такой оператор попадает в emptyVars (отдельно от unresolved). Ветки
+ *    «matched + пусто → fallback» здесь сознательно нет: боевой пайплайн не
+ *    проставляет fallback у matched-маппингов, и превью не должно показывать
+ *    подстановку, которой в Instantly не будет;
+ *  - unmatched-оператор с fallback → подставляется fallback (как обещает
+ *    таблица маппинга «Подставим: …»), токен kind='fallback';
+ *  - unmatched без fallback и операторы вне маппинга → как есть + unresolved.
  */
 
 import type { HeOperatorMapping } from './types';
 
-/** Тот же регексп операторов, что и в stages/template. */
-const OPERATOR_RE = /\{\{\s*([A-Za-zА-Яа-яЁё0-9_.-]+)\s*\}\}/g;
+/**
+ * Тот же регексп операторов, что и в stages/template (байт-в-байт).
+ * Экспортирован для UI-подсветки (OperatorText), чтобы подсветка совпадала
+ * с продакшн-экстракцией операторов. Флаг g: split/matchAll клонируют регексп,
+ * общий lastIndex не мутируется.
+ */
+export const OPERATOR_RE = /\{\{\s*([A-Za-zА-Яа-яЁё0-9_.-]+)\s*\}\}/g;
 
 /** Колонки-кандидаты для подписи лида (lowercase, в порядке приоритета). */
 const LABEL_COLUMNS = ['companyname', 'company', 'компания'];
@@ -27,6 +38,12 @@ export interface HePreviewLead {
   wait_days: number;
   /** Имена операторов (без скобок), которые не удалось подставить. */
   unresolved: string[];
+  /**
+   * Имена matched-операторов, подставленных пустой строкой (колонка есть,
+   * ячейка пуста). Отдельно от unresolved: это не ошибка маппинга, а пустые
+   * данные у лида.
+   */
+  emptyVars: string[];
 }
 
 export interface HePreviewResult {
@@ -35,12 +52,13 @@ export interface HePreviewResult {
 
 /**
  * Токен разметки превью для UI-подсветки: подставленные значения (value)
- * отдельно от неразрешённых операторов (unresolved, текст как в шаблоне).
+ * отдельно от неразрешённых операторов (unresolved, текст как в шаблоне)
+ * и запасного текста (fallback — unmatched-оператор с fallback из маппинга).
  */
 export interface HePreviewToken {
   text: string;
-  kind: 'text' | 'value' | 'unresolved';
-  /** Имя оператора (без скобок) для kind value/unresolved. */
+  kind: 'text' | 'value' | 'fallback' | 'unresolved';
+  /** Имя оператора (без скобок) для kind value/fallback/unresolved. */
   operator?: string;
 }
 
@@ -69,35 +87,51 @@ function indexMapping(
   return map;
 }
 
+type ResolvedOperator =
+  /** value с empty=true — matched-маппинг, но ячейка пуста (Instantly → ''). */
+  | { kind: 'value'; text: string; empty?: boolean }
+  /** fallback — unmatched-оператор, у которого в маппинге задан fallback. */
+  | { kind: 'fallback'; text: string }
+  | { kind: 'unresolved' };
+
 function resolveOperator(
   name: string,
   mapping: Map<string, HeOperatorMapping>,
   row: Record<string, unknown>,
-): { kind: 'value'; text: string } | { kind: 'unresolved' } {
+): ResolvedOperator {
   const m = mapping.get(name.toLowerCase());
   if (m && m.matched && m.column) {
     const value = stringifyCell(row[m.column]);
     if (value) return { kind: 'value', text: value };
+    // Колонка есть, ячейка пуста → Instantly подставит пустую строку, а не
+    // литерал {{var}}. Fallback matched-маппинга здесь НЕ применяется: боевой
+    // пайплайн (stages/template) не проставляет fallback у matched-маппингов,
+    // и превью не должно показывать подстановку, которой в рассылке не будет.
+    return { kind: 'value', text: '', empty: true };
+  }
+  if (m && !m.matched) {
     const fallback = (m.fallback ?? '').trim();
-    if (fallback) return { kind: 'value', text: fallback };
+    if (fallback) return { kind: 'fallback', text: fallback };
   }
   return { kind: 'unresolved' };
 }
 
 /**
  * Разбивает текст письма на токены с подстановкой операторов по строке базы.
- * Используется UI для подсветки; unresolved — имена неразрешённых операторов
- * (дедуплицированы регистронезависимо, в порядке появления).
+ * Используется UI для подсветки; unresolved/emptyVars — имена операторов
+ * (дедуплицированы регистронезависимо, в порядке появления, первое написание).
  */
 export function tokenizePreviewText(
   text: string,
   operatorMapping: HeOperatorMapping[],
   row: Record<string, unknown>,
-): { tokens: HePreviewToken[]; unresolved: string[] } {
+): { tokens: HePreviewToken[]; unresolved: string[]; emptyVars: string[] } {
   const mapping = indexMapping(operatorMapping);
   const tokens: HePreviewToken[] = [];
   const unresolved: string[] = [];
+  const emptyVars: string[] = [];
   const seenUnresolved = new Set<string>();
+  const seenEmpty = new Set<string>();
   let last = 0;
   for (const match of text.matchAll(OPERATOR_RE)) {
     const idx = match.index;
@@ -106,6 +140,15 @@ export function tokenizePreviewText(
     const resolved = resolveOperator(name, mapping, row);
     if (resolved.kind === 'value') {
       tokens.push({ text: resolved.text, kind: 'value', operator: name });
+      if (resolved.empty) {
+        const key = name.toLowerCase();
+        if (!seenEmpty.has(key)) {
+          seenEmpty.add(key);
+          emptyVars.push(name);
+        }
+      }
+    } else if (resolved.kind === 'fallback') {
+      tokens.push({ text: resolved.text, kind: 'fallback', operator: name });
     } else {
       tokens.push({ text: match[0], kind: 'unresolved', operator: name });
       const key = name.toLowerCase();
@@ -117,15 +160,27 @@ export function tokenizePreviewText(
     last = idx + match[0].length;
   }
   if (last < text.length) tokens.push({ text: text.slice(last), kind: 'text' });
-  return { tokens, unresolved };
+  return { tokens, unresolved, emptyVars };
 }
 
-/** Подпись лида: первая непустая из колонок companyName/company/компания, иначе «Лид N». */
+/**
+ * Подпись лида. Сначала маппинг: matched-оператор companyName/company указывает
+ * на реальную колонку базы — так работают и русскоязычные реестры
+ * («Название компании»). Затем — колонки-кандидаты LABEL_COLUMNS, в конце «Лид N».
+ */
 function previewRowLabel(
   row: Record<string, unknown>,
   columns: string[],
+  operatorMapping: HeOperatorMapping[],
   index: number,
 ): string {
+  for (const m of operatorMapping) {
+    if (!m.matched || !m.column) continue;
+    const op = m.operator.toLowerCase();
+    if (op !== 'companyname' && op !== 'company') continue;
+    const value = stringifyCell(row[m.column]);
+    if (value) return value;
+  }
   const keys = [...columns, ...Object.keys(row)];
   for (const candidate of LABEL_COLUMNS) {
     // Колонок, отличающихся только регистром («Компания»/«компания»), может быть
@@ -143,7 +198,8 @@ function flattenTokens(tokens: HePreviewToken[]): string {
   return tokens.map((t) => t.text).join('');
 }
 
-function mergeUnresolved(first: string[], second: string[]): string[] {
+/** Слияние списков операторов с регистронезависимым дедупом (первое написание). */
+function mergeOperatorNames(first: string[], second: string[]): string[] {
   const seen = new Set(first.map((n) => n.toLowerCase()));
   const out = [...first];
   for (const name of second) {
@@ -175,7 +231,7 @@ export function renderTemplatePreview(input: {
   const rows = input.rows.slice(0, maxRows);
   return {
     rows: rows.map((row, index) => ({
-      rowLabel: previewRowLabel(row, input.columns, index),
+      rowLabel: previewRowLabel(row, input.columns, input.operatorMapping, index),
       letters: input.letters.map((letter) => {
         const subject = tokenizePreviewText(letter.subject ?? '', input.operatorMapping, row);
         const body = tokenizePreviewText(letter.body ?? '', input.operatorMapping, row);
@@ -183,7 +239,8 @@ export function renderTemplatePreview(input: {
           subject: flattenTokens(subject.tokens),
           body: flattenTokens(body.tokens),
           wait_days: letter.wait_days ?? 0,
-          unresolved: mergeUnresolved(subject.unresolved, body.unresolved),
+          unresolved: mergeOperatorNames(subject.unresolved, body.unresolved),
+          emptyVars: mergeOperatorNames(subject.emptyVars, body.emptyVars),
         };
       }),
     })),

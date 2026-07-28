@@ -109,14 +109,20 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       if (!template) return jsonError('Шаблон ещё не сгенерирован', 404);
 
       // Строки базы для превью — лёгкие (sample_rows ≤ 30 в БД, отдаём ≤ 5);
-      // ошибка чтения базы не должна ронять выдачу шаблона.
+      // ошибка чтения базы не должна ронять выдачу шаблона, но не должна и
+      // деградировать молча — логируем.
       let columns: string[] = [];
       let sampleRows: Array<Record<string, unknown>> = [];
-      const { data: baseRow } = await supabaseAdmin
+      const { data: baseRow, error: baseErr } = await supabaseAdmin
         .from('he_bases')
         .select('columns, sample_rows')
         .eq('id', id)
         .single();
+      if (baseErr) {
+        await logError('tools.hypothesis-engine.template.get.base_read_failed', baseErr, {
+          baseId: id,
+        });
+      }
       const base = baseRow as { columns?: unknown; sample_rows?: unknown } | null;
       if (Array.isArray(base?.columns)) {
         columns = base.columns.filter((c): c is string => typeof c === 'string');
