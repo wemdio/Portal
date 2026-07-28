@@ -15,7 +15,12 @@ const statuses = [
 function lead(
   fields: Record<string, string>,
   statusId: number,
-  opts: { amount?: number; createdAt?: string; updatedAt?: string } = {},
+  opts: {
+    amount?: number;
+    createdAt?: string;
+    updatedAt?: string;
+    closedAt?: string | null;
+  } = {},
 ) {
   return {
     status_id: statusId,
@@ -23,6 +28,7 @@ function lead(
     amount: opts.amount ?? null,
     created_at: opts.createdAt ?? '2026-07-15T12:00:00.000Z',
     updated_at: opts.updatedAt ?? '2026-07-16T12:00:00.000Z',
+    closed_at: opts.closedAt === undefined ? '2026-07-16T12:00:00.000Z' : opts.closedAt,
     raw: {
       custom_fields_values: Object.entries(fields).map(([field_name, value]) => ({
         field_name,
