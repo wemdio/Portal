@@ -24,13 +24,14 @@ import type {
   HeChain,
   HeChainLanguage,
   HeChainLetter,
+  HeHypothesis,
   HeJob,
   HeOperatorMapping,
   HePersonalizationPlan,
   HeSegmentVariant,
   HeVertical,
 } from '../types';
-import { parsedToChainLetters } from './chain';
+import { parsedToChainLetters, selectPromptHypotheses } from './chain';
 import {
   addUsage,
   newUsage,
@@ -367,6 +368,27 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   if (vError || !verticalRow) throw new Error(`he_verticals ${base.vertical_id}: ${vError?.message ?? 'not found'}`);
   const vertical = verticalRow as HeVertical;
 
+  // Разметка специалиста по гипотезам вертикали: rejected уходят из промпта,
+  // accepted — первыми (см. selectPromptHypotheses в stages/chain).
+  const { data: hyps, error: hError } = await ctx.supabase
+    .from('he_hypotheses')
+    .select('title, description, tier, status')
+    .eq('project_id', job.project_id)
+    .eq('vertical_id', base.vertical_id);
+  if (hError) throw new Error(`he_hypotheses read: ${hError.message}`);
+  const hypSelection = selectPromptHypotheses(
+    (hyps ?? []) as Array<Pick<HeHypothesis, 'title' | 'description' | 'tier' | 'status'>>,
+  );
+  if (hypSelection.fallbackUsed) {
+    stageLog(ctx, '[template] все гипотезы вертикали отклонены специалистом — используем полный список без разметки');
+  }
+  const hypotheses = hypSelection.list.map((h) => ({
+    title: h.title,
+    description: h.description,
+    tier: h.tier,
+    confirmed: h.status === 'accepted',
+  }));
+
   const { data: chainRow, error: cError } = await ctx.supabase
     .from('he_chains')
     .select('*')
@@ -390,6 +412,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       chainLetters,
       baseAnalysis: analysis,
       columns,
+      hypotheses,
     }),
     HeTemplatePlanSchema,
     { model: getHeModel('chain'), maxTokens: 8192 },

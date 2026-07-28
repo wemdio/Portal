@@ -10,6 +10,7 @@ import { callLLMWithSchema, getHeModel } from '../llm';
 import { HeVocabSchema } from '../schemas';
 import { buildVocabMessages } from '../prompts/vocab';
 import type { HeHypothesis, HeJob, HeVertical } from '../types';
+import { selectPromptHypotheses } from './chain';
 import { resolveSearch } from './io';
 import {
   addUsage,
@@ -37,10 +38,23 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
 
   const { data: hyps, error: hError } = await ctx.supabase
     .from('he_hypotheses')
-    .select('title, description')
+    .select('title, description, tier, status')
+    .eq('project_id', job.project_id)
     .eq('vertical_id', verticalId);
   if (hError) throw new Error(`he_hypotheses read: ${hError.message}`);
-  const hypotheses = (hyps ?? []) as Array<Pick<HeHypothesis, 'title' | 'description'>>;
+  // Разметка специалиста: rejected уходят из промпта, accepted — первыми.
+  const selection = selectPromptHypotheses(
+    (hyps ?? []) as Array<Pick<HeHypothesis, 'title' | 'description' | 'tier' | 'status'>>,
+  );
+  if (selection.fallbackUsed) {
+    stageLog(ctx, '[vocab] все гипотезы вертикали отклонены специалистом — используем полный список без разметки');
+  }
+  const hypotheses = selection.list.map((h) => ({
+    title: h.title,
+    description: h.description,
+    tier: h.tier,
+    confirmed: h.status === 'accepted',
+  }));
 
   const model = getHeModel('bulk');
   const llm = await callLLMWithSchema(
