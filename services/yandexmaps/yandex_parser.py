@@ -66,6 +66,16 @@ PARSE_MAX_DELAY_SEC = float(os.environ.get("YANDEXMAPS_PARSE_MAX_DELAY_SEC", "6.
 # редкая карточка без имени в самом Яндексе, кратковременный
 # сетевой сбой). Двенадцать подряд = уже реально что-то не так.
 PARSE_MAX_CONSECUTIVE_EMPTY = int(os.environ.get("YANDEXMAPS_PARSE_MAX_CONSECUTIVE_EMPTY", "12"))
+# Отдельный счётчик именно для page.goto timeout'ов (в отличие от
+# consecutive_empty, который считает ЛЮБУЮ пустую карточку — включая
+# удалённые организации без имени). Инкрементируется в
+# parse_organizations_from_links, когда parse_organization выставила
+# self.last_goto_timeout=True И вернула пустую org. Триггерит быстрый
+# ProxyNetworkError, воркер ретраит чанк через следующий прокси. Отличает
+# «прокси медленный, страницы не грузятся за 60с» (ProxyNetworkError → 502)
+# от «Яндекс антибот на серии карточек» (YandexBlockedError → 429).
+# Дефолт 3: 3 × 65с = ~3 мин на детект вместо 5-6 (empty) или 12 (старый).
+PARSE_MAX_CONSECUTIVE_TIMEOUT = int(os.environ.get("YANDEXMAPS_PARSE_MAX_CONSECUTIVE_TIMEOUT", "3"))
 
 
 # Свежий пул User-Agent'ов: Chrome 130-131 на разных ОС + мобильный Android.
@@ -184,6 +194,11 @@ class YandexMapsParser:
     # версия отдаёт урезанную выдачу и, по наблюдениям инцидента 15.07.2026,
     # не подгружает список при скролле — собирается только «первый экран».
     self.intl_redirect_detected = False
+    # Транзиентный флаг: последняя parse_organization завершилась после
+    # PWTimeoutError на page.goto (страница не загрузилась за 60с). Читается
+    # снаружи в parse_organizations_from_links для счётчика consecutive_timeout.
+    # Сбрасывается в начале каждой parse_organization.
+    self.last_goto_timeout = False
 
   # ── логирование / progress ─────────────────────────────────────────
 
@@ -910,6 +925,7 @@ class YandexMapsParser:
     loop = asyncio.get_event_loop()
     deadline = loop.time() + max_seconds
     consecutive_empty = 0
+    consecutive_timeout = 0
 
     try:
       for i, url in enumerate(links):
@@ -933,8 +949,24 @@ class YandexMapsParser:
         if org.name:
           organizations.append(org)
           consecutive_empty = 0
+          consecutive_timeout = 0
         else:
           consecutive_empty += 1
+          # Отдельно считаем «пустая карточка ИЗ-ЗА page.goto timeout» —
+          # это признак медленного прокси, а не удалённой карточки.
+          # 3 подряд timeout'а (~3 мин) → бросаем ProxyNetworkError → воркер
+          # ретраит чанк через следующий прокси, не ждём 12/5 consecutive_empty.
+          if self.last_goto_timeout:
+            consecutive_timeout += 1
+            if consecutive_timeout >= PARSE_MAX_CONSECUTIVE_TIMEOUT:
+              self.log(
+                f"[!] {consecutive_timeout} page.goto timeout подряд на карточке "
+                f"{i + 1}/{len(links)} — прокси слишком медленный, "
+                f"переключаемся. Уже собрано: {len(organizations)}."
+              )
+              raise ProxyNetworkError(
+                f"proxy too slow: {consecutive_timeout} page.goto timeouts in a row"
+              )
           if consecutive_empty >= PARSE_MAX_CONSECUTIVE_EMPTY:
             self.log(
               f"[!] {consecutive_empty} карточек подряд без данных — "
@@ -958,6 +990,10 @@ class YandexMapsParser:
 
   async def parse_organization(self, url: str) -> Organization:
     org = Organization(card_url=url)
+    # Сбрасываем в начале каждого вызова — флаг живёт ровно одну
+    # parse_organization, читается снаружи в parse_organizations_from_links
+    # для отдельного счётчика consecutive_timeout (см. PARSE_MAX_CONSECUTIVE_TIMEOUT).
+    self.last_goto_timeout = False
     page = await self._context.new_page()
     try:
       await stealth_async(page)
@@ -970,8 +1006,9 @@ class YandexMapsParser:
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
       except PWTimeoutError:
         # Таймаут = медленный прокси / долгий рендер, но соединение живо —
-        # пытаемся дожать по существующему DOM.
-        pass
+        # пытаемся дожать по существующему DOM. Флаг зажигаем, чтобы вызывающий
+        # цикл смог посчитать серию таймаутов подряд и переключить прокси.
+        self.last_goto_timeout = True
       except Exception as goto_exc:
         # Явный сетевой отказ прокси (ERR_TUNNEL_CONNECTION_FAILED,
         # ERR_PROXY_CONNECTION_FAILED и т.п.) — бесполезно продолжать через
