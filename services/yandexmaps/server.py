@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
 
-from yandex_parser import Organization, ProxySettings, YandexBlockedError, YandexMapsParser
+from yandex_parser import Organization, ProxyNetworkError, ProxySettings, YandexBlockedError, YandexMapsParser
 
 
 app = FastAPI()
@@ -207,6 +207,9 @@ async def collect_links(req: CollectLinksRequest):
       raise HTTPException(status_code=504, detail=f"collect-links timed out after {COLLECT_TIMEOUT_SEC}s")
     except YandexBlockedError as e:
       raise HTTPException(status_code=429, detail=f"yandex_blocked: {e}")
+    except ProxyNetworkError as e:
+      # См. коммент в parse-orgs handler.
+      raise HTTPException(status_code=502, detail=f"proxy_broken: {e}")
     except Exception as e:
       raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -331,6 +334,13 @@ async def parse_orgs(req: ParseOrgsRequest):
       raise HTTPException(status_code=504, detail=f"parse-orgs timed out after {PARSE_TIMEOUT_SEC}s")
     except YandexBlockedError as e:
       raise HTTPException(status_code=429, detail=f"yandex_blocked: {e}")
+    except ProxyNetworkError as e:
+      # Прокси сдох (ERR_TUNNEL_CONNECTION_FAILED и т.п.) — быстрый сигнал
+      # JS-воркеру, чтобы он ретрайнул чанк через следующий прокси из пула,
+      # а не ждал 12 пустых карточек подряд (~13 мин). 502 Bad Gateway — по
+      # смыслу «промежуточный шлюз (прокси) не отвечает». Воркер уже ловит
+      # любой не-blocked HTTP-код как generic error → следующий прокси.
+      raise HTTPException(status_code=502, detail=f"proxy_broken: {e}")
     except Exception as e:
       raise HTTPException(status_code=500, detail=str(e))
     finally:

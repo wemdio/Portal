@@ -21,6 +21,40 @@ class YandexBlockedError(Exception):
   """Yandex вернул капчу / антибот-страницу вместо результатов."""
 
 
+class ProxyNetworkError(Exception):
+  """Прокси не отвечает (ERR_TUNNEL_CONNECTION_FAILED и т.п.) — надо
+  переключаться на другой прокси немедленно, не ждать 12 пустых карточек.
+
+  Раньше при мёртвом прокси парсер молча получал пустые карточки одну за
+  одной и триггерил YandexBlockedError только после
+  PARSE_MAX_CONSECUTIVE_EMPTY=12 — это ~13 минут на чанк, воркер за это
+  время часто уходит в зомби-статус через 15-мин watchdog. Теперь при
+  первом же сетевом отказе прокси прерываем чанк сразу; JS-воркер поймает
+  как generic error и ретраит чанк через следующий прокси из пула.
+  """
+
+
+# Маркеры сетевого отказа прокси в message'ах Playwright: не путать со
+# скачанной страницей, где Яндекс вернул 4xx/5xx (это отдельно ловится
+# _page_looks_blocked). Именно транспортный уровень: соединение до прокси
+# либо до целевого сервера через прокси не установилось.
+_PROXY_NETWORK_MARKERS = (
+  "err_tunnel_connection_failed",
+  "err_proxy_connection_failed",
+  "err_connection_refused",
+  "err_connection_reset",
+  "err_connection_closed",
+  "err_connection_aborted",
+  "err_name_not_resolved",
+  "err_socks_connection_failed",
+)
+
+
+def _is_proxy_network_error(exc: BaseException) -> bool:
+  msg = str(exc).lower()
+  return any(marker in msg for marker in _PROXY_NETWORK_MARKERS)
+
+
 # Паузы между карточками — минимум 3, максимум 6 сек. Раньше 1.5-3
 # было слишком тесно: с ротацией мобильного прокси иногда выпадал
 # медленный IP, карточка не догружалась, мы шли дальше, детектор
@@ -882,7 +916,20 @@ class YandexMapsParser:
         if not self.is_running or loop.time() > deadline:
           break
         self.update_progress(i + 1, len(links), f"Парсинг: {i + 1}/{len(links)}")
-        org = await self.parse_organization(url)
+        try:
+          org = await self.parse_organization(url)
+        except ProxyNetworkError as pe:
+          # Прокси сдох (ERR_TUNNEL_CONNECTION_FAILED и т.п.) — все следующие
+          # карточки в чанке пойдут через тот же контекст с тем же прокси и
+          # упадут так же. Прерываем чанк сразу: JS-воркер поймает как generic
+          # error и ретраит через следующий прокси из пула. Возвращаем уже
+          # набранные organizations — не теряем то, что успели.
+          self.log(
+            f"[!] Сетевой отказ прокси на карточке {i + 1}/{len(links)} ({pe}). "
+            f"Прерываем чанк — воркер переключится на следующий прокси. "
+            f"Уже собрано: {len(organizations)}."
+          )
+          raise
         if org.name:
           organizations.append(org)
           consecutive_empty = 0
@@ -900,6 +947,8 @@ class YandexMapsParser:
         await asyncio.sleep(random.uniform(PARSE_MIN_DELAY_SEC, PARSE_MAX_DELAY_SEC))
       return organizations
     except YandexBlockedError:
+      raise
+    except ProxyNetworkError:
       raise
     except Exception as e:
       self.log(f"[X] Критическая ошибка: {e}")
@@ -920,7 +969,20 @@ class YandexMapsParser:
         # карточки с рендером фото/отзывов/карты может занимать минуту.
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
       except PWTimeoutError:
+        # Таймаут = медленный прокси / долгий рендер, но соединение живо —
+        # пытаемся дожать по существующему DOM.
         pass
+      except Exception as goto_exc:
+        # Явный сетевой отказ прокси (ERR_TUNNEL_CONNECTION_FAILED,
+        # ERR_PROXY_CONNECTION_FAILED и т.п.) — бесполезно продолжать через
+        # мёртвый прокси, все следующие 14 карточек в чанке упадут так же.
+        # Пробрасываем наверх, чтобы parse_organizations_from_links сразу
+        # отдал чанк на ретрай через другой прокси.
+        if _is_proxy_network_error(goto_exc):
+          raise ProxyNetworkError(str(goto_exc))
+        # Остальное — обычная ошибка страницы, ловим ниже и возвращаем
+        # пустую org (сохранённое поведение).
+        raise
       try:
         # Ждём заголовок до 30 сек — на скрине юзера иногда видно как
         # карточка "пустая" 15-20 сек прежде чем прорендерится.
@@ -944,6 +1006,10 @@ class YandexMapsParser:
       org.telegram, org.vk, org.instagram, org.whatsapp = self._extract_social(soup)
       org.working_hours = self._extract_working_hours(soup)
       org.categories = self._extract_categories(soup)
+    except ProxyNetworkError:
+      # Пробрасываем — parse_organizations_from_links ждёт этот сигнал,
+      # чтобы прервать чанк без 12-empty-подряд ожидания.
+      raise
     except Exception as e:
       self.log(f"[!] Ошибка парсинга {url}: {e}")
     finally:
