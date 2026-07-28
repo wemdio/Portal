@@ -47,15 +47,23 @@ export function disableTabDemoMode(): void {
 
 /**
  * Захват ?demo=1 из адресной строки (точка входа в демо-вкладку).
- * Возвращает true, если параметр был и флаг включён. Параметр из URL
- * убирает, чтобы он не протекал в ссылки/шаринг.
+ * Возвращает true, только если флаг реально встал (приватный режим без
+ * sessionStorage → false: лучше остаться в обычном режиме, чем молча
+ * показать РЕАЛЬНЫЙ кабинет под видом демо). Параметр из URL убирает,
+ * чтобы он не протекал в ссылки/шаринг.
  */
 export function captureTabDemoFromLocation(): boolean {
   if (typeof window === 'undefined') return false;
   const url = new URL(window.location.href);
   if (url.searchParams.get('demo') !== '1') return false;
   enableTabDemoMode();
+  if (!isTabDemoMode()) return false; // sessionStorage недоступен
   url.searchParams.delete('demo');
-  window.history.replaceState(null, '', url.toString());
+  try {
+    window.history.replaceState(null, '', url.toString());
+  } catch {
+    // sandboxed iframe без allow-same-origin: флаг уже стоит, грязный URL
+    // не страшен — повторный capture просто вернёт true ещё раз.
+  }
   return true;
 }

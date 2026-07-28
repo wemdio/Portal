@@ -60,15 +60,21 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const isDemo = useDemoMode();
 
   // Точка входа в демо-вкладку: /client?demo=1 (или любая страница портала
-  // с этим параметром). Флаг кладётся в sessionStorage (per-tab — соседняя
-  // рабочая вкладка не затрагивается), URL чистится и страница
-  // перезагружается, чтобы ВСЕ запросы ушли уже с демо-заголовком, а не
-  // смесью «часть реальных, часть фикстур».
+  // с этим параметром). Захват СИНХРОННО в фазе рендера: useState-инициализатор
+  // отрабатывает ДО любых эффектов дочерних страниц (React гоняет эффекты
+  // снизу вверх) — иначе страницы успевали уйти за данными БЕЗ демо-заголовка,
+  // вплоть до GET с сайд-эффектами (support/thread метил реальные уведомления
+  // прочитанными из «демо-вкладки», ревью 27.07). Флаг — sessionStorage
+  // (per-tab), URL чистится внутри capture, reload — страховка для чистого
+  // документа и сброса in-flight дедупа, а не закрытие гонки.
+  const [capturedAtMount] = useState(() => captureTabDemoFromLocation());
   useEffect(() => {
-    if (captureTabDemoFromLocation()) {
+    if (capturedAtMount || captureTabDemoFromLocation()) {
       window.location.reload();
     }
-  }, []);
+    // pathname в deps: layout при SPA-навигации не перемонтируется, а захват
+    // нужен и при клиентском переходе на URL с ?demo=1.
+  }, [pathname, capturedAtMount]);
 
   // Бейдж непрочитанных сообщений поддержки и флаг BYO-почт раньше жили внутри
   // ClientNavList, который монтируется ДВАЖДЫ (десктоп-сайдбар + мобильный
