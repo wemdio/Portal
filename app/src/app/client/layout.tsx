@@ -30,6 +30,7 @@ import { ClientSidebar } from '@/components/client/ClientSidebar';
 import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
 import { DemoBanner } from '@/components/client/DemoBanner';
 import { useDemoMode } from '@/lib/clientDemo/useDemoMode';
+import { captureTabDemoFromLocation } from '@/lib/clientDemo/tabDemoMode';
 import { DemoRegisterGate } from '@/components/client/DemoRegisterGate';
 import { PaymentLockedBanner } from '@/components/client/PaymentLockedBanner';
 import { ClientPortalProvider } from '@/lib/clientPortalContext';
@@ -57,6 +58,17 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   // Демо использует общий профиль, поэтому его язык хранится только локально
   // в браузере посетителя и никогда не записывается в shared demo account.
   const isDemo = useDemoMode();
+
+  // Точка входа в демо-вкладку: /client?demo=1 (или любая страница портала
+  // с этим параметром). Флаг кладётся в sessionStorage (per-tab — соседняя
+  // рабочая вкладка не затрагивается), URL чистится и страница
+  // перезагружается, чтобы ВСЕ запросы ушли уже с демо-заголовком, а не
+  // смесью «часть реальных, часть фикстур».
+  useEffect(() => {
+    if (captureTabDemoFromLocation()) {
+      window.location.reload();
+    }
+  }, []);
 
   // Бейдж непрочитанных сообщений поддержки и флаг BYO-почт раньше жили внутри
   // ClientNavList, который монтируется ДВАЖДЫ (десктоп-сайдбар + мобильный
