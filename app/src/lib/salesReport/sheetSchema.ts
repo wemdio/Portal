@@ -84,9 +84,29 @@ export type SheetSchema = {
 };
 
 function parseSheetDate(v: unknown): Date | null {
+  if (v == null || v === '') return null;
   if (v instanceof Date) return v;
+  // Excel serial number (days since 1899-12-30 — Excel-совместимая эпоха).
+  // Google Sheets возвращает даты в этом формате при valueRenderOption=UNFORMATTED_VALUE
+  // либо dateTimeRenderOption=SERIAL_NUMBER.
+  if (typeof v === 'number' && Number.isFinite(v) && v > 25000 && v < 100000) {
+    const EPOCH_MS = Date.UTC(1899, 11, 30);
+    return new Date(EPOCH_MS + Math.round(v) * 86_400_000);
+  }
   if (typeof v === 'string') {
-    const parsed = new Date(v);
+    const s = v.trim();
+    // Русский формат DD.MM.YYYY (native JavaScript Date такое не распарсит).
+    const ruMatch = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(s);
+    if (ruMatch) {
+      const day = Number(ruMatch[1]);
+      const month = Number(ruMatch[2]);
+      const year = Number(ruMatch[3]);
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        return new Date(Date.UTC(year, month - 1, day));
+      }
+    }
+    // ISO / другой формат, native parser
+    const parsed = new Date(s);
     if (!Number.isNaN(parsed.getTime())) return parsed;
   }
   return null;
