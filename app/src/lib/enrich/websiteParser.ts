@@ -20,34 +20,72 @@ const MIN_MAIN_TEXT_TO_SKIP_ABOUT = Number(
 const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-let _proxyUrls: string[] | null = null;
-function getProxyUrls(): string[] {
-  if (_proxyUrls) return _proxyUrls;
+function parseProxyEnv(raw: string): string[] {
+  const s = raw.trim();
+  if (!s) return [];
   try {
-    const raw = (process.env.PROXY_URLS ?? '').trim();
-    if (raw.startsWith('[')) {
-      _proxyUrls = (JSON.parse(raw) as string[]).map((s) => s.trim()).filter(Boolean);
-    } else {
-      _proxyUrls = raw.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean);
+    if (s.startsWith('[')) {
+      return (JSON.parse(s) as string[]).map((v) => v.trim()).filter(Boolean);
     }
+    return s.split(/[\n,;]+/).map((v) => v.trim()).filter(Boolean);
   } catch {
-    _proxyUrls = [];
+    return [];
   }
-  return _proxyUrls;
 }
 
-let _proxyRR = 0;
-function pickProxyUrl(): string {
-  const urls = getProxyUrls();
-  if (!urls.length) return '';
-  _proxyRR = (_proxyRR + 1) % urls.length;
-  return urls[_proxyRR];
+// Приоритетная группа (обычно российские DC-прокси) — идут ПЕРВЫМИ
+// при каждом запросе. Fallback (зарубежные HK/EU) используется только
+// на retry, если прокси из priority отказал: инцидент 28.07.2026,
+// ИНН-парсер имел success rate 27% из-за того что 9/12 прокси в общем
+// пуле — HK/EU, и .ru-сайты их отдавали 403/Cloudflare-геоблоком.
+//
+// Приоритет:
+//   YANDEXMAPS_PROXY_URLS_PRIORITY (юзер вписывает только RU) →
+//   YANDEXMAPS_PROXY_URLS →
+//   PROXY_URLS (legacy fallback).
+// Если PRIORITY пуст, используется YANDEXMAPS_PROXY_URLS как приоритет
+// (сохранённое поведение до этого фикса).
+let _proxyGroups: { priority: string[]; fallback: string[] } | null = null;
+function getProxyGroups(): { priority: string[]; fallback: string[] } {
+  if (_proxyGroups) return _proxyGroups;
+  const priorityRaw = process.env.YANDEXMAPS_PROXY_URLS_PRIORITY ?? '';
+  const yandexRaw = process.env.YANDEXMAPS_PROXY_URLS ?? '';
+  const legacyRaw = process.env.PROXY_URLS ?? '';
+  const priority = parseProxyEnv(priorityRaw);
+  const fallback = parseProxyEnv(yandexRaw || legacyRaw);
+  // Если PRIORITY не задан отдельно — используем весь список как priority,
+  // без fallback (старое поведение: один пул, round-robin).
+  if (priority.length === 0) {
+    _proxyGroups = { priority: fallback, fallback: [] };
+  } else {
+    _proxyGroups = { priority, fallback };
+  }
+  return _proxyGroups;
+}
+
+let _priorityRR = 0;
+let _fallbackRR = 0;
+function pickProxyUrl(preferPriority = true): string {
+  const { priority, fallback } = getProxyGroups();
+  if (preferPriority && priority.length > 0) {
+    _priorityRR = (_priorityRR + 1) % priority.length;
+    return priority[_priorityRR];
+  }
+  if (fallback.length > 0) {
+    _fallbackRR = (_fallbackRR + 1) % fallback.length;
+    return fallback[_fallbackRR];
+  }
+  // Нет fallback — крутимся по priority (лучше ретрай через тот же RU,
+  // чем прямое соединение с IP US-сервера, которое Cloudflare-геоблок гарантирует).
+  if (priority.length === 0) return '';
+  _priorityRR = (_priorityRR + 1) % priority.length;
+  return priority[_priorityRR];
 }
 
 type Dispatcher = import('undici').Dispatcher;
 const _proxyDispatchers = new Map<string, Dispatcher>();
-async function getProxyDispatcher(): Promise<Dispatcher | undefined> {
-  const url = pickProxyUrl();
+async function getProxyDispatcher(preferPriority = true): Promise<Dispatcher | undefined> {
+  const url = pickProxyUrl(preferPriority);
   if (!url) return undefined;
   const existing = _proxyDispatchers.get(url);
   if (existing) return existing;
@@ -780,7 +818,7 @@ function decodeHtml(body: ArrayBuffer, contentType: string | null): string {
 
 async function fetchHtml(
   url: string,
-  options?: { timeout?: number; signal?: AbortSignal; allowHttpErrors?: boolean },
+  options?: { timeout?: number; signal?: AbortSignal; allowHttpErrors?: boolean; preferPriority?: boolean },
 ): Promise<{ html: string; status: number } | null> {
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   const controller = new AbortController();
@@ -791,7 +829,9 @@ async function fetchHtml(
   externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
   try {
-    const dispatcher = await getProxyDispatcher();
+    // По умолчанию — приоритетная группа (RU). Retry-обёртка передаёт
+    // preferPriority=false на второй попытке, чтобы уйти в fallback.
+    const dispatcher = await getProxyDispatcher(options?.preferPriority !== false);
     const fetchOpts: RequestInit & { dispatcher?: Dispatcher } = {
       method: 'GET',
       headers: {
@@ -841,7 +881,11 @@ export async function fetchHtmlWithRetry(
 ): Promise<{ html: string; status: number } | null> {
   const retries = Math.max(0, Math.floor(options?.retries ?? FETCH_RETRIES));
   for (let attempt = 0; attempt <= retries; attempt += 1) {
-    const result = await fetchHtml(url, options);
+    // Первая попытка — приоритетный пул (RU). Retry — уходим в fallback:
+    // если RU-прокси упал/дал 403 на .ru-сайте, второй раз через тот же
+    // RU-прокси обычно ничего не даст; шанс через HK/EU выше нуля.
+    const preferPriority = attempt === 0;
+    const result = await fetchHtml(url, { ...options, preferPriority });
     if (result) return result;
     if (options?.signal?.aborted) return null;
     if (attempt < retries) {
