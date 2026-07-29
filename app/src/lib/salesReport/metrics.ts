@@ -34,6 +34,7 @@ const MEETING_HELD_STATUS = 'Встреча проведена + КП отпра
 const INVOICE_SENT_STATUS = 'Отправлен счет';
 const CONTRACT_STATUS = 'Согласование договора';
 const WON_STATUS_ID = 142;
+const LOST_STATUS_ID = 143;
 
 const normalize = (value: string | null): string =>
   (value ?? '').trim().toLocaleLowerCase('ru-RU').replaceAll('ё', 'е');
@@ -173,7 +174,12 @@ export function computeSalesReportBlockFromRows(
     // переходов (amo_events) не sync'ится, поэтому точную дату входа в
     // статус мы не знаем. Такой подход соответствует ожиданиям продаж
     // (Егор, 2026-07-29) и не раздувается touching'ом старых backlog-сделок.
-    if (createdInWindow && !isLeadMagnet(lead.name)) {
+    // Егор (2026-07-29): «мёртвые» сделки (статус 143 «Закрыто и не реализовано»)
+    // в отчёте продаж не считаются вообще ни в одну воронковую метрику.
+    // Оплаты не затрагиваются: 143 никогда не 142, условие ниже само отсеет.
+    const isLost = statusId === LOST_STATUS_ID;
+
+    if (createdInWindow && !isLeadMagnet(lead.name) && !isLost) {
       const channel = detectSummaryChannel(lead.raw);
       const qualified =
         statusSort !== undefined && statusSort >= thresholds.qualifiedSort;

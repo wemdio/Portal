@@ -115,6 +115,23 @@ describe('computeSalesReportBlockFromRows', () => {
     expect(result.newLeadsOutreach).toBe(0);
   });
 
+  it('сделки в статусе 143 «Закрыто и не реализовано» не считаются в воронке', () => {
+    const result = computeSalesReportBlockFromRows(
+      [
+        // Обычная маркет-сделка на этапе Договор — считается
+        lead({ Контур: 'Маркетинг' }, 7),  // sort 110
+        // Такая же но закрыта как «не реализовано» — не считаем нигде
+        lead({ Контур: 'Маркетинг' }, 143),
+      ],
+      statuses,
+      start,
+      end,
+    );
+    expect(result.newLeadsMarketing).toBe(1);
+    expect(result.qualMarketing).toBe(1);
+    expect(result.contracts).toBe(1);
+  });
+
   it('лид-магниты (Бот:...) не входят в воронковые метрики, но оплата засчитывается', () => {
     const result = computeSalesReportBlockFromRows(
       [
