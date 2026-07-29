@@ -442,11 +442,29 @@ function DossierSegmentCard({ data }: { data: HeDossierData }) {
           </div>
         ) : null}
         {interpretation.segment_size_assessment ? (
-          <p>
-            <Badge tone="blue">{interpretation.segment_size_assessment}</Badge>
-          </p>
+          <SegmentSizeBadge value={interpretation.segment_size_assessment} />
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/** Бейдж размера сегмента: «LARGE — пояснение» → пилюля размера + текст под ней. */
+const SEGMENT_SIZE_META: Record<string, { label: string; tone: 'emerald' | 'amber' | 'gray' }> = {
+  large: { label: 'Крупный сегмент', tone: 'emerald' },
+  medium: { label: 'Средний сегмент', tone: 'amber' },
+  niche: { label: 'Нишевый сегмент', tone: 'gray' },
+};
+
+function SegmentSizeBadge({ value }: { value: string }) {
+  const [rawSize, ...rest] = value.split('—');
+  const sizeKey = (rawSize ?? '').trim().toLowerCase();
+  const meta = SEGMENT_SIZE_META[sizeKey];
+  const note = rest.join('—').trim();
+  return (
+    <div>
+      <Badge tone={meta?.tone ?? 'blue'}>{meta?.label ?? (rawSize ?? '').trim()}</Badge>
+      {note ? <p className="mt-1 text-[11px] leading-relaxed text-gray-400">{note}</p> : null}
     </div>
   );
 }
@@ -529,10 +547,20 @@ function DossierDatasetCard({ data }: { data: HeDossierData }) {
         </details>
       ) : null}
       {interpretation.dataset_verdict ? (
-        <p className="mt-2 text-xs leading-relaxed text-gray-500">{interpretation.dataset_verdict}</p>
+        <details className="group mt-2">
+          <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 hover:text-gray-700">
+            Вывод по кампаниям
+          </summary>
+          <p className="mt-1 text-xs leading-relaxed text-gray-500">{interpretation.dataset_verdict}</p>
+        </details>
       ) : null}
       {interpretation.market_summary ? (
-        <p className="mt-1 text-xs leading-relaxed text-gray-400">{interpretation.market_summary}</p>
+        <details className="group mt-1.5">
+          <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 hover:text-gray-700">
+            Резюме рынка
+          </summary>
+          <p className="mt-1 text-xs leading-relaxed text-gray-400">{interpretation.market_summary}</p>
+        </details>
       ) : null}
     </div>
   );
