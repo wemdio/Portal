@@ -25,6 +25,7 @@ function makeDb(campaignRows: CampaignRow[], jobRows: JobRow[]) {
 
   const from = jest.fn((table: string) => {
     const filters: Record<string, unknown> = {};
+    let rowLimit: number | undefined;
     const builder: Record<string, unknown> = {
       select: () => builder,
       eq: (col: string, val: unknown) => {
@@ -33,6 +34,10 @@ function makeDb(campaignRows: CampaignRow[], jobRows: JobRow[]) {
       },
       in: (col: string, val: unknown) => {
         filters[col] = val;
+        return builder;
+      },
+      limit: (val: number) => {
+        rowLimit = val;
         return builder;
       },
       update: (data: Record<string, unknown>) => {
@@ -51,14 +56,21 @@ function makeDb(campaignRows: CampaignRow[], jobRows: JobRow[]) {
         resolve({ data: jobRows, error: null });
       },
       maybeSingle: async () => {
-        const matching = jobRows.find((row) => {
+        let matching = jobRows.filter((row) => {
           if (row.campaign_id !== filters.campaign_id) return false;
           if (filters.action && row.action !== filters.action) return false;
           const statusFilter = filters.status as string[] | undefined;
           if (statusFilter && !statusFilter.includes(row.status)) return false;
           return true;
         });
-        return { data: matching ?? null, error: null };
+        if (rowLimit !== undefined) matching = matching.slice(0, rowLimit);
+        if (matching.length > 1) {
+          return {
+            data: null,
+            error: { code: 'PGRST116', message: 'JSON object requested, multiple rows returned' },
+          };
+        }
+        return { data: matching[0] ?? null, error: null };
       },
       single: async () => ({ data: null, error: null }),
     };
@@ -116,6 +128,20 @@ describe('worker resumeRunningCampaigns', () => {
     );
 
     await resumeAiCampaigns();
+
+    expect(inserts).toHaveLength(0);
+  });
+
+  it('does not queue another TG Outreach start job when duplicates already exist', async () => {
+    const { inserts } = makeDb(
+      [{ id: 'camp-1', user_id: 'user-1' }],
+      [
+        { id: 'job-1', campaign_id: 'camp-1', action: 'start', status: 'running' },
+        { id: 'job-2', campaign_id: 'camp-1', action: 'start', status: 'pending' },
+      ],
+    );
+
+    await resumeTgCampaigns();
 
     expect(inserts).toHaveLength(0);
   });
