@@ -146,6 +146,8 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
 
   const verticals = useMemo(() => detail?.verticals ?? [], [detail]);
   const hypotheses = useMemo(() => detail?.hypotheses ?? [], [detail]);
+  const dossiers = useMemo(() => detail?.dossiers ?? [], [detail]);
+  const cases = useMemo(() => detail?.cases ?? [], [detail]);
   const selectedVertical = useMemo(
     () => verticals.find((v) => v.id === selectedVerticalId) ?? null,
     [verticals, selectedVerticalId],
@@ -243,6 +245,20 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
       const { ok, data } = await hePost<HeJobResponse>(`${HE_API}/verticals/${verticalId}/vocab`);
       if (!ok) {
         setActionError(data.error || 'Не удалось запустить генерацию вокабуляра');
+        return;
+      }
+      await load({ silent: true });
+    },
+    [load],
+  );
+
+  // Досье вертикали: 409 = сборка уже идёт — не ошибка, просто перезагружаемся.
+  const runDossier = useCallback(
+    async (verticalId: string) => {
+      setActionError('');
+      const { ok, status, data } = await hePost<HeJobResponse>(`${HE_API}/verticals/${verticalId}/dossier`);
+      if (!ok && status !== 409) {
+        setActionError(data.error || 'Не удалось запустить сборку досье');
         return;
       }
       await load({ silent: true });
@@ -408,6 +424,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             onPatchHypothesis={patchHypothesis}
             onSelectVertical={handleSelectVertical}
             jobs={jobs}
+            dossiers={dossiers}
           />
         );
       }
@@ -422,6 +439,8 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             onGenerateChain={(language: 'ru' | 'en' | 'pl') => void runChain(selectedVertical.id, language)}
             onGenerateVocab={() => void runVocab(selectedVertical.id)}
             onGoToBase={() => jumpTo(4)}
+            dossiers={dossiers}
+            onBuildDossier={() => void runDossier(selectedVertical.id)}
           />
         );
       }
@@ -460,6 +479,8 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             onStartResearch={() => void runResearch()}
             offerValue={savedOffer}
             onSaveOffer={saveOffer}
+            cases={cases}
+            onCasesChanged={() => void load({ silent: true })}
           />
         );
     }

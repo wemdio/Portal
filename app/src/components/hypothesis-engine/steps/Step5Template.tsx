@@ -8,9 +8,14 @@
  */
 
 import { useCallback, useMemo, useState, type JSX } from 'react';
-import { Check, Copy, Download, FileText, Sparkles } from 'lucide-react';
+import { Check, Copy, Download, Eye, FileText, Sparkles, User } from 'lucide-react';
 import type { HeTemplate } from '@/lib/hypothesisEngine/types';
-import type { HeBaseSummary, HeJobSummary } from '../api';
+import {
+  renderTemplatePreview,
+  tokenizePreviewText,
+  type HePreviewToken,
+} from '@/lib/hypothesisEngine/renderPreview';
+import { HE_API, heCall, type HeBaseSummary, type HeJobSummary } from '../api';
 import { Badge, OperatorText, StatusBox } from '../ui';
 
 const PRIMARY_BTN =
@@ -39,6 +44,204 @@ function latestStageJob(jobs: HeJobSummary[], stage: HeJobSummary['stage']): HeJ
     if (!best || (job.started_at ?? '') >= (best.started_at ?? '')) best = job;
   }
   return best;
+}
+
+/** Ответ GET bases/[id]/template — шаблон + лёгкие строки базы для превью. */
+interface HeTemplateGetResponse {
+  template?: HeTemplate;
+  columns?: string[];
+  sample_rows?: Array<Record<string, unknown>>;
+  error?: string;
+}
+
+/** Дедуп имён операторов по lowercase-ключу, сохраняет первое написание. */
+function dedupOperatorNames(names: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const name of names) {
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
+}
+
+/**
+ * Подсветка превью: подставленные значения — янтарные (зеркально OperatorText,
+ * где янтарным был сам {{operator}}), запасной текст unmatched-операторов —
+ * фиолетовый, неразрешённые операторы — красные.
+ */
+function PreviewTokens({ tokens, className }: { tokens: HePreviewToken[]; className?: string }) {
+  return (
+    <span className={className}>
+      {tokens.map((t, i) =>
+        t.kind === 'value' ? (
+          <mark key={i} className="rounded bg-amber-100 px-0.5 text-amber-800">
+            {t.text}
+          </mark>
+        ) : t.kind === 'fallback' ? (
+          <mark
+            key={i}
+            title="Запасной текст: колонки нет"
+            className="rounded bg-violet-100 px-0.5 text-violet-800"
+          >
+            {t.text}
+          </mark>
+        ) : t.kind === 'unresolved' ? (
+          <mark key={i} className="rounded bg-red-100 px-0.5 font-mono text-[0.92em] text-red-700">
+            {t.text}
+          </mark>
+        ) : (
+          <span key={i}>{t.text}</span>
+        ),
+      )}
+    </span>
+  );
+}
+
+/**
+ * «Превью по лидам»: финальные письма глазами конкретных лидов из базы.
+ * Строки базы лениво подгружаются при первом раскрытии; рендер — чистый,
+ * через renderTemplatePreview (сегментные варианты не применяются).
+ */
+function TemplateLeadPreview({ template, baseId }: { template: HeTemplate; baseId: string }) {
+  const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [sample, setSample] = useState<{
+    columns: string[];
+    rows: Array<Record<string, unknown>>;
+  } | null>(null);
+
+  const mapping = useMemo(
+    () => template.personalization_plan?.operator_mapping ?? [],
+    [template],
+  );
+
+  const handleToggle = (open: boolean) => {
+    if (!open || (state !== 'idle' && state !== 'error')) return;
+    setState('loading');
+    heCall<HeTemplateGetResponse>(`${HE_API}/bases/${baseId}/template`)
+      .then(({ ok, data }) => {
+        if (!ok) {
+          setState('error');
+          return;
+        }
+        setSample({ columns: data.columns ?? [], rows: data.sample_rows ?? [] });
+        setState('ready');
+      })
+      .catch(() => setState('error'));
+  };
+
+  const preview = useMemo(() => {
+    if (state !== 'ready' || !sample) return null;
+    return renderTemplatePreview({
+      letters: template.letters,
+      operatorMapping: mapping,
+      rows: sample.rows,
+      columns: sample.columns,
+      maxRows: 3,
+    });
+  }, [state, sample, template, mapping]);
+
+  const hasVariants = template.letters.some((l) => (l.segment_variants ?? []).length > 0);
+
+  return (
+    <details
+      className="rounded-xl border border-amber-200 bg-amber-50/40"
+      onToggle={(e) => handleToggle(e.currentTarget.open)}
+    >
+      <summary className="flex cursor-pointer select-none flex-wrap items-center gap-2 px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-800">
+        <Eye className="h-4 w-4 text-amber-500" aria-hidden />
+        Превью по лидам — письма глазами конкретных лидов из базы
+        <Badge tone="amber">новое</Badge>
+      </summary>
+      <div className="border-t border-amber-100 px-4 py-3">
+        {state === 'loading' || state === 'idle' ? (
+          <p className="text-xs text-gray-400">Загружаем строки базы…</p>
+        ) : null}
+        {state === 'error' ? (
+          <p className="text-xs text-gray-400">
+            Не удалось загрузить строки базы — превью недоступно. Закройте и откройте блок, чтобы
+            повторить.
+          </p>
+        ) : null}
+        {preview && preview.rows.length === 0 ? (
+          <p className="text-xs text-gray-400">В базе нет строк для превью.</p>
+        ) : null}
+        {preview && preview.rows.length > 0 && sample ? (
+          <div className="space-y-3">
+            {preview.rows.map((leadRow, leadIdx) => {
+              const rawRow = sample.rows[leadIdx] ?? {};
+              const unresolved = dedupOperatorNames(leadRow.letters.flatMap((l) => l.unresolved));
+              const emptyVars = dedupOperatorNames(leadRow.letters.flatMap((l) => l.emptyVars));
+              return (
+                <div key={leadIdx} className="rounded-lg border border-gray-200 bg-white p-3">
+                  <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-gray-700">
+                    <User className="h-3.5 w-3.5 text-gray-400" aria-hidden />
+                    {leadRow.rowLabel}
+                  </p>
+                  <div className="space-y-2">
+                    {leadRow.letters.map((letter, letterIdx) => {
+                      // Токенизируем ИСХОДНЫЙ текст письма (индексы совпадают с
+                      // template.letters) — иначе позиции подстановок потеряны.
+                      const source = template.letters[letterIdx];
+                      const subjectTokens = tokenizePreviewText(
+                        source?.subject ?? '',
+                        mapping,
+                        rawRow,
+                      ).tokens;
+                      const bodyTokens = tokenizePreviewText(source?.body ?? '', mapping, rawRow).tokens;
+                      return (
+                        <div
+                          key={letterIdx}
+                          className="rounded-md border border-gray-100 bg-gray-50/60 px-3 py-2"
+                        >
+                          <p className="text-xs font-semibold text-gray-800">
+                            Письмо {letterIdx + 1}
+                            {letter.wait_days > 0 ? (
+                              <span className="ml-1 font-normal text-gray-400">
+                                через {letter.wait_days} дн.
+                              </span>
+                            ) : null}
+                            {letter.subject ? (
+                              <>
+                                {' — '}
+                                <PreviewTokens tokens={subjectTokens} />
+                              </>
+                            ) : null}
+                          </p>
+                          <PreviewTokens
+                            tokens={bodyTokens}
+                            className="mt-1 block whitespace-pre-wrap text-xs leading-relaxed text-gray-600"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {unresolved.length > 0 ? (
+                    <p className="mt-2 text-[11px] text-red-500">
+                      Не подставлено: {unresolved.map((u) => `{{${u}}}`).join(', ')}
+                    </p>
+                  ) : null}
+                  {emptyVars.length > 0 ? (
+                    <p className="mt-1 text-[11px] text-gray-400">
+                      Пустые значения у этого лида: {emptyVars.map((u) => `{{${u}}}`).join(', ')} —
+                      в письме будет пустая строка
+                    </p>
+                  ) : null}
+                </div>
+              );
+            })}
+            {hasVariants ? (
+              <p className="text-[11px] text-gray-400">
+                Сегментные варианты в превью не применяются — показан дефолтный текст писем.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </details>
+  );
 }
 
 export function Step5Template(props: {
@@ -154,6 +357,9 @@ export function Step5Template(props: {
           </button>
         </div>
       </header>
+
+      {/* Превью по лидам — финальные письма с подставленными значениями базы */}
+      <TemplateLeadPreview template={template} baseId={base?.id ?? template.base_id} />
 
       {/* Финальные письма */}
       <ol className="space-y-3">

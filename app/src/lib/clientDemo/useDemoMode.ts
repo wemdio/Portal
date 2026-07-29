@@ -2,12 +2,13 @@
 
 import { useEffect, useState } from 'react';
 import { clientApiFetch } from '@/lib/clientFetcher';
+import { isTabDemoMode } from '@/lib/clientDemo/tabDemoMode';
 
 /**
- * Хук: true, если под порталом залогинен демо-аккаунт (profiles.is_demo).
- * Возвращает null, пока статус грузится — чтобы баннер не мигал.
- *
- * Один лёгкий запрос к /api/client/demo-status на монтирование.
+ * Хук: true, если вкладка в демо-режиме — либо под порталом залогинен
+ * демо-аккаунт (profiles.is_demo), либо это демо-вкладка (?demo=1,
+ * sessionStorage — см. tabDemoMode). Возвращает null, пока статус
+ * грузится — чтобы баннер не мигал.
  */
 export function useDemoMode(): boolean | null {
   const [isDemo, setIsDemo] = useState<boolean | null>(null);
@@ -15,6 +16,11 @@ export function useDemoMode(): boolean | null {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      // Демо-вкладка знает о себе синхронно, запрос не нужен.
+      if (isTabDemoMode()) {
+        if (!cancelled) setIsDemo(true);
+        return;
+      }
       try {
         // Таймаут обязателен: страницы гейтят контент на isDemo (null = ничего
         // не рендерим), и зависший — не упавший — запрос оставил бы вкладку

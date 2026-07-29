@@ -2,6 +2,8 @@
 
 import { supabase } from '@/lib/supabaseClient';
 import { promptDemoRegister } from '@/lib/clientDemo/registerPrompt';
+import { isTabDemoMode } from '@/lib/clientDemo/tabDemoMode';
+import { TAB_DEMO_HEADER } from '@/lib/clientDemo/demoHeader';
 
 /**
  * Thrown by authFetchJson when our backend returns 401 AND our one-shot
@@ -53,6 +55,11 @@ export async function authFetch(
   const token = await getAccessToken();
   const headers = new Headers(init?.headers);
   headers.set('Authorization', `Bearer ${token}`);
+  // Демо-вкладка (?demo=1) помечает ВСЕ свои запросы — не только идущие через
+  // clientFetcher. Иначе страницы на голом authFetch (конструктор баз, ящики,
+  // manual-scoring, персонализация) в «витрине» молча работали бы с реальными
+  // данными и выполняли бы реальные мутации (ревью 27.07).
+  if (isTabDemoMode()) headers.set(TAB_DEMO_HEADER, '1');
   const isFormData = typeof FormData !== 'undefined' && init?.body instanceof FormData;
   if (!isFormData && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
 

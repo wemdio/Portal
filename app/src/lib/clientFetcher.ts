@@ -2,6 +2,8 @@
 
 import { authFetchJson, isAuthExpiredError } from '@/lib/authFetch';
 import { scrubBrand } from '@/lib/scrubBrand';
+import { isTabDemoMode } from '@/lib/clientDemo/tabDemoMode';
+import { TAB_DEMO_HEADER } from '@/lib/clientDemo/demoHeader';
 
 const inFlightClientReads = new Map<string, Promise<unknown>>();
 
@@ -18,7 +20,22 @@ function dedupKey(path: string, init?: RequestInit): string | null {
   const initKeys = Object.keys(init ?? {}).filter((key) => key !== 'method');
   if (initKeys.length > 0) return null;
 
-  return `${method} /api/client${path}`;
+  // Флаг демо-вкладки — часть ключа: до захвата ?demo=1 и после него в одной
+  // вкладке могут жить оба набора данных (реальный + фикстуры), их нельзя
+  // склеивать в один in-flight.
+  return `${method} /api/client${path} demo:${isTabDemoMode() ? '1' : '0'}`;
+}
+
+/**
+ * Демо-вкладка (?demo=1, sessionStorage) помечает свои запросы заголовком —
+ * сервер по нему отдаёт фикстуры (см. requireClientAuth). Обычные вкладки
+ * заголовок не шлют, поведение не меняется.
+ */
+function withDemoHeader(init?: RequestInit): RequestInit | undefined {
+  if (!isTabDemoMode()) return init;
+  const headers = new Headers(init?.headers);
+  headers.set(TAB_DEMO_HEADER, '1');
+  return { ...init, headers };
 }
 
 /**
@@ -39,12 +56,12 @@ export async function clientApiFetch<T = unknown>(
 ): Promise<T> {
   const url = `/api/client${path}`;
   const key = dedupKey(path, init);
-  if (!key) return authFetchJson<T>(url, init).catch((e) => { throw scrubClientError(e); });
+  if (!key) return authFetchJson<T>(url, withDemoHeader(init)).catch((e) => { throw scrubClientError(e); });
 
   const existing = inFlightClientReads.get(key);
   if (existing) return existing as Promise<T>;
 
-  const request = authFetchJson<T>(url, init).catch((e) => { throw scrubClientError(e); }).finally(() => {
+  const request = authFetchJson<T>(url, withDemoHeader(init)).catch((e) => { throw scrubClientError(e); }).finally(() => {
     if (inFlightClientReads.get(key) === request) {
       inFlightClientReads.delete(key);
     }

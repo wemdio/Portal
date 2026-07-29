@@ -67,10 +67,12 @@ jest.mock('@/lib/apiTiming', () => ({
 
 import { requireClientAuth } from '@/lib/clientApiHelper';
 
-function makeReq(method = 'GET', path = '/api/client/campaigns'): NextRequest {
+function makeReq(method = 'GET', path = '/api/client/campaigns', tabDemo = false): NextRequest {
+  const headers: Record<string, string> = { authorization: 'Bearer t' };
+  if (tabDemo) headers['x-client-demo'] = '1';
   return new NextRequest(`http://localhost${path}`, {
     method,
-    headers: { authorization: 'Bearer t' },
+    headers,
   });
 }
 
@@ -140,6 +142,51 @@ describe('requireClientAuth — инфраструктурные ошибки Н
   it('не-клиентская роль → прежняя семантика: 403', async () => {
     state.profileResult = { data: { role: 'lead', is_demo: false }, error: null };
     const result = await requireClientAuth(makeReq());
+    if (!('error' in result)) throw new Error('ожидали error-ответ');
+    expect(result.error.status).toBe(403);
+  });
+});
+
+describe('requireClientAuth — демо-вкладка (заголовок x-client-demo)', () => {
+  it('GET с заголовком → isDemo, accessRows=[], userId сохранён, профиль is_demo не нужен', async () => {
+    const result = await requireClientAuth(makeReq('GET', '/api/client/campaigns', true));
+    if ('error' in result) throw new Error('ожидали auth');
+    expect(result.auth.isDemo).toBe(true);
+    expect(result.auth.userId).toBe('u-1');
+    expect(result.auth.accessRows).toEqual([]);
+  });
+
+  it('демо-вкладка не зависит от блипа instantly-БД (rows не читаются)', async () => {
+    state.rowsResult = { data: null, error: { code: '', message: 'fetch failed' } };
+    const result = await requireClientAuth(makeReq('GET', '/api/client/campaigns', true));
+    if ('error' in result) throw new Error('демо-вкладка не должна зависеть от instantly-БД');
+    expect(result.auth.isDemo).toBe(true);
+  });
+
+  it('мутирующий POST с заголовком → 403 DEMO_READONLY, как у демо-аккаунта', async () => {
+    const result = await requireClientAuth(makeReq('POST', '/api/client/blocklist', true));
+    if (!('error' in result)) throw new Error('ожидали error-ответ');
+    expect(result.error.status).toBe(403);
+    const body = (await result.error.json()) as { code?: string };
+    expect(body.code).toBe('DEMO_READONLY');
+  });
+
+  it('read-only POST (отчёт) с заголовком пропускается как демо', async () => {
+    const result = await requireClientAuth(makeReq('POST', '/api/client/reports', true));
+    if ('error' in result) throw new Error('read-only POST в демо должен проходить');
+    expect(result.auth.isDemo).toBe(true);
+  });
+
+  it('без заголовка — прежнее поведение (isDemo=false, реальные accessRows)', async () => {
+    const result = await requireClientAuth(makeReq());
+    if ('error' in result) throw new Error('ожидали auth');
+    expect(result.auth.isDemo).toBe(false);
+    expect(result.auth.accessRows).toEqual([AUTH_ROW]);
+  });
+
+  it('заголовок не спасает от бесролевого аккаунта (403 до демо-ветки)', async () => {
+    state.profileResult = { data: { role: 'lead', is_demo: false }, error: null };
+    const result = await requireClientAuth(makeReq('GET', '/api/client/campaigns', true));
     if (!('error' in result)) throw new Error('ожидали error-ответ');
     expect(result.error.status).toBe(403);
   });
