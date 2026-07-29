@@ -16,14 +16,26 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
-import { reduceToTopCodes } from '@/lib/companiesSearch/okved2';
+import { getOkvedFlat, reduceToTopCodes } from '@/lib/companiesSearch/okved2';
 import { searchCount } from '@/lib/companiesSearch/rpcSearch';
 import { fetchWithRetry } from '@/lib/parsers/hhParser';
-import {
-  getAllowedCompanyBaseIndustryCategories,
-  type CompanyBaseIndustryCategory,
-} from '@/lib/projectBriefHypotheses/ourBaseValidation';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+
+/* Локальная копия whitelist'а категорий «Нашей базы» (ранее импортировалась
+ * из projectBriefHypotheses/ourBaseValidation — тот файл пока не закоммичен,
+ * из-за чего падал CI-тайпчек). Классы XX и группы XX.X, как в оригинале. */
+const ALLOWED_INDUSTRY_CATEGORY_CODE = /^\d{2}(?:\.\d)?$/;
+
+interface CompanyBaseIndustryCategory {
+  code: string;
+  name: string;
+}
+
+function getAllowedCompanyBaseIndustryCategories(): CompanyBaseIndustryCategory[] {
+  return getOkvedFlat()
+    .filter((entry) => ALLOWED_INDUSTRY_CATEGORY_CODE.test(entry.code))
+    .map(({ code, name }) => ({ code, name }));
+}
 
 export interface HeDossierSignal {
   kind: string;
@@ -67,8 +79,8 @@ export interface CollectDossierCountersDeps {
 /**
  * Скоринг повторяет promptTokens/promptCategoryScore из ourBaseValidation
  * (те хелперы не экспортируются), а допустимый набор категорий (классы XX и
- * родительские группы XX.X) берём из того же модуля — тот самый whitelist,
- * который разрешён в контракте «Нашей базы компаний».
+ * родительские группы XX.X) собираем локально из getOkvedFlat — тот самый
+ * whitelist, который разрешён в контракте «Нашей базы компаний».
  */
 const GENERIC_TOKEN_PREFIXES = [
   'деятел',
