@@ -18,7 +18,8 @@ export type HeStage =
   | 'chain'
   | 'vocab'
   | 'base_analyze'
-  | 'template';
+  | 'template'
+  | 'dossier';
 
 export type HeJobStatus = 'pending' | 'running' | 'done' | 'failed';
 
@@ -32,6 +33,10 @@ export type HeHypothesisTier = 1 | 2 | 3;
 export type HeBaseStatus = 'uploaded' | 'analyzing' | 'analyzed' | 'failed';
 
 export type HeTemplateStatus = 'draft' | 'ready';
+
+export type HeDossierStatus = 'draft' | 'ready' | 'failed';
+
+export type HeCaseSource = 'site' | 'upload';
 
 export type HeChainLanguage = 'ru' | 'en' | 'pl';
 
@@ -155,6 +160,42 @@ export interface HeTemplate {
   updated_at: string;
 }
 
+export interface HeVerticalDossier {
+  id: string;
+  vertical_id: string;
+  project_id: string;
+  status: HeDossierStatus;
+  /** Счётчики досье вертикали (HeDossierCounters, см. dossierData.ts). */
+  data: Record<string, unknown>;
+  error: string | null;
+  llm_model: string | null;
+  tokens_used: number;
+  cost_usd: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HeCase {
+  id: string;
+  project_id: string;
+  source: HeCaseSource;
+  /** Имя файла для source='upload'. */
+  filename: string | null;
+  /** Отрасль/вертикаль клиента из кейса. */
+  industry: string | null;
+  client_type: string | null;
+  /** Задача клиента из кейса. */
+  task: string | null;
+  /** Структурированные метрики результата. */
+  metrics: Record<string, unknown>;
+  /** Достигнутый результат. */
+  result: string | null;
+  /** Полный текст кейса. */
+  text: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /* ─────────────────────── jsonb-подструктуры ─────────────────────── */
 
 /** Единичное доказательство гипотезы. URL — только реально найденный поиском. */
@@ -186,6 +227,12 @@ export interface HeCompanyType {
 
 export interface HeJobTitle {
   title: string;
+  /**
+   * Сторона аудитории (vocab-схема пишет всегда; в старых записях поля нет):
+   * buyer — ЛПР компаний вертикали (кому агентство продаёт);
+   * campaign_target — цели будущих кампаний клиентов вертикали.
+   */
+  audience_side?: 'buyer' | 'campaign_target';
   seniority?: string;
   function?: string;
   geo?: string;

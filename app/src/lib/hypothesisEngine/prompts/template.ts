@@ -12,12 +12,25 @@
  * per-lead присутствует только как операторы {{var}}, замапленные на колонки
  * базы. Варианты хранятся ОТДЕЛЬНО от основного текста: основной текст письма
  * — дефолт для всей базы, вариант идёт только лидам сегмента.
+ *
+ * Проход 2 (критик/рерайт финальных писем) — template-фасад над общими
+ * билдерами chain: buildTemplateCriticMessages / buildTemplateRewriteMessages.
+ * Опциональные инжекты (styleExample / winnerPatterns) принимают все
+ * сборщики этого файла — см. HePromptInjections в ./chain.
  */
 
 import type { LLMMessage } from '../llm';
 import type { HeBaseAnalysisOutput, HeTemplatePlanOutput } from '../schemas';
 import type { HeChainLanguage, HeChainLetter } from '../types';
-import { CHAIN_REGULATIONS } from './chain';
+import { renderClientCaseBlock, type HeCaseDraft } from '../caseBank';
+import {
+  CHAIN_REGULATIONS,
+  buildChainCriticMessages,
+  buildChainRewriteMessages,
+  renderStyleExampleBlock,
+  renderWinnerPatternsBlock,
+  type HePromptInjections,
+} from './chain';
 
 /* ─────────────────────── Шаг 1: план 85/15 ─────────────────────── */
 
@@ -34,6 +47,7 @@ ${CHAIN_REGULATIONS}
 - Гипотезы вертикали (если есть в материалах) — ПЕРВИЧНЫЙ источник болей, углов и доказательств для fixed_block: помеченные «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» подтверждены человеком и в приоритете; не вводи рыночные углы и боли, противоречащие списку; отклонённые специалистом гипотезы в материалах просто отсутствуют — не упоминай их существование.
 - fixed_block опирается на готовую цепочку вертикали (ниже) — сохраняй её сильные ходы, усиливай слабые.
 - Оффер клиента специфицируй в fixed_block по обязательной структуре из четырёх частей: (1) услуга простыми словами — одна фраза, понятная постороннему («email-аутрич под ключ», «кадровое агентство по массовому подбору»); размытые ярлыки («внешняя команда», «партнёр по росту») запрещены; (2) результат для получателя в его единицах — встречи/лиды/сделки с названными целевыми ролями за период, а НЕ процесс отправителя («пишем письма», «занимаемся аутричем»); (3) старт — первый шаг с низким порогом входа («тест на узком сегменте»); (4) доказательство — один кейс из материалов, назначенный ровно в одно письмо цепочки.
+- Если в материалах есть блок «КЕЙС КЛИЕНТА» — специфицируй в fixed_block именно его как ГЛАВНОЕ доказательство и единственный кейс-слот цепочки: он замещает общее правило «один кейс из материалов» (кейсы из цепочки/брифа — fallback, когда блока нет). Назначь его ровно в одно письмо, с реальными цифрами из блока, и никогда не приписывай его другой индустрии, чем указана в блоке.
 - Письмо 1 специфицируй по обязательным битам, человеческим диалогом, а не питчем: почему пишу (триггер про получателя — наблюдаемый факт о его сегменте, не «Вы продаёте в X») → что предлагаю (одна простая строка: услуга простыми словами + для кого) → как и почему могу помочь (доказательство/релевантность, результат через роли/сегменты, без маркетинговых цифр) → один мягкий вопрос (гибридный CTA по регламенту: одна развилка «к вам, или кто отвечает»). Письмо 1 обязано проходить тест 5 секунд: незнакомец мгновенно понимает, кто пишет, что предлагают и как это поможет ему. Описания процесса отправителя («собираем сигналы», «пишем под контекст») в письме 1 запрещай — процессу место в письмах 2+.
 - Тон — человеческий диалог, не реклама: письмо от одного человека другому («пишу», «у нас», разговорный русский, короткие предложения), не лендинг и не презентация компании. Рекламные клише запрещай в fixed_block: «лидер», «лучший», «эффективный», «поток заявок», «гарантируем», «выгодно», «бесплатно», «команда профессионалов», «индивидуальный подход» и подобные. В письме 1 — без маркетинговых цифр (цифры в теле — минус 63% reply): результат получателя формулируй через роли/сегменты («встречи с HRD крупных работодателей»), не каденсом «3–5 встреч в месяц».
 - Одно и то же название кейса/клиента — не более чем в одном письме цепочки: не распределяй один кейс на несколько писем.
@@ -44,7 +58,7 @@ ${CHAIN_REGULATIONS}
 - В теме письма используй только операторы, у которых есть реальная колонка базы: fallback в теме невозможен.
 - Отвечай строго на русском, ТОЛЬКО JSON.`;
 
-export interface TemplatePlanPromptInput {
+export interface TemplatePlanPromptInput extends HePromptInjections {
   verticalName: string;
   verticalSummary: string;
   /** Исходная цепочка вертикали (уже с wait_days). */
@@ -57,6 +71,12 @@ export interface TemplatePlanPromptInput {
    * собирается как раньше.
    */
   hypotheses?: Array<{ title: string; description: string; tier?: number; confirmed?: boolean }>;
+  /**
+   * Опционально: выбранный кейс клиента из кейс-банка (he_cases) под эту
+   * вертикаль — ГЛАВНОЕ доказательство fixed_block. Отсутствует → обычное
+   * правило: один кейс из цепочки/брифа или безымянно.
+   */
+  clientCase?: HeCaseDraft | null;
 }
 
 function renderChainLetters(letters: HeChainLetter[]): string {
@@ -72,10 +92,13 @@ ${input.hypotheses.map((h) => `- ${h.tier != null ? `[tier ${h.tier}] ` : ''}${h
 
 `
     : '';
+  const clientCaseBlock = input.clientCase ? `${renderClientCaseBlock(input.clientCase)}\n\n` : '';
+  const styleBlock = renderStyleExampleBlock(input.styleExample);
+  const winnersBlock = renderWinnerPatternsBlock(input.winnerPatterns);
   const user = `ВЕРТИКАЛЬ: ${input.verticalName}
 ${input.verticalSummary}
 
-${hypothesesBlock}ИСХОДНАЯ ЦЕПОЧКА ВЕРТИКАЛИ (базовый костяк):
+${hypothesesBlock}${clientCaseBlock}${styleBlock}${winnersBlock}ИСХОДНАЯ ЦЕПОЧКА ВЕРТИКАЛИ (базовый костяк):
 ${renderChainLetters(input.chainLetters)}
 
 АНАЛИЗ ЗАГРУЖЕННОЙ БАЗЫ:
@@ -116,6 +139,7 @@ ${CHAIN_REGULATIONS}
 - Письмо 1 — обязательные биты, человеческим диалогом, а не питчем: (1) почему пишу — триггер про получателя: наблюдаемый факт о его сегменте, не голая категоризация «Вы продаёте в X»; (2) что предлагаю — одна простая строка: услуга простыми словами + для кого; (3) как и почему могу помочь — доказательство/релевантность (результат получателя через роли/сегменты); (4) один мягкий вопрос — гибридный CTA по регламенту (одна развилка «к вам, или кто отвечает»). Тест 5 секунд: незнакомец мгновенно отвечает — кто это, что предлагают, как это поможет мне. Описания процесса отправителя («собираем сигналы», «пишем под контекст») в письме 1 запрещены — процессу место в письмах 2+.
 - Fallback операторов — в именительном падеже («ваша компания»): подстановка может оказаться в любой позиции предложения. В тему ставь только операторы с реальной колонкой базы — fallback в теме невозможен.
 - Хотя бы одно письмо цепочки обязано содержать один конкретный доказательный элемент из предоставленных материалов (fixed_block / исходная цепочка): названный клиент ИЛИ конкретный числовой факт — только если он реально есть в материалах. Одно и то же название кейса/клиента — максимум в одном письме цепочки. Выдумывать имена клиентов и цифры запрещено (см. регламент); если подходящего кейса нет — пиши безымянно.
+- Если в материалах есть блок «КЕЙС КЛИЕНТА» — это ГЛАВНОЕ доказательство цепочки и её единственный кейс-слот: он замещает общее правило «один кейс из материалов» (кейсы из исходной цепочки — fallback, когда блока нет). Используй его с реальными цифрами из блока, максимум в ОДНОМ письме, и никогда не приписывай его другой индустрии, чем указана в блоке.
 - Письма должны читаться как настоящая 1:1-переписка с представителем сегмента базы.
 - Перед выдачей перечитай каждое письмо вслух: согласование падежей и родов должно быть идеальным (пример ошибки: «на постоянной работой» → «на постоянной работе»).
 
@@ -181,12 +205,14 @@ Temat: <temat maila 2>
 ...i tak dalej do ostatniego maila. Blok „---SEGMENT: ...---” dodawaj TYLKO jeśli plan przewiduje wariant segmentowy dla tego maila, zaraz po odpowiednim mailu (jeden blok na wariant). Żadnych wyjaśnień przed/po blokach. Znaczników „---LETTER N---”, „---SEGMENT: ...---” i słowa "Temat:" nie zmieniaj. Pisz po polsku.`,
 };
 
-export interface TemplateLettersPromptInput {
+export interface TemplateLettersPromptInput extends HePromptInjections {
   language: HeChainLanguage;
   plan: HeTemplatePlanOutput;
   verticalName: string;
   chainLetters: HeChainLetter[];
   baseAnalysis: HeBaseAnalysisOutput;
+  /** Опционально: выбранный кейс клиента (he_cases) — ГЛАВНОЕ доказательство цепочки. */
+  clientCase?: HeCaseDraft | null;
 }
 
 /** Сообщения для генерации финальных писем по плану 85/15. */
@@ -216,8 +242,8 @@ FIXED BLOCK (~85%, обязательный костяк):
 """
 ${input.plan.fixed_block}
 """
-
-СЕГМЕНТНЫЕ ВАРИАНТЫ (~15%, условные — для каждого отдельный блок ---SEGMENT: <when>--- после письма; в основной текст НЕ включать):
+${input.clientCase ? `\n${renderClientCaseBlock(input.clientCase)}\n` : ''}
+${renderStyleExampleBlock(input.styleExample)}${renderWinnerPatternsBlock(input.winnerPatterns)}СЕГМЕНТНЫЕ ВАРИАНТЫ (~15%, условные — для каждого отдельный блок ---SEGMENT: <when>--- после письма; в основной текст НЕ включать):
 ${variants || '(нет)'}${legacyAdditions ? `\nДополнительные углы из плана (тоже только в сегментные варианты, не в основной текст):\n${legacyAdditions}` : ''}
 
 ОПЕРАТОРЫ ПЕРСОНАЛИЗАЦИИ (вставлять как есть, формат {{var}}):
@@ -236,4 +262,58 @@ ${renderChainLetters(input.chainLetters)}
     { role: 'assistant', content: 'План и регламент в контексте. Пишу финальные письма строго по плану.' },
     { role: 'user', content: LETTERS_TASK[lang] },
   ];
+}
+
+/* ─────────────── Проход 2: критик и рерайт финальных писем ─────────────── */
+
+/**
+ * Финальные письма шаблона — та же цепочка {subject, body}, поэтому проход 2
+ * переиспользует общие билдеры chain (скептичный ЛПР вертикали + рерайт
+ * только отмеченных писем, маркеры ---LETTER N--- для letterParser). Типы
+ * продублированы с template-неймингом, чтобы стадия template не тянула
+ * chain-терминологию.
+ */
+
+/** Одна реальная проблема письма (letter_index — 1-based номер в цепочке). */
+export interface HeTemplateCriticIssue {
+  letter_index: number;
+  problem: string;
+  fix: string;
+}
+
+/** Вердикт критика по финальным письмам: одна строка + список проблем. */
+export interface HeTemplateCritique {
+  verdict: string;
+  issues: HeTemplateCriticIssue[];
+}
+
+/**
+ * Сообщения критик-прохода для финальных писем шаблона.
+ * Ответ — JSON HeTemplateCritique (вызов через callLLMWithSchema).
+ */
+export function buildTemplateCriticMessages(input: {
+  verticalName: string;
+  verticalSummary?: string | null;
+  letters: Array<{ subject: string; body: string }>;
+  language: 'ru' | 'en' | 'pl';
+  styleExample?: string | null;
+  winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
+}): LLMMessage[] {
+  return buildChainCriticMessages(input);
+}
+
+/**
+ * Сообщения рерайт-прохода для финальных писем шаблона: переписываются
+ * только письма из issues критики, остальные возвращаются дословно; вывод —
+ * маркерами ---LETTER N--- (парсит letterParser).
+ */
+export function buildTemplateRewriteMessages(input: {
+  verticalName: string;
+  letters: Array<{ subject: string; body: string }>;
+  critique: HeTemplateCritique;
+  language: 'ru' | 'en' | 'pl';
+  styleExample?: string | null;
+  winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
+}): LLMMessage[] {
+  return buildChainRewriteMessages(input);
 }

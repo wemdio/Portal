@@ -16,6 +16,8 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { TAB_DEMO_HEADER } from '@/lib/clientDemo/demoHeader';
+import { demoReadonlyError } from '@/lib/clientApiHelper';
 import { parseDomainsInput } from '@/lib/jobs/manualScoringRunner';
 import { normalizeDomain } from '@/lib/jobs/mailganerScoreCache';
 import { logAudit, logError } from '@/lib/loggerServer';
@@ -43,12 +45,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Не авторизован' }, { status: 401 });
   }
 
+  // Демо-вкладка: роут идёт мимо requireClientAuth, поэтому центральный блок
+  // мутаций его не накрывает — режем здесь явно (ревью 27.07: иначе из
+  // «витрины» создавались реальные прогоны до 50k доменов).
+  if (req.headers.get(TAB_DEMO_HEADER) === '1') {
+    return demoReadonlyError();
+  }
+
   // Проверка что клиент в auto-pipeline режиме (только им доступна фича)
   const { data: profile } = await supabase
     .from('profiles')
-    .select('auto_pipeline_enabled')
+    .select('auto_pipeline_enabled, is_demo')
     .eq('id', user.id)
     .single();
+
+  if (profile?.is_demo === true) {
+    return demoReadonlyError();
+  }
 
   if (!profile?.auto_pipeline_enabled) {
     return NextResponse.json(

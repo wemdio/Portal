@@ -4,6 +4,7 @@ import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteC
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import type { ClientAccessRow } from '@/lib/clientAccess';
+import { TAB_DEMO_HEADER } from '@/lib/clientDemo/demoHeader';
 import { withApiTiming } from '@/lib/apiTiming';
 import { scrubBrand } from '@/lib/scrubBrand';
 
@@ -125,7 +126,15 @@ export async function requireClientAuth(
     return { error: jsonError('Forbidden', 403) };
   }
 
-  const isDemo = profile?.is_demo === true;
+  // Демо-вкладка (?demo=1, помечена заголовком фронтом — см. clientDemo/tabDemoMode):
+  // пользователь ЗАЛОГИНЕН как обычно (сессия проверена выше), но этот запрос
+  // обслуживается как демо: фикстуры вместо реальных данных. Даёт возможность
+  // держать демо и рабочий кабинет в соседних вкладках одного браузера (одна
+  // сессия, два режима). Чужих данных не открывает: роуты при isDemo идут в
+  // serveClientDemo и БД не трогают; мутации режутся тем же блоком ниже.
+  const isTabDemo = req.headers.get(TAB_DEMO_HEADER) === '1';
+
+  const isDemo = isTabDemo || profile?.is_demo === true;
 
   // Демо-аккаунт строго read-only. Любой мутирующий запрос режем здесь,
   // централизованно — ни один клиентский роут физически не сможет ничего
@@ -137,6 +146,18 @@ export async function requireClientAuth(
     !DEMO_READONLY_POST_PATHS.has(req.nextUrl.pathname)
   ) {
     return { error: demoReadonlyError() };
+  }
+
+  // Демо-вкладке права доступа не нужны (фикстуры), instantly-БД не дёргаем
+  // и от её блипов не зависим.
+  if (isTabDemo) {
+    return {
+      auth: {
+        userId: user.id,
+        accessRows: [],
+        isDemo: true,
+      },
+    };
   }
 
   // Инфраструктурный сбой чтения прав доступа (блип instantly-БД, 20с-таймаут

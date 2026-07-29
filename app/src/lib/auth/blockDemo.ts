@@ -1,10 +1,17 @@
 import { NextResponse } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { TAB_DEMO_HEADER } from '@/lib/clientDemo/demoHeader';
 
 /**
  * Read-only guard for client-facing TOOL routes that are reachable by the public
  * demo account (role=client, is_demo=true) but do NOT go through requireClientAuth
  * (so the centralized demo-mutation block in clientApiHelper doesn't apply).
+ *
+ * Режет два вида демо:
+ *   1. демо-аккаунт (profiles.is_demo) — через authed клиент вызвавшего;
+ *   2. демо-вкладку (заголовок TAB_DEMO_HEADER, см. clientDemo/tabDemoMode) —
+ *      по заголовку запроса через next/headers; вне request-scope (тесты,
+ *      воркеры) headers() кидает — тогда просто пропускаем эту проверку.
  *
  * Reads `is_demo` via the caller's OWN authed Supabase client (RLS self-read), so
  * it does NOT depend on supabaseAdmin being configured. Fails CLOSED: if the read
@@ -21,6 +28,20 @@ export async function blockDemo(
   supabase: SupabaseClient,
   userId: string,
 ): Promise<NextResponse | null> {
+  // Демо-вкладка: заголовок достаточен, в БД не ходим.
+  try {
+    const { headers } = await import('next/headers');
+    const h = await headers();
+    if (h.get(TAB_DEMO_HEADER) === '1') {
+      return NextResponse.json(
+        { error: 'Демо-режим: это витрина портала — запуск инструментов недоступен.', code: 'DEMO_READONLY' },
+        { status: 403 },
+      );
+    }
+  } catch {
+    // Вне request-scope (тесты, воркеры) — проверка по профилю ниже.
+  }
+
   const { data, error } = await supabase
     .from('profiles')
     .select('is_demo')

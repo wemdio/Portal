@@ -25,11 +25,80 @@ export type HeBaseSummary = Pick<
   'id' | 'vertical_id' | 'filename' | 'row_count' | 'status' | 'analysis' | 'created_at'
 >;
 
-/** Усечённая строка джобы (без payload/result/tokens). */
+/** Усечённая строка джобы (без result/tokens). */
 export type HeJobSummary = Pick<
   HeJob,
   'id' | 'stage' | 'status' | 'error' | 'attempts' | 'started_at'
-> & { finished_at: string | null };
+> & {
+  finished_at: string | null;
+  /** Вход стадии: фильтрация джоб по вертикали (payload.vertical_id). */
+  payload?: { vertical_id?: string } | null;
+};
+
+/* ── Досье вертикали ── */
+
+/** Сигнал боли из счётчиков досье (jsonb). */
+export interface HeDossierSignal {
+  kind: string;
+  label: string;
+  value: string | number;
+  source?: string;
+}
+
+/** Форма jsonb-поля data досье вертикали — объективные числа сегмента. */
+export interface HeDossierData {
+  counters: {
+    companies_total: number | null;
+    companies_note?: string;
+    hh_vacancies_total: number | null;
+    hh_vacancies_sample: string[];
+    signals: HeDossierSignal[];
+  };
+  dataset_stats: {
+    matched_segments: string[];
+    campaigns: number;
+    sent: number;
+    replies: number;
+    reply_pct: number | null;
+    baseline_pct: number | null;
+    top_subjects: string[];
+    note?: string;
+  };
+  interpretation: {
+    market_summary: string;
+    pain_signals: string[];
+    segment_size_assessment: string;
+    dataset_verdict: string;
+  };
+  computed_at: string;
+}
+
+export type HeDossierStatus = 'draft' | 'ready' | 'failed';
+
+/** Строка досье вертикали в выдаче GET /projects/[id]. */
+export interface HeDossier {
+  id: string;
+  vertical_id: string;
+  status: HeDossierStatus;
+  data: HeDossierData | null;
+  error: string | null;
+}
+
+/* ── Банк кейсов клиента ── */
+
+/** Кейс клиента (с сайта или загруженный вручную) в выдаче GET /projects/[id]. */
+export interface HeCaseEntry {
+  id: string;
+  source: 'site' | 'upload';
+  filename: string | null;
+  industry: string | null;
+  client_type: string | null;
+  task: string | null;
+  /** Структурированные метрики результата (he_cases.metrics — jsonb). */
+  metrics: Record<string, unknown> | null;
+  result: string | null;
+  created_at: string;
+}
 
 export interface HeProjectsResponse {
   projects?: HeProject[];
@@ -55,6 +124,8 @@ export interface HeProjectDetailResponse {
   bases?: HeBaseSummary[];
   templates?: HeTemplate[];
   jobs?: HeJobSummary[];
+  dossiers?: HeDossier[];
+  cases?: HeCaseEntry[];
   error?: string;
 }
 
@@ -73,6 +144,18 @@ export interface HeHypothesisResponse {
 
 export interface HeBaseCreateResponse {
   base?: { id: string; status: string };
+  error?: string;
+}
+
+/** POST /projects/[id]/cases → 201 { case }. */
+export interface HeCaseCreateResponse {
+  case?: HeCaseEntry;
+  error?: string;
+}
+
+/** DELETE /projects/[id]/cases { id } → { ok }. */
+export interface HeCaseDeleteResponse {
+  ok?: boolean;
   error?: string;
 }
 
@@ -97,6 +180,13 @@ export function hePatch<T>(url: string, body: unknown): Promise<{ ok: boolean; s
   return heCall<T>(url, {
     method: 'PATCH',
     body: JSON.stringify(body),
+  });
+}
+
+export function heDelete<T>(url: string, body?: unknown): Promise<{ ok: boolean; status: number; data: T }> {
+  return heCall<T>(url, {
+    method: 'DELETE',
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
 
