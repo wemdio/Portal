@@ -17,6 +17,7 @@ import { decompressStateFromBase64 } from '@/lib/databases/stateCompression';
 import { loadStateViaWorker } from '@/lib/databases/backgroundLoad';
 import { SIGNAL_ERROR_MARKER, isStackCellRefillable } from '@/lib/enrich/signalConstants';
 import { removeSignalErrorRows } from '@/lib/spreadsheet/removeSignalErrorRows';
+import { deduplicateRowsByKey } from '@/lib/spreadsheet/deduplicateRowsByKey';
 import { resolveInnLookupColumns } from '@/lib/enrich/innLookupColumns';
 import {
   ALL_EXTRACTOR_KEYS,
@@ -3234,23 +3235,15 @@ export function DatabaseSpreadsheet() {
     const body = header ? data.slice(1) : data;
     const emailColumns = selectedCol !== undefined ? [selectedCol] : detectEmailColumns(data);
 
-    const emailMap = new Map<string, { row: string[]; score: number }>();
-    const rowsWithoutEmail: string[][] = [];
-
-    for (const row of body) {
-      const email = getRowEmail(row, emailColumns);
-      if (!email) {
-        rowsWithoutEmail.push(row);
-        continue;
-      }
-      const score = countFilledCells(row);
-      const existing = emailMap.get(email);
-      if (!existing || score > existing.score) {
-        emailMap.set(email, { row, score });
-      }
-    }
-
-    const nextRows = [...emailMap.values().map((item) => item.row), ...rowsWithoutEmail];
+    const {
+      rows: nextRows,
+      duplicateCount,
+      missingKeyCount,
+    } = deduplicateRowsByKey(body, (row) => (
+      selectedCol !== undefined
+        ? extractEmail(row[selectedCol] ?? '')
+        : getRowEmail(row, emailColumns)
+    ));
     const removed = body.length - nextRows.length;
     if (removed === 0) {
       setLastAction({ message: 'Дубликатов по почте не найдено', time: Date.now() });
@@ -3259,12 +3252,12 @@ export function DatabaseSpreadsheet() {
 
     requestConfirm(
       'Удалить дубликаты по почте?',
-      `Будет удалено строк: ${removed} (было ${body.length}, станет ${nextRows.length}).`,
+      `Будет удалено строк: ${removed} — дубликатов: ${duplicateCount}, без валидного Email: ${missingKeyCount} (было ${body.length}, станет ${nextRows.length}).`,
       () => {
         setUndoSnapshot(`Удаление дублей по почте (${removed})`);
         applyRows(header ? [header, ...nextRows] : nextRows);
         setLastAction({
-          message: `Удалено строк по почте: ${removed} (было ${body.length}, стало ${nextRows.length})`,
+          message: `Удалено строк: ${removed} — дубликатов Email: ${duplicateCount}, без Email: ${missingKeyCount} (было ${body.length}, стало ${nextRows.length})`,
           time: Date.now(),
         });
       },
