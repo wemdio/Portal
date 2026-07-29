@@ -247,6 +247,16 @@ function VerticalCard({
 
 /* ─────────────────────────── Гипотеза ─────────────────────────── */
 
+/**
+ * fit_rationale приезжает в he_hypotheses отдельной интеграцией — тип
+ * HeHypothesis ей не владеет, поэтому читаем поле структурно (как
+ * audience_side в dossier.ts). Легаси-строки без поля рендерятся как раньше.
+ */
+function fitRationaleOf(h: HeHypothesis): string | null {
+  const raw = (h as HeHypothesis & { fit_rationale?: unknown }).fit_rationale;
+  return typeof raw === 'string' && raw.trim().length > 0 ? raw : null;
+}
+
 /** Компактная строка цифр досье: «~N компаний · M вакансий hh · reply X% vs Y%» (null-safe). */
 function DossierStatRow({ dossier }: { dossier: HeDossier }) {
   const data = dossier.data;
@@ -278,6 +288,7 @@ function HypothesisItem({
 }) {
   const rejected = hypothesis.status === 'rejected';
   const accepted = hypothesis.status === 'accepted';
+  const fitRationale = fitRationaleOf(hypothesis);
 
   return (
     <li
@@ -298,6 +309,12 @@ function HypothesisItem({
             {accepted ? <Badge tone="emerald">Принята</Badge> : null}
             {rejected ? <Badge tone="gray">Отклонена</Badge> : null}
           </div>
+          {fitRationale ? (
+            <div className="mt-2 rounded-md border-l-2 border-blue-400 bg-blue-50/50 px-3 py-2">
+              <p className="text-[11px] font-semibold text-blue-600">Почему это рынок:</p>
+              <p className="mt-0.5 text-xs leading-relaxed text-gray-700">{fitRationale}</p>
+            </div>
+          ) : null}
           {hypothesis.description ? (
             <p className="mt-1 text-sm leading-relaxed text-gray-600">{hypothesis.description}</p>
           ) : null}

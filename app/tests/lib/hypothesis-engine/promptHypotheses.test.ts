@@ -1,9 +1,11 @@
 /** @jest-environment node */
 
 import { buildChainMaterialsMessage } from '@/lib/hypothesisEngine/prompts/chain';
+import { buildHypothesesInstantMessages } from '@/lib/hypothesisEngine/prompts/hypotheses';
+import { buildEvidenceMessages } from '@/lib/hypothesisEngine/prompts/evidence';
 import { buildVocabMessages } from '@/lib/hypothesisEngine/prompts/vocab';
 import { buildTemplatePlanMessages } from '@/lib/hypothesisEngine/prompts/template';
-import type { HeBaseAnalysisOutput } from '@/lib/hypothesisEngine/schemas';
+import { HeSiteProfileSchema, type HeBaseAnalysisOutput, type HeHypothesisCandidate } from '@/lib/hypothesisEngine/schemas';
 import { selectPromptHypotheses } from '@/lib/hypothesisEngine/stages/chain';
 
 const MARKER = '✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ';
@@ -109,5 +111,45 @@ describe('промпты: маркер подтверждения в инжек�
     });
     expect(legacy[1].content).not.toContain('ГИПОТЕЗЫ ВЕРТИКАЛИ');
     expect(legacy[1].content).not.toContain(MARKER);
+  });
+});
+
+describe('промпты: обязательный fit_rationale («почему это рынок для клиента»)', () => {
+  const profile = HeSiteProfileSchema.parse({ company_name: 'Польза', product_summary: 'Аутрич-агентство' });
+
+  it('hypotheses: промпт требует цепочку ЛПР → цель → боль → оффер, формат и самопроверка содержат поле', () => {
+    const [system, user] = buildHypothesesInstantMessages({
+      profile,
+      websiteUrl: 'https://polza.ru',
+      brandCloud: [],
+      competitors: [],
+    });
+    expect(system.content).toContain('fit_rationale');
+    expect(system.content).toContain('ЛПР, по роли');
+    expect(system.content).toContain('Тавтологии запрещены');
+    expect(user.content).toContain('"fit_rationale"');
+    expect(user.content).toContain('все четыре звена цепочки');
+  });
+
+  it('evidence: вердикт обязан сохранить/уточнить fit_rationale, цепочка кандидата инжектится в промпт', () => {
+    const candidate: HeHypothesisCandidate = {
+      tier: 2,
+      title: 'HR-агентства',
+      description: 'd',
+      fit_rationale: 'Собственник HR-агентства → больше клиентов на подбор → нет канала лидов → аутрич-кампания под ключ',
+      rationale: '',
+      potential_pct: 40,
+      search_queries: ['q'],
+    };
+    const [system, user] = buildEvidenceMessages({
+      candidate,
+      profile,
+      allCandidateTitles: [candidate.title],
+      sources: [],
+      searchResults: [],
+    });
+    expect(system.content).toContain('fit_rationale');
+    expect(user.content).toContain('"fit_rationale"');
+    expect(user.content).toContain(candidate.fit_rationale);
   });
 });

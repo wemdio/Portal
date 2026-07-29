@@ -68,6 +68,11 @@ export const HeHypothesisCandidateSchema = z.object({
   tier: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   title: z.string(),
   description: z.string(),
+  /**
+   * «Почему это рынок для клиента» (обязательна): цепочка ЛПР сегмента →
+   * его цель → его боль, которую снимает продукт клиента → оффер клиента.
+   */
+  fit_rationale: z.string().min(1),
   rationale: z.string().default(''),
   potential_pct: z.number().int().min(0).max(100),
   /** Точные поисковые запросы для стадии верификации. */
@@ -93,6 +98,8 @@ export const HeEvidenceVerdictSchema = z.object({
   /** Точный title другой гипотезы-кандидата — только для verdict=merge. */
   merge_with_title: z.string().nullable().default(null),
   reason: z.string().default(''),
+  /** «Почему это рынок для клиента»: пронести из кандидата или уточнить по фактам (для drop — пустая). */
+  fit_rationale: z.string().default(''),
   evidence: z.array(HeEvidenceItemSchema).default([]),
   /** Перекалиброванный по фактам процент потенциала. */
   potential_pct: z.number().int().min(0).max(100),

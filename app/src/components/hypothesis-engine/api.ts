@@ -69,6 +69,9 @@ export interface HeDossierData {
     pain_signals: string[];
     segment_size_assessment: string;
     dataset_verdict: string;
+    /** Вердикт «сегмент покупает каналы продаж»; у досье, собранных до его появления, поля нет. */
+    buys_sales_channels?: 'yes' | 'likely' | 'unknown';
+    buys_sales_channels_reason?: string;
   };
   computed_at: string;
 }
