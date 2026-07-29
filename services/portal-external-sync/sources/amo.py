@@ -269,7 +269,7 @@ class AmoSync(SyncSource):
     async def _fetch_contacts(
         self, client: httpx.AsyncClient, base: str
     ) -> dict[int, dict[str, str | None]]:
-        """{contact_id → {phone, email, tg_username}}. company_name достаётся отдельно."""
+        """{contact_id → {phone, email, tg_username, name}}. company_name достаётся отдельно."""
         out: dict[int, dict[str, str | None]] = {}
         page = 1
         while page <= MAX_PAGES:
@@ -286,10 +286,17 @@ class AmoSync(SyncSource):
                 cid = c.get("id")
                 if cid is None:
                     continue
+                # Имя: сначала пробуем c["name"] (то что менеджер видит в AMO),
+                # потом склеиваем first_name + last_name как запасной вариант.
+                display_name = (c.get("name") or "").strip() or None
+                if not display_name:
+                    parts = [p for p in (c.get("first_name"), c.get("last_name")) if p]
+                    display_name = " ".join(parts).strip() or None
                 out[cid] = {
                     "phone": _cf_by_code(c, "PHONE"),
                     "email": _cf_by_code(c, "EMAIL"),
                     "tg_username": _tg_from_contact(c),
+                    "name": display_name,
                 }
             if not ((data.get("_links") or {}).get("next")):
                 break
@@ -351,9 +358,20 @@ class AmoSync(SyncSource):
         tg_username = (contact_row or {}).get("tg_username") or _tg_from_name(lead.get("name"))
         website = _extract_website_from_lead(lead)
 
+        # Имя сделки: если AMO дал шаблонное «Сделка #NNN» (менеджер не
+        # переименовал), подставляем имя контакта. Так downstream
+        # (Google Sheets отчёты, TG бот) вместо ссылки на карточку показывают
+        # реальное имя человека.
+        raw_deal_name = lead.get("name")
+        deal_name: str | None = raw_deal_name
+        if raw_deal_name and raw_deal_name.startswith("Сделка #"):
+            contact_name = (contact_row or {}).get("name")
+            if contact_name:
+                deal_name = contact_name
+
         return (
             lead["id"],
-            lead.get("name"),
+            deal_name,
             sid,
             pipe_row["status_name"] if pipe_row else None,
             pid,
