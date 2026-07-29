@@ -832,13 +832,19 @@ async function fetchHtml(
 
 export async function fetchHtmlWithRetry(
   url: string,
-  options?: { timeout?: number; signal?: AbortSignal; allowHttpErrors?: boolean },
+  options?: {
+    timeout?: number;
+    signal?: AbortSignal;
+    allowHttpErrors?: boolean;
+    retries?: number;
+  },
 ): Promise<{ html: string; status: number } | null> {
-  for (let attempt = 0; attempt <= FETCH_RETRIES; attempt += 1) {
+  const retries = Math.max(0, Math.floor(options?.retries ?? FETCH_RETRIES));
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
     const result = await fetchHtml(url, options);
     if (result) return result;
     if (options?.signal?.aborted) return null;
-    if (attempt < FETCH_RETRIES) {
+    if (attempt < retries) {
       await sleep(FETCH_RETRY_DELAY_MS * (attempt + 1));
     }
   }
@@ -1164,7 +1170,12 @@ export async function fetchInnFromWebsite(
   const wwwOrigin = tryWithWww ? origin.replace(/^https?:\/\//i, (m) => `${m}www.`) : null;
 
   // Step 1: fetch main page — search raw HTML first (catches SPA/JS-rendered INN)
-  const mainHtml = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true });
+  const mainHtml = await fetchHtmlWithRetry(url, {
+    timeout,
+    signal,
+    allowHttpErrors: true,
+    retries: 0,
+  });
   if (mainHtml?.html) {
     const fromHtml = extractInnFromHtml(mainHtml.html);
     if (fromHtml) return fromHtml;
@@ -1176,7 +1187,12 @@ export async function fetchInnFromWebsite(
 
   // Also try www variant
   if (!mainHtml && wwwOrigin) {
-    const wwwHtml = await fetchHtmlWithRetry(wwwOrigin, { timeout, signal, allowHttpErrors: true });
+    const wwwHtml = await fetchHtmlWithRetry(wwwOrigin, {
+      timeout,
+      signal,
+      allowHttpErrors: true,
+      retries: 0,
+    });
     if (wwwHtml?.html) {
       const fromHtml = extractInnFromHtml(wwwHtml.html);
       if (fromHtml) return fromHtml;
@@ -1191,7 +1207,7 @@ export async function fetchInnFromWebsite(
 
     const batch = candidates.slice(i, i + 3);
     const results = await Promise.allSettled(
-      batch.map((c) => fetchHtmlWithRetry(c, { timeout: 6_000, signal })),
+      batch.map((c) => fetchHtmlWithRetry(c, { timeout: 6_000, signal, retries: 0 })),
     );
 
     for (const r of results) {
