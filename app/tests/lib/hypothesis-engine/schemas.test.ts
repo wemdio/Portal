@@ -37,24 +37,38 @@ describe('hypothesisEngine schemas — валидные payload', () => {
     if (r.success) expect(r.data.entities[0].kind).toBe('other');
   });
 
-  it('hypotheses batch: кандидат tier 1..3 с search_queries', () => {
+  it('hypotheses batch: кандидат tier 1..3 с search_queries и обязательным fit_rationale', () => {
+    const fit = 'Собственник производства БАД → выйти в маркетплейсы → нет отдела продаж под канал → аутрич-кампания под ключ';
     const r = HeHypothesesBatchSchema.safeParse({
       hypotheses: [
-        { tier: 3, title: 'Производители БАД', description: 'd', potential_pct: 25, search_queries: ['q1', 'q2'] },
+        { tier: 3, title: 'Производители БАД', description: 'd', fit_rationale: fit, potential_pct: 25, search_queries: ['q1', 'q2'] },
       ],
     });
     expect(r.success).toBe(true);
-    if (r.success) expect(r.data.hypotheses[0].rationale).toBe('');
+    if (r.success) {
+      expect(r.data.hypotheses[0].rationale).toBe('');
+      expect(r.data.hypotheses[0].fit_rationale).toBe(fit);
+    }
   });
 
   it('evidence verdict: keep с доказательствами; merge_with_title дефолтится в null', () => {
     const r = HeEvidenceVerdictSchema.safeParse({
       verdict: 'keep',
+      fit_rationale: 'Директор по продажам → рост выручки → мало входящих лидов → аутрич-кампания',
       evidence: [{ claim: 'Рынок растёт', source_url: 'https://rbc.ru/x', quote: 'объём рынка вырос' }],
       potential_pct: 60,
     });
     expect(r.success).toBe(true);
-    if (r.success) expect(r.data.merge_with_title).toBeNull();
+    if (r.success) {
+      expect(r.data.merge_with_title).toBeNull();
+      expect(r.data.fit_rationale).toContain('Директор по продажам');
+    }
+  });
+
+  it('evidence verdict: fit_rationale при пропуске дефолтится в пустую строку (drop)', () => {
+    const r = HeEvidenceVerdictSchema.safeParse({ verdict: 'drop', potential_pct: 5 });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.fit_rationale).toBe('');
   });
 
   it('clustering: вертикаль с member_titles', () => {
@@ -120,11 +134,25 @@ describe('hypothesisEngine schemas — невалидные payload', () => {
   });
 
   it('hypotheses batch: tier вне 1..3, строковый tier и % вне 0..100 отклоняются', () => {
-    const base = { title: 't', description: 'd', potential_pct: 10 };
+    const base = { title: 't', description: 'd', fit_rationale: 'f', potential_pct: 10 };
     expect(HeHypothesesBatchSchema.safeParse({ hypotheses: [{ ...base, tier: 4 }] }).success).toBe(false);
     expect(HeHypothesesBatchSchema.safeParse({ hypotheses: [{ ...base, tier: '2' }] }).success).toBe(false);
     expect(HeHypothesesBatchSchema.safeParse({ hypotheses: [{ ...base, tier: 2, potential_pct: 101 }] }).success).toBe(false);
     expect(HeHypothesesBatchSchema.safeParse({ hypotheses: [] }).success).toBe(false);
+  });
+
+  it('hypotheses batch: кандидат без fit_rationale или с пустым отклоняется', () => {
+    const base = { tier: 2, title: 't', description: 'd', potential_pct: 10 };
+    expect(HeHypothesesBatchSchema.safeParse({ hypotheses: [base] }).success).toBe(false);
+    expect(
+      HeHypothesesBatchSchema.safeParse({ hypotheses: [{ ...base, fit_rationale: '' }] }).success,
+    ).toBe(false);
+    // Позитивный контроль: тот же кандидат с непустым fit_rationale проходит —
+    // значит отказ выше именно из-за fit_rationale.
+    expect(
+      HeHypothesesBatchSchema.safeParse({ hypotheses: [{ ...base, fit_rationale: 'ЛПР → цель → боль → оффер' }] })
+        .success,
+    ).toBe(true);
   });
 
   it('evidence verdict: неизвестный verdict, длинная quote и не-URL-структура отклоняются', () => {

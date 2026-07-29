@@ -42,6 +42,7 @@ interface AcceptedHypothesis {
   tier: HeHypothesisTier;
   title: string;
   description: string;
+  fit_rationale: string;
   evidence: HeEvidenceItem[];
   potential_pct: number;
 }
@@ -134,6 +135,9 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
         tier: candidate.tier,
         title: candidate.title,
         description: candidate.description,
+        // Вердикт обязан пронести fit_rationale (возможно, уточнив по фактам);
+        // пустое поле — откат к исходной цепочке кандидата.
+        fit_rationale: v.fit_rationale || candidate.fit_rationale,
         evidence: v.evidence.slice(0, MAX_EVIDENCE_PER_HYPOTHESIS),
         potential_pct: v.potential_pct,
       });
@@ -159,6 +163,7 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
       tier: a.tier,
       title: a.title,
       description: a.description,
+      fit_rationale: a.fit_rationale,
       evidence: a.evidence,
       potential_pct: a.potential_pct,
       status: 'proposed',

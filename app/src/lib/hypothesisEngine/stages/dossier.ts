@@ -63,6 +63,10 @@ const HeDossierInterpretationLlmSchema = z.object({
   segment_size_line: z.string().default(''),
   /** 1–2 предложения: reply_pct vs baseline_pct, либо «данных недостаточно». */
   dataset_verdict: z.string(),
+  /** Объективный вердикт «сегмент покупает каналы продаж» — только по присланным сигналам. */
+  buys_sales_channels: z.enum(['yes', 'likely', 'unknown']),
+  /** Одна строка обоснования вердикта со ссылкой на конкретный сигнал/значение. */
+  buys_sales_channels_reason: z.string(),
 });
 
 function buildDossierMessages(input: {
@@ -88,6 +92,15 @@ function buildDossierMessages(input: {
     '   обоснования в segment_size_line;',
     ' - dataset_verdict: 1–2 предложения, сравни reply_pct с baseline_pct; если хотя бы',
     '   один из них null — прямо скажи, что данных недостаточно для вывода;',
+    ' - buys_sales_channels: реши ТОЛЬКО по присланным сигналам — yes, если в',
+    '   counters.signals есть сигнал kind=outbound_diy (сегмент сам нанимает',
+    '   продажи/SDR, т.е. делает аутбаунд своими силами) или в выборке',
+    '   hh_vacancies_sample явно много вакансий в продажи; likely — если сигналы',
+    '   смешанные или слабые; unknown — если релевантных сигналов нет, тогда',
+    '   buys_sales_channels_reason = "нет данных";',
+    ' - buys_sales_channels_reason: одна строка со ссылкой на конкретный сигнал',
+    '   и его значение (например «5 из 10 вакансий — продажи»); никаких чисел,',
+    '   которых нет в counters/dataset_stats;',
     ' - если у блока есть note о недоступности данных — учти это, не выдумывай числа.',
   ].join('\n');
 
@@ -275,6 +288,8 @@ export async function runDossierStage(job: HeJob, ctx: HeStageContext): Promise<
         ? `${interp.segment_size} — ${interp.segment_size_line}`
         : interp.segment_size,
       dataset_verdict: interp.dataset_verdict,
+      buys_sales_channels: interp.buys_sales_channels,
+      buys_sales_channels_reason: interp.buys_sales_channels_reason,
     },
     computed_at: new Date().toISOString(),
   };
