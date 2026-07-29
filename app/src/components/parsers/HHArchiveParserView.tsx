@@ -62,6 +62,22 @@ const DEFAULT_QUERIES = `PR-менеджер
 пресс-секретарь
 руководитель PR`;
 
+// Локальный архив `hh_vacancies` копится с 04.02.2026 (первая запись
+// обычного HH-парсера спецов). До этой даты HH API не даёт ничего:
+// удерживает вакансии только ~2 месяца, историю мы собираем сами. Ставим
+// жёсткую нижнюю границу на date-инпуты — чтобы юзеры не запускали job
+// на 2023-2025 и не получали 0 результатов с непонятной причиной.
+// Env-override HH_ARCHIVE_MIN_DATE может понадобиться, если однажды
+// подключим более старые источники (mailganer/outreachos сумели скопить
+// глубже) — тогда просто снизим границу.
+const ARCHIVE_MIN_DATE =
+  (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_HH_ARCHIVE_MIN_DATE) ||
+  '2026-01-01';
+
+function clampToArchiveMin(date: string): string {
+  return date < ARCHIVE_MIN_DATE ? ARCHIVE_MIN_DATE : date;
+}
+
 const CHUNK_HELP: Record<ArchiveJob['chunk_strategy'], string> = {
   single: 'Один большой запрос. Риск: если за период >2000 вакансий, всё что свыше потеряется.',
   monthly: 'Период режется по месяцам. Подходит для большинства задач (PR, узкие ниши).',
@@ -73,8 +89,14 @@ export function HHArchiveParserView() {
   const [queriesRaw, setQueriesRaw] = useState(DEFAULT_QUERIES);
   // areas — массив выбранных area id. Пусто = вся РФ (113, дефолт на сервере).
   const [areas, setAreas] = useState<string[]>(['113']);
-  const [dateFrom, setDateFrom] = useState(() => `${new Date().getFullYear() - 1}-01-01`);
-  const [dateTo, setDateTo] = useState(() => `${new Date().getFullYear() - 1}-12-31`);
+  // Дефолт: год назад, но не раньше ARCHIVE_MIN_DATE — иначе с ходу
+  // получаем 0 результатов, юзер думает «парсер сломан».
+  const [dateFrom, setDateFrom] = useState(() =>
+    clampToArchiveMin(`${new Date().getFullYear() - 1}-01-01`),
+  );
+  const [dateTo, setDateTo] = useState(() =>
+    clampToArchiveMin(`${new Date().getFullYear() - 1}-12-31`),
+  );
   const [chunkStrategy, setChunkStrategy] = useState<ArchiveJob['chunk_strategy']>('monthly');
   const [maxResults, setMaxResults] = useState(50000);
 
@@ -244,13 +266,11 @@ export function HHArchiveParserView() {
       <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-900 space-y-1">
         <div>
           <strong>Архивный режим:</strong> поиск идёт по <strong>локальному архиву</strong> уже
-          собранных вакансий (обычный HH-парсер спецов + ежедневный auto-pipeline). Один активный
-          job на пользователя. Cap: <strong>{maxResults.toLocaleString()}</strong> строк.
+          собранных вакансий. Один активный job на пользователя. Cap:{' '}
+          <strong>{maxResults.toLocaleString()}</strong> строк.
         </div>
         <div className="text-xs">
-          Данные накоплены с <strong>{formatOldestForBanner(preview?.oldest_available)}</strong> —
-          за более ранние периоды в HH нет доступа (API держит только последние ~2 месяца, поэтому
-          более старую историю копим сами; для полноты нужно подождать несколько месяцев).
+          Данные накоплены с <strong>января 2026</strong> — за более ранние периоды в HH нет доступа.
         </div>
       </div>
 
@@ -273,7 +293,15 @@ export function HHArchiveParserView() {
             <input
               type="date"
               value={dateFrom}
-              onChange={(e) => { setDateFrom(e.target.value); setPreview(null); }}
+              min={ARCHIVE_MIN_DATE}
+              onChange={(e) => {
+                // Клампим руками: `min` на input блокирует ТОЛЬКО стрелки
+                // date-picker'а, но type=text-ввод и paste пропускают меньшие
+                // значения (браузеры показывают их красным, но state обновляют).
+                const next = clampToArchiveMin(e.target.value);
+                setDateFrom(next);
+                setPreview(null);
+              }}
               className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
             />
           </div>
@@ -282,7 +310,15 @@ export function HHArchiveParserView() {
             <input
               type="date"
               value={dateTo}
-              onChange={(e) => { setDateTo(e.target.value); setPreview(null); }}
+              min={dateFrom || ARCHIVE_MIN_DATE}
+              onChange={(e) => {
+                const clamped = clampToArchiveMin(e.target.value);
+                // Не даём «по» уйти раньше «с» — это и логическая ошибка,
+                // и запрос бы вернул 0.
+                const next = clamped < dateFrom ? dateFrom : clamped;
+                setDateTo(next);
+                setPreview(null);
+              }}
               className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
             />
           </div>
