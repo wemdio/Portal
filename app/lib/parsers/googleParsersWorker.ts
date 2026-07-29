@@ -286,7 +286,7 @@ export async function runGoogleMapsJob(jobId: string): Promise<void> {
             message: string;
           };
           await updateMapsJob(jobId, {
-            processed_targets: p.currentTargetIndex,
+            processed_targets: Math.min(job.total_targets, Math.max(0, p.currentTargetIndex + 1)),
             message: p.message,
           });
           await writeLog(jobId, 'maps', 'info', p.message, {

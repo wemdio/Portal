@@ -306,6 +306,20 @@ services:
     # переведёт в failed автоматически. 30m делали docker restart вечным
     # (blocking на ~30 минут), сегодня из-за этого пришлось docker kill.
     stop_grace_period: 60s
+    # autoheal + heartbeat healthcheck — защита от event-loop hang'ов
+    # (инцидент 27.07.2026: воркер дважды за день замерз на 1-5 часов при
+    # живом процессе, in-process watchdog умирал вместе с event loop'ом).
+    # Heartbeat пишется независимым setInterval в worker/yandexmaps.ts;
+    # healthcheck читает mtime и флипает контейнер в unhealthy, если он
+    # старше 300с — autoheal sidecar тогда `docker restart`.
+    labels:
+      - autoheal=true
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/yandexmaps-worker-heartbeat && test $$(( $$(date +%s) - $$(cat /tmp/yandexmaps-worker-heartbeat | cut -c1-10) )) -lt 300 || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
     deploy:
       resources:
         limits:
@@ -518,6 +532,9 @@ services:
       - LEADS_REPORT_MARKETING_SHEET_ID=${LEADS_REPORT_MARKETING_SHEET_ID}
       - LEADS_REPORT_OUTREACH_SHEET_ID=${LEADS_REPORT_OUTREACH_SHEET_ID}
       - LEADS_REPORT_SINCE_DAYS=${LEADS_REPORT_SINCE_DAYS:-30}
+      # ID таблицы «Отчетность продаж Polza Agency» — используется скриптом
+      # /app/workers/salesReportCron.js (host cron 17:10 МСК ежедневно).
+      - SALES_REPORT_SPREADSHEET_ID=${SALES_REPORT_SPREADSHEET_ID}
       - AMO_BASE_URL_HOST=${AMO_BASE_URL_HOST:-polzaagency.amocrm.ru}
       - GOOGLE_SERVICE_ACCOUNT_EMAIL=${GOOGLE_SERVICE_ACCOUNT_EMAIL}
       - GOOGLE_PRIVATE_KEY=${GOOGLE_PRIVATE_KEY}
@@ -982,6 +999,8 @@ services:
   googleparsers:
     image: ${DOCKER_USERNAME}/portal-googleparsers:prod
     container_name: portal-googleparsers
+    environment:
+      - GOOGLE_MAPS_PLACE_CONCURRENCY=${GOOGLE_MAPS_PLACE_CONCURRENCY:-4}
     # Playwright/Chromium children — same reaping story as yandexmaps.
     init: true
     restart: unless-stopped
@@ -1210,15 +1229,15 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - GITHUB_REPO=${GITHUB_REPO:-wemdio/Portal}
       - REQUESTY_CHANGELOG_API_KEY=${REQUESTY_CHANGELOG_API_KEY}
-      - CHANGELOG_OPENROUTER_MODEL=${CHANGELOG_OPENROUTER_MODEL:-anthropic/claude-sonnet-4-5}
+      - CHANGELOG_OPENROUTER_MODEL=${CHANGELOG_OPENROUTER_MODEL:-google/gemini-2.5-flash}
       - CHANGELOG_WEBHOOK_PORT=${CHANGELOG_WEBHOOK_PORT:-8095}
     ports:
       - "8095:8095"
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: '0.1'
+          memory: 1G
+          cpus: '1'
           pids: 512
     restart: unless-stopped
     networks:

@@ -48,6 +48,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { findNewHhEmployers, deriveDomain, type HhEmployer } from './hhAutoParser';
+import { ensureArchiveSinkJob, buildHhArchiveSinkCallback } from '@/lib/parsers/hhArchiveSink';
 import { getOrFetchScore, emptyCacheStats } from './mailganerScoreCache';
 import { resolveMailganerScoringConcurrency } from './mailganerScoringThrottle';
 import { validateEmailForAutoPipeline, type AutoPipelineEmailValidation } from './autoPipelineEmailValidation';
@@ -805,6 +806,13 @@ export async function runAutoPipelineForClient(
     const since = new Date(Date.now() - config.hh_date_window_hours * 60 * 60 * 1000);
     const excludePatterns = buildExcludePatterns(config.hh_extra_exclude_patterns ?? []);
 
+    // Sink в общий hh_vacancies — см. lib/parsers/hhArchiveSink.ts. Инлайн-
+    // код (~30 строк) вынесен в общий helper, чтобы то же самое было
+    // подключено к OutreachOS-пайплайну (иначе его ~10-30К вакансий/день
+    // проходили мимо архива).
+    const sinkJobId = await ensureArchiveSinkJob(clientUserId);
+    const onVacancies = buildHhArchiveSinkCallback(sinkJobId);
+
     const employers = await findNewHhEmployers({
       since,
       excludePatterns,
@@ -815,6 +823,7 @@ export async function runAutoPipelineForClient(
       industries: config.industries.length > 0 ? config.industries : undefined,
       limit: config.daily_limit ?? 1000,
       log: (m) => void logAudit('auto-pipeline.hh', m, logCtx),
+      onVacancies,
     });
 
     // 3. Дедуп HH-результатов по hh_employer_id.

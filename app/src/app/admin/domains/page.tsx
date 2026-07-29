@@ -72,6 +72,11 @@ export default function AdminDomainsPage() {
   const [error, setError] = useState('');
   const [warnings, setWarnings] = useState<string[]>([]);
   const [filterAccount, setFilterAccount] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<{ expired: boolean; urgent: boolean; ok: boolean }>({
+    expired: true,
+    urgent: true,
+    ok: true,
+  });
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 30;
@@ -105,7 +110,9 @@ export default function AdminDomainsPage() {
     return map;
   }, [accounts]);
 
-  const filtered = useMemo(() => {
+  // Search+account срез — на нём считаются карточки (иначе выключая статус
+  // мы обнуляли бы его собственный счётчик).
+  const searchAccountFiltered = useMemo(() => {
     let result = filterAccount ? domains.filter((d) => d.account === filterAccount) : domains;
     const q = search.trim().toLowerCase();
     if (q) {
@@ -116,9 +123,19 @@ export default function AdminDomainsPage() {
     return result;
   }, [domains, filterAccount, search]);
 
+  const filtered = useMemo(
+    () => searchAccountFiltered.filter((d) => {
+      const days = daysUntil(d.expiration_date);
+      if (days < 0) return statusFilter.expired;
+      if (days <= 30) return statusFilter.urgent;
+      return statusFilter.ok;
+    }),
+    [searchAccountFiltered, statusFilter],
+  );
+
   // Сброс страницы при смене фильтров/поиска — иначе page может остаться
   // указывать на страницу за пределами нового списка.
-  useEffect(() => { setPage(0); }, [filterAccount, search]);
+  useEffect(() => { setPage(0); }, [filterAccount, search, statusFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages - 1);
@@ -128,11 +145,11 @@ export default function AdminDomainsPage() {
   );
 
   const stats = useMemo(() => {
-    const expired = filtered.filter((d) => daysUntil(d.expiration_date) < 0).length;
-    const urgent = filtered.filter((d) => { const dd = daysUntil(d.expiration_date); return dd >= 0 && dd <= 30; }).length;
-    const ok = filtered.length - expired - urgent;
-    return { total: filtered.length, expired, urgent, ok };
-  }, [filtered]);
+    const expired = searchAccountFiltered.filter((d) => daysUntil(d.expiration_date) < 0).length;
+    const urgent = searchAccountFiltered.filter((d) => { const dd = daysUntil(d.expiration_date); return dd >= 0 && dd <= 30; }).length;
+    const ok = searchAccountFiltered.length - expired - urgent;
+    return { total: searchAccountFiltered.length, expired, urgent, ok };
+  }, [searchAccountFiltered]);
 
   // Последние два столбца («Осталось» и «Статус») расширены: раньше 80px
   // не вмещали «Истёк 36 дн. назад» и «Приостановлен», лейблы налезали друг
@@ -187,25 +204,64 @@ export default function AdminDomainsPage() {
         </div>
       ) : (
         <>
-          {/* Stats */}
+          {/* Stats — 3 карточки-статуса кликабельные (toggle), «Всего» — счётчик. */}
           {domains.length > 0 && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
               <div className="bg-white border border-gray-200 rounded-xl p-4">
                 <div className="text-2xl font-bold text-gray-900">{stats.total}</div>
                 <div className="text-xs text-gray-500 mt-1">Всего доменов</div>
               </div>
-              <div className={`border rounded-xl p-4 ${stats.expired > 0 ? 'bg-red-50 border-red-200' : 'bg-white border-gray-200'}`}>
-                <div className={`text-2xl font-bold ${stats.expired > 0 ? 'text-red-600' : 'text-gray-900'}`}>{stats.expired}</div>
-                <div className={`text-xs mt-1 ${stats.expired > 0 ? 'text-red-500' : 'text-gray-500'}`}>Истекли</div>
-              </div>
-              <div className={`border rounded-xl p-4 ${stats.urgent > 0 ? 'bg-amber-50 border-amber-200' : 'bg-white border-gray-200'}`}>
-                <div className={`text-2xl font-bold ${stats.urgent > 0 ? 'text-amber-600' : 'text-gray-900'}`}>{stats.urgent}</div>
-                <div className={`text-xs mt-1 ${stats.urgent > 0 ? 'text-amber-500' : 'text-gray-500'}`}>Истекают ≤30 дн.</div>
-              </div>
-              <div className="bg-white border border-gray-200 rounded-xl p-4">
-                <div className="text-2xl font-bold text-emerald-600">{stats.ok}</div>
-                <div className="text-xs text-gray-500 mt-1">В порядке</div>
-              </div>
+              <button
+                type="button"
+                onClick={() => setStatusFilter((s) => ({ ...s, expired: !s.expired }))}
+                aria-pressed={statusFilter.expired}
+                className={`text-left border rounded-xl p-4 transition-colors ${
+                  statusFilter.expired
+                    ? 'bg-red-50 border-red-200'
+                    : 'bg-white border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                <div className={`text-2xl font-bold ${statusFilter.expired ? 'text-red-600' : 'text-gray-400'}`}>
+                  {stats.expired}
+                </div>
+                <div className={`text-xs mt-1 ${statusFilter.expired ? 'text-red-500' : 'text-gray-400'}`}>
+                  Истекли
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter((s) => ({ ...s, urgent: !s.urgent }))}
+                aria-pressed={statusFilter.urgent}
+                className={`text-left border rounded-xl p-4 transition-colors ${
+                  statusFilter.urgent
+                    ? 'bg-amber-50 border-amber-200'
+                    : 'bg-white border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                <div className={`text-2xl font-bold ${statusFilter.urgent ? 'text-amber-600' : 'text-gray-400'}`}>
+                  {stats.urgent}
+                </div>
+                <div className={`text-xs mt-1 ${statusFilter.urgent ? 'text-amber-500' : 'text-gray-400'}`}>
+                  Истекают ≤30 дн.
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter((s) => ({ ...s, ok: !s.ok }))}
+                aria-pressed={statusFilter.ok}
+                className={`text-left border rounded-xl p-4 transition-colors ${
+                  statusFilter.ok
+                    ? 'bg-emerald-50 border-emerald-200'
+                    : 'bg-white border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                <div className={`text-2xl font-bold ${statusFilter.ok ? 'text-emerald-600' : 'text-gray-400'}`}>
+                  {stats.ok}
+                </div>
+                <div className={`text-xs mt-1 ${statusFilter.ok ? 'text-emerald-500' : 'text-gray-400'}`}>
+                  В порядке
+                </div>
+              </button>
             </div>
           )}
 
@@ -341,13 +397,14 @@ export default function AdminDomainsPage() {
           </div>
 
           {/* Пагинация — по 30 доменов на странице. Показываем только если
-              элементов больше одной страницы, иначе визуальный шум. */}
+              элементов больше одной страницы, иначе визуальный шум.
+              3-колоночный grid держит кнопки по центру, а стата слева. */}
           {filtered.length > PAGE_SIZE && (
-            <div className="flex items-center justify-between gap-3 mt-4">
-              <div className="text-xs text-gray-500">
+            <div className="grid grid-cols-3 items-center gap-3 mt-4">
+              <div className="text-xs text-gray-500 justify-self-start">
                 {safePage * PAGE_SIZE + 1}–{Math.min((safePage + 1) * PAGE_SIZE, filtered.length)} из {filtered.length}
               </div>
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 justify-self-center">
                 <button
                   type="button"
                   disabled={safePage === 0}
@@ -370,6 +427,7 @@ export default function AdminDomainsPage() {
                   <ChevronRight className="h-4 w-4" />
                 </button>
               </div>
+              <div />
             </div>
           )}
         </>

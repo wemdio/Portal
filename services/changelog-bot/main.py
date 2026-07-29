@@ -14,7 +14,7 @@ Changelog-bot: ежедневный дайджест обновлений пор
   GITHUB_TOKEN             — Personal Access Token (для приватного репо)
   GITHUB_REPO              — owner/repo  (default: wemdio/Portal)
   REQUESTY_CHANGELOG_API_KEY   — ключ Requesty для AI-саммари
-  CHANGELOG_OPENROUTER_MODEL  — модель (default: google/gemini-2.0-flash-001)
+  CHANGELOG_OPENROUTER_MODEL  — модель (default: google/gemini-2.5-flash, 1M токенов контекста)
   CHANGELOG_THREAD_ID      — ID топика в супергруппе (опционально, для отправки в тред)
   CHANGELOG_RUN_NOW        — если "1", запустить дайджест сразу при старте (для теста)
   DATABASE_URL             — Postgres URL (опционально, для хранения истории саммари)
@@ -22,8 +22,10 @@ Changelog-bot: ежедневный дайджест обновлений пор
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,7 +52,7 @@ CHAT_ID = os.environ.get("CHANGELOG_CHAT_ID", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "wemdio/Portal")
 OPENROUTER_API_KEY = os.environ.get("REQUESTY_CHANGELOG_API_KEY", "")
-AI_MODEL = os.environ.get("CHANGELOG_OPENROUTER_MODEL", "anthropic/claude-sonnet-4-5")
+AI_MODEL = os.environ.get("CHANGELOG_OPENROUTER_MODEL", "google/gemini-2.5-flash")
 THREAD_ID = os.environ.get("CHANGELOG_THREAD_ID", "")
 RUN_NOW = os.environ.get("CHANGELOG_RUN_NOW", "") == "1"
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL", "")
@@ -180,15 +182,37 @@ def _parse_next_link(link_header: str) -> str | None:
     return None
 
 
+def _is_noise_merge(first_line: str) -> bool:
+    """Merge-коммиты веток — не несут смысла для дайджеста и жрут слоты
+    из MAX_MESSAGES + токены (`Merge pull request #NNN from wemdio/test`,
+    `Merge branch 'test' into main` и т.п.). Настоящие изменения уже лежат
+    отдельными коммитами в списке — их фичи модель и опишет.
+    Промпт и так велит их игнорировать, но пока они в user_content, они
+    оттесняют реальные коммиты за границу лимита."""
+    low = first_line.lower()
+    return (
+        low.startswith("merge pull request ")
+        or low.startswith("merge branch ")
+        or low.startswith("merge remote-tracking branch ")
+    )
+
+
 def _extract_commit_info(commits: list[dict[str, Any]]) -> list[str]:
-    messages = []
+    messages: list[str] = []
+    skipped_merges = 0
     for c in commits:
         msg: str = c.get("commit", {}).get("message", "").strip()
         if not msg:
             continue
         first_line = msg.splitlines()[0].strip()
-        if first_line:
-            messages.append(first_line)
+        if not first_line:
+            continue
+        if _is_noise_merge(first_line):
+            skipped_merges += 1
+            continue
+        messages.append(first_line)
+    if skipped_merges:
+        print(f"[changelog] Skipped {skipped_merges} merge-only commits (branch/PR merges)", flush=True)
     return messages
 
 
@@ -203,59 +227,64 @@ SYSTEM_PROMPT = """\
 Если в каком-то блоке нечего написать — блок полностью пропускай (не пиши пустой заголовок).
 
 Блок 1 — заголовок: «Обновления основного функционала портала {period}:»
-Сюда идут: новый функционал и исправления багов в инструментах с меткой [спец] из справочника ниже.
-Сначала новый функционал, затем исправления. Для нового функционала обязательно укажи что это, где находится и что делает.
+Сюда идут изменения, затрагивающие интерфейс СПЕЦИАЛИСТОВ (наш внутренний портал).
 
 Блок 2 — заголовок: «Обновления функционала клиентского доступа на портале {period}:»
-Сюда идут: новый функционал и исправления багов в инструментах с меткой [клиент] или [спец+клиент].
-Сначала новый функционал, затем исправления.
+Сюда идут изменения, затрагивающие КЛИЕНТСКИЙ портал.
 
 Блок 3 — заголовок: «Прочие технические обновления:»
 Сюда идут: инфраструктурные, косметические и прочие технические изменения без пользовательского эффекта.
 
-## Справочник инструментов (технический slug → название [кто использует])
+## Как разложить коммит по блокам
 
-  done-for-you → Done For You База [спец]
-  base-constructor → Конструктор баз [спец]
-  ai-caller → AI Звонилка [спец]
-  ai-caller-v2 → AI Звонилка v2 [спец]
-  databases → Работа с базами [спец]
-  database-review → Проверка баз [спец]
-  parsers → Парсеры [спец]
-  email-sequence → Цепочки писем [спец]
-  email-sequence-v2 → Цепочки писем 2.0 [спец]
-  auto-report → Автоотчёты [спец]
-  audio-transcribe → Расшифровка видео и аудио [спец]
-  tg-transcribe → Транскрибации из ТГ [спец]
-  cis-lead-finder → CIS Lead Finder [спец]
-  li-outreach → LinkedIn Outreach [спец]
-  rdp → Удалённый рабочий стол [спец]
-  instantly → Instantly [спец]
-  tg-outreach → TG Аутрич [спец]
-  habr-career → Habr Career [спец]
-  tg-parser → TG User Parser [спец]
-  sales-copilot → Sales Copilot [спец]
-  knowledge-base → База знаний [спец]
-  bugor-outreach → Наш бугор аутрич [спец]
-  nash-outreach → Наш аутрич [спец]
-  reputation-finder → Reputation Finder [спец]
-  our-bases → Наша база баз [спец]
-  companies-search → Наша база баз [спец]
-  atmos-analytics → Atmos-аналитика [спец]
-  okved-modal → ОКВЭД справочник [спец]
-  client-brief → Бриф клиента [спец]
-  client-support → Поддержка клиентов [спец+клиент]
-  client → клиентский кабинет [клиент]
-  tariff → тарифный план [клиент]
+Многие инструменты (парсеры, цепочки писем, кампании, конструктор баз, поиск компаний, брифы, ответы, лиды и т.п.) существуют И в клиентском портале, И в спец-портале. Один и тот же инструмент может быть упомянут в обоих блоках, если изменения затронули обе стороны.
+
+Признаки КЛИЕНТСКОГО изменения (→ Блок 2):
+- Префикс коммита начинается с `client-` или содержит слово `client` (например: client-tools, client-onboarding, client-replies, client-leads, client-portal, client-ui).
+- В теле упоминаются «клиент», «клиентский», «клиентском».
+- Пути в коммите ведут в `app/src/app/client/…`.
+- Инструменты, живущие только в клиенте: тариф (tariff), поддержка клиентов, бриф клиента, ответы клиентов, лиды клиента, дашборд клиента, онбординг.
+
+Признаки СПЕЦ-изменения (→ Блок 1):
+- Всё остальное, что не подпадает под клиентские признаки.
+- Инструменты, живущие только в спец-портале (не имеют клиентского аналога): AI Звонилка, TG Outreach, TG-парсер, TG-транскрибации, LinkedIn Outreach, CIS Lead Finder, Habr Career, Sales Copilot, Reputation Finder, Atmos-аналитика, RDP, Автоотчёты, аудио-расшифровка, Наш аутрич / Бугор аутрич, ОКВЭД справочник, база знаний, Hypothesis Engine (projects), Instantly (админ-панель), 2ГИС-парсер (админ), ЯКарты-парсер.
+
+Признаки ПРОЧЕГО (→ Блок 3):
+- Инфраструктура (docker, compose, миграции, лимиты памяти/CPU, healthcheck).
+- Изменения в скриптах, CI, воркерах, бэкапах, БД-индексах.
+- Косметика без видимого эффекта для пользователя.
+
+## Правило группировки (КРИТИЧНО)
+
+ВСЕ коммиты про один инструмент собирай в ОДИН пункт (или в подряд идущий блок пунктов), НЕ РАЗБРАСЫВАЙ по документу.
+
+Плохо (было):
+- Добавлен отдельный инструмент парсера 2ГИС.
+- ... (15 других пунктов) ...
+- Ограничен экспорт CSV из парсера 2ГИС до 500 тысяч строк.
+- Улучшены фильтры парсера 2ГИС.
+
+Хорошо (должно быть):
+- Парсер 2ГИС: выделен в отдельный инструмент, добавлены иерархические фильтры по рубрикам, улучшены фильтры источников, ограничен экспорт CSV до 500 тыс. строк.
+
+Приёмы группировки:
+- Один пункт-«шапка» на инструмент, внутри перечисление через запятую или точку с запятой.
+- Если пунктов про инструмент много (>3-4) — можно оставить главный пункт и подпункты через двоеточие + перечисление.
+- Порядок внутри пункта: сначала новое, потом улучшения, потом исправления.
+
+Порядок пунктов внутри блока:
+1. Крупные новые инструменты и фичи в существующих.
+2. Улучшения UI/UX и работы существующих инструментов.
+3. Исправления багов.
 
 ## Правила форматирования
 
 - Пиши на русском языке.
 - Каждый пункт начинается с «- » (тире и пробел). Без эмодзи.
-- Группируй похожие изменения в один пункт.
 - Используй глагол действия: «добавлен», «обновлён», «исправлен», «улучшен».
 - Между блоками — одна пустая строка.
-- НИКОГДА не используй markdown: никаких бэктиков (`), звёздочек (*), подчёркиваний (_), решёток (#).
+- Название инструмента в начале пункта оборачивай в двойные звёздочки для жирного шрифта: `- **Парсер 2ГИС:** описание изменений.`. Это единственный разрешённый markdown.
+- Другой markdown НЕ используй: никаких бэктиков (`), одиночных звёздочек (*курсив*), подчёркиваний (_), решёток (#).
 - Пиши простым языком без технических терминов («идемпотентность», «upsert», «миграция», «рефакторинг» и т.п.).
 - Не включай: SHA, имена файлов, названия веток, номера PR.
 - Игнорируй коммиты: Merge branch, Merge pull request, а также любые упоминания об удалении файлов, скриптов, секретов, ключей.
@@ -264,20 +293,55 @@ SYSTEM_PROMPT = """\
 """
 
 
-async def summarize_with_ai(messages: list[str], period: str = "за прошедшие сутки") -> str:
+MAX_MESSAGES = 2000
+MAX_USER_CONTENT_CHARS = 400_000
+
+
+async def summarize_with_ai(
+    messages: list[str],
+    period: str = "за прошедшие сутки",
+    model_override: str | None = None,
+) -> str:
     if not messages:
         return ""
 
-    user_content = f"Период: {period}\n\nСписок коммит-сообщений:\n" + "\n".join(f"- {m}" for m in messages)
+    original_count = len(messages)
+    truncated_count = 0
+    if original_count > MAX_MESSAGES:
+        messages = messages[:MAX_MESSAGES]
+        truncated_count = original_count - MAX_MESSAGES
+        print(
+            f"[changelog] Too many messages ({original_count}) — capped at {MAX_MESSAGES}, dropped {truncated_count}",
+            flush=True,
+        )
 
+    tail = f"\n- …и ещё {truncated_count} коммитов не показаны" if truncated_count else ""
+    user_content = (
+        f"Период: {period}\n\nСписок коммит-сообщений:\n"
+        + "\n".join(f"- {m}" for m in messages)
+        + tail
+    )
+
+    if len(user_content) > MAX_USER_CONTENT_CHARS:
+        cut = MAX_USER_CONTENT_CHARS
+        newline = user_content.rfind("\n", 0, cut)
+        if newline > 0:
+            cut = newline
+        print(
+            f"[changelog] user_content too long ({len(user_content)} chars) — truncating to {cut}",
+            flush=True,
+        )
+        user_content = user_content[:cut] + "\n- …остальные коммиты обрезаны (слишком много)"
+
+    model = model_override or AI_MODEL
+    print(f"[changelog] AI model: {model}, input chars: {len(user_content)}", flush=True)
     payload = {
-        "model": AI_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
         "temperature": 0.3,
-        "max_tokens": 1500,
     }
 
     try:
@@ -356,19 +420,32 @@ async def send_message(text: str) -> bool:
 
 # ── Core job ──────────────────────────────────────────────────────────────────
 
-async def run_digest() -> None:
+async def run_digest(
+    *,
+    force: bool = False,
+    days_override: int | None = None,
+    model_override: str | None = None,
+    skip_already_sent_check: bool = False,
+) -> None:
     now_msk = datetime.now(MSK)
     weekday = now_msk.weekday()
     print(f"[changelog] run_digest triggered: {now_msk.strftime('%d.%m.%Y %H:%M MSK')} weekday={weekday}", flush=True)
 
-    if weekday >= 5:
+    if weekday >= 5 and not force:
         print("[changelog] Weekend — skip.", flush=True)
         return
 
-    since_utc, until_utc = _compute_window(now_msk)
+    if days_override is not None:
+        until_utc = datetime.now(timezone.utc)
+        since_utc = until_utc - timedelta(days=days_override)
+        period_label = f"за последние {days_override} дн."
+    else:
+        since_utc, until_utc = _compute_window(now_msk)
+        period_label = "за прошедшие выходные и пятницу" if weekday == 0 else "за прошедшие сутки"
+
     print(f"[changelog] Window: {since_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} → {until_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}", flush=True)
 
-    if not RUN_NOW and await already_sent(since_utc, until_utc):
+    if not RUN_NOW and not skip_already_sent_check and await already_sent(since_utc, until_utc):
         print("[changelog] Digest for this window already sent — skipping.", flush=True)
         return
 
@@ -388,14 +465,17 @@ async def run_digest() -> None:
         print("[changelog] No meaningful commit messages — skip.", flush=True)
         return
 
-    period_label = "за прошедшие выходные и пятницу" if weekday == 0 else "за прошедшие сутки"
-    summary = await summarize_with_ai(messages, period=period_label)
+    summary = await summarize_with_ai(messages, period=period_label, model_override=model_override)
 
     if not summary or not summary.strip():
         print("[changelog] AI returned empty summary — nothing to send.", flush=True)
         return
 
     escaped = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Модель по-прежнему любит писать markdown-жирный **Название**; Telegram с
+    # parse_mode=HTML показывает звёздочки как есть. Конвертируем после escape,
+    # чтобы <b>…</b> не попали под замену & < >.
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
     raw_lines = escaped.splitlines()
     lines = []
     prev_is_header = False
@@ -454,6 +534,41 @@ async def _run_catchup() -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Portal changelog bot")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run digest immediately and exit (no scheduler, no health server, bypasses weekend check).",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Override window: last N days back from now (only with --once).",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Override AI model id (e.g. google/gemini-2.0-flash-001 for 1M-token context).",
+    )
+    return parser.parse_args()
+
+
+async def run_once(days: int | None, model: str | None) -> None:
+    _require("CHANGELOG_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
+    _require("CHANGELOG_CHAT_ID", CHAT_ID)
+    _require("REQUESTY_CHANGELOG_API_KEY", OPENROUTER_API_KEY)
+    await ensure_table()
+    await run_digest(
+        force=True,
+        days_override=days,
+        model_override=model,
+        skip_already_sent_check=True,
+    )
+
+
 async def main() -> None:
     _require("CHANGELOG_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
     _require("CHANGELOG_CHAT_ID", CHAT_ID)
@@ -490,4 +605,8 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    args = _parse_args()
+    if args.once:
+        asyncio.run(run_once(days=args.days, model=args.model))
+    else:
+        asyncio.run(main())

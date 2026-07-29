@@ -610,7 +610,16 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       return;
     }
 
-    const chunks = chunk(remainingLinks, 15);
+    // Chunk size 15 → 5 (28.07.2026): при медленных прокси (US→RU, 60-90с
+    // на карточку) чанк из 15 карт занимал 15+ мин и упирался в
+    // PARSE_TIMEOUT_SEC=900 в python-сервисе. Одновременно watchdog
+    // (тоже 15 мин по updated_at, обновляется только МЕЖДУ чанками) фейлил
+    // задачу как «зомби». Race: PARSE_TIMEOUT == WATCHDOG_THRESHOLD.
+    // Chunk size 5 → максимум 5×90с = 7.5 мин на чанк, updated_at
+    // обновляется в 3× чаще, watchdog никогда не догоняет. Env-override для
+    // быстрого регулирования без rebuild.
+    const chunkSize = Number(process.env.YANDEXMAPS_PARSE_CHUNK_SIZE ?? '5');
+    const chunks = chunk(remainingLinks, chunkSize);
 
     // Тот же фильтр по скорости, что и на сборе ссылок: карточки организаций
     // легче поисковой страницы, но через 2.7 КБ/с не грузятся и они.

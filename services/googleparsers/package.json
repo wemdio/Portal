@@ -6,7 +6,7 @@
   "scripts": {
     "start": "tsx src/server.ts",
     "build": "tsc",
-    "test": "node --import tsx --test src/shared/proxy.test.ts"
+    "test": "node --import tsx --test src/shared/*.test.ts"
   },
   "dependencies": {
     "express": "^4.21.2",

@@ -40,11 +40,26 @@ async function resetStuckJobs() {
   }
 }
 
-async function claimJob(): Promise<{ id: string; campaign_id: string; action: string } | null> {
-  const { data: pending } = await db
+// Control-джобы (stop/restart/refetch_messages) не занимают слот в
+// runningCampaigns и должны подхватываться независимо от concurrency-limit —
+// иначе оператор жмёт «Стоп», но при 5/5 занятых слотах джоб живёт в pending
+// до истечения (см. resumeRunningCampaigns:249 — auto-completes stale через
+// 5 мин). Инцидент 29.07.2026: 5 running кампаний → 4 стоп-клика подряд ушли
+// в stale, кампании продолжали работать.
+export const CONTROL_ACTIONS = ['stop', 'restart', 'refetch_messages'] as const;
+export const START_ACTIONS = ['start'] as const;
+
+export async function claimJob(
+  actionFilter?: readonly string[],
+): Promise<{ id: string; campaign_id: string; action: string } | null> {
+  let pendingQuery = db
     .from('tg_outreach_jobs')
     .select('id, campaign_id, action')
-    .eq('status', 'pending')
+    .eq('status', 'pending');
+  if (actionFilter && actionFilter.length > 0) {
+    pendingQuery = pendingQuery.in('action', actionFilter as unknown as string[]);
+  }
+  const { data: pending } = await pendingQuery
     .order('created_at', { ascending: true })
     .limit(1)
     .maybeSingle();
@@ -181,20 +196,8 @@ async function handleRefetchJob(job: { id: string; campaign_id: string }) {
   }
 }
 
-async function pollOnce(): Promise<boolean> {
-  if (runningCampaigns.size >= _MAX_CONCURRENCY) {
-    log(
-      'info',
-      `Max concurrent campaigns reached (${runningCampaigns.size}/${_MAX_CONCURRENCY}), waiting for free slot`,
-    );
-    return false;
-  }
-
-  const job = await claimJob();
-  if (!job) return false;
-
+async function dispatchJob(job: { id: string; campaign_id: string; action: string }): Promise<void> {
   log('info', `Claimed job ${job.id}: ${job.action} for campaign ${job.campaign_id}`);
-
   try {
     switch (job.action) {
       case 'start':
@@ -225,7 +228,31 @@ async function pollOnce(): Promise<boolean> {
       finished_at: new Date().toISOString(),
     }).eq('id', job.id);
   }
+}
 
+export async function pollOnce(): Promise<boolean> {
+  // Всегда сначала пытаемся подхватить control-джобы (stop/restart/refetch):
+  // они не занимают слот в runningCampaigns, а stop даже освобождает его.
+  // Если ждать освобождения concurrency-slot'а перед стопом — оператор
+  // не может выключить ничего, когда все слоты заняты.
+  const controlJob = await claimJob(CONTROL_ACTIONS);
+  if (controlJob) {
+    await dispatchJob(controlJob);
+    return true;
+  }
+
+  if (runningCampaigns.size >= _MAX_CONCURRENCY) {
+    log(
+      'info',
+      `Max concurrent campaigns reached (${runningCampaigns.size}/${_MAX_CONCURRENCY}), waiting for free slot`,
+    );
+    return false;
+  }
+
+  const startJob = await claimJob(START_ACTIONS);
+  if (!startJob) return false;
+
+  await dispatchJob(startJob);
   return true;
 }
 
@@ -261,21 +288,46 @@ export async function resumeRunningCampaigns() {
 
   log('info', `Found ${running.length} campaigns with status running/paused, scheduling auto-resume`);
   for (const campaign of running) {
-    const { data: existingJob } = await db
+    // There may already be duplicate active start jobs left by an older
+    // worker/deploy race. Limit the existence check to one row: maybeSingle()
+    // returns an error (and null data) when multiple rows match, which used to
+    // make this loop enqueue one more duplicate every five minutes.
+    const { data: existingJob, error: existingJobError } = await db
       .from('tg_outreach_jobs')
       .select('id')
       .eq('campaign_id', campaign.id)
       .eq('action', 'start')
       .in('status', ['pending', 'running'])
+      .limit(1)
       .maybeSingle();
 
+    if (existingJobError) {
+      throw new Error(
+        `Failed to check active start job for campaign ${campaign.id}: ${existingJobError.message}`,
+      );
+    }
+
     if (!existingJob) {
-      await db.from('tg_outreach_jobs').insert({
+      const { error: insertError } = await db.from('tg_outreach_jobs').insert({
         campaign_id: campaign.id,
         user_id: campaign.user_id ?? '00000000-0000-0000-0000-000000000000',
         action: 'start',
         status: 'pending',
       });
+
+      // A partial unique index is the final race guard. A concurrent resume
+      // check may win the insert after our existence check; that is already
+      // the desired state, so treat only that conflict as benign.
+      if (insertError?.code === '23505') {
+        log('info', `Active start job already exists for campaign ${campaign.id}`);
+        continue;
+      }
+      if (insertError) {
+        throw new Error(
+          `Failed to queue auto-resume for campaign ${campaign.id}: ${insertError.message}`,
+        );
+      }
+
       log('info', `Queued auto-resume start job for campaign ${campaign.id}`);
     }
   }

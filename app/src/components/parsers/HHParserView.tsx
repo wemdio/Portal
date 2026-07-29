@@ -629,7 +629,7 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
       return;
     }
     setAddingToDb(true);
-    setExportProgress('Базы: готовим компании');
+    setExportProgress('Базы: готовим вакансии');
     try {
       await waitForBrowserPaint();
       const items = await resolveExportItems('Базы');
@@ -638,59 +638,18 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
         return;
       }
 
-      const map = new Map<
-        string,
-        { company_name: string; site: string; company_url: string; description: string; vacancyCount: number }
-      >();
-      for (const v of items) {
-        const siteHost = safeHostname(v.company_site_url);
-        const hhEmployerKey = extractHhEmployerKey(v.company_url);
-        const fallbackName = (v.company_name ?? '').trim().toLowerCase();
-
-        const key = (
-          siteHost && siteHost !== 'hh.ru'
-            ? siteHost
-            : hhEmployerKey
-              ? hhEmployerKey
-              : siteHost || fallbackName
-        ).trim().toLowerCase();
-        if (!key) continue;
-        const existing = map.get(key);
-        if (!existing) {
-          map.set(key, {
-            company_name: v.company_name ?? '',
-            site: v.company_site_url ?? '',
-            company_url: v.company_url ?? '',
-            description: v.company_description ?? '',
-            vacancyCount: 1,
-          });
-          continue;
-        }
-        existing.vacancyCount += 1;
-        if (!existing.site && v.company_site_url) existing.site = v.company_site_url;
-        if (!existing.company_url && v.company_url) existing.company_url = v.company_url;
-        if ((!existing.description || existing.description.length < 40) && v.company_description) {
-          existing.description = v.company_description;
-        }
-      }
-
-      const companies = Array.from(map.values()).sort((a, b) =>
-        (a.company_name || a.site).localeCompare(b.company_name || b.site, 'ru'),
-      );
-      if (companies.length === 0) {
-        setToast({ tone: 'error', message: 'Не удалось собрать компании из результатов' });
-        return;
-      }
-
-      const MAX_ROWS = 5000;
+      // Раньше здесь был dedup по работодателю (siteHost / hhEmployerKey /
+      // fallbackName) → 10 000 вакансий превращались в 500 «компаний», плюс
+      // 5 000 колонок сверху обрезалось MAX_ROWS. Юзеры (Эльвира,
+      // 28.07.2026) ожидали полную выгрузку вакансий, а получали 500 —
+      // выглядело как жёсткий лимит. Убираем dedup: каждая вакансия =
+      // отдельная строка в базе, столбцы совпадают с CSV/Excel экспортом,
+      // так что «В базу» и «CSV» дают одинаковый набор данных.
+      const MAX_ROWS = 50_000;
       const rows: string[][] = [
-        ['Company', 'Site', 'CompanyUrl', 'Description', 'Vacancies', 'JobId', 'Parser'],
-        ...companies.slice(0, MAX_ROWS).map((c) => [
-          c.company_name,
-          c.site,          // только внешний сайт компании (если есть)
-          c.company_url,   // страница работодателя на hh.ru
-          c.description,
-          String(c.vacancyCount),
+        [...exportHeader, 'JobId', 'Parser'],
+        ...items.slice(0, MAX_ROWS).map((v) => [
+          ...exportRow(v).map((cell) => String(cell ?? '')),
           activeJobId,
           'hh',
         ]),
@@ -699,12 +658,12 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
       const title = `Вакансии #${activeJobId.slice(0, 8)}`;
       const { id } = await writePendingDbImport({ title, rows });
       const url = buildDatabasesImportUrl(id);
-      const trimmed = companies.length > MAX_ROWS;
+      const trimmed = items.length > MAX_ROWS;
       setToast({
         tone: 'success',
         message: trimmed
-          ? `Добавлено в “Базы” (${MAX_ROWS} из ${companies.length} компаний). Можете перейти и проверить импорт.`
-          : `Добавлено в “Базы” (${companies.length} компаний). Можете перейти и проверить импорт.`,
+          ? `Добавлено в “Базы” (${MAX_ROWS} из ${items.length} вакансий, лимит на импорт). Можете перейти и проверить.`
+          : `Добавлено в “Базы” (${items.length} вакансий). Можете перейти и проверить импорт.`,
         href: url,
       });
     } catch (e) {

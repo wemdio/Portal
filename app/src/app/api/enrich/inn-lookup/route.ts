@@ -6,6 +6,7 @@ import { findByInn, hasDadataKey } from '@/lib/enrich/dadataClient';
 
 export const dynamic = 'force-dynamic';
 const MAX_ITEMS = 5;
+const SITE_TIMEOUT_MS = 10_000;
 
 type RequestItem = { url?: string };
 type ResultItem = {
@@ -41,22 +42,18 @@ export async function POST(req: NextRequest) {
     return jsonError(`Maximum ${MAX_ITEMS} items per request`, 400);
   }
 
-  const results: ResultItem[] = [];
-
-  for (const item of items) {
+  const processItem = async (item: RequestItem): Promise<ResultItem> => {
     const url = typeof item.url === 'string' ? item.url.trim() : '';
 
     if (!url) {
-      results.push({ inn: null, companyName: null, error: 'empty URL' });
-      continue;
+      return { inn: null, companyName: null, error: 'empty URL' };
     }
 
     try {
-      const inn = await fetchInnFromWebsite(url, { timeout: 15_000 });
+      const inn = await fetchInnFromWebsite(url, { timeout: SITE_TIMEOUT_MS });
       if (!inn) {
         console.warn(`[inn-lookup] ${url} — no INN found on site`);
-        results.push({ inn: null, companyName: null, error: 'no INN found on site' });
-        continue;
+        return { inn: null, companyName: null, error: 'no INN found on site' };
       }
       let companyName: string | null = null;
       if (hasDadataKey()) {
@@ -67,13 +64,17 @@ export async function POST(req: NextRequest) {
           console.warn(`[inn-lookup] DaData lookup failed for ${inn}:`, (err as Error).message);
         }
       }
-      results.push({ inn, companyName });
+      return { inn, companyName };
     } catch (err) {
       const msg = (err as Error).message || 'unknown error';
       console.warn(`[inn-lookup] ${url} — ${msg}`);
-      results.push({ inn: null, companyName: null, error: msg });
+      return { inn: null, companyName: null, error: msg };
     }
-  }
+  };
 
+  // Keep request order stable for the spreadsheet while resolving the five
+  // independent websites concurrently. The previous sequential loop made a
+  // single batch take the sum of every site's network timeouts.
+  const results = await Promise.all(items.map(processItem));
   return NextResponse.json({ results });
 }
