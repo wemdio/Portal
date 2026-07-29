@@ -40,11 +40,26 @@ async function resetStuckJobs() {
   }
 }
 
-async function claimJob(): Promise<{ id: string; campaign_id: string; action: string } | null> {
-  const { data: pending } = await db
+// Control-джобы (stop/restart/refetch_messages) не занимают слот в
+// runningCampaigns и должны подхватываться независимо от concurrency-limit —
+// иначе оператор жмёт «Стоп», но при 5/5 занятых слотах джоб живёт в pending
+// до истечения (см. resumeRunningCampaigns:249 — auto-completes stale через
+// 5 мин). Инцидент 29.07.2026: 5 running кампаний → 4 стоп-клика подряд ушли
+// в stale, кампании продолжали работать.
+export const CONTROL_ACTIONS = ['stop', 'restart', 'refetch_messages'] as const;
+export const START_ACTIONS = ['start'] as const;
+
+export async function claimJob(
+  actionFilter?: readonly string[],
+): Promise<{ id: string; campaign_id: string; action: string } | null> {
+  let pendingQuery = db
     .from('tg_outreach_jobs')
     .select('id, campaign_id, action')
-    .eq('status', 'pending')
+    .eq('status', 'pending');
+  if (actionFilter && actionFilter.length > 0) {
+    pendingQuery = pendingQuery.in('action', actionFilter as unknown as string[]);
+  }
+  const { data: pending } = await pendingQuery
     .order('created_at', { ascending: true })
     .limit(1)
     .maybeSingle();
@@ -181,20 +196,8 @@ async function handleRefetchJob(job: { id: string; campaign_id: string }) {
   }
 }
 
-async function pollOnce(): Promise<boolean> {
-  if (runningCampaigns.size >= _MAX_CONCURRENCY) {
-    log(
-      'info',
-      `Max concurrent campaigns reached (${runningCampaigns.size}/${_MAX_CONCURRENCY}), waiting for free slot`,
-    );
-    return false;
-  }
-
-  const job = await claimJob();
-  if (!job) return false;
-
+async function dispatchJob(job: { id: string; campaign_id: string; action: string }): Promise<void> {
   log('info', `Claimed job ${job.id}: ${job.action} for campaign ${job.campaign_id}`);
-
   try {
     switch (job.action) {
       case 'start':
@@ -225,7 +228,31 @@ async function pollOnce(): Promise<boolean> {
       finished_at: new Date().toISOString(),
     }).eq('id', job.id);
   }
+}
 
+export async function pollOnce(): Promise<boolean> {
+  // Всегда сначала пытаемся подхватить control-джобы (stop/restart/refetch):
+  // они не занимают слот в runningCampaigns, а stop даже освобождает его.
+  // Если ждать освобождения concurrency-slot'а перед стопом — оператор
+  // не может выключить ничего, когда все слоты заняты.
+  const controlJob = await claimJob(CONTROL_ACTIONS);
+  if (controlJob) {
+    await dispatchJob(controlJob);
+    return true;
+  }
+
+  if (runningCampaigns.size >= _MAX_CONCURRENCY) {
+    log(
+      'info',
+      `Max concurrent campaigns reached (${runningCampaigns.size}/${_MAX_CONCURRENCY}), waiting for free slot`,
+    );
+    return false;
+  }
+
+  const startJob = await claimJob(START_ACTIONS);
+  if (!startJob) return false;
+
+  await dispatchJob(startJob);
   return true;
 }
 
