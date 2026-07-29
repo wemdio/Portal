@@ -123,7 +123,7 @@ services:
       dockerfile: Dockerfile
     container_name: portal-googleparsers-dev
     environment:
-      - GOOGLE_MAPS_PLACE_CONCURRENCY=${GOOGLE_MAPS_PLACE_CONCURRENCY:-3}
+      - GOOGLE_MAPS_PLACE_CONCURRENCY=${GOOGLE_MAPS_PLACE_CONCURRENCY:-4}
     restart: unless-stopped
     networks:
       - portal-network

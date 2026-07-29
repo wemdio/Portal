@@ -14,7 +14,7 @@ const GOOGLE_CONNECTIVITY_URL = "https://www.google.com/robots.txt";
 const NAVIGATION_TIMEOUT_MS = 30_000;
 const MAPS_READY_TIMEOUT_MS = 35_000;
 const PAGE_OPERATION_TIMEOUT_MS = 10_000;
-const DEFAULT_PLACE_CONCURRENCY = 3;
+const DEFAULT_PLACE_CONCURRENCY = 4;
 const MAX_PLACE_CONCURRENCY = 6;
 
 type BrowserSession = {

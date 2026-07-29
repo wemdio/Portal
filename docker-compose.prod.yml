@@ -1000,7 +1000,7 @@ services:
     image: ${DOCKER_USERNAME}/portal-googleparsers:prod
     container_name: portal-googleparsers
     environment:
-      - GOOGLE_MAPS_PLACE_CONCURRENCY=${GOOGLE_MAPS_PLACE_CONCURRENCY:-3}
+      - GOOGLE_MAPS_PLACE_CONCURRENCY=${GOOGLE_MAPS_PLACE_CONCURRENCY:-4}
     # Playwright/Chromium children — same reaping story as yandexmaps.
     init: true
     restart: unless-stopped
