@@ -577,7 +577,7 @@ async function upsertDialog(
   tgUsername: string | null,
   messages: DialogMessage[],
   status?: string,
-  opts?: { canSend?: boolean; tgIsBot?: boolean },
+  opts?: { canSend?: boolean; initialCanSend?: boolean; tgIsBot?: boolean },
 ) {
   const { data: existing } = await db
     .from('tg_outreach_dialogs')
@@ -603,6 +603,8 @@ async function upsertDialog(
       tg_is_bot: opts?.tgIsBot ?? existing.tg_is_bot ?? false,
       ...(status ? { status } : {}),
     };
+    // initialCanSend применяется ТОЛЬКО при insert — иначе перезапишет ручной
+    // toggle оператора в UI при следующем витке цикла.
     if (typeof opts?.canSend === 'boolean') {
       updatePayload.can_send = opts.canSend;
     }
@@ -618,7 +620,7 @@ async function upsertDialog(
       messages,
       status: status ?? 'none',
       tg_is_bot: opts?.tgIsBot ?? false,
-      can_send: opts?.canSend ?? !(opts?.tgIsBot ?? false),
+      can_send: opts?.canSend ?? opts?.initialCanSend ?? !(opts?.tgIsBot ?? false),
       last_message_at: lastMessageAt,
     });
   }
@@ -707,44 +709,6 @@ async function disableDialogIfUnreachable(
     ctx.log('warning', `Диалог ${ctx.dialogLabel}: Telegram вернул ${reasonCode} — пользователь недоступен (удалил аккаунт, заблокировал бота или невалидный peer). Дальнейшие отправки в этот диалог отключены автоматически (can_send=false).`);
   }
   return reasonCode;
-}
-
-async function ensureDialogMeta(
-  db: SupabaseClient,
-  campaignId: string,
-  accountId: string,
-  tgUserId: number,
-  tgUsername: string | null,
-  tgIsBot: boolean,
-  autoAllowNewDialogs: boolean,
-) {
-  const { data: existing } = await db
-    .from('tg_outreach_dialogs')
-    .select('id')
-    .eq('campaign_id', campaignId)
-    .eq('account_id', accountId)
-    .eq('tg_user_id', tgUserId)
-    .maybeSingle();
-
-  if (existing?.id) {
-    await db.from('tg_outreach_dialogs').update({
-      tg_username: tgUsername,
-      tg_is_bot: tgIsBot,
-    }).eq('id', existing.id);
-    return;
-  }
-
-  await db.from('tg_outreach_dialogs').insert({
-    campaign_id: campaignId,
-    account_id: accountId,
-    tg_user_id: tgUserId,
-    tg_username: tgUsername,
-    tg_is_bot: tgIsBot,
-    can_send: autoAllowNewDialogs && !tgIsBot,
-    messages: [],
-    status: 'none',
-    last_message_at: new Date().toISOString(),
-  });
 }
 
 async function writeLog(
@@ -847,16 +811,6 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
-  await ensureDialogMeta(
-    db,
-    campaign.id,
-    account.id,
-    tgUserId,
-    tgUsername,
-    tgIsBot,
-    Boolean(tg.auto_allow_new_dialogs),
-  );
-
   const preReadDelay = randomRange(tg.pre_read_delay_range) * 1000;
   if (shouldStop) await interruptibleSleep(preReadDelay, shouldStop); else await sleep(preReadDelay);
 
@@ -891,7 +845,10 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
-  await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot });
+  await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, {
+    tgIsBot,
+    initialCanSend: Boolean(tg.auto_allow_new_dialogs) && !tgIsBot,
+  });
 
   if (!(await canSendToDialog(db, campaign.id, account.id, tgUserId))) {
     log('info', `${displayName}: отправка в этот диалог отключена вручную в UI — пропускаю`);
