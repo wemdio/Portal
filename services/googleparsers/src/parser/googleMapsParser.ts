@@ -1,4 +1,5 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { runConcurrentPool } from "../shared/concurrency";
 import { extractCoordinatesFromUrl, ensureGoogleMapsLocale } from "../shared/googleMaps";
 import { buildDedupeKey, mergeResult } from "../shared/normalize";
 import { maskProxy, shuffledUniqueProxies, toPlaywrightProxy } from "../shared/proxy";
@@ -13,6 +14,8 @@ const GOOGLE_CONNECTIVITY_URL = "https://www.google.com/robots.txt";
 const NAVIGATION_TIMEOUT_MS = 30_000;
 const MAPS_READY_TIMEOUT_MS = 35_000;
 const PAGE_OPERATION_TIMEOUT_MS = 10_000;
+const DEFAULT_PLACE_CONCURRENCY = 4;
+const MAX_PLACE_CONCURRENCY = 6;
 
 type BrowserSession = {
   browser: Browser;
@@ -254,14 +257,27 @@ async function parseTarget(
     log(cb, "info", "Discovered place links", { count: links.length, query: target.query });
     addDiscoveredPlaces(job, cb, links.length);
 
-    for (const link of links.slice(0, job.settings.limitPerQuery)) {
-      if (cb.shouldStop()) break;
-      await waitWhilePaused(cb);
+    const placeLinks = links.slice(0, job.settings.limitPerQuery);
+    const concurrency = placeConcurrency();
+    log(cb, "info", "Parsing place links", {
+      count: placeLinks.length,
+      concurrency,
+      query: target.query
+    });
 
-      const result = await parsePlace(context, job, cb, target, link);
-      addResult(job, cb, result);
-      await randomDelay(job);
-    }
+    await runConcurrentPool(
+      placeLinks,
+      concurrency,
+      async (link) => {
+        await waitWhilePaused(cb);
+        if (cb.shouldStop()) return;
+
+        const result = await parsePlace(context, job, cb, target, link);
+        addResult(job, cb, result);
+        await randomDelay(job);
+      },
+      cb.shouldStop
+    );
     return { ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : `Не удалось обработать ${target.query}`;
@@ -274,6 +290,12 @@ async function parseTarget(
   } finally {
     await closePage(page);
   }
+}
+
+function placeConcurrency(): number {
+  const configured = Number(process.env.GOOGLE_MAPS_PLACE_CONCURRENCY ?? DEFAULT_PLACE_CONCURRENCY);
+  if (!Number.isFinite(configured)) return DEFAULT_PLACE_CONCURRENCY;
+  return Math.min(MAX_PLACE_CONCURRENCY, Math.max(1, Math.floor(configured)));
 }
 
 async function collectPlaceLinks(page: Page, job: ScrapeJob, cb: MapsRunCallbacks, target: SearchTarget): Promise<string[]> {

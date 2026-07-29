@@ -46,7 +46,7 @@ app.post("/run/maps", async (req, res) => {
     status: "running",
     settings,
     targets,
-    currentTargetIndex: 0,
+    currentTargetIndex: -1,
     processedPlaces: 0,
     totalDiscovered: 0,
     message: "",
