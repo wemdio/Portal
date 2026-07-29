@@ -214,6 +214,52 @@ describe('tgOutreach handleChat', () => {
     expect(messageSaves.length).toBe(0);
   });
 
+  it('does not create placeholder row for a new dialog with no chat history', async () => {
+    // Регрессия: раньше handleChat вызывал ensureDialogMeta ДО getMessages, из-за
+    // чего для нового контакта без сообщений (спам, service-messages) в БД
+    // оставалась строка с messages=[]. UI её показывал как "пустой диалог".
+    const campaign = makeCampaign();
+    const client = makeMockClient([]);
+    const { db, calls } = makeMockDb({ dialogExists: false });
+
+    const entity = makeUser({ id: 54321, username: 'ghost' });
+    const dialog = { entity, unreadCount: 1 } as unknown as import('telegram/tl/custom/dialog').Dialog;
+
+    const result = await handleChat(client as never, ACCOUNT, dialog, campaign, db as never, log);
+
+    expect(result.replied).toBe(false);
+    const dialogWrites = calls.filter(
+      c => c.table === 'tg_outreach_dialogs' && (c.op === 'insert' || c.op === 'upsert' || c.op === 'update'),
+    );
+    expect(dialogWrites).toEqual([]);
+  });
+
+  it('respects auto_allow_new_dialogs=false when inserting a fresh dialog', async () => {
+    const campaign = makeCampaign({
+      telegram_settings: {
+        ...DEFAULT_TELEGRAM_SETTINGS,
+        auto_allow_new_dialogs: false,
+        pre_read_delay_range: [0, 0],
+        read_reply_delay_range: [0, 0],
+      },
+    });
+    (openaiGenerate as jest.Mock).mockResolvedValue(null);
+
+    const client = makeMockClient(USER_MESSAGES);
+    const { db, calls } = makeMockDb({ dialogExists: false });
+
+    const entity = makeUser({ id: 77777, username: 'newlead' });
+    const dialog = { entity, unreadCount: 1 } as unknown as import('telegram/tl/custom/dialog').Dialog;
+
+    await handleChat(client as never, ACCOUNT, dialog, campaign, db as never, log);
+
+    const inserts = calls.filter(
+      c => c.table === 'tg_outreach_dialogs' && c.op === 'insert',
+    );
+    expect(inserts.length).toBe(1);
+    expect(inserts[0].payload?.can_send).toBe(false);
+  });
+
   describe('global blocked users', () => {
     it('skips chat completely when tg_user_id is in blockedUserIds (with username)', async () => {
       const campaign = makeCampaign();
