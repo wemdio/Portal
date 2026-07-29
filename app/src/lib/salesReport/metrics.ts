@@ -144,31 +144,35 @@ export function computeSalesReportBlockFromRows(
 
   for (const lead of leads) {
     const createdInWindow = isInWindow(lead.created_at, start, end);
-    const updatedInWindow = isInWindow(lead.updated_at, start, end);
-    if (!createdInWindow && !updatedInWindow) continue;
+    const closedInWindow = isInWindow(lead.closed_at, start, end);
+    if (!createdInWindow && !closedInWindow) continue;
 
     const statusId =
       typeof lead.status_id === 'number' ? lead.status_id : Number.NaN;
     const statusSort = thresholds.sortByStatusId.get(statusId);
-    const channel = detectSummaryChannel(lead.raw);
-    const qualified =
-      statusSort !== undefined && statusSort >= thresholds.qualifiedSort;
 
-    bump(channel, createdInWindow, qualified, updatedInWindow);
+    // Все воронковые метрики (Квал, Встречи, Договоры, Счета) считаем ТОЛЬКО
+    // по сделкам, ПРИШЕДШИМ в окне, где текущий статус ≥ соответствующего
+    // этапа. «Сколько из пришедших в этот месяц уже дошли до Х». История
+    // переходов (amo_events) не sync'ится, поэтому точную дату входа в
+    // статус мы не знаем. Такой подход соответствует ожиданиям продаж
+    // (Егор, 2026-07-29) и не раздувается touching'ом старых backlog-сделок.
+    if (createdInWindow) {
+      const channel = detectSummaryChannel(lead.raw);
+      const qualified =
+        statusSort !== undefined && statusSort >= thresholds.qualifiedSort;
+      bump(channel, /* createdInWindow */ true, qualified, /* updatedInWindow */ true);
 
-    if (!updatedInWindow) continue;
-    if (statusSort === undefined) continue;
+      if (statusSort !== undefined) {
+        if (statusSort >= thresholds.meetingHeldSort) result.meetings += 1;
+        if (statusSort >= thresholds.invoiceSentSort) result.invoicesSent += 1;
+        if (statusSort >= thresholds.contractSort) result.contracts += 1;
+      }
+    }
 
-    if (statusSort >= thresholds.meetingHeldSort) result.meetings += 1;
-    if (statusSort >= thresholds.invoiceSentSort) result.invoicesSent += 1;
-    if (statusSort >= thresholds.contractSort) result.contracts += 1;
-
-    // Оплата — сделка ЗАКРЫТА в статус «Успешно реализовано» именно в окне
-    // отчёта. Смотрим на closed_at (момент фактической оплаты), а не на
-    // updated_at — иначе в отчёт попадают старые сделки, у которых менеджер
-    // просто добавил комментарий или сдвинул поле, и Сумма оплат раздувается
-    // (389% плана вместо реальных 80%).
-    if (statusId === WON_STATUS_ID && isInWindow(lead.closed_at, start, end)) {
+    // Оплаты — сделка закрыта в статус «Успешно реализовано» именно в окне.
+    // created_at тут не важен: важно когда реально пришли деньги (closed_at).
+    if (statusId === WON_STATUS_ID && closedInWindow) {
       result.paymentsReceived += 1;
       result.revenue += Number.isFinite(Number(lead.amount)) ? Number(lead.amount) : 0;
     }
@@ -203,13 +207,15 @@ export async function computeSalesReportBlock(
 
   const startIso = start.toISOString();
   const endIso = end.toISOString();
+  // Тянем сделки с активностью в окне: либо СОЗДАНЫ в окне (для воронковых
+  // метрик), либо ЗАКРЫТЫ в окне (для метрики Оплаты). updated_at не нужен —
+  // из него старые backlog-сделки раздувают цифры при массовых touching'ах.
   const { data: leadsData, error: leadsError } = await db
     .from('amo_leads')
     .select('status_id, status_name, amount, created_at, updated_at, closed_at, raw')
     .eq('pipeline_id', pipelineId)
     .or(
       `and(created_at.gte.${startIso},created_at.lt.${endIso}),` +
-        `and(updated_at.gte.${startIso},updated_at.lt.${endIso}),` +
         `and(closed_at.gte.${startIso},closed_at.lt.${endIso})`,
     );
   if (leadsError) throw leadsError;
