@@ -20,11 +20,13 @@ function lead(
     createdAt?: string;
     updatedAt?: string;
     closedAt?: string | null;
+    name?: string | null;
   } = {},
 ) {
   return {
     status_id: statusId,
     status_name: null,
+    name: opts.name ?? 'Обычная сделка',
     amount: opts.amount ?? null,
     created_at: opts.createdAt ?? '2026-07-15T12:00:00.000Z',
     updated_at: opts.updatedAt ?? '2026-07-16T12:00:00.000Z',
@@ -111,6 +113,35 @@ describe('computeSalesReportBlockFromRows', () => {
     expect(result.newLeadsMarketing).toBe(0);
     expect(result.qualMarketing).toBe(0);
     expect(result.newLeadsOutreach).toBe(0);
+  });
+
+  it('лид-магниты (Бот:...) не входят в воронковые метрики, но оплата засчитывается', () => {
+    const result = computeSalesReportBlockFromRows(
+      [
+        // Обычная маркет-сделка на этапе Договор — попадает в Пришло/Квал/встречи/договор
+        lead({ Контур: 'Маркетинг' }, 7, { name: 'ООО Ромашка' }),
+        // Лид-магнит на этапе Договор — не должен попасть никуда кроме оплат (её здесь нет)
+        lead({ Контур: 'Маркетинг' }, 7, { name: 'Бот: Иван' }),
+        // Лид-магнит с успешной оплатой — оплата всё-таки засчитывается
+        lead({ Контур: 'Маркетинг' }, 142, {
+          name: 'Бот: Мария',
+          amount: 100000,
+          closedAt: '2026-07-20T12:00:00.000Z',
+        }),
+      ],
+      statuses,
+      start,
+      end,
+    );
+    // Пришло/Квал: только не-магнит → 1
+    expect(result.newLeadsMarketing).toBe(1);
+    expect(result.qualMarketing).toBe(1);
+    // Встречи/договоры: только не-магнит (7 ≥ 70? нет — sort статуса 7 (Согласование договора) = 110)
+    expect(result.meetings).toBe(1);       // sort 110 ≥ 70
+    expect(result.contracts).toBe(1);      // sort 110 ≥ 110
+    // Оплаты — лид-магнит с closed_at засчитывается
+    expect(result.paymentsReceived).toBe(1);
+    expect(result.revenue).toBe(100000);
   });
 
   it('игнорирует сделки полностью вне окна (created_at и updated_at раньше start)', () => {

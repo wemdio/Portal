@@ -59,12 +59,28 @@ export type SalesReportBlock = {
 type LeadRow = {
   status_id: number | null;
   status_name: string | null;
+  name: string | null;
   amount: number | null;
   created_at: string | null;
   updated_at: string | null;
   closed_at: string | null;
   raw: unknown;
 };
+
+/**
+ * Лид-магнит — сделка, автосозданная TG-ботом «Polza Site Feedback»
+ * (имя всегда с префиксом «Бот:»). Егор (2026-07-29) уточнил: такие сделки
+ * НЕ входят в воронковые метрики отчёта продаж вообще (ни в Пришло, ни в
+ * Квал / Встречи / Договоры / Счета) — они создают много слабых заявок
+ * «через магнит», из-за чего маркетинг раздувался с 26 до 132 в отчёте.
+ *
+ * Единственная метрика, которую лид-магниты всё-таки могут попасть —
+ * это Оплаты (если сделка реально закрылась деньгами, это уже деньги
+ * в кассе, вне зависимости от того как лид пришёл).
+ */
+function isLeadMagnet(name: string | null): boolean {
+  return typeof name === 'string' && name.trimStart().startsWith('Бот:');
+}
 
 type PipelineThresholds = {
   qualifiedSort: number;
@@ -157,7 +173,7 @@ export function computeSalesReportBlockFromRows(
     // переходов (amo_events) не sync'ится, поэтому точную дату входа в
     // статус мы не знаем. Такой подход соответствует ожиданиям продаж
     // (Егор, 2026-07-29) и не раздувается touching'ом старых backlog-сделок.
-    if (createdInWindow) {
+    if (createdInWindow && !isLeadMagnet(lead.name)) {
       const channel = detectSummaryChannel(lead.raw);
       const qualified =
         statusSort !== undefined && statusSort >= thresholds.qualifiedSort;
@@ -212,7 +228,7 @@ export async function computeSalesReportBlock(
   // из него старые backlog-сделки раздувают цифры при массовых touching'ах.
   const { data: leadsData, error: leadsError } = await db
     .from('amo_leads')
-    .select('status_id, status_name, amount, created_at, updated_at, closed_at, raw')
+    .select('status_id, status_name, name, amount, created_at, updated_at, closed_at, raw')
     .eq('pipeline_id', pipelineId)
     .or(
       `and(created_at.gte.${startIso},created_at.lt.${endIso}),` +
