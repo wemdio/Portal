@@ -8871,11 +8871,9 @@ export function DatabaseSpreadsheet() {
 
     let processedCount = 0;
     let found = 0;
-    // BATCH=2 (раньше 5): на проде batches с 5 строк уходят в backend на 5-7
-    // минут (15s timeout × ~6 URL-кандидатов × 5 строк), и юзер видит «0/N»
-    // первые минуты — выглядит как hang. На 2 строки worst-case ~3 минуты,
-    // прогресс обновляется в 2.5× раз чаще. Бэк MAX_ITEMS=5, так что 2 пройдёт.
-    const BATCH = 2;
+    // Backend resolves all five websites concurrently, so a batch now takes
+    // roughly the slowest site's time instead of the sum of five sites.
+    const BATCH = 5;
     // Per-batch timeout на frontend: если backend завис (network/proxy/контейнер),
     // fetch без timeout'а будет висеть до закрытия вкладки. 90 секунд — щедрый
     // запас на worst-case бэк (15s × 6 URL × 2 строки ≈ 3 мин — нет, не влезаем,

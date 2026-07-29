@@ -261,21 +261,46 @@ export async function resumeRunningCampaigns() {
 
   log('info', `Found ${running.length} campaigns with status running/paused, scheduling auto-resume`);
   for (const campaign of running) {
-    const { data: existingJob } = await db
+    // There may already be duplicate active start jobs left by an older
+    // worker/deploy race. Limit the existence check to one row: maybeSingle()
+    // returns an error (and null data) when multiple rows match, which used to
+    // make this loop enqueue one more duplicate every five minutes.
+    const { data: existingJob, error: existingJobError } = await db
       .from('tg_outreach_jobs')
       .select('id')
       .eq('campaign_id', campaign.id)
       .eq('action', 'start')
       .in('status', ['pending', 'running'])
+      .limit(1)
       .maybeSingle();
 
+    if (existingJobError) {
+      throw new Error(
+        `Failed to check active start job for campaign ${campaign.id}: ${existingJobError.message}`,
+      );
+    }
+
     if (!existingJob) {
-      await db.from('tg_outreach_jobs').insert({
+      const { error: insertError } = await db.from('tg_outreach_jobs').insert({
         campaign_id: campaign.id,
         user_id: campaign.user_id ?? '00000000-0000-0000-0000-000000000000',
         action: 'start',
         status: 'pending',
       });
+
+      // A partial unique index is the final race guard. A concurrent resume
+      // check may win the insert after our existence check; that is already
+      // the desired state, so treat only that conflict as benign.
+      if (insertError?.code === '23505') {
+        log('info', `Active start job already exists for campaign ${campaign.id}`);
+        continue;
+      }
+      if (insertError) {
+        throw new Error(
+          `Failed to queue auto-resume for campaign ${campaign.id}: ${insertError.message}`,
+        );
+      }
+
       log('info', `Queued auto-resume start job for campaign ${campaign.id}`);
     }
   }
