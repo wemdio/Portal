@@ -116,7 +116,10 @@ export function LayoutShell({
   const isSignupPage = pathname === '/signup';
   const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || isClientPortal || isLegalPage || isSignupPage;
 
-  if (isClientPortal || isLegalPage || isSignupPage || isMaintenancePage) {
+  // /leads-board/<token> — публичная гостевая таблица лидов: рендерим голой,
+  // как /offer и /signup — без TopNav/sidebar и без 100vh-шелла (длинная таблица
+  // скроллится документом, а не внутренним контейнером).
+  if (isClientPortal || isLegalPage || isSignupPage || isMaintenancePage || pathname.startsWith('/leads-board/')) {
     // Maintenance: render the page bare so its full-screen radial gradient
     // and centred card aren't nested inside the portal frame/topnav. The
     // page renders its own <main> with the dark background.

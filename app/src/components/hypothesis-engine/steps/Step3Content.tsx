@@ -38,6 +38,13 @@ const KIND_META: Record<HeCompanyTypeKind, { label: string; tone: BadgeTone }> =
   slang: { label: 'Сленг', tone: 'gray' },
 };
 
+/** Вердикт досье «покупает ли сегмент каналы продаж» → лейбл и тон бейджа. */
+const BUYS_CHANNELS_META: Record<'yes' | 'likely' | 'unknown', { label: string; tone: BadgeTone }> = {
+  yes: { label: 'Сегмент покупает каналы продаж', tone: 'emerald' },
+  likely: { label: 'Вероятно покупает', tone: 'amber' },
+  unknown: { label: 'Про покупку каналов данных нет', tone: 'gray' },
+};
+
 /** На новых данных должность может нести audience_side; на старых поля нет. */
 type JobTitleRow = HeJobTitle & { audience_side?: string };
 
@@ -447,6 +454,9 @@ function DossierSegmentCard({ data }: { data: HeDossierData }) {
 /** «Сигналы боли»: список сигналов из счётчиков (метка + значение). */
 function DossierSignalsCard({ data }: { data: HeDossierData }) {
   const { signals } = data.counters;
+  // У старых досье поля вердикта нет — тогда блок не рендерим вообще.
+  const buysChannels = data.interpretation.buys_sales_channels;
+  const buysMeta = buysChannels ? BUYS_CHANNELS_META[buysChannels] : undefined;
   return (
     <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3">
       <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">Сигналы боли</p>
@@ -464,6 +474,16 @@ function DossierSignalsCard({ data }: { data: HeDossierData }) {
           ))}
         </ul>
       )}
+      {buysMeta ? (
+        <div className="mt-3 border-t border-gray-200 pt-2">
+          <Badge tone={buysMeta.tone}>{buysMeta.label}</Badge>
+          {data.interpretation.buys_sales_channels_reason ? (
+            <p className="mt-1 text-[11px] leading-relaxed text-gray-400">
+              {data.interpretation.buys_sales_channels_reason}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

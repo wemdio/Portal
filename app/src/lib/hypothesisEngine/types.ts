@@ -88,6 +88,8 @@ export interface HeHypothesis {
   tier: HeHypothesisTier;
   title: string;
   description: string;
+  /** «Почему это рынок для клиента» (ЛПР → цель → боль → оффер). NULL/отсутствует у легаси-строк. */
+  fit_rationale?: string | null;
   evidence: HeEvidenceItem[];
   potential_pct: number;
   status: HeHypothesisStatus;
