@@ -1,7 +1,8 @@
 """
 portal-external-sync — daily sync of external data into main-postgres.
 
-Sources: Yandex Metrika, AMO CRM, Точка Банк, Т-Банк.
+Sources: Yandex Metrika, AMO CRM, Точка Банк, Т-Банк, Brocard, курсы ЦБ,
+применение правил разметки расходов.
 
 Расписание:
 - Cron `EXTERNAL_SYNC_CRON` (default '30 13 * * *' UTC = 16:30 МСК) через APScheduler.
@@ -43,6 +44,9 @@ from sources.amo_enrich import AmoCompanyEnrichSync
 from sources.amo_events import AmoEventsSync
 from sources.bank_tochka import BankTochkaSync
 from sources.bank_tbank import BankTBankSync
+from sources.brocard import BrocardSync
+from sources.fx_cbr import FxCbrSync
+from sources.expense_rules import ExpenseRulesSync
 
 # ── Config ────────────────────────────────────────────────────────────────
 
@@ -65,6 +69,9 @@ SOURCES = [
     AmoCompanyEnrichSync(),  # ходит на company_website и заполняет company_name; идёт СТРОГО после AmoSync
     BankTochkaSync(),
     BankTBankSync(),
+    BrocardSync(),
+    FxCbrSync(),        # после Brocard: спрашивает курсы под уже приехавшие валютные траты
+    ExpenseRulesSync(), # строго последним: размечает всё, что приехало выше
 ]
 
 # ── Run pipeline ──────────────────────────────────────────────────────────
