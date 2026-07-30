@@ -17,7 +17,6 @@
 
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop } from './_shared';
 import { runHeStage } from '@/lib/hypothesisEngine/stages';
-import { notifyHeResearchDone, notifyHeResearchFailed } from '@/lib/hypothesisEngine/tgNotify';
 import type { HeJob, HeStage } from '@/lib/hypothesisEngine/types';
 
 const WORKER_ID = `hypothesis-engine-${process.pid}`;
@@ -158,12 +157,6 @@ async function handleJob(job: HeJob) {
   await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
   await enqueueNextResearchStage(job);
   log('info', `Job ${job.id} (${job.stage}) → done (+${tokensUsed} tok, $${costUsd.toFixed(6)})`);
-
-  // clustering — финал research-пайплайна (стадия сама перевела проект в
-  // 'researched'): уведомляем создателя в Telegram. Никогда не бросает.
-  if (job.stage === 'clustering') {
-    await notifyHeResearchDone(db, job.project_id, log);
-  }
 }
 
 async function failJob(job: HeJob, err: unknown) {
@@ -191,9 +184,6 @@ async function failJob(job: HeJob, err: unknown) {
         updated_at: new Date().toISOString(),
       })
       .eq('id', job.project_id);
-
-    // Уведомляем создателя в Telegram о провале исследования. Никогда не бросает.
-    await notifyHeResearchFailed(db, job.project_id, job.stage, msg, log);
   }
 }
 
