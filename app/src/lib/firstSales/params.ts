@@ -1,14 +1,14 @@
 import type { GroupBy } from '@/lib/firstSales/buckets';
-import type { FirstSalesChannel } from '@/lib/firstSales/sourceChannels';
+import {
+  FIRST_SALES_CHANNELS,
+  type FirstSalesChannel,
+} from '@/lib/firstSales/sourceChannels';
 
 const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
 const MAX_RANGE_DAYS = 800;
 
 const GROUP_BYS: GroupBy[] = ['day', 'week', 'month'];
-const CHANNELS: FirstSalesChannel[] = [
-  'marketing', 'smm', 'outreach', 'partners',
-  'tg_outreach', 'inbound', 'referral', 'events', 'unassigned',
-];
+const CHANNELS: readonly FirstSalesChannel[] = FIRST_SALES_CHANNELS;
 
 export type FirstSalesParams = {
   from: Date;
@@ -65,12 +65,21 @@ export function parseFirstSalesParams(
   };
 }
 
-/** Предыдущее окно той же длины, вплотную к текущему. Нужно для Δ:
- *  сравнивать июль с июнем корректно только при равной длине окон. */
+/**
+ * Предыдущее окно той же длины, вплотную к текущему, но БЕЗ пересечения.
+ *
+ * Конец прошлого окна — на миллисекунду раньше начала текущего. Иначе они
+ * делят одну точку, а проверка попадания в окно (`inWindow` в metrics.ts)
+ * включает обе границы — и сделка, случившаяся ровно в полночь по Москве,
+ * посчиталась бы и в текущем периоде, и в прошлом. Полночь по Москве — ровно
+ * та секунда, в которую такое и происходит, так что «маловероятно» тут не
+ * аргумент.
+ */
 export function previousWindow(from: Date, to: Date): { from: Date; to: Date } {
   const span = to.getTime() - from.getTime();
+  const prevTo = new Date(from.getTime() - 1);
   return {
-    from: new Date(from.getTime() - span),
-    to: new Date(from.getTime()),
+    from: new Date(prevTo.getTime() - span),
+    to: prevTo,
   };
 }

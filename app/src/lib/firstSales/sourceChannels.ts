@@ -8,16 +8,30 @@
  */
 import { extractCustomField } from '@/lib/leadsReport/extractCustomField';
 
-export type FirstSalesChannel =
-  | 'marketing'
-  | 'smm'
-  | 'outreach'
-  | 'partners'
-  | 'tg_outreach'
-  | 'inbound'
-  | 'referral'
-  | 'events'
-  | 'unassigned';
+/**
+ * Единственный список каналов в TypeScript-коде. Тип выводится из него, а не
+ * объявляется рядом — иначе добавленный канал пришлось бы вписывать дважды, и
+ * рано или поздно кто-то вписал бы один раз. Тот же приём, что у
+ * `ALL_NAV_TAB_IDS` в `toolsRegistry.ts`.
+ *
+ * Второй источник истины неизбежен и лежит в SQL: CHECK-констрейнт
+ * `lead_source_channels.channel` в миграции 20260730_0001. Из TypeScript его
+ * не достать, так что при добавлении канала правятся ровно два места — этот
+ * массив и миграция.
+ */
+export const FIRST_SALES_CHANNELS = [
+  'marketing',
+  'smm',
+  'outreach',
+  'partners',
+  'tg_outreach',
+  'inbound',
+  'referral',
+  'events',
+  'unassigned',
+] as const;
+
+export type FirstSalesChannel = (typeof FIRST_SALES_CHANNELS)[number];
 
 export const CHANNEL_LABELS: Record<FirstSalesChannel, string> = {
   marketing: 'Маркетинг',

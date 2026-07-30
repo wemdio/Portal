@@ -8,6 +8,11 @@ import {
   fetchSourceMap,
 } from '@/lib/firstSales/metrics';
 
+// Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
+// либо пустой ответ, либо чужой. Явно снимаем этот вопрос, как и соседние
+// роуты аналитики.
+export const dynamic = 'force-dynamic';
+
 const PIPELINE_ID = Number(process.env.FIRST_SALES_PIPELINE_ID ?? '7670334');
 
 export async function GET(req: NextRequest) {

@@ -1,12 +1,18 @@
 import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireFirstSalesAccess } from '@/lib/firstSales/access';
-import { normalizeSource, type FirstSalesChannel } from '@/lib/firstSales/sourceChannels';
+import {
+  FIRST_SALES_CHANNELS,
+  normalizeSource,
+  type FirstSalesChannel,
+} from '@/lib/firstSales/sourceChannels';
 
-const CHANNELS: FirstSalesChannel[] = [
-  'marketing', 'smm', 'outreach', 'partners',
-  'tg_outreach', 'inbound', 'referral', 'events', 'unassigned',
-];
+// Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
+// либо пустой ответ, либо чужой. Явно снимаем этот вопрос, как и соседние
+// роуты аналитики.
+export const dynamic = 'force-dynamic';
+
+const CHANNELS: readonly FirstSalesChannel[] = FIRST_SALES_CHANNELS;
 
 export async function GET(req: NextRequest) {
   const gate = await requireFirstSalesAccess(req);

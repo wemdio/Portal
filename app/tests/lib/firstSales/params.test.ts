@@ -49,15 +49,25 @@ describe('previousWindow', () => {
     const from = new Date('2026-07-01T00:00:00.000Z');
     const to = new Date('2026-07-31T00:00:00.000Z');
     const prev = previousWindow(from, to);
-    expect(prev.to.toISOString()).toBe('2026-07-01T00:00:00.000Z');
-    expect(prev.from.toISOString()).toBe('2026-06-01T00:00:00.000Z');
+    expect(prev.to.toISOString()).toBe('2026-06-30T23:59:59.999Z');
+    expect(prev.from.toISOString()).toBe('2026-05-31T23:59:59.999Z');
   });
 
   it('работает на окне в один день', () => {
     const from = new Date('2026-07-15T00:00:00.000Z');
     const to = new Date('2026-07-15T23:59:59.999Z');
     const prev = previousWindow(from, to);
-    expect(prev.from.toISOString()).toBe('2026-07-14T00:00:00.001Z');
-    expect(prev.to.toISOString()).toBe('2026-07-15T00:00:00.000Z');
+    expect(prev.to.toISOString()).toBe('2026-07-14T23:59:59.999Z');
+    expect(prev.from.toISOString()).toBe('2026-07-14T00:00:00.000Z');
+  });
+
+  it('окна не пересекаются и равны по длине', () => {
+    // Проверка попадания в окно включает обе границы, поэтому общая точка
+    // означала бы двойной счёт сделки, случившейся ровно в полночь по Москве.
+    const from = new Date('2026-07-01T00:00:00.000Z');
+    const to = new Date('2026-07-31T20:59:59.999Z');
+    const prev = previousWindow(from, to);
+    expect(prev.to.getTime()).toBeLessThan(from.getTime());
+    expect(prev.to.getTime() - prev.from.getTime()).toBe(to.getTime() - from.getTime());
   });
 });
