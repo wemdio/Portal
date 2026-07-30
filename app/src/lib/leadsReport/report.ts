@@ -31,6 +31,36 @@ function matchesFilter(lead: AmoLead, config: LeadsReportConfig): boolean {
 }
 
 /**
+ * Читает колонку `dateColumnLetter` в шите (значения возвращаются как
+ * FORMATTED_VALUE — Google Sheets отдаёт то, что видит пользователь) и
+ * ищет максимальную дату в формате DD.MM.YYYY — единственном формате,
+ * в котором скрипт сам пишет даты (см. `formatMskDate` в rowBuilder).
+ * Всё что не парсится (заголовки, пустые ячейки, ручные заметки типа
+ * «отдал ЛПР») пропускаем — max-дата всё равно определяется по нашим
+ * же записям либо по ручным датам менеджеров, если те использовали
+ * тот же формат.
+ *
+ * Возвращает null, если ни одной валидной DD.MM.YYYY-даты нет — тогда
+ * вызывающий код должен упасть на sinceDays-fallback.
+ */
+function parseMaxDddMmYyyy(values: string[]): Date | null {
+  let max: Date | null = null;
+  for (const raw of values) {
+    const s = raw.trim();
+    if (!s) continue;
+    const m = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(s);
+    if (!m) continue;
+    const day = Number(m[1]);
+    const mon = Number(m[2]);
+    const year = Number(m[3]);
+    const d = new Date(Date.UTC(year, mon - 1, day));
+    if (!Number.isFinite(d.getTime())) continue;
+    if (!max || d.getTime() > max.getTime()) max = d;
+  }
+  return max;
+}
+
+/**
  * Выполнить один прогон отчёта: читает свежие лиды из БД, фильтрует,
  * дедуплицирует по amo_id уже присутствующим в Sheet и дописывает новые.
  */
@@ -46,8 +76,21 @@ export async function runReport(
     throw new Error(`sinceDays must be positive for config ${config.name}`);
   }
 
-  const since = new Date();
-  since.setUTCDate(since.getUTCDate() - opts.sinceDays);
+  // Инкрементальное окно: тянем из БД только сделки, которые созданы не
+  // раньше max-даты в шите. Это позволяет переключиться на боевую таблицу
+  // без разовых дубликатов существующих ручных строк (у которых amo_id
+  // в служебной колонке пустой, поэтому classic amo_id-дедуп их не видит).
+  // Если шит совсем пустой (первый запуск на новом листе) — fallback на
+  // `sinceDays` от «сейчас».
+  const dateValues = await readColumn(
+    config.spreadsheetId,
+    config.sheetName,
+    config.dateColumnLetter,
+  );
+  const sheetMaxDate = parseMaxDddMmYyyy(dateValues);
+  const fallback = new Date();
+  fallback.setUTCDate(fallback.getUTCDate() - opts.sinceDays);
+  const since = sheetMaxDate ?? fallback;
 
   const { data, error } = await db
     .from('amo_leads')

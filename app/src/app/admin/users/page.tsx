@@ -913,9 +913,25 @@ export default function UsersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  // Вкладка-фильтр по типу профиля. 'client' — только клиенты (их трудно
-  // выцепить из общей массы сотрудников), 'staff' — все внутренние роли.
-  const [roleFilter, setRoleFilter] = useState<'all' | 'client' | 'staff'>('all');
+  // Мультифильтр по ролям. null-роль ("Нет роли") представлена ключом 'none'.
+  // Дефолт — все роли выбраны (эквивалент старого «Все»). Пустой набор →
+  // список пустой (осмысленно: пользователь снял все галочки).
+  const ROLE_FILTER_KEYS = useMemo(() => [...ALL_ROLES, 'none' as const], []);
+  const [selectedRoleFilters, setSelectedRoleFilters] = useState<Set<UserRole | 'none'>>(
+    () => new Set(ROLE_FILTER_KEYS),
+  );
+  const [roleFilterOpen, setRoleFilterOpen] = useState(false);
+  const roleFilterRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!roleFilterOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!roleFilterRef.current) return;
+      if (!roleFilterRef.current.contains(e.target as Node)) setRoleFilterOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [roleFilterOpen]);
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -1536,21 +1552,24 @@ export default function UsersPage() {
   const filteredUsers = useMemo(() => {
     const q = searchQuery.toLowerCase();
     return users.filter((user) => {
-      if (roleFilter === 'client' && user.role !== 'client') return false;
-      if (roleFilter === 'staff' && user.role === 'client') return false;
+      const roleKey: UserRole | 'none' = user.role ?? 'none';
+      if (!selectedRoleFilters.has(roleKey)) return false;
       return (
         user.email?.toLowerCase().includes(q) ||
         user.full_name?.toLowerCase().includes(q) ||
         (user.role && ROLE_LABELS[user.role]?.toLowerCase().includes(q))
       );
     });
-  }, [users, searchQuery, roleFilter]);
+  }, [users, searchQuery, selectedRoleFilters]);
 
-  // Счётчики для вкладок — по всей базе, независимо от поиска и активной
-  // вкладки. Каждый пользователь либо клиент, либо нет, так что всего =
-  // clientCount + staffCount.
-  const clientCount = useMemo(() => users.filter((u) => u.role === 'client').length, [users]);
-  const staffCount = users.length - clientCount;
+  // Счётчики по каждой роли — по всей базе, независимо от поиска и выбранных
+  // фильтров. Показываются в дропдауне рядом с каждым чекбоксом.
+  const roleCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const k of ROLE_FILTER_KEYS) counts[k] = 0;
+    for (const u of users) counts[u.role ?? 'none'] = (counts[u.role ?? 'none'] ?? 0) + 1;
+    return counts as Record<UserRole | 'none', number>;
+  }, [users, ROLE_FILTER_KEYS]);
 
   const sortedUsers = useMemo(() => {
     const list = [...filteredUsers];
@@ -1610,32 +1629,95 @@ export default function UsersPage() {
         </div>
       )}
 
-      <div className="mb-4 inline-flex w-full gap-1 overflow-x-auto rounded-xl border border-gray-200 bg-gray-50 p-1 sm:w-fit">
-        {([
-          { key: 'all' as const, label: 'Все', count: users.length },
-          { key: 'client' as const, label: 'Клиенты', count: clientCount },
-          { key: 'staff' as const, label: 'Сотрудники', count: staffCount },
-        ]).map(({ key, label, count }) => (
+      <div className="mb-4" ref={roleFilterRef}>
+        <div className="relative inline-block w-full sm:w-72">
           <button
-            key={key}
             type="button"
-            onClick={() => setRoleFilter(key)}
-            className={`inline-flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 py-1.5 text-sm font-medium transition-colors sm:flex-none ${
-              roleFilter === key
-                ? 'bg-white text-gray-900 shadow-sm'
-                : 'text-gray-500 hover:text-gray-700'
-            }`}
+            onClick={() => setRoleFilterOpen((v) => !v)}
+            className="flex w-full items-center justify-between gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
+            aria-haspopup="listbox"
+            aria-expanded={roleFilterOpen}
           >
-            {label}
-            <span
-              className={`inline-flex min-w-[1.25rem] justify-center rounded-full px-1.5 py-0.5 text-[11px] font-semibold tabular-nums ${
-                roleFilter === key ? 'bg-blue-100 text-blue-700' : 'bg-gray-200 text-gray-600'
-              }`}
-            >
-              {count}
+            <span className="truncate">
+              {selectedRoleFilters.size === 0
+                ? 'Роли не выбраны'
+                : selectedRoleFilters.size === ROLE_FILTER_KEYS.length
+                  ? `Все роли · ${users.length}`
+                  : selectedRoleFilters.size === 1
+                    ? (() => {
+                        const only = [...selectedRoleFilters][0];
+                        const label = only === 'none' ? 'Без роли' : ROLE_LABELS[only];
+                        return `${label} · ${roleCounts[only] ?? 0}`;
+                      })()
+                    : `Роли: ${selectedRoleFilters.size} · ${filteredUsers.length}`}
             </span>
+            <ChevronDown className={`h-4 w-4 text-gray-500 transition-transform ${roleFilterOpen ? 'rotate-180' : ''}`} />
           </button>
-        ))}
+          {roleFilterOpen && (
+            <div
+              role="listbox"
+              className="absolute left-0 right-0 z-20 mt-1 max-h-80 overflow-auto rounded-xl border border-gray-200 bg-white shadow-lg"
+            >
+              <div className="flex items-center justify-between border-b border-gray-100 px-3 py-1.5 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setSelectedRoleFilters(new Set(ROLE_FILTER_KEYS))}
+                  className="font-medium text-blue-600 hover:text-blue-700"
+                >
+                  Выбрать все
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedRoleFilters(new Set())}
+                  className="font-medium text-gray-500 hover:text-gray-700"
+                >
+                  Снять все
+                </button>
+              </div>
+              <ul className="py-1">
+                {ROLE_FILTER_KEYS.map((key) => {
+                  const label = key === 'none' ? 'Без роли' : ROLE_LABELS[key];
+                  const checked = selectedRoleFilters.has(key);
+                  const count = roleCounts[key] ?? 0;
+                  return (
+                    <li key={key}>
+                      <label className="flex cursor-pointer items-center justify-between gap-3 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50">
+                        <span className="flex items-center gap-2">
+                          <span
+                            className={`flex h-4 w-4 items-center justify-center rounded border ${
+                              checked
+                                ? 'border-blue-600 bg-blue-600 text-white'
+                                : 'border-gray-300 bg-white'
+                            }`}
+                          >
+                            {checked && <Check className="h-3 w-3" />}
+                          </span>
+                          <input
+                            type="checkbox"
+                            className="sr-only"
+                            checked={checked}
+                            onChange={() => {
+                              setSelectedRoleFilters((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(key)) next.delete(key);
+                                else next.add(key);
+                                return next;
+                              });
+                            }}
+                          />
+                          {label}
+                        </span>
+                        <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-gray-600">
+                          {count}
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center">
