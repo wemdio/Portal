@@ -20,7 +20,7 @@ import asyncpg
 import httpx
 
 from .base import SyncSource
-from ._bank_common import classify_revenue, parse_date, to_row
+from ._bank_common import classify_revenue, coerce_amount, parse_date, to_row
 
 JWT = os.environ.get("TOCHKA_JWT", "").strip()
 API_BASE = "https://enter.tochka.com/uapi/open-banking/v1.0"
@@ -40,18 +40,8 @@ POLL_INTERVAL_SEC = 1.5
 
 
 def _parse_amount(t: dict) -> float | None:
-    """Amount.amount → float, либо None, если поля нет / оно None / не число.
-
-    Молчаливый ноль здесь недопустим: настоящий ноль в выписке и отсутствующая
-    сумма — разные вещи, и подмена второго первым тихо занижает расход.
-    """
-    raw = (t.get("Amount") or {}).get("amount")
-    if raw is None:
-        return None
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return None
+    """Amount.amount → float через общий coerce_amount (см. _bank_common)."""
+    return coerce_amount((t.get("Amount") or {}).get("amount"))
 
 
 def map_transaction(

@@ -42,6 +42,23 @@ def classify_revenue(payer: str, payer_inn: str, purpose: str) -> str:
     return ""
 
 
+def coerce_amount(value) -> float | None:
+    """Уже извлечённое значение суммы → float, либо None, если его нет или
+    оно не приводится к числу.
+
+    Общее для Точки (значение достаётся из Amount.amount) и Т-Банка
+    (значение — amount верхнего уровня): молчаливый ноль здесь недопустим,
+    настоящий ноль в выписке и отсутствующая сумма — разные вещи, и подмена
+    второго первым тихо занижает расход.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_date(s: str | None) -> datetime | None:
     if not s:
         return None
