@@ -17,7 +17,7 @@ import {
 import * as instantly from './client';
 import { isFreeProvider } from '@/lib/emailValidation/shared';
 import { getEmailRecipients } from '@/lib/clientCampaignReplies/participants';
-import { generateHandoffReply } from './handoffGenerator';
+import { substituteHandoffLegend } from './handoffLegend';
 import { signHandoffCallback } from './handoffCallback';
 import {
   resolveBoardProjectId,
@@ -1576,8 +1576,9 @@ function handoffEnabled(): boolean {
 
 /**
  * If the lead's project has handoff configured (handoff_email + handoff_legend)
- * and a responsible specialist, generate a handoff reply and post it to Telegram
- * with a "Передать клиенту" button. The press (handled by
+ * and a responsible specialist, post the handoff card to Telegram with a
+ * "Передать клиенту" button. Текст передачи — легенда проекта ДОСЛОВНО (без ИИ,
+ * спецы полностью контролируют формулировку). The press (handled by
  * /api/telegram/handoff/webhook) is what actually sends it — only the responsible
  * specialist may press. Gated by LEAD_HANDOFF_ENABLED; never throws into the
  * qualification flow.
@@ -1648,17 +1649,13 @@ async function maybePostLeadHandoff(opts: {
       return;
     }
 
-    // 4. Generate the handoff reply from the project legend + lead context.
-    const draft = await generateHandoffReply(
-      {
-        leadReplyText: opts.leadReplyText,
-        lastOutboundText: opts.lastOutboundText,
-        leadName: opts.leadName,
-        framing: project.handoff_legend,
-      },
-      { apiKey: opts.apiKey },
-    );
-    if (!draft.trim()) return;
+    // 4. Текст передачи — ДОСЛОВНО легенда проекта, БЕЗ ИИ (жалобы спецов:
+    // генератор писал широко, «консультировал», добавлял лишнее). Что в легенде
+    // написано — то и уйдёт лиду; текст полностью под контролем проекта.
+    // ИИ-генератор остался только для ручного превью-драфта в UI (спец правит руками).
+    // Поддерживаемый плейсхолдер: «[Имя, если есть]»/«[Имя]» → имя лида.
+    const draft = substituteHandoffLegend((project.handoff_legend ?? '').trim(), opts.leadName);
+    if (!draft) return;
 
     // 5. Responsible specialist name (display only).
     let specialistName = 'ответственный';
