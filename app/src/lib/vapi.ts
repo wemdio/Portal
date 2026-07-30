@@ -87,8 +87,38 @@ export function listCalls(params?: {
   return vapiRequest<Record<string, unknown>[]>(`/call${query ? `?${query}` : ''}`);
 }
 
-export function getCall(id: string) {
-  return vapiRequest<Record<string, unknown>>(`/call/${id}`);
+/**
+ * Vapi отдаёт `recordingUrl` как «сырую» ссылку на приватный R2-бакет
+ * (`*.r2.cloudflarestorage.com/hipaa-recordings/...`). Без подписи R2 отвечает
+ * `400 InvalidArgument/Authorization`, поэтому такую ссылку нельзя ни отдать
+ * браузеру, ни скачать на сервере. Рабочие ссылки лежат в
+ * `artifact.presigned*Url` — SigV4, TTL 30 минут, перевыпускаются на каждый
+ * `GET /call/{id}`.
+ */
+export function pickRecordingUrl(
+  call: Record<string, unknown> | null | undefined,
+): string {
+  const artifact = (call?.artifact ?? {}) as Record<string, unknown>;
+  return (
+    (artifact.presignedMonoUrl as string) ||
+    (artifact.presignedStereoUrl as string) ||
+    (call?.recordingUrl as string) ||
+    (artifact.recordingUrl as string) ||
+    ''
+  );
+}
+
+export async function getCall(id: string) {
+  const call = await vapiRequest<Record<string, unknown>>(`/call/${id}`);
+  const recordingUrl = pickRecordingUrl(call);
+  if (!recordingUrl) return call;
+
+  const artifact = (call.artifact ?? {}) as Record<string, unknown>;
+  return {
+    ...call,
+    recordingUrl,
+    artifact: { ...artifact, recordingUrl },
+  };
 }
 
 export function createCall(data: {
