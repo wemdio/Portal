@@ -51,3 +51,18 @@ def parse_date(s: str | None) -> datetime | None:
         except (ValueError, TypeError):
             continue
     return None
+
+
+#: Порядок колонок в INSERT'ах обоих банковских источников.
+#: Менять только вместе с обоими _upsert().
+BANK_COLUMNS: tuple[str, ...] = (
+    "bank", "account_id", "transaction_id", "document_number",
+    "occurred_at", "amount", "currency", "direction",
+    "payer_name", "payer_inn", "payee_name", "payee_inn",
+    "purpose", "is_revenue", "exclude_reason", "raw",
+)
+
+
+def to_row(d: dict) -> tuple:
+    """dict → кортеж в порядке BANK_COLUMNS для executemany."""
+    return tuple(d[c] for c in BANK_COLUMNS)
