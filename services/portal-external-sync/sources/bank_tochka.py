@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import traceback
 from datetime import date
 from urllib.parse import quote
 
@@ -150,7 +151,7 @@ class BankTochkaSync(SyncSource):
                             total += len(rows)
                     except Exception as e:
                         print(
-                            f"[bank_tochka] period FAIL acc={acc} {st}..{en}: {e}",
+                            f"[bank_tochka] period FAIL acc={acc} {st}..{en}: {e}\n{traceback.format_exc()}",
                             flush=True,
                         )
 

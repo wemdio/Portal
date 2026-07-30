@@ -1,8 +1,10 @@
-"""Маппинг операций Точки в строку bank_transactions.
+"""Маппинг банковских операций (Точка, Т-Банк) в строку bank_transactions.
 
-Логика вынесена в чистую функцию map_transaction именно ради этих тестов:
-сам _fetch_period ходит в сеть и в юните непроверяем.
+Логика вынесена в чистые функции map_transaction/map_operation именно ради
+этих тестов: сетевые части (_fetch_period у Точки, run у Т-Банка) ходят в
+сеть и в юните непроверяемы.
 """
+from sources.bank_tbank import map_operation
 from sources.bank_tochka import map_transaction
 
 CREDIT = {
@@ -89,8 +91,6 @@ def test_debit_without_creditor_party_is_not_dropped():
     assert row["payee_inn"] is None
 
 
-from sources.bank_tbank import map_operation
-
 ACC = "40802810600001780269"
 
 TB_CREDIT = {
@@ -151,3 +151,25 @@ def test_tbank_missing_amount_is_skipped_not_zeroed():
     tx = dict(TB_DEBIT)
     del tx["amount"]
     assert map_operation(tx, ACC) is None
+
+
+def test_tbank_skip_counts_tally_by_reason():
+    """skip_counts, общий на весь прогон, обязан копить причины пропуска
+    по отдельности — это то, что печатается в сводке в конце run(). Без
+    счётчика на "чужие" операции опечатка в имени поля API (например, если
+    ответ вдруг придёт не с payerAccount) тихо превратила бы весь расход в
+    "за период не было операций", неотличимое от правды."""
+    skip_counts: dict[str, int] = {}
+
+    bad_date = dict(TB_DEBIT)
+    bad_date["date"] = "16.07.2026"
+    bad_amount = dict(TB_DEBIT)
+    del bad_amount["amount"]
+    foreign = {"recipientAccount": "1", "payerAccount": "2"}
+
+    assert map_operation(bad_date, ACC, skip_counts) is None
+    assert map_operation(bad_amount, ACC, skip_counts) is None
+    assert map_operation(foreign, ACC, skip_counts) is None
+    assert map_operation(foreign, ACC, skip_counts) is None  # ещё одна чужая
+
+    assert skip_counts == {"bad_date": 1, "bad_amount": 1, "not_ours": 2}

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import traceback
 from datetime import date
 
 import asyncpg
@@ -51,10 +52,18 @@ def map_operation(
     предупреждением в лог, а не роняет вызывающий батч: перед бэкфиллом за
     2023 год одна битая строка не должна уносить с собой весь период.
     skip_counts, если передан, копит причины пропуска для сводки по прогону.
+
+    Чужая операция (наш счёт не с одной из сторон) считается в skip_counts
+    под причиной "not_ours" без построчного лога — их много, и без счётчика
+    молчаливая опечатка в имени поля API (например, если ответ вдруг придёт
+    не с payerAccount, а с другим ключом) выглядела бы как "за период не
+    было расходов", а не как поломка маппинга.
     """
     is_credit = o.get("recipientAccount") == account
     is_debit = o.get("payerAccount") == account
     if not is_credit and not is_debit:
+        if skip_counts is not None:
+            skip_counts["not_ours"] = skip_counts.get("not_ours", 0) + 1
         return None
 
     tx_id = o.get("operationId") or f"{account}|{o.get('id')}"
@@ -116,6 +125,11 @@ class BankTBankSync(SyncSource):
     async def run(self, conn: asyncpg.Connection) -> int:
         if not TOKEN:
             raise NotImplementedError("TBANK_TOKEN не задан")
+        if not ACCOUNT:
+            # Пустой ACCOUNT делает is_credit/is_debit истинными для любой
+            # операции с пустым recipientAccount/payerAccount — часть
+            # внутренних банковских операций помечена именно так.
+            raise NotImplementedError("TBANK_ACCOUNT не задан")
 
         headers = {"Authorization": f"Bearer {TOKEN}"}
         total = 0
@@ -145,7 +159,7 @@ class BankTBankSync(SyncSource):
                         total += len(rows)
                 except Exception as e:
                     print(
-                        f"[bank_tbank] period FAIL {frm}..{till}: {e}",
+                        f"[bank_tbank] period FAIL {frm}..{till}: {e}\n{traceback.format_exc()}",
                         flush=True,
                     )
 

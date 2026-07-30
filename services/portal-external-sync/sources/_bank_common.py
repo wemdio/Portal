@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime, timezone
 
@@ -42,7 +43,7 @@ def classify_revenue(payer: str, payer_inn: str, purpose: str) -> str:
     return ""
 
 
-def coerce_amount(value) -> float | None:
+def coerce_amount(value: object) -> float | None:
     """Уже извлечённое значение суммы → float, либо None, если его нет или
     оно не приводится к числу.
 
@@ -50,13 +51,21 @@ def coerce_amount(value) -> float | None:
     (значение — amount верхнего уровня): молчаливый ноль здесь недопустим,
     настоящий ноль в выписке и отсутствующая сумма — разные вещи, и подмена
     второго первым тихо занижает расход.
+
+    nan и inf отдельно отсекаются через math.isfinite: float("nan") и
+    float("Infinity") не бросают исключение и не равны None, поэтому без
+    этой проверки одна такая строка тихо попала бы в базу как валидная
+    сумма и отравила бы sum(amount) по всей витрине расходов.
     """
     if value is None:
         return None
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(result):
+        return None
+    return result
 
 
 def parse_date(s: str | None) -> datetime | None:
