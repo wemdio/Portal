@@ -9,6 +9,7 @@ import KpiRow from '@/components/first-sales/KpiRow';
 import TimeSeriesChart from '@/components/first-sales/TimeSeriesChart';
 import SourceTable, { drillKey } from '@/components/first-sales/SourceTable';
 import SourceMapEditor from '@/components/first-sales/SourceMapEditor';
+import MeetingLinksEditor from '@/components/first-sales/MeetingLinksEditor';
 
 type SummaryResponse = FirstSalesSeries & {
   previousTotals: FirstSalesSeries['totals'];
@@ -21,10 +22,16 @@ export default function FirstSalesView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showSourceMap, setShowSourceMap] = useState(false);
-  // Инкрементируется после сохранения в справочнике источников, чтобы
-  // перезапустить фетч сводки без изменения самих фильтров (эффект ниже
-  // держит его в зависимостях ровно для этого).
+  const [showMeetingLinks, setShowMeetingLinks] = useState(false);
+  // Инкрементируется после сохранения в справочнике источников или в очереди
+  // записей встреч, чтобы перезапустить фетч сводки без изменения самих
+  // фильтров (эффекты ниже держат его в зависимостях ровно для этого).
   const [reloadKey, setReloadKey] = useState(0);
+  // Размер очереди записей без сделки — нужен ДО того, как панель открыта:
+  // кнопка-переключатель показывает число рядом с названием, чтобы было
+  // видно, есть ли работа, не разворачивая панель. null, пока число ещё не
+  // пришло (не «очередь пуста», а «неизвестно»).
+  const [meetingQueueCount, setMeetingQueueCount] = useState<{ count: number; truncated: boolean } | null>(null);
 
   // Фетч в эффекте по ключу = весь объект фильтров. Клик по каналу или пресету
   // периода запускает новый запрос при каждом изменении; быстрые повторные
@@ -72,6 +79,35 @@ export default function FirstSalesView() {
     };
   }, [filters, reloadKey]);
 
+  // Отдельный лёгкий фетч только под счётчик на кнопке — не завязан на
+  // showMeetingLinks: число должно быть видно ДО того, как панель открыта
+  // (условие reloadKey — то же самое, чем закрывается цикл после сохранения
+  // строки в MeetingLinksEditor). Канал сюда не передаём: запись ещё не
+  // привязана к сделке, у неё нет канала, по которому можно фильтровать.
+  useEffect(() => {
+    let active = true;
+    const run = async () => {
+      try {
+        const qs = new URLSearchParams({ from: filters.from, to: filters.to });
+        const res = await authFetch(`/api/analytics/first-sales/meeting-links?${qs.toString()}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as { rows: unknown[]; truncated: boolean };
+        if (!active) return;
+        setMeetingQueueCount({ count: json.rows.length, truncated: json.truncated });
+      } catch (e) {
+        if (!active) return;
+        // Не роняем весь дашборд из-за счётчика на второстепенной кнопке —
+        // просто оставляем число неизвестным (кнопка без числа в скобках).
+        logError('first-sales.meeting_links.count_failed', e);
+        setMeetingQueueCount(null);
+      }
+    };
+    void run();
+    return () => {
+      active = false;
+    };
+  }, [filters.from, filters.to, reloadKey]);
+
   const isEmpty = !!data && data.totals.leads === 0 && data.bySource.length === 0;
 
   return (
@@ -109,7 +145,7 @@ export default function FirstSalesView() {
             </>
           )}
 
-          <div>
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => setShowSourceMap((v) => !v)}
@@ -118,10 +154,33 @@ export default function FirstSalesView() {
             >
               {showSourceMap ? 'Скрыть справочник источников' : 'Справочник источников'}
             </button>
+            <button
+              type="button"
+              onClick={() => setShowMeetingLinks((v) => !v)}
+              className="rounded-full border border-zinc-200 px-2.5 py-1 text-xs text-zinc-600 hover:bg-zinc-50"
+              aria-expanded={showMeetingLinks}
+            >
+              {showMeetingLinks ? 'Скрыть записи без сделки' : 'Записи без сделки'}
+              {meetingQueueCount && (
+                <span className={meetingQueueCount.count > 0 ? ' font-semibold text-amber-700' : ' text-zinc-400'}>
+                  {' '}
+                  ({meetingQueueCount.count}
+                  {meetingQueueCount.truncated ? '+' : ''})
+                </span>
+              )}
+            </button>
           </div>
 
           {showSourceMap && (
             <SourceMapEditor onSaved={() => setReloadKey((k) => k + 1)} />
+          )}
+
+          {showMeetingLinks && (
+            <MeetingLinksEditor
+              from={filters.from}
+              to={filters.to}
+              onSaved={() => setReloadKey((k) => k + 1)}
+            />
           )}
         </>
       )}
