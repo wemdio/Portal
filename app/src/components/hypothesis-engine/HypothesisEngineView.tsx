@@ -78,9 +78,9 @@ export function HypothesisEngineView() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-4 py-8 text-left">
+    <div className="mx-auto w-full max-w-7xl space-y-8 px-4 py-8 text-left sm:px-6 lg:px-8">
       {/* Заголовок */}
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-3 border-b border-gray-200 pb-6">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
           <Telescope className="h-5 w-5" aria-hidden />
         </div>
@@ -94,7 +94,7 @@ export function HypothesisEngineView() {
       </div>
 
       {/* Новый проект */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5">
+      <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
         <label htmlFor="he-website" className="block text-sm font-medium text-gray-700">
           Новый проект
         </label>
@@ -155,7 +155,7 @@ export function HypothesisEngineView() {
 
       {/* Список проектов */}
       {listLoading ? (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {[1, 2].map((i) => (
             <div
               key={i}
@@ -173,13 +173,13 @@ export function HypothesisEngineView() {
           </p>
         </div>
       ) : (
-        <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {projects.map((p) => (
             <li key={p.id}>
               <button
                 type="button"
                 onClick={() => setSelectedId(p.id)}
-                className="flex w-full flex-col gap-2 rounded-2xl border border-gray-200 bg-white p-5 text-left transition hover:border-blue-300 hover:shadow-md"
+                className="flex w-full flex-col gap-2 rounded-2xl border border-gray-200 bg-white p-5 text-left shadow-sm transition hover:border-blue-300 hover:shadow-md"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">

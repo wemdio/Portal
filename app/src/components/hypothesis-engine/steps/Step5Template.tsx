@@ -147,7 +147,7 @@ function TemplateLeadPreview({ template, baseId }: { template: HeTemplate; baseI
 
   return (
     <details
-      className="rounded-xl border border-amber-200 bg-amber-50/40"
+      className="rounded-2xl border border-amber-200 bg-amber-50/40 shadow-sm"
       onToggle={(e) => handleToggle(e.currentTarget.open)}
     >
       <summary className="flex cursor-pointer select-none flex-wrap items-center gap-2 px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-800">
@@ -364,7 +364,7 @@ export function Step5Template(props: {
         <div className="flex shrink-0 items-center gap-2">
           <button type="button" onClick={handleCopy} className={SECONDARY_BTN}>
             {copied ? (
-              <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden />
+              <Check className="h-3.5 w-3.5 text-emerald-500" aria-hidden />
             ) : (
               <Copy className="h-3.5 w-3.5" aria-hidden />
             )}
@@ -381,9 +381,9 @@ export function Step5Template(props: {
       <TemplateLeadPreview template={template} baseId={base?.id ?? template.base_id} />
 
       {/* Финальные письма */}
-      <ol className="space-y-3">
+      <ol className="max-w-3xl space-y-3">
         {template.letters.map((letter, idx) => (
-          <li key={idx} className="rounded-xl border border-gray-200 bg-white p-4">
+          <li key={idx} className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-[11px] font-bold text-blue-700">
                 {idx + 1}
@@ -401,10 +401,10 @@ export function Step5Template(props: {
                 onClick={() => handleCopyLetter(idx)}
                 title="Скопировать письмо"
                 aria-label="Скопировать письмо"
-                className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
+                className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
               >
                 {copiedLetterIdx === idx ? (
-                  <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden />
+                  <Check className="h-3.5 w-3.5 text-emerald-500" aria-hidden />
                 ) : (
                   <Copy className="h-3.5 w-3.5" aria-hidden />
                 )}
@@ -419,7 +419,7 @@ export function Step5Template(props: {
                 {letter.segment_variants.map((v, vi) => (
                   <details
                     key={`${v.when}-${vi}`}
-                    className="rounded-lg border border-violet-200 bg-violet-50/40"
+                    className="rounded-lg border border-violet-200 bg-violet-50"
                   >
                     <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold text-violet-700">
                       Вариант для сегмента: {v.when}
@@ -440,7 +440,7 @@ export function Step5Template(props: {
 
       {/* Фиксированный блок — длинный, свёрнут */}
       {template.fixed_block ? (
-        <details className="rounded-xl border border-gray-200 bg-white">
+        <details className="rounded-2xl border border-gray-200 bg-white shadow-sm">
           <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-800">
             Фиксированный блок (85%) — общая основа всех писем
           </summary>
@@ -456,7 +456,7 @@ export function Step5Template(props: {
 
       {/* Маппинг операторов на колонки базы — свёрнут */}
       {mapping.length > 0 ? (
-        <details className="rounded-xl border border-gray-200 bg-white">
+        <details className="rounded-2xl border border-gray-200 bg-white shadow-sm">
           <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-800">
             Маппинг операторов на колонки базы ({mapping.length})
           </summary>

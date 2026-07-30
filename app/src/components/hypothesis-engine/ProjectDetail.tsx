@@ -487,9 +487,9 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 px-4 py-8 text-left">
+    <div className="mx-auto w-full max-w-7xl space-y-8 px-4 py-8 text-left sm:px-6 lg:px-8">
       {/* Шапка: назад, название проекта и ссылка на сайт — без технических деталей */}
-      <div className="flex min-w-0 items-start gap-3">
+      <div className="flex min-w-0 items-start gap-3 border-b border-gray-200 pb-6">
         <button
           type="button"
           onClick={onBack}
@@ -540,15 +540,13 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
 
       {detail ? (
         <>
-          {/* Навигация мастера */}
-          <div className="rounded-2xl border border-gray-200 bg-white px-3 py-4 sm:px-6">
-            <StepNav steps={wizardSteps} onJump={jumpTo} />
-          </div>
+          {/* Навигация мастера — sticky-плашка внутри StepNav */}
+          <StepNav steps={wizardSteps} onJump={jumpTo} />
 
           {renderStep()}
 
           {/* Техническая информация для отладки — по умолчанию скрыта */}
-          <details className="rounded-2xl border border-gray-200 bg-white px-4 py-3">
+          <details className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
             <summary className="cursor-pointer select-none text-xs font-semibold uppercase tracking-widest text-gray-400 transition hover:text-gray-600">
               Подробности
             </summary>

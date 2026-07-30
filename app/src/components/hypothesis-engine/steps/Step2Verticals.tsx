@@ -90,7 +90,7 @@ export function Step2Verticals({
 
   if (sorted.length === 0) {
     return (
-      <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50/50 p-10 text-center">
+      <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50/50 p-10 text-center">
         <p className="text-sm font-medium text-gray-500">Вертикалей пока нет</p>
         <p className="mt-1 text-xs text-gray-400">
           Дождитесь окончания исследования — направления появятся здесь.
@@ -100,8 +100,8 @@ export function Step2Verticals({
   }
 
   return (
-    <div className="space-y-4">
-      <p className="text-sm text-gray-600">
+    <div className="grid items-start gap-4 xl:grid-cols-2">
+      <p className="text-sm text-gray-600 xl:col-span-2">
         Движок нашёл {sorted.length} {pluralDirections(sorted.length)}. Выберите одно — под него соберём письма,
         вокабуляр и шаблон.
       </p>
@@ -145,8 +145,8 @@ function VerticalCard({
 
   return (
     <article
-      className={`rounded-xl border p-5 transition ${
-        selected ? 'border-emerald-500 bg-white ring-1 ring-emerald-500/40' : 'border-gray-200 bg-white'
+      className={`rounded-2xl border p-5 shadow-sm transition ${
+        selected ? 'border-emerald-300 bg-white ring-1 ring-emerald-500/40' : 'border-gray-200 bg-white'
       }`}
     >
       {/* Шапка: rank, название, потенциал */}
@@ -328,7 +328,7 @@ function HypothesisItem({
             className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition ${
               accepted
                 ? 'border-emerald-300 bg-emerald-100 text-emerald-700'
-                : 'border-gray-200 bg-white text-gray-400 hover:border-emerald-200 hover:text-emerald-600'
+                : 'border-gray-200 bg-white text-gray-400 hover:border-emerald-200 hover:text-emerald-500'
             }`}
           >
             <Check className="h-4 w-4" aria-hidden />

@@ -177,9 +177,9 @@ export function Step4Base(props: {
       </p>
 
       {/* Загрузка файла */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5">
+      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
         <label
-          className={`flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-gray-300 bg-gray-50/50 px-4 py-8 text-center transition hover:border-blue-300 hover:bg-blue-50/30 ${
+          className={`flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-gray-300 bg-gray-50/50 px-4 py-8 text-center transition hover:border-blue-300 hover:bg-blue-50/60 ${
             parsing ? 'pointer-events-none opacity-60' : ''
           }`}
         >
@@ -336,7 +336,7 @@ export function Step4Base(props: {
       ) : null}
 
       {/* Переход к шаблону */}
-      <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white p-5">
+      <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
         {templateDone ? (
           <button type="button" onClick={onGoToTemplate} className={PRIMARY_BTN}>
             Перейти к шаблону
@@ -399,7 +399,7 @@ function BarList({
               </span>
               <span className="shrink-0 text-gray-400">{e.share_pct}%</span>
             </div>
-            <span className="mt-0.5 block h-1.5 overflow-hidden rounded-full bg-gray-200/70">
+            <span className="mt-0.5 block h-1.5 overflow-hidden rounded-full bg-gray-200">
               <span
                 className="block h-full rounded-full bg-blue-400"
                 style={{ width: `${Math.min(100, Math.max(3, e.share_pct))}%` }}
