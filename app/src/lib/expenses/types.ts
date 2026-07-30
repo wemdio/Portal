@@ -6,6 +6,9 @@ export type ExpenseCategory =
 /** Категории, которые не расход, а перемещение уже учтённых денег. */
 export const TRANSFER_CATEGORIES: readonly ExpenseCategory[] = ['transfer'] as const;
 
+/** Ключ бакета в byCategory/группировках для трат без категории — тот же ключ использует график. */
+export const UNCLASSIFIED_CATEGORY_KEY = 'unclassified';
+
 export const CATEGORY_LABELS: Record<ExpenseCategory, string> = {
   payroll: 'ФОТ',
   marketing: 'Маркетинг',
@@ -38,6 +41,15 @@ export interface SeriesPoint {
   total: number;
   byCategory: Record<string, number>;
   bySource: Record<string, number>;
+  /**
+   * Истина, когда календарные границы бакета (неделя/месяц) выходят за
+   * пределы запрошенного периода — например первая неделя месячного отчёта,
+   * начинающаяся до `from`. Данные в бакете полные для тех дней, что попали
+   * в период, но столбец на графике ниже соседних не потому что расходов
+   * стало меньше, а потому что в него попало меньше дней. UI помечает такой
+   * столбец, а не рисует его как обычный.
+   */
+  partial: boolean;
 }
 
 export interface ExpensesSummary {
@@ -48,6 +60,8 @@ export interface ExpensesSummary {
   unclassifiedCount: number;
   unclassifiedTotal: number;
   unconvertedCount: number;
+  /** Сумма в исходной валюте (поле amount) по строкам без курса, сгруппированная по валюте. */
+  unconvertedByCurrency: Record<string, number>;
   series: SeriesPoint[];
 }
 
@@ -59,4 +73,7 @@ export interface VendorBreakdownItem {
   ops: number;
   share: number;
   deltaPrev: number | null;
+  /** Число операций этого вендора без курса ЦБ — total их не учитывает (amount_rub падает в 0), эти счётчики не дают этому потеряться. */
+  unconvertedCount: number;
+  unconvertedByCurrency: Record<string, number>;
 }
