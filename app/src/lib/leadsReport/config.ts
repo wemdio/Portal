@@ -40,6 +40,21 @@ export type LeadsReportConfig = {
   columns: ColumnSpec[];
   /** Логический источник для external_sync_runs. */
   syncSource: 'leads_report_marketing' | 'leads_report_outreach';
+  /**
+   * Буква колонки, в которую скрипт пишет дату лида в формате DD.MM.YYYY
+   * (для outreach — `I` «Дата передачи лида», для marketing — `D` «Дата»).
+   *
+   * Используется для инкрементального дедупа при первом переключении на
+   * боевую таблицу: перед запросом в AMO скрипт читает эту колонку, находит
+   * max-дату и тянет из `amo_leads` только сделки с `created_at >= max`.
+   * Это позволяет не полагаться на amo_id-дедуп по существующим ручным
+   * строкам (у них amo_id пустой), но при этом не терять сделки. Дубликаты
+   * за граничную дату отсекает уже дедуп по amo_id ниже.
+   *
+   * Если колонка пустая (свежий лист без единой записи) — fallback на
+   * `sinceDays * DAY` от «сейчас».
+   */
+  dateColumnLetter: string;
 };
 
 const AMO_ID_COLUMN: ColumnSpec = { header: 'AMO id', key: 'amo_id_raw' };
@@ -58,6 +73,7 @@ export const marketingConfig: LeadsReportConfig = {
     match: { equals: 'Маркетинг' },
   },
   syncSource: 'leads_report_marketing',
+  dateColumnLetter: 'D',
   // Порядок колонок 1:1 с боевой таблицей «Учет проектов внутреннее» → лист «Лиды маркетинг».
   // Ручные колонки менеджера (Дата последнего контакта, Качество лида, На чем остановились,
   // и числовая метрика в L) — оставляем пустыми: заполнит менеджер вручную. AMO id пишется
@@ -89,6 +105,7 @@ export const outreachConfig: LeadsReportConfig = {
     match: { equals: 'Email Outreach' },
   },
   syncSource: 'leads_report_outreach',
+  dateColumnLetter: 'I',
   // Порядок и позиции колонок 1:1 соответствуют боевому листу «Лиды»
   // (см. образец «Polza Ru Outreach.xlsx»): ручные колонки менеджера
   // (Оффер / Сфера деятельности / Ком-й / Из какой кампании / Статус /

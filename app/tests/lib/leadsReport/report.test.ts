@@ -38,12 +38,12 @@ function lead(amoId: number, fields: Record<string, string>): AmoLead {
 function dbReturning(
   data: AmoLead[] | null,
   error: unknown = null,
-): SupabaseClient {
+): { db: SupabaseClient; gte: jest.Mock } {
   const order = jest.fn().mockResolvedValue({ data, error });
   const gte = jest.fn().mockReturnValue({ order });
   const select = jest.fn().mockReturnValue({ gte });
   const from = jest.fn().mockReturnValue({ select });
-  return { from } as unknown as SupabaseClient;
+  return { db: { from } as unknown as SupabaseClient, gte };
 }
 
 describe('extractCustomField', () => {
@@ -73,20 +73,28 @@ describe('runReport', () => {
       ...marketingConfig,
       spreadsheetId: 'sheet-id',
     };
-    mockedReadColumn.mockResolvedValue(['AMO id', '2']);
+    // Первый вызов — читаем колонку с датами (D) для инкрементального окна.
+    // Второй — колонку amo_id (N) для дедупа.
+    mockedReadColumn
+      .mockResolvedValueOnce(['Дата', '20.07.2026', '19.07.2026'])
+      .mockResolvedValueOnce(['AMO id', '2']);
 
-    const result = await runReport(
-      dbReturning([
-        lead(1, { Контур: 'Маркетинг' }),
-        lead(2, { Контур: 'Маркетинг' }),
-        lead(3, { Источник: 'Email Outreach' }),
-        lead(4, { Источник: 'Сайт' }),
-      ]),
-      config,
-      { sinceDays: 30, amoHost: 'polzaagency.amocrm.ru' },
-    );
+    const { db, gte } = dbReturning([
+      lead(1, { Контур: 'Маркетинг' }),
+      lead(2, { Контур: 'Маркетинг' }),
+      lead(3, { Источник: 'Email Outreach' }),
+      lead(4, { Источник: 'Сайт' }),
+    ]);
 
-    expect(mockedReadColumn).toHaveBeenCalledWith('sheet-id', 'Лиды маркетинг', 'N');
+    const result = await runReport(db, config, {
+      sinceDays: 30,
+      amoHost: 'polzaagency.amocrm.ru',
+    });
+
+    expect(mockedReadColumn).toHaveBeenNthCalledWith(1, 'sheet-id', 'Лиды маркетинг', 'D');
+    expect(mockedReadColumn).toHaveBeenNthCalledWith(2, 'sheet-id', 'Лиды маркетинг', 'N');
+    // Окно должно начинаться от max-даты в шите (20.07.2026), а не sinceDays назад.
+    expect(gte).toHaveBeenCalledWith('created_at', '2026-07-20T00:00:00.000Z');
     expect(mockedAppendRows).toHaveBeenCalledTimes(1);
     expect(mockedAppendRows.mock.calls[0][2]).toHaveLength(1);
     expect(mockedAppendRows.mock.calls[0][2][0].at(-1)).toBe('1');
@@ -98,14 +106,36 @@ describe('runReport', () => {
     });
   });
 
+  it('если в шите нет ни одной DD.MM.YYYY-даты, окно откатывается на sinceDays от «сейчас»', async () => {
+    const config = { ...marketingConfig, spreadsheetId: 'sheet-id' };
+    // В колонке дат только заголовок + мусор — max-даты нет, fallback.
+    mockedReadColumn
+      .mockResolvedValueOnce(['Дата', '', 'не дата', '2026/07/20'])
+      .mockResolvedValueOnce(['AMO id']);
+
+    const { db, gte } = dbReturning([]);
+    const now = Date.now();
+    await runReport(db, config, {
+      sinceDays: 30,
+      amoHost: 'polzaagency.amocrm.ru',
+    });
+    // Проверяем не точное значение (Date.now зависит от прогона),
+    // а что since не совпадает с эпохой и находится в окне 30±1 день.
+    const sinceIso = gte.mock.calls[0]?.[1] as string;
+    expect(sinceIso).toBeTruthy();
+    const since = new Date(sinceIso).getTime();
+    expect(now - since).toBeGreaterThan(29 * 24 * 3600 * 1000);
+    expect(now - since).toBeLessThan(31 * 24 * 3600 * 1000);
+  });
+
   it('не маскирует ошибку чтения AMO', async () => {
+    mockedReadColumn.mockResolvedValue(['Дата', '20.07.2026']);
     await expect(
       runReport(
-        dbReturning(null, new Error('db unavailable')),
+        dbReturning(null, new Error('db unavailable')).db,
         { ...marketingConfig, spreadsheetId: 'sheet-id' },
         { sinceDays: 30, amoHost: 'polzaagency.amocrm.ru' },
       ),
     ).rejects.toThrow('db unavailable');
-    expect(mockedReadColumn).not.toHaveBeenCalled();
   });
 });
