@@ -22,18 +22,55 @@ const BROWSER_USER_AGENT =
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// ── Proxy pool ─────────────────────────────────────────────────
+// ── Proxy pool (round-robin) ───────────────────────────────────
 //
-// До 2026-07-21 email-скрапер ходил напрямую с IP воркера, потом его пустили
-// через общий пул residential-прокси (PROXY_URLS). Ротация IP полезна, но
-// висящий прокси съедал весь таймаут строки — детали и лечение в proxyPool.ts.
+// Тот же формат PROXY_URLS, что и websiteParser.ts, hhParser.ts и др. —
+// JSON-массив строк ["http://user:pass@ip:port", ...] или "url1,url2,url3".
+// До 2026-07-21 email-скрапер шёл напрямую с IP воркера — на 800+ сайтах
+// это заметно, потому что портал же уже покупает residential-прокси
+// (5 IP на момент внедрения) и text/INN-режим ими пользуется, а email —
+// нет. Fix: ротируем 5 IP через тот же undici.ProxyAgent-паттерн.
 type Dispatcher = import('undici').Dispatcher;
 
-import {
-  getProxyDispatcher,
-  proxyAttemptTimeoutMs,
-  reportProxyResult,
-} from '@/lib/enrich/proxyPool';
+let _proxyUrls: string[] | null = null;
+function getProxyUrls(): string[] {
+  if (_proxyUrls) return _proxyUrls;
+  try {
+    const raw = (process.env.PROXY_URLS ?? '').trim();
+    if (raw.startsWith('[')) {
+      _proxyUrls = (JSON.parse(raw) as string[]).map((s) => s.trim()).filter(Boolean);
+    } else {
+      _proxyUrls = raw.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean);
+    }
+  } catch {
+    _proxyUrls = [];
+  }
+  return _proxyUrls;
+}
+
+let _proxyRR = 0;
+function pickProxyUrl(): string {
+  const urls = getProxyUrls();
+  if (!urls.length) return '';
+  _proxyRR = (_proxyRR + 1) % urls.length;
+  return urls[_proxyRR];
+}
+
+const _proxyDispatchers = new Map<string, Dispatcher>();
+async function getProxyDispatcher(): Promise<Dispatcher | undefined> {
+  const url = pickProxyUrl();
+  if (!url) return undefined;
+  const existing = _proxyDispatchers.get(url);
+  if (existing) return existing;
+  try {
+    const mod = await import('undici');
+    const d = new mod.ProxyAgent(url) as unknown as Dispatcher;
+    _proxyDispatchers.set(url, d);
+    return d;
+  } catch {
+    return undefined;
+  }
+}
 
 // ── Contact / About / Team page paths ──────────────────────────
 
@@ -480,8 +517,7 @@ function isHtmlLikeContentType(contentType: string | null): boolean {
   return ct.includes('text/html') || ct.includes('application/xhtml') || ct.startsWith('text/plain');
 }
 
-/** Экспортируется ради тестов на связку «прокси → прямой запрос» */
-export async function fetchPage(
+async function fetchPage(
   url: string,
   options?: { timeout?: number; signal?: AbortSignal },
 ): Promise<string | null> {
@@ -503,8 +539,13 @@ async function fetchPageInner(
   url: string,
   options: { timeout: number; signal?: AbortSignal },
 ): Promise<string | null> {
-  const deadline = Date.now() + options.timeout;
+  const { timeout } = options;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
   const externalSignal = options.signal;
+  const onExternalAbort = () => controller.abort();
+  externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
   const baseHeaders = {
     'User-Agent': BROWSER_USER_AGENT,
@@ -512,59 +553,51 @@ async function fetchPageInner(
     'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
   } as const;
 
-  /** Одна попытка со своим бюджетом. Возврат `null` = ответ есть, но не HTML/4xx */
-  const attempt = async (dispatcher: Dispatcher | undefined, budgetMs: number) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), budgetMs);
-    const onExternalAbort = () => controller.abort();
-    externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
+  const dispatcher = await getProxyDispatcher();
+
+  const doFetch = async (opts: RequestInit & { dispatcher?: Dispatcher }) => {
+    const res = await fetch(url, opts);
+    if (res.status >= 400) return null;
+    const contentType = res.headers.get('content-type');
+    if (!isHtmlLikeContentType(contentType)) return null;
+    const body = await res.arrayBuffer();
+    return decodeHtml(body, contentType);
+  };
+
+  try {
+    const fetchOpts: RequestInit & { dispatcher?: Dispatcher } = {
+      method: 'GET',
+      headers: baseHeaders,
+      signal: controller.signal,
+      redirect: 'follow',
+    };
+    if (dispatcher) fetchOpts.dispatcher = dispatcher;
 
     try {
-      const opts: RequestInit & { dispatcher?: Dispatcher } = {
+      return await doFetch(fetchOpts);
+    } catch (err) {
+      // Один retry без прокси при сетевой ошибке через прокси. Если 1 из 5
+      // резидентных IP протух/дал 502 — не роняем сайт целиком, пробуем
+      // напрямую. Общий FETCH_RETRIES снаружи ловит остальные транзиенты.
+      if (!dispatcher || externalSignal?.aborted || controller.signal.aborted) {
+        return null;
+      }
+      void err;
+      const directOpts: RequestInit = {
         method: 'GET',
         headers: baseHeaders,
         signal: controller.signal,
         redirect: 'follow',
       };
-      if (dispatcher) opts.dispatcher = dispatcher;
-
-      const res = await fetch(url, opts);
-      if (res.status >= 400) return null;
-      const contentType = res.headers.get('content-type');
-      if (!isHtmlLikeContentType(contentType)) return null;
-      const body = await res.arrayBuffer();
-      return decodeHtml(body, contentType);
-    } finally {
-      clearTimeout(timer);
-      externalSignal?.removeEventListener('abort', onExternalAbort);
-    }
-  };
-
-  // 1. Через прокси — но с коротким бюджетом. Висящий IP не должен съедать всё
-  //    время строки, иначе прямой запрос ниже никогда не выполнится.
-  const proxy = await getProxyDispatcher();
-  if (proxy) {
-    const budget = Math.min(proxyAttemptTimeoutMs(), deadline - Date.now());
-    if (budget > 0) {
       try {
-        const html = await attempt(proxy.dispatcher, budget);
-        reportProxyResult(proxy.url, true);
-        return html;
+        return await doFetch(directOpts);
       } catch {
-        // Отменил пользователь — это не вина прокси и повторять нечего
-        if (externalSignal?.aborted) return null;
-        reportProxyResult(proxy.url, false);
+        return null;
       }
     }
-  }
-
-  // 2. Остаток бюджета — прямой запрос с IP воркера
-  const rest = deadline - Date.now();
-  if (rest <= 0 || externalSignal?.aborted) return null;
-  try {
-    return await attempt(undefined, rest);
-  } catch {
-    return null;
+  } finally {
+    clearTimeout(timer);
+    externalSignal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
