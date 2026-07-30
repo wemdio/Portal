@@ -17,7 +17,10 @@ function jsonError(message: string, status: number) {
 // источников → коллекторы → harvest в he_bases). Создаёт he_bases
 // (source='auto', status='collecting') + he_jobs (stage='base_collect').
 // Дедуп: активная (pending/running) base_collect-задача этой вертикали или
-// собирающаяся auto-база уже есть → возвращаем её со статусом 200.
+// собирающаяся auto-база уже есть → возвращаем её со статусом 200. Гонку
+// двух параллельных POST (оба прошли проверки до insert) закрывает partial
+// unique index he_bases_one_collecting_per_vertical: проигравший insert
+// получает 23505 и тоже отвечает 200 с чужой collecting-базой.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.collect.post' },
@@ -72,6 +75,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           .select('id, status')
           .eq('vertical_id', id)
           .in('id', baseIds)
+          // Упавшая сборка не блокирует повторный запуск: failed-базу
+          // не считаем конфликтом, даём создать новую.
+          .neq('status', 'failed')
           .limit(1)
           .maybeSingle();
         if (baseErr) return jsonError(baseErr.message, 500);
@@ -93,6 +99,21 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         .select('id, status')
         .single();
       if (baseInsertErr || !base) {
+        // 23505 = unique_violation на he_bases_one_collecting_per_vertical:
+        // параллельный POST успел вставить collecting-базу раньше. Это тот же
+        // дедуп, только пойманный индексом, — отвечаем 200 с чужой базой.
+        if (baseInsertErr?.code === '23505') {
+          const { data: conflict, error: conflictErr } = await supabaseAdmin
+            .from('he_bases')
+            .select('id, status')
+            .eq('vertical_id', id)
+            .eq('source', 'auto')
+            .eq('status', 'collecting')
+            .limit(1)
+            .maybeSingle();
+          if (conflictErr) return jsonError(conflictErr.message, 500);
+          if (conflict) return NextResponse.json({ ok: true, base: conflict });
+        }
         await logError('tools.hypothesis-engine.collect.insert_failed', baseInsertErr, {
           userId,
           verticalId: id,

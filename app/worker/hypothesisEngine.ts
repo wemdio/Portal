@@ -17,13 +17,22 @@
  * serperSearch).
  */
 
-import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop } from './_shared';
+import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, startWorkerHeartbeat } from './_shared';
 import { runHeStage } from '@/lib/hypothesisEngine/stages';
 import type { HeJob, HeStage } from '@/lib/hypothesisEngine/types';
 
 const WORKER_ID = `hypothesis-engine-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
 const MAX_ATTEMPTS = 3;
+
+/**
+ * Heartbeat-файл: обновляется каждые 30с независимым setInterval-тиком.
+ * Docker healthcheck читает mtime и флипает контейнер в unhealthy, если он
+ * не обновлялся > 300с — autoheal тогда перезапускает воркер (паттерн
+ * worker/yandexmaps.ts, инцидент 27.07.2026: event-loop hang при живом
+ * процессе невидим без внешнего heartbeat).
+ */
+const HEARTBEAT_PATH = process.env.HE_WORKER_HEARTBEAT_PATH ?? '/tmp/hypothesis-engine-worker-heartbeat';
 
 const log = createWorkerLogger(WORKER_ID);
 const db = requireSupabaseAdmin(log);
@@ -67,17 +76,23 @@ async function claimJob(): Promise<HeJob | null> {
     .from('he_jobs')
     .select('*')
     .eq('status', 'pending')
+    // Отложенные джобы (self-requeue base_collect ставит run_after в будущее)
+    // не клеймим раньше времени — иначе ожидание дочерних парсеров
+    // превращается в hot spin по БД.
+    .lte('run_after', new Date().toISOString())
     .order('created_at', { ascending: true })
     .limit(1)
     .maybeSingle();
   if (!pending) return null;
 
+  // attempts здесь НЕ инкрементируем: attempts — счётчик фейлов (failJob),
+  // а не клеймов. Self-requeue base_collect переводит джобу в pending десятки
+  // раз подряд — инкремент на клейме сжигал все попытки за секунды ожидания.
   const { data: claimed } = await db
     .from('he_jobs')
     .update({
       status: 'running',
       started_at: new Date().toISOString(),
-      attempts: ((pending as HeJob).attempts ?? 0) + 1,
       updated_at: new Date().toISOString(),
     })
     .eq('id', (pending as HeJob).id)
@@ -185,13 +200,16 @@ async function handleJob(job: HeJob) {
 
 async function failJob(job: HeJob, err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
-  const finalFail = job.attempts >= MAX_ATTEMPTS;
-  log('error', `Job ${job.id} (${job.stage}) failed (attempt ${job.attempts}/${MAX_ATTEMPTS}): ${msg}`);
+  // attempts — число фейлов, а не клеймов: инкремент только здесь.
+  const nextAttempts = job.attempts + 1;
+  const finalFail = nextAttempts >= MAX_ATTEMPTS;
+  log('error', `Job ${job.id} (${job.stage}) failed (attempt ${nextAttempts}/${MAX_ATTEMPTS}): ${msg}`);
 
   await db
     .from('he_jobs')
     .update({
       status: finalFail ? 'failed' : 'pending',
+      attempts: nextAttempts,
       error: msg.slice(0, 500),
       finished_at: finalFail ? new Date().toISOString() : null,
       updated_at: new Date().toISOString(),
@@ -209,6 +227,24 @@ async function failJob(job: HeJob, err: unknown) {
       })
       .eq('id', job.project_id);
   }
+
+  // Финальный фейл base_collect: без этого he_bases навсегда остаётся в
+  // 'collecting' (failed пишет только путь «ноль строк» в самой стадии), и
+  // collect-роут продолжает отдавать базу как живую. payload может не
+  // содержать base_id — тогда просто не трогаем базу.
+  if (finalFail && job.stage === 'base_collect') {
+    const baseId = typeof job.payload?.base_id === 'string' ? job.payload.base_id : null;
+    if (baseId) {
+      await db
+        .from('he_bases')
+        .update({
+          status: 'failed',
+          error: msg.slice(0, 500),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', baseId);
+    }
+  }
 }
 
 async function pollOnce(): Promise<boolean> {
@@ -224,15 +260,23 @@ async function pollOnce(): Promise<boolean> {
 
 async function main() {
   log('info', 'Hypothesis Engine worker starting…');
+
+  const heartbeat = startWorkerHeartbeat(HEARTBEAT_PATH);
+  log('info', `Heartbeat ticker started → ${HEARTBEAT_PATH} (every 30s)`);
+
   await resetStuckJobs();
 
-  await pollLoop({
-    log,
-    pollIntervalMs: POLL_INTERVAL_MS,
-    shouldStop,
-    pollOnce,
-    realtimeTables: ['he_jobs'],
-  });
+  try {
+    await pollLoop({
+      log,
+      pollIntervalMs: POLL_INTERVAL_MS,
+      shouldStop,
+      pollOnce,
+      realtimeTables: ['he_jobs'],
+    });
+  } finally {
+    clearInterval(heartbeat);
+  }
 
   log('info', 'Hypothesis Engine worker stopped');
   process.exit(0);

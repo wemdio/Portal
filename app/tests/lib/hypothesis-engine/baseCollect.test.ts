@@ -5,7 +5,8 @@
  *
  *   pure helpers     — each source row → unified row, dedup, filter/query builders
  *   DISPATCH         — hh/yandex/google child job insert shapes; directory via searchRows
- *   WAIT / requeue   — own he_jobs row → status 'pending', attempts untouched
+ *   WAIT / requeue   — own he_jobs row → status 'pending' + run_after cooldown,
+ *                      attempts untouched; stuck child (>3h) → task failed (timeout)
  *   HARVEST          — child rows merged into he_bases (+base_analyze enqueue),
  *                      zero rows → base failed + job throws
  *   guards           — base must be source='auto' AND status='collecting'
@@ -145,6 +146,13 @@ describe('source row → unified row mapping', () => {
     expect(mapped.source_detail).toBe('реестр');
   });
 
+  it('maps directory phones stored as comma-joined text (first phone wins)', () => {
+    const mapped = mapDirectoryRow({ name: 'ООО Текст', phones: '+7999000001, +7999000002' });
+    expect(mapped.phone).toBe('+7999000001');
+    // И массив схлопывается в ту же строку — первый телефон тоже выживает.
+    expect(mapDirectoryRow({ name: 'N', phones: ['+7111', '+7222'] }).phone).toBe('+7111');
+  });
+
   it('maps an hh vacancy row (vacancy → vacancy_title, hh: query detail)', () => {
     const mapped = mapHhRow(
       {
@@ -217,7 +225,7 @@ describe('dedupUnifiedRows', () => {
 });
 
 describe('collector request builders', () => {
-  it('maps directory_filters to CompaniesSearchFilters (set fields only)', () => {
+  it('maps directory_filters to CompaniesSearchFilters (set fields only, includeIp дефолтит в false)', () => {
     expect(
       mapDirectoryFilters({
         okvedCodes: ['62'],
@@ -225,7 +233,7 @@ describe('collector request builders', () => {
         revenueFrom: 1,
         employeesTo: 100,
         hasEmail: true,
-        includeIp: false,
+        includeIp: true,
       }),
     ).toEqual({
       okvedCodes: ['62'],
@@ -233,11 +241,16 @@ describe('collector request builders', () => {
       revenueFrom: 1,
       employeesTo: 100,
       hasEmail: true,
+      includeIp: true,
+    });
+    // B2B-дефолт: includeIp=false даже когда LLM поле не задал (RPC иначе вернёт true).
+    expect(mapDirectoryFilters({})).toEqual({ includeIp: false });
+    expect(mapDirectoryFilters(undefined)).toEqual({ includeIp: false });
+    expect(mapDirectoryFilters({ okvedCodes: [] })).toEqual({ includeIp: false });
+    expect(mapDirectoryFilters({ okvedCodes: ['62'] })).toEqual({
+      okvedCodes: ['62'],
       includeIp: false,
     });
-    expect(mapDirectoryFilters({})).toEqual({});
-    expect(mapDirectoryFilters(undefined)).toEqual({});
-    expect(mapDirectoryFilters({ okvedCodes: [] })).toEqual({});
   });
 
   it('builds yandex search urls (geo appended, url-encoded)', () => {
@@ -355,7 +368,7 @@ describe('dispatch + wait', () => {
       }),
     );
 
-    // google → google_maps_jobs
+    // google → google_maps_jobs (minDelayMs/maxDelayMs обязательны — иначе delay NaN)
     const gmInsert = mockDb.inserts.find((i) => i.table === 'google_maps_jobs');
     expect(gmInsert?.rows[0]).toEqual(
       expect.objectContaining({
@@ -368,20 +381,28 @@ describe('dispatch + wait', () => {
           language: 'ru',
           region: 'RU',
           enrichContacts: true,
+          minDelayMs: 1200,
+          maxDelayMs: 2800,
         },
       }),
     );
 
     // Дочерние джобы pending/queued → self-requeue: своя строка → pending,
-    // attempts НЕ трогаем (клейм воркера сам инкрементирует).
+    // attempts НЕ трогаем (инкремент — только в failJob при фейле), клейм
+    // отложен run_after на ~30с вперёд (hot-spin guard).
     const requeue = mockDb.updates.find((u) => u.table === 'he_jobs');
     expect(requeue?.patch).toMatchObject({ status: 'pending', started_at: null });
     expect(requeue?.patch).not.toHaveProperty('attempts');
+    const runAfter = Date.parse(String(requeue?.patch.run_after));
+    expect(runAfter).toBeGreaterThan(Date.now() + 20_000);
+    expect(runAfter).toBeLessThanOrEqual(Date.now() + 40_000);
 
-    // child_job_id задач персистнуты в collect_info
+    // child_job_id и dispatched_at задач персистнуты в collect_info
     const baseUpdates = mockDb.updates.filter((u) => u.table === 'he_bases');
     const lastInfo = baseUpdates.at(-1)?.patch.collect_info as HeCollectInfo;
     expect(lastInfo.tasks?.every((t) => t.status === 'dispatched' && t.child_job_id)).toBe(true);
+    expect(lastInfo.tasks?.every((t) => typeof t.dispatched_at === 'string')).toBe(true);
+    expect(Date.parse(lastInfo.tasks![0].dispatched_at!)).toBeLessThanOrEqual(Date.now());
   });
 
   it('requeues while a child job is still running (attempts untouched)', async () => {
@@ -393,6 +414,8 @@ describe('dispatch + wait', () => {
           status: 'dispatched',
           child_job_id: 'pj1',
           rows: 0,
+          // dispatched_at нарочно не задан (collect_info до появления штампа):
+          // без него таймаута нет — поведение как раньше.
           task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
         },
       ],
@@ -415,9 +438,66 @@ describe('dispatch + wait', () => {
     const requeue = mockDb.updates.find((u) => u.table === 'he_jobs');
     expect(requeue?.patch.status).toBe('pending');
     expect(requeue?.patch).not.toHaveProperty('attempts');
+    expect(Date.parse(String(requeue?.patch.run_after))).toBeGreaterThan(Date.now());
     // Ни база не тронута статусом, ни base_analyze не поставлен.
     expect(mockDb.updates.filter((u) => u.table === 'he_bases').every((u) => !('status' in u.patch))).toBe(true);
     expect(mockDb.inserts.find((i) => i.table === 'he_jobs')).toBeUndefined();
+  });
+
+  it('fails a task whose child job is stuck over 3h and harvests the rest', async () => {
+    const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'hh_live',
+          status: 'dispatched',
+          child_job_id: 'pj1',
+          rows: 0,
+          dispatched_at: fourHoursAgo,
+          task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
+        },
+        {
+          source: 'yandex_maps',
+          status: 'dispatched',
+          child_job_id: 'ym1',
+          rows: 0,
+          dispatched_at: new Date().toISOString(),
+          task: { source: 'yandex_maps', rationale: 'r', maps_query: { queries: ['q'] } },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        // Зависшая джоба — до неё дело даже не доходит: таймаут раньше опроса.
+        parser_jobs: [{ id: 'pj1', status: 'running' }],
+        yandex_maps_jobs: [{ id: 'ym1', status: 'completed', error_message: null }],
+        yandex_maps_organizations: [
+          { job_id: 'ym1', name: 'Стоматология Улыбка', website: 'smile.ru', email: null, phone: '1', address: 'Казань', categories: 'Стоматология' },
+        ],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    const result = res.result as { rows: number; tasks_done: number; tasks_failed: number; failed_sources: string[] };
+    expect(result.rows).toBe(1);
+    expect(result.tasks_done).toBe(1);
+    expect(result.tasks_failed).toBe(1);
+    expect(result.failed_sources).toEqual(['hh_live']);
+
+    // Таймаут зафиксирован в collect_info, harvest прошёл по остальным задачам.
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(harvest?.status).toBe('analyzing');
+    const savedInfo = harvest?.collect_info as HeCollectInfo;
+    const stuck = savedInfo.tasks?.find((t) => t.source === 'hh_live');
+    expect(stuck?.status).toBe('failed');
+    expect(stuck?.error).toBe('timeout: дочерняя джоба зависла');
+    // Никакого self-requeue — зависшая задача больше не держит сборку.
+    expect(mockDb.updates.find((u) => u.table === 'he_jobs')).toBeUndefined();
   });
 });
 
@@ -538,7 +618,7 @@ describe('harvest', () => {
     const res = await runBaseCollectStage(makeJob(), ctx());
     expect((res.result as { rows: number }).rows).toBe(1);
 
-    expect(searchRowsMock).toHaveBeenCalledWith({ okvedCodes: ['62'], hasEmail: true }, 2000);
+    expect(searchRowsMock).toHaveBeenCalledWith({ okvedCodes: ['62'], hasEmail: true, includeIp: false }, 2000);
     // Без дочерних джоб парсеров.
     expect(mockDb.inserts.filter((i) => i.table !== 'he_jobs')).toHaveLength(0);
 

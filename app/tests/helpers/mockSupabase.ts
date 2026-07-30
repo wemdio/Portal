@@ -50,6 +50,16 @@ export interface MockSupabaseSeed {
    * таблице (напр. верификацию привязки projects.select('id, client')).
    */
   errorSelects?: Record<string, { columnsInclude: string; message: string }>;
+  /**
+   * Прицельная инъекция ошибки INSERT'а в таблицу с кодом Postgres
+   * (напр. { code: '23505' } — unique_violation). SELECT'ы той же таблицы
+   * не задевает: нужно, чтобы сымитировать гонку check-then-insert, когда
+   * предварительные выборки проходят, а падает только сам insert.
+   * commitRow: сымитировать выигравшую параллельную транзакцию — при ошибке
+   * строка всё же появляется в таблице (как конфликтующая запись чужого
+   * COMMIT'а), и последующие SELECT'ы её видят.
+   */
+  errorInserts?: Record<string, { code: string; message: string; commitRow?: boolean }>;
 }
 
 export interface InsertCall {
@@ -249,6 +259,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
   function makeBuilder(table: string): Builder {
     let errorMessage = seed.errorTables?.[table];
     const selectError = seed.errorSelects?.[table];
+    const insertError = seed.errorInserts?.[table];
     const filters: Filter[] = [];
     const orGroups: Filter[][][] = []; // list of (DNF) constraints; each must hold
     let mode: 'select' | 'insert' | 'upsert' | 'update' | 'delete' = 'select';
@@ -265,6 +276,18 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         );
       }
       return out;
+    }
+
+    // Ошибка insert'а (errorInserts): commitRow кладёт конфликтующую строку
+    // в таблицу — как COMMIT выигравшей параллельной транзакции, — но сам
+    // insert всё равно возвращает ошибку. В inserts/mutations не пишем:
+    // это чужая запись, не результат этого клиента.
+    function failInsert(error: { code: string; message: string; commitRow?: boolean }) {
+      if (error.commitRow) {
+        const committed = pendingInsert.map((row) => withGeneratedId(table, row));
+        tables[table] = (tables[table] ?? []).concat(committed);
+      }
+      return { data: null, error };
     }
 
     function flushMutation(): { data: Row[]; error: null; count: number } {
@@ -386,6 +409,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
       range: async () => flushMutation(),
 
       single: async () => {
+        if (mode === 'insert' && insertError) return failInsert(insertError);
         if (errorMessage) return { data: null, error: { message: errorMessage } };
         const result = flushMutation();
         const first = result.data[0] ?? null;
@@ -393,15 +417,20 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         return { data: first, error: first ? null : { message: 'not found', code: 'PGRST116' } };
       },
       maybeSingle: async () => {
+        if (mode === 'insert' && insertError) return failInsert(insertError) as never;
         if (errorMessage) return { data: null, error: { message: errorMessage } as never };
         const result = flushMutation();
         return { data: result.data[0] ?? null, error: null };
       },
 
-      then: <T>(onFulfilled?: (v: { data: Row[]; error: null; count: number }) => T) =>
-        errorMessage
+      then: <T>(onFulfilled?: (v: { data: Row[]; error: null; count: number }) => T) => {
+        if (mode === 'insert' && insertError) {
+          return Promise.resolve({ ...failInsert(insertError), count: 0 } as never).then(onFulfilled as never);
+        }
+        return errorMessage
           ? Promise.resolve({ data: null as never, error: { message: errorMessage } as never, count: 0 }).then(onFulfilled as never)
-          : Promise.resolve(flushMutation()).then(onFulfilled as never),
+          : Promise.resolve(flushMutation()).then(onFulfilled as never);
+      },
     };
 
     return builder;

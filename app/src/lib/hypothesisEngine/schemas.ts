@@ -252,25 +252,34 @@ export type HeTemplatePlanOutput = z.infer<typeof HeTemplatePlanSchema>;
  * Лишние поля LLM молча отбрасываются (zod strip-режим по умолчанию).
  */
 
-/** ОКВЭД только класс XX или группа XX.X — допустимая гранулярность реестра. */
-const HeOkvedCodeSchema = z.string().regex(/^\d{2}(\.\d)?$/);
+/** ОКВЭД: класс XX, группа XX.X или подгруппа XX.XX — RPC реестра матчит код префиксно. */
+const HeOkvedCodeSchema = z.string().regex(/^\d{2}(\.\d{1,2})?$/);
 
-export const HeDirectoryFiltersSchema = z.object({
-  okvedCodes: z.array(HeOkvedCodeSchema).optional(),
-  regionCodes: z.array(z.string()).optional(),
-  revenueFrom: z.number().optional(),
-  revenueTo: z.number().optional(),
-  employeesFrom: z.number().optional(),
-  employeesTo: z.number().optional(),
-  hasEmail: z.boolean().optional(),
-  includeIp: z.boolean().optional(),
-});
+/** Код региона РФ — ровно две цифры («77», «78», «50»). */
+const HeRegionCodeSchema = z.string().regex(/^\d{2}$/);
+
+/** Дата в формате YYYY-MM-DD. */
+const HeDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+export const HeDirectoryFiltersSchema = z
+  .object({
+    okvedCodes: z.array(HeOkvedCodeSchema).optional(),
+    regionCodes: z.array(HeRegionCodeSchema).optional(),
+    revenueFrom: z.number().optional(),
+    revenueTo: z.number().optional(),
+    employeesFrom: z.number().optional(),
+    employeesTo: z.number().optional(),
+    hasEmail: z.boolean().optional(),
+    includeIp: z.boolean().optional(),
+  })
+  // Пустой {} — нефильтрованный срез реестра на DIRECTORY_LIMIT строк: запрещаем.
+  .refine((f) => Object.values(f).some((v) => v !== undefined), 'укажи хотя бы один фильтр');
 
 export const HeHhQuerySchema = z.object({
   text: z.string().min(1).max(300),
   area: z.string().optional(),
-  date_from: z.string().optional(),
-  date_to: z.string().optional(),
+  date_from: HeDateSchema.optional(),
+  date_to: HeDateSchema.optional(),
 });
 
 export const HeMapsQuerySchema = z.object({

@@ -5,7 +5,7 @@
  * Всё состояние живёт в he_bases.collect_info, поэтому джоба безопасно
  * перевызывается: пока дочерние парсеры работают, стадия делает self-requeue
  * (своя he_jobs-строка → status='pending' БЕЗ инкремента attempts) и воркер
- * клеймит её на следующем тикe опроса.
+ * клеймит её после 30-секундной паузы (run_after).
  *
  * Фазы:
  *  1. PLAN — один LLM-вызов (модель bulk): вертикаль + неотклонённые гипотезы
@@ -55,9 +55,8 @@ const CHILD_ROWS_LIMIT = 2000;
 const TOTAL_ROWS_CAP = 2000;
 /** Строк в he_bases.sample_rows — как у ручной загрузки. */
 const SAMPLE_ROWS = 30;
-/** Яндекс.Карты: результатов на один поисковый URL, жёсткий потолок на задачу. */
+/** Яндекс.Карты: max_results в воркере трактуется НА ОДИН поисковый URL, а не на задачу. */
 const YANDEX_RESULTS_PER_URL = 500;
-const YANDEX_MAX_RESULTS_CAP = 2000;
 
 /* ─────────────────────── Унифицированная строка ─────────────────────── */
 
@@ -101,7 +100,8 @@ export function mapDirectoryRow(row: Record<string, unknown>): HeUnifiedRow {
     company: cell(row.name),
     website: cell(row.website),
     email: cell(row.email),
-    phone: firstCell(row.phones),
+    // phones в реестре — text с телефонами через запятую (массив тоже схлопнется в ту же строку).
+    phone: cell(row.phones).split(',')[0]?.trim() ?? '',
     address: cell(row.address),
     category: cell(row.okved_code),
     employees: cell(row.employees_count),
@@ -170,7 +170,8 @@ export function dedupUnifiedRows(rows: HeUnifiedRow[]): HeUnifiedRow[] {
 export function mapDirectoryFilters(
   filters: HeCollectTask['directory_filters'],
 ): CompaniesSearchFilters {
-  const out: CompaniesSearchFilters = {};
+  // B2B-дефолт: ИП не включаем (RPC при отсутствии фильтра вернёт includeIp=true).
+  const out: CompaniesSearchFilters = { includeIp: filters?.includeIp ?? false };
   if (!filters) return out;
   if (filters.okvedCodes?.length) out.okvedCodes = filters.okvedCodes;
   if (filters.regionCodes?.length) out.regionCodes = filters.regionCodes;
@@ -179,7 +180,6 @@ export function mapDirectoryFilters(
   if (typeof filters.employeesFrom === 'number') out.employeesFrom = filters.employeesFrom;
   if (typeof filters.employeesTo === 'number') out.employeesTo = filters.employeesTo;
   if (typeof filters.hasEmail === 'boolean') out.hasEmail = filters.hasEmail;
-  if (typeof filters.includeIp === 'boolean') out.includeIp = filters.includeIp;
   return out;
 }
 
@@ -213,6 +213,8 @@ export interface HeCollectTaskState {
   task: HeCollectTask;
   /** Унифицированные строки задачи (реестр — сразу на dispatch). */
   harvest?: HeUnifiedRow[];
+  /** Когда задача ушла в дочерний парсер (ISO) — таймаут ожидания в WAIT. */
+  dispatched_at?: string;
   error?: string;
 }
 
@@ -323,6 +325,9 @@ async function buildPlan(
 
 /* ─────────────────────────── Фаза DISPATCH ─────────────────────────── */
 
+/** Сколько ждём дочернюю джобу парсера, прежде чем считать её зависшей. */
+const CHILD_TIMEOUT_MS = 3 * 60 * 60 * 1000;
+
 async function insertChildJob(
   ctx: HeStageContext,
   table: string,
@@ -360,8 +365,8 @@ async function dispatchTask(
   if (task.source === 'hh_live') {
     const q = task.hh_query;
     if (!q?.text) throw new Error('hh_live: в задаче нет hh_query.text');
-    const config: Record<string, unknown> = { text: q.text, per_page: 100 };
-    if (q.area) config.area = q.area;
+    // Россия по умолчанию: LLM может не указать area, а план — только рынок РФ/СНГ.
+    const config: Record<string, unknown> = { text: q.text, per_page: 100, area: q.area ?? '113' };
     if (q.date_from) config.date_from = q.date_from;
     if (q.date_to) config.date_to = q.date_to;
     state.child_job_id = await insertChildJob(ctx, CHILD_JOB_TABLE.hh_live, {
@@ -382,7 +387,7 @@ async function dispatchTask(
       progress_stage: 'pending',
       config: {
         search_urls: searchUrls,
-        max_results: Math.min(searchUrls.length * YANDEX_RESULTS_PER_URL, YANDEX_MAX_RESULTS_CAP),
+        max_results: YANDEX_RESULTS_PER_URL,
         headless: true,
       },
     });
@@ -400,10 +405,17 @@ async function dispatchTask(
         language: 'ru',
         region: 'RU',
         enrichContacts: true,
+        // Вежливая пауза между запросами (как дефолты GoogleNewsParserForm);
+        // без этих полей воркер считает delay от undefined → NaN.
+        minDelayMs: 1200,
+        maxDelayMs: 2800,
       },
     });
   }
   state.status = 'dispatched';
+  // Штамп нужен WAIT-фазе: по нему зависшая дочерняя джоба (парсер умер и не
+  // закрыл строку) уходит в failed по таймауту, а не ждёт вечно.
+  state.dispatched_at = new Date().toISOString();
 }
 
 /* ─────────────────────────── Фаза WAIT ─────────────────────────── */
@@ -477,14 +489,21 @@ async function pollTask(ctx: HeStageContext, state: HeCollectTaskState): Promise
 /* ─────────────────────────── Self-requeue ─────────────────────────── */
 
 /**
- * Вернуть свою джобу в pending БЕЗ инкремента attempts — воркер клеймит её на
- * следующем тикe опроса. Финальный done-апдейт воркер пропускает, видя, что
- * строка больше не running (см. app/worker/hypothesisEngine.ts).
+ * Вернуть свою джобу в pending БЕЗ инкремента attempts — воркер клеймит её
+ * не раньше run_after (30с пауза между тиками ожидания дочерних парсеров;
+ * без паузы цикл claim→requeue крутился с нулевой задержкой, ~10 запросов
+ * к БД на итерацию в течение всего ожидания). Финальный done-апдейт воркер
+ * пропускает, видя, что строка больше не running (см. app/worker/hypothesisEngine.ts).
  */
 async function requeueSelf(ctx: HeStageContext, job: HeJob): Promise<void> {
   const { error } = await ctx.supabase
     .from('he_jobs')
-    .update({ status: 'pending', started_at: null, updated_at: new Date().toISOString() })
+    .update({
+      status: 'pending',
+      started_at: null,
+      run_after: new Date(Date.now() + 30_000).toISOString(),
+      updated_at: new Date().toISOString(),
+    })
     .eq('id', job.id);
   if (error) throw new Error(`he_jobs requeue: ${error.message}`);
 }
@@ -561,6 +580,19 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // ─── WAIT ───
   for (const state of tasks) {
     if (state.status !== 'dispatched') continue;
+    // Дочерняя джоба висит дольше 3ч (парсер умер/потерял строку) — вечно
+    // не ждём: задача failed, сборка продолжается по остальным задачам.
+    // У задач без dispatched_at (collect_info до появления штампа) таймаута
+    // нет — поведение как раньше.
+    if (
+      state.dispatched_at &&
+      Date.now() - new Date(state.dispatched_at).getTime() > CHILD_TIMEOUT_MS
+    ) {
+      state.status = 'failed';
+      state.error = 'timeout: дочерняя джоба зависла';
+      stageLog(ctx, `[base_collect] ${state.source}: ${state.error} (${state.child_job_id})`);
+      continue;
+    }
     try {
       await pollTask(ctx, state);
     } catch (e) {

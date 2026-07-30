@@ -6,8 +6,9 @@
  *   POST /api/tools/hypothesis-engine/verticals/[id]/collect
  *     201 -> { ok, base } — inserts he_bases (source='auto', status='collecting')
  *            + he_jobs (stage 'base_collect', payload {base_id})
- *     200 -> { ok, base } — dedupe: an auto base is already collecting, or a
- *            pending/running base_collect job for this vertical exists
+ *     200 -> { ok, base } — dedupe: an auto base is already collecting, a
+ *            pending/running base_collect job targets a non-failed base of
+ *            this vertical, or the insert loses the unique-index race (23505)
  *     404 -> { error } when the vertical does not exist
  */
 
@@ -161,6 +162,66 @@ describe('POST verticals/[id]/collect', () => {
     expect(res.status).toBe(201);
     expect(mockDb.getRows('he_bases')).toHaveLength(2);
     expect(mockDb.getRows('he_jobs')).toHaveLength(2);
+  });
+
+  it('starts a new collect when the job-targeted base is failed (failed is not a conflict)', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_verticals: [{ id: 'v1', project_id: 'p1', name: 'HR-агентства' }],
+        // Сборка уже падала: джоба ещё активна, но её база в failed — retry
+        // обязан создать новую базу, а не вернуть упавшую как «уже идёт».
+        he_bases: [
+          { id: 'b8', project_id: 'p1', vertical_id: 'v1', source: 'auto', status: 'failed' },
+        ],
+        he_jobs: [
+          { id: 'j1', project_id: 'p1', stage: 'base_collect', status: 'running', payload: { base_id: 'b8' } },
+        ],
+      },
+    });
+
+    const res = await POST(makePostReq(), verticalParams);
+    expect(res.status).toBe(201);
+
+    const bases = mockDb.getRows('he_bases');
+    expect(bases).toHaveLength(2);
+    expect(bases[1]).toEqual(
+      expect.objectContaining({ vertical_id: 'v1', source: 'auto', status: 'collecting' }),
+    );
+    expect(mockDb.getRows('he_jobs')).toHaveLength(2);
+  });
+
+  it('maps a 23505 insert race to 200 with the conflicting collecting base', async () => {
+    // Гонка: проверки дедупа прошли до чужого COMMIT'а, а insert упал на
+    // partial unique index he_bases_one_collecting_per_vertical.
+    mockDb = createMockSupabase({
+      tables: {
+        he_verticals: [{ id: 'v1', project_id: 'p1', name: 'HR-агентства' }],
+        he_bases: [],
+        he_jobs: [],
+      },
+      errorInserts: {
+        he_bases: {
+          code: '23505',
+          message:
+            'duplicate key value violates unique constraint "he_bases_one_collecting_per_vertical"',
+          // Выигравший параллельный POST: его база видна после нашего фейла.
+          commitRow: true,
+        },
+      },
+    });
+
+    const res = await POST(makePostReq(), verticalParams);
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as { ok: boolean; base: { id: string; status: string } };
+    expect(body.ok).toBe(true);
+    expect(body.base.status).toBe('collecting');
+
+    // Возвращаем чужую collecting-базу, свою джобу не создаём.
+    const bases = mockDb.getRows('he_bases');
+    expect(bases).toHaveLength(1);
+    expect(body.base.id).toBe(bases[0].id);
+    expect(mockDb.getRows('he_jobs')).toHaveLength(0);
   });
 
   it('ignores uploaded (non-auto) bases when checking for conflicts', async () => {

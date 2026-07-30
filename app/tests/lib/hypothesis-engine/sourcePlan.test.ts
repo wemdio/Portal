@@ -55,7 +55,7 @@ describe('HeSourcePlanSchema — валидные payload', () => {
   it('смешанный план из 4 задач проходит', () => {
     const r = HeSourcePlanSchema.safeParse({
       tasks: [
-        { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+        { source: 'companies_directory', rationale: 'r', directory_filters: { okvedCodes: ['62'] } },
         { source: 'hh_live', rationale: 'r', hh_query: { text: 'HRD' } },
         { source: 'yandex_maps', rationale: 'r', maps_query: { queries: ['кофейня'] } },
         { source: 'google_maps', rationale: 'r', maps_query: { queries: ['автомойка'], geo: 'СПб' } },
@@ -90,9 +90,9 @@ describe('HeSourcePlanSchema — невалидные payload', () => {
     expect(r.success).toBe(false);
   });
 
-  it('невалидные коды ОКВЭД отклоняются, класс XX и группа XX.X — нет', () => {
+  it('невалидные коды ОКВЭД отклоняются, класс XX, группа XX.X и подгруппа XX.XX — нет', () => {
     const base = { source: 'companies_directory', rationale: 'r' };
-    for (const bad of ['6', '620', '62.01', '62.1.1', 'XX', '62.', ' 62']) {
+    for (const bad of ['6', '620', '6X.1', '62.1.1', 'XX', '62.', ' 62', '62.012']) {
       expect(
         HeSourcePlanSchema.safeParse({
           tasks: [{ ...base, directory_filters: { okvedCodes: [bad] } }],
@@ -101,7 +101,47 @@ describe('HeSourcePlanSchema — невалидные payload', () => {
     }
     expect(
       HeSourcePlanSchema.safeParse({
-        tasks: [{ ...base, directory_filters: { okvedCodes: ['62', '62.0'] } }],
+        tasks: [{ ...base, directory_filters: { okvedCodes: ['62', '62.0', '62.01'] } }],
+      }).success,
+    ).toBe(true);
+  });
+
+  it('regionCodes: только двузначные коды РФ', () => {
+    const base = { source: 'companies_directory', rationale: 'r' };
+    for (const bad of ['7', '777', 'Мск', '7a']) {
+      expect(
+        HeSourcePlanSchema.safeParse({
+          tasks: [{ ...base, directory_filters: { regionCodes: [bad] } }],
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      HeSourcePlanSchema.safeParse({
+        tasks: [{ ...base, directory_filters: { regionCodes: ['77', '78', '50'] } }],
+      }).success,
+    ).toBe(true);
+  });
+
+  it('пустой directory_filters {} отклоняется — нефильтрованный срез реестра', () => {
+    expect(
+      HeSourcePlanSchema.safeParse({
+        tasks: [{ source: 'companies_directory', rationale: 'r', directory_filters: {} }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('date_from/date_to: только формат YYYY-MM-DD', () => {
+    const base = { source: 'hh_live', rationale: 'r' };
+    for (const bad of ['01.07.2026', '2026-7-1', '20260701', 'вчера']) {
+      expect(
+        HeSourcePlanSchema.safeParse({
+          tasks: [{ ...base, hh_query: { text: 'q', date_from: bad } }],
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      HeSourcePlanSchema.safeParse({
+        tasks: [{ ...base, hh_query: { text: 'q', date_from: '2026-07-01', date_to: '2026-07-31' } }],
       }).success,
     ).toBe(true);
   });

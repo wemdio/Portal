@@ -13,7 +13,10 @@ function jsonError(message: string, status: number) {
 }
 
 // Без data/sample_rows — это тяжёлые jsonb-поля, деталка проекта их не тянет.
-const BASE_LIST_COLUMNS = 'id, vertical_id, filename, row_count, status, analysis, created_at';
+// source/collect_info лёгкие и нужны шагу «База»: прогресс-карта авто-сборки,
+// бейдж «авто» и состояние retry рисуются по ним.
+const BASE_LIST_COLUMNS =
+  'id, vertical_id, filename, row_count, status, analysis, source, collect_info, created_at';
 // payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
 // иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
 const JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
