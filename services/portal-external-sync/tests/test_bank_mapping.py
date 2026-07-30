@@ -134,6 +134,27 @@ def test_currency_falls_back_to_rub_when_field_empty():
     assert row["currency"] == "RUB"
 
 
+def test_amount_nat_is_read_alongside_amount():
+    """amount_nat нужен только сверке остатков (reconcile_period_totals),
+    в bank_transactions не пишется, но map_transaction обязан класть его в
+    возвращаемый словарь, читая Amount.amountNat отдельно от Amount.amount —
+    на валютной операции они разные числа."""
+    tx = dict(DEBIT)
+    tx["Amount"] = {"amount": "55.00", "amountNat": "5000.00", "currency": "usd"}
+    row = map_transaction(tx, "acc-1")
+    assert row["amount"] == 55.00
+    assert row["amount_nat"] == 5000.00
+
+
+def test_amount_nat_is_none_when_field_missing():
+    """Amount без amountNat — не ошибка, реконсиляция сама падёт обратно на
+    amount (см. test_bank_tochka_reconcile.py)."""
+    tx = dict(DEBIT)
+    tx["Amount"] = {"amount": "1500.50", "currency": "RUB"}  # без amountNat
+    row = map_transaction(tx, "acc-1")
+    assert row["amount_nat"] is None
+
+
 def test_status_counts_tally_by_value():
     """status_counts, общий на весь прогон, обязан копить встреченные
     значения Transaction.status по отдельности — их печатает в сводке в

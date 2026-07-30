@@ -6,10 +6,16 @@
 строку под датой публикации, а витрина берёт ближайший курс не позже даты
 операции — так выходные закрываются сами.
 
-Источники валютных дат — только brocard_transactions и manual_expenses.
-bank_tochka и bank_tbank сюда не входят: оба банковских источника жёстко
-пишут currency='RUB' (см. map_transaction/map_operation), валютных трат в
-bank_transactions не бывает в принципе.
+Источники валютных дат — brocard_transactions, manual_expenses и
+bank_transactions. Раньше bank_tochka и bank_tbank сюда не входили вовсе:
+оба банковских источника жёстко писали currency='RUB' (см.
+map_transaction/map_operation), и валютных трат в bank_transactions не
+бывало в принципе. С тех пор, как bank_tochka стал читать валюту из
+Amount.currency вместо хардкода, это больше не так — нерублёвая банковская
+операция редка, но возможна, и её тоже нужно учитывать: без курса её
+amount_rub в expenses_v молча останется NULL навсегда. bank_tbank по-прежнему
+хардкодит RUB, но это не проблема — фильтр currency <> 'RUB' ниже просто не
+заденет её строки.
 
 Непригодный ответ за одну дату (сеть, HTTP-ошибка, тело не парсится) не
 должен ронять остальные даты прогона — та же изоляция «единица работы =
@@ -47,6 +53,10 @@ _NEEDED_DATES_SQL = f"""
       UNION ALL
       SELECT occurred_on AS d, currency
       FROM manual_expenses
+      UNION ALL
+      SELECT (occurred_at AT TIME ZONE 'Europe/Moscow')::date AS d, currency
+      FROM bank_transactions
+      WHERE currency <> 'RUB'
     ) x
     WHERE x.currency <> 'RUB'
       AND NOT EXISTS (
@@ -93,6 +103,10 @@ _STILL_MISSING_CURRENCIES_SQL = f"""
       UNION ALL
       SELECT occurred_on AS d, currency
       FROM manual_expenses
+      UNION ALL
+      SELECT (occurred_at AT TIME ZONE 'Europe/Moscow')::date AS d, currency
+      FROM bank_transactions
+      WHERE currency <> 'RUB'
     ) x
     WHERE x.currency <> 'RUB'
       AND x.d = ANY($1::date[])

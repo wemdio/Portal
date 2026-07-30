@@ -89,3 +89,42 @@ def test_nested_balance_objects_still_catch_mismatch():
     warnings = reconcile_period_totals(rows, statement)
     assert len(warnings) == 1
     assert "balance mismatch" in warnings[0]
+
+
+# Остатки банка — в рублях, Amount.amount валютной операции — нет (см.
+# _parse_currency в sources/bank_tochka.py). amount_nat здесь — рублёвый
+# эквивалент, который map_transaction кладёт рядом с amount специально для
+# этой сверки (см. _parse_amount_nat) и который отличается от amount, чтобы
+# тесты ниже не могли случайно "пройти" при использовании не того поля.
+CREDIT_ROW_FX = {"direction": "credit", "amount": 55.0, "amount_nat": 5000.0}
+
+
+def test_uses_amount_nat_over_amount_when_both_present():
+    """55 USD с amount_nat=5000 RUB и реальным приростом остатка 5000 RUB:
+    если бы сверка ошибочно взяла amount (55), она бы с грохотом разошлась
+    с остатком банка. Отсутствие предупреждения доказывает, что взят именно
+    amount_nat, а не amount."""
+    rows = [CREDIT_ROW_FX]
+    statement = {"startDateBalance": 1000.0, "endDateBalance": 6000.0}
+    assert reconcile_period_totals(rows, statement) == []
+
+
+def test_amount_nat_mismatch_is_reported_even_when_amount_would_match():
+    """Обратный случай: подставляем amount так, чтобы он сам по себе совпал
+    с приростом остатка (5000), но amount_nat (4000) — нет. Если бы сверка
+    втихую использовала amount вместо amount_nat, это прошло бы без
+    предупреждения и замаскировало настоящее расхождение."""
+    rows = [{"direction": "credit", "amount": 5000.0, "amount_nat": 4000.0}]
+    statement = {"startDateBalance": 1000.0, "endDateBalance": 6000.0}
+    warnings = reconcile_period_totals(rows, statement)
+    assert len(warnings) == 1
+    assert "balance mismatch" in warnings[0]
+
+
+def test_falls_back_to_amount_when_amount_nat_absent():
+    """Ряд без ключа amount_nat вовсе (форма rows до этой правки, либо
+    старый тестовый фикстур) не должен падать с KeyError — сверка обязана
+    молча взять amount, как раньше."""
+    rows = [{"direction": "credit", "amount": 5000.0}]
+    statement = {"startDateBalance": 1000.0, "endDateBalance": 6000.0}
+    assert reconcile_period_totals(rows, statement) == []

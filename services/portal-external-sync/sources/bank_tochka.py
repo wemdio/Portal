@@ -53,6 +53,15 @@ def _parse_amount(t: dict) -> float | None:
     return coerce_amount((t.get("Amount") or {}).get("amount"))
 
 
+def _parse_amount_nat(t: dict) -> float | None:
+    """Amount.amountNat → float, тем же путём, что и amount.
+
+    Используется только сверкой остатков (reconcile_period_totals ниже),
+    не мапится в bank_transactions: amount там обязан остаться в валюте
+    операции, витрина сама конвертирует его по курсу ЦБ."""
+    return coerce_amount((t.get("Amount") or {}).get("amountNat"))
+
+
 def _parse_currency(t: dict) -> str:
     """Amount.currency → верхний регистр, RUB — запасное значение.
 
@@ -99,6 +108,19 @@ def reconcile_period_totals(
     Сравнение — с допуском tolerance (по умолчанию копейка), не точное
     равенство float. Если полей с остатками в ответе нет — сверка по этому
     периоду молча пропускается, отсутствие полей не ошибка.
+
+    Остатки startDateBalance/endDateBalance — в рублях, а Amount.amount
+    операции — в валюте самой операции (см. _parse_currency), не обязательно
+    в рублях. Сравнивать их напрямую при валютной операции нельзя — суммы в
+    разных шкалах. Amount.amountNat по названию и по документации Точки —
+    рублёвый эквивалент суммы, поэтому в сверке используется он, если поле
+    пришло (r["amount_nat"] в замапленной строке), и только иначе — amount.
+    На живых данных это предположение пока не проверено: все встреченные
+    операции рублёвые, и в них amount == amountNat, так что от подмены
+    ничего не меняется. Если предположение неверно (например, amountNat
+    вдруг не рублёвый эквивалент, а что-то другое), рублёвая сумма разойдётся
+    с остатком банка, и предупреждение о расхождении ниже как раз это
+    вскроет — молчаливо ошибочным это предположение остаться не может.
     """
     warnings: list[str] = []
 
@@ -107,8 +129,12 @@ def reconcile_period_totals(
     if start_balance is None or end_balance is None:
         return warnings
 
-    mapped_credit = sum(r["amount"] for r in rows if r["direction"] == "credit")
-    mapped_debit = sum(r["amount"] for r in rows if r["direction"] == "debit")
+    def _rub_amount(r: dict) -> float:
+        amount_nat = r.get("amount_nat")
+        return amount_nat if amount_nat is not None else r["amount"]
+
+    mapped_credit = sum(_rub_amount(r) for r in rows if r["direction"] == "credit")
+    mapped_debit = sum(_rub_amount(r) for r in rows if r["direction"] == "debit")
     bank_delta = end_balance - start_balance
     mapped_delta = mapped_credit - mapped_debit
     diff = bank_delta - mapped_delta
@@ -127,6 +153,11 @@ def map_transaction(
     status_counts: dict[str, int] | None = None,
 ) -> dict | None:
     """Операция Точки → словарь полей bank_transactions. None — пропустить.
+
+    Возвращаемый словарь несёт один ключ сверх колонок bank_transactions —
+    amount_nat (Amount.amountNat, см. _parse_amount_nat). Он существует
+    только для reconcile_period_totals и в to_row/BANK_COLUMNS не попадает,
+    то есть в саму таблицу не пишется.
 
     Классификатор «выручка / не выручка» осмыслен только для прихода: у
     расхода нет плательщика-клиента, и прогонять по нему classify_revenue
@@ -199,6 +230,7 @@ def map_transaction(
         "document_number": str(doc) if doc is not None else None,
         "occurred_at": occurred_at,
         "amount": amount,
+        "amount_nat": _parse_amount_nat(t),
         "currency": _parse_currency(t),
         "direction": "credit" if is_credit else "debit",
         "payer_name": payer or None,
