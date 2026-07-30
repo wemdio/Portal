@@ -14,7 +14,7 @@ create table if not exists public.lead_source_channels (
                  )),
   display_name text,
   sort_order   integer not null default 100,
-  updated_by   uuid,
+  updated_by   uuid references public.profiles(id) on delete set null,
   updated_at   timestamptz not null default now()
 );
 
@@ -88,18 +88,7 @@ create index if not exists idx_amo_events_type_deal_changed on public.amo_events
 -- промежуточное событие — оно и засчитается; факт выигрыша живёт отдельно в
 -- won_at (из closed_at), эта граница на него не влияет.
 create or replace view public.amo_lead_stage_dates_v as
-with horizon as (
-  -- Дата, раньше которой событий смены этапа у нас нет. Сделки, созданные до
-  -- неё, могли иметь переходы, которых мы не видели. Фильтр по event_type
-  -- обязателен: amo_events помимо переходов хранит и задачи, и заметки (см.
-  -- комментарий к таблице в 20260706_0003) — без фильтра горизонт уехал бы
-  -- вниз при первой же синхронизированной заметке, и history_complete стал
-  -- бы ложно-оптимистичным для сделок без видимой истории переходов.
-  select min(changed_at) as first_event_at
-  from public.amo_events
-  where event_type = 'lead_status_changed'
-),
-ev as (
+with ev as (
   select
     e.amo_deal_id,
     e.changed_at,
@@ -114,15 +103,50 @@ ev as (
   from public.amo_events e
   where e.event_type = 'lead_status_changed'
 ),
+horizon as (
+  -- Дата, раньше которой событий смены этапа у нас нет. Сделки, созданные до
+  -- неё, могли иметь переходы, которых мы не видели.
+  --
+  -- Считаем от ev, а не отдельным select по amo_events с собственным
+  -- `where event_type = 'lead_status_changed'`: литерал должен жить РОВНО в
+  -- одном месте. Раньше он был продублирован здесь и в ev независимо — если
+  -- бы его поправили только в одной из двух копий, history_complete начал бы
+  -- считаться по другому набору событий, чем reached и initial_status,
+  -- молча и без ошибки. amo_events помимо переходов хранит и задачи, и
+  -- заметки (см. комментарий к таблице в 20260706_0003) — без этого фильтра
+  -- горизонт уехал бы вниз при первой же синхронизированной заметке.
+  select min(changed_at) as first_event_at from ev
+),
 initial_status as (
   -- LEFT JOIN вместо коррелированного скалярного подзапроса на ev: ev
-  -- упоминается в этом запросе дважды (здесь и в reached), поэтому Postgres
-  -- материализует её и не инлайнит — подзапрос `where ev.amo_deal_id = ...`
-  -- пересканировал бы весь tuplestore на каждую сделку (O(сделки × события)
-  -- на каждое чтение view). JOIN по (amo_deal_id, rn=1) — один проход.
+  -- упоминается в этом запросе не единожды, поэтому Postgres материализует
+  -- её и не инлайнит — подзапрос `where ev.amo_deal_id = ...` пересканировал
+  -- бы весь tuplestore на каждую сделку (O(сделки × события) на каждое
+  -- чтение view). JOIN по (amo_deal_id, rn=1) — один проход.
+  --
+  -- Явный CASE, а не coalesce(first_ev.from_status, l.status_id): это два
+  -- разных факта, и схлопывать их в одно поле нельзя.
+  --   - Событий нет вовсе (first_ev.amo_deal_id is null) — законный повод
+  --     взять текущий статус сделки: сделка не двигалась с момента, откуда
+  --     мы её видим.
+  --   - Событие есть, но from_value не прошёл регекс в ev (from_status
+  --     вышел NULL) — это НЕ повод считать сделку находящейся в текущем
+  --     статусе с самого начала. Для сделки, которая сейчас высоко в
+  --     воронке, coalesce тут задним числом приписал бы
+  --     first_meeting_at/first_contract_at = created_at, выдумав встречу,
+  --     которой не было. history_complete этого не ловит — она про глубину
+  --     истории по времени, а не про валидность данных внутри неё.
+  --
+  -- Поэтому при битом первом событии status_id уходит в NULL: сравнения
+  -- init_s.sort >= N ниже дают UNKNOWN, CASE в финальном select уходит в
+  -- ELSE, и даты берутся из r.ev_*_at — то есть из фактических событий,
+  -- а не из угадывания.
   select
     l.amo_id as amo_deal_id,
-    coalesce(first_ev.from_status, l.status_id) as status_id
+    case
+      when first_ev.amo_deal_id is null then l.status_id
+      else first_ev.from_status
+    end as status_id
   from public.amo_leads l
   left join ev first_ev
     on first_ev.amo_deal_id = l.amo_id and first_ev.rn = 1
