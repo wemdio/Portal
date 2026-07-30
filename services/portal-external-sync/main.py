@@ -40,6 +40,7 @@ from db import log_run_start, log_run_finish
 from sources.metrika import MetrikaSync
 from sources.amo import AmoSync
 from sources.amo_enrich import AmoCompanyEnrichSync
+from sources.amo_events import AmoEventsSync
 from sources.bank_tochka import BankTochkaSync
 from sources.bank_tbank import BankTBankSync
 
@@ -60,6 +61,7 @@ MSK_TZ = timezone(timedelta(hours=3))
 SOURCES = [
     MetrikaSync(),
     AmoSync(),
+    AmoEventsSync(),         # после AmoSync: нужны свежие amo_statuses
     AmoCompanyEnrichSync(),  # ходит на company_website и заполняет company_name; идёт СТРОГО после AmoSync
     BankTochkaSync(),
     BankTBankSync(),
