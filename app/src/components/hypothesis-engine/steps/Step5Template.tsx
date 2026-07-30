@@ -252,6 +252,7 @@ export function Step5Template(props: {
 }): JSX.Element {
   const { template, base, jobs, onBuildTemplate } = props;
   const [copied, setCopied] = useState(false);
+  const [copiedLetterIdx, setCopiedLetterIdx] = useState<number | null>(null);
 
   const templateJob = useMemo(() => latestStageJob(jobs, 'template'), [jobs]);
   const busy = templateJob?.status === 'pending' || templateJob?.status === 'running';
@@ -264,6 +265,21 @@ export function Step5Template(props: {
       setTimeout(() => setCopied(false), 1500);
     });
   }, [template]);
+
+  // Копирование одного письма: «{subject}\n\n{body}», краткое «✓» на кнопке.
+  const handleCopyLetter = useCallback(
+    (idx: number) => {
+      if (!template || typeof navigator === 'undefined' || !navigator.clipboard) return;
+      const letter = template.letters[idx];
+      if (!letter) return;
+      const text = letter.subject ? `${letter.subject}\n\n${letter.body}` : letter.body;
+      void navigator.clipboard.writeText(text).then(() => {
+        setCopiedLetterIdx(idx);
+        setTimeout(() => setCopiedLetterIdx((cur) => (cur === idx ? null : cur)), 1500);
+      });
+    },
+    [template],
+  );
 
   const handleDownload = useCallback(() => {
     if (!template) return;
@@ -341,6 +357,9 @@ export function Step5Template(props: {
             Боевой шаблон: цепочка вертикали, адаптированная под базу {base?.filename ?? '—'}. В
             рассылку идёт этот текст.
           </p>
+          <p className="mt-1 text-xs text-gray-400">
+            Правится на шаге 3 (Контент) → пересобрать шаблон
+          </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <button type="button" onClick={handleCopy} className={SECONDARY_BTN}>
@@ -377,6 +396,19 @@ export function Step5Template(props: {
               {letter.wait_days > 0 ? (
                 <span className="text-[11px] text-gray-400">через {letter.wait_days} дн.</span>
               ) : null}
+              <button
+                type="button"
+                onClick={() => handleCopyLetter(idx)}
+                title="Скопировать письмо"
+                aria-label="Скопировать письмо"
+                className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
+              >
+                {copiedLetterIdx === idx ? (
+                  <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden />
+                ) : (
+                  <Copy className="h-3.5 w-3.5" aria-hidden />
+                )}
+              </button>
             </div>
             <OperatorText
               text={letter.body}
