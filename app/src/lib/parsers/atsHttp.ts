@@ -72,7 +72,11 @@ async function defaultCurl(
 
   args.push(url);
 
-  const { stdout } = await execFileP('curl', args, {
+  // The WAF in front of Workday CXS blocks by TLS fingerprint, and whether a
+  // given curl build passes depends on the binary — so prod can point this at a
+  // curl-impersonate binary via ATS_CURL_BIN without a code redeploy.
+  const curlBin = process.env.ATS_CURL_BIN?.trim() || 'curl';
+  const { stdout } = await execFileP(curlBin, args, {
     timeout: timeoutMs + 5_000,
     maxBuffer: 20 * 1024 * 1024,
   });

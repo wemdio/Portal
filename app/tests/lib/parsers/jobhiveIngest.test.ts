@@ -3,8 +3,11 @@
 import {
   JOBHIVE_FEED_URL,
   buildJobhiveDuckdbSql,
+  buildJobhiveDryRunReport,
   mapJobhiveRowToCacheRow,
   dedupeJobhiveRowsByCompanyCountry,
+  parseJobhiveLimit,
+  processJobhiveRows,
   type JobhiveRow,
 } from '@/lib/parsers/jobhiveIngest';
 
@@ -167,5 +170,101 @@ describe('dedupeJobhiveRowsByCompanyCountry', () => {
 
   it('drops rows with no usable company name', () => {
     expect(dedupeJobhiveRowsByCompanyCountry([row({ company: '  ' })])).toHaveLength(0);
+  });
+});
+
+describe('buildJobhiveDuckdbSql limit option (rehearsal cap)', () => {
+  const base = { parquetUrl: JOBHIVE_FEED_URL, cutoffIso: '2026-03-26T00:00:00.000Z' };
+
+  it('omits LIMIT by default (full scan)', () => {
+    expect(buildJobhiveDuckdbSql(base)).not.toMatch(/\bLIMIT\b/i);
+  });
+
+  it('appends LIMIT when a positive integer limit is given', () => {
+    const sql = buildJobhiveDuckdbSql({ ...base, limit: 500 });
+    expect(sql).toMatch(/LIMIT 500\s*$/);
+  });
+
+  it('rejects a non-positive / non-integer limit (fail fast, never silently scan 4M rows)', () => {
+    for (const bad of [0, -5, 1.5, Number.NaN]) {
+      expect(() => buildJobhiveDuckdbSql({ ...base, limit: bad })).toThrow(/limit/i);
+    }
+  });
+});
+
+describe('parseJobhiveLimit', () => {
+  it('returns null when unset or blank', () => {
+    expect(parseJobhiveLimit(undefined)).toBeNull();
+    expect(parseJobhiveLimit(null)).toBeNull();
+    expect(parseJobhiveLimit('')).toBeNull();
+    expect(parseJobhiveLimit('   ')).toBeNull();
+  });
+
+  it('parses a positive integer cap', () => {
+    expect(parseJobhiveLimit('2000')).toBe(2000);
+  });
+
+  it('throws on garbage so a typo never triggers an unbounded scan', () => {
+    for (const bad of ['abc', '0', '-10', '2.5']) {
+      expect(() => parseJobhiveLimit(bad)).toThrow(/JOBHIVE_LIMIT/);
+    }
+  });
+});
+
+describe('processJobhiveRows', () => {
+  it('runs the exact title filter, dedup and mapping, returning full funnel stats', () => {
+    const stats = processJobhiveRows([
+      row({ ats_id: 'a', posted_at: '2026-06-20T00:00:00Z' }),
+      row({ ats_id: 'b', posted_at: '2026-06-22T00:00:00Z' }), // fresher dup -> wins
+      row({ title: 'Senior Software Engineer', ats_id: 'c' }), // not a sales title -> filtered
+      row({ company: '', ats_id: 'd' }), // no company -> dropped in dedup
+      row({ company: 'NoUrl Co', url: '', apply_url: '', ats_id: 'e' }), // unmappable (NOT NULL url)
+    ]);
+    expect(stats.exported).toBe(5);
+    expect(stats.titleMatched).toBe(4); // everything but the engineer
+    expect(stats.deduped).toBe(2); // Datadog (fresher posting) + NoUrl Co
+    expect(stats.mapped).toBe(1);
+    expect(stats.unmappable).toBe(1);
+    expect(stats.cacheRows).toHaveLength(1);
+    expect(stats.cacheRows[0].company_name).toBe('Datadog');
+    expect(stats.cacheRows[0].raw.ats_id).toBe('b'); // the fresher posting survived
+  });
+
+  it('returns zeroed stats for an empty export', () => {
+    const stats = processJobhiveRows([]);
+    expect(stats).toMatchObject({ exported: 0, titleMatched: 0, deduped: 0, mapped: 0, unmappable: 0 });
+    expect(stats.cacheRows).toEqual([]);
+  });
+});
+
+describe('buildJobhiveDryRunReport', () => {
+  it('states that no DB writes happened, prints the funnel counts and sample rows', () => {
+    const stats = processJobhiveRows([
+      row({ company: 'Alpha', ats_id: 'a1' }),
+      row({ company: 'Beta', ats_id: 'b1' }),
+      row({ title: 'Senior Software Engineer', ats_id: 'c1' }),
+    ]);
+    const report = buildJobhiveDryRunReport(stats);
+    expect(report).toMatch(/dry-run/i);
+    expect(report).toMatch(/no DB writes/i);
+    expect(report).toContain('rows exported from feed: 3');
+    expect(report).toContain('passed exact sales-title filter: 2');
+    expect(report).toContain('after company/country dedup: 2');
+    expect(report).toContain('mapped to eng_hiring_cache rows: 2');
+    expect(report).toContain('unmappable');
+    expect(report).toContain('Alpha');
+    expect(report).toContain('Beta');
+  });
+
+  it('caps the sample section at 5 rows by default and honours sampleSize', () => {
+    const stats = processJobhiveRows(
+      Array.from({ length: 8 }, (_, i) => row({ company: `Co${i}`, ats_id: `id${i}` })),
+    );
+    const report = buildJobhiveDryRunReport(stats);
+    expect(report).toContain('Co4');
+    expect(report).not.toContain('Co5');
+    const small = buildJobhiveDryRunReport(stats, { sampleSize: 2 });
+    expect(small).toContain('Co1');
+    expect(small).not.toContain('Co2');
   });
 });

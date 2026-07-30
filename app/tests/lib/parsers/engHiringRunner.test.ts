@@ -265,6 +265,8 @@ describe('runEngHiringParserJob cache-run resume', () => {
     jest.clearAllMocks();
     delete process.env.ENG_HIRING_SCAN_CONCURRENCY;
     delete process.env.ENG_HIRING_SCAN_DELAY_MS;
+    delete process.env.ENG_HIRING_WORKDAY_SCAN_CONCURRENCY;
+    delete process.env.ENG_HIRING_WORKDAY_SCAN_DELAY_MS;
     delete process.env.ENG_HIRING_DETAIL_LIMIT;
     delete process.env.ENG_HIRING_ENRICH_LIMIT;
     delete process.env.ENG_HIRING_TOKEN_BASES;
@@ -416,6 +418,122 @@ describe('runEngHiringParserJob cache-run resume', () => {
 
     expect(maxActive).toBeGreaterThanOrEqual(3);
     expect(fetchJsonWithFallback).toHaveBeenCalledTimes(6);
+  });
+
+  it('throttles Workday scans to its own gentle defaults (WAF IP-ban guard)', async () => {
+    process.env.ENG_HIRING_WORKDAY_SCAN_DELAY_MS = '0';
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: { text: 'account executive', sources: ['workday'], countries: ['us'], companies_limit: 4, refresh_cache: true, enrich: false, max_results: 20 },
+      }],
+      eng_hiring_cache_runs: [],
+      eng_hiring_cache: [],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+    fetchTextWithFallback.mockResolvedValue([
+      'name,slug,url',
+      ...[0, 1, 2, 3].map((i) => `Co ${i},co${i}/co${i}_external,https://co${i}.wd5.myworkdayjobs.com/co${i}_external`),
+    ].join('\n'));
+
+    let active = 0;
+    let maxActive = 0;
+    fetchJsonWithFallback.mockImplementation(async (url: string) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+      const n = String(url).match(/cxs\/co(\d)\//)?.[1] ?? '0';
+      return {
+        total: 1,
+        jobPostings: [{ title: 'Account Executive', externalPath: `/job/US/AE_R${n}`, locationsText: 'Austin, TX', postedOn: 'Posted Today', bulletFields: [`R${n}`] }],
+      };
+    });
+
+    await runEngHiringParserJob('job-1');
+
+    // workday's built-in default concurrency is 2, NOT the global default
+    expect(maxActive).toBe(2);
+    expect(fetchJsonWithFallback).toHaveBeenCalledTimes(4);
+  });
+
+  it('honours ENG_HIRING_WORKDAY_SCAN_CONCURRENCY / _DELAY_MS overrides without touching other sources', async () => {
+    process.env.ENG_HIRING_WORKDAY_SCAN_CONCURRENCY = '4';
+    process.env.ENG_HIRING_WORKDAY_SCAN_DELAY_MS = '50';
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: { text: 'account executive', sources: ['workday'], countries: ['us'], companies_limit: 5, refresh_cache: true, enrich: false, max_results: 20 },
+      }],
+      eng_hiring_cache_runs: [],
+      eng_hiring_cache: [],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+    fetchTextWithFallback.mockResolvedValue([
+      'name,slug,url',
+      ...[0, 1, 2, 3, 4].map((i) => `Co ${i},co${i}/co${i}_external,https://co${i}.wd5.myworkdayjobs.com/co${i}_external`),
+    ].join('\n'));
+
+    let active = 0;
+    let maxActive = 0;
+    fetchJsonWithFallback.mockImplementation(async (url: string) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+      const n = String(url).match(/cxs\/co(\d)\//)?.[1] ?? '0';
+      return {
+        total: 1,
+        jobPostings: [{ title: 'Account Executive', externalPath: `/job/US/AE_R${n}`, locationsText: 'Austin, TX', postedOn: 'Posted Today', bulletFields: [`R${n}`] }],
+      };
+    });
+
+    const startedAt = Date.now();
+    await runEngHiringParserJob('job-1');
+    const elapsed = Date.now() - startedAt;
+
+    expect(maxActive).toBe(4); // per-source concurrency override applied
+    expect(fetchJsonWithFallback).toHaveBeenCalledTimes(5);
+    expect(elapsed).toBeGreaterThanOrEqual(40); // one inter-chunk 50ms workday delay happened
+  });
+
+  it('does not leak Workday pacing knobs into other sources', async () => {
+    process.env.ENG_HIRING_WORKDAY_SCAN_CONCURRENCY = '5';
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: { text: 'b2b manager', sources: ['greenhouse'], countries: ['us'], companies_limit: 4, refresh_cache: true, enrich: false, max_results: 20 },
+      }],
+      eng_hiring_cache_runs: [],
+      eng_hiring_cache: [],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+    fetchTextWithFallback.mockResolvedValue(makeCompanyCsv(4));
+
+    let active = 0;
+    let maxActive = 0;
+    fetchJsonWithFallback.mockImplementation(async (url: string) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+      const slug = url.match(/boards\/([^/]+)\/jobs/)?.[1] ?? 'unknown';
+      return makeGreenhouseJob(slug, 1);
+    });
+
+    await runEngHiringParserJob('job-1');
+
+    // greenhouse keeps the global pacing (test env ENG_HIRING_SCAN_CONCURRENCY=1)
+    expect(maxActive).toBe(1);
   });
 
   it('merges company token lists from multiple bases and scans each board once', async () => {
@@ -845,6 +963,101 @@ describe('runEngHiringParserJob cache-run resume', () => {
         source_stats: expect.objectContaining({
           greenhouse: expect.objectContaining({
             matched_rows: 1,
+          }),
+        }),
+      }),
+    }));
+  });
+
+  it('marks the cache run failed with a loud error when a scan yields 0 vacancies (WAF/IP block or schema change)', async () => {
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: { text: 'b2b manager', sources: ['greenhouse'], countries: ['us'], companies_limit: 3, refresh_cache: true, enrich: false, max_results: 20 },
+      }],
+      eng_hiring_cache_runs: [],
+      eng_hiring_cache: [],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+    fetchTextWithFallback.mockResolvedValue(makeCompanyCsv(3));
+    // every board fetch is blocked (Workday-WAF style: all errors swallowed per board)
+    fetchJsonWithFallback.mockRejectedValue(new Error('HTTP 400'));
+
+    await runEngHiringParserJob('job-1');
+
+    const runUpdates = db.operations.filter((op) => op.table === 'eng_hiring_cache_runs' && op.type === 'update');
+    expect(runUpdates).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ data: expect.objectContaining({ status: 'completed' }) }),
+    ]));
+    expect(runUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          error_message: expect.stringMatching(/0 vacancies from 3 boards.*3 board fetches failed/i),
+        }),
+      }),
+    ]));
+    const failedUpdate = runUpdates.find((op) => (op.data as Row).status === 'failed');
+    expect(String((failedUpdate?.data as Row).error_message)).toMatch(/WAF|IP block|schema/i);
+
+    // the job itself still completes, but its progress detail carries the diagnosis
+    const completedUpdate = db.operations.find((op) =>
+      op.table === 'parser_jobs' && op.type === 'update' && (op.data as Row).status === 'completed');
+    expect(completedUpdate?.data).toEqual(expect.objectContaining({
+      progress_detail: expect.objectContaining({
+        source_stats: expect.objectContaining({
+          greenhouse: expect.objectContaining({
+            scanned_companies: 3,
+            cached_vacancies: 0,
+            failed_boards: 3,
+            error: expect.stringMatching(/WAF|IP block|schema/i),
+          }),
+        }),
+      }),
+    }));
+  });
+
+  it('still completes the cache run when some boards fail but others yield vacancies', async () => {
+    const { runEngHiringParserJob, supabaseAdmin, fetchTextWithFallback, fetchJsonWithFallback } = await loadRunner();
+    const db = makeDb({
+      parser_jobs: [{
+        id: 'job-1',
+        status: 'running',
+        config: { text: 'b2b manager', sources: ['greenhouse'], countries: ['us'], companies_limit: 3, refresh_cache: true, enrich: false, max_results: 20 },
+      }],
+      eng_hiring_cache_runs: [],
+      eng_hiring_cache: [],
+      eng_hiring_vacancies: [],
+    });
+    supabaseAdmin.from.mockImplementation(db.from);
+    fetchTextWithFallback.mockResolvedValue(makeCompanyCsv(3));
+    fetchJsonWithFallback.mockImplementation(async (url: string) => {
+      if (url.includes('/company-1/')) throw new Error('HTTP 404'); // dead board
+      const slug = url.match(/boards\/([^/]+)\/jobs/)?.[1] ?? 'unknown';
+      return makeGreenhouseJob(slug, 1);
+    });
+
+    await runEngHiringParserJob('job-1');
+
+    const runUpdates = db.operations.filter((op) => op.table === 'eng_hiring_cache_runs' && op.type === 'update');
+    expect(runUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ data: expect.objectContaining({ status: 'completed' }) }),
+    ]));
+    expect(runUpdates).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ data: expect.objectContaining({ status: 'failed' }) }),
+    ]));
+    const completedUpdate = db.operations.find((op) =>
+      op.table === 'parser_jobs' && op.type === 'update' && (op.data as Row).status === 'completed');
+    expect(completedUpdate?.data).toEqual(expect.objectContaining({
+      progress_detail: expect.objectContaining({
+        source_stats: expect.objectContaining({
+          greenhouse: expect.objectContaining({
+            cached_vacancies: 2,
+            failed_boards: 1,
+            error: null,
           }),
         }),
       }),
