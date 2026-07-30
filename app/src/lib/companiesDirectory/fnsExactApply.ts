@@ -4,6 +4,11 @@ import {
   canonicalJson,
   sha256Hex,
 } from '@/lib/companiesDirectory/guardedImportCore';
+import type {
+  FnsExactApplyCheckpoint,
+  FnsExactApplyCheckpointStore,
+  FnsExactApplyTarget,
+} from '@/lib/companiesDirectory/fnsExactCheckpoint';
 
 export interface FnsExactImportPreviewBody {
   stagedUpdates: number;
@@ -19,15 +24,33 @@ export interface FnsExactImportPreview extends FnsExactImportPreviewBody {
   fingerprint: string;
 }
 
-export interface FnsExactApplySession {
-  beginReadOnly(): Promise<void>;
-  beginReadWrite(): Promise<void>;
-  acquireAdvisoryLock(): Promise<void>;
+export interface FnsExactCheckSession {
   stageArtifacts(): Promise<void>;
+  beginReadOnly(): Promise<void>;
   preview(): Promise<FnsExactImportPreview>;
-  updateNextBatch(limit: number): Promise<number>;
-  commit(): Promise<void>;
   rollback(): Promise<void>;
+}
+
+export interface FnsExactApplyPageResult {
+  scannedRows: number;
+  updatedRows: number;
+  alreadyAppliedRows: number;
+  cursorId: string;
+}
+
+export interface FnsExactApplySession extends FnsExactCheckSession {
+  acquireSessionAdvisoryLock(): Promise<void>;
+  releaseSessionAdvisoryLock(): Promise<void>;
+  beginReadWrite(): Promise<void>;
+  verifyAppliedPrefix(
+    cursorId: string,
+    expectedRows: number,
+  ): Promise<void>;
+  applyNextPage(
+    afterCursorId: string | null,
+    pageSize: number,
+  ): Promise<FnsExactApplyPageResult>;
+  commit(): Promise<void>;
 }
 
 export interface FnsExactApplyResult {
@@ -41,10 +64,20 @@ export interface FnsExactApplyCliArgs {
   mode: 'check' | 'apply';
   planDir: string;
   manifestPath?: string;
+  checkpointPath?: string;
   confirmedPlanFingerprint?: string;
   confirmedPreviewFingerprint?: string;
   confirmedTarget?: string;
   batchSize: number;
+  resume: boolean;
+}
+
+export interface FnsExactResumableApplyOptions {
+  planFingerprint: string;
+  expectedPreviewFingerprint: string;
+  target: FnsExactApplyTarget;
+  pageSize: number;
+  resume: boolean;
 }
 
 export function computeFnsExactPreviewFingerprint(
@@ -112,7 +145,8 @@ export function parseFnsExactApplyCliArgs(
   const parsed: FnsExactApplyCliArgs = {
     mode: 'check',
     planDir: '',
-    batchSize: 20_000,
+    batchSize: 25_000,
+    resume: false,
   };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -120,11 +154,16 @@ export function parseFnsExactApplyCliArgs(
       parsed.mode = 'apply';
     } else if (arg === '--check') {
       parsed.mode = 'check';
+    } else if (arg === '--resume') {
+      parsed.resume = true;
     } else if (arg === '--plan-dir') {
       parsed.planDir = readFlagValue(args, index, arg);
       index += 1;
     } else if (arg === '--manifest') {
       parsed.manifestPath = readFlagValue(args, index, arg);
+      index += 1;
+    } else if (arg === '--checkpoint') {
+      parsed.checkpointPath = readFlagValue(args, index, arg);
       index += 1;
     } else if (arg === '--confirm-plan') {
       parsed.confirmedPlanFingerprint = readFlagValue(args, index, arg);
@@ -152,6 +191,9 @@ export function parseFnsExactApplyCliArgs(
   ) {
     throw new Error('--batch-size must be between 1 and 100000');
   }
+  if (parsed.resume && parsed.mode !== 'apply') {
+    throw new Error('--resume requires --apply');
+  }
   return parsed;
 }
 
@@ -161,7 +203,9 @@ function assertNonNegativeInteger(value: number, label: string): void {
   }
 }
 
-function assertPreviewIsSafe(preview: FnsExactImportPreview): void {
+export function assertFnsExactPreviewIsSafe(
+  preview: FnsExactImportPreview,
+): void {
   for (const field of [
     'stagedUpdates',
     'rowsToUpdate',
@@ -214,7 +258,7 @@ function assertPreviewIsSafe(preview: FnsExactImportPreview): void {
 }
 
 async function rollbackAfterFailure(
-  session: FnsExactApplySession,
+  session: Pick<FnsExactCheckSession, 'rollback'>,
   originalError: unknown,
 ): Promise<never> {
   try {
@@ -228,16 +272,15 @@ async function rollbackAfterFailure(
   throw originalError;
 }
 
-export async function executeFnsExactCheck(
-  session: FnsExactApplySession,
+async function readSafePreview(
+  session: FnsExactCheckSession,
 ): Promise<FnsExactImportPreview> {
   let began = false;
   try {
     await session.beginReadOnly();
     began = true;
-    await session.stageArtifacts();
     const preview = await session.preview();
-    assertPreviewIsSafe(preview);
+    assertFnsExactPreviewIsSafe(preview);
     await session.rollback();
     began = false;
     return preview;
@@ -249,91 +292,283 @@ export async function executeFnsExactCheck(
   }
 }
 
-export async function executeFnsExactApply(
+async function verifyCheckpointPrefix(
   session: FnsExactApplySession,
-  expectedPreviewFingerprint: string,
-  batchSize: number,
-): Promise<FnsExactApplyResult> {
-  if (
-    !Number.isSafeInteger(batchSize)
-    || batchSize < 1
-    || batchSize > 100_000
-  ) {
-    throw new Error('FNS apply batch size must be between 1 and 100000');
+  checkpoint: FnsExactApplyCheckpoint,
+): Promise<void> {
+  if (checkpoint.cursorId === null) {
+    if (checkpoint.committedRows !== 0) {
+      throw new Error('FNS checkpoint prefix metadata is inconsistent');
+    }
+    return;
+  }
+  if (checkpoint.committedRows < 1) {
+    throw new Error('FNS checkpoint prefix metadata is inconsistent');
   }
 
   let began = false;
   try {
-    await session.beginReadWrite();
+    await session.beginReadOnly();
     began = true;
-    await session.acquireAdvisoryLock();
-    await session.stageArtifacts();
+    await session.verifyAppliedPrefix(
+      checkpoint.cursorId,
+      checkpoint.committedRows,
+    );
+    await session.rollback();
+    began = false;
+  } catch (error) {
+    if (began) return rollbackAfterFailure(session, error);
+    throw error;
+  }
+}
 
-    const before = await session.preview();
-    assertPreviewIsSafe(before);
-    const isAlreadyApplied = (
+export async function executeFnsExactCheck(
+  session: FnsExactCheckSession,
+): Promise<FnsExactImportPreview> {
+  await session.stageArtifacts();
+  return readSafePreview(session);
+}
+
+function assertCheckpointMatches(
+  checkpoint: FnsExactApplyCheckpoint,
+  options: FnsExactResumableApplyOptions,
+): void {
+  if (checkpoint.version !== 1) {
+    throw new Error('FNS checkpoint version does not match');
+  }
+  if (
+    checkpoint.planFingerprint?.toLowerCase()
+    !== options.planFingerprint.toLowerCase()
+  ) {
+    throw new Error('FNS checkpoint plan fingerprint does not match');
+  }
+  if (
+    checkpoint.expectedPreviewFingerprint?.toLowerCase()
+    !== options.expectedPreviewFingerprint.toLowerCase()
+  ) {
+    throw new Error('FNS checkpoint preview fingerprint does not match');
+  }
+  if (
+    checkpoint.target?.host !== options.target.host
+    || checkpoint.target?.port !== options.target.port
+    || checkpoint.target?.database !== options.target.database
+    || checkpoint.target?.table !== options.target.table
+  ) {
+    throw new Error('FNS checkpoint target does not match');
+  }
+  if (checkpoint.pageSize !== options.pageSize) {
+    throw new Error('FNS checkpoint page size does not match');
+  }
+  if (
+    checkpoint.cursorId !== null
+    && !/^\d+$/.test(checkpoint.cursorId)
+  ) {
+    throw new Error('FNS checkpoint cursor is invalid');
+  }
+  if (
+    !Number.isSafeInteger(checkpoint.committedRows)
+    || checkpoint.committedRows < 0
+  ) {
+    throw new Error('FNS checkpoint committed row count is invalid');
+  }
+}
+
+function validatePageResult(input: {
+  page: FnsExactApplyPageResult;
+  pageSize: number;
+  previousCursor: string | null;
+  remainingRows: number;
+}): void {
+  const { page } = input;
+  for (const field of [
+    'scannedRows',
+    'updatedRows',
+    'alreadyAppliedRows',
+  ] as const) {
+    assertNonNegativeInteger(page[field], `page ${field}`);
+  }
+  if (
+    page.scannedRows < 1
+    || page.scannedRows > input.pageSize
+    || page.scannedRows > input.remainingRows
+  ) {
+    throw new Error(
+      `Invalid FNS page scanned row count: ${page.scannedRows}`,
+    );
+  }
+  if (
+    page.updatedRows + page.alreadyAppliedRows !== page.scannedRows
+  ) {
+    throw new Error('FNS page classification is inconsistent');
+  }
+  if (!/^\d+$/.test(page.cursorId)) {
+    throw new Error(`Invalid FNS page cursor: ${page.cursorId}`);
+  }
+  if (
+    input.previousCursor !== null
+    && BigInt(page.cursorId) <= BigInt(input.previousCursor)
+  ) {
+    throw new Error('FNS page cursor did not advance');
+  }
+}
+
+function checkpointAfterPage(input: {
+  options: FnsExactResumableApplyOptions;
+  cursorId: string;
+  committedRows: number;
+}): FnsExactApplyCheckpoint {
+  return {
+    version: 1,
+    planFingerprint: input.options.planFingerprint.toLowerCase(),
+    expectedPreviewFingerprint:
+      input.options.expectedPreviewFingerprint.toLowerCase(),
+    target: { ...input.options.target },
+    pageSize: input.options.pageSize,
+    cursorId: input.cursorId,
+    committedRows: input.committedRows,
+  };
+}
+
+function assertFinalVerification(
+  before: FnsExactImportPreview,
+  after: FnsExactImportPreview,
+): void {
+  if (
+    after.stagedUpdates !== before.stagedUpdates
+    || after.rowsToUpdate !== 0
+    || after.alreadyApplied !== after.stagedUpdates
+  ) {
+    throw new Error(
+      'FNS exact OKVED final global verification has remaining rows',
+    );
+  }
+}
+
+export async function executeFnsExactResumableApply(
+  session: FnsExactApplySession,
+  checkpointStore: FnsExactApplyCheckpointStore,
+  options: FnsExactResumableApplyOptions,
+): Promise<FnsExactApplyResult> {
+  assertSha256Hex(options.planFingerprint, 'FNS plan fingerprint');
+  assertSha256Hex(
+    options.expectedPreviewFingerprint,
+    'FNS expected preview fingerprint',
+  );
+  if (
+    !Number.isSafeInteger(options.pageSize)
+    || options.pageSize < 1
+    || options.pageSize > 100_000
+  ) {
+    throw new Error('FNS apply page size must be between 1 and 100000');
+  }
+
+  const storedCheckpoint = await checkpointStore.load();
+  if (storedCheckpoint && !options.resume) {
+    throw new Error(
+      'A partial FNS import checkpoint exists; pass --resume explicitly',
+    );
+  }
+  if (storedCheckpoint) {
+    assertCheckpointMatches(storedCheckpoint, options);
+  }
+
+  let lockAcquired = false;
+  let runError: unknown;
+  try {
+    await session.acquireSessionAdvisoryLock();
+    lockAcquired = true;
+
+    await session.stageArtifacts();
+    const before = await readSafePreview(session);
+    const wasAlreadyApplied = (
       before.rowsToUpdate === 0
       && before.alreadyApplied === before.stagedUpdates
     );
-    if (isAlreadyApplied) {
-      await session.commit();
-      began = false;
-      return {
-        updated: 0,
-        alreadyApplied: true,
-        before,
-        after: before,
-      };
+    if (storedCheckpoint) {
+      await verifyCheckpointPrefix(session, storedCheckpoint);
     }
-    if (before.fingerprint !== expectedPreviewFingerprint.toLowerCase()) {
+    if (
+      !wasAlreadyApplied
+      && !options.resume
+      && before.fingerprint
+        !== options.expectedPreviewFingerprint.toLowerCase()
+    ) {
       throw new Error(
         'Live preview fingerprint changed; run --check again before applying',
       );
     }
+    if (wasAlreadyApplied) {
+      const after = await readSafePreview(session);
+      assertFinalVerification(before, after);
+      await checkpointStore.clear();
+      return {
+        updated: 0,
+        alreadyApplied: true,
+        before,
+        after,
+      };
+    }
 
+    let cursorId: string | null = null;
+    let committedRows = 0;
     let updated = 0;
-    while (updated < before.rowsToUpdate) {
-      const requested = Math.min(batchSize, before.rowsToUpdate - updated);
-      const affected = await session.updateNextBatch(requested);
-      if (
-        !Number.isSafeInteger(affected)
-        || affected < 1
-        || affected > requested
-      ) {
-        throw new Error(
-          `Unexpected updated row count: requested ${requested}, got ${String(affected)}`,
-        );
+    while (committedRows < before.stagedUpdates) {
+      let began = false;
+      let page: FnsExactApplyPageResult;
+      try {
+        await session.beginReadWrite();
+        began = true;
+        page = await session.applyNextPage(cursorId, options.pageSize);
+        validatePageResult({
+          page,
+          pageSize: options.pageSize,
+          previousCursor: cursorId,
+          remainingRows: before.stagedUpdates - committedRows,
+        });
+        await session.commit();
+        began = false;
+      } catch (error) {
+        if (began) {
+          return rollbackAfterFailure(session, error);
+        }
+        throw error;
       }
-      updated += affected;
-    }
-    if (updated !== before.rowsToUpdate) {
-      throw new Error(
-        `Unexpected updated row count: expected ${before.rowsToUpdate}, got ${updated}`,
-      );
+
+      cursorId = page.cursorId;
+      committedRows += page.scannedRows;
+      updated += page.updatedRows;
+      await checkpointStore.save(checkpointAfterPage({
+        options,
+        cursorId,
+        committedRows,
+      }));
     }
 
-    const after = await session.preview();
-    assertPreviewIsSafe(after);
-    if (
-      after.stagedUpdates !== before.stagedUpdates
-      || after.rowsToUpdate !== 0
-      || after.alreadyApplied !== after.stagedUpdates
-    ) {
-      throw new Error('FNS exact OKVED post-apply verification failed');
-    }
-
-    await session.commit();
-    began = false;
+    const after = await readSafePreview(session);
+    assertFinalVerification(before, after);
+    await checkpointStore.clear();
     return {
       updated,
-      alreadyApplied: false,
+      alreadyApplied: wasAlreadyApplied,
       before,
       after,
     };
   } catch (error) {
-    if (began) {
-      return rollbackAfterFailure(session, error);
-    }
+    runError = error;
     throw error;
+  } finally {
+    if (lockAcquired) {
+      try {
+        await session.releaseSessionAdvisoryLock();
+      } catch (releaseError) {
+        if (runError !== undefined) {
+          throw new AggregateError(
+            [runError, releaseError],
+            'FNS exact OKVED import failed and advisory unlock also failed',
+          );
+        }
+        throw releaseError;
+      }
+    }
   }
 }

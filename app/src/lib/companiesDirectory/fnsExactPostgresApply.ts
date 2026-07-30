@@ -1,7 +1,13 @@
+import { once } from 'node:events';
+import { PassThrough } from 'node:stream';
+
 import {
+  assertFnsExactPreviewIsSafe,
   computeFnsExactPreviewFingerprint,
+  type FnsExactApplyPageResult,
   type FnsExactApplySession,
   type FnsExactImportPreview,
+  type FnsExactImportPreviewBody,
 } from '@/lib/companiesDirectory/fnsExactApply';
 import {
   beginImportTransaction,
@@ -11,7 +17,12 @@ import {
 } from '@/lib/companiesDirectory/postgresImportCore';
 
 export type FnsExactPgQueryResult = ImportPgQueryResult;
-export type FnsExactPgClient = ImportPgClient;
+export interface FnsExactPgClient extends ImportPgClient {
+  copyFrom?(
+    sql: string,
+    rows: AsyncIterable<string>,
+  ): Promise<number>;
+}
 
 interface FnsExactStageCallbacks {
   onUpdateBatch(rows: Record<string, unknown>[]): Promise<void>;
@@ -22,11 +33,18 @@ interface FnsExactPostgresApplySessionOptions {
   expectedPlanFingerprint: string;
   processArtifacts(
     callbacks: FnsExactStageCallbacks,
-  ): Promise<{ planFingerprint: string }>;
+  ): Promise<{ planFingerprint: string; updateRows?: number }>;
+}
+
+export interface FnsExactBatchPage {
+  fromExclusive: string | null;
+  toInclusive: string;
+  rowCount: number;
 }
 
 const STAGE_TABLE = 'fns_exact_okved_import_stage';
 const FNS_SOURCE = 'fns_sme_registry';
+const POSTGRES_BIGINT_MAX = BigInt('9223372036854775807');
 
 const CREATE_STAGE_SQL = `
 CREATE TEMP TABLE ${STAGE_TABLE} (
@@ -59,11 +77,11 @@ CREATE TEMP TABLE ${STAGE_TABLE} (
     (length(inn) = 10 AND length(fns_ogrn) = 13)
     OR (length(inn) = 12 AND length(fns_ogrn) = 15)
   )
-)
+) ON COMMIT PRESERVE ROWS
 `.trim();
 
-const INSERT_STAGE_SQL = `
-INSERT INTO ${STAGE_TABLE} (
+const COPY_STAGE_SQL = `
+COPY ${STAGE_TABLE} (
   id,
   inn,
   expected_ogrn,
@@ -72,26 +90,17 @@ INSERT INTO ${STAGE_TABLE} (
   okved_code_exact,
   okved_exact_source
 )
-SELECT
-  staged.id::bigint,
-  staged.inn,
-  staged.expected_ogrn,
-  staged.fns_ogrn,
-  staged.match_method,
-  staged.okved_code_exact,
-  staged.okved_exact_source
-FROM jsonb_to_recordset($1::jsonb) AS staged(
-  id text,
-  inn text,
-  expected_ogrn text,
-  fns_ogrn text,
-  match_method text,
-  okved_code_exact text,
-  okved_exact_source text
-)
+FROM STDIN WITH (FORMAT csv, NULL '\\N')
 `.trim();
 
-const PREVIEW_SQL = `
+const GLOBAL_STAGE_FILTER = 'TRUE';
+const PAGE_STAGE_FILTER = `
+($1::bigint IS NULL OR s.id > $1::bigint)
+AND s.id <= $2::bigint
+`.trim();
+
+function previewSql(stageFilter: string): string {
+  return `
 WITH current_state AS (
   SELECT
     s.id AS expected_id,
@@ -144,6 +153,7 @@ WITH current_state AS (
     ON c.id = s.id
    AND c.inn = s.inn
    AND c.ogrn IS NOT DISTINCT FROM s.expected_ogrn
+  WHERE ${stageFilter}
 ),
 classified AS (
   SELECT
@@ -188,37 +198,51 @@ SELECT
   ) AS state_digest
 FROM aggregate_state
 `.trim();
+}
 
-const UPDATE_BATCH_SQL = `
-WITH batch AS (
-  SELECT
-    c.id,
-    c.inn,
-    s.expected_ogrn,
-    s.okved_code_exact,
-    s.okved_exact_source
+const PREVIEW_SQL = previewSql(GLOBAL_STAGE_FILTER);
+const PAGE_PREVIEW_SQL = previewSql(PAGE_STAGE_FILTER);
+
+const NEXT_PAGE_SQL = `
+WITH page AS (
+  SELECT s.id
   FROM ${STAGE_TABLE} s
-  JOIN public.companies_directory c
-    ON c.id = s.id
-   AND c.inn = s.inn
-   AND c.ogrn IS NOT DISTINCT FROM s.expected_ogrn
-  WHERE c.okved_code_exact IS NULL
-    AND c.okved_exact_source IS NULL
-    AND s.okved_exact_source = '${FNS_SOURCE}'
-  ORDER BY s.inn, s.id
-  LIMIT $1
-  FOR UPDATE OF c
+  WHERE ($1::bigint IS NULL OR s.id > $1::bigint)
+  ORDER BY s.id
+  LIMIT $2
 )
+SELECT
+  $1::text AS from_exclusive,
+  MAX(id)::text AS to_inclusive,
+  COUNT(*)::text AS row_count
+FROM page
+`.trim();
+
+const LOCK_PAGE_TARGETS_SQL = `
+SELECT c.id::text AS id
+FROM ${STAGE_TABLE} s
+JOIN public.companies_directory c
+  ON c.id = s.id
+WHERE ($1::bigint IS NULL OR s.id > $1::bigint)
+  AND s.id <= $2::bigint
+ORDER BY s.id
+FOR UPDATE OF c
+`.trim();
+
+const UPDATE_PAGE_SQL = `
 UPDATE public.companies_directory c
 SET
-  okved_code_exact = batch.okved_code_exact,
-  okved_exact_source = batch.okved_exact_source
-FROM batch
-WHERE c.id = batch.id
-  AND c.inn = batch.inn
-  AND c.ogrn IS NOT DISTINCT FROM batch.expected_ogrn
+  okved_code_exact = s.okved_code_exact,
+  okved_exact_source = s.okved_exact_source
+FROM ${STAGE_TABLE} s
+WHERE ($1::bigint IS NULL OR s.id > $1::bigint)
+  AND s.id <= $2::bigint
+  AND c.id = s.id
+  AND c.inn = s.inn
+  AND c.ogrn IS NOT DISTINCT FROM s.expected_ogrn
   AND c.okved_code_exact IS NULL
   AND c.okved_exact_source IS NULL
+  AND s.okved_exact_source = '${FNS_SOURCE}'
 `.trim();
 
 function integerFromRow(
@@ -234,14 +258,108 @@ function integerFromRow(
   return value;
 }
 
+function previewFromResult(
+  result: FnsExactPgQueryResult,
+): FnsExactImportPreview {
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error('FNS exact live preview returned no row');
+  }
+  const stateDigest = String(row.state_digest ?? '').toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(stateDigest)) {
+    throw new Error('FNS exact live preview returned an invalid state digest');
+  }
+  const body = {
+    stagedUpdates: integerFromRow(row, 'staged_updates'),
+    rowsToUpdate: integerFromRow(row, 'rows_to_update'),
+    alreadyApplied: integerFromRow(row, 'already_applied'),
+    missingTargets: integerFromRow(row, 'missing_targets'),
+    identityMismatches: integerFromRow(row, 'identity_mismatches'),
+    conflictingValues: integerFromRow(row, 'conflicting_values'),
+    stateDigest,
+  };
+  return {
+    ...body,
+    fingerprint: computeFnsExactPreviewFingerprint(body),
+  };
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function csvField(value: unknown, field: string): string {
+  if (value === null && field === 'expected_ogrn') {
+    return '\\N';
+  }
+  if (typeof value !== 'string') {
+    throw new Error(`FNS exact COPY field ${field} must be text`);
+  }
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function encodeCopyRow(row: Record<string, unknown>): string {
+  return [
+    csvField(row.id, 'id'),
+    csvField(row.inn, 'inn'),
+    csvField(row.expected_ogrn, 'expected_ogrn'),
+    csvField(row.fns_ogrn, 'fns_ogrn'),
+    csvField(row.match_method, 'match_method'),
+    csvField(row.okved_code_exact, 'okved_code_exact'),
+    csvField(row.okved_exact_source, 'okved_exact_source'),
+  ].join(',') + '\n';
+}
+
+function validateCursor(value: string | null, label: string): void {
+  if (value === null) return;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`Invalid FNS ${label}: ${value}`);
+  }
+  const parsed = BigInt(value);
+  if (parsed < BigInt(1) || parsed > POSTGRES_BIGINT_MAX) {
+    throw new Error(`Invalid FNS ${label}: ${value}`);
+  }
+}
+
+function validatePageLimit(limit: number): void {
+  if (
+    !Number.isSafeInteger(limit)
+    || limit < 1
+    || limit > 100_000
+  ) {
+    throw new Error(
+      'FNS exact page limit must be between 1 and 100000',
+    );
+  }
+}
+
+function validatePage(page: FnsExactBatchPage): void {
+  validateCursor(page.fromExclusive, 'page start cursor');
+  validateCursor(page.toInclusive, 'page end cursor');
+  validatePageLimit(page.rowCount);
+  if (
+    page.fromExclusive !== null
+    && BigInt(page.toInclusive) <= BigInt(page.fromExclusive)
+  ) {
+    throw new Error('FNS exact page cursor did not advance');
+  }
+}
+
+function pageValues(page: FnsExactBatchPage): [string | null, string] {
+  validatePage(page);
+  return [page.fromExclusive, page.toInclusive];
+}
+
 export class FnsExactPostgresApplySession implements FnsExactApplySession {
   private readonly client: FnsExactPgClient;
   private readonly expectedPlanFingerprint: string;
   private readonly processArtifacts: (
     callbacks: FnsExactStageCallbacks,
-  ) => Promise<{ planFingerprint: string }>;
+  ) => Promise<{ planFingerprint: string; updateRows?: number }>;
   private stageTablePrepared = false;
-  private readOnly = false;
+  private stageLoaded = false;
+  private stageAnalyzed = false;
+  private sessionLockAcquired = false;
 
   constructor(options: FnsExactPostgresApplySessionOptions) {
     this.client = options.client;
@@ -258,7 +376,6 @@ export class FnsExactPostgresApplySession implements FnsExactApplySession {
 
   async beginReadOnly(): Promise<void> {
     await this.prepareStageTable();
-    this.readOnly = true;
     await beginImportTransaction(this.client, 'BEGIN READ ONLY', {
       lockTimeout: '30s',
       statementTimeout: '30min',
@@ -267,96 +384,291 @@ export class FnsExactPostgresApplySession implements FnsExactApplySession {
   }
 
   async beginReadWrite(): Promise<void> {
+    await this.beginReadWriteBatch();
+  }
+
+  async beginReadWriteBatch(): Promise<void> {
     await this.prepareStageTable();
-    this.readOnly = false;
+    if (this.stageLoaded && !this.stageAnalyzed) {
+      await this.client.query(`ANALYZE ${STAGE_TABLE}`);
+      this.stageAnalyzed = true;
+    }
     await beginImportTransaction(this.client, 'BEGIN READ WRITE', {
       lockTimeout: '30s',
       statementTimeout: '30min',
-      idleTimeout: '2h',
+      idleTimeout: '10min',
     });
   }
 
-  async acquireAdvisoryLock(): Promise<void> {
-    await this.client.query(`
-SELECT pg_advisory_xact_lock(
+  async acquireSessionAdvisoryLock(): Promise<void> {
+    if (this.sessionLockAcquired) {
+      throw new Error('FNS exact advisory lock is already held');
+    }
+    const result = await this.client.query(`
+SELECT pg_try_advisory_lock(
   hashtextextended('companies_directory:fns-exact-okved', 0)
-)
+) AS acquired
 `.trim());
-  }
-
-  private async stageBatch(rows: Record<string, unknown>[]): Promise<void> {
-    if (rows.length === 0) return;
-    const result = await this.client.query(
-      INSERT_STAGE_SQL,
-      [JSON.stringify(rows)],
-    );
-    if (result.rowCount !== rows.length) {
+    if (result.rows[0]?.acquired !== true) {
       throw new Error(
-        `Unexpected FNS exact staging count: `
-        + `expected ${rows.length}, got ${String(result.rowCount)}`,
+        'Another FNS exact OKVED import holds the advisory lock; try later',
       );
     }
+    this.sessionLockAcquired = true;
+  }
+
+  async releaseSessionAdvisoryLock(): Promise<void> {
+    if (!this.sessionLockAcquired) return;
+    const result = await this.client.query(`
+SELECT pg_advisory_unlock(
+  hashtextextended('companies_directory:fns-exact-okved', 0)
+) AS released
+`.trim());
+    if (result.rows[0]?.released !== true) {
+      throw new Error('FNS exact OKVED advisory lock was not released');
+    }
+    this.sessionLockAcquired = false;
   }
 
   async stageArtifacts(): Promise<void> {
-    if (!this.stageTablePrepared) {
-      throw new Error(
-        'FNS exact staging table was not prepared before the transaction',
-      );
+    await this.prepareStageTable();
+    if (this.stageLoaded) {
+      throw new Error('FNS exact artifacts were already staged');
     }
-    const processed = await this.processArtifacts({
-      onUpdateBatch: async (rows) => this.stageBatch(rows),
+    if (!this.client.copyFrom) {
+      throw new Error('FNS exact COPY adapter is not configured');
+    }
+
+    const rowStream = new PassThrough({
+      highWaterMark: 1024 * 1024,
     });
-    if (
-      processed.planFingerprint.toLowerCase()
-      !== this.expectedPlanFingerprint
-    ) {
-      throw new Error(
-        'FNS exact plan fingerprint changed while staging',
-      );
-    }
-    if (!this.readOnly) {
+    rowStream.setEncoding('utf8');
+    rowStream.on('error', () => undefined);
+    let emittedRows = 0;
+    let copyFailure: unknown;
+    const copyPromise = this.client
+      .copyFrom(COPY_STAGE_SQL, rowStream)
+      .catch((error: unknown) => {
+        copyFailure = error;
+        rowStream.destroy(asError(error));
+        throw error;
+      });
+    void copyPromise.catch(() => undefined);
+    const copyFailureSignal = copyPromise.then<never>(
+      () => new Promise<never>(() => undefined),
+      (error: unknown) => {
+        throw error;
+      },
+    );
+    void copyFailureSignal.catch(() => undefined);
+
+    try {
+      const processed = await this.processArtifacts({
+        onUpdateBatch: async (rows) => {
+          for (const row of rows) {
+            if (copyFailure !== undefined) {
+              throw copyFailure;
+            }
+            if (rowStream.destroyed) {
+              throw new Error(
+                'FNS exact COPY stream closed before staging completed',
+              );
+            }
+            if (!rowStream.write(encodeCopyRow(row))) {
+              await Promise.race([
+                once(rowStream, 'drain'),
+                copyFailureSignal,
+              ]);
+            }
+            if (copyFailure !== undefined) {
+              throw copyFailure;
+            }
+            emittedRows += 1;
+          }
+        },
+      });
+      rowStream.end();
+      const copiedRows = await copyPromise;
+      if (copiedRows !== emittedRows) {
+        throw new Error(
+          `Unexpected FNS exact staging count: `
+          + `expected ${emittedRows}, got ${String(copiedRows)}`,
+        );
+      }
+      if (
+        processed.updateRows !== undefined
+        && processed.updateRows !== emittedRows
+      ) {
+        throw new Error(
+          `Validated FNS update count changed while staging: `
+          + `expected ${processed.updateRows}, got ${emittedRows}`,
+        );
+      }
+      if (
+        processed.planFingerprint.toLowerCase()
+        !== this.expectedPlanFingerprint
+      ) {
+        throw new Error(
+          'FNS exact plan fingerprint changed while staging',
+        );
+      }
       await this.client.query(`ANALYZE ${STAGE_TABLE}`);
+      this.stageAnalyzed = true;
+      this.stageLoaded = true;
+    } catch (error) {
+      rowStream.destroy(asError(error));
+      await copyPromise.catch(() => undefined);
+      throw copyFailure ?? error;
     }
   }
 
   async preview(): Promise<FnsExactImportPreview> {
-    const result = await this.client.query(PREVIEW_SQL);
+    return previewFromResult(await this.client.query(PREVIEW_SQL));
+  }
+
+  async nextPage(
+    afterId: string | null,
+    limit: number,
+  ): Promise<FnsExactBatchPage | null> {
+    validateCursor(afterId, 'page cursor');
+    validatePageLimit(limit);
+    const result = await this.client.query(
+      NEXT_PAGE_SQL,
+      [afterId, limit],
+    );
     const row = result.rows[0];
     if (!row) {
-      throw new Error('FNS exact live preview returned no row');
+      throw new Error('FNS exact next-page query returned no row');
     }
-    const stateDigest = String(row.state_digest ?? '').toLowerCase();
-    if (!/^[a-f0-9]{64}$/.test(stateDigest)) {
-      throw new Error('FNS exact live preview returned an invalid state digest');
+    const rowCount = integerFromRow(row, 'row_count');
+    if (rowCount === 0) return null;
+    if (rowCount > limit) {
+      throw new Error('FNS exact next-page query exceeded its limit');
     }
-    const body = {
-      stagedUpdates: integerFromRow(row, 'staged_updates'),
-      rowsToUpdate: integerFromRow(row, 'rows_to_update'),
-      alreadyApplied: integerFromRow(row, 'already_applied'),
-      missingTargets: integerFromRow(row, 'missing_targets'),
-      identityMismatches: integerFromRow(row, 'identity_mismatches'),
-      conflictingValues: integerFromRow(row, 'conflicting_values'),
-      stateDigest,
-    };
+    const toInclusive = String(row.to_inclusive ?? '');
+    validateCursor(toInclusive, 'page end cursor');
+    if (
+      afterId !== null
+      && BigInt(toInclusive) <= BigInt(afterId)
+    ) {
+      throw new Error('FNS exact next-page cursor did not advance');
+    }
     return {
-      ...body,
-      fingerprint: computeFnsExactPreviewFingerprint(body),
+      fromExclusive: afterId,
+      toInclusive,
+      rowCount,
     };
   }
 
-  async updateNextBatch(limit: number): Promise<number> {
+  async lockPageTargets(page: FnsExactBatchPage): Promise<number> {
+    const result = await this.client.query(
+      LOCK_PAGE_TARGETS_SQL,
+      pageValues(page),
+    );
+    return result.rowCount ?? result.rows.length;
+  }
+
+  async previewPage(
+    page: FnsExactBatchPage,
+  ): Promise<FnsExactImportPreviewBody> {
+    const preview = previewFromResult(await this.client.query(
+      PAGE_PREVIEW_SQL,
+      pageValues(page),
+    ));
+    const { fingerprint: _fingerprint, ...body } = preview;
+    return body;
+  }
+
+  async verifyAppliedPrefix(
+    cursorId: string,
+    expectedRows: number,
+  ): Promise<void> {
+    validateCursor(cursorId, 'checkpoint prefix cursor');
     if (
-      !Number.isSafeInteger(limit)
-      || limit < 1
-      || limit > 100_000
+      !Number.isSafeInteger(expectedRows)
+      || expectedRows < 1
     ) {
       throw new Error(
-        'FNS exact update batch limit must be between 1 and 100000',
+        'FNS checkpoint prefix row count must be a positive integer',
       );
     }
-    const result = await this.client.query(UPDATE_BATCH_SQL, [limit]);
+    const preview = previewFromResult(await this.client.query(
+      PAGE_PREVIEW_SQL,
+      [null, cursorId],
+    ));
+    assertFnsExactPreviewIsSafe(preview);
+    if (
+      preview.stagedUpdates !== expectedRows
+      || preview.rowsToUpdate !== 0
+      || preview.alreadyApplied !== expectedRows
+    ) {
+      throw new Error(
+        'FNS checkpoint prefix is not fully applied',
+      );
+    }
+  }
+
+  async updatePage(page: FnsExactBatchPage): Promise<number> {
+    const result = await this.client.query(
+      UPDATE_PAGE_SQL,
+      pageValues(page),
+    );
     return result.rowCount ?? 0;
+  }
+
+  async applyNextPage(
+    afterCursorId: string | null,
+    pageSize: number,
+  ): Promise<FnsExactApplyPageResult> {
+    const page = await this.nextPage(afterCursorId, pageSize);
+    if (!page) {
+      throw new Error('FNS exact stage ended before all rows were processed');
+    }
+
+    const lockedTargets = await this.lockPageTargets(page);
+    const beforeBody = await this.previewPage(page);
+    const before = {
+      ...beforeBody,
+      fingerprint: computeFnsExactPreviewFingerprint(beforeBody),
+    };
+    assertFnsExactPreviewIsSafe(before);
+    if (before.stagedUpdates !== page.rowCount) {
+      throw new Error('FNS exact page contains an unexpected number of rows');
+    }
+    if (lockedTargets !== page.rowCount) {
+      throw new Error(
+        `Live target is missing ${page.rowCount - lockedTargets} page rows`,
+      );
+    }
+
+    const updatedRows = await this.updatePage(page);
+    if (updatedRows !== before.rowsToUpdate) {
+      throw new Error(
+        `FNS exact page update count changed: `
+        + `expected ${before.rowsToUpdate}, got ${updatedRows}`,
+      );
+    }
+
+    const afterBody = await this.previewPage(page);
+    const after = {
+      ...afterBody,
+      fingerprint: computeFnsExactPreviewFingerprint(afterBody),
+    };
+    assertFnsExactPreviewIsSafe(after);
+    if (
+      after.stagedUpdates !== page.rowCount
+      || after.rowsToUpdate !== 0
+      || after.alreadyApplied !== page.rowCount
+    ) {
+      throw new Error('FNS exact page post-update verification failed');
+    }
+
+    return {
+      scannedRows: page.rowCount,
+      updatedRows,
+      alreadyAppliedRows: before.alreadyApplied,
+      cursorId: page.toInclusive,
+    };
   }
 
   async commit(): Promise<void> {
