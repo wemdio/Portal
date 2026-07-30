@@ -59,3 +59,31 @@ def test_transaction_id_falls_back_to_document_number():
     del tx["transactionId"]
     row = map_transaction(tx, "acc-9")
     assert row["transaction_id"] == "acc-9|202"
+
+
+def test_unparsable_date_is_skipped():
+    """Перед бэкфиллом за 2023 год: битая дата не должна ронять весь батч,
+    она просто пропускается."""
+    tx = dict(DEBIT)
+    tx["documentProcessDate"] = "15.07.2026"  # неожиданный формат
+    assert map_transaction(tx, "acc-1") is None
+
+
+def test_missing_amount_is_skipped_not_zeroed():
+    """Главный тест: отсутствующая сумма не должна тихо стать 0.00 —
+    настоящий ноль в выписке и отсутствующая сумма это разные вещи."""
+    tx = dict(DEBIT)
+    del tx["Amount"]
+    assert map_transaction(tx, "acc-1") is None
+
+
+def test_debit_without_creditor_party_is_not_dropped():
+    """Уже существующее поведение, зафиксированное намеренно: расход без
+    получателя не отбрасывается целиком, он просто уходит в очередь ручной
+    разметки с пустыми payee_name/payee_inn."""
+    tx = dict(DEBIT)
+    del tx["CreditorParty"]
+    row = map_transaction(tx, "acc-1")
+    assert row is not None
+    assert row["payee_name"] is None
+    assert row["payee_inn"] is None

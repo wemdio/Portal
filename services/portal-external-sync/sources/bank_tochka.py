@@ -39,17 +39,64 @@ POLL_ATTEMPTS = 30
 POLL_INTERVAL_SEC = 1.5
 
 
-def map_transaction(t: dict, acc: str) -> dict | None:
+def _parse_amount(t: dict) -> float | None:
+    """Amount.amount → float, либо None, если поля нет / оно None / не число.
+
+    Молчаливый ноль здесь недопустим: настоящий ноль в выписке и отсутствующая
+    сумма — разные вещи, и подмена второго первым тихо занижает расход.
+    """
+    raw = (t.get("Amount") or {}).get("amount")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def map_transaction(
+    t: dict, acc: str, skip_counts: dict[str, int] | None = None
+) -> dict | None:
     """Операция Точки → словарь полей bank_transactions. None — пропустить.
 
     Классификатор «выручка / не выручка» осмыслен только для прихода: у
     расхода нет плательщика-клиента, и прогонять по нему classify_revenue
     значит записывать в exclude_reason случайный мусор.
+
+    Непригодная запись (не разобралась дата или сумма) пропускается с
+    предупреждением в лог, а не роняет вызывающий батч: перед бэкфиллом за
+    2023 год одна битая строка не должна уносить с собой год операций счёта.
+    skip_counts, если передан, копит причины пропуска для сводки по прогону.
     """
     indicator = t.get("creditDebitIndicator")
     if indicator not in ("Credit", "Debit"):
         return None
     is_credit = indicator == "Credit"
+
+    doc = t.get("documentNumber")
+    tx_id = t.get("transactionId") or f"{acc}|{doc}"
+
+    occurred_at = parse_date(t.get("documentProcessDate", ""))
+    if occurred_at is None:
+        print(
+            f"[bank_tochka] skip transactionId={tx_id!r}: не разобралась дата "
+            f"documentProcessDate={t.get('documentProcessDate')!r}",
+            flush=True,
+        )
+        if skip_counts is not None:
+            skip_counts["bad_date"] = skip_counts.get("bad_date", 0) + 1
+        return None
+
+    amount = _parse_amount(t)
+    if amount is None:
+        print(
+            f"[bank_tochka] skip transactionId={tx_id!r}: не разобралась сумма "
+            f"Amount={t.get('Amount')!r}",
+            flush=True,
+        )
+        if skip_counts is not None:
+            skip_counts["bad_amount"] = skip_counts.get("bad_amount", 0) + 1
+        return None
 
     debtor = t.get("DebtorParty") or {}
     creditor = t.get("CreditorParty") or {}
@@ -63,16 +110,13 @@ def map_transaction(t: dict, acc: str) -> dict | None:
     exclude_reason = classify_revenue(payer, payer_inn, purpose) if is_credit else ""
     is_revenue = (not exclude_reason) if is_credit else None
 
-    doc = t.get("documentNumber")
-    tx_id = t.get("transactionId") or f"{acc}|{doc}"
-
     return {
         "bank": "tochka",
         "account_id": acc,
         "transaction_id": str(tx_id),
         "document_number": str(doc) if doc is not None else None,
-        "occurred_at": parse_date(t.get("documentProcessDate", "")),
-        "amount": float((t.get("Amount") or {}).get("amount", 0)),
+        "occurred_at": occurred_at,
+        "amount": amount,
         "currency": "RUB",
         "direction": "credit" if is_credit else "debit",
         "payer_name": payer or None,
@@ -95,6 +139,7 @@ class BankTochkaSync(SyncSource):
 
         headers = {"Authorization": f"Bearer {JWT}", "Content-Type": "application/json"}
         total = 0
+        skip_counts: dict[str, int] = {}
 
         async with httpx.AsyncClient(timeout=90, headers=headers) as client:
             bal = await client.get(f"{API_BASE}/balances")
@@ -105,15 +150,39 @@ class BankTochkaSync(SyncSource):
 
             for acc in accounts:
                 for st, en in PERIODS:
-                    rows = await self._fetch_period(client, acc, st, en)
-                    if rows:
-                        await self._upsert(conn, rows)
-                        total += len(rows)
+                    # Изоляция периода: сбой одного счёта/периода (сеть, битые
+                    # данные, ошибка upsert) не должен обрывать остальные —
+                    # источник обязан дойти до конца и залить то, что удалось.
+                    try:
+                        rows = await self._fetch_period(client, acc, st, en, skip_counts)
+                        if rows:
+                            await self._upsert(conn, rows)
+                            total += len(rows)
+                    except Exception as e:
+                        print(
+                            f"[bank_tochka] period FAIL acc={acc} {st}..{en}: {e}",
+                            flush=True,
+                        )
+
+        if skip_counts:
+            total_skipped = sum(skip_counts.values())
+            breakdown = ", ".join(
+                f"{reason}={n}" for reason, n in sorted(skip_counts.items())
+            )
+            print(
+                f"[bank_tochka] skipped {total_skipped} record(s): {breakdown}",
+                flush=True,
+            )
 
         return total
 
     async def _fetch_period(
-        self, client: httpx.AsyncClient, acc: str, st: str, en: str
+        self,
+        client: httpx.AsyncClient,
+        acc: str,
+        st: str,
+        en: str,
+        skip_counts: dict[str, int] | None = None,
     ) -> list[tuple]:
         create = await client.post(
             f"{API_BASE}/statements",
@@ -138,7 +207,7 @@ class BankTochkaSync(SyncSource):
 
         rows: list[tuple] = []
         for t in stmt.get("Transaction", []) or []:
-            mapped = map_transaction(t, acc)
+            mapped = map_transaction(t, acc, skip_counts)
             if mapped is not None:
                 rows.append(to_row(mapped))
         return rows
