@@ -207,12 +207,19 @@ export interface HeEvidenceItem {
   quote: string;
 }
 
+/** A/B-вариант письма: тот же шаг цепочки с другим поводом/углом (A — основной). */
+export interface HeChainLetterVariant {
+  subject: string | null;
+  body: string;
+}
+
 export interface HeChainLetter {
   subject: string | null;
   body: string;
   /** Пауза в днях после предыдущего письма (у первого — 0). */
   wait_days: number;
-  variants?: string[];
+  /** A/B-варианты (B, C…) для ручного выбора и A/B-теста в Instantly. */
+  variants?: HeChainLetterVariant[];
   /**
    * Условные сегментные варианты тела (только финальные шаблоны he_templates):
    * основной body — дефолт для всей базы, вариант идёт только лидам сегмента.

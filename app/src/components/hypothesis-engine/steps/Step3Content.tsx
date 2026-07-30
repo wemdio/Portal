@@ -9,7 +9,6 @@
 import { useMemo, useState, type JSX } from 'react';
 import { ArrowRight, BarChart3, BookOpen, Mail, Search } from 'lucide-react';
 import type {
-  HeChain,
   HeChainLanguage,
   HeCompanyType,
   HeCompanyTypeKind,
@@ -17,7 +16,16 @@ import type {
   HeVocab,
   HeVertical,
 } from '@/lib/hypothesisEngine/types';
-import type { HeDossier, HeDossierData, HeJobSummary } from '../api';
+import { HE_API, hePatch } from '../api';
+import type {
+  HeChainDto,
+  HeChainLetterDto,
+  HeChainPatchResponse,
+  HeDossier,
+  HeDossierData,
+  HeJobSummary,
+  HeLetterVariant,
+} from '../api';
 import { Badge, PotentialBadge, Spinner, StatusBox, type BadgeTone } from '../ui';
 
 const LANG_OPTIONS: Array<{ value: HeChainLanguage; label: string }> = [
@@ -47,6 +55,15 @@ const BUYS_CHANNELS_META: Record<'yes' | 'likely' | 'unknown', { label: string; 
 
 /** На новых данных должность может нести audience_side; на старых поля нет. */
 type JobTitleRow = HeJobTitle & { audience_side?: string };
+
+/** Объектные A/B-варианты письма; легаси-строки старого формата отбрасываем. */
+function abVariants(letter: HeChainLetterDto): HeLetterVariant[] {
+  if (!Array.isArray(letter.variants)) return [];
+  return (letter.variants as unknown[]).filter(
+    (v): v is HeLetterVariant =>
+      typeof v === 'object' && v !== null && typeof (v as HeLetterVariant).body === 'string',
+  );
+}
 
 function latestByCreatedAt<T extends { created_at: string }>(items: T[]): T | undefined {
   let best: T | undefined;
@@ -83,7 +100,7 @@ function sourceLabel(source: string): string {
 
 export function Step3Content(props: {
   vertical: HeVertical;
-  chains: HeChain[];
+  chains: HeChainDto[];
   vocabs: HeVocab[];
   jobs: HeJobSummary[];
   onGenerateChain: (language: 'ru' | 'en' | 'pl') => void;
@@ -111,6 +128,71 @@ export function Step3Content(props: {
     () => latestByCreatedAt(chains.filter((c) => c.vertical_id === vertical.id)),
     [chains, vertical.id],
   );
+
+  // A/B-просмотр писем: какая сторона показана по каждому письму (0 = основной/A, 1 = вариант/B).
+  // Состояние ключируется цепочкой (id + updated_at): свежие данные с сервера
+  // (другая цепочка, перегенерация, подтверждённый PATCH после поллинга)
+  // автоматически возвращают вид к основному варианту — без эффекта-сброса.
+  const chainKey = chain ? `${chain.id}:${chain.updated_at}` : '';
+  const [variantView, setVariantView] = useState<{ key: string; map: Record<number, number> }>({
+    key: '',
+    map: {},
+  });
+  const viewMap = variantView.key === chainKey ? variantView.map : {};
+  // Оптимистично подменённые письма после «сделать основным» (до перезагрузки с сервера).
+  const [lettersOverride, setLettersOverride] = useState<{
+    chainKey: string;
+    letters: HeChainLetterDto[];
+  } | null>(null);
+  const [variantBusy, setVariantBusy] = useState<number | null>(null);
+  const [variantError, setVariantError] = useState('');
+
+  const letters = chain
+    ? lettersOverride?.chainKey === chainKey
+      ? lettersOverride.letters
+      : chain.letters
+    : [];
+
+  // «Сделать основным»: оптимистично меняем местами основное письмо и вариант B,
+  // затем PATCH; при ошибке — откат к серверным данным и плашка с ошибкой.
+  const makeVariantPrimary = async (letterIdx: number) => {
+    if (!chain || variantBusy !== null) return;
+    const letter = letters[letterIdx];
+    const variant = letter ? abVariants(letter)[0] : undefined;
+    if (!letter || !variant) return;
+    setVariantError('');
+    setVariantView({ key: chainKey, map: { ...viewMap, [letterIdx]: 0 } });
+    setLettersOverride({
+      chainKey,
+      letters: letters.map((l, i) =>
+        i === letterIdx
+          ? {
+              ...l,
+              subject: variant.subject,
+              body: variant.body,
+              variants: [{ subject: l.subject, body: l.body }, ...abVariants(l).slice(1)],
+            }
+          : l,
+      ),
+    });
+    setVariantBusy(letterIdx);
+    try {
+      const { ok, data } = await hePatch<HeChainPatchResponse>(`${HE_API}/chains/${chain.id}`, {
+        letter_index: letterIdx,
+        variant_index: 0,
+      });
+      if (ok && data.letters) {
+        setLettersOverride({ chainKey, letters: data.letters });
+      } else {
+        // Откат: показываем серверные письма из пропсов, вид — как был (вариант B).
+        setLettersOverride(null);
+        setVariantView({ key: chainKey, map: { ...viewMap, [letterIdx]: 1 } });
+        setVariantError(data.error || 'Не удалось сделать вариант основным');
+      }
+    } finally {
+      setVariantBusy(null);
+    }
+  };
   const vocab = useMemo(
     () => latestByCreatedAt(vocabs.filter((v) => v.vertical_id === vertical.id)),
     [vocabs, vertical.id],
@@ -217,45 +299,83 @@ export function Step3Content(props: {
           </div>
         ) : null}
 
-        {chain && chain.letters.length > 0 ? (
+        {variantError ? (
+          <div className="mt-3">
+            <StatusBox tone="error">{variantError}</StatusBox>
+          </div>
+        ) : null}
+
+        {chain && letters.length > 0 ? (
           <ol className="mt-4 space-y-3">
-            {chain.letters.map((letter, idx) => (
-              <li key={idx} className="rounded-lg border border-gray-200 bg-gray-50/50 p-4">
-                <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-[11px] font-bold text-blue-700">
-                    {idx + 1}
-                  </span>
-                  {letter.subject ? (
-                    <p className="text-sm font-semibold text-gray-900">{letter.subject}</p>
-                  ) : (
-                    <p className="text-sm italic text-gray-400">Без темы</p>
-                  )}
-                  {letter.wait_days > 0 ? (
-                    <span className="text-[11px] text-gray-400">через {letter.wait_days} дн.</span>
-                  ) : null}
-                </div>
-                <p className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">
-                  {letter.body}
-                </p>
-                {letter.variants && letter.variants.length > 0 ? (
-                  <details className="group mt-2">
-                    <summary className="cursor-pointer list-none text-xs font-medium text-gray-500 hover:text-gray-700">
-                      Варианты ({letter.variants.length})
-                    </summary>
-                    <div className="mt-2 space-y-2 border-l-2 border-gray-100 pl-3">
-                      {letter.variants.map((v, vi) => (
-                        <p
-                          key={vi}
-                          className="whitespace-pre-wrap text-xs leading-relaxed text-gray-500"
-                        >
-                          {v}
-                        </p>
-                      ))}
+            {letters.map((letter, idx) => {
+              const variants = abVariants(letter);
+              const view = viewMap[idx] ?? 0;
+              const shown =
+                view > 0 && variants[0]
+                  ? variants[0]
+                  : { subject: letter.subject, body: letter.body };
+              return (
+                <li key={idx} className="rounded-lg border border-gray-200 bg-gray-50/50 p-4">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-[11px] font-bold text-blue-700">
+                      {idx + 1}
+                    </span>
+                    {shown.subject ? (
+                      <p className="text-sm font-semibold text-gray-900">{shown.subject}</p>
+                    ) : (
+                      <p className="text-sm italic text-gray-400">Без темы</p>
+                    )}
+                    {letter.wait_days > 0 ? (
+                      <span className="text-[11px] text-gray-400">через {letter.wait_days} дн.</span>
+                    ) : null}
+                  </div>
+                  {variants.length > 0 ? (
+                    <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                      <div className="inline-flex items-center overflow-hidden rounded-md border border-gray-200">
+                        {(['A', 'B'] as const).map((side, sideIdx) => (
+                          <button
+                            key={side}
+                            type="button"
+                            aria-pressed={view === sideIdx}
+                            disabled={variantBusy === idx}
+                            onClick={() =>
+                              setVariantView({ key: chainKey, map: { ...viewMap, [idx]: sideIdx } })
+                            }
+                            className={`px-2 py-0.5 text-[11px] font-semibold transition disabled:opacity-50 ${
+                              view === sideIdx
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-white text-gray-500 hover:bg-gray-100'
+                            }`}
+                          >
+                            {side}
+                          </button>
+                        ))}
+                      </div>
+                      {view === 0 ? (
+                        <span className="text-[10px] font-medium uppercase tracking-wide text-gray-400">
+                          основной
+                        </span>
+                      ) : (
+                        <>
+                          <span className="text-[10px] text-gray-400">основной: A</span>
+                          <button
+                            type="button"
+                            disabled={variantBusy !== null}
+                            onClick={() => void makeVariantPrimary(idx)}
+                            className="text-[11px] font-medium text-blue-600 transition hover:text-blue-700 disabled:opacity-50"
+                          >
+                            {variantBusy === idx ? 'Сохраняем…' : 'сделать основным'}
+                          </button>
+                        </>
+                      )}
                     </div>
-                  </details>
-                ) : null}
-              </li>
-            ))}
+                  ) : null}
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">
+                    {shown.body}
+                  </p>
+                </li>
+              );
+            })}
           </ol>
         ) : null}
         {!chain && !chainBusy && !chainFailed ? (
