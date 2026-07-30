@@ -22,7 +22,6 @@ import {
   DEFAULT_PIPELINE_SETTINGS,
 } from '@/types/ai-caller';
 import { CAMPAIGN_PRESETS } from '@/lib/ai-caller-prompts';
-import { Pagination, usePagination } from '@/components/ai-caller/Pagination';
 
 interface Props {
   assistants: VapiAssistant[];
@@ -64,9 +63,6 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
   const [parsing, setParsing] = useState(false);
   const [error, setError] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
-
-  const { page, setPage, pageItems: pagedAssistants, totalPages, total } =
-    usePagination(assistants);
 
   // ── Brief Upload ──
 
@@ -523,7 +519,7 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
         </div>
       ) : (
         <div className="space-y-3">
-          {pagedAssistants.map((a) => {
+          {assistants.map((a) => {
             const isExpanded = expandedId === a.id;
             const matchedVoice = voicePresets.find(
               (v) => v.voiceId === a.voice?.voiceId && (!a.voice?.provider || v.provider === a.voice.provider),
@@ -634,14 +630,6 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
               </div>
             );
           })}
-
-          <Pagination
-            page={page}
-            totalPages={totalPages}
-            total={total}
-            onPageChange={setPage}
-            unit="ассистентов"
-          />
         </div>
       )}
     </div>

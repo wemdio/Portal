@@ -20,7 +20,6 @@ import {
   Mic,
 } from 'lucide-react';
 import type { VapiAssistant, VapiPhoneNumber } from '@/types/ai-caller';
-import { Pagination, usePagination } from '@/components/ai-caller/Pagination';
 
 interface Campaign {
   id: string;
@@ -92,10 +91,6 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   const tgLoadedRef = useRef(false);
   const [sendingTgRec, setSendingTgRec] = useState<string | null>(null);
   const [tgRecSuccess, setTgRecSuccess] = useState<string | null>(null);
-
-  // Пагинация: список кампаний и контакты внутри раскрытой кампании
-  const campaignPaging = usePagination(campaigns);
-  const contactPaging = usePagination(contacts, expandedId);
 
   const fetchCampaigns = useCallback(async (silent = false) => {
     if (!silent) setLoadingCampaigns(true);
@@ -532,7 +527,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
         </div>
       ) : (
         <div className="space-y-3">
-          {campaignPaging.pageItems.map((camp) => {
+          {campaigns.map((camp) => {
             const isExpanded = expandedId === camp.id;
             const progress = camp.total_contacts > 0
               ? Math.round((camp.called_contacts / camp.total_contacts) * 100)
@@ -623,7 +618,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-100">
-                            {contactPaging.pageItems.map((c) => {
+                            {contacts.map((c) => {
                               const isPlaying = playingCallId === c.vapi_call_id;
                               const isLoadingRec = loadingAudio === c.vapi_call_id;
                               const canPlay = c.status === 'completed' && c.vapi_call_id;
@@ -698,29 +693,11 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
                         </table>
                       </div>
                     )}
-
-                    {!loadingContacts && (
-                      <Pagination
-                        page={contactPaging.page}
-                        totalPages={contactPaging.totalPages}
-                        total={contactPaging.total}
-                        onPageChange={contactPaging.setPage}
-                        unit="контактов"
-                      />
-                    )}
                   </div>
                 )}
               </div>
             );
           })}
-
-          <Pagination
-            page={campaignPaging.page}
-            totalPages={campaignPaging.totalPages}
-            total={campaignPaging.total}
-            onPageChange={campaignPaging.setPage}
-            unit="кампаний"
-          />
         </div>
       )}
     </div>
