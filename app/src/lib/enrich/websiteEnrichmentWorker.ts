@@ -2,6 +2,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { extractNormalizedUrls, fetchAndExtract, normalizeUrl } from '@/lib/enrich/websiteParser';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
+import { isProxyEnabled } from '@/lib/enrich/proxyPool';
 import { processSignalsForUrl } from '@/lib/enrich/websiteSignalProcessor';
 import { runWithTimeout } from '@/lib/enrich/timeoutUtils';
 import { shouldRetryEnrichmentItem, shouldUseCachedError } from '@/lib/enrich/errorPolicy';
@@ -82,12 +83,18 @@ const WORKER_BATCH_SIZE = 15;
 const CACHE_SUCCESS_DAYS = Number(process.env.WEBSITE_ENRICHMENT_CACHE_DAYS ?? '7');
 const CACHE_ERROR_HOURS = Number(process.env.WEBSITE_ENRICHMENT_ERROR_TTL_HOURS ?? '6');
 // До 2026-07-21 стояло '1' — per-domain sequential из-за страха бана. Но email-
-// скрапер теперь ходит через PROXY_URLS (5 residential-IP round-robin), т.е.
+// скрапер теперь ходит через PROXY_URLS (residential-IP round-robin), т.е.
 // параллельные запросы к vkusvill.ru приходят с РАЗНЫХ IP — сайт не видит
 // один воркер как источник. Плюс это была главная причина long-tail'а: 601
 // точка ВкусВилла в одном job'е сериализовалась в 1 поток и держала всех
-// остальных воркеров. Откатить в случае жалоб на бан — через env.
-const DOMAIN_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_DOMAIN_CONCURRENCY ?? '4');
+// остальных воркеров.
+//
+// Если прокси выключены (EMAIL_SCRAPER_PROXY=0), все 4 запроса к домену летят
+// с одного IP воркера — возвращаемся к последовательному режиму, иначе рискуем
+// поймать бан. Явный env-override сильнее обоих дефолтов.
+const DOMAIN_CONCURRENCY = Number(
+  process.env.WEBSITE_ENRICHMENT_DOMAIN_CONCURRENCY ?? (isProxyEnabled() ? '4' : '1'),
+);
 const FETCH_TIMEOUT_MS = Number(process.env.WEBSITE_ENRICHMENT_TIMEOUT_MS ?? '15000');
 const FETCH_HARD_TIMEOUT_MS = Number(
   process.env.WEBSITE_ENRICHMENT_HARD_TIMEOUT_MS ?? String(Math.max(FETCH_TIMEOUT_MS * 4, 60000)),
