@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireFirstSalesAccess } from '@/lib/firstSales/access';
 import { parseFirstSalesParams } from '@/lib/firstSales/params';
 import { fetchFirstSalesLeads, fetchSourceMap } from '@/lib/firstSales/metrics';
+import { fetchMeetingLinks } from '@/lib/firstSales/meetings';
 import { buildSourceIndex, resolveChannel } from '@/lib/firstSales/sourceChannels';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
@@ -36,8 +37,15 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    // Та же ширина выборки, что в summary/route.ts: сделка с привязанной
+    // встречей в окне может лежать вне окна по created_at/этапам (пришла
+    // раньше). Без этого расширения drill-down источника показал бы меньше
+    // сделок, чем summary насчитал встреч для того же источника.
+    const meetingLinks = await fetchMeetingLinks(gate.supabaseAdmin, PIPELINE_ID, from, to);
+    const meetingDealIds = [...new Set(meetingLinks.map((m) => m.amo_deal_id))];
+
     const [leads, sourceMap] = await Promise.all([
-      fetchFirstSalesLeads(gate.supabaseAdmin, PIPELINE_ID, from, to),
+      fetchFirstSalesLeads(gate.supabaseAdmin, PIPELINE_ID, from, to, meetingDealIds),
       fetchSourceMap(gate.supabaseAdmin),
     ]);
     const index = buildSourceIndex(sourceMap);

@@ -91,10 +91,23 @@ export default function KpiRow({
         value={fmt(totals.qualified)}
         delta={<Delta current={totals.qualified} previous={previousTotals.qualified} />}
       />
+      {/* Прочерк, а не ноль, пока окно целиком раньше даты, с которой подписи
+          к записям в чате встреч стали регулярными: ноль читался бы как
+          «встреч не было», хотя на деле автоматчер не может привязать
+          неподписанную запись. Тот же приём, что у «Договоры» ниже. */}
       <Tile
         label="Встречи"
-        value={fmt(totals.meetings)}
-        delta={<Delta current={totals.meetings} previous={previousTotals.meetings} />}
+        value={totals.meetingsReliable ? fmt(totals.meetings) : '—'}
+        sub={
+          totals.meetingsReliable
+            ? undefined
+            : `считаются с ${new Date(totals.meetingsSince).toLocaleDateString('ru-RU')}`
+        }
+        delta={
+          totals.meetingsReliable
+            ? <Delta current={totals.meetings} previous={previousTotals.meetings} />
+            : undefined
+        }
       />
       {/* Прочерк, а не ноль, пока окно целиком раньше даты правила: ноль
           читался бы как «договоров не было», хотя на деле мы отказались

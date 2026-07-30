@@ -7,6 +7,7 @@ import {
   fetchFirstSalesLeads,
   fetchSourceMap,
 } from '@/lib/firstSales/metrics';
+import { fetchMeetingLinks } from '@/lib/firstSales/meetings';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
 // либо пустой ответ, либо чужой. Явно снимаем этот вопрос, как и соседние
@@ -32,19 +33,28 @@ export async function GET(req: NextRequest) {
   const { from, to, groupBy, channels } = parsed.value;
 
   try {
+    // Привязки встреч тянем раньше сделок: список задействованных amo_deal_id
+    // идёт в fetchFirstSalesLeads как extraDealIds — иначе сделка, пришедшая
+    // раньше окна (встреча в июле у мартовской сделки), не попадёт в `leads`,
+    // и computeFirstSalesSeries не сможет резолвнуть её канал для встречи.
+    const meetingLinks = await fetchMeetingLinks(db, PIPELINE_ID, from, to);
+    const meetingDealIds = [...new Set(meetingLinks.map((m) => m.amo_deal_id))];
+
     const [leads, sourceMap] = await Promise.all([
-      fetchFirstSalesLeads(db, PIPELINE_ID, from, to),
+      fetchFirstSalesLeads(db, PIPELINE_ID, from, to, meetingDealIds),
       fetchSourceMap(db),
     ]);
 
-    const result = computeFirstSalesSeries(leads, sourceMap, from, to, groupBy, channels);
+    const result = computeFirstSalesSeries(leads, meetingLinks, sourceMap, from, to, groupBy, channels);
 
     // Предыдущее окно тянем отдельным запросом: расширять текущее нельзя —
     // ряд по времени раздуется вдвое и график покажет лишнее.
     const prev = previousWindow(from, to);
-    const prevLeads = await fetchFirstSalesLeads(db, PIPELINE_ID, prev.from, prev.to);
+    const prevMeetingLinks = await fetchMeetingLinks(db, PIPELINE_ID, prev.from, prev.to);
+    const prevMeetingDealIds = [...new Set(prevMeetingLinks.map((m) => m.amo_deal_id))];
+    const prevLeads = await fetchFirstSalesLeads(db, PIPELINE_ID, prev.from, prev.to, prevMeetingDealIds);
     const prevResult = computeFirstSalesSeries(
-      prevLeads, sourceMap, prev.from, prev.to, groupBy, channels,
+      prevLeads, prevMeetingLinks, sourceMap, prev.from, prev.to, groupBy, channels,
     );
 
     // Дата последнего успешного синка — на дашборд. Тихо устаревшие цифры хуже

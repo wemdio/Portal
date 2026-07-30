@@ -6,16 +6,20 @@
  *      их выбрасывает; для дашборда это означало бы, что число лидов за май
  *      уменьшается задним числом каждый раз, когда майскую сделку закрывают.
  *      Прошлое должно быть неподвижным.
- *   2. Встречи и договоры считаются по ДАТЕ достижения этапа из истории
- *      переходов, а не когортно «из пришедших в окне дошли до».
+ *   2. Договоры считаются по ДАТЕ достижения этапа из истории переходов, а
+ *      не когортно «из пришедших в окне дошли до». Встречи — по ДАТЕ записи
+ *      разговора (`meeting_deal_links` → `tg_video_transcripts`), а не по
+ *      этапу AMO вовсе: этап «Встреча проведена» засорён, см. `meetings.ts`.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 import { bucketKey, buildBuckets, type GroupBy } from '@/lib/firstSales/buckets';
+import { MEETINGS_RELIABLE_SINCE, type MeetingLinkRow } from '@/lib/firstSales/meetings';
 import {
   buildSourceIndex,
   resolveChannel,
   type FirstSalesChannel,
+  type ResolvedChannel,
   type SourceChannelRow,
 } from '@/lib/firstSales/sourceChannels';
 
@@ -68,6 +72,15 @@ export type FirstSalesTotals = {
   contractsReliable: boolean;
   /** Дата вступления правила в силу — чтобы UI мог назвать её пользователю. */
   contractsSince: string;
+  /**
+   * false — окно целиком раньше даты, с которой подписи к записям в чате
+   * встреч стали регулярными (`MEETINGS_RELIABLE_SINCE`). Тогда `meetings`
+   * заведомо занижен не потому, что встреч не было, а потому что автоматчер
+   * не может привязать запись без подписи. UI обязан показать прочерк.
+   */
+  meetingsReliable: boolean;
+  /** Дата вступления правила в силу — чтобы UI мог назвать её пользователю. */
+  meetingsSince: string;
 };
 
 export type FirstSalesSeries = {
@@ -118,6 +131,7 @@ function median(values: number[]): number | null {
 
 export function computeFirstSalesSeries(
   leads: FirstSalesLeadRow[],
+  meetingLinks: MeetingLinkRow[],
   sourceMap: SourceChannelRow[],
   from: Date,
   to: Date,
@@ -139,8 +153,18 @@ export function computeFirstSalesSeries(
     cycleAvgDays: null, cycleMedianDays: null,
     contractsReliable: to.getTime() >= CONTRACT_RULE_SINCE.getTime(),
     contractsSince: CONTRACT_RULE_SINCE.toISOString(),
+    meetingsReliable: to.getTime() >= MEETINGS_RELIABLE_SINCE.getTime(),
+    meetingsSince: MEETINGS_RELIABLE_SINCE.toISOString(),
   };
   const cycles: number[] = [];
+
+  // Канал встречи берётся у СДЕЛКИ, не у записи разговора — иначе фильтр по
+  // каналам не работал бы для встреч. Карта заполняется ниже, в основном
+  // цикле по `leads`, ДО фильтра по каналу (см. комментарий у `continue`),
+  // чтобы в ней остались все сделки независимо от того, какой канал сейчас
+  // выбран в фильтре — фильтрация встреч по каналу применяется отдельно,
+  // при их собственной обработке.
+  const dealChannelMap = new Map<number, ResolvedChannel>();
 
   // Тип поля сужен до счётчиков: `keyof SeriesBucket` включал бы `key: string`,
   // и `bucket[field] += 1` не прошёл бы проверку типов.
@@ -153,6 +177,7 @@ export function computeFirstSalesSeries(
 
   for (const lead of leads) {
     const resolved = resolveChannel(lead.raw, index);
+    dealChannelMap.set(lead.amo_id, resolved);
     if (allowed && !allowed.has(resolved.channel)) continue;
 
     const sourceKey = resolved.source || '(не указан)';
@@ -202,15 +227,20 @@ export function computeFirstSalesSeries(
       }
     }
 
-    // Встречи и договоры — по дате достижения этапа. Сделка с неполной историей
+    // Договор — по дате достижения этапа. Сделка с неполной историей
     // исключается: у неё переход мог случиться до горизонта событий, и мы его
     // не видели. Считать её нулём — врать.
+    //
+    // Встречи здесь больше не считаются: этап AMO «Встреча проведена» был
+    // источником этой метрики раньше и давал 200+ встреч в месяц против 64 у
+    // руководителя продаж — этап засорён, сделку двигают по нему и без
+    // реальной встречи. Новый расчёт — ниже, отдельным проходом по
+    // `meetingLinks` (привязки записей разговоров к сделкам), см. блок после
+    // основного цикла. `first_meeting_at` на объекте лида НЕ удалён — он
+    // остаётся полезным следом того, что происходило в CRM, и показывается в
+    // drill-down (SourceTable) под меткой «Этап AMO», но в счётчик встреч не
+    // идёт, чтобы под одним названием не жили две разные цифры.
     if (lead.history_complete) {
-      if (inWindow(lead.first_meeting_at, from, to)) {
-        totals.meetings += 1;
-        breakdown.meetings += 1;
-        bump(bucketKey(new Date(lead.first_meeting_at as string), groupBy), 'meetings');
-      }
       // Договоры — только с даты, когда этап начал означать договор.
       // До неё этап ставили и на «просто отправил файл», см. CONTRACT_RULE_SINCE.
       if (
@@ -240,6 +270,60 @@ export function computeFirstSalesSeries(
     totals.cycleMedianDays = median(cycles);
   }
 
+  // ─── Встречи — по привязкам записей разговоров ──────────────────────────
+  //
+  // Встреча = уникальная пара (сделка, дата записи по МСК), а не запись.
+  // Одна встреча часто разрезана на несколько файлов: в боевых данных
+  // `denvic.tech` встречается дважды за один день файлами `1.mp4` и `2.mp4` —
+  // это одна встреча, а не две. Дедуп — по дню в МСК (bucketKey с groupBy
+  // 'day' независимо от groupBy самого графика): при groupBy='month' два
+  // разных июльских дня одной сделки — всё ещё две встречи, просто обе
+  // попадают в одну месячную корзину графика.
+  const meetingDayKeys = new Set<string>();
+  for (const link of meetingLinks) {
+    const meetingDate = new Date(link.meeting_at);
+    if (!Number.isFinite(meetingDate.getTime())) continue;
+    if (!inWindow(link.meeting_at, from, to)) continue;
+    // Подписи к записям стали регулярными только с MEETINGS_RELIABLE_SINCE —
+    // раньше запись без подписи автоматчер привязать не мог, и привязок за
+    // март/апрель кратно меньше июньских/июльских. Считать эти месяцы нулём
+    // было бы неверно (см. totals.meetingsReliable), но досчитать их тоже
+    // нечем — единственное честное действие для отдельных ранних записей,
+    // которые всё же как-то привязались, — не звать их системным сигналом.
+    // Не отбрасывать раннюю запись означало бы дать частичную, непроверяемую
+    // цифру за месяц, который дальше в UI помечен прочерком.
+    if (meetingDate.getTime() < MEETINGS_RELIABLE_SINCE.getTime()) continue;
+
+    const dayKey = `${link.amo_deal_id}|${bucketKey(meetingDate, 'day')}`;
+    if (meetingDayKeys.has(dayKey)) continue; // тот же день, та же сделка — один файл из нескольких
+    meetingDayKeys.add(dayKey);
+
+    // Сделка, на которую сослалась привязка, но которой нет в `leads`, —
+    // защитный случай (см. `fetchFirstSalesLeads`, параметр `extraDealIds`:
+    // в проде такая сделка должна была подтянуться именно через него). Если
+    // всё же не подтянулась — не роняем расчёт, относим встречу к «не
+    // распределено» вместо того, чтобы потерять её вовсе.
+    const resolved = dealChannelMap.get(link.amo_deal_id);
+    const channel = resolved?.channel ?? 'unassigned';
+    if (allowed && !allowed.has(channel)) continue;
+
+    totals.meetings += 1;
+    bump(bucketKey(meetingDate, groupBy), 'meetings');
+
+    const sourceKey = resolved?.source || '(не указан)';
+    let breakdown = bySource.get(sourceKey);
+    if (!breakdown) {
+      breakdown = {
+        source: sourceKey,
+        channel,
+        known: resolved?.known ?? false,
+        leads: 0, qualified: 0, meetings: 0, contracts: 0,
+      };
+      bySource.set(sourceKey, breakdown);
+    }
+    breakdown.meetings += 1;
+  }
+
   return {
     series: keys.map((k) => series.get(k) as SeriesBucket),
     // Пустые строки отбрасываем: выборка тянет сделки с любой активностью в
@@ -255,12 +339,31 @@ export function computeFirstSalesSeries(
   };
 }
 
-/** Тянет сделки воронки первички вместе с датами этапов из view. */
+const STAGE_DATE_COLUMNS =
+  'amo_deal_id, created_at, first_qualified_at, first_meeting_at, first_contract_at, won_at, history_complete';
+
+type StageDateRow = Omit<FirstSalesLeadRow, 'amo_id' | 'name' | 'raw'> & { amo_deal_id: number };
+
+/**
+ * Тянет сделки воронки первички вместе с датами этапов из view.
+ *
+ * `extraDealIds` — сделки, которые обязаны попасть в выборку ДАЖЕ если ни
+ * одно из полей окна (`created_at`/`first_meeting_at`/`first_contract_at`/
+ * `won_at`) в окно не попадает. Нужны для встреч: сделка могла прийти в
+ * марте, а привязанная запись разговора — датироваться июлем; фильтр по
+ * стадиям её не увидит, а `computeFirstSalesSeries` без неё не сможет
+ * определить канал сделки для встречи (канал резолвится из `raw`, который
+ * есть только у сделок, попавших в этот массив) — встреча в лучшем случае
+ * ушла бы в «не распределено», в худшем — потерялась бы при фильтре по
+ * каналу. Вызывающий код передаёт сюда id сделок из `fetchMeetingLinks` за
+ * то же окно.
+ */
 export async function fetchFirstSalesLeads(
   db: SupabaseClient,
   pipelineId: number,
   from: Date,
   to: Date,
+  extraDealIds: number[] = [],
 ): Promise<FirstSalesLeadRow[]> {
   const fromIso = from.toISOString();
   const toIso = to.toISOString();
@@ -270,9 +373,7 @@ export async function fetchFirstSalesLeads(
   // в июльское окно не попадёт.
   const { data, error } = await db
     .from('amo_lead_stage_dates_v')
-    .select(
-      'amo_deal_id, created_at, first_qualified_at, first_meeting_at, first_contract_at, won_at, history_complete',
-    )
+    .select(STAGE_DATE_COLUMNS)
     .eq('pipeline_id', pipelineId)
     .or(
       `and(created_at.gte.${fromIso},created_at.lte.${toIso}),` +
@@ -282,9 +383,27 @@ export async function fetchFirstSalesLeads(
     );
   if (error) throw error;
 
-  const stageRows = (data ?? []) as Array<
-    Omit<FirstSalesLeadRow, 'amo_id' | 'name' | 'raw'> & { amo_deal_id: number }
-  >;
+  const stageRows = (data ?? []) as StageDateRow[];
+
+  // Сделки из extraDealIds, которые окно по стадиям не поймало (см. doc-
+  // комментарий выше). Отдельным запросом, без date-фильтра — только
+  // воронка и конкретные id.
+  const seenIds = new Set(stageRows.map((r) => r.amo_deal_id));
+  const missingExtraIds = extraDealIds.filter((id) => !seenIds.has(id));
+  for (const chunk of chunkArray(missingExtraIds, IN_CHUNK_SIZE)) {
+    const { data: extraData, error: extraError } = await db
+      .from('amo_lead_stage_dates_v')
+      .select(STAGE_DATE_COLUMNS)
+      .eq('pipeline_id', pipelineId)
+      .in('amo_deal_id', chunk);
+    if (extraError) throw extraError;
+    for (const row of (extraData ?? []) as StageDateRow[]) {
+      if (seenIds.has(row.amo_deal_id)) continue;
+      stageRows.push(row);
+      seenIds.add(row.amo_deal_id);
+    }
+  }
+
   if (stageRows.length === 0) return [];
 
   // Список id может уйти за тысячи сделок (год активности воронки). PostgREST

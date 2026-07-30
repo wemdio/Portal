@@ -129,7 +129,12 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
               <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
                 <th className="px-2.5 py-1.5 font-medium">Сделка</th>
                 <th className="px-2.5 py-1.5 font-medium">Создана</th>
-                <th className="px-2.5 py-1.5 font-medium">Встреча</th>
+                <th
+                  className="px-2.5 py-1.5 font-medium"
+                  title="Дата этапа AMO «Встреча проведена» — историческая метка CRM, не метрика «Встречи» на дашборде. Метрика считается по записям разговоров и может с этой датой не совпадать."
+                >
+                  Этап AMO
+                </th>
                 <th className="px-2.5 py-1.5 font-medium">Договор</th>
                 <th className="px-2.5 py-1.5 font-medium">Оплата</th>
               </tr>
