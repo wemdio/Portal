@@ -1,16 +1,20 @@
 /**
  * Стадия template: база + вертикаль + цепочка → финальный шаблон 85/15.
  *  1) LLM-план (fixed_block ~85% + personalization_plan + letters[].segment_variants);
- *  2) LLM финальных писем по плану (маркеры ---LETTER N--- + ---SEGMENT: <when>---):
- *     основной текст — дефолт для всей базы, сегментные варианты хранятся отдельно
- *     (letters[].segment_variants), wait_days — лесенка CHAIN_WAIT_DAYS из stages/chain;
- *  3) пост-проверки с одним retry каждая: длина тел (<50 слов, письмо 1 ≤45) и
+ *  2) LLM финальных писем по плану (маркеры ---LETTER N--- + ---SEGMENT: <when>---,
+ *     у письма 1 — A/B-вариант ---LETTER 1 B---): основной текст — дефолт для
+ *     всей базы, сегментные варианты хранятся отдельно
+ *     (letters[].segment_variants), B-вариант — в letters[].variants,
+ *     wait_days — лесенка CHAIN_WAIT_DAYS из stages/chain;
+ *  3) пост-проверки с одним retry каждая: длина тел (≤80 слов, письмо 1 ≤70) и
  *     консистентность operator_mapping (см. validateOperatorMapping);
  *  4) pure-маппинг операторов {{var}} финальных писем на колонки базы;
  *  5) insert в he_templates (status 'ready', llm_model).
  * В промпты подмешиваются style_override из брифа (styleExample) и
  * winner-паттерны датасета (best-effort); после генерации писем — критик-луп:
- * одна оценка + максимум один rewrite по её замечаниям.
+ * одна оценка (только основной вариант A) + максимум один rewrite по её
+ * замечаниям; B-вариант и сегментные варианты после рерайта восстанавливаются
+ * из исходных писем.
  */
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
@@ -41,7 +45,13 @@ import type {
   HeSegmentVariant,
   HeVertical,
 } from '../types';
-import { HeChainCritiqueSchema, parsedToChainLetters, selectPromptHypotheses } from './chain';
+import {
+  HeChainCritiqueSchema,
+  extractLetterBVariants,
+  parsedToChainLetters,
+  selectPromptHypotheses,
+  type HeChainLetterAB,
+} from './chain';
 import {
   addUsage,
   newUsage,
@@ -219,7 +229,7 @@ export function extractSegmentVariants(raw: string): SegmentVariantsExtraction {
  * названными в анализе базы. Не роняет джобу — только warnings в лог/result.
  */
 export function validateSegmentVariants(
-  letters: HeChainLetter[],
+  letters: HeChainLetterAB[],
   analysis: HeBaseAnalysisOutput,
 ): string[] {
   const segmentNames = [
@@ -308,18 +318,26 @@ export function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
-/** Порог, выше которого уходим в retry на сокращение (регламент — <50/≤45). */
-const SHORTEN_RETRY_WORDS = 55;
+/** Порог, выше которого уходим в retry на сокращение (регламент — ≤80/≤70). */
+const SHORTEN_RETRY_WORDS = 85;
 
-/** Предупреждения о длине тел по регламенту (<50 слов; письмо 1 ≤45). */
-export function collectLengthWarnings(letters: HeChainLetter[]): string[] {
+/** Предупреждения о длине тел по регламенту (≤80 слов; письмо 1 ≤70). */
+export function collectLengthWarnings(letters: HeChainLetterAB[]): string[] {
   const warnings: string[] = [];
   letters.forEach((l, i) => {
-    const limit = i === 0 ? 45 : 50;
+    const limit = i === 0 ? 70 : 80;
     const bodyWords = countWords(l.body);
     if (bodyWords > limit) {
       warnings.push(`Письмо ${i + 1}: ${bodyWords} слов в теле (регламент ≤ ${limit})`);
     }
+    (l.variants ?? []).forEach((v, vi) => {
+      const variantWords = countWords(v.body);
+      if (variantWords > limit) {
+        warnings.push(
+          `Письмо ${i + 1}, вариант ${String.fromCharCode(66 + vi)}: ${variantWords} слов (регламент ≤ ${limit})`,
+        );
+      }
+    });
     (l.segment_variants ?? []).forEach((v) => {
       const variantWords = countWords(v.text);
       if (variantWords > limit) {
@@ -332,13 +350,13 @@ export function collectLengthWarnings(letters: HeChainLetter[]): string[] {
 
 /* ───────────────── Стадия ───────────────── */
 
-const RETRY_HINT = `Ты вернул слишком мало писем или нарушил формат. Нужно столько же писем, сколько в исходной цепочке (3–5), каждое блоком «---LETTER N---» + строка темы; сегментные варианты — блоками «---SEGMENT: <when>---» после письма. Верни шаблон заново, целиком, без пояснений.`;
+const RETRY_HINT = `Ты вернул слишком мало писем или нарушил формат. Нужно столько же писем, сколько в исходной цепочке (3–5), каждое блоком «---LETTER N---» + строка темы; у письма 1 — вариант B блоком «---LETTER 1 B---»; сегментные варианты — блоками «---SEGMENT: <when>---» после письма. Верни шаблон заново, целиком, без пояснений.`;
 
-function shortenRetryHint(letters: HeChainLetter[]): string {
+function shortenRetryHint(letters: HeChainLetterAB[]): string {
   const counts = letters.map((l, i) => `письмо ${i + 1}: ${countWords(l.body)} слов`).join(', ');
   return (
-    `Тела писем длиннее регламента (${counts}). Регламент непреодолим: тело строго < 50 слов, первое письмо ≤ 45 слов. ` +
-    `Сократи каждое длинное письмо, сохранив смысл, операторы {{var}} и блоки «---SEGMENT: <when>---». ` +
+    `Тела писем длиннее регламента (${counts}). Регламент непреодолим: тело ≤ 80 слов, первое письмо ≤ 70 слов. ` +
+    `Сократи каждое длинное письмо, сохранив смысл, операторы {{var}}, блок «---LETTER 1 B---» и блоки «---SEGMENT: <when>---». ` +
     `Верни шаблон заново, целиком, в том же формате.`
   );
 }
@@ -477,15 +495,25 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     winnerPatterns,
   });
 
-  /** Сырой ответ модели → письма с приклеенными сегментными вариантами. */
-  const buildLetters = (raw: string): { parsed: ParsedLetter[]; letters: HeChainLetter[] } => {
-    const seg = extractSegmentVariants(raw);
+  /** Сырой ответ модели → письма с приклеенными сегментными и B-вариантами. */
+  const buildLetters = (raw: string): { parsed: ParsedLetter[]; letters: HeChainLetterAB[] } => {
+    // Сначала B-варианты (---LETTER 1 B---), затем сегментные блоки: оба
+    // сплиттера работают до letterParser, который про эти маркеры не знает.
+    const ab = extractLetterBVariants(raw);
+    const seg = extractSegmentVariants(ab.cleaned);
     const parsed = parseLettersFromModelOutput(seg.cleaned);
     const sliced = parsed.slice(0, 6);
     // wait_days — лесенка цепочки CHAIN_WAIT_DAYS (внутри parsedToChainLetters), по индексу письма.
-    const letters = parsedToChainLetters(sliced).map((l, i) => {
-      const sv = seg.variants.get(sliced[i]?.letter_index ?? i + 1);
-      return sv?.length ? { ...l, segment_variants: sv } : l;
+    const letters = parsedToChainLetters(sliced).map((l, i): HeChainLetterAB => {
+      const { variants: _legacy, ...rest } = l;
+      const idx = sliced[i]?.letter_index ?? i + 1;
+      const sv = seg.variants.get(idx);
+      const bv = ab.variants.get(idx);
+      return {
+        ...rest,
+        ...(sv?.length ? { segment_variants: sv } : {}),
+        ...(bv ? { variants: [bv] } : {}),
+      };
     });
     return { parsed, letters };
   };
@@ -509,7 +537,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     throw new Error(`Шаблон не распарсился: ${parsed.length} писем после retry`);
   }
 
-  // Шаг 2b: длина тел — регламент <50 слов (письмо 1 ≤45); >55 слов → один retry на сокращение.
+  // Шаг 2b: длина тел — регламент ≤80 слов (письмо 1 ≤70); >85 слов → один retry на сокращение.
   if (letters.some((l) => countWords(l.body) > SHORTEN_RETRY_WORDS)) {
     stageLog(ctx, '[template] тела писем длиннее регламента — retry на сокращение');
     const retryLlm = await callLLMText(
@@ -532,10 +560,12 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
 
   // Шаг 2c: критик-луп — одна оценка финальных писем той же моделью, что и
   // генерация (getHeModel('chain')), + максимум один rewrite по её замечаниям.
-  // Rewrite не содержит ---SEGMENT--- блоков: сегментные варианты после его
-  // принятия восстанавливаются из исходных писем по индексу. Без цикла; сбой
-  // критика, нечитаемый, урезанный или раздутый rewrite → остаются исходные
-  // письма. Операторы (шаг 3) считаются уже по финальному тексту.
+  // Критик работает ТОЛЬКО по основному варианту A (B-вариант и сегментные
+  // варианты в разбор не идут — стоимость). Rewrite не содержит ---SEGMENT---
+  // и ---LETTER N B--- блоков: варианты после его принятия восстанавливаются
+  // из исходных писем по индексу. Без цикла; сбой критика, нечитаемый,
+  // урезанный или раздутый rewrite → остаются исходные письма. Операторы
+  // (шаг 3) считаются уже по финальному тексту.
   let critiqueInfo: { verdict: string; issues_count: number; rewritten: boolean } | null = null;
   try {
     const criticLetters = letters.map((l) => ({ subject: l.subject ?? '', body: l.body }));
@@ -578,12 +608,17 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       if (rebuilt.parsed.length === letters.length) {
         llm = rewrite;
         parsed = rebuilt.parsed;
-        // Рерайт выводит только тему+тело (---SEGMENT--- блоков в нём нет):
-        // варианты восстанавливаем детерминированно из исходных писем.
+        // Рерайт выводит только тему+тело основного варианта (---SEGMENT--- и
+        // ---LETTER N B--- блоков в нём нет): варианты восстанавливаем
+        // детерминированно из исходных писем по индексу.
         const originalLetters = letters;
-        letters = rebuilt.letters.map((l, i) => {
-          const sv = originalLetters[i]?.segment_variants;
-          return sv?.length ? { ...l, segment_variants: sv } : l;
+        letters = rebuilt.letters.map((l, i): HeChainLetterAB => {
+          const orig = originalLetters[i];
+          return {
+            ...l,
+            ...(orig?.segment_variants?.length ? { segment_variants: orig.segment_variants } : {}),
+            ...(orig?.variants?.length ? { variants: orig.variants } : {}),
+          };
         });
         critiqueInfo.rewritten = true;
       } else {
@@ -595,11 +630,23 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   }
 
   // Шаг 3: операторы финальных писем → колонки базы (pure) + консистентность.
-  const collectOperators = (ls: HeChainLetter[]) => {
-    const subjectOperators = extractPersonalizationOperators(ls.map((l) => l.subject ?? '').join('\n'));
+  // Операторы собираются из основного текста (A), B-вариантов и сегментных
+  // вариантов: B — полноценное письмо и тоже может нести {{var}}.
+  const collectOperators = (ls: HeChainLetterAB[]) => {
+    const variantTexts = (l: HeChainLetterAB) => (l.variants ?? []).flatMap((v) => [v.subject ?? '', v.body]);
+    const subjectOperators = extractPersonalizationOperators(
+      ls.map((l) => [l.subject ?? '', ...variantTexts(l)].join('\n')).join('\n'),
+    );
     const allOperators = extractPersonalizationOperators(
       ls
-        .map((l) => [l.subject ?? '', l.body, ...(l.segment_variants ?? []).map((v) => v.text)].join('\n'))
+        .map((l) =>
+          [
+            l.subject ?? '',
+            l.body,
+            ...variantTexts(l),
+            ...(l.segment_variants ?? []).map((v) => v.text),
+          ].join('\n'),
+        )
         .join('\n'),
     );
     return { subjectOperators, allOperators };

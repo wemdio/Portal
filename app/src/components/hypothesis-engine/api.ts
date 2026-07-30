@@ -9,6 +9,7 @@ import { authFetch } from '@/lib/authFetch';
 import type {
   HeBase,
   HeChain,
+  HeChainLetter,
   HeHypothesis,
   HeJob,
   HeProject,
@@ -34,6 +35,31 @@ export type HeJobSummary = Pick<
   /** Вход стадии: фильтрация джоб по вертикали (payload.vertical_id). */
   payload?: { vertical_id?: string } | null;
 };
+
+/* ── Цепочка писем: A/B-варианты ── */
+
+/** A/B-вариант письма: альтернативные тема/тело рядом с основным (= «вариант A»). */
+export interface HeLetterVariant {
+  subject: string | null;
+  body: string;
+}
+
+/**
+ * Письмо цепочки по контракту API. Отличается от HeChainLetter в lib-типах:
+ * variants — массив объектов {subject, body} (легаси-строки UI отбрасывает).
+ */
+export type HeChainLetterDto = Omit<HeChainLetter, 'variants'> & {
+  variants?: HeLetterVariant[];
+};
+
+/** Цепочка из выдачи API: letters — HeChainLetterDto. */
+export type HeChainDto = Omit<HeChain, 'letters'> & { letters: HeChainLetterDto[] };
+
+/** PATCH /chains/[id] { letter_index, variant_index } → { letters }. */
+export interface HeChainPatchResponse {
+  letters?: HeChainLetterDto[];
+  error?: string;
+}
 
 /* ── Досье вертикали ── */
 
@@ -122,7 +148,7 @@ export interface HeProjectDetailResponse {
   project?: HeProject;
   hypotheses?: HeHypothesis[];
   verticals?: HeVertical[];
-  chains?: HeChain[];
+  chains?: HeChainDto[];
   vocabs?: HeVocab[];
   bases?: HeBaseSummary[];
   templates?: HeTemplate[];

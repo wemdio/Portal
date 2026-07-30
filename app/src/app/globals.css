@@ -2478,6 +2478,7 @@ html[data-portal-theme='dark'] .portal-shell .bg-gray-50\/30,
 html[data-portal-theme='dark'] .portal-shell .bg-gray-50\/40,
 html[data-portal-theme='dark'] .portal-shell .bg-gray-50\/50,
 html[data-portal-theme='dark'] .portal-shell .bg-gray-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-gray-50\/70,
 html[data-portal-theme='dark'] .portal-shell .bg-gray-50\/80,
 html[data-portal-theme='dark'] .portal-shell .bg-zinc-50\/30,
 html[data-portal-theme='dark'] .portal-shell .bg-zinc-50\/40,
@@ -2578,7 +2579,8 @@ html[data-portal-theme='dark'] .portal-shell .hover\:bg-zinc-50\/70:hover {
 }
 
 /* === TEXT COLORS === */
-/* Основной текст — gray-900/800/700 / zinc-* того же диапазона. */
+/* Основной текст — gray-950/900/800/700 / zinc-* того же диапазона. */
+html[data-portal-theme='dark'] .portal-shell .text-gray-950,
 html[data-portal-theme='dark'] .portal-shell .text-gray-900,
 html[data-portal-theme='dark'] .portal-shell .text-gray-800,
 html[data-portal-theme='dark'] .portal-shell .text-zinc-900,
@@ -3002,7 +3004,8 @@ html[data-portal-theme='dark'] .portal-shell .bg-red-50\/40,
 html[data-portal-theme='dark'] .portal-shell .bg-red-50\/50,
 html[data-portal-theme='dark'] .portal-shell .bg-red-50\/60,
 html[data-portal-theme='dark'] .portal-shell .bg-red-50\/70,
-html[data-portal-theme='dark'] .portal-shell .bg-red-50\/80 {
+html[data-portal-theme='dark'] .portal-shell .bg-red-50\/80,
+html[data-portal-theme='dark'] .portal-shell .hover\:bg-red-100:hover {
   background-color: rgba(248, 113, 113, 0.12) !important;
 }
 html[data-portal-theme='dark'] .portal-shell .bg-red-500,
