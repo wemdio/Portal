@@ -51,6 +51,28 @@ function normTitle(t: string): string {
   return t.toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Живой прогресс стадии → he_jobs.progress ({done, total, label}); его
+ * показывает UI шага «Исследование». Best-effort: сбой обновления
+ * не должен валить стадию.
+ */
+async function reportProgress(
+  ctx: HeStageContext,
+  jobId: string,
+  done: number,
+  total: number,
+  label: string,
+): Promise<void> {
+  try {
+    await ctx.supabase
+      .from('he_jobs')
+      .update({ progress: { done, total, label } })
+      .eq('id', jobId);
+  } catch {
+    // прогресс — best-effort, сбой игнорируем
+  }
+}
+
 export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
   const project = await readProject(ctx.supabase, job.project_id);
@@ -73,7 +95,9 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
   let merged = 0;
   let dropped = 0;
 
-  for (const candidate of candidates) {
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidate = candidates[i];
+    await reportProgress(ctx, job.id, i + 1, candidates.length, 'проверяем гипотезу');
     stageLog(ctx, `[evidence] «${candidate.title}»…`);
 
     // 1) Поиск по запросам кандидата (2–4), дедуп ссылок, best-effort.

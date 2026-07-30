@@ -34,6 +34,8 @@ export type HeJobSummary = Pick<
   finished_at: string | null;
   /** Вход стадии: фильтрация джоб по вертикали (payload.vertical_id). */
   payload?: { vertical_id?: string } | null;
+  /** Живой прогресс стадии (he_jobs.progress): счётчик «— 14/33 · проверяем гипотезу». */
+  progress?: { done?: number; total?: number; label?: string } | null;
 };
 
 /* ── Цепочка писем: A/B-варианты ── */

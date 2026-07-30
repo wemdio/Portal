@@ -16,7 +16,7 @@ function jsonError(message: string, status: number) {
 const BASE_LIST_COLUMNS = 'id, vertical_id, filename, row_count, status, analysis, created_at';
 // payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
 // иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
-const JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload';
+const JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
 // Досье вертикалей: data — объективные счётчики сегмента, нужна на карточке.
 const DOSSIER_LIST_COLUMNS = 'id, vertical_id, status, data, error';
 // Банк кейсов: БЕЗ text — полный текст кейса тяжёлый, списку хватает карточки.

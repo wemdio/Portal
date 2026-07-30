@@ -494,7 +494,20 @@ function CasesBlock({
 
 type StageState = 'done' | 'current' | 'upcoming' | 'failed';
 
-/** Вертикальный чек-лист стадий: сделано / идёт / впереди / не удалось. */
+/** Текст живого счётчика стадии: «14/33 · проверяем гипотезу» (из he_jobs.progress). */
+function progressText(job: HeJobSummary | undefined): string | null {
+  const p = job?.progress;
+  if (!p) return null;
+  const counter =
+    typeof p.done === 'number' && typeof p.total === 'number' && p.total > 0
+      ? `${p.done}/${p.total}`
+      : null;
+  const label = p.label?.trim() ? p.label.trim() : null;
+  if (!counter && !label) return null;
+  return [counter, label].filter(Boolean).join(' · ');
+}
+
+/** Вертикальный чек-лист стадий: сделано / идёт / впереди / не удалось. У активной — живой счётчик. */
 function StageChecklist({ jobs, running }: { jobs: HeJobSummary[]; running: boolean }) {
   const states: StageState[] = RESEARCH_STAGES.map(({ stage }) => {
     const job = latestJobOf(jobs, stage);
@@ -522,6 +535,7 @@ function StageChecklist({ jobs, running }: { jobs: HeJobSummary[]; running: bool
     <ol className="space-y-2.5">
       {RESEARCH_STAGES.map(({ stage, line }, i) => {
         const state = states[i];
+        const progress = state === 'current' ? progressText(latestJobOf(jobs, stage)) : null;
         return (
           <li
             key={stage}
@@ -546,7 +560,10 @@ function StageChecklist({ jobs, running }: { jobs: HeJobSummary[]; running: bool
                 <span className="h-1.5 w-1.5 rounded-full bg-gray-300" aria-hidden />
               )}
             </span>
-            {line}
+            <span>
+              {line}
+              {progress ? <span className="block text-xs font-normal text-blue-500">— {progress}</span> : null}
+            </span>
           </li>
         );
       })}
