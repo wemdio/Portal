@@ -93,7 +93,7 @@ def map_operation(
     purpose = o.get("paymentPurpose", "") or ""
     payer = (o.get("payerName") or "") if is_credit else ""
     payer_inn = (o.get("payerInn") or "") if is_credit else ""
-    payee = "" if is_credit else (o.get("recipientName") or "")
+    payee = "" if is_credit else (o.get("recipient") or "")
     payee_inn = "" if is_credit else (o.get("recipientInn") or "")
 
     exclude_reason = classify_revenue(payer, payer_inn, purpose) if is_credit else ""
@@ -117,6 +117,50 @@ def map_operation(
         "exclude_reason": exclude_reason or None,
         "raw": json.dumps(o, ensure_ascii=False),
     }
+
+
+def reconcile_period_totals(
+    rows: list[dict], data: dict, tolerance: float = 0.01
+) -> list[str]:
+    """Сверяет сумму замапленных операций периода с income/outcome, которые
+    банк сам посчитал за тот же период в ответе /bank-statement.
+
+    Это единственная доступная проверка полноты выгрузки: у ручки нет ни
+    курсора, ни total — раньше расхождение с ожидаемым числом операций можно
+    было объяснить только подозрением на пагинацию. Если сумма замапленных
+    приходов/расходов не сходится с income/outcome банка, часть операций до
+    базы не доехала (сетевой сбой периода, битая дата/сумма и т.п.) — то же
+    самое, что раньше пытались ловить пагинацией, только без домыслов о её
+    существовании.
+
+    rows — словари после map_operation (до to_row), т.е. уже без
+    отфильтрованных/пропущенных операций. data — сырой ответ API за период.
+
+    Сравнение — с допуском tolerance (по умолчанию копейка), не точное
+    равенство float. Если банк не прислал income или outcome в ответе,
+    сверка по этому полю молча пропускается — отсутствие поля не ошибка.
+    """
+    warnings: list[str] = []
+
+    income = data.get("income")
+    if income is not None:
+        mapped_income = sum(r["amount"] for r in rows if r["direction"] == "credit")
+        diff = mapped_income - float(income)
+        if abs(diff) > tolerance:
+            warnings.append(
+                f"income mismatch: bank={income} mapped={mapped_income} diff={diff:+.2f}"
+            )
+
+    outcome = data.get("outcome")
+    if outcome is not None:
+        mapped_outcome = sum(r["amount"] for r in rows if r["direction"] == "debit")
+        diff = mapped_outcome - float(outcome)
+        if abs(diff) > tolerance:
+            warnings.append(
+                f"outcome mismatch: bank={outcome} mapped={mapped_outcome} diff={diff:+.2f}"
+            )
+
+    return warnings
 
 
 class BankTBankSync(SyncSource):
@@ -149,14 +193,20 @@ class BankTBankSync(SyncSource):
                         continue
                     data = resp.json()
 
-                    rows: list[tuple] = []
+                    mapped_rows: list[dict] = []
                     for o in data.get("operation", []) or []:
                         mapped = map_operation(o, ACCOUNT, skip_counts)
                         if mapped is not None:
-                            rows.append(to_row(mapped))
-                    if rows:
-                        await self._upsert(conn, rows)
-                        total += len(rows)
+                            mapped_rows.append(mapped)
+                    if mapped_rows:
+                        await self._upsert(conn, [to_row(m) for m in mapped_rows])
+                        total += len(mapped_rows)
+
+                    for warning in reconcile_period_totals(mapped_rows, data):
+                        print(
+                            f"[bank_tbank] {frm}..{till}: {warning}",
+                            flush=True,
+                        )
                 except Exception as e:
                     print(
                         f"[bank_tbank] period FAIL {frm}..{till}: {e}\n{traceback.format_exc()}",

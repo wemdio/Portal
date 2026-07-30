@@ -860,7 +860,7 @@ ACC = "40802810600001780269"
 TB_CREDIT = {
     "operationId": "op-1",
     "id": 11,
-    "date": "2026-07-15T10:00:00",
+    "date": "2026-07-15",
     "amount": 5000,
     "recipientAccount": ACC,
     "payerName": "ООО Клиент",
@@ -871,11 +871,13 @@ TB_CREDIT = {
 TB_DEBIT = {
     "operationId": "op-2",
     "id": 12,
-    "date": "2026-07-16T10:00:00",
+    "date": "2026-07-16",
     "amount": 1500.5,
     "recipientAccount": "40702810000000000001",
     "payerAccount": ACC,
-    "recipientName": "ООО ЯНДЕКС",
+    # Живая проверка API 2026-07-30: имя получателя приходит в "recipient",
+    # такого поля, как "recipientName", в ответе нет.
+    "recipient": "ООО ЯНДЕКС",
     "recipientInn": "7736207543",
     "paymentPurpose": "Оплата рекламных услуг",
 }
@@ -934,7 +936,7 @@ def map_operation(o: dict, account: str) -> dict | None:
     purpose = o.get("paymentPurpose", "") or ""
     payer = (o.get("payerName") or "") if is_credit else ""
     payer_inn = (o.get("payerInn") or "") if is_credit else ""
-    payee = "" if is_credit else (o.get("recipientName") or "")
+    payee = "" if is_credit else (o.get("recipient") or "")
     payee_inn = "" if is_credit else (o.get("recipientInn") or "")
 
     exclude_reason = classify_revenue(payer, payer_inn, purpose) if is_credit else ""

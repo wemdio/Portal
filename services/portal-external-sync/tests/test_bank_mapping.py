@@ -96,7 +96,7 @@ ACC = "40802810600001780269"
 TB_CREDIT = {
     "operationId": "op-1",
     "id": 11,
-    "date": "2026-07-15T10:00:00",
+    "date": "2026-07-15",
     "amount": 5000,
     "recipientAccount": ACC,
     "payerName": "ООО Клиент",
@@ -107,11 +107,14 @@ TB_CREDIT = {
 TB_DEBIT = {
     "operationId": "op-2",
     "id": 12,
-    "date": "2026-07-16T10:00:00",
+    "date": "2026-07-16",
     "amount": 1500.5,
     "recipientAccount": "40702810000000000001",
     "payerAccount": ACC,
-    "recipientName": "ООО ЯНДЕКС",
+    # Реальный ответ API отдаёт имя получателя в "recipient", а не
+    # "recipientName" — так и должна выглядеть фикстура (см.
+    # test_tbank_debit_payee_name_reads_recipient_field).
+    "recipient": "ООО ЯНДЕКС",
     "recipientInn": "7736207543",
     "paymentPurpose": "Оплата рекламных услуг",
 }
@@ -130,6 +133,18 @@ def test_tbank_debit_fills_payee():
     assert row["payee_name"] == "ООО ЯНДЕКС"
     assert row["payee_inn"] == "7736207543"
     assert row["is_revenue"] is None
+
+
+def test_tbank_debit_payee_name_reads_recipient_field():
+    """Живая проверка API Т-Банка 30.07.2026 показала: имя получателя в
+    ответе приходит в поле "recipient", а не "recipientName" (такого поля
+    в ответе не существует). map_operation читал именно "recipientName",
+    поэтому payee_name у всех расходных операций уходил в базу пустым, и
+    правила разметки по имени получателя не срабатывали вовсе. Тест
+    зафиксирован отдельно от test_tbank_debit_fills_payee — тот тоже ловит
+    регресс, но не объясняет, из какого именно поля должно браться имя."""
+    row = map_operation(TB_DEBIT, ACC)
+    assert row["payee_name"] == TB_DEBIT["recipient"]
 
 
 def test_tbank_foreign_operation_is_skipped():
