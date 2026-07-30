@@ -24,7 +24,12 @@ export async function GET(req: NextRequest) {
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
   const { from, to, channels } = parsed.value;
 
-  // Пустая строка — валидный источник: это сделки без заполненного «Источник».
+  // Сделки без заполненного «Источник» приходят сюда под меткой «(не указан)» —
+  // именно её кладёт в разбивку metrics.ts, и именно её присылает таблица.
+  // Пустую строку слать бессмысленно: сравнение ниже подставляет «(не указан)»
+  // слева, так что `''` не совпадёт ни с чем и вернёт пустой список.
+  // Проверяем на `null`, а не на пустоту: отсутствие параметра — это ошибка
+  // вызова, а не «источник без имени».
   const source = url.searchParams.get('source');
   if (source === null) {
     return NextResponse.json({ error: 'Нужен параметр source' }, { status: 400 });
