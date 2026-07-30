@@ -1,3 +1,4 @@
+import { isValid, parseISO } from 'date-fns';
 import type { NextRequest } from 'next/server';
 
 import { GROUP_BY_VALUES, parseRange, type GroupBy } from '@/lib/expenses/period';
@@ -92,6 +93,46 @@ export function parsePage(params: URLSearchParams): number {
     throw new Error('page: ожидается неотрицательное целое');
   }
   return page;
+}
+
+/**
+ * Сегодняшняя дата по Москве.
+ *
+ * Витрина кладёт ручную трату в московский день (`occurred_on_msk`), а
+ * `toISOString()` вернул бы день по UTC: с 00:00 до 03:00 МСК сегодняшняя
+ * дата отвергалась бы как «в будущем».
+ */
+export function todayMsk(): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Moscow' }).format(new Date());
+}
+
+/** Дата ручной траты: формат, существование в календаре и не в будущем. */
+export function parseOccurredOn(value: unknown): string {
+  if (typeof value !== 'string' || !ISO_DATE_RE.test(value) || !isValid(parseISO(value))) {
+    throw new Error('Дата в формате ГГГГ-ММ-ДД');
+  }
+  if (value > todayMsk()) {
+    throw new Error('Дата траты в будущем');
+  }
+  return value;
+}
+
+/** Сумма ручной траты: положительное конечное число. */
+export function parseAmount(value: unknown): number {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error('Сумма должна быть больше нуля');
+  }
+  return amount;
+}
+
+/** Код валюты: три буквы, как в fx_rates. */
+export function parseCurrency(value: unknown): string {
+  const currency = typeof value === 'string' ? value.trim().toUpperCase() : '';
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    throw new Error('Валюта — трёхбуквенный код, например RUB или USD');
+  }
+  return currency;
 }
 
 /** Тело запроса. Битый JSON — тоже пользовательский ввод, а не сбой сервера. */
