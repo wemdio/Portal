@@ -201,6 +201,13 @@ describe('миграция дашборда первички', () => {
   it('индексирует amo_events под запросы view', () => {
     expect(SQL).toMatch(/create index if not exists .* on public\.amo_events/);
   });
+
+  it('ограничивает пороги этапов сверху', () => {
+    // Статус 143 «Закрыто и не реализовано» имеет sort 11000 и прошёл бы ЛЮБОЙ
+    // порог, приписав мёртвой сделке встречу и договор. На этом уже наступали
+    // в отчёте продаж — коммит 60ac8a1e. Верхняя граница обязана остаться.
+    expect(SQL).toMatch(/sort\s*<\s*10000/);
+  });
 });
 ```
 
@@ -314,12 +321,19 @@ initial_status as (
   from public.amo_leads l
 ),
 reached as (
+  -- Верхняя граница `< 10000` обязательна: закрытые статусы 142 «Успешно»
+  -- (sort 10000) и 143 «Закрыто и не реализовано» (sort 11000) проходят ЛЮБОЙ
+  -- порог. Без границы сделка, брошенная в минус на первом контакте, получит
+  -- дату встречи и договора равной дате закрытия, и воронка раздуется на весь
+  -- поток мёртвых лидов. Ровно на это уже наступали в отчёте продаж — см.
+  -- коммит 60ac8a1e. Закрытые статусы терминальны, а не этапы воронки; факт
+  -- выигрыша живёт отдельно в won_at.
   select
     ev.amo_deal_id,
-    min(ev.changed_at) filter (where s.sort >= 40)  as ev_qualified_at,
-    min(ev.changed_at) filter (where s.sort >= 70)  as ev_meeting_at,
-    min(ev.changed_at) filter (where s.sort >= 100) as ev_invoice_at,
-    min(ev.changed_at) filter (where s.sort >= 110) as ev_contract_at
+    min(ev.changed_at) filter (where s.sort >= 40  and s.sort < 10000) as ev_qualified_at,
+    min(ev.changed_at) filter (where s.sort >= 70  and s.sort < 10000) as ev_meeting_at,
+    min(ev.changed_at) filter (where s.sort >= 100 and s.sort < 10000) as ev_invoice_at,
+    min(ev.changed_at) filter (where s.sort >= 110 and s.sort < 10000) as ev_contract_at
   from ev
   join public.amo_leads l on l.amo_id = ev.amo_deal_id
   join public.amo_statuses s
@@ -331,10 +345,12 @@ select
   l.amo_id                                        as amo_deal_id,
   l.pipeline_id,
   l.created_at,
-  case when init_s.sort >= 40  then l.created_at else r.ev_qualified_at end as first_qualified_at,
-  case when init_s.sort >= 70  then l.created_at else r.ev_meeting_at   end as first_meeting_at,
-  case when init_s.sort >= 100 then l.created_at else r.ev_invoice_at   end as first_invoice_at,
-  case when init_s.sort >= 110 then l.created_at else r.ev_contract_at  end as first_contract_at,
+  -- Та же верхняя граница, что в `reached`: сделка, СОЗДАННАЯ сразу в закрытом
+  -- статусе, не считается прошедшей этапы воронки.
+  case when init_s.sort >= 40  and init_s.sort < 10000 then l.created_at else r.ev_qualified_at end as first_qualified_at,
+  case when init_s.sort >= 70  and init_s.sort < 10000 then l.created_at else r.ev_meeting_at   end as first_meeting_at,
+  case when init_s.sort >= 100 and init_s.sort < 10000 then l.created_at else r.ev_invoice_at   end as first_invoice_at,
+  case when init_s.sort >= 110 and init_s.sort < 10000 then l.created_at else r.ev_contract_at  end as first_contract_at,
   -- Дата оплаты берётся из closed_at, а не из событий: он синкается с 2024 года
   -- и достоверен для всей истории. Средний цикл поэтому не зависит от глубины
   -- событий AMO.
