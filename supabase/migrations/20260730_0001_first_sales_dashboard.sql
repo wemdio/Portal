@@ -76,59 +76,87 @@ create index if not exists idx_amo_events_type_deal_changed on public.amo_events
 -- Сделка, СОЗДАННАЯ сразу на высоком этапе, события не порождает. Поэтому
 -- начальный статус восстанавливаем из from_value первого события, а при полном
 -- отсутствии событий — из текущего статуса сделки.
+--
+-- Верхняя граница `sort < 10000` на КАЖДОМ пороговом сравнении обязательна.
+-- Статусы 142 «Успешно реализовано» (sort 10000) и 143 «Закрыто и не
+-- реализовано» (sort 11000) — терминальные, не этапы воронки, но
+-- арифметически проходят любой `>= N`. Без границы сделка, брошенная в минус
+-- на первом контакте, получала бы first_meeting_at/first_contract_at равными
+-- дате закрытия — ровно эта ошибка уже ловилась в отчёте продаж на реальных
+-- цифрах (см. коммит 60ac8a1e: «у меня они попадали, потому что
+-- sort=11000 >= любого порога»). Сделка, реально дошедшая до этапа, оставляет
+-- промежуточное событие — оно и засчитается; факт выигрыша живёт отдельно в
+-- won_at (из closed_at), эта граница на него не влияет.
 create or replace view public.amo_lead_stage_dates_v as
 with horizon as (
-  -- Дата, раньше которой событий у нас нет. Сделки, созданные до неё, могли
-  -- иметь переходы, которых мы не видели.
-  select min(changed_at) as first_event_at from public.amo_events
+  -- Дата, раньше которой событий смены этапа у нас нет. Сделки, созданные до
+  -- неё, могли иметь переходы, которых мы не видели. Фильтр по event_type
+  -- обязателен: amo_events помимо переходов хранит и задачи, и заметки (см.
+  -- комментарий к таблице в 20260706_0003) — без фильтра горизонт уехал бы
+  -- вниз при первой же синхронизированной заметке, и history_complete стал
+  -- бы ложно-оптимистичным для сделок без видимой истории переходов.
+  select min(changed_at) as first_event_at
+  from public.amo_events
+  where event_type = 'lead_status_changed'
 ),
 ev as (
   select
     e.amo_deal_id,
     e.changed_at,
-    e.from_value,
-    e.to_value,
+    -- Защищённое приведение: nullif снимает только пустую строку, а битый
+    -- импорт/ручной бэкфилл может занести нечисловой from_value/to_value.
+    -- Без регекса один такой event роняет invalid input syntax for type
+    -- bigint на ВЕСЬ SELECT из view, а не на одну строку — дашборд отдаёт
+    -- 500 целиком.
+    case when e.from_value ~ '^[0-9]+$' then e.from_value::bigint end as from_status,
+    case when e.to_value   ~ '^[0-9]+$' then e.to_value::bigint   end as to_status,
     row_number() over (partition by e.amo_deal_id order by e.changed_at) as rn
   from public.amo_events e
   where e.event_type = 'lead_status_changed'
 ),
 initial_status as (
+  -- LEFT JOIN вместо коррелированного скалярного подзапроса на ev: ev
+  -- упоминается в этом запросе дважды (здесь и в reached), поэтому Postgres
+  -- материализует её и не инлайнит — подзапрос `where ev.amo_deal_id = ...`
+  -- пересканировал бы весь tuplestore на каждую сделку (O(сделки × события)
+  -- на каждое чтение view). JOIN по (amo_deal_id, rn=1) — один проход.
   select
     l.amo_id as amo_deal_id,
-    coalesce(
-      (select nullif(ev.from_value, '')::bigint from ev
-        where ev.amo_deal_id = l.amo_id and ev.rn = 1),
-      l.status_id
-    ) as status_id
+    coalesce(first_ev.from_status, l.status_id) as status_id
   from public.amo_leads l
+  left join ev first_ev
+    on first_ev.amo_deal_id = l.amo_id and first_ev.rn = 1
 ),
 reached as (
   select
     ev.amo_deal_id,
-    min(ev.changed_at) filter (where s.sort >= 40)  as ev_qualified_at,
-    min(ev.changed_at) filter (where s.sort >= 70)  as ev_meeting_at,
-    min(ev.changed_at) filter (where s.sort >= 100) as ev_invoice_at,
-    min(ev.changed_at) filter (where s.sort >= 110) as ev_contract_at
+    min(ev.changed_at) filter (where s.sort >= 40  and s.sort < 10000) as ev_qualified_at,
+    min(ev.changed_at) filter (where s.sort >= 70  and s.sort < 10000) as ev_meeting_at,
+    min(ev.changed_at) filter (where s.sort >= 100 and s.sort < 10000) as ev_invoice_at,
+    min(ev.changed_at) filter (where s.sort >= 110 and s.sort < 10000) as ev_contract_at
   from ev
   join public.amo_leads l on l.amo_id = ev.amo_deal_id
   join public.amo_statuses s
     on s.pipeline_id = l.pipeline_id
-   and s.status_id = nullif(ev.to_value, '')::bigint
+   and s.status_id = ev.to_status
   group by ev.amo_deal_id
 )
 select
   l.amo_id                                        as amo_deal_id,
   l.pipeline_id,
   l.created_at,
-  case when init_s.sort >= 40  then l.created_at else r.ev_qualified_at end as first_qualified_at,
-  case when init_s.sort >= 70  then l.created_at else r.ev_meeting_at   end as first_meeting_at,
-  case when init_s.sort >= 100 then l.created_at else r.ev_invoice_at   end as first_invoice_at,
-  case when init_s.sort >= 110 then l.created_at else r.ev_contract_at  end as first_contract_at,
+  case when init_s.sort >= 40  and init_s.sort < 10000 then l.created_at else r.ev_qualified_at end as first_qualified_at,
+  case when init_s.sort >= 70  and init_s.sort < 10000 then l.created_at else r.ev_meeting_at   end as first_meeting_at,
+  case when init_s.sort >= 100 and init_s.sort < 10000 then l.created_at else r.ev_invoice_at   end as first_invoice_at,
+  case when init_s.sort >= 110 and init_s.sort < 10000 then l.created_at else r.ev_contract_at  end as first_contract_at,
   -- Дата оплаты берётся из closed_at, а не из событий: он синкается с 2024 года
   -- и достоверен для всей истории. Средний цикл поэтому не зависит от глубины
   -- событий AMO.
   case when l.status_id = 142 then l.closed_at end as won_at,
-  (h.first_event_at is not null and l.created_at >= h.first_event_at) as history_complete
+  -- coalesce(..., false): l.created_at nullable, и при первом true-операнде
+  -- true И l.created_at IS NULL даёт UNKNOWN (NULL), а не false — TypeScript
+  -- сторона объявляет history_complete как boolean, NULL туда не годится.
+  coalesce(h.first_event_at is not null and l.created_at >= h.first_event_at, false) as history_complete
 from public.amo_leads l
 cross join horizon h
 left join initial_status i on i.amo_deal_id = l.amo_id
@@ -137,8 +165,10 @@ left join public.amo_statuses init_s
       and init_s.status_id = i.status_id
 left join reached r on r.amo_deal_id = l.amo_id;
 
+alter view public.amo_lead_stage_dates_v set (security_invoker = on);
+
 comment on view public.amo_lead_stage_dates_v is
-  'Когда сделка ВПЕРВЫЕ дошла до каждого этапа. Проскок этапа засчитывается. history_complete=false — сделка создана раньше глубины событий, её этапы считать нельзя.';
+  'Когда сделка ВПЕРВЫЕ дошла до каждого этапа. Проскок этапа засчитывается, терминальные статусы (142/143, sort>=10000) в пороги не считаются. history_complete=false — сделка создана раньше глубины событий, её этапы считать нельзя.';
 
 -- ─── RLS и гранты ────────────────────────────────────────────────────────
 
