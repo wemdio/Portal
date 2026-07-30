@@ -7,7 +7,8 @@ import type { FirstSalesSeries } from '@/lib/firstSales/metrics';
 import FiltersBar, { getDefaultFilters, type FiltersState } from '@/components/first-sales/FiltersBar';
 import KpiRow from '@/components/first-sales/KpiRow';
 import TimeSeriesChart from '@/components/first-sales/TimeSeriesChart';
-import SourceTable from '@/components/first-sales/SourceTable';
+import SourceTable, { drillKey } from '@/components/first-sales/SourceTable';
+import SourceMapEditor from '@/components/first-sales/SourceMapEditor';
 
 type SummaryResponse = FirstSalesSeries & {
   previousTotals: FirstSalesSeries['totals'];
@@ -19,6 +20,11 @@ export default function FirstSalesView() {
   const [data, setData] = useState<SummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showSourceMap, setShowSourceMap] = useState(false);
+  // Инкрементируется после сохранения в справочнике источников, чтобы
+  // перезапустить фетч сводки без изменения самих фильтров (эффект ниже
+  // держит его в зависимостях ровно для этого).
+  const [reloadKey, setReloadKey] = useState(0);
 
   // Фетч в эффекте по ключу = весь объект фильтров. Клик по каналу или пресету
   // периода запускает новый запрос при каждом изменении; быстрые повторные
@@ -64,7 +70,7 @@ export default function FirstSalesView() {
       active = false;
       controller.abort();
     };
-  }, [filters]);
+  }, [filters, reloadKey]);
 
   const isEmpty = !!data && data.totals.leads === 0 && data.bySource.length === 0;
 
@@ -95,8 +101,27 @@ export default function FirstSalesView() {
           ) : (
             <>
               <TimeSeriesChart series={data.series} groupBy={filters.groupBy} />
-              <SourceTable rows={data.bySource} />
+              {/* key на from/to/channels: смена периода или каналов размонтирует и
+                  заново монтирует таблицу, сбрасывая раскрытую drill-down строку
+                  вместо того, чтобы показывать под ней сделки уже не того окна.
+                  groupBy в ключ не входит — drillKey() это объясняет. */}
+              <SourceTable key={drillKey(filters)} rows={data.bySource} filters={filters} />
             </>
+          )}
+
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowSourceMap((v) => !v)}
+              className="rounded-full border border-zinc-200 px-2.5 py-1 text-xs text-zinc-600 hover:bg-zinc-50"
+              aria-expanded={showSourceMap}
+            >
+              {showSourceMap ? 'Скрыть справочник источников' : 'Справочник источников'}
+            </button>
+          </div>
+
+          {showSourceMap && (
+            <SourceMapEditor onSaved={() => setReloadKey((k) => k + 1)} />
           )}
         </>
       )}
