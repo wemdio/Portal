@@ -662,6 +662,27 @@ git commit -m "refactor(sync): единый порядок колонок bank_t
 **Files:**
 - Modify: `services/portal-external-sync/sources/bank_tochka.py`
 - Test: `services/portal-external-sync/tests/test_bank_mapping.py`
+- Test: `services/portal-external-sync/tests/test_bank_tochka_reconcile.py`
+
+> **Живая проверка API 2026-07-30** (один запрос выписки за 2025 год, 705
+> операций: 236 Credit / 469 Debit, пагинации в ответе нет) поправила
+> несколько неточностей исходной версии этого таска:
+> - у расходной операции поля `DebtorParty` в ответе нет вовсе (не пустой
+>   объект — отсутствующий ключ), мы сами плательщик;
+> - `Amount` — объект `{"amount", "amountNat", "currency"}`, а не голое
+>   число: `currency` нужно читать из ответа, а не хардкодить `"RUB"`
+>   константой (счёт сегодня рублёвый, поэтому раньше это совпадало
+>   молча — платёж в другой валюте лёг бы рублёвым и завысил рублёвый
+>   итог);
+> - `documentProcessDate` — дата без времени (`"2025-12-31"`), без смещения
+>   пояса;
+> - у операции есть поле `status`, набор возможных значений неизвестен —
+>   пока не фильтруем по нему ничего, только копим встреченные значения для
+>   сводки;
+> - выписка содержит `startDateBalance`/`endDateBalance` — это даёт
+>   единственную доступную проверку полноты выгрузки периода (тот же приём,
+>   что `reconcile_period_totals` у Т-Банка в Task 7, только по остаткам, а
+>   не по `income`/`outcome`).
 
 - [ ] **Step 1: Написать падающий тест**
 
@@ -680,21 +701,34 @@ CREDIT = {
     "transactionId": "tx-credit-1",
     "documentNumber": "101",
     "documentProcessDate": "2026-07-15",
-    "Amount": {"amount": "5000.00"},
+    "Amount": {"amount": "5000.00", "amountNat": "5000.00", "currency": "RUB"},
     "DebtorParty": {"name": "ООО Клиент", "inn": "7701234567"},
     "CreditorParty": {"name": "ИП Мы", "inn": "165808519703"},
+    "CreditorAccount": "40802810600001780269",
     "description": "Оплата по счёту 42",
+    "paymentId": "pay-101",
+    "status": "Executed",
+    "transactionTypeCode": "01",
 }
 
+# Живая проверка API Точки 30.07.2026: у расходной операции DebtorParty
+# отсутствует вовсе — мы сами плательщик, банк его не присылает (не пустой
+# объект, а отсутствующий ключ). Amount приходит объектом с
+# amount/amountNat/currency, а не голым числом. documentProcessDate — дата
+# без времени и без смещения пояса. paymentId/status/transactionTypeCode/
+# CreditorAccount — реальные ключи ответа, тоже подтверждённые тем прогоном.
 DEBIT = {
     "creditDebitIndicator": "Debit",
     "transactionId": "tx-debit-1",
     "documentNumber": "202",
     "documentProcessDate": "2026-07-16",
-    "Amount": {"amount": "1500.50"},
-    "DebtorParty": {"name": "ИП Мы", "inn": "165808519703"},
+    "Amount": {"amount": "1500.50", "amountNat": "1500.50", "currency": "RUB"},
     "CreditorParty": {"name": "ООО ЯНДЕКС", "inn": "7736207543"},
+    "CreditorAccount": "40702810900000012345",
     "description": "Оплата рекламных услуг",
+    "paymentId": "pay-202",
+    "status": "Executed",
+    "transactionTypeCode": "01",
 }
 
 
@@ -729,7 +763,42 @@ def test_transaction_id_falls_back_to_document_number():
     del tx["transactionId"]
     row = map_transaction(tx, "acc-9")
     assert row["transaction_id"] == "acc-9|202"
+
+
+def test_currency_is_read_from_amount_and_uppercased():
+    """Главный тест: если платёж придёт не в рублях, он не должен молча
+    лечь рублёвым — валюта берётся из Amount.currency, а не константой."""
+    tx = dict(DEBIT)
+    tx["Amount"] = {"amount": "1500.50", "amountNat": "1500.50", "currency": "usd"}
+    row = map_transaction(tx, "acc-1")
+    assert row["currency"] == "USD"
+
+
+def test_currency_falls_back_to_rub_when_field_missing():
+    tx = dict(DEBIT)
+    tx["Amount"] = {"amount": "1500.50", "amountNat": "1500.50"}  # без currency
+    row = map_transaction(tx, "acc-1")
+    assert row["currency"] == "RUB"
+
+
+def test_status_counts_tally_by_value():
+    """status_counts, общий на весь прогон, обязан копить встреченные
+    значения Transaction.status по отдельности — их печатает в сводке в
+    конце run(). Мы не знаем полный набор возможных значений заранее, так
+    что просто считаем встреченное как есть, ничего не отбрасывая."""
+    status_counts: dict[str, int] = {}
+    executed = dict(CREDIT)
+    pending = dict(DEBIT)
+    pending["status"] = "Pending"
+    map_transaction(executed, "acc-1", status_counts=status_counts)
+    map_transaction(pending, "acc-1", status_counts=status_counts)
+    assert status_counts == {"Executed": 1, "Pending": 1}
 ```
+
+(Полный набор тестов — включая пропуск битой даты/суммы, расход без
+`CreditorParty`, пустую/отсутствующую валюту и подсчёт `status` для
+пропущенных записей — см. итоговый файл
+`services/portal-external-sync/tests/test_bank_mapping.py`.)
 
 - [ ] **Step 2: Запустить тест и убедиться, что он падает**
 
@@ -739,28 +808,133 @@ cd services/portal-external-sync && python -m pytest tests/test_bank_mapping.py 
 
 Ожидается: FAIL — `ImportError: cannot import name 'map_transaction'`.
 
-- [ ] **Step 3: Реализовать `map_transaction` и переключить `_fetch_period`**
+- [ ] **Step 3: Реализовать `map_transaction`, `reconcile_period_totals` и переключить `_fetch_period`**
 
 В `services/portal-external-sync/sources/bank_tochka.py` заменить импорт:
 
 ```python
-from ._bank_common import classify_revenue, parse_date, to_row
+from ._bank_common import classify_revenue, coerce_amount, parse_date, to_row
 ```
 
-Добавить функцию модульного уровня (после констант, до класса):
+Добавить функции модульного уровня (после констант, до класса):
 
 ```python
-def map_transaction(t: dict, acc: str) -> dict | None:
+def _parse_amount(t: dict) -> float | None:
+    """Amount.amount → float через общий coerce_amount (см. _bank_common)."""
+    return coerce_amount((t.get("Amount") or {}).get("amount"))
+
+
+def _parse_currency(t: dict) -> str:
+    """Amount.currency → верхний регистр, RUB — запасное значение.
+
+    Счёт сегодня рублёвый, поэтому раньше валюта была захардкожена
+    константой. Если хоть один платёж придёт не в рублях, он молча ляжет
+    рублёвым и завысит рублёвый итог: витрина расходов конвертирует по
+    курсу только то, что явно помечено не рублями.
+    """
+    currency = (t.get("Amount") or {}).get("currency")
+    return str(currency).upper() if currency else "RUB"
+
+
+def _extract_balance(value: object) -> float | None:
+    """startDateBalance/endDateBalance → float.
+
+    Банк может прислать остаток и голым числом, и вложенным объектом вида
+    Amount ({"amount": ...}) — живого примера структуры на момент написания
+    не было, только имена ключей, поэтому оба варианта обрабатываются
+    одинаково устойчиво.
+    """
+    if isinstance(value, dict):
+        value = value.get("amount")
+    return coerce_amount(value)
+
+
+def reconcile_period_totals(
+    rows: list[dict], statement: dict, tolerance: float = 0.01
+) -> list[str]:
+    """Сверяет изменение остатка по выписке периода с суммой замапленных
+    операций того же периода: endDateBalance - startDateBalance обязано
+    равняться сумме приходов минус сумма расходов.
+
+    Пагинации в ответе Точки нет — это единственная доступная проверка
+    полноты выгрузки (тот же приём, что reconcile_period_totals у Т-Банка,
+    см. sources/bank_tbank.py, только там сверяют с income/outcome, а не с
+    остатками). Сравнение — с допуском tolerance (по умолчанию копейка).
+    Если полей с остатками в ответе нет — сверка молча пропускается.
+    """
+    warnings: list[str] = []
+
+    start_balance = _extract_balance(statement.get("startDateBalance"))
+    end_balance = _extract_balance(statement.get("endDateBalance"))
+    if start_balance is None or end_balance is None:
+        return warnings
+
+    mapped_credit = sum(r["amount"] for r in rows if r["direction"] == "credit")
+    mapped_debit = sum(r["amount"] for r in rows if r["direction"] == "debit")
+    bank_delta = end_balance - start_balance
+    mapped_delta = mapped_credit - mapped_debit
+    diff = bank_delta - mapped_delta
+    if abs(diff) > tolerance:
+        warnings.append(
+            f"balance mismatch: start={start_balance} end={end_balance} "
+            f"bank_delta={bank_delta} mapped_delta={mapped_delta} diff={diff:+.2f}"
+        )
+    return warnings
+
+
+def map_transaction(
+    t: dict,
+    acc: str,
+    skip_counts: dict[str, int] | None = None,
+    status_counts: dict[str, int] | None = None,
+) -> dict | None:
     """Операция Точки → словарь полей bank_transactions. None — пропустить.
 
     Классификатор «выручка / не выручка» осмыслен только для прихода: у
     расхода нет плательщика-клиента, и прогонять по нему classify_revenue
     значит записывать в exclude_reason случайный мусор.
+
+    skip_counts, если передан, копит причины пропуска (битая дата/сумма)
+    для сводки по прогону. status_counts, если передан, копит встреченные
+    значения Transaction.status за весь прогон — набор возможных значений
+    заранее не известен, поэтому просто считаем как есть, ничего не
+    отбрасывая, и делаем это для каждой операции, даже той, что дальше
+    будет пропущена по другой причине.
     """
+    if status_counts is not None:
+        status = t.get("status")
+        key = str(status) if status is not None else "<missing>"
+        status_counts[key] = status_counts.get(key, 0) + 1
+
     indicator = t.get("creditDebitIndicator")
     if indicator not in ("Credit", "Debit"):
         return None
     is_credit = indicator == "Credit"
+
+    doc = t.get("documentNumber")
+    tx_id = t.get("transactionId") or f"{acc}|{doc}"
+
+    occurred_at = parse_date(t.get("documentProcessDate", ""))
+    if occurred_at is None:
+        print(
+            f"[bank_tochka] skip transactionId={tx_id!r}: не разобралась дата "
+            f"documentProcessDate={t.get('documentProcessDate')!r}",
+            flush=True,
+        )
+        if skip_counts is not None:
+            skip_counts["bad_date"] = skip_counts.get("bad_date", 0) + 1
+        return None
+
+    amount = _parse_amount(t)
+    if amount is None:
+        print(
+            f"[bank_tochka] skip transactionId={tx_id!r}: не разобралась сумма "
+            f"Amount={t.get('Amount')!r}",
+            flush=True,
+        )
+        if skip_counts is not None:
+            skip_counts["bad_amount"] = skip_counts.get("bad_amount", 0) + 1
+        return None
 
     debtor = t.get("DebtorParty") or {}
     creditor = t.get("CreditorParty") or {}
@@ -774,17 +948,14 @@ def map_transaction(t: dict, acc: str) -> dict | None:
     exclude_reason = classify_revenue(payer, payer_inn, purpose) if is_credit else ""
     is_revenue = (not exclude_reason) if is_credit else None
 
-    doc = t.get("documentNumber")
-    tx_id = t.get("transactionId") or f"{acc}|{doc}"
-
     return {
         "bank": "tochka",
         "account_id": acc,
         "transaction_id": str(tx_id),
         "document_number": str(doc) if doc is not None else None,
-        "occurred_at": parse_date(t.get("documentProcessDate", "")),
-        "amount": float((t.get("Amount") or {}).get("amount", 0)),
-        "currency": "RUB",
+        "occurred_at": occurred_at,
+        "amount": amount,
+        "currency": _parse_currency(t),
         "direction": "credit" if is_credit else "debit",
         "payer_name": payer or None,
         "payer_inn": payer_inn or None,
@@ -797,45 +968,61 @@ def map_transaction(t: dict, acc: str) -> dict | None:
     }
 ```
 
-Заменить тело цикла в `_fetch_period` (сейчас `bank_tochka.py:92-122`) на:
+Заменить тело цикла в `_fetch_period` на сборку списка через `map_transaction`,
+вызов `reconcile_period_totals` для этого периода (печатая расхождения тем же
+`print(..., flush=True)`, что и остальные логи источника) и `to_row` только
+на выходе:
 
 ```python
-        rows: list[tuple] = []
+        mapped_rows: list[dict] = []
         for t in stmt.get("Transaction", []) or []:
-            mapped = map_transaction(t, acc)
+            mapped = map_transaction(t, acc, skip_counts, status_counts)
             if mapped is not None:
-                rows.append(to_row(mapped))
-        return rows
+                mapped_rows.append(mapped)
+
+        for warning in reconcile_period_totals(mapped_rows, stmt):
+            print(f"[bank_tochka] acc={acc} {st}..{en}: {warning}", flush=True)
+
+        return [to_row(m) for m in mapped_rows]
 ```
 
-В `_upsert` дополнить `DO UPDATE SET`, чтобы повторный прогон чинил ранее сохранённые строки:
+`_fetch_period` и `run()` дополнительно прокидывают общий на весь прогон
+`status_counts: dict[str, int] = {}` (по образцу уже существующего
+`skip_counts`) и печатают его сводку в конце `run()`:
 
 ```python
-               ON CONFLICT (bank, transaction_id) DO UPDATE SET
-                 direction      = EXCLUDED.direction,
-                 payee_name     = EXCLUDED.payee_name,
-                 payee_inn      = EXCLUDED.payee_inn,
-                 is_revenue     = EXCLUDED.is_revenue,
-                 exclude_reason = EXCLUDED.exclude_reason,
-                 raw            = EXCLUDED.raw,
-                 synced_at      = now()""",
+        if status_counts:
+            breakdown = ", ".join(
+                f"{status}={n}" for status, n in sorted(status_counts.items())
+            )
+            print(f"[bank_tochka] statuses seen: {breakdown}", flush=True)
 ```
 
-Обновить docstring модуля: вместо «Тянет входящие транзакции (только creditDebitIndicator='Credit')» — «Тянет приход и расход: Credit → выручка (с классификатором), Debit → расход».
+`_upsert`/`DO UPDATE SET` не меняются: `amount`/`currency`/`occurred_at` и
+так не обновляются при конфликте (только производные от классификатора и
+`raw`) — это уже существующее поведение, менять его не нужно.
+
+Обновить docstring модуля: добавить, что валюта берётся из `Amount.currency`
+(не хардкодится), что полнота периода сверяется по остаткам, и что значения
+`status` копятся и печатаются, но пока не влияют на поведение.
 
 - [ ] **Step 4: Запустить тесты**
 
 ```bash
-cd services/portal-external-sync && python -m pytest tests/test_bank_mapping.py -v
+cd services/portal-external-sync && python -m pytest tests/test_bank_mapping.py tests/test_bank_tochka_reconcile.py -v
 ```
 
-Ожидается: 4 passed.
+Ожидается: все зелёные (маппинг — 21 тест вместе с Т-Банком в том же файле,
+сверка остатков — отдельным файлом `test_bank_tochka_reconcile.py` по
+образцу `test_bank_tbank_reconcile.py`: сходится / не сходится с числами и
+диффом / поля отсутствуют — молча пропускаем / расхождение в пределах
+допуска на копейки).
 
 - [ ] **Step 5: Коммит**
 
 ```bash
-git add services/portal-external-sync/sources/bank_tochka.py services/portal-external-sync/tests/test_bank_mapping.py
-git commit -m "feat(sync): Точка отдаёт расход наравне с приходом"
+git add services/portal-external-sync/sources/bank_tochka.py services/portal-external-sync/tests/test_bank_mapping.py services/portal-external-sync/tests/test_bank_tochka_reconcile.py
+git commit -m "feat(sync): Точка — валюта из ответа, сверка по остаткам, лог статусов"
 ```
 
 ---

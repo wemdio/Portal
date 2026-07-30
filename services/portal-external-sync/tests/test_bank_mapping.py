@@ -12,21 +12,34 @@ CREDIT = {
     "transactionId": "tx-credit-1",
     "documentNumber": "101",
     "documentProcessDate": "2026-07-15",
-    "Amount": {"amount": "5000.00"},
+    "Amount": {"amount": "5000.00", "amountNat": "5000.00", "currency": "RUB"},
     "DebtorParty": {"name": "ООО Клиент", "inn": "7701234567"},
     "CreditorParty": {"name": "ИП Мы", "inn": "165808519703"},
+    "CreditorAccount": "40802810600001780269",
     "description": "Оплата по счёту 42",
+    "paymentId": "pay-101",
+    "status": "Executed",
+    "transactionTypeCode": "01",
 }
 
+# Живая проверка API Точки 30.07.2026: у расходной операции DebtorParty
+# отсутствует вовсе — мы сами плательщик, банк его не присылает (не пустой
+# объект, а отсутствующий ключ). Amount приходит объектом с
+# amount/amountNat/currency, а не голым числом. documentProcessDate — дата
+# без времени и без смещения пояса. paymentId/status/transactionTypeCode/
+# CreditorAccount — реальные ключи ответа, тоже подтверждённые тем прогоном.
 DEBIT = {
     "creditDebitIndicator": "Debit",
     "transactionId": "tx-debit-1",
     "documentNumber": "202",
     "documentProcessDate": "2026-07-16",
-    "Amount": {"amount": "1500.50"},
-    "DebtorParty": {"name": "ИП Мы", "inn": "165808519703"},
+    "Amount": {"amount": "1500.50", "amountNat": "1500.50", "currency": "RUB"},
     "CreditorParty": {"name": "ООО ЯНДЕКС", "inn": "7736207543"},
+    "CreditorAccount": "40702810900000012345",
     "description": "Оплата рекламных услуг",
+    "paymentId": "pay-202",
+    "status": "Executed",
+    "transactionTypeCode": "01",
 }
 
 
@@ -89,6 +102,76 @@ def test_debit_without_creditor_party_is_not_dropped():
     assert row is not None
     assert row["payee_name"] is None
     assert row["payee_inn"] is None
+
+
+def test_currency_defaults_to_rub_from_fixtures():
+    """Фикстуры сами по себе рублёвые — currency читается из Amount, а не
+    хардкодится, поэтому дефолтный прогон должен остаться RUB."""
+    assert map_transaction(CREDIT, "acc-1")["currency"] == "RUB"
+    assert map_transaction(DEBIT, "acc-1")["currency"] == "RUB"
+
+
+def test_currency_is_read_from_amount_and_uppercased():
+    """Главный тест: если платёж придёт не в рублях, он не должен молча
+    лечь рублёвым — валюта берётся из Amount.currency, а не константой."""
+    tx = dict(DEBIT)
+    tx["Amount"] = {"amount": "1500.50", "amountNat": "1500.50", "currency": "usd"}
+    row = map_transaction(tx, "acc-1")
+    assert row["currency"] == "USD"
+
+
+def test_currency_falls_back_to_rub_when_field_missing():
+    tx = dict(DEBIT)
+    tx["Amount"] = {"amount": "1500.50", "amountNat": "1500.50"}  # без currency
+    row = map_transaction(tx, "acc-1")
+    assert row["currency"] == "RUB"
+
+
+def test_currency_falls_back_to_rub_when_field_empty():
+    tx = dict(DEBIT)
+    tx["Amount"] = {"amount": "1500.50", "currency": ""}
+    row = map_transaction(tx, "acc-1")
+    assert row["currency"] == "RUB"
+
+
+def test_status_counts_tally_by_value():
+    """status_counts, общий на весь прогон, обязан копить встреченные
+    значения Transaction.status по отдельности — их печатает в сводке в
+    конце run(). Мы не знаем полный набор возможных значений заранее, так
+    что просто считаем встреченное как есть, ничего не отбрасывая."""
+    status_counts: dict[str, int] = {}
+
+    executed = dict(CREDIT)
+    executed["status"] = "Executed"
+    pending = dict(DEBIT)
+    pending["status"] = "Pending"
+    another_executed = dict(DEBIT)
+    another_executed["status"] = "Executed"
+
+    map_transaction(executed, "acc-1", status_counts=status_counts)
+    map_transaction(pending, "acc-1", status_counts=status_counts)
+    map_transaction(another_executed, "acc-1", status_counts=status_counts)
+
+    assert status_counts == {"Executed": 2, "Pending": 1}
+
+
+def test_status_counts_uses_missing_marker_when_field_absent():
+    status_counts: dict[str, int] = {}
+    tx = dict(CREDIT)
+    del tx["status"]
+    map_transaction(tx, "acc-1", status_counts=status_counts)
+    assert status_counts == {"<missing>": 1}
+
+
+def test_status_counts_counts_even_skipped_records():
+    """Статус считается для каждой встреченной операции, даже той, что
+    дальше будет отброшена по другой причине (тут — неизвестный индикатор) —
+    цель увидеть весь спектр значений status, а не только те, что доехали
+    до записи в базу."""
+    status_counts: dict[str, int] = {}
+    unknown = {"creditDebitIndicator": "Reserved", "status": "Cancelled"}
+    assert map_transaction(unknown, "acc-1", status_counts=status_counts) is None
+    assert status_counts == {"Cancelled": 1}
 
 
 ACC = "40802810600001780269"

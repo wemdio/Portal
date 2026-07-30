@@ -7,6 +7,14 @@
 Flow API (Open Banking): GET /balances → список accountId → POST /statements
 → получить statementId → poll GET /accounts/{acc}/statements/{sid} до
 status='Ready' → взять Transaction[].
+
+Валюта берётся из Amount.currency (с запасным RUB, если поле не пришло) —
+не хардкодится, чтобы платёж не в рублях не лёг в базу рублёвым по ошибке.
+Полнота выгрузки периода сверяется по остаткам (startDateBalance /
+endDateBalance — см. reconcile_period_totals), пагинации в ответе нет.
+Встреченные значения Transaction.status копятся за весь прогон и печатаются
+в сводке run() — набор возможных значений заранее не известен, поведение
+по status пока не меняем.
 """
 from __future__ import annotations
 
@@ -45,8 +53,78 @@ def _parse_amount(t: dict) -> float | None:
     return coerce_amount((t.get("Amount") or {}).get("amount"))
 
 
+def _parse_currency(t: dict) -> str:
+    """Amount.currency → верхний регистр, RUB — запасное значение.
+
+    Счёт сегодня рублёвый, поэтому раньше валюта была захардкожена
+    константой. Если хоть один платёж придёт не в рублях, он молча ляжет
+    рублёвым и завысит рублёвый итог: витрина расходов конвертирует по
+    курсу только то, что явно помечено не рублями.
+    """
+    currency = (t.get("Amount") or {}).get("currency")
+    return str(currency).upper() if currency else "RUB"
+
+
+def _extract_balance(value: object) -> float | None:
+    """startDateBalance/endDateBalance → float.
+
+    Банк может прислать остаток и голым числом, и вложенным объектом вида
+    Amount ({"amount": ...}) — живого примера структуры на момент написания
+    не было, только имена ключей, поэтому оба варианта обрабатываются
+    одинаково устойчиво.
+    """
+    if isinstance(value, dict):
+        value = value.get("amount")
+    return coerce_amount(value)
+
+
+def reconcile_period_totals(
+    rows: list[dict], statement: dict, tolerance: float = 0.01
+) -> list[str]:
+    """Сверяет изменение остатка по выписке периода с суммой замапленных
+    операций того же периода: endDateBalance - startDateBalance обязано
+    равняться сумме приходов минус сумма расходов.
+
+    Пагинации в ответе Точки нет — это единственная доступная проверка
+    полноты выгрузки (тот же приём, что reconcile_period_totals у Т-Банка,
+    см. sources/bank_tbank.py, только там сверяют с income/outcome, а не с
+    остатками). Если сумма замапленных операций не сходится с изменением
+    остатка, часть операций до базы не доехала (сетевой сбой периода, битая
+    дата/сумма и т.п.).
+
+    rows — словари после map_transaction (до to_row), т.е. уже без
+    отфильтрованных/пропущенных операций. statement — сырой объект
+    Statement за период (содержит startDateBalance/endDateBalance).
+
+    Сравнение — с допуском tolerance (по умолчанию копейка), не точное
+    равенство float. Если полей с остатками в ответе нет — сверка по этому
+    периоду молча пропускается, отсутствие полей не ошибка.
+    """
+    warnings: list[str] = []
+
+    start_balance = _extract_balance(statement.get("startDateBalance"))
+    end_balance = _extract_balance(statement.get("endDateBalance"))
+    if start_balance is None or end_balance is None:
+        return warnings
+
+    mapped_credit = sum(r["amount"] for r in rows if r["direction"] == "credit")
+    mapped_debit = sum(r["amount"] for r in rows if r["direction"] == "debit")
+    bank_delta = end_balance - start_balance
+    mapped_delta = mapped_credit - mapped_debit
+    diff = bank_delta - mapped_delta
+    if abs(diff) > tolerance:
+        warnings.append(
+            f"balance mismatch: start={start_balance} end={end_balance} "
+            f"bank_delta={bank_delta} mapped_delta={mapped_delta} diff={diff:+.2f}"
+        )
+    return warnings
+
+
 def map_transaction(
-    t: dict, acc: str, skip_counts: dict[str, int] | None = None
+    t: dict,
+    acc: str,
+    skip_counts: dict[str, int] | None = None,
+    status_counts: dict[str, int] | None = None,
 ) -> dict | None:
     """Операция Точки → словарь полей bank_transactions. None — пропустить.
 
@@ -58,7 +136,20 @@ def map_transaction(
     предупреждением в лог, а не роняет вызывающий батч: перед бэкфиллом за
     2023 год одна битая строка не должна уносить с собой год операций счёта.
     skip_counts, если передан, копит причины пропуска для сводки по прогону.
+
+    status_counts, если передан, копит встреченные значения Transaction.status
+    за весь прогон (для итоговой сводки в run()) — мы не знаем полный набор
+    возможных значений заранее, поэтому просто считаем как есть, ничего не
+    отбрасывая и не фильтруя по нему. Считается для каждой операции, даже
+    той, что дальше будет пропущена по другой причине (неизвестный
+    индикатор, битая дата/сумма) — цель здесь увидеть весь спектр значений,
+    а не только те, что дошли до записи в базу.
     """
+    if status_counts is not None:
+        status = t.get("status")
+        key = str(status) if status is not None else "<missing>"
+        status_counts[key] = status_counts.get(key, 0) + 1
+
     indicator = t.get("creditDebitIndicator")
     if indicator not in ("Credit", "Debit"):
         return None
@@ -108,7 +199,7 @@ def map_transaction(
         "document_number": str(doc) if doc is not None else None,
         "occurred_at": occurred_at,
         "amount": amount,
-        "currency": "RUB",
+        "currency": _parse_currency(t),
         "direction": "credit" if is_credit else "debit",
         "payer_name": payer or None,
         "payer_inn": payer_inn or None,
@@ -131,6 +222,7 @@ class BankTochkaSync(SyncSource):
         headers = {"Authorization": f"Bearer {JWT}", "Content-Type": "application/json"}
         total = 0
         skip_counts: dict[str, int] = {}
+        status_counts: dict[str, int] = {}
 
         async with httpx.AsyncClient(timeout=90, headers=headers) as client:
             bal = await client.get(f"{API_BASE}/balances")
@@ -145,7 +237,9 @@ class BankTochkaSync(SyncSource):
                     # данные, ошибка upsert) не должен обрывать остальные —
                     # источник обязан дойти до конца и залить то, что удалось.
                     try:
-                        rows = await self._fetch_period(client, acc, st, en, skip_counts)
+                        rows = await self._fetch_period(
+                            client, acc, st, en, skip_counts, status_counts
+                        )
                         if rows:
                             await self._upsert(conn, rows)
                             total += len(rows)
@@ -165,6 +259,16 @@ class BankTochkaSync(SyncSource):
                 flush=True,
             )
 
+        if status_counts:
+            # Набор возможных значений Transaction.status заранее не известен —
+            # просто печатаем встреченное с количествами, ничего не отбрасывая.
+            # Дальнейшее решение (фильтровать ли какие-то статусы) принимается
+            # осознанно на основании этой сводки, а не заранее угадывается.
+            breakdown = ", ".join(
+                f"{status}={n}" for status, n in sorted(status_counts.items())
+            )
+            print(f"[bank_tochka] statuses seen: {breakdown}", flush=True)
+
         return total
 
     async def _fetch_period(
@@ -174,6 +278,7 @@ class BankTochkaSync(SyncSource):
         st: str,
         en: str,
         skip_counts: dict[str, int] | None = None,
+        status_counts: dict[str, int] | None = None,
     ) -> list[tuple]:
         create = await client.post(
             f"{API_BASE}/statements",
@@ -196,12 +301,16 @@ class BankTochkaSync(SyncSource):
         if not stmt:
             return []
 
-        rows: list[tuple] = []
+        mapped_rows: list[dict] = []
         for t in stmt.get("Transaction", []) or []:
-            mapped = map_transaction(t, acc, skip_counts)
+            mapped = map_transaction(t, acc, skip_counts, status_counts)
             if mapped is not None:
-                rows.append(to_row(mapped))
-        return rows
+                mapped_rows.append(mapped)
+
+        for warning in reconcile_period_totals(mapped_rows, stmt):
+            print(f"[bank_tochka] acc={acc} {st}..{en}: {warning}", flush=True)
+
+        return [to_row(m) for m in mapped_rows]
 
     async def _upsert(self, conn: asyncpg.Connection, rows: list[tuple]) -> None:
         await conn.executemany(
