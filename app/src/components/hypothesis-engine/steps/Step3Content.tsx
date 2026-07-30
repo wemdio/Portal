@@ -7,7 +7,7 @@
  */
 
 import { useMemo, useState, type JSX } from 'react';
-import { ArrowRight, BookOpen, Mail, Search } from 'lucide-react';
+import { ArrowRight, BarChart3, BookOpen, Mail, Search } from 'lucide-react';
 import type {
   HeChain,
   HeChainLanguage,
@@ -17,7 +17,7 @@ import type {
   HeVocab,
   HeVertical,
 } from '@/lib/hypothesisEngine/types';
-import type { HeJobSummary } from '../api';
+import type { HeDossier, HeDossierData, HeJobSummary } from '../api';
 import { Badge, PotentialBadge, Spinner, StatusBox, type BadgeTone } from '../ui';
 
 const LANG_OPTIONS: Array<{ value: HeChainLanguage; label: string }> = [
@@ -38,6 +38,13 @@ const KIND_META: Record<HeCompanyTypeKind, { label: string; tone: BadgeTone }> =
   slang: { label: 'Сленг', tone: 'gray' },
 };
 
+/** Вердикт досье «покупает ли сегмент каналы продаж» → лейбл и тон бейджа. */
+const BUYS_CHANNELS_META: Record<'yes' | 'likely' | 'unknown', { label: string; tone: BadgeTone }> = {
+  yes: { label: 'Сегмент покупает каналы продаж', tone: 'emerald' },
+  likely: { label: 'Вероятно покупает', tone: 'amber' },
+  unknown: { label: 'Про покупку каналов данных нет', tone: 'gray' },
+};
+
 /** На новых данных должность может нести audience_side; на старых поля нет. */
 type JobTitleRow = HeJobTitle & { audience_side?: string };
 
@@ -50,10 +57,11 @@ function latestByCreatedAt<T extends { created_at: string }>(items: T[]): T | un
 }
 
 /** Последняя джоба стадии (по started_at; записи без started_at считаются старыми). */
-function latestStageJob(jobs: HeJobSummary[], stage: HeJobSummary['stage']): HeJobSummary | undefined {
+function latestStageJob(jobs: HeJobSummary[], stage: string): HeJobSummary | undefined {
   let best: HeJobSummary | undefined;
   for (const job of jobs) {
-    if (job.stage !== stage) continue;
+    // Сравниваем как строки: свежие стадии (напр. 'dossier') могут отставать в HeStage.
+    if ((job.stage as string) !== stage) continue;
     if (!best || (job.started_at ?? '') >= (best.started_at ?? '')) best = job;
   }
   return best;
@@ -81,8 +89,22 @@ export function Step3Content(props: {
   onGenerateChain: (language: 'ru' | 'en' | 'pl') => void;
   onGenerateVocab: () => void;
   onGoToBase: () => void;
+  /** Досье вертикалей проекта (из GET /projects/[id]). */
+  dossiers?: HeDossier[];
+  /** Запуск сборки досье выбранной вертикали (POST /verticals/[id]/dossier). */
+  onBuildDossier?: () => void;
 }): JSX.Element {
-  const { vertical, chains, vocabs, jobs, onGenerateChain, onGenerateVocab, onGoToBase } = props;
+  const {
+    vertical,
+    chains,
+    vocabs,
+    jobs,
+    onGenerateChain,
+    onGenerateVocab,
+    onGoToBase,
+    dossiers,
+    onBuildDossier,
+  } = props;
   const [language, setLanguage] = useState<HeChainLanguage>('ru');
 
   const chain = useMemo(
@@ -101,6 +123,26 @@ export function Step3Content(props: {
   const vocabBusy = jobActive(vocabJob);
   const chainFailed = !chainBusy && (chainJob?.status === 'failed' || chain?.status === 'failed');
   const vocabFailed = !vocabBusy && vocabJob?.status === 'failed';
+
+  // Досье выбранной вертикали — последняя запись в выдаче.
+  const dossier = useMemo(() => {
+    let found: HeDossier | undefined;
+    for (const d of dossiers ?? []) {
+      if (d.vertical_id === vertical.id) found = d;
+    }
+    return found;
+  }, [dossiers, vertical.id]);
+  // Джоба досье привязана к вертикали через payload.vertical_id: без фильтра
+  // чужая dossier-джоба показывала бы busy/error на карточке этой вертикали.
+  // Джобы без payload (старые строки) вертикали не соответствуют.
+  const dossierJob = useMemo(
+    () => latestStageJob(jobs.filter((j) => j.payload?.vertical_id === vertical.id), 'dossier'),
+    [jobs, vertical.id],
+  );
+  // Дедупликация: кнопка выключена, пока джоба досье pending/running (или строка ещё draft).
+  const dossierBusy = jobActive(dossierJob) || dossier?.status === 'draft';
+  const dossierFailed = !dossierBusy && (dossierJob?.status === 'failed' || dossier?.status === 'failed');
+  const dossierReady = !dossierBusy && dossier?.status === 'ready' && dossier.data ? dossier.data : null;
 
   return (
     <div className="space-y-5">
@@ -279,6 +321,61 @@ export function Step3Content(props: {
         ) : null}
       </section>
 
+      {/* Блок C: досье вертикали — объективные числа сегмента */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <BarChart3 className="h-4 w-4 text-gray-400" aria-hidden />
+              <h3 className="text-sm font-semibold text-gray-800">Досье вертикали</h3>
+            </div>
+            <p className="mt-1 text-xs text-gray-400">
+              Объективные числа сегмента: наша директория, hh.ru, статистика наших кампаний.
+            </p>
+          </div>
+          {onBuildDossier ? (
+            <button
+              type="button"
+              onClick={onBuildDossier}
+              disabled={dossierBusy}
+              className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {dossierBusy ? (
+                <Spinner className="h-3.5 w-3.5" />
+              ) : (
+                <BarChart3 className="h-3.5 w-3.5" aria-hidden />
+              )}
+              {dossierFailed ? 'Попробовать снова' : dossierReady ? 'Пересобрать' : 'Собрать досье'}
+            </button>
+          ) : null}
+        </div>
+
+        {dossierFailed ? (
+          <div className="mt-3">
+            <StatusBox tone="error">
+              {dossier?.error || dossierJob?.error || 'Сборка досье завершилась ошибкой.'} Нажмите
+              «Попробовать снова».
+            </StatusBox>
+          </div>
+        ) : null}
+        {dossierBusy && !dossierReady ? (
+          <div className="mt-3">
+            <StatusBox tone="info">Собираем досье — обычно 2–5 минут…</StatusBox>
+          </div>
+        ) : null}
+
+        {dossierReady ? (
+          <div className="mt-4 grid gap-4 lg:grid-cols-3">
+            <DossierSegmentCard data={dossierReady} />
+            <DossierSignalsCard data={dossierReady} />
+            <DossierDatasetCard data={dossierReady} />
+          </div>
+        ) : null}
+        {!dossier && !dossierBusy && !dossierFailed ? (
+          <p className="mt-4 text-xs text-gray-400">Досье пока нет — нажмите «Собрать досье».</p>
+        ) : null}
+      </section>
+
       {/* Переход к шагу «База» — всегда доступен */}
       <div className="flex justify-end">
         <button
@@ -290,6 +387,153 @@ export function Step3Content(props: {
           <ArrowRight className="h-4 w-4" aria-hidden />
         </button>
       </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────── Карточки досье ─────────────────────────── */
+
+/** Крупная цифра с подписью — «.num»-статистика карточек досье. */
+function DossierNum({ value, caption }: { value: string; caption: string }) {
+  return (
+    <div>
+      <p className="text-2xl font-bold tabular-nums text-gray-900">{value}</p>
+      <p className="text-[11px] text-gray-400">{caption}</p>
+    </div>
+  );
+}
+
+/** «Сегмент в цифрах»: компании директории, вакансии hh, оценка размера сегмента. */
+function DossierSegmentCard({ data }: { data: HeDossierData }) {
+  const { counters, interpretation } = data;
+  return (
+    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3">
+      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">Сегмент в цифрах</p>
+      <div className="space-y-3">
+        {counters.companies_total != null ? (
+          <div>
+            <DossierNum
+              value={`~${counters.companies_total.toLocaleString('ru-RU')}`}
+              caption="компаний в директории"
+            />
+            {counters.companies_note ? (
+              <p className="mt-0.5 text-[11px] text-gray-400">{counters.companies_note}</p>
+            ) : null}
+          </div>
+        ) : null}
+        {counters.hh_vacancies_total != null ? (
+          <div>
+            <DossierNum
+              value={counters.hh_vacancies_total.toLocaleString('ru-RU')}
+              caption="вакансий на hh.ru"
+            />
+            {counters.hh_vacancies_sample.length > 0 ? (
+              <details className="group mt-1">
+                <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 hover:text-gray-700">
+                  Примеры вакансий ({counters.hh_vacancies_sample.length})
+                </summary>
+                <ul className="mt-1 space-y-0.5 border-l-2 border-gray-100 pl-2 text-[11px] text-gray-500">
+                  {counters.hh_vacancies_sample.map((title, i) => (
+                    <li key={i}>{title}</li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
+          </div>
+        ) : null}
+        {interpretation.segment_size_assessment ? (
+          <p>
+            <Badge tone="blue">{interpretation.segment_size_assessment}</Badge>
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** «Сигналы боли»: список сигналов из счётчиков (метка + значение). */
+function DossierSignalsCard({ data }: { data: HeDossierData }) {
+  const { signals } = data.counters;
+  // У старых досье поля вердикта нет — тогда блок не рендерим вообще.
+  const buysChannels = data.interpretation.buys_sales_channels;
+  const buysMeta = buysChannels ? BUYS_CHANNELS_META[buysChannels] : undefined;
+  return (
+    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3">
+      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">Сигналы боли</p>
+      {signals.length === 0 ? (
+        <p className="text-xs text-gray-400">Сигналов не найдено.</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {signals.map((s, i) => (
+            <li key={i} className="flex items-baseline justify-between gap-2 text-xs">
+              <span className="min-w-0 text-gray-600" title={s.source}>
+                {s.label}
+              </span>
+              <span className="shrink-0 font-semibold tabular-nums text-gray-900">{s.value}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {buysMeta ? (
+        <div className="mt-3 border-t border-gray-200 pt-2">
+          <Badge tone={buysMeta.tone}>{buysMeta.label}</Badge>
+          {data.interpretation.buys_sales_channels_reason ? (
+            <p className="mt-1 text-[11px] leading-relaxed text-gray-400">
+              {data.interpretation.buys_sales_channels_reason}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** «Наши кампании»: reply против базового, охват, сегменты, лучшие темы, выводы. */
+function DossierDatasetCard({ data }: { data: HeDossierData }) {
+  const { dataset_stats: ds, interpretation } = data;
+  return (
+    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3">
+      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">Наши кампании</p>
+      {ds.reply_pct != null || ds.baseline_pct != null ? (
+        <div className="flex flex-wrap gap-6">
+          {ds.reply_pct != null ? <DossierNum value={`${ds.reply_pct}%`} caption="reply в вертикали" /> : null}
+          {ds.baseline_pct != null ? (
+            <DossierNum value={`${ds.baseline_pct}%`} caption="в среднем по базе" />
+          ) : null}
+        </div>
+      ) : null}
+      <p className="mt-2 text-[11px] text-gray-400">
+        {ds.campaigns.toLocaleString('ru-RU')} кампаний · {ds.sent.toLocaleString('ru-RU')} отправлено ·{' '}
+        {ds.replies.toLocaleString('ru-RU')} ответов
+      </p>
+      {ds.note ? <p className="mt-1 text-[11px] text-gray-400">{ds.note}</p> : null}
+      {ds.matched_segments.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {ds.matched_segments.map((seg) => (
+            <span key={seg} className="rounded bg-white px-1.5 py-0.5 text-[11px] text-gray-600 ring-1 ring-gray-200">
+              {seg}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {ds.top_subjects.length > 0 ? (
+        <details className="group mt-2">
+          <summary className="cursor-pointer list-none text-[11px] font-medium text-gray-500 hover:text-gray-700">
+            Лучшие темы ({ds.top_subjects.length})
+          </summary>
+          <ul className="mt-1 space-y-0.5 border-l-2 border-gray-100 pl-2 text-[11px] text-gray-500">
+            {ds.top_subjects.map((subj, i) => (
+              <li key={i}>{subj}</li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+      {interpretation.dataset_verdict ? (
+        <p className="mt-2 text-xs leading-relaxed text-gray-500">{interpretation.dataset_verdict}</p>
+      ) : null}
+      {interpretation.market_summary ? (
+        <p className="mt-1 text-xs leading-relaxed text-gray-400">{interpretation.market_summary}</p>
+      ) : null}
     </div>
   );
 }

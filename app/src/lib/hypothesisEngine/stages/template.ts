@@ -8,6 +8,9 @@
  *     консистентность operator_mapping (см. validateOperatorMapping);
  *  4) pure-маппинг операторов {{var}} финальных писем на колонки базы;
  *  5) insert в he_templates (status 'ready', llm_model).
+ * В промпты подмешиваются style_override из брифа (styleExample) и
+ * winner-паттерны датасета (best-effort); после генерации писем — критик-луп:
+ * одна оценка + максимум один rewrite по её замечаниям.
  */
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
@@ -18,7 +21,14 @@ import {
   type HeBaseAnalysisOutput,
   type HeTemplatePlanOutput,
 } from '../schemas';
-import { buildTemplateLettersMessages, buildTemplatePlanMessages } from '../prompts/template';
+import {
+  buildTemplateCriticMessages,
+  buildTemplateLettersMessages,
+  buildTemplatePlanMessages,
+  buildTemplateRewriteMessages,
+} from '../prompts/template';
+import { selectCaseForVertical, type HeCase } from '../caseBank';
+import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
 import type {
   HeBase,
   HeChain,
@@ -31,11 +41,12 @@ import type {
   HeSegmentVariant,
   HeVertical,
 } from '../types';
-import { parsedToChainLetters, selectPromptHypotheses } from './chain';
+import { HeChainCritiqueSchema, parsedToChainLetters, selectPromptHypotheses } from './chain';
 import {
   addUsage,
   newUsage,
   payloadString,
+  readProject,
   stageLog,
   type HeStageContext,
   type HeStageResult,
@@ -402,6 +413,37 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const chainLetters = (Array.isArray(chain.letters) ? chain.letters : []) as HeChainLetter[];
   if (!chainLetters.length) throw new Error('he_chains.letters пуст — перегенерируйте цепочку');
 
+  // Кейс-банк: лучший кейс клиента под вертикаль → главное доказательство
+  // fixed_block/писем. Best-effort: сбой чтения he_cases не роняет генерацию.
+  let clientCase: HeCase | null = null;
+  try {
+    clientCase = await selectCaseForVertical(ctx.supabase, job.project_id, {
+      name: vertical.name,
+      synonyms: vertical.synonyms,
+    });
+  } catch (e) {
+    stageLog(ctx, `[template] кейс-банк недоступен: ${e instanceof Error ? e.message : String(e)} — продолжаем без кейса`);
+  }
+  if (clientCase) stageLog(ctx, `[template] кейс клиента под вертикаль: ${clientCase.id}`);
+
+  // Стиль клиента из брифа проекта (style_override, рядом с offer_override) →
+  // styleExample в промпты плана и финальных писем.
+  const project = await readProject(ctx.supabase, job.project_id);
+  const brief = (project.brief ?? {}) as Record<string, unknown>;
+  const styleExample = typeof brief.style_override === 'string' ? brief.style_override : undefined;
+
+  // Winner-паттерны датасета (best-effort): метки сегментов по терминам
+  // вертикали (имя + синонимы), фолбэк хинтов — имя вертикали. Любой сбой →
+  // генерим без паттернов, стадию это не валит.
+  let winnerPatterns: HeWinnerPattern[] = [];
+  try {
+    const terms = [vertical.name, ...(Array.isArray(vertical.synonyms) ? vertical.synonyms : [])];
+    const labels = matchSegmentLabels(terms);
+    winnerPatterns = await getWinnerPatterns(labels.length ? labels : [vertical.name], 5);
+  } catch (e) {
+    stageLog(ctx, `[template] winner-паттерны датасета недоступны: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   const columns = Array.isArray(base.columns) ? base.columns : [];
 
   // Шаг 1: план 85/15.
@@ -413,6 +455,8 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       baseAnalysis: analysis,
       columns,
       hypotheses,
+      clientCase,
+      styleExample,
     }),
     HeTemplatePlanSchema,
     { model: getHeModel('chain'), maxTokens: 8192 },
@@ -428,6 +472,9 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     verticalName: vertical.name,
     chainLetters,
     baseAnalysis: analysis,
+    clientCase,
+    styleExample,
+    winnerPatterns,
   });
 
   /** Сырой ответ модели → письма с приклеенными сегментными вариантами. */
@@ -481,6 +528,70 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     } else {
       stageLog(ctx, '[template] сокращённый вариант не распарсился — оставляем исходные письма');
     }
+  }
+
+  // Шаг 2c: критик-луп — одна оценка финальных писем той же моделью, что и
+  // генерация (getHeModel('chain')), + максимум один rewrite по её замечаниям.
+  // Rewrite не содержит ---SEGMENT--- блоков: сегментные варианты после его
+  // принятия восстанавливаются из исходных писем по индексу. Без цикла; сбой
+  // критика, нечитаемый, урезанный или раздутый rewrite → остаются исходные
+  // письма. Операторы (шаг 3) считаются уже по финальному тексту.
+  let critiqueInfo: { verdict: string; issues_count: number; rewritten: boolean } | null = null;
+  try {
+    const criticLetters = letters.map((l) => ({ subject: l.subject ?? '', body: l.body }));
+    const critique = await callLLMWithSchema(
+      buildTemplateCriticMessages({
+        verticalName: vertical.name,
+        verticalSummary: vertical.summary ?? '',
+        letters: criticLetters,
+        language,
+        styleExample,
+        winnerPatterns,
+      }),
+      HeChainCritiqueSchema,
+      { model, maxTokens: 2048 },
+    );
+    addUsage(usage, critique);
+    // letter_index вне 1..letters.length — галлюцинация критика: отбрасываем
+    // такие issue до решения о рерайте, чтобы не переписывать по фантомам.
+    const issues = critique.data.issues.filter(
+      (i) => i.letter_index >= 1 && i.letter_index <= letters.length,
+    );
+    critiqueInfo = { verdict: critique.data.verdict, issues_count: issues.length, rewritten: false };
+
+    if (issues.length > 0) {
+      const rewrite = await callLLMText(
+        buildTemplateRewriteMessages({
+          verticalName: vertical.name,
+          letters: criticLetters,
+          critique: { ...critique.data, issues },
+          language,
+          styleExample,
+          winnerPatterns,
+        }),
+        { model, maxTokens: 6144 },
+      );
+      addUsage(usage, rewrite);
+      const rebuilt = buildLetters(rewrite.text);
+      // Принимаем rewrite только при точном совпадении числа писем: иначе
+      // ломаются лесенка wait_days и индексация сегментных вариантов.
+      if (rebuilt.parsed.length === letters.length) {
+        llm = rewrite;
+        parsed = rebuilt.parsed;
+        // Рерайт выводит только тему+тело (---SEGMENT--- блоков в нём нет):
+        // варианты восстанавливаем детерминированно из исходных писем.
+        const originalLetters = letters;
+        letters = rebuilt.letters.map((l, i) => {
+          const sv = originalLetters[i]?.segment_variants;
+          return sv?.length ? { ...l, segment_variants: sv } : l;
+        });
+        critiqueInfo.rewritten = true;
+      } else {
+        stageLog(ctx, `[template] rewrite критика: ${rebuilt.parsed.length} писем вместо ${letters.length} — оставляем исходные`);
+      }
+    }
+  } catch (e) {
+    stageLog(ctx, `[template] критик-луп недоступен: ${e instanceof Error ? e.message : String(e)} — оставляем исходные письма`);
   }
 
   // Шаг 3: операторы финальных писем → колонки базы (pure) + консистентность.
@@ -594,6 +705,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       length_warnings: lengthWarnings,
       operator_mapping_issues: mappingIssues,
       segment_warnings: segmentWarnings,
+      critique: critiqueInfo,
     },
     tokensUsed: usage.tokensUsed,
     costUsd: usage.costUsd,

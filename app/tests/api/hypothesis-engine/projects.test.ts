@@ -208,3 +208,93 @@ describe('PATCH /api/tools/hypothesis-engine/projects/[id] — offer_override', 
     expect(brief).not.toHaveProperty('offer_override');
   });
 });
+
+describe('PATCH /api/tools/hypothesis-engine/projects/[id] — style_override', () => {
+  it('merges style_override without clobbering offer_override/site_profile', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_projects: [
+          {
+            id: 'p1',
+            name: 'One',
+            website_url: 'https://one.example/',
+            status: 'draft',
+            brief: { site_profile: { usp: 'seo' }, offer_override: '3–5 встреч в месяц' },
+          },
+        ],
+      },
+    });
+
+    const res = await PATCH(makePatchReq({ style_override: 'Здравствуйте, Иван! …' }), patchParams);
+    expect(res.status).toBe(200);
+
+    expect(mockDb.getRows('he_projects')[0].brief).toEqual({
+      site_profile: { usp: 'seo' },
+      offer_override: '3–5 встреч в месяц',
+      style_override: 'Здравствуйте, Иван! …',
+    });
+  });
+
+  it('accepts offer_override and style_override in one request', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_projects: [
+          {
+            id: 'p1',
+            name: 'One',
+            website_url: 'https://one.example/',
+            status: 'draft',
+            brief: { site_profile: { usp: 'seo' } },
+          },
+        ],
+      },
+    });
+
+    const res = await PATCH(
+      makePatchReq({ offer_override: 'тест за 2 недели', style_override: 'Добрый день! …', junk: 1 }),
+      patchParams,
+    );
+    expect(res.status).toBe(200);
+
+    expect(mockDb.getRows('he_projects')[0].brief).toEqual({
+      site_profile: { usp: 'seo' },
+      offer_override: 'тест за 2 недели',
+      style_override: 'Добрый день! …',
+    });
+  });
+
+  it('returns 400 when style_override is not a string', async () => {
+    const res = await PATCH(makePatchReq({ style_override: 42 }), patchParams);
+    expect(res.status).toBe(400);
+    expect(mockDb.updates).toHaveLength(0);
+  });
+
+  it('returns 413 when style_override exceeds 8000 chars after trim', async () => {
+    const res = await PATCH(makePatchReq({ style_override: `  ${'д'.repeat(8001)}  ` }), patchParams);
+    expect(res.status).toBe(413);
+    expect(mockDb.updates).toHaveLength(0);
+  });
+
+  it('removes style_override from brief on an empty string', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_projects: [
+          {
+            id: 'p1',
+            name: 'One',
+            website_url: 'https://one.example/',
+            status: 'draft',
+            brief: { site_profile: { usp: 'seo' }, style_override: 'старый эталон' },
+          },
+        ],
+      },
+    });
+
+    const res = await PATCH(makePatchReq({ style_override: '' }), patchParams);
+    expect(res.status).toBe(200);
+
+    const brief = mockDb.getRows('he_projects')[0].brief as Record<string, unknown>;
+    expect(brief).toEqual({ site_profile: { usp: 'seo' } });
+    expect(brief).not.toHaveProperty('style_override');
+  });
+});

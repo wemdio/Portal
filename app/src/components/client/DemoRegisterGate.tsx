@@ -1,12 +1,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Send } from 'lucide-react';
+import { Send, X } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import {
   DEMO_REGISTER_PROMPT_EVENT,
   type DemoRegisterPromptDetail,
 } from '@/lib/clientDemo/registerPrompt';
+import { isTabDemoMode, disableTabDemoMode } from '@/lib/clientDemo/tabDemoMode';
 
 /**
  * Global "register to unlock" modal for the demo portal. Mounted once in the
@@ -29,6 +30,14 @@ export function DemoRegisterGate() {
 
   const goRegister = async () => {
     setLeaving(true);
+    // Демо-ВКЛАДКА: пользователь уже залогинен — signOut тут убил бы его
+    // реальную сессию посреди показа (и в соседней рабочей вкладке). Выход —
+    // просто снять флаг вкладки и вернуться в рабочий кабинет.
+    if (isTabDemoMode()) {
+      disableTabDemoMode();
+      window.location.assign('/client');
+      return;
+    }
     // Sign out the shared demo session before /signup: middleware redirects an
     // authenticated role=client away from /signup to /client. Cookie-based
     // (@supabase/ssr) signOut clears the session cookie the middleware reads, so a
@@ -80,11 +89,14 @@ export function DemoRegisterGate() {
           Доступно в рабочем аккаунте
         </p>
         <h2 id="demo-register-title" className="text-lg font-bold mb-2" style={{ color: 'var(--cp-paper)' }}>
-          {reason ? `Зарегистрируйтесь, чтобы ${reason}` : 'Зарегистрируйтесь, чтобы продолжить'}
+          {isTabDemoMode()
+            ? (reason ? `Выйдите из демо, чтобы ${reason}` : 'Выйдите из демо, чтобы продолжить')
+            : (reason ? `Зарегистрируйтесь, чтобы ${reason}` : 'Зарегистрируйтесь, чтобы продолжить')}
         </h2>
         <p className="text-sm mb-5" style={{ color: 'var(--cp-paper-mute)' }}>
-          Это демо — витрина на тестовых данных, здесь действия отключены. Создайте аккаунт за минуту
-          и работайте на своих данных: загрузка баз, запуск кампаний, выгрузки.
+          {isTabDemoMode()
+            ? 'Это демо-вкладка — витрина на тестовых данных, действия в ней отключены. Вернитесь в рабочий режим, чтобы продолжить на своих данных.'
+            : 'Это демо — витрина на тестовых данных, здесь действия отключены. Создайте аккаунт за минуту и работайте на своих данных: загрузка баз, запуск кампаний, выгрузки.'}
         </p>
         <div className="flex items-center gap-4 flex-wrap">
           <button
@@ -94,7 +106,11 @@ export function DemoRegisterGate() {
             className="neu-pill inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold"
             style={{ background: 'var(--cp-amber)', color: 'var(--cp-ink)' }}
           >
-            <Send size={15} /> {leaving ? 'Открываем…' : 'Зарегистрироваться'}
+            {isTabDemoMode() ? (
+              <><X size={15} /> {leaving ? 'Выходим…' : 'Выйти из демо'}</>
+            ) : (
+              <><Send size={15} /> {leaving ? 'Открываем…' : 'Зарегистрироваться'}</>
+            )}
           </button>
           <button
             type="button"

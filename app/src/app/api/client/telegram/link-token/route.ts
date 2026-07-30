@@ -19,6 +19,15 @@ export async function GET(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
 
+  // Под демо токен привязки не выпускаем: deeplink реальный (HMAC от userId),
+  // и бот привязал бы Telegram к боевому аккаунту с «витрины» (ревью 27.07).
+  if (result.auth.isDemo) {
+    return NextResponse.json(
+      { error: 'Демо-режим: привязка Telegram недоступна на витрине.', code: 'DEMO_READONLY' },
+      { status: 403 },
+    );
+  }
+
   if (!isClientRepliesBotConfigured()) {
     return NextResponse.json({ bot_configured: false });
   }

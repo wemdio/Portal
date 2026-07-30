@@ -1,12 +1,14 @@
-import { createHash } from 'node:crypto';
-
 import {
   SBIS_APPROXIMATE_OKVED_BY_ACTIVITY,
   normalizeSbisInn,
 } from '@/lib/companiesDirectory/sbisImportPlan';
+import {
+  assertPortalProductionTarget,
+  canonicalJson,
+  sha256Hex,
+} from '@/lib/companiesDirectory/guardedImportCore';
 
 const CURRENT_PRODUCTION_HOST = '139.60.162.12';
-const FORMER_PRODUCTION_HOST = '144.31.54.166';
 const CURRENT_PRODUCTION_PORT = 35434;
 const CURRENT_PRODUCTION_DATABASE = 'postgres';
 const POSTGRES_BIGINT_MAX = BigInt('9223372036854775807');
@@ -169,28 +171,6 @@ function assertSha256(value: unknown, label: string): asserts value is string {
   if (typeof value !== 'string' || !/^[a-f0-9]{64}$/i.test(value)) {
     throw new Error(`${label} must be a SHA-256 hex digest`);
   }
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(canonicalize);
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.keys(value)
-        .sort()
-        .map((key) => [key, canonicalize(value[key])]),
-    );
-  }
-  return value;
-}
-
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(canonicalize(value));
-}
-
-function sha256Hex(value: string | Buffer): string {
-  return createHash('sha256').update(value).digest('hex');
 }
 
 function isBlank(value: unknown): boolean {
@@ -529,54 +509,11 @@ export function assertSbisProductionTarget(
   port: number;
   database: string;
 } {
-  let parsed: URL;
-  try {
-    parsed = new URL(connectionString);
-  } catch {
-    throw new Error('SBIS import database URL is invalid');
-  }
-  if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) {
-    throw new Error('SBIS import database URL must use postgres');
-  }
-  if (parsed.hostname === FORMER_PRODUCTION_HOST) {
-    throw new Error(
-      `Refusing the former production host ${FORMER_PRODUCTION_HOST}`,
-    );
-  }
-  if (confirmedTarget !== CURRENT_PRODUCTION_HOST) {
-    throw new Error(
-      `Production target must be explicitly confirmed as ${CURRENT_PRODUCTION_HOST}`,
-    );
-  }
-  if (parsed.hostname !== CURRENT_PRODUCTION_HOST) {
-    throw new Error(
-      `SBIS import database host must be ${CURRENT_PRODUCTION_HOST}`,
-    );
-  }
-  const port = Number(parsed.port);
-  if (port !== CURRENT_PRODUCTION_PORT) {
-    throw new Error(
-      `SBIS import database port must be ${CURRENT_PRODUCTION_PORT}`,
-    );
-  }
-  const database = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
-  if (database !== CURRENT_PRODUCTION_DATABASE) {
-    throw new Error(
-      `SBIS import database must be ${CURRENT_PRODUCTION_DATABASE}`,
-    );
-  }
-  for (const key of parsed.searchParams.keys()) {
-    if (key !== 'sslmode') {
-      throw new Error(
-        `SBIS import database URL query parameter "${key}" is forbidden`,
-      );
-    }
-  }
-  return {
-    host: parsed.hostname,
-    port,
-    database,
-  };
+  return assertPortalProductionTarget(
+    connectionString,
+    confirmedTarget,
+    'SBIS import',
+  );
 }
 
 function readFlagValue(args: string[], index: number, flag: string): string {

@@ -1,8 +1,9 @@
 'use client';
 
-import { Send } from 'lucide-react';
+import { Send, X } from 'lucide-react';
 import { useDemoMode } from '@/lib/clientDemo/useDemoMode';
 import { promptDemoRegister } from '@/lib/clientDemo/registerPrompt';
+import { isTabDemoMode, disableTabDemoMode } from '@/lib/clientDemo/tabDemoMode';
 
 /**
  * Полоса «Демо-режим» вверху клиентского портала.
@@ -44,15 +45,32 @@ export function DemoBanner() {
         />
         Демо-режим — это витрина портала с тестовыми данными. Любые изменения отключены.
       </span>
-      <button
-        type="button"
-        onClick={() => promptDemoRegister('работать на своих данных')}
-        className="neu-pill inline-flex items-center gap-1.5 px-3 py-1 text-xs font-bold shrink-0"
-        style={{ background: 'var(--cp-amber)', color: 'var(--cp-ink)' }}
-      >
-        <Send size={13} aria-hidden />
-        Зарегистрироваться
-      </button>
+      {isTabDemoMode() ? (
+        // Демо-вкладка (?demo=1): выход — снять флаг вкладки, аккаунт не трогаем.
+        // Рядом в другой вкладке может жить рабочий кабинет — он не затрагивается.
+        <button
+          type="button"
+          onClick={() => {
+            disableTabDemoMode();
+            window.location.assign('/client');
+          }}
+          className="neu-pill inline-flex items-center gap-1.5 px-3 py-1 text-xs font-bold shrink-0"
+          style={{ background: 'var(--cp-surface)', color: 'var(--cp-paper)' }}
+        >
+          <X size={13} aria-hidden />
+          Выйти из демо
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={() => promptDemoRegister('работать на своих данных')}
+          className="neu-pill inline-flex items-center gap-1.5 px-3 py-1 text-xs font-bold shrink-0"
+          style={{ background: 'var(--cp-amber)', color: 'var(--cp-ink)' }}
+        >
+          <Send size={13} aria-hidden />
+          Зарегистрироваться
+        </button>
+      )}
     </div>
   );
 }

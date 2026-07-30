@@ -3,6 +3,10 @@ import {
   type SbisApplySession,
   type SbisImportPreview,
 } from '@/lib/companiesDirectory/sbisPlanApply';
+import {
+  beginImportTransaction,
+  verifyPortalCompaniesDirectoryIdentity,
+} from '@/lib/companiesDirectory/postgresImportCore';
 
 export interface SbisPgQueryResult {
   rows: Array<Record<string, unknown>>;
@@ -314,25 +318,6 @@ function integerFromRow(
   return value;
 }
 
-async function beginWithSettings(
-  client: SbisPgClient,
-  statement: 'BEGIN READ ONLY' | 'BEGIN READ WRITE',
-): Promise<void> {
-  await client.query(statement);
-  try {
-    await client.query("SET LOCAL lock_timeout = '30s'");
-    await client.query("SET LOCAL statement_timeout = '30min'");
-    await client.query("SET LOCAL idle_in_transaction_session_timeout = '35min'");
-  } catch (error) {
-    try {
-      await client.query('ROLLBACK');
-    } catch {
-      // The original setup error is more actionable than a second rollback error.
-    }
-    throw error;
-  }
-}
-
 export class SbisPostgresApplySession implements SbisApplySession {
   private readonly client: SbisPgClient;
   private readonly expectedPlanFingerprint: string;
@@ -360,13 +345,21 @@ export class SbisPostgresApplySession implements SbisApplySession {
   async beginReadOnly(): Promise<void> {
     await this.prepareStageTable();
     this.readOnly = true;
-    await beginWithSettings(this.client, 'BEGIN READ ONLY');
+    await beginImportTransaction(this.client, 'BEGIN READ ONLY', {
+      lockTimeout: '30s',
+      statementTimeout: '30min',
+      idleTimeout: '35min',
+    });
   }
 
   async beginReadWrite(): Promise<void> {
     await this.prepareStageTable();
     this.readOnly = false;
-    await beginWithSettings(this.client, 'BEGIN READ WRITE');
+    await beginImportTransaction(this.client, 'BEGIN READ WRITE', {
+      lockTimeout: '30s',
+      statementTimeout: '30min',
+      idleTimeout: '35min',
+    });
   }
 
   async acquireAdvisoryLock(): Promise<void> {
@@ -487,26 +480,5 @@ export async function verifySbisDatabaseIdentity(
   database: string;
   directoryTable: string;
 }> {
-  const result = await client.query(`
-SELECT
-  current_database() AS database,
-  to_regclass('public.companies_directory')::text AS directory_table
-`.trim());
-  const row = result.rows[0];
-  const database = String(row?.database ?? '');
-  const directoryTable = String(row?.directory_table ?? '');
-  if (
-    database !== 'postgres'
-    || !['companies_directory', 'public.companies_directory'].includes(
-      directoryTable,
-    )
-  ) {
-    throw new Error(
-      'Connected database identity is not the current Portal companies directory',
-    );
-  }
-  return {
-    database,
-    directoryTable,
-  };
+  return verifyPortalCompaniesDirectoryIdentity(client);
 }

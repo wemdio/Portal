@@ -21,6 +21,15 @@ export async function GET(req: NextRequest) {
   const res = await requireByoMailboxClient(req);
   if ('error' in res) return res.error;
 
+  // Под демо OAuth-флоу не начинаем: выданный state приведёт на callback,
+  // который запишет ящик в реальный аккаунт (ревью 27.07).
+  if (res.auth.isDemo) {
+    return NextResponse.json(
+      { error: 'Демо-режим: подключение почты недоступно на витрине.', code: 'DEMO_READONLY' },
+      { status: 403 },
+    );
+  }
+
   try {
     getGoogleClientCreds();
   } catch {

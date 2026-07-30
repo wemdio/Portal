@@ -12,7 +12,7 @@ import { useMemo, useState, type JSX } from 'react';
 import { Check, ChevronDown, ExternalLink, X } from 'lucide-react';
 import type { HeHypothesis, HeStage, HeVertical } from '@/lib/hypothesisEngine/types';
 import { Badge, PotentialBadge, Spinner, TierBadge } from '../ui';
-import type { HeJobSummary, HeProjectDetailResponse } from '../api';
+import type { HeDossier, HeJobSummary, HeProjectDetailResponse } from '../api';
 
 /** Стадии досборки материалов под выбранную вертикаль (письма/вокабуляр/шаблон). */
 const BUILD_STAGES: ReadonlySet<HeStage> = new Set(['chain', 'vocab', 'template']);
@@ -35,6 +35,8 @@ export interface Step2VerticalsProps {
   onPatchHypothesis: (id: string, status: HypothesisPatchStatus) => void;
   onSelectVertical: (id: string) => void;
   jobs: HeJobSummary[];
+  /** Досье вертикалей (для компактной строки цифр на готовых). */
+  dossiers?: HeDossier[];
 }
 
 export function Step2Verticals({
@@ -44,6 +46,7 @@ export function Step2Verticals({
   onPatchHypothesis,
   onSelectVertical,
   jobs,
+  dossiers,
 }: Step2VerticalsProps): JSX.Element {
   const sorted = useMemo(
     () =>
@@ -76,6 +79,15 @@ export function Step2Verticals({
     (j) => BUILD_STAGES.has(j.stage) && (j.status === 'pending' || j.status === 'running'),
   );
 
+  // Готовые досье по вертикали — для строки цифр на карточке.
+  const readyDossierByVertical = useMemo(() => {
+    const map = new Map<string, HeDossier>();
+    for (const d of dossiers ?? []) {
+      if (d.status === 'ready' && d.data) map.set(d.vertical_id, d);
+    }
+    return map;
+  }, [dossiers]);
+
   if (sorted.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50/50 p-10 text-center">
@@ -100,6 +112,7 @@ export function Step2Verticals({
           hypotheses={hypothesesByVertical.get(vertical.id) ?? []}
           selected={vertical.id === selectedVerticalId}
           buildNote={vertical.id === selectedVerticalId && buildActive}
+          dossier={readyDossierByVertical.get(vertical.id) ?? null}
           onSelectVertical={onSelectVertical}
           onPatchHypothesis={onPatchHypothesis}
         />
@@ -115,6 +128,7 @@ function VerticalCard({
   hypotheses,
   selected,
   buildNote,
+  dossier,
   onSelectVertical,
   onPatchHypothesis,
 }: {
@@ -122,6 +136,7 @@ function VerticalCard({
   hypotheses: HeHypothesis[];
   selected: boolean;
   buildNote: boolean;
+  dossier: HeDossier | null;
   onSelectVertical: (id: string) => void;
   onPatchHypothesis: (id: string, status: HypothesisPatchStatus) => void;
 }) {
@@ -151,6 +166,9 @@ function VerticalCard({
           {vertical.summary}
         </p>
       ) : null}
+
+      {/* Цифры готового досье — компактная строка под саммари */}
+      {dossier ? <DossierStatRow dossier={dossier} /> : null}
 
       {/* Синонимы — за «Подробнее», чтобы не шуметь */}
       {vertical.synonyms.length > 0 ? (
@@ -229,6 +247,38 @@ function VerticalCard({
 
 /* ─────────────────────────── Гипотеза ─────────────────────────── */
 
+/**
+ * fit_rationale приезжает в he_hypotheses отдельной интеграцией — тип
+ * HeHypothesis ей не владеет, поэтому читаем поле структурно (как
+ * audience_side в dossier.ts). Легаси-строки без поля рендерятся как раньше.
+ */
+function fitRationaleOf(h: HeHypothesis): string | null {
+  const raw = (h as HeHypothesis & { fit_rationale?: unknown }).fit_rationale;
+  return typeof raw === 'string' && raw.trim().length > 0 ? raw : null;
+}
+
+/** Компактная строка цифр досье: «~N компаний · M вакансий hh · reply X% vs Y%» (null-safe). */
+function DossierStatRow({ dossier }: { dossier: HeDossier }) {
+  const data = dossier.data;
+  if (!data) return null;
+  const parts: string[] = [];
+  if (data.counters.companies_total != null) {
+    parts.push(`~${data.counters.companies_total.toLocaleString('ru-RU')} компаний`);
+  }
+  if (data.counters.hh_vacancies_total != null) {
+    parts.push(`${data.counters.hh_vacancies_total.toLocaleString('ru-RU')} вакансий hh`);
+  }
+  if (data.dataset_stats.reply_pct != null) {
+    parts.push(
+      data.dataset_stats.baseline_pct != null
+        ? `reply ${data.dataset_stats.reply_pct}% vs ${data.dataset_stats.baseline_pct}%`
+        : `reply ${data.dataset_stats.reply_pct}%`,
+    );
+  }
+  if (parts.length === 0) return null;
+  return <p className="mt-2 text-xs font-medium text-gray-500">{parts.join(' · ')}</p>;
+}
+
 function HypothesisItem({
   hypothesis,
   onPatch,
@@ -238,6 +288,7 @@ function HypothesisItem({
 }) {
   const rejected = hypothesis.status === 'rejected';
   const accepted = hypothesis.status === 'accepted';
+  const fitRationale = fitRationaleOf(hypothesis);
 
   return (
     <li
@@ -258,6 +309,12 @@ function HypothesisItem({
             {accepted ? <Badge tone="emerald">Принята</Badge> : null}
             {rejected ? <Badge tone="gray">Отклонена</Badge> : null}
           </div>
+          {fitRationale ? (
+            <div className="mt-2 rounded-md border-l-2 border-blue-400 bg-blue-50/50 px-3 py-2">
+              <p className="text-[11px] font-semibold text-blue-600">Почему это рынок:</p>
+              <p className="mt-0.5 text-xs leading-relaxed text-gray-700">{fitRationale}</p>
+            </div>
+          ) : null}
           {hypothesis.description ? (
             <p className="mt-1 text-sm leading-relaxed text-gray-600">{hypothesis.description}</p>
           ) : null}

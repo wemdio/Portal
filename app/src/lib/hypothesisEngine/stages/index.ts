@@ -16,6 +16,7 @@ import { runChainStage } from './chain';
 import { runVocabStage } from './vocab';
 import { runBaseAnalyzeStage } from './baseAnalyze';
 import { runTemplateStage } from './template';
+import { runDossierStage } from './dossier';
 
 export type { HeStageContext, HeStageResult } from './shared';
 
@@ -41,6 +42,8 @@ export async function runHeStage(job: HeJob, ctx: HeStageContext): Promise<HeSta
       return runBaseAnalyzeStage(job, ctx);
     case 'template':
       return runTemplateStage(job, ctx);
+    case 'dossier':
+      return runDossierStage(job, ctx);
     default: {
       const neverStage: never = job.stage;
       throw new Error(`Неизвестная стадия hypothesis engine: ${String(neverStage)}`);
@@ -63,3 +66,4 @@ export {
   extractPersonalizationOperators,
   mapOperatorsToColumns,
 } from './template';
+export { runDossierStage } from './dossier';

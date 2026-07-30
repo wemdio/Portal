@@ -8,6 +8,7 @@
 
 import { AlertCircle, Loader2 } from 'lucide-react';
 import type { HeHypothesisTier, HeProjectStatus } from '@/lib/hypothesisEngine/types';
+import { OPERATOR_RE } from '@/lib/hypothesisEngine/renderPreview';
 
 export type BadgeTone = 'gray' | 'emerald' | 'amber' | 'red' | 'blue' | 'violet';
 
@@ -67,15 +68,20 @@ export function Spinner({ className = 'h-4 w-4' }: { className?: string }) {
   return <Loader2 className={`animate-spin ${className}`} aria-hidden />;
 }
 
-/** Подсветка операторов персонализации {{var}} янтарной плашкой. */
+/**
+ * Подсветка операторов персонализации {{var}} янтарной плашкой.
+ * Регексп — тот же, что в боевой экстракции операторов (OPERATOR_RE):
+ * split с единственной capture-группой отдаёт чётные части как текст,
+ * нечётные — имена операторов (без скобок).
+ */
 export function OperatorText({ text, className }: { text: string; className?: string }) {
-  const parts = text.split(/(\{\{[^{}]+\}\})/g);
+  const parts = text.split(OPERATOR_RE);
   return (
     <span className={className}>
       {parts.map((part, i) =>
-        /^\{\{[^{}]+\}\}$/.test(part) ? (
+        i % 2 === 1 ? (
           <mark key={i} className="rounded bg-amber-100 px-0.5 font-mono text-[0.92em] text-amber-800">
-            {part}
+            {`{{${part}}}`}
           </mark>
         ) : (
           <span key={i}>{part}</span>

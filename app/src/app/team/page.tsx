@@ -7,6 +7,8 @@ import { useIsTma } from '@/lib/useIsTma';
 import { UserProfile, UserRole } from '@/types';
 import { getAssigneeDisplayName } from '@/lib/projectAssignees';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
+import TeamStatisticsPanel from '@/components/team/TeamStatisticsPanel';
+import TeamReviewsPanel from '@/components/team/TeamReviewsPanel';
 
 interface ProjectData {
   id: string;
@@ -40,6 +42,7 @@ const DEFAULT_CAPACITY = 4;
 const LEAD_ROLES = new Set<UserRole>(['lead']);
 const NO_SPEC = '— без специалиста';
 
+type TeamWorkspaceView = 'load' | 'statistics' | 'reviews';
 type Segment = 'leads' | 'specs' | 'projects';
 type SortKey = 'projects' | 'load' | 'result' | 'name';
 type StatusFilter = 'all' | 'Перегруз' | 'Норма' | 'Свободен';
@@ -241,6 +244,7 @@ function Caret({ open, hidden }: { open: boolean; hidden?: boolean }) {
 
 export default function TeamPage() {
   const isTma = useIsTma();
+  const [workspaceView, setWorkspaceView] = useState<TeamWorkspaceView>('load');
   const [projects, setProjects] = useState<ProjectData[]>([]);
   const [profiles, setProfiles] = useState<ProfileData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -266,11 +270,11 @@ export default function TeamPage() {
     return map;
   }, [profiles]);
 
+
   useEffect(() => {
     void fetchData();
     loadCapacities();
   }, []);
-
   useEffect(() => {
     if (profiles.length === 0) return;
     let cancelled = false;
@@ -418,13 +422,6 @@ export default function TeamPage() {
     return arr;
   };
 
-  if (loading) {
-    return (
-      <div className="flex h-64 items-center justify-center">
-        <div className="text-gray-400 text-sm">Загрузка...</div>
-      </div>
-    );
-  }
 
   const isProjectsView = segment === 'projects';
 
@@ -518,7 +515,7 @@ export default function TeamPage() {
     );
   };
 
-  // specialist sub-row inside a lead (read-only capacity, global stats)
+  // Specialist sub-row: global load and results, with the current lead scope stated explicitly.
   const specSubRow = (lead: string, sname: string, list: ProjectData[], open: boolean, onToggle: () => void) => {
     const isPlaceholder = sname === NO_SPEC;
     const s = model.specStat(sname);
@@ -532,7 +529,7 @@ export default function TeamPage() {
           <TeamMemberAvatar displayName={isPlaceholder ? '?' : sname} avatarUrl={isPlaceholder ? null : nameToAvatarUrl.get(sname)} signedUrl={isPlaceholder ? null : avatarSignedUrls[sname]} variant="specialist" size="sm" />
           <div className="min-w-0">
             <p className={`text-sm font-medium truncate ${isPlaceholder ? 'text-gray-500 italic' : 'text-gray-900'}`}>{isPlaceholder ? 'Без специалиста' : sname}</p>
-            <p className="text-xs text-gray-500">{isPlaceholder ? `${list.length} ${plural(list.length)} без спеца` : `специалист · ${list.length} ${plural(list.length)} у лида`}</p>
+            <p className="text-xs text-gray-500">{isPlaceholder ? `${list.length} ${plural(list.length)} без спеца` : `проекты: ${list.length} у этого лида, ${s.projects.length} всего`}</p>
           </div>
         </div>
         {isPlaceholder ? (
@@ -724,11 +721,43 @@ export default function TeamPage() {
 
   return (
     <div className={`${isTma ? 'space-y-5' : 'space-y-6'} max-w-[1600px] mx-auto`}>
-      <div>
-        <h1 className={`${isTma ? 'text-2xl' : 'text-3xl'} font-bold tracking-tight text-gray-900`}>Нагрузка команды</h1>
-        <p className="mt-1 text-sm text-gray-500">Занятость, распределение по проектам и результаты — в одном месте</p>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className={`${isTma ? 'text-2xl' : 'text-3xl'} font-bold tracking-tight text-gray-900`}>Команда</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            {workspaceView === 'load'
+              ? 'Текущая загрузка, распределение по проектам и результаты'
+              : workspaceView === 'statistics'
+                ? 'Показатели команды за выбранный календарный период'
+                : 'Итоги встреч и рекомендации по развитию сотрудников'}
+          </p>
+        </div>
+        <div role="group" aria-label="Разделы команды" className="inline-flex min-h-11 w-fit gap-1 rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
+          {([
+            ['load', 'Загрузка'],
+            ['statistics', 'Статистика'],
+            ['reviews', 'Ревью'],
+          ] as const).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              aria-pressed={workspaceView === key}
+              onClick={() => setWorkspaceView(key)}
+              className={`min-h-11 rounded-lg px-4 text-sm font-semibold transition-colors ${workspaceView === key ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
+      {workspaceView === 'load' ? (
+        loading ? (
+          <div className="flex h-64 items-center justify-center rounded-2xl border border-gray-200 bg-white">
+            <div className="text-sm text-gray-400">Загрузка...</div>
+          </div>
+        ) : (
+          <div className={isTma ? 'space-y-5' : 'space-y-6'}>
       {/* KPI cards */}
       <div className={`grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 ${isTma ? 'gap-3' : 'gap-4'}`}>
         {kpiCards.map((c) => (
@@ -821,6 +850,13 @@ export default function TeamPage() {
           </div>
         </div>
       </div>
+          </div>
+        )
+      ) : workspaceView === 'statistics' ? (
+        <TeamStatisticsPanel />
+      ) : (
+        <TeamReviewsPanel />
+      )}
     </div>
   );
 }

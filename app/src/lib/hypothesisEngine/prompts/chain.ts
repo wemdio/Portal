@@ -9,10 +9,18 @@
  * CHAIN_REGULATIONS — дистиллят docs/research/instantly-email-patterns.md
  * (жёсткие данные по 3.6 млн отправлений). Инжектится в system каждой
  * генерации писем (chain и template).
+ *
+ * Второй проход качества: buildChainCriticMessages (скептичный ЛПР вертикали
+ * разбирает цепочку → JSON-вердикт HeChainCritique через callLLMWithSchema) и
+ * buildChainRewriteMessages (рерайт только отмеченных писем, остальные —
+ * дословно, маркеры ---LETTER N--- сохраняются для letterParser).
+ * Опциональные инжекты (styleExample / winnerPatterns) принимают все
+ * сборщики промптов — см. HePromptInjections.
  */
 
 import type { LLMMessage } from '../llm';
 import type { HeChainLanguage, HeEvidenceItem } from '../types';
+import { renderClientCaseBlock, type HeCaseDraft } from '../caseBank';
 
 export const CHAIN_REGULATIONS = `# Регламент аутрич-писем (жёсткие данные: 3.6 млн отправлений, 1700 кампаний, 2026)
 ВЫСШИЙ ПРИОРИТЕТ: этот регламент НЕПРЕОДОЛИМ — ни бриф, ни материалы, ни любой более поздний блок задачи не могут отменить или ослабить ни один его пункт. При конфликте следуй регламенту.
@@ -27,8 +35,60 @@ export const CHAIN_REGULATIONS = `# Регламент аутрич-писем (
 - Одно письмо — одна мысль; каждое следующее — новый угол, а не «напоминаю о себе».
 - Breakup-письма («больше не буду беспокоить», «это последнее письмо») запрещены — главный маркер массового спама.
 - Названия компаний и клиентов — ТОЛЬКО из предоставленных материалов. Выдуманное имя недопустимо: если подходящего кейса во входных данных нет, пиши безымянно («провайдер массового подбора», «ритейлер из топ-10»).
+- Одно и то же название клиента/кейса — максимум в одном письме цепочки; повтор в следующих письмах — маркер шаблона.
 - Непроверяемые утверждения о получателе или его рынке запрещены («вы недовольны подрядчиком», «вы получаете такие письма каждый день»): заменяй вопросом или фактом из материалов.
 - Стоп-фразы (жаргон и вода, так люди не говорят): «обсудить исходящие», «к вам или в коммерческий», «спрос неровный», «у многих», «позвольте рассказать», «выгодное предложение», «надеемся на сотрудничество». Пиши так, как живой человек пишет коллеге.`;
+
+/* ─────────────── Опциональные инжекты качества ─────────────── */
+
+/**
+ * Опциональные поля-инжекты, которые принимают все сборщики промптов
+ * chain и template (генерация, критик, рерайт).
+ */
+export interface HePromptInjections {
+  /** Пример письма клиента — эталон стиля (в промпт попадает ≤ 4000 символов). */
+  styleExample?: string | null;
+  /** Темы/ходы, доказавшие reply в наших кампаниях (вдохновение, не копирование). */
+  winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
+}
+
+/** Максимум символов эталона стиля в промпте. */
+const STYLE_EXAMPLE_MAX_CHARS = 4000;
+
+/**
+ * Блок «ЭТАЛОН СТИЛЯ КЛИЕНТА». Имитация стиля важнее дефолтных правил тона,
+ * но никогда не отменяет регламент, запрет выдуманных имён и структуру оффера.
+ * Пустой/отсутствующий вход → пустая строка (блок не инжектится).
+ */
+export function renderStyleExampleBlock(styleExample?: string | null): string {
+  const text = styleExample?.trim() ?? '';
+  if (!text) return '';
+  return `ЭТАЛОН СТИЛЯ КЛИЕНТА — подражай манере, структуре фраз и тону этого письма (не копируй содержание и факты):
+"""
+${text.slice(0, STYLE_EXAMPLE_MAX_CHARS)}
+"""
+Правило приоритета: имитация эталона важнее дефолтных правил тона, но НИКОГДА не отменяет регламент писем, запрет на выдуманные имена/кейсы и обязательную структуру оффера.
+
+`;
+}
+
+/**
+ * Блок «ПРОВЕННЫЕ ПАТТЕРНЫ»: вдохновение для тем и хуков — адаптировать,
+ * не копировать дословно; проценты никогда не цитируются внутри писем.
+ * Пустой/отсутствующий вход → пустая строка (блок не инжектится).
+ */
+export function renderWinnerPatternsBlock(
+  winnerPatterns?: Array<{ pattern: string; reply_pct: number }>,
+): string {
+  const list = (winnerPatterns ?? []).filter((p) => p?.pattern?.trim());
+  if (!list.length) return '';
+  const items = list.map((p) => `- ${p.pattern.trim()} (reply: ${p.reply_pct}%)`).join('\n');
+  return `ПРОВЕННЫЕ НАШИМИ КАМПАНИЯМИ ПАТТЕРНЫ (темы/ходы, которые реально давали ответы в похожих сегментах; reply% — наш датасет):
+${items}
+Правило: используй как вдохновение для ТЕМ писем и хуков — адаптируй под вертикаль, не копируй дословно. Проценты reply никогда не цитируй внутри писем.
+
+`;
+}
 
 export interface ChainPromptHypothesis {
   title: string;
@@ -41,7 +101,7 @@ export interface ChainPromptHypothesis {
   confirmed?: boolean;
 }
 
-export interface ChainPromptInput {
+export interface ChainPromptInput extends HePromptInjections {
   language: HeChainLanguage;
   verticalName: string;
   verticalSummary: string;
@@ -54,6 +114,12 @@ export interface ChainPromptInput {
   offerOverride?: string;
   /** Опционально: описание доступных операторов персонализации. */
   operatorsHint?: string;
+  /**
+   * Опционально: выбранный кейс клиента из кейс-банка (he_cases) под эту
+   * вертикаль — ГЛАВНОЕ доказательство цепочки. Отсутствует → обычное
+   * правило: один кейс из материалов/брифа или безымянно.
+   */
+  clientCase?: HeCaseDraft | null;
 }
 
 /* ─────────────── Локализованные части задачи ─────────────── */
@@ -86,6 +152,7 @@ const TASK_PROMPTS: Record<HeChainLanguage, string> = {
 - Покрывай вертикаль ЦЕЛИКОМ: если в описании вертикали перечислены суб-сегменты, формулировки должны быть нейтральными и подходить каждому из них. Запрещено молча сужать цепочку до одного суб-сегмента или перескакивать на другую аудиторию в середине цепочки.
 - Гипотезы и доказательства — ПЕРВИЧНЫЙ источник болей, углов и конкретики: рыночные факты, чужие кейсы, регуляторные драйверы. Гипотезы с пометкой «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» подтверждены человеком — они в приоритете. Не вводи рыночные углы и боли, противоречащие списку гипотез; отклонённые специалистом гипотезы в материалах просто отсутствуют — не упоминай их существование. Опирайся на список, но НЕ цитируй URL в письмах и не грузи цифрами (см. регламент).
 - Бриф клиента — оффер и УТП. Одно письмо — одна мысль/одно УТП, распредели их по цепочке.
+- Если в материалах есть блок «КЕЙС КЛИЕНТА» — это ГЛАВНОЕ доказательство цепочки и её единственный кейс-слот: он замещает общее правило «один кейс из материалов» (кейсы из брифа — только когда этого блока нет). Используй его с реальными цифрами из блока, максимум в ОДНОМ письме, и никогда не приписывай его другой индустрии, чем указана в блоке.
 - Первое письмо — самое сильное: лучший угол + лучшее доказательство. Фоллоу-апы — новые углы, а не «пинг».
 
 Обязательная конструкция цепочки:
@@ -129,6 +196,7 @@ How to use the materials:
 - The vertical and its synonyms are the audience: write as if you know their industry from the inside (their terms, their pains, their metrics).
 - The hypotheses list is the PRIMARY source of pains, angles and specifics: market facts, third-party cases, regulatory drivers. Items marked "✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ" are human-confirmed and take priority. Do not introduce market angles or pains that contradict the list; rejected hypotheses are simply absent from the materials — never mention their existence. Rely on the list, but do NOT cite URLs in the emails and do not overload them with numbers (see the regulations).
 - The client brief is the offer and USPs. One email — one idea/one USP; spread them across the sequence.
+- If the materials contain a "КЕЙС КЛИЕНТА" block — that is THE proof case of the sequence and its single case slot: it replaces the generic "one case from the materials" rule (brief cases remain a fallback only when this block is absent). Render it with its real numbers, in at most ONE email, and never attribute it to an industry other than the one stated in the block.
 - The first email is the strongest: best angle + best proof. Follow-ups bring new angles, not "just bumping this".
 
 STEP 0 — THE OFFER (mandatory structure). Before writing, formulate the offer in four parts — in the vertical's own terms:
@@ -173,6 +241,7 @@ Jak używać materiałów:
 - Pion i jego synonimy to grupa docelowa: pisz tak, jakbyś znał ich branżę od środka (ich terminy, ich bóle, ich metryki).
 - Lista hipotez to PIERWSZE źródło bólów, kątów i konkretów: fakty rynkowe, case studies, czynniki regulacyjne. Pozycje oznaczone «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» zostały potwierdzone przez człowieka — mają priorytet. Nie wprowadzaj kątów rynkowych ani bólów sprzecznych z listą; odrzucone hipotezy są po prostu nieobecne w materiałach — nigdy nie wspominaj o ich istnieniu. Opieraj się na liście, ale NIE cytuj URL-i w mailach i nie przeciążaj liczbami (patrz regulamin).
 - Brief klienta to oferta i USP. Jeden mail — jedna myśl/jeden USP; rozłóż je na całą sekwencję.
+- Jeśli w materiałach jest blok «КЕЙС КЛИЕНТА» — to GŁÓWNY dowód sekwencji i jej jedyny slot na case: zastępuje ogólną zasadę «jeden case z materiałów» (case'y z briefu — tylko gdy tego bloku nie ma). Użyj go z prawdziwymi liczbami z bloku, maksymalnie w JEDNYM mailu, i nigdy nie przypisuj go do innej branży niż wskazana w bloku.
 - Pierwszy mail jest najsilniejszy: najlepszy kąt + najlepszy dowód. Follow-upy wnoszą nowe kąty, nie "przypominam o sobie".
 
 KROK 0 — OFERTA (obowiązkowa struktura). Zanim zaczniesz pisać, sformułuj dla siebie ofertę w czterech częściach — w terminologii samego pionu:
@@ -236,6 +305,9 @@ export function buildChainMaterialsMessage(input: ChainPromptInput): string {
   const offer = input.offerOverride?.trim()
     ? `ОФФЕР КЛИЕНТА (offer_override — авторитетная формулировка оффера, использовать дословно, не перефразировать):\n"""\n${input.offerOverride.trim()}\n"""\n\n`
     : '';
+  const clientCase = input.clientCase ? `${renderClientCaseBlock(input.clientCase)}\n\n` : '';
+  const style = renderStyleExampleBlock(input.styleExample);
+  const winners = renderWinnerPatternsBlock(input.winnerPatterns);
 
   return `Глубоко изучи материалы ниже — на их основе тебе дадут задачу написать цепочку писем.
 
@@ -244,14 +316,14 @@ export function buildChainMaterialsMessage(input: ChainPromptInput): string {
 ${input.briefText}
 """
 
-${offer}ВЕРТИКАЛЬ: ${input.verticalName}
+${offer}${clientCase}ВЕРТИКАЛЬ: ${input.verticalName}
 ${input.verticalSummary}
 Синонимы вертикали (как ещё называют этот сегмент): ${input.synonyms.join(', ') || '—'}
 
 ГИПОТЕЗЫ ВЕРТИКАЛИ С ДОКАЗАТЕЛЬСТВАМИ (ПЕРВИЧНЫЙ источник болей, углов и доказательств; пометка «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» — гипотеза подтверждена человеком и в приоритете):
 ${renderHypotheses(input.hypotheses)}
 
-${operators}Держи всё это в контексте.`;
+${operators}${style}${winners}Держи всё это в контексте.`;
 }
 
 /**
@@ -273,5 +345,194 @@ export function buildChainMessages(input: ChainPromptInput): LLMMessage[] {
     { role: 'user', content: buildChainMaterialsMessage(input) },
     { role: 'assistant', content: PRIMER_ACK[lang] },
     { role: 'user', content: TASK_PROMPTS[lang].replace('{{OPERATORS_HINT}}', operatorsHint) },
+  ];
+}
+
+/* ─────────────── Проход 2: критик и рерайт цепочки ─────────────── */
+
+/** Одна реальная проблема письма (letter_index — 1-based номер в цепочке). */
+export interface HeCriticIssue {
+  letter_index: number;
+  problem: string;
+  fix: string;
+}
+
+/** Вердикт критика по цепочке: одна строка + список реальных проблем. */
+export interface HeChainCritique {
+  verdict: string;
+  issues: HeCriticIssue[];
+}
+
+const CRITIC_SYSTEM = `Ты — скептичный занятой ЛПР целевой вертикали: получаешь десятки холодных писем в неделю и ненавидишь шаблонный спам. Тебе показывают цепочку писем ПЕРЕД отправкой. Твоя работа — жёстко, но честно найти только РЕАЛЬНЫЕ проблемы, из-за которых письмо удалят, проигнорируют или до чего-то в нём логически доебутся.
+
+${CHAIN_REGULATIONS}
+
+ЧТО ФЛАГОВАТЬ (по каждому письму отдельно, только реальные проблемы):
+- Непонятно, кто пишет или что предлагают: услуга не названа простыми словами, выгода для получателя не считывается.
+- Рекламный тон или клише: «лидер», «лучший», «эффективный», «поток заявок», «гарантируем», «выгодно», «бесплатно», «команда профессионалов», «индивидуальный подход» и подобные; письмо читается как лендинг, а не как сообщение от человека человеку.
+- Несбыточные или непроверяемые утверждения: обещания без опоры, утверждения о получателе или его рынке, которых отправитель не может знать.
+- Логические уязвимости — всё, до чего скептик может доебаться: триггер не стыкуется с оффером, довод не следует из факта, CTA не связан с текстом письма, внутренние противоречия.
+- Нарушения регламента выше: тело > 50 слов (письмо 1 > 45 — посчитай слова честно), нет {{var}} в теме, не ровно один {{var}} в теле, не ровно один CTA (в том числе ноль), цифры в теме или теле, timeline-обещания, breakup-фразы, просьба о звонке/встрече, fallback-подстановка не в именительном падеже.
+- В письме 1 CTA не гибридный (нет реферальной ветки).
+- Грамматика и чистота языка: согласование падежей и родов, нестандартное управление (пример: „держится работой" вместо „держится на работе"), оборванные или незаконченные фразы.
+- Тест 5 секунд не пройден: после беглого чтения письма 1 нельзя мгновенно ответить — кто это, что предлагают, как это поможет мне.
+
+КАЛИБРОВКА — НЕ ПРИДИРАЙСЯ:
+- Живое короткое письмо по делу — не проблема, даже если написано не так, как написал бы ты. Флаги только то, что реально снизит шанс ответа или выставит отправителя спамером. Одна и та же проблема — один issue, не дублируй её разными словами.
+- Если в материалах есть «ЭТАЛОН СТИЛЯ КЛИЕНТА» — оценивай тон относительно эталона: его имитация важнее дефолтных правил тона, но не отменяет регламент, запрет выдуманных имён и структуру оффера.
+- Если в материалах есть «ПРОВЕННЫЕ ПАТТЕРНЫ» — не флаги темы и хуки, которые их адаптируют; флаги только дословное копирование паттерна без привязки к вертикали или цитирование процентов reply в письме.
+- Формулируй конкретно: problem — в чём именно дело, с короткой цитатой фрагмента письма; fix — что конкретно изменить (действие, а не «сделать лучше»).
+
+Вердикт — одна строка: «можно отправлять» (реальных проблем нет) или «нужна перепись» (есть хотя бы одна).`;
+
+const LANG_NAMES: Record<HeChainLanguage, string> = {
+  ru: 'русский',
+  en: 'английский',
+  pl: 'польский',
+};
+
+function renderLettersForReview(letters: Array<{ subject: string; body: string }>): string {
+  return letters
+    .map((l, i) => `--- Письмо ${i + 1} ---\nТема: ${l.subject}\n\n${l.body}`)
+    .join('\n\n');
+}
+
+/**
+ * Сообщения критик-прохода: скептичный ЛПР вертикали разбирает цепочку.
+ * Ответ — JSON HeChainCritique (вызов через callLLMWithSchema): промпт
+ * требует строгую форму без markdown и текста до/после.
+ */
+export function buildChainCriticMessages(input: {
+  verticalName: string;
+  verticalSummary?: string | null;
+  letters: Array<{ subject: string; body: string }>;
+  language: 'ru' | 'en' | 'pl';
+  styleExample?: string | null;
+  winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
+}): LLMMessage[] {
+  const lang: HeChainLanguage = input.language === 'en' || input.language === 'pl' ? input.language : 'ru';
+  const style = renderStyleExampleBlock(input.styleExample);
+  const winners = renderWinnerPatternsBlock(input.winnerPatterns);
+  const summary = input.verticalSummary?.trim() ?? '';
+
+  const user = `ВЕРТИКАЛЬ: ${input.verticalName}
+${summary ? `${summary}\n` : ''}
+${style}${winners}ЦЕПОЧКА ПИСЕМ (${input.letters.length} шт., язык: ${LANG_NAMES[lang]} — оценивай глазами носителя этого языка):
+${renderLettersForReview(input.letters)}
+
+Прочитай цепочку как занятой ЛПР этой вертикали, который ненавидит шаблонный спам. Разбери каждое письмо по правилам выше и верни ТОЛЬКО JSON строго такой формы — без markdown-фенсов, без текста до или после:
+{
+  "verdict": "можно отправлять" | "нужна перепись",
+  "issues": [
+    { "letter_index": <1-based номер письма>, "problem": "<в чём проблема, с короткой цитатой>", "fix": "<что конкретно изменить>" }
+  ]
+}
+Правила ответа: verdict — ровно одна из двух строк; «можно отправлять» ⇔ issues пустой, «нужна перепись» ⇔ хотя бы один issue; letter_index — только в диапазоне 1..${input.letters.length}; problem и fix — по-русски.`;
+
+  return [
+    { role: 'system', content: CRITIC_SYSTEM },
+    { role: 'user', content: user },
+  ];
+}
+
+/* ─────────────── Рерайт отмеченных писем ─────────────── */
+
+const REWRITE_SYSTEM = `Ты — senior email outreach редактор агентства Polza. Получаешь цепочку писем и разбор критика: переписываешь ТОЛЬКО отмеченные письма, остальные возвращаешь без изменений.
+
+${CHAIN_REGULATIONS}
+
+ЖЁСТКИЕ ПРАВИЛА РЕРАЙТА:
+- Переписывай ТОЛЬКО письма, чей letter_index есть в issues критики. Все остальные письма возвращай ДОСЛОВНО — символ в символ, включая тему: никаких «заодно поправил».
+- Каждый issue отмеченного письма закрывай по его полю fix; после переписи письмо обязано проходить ВЕСЬ регламент. Самопроверка обязательна: посчитай слова в теле (≤ 50, письмо 1 ≤ 45), {{var}} в теме и ровно один в теле, ровно один CTA (в письме 1 — гибридный вопрос с одним вопросительным знаком).
+- Конструкция цепочки неизменна: то же количество писем, тот же порядок и те же роли писем в лесенке (письмо 1 — оффер и гибридный CTA, чистый реферальный вопрос — только в последнем). Ничего не добавляй, не удаляй и не меняй местами.
+- Новые факты запрещены: используй только то, что уже есть во входных письмах и материалах задачи. Новые имена клиентов, кейсы, цифры и обещания выдумывать нельзя — если критик требует конкретики, которой нет во входе, переписывай безымянно.
+- Конкретный кейс/название клиента — максимум в одном письме цепочки; при переписи не размазывай его на несколько писем.
+- Углы писем не смешивай: переписанное письмо держит свой исходный угол, не тащи мысль соседнего письма.
+- Формат операторов {{var}} не ломай: имена операторов сохраняй как есть, fallback-формулировки — в именительном падеже.
+- Тон — человеческий диалог, не реклама; стоп-фразы и клише из регламента запрещены. Перечитай каждое переписанное письмо вслух: согласование падежей и родов должно быть идеальным.
+- Если в материалах есть «ЭТАЛОН СТИЛЯ КЛИЕНТА» — переписанные письма подражают его манере, структуре фраз и тону (это важнее дефолтных правил тона), но регламент, запрет выдуманных имён и структура оффера неизменны.
+- Если в материалах есть «ПРОВЕННЫЕ ПАТТЕРНЫ» — темы и хуки переписанных писем вдохновляй ими: адаптируй, не копируй дословно, проценты reply не цитируй.`;
+
+const REWRITE_ACK: Record<HeChainLanguage, string> = {
+  ru: 'Цепочка и критика в контексте. Переписываю только отмеченные письма, остальные возвращаю дословно.',
+  en: 'The sequence and the critique are in context. Rewriting only the flagged emails, returning the rest verbatim.',
+  pl: 'Sekwencja i krytyka są w kontekście. Przepisuję tylko oflagowane maile, resztę zwracam bez zmian.',
+};
+
+const REWRITE_TASK: Record<HeChainLanguage, string> = {
+  ru: `Перепиши цепочку по критике выше: закрой каждый issue, не отмеченные письма верни дословно. Верни цепочку ЦЕЛИКОМ — все письма по порядку, и переписанные, и нетронутые. Сегментные варианты писем не трогаем — они восстанавливаются отдельно, их не выводи.
+
+ФОРМАТ ВЫВОДА (ОБЯЗАТЕЛЕН — иначе ответ не пройдёт парсинг):
+---LETTER 1---
+Тема: <тема письма 1>
+
+<тело письма 1>
+
+---LETTER 2---
+Тема: <тема письма 2>
+
+<тело письма 2>
+
+...и так далее до последнего письма. Никаких пояснений до/после блоков. Маркеры «---LETTER N---» и слово «Тема:» не меняй. Пиши на русском.`,
+  en: `Rewrite the sequence per the critique above: close every issue, return unflagged emails verbatim. Return the WHOLE sequence — all emails in order, rewritten and untouched alike. Leave segment variants alone — they are restored separately; do not output them.
+
+OUTPUT FORMAT (MANDATORY — otherwise the response will fail parsing):
+---LETTER 1---
+Subject: <subject of email 1>
+
+<body of email 1>
+
+---LETTER 2---
+Subject: <subject of email 2>
+
+<body of email 2>
+
+...and so on through the last email. No explanations before/after the blocks. Keep the "---LETTER N---" markers and the word "Subject:" exactly as shown. Write in English.`,
+  pl: `Przepisz sekwencję według krytyki powyżej: zamknij każdy issue, nieoflagowane maile zwróć dosłownie. Zwróć CAŁĄ sekwencję — wszystkie maile po kolei, i przepisane, i nietknięte. Wariantów segmentowych nie ruszamy — są odtwarzane osobno, nie wypisuj ich.
+
+FORMAT ODPOWIEDZI (OBOWIĄZKOWY — inaczej odpowiedź nie przejdzie parsowania):
+---LETTER 1---
+Temat: <temat maila 1>
+
+<treść maila 1>
+
+---LETTER 2---
+Temat: <temat maila 2>
+
+<treść maila 2>
+
+...i tak dalej do ostatniego maila. Żadnych wyjaśnień przed/po blokach. Znaczników "---LETTER N---" i słowa "Temat:" nie zmieniaj. Pisz po polsku.`,
+};
+
+/**
+ * Сообщения рерайт-прохода: переписываются только письма из issues критики,
+ * остальные возвращаются дословно. Вывод — теми же маркерами ---LETTER N---,
+ * что и генерация: ответ потребляет letterParser.
+ */
+export function buildChainRewriteMessages(input: {
+  verticalName: string;
+  letters: Array<{ subject: string; body: string }>;
+  critique: HeChainCritique;
+  language: 'ru' | 'en' | 'pl';
+  styleExample?: string | null;
+  winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
+}): LLMMessage[] {
+  const lang: HeChainLanguage = input.language === 'en' || input.language === 'pl' ? input.language : 'ru';
+  const style = renderStyleExampleBlock(input.styleExample);
+  const winners = renderWinnerPatternsBlock(input.winnerPatterns);
+
+  const materials = `ВЕРТИКАЛЬ: ${input.verticalName}
+
+${style}${winners}ИСХОДНАЯ ЦЕПОЧКА (${input.letters.length} писем, язык: ${LANG_NAMES[lang]}):
+${renderLettersForReview(input.letters)}
+
+КРИТИКА ЦЕПОЧКИ (вердикт и проблемы; переписываются ТОЛЬКО письма из issues):
+${JSON.stringify(input.critique, null, 2)}`;
+
+  return [
+    { role: 'system', content: REWRITE_SYSTEM },
+    { role: 'user', content: materials },
+    { role: 'assistant', content: REWRITE_ACK[lang] },
+    { role: 'user', content: REWRITE_TASK[lang] },
   ];
 }

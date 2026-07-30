@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { requireClientAuth } from '@/lib/clientApiHelper';
+import { requireClientAuth, demoReadonlyError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { calcBillingAmount, isPaymentLocked, SETUP_DAYS, TEST_PERIOD_MINUTES_BY_PERIOD, TEST_SETUP_MINUTES,
   normalizeTariffType, TARIFF_LAUNCH, TARIFF_FLOW } from '@/lib/tariffs';
@@ -29,6 +29,11 @@ export async function GET(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
   const { userId } = result.auth;
+
+  // Под демо (аккаунт или вкладка) инвойс не создаём: ensurePendingInvoiceForTariff
+  // пишет реальный pending-инвойс и платёж в ЮKassa — сайд-эффект недопустим
+  // на витрине (ревью 27.07).
+  if (result.auth.isDemo) return demoReadonlyError();
 
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
 
