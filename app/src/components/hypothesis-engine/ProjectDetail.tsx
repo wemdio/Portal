@@ -730,6 +730,7 @@ const VISIT_STAGE_NAMES: Record<HeStage, string> = {
   chain: 'Генерация цепочки',
   vocab: 'Сборка вокабуляра',
   base_analyze: 'Анализ базы',
+  base_collect: 'Авто-сборка базы',
   template: 'Сборка шаблона',
   dossier: 'Сборка досье',
 };

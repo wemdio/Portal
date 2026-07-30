@@ -8,9 +8,11 @@
  *
  * Джобы создаются API (/api/tools/hypothesis-engine/*): API ставит только
  * первую research-стадию (site_profile) либо точечные стадии (chain/vocab/
- * base_analyze/template). Research-цепочку дальше ведёт сам воркер:
+ * base_analyze/base_collect/template). Research-цепочку дальше ведёт сам воркер:
  * site_profile → competitors → brand_cloud → hypotheses → evidence → clustering.
- * Стадии выполняются через runHeStage из lib/hypothesisEngine; fetchText/search
+ * Стадия base_collect — оркестратор: ждёт дочерние парсеры через self-requeue
+ * (сама возвращает свою строку в pending; handleJob такой requeue не затирает
+ * done-апдейтом). Стадии выполняются через runHeStage из lib/hypothesisEngine; fetchText/search
  * не переопределяем — используются дефолты либы (SSRF-гейт + websiteParser,
  * serperSearch).
  */
@@ -140,6 +142,28 @@ async function handleJob(job: HeJob) {
   });
   const tokensUsed = stageResult.tokensUsed ?? 0;
   const costUsd = stageResult.costUsd ?? 0;
+
+  // base_collect переводит свою строку обратно в pending (self-requeue на
+  // время работы дочерних парсеров) и возвращает {waiting: true}. Не затираем
+  // requeue финальным done-апдейтом — только накапливаем расход стадии.
+  const { data: current } = await db
+    .from('he_jobs')
+    .select('status')
+    .eq('id', job.id)
+    .maybeSingle();
+  if (current && (current as { status: string }).status !== 'running') {
+    await db
+      .from('he_jobs')
+      .update({
+        tokens_used: (job.tokens_used ?? 0) + tokensUsed,
+        cost_usd: Number(job.cost_usd ?? 0) + costUsd,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', job.id);
+    await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
+    log('info', `Job ${job.id} (${job.stage}) → waiting (self-requeue, +${tokensUsed} tok)`);
+    return;
+  }
 
   await db
     .from('he_jobs')

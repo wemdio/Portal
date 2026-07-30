@@ -243,3 +243,69 @@ export const HeTemplatePlanSchema = z.object({
     .default([]),
 });
 export type HeTemplatePlanOutput = z.infer<typeof HeTemplatePlanSchema>;
+
+/* ─────────────────────── source_plan (автосбор базы) ─────────────────────── */
+
+/**
+ * План сбора лидной базы по вертикали: 1–4 задачи, каждая — ровно один
+ * источник с обязательным под-объектом параметров этого источника.
+ * Лишние поля LLM молча отбрасываются (zod strip-режим по умолчанию).
+ */
+
+/** ОКВЭД только класс XX или группа XX.X — допустимая гранулярность реестра. */
+const HeOkvedCodeSchema = z.string().regex(/^\d{2}(\.\d)?$/);
+
+export const HeDirectoryFiltersSchema = z.object({
+  okvedCodes: z.array(HeOkvedCodeSchema).optional(),
+  regionCodes: z.array(z.string()).optional(),
+  revenueFrom: z.number().optional(),
+  revenueTo: z.number().optional(),
+  employeesFrom: z.number().optional(),
+  employeesTo: z.number().optional(),
+  hasEmail: z.boolean().optional(),
+  includeIp: z.boolean().optional(),
+});
+
+export const HeHhQuerySchema = z.object({
+  text: z.string().min(1).max(300),
+  area: z.string().optional(),
+  date_from: z.string().optional(),
+  date_to: z.string().optional(),
+});
+
+export const HeMapsQuerySchema = z.object({
+  queries: z.array(z.string().min(1).max(300)).min(1),
+  geo: z.string().optional(),
+});
+
+export const HeCollectTaskSchema = z
+  .object({
+    source: z.enum(['companies_directory', 'hh_live', 'yandex_maps', 'google_maps']),
+    /** Что и зачем собираем, 1 строка. */
+    rationale: z.string().min(1),
+    directory_filters: HeDirectoryFiltersSchema.optional(),
+    hh_query: HeHhQuerySchema.optional(),
+    maps_query: HeMapsQuerySchema.optional(),
+  })
+  .superRefine((task, ctx) => {
+    // Обязательный под-объект параметров зависит от источника.
+    const required: 'directory_filters' | 'hh_query' | 'maps_query' =
+      task.source === 'companies_directory'
+        ? 'directory_filters'
+        : task.source === 'hh_live'
+          ? 'hh_query'
+          : 'maps_query';
+    if (task[required] == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [required],
+        message: `Для source="${task.source}" обязателен под-объект "${required}"`,
+      });
+    }
+  });
+export type HeCollectTaskOutput = z.infer<typeof HeCollectTaskSchema>;
+
+export const HeSourcePlanSchema = z.object({
+  tasks: z.array(HeCollectTaskSchema).min(1).max(4),
+});
+export type HeSourcePlanOutput = z.infer<typeof HeSourcePlanSchema>;
