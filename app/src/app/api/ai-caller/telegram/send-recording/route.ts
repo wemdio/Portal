@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { blockNonInternal } from '@/lib/ai-caller/requireInternal';
-import { pickRecordingUrl } from '@/lib/vapi';
 
 export const dynamic = 'force-dynamic';
 
@@ -45,7 +44,7 @@ export async function POST(req: NextRequest) {
       });
       if (vapiRes.ok) {
         const vapiData = await vapiRes.json();
-        recordingUrl = pickRecordingUrl(vapiData);
+        recordingUrl = vapiData.recordingUrl || vapiData.artifact?.recordingUrl || '';
       }
     } catch { /* continue */ }
   }
