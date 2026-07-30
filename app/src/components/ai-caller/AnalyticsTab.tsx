@@ -337,33 +337,15 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
 
   // Download recording
   async function downloadRecording(callId: string) {
-    let url = recordingUrls[callId];
-    if (!url) {
-      try {
-        const res = await authFetch(`/api/ai-caller/calls/${callId}`);
-        const data = await res.json();
-        const call = data.call as Record<string, unknown> | undefined;
-        url = (call?.recordingUrl as string)
-          || ((call?.artifact as Record<string, unknown>)?.recordingUrl as string)
-          || '';
-        if (url) {
-          if (url.startsWith('/api/')) {
-            const token = await getAccessToken();
-            const sep = url.includes('?') ? '&' : '?';
-            url = `${url}${sep}token=${encodeURIComponent(token)}`;
-          }
-          setRecordingUrls((prev) => ({ ...prev, [callId]: url }));
-        }
-      } catch {
-        return;
-      }
-    }
-    if (!url) return;
+    const token = await getAccessToken();
+    if (!token) return;
+    const url =
+      `/api/ai-caller/calls/${encodeURIComponent(callId)}/recording` +
+      `?download=1&token=${encodeURIComponent(token)}`;
 
     const a = document.createElement('a');
     a.href = url;
     a.download = `call-${callId}.wav`;
-    a.target = '_blank';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
