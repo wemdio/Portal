@@ -1,4 +1,5 @@
 import {
+  CONTRACT_RULE_SINCE,
   computeFirstSalesSeries,
   type FirstSalesLeadRow,
 } from '@/lib/firstSales/metrics';
@@ -141,5 +142,51 @@ describe('computeFirstSalesSeries', () => {
     expect(unknown?.leads).toBe(1);
     expect(unknown?.known).toBe(false);
     expect(res.totals.unassignedLeads).toBe(1);
+  });
+});
+
+describe('договоры считаются только с даты, когда этап начал означать договор', () => {
+  // До 30.07.2026 этап «Согласование договора» ставили и когда договор реально
+  // правили, и когда его просто отправили по просьбе клиента. За июнь 2026 туда
+  // попали 169 сделок, из которых 162 умерли с нулевой суммой, — при том что
+  // реальных договоров у продаж около двадцати в месяц. Разделить задним числом
+  // нечем, поэтому старое не считаем вовсе.
+  const cutoff = CONTRACT_RULE_SINCE.getTime();
+  const before = new Date(cutoff - 5 * 24 * 60 * 60 * 1000).toISOString();
+  const after = new Date(cutoff + 60 * 60 * 1000).toISOString();
+
+  const wide = { from: new Date(cutoff - 60 * 24 * 60 * 60 * 1000), to: new Date(cutoff + 60 * 24 * 60 * 60 * 1000) };
+
+  it('договор до даты правила не засчитывается', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ created_at: before, first_contract_at: before })],
+      map, wide.from, wide.to, 'month', null,
+    );
+    expect(res.totals.contracts).toBe(0);
+  });
+
+  it('договор после даты правила засчитывается', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ created_at: before, first_contract_at: after })],
+      map, wide.from, wide.to, 'month', null,
+    );
+    expect(res.totals.contracts).toBe(1);
+  });
+
+  it('окно целиком до правила помечено как недостоверное', () => {
+    const res = computeFirstSalesSeries(
+      [], map,
+      new Date(cutoff - 60 * 24 * 60 * 60 * 1000),
+      new Date(cutoff - 1),
+      'month', null,
+    );
+    // UI обязан показать прочерк: ноль тут означал бы «договоров не было»,
+    // хотя на самом деле мы отказались считать грязные данные.
+    expect(res.totals.contractsReliable).toBe(false);
+  });
+
+  it('окно, захватывающее дату правила, помечено как достоверное', () => {
+    const res = computeFirstSalesSeries([], map, wide.from, wide.to, 'month', null);
+    expect(res.totals.contractsReliable).toBe(true);
   });
 });

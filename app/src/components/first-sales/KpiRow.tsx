@@ -96,10 +96,23 @@ export default function KpiRow({
         value={fmt(totals.meetings)}
         delta={<Delta current={totals.meetings} previous={previousTotals.meetings} />}
       />
+      {/* Прочерк, а не ноль, пока окно целиком раньше даты правила: ноль
+          читался бы как «договоров не было», хотя на деле мы отказались
+          считать грязные данные. Дельту в этом случае тоже не показываем —
+          сравнивать не с чем. */}
       <Tile
         label="Договоры"
-        value={fmt(totals.contracts)}
-        delta={<Delta current={totals.contracts} previous={previousTotals.contracts} />}
+        value={totals.contractsReliable ? fmt(totals.contracts) : '—'}
+        sub={
+          totals.contractsReliable
+            ? undefined
+            : `считаются с ${new Date(totals.contractsSince).toLocaleDateString('ru-RU')}`
+        }
+        delta={
+          totals.contractsReliable
+            ? <Delta current={totals.contracts} previous={previousTotals.contracts} />
+            : undefined
+        }
       />
       <Tile
         label="Средний цикл"

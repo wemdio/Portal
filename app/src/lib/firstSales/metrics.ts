@@ -59,6 +59,15 @@ export type FirstSalesTotals = {
   wonCount: number;
   cycleAvgDays: number | null;
   cycleMedianDays: number | null;
+  /**
+   * false — окно целиком раньше даты, с которой этап «Согласование договора»
+   * начал означать договор. Тогда `contracts` заведомо равен нулю не потому,
+   * что договоров не было, а потому что мы отказались считать грязные данные.
+   * UI обязан показать прочерк, а не ноль.
+   */
+  contractsReliable: boolean;
+  /** Дата вступления правила в силу — чтобы UI мог назвать её пользователю. */
+  contractsSince: string;
 };
 
 export type FirstSalesSeries = {
@@ -81,6 +90,24 @@ function inWindow(value: string | null, from: Date, to: Date): boolean {
   const t = new Date(value).getTime();
   return Number.isFinite(t) && t >= from.getTime() && t <= to.getTime();
 }
+
+/**
+ * Дата, с которой этап «Согласование договора» в AMO начал означать договор.
+ *
+ * До неё этап ставили и когда договор действительно правили, и когда его
+ * просто отправили по просьбе клиента. Из-за этого за июнь 2026 туда попали
+ * 169 сделок, из которых 162 умерли с нулевой суммой, — при том что реальных
+ * договоров у продаж около двадцати в месяц. Разделить одно от другого задним
+ * числом нечем: в данных нет признака, по которому это можно отличить.
+ *
+ * Егор с командой договорились (30.07.2026) ставить этап только при реальном
+ * согласовании и правках. Поэтому договоры считаются с этой даты, а раньше
+ * отдаётся `null` — прочерк, а не ноль: ноль читался бы как «договоров не
+ * было», и это было бы враньём худшего сорта, чем отсутствие цифры.
+ */
+export const CONTRACT_RULE_SINCE = new Date(
+  process.env.FIRST_SALES_CONTRACT_RULE_SINCE ?? '2026-07-30T00:00:00.000Z',
+);
 
 function median(values: number[]): number | null {
   if (values.length === 0) return null;
@@ -110,6 +137,8 @@ export function computeFirstSalesSeries(
     leads: 0, qualified: 0, meetings: 0, contracts: 0,
     leadMagnets: 0, unassignedLeads: 0, wonCount: 0,
     cycleAvgDays: null, cycleMedianDays: null,
+    contractsReliable: to.getTime() >= CONTRACT_RULE_SINCE.getTime(),
+    contractsSince: CONTRACT_RULE_SINCE.toISOString(),
   };
   const cycles: number[] = [];
 
@@ -182,7 +211,12 @@ export function computeFirstSalesSeries(
         breakdown.meetings += 1;
         bump(bucketKey(new Date(lead.first_meeting_at as string), groupBy), 'meetings');
       }
-      if (inWindow(lead.first_contract_at, from, to)) {
+      // Договоры — только с даты, когда этап начал означать договор.
+      // До неё этап ставили и на «просто отправил файл», см. CONTRACT_RULE_SINCE.
+      if (
+        inWindow(lead.first_contract_at, from, to)
+        && new Date(lead.first_contract_at as string).getTime() >= CONTRACT_RULE_SINCE.getTime()
+      ) {
         totals.contracts += 1;
         breakdown.contracts += 1;
         bump(bucketKey(new Date(lead.first_contract_at as string), groupBy), 'contracts');
