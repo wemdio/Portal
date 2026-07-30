@@ -87,3 +87,67 @@ def test_debit_without_creditor_party_is_not_dropped():
     assert row is not None
     assert row["payee_name"] is None
     assert row["payee_inn"] is None
+
+
+from sources.bank_tbank import map_operation
+
+ACC = "40802810600001780269"
+
+TB_CREDIT = {
+    "operationId": "op-1",
+    "id": 11,
+    "date": "2026-07-15T10:00:00",
+    "amount": 5000,
+    "recipientAccount": ACC,
+    "payerName": "ООО Клиент",
+    "payerInn": "7701234567",
+    "paymentPurpose": "Оплата по счёту 42",
+}
+
+TB_DEBIT = {
+    "operationId": "op-2",
+    "id": 12,
+    "date": "2026-07-16T10:00:00",
+    "amount": 1500.5,
+    "recipientAccount": "40702810000000000001",
+    "payerAccount": ACC,
+    "recipientName": "ООО ЯНДЕКС",
+    "recipientInn": "7736207543",
+    "paymentPurpose": "Оплата рекламных услуг",
+}
+
+
+def test_tbank_credit_marks_revenue():
+    row = map_operation(TB_CREDIT, ACC)
+    assert row["direction"] == "credit"
+    assert row["payer_name"] == "ООО Клиент"
+    assert row["is_revenue"] is True
+
+
+def test_tbank_debit_fills_payee():
+    row = map_operation(TB_DEBIT, ACC)
+    assert row["direction"] == "debit"
+    assert row["payee_name"] == "ООО ЯНДЕКС"
+    assert row["payee_inn"] == "7736207543"
+    assert row["is_revenue"] is None
+
+
+def test_tbank_foreign_operation_is_skipped():
+    """Операция, где наш счёт не участвует ни одной стороной."""
+    assert map_operation({"recipientAccount": "1", "payerAccount": "2"}, ACC) is None
+
+
+def test_tbank_unparsable_date_is_skipped():
+    """Перед бэкфиллом за 2023 год: битая дата не должна ронять весь батч,
+    она просто пропускается."""
+    tx = dict(TB_DEBIT)
+    tx["date"] = "16.07.2026"  # неожиданный формат
+    assert map_operation(tx, ACC) is None
+
+
+def test_tbank_missing_amount_is_skipped_not_zeroed():
+    """Главный тест: отсутствующая сумма не должна тихо стать 0.00 —
+    настоящий ноль в выписке и отсутствующая сумма это разные вещи."""
+    tx = dict(TB_DEBIT)
+    del tx["amount"]
+    assert map_operation(tx, ACC) is None
