@@ -22,6 +22,56 @@ const BROWSER_USER_AGENT =
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// ── Proxy pool (round-robin) ───────────────────────────────────
+//
+// Тот же формат PROXY_URLS, что и websiteParser.ts, hhParser.ts и др. —
+// JSON-массив строк ["http://user:pass@ip:port", ...] или "url1,url2,url3".
+// До 2026-07-21 email-скрапер шёл напрямую с IP воркера — на 800+ сайтах
+// это заметно, потому что портал же уже покупает residential-прокси
+// (5 IP на момент внедрения) и text/INN-режим ими пользуется, а email —
+// нет. Fix: ротируем 5 IP через тот же undici.ProxyAgent-паттерн.
+type Dispatcher = import('undici').Dispatcher;
+
+let _proxyUrls: string[] | null = null;
+function getProxyUrls(): string[] {
+  if (_proxyUrls) return _proxyUrls;
+  try {
+    const raw = (process.env.PROXY_URLS ?? '').trim();
+    if (raw.startsWith('[')) {
+      _proxyUrls = (JSON.parse(raw) as string[]).map((s) => s.trim()).filter(Boolean);
+    } else {
+      _proxyUrls = raw.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean);
+    }
+  } catch {
+    _proxyUrls = [];
+  }
+  return _proxyUrls;
+}
+
+let _proxyRR = 0;
+function pickProxyUrl(): string {
+  const urls = getProxyUrls();
+  if (!urls.length) return '';
+  _proxyRR = (_proxyRR + 1) % urls.length;
+  return urls[_proxyRR];
+}
+
+const _proxyDispatchers = new Map<string, Dispatcher>();
+async function getProxyDispatcher(): Promise<Dispatcher | undefined> {
+  const url = pickProxyUrl();
+  if (!url) return undefined;
+  const existing = _proxyDispatchers.get(url);
+  if (existing) return existing;
+  try {
+    const mod = await import('undici');
+    const d = new mod.ProxyAgent(url) as unknown as Dispatcher;
+    _proxyDispatchers.set(url, d);
+    return d;
+  } catch {
+    return undefined;
+  }
+}
+
 // ── Contact / About / Team page paths ──────────────────────────
 
 const CONTACT_PATHS = [
@@ -497,28 +547,54 @@ async function fetchPageInner(
   const onExternalAbort = () => controller.abort();
   externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
-  try {
-    // Email discovery intentionally goes directly from the worker. It used the
-    // shared PROXY_URLS pool between 2026-07-21 and 2026-07-30, but slow/dead
-    // residential proxies consumed the per-page timeout and made 1k-row jobs
-    // take about an hour. Other parsers still use their own proxy routing.
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'User-Agent': BROWSER_USER_AGENT,
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-      },
-      signal: controller.signal,
-      redirect: 'follow',
-    });
+  const baseHeaders = {
+    'User-Agent': BROWSER_USER_AGENT,
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+  } as const;
+
+  const dispatcher = await getProxyDispatcher();
+
+  const doFetch = async (opts: RequestInit & { dispatcher?: Dispatcher }) => {
+    const res = await fetch(url, opts);
     if (res.status >= 400) return null;
     const contentType = res.headers.get('content-type');
     if (!isHtmlLikeContentType(contentType)) return null;
     const body = await res.arrayBuffer();
     return decodeHtml(body, contentType);
-  } catch {
-    return null;
+  };
+
+  try {
+    const fetchOpts: RequestInit & { dispatcher?: Dispatcher } = {
+      method: 'GET',
+      headers: baseHeaders,
+      signal: controller.signal,
+      redirect: 'follow',
+    };
+    if (dispatcher) fetchOpts.dispatcher = dispatcher;
+
+    try {
+      return await doFetch(fetchOpts);
+    } catch (err) {
+      // Один retry без прокси при сетевой ошибке через прокси. Если 1 из 5
+      // резидентных IP протух/дал 502 — не роняем сайт целиком, пробуем
+      // напрямую. Общий FETCH_RETRIES снаружи ловит остальные транзиенты.
+      if (!dispatcher || externalSignal?.aborted || controller.signal.aborted) {
+        return null;
+      }
+      void err;
+      const directOpts: RequestInit = {
+        method: 'GET',
+        headers: baseHeaders,
+        signal: controller.signal,
+        redirect: 'follow',
+      };
+      try {
+        return await doFetch(directOpts);
+      } catch {
+        return null;
+      }
+    }
   } finally {
     clearTimeout(timer);
     externalSignal?.removeEventListener('abort', onExternalAbort);

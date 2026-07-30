@@ -2,23 +2,16 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
-import { pickRecordingUrl } from '@/lib/vapi';
 
 export const dynamic = 'force-dynamic';
 
 type Ctx = { params: Promise<{ id: string }> };
 
-function attachment(id: string, extension: string): string {
-  const safeId = id.replace(/[^a-zA-Z0-9_-]/g, '') || 'recording';
-  return `attachment; filename="call-${safeId}.${extension}"`;
-}
-
 /** GET — proxy audio recording (handles ElevenLabs auth transparently) */
 export async function GET(req: NextRequest, ctx: Ctx) {
-  const reqUrl = new URL(req.url);
   const token =
     getBearerToken(req.headers.get('authorization')) ||
-    reqUrl.searchParams.get('token') ||
+    new URL(req.url).searchParams.get('token') ||
     '';
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -28,7 +21,6 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
   const { id } = await ctx.params;
   const provider = resolveAiCallerProvider(req);
-  const download = reqUrl.searchParams.get('download') === '1';
 
   if (provider === 'elevenlabs') {
     const apiKey = process.env.ELEVENLABS_API_KEY;
@@ -63,39 +55,21 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       headers: {
         'Content-Type': contentType,
         'Cache-Control': 'private, max-age=3600',
-        ...(download ? { 'Content-Disposition': attachment(id, 'mp3') } : {}),
       },
     });
   }
 
-  // Vapi stores recordings in private R2. Always prefer the freshly generated
-  // presigned artifact URL; the plain recordingUrl returns an Authorization XML.
+  // Vapi: redirect to public recording URL
   const { getCall } = await import('@/lib/ai-caller-provider');
   const call = (await getCall(id, provider)) as Record<string, unknown>;
-  const recordingUrl = pickRecordingUrl(call);
+  const recordingUrl =
+    (call.recordingUrl as string) ||
+    ((call.artifact as Record<string, unknown>)?.recordingUrl as string) ||
+    '';
 
   if (!recordingUrl) {
     return NextResponse.json({ error: 'No recording' }, { status: 404 });
   }
 
-  if (!download) return NextResponse.redirect(recordingUrl);
-
-  const upstream = await fetch(recordingUrl);
-  if (!upstream.ok) {
-    return NextResponse.json(
-      { error: `Recording ${upstream.status}` },
-      { status: 502 },
-    );
-  }
-
-  const contentLength = upstream.headers.get('content-length');
-  return new NextResponse(upstream.body, {
-    status: 200,
-    headers: {
-      'Content-Type': upstream.headers.get('content-type') ?? 'audio/wav',
-      'Content-Disposition': attachment(id, 'wav'),
-      ...(contentLength ? { 'Content-Length': contentLength } : {}),
-      'Cache-Control': 'private, max-age=300',
-    },
-  });
+  return NextResponse.redirect(recordingUrl);
 }
