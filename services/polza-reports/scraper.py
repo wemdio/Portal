@@ -1,14 +1,21 @@
 """Coldy web scraper.
 
-Copied from polza_bot/scraper.py with two changes:
+Copied from polza_bot/scraper.py with these changes:
   1. ColdyCredentials / Campaign / CampaignAnalytics / LetterStat now live in
      models.py (no more dependency on the Telegram bot's app_settings module).
   2. scrape_all() accepts an optional async ``on_progress`` callback so the
      FastAPI layer can stream SSE progress events to the Portal.
+  3. Support for the redesigned Coldy UI (2026-07), ported from the employee's
+     fixed polza_bot/scraper.py: the SPA never reaches "networkidle", the
+     campaigns list packs name/status/date into one cell, and analytics is a
+     div-based navigation with text-line metrics. Our header-based letters
+     table mapping is layered on top of his positional parsing so the bugs
+     fixed here earlier (replies read from the «Баунс» column, silent zeroing
+     on unrecognised headers) do not come back.
 
-All Coldy-specific selectors and fallbacks are preserved verbatim — these took
-work to get right and are the reason we keep the original Python implementation
-instead of rewriting in TypeScript.
+All Coldy-specific selectors and fallbacks are preserved verbatim where
+possible — these took work to get right and are the reason we keep the
+original Python implementation instead of rewriting in TypeScript.
 """
 from __future__ import annotations
 
@@ -16,7 +23,13 @@ import re
 import logging
 from typing import Awaitable, Callable, Optional
 
-from playwright.async_api import async_playwright, Page, BrowserContext, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import (
+    async_playwright,
+    Page,
+    BrowserContext,
+    Locator,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from models import Campaign, CampaignAnalytics, ColdyCredentials, LetterStat
 
@@ -51,6 +64,44 @@ def _parse_fraction(text: str) -> tuple[int, int]:
     return n, n
 
 
+def _parse_numbers(text: str) -> list[int]:
+    return [int(value) for value in re.findall(r"\d+", text.replace("\xa0", " "))]
+
+
+async def _parse_current_campaign_row(cells: list[Locator], header_map: dict[str, int]) -> Campaign:
+    """Parse the redesigned Coldy list, which stores metadata in one cell."""
+    campaign_lines = [
+        line.strip()
+        for line in (await cells[header_map["campaign"]].inner_text()).splitlines()
+        if line.strip()
+    ]
+    name = campaign_lines[0] if campaign_lines else ""
+    date_pattern = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
+    created = next((line for line in campaign_lines if date_pattern.search(line)), "")
+    status = " | ".join(line for line in campaign_lines[1:] if line != created) or "-"
+
+    connected_numbers = _parse_numbers(await cells[header_map["connected"]].inner_text())
+    connected_reached = connected_numbers[0] if connected_numbers else 0
+    connected_total = connected_numbers[1] if len(connected_numbers) > 1 else connected_reached
+    opened_text = (await cells[header_map["opened"]].inner_text()).strip()
+    replied_text = (await cells[header_map["replied"]].inner_text()).strip()
+
+    return Campaign(
+        name=name,
+        status=status,
+        created=created,
+        # The redesigned page has no separate "sent" column. Its total
+        # contacted count is the equivalent aggregate for the report.
+        sent=connected_total,
+        connected_reached=connected_reached,
+        connected_total=connected_total,
+        opened=_parse_int(opened_text.split("(")[0]),
+        opened_pct=_parse_pct(opened_text),
+        replied=_parse_int(replied_text.split("(")[0]),
+        replied_pct=_parse_pct(replied_text),
+    )
+
+
 def _absolute_url(base_url: str, href: str) -> str:
     if not href:
         return ""
@@ -75,7 +126,7 @@ async def _login(page: Page, credentials: ColdyCredentials) -> None:
         raise RuntimeError("Логин и пароль Coldy не заданы")
 
     logger.info("Logging in to Coldy...")
-    await page.goto(f"{credentials.url}/sign-in", wait_until="networkidle")
+    await page.goto(f"{credentials.url}/sign-in", wait_until="domcontentloaded")
 
     # Try common input selectors for email/password
     await page.locator('input[type="email"], input[name="email"]').first.fill(credentials.email)
@@ -103,12 +154,25 @@ async def _login(page: Page, credentials: ColdyCredentials) -> None:
 
 async def _get_campaigns_list(page: Page, base_url: str) -> list[Campaign]:
     logger.info("Navigating to campaigns list...")
-    await page.goto(f"{base_url}/campaigns", wait_until="networkidle")
+    await page.goto(f"{base_url}/campaigns", wait_until="domcontentloaded")
 
     if "/campaigns" not in page.url:
         raise RuntimeError(f"Не удалось открыть список кампаний. Текущая страница: {page.url}")
 
     await page.wait_for_selector("table, [class*='table'], [class*='campaign']", timeout=15_000)
+
+    # The redesigned (2026-07) list packs name/status/date into a single
+    # «Рассылка» column and has no separate «Отправлено» column. Detect it by
+    # the table headers and parse accordingly; otherwise fall back to the
+    # legacy positional layout below.
+    headers = [header.strip().casefold() for header in await page.locator("thead th").all_inner_texts()]
+    header_map = {
+        "campaign": next((i for i, header in enumerate(headers) if "рассылк" in header), -1),
+        "connected": next((i for i, header in enumerate(headers) if "связал" in header), -1),
+        "opened": next((i for i, header in enumerate(headers) if "открыл" in header), -1),
+        "replied": next((i for i, header in enumerate(headers) if "ответил" in header), -1),
+    }
+    is_current_layout = all(index >= 0 for index in header_map.values())
 
     campaigns: list[Campaign] = []
 
@@ -120,6 +184,14 @@ async def _get_campaigns_list(page: Page, base_url: str) -> list[Campaign]:
     for row_index, row in enumerate(rows):
         cells = await row.locator("td").all()
         if len(cells) < 5:
+            continue
+
+        if is_current_layout:
+            if max(header_map.values()) >= len(cells):
+                continue
+            campaign = await _parse_current_campaign_row(cells, header_map)
+            campaign.row_index = row_index
+            campaigns.append(campaign)
             continue
 
         name_cell = cells[0]
@@ -193,7 +265,7 @@ async def _resolve_missing_campaign_urls(page: Page, base_url: str, campaigns: l
 
     for campaign in missing:
         try:
-            await page.goto(f"{base_url}/campaigns", wait_until="networkidle")
+            await page.goto(f"{base_url}/campaigns", wait_until="domcontentloaded")
             await page.wait_for_selector("tbody tr", timeout=15_000)
 
             row = page.locator("tbody tr").nth(campaign.row_index)
@@ -214,15 +286,204 @@ async def _resolve_missing_campaign_urls(page: Page, base_url: str, campaigns: l
             logger.warning("Failed to resolve campaign URL for %s: %s", campaign.name, e)
 
 
+async def _find_letters_table(tables: list[Locator]) -> tuple[dict[str, int], Optional[Locator]]:
+    """Find the per-letter «Статистика писем» table and map its columns by header.
+
+    Coldy's «Статистика писем» columns are NOT fixed: the «Открыли» column
+    disappears when open-tracking is off, and a «Баунс» column may or may not be
+    present. Reading by position made replies come from the bounce column (or, on
+    tables without it, default to 0). Map columns by header instead. The table is
+    identified by its «Письмо» header (skips the «Статистика почт» table), and a
+    candidate must expose BOTH a letter column and a replies column so a
+    decoy/«Итого» table headed «Письмо» is ignored.
+    """
+    for tbl in tables:
+        try:
+            headers = [h.strip().lower() for h in await tbl.locator("thead th, thead td").all_inner_texts()]
+        except Exception:  # noqa: BLE001
+            headers = []
+        if not any(h.startswith("письмо") for h in headers):
+            continue
+        candidate: dict[str, int] = {}
+        for i, h in enumerate(headers):
+            if h.startswith("письмо"):
+                candidate["name"] = i
+            elif "отправл" in h:
+                candidate["sent"] = i
+            elif h.startswith("ответ"):  # startswith, so «Не ответили» can't match
+                candidate["replied"] = i
+            elif h.startswith("открыл"):
+                candidate["opened"] = i
+        if "name" in candidate and "replied" in candidate:
+            return candidate, tbl
+    return {}, None
+
+
+async def _parse_letter_rows(letters_table: Locator, col: dict[str, int]) -> list[LetterStat]:
+    """Parse rows of a header-mapped «Статистика писем» table."""
+    def _pick(texts: list[str], key: str) -> str:
+        i = col.get(key)
+        return texts[i] if (i is not None and i < len(texts)) else ""
+
+    letters: list[LetterStat] = []
+    for lr in await letters_table.locator("tbody tr").all():
+        lcells = await lr.locator("td").all()
+        if len(lcells) < 2:
+            continue
+        texts = [(await c.inner_text()).strip() for c in lcells]
+        letter_name = _pick(texts, "name") or texts[0]
+        if "@" in letter_name:  # skip rows from the per-mailbox «Статистика почт» table
+            continue
+        l_open_text = _pick(texts, "opened")
+        l_rep_text = _pick(texts, "replied")
+
+        letters.append(LetterStat(
+            name=letter_name,
+            sent=_parse_int(_pick(texts, "sent")),
+            opened=_parse_int(l_open_text.split("(")[0]),
+            opened_pct=_parse_pct(l_open_text),
+            replied=_parse_int(l_rep_text.split("(")[0]),
+            replied_pct=_parse_pct(l_rep_text),
+        ))
+    return letters
+
+
+async def _parse_current_letters(page: Page, campaign: Campaign) -> list[LetterStat]:
+    """Read per-letter stats from the redesigned Coldy UI.
+
+    Preferred path is the same header-based column mapping as the legacy UI
+    (keeps replies correct when Coldy hides the «Открыли» column or adds a
+    «Баунс» column). If no table with recognisable headers is visible, fall
+    back to the positional layout verified against the live redesigned UI
+    (Письмо | Отправлено | Открыли | Ответили).
+    """
+    col, letters_table = await _find_letters_table(await page.locator("table:visible").all())
+    if letters_table is not None:
+        return await _parse_letter_rows(letters_table, col)
+
+    letters: list[LetterStat] = []
+    for row in await page.locator("tbody:visible tr").all():
+        cells = await row.locator("td").all()
+        if len(cells) < 4:
+            continue
+        name = (await cells[0].inner_text()).strip()
+        if "@" in name:  # skip rows from the per-mailbox «Статистика почт» table
+            continue
+        opened_text = (await cells[2].inner_text()).strip()
+        replied_text = (await cells[3].inner_text()).strip()
+        letters.append(LetterStat(
+            name=name,
+            sent=_parse_int(await cells[1].inner_text()),
+            opened=_parse_int(opened_text.split("(")[0]),
+            opened_pct=_parse_pct(opened_text),
+            replied=_parse_int(replied_text.split("(")[0]),
+            replied_pct=_parse_pct(replied_text),
+        ))
+    return letters
+
+
+async def _parse_current_analytics(page: Page, campaign: Campaign) -> CampaignAnalytics:
+    """Parse the redesigned (2026-07) Coldy analytics screen.
+
+    The summary metrics are plain text lines — a label line (e.g. «Открыли»)
+    followed by a value line and a percent line — so read the whole body text
+    instead of looking for card elements.
+    """
+    try:
+        await page.wait_for_function(
+            "document.body.innerText.includes('За все время')",
+            timeout=10_000,
+        )
+    except PlaywrightTimeoutError:
+        pass
+
+    analytics_body = await page.locator("body").inner_text()
+
+    def current_metric(label: str) -> tuple[int, float]:
+        lines = [line.strip() for line in analytics_body.splitlines() if line.strip()]
+        for index, line in enumerate(lines[:-1]):
+            if line.casefold() != label.casefold():
+                continue
+            value = _parse_int(lines[index + 1])
+            pct = _parse_pct(lines[index + 2]) if len(lines) > index + 2 else 0.0
+            return value, pct
+        return 0, 0.0
+
+    connected, _ = current_metric("Связались")
+    opened, opened_pct = current_metric("Открыли")
+    replied, replied_pct = current_metric("Ответили")
+    interested, interested_pct = current_metric("Заинтересованы")
+
+    # --- Letter stats table ---
+    letters_item = page.get_by_text(re.compile(r"^\s*Статистика писем\s*$", re.IGNORECASE)).first
+    if await letters_item.count():
+        await letters_item.click()
+        try:
+            await page.wait_for_function(
+                "document.body.innerText.includes('Письмо #')",
+                timeout=10_000,
+            )
+        except PlaywrightTimeoutError:
+            pass
+    else:
+        logger.warning("Letters statistics tab was not found for %s", campaign.name)
+
+    letters = await _parse_current_letters(page, campaign)
+
+    return CampaignAnalytics(
+        connected=connected,
+        opened=opened,
+        opened_pct=opened_pct,
+        replied=replied,
+        replied_pct=replied_pct,
+        interested=interested,
+        interested_pct=interested_pct,
+        letters=letters,
+    )
+
+
 async def _get_analytics(page: Page, campaign: Campaign) -> Optional[CampaignAnalytics]:
     if not campaign.url:
         return None
 
     logger.info("Fetching analytics for: %s", campaign.name)
 
-    # Navigate to campaign page
-    await page.goto(campaign.url, wait_until="networkidle")
+    # Navigate to campaign page. The redesigned SPA keeps network connections
+    # open, so "networkidle" never settles — wait for DOM content only.
+    await page.goto(campaign.url, wait_until="domcontentloaded")
 
+    # --- Current (2026-07) Coldy UI ---
+    # The redesigned campaign page is a div-based SPA: «Аналитика» and
+    # «Статистика писем» are text nav items, and the summary metrics are plain
+    # text lines rather than card elements. If the «Аналитика» nav item is
+    # missing we fall through to the legacy selector-based logic below.
+    try:
+        await page.wait_for_function(
+            "document.body.innerText.includes('Цепочка писем')",
+            timeout=20_000,
+        )
+    except PlaywrightTimeoutError:
+        pass
+
+    # Give the SPA a moment to render the nav items after first paint.
+    await page.wait_for_timeout(3_000)
+
+    chain_item = page.get_by_text(re.compile(r"^\s*Цепочка писем\s*$", re.IGNORECASE)).first
+    try:
+        await chain_item.click(timeout=10_000)
+        await page.wait_for_timeout(1_000)
+    except PlaywrightTimeoutError:
+        logger.warning("Campaign chain tab was not found for %s", campaign.name)
+
+    analytics_item = page.get_by_text(re.compile(r"^\s*Аналитика\s*$", re.IGNORECASE)).first
+    try:
+        await analytics_item.click(timeout=10_000)
+    except PlaywrightTimeoutError:
+        logger.warning("Campaign analytics tab was not found for %s — trying legacy layout", campaign.name)
+    else:
+        return await _parse_current_analytics(page, campaign)
+
+    # --- Legacy Coldy UI (pre-2026-07 redesign) ---
     # Open "Аналитика". Different Coldy screens expose it as a tab, link, or plain button.
     analytics_tab = page.get_by_role("tab", name=re.compile("аналитика", re.IGNORECASE))
     analytics_link = page.get_by_role("link", name=re.compile("аналитика", re.IGNORECASE))
@@ -234,7 +495,7 @@ async def _get_analytics(page: Page, campaign: Campaign) -> Optional[CampaignAna
         await page.wait_for_timeout(1500)
     elif await analytics_link.count():
         await analytics_link.first.click()
-        await page.wait_for_load_state("networkidle")
+        await page.wait_for_load_state("domcontentloaded")
     elif await analytics_button.count():
         await analytics_button.first.click()
         await page.wait_for_timeout(1500)
@@ -243,7 +504,7 @@ async def _get_analytics(page: Page, campaign: Campaign) -> Optional[CampaignAna
         await page.wait_for_timeout(1500)
     else:
         analytics_url = campaign.url.rstrip("/") + "/analytics"
-        await page.goto(analytics_url, wait_until="networkidle")
+        await page.goto(analytics_url, wait_until="domcontentloaded")
 
     # --- Summary cards ---
     async def card_values(label_pattern: str) -> tuple[int, float]:
@@ -297,36 +558,7 @@ async def _get_analytics(page: Page, campaign: Campaign) -> Optional[CampaignAna
             letters=letters,
         )
 
-    # Coldy's «Статистика писем» columns are NOT fixed: the «Открыли» column
-    # disappears when open-tracking is off, and a «Баунс» column may or may not be
-    # present. Reading by position made replies come from the bounce column (or, on
-    # tables without it, default to 0). Map columns by header instead. Find the
-    # per-letter table by its «Письмо» header (skips the «Статистика почт» table).
-    col: dict[str, int] = {}
-    letters_table = None
-    for tbl in await page.locator("table").all():
-        try:
-            headers = [h.strip().lower() for h in await tbl.locator("thead th, thead td").all_inner_texts()]
-        except Exception:  # noqa: BLE001
-            headers = []
-        if not any(h.startswith("письмо") for h in headers):
-            continue
-        candidate: dict[str, int] = {}
-        for i, h in enumerate(headers):
-            if h.startswith("письмо"):
-                candidate["name"] = i
-            elif "отправл" in h:
-                candidate["sent"] = i
-            elif h.startswith("ответ"):  # startswith, so «Не ответили» can't match
-                candidate["replied"] = i
-            elif h.startswith("открыл"):
-                candidate["opened"] = i
-        # A real «Статистика писем» table has both a letter column and a replies
-        # column — require them so a decoy/«Итого» table headed «Письмо» is ignored.
-        if "name" in candidate and "replied" in candidate:
-            col = candidate
-            letters_table = tbl
-            break
+    col, letters_table = await _find_letters_table(await page.locator("table").all())
 
     if letters_table is None:
         # Unrecognised layout (e.g. Coldy drops the <thead>, renames or localizes
@@ -345,30 +577,7 @@ async def _get_analytics(page: Page, campaign: Campaign) -> Optional[CampaignAna
             letters=letters,
         )
 
-    def _pick(texts: list[str], key: str) -> str:
-        i = col.get(key)
-        return texts[i] if (i is not None and i < len(texts)) else ""
-
-    letter_rows = await letters_table.locator("tbody tr").all()
-    for lr in letter_rows:
-        lcells = await lr.locator("td").all()
-        if len(lcells) < 2:
-            continue
-        texts = [(await c.inner_text()).strip() for c in lcells]
-        letter_name = _pick(texts, "name") or texts[0]
-        if "@" in letter_name:  # skip rows from the per-mailbox «Статистика почт» table
-            continue
-        l_open_text = _pick(texts, "opened")
-        l_rep_text = _pick(texts, "replied")
-
-        letters.append(LetterStat(
-            name=letter_name,
-            sent=_parse_int(_pick(texts, "sent")),
-            opened=_parse_int(l_open_text.split("(")[0]),
-            opened_pct=_parse_pct(l_open_text),
-            replied=_parse_int(l_rep_text.split("(")[0]),
-            replied_pct=_parse_pct(l_rep_text),
-        ))
+    letters = await _parse_letter_rows(letters_table, col)
 
     return CampaignAnalytics(
         connected=conn_val,

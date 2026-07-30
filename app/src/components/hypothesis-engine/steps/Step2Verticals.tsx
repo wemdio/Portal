@@ -6,6 +6,9 @@
  * за «Подробнее», гипотезы с доказательствами — в раскрываемом блоке
  * (accept/reject как в старой доске, оптимистично через onPatchHypothesis).
  * Главное действие карточки — «Выбрать это направление →» (onSelectVertical).
+ * Чтобы разметка десятков гипотез не утомляла: над доской фильтр-чипы и
+ * «Свернуть/развернуть все», на карточке — шеврон-коллапс до одной строки и
+ * тихие массовые действия «принять все / отклонить все / сбросить».
  */
 
 import { useMemo, useState, type JSX } from 'react';
@@ -19,13 +22,52 @@ const BUILD_STAGES: ReadonlySet<HeStage> = new Set(['chain', 'vocab', 'template'
 
 type HypothesisPatchStatus = 'accepted' | 'rejected' | 'proposed';
 
-/** 1 направление, 2–4 направления, 5+ направлений. */
-function pluralDirections(n: number): string {
+/** Русская плюрализация: one = 1, few = 2–4, many = 5+. */
+function pluralRu(n: number, one: string, few: string, many: string): string {
   const mod10 = n % 10;
   const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return 'направление';
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'направления';
-  return 'направлений';
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+/** 1 направление, 2–4 направления, 5+ направлений. */
+function pluralDirections(n: number): string {
+  return pluralRu(n, 'направление', 'направления', 'направлений');
+}
+
+/** 1 гипотеза, 2–4 гипотезы, 5+ гипотез. */
+function pluralHypotheses(n: number): string {
+  return pluralRu(n, 'гипотеза', 'гипотезы', 'гипотез');
+}
+
+/** Фильтр гипотез внутри карточек: все, по тиру или по статусу разметки. */
+type HypothesisFilter = 'all' | 't1' | 't2' | 't3' | 'accepted' | 'rejected';
+
+const FILTER_CHIPS: ReadonlyArray<{ id: HypothesisFilter; label: string }> = [
+  { id: 'all', label: 'Все' },
+  { id: 't1', label: 'T1' },
+  { id: 't2', label: 'T2' },
+  { id: 't3', label: 'T3' },
+  { id: 'accepted', label: 'Принятые' },
+  { id: 'rejected', label: 'Отклонённые' },
+];
+
+function matchesFilter(h: HeHypothesis, filter: HypothesisFilter): boolean {
+  switch (filter) {
+    case 'all':
+      return true;
+    case 't1':
+      return h.tier === 1;
+    case 't2':
+      return h.tier === 2;
+    case 't3':
+      return h.tier === 3;
+    case 'accepted':
+      return h.status === 'accepted';
+    case 'rejected':
+      return h.status === 'rejected';
+  }
 }
 
 export interface Step2VerticalsProps {
@@ -88,9 +130,22 @@ export function Step2Verticals({
     return map;
   }, [dossiers]);
 
+  // Фильтр-чипы над доской и набор свёрнутых карточек (по умолчанию все развёрнуты).
+  const [filter, setFilter] = useState<HypothesisFilter>('all');
+  const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(() => new Set());
+
+  const toggleCollapsed = (id: string) => {
+    setCollapsedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   if (sorted.length === 0) {
     return (
-      <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50/50 p-10 text-center">
+      <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50/50 p-10 text-center">
         <p className="text-sm font-medium text-gray-500">Вертикалей пока нет</p>
         <p className="mt-1 text-xs text-gray-400">
           Дождитесь окончания исследования — направления появятся здесь.
@@ -100,16 +155,57 @@ export function Step2Verticals({
   }
 
   return (
-    <div className="space-y-4">
-      <p className="text-sm text-gray-600">
+    <div className="grid items-start gap-4 xl:grid-cols-2">
+      <p className="text-sm text-gray-600 xl:col-span-2">
         Движок нашёл {sorted.length} {pluralDirections(sorted.length)}. Выберите одно — под него соберём письма,
         вокабуляр и шаблон.
       </p>
+
+      {/* Фильтр гипотез внутри карточек + свёртка всех карточек разом */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 xl:col-span-2">
+        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Фильтр гипотез">
+          {FILTER_CHIPS.map((chip) => (
+            <button
+              key={chip.id}
+              type="button"
+              onClick={() => setFilter(chip.id)}
+              aria-pressed={filter === chip.id}
+              className={`rounded-full border px-2.5 py-1 text-xs font-medium transition ${
+                filter === chip.id
+                  ? 'border-blue-200 bg-blue-50 text-blue-700'
+                  : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:text-gray-700'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
+        </div>
+        <div className="ml-auto flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setCollapsedIds(new Set(sorted.map((v) => v.id)))}
+            className="text-xs font-medium text-gray-500 transition hover:text-gray-700"
+          >
+            Свернуть все
+          </button>
+          <button
+            type="button"
+            onClick={() => setCollapsedIds(new Set())}
+            className="text-xs font-medium text-gray-500 transition hover:text-gray-700"
+          >
+            Развернуть все
+          </button>
+        </div>
+      </div>
+
       {sorted.map((vertical) => (
         <VerticalCard
           key={vertical.id}
           vertical={vertical}
           hypotheses={hypothesesByVertical.get(vertical.id) ?? []}
+          filter={filter}
+          collapsed={collapsedIds.has(vertical.id)}
+          onToggleCollapsed={() => toggleCollapsed(vertical.id)}
           selected={vertical.id === selectedVerticalId}
           buildNote={vertical.id === selectedVerticalId && buildActive}
           dossier={readyDossierByVertical.get(vertical.id) ?? null}
@@ -126,6 +222,9 @@ export function Step2Verticals({
 function VerticalCard({
   vertical,
   hypotheses,
+  filter,
+  collapsed,
+  onToggleCollapsed,
   selected,
   buildNote,
   dossier,
@@ -134,6 +233,9 @@ function VerticalCard({
 }: {
   vertical: HeVertical;
   hypotheses: HeHypothesis[];
+  filter: HypothesisFilter;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
   selected: boolean;
   buildNote: boolean;
   dossier: HeDossier | null;
@@ -141,16 +243,55 @@ function VerticalCard({
   onPatchHypothesis: (id: string, status: HypothesisPatchStatus) => void;
 }) {
   const [showDetails, setShowDetails] = useState(false);
+  // Какое массовое действие сейчас выполняется (спиннер на группе кнопок).
+  const [busyAction, setBusyAction] = useState<HypothesisPatchStatus | null>(null);
+
+  const total = hypotheses.length;
   const acceptedCount = hypotheses.filter((h) => h.status === 'accepted').length;
+  const visibleHypotheses =
+    filter === 'all' ? hypotheses : hypotheses.filter((h) => matchesFilter(h, filter));
+
+  // Массовая разметка всех гипотез вертикали — последовательно, чтобы не гнать
+  // десятки PATCH параллельно; ошибки показывает родитель (actionError).
+  const applyToAll = async (status: HypothesisPatchStatus) => {
+    if (status === 'rejected') {
+      const confirmed = window.confirm(`Отклонить все гипотезы направления «${vertical.name}»?`);
+      if (!confirmed) return;
+    }
+    const targets = hypotheses.filter((h) => h.status !== status);
+    if (targets.length === 0) return;
+    setBusyAction(status);
+    try {
+      for (const h of targets) {
+        await onPatchHypothesis(h.id, status);
+      }
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const busy = busyAction !== null;
 
   return (
     <article
-      className={`rounded-xl border p-5 transition ${
-        selected ? 'border-emerald-500 bg-white ring-1 ring-emerald-500/40' : 'border-gray-200 bg-white'
+      className={`rounded-2xl border p-5 shadow-sm transition ${
+        selected ? 'border-emerald-300 bg-white ring-1 ring-emerald-500/40' : 'border-gray-200 bg-white'
       }`}
     >
-      {/* Шапка: rank, название, потенциал */}
+      {/* Шапка: свёртка, rank, название, потенциал, массовые действия */}
       <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          aria-expanded={!collapsed}
+          title={collapsed ? 'Развернуть карточку' : 'Свернуть карточку'}
+          className="-ml-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
+        >
+          <ChevronDown
+            className={`h-4 w-4 transition-transform ${collapsed ? '-rotate-90' : ''}`}
+            aria-hidden
+          />
+        </button>
         {vertical.rank != null ? (
           <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-100 text-[11px] font-bold text-gray-500">
             {vertical.rank}
@@ -159,88 +300,139 @@ function VerticalCard({
         <h3 className="text-base font-semibold text-gray-900">{vertical.name}</h3>
         <PotentialBadge pct={vertical.potential_pct} />
         {selected ? <Badge tone="emerald">Выбрано</Badge> : null}
-      </div>
-
-      {vertical.summary ? (
-        <p className={`mt-2 text-sm leading-relaxed text-gray-600 ${showDetails ? '' : 'line-clamp-2'}`}>
-          {vertical.summary}
-        </p>
-      ) : null}
-
-      {/* Цифры готового досье — компактная строка под саммари */}
-      {dossier ? <DossierStatRow dossier={dossier} /> : null}
-
-      {/* Синонимы — за «Подробнее», чтобы не шуметь */}
-      {vertical.synonyms.length > 0 ? (
-        <div className="mt-2">
-          <button
-            type="button"
-            onClick={() => setShowDetails((v) => !v)}
-            aria-expanded={showDetails}
-            className="inline-flex items-center gap-1 text-xs font-medium text-gray-500 transition hover:text-gray-700"
+        {collapsed && total > 0 ? (
+          <span className="text-xs text-gray-400">
+            {total} {pluralHypotheses(total)} · {acceptedCount}/{total} принято
+          </span>
+        ) : null}
+        {!collapsed && total > 0 ? (
+          <div
+            className="ml-auto flex items-center gap-0.5"
+            role="group"
+            aria-label="Массовые действия с гипотезами"
           >
-            <ChevronDown
-              className={`h-3.5 w-3.5 transition-transform ${showDetails ? 'rotate-180' : ''}`}
-              aria-hidden
-            />
-            {showDetails ? 'Скрыть' : 'Подробнее'}
-          </button>
-          {showDetails ? (
-            <div className="mt-2 flex flex-wrap gap-1">
-              {vertical.synonyms.map((syn) => (
-                <span key={syn} className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">
-                  {syn}
-                </span>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {/* Гипотезы вертикали */}
-      {hypotheses.length > 0 ? (
-        <details className="group mt-3">
-          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-sm font-medium text-gray-600 hover:text-gray-800">
-            <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" aria-hidden />
-            Гипотезы ({hypotheses.length}
-            {acceptedCount > 0 ? `, принято ${acceptedCount}` : ''})
-          </summary>
-          <ul className="mt-3 space-y-2">
-            {hypotheses.map((h) => (
-              <HypothesisItem key={h.id} hypothesis={h} onPatch={onPatchHypothesis} />
-            ))}
-          </ul>
-        </details>
-      ) : null}
-
-      {/* Главное действие */}
-      <div className="mt-4">
-        <button
-          type="button"
-          onClick={() => onSelectVertical(vertical.id)}
-          disabled={selected}
-          className={
-            selected
-              ? 'inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-5 text-sm font-medium text-emerald-700'
-              : 'inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700'
-          }
-        >
-          {selected ? (
-            <>
-              <Check className="h-4 w-4" aria-hidden />
-              Выбрано
-            </>
-          ) : (
-            'Выбрать это направление →'
-          )}
-        </button>
-        {buildNote ? (
-          <p className="mt-2 flex items-center justify-center gap-1.5 text-xs text-gray-400">
-            <Spinner className="h-3 w-3" />
-            Собираем письма, вокабуляр и шаблон…
-          </p>
+            {busy ? <Spinner className="mr-1 h-3.5 w-3.5 text-gray-400" /> : null}
+            <button
+              type="button"
+              onClick={() => void applyToAll('accepted')}
+              disabled={busy || acceptedCount === total}
+              title="Принять все гипотезы направления"
+              className="rounded px-1.5 py-0.5 text-[11px] font-medium text-gray-400 transition hover:bg-emerald-50 hover:text-emerald-600 disabled:pointer-events-none disabled:opacity-40"
+            >
+              принять все
+            </button>
+            <button
+              type="button"
+              onClick={() => void applyToAll('rejected')}
+              disabled={busy || hypotheses.every((h) => h.status === 'rejected')}
+              title="Отклонить все гипотезы направления"
+              className="rounded px-1.5 py-0.5 text-[11px] font-medium text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:pointer-events-none disabled:opacity-40"
+            >
+              отклонить все
+            </button>
+            <button
+              type="button"
+              onClick={() => void applyToAll('proposed')}
+              disabled={busy || hypotheses.every((h) => h.status === 'proposed')}
+              title="Сбросить разметку всех гипотез направления"
+              className="rounded px-1.5 py-0.5 text-[11px] font-medium text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:pointer-events-none disabled:opacity-40"
+            >
+              сбросить
+            </button>
+          </div>
         ) : null}
       </div>
+
+      {!collapsed ? (
+        <>
+          {vertical.summary ? (
+            <p className={`mt-2 text-sm leading-relaxed text-gray-600 ${showDetails ? '' : 'line-clamp-2'}`}>
+              {vertical.summary}
+            </p>
+          ) : null}
+
+          {/* Цифры готового досье — компактная строка под саммари */}
+          {dossier ? <DossierStatRow dossier={dossier} /> : null}
+
+          {/* Синонимы — за «Подробнее», чтобы не шуметь */}
+          {vertical.synonyms.length > 0 ? (
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={() => setShowDetails((v) => !v)}
+                aria-expanded={showDetails}
+                className="inline-flex items-center gap-1 text-xs font-medium text-gray-500 transition hover:text-gray-700"
+              >
+                <ChevronDown
+                  className={`h-3.5 w-3.5 transition-transform ${showDetails ? 'rotate-180' : ''}`}
+                  aria-hidden
+                />
+                {showDetails ? 'Скрыть' : 'Подробнее'}
+              </button>
+              {showDetails ? (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {vertical.synonyms.map((syn) => (
+                    <span key={syn} className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">
+                      {syn}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* Гипотезы вертикали (список фильтруется чипами над доской) */}
+          {total > 0 ? (
+            <details className="group mt-3">
+              <summary className="flex cursor-pointer list-none items-center gap-1.5 text-sm font-medium text-gray-600 hover:text-gray-800">
+                <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" aria-hidden />
+                Гипотезы ({filter === 'all' ? total : `${visibleHypotheses.length} из ${total}`})
+                <span className="text-xs font-normal text-gray-400">
+                  · принято {acceptedCount} / {total}
+                </span>
+              </summary>
+              {visibleHypotheses.length > 0 ? (
+                <ul className="mt-3 space-y-2">
+                  {visibleHypotheses.map((h) => (
+                    <HypothesisItem key={h.id} hypothesis={h} onPatch={onPatchHypothesis} />
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-2 text-xs text-gray-400">Под этот фильтр здесь ничего не попадает.</p>
+              )}
+            </details>
+          ) : null}
+
+          {/* Главное действие */}
+          <div className="mt-4">
+            <button
+              type="button"
+              onClick={() => onSelectVertical(vertical.id)}
+              disabled={selected}
+              className={
+                selected
+                  ? 'inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-5 text-sm font-medium text-emerald-700'
+                  : 'inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700'
+              }
+            >
+              {selected ? (
+                <>
+                  <Check className="h-4 w-4" aria-hidden />
+                  Выбрано
+                </>
+              ) : (
+                'Выбрать это направление →'
+              )}
+            </button>
+            {buildNote ? (
+              <p className="mt-2 flex items-center justify-center gap-1.5 text-xs text-gray-400">
+                <Spinner className="h-3 w-3" />
+                Собираем письма, вокабуляр и шаблон…
+              </p>
+            ) : null}
+          </div>
+        </>
+      ) : null}
     </article>
   );
 }
@@ -328,7 +520,7 @@ function HypothesisItem({
             className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition ${
               accepted
                 ? 'border-emerald-300 bg-emerald-100 text-emerald-700'
-                : 'border-gray-200 bg-white text-gray-400 hover:border-emerald-200 hover:text-emerald-600'
+                : 'border-gray-200 bg-white text-gray-400 hover:border-emerald-200 hover:text-emerald-500'
             }`}
           >
             <Check className="h-4 w-4" aria-hidden />

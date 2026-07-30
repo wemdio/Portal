@@ -37,6 +37,28 @@ interface BrandCloudEntity {
   source_brand: string;
 }
 
+/**
+ * Живой прогресс стадии → he_jobs.progress ({done, total, label}); его
+ * показывает UI шага «Исследование». Best-effort: сбой обновления
+ * не должен валить стадию.
+ */
+async function reportProgress(
+  ctx: HeStageContext,
+  jobId: string,
+  done: number,
+  total: number,
+  label: string,
+): Promise<void> {
+  try {
+    await ctx.supabase
+      .from('he_jobs')
+      .update({ progress: { done, total, label } })
+      .eq('id', jobId);
+  } catch {
+    // прогресс — best-effort, сбой игнорируем
+  }
+}
+
 async function collectBrandPages(
   target: { name: string; url: string },
   ctx: HeStageContext,
@@ -88,7 +110,9 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
   ];
 
   const entities: BrandCloudEntity[] = [];
-  for (const target of targets) {
+  for (let i = 0; i < targets.length; i += 1) {
+    const target = targets[i];
+    await reportProgress(ctx, job.id, i + 1, targets.length, 'разбираем бренд');
     stageLog(ctx, `[brand_cloud] ${target.name}…`);
     const { pages, searchResults } = await collectBrandPages(target, ctx);
     try {

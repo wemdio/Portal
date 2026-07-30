@@ -42,7 +42,10 @@ jest.mock('@/lib/loggerServer', () => ({
 }));
 
 import { GET, POST } from '@/app/api/tools/hypothesis-engine/projects/route';
-import { PATCH } from '@/app/api/tools/hypothesis-engine/projects/[id]/route';
+import {
+  GET as GET_PROJECT_DETAIL,
+  PATCH,
+} from '@/app/api/tools/hypothesis-engine/projects/[id]/route';
 
 function makeReq(body?: unknown, method = 'POST'): NextRequest {
   return new Request('http://x/api/tools/hypothesis-engine/projects', {
@@ -141,6 +144,42 @@ describe('GET /api/tools/hypothesis-engine/projects', () => {
     };
     const byId = Object.fromEntries(body.projects.map((p) => [p.id, p.vertical_count]));
     expect(byId).toEqual({ p1: 0, p2: 2 });
+  });
+});
+
+describe('GET /api/tools/hypothesis-engine/projects/[id] — bases projection', () => {
+  it('selects source and collect_info so the auto-collect UI can render', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_projects: [
+          { id: 'p1', name: 'One', website_url: 'https://one.example/', status: 'draft' },
+        ],
+        he_hypotheses: [],
+        he_verticals: [],
+        he_bases: [
+          {
+            id: 'b1',
+            project_id: 'p1',
+            vertical_id: 'v1',
+            source: 'auto',
+            status: 'collecting',
+            collect_info: { plan: {}, tasks: [] },
+          },
+        ],
+        he_jobs: [],
+        he_vertical_dossiers: [],
+        he_cases: [],
+      },
+    });
+
+    const res = await GET_PROJECT_DETAIL(makeReq(undefined, 'GET'), patchParams);
+    expect(res.status).toBe(200);
+
+    // Регрессия «мёртвого UI»: без source/collect_info в проекции шаг «База»
+    // не рисует прогресс-карту авто-сборки, бейдж «авто» и состояние retry.
+    const basesSelect = mockDb.selects.find((s) => s.table === 'he_bases');
+    expect(basesSelect?.columns).toContain('source');
+    expect(basesSelect?.columns).toContain('collect_info');
   });
 });
 

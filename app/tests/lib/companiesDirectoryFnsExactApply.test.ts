@@ -4,10 +4,9 @@ import {
   assertFnsExactApplyAuthorized,
   assertFnsProductionTarget,
   computeFnsExactPreviewFingerprint,
-  executeFnsExactApply,
   executeFnsExactCheck,
   parseFnsExactApplyCliArgs,
-  type FnsExactApplySession,
+  type FnsExactCheckSession,
   type FnsExactImportPreview,
   type FnsExactImportPreviewBody,
 } from '@/lib/companiesDirectory/fnsExactApply';
@@ -33,41 +32,39 @@ function makePreview(
 
 function makeSession(
   previews: FnsExactImportPreview[],
-): jest.Mocked<FnsExactApplySession> {
+): jest.Mocked<FnsExactCheckSession> {
   return {
-    beginReadOnly: jest.fn().mockResolvedValue(undefined),
-    beginReadWrite: jest.fn().mockResolvedValue(undefined),
-    acquireAdvisoryLock: jest.fn().mockResolvedValue(undefined),
     stageArtifacts: jest.fn().mockResolvedValue(undefined),
+    beginReadOnly: jest.fn().mockResolvedValue(undefined),
     preview: jest.fn().mockImplementation(async () => {
       const next = previews.shift();
       if (!next) throw new Error('No preview configured');
       return next;
     }),
-    updateNextBatch: jest.fn()
-      .mockResolvedValueOnce(2)
-      .mockResolvedValueOnce(1),
-    commit: jest.fn().mockResolvedValue(undefined),
     rollback: jest.fn().mockResolvedValue(undefined),
   };
 }
 
 describe('FNS exact OKVED apply guardrails', () => {
-  it('defaults CLI to check and requires explicit apply confirmations', () => {
+  it('defaults CLI to check with 25k pages and requires explicit resume', () => {
     expect(parseFnsExactApplyCliArgs([
       '--plan-dir',
       'C:\\plan',
     ])).toMatchObject({
       mode: 'check',
       planDir: 'C:\\plan',
-      batchSize: 20_000,
+      batchSize: 25_000,
+      resume: false,
     });
     expect(parseFnsExactApplyCliArgs([
       '--apply',
+      '--resume',
       '--plan-dir',
       'C:\\plan',
       '--manifest',
       'C:\\plan\\manifest.json',
+      '--checkpoint',
+      'C:\\state\\fns.json',
       '--confirm-plan',
       '1'.repeat(64),
       '--confirm-preview',
@@ -79,9 +76,16 @@ describe('FNS exact OKVED apply guardrails', () => {
     ])).toMatchObject({
       mode: 'apply',
       batchSize: 5_000,
+      resume: true,
+      checkpointPath: 'C:\\state\\fns.json',
       confirmedTarget: '139.60.162.12',
     });
     expect(() => parseFnsExactApplyCliArgs([])).toThrow('--plan-dir');
+    expect(() => parseFnsExactApplyCliArgs([
+      '--plan-dir',
+      'C:\\plan',
+      '--resume',
+    ])).toThrow('--resume requires --apply');
     expect(() => parseFnsExactApplyCliArgs([
       '--plan-dir',
       'C:\\plan',
@@ -90,16 +94,17 @@ describe('FNS exact OKVED apply guardrails', () => {
     ])).toThrow('Unknown');
   });
 
-  it('checks in a read-only transaction and never calls target DML', async () => {
+  it('COPY-stages before a read-only check transaction and never calls DML', async () => {
     const before = makePreview();
     const session = makeSession([before]);
 
     await expect(executeFnsExactCheck(session)).resolves.toEqual(before);
 
-    expect(session.beginReadOnly).toHaveBeenCalledTimes(1);
     expect(session.stageArtifacts).toHaveBeenCalledTimes(1);
-    expect(session.updateNextBatch).not.toHaveBeenCalled();
-    expect(session.commit).not.toHaveBeenCalled();
+    expect(session.beginReadOnly).toHaveBeenCalledTimes(1);
+    expect(session.stageArtifacts.mock.invocationCallOrder[0]).toBeLessThan(
+      session.beginReadOnly.mock.invocationCallOrder[0],
+    );
     expect(session.rollback).toHaveBeenCalledTimes(1);
     expect(session).not.toHaveProperty('insertMissing');
   });
@@ -172,84 +177,24 @@ describe('FNS exact OKVED apply guardrails', () => {
     });
     const session = makeSession([before]);
 
-    await expect(
-      executeFnsExactApply(session, before.fingerprint, 2),
-    ).rejects.toThrow(/missing|identity|conflict/i);
+    await expect(executeFnsExactCheck(session)).rejects.toThrow(
+      /missing|identity|conflict/i,
+    );
 
-    expect(session.updateNextBatch).not.toHaveBeenCalled();
-    expect(session.commit).not.toHaveBeenCalled();
     expect(session.rollback).toHaveBeenCalledTimes(1);
   });
 
-  it('is one atomic transaction across batches and verifies the post-state', async () => {
-    const before = makePreview();
-    const after = makePreview({
-      rowsToUpdate: 0,
-      alreadyApplied: 3,
-      stateDigest: 'c'.repeat(64),
-    });
-    const session = makeSession([before, after]);
-
-    await expect(
-      executeFnsExactApply(session, before.fingerprint, 2),
-    ).resolves.toEqual({
-      updated: 3,
-      alreadyApplied: false,
-      before,
-      after,
-    });
-
-    expect(session.beginReadWrite).toHaveBeenCalledTimes(1);
-    expect(session.acquireAdvisoryLock).toHaveBeenCalledTimes(1);
-    expect(session.updateNextBatch).toHaveBeenNthCalledWith(1, 2);
-    expect(session.updateNextBatch).toHaveBeenNthCalledWith(2, 1);
-    expect(session.commit).toHaveBeenCalledTimes(1);
-    expect(session.rollback).not.toHaveBeenCalled();
-  });
-
-  it('treats a repeat as a no-op and rolls back any partial-count drift', async () => {
-    const alreadyApplied = makePreview({
-      rowsToUpdate: 0,
-      alreadyApplied: 3,
-      stateDigest: 'd'.repeat(64),
-    });
-    const repeated = makeSession([alreadyApplied]);
-
-    await expect(
-      executeFnsExactApply(repeated, '0'.repeat(64), 2),
-    ).resolves.toMatchObject({
-      updated: 0,
-      alreadyApplied: true,
-    });
-    expect(repeated.updateNextBatch).not.toHaveBeenCalled();
-    expect(repeated.commit).toHaveBeenCalledTimes(1);
-
-    const before = makePreview();
-    const drifted = makeSession([before]);
-    drifted.updateNextBatch
-      .mockReset()
-      .mockResolvedValueOnce(2)
-      .mockResolvedValueOnce(0);
-
-    await expect(
-      executeFnsExactApply(drifted, before.fingerprint, 2),
-    ).rejects.toThrow('updated row count');
-    expect(drifted.commit).not.toHaveBeenCalled();
-    expect(drifted.rollback).toHaveBeenCalledTimes(1);
-  });
-
-  it('rolls back when artifact validation fails during staging', async () => {
-    const before = makePreview();
-    const session = makeSession([before]);
+  it('fails artifact validation before opening a database transaction', async () => {
+    const session = makeSession([]);
     session.stageArtifacts.mockRejectedValueOnce(
       new Error('archive SHA-256 mismatch'),
     );
 
-    await expect(
-      executeFnsExactApply(session, before.fingerprint, 2),
-    ).rejects.toThrow('archive SHA-256 mismatch');
-    expect(session.updateNextBatch).not.toHaveBeenCalled();
-    expect(session.commit).not.toHaveBeenCalled();
-    expect(session.rollback).toHaveBeenCalledTimes(1);
+    await expect(executeFnsExactCheck(session)).rejects.toThrow(
+      'archive SHA-256 mismatch',
+    );
+    expect(session.beginReadOnly).not.toHaveBeenCalled();
+    expect(session.preview).not.toHaveBeenCalled();
+    expect(session.rollback).not.toHaveBeenCalled();
   });
 });

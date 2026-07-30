@@ -376,7 +376,7 @@ export function Step3Content(props: {
       </header>
 
       {/* Блок A: цепочка писем (черновик) */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5">
+      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -446,7 +446,7 @@ export function Step3Content(props: {
         ) : null}
 
         {chain && letters.length > 0 ? (
-          <ol className="mt-4 space-y-3">
+          <ol className="mt-4 max-w-3xl space-y-3">
             {letters.map((letter, idx) => {
               // Открытый редактор заменяет карточку письма (правится только
               // основной вариант; A/B-показ других писем — read-only).
@@ -496,10 +496,10 @@ export function Step3Content(props: {
                         onClick={() => copyLetter(idx, shown.subject, shown.body)}
                         title="Скопировать письмо"
                         aria-label="Скопировать письмо"
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
                       >
                         {copiedIdx === idx ? (
-                          <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden />
+                          <Check className="h-3.5 w-3.5 text-emerald-500" aria-hidden />
                         ) : (
                           <Copy className="h-3.5 w-3.5" aria-hidden />
                         )}
@@ -510,7 +510,7 @@ export function Step3Content(props: {
                         disabled={lettersSaving || chainBusy}
                         title="Редактировать письмо"
                         aria-label="Редактировать письмо"
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50"
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50"
                       >
                         <Pencil className="h-3.5 w-3.5" aria-hidden />
                       </button>
@@ -591,7 +591,7 @@ export function Step3Content(props: {
       </section>
 
       {/* Блок B: вокабуляр для сбора базы */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5">
+      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -647,7 +647,7 @@ export function Step3Content(props: {
       </section>
 
       {/* Блок C: досье вертикали — объективные числа сегмента */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5">
+      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -775,7 +775,7 @@ function ChainLetterEditor({
     totalDays === 0 ? 'Сразу' : `через ${totalDays} ${daysWord(totalDays)} от старта`;
 
   return (
-    <div className="rounded-lg border border-blue-200 bg-white p-4">
+    <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-4">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-[11px] font-bold text-blue-700">
           {letterIndex + 1}
@@ -876,7 +876,7 @@ function DossierNum({ value, caption }: { value: string; caption: string }) {
 function DossierSegmentCard({ data }: { data: HeDossierData }) {
   const { counters, interpretation } = data;
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3">
+    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
       <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">Сегмент в цифрах</p>
       <div className="space-y-3">
         {counters.companies_total != null ? (
@@ -945,7 +945,7 @@ function DossierSignalsCard({ data }: { data: HeDossierData }) {
   const buysChannels = data.interpretation.buys_sales_channels;
   const buysMeta = buysChannels ? BUYS_CHANNELS_META[buysChannels] : undefined;
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3">
+    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
       <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">Сигналы боли</p>
       {signals.length === 0 ? (
         <p className="text-xs text-gray-400">Сигналов не найдено.</p>
@@ -979,7 +979,7 @@ function DossierSignalsCard({ data }: { data: HeDossierData }) {
 function DossierDatasetCard({ data }: { data: HeDossierData }) {
   const { dataset_stats: ds, interpretation } = data;
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3">
+    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
       <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">Наши кампании</p>
       {ds.reply_pct != null || ds.baseline_pct != null ? (
         <div className="flex flex-wrap gap-6">
@@ -1053,7 +1053,7 @@ function CompanyTypesCard({ companyTypes }: { companyTypes: HeCompanyType[] }) {
   }, [companyTypes]);
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3">
+    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
       <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">
         Типы компаний ({companyTypes.length})
       </p>
@@ -1096,7 +1096,7 @@ function JobTitlesCard({ jobTitles }: { jobTitles: JobTitleRow[] }) {
   const targetRows = hasSide ? jobTitles.filter((jt) => jt.audience_side === 'campaign_target') : [];
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3">
+    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
       <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">
         Должности ({jobTitles.length})
       </p>
@@ -1129,10 +1129,10 @@ function JobTitlesTable({ title, rows }: { title?: string; rows: JobTitleRow[] }
               <th className="px-2 py-1.5 text-left font-semibold text-gray-500">Другие названия</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-100">
+          <tbody className="divide-y divide-gray-200">
             {rows.map((jt, i) => (
               <tr key={`${jt.title}-${i}`}>
-                <td className="px-2 py-1.5 align-top font-medium text-gray-900">{jt.title}</td>
+                <td className="whitespace-nowrap px-2 py-1.5 align-top font-medium text-gray-900">{jt.title}</td>
                 <td className="px-2 py-1.5 align-top text-gray-600">{jt.seniority || '—'}</td>
                 <td className="px-2 py-1.5 align-top text-gray-600">{jt.function || '—'}</td>
                 <td className="px-2 py-1.5 align-top">
@@ -1173,7 +1173,7 @@ function QueriesCard({ queries }: { queries: HeVocab['search_queries'] }) {
   }, [queries]);
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3">
+    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
       <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-widest text-gray-400">
         <Search className="h-3.5 w-3.5" aria-hidden />
         Поисковые запросы ({queries.length})
