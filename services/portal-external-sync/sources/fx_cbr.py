@@ -6,6 +6,11 @@
 строку под датой публикации, а витрина берёт ближайший курс не позже даты
 операции — так выходные закрываются сами.
 
+Источники валютных дат — только brocard_transactions и manual_expenses.
+bank_tochka и bank_tbank сюда не входят: оба банковских источника жёстко
+пишут currency='RUB' (см. map_transaction/map_operation), валютных трат в
+bank_transactions не бывает в принципе.
+
 Непригодный ответ за одну дату (сеть, HTTP-ошибка, тело не парсится) не
 должен ронять остальные даты прогона — та же изоляция «единица работы =
 одна дата», что у банковских источников.
@@ -24,8 +29,80 @@ from .base import SyncSource
 
 API_URL = "https://www.cbr.ru/scripts/XML_daily.asp"
 
-#: Потолок на прогон, чтобы первый бэкфилл не превратился в тысячу запросов.
+#: Потолок на прогон, чтобы первый бэкфилл не превратился в тысячу запросов
+#: за одну ночь. Если недостающих дат больше — часть достаётся следующим
+#: прогонам, run() об этом печатает (см. ниже), а не молчит про хвост.
 MAX_DATES_PER_RUN = 120
+
+#: Окно "курс не устарел" для предиката отбора дат — см. комментарий у SQL
+#: ниже про то, почему это окно, а не точное совпадение дат и не "хоть один
+#: более ранний курс существует".
+_STALE_WINDOW_SQL = "interval '10 days'"
+
+_NEEDED_DATES_SQL = f"""
+    SELECT DISTINCT d
+    FROM (
+      SELECT (occurred_at AT TIME ZONE 'Europe/Moscow')::date AS d, currency
+      FROM brocard_transactions
+      UNION ALL
+      SELECT occurred_on AS d, currency
+      FROM manual_expenses
+    ) x
+    WHERE x.currency <> 'RUB'
+      AND NOT EXISTS (
+        -- Окно в 10 дней, а НЕ:
+        --   (а) точное совпадение дат — ЦБ не публикует курс в выходные и
+        --       праздники, и мы намеренно пишем строку под пятницей вместо
+        --       субботы, поэтому rate_date = x.d для субботы никогда не
+        --       будет true, и источник ходил бы в ЦБ за одной и той же
+        --       субботой каждую ночь вечно;
+        --   (б) "существует хоть один курс этой валюты с rate_date <= x.d"
+        --       без нижней границы — это и есть баг, который тут был:
+        --       после первой же загрузки валюты в fx_rates появляется одна
+        --       строка, и она <= любой более поздней дате, поэтому ВСЕ
+        --       будущие даты этой валюты считаются закрытыми навсегда —
+        --       источник перестаёт ходить в ЦБ за свежим курсом, а витрина
+        --       (join "ближайший курс не позже") тихо продолжает считать
+        --       по этой годовалой строке. Дашборд выглядит полным (нет
+        --       NULL, нет ошибок), а деньги в нём молча неверные.
+        -- Правильное условие — "ближайший доступный курс для этой даты не
+        -- устарел", то есть окно: rate_date <= x.d И rate_date не более чем
+        -- на N дней раньше x.d. 10 дней выбрано по самому длинному реальному
+        -- разрыву в публикации ЦБ — новогодним каникулам (8 дней), с
+        -- запасом. Ошибка в сторону лишнего запроса к ЦБ безвредна —
+        -- ON CONFLICT DO UPDATE делает повтор идемпотентным; ошибка в
+        -- другую сторону (шире окно/без окна) даёт молча неверные суммы.
+        -- Не сужать и не убирать нижнюю границу.
+        SELECT 1 FROM fx_rates f
+        WHERE f.currency = x.currency
+          AND f.rate_date <= x.d
+          AND f.rate_date >= x.d - {_STALE_WINDOW_SQL}
+      )
+    ORDER BY d
+"""
+
+# Тот же предикат, что и выше, но ограниченный конкретными датами: зовётся
+# после того, как для dates_to_process уже сходили в ЦБ, чтобы понять, какие
+# валюты так и остались без курса — сигнал "у ЦБ такой валюты вообще нет",
+# а не "ещё не успели дойти".
+_STILL_MISSING_CURRENCIES_SQL = f"""
+    SELECT DISTINCT x.currency
+    FROM (
+      SELECT (occurred_at AT TIME ZONE 'Europe/Moscow')::date AS d, currency
+      FROM brocard_transactions
+      UNION ALL
+      SELECT occurred_on AS d, currency
+      FROM manual_expenses
+    ) x
+    WHERE x.currency <> 'RUB'
+      AND x.d = ANY($1::date[])
+      AND NOT EXISTS (
+        SELECT 1 FROM fx_rates f
+        WHERE f.currency = x.currency
+          AND f.rate_date <= x.d
+          AND f.rate_date >= x.d - {_STALE_WINDOW_SQL}
+      )
+"""
 
 
 def parse_cbr_xml(text: str) -> tuple[date, dict[str, Decimal]]:
@@ -58,35 +135,28 @@ class FxCbrSync(SyncSource):
     name = "fx_cbr"
 
     async def run(self, conn: asyncpg.Connection) -> int:
-        needed = await conn.fetch(
-            """
-            SELECT DISTINCT d
-            FROM (
-              SELECT (occurred_at AT TIME ZONE 'Europe/Moscow')::date AS d, currency
-              FROM brocard_transactions
-              UNION ALL
-              SELECT occurred_on AS d, currency
-              FROM manual_expenses
-            ) x
-            WHERE x.currency <> 'RUB'
-              AND NOT EXISTS (
-                SELECT 1 FROM fx_rates f
-                WHERE f.currency = x.currency AND f.rate_date <= x.d
-              )
-            ORDER BY d
-            LIMIT $1
-            """,
-            MAX_DATES_PER_RUN,
-        )
+        needed = await conn.fetch(_NEEDED_DATES_SQL)
         if not needed:
             return 0
+
+        all_dates: list[date] = sorted(row["d"] for row in needed)
+        total_dates_needed = len(all_dates)
+        dates_to_process = all_dates[:MAX_DATES_PER_RUN]
+
+        if total_dates_needed > MAX_DATES_PER_RUN:
+            remaining = total_dates_needed - MAX_DATES_PER_RUN
+            print(
+                f"[fx_cbr] лимит {MAX_DATES_PER_RUN} дат за прогон достигнут: "
+                f"обработано {MAX_DATES_PER_RUN} из {total_dates_needed}, "
+                f"ещё {remaining} дата(ы) — в следующих прогонах",
+                flush=True,
+            )
 
         total = 0
         skip_counts: dict[str, int] = {}
 
         async with httpx.AsyncClient(timeout=30) as client:
-            for row in needed:
-                d: date = row["d"]
+            for d in dates_to_process:
                 # Изоляция даты: сбой одного ответа ЦБ (сеть, HTTP-ошибка,
                 # неразбираемое тело) не должен обрывать остальные даты
                 # прогона — источник обязан дойти до конца и залить то, что
@@ -143,6 +213,23 @@ class FxCbrSync(SyncSource):
             )
             print(
                 f"[fx_cbr] skipped {total_skipped} date(s): {breakdown}",
+                flush=True,
+            )
+
+        # Валюта вне ежедневного списка ЦБ (или опечатка в currency у
+        # источника трат) никогда не получит строку в fx_rates, и с окном
+        # вместо "любой более ранний курс" источник будет молча стучаться в
+        # ЦБ за ней каждую ночь без единого сигнала. Явно называем, что не
+        # закрылось, даже после успешных запросов выше.
+        still_missing = await conn.fetch(
+            _STILL_MISSING_CURRENCIES_SQL, dates_to_process
+        )
+        if still_missing:
+            currencies = sorted(row["currency"] for row in still_missing)
+            print(
+                f"[fx_cbr] ЦБ не публикует курс для: {', '.join(currencies)} — "
+                f"fx_rates для них не появится сам по себе, эти валюты будут "
+                f"запрашиваться каждый прогон, пока курс не заведут вручную",
                 flush=True,
             )
 
