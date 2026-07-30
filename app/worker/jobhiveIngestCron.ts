@@ -16,14 +16,20 @@
  *   2. Apply migration 20260624_0002 (adds 'jobhive' to the source CHECK constraints).
  *   3. DuckDB single binary must be on PATH (or set DUCKDB_BIN). Same binary the pdl
  *      loader uses — see app/scripts/pdl/README.md.
- *   4. Manual first run (measure yield before scheduling):
+ *   4. DRY-RUN rehearsal before the first prod run (full DuckDB scan + row mapping,
+ *      but NO DB connection and NO writes; prints the funnel counts + 5 sample rows).
+ *      Use JOBHIVE_LIMIT to cap the export while rehearsing:
+ *        cd /path/to/portal/app && JOBHIVE_LIMIT=2000 node --env-file=../.env dist/workers/jobhiveIngestCron.js --dry-run
+ *   5. Manual first real run (measure yield before scheduling):
  *        cd /path/to/portal/app && node --env-file=../.env dist/workers/jobhiveIngestCron.js
- *   5. Then schedule via host crontab (survives redeploys), nightly AFTER the feed
+ *   6. Then schedule via host crontab (survives redeploys), nightly AFTER the feed
  *      regenerates (~14:30 UTC), e.g.:
  *        30 16 * * * cd /path/to/portal/app && /usr/bin/node --env-file=../.env dist/workers/jobhiveIngestCron.js >> /var/log/portal/jobhive-ingest.log 2>&1
  *
  * Env knobs: JOBHIVE_FEED_URL, JOBHIVE_RECENCY_DAYS (default 90 — covers the 7/30/90
- * query options), JOBHIVE_INGEST_CHUNK (default 300), DUCKDB_BIN.
+ * query options), JOBHIVE_INGEST_CHUNK (default 300), JOBHIVE_DRY_RUN=1 (same as the
+ * --dry-run flag), JOBHIVE_LIMIT (positive int; caps scanned rows, for rehearsals),
+ * DUCKDB_BIN.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -34,12 +40,12 @@ import Papa from 'papaparse';
 import { createWorkerLogger, requireSupabaseAdmin } from './_shared';
 import type { WorkerLogger } from './_shared';
 import { upsertInChunksWithRetry } from '@/lib/parsers/engHiringRunner';
-import { isHighIntentB2BSalesTitle } from '@/lib/parsers/engHiring';
 import {
   JOBHIVE_FEED_URL,
   buildJobhiveDuckdbSql,
-  dedupeJobhiveRowsByCompanyCountry,
-  mapJobhiveRowToCacheRow,
+  buildJobhiveDryRunReport,
+  parseJobhiveLimit,
+  processJobhiveRows,
   type JobhiveRow,
 } from '@/lib/parsers/jobhiveIngest';
 
@@ -47,6 +53,9 @@ const WORKER_ID = 'jobhive-ingest-cron';
 const RECENCY_DAYS = Math.max(1, Number(process.env.JOBHIVE_RECENCY_DAYS ?? '90'));
 const DUCKDB_BIN = process.env.DUCKDB_BIN || 'duckdb';
 const UPSERT_CHUNK = Math.max(1, Number(process.env.JOBHIVE_INGEST_CHUNK ?? '300'));
+// Rehearsal mode: full scan + mapping, but no DB connection and no writes.
+const DRY_RUN = process.argv.includes('--dry-run')
+  || ['1', 'true', 'yes'].includes((process.env.JOBHIVE_DRY_RUN ?? '').trim().toLowerCase());
 
 /** Run the DuckDB scan, writing the (already coarse-deduped) result to a temp CSV, and
  *  parse it back. COPY-to-file (not stdout) so a large result never overflows a pipe. */
@@ -67,13 +76,21 @@ function scanFeed(sql: string, log: WorkerLogger): JobhiveRow[] {
 
 async function main(): Promise<number> {
   const log = createWorkerLogger(WORKER_ID);
-  const supabase = requireSupabaseAdmin(log);
+
+  // A typo'd limit must fail fast — silently ignoring it would mean an unbounded scan.
+  let limit: number | null;
+  try {
+    limit = parseJobhiveLimit(process.env.JOBHIVE_LIMIT);
+  } catch (err) {
+    log('error', (err as Error).message);
+    return 1;
+  }
 
   const startedAt = Date.now();
   const cutoffIso = new Date(startedAt - RECENCY_DAYS * 86_400_000).toISOString();
-  const sql = buildJobhiveDuckdbSql({ parquetUrl: JOBHIVE_FEED_URL, cutoffIso });
+  const sql = buildJobhiveDuckdbSql({ parquetUrl: JOBHIVE_FEED_URL, cutoffIso, limit });
 
-  log('info', `Streaming jobhive feed (cutoff ${cutoffIso}, ${RECENCY_DAYS}d) via DuckDB…`);
+  log('info', `${DRY_RUN ? '[DRY-RUN] ' : ''}Streaming jobhive feed (cutoff ${cutoffIso}, ${RECENCY_DAYS}d${limit != null ? `, limit ${limit}` : ''}) via DuckDB…`);
   let rawRows: JobhiveRow[];
   try {
     rawRows = scanFeed(sql, log);
@@ -83,19 +100,25 @@ async function main(): Promise<number> {
   }
   log('info', `Coarse sales rows from feed: ${rawRows.length}`);
 
-  // The SQL prefilter is deliberately broad; apply the EXACT title filter, then fold
-  // legal-suffix name variants and recover blank countries into one row per company.
-  const salesRows = rawRows.filter((row) => isHighIntentB2BSalesTitle(String(row.title ?? '')));
-  const deduped = dedupeJobhiveRowsByCompanyCountry(salesRows);
-  const cacheRows = deduped
-    .map(mapJobhiveRowToCacheRow)
-    .filter((row): row is NonNullable<typeof row> => row != null);
-  log('info', `After exact title filter + company/country dedup: ${cacheRows.length} companies`);
+  // The SQL prefilter is deliberately broad; the shared pure pipeline applies the EXACT
+  // title filter, folds legal-suffix name variants, recovers blank countries into one
+  // row per company, and maps to eng_hiring_cache rows.
+  const stats = processJobhiveRows(rawRows);
+  log('info', `After exact title filter + company/country dedup: ${stats.mapped} companies`);
 
+  if (DRY_RUN) {
+    log('info', `\n${buildJobhiveDryRunReport(stats)}`);
+    return 0;
+  }
+
+  const cacheRows = stats.cacheRows;
   if (cacheRows.length === 0) {
     log('info', 'Nothing to upsert');
     return 0;
   }
+
+  // Real ingest only from here on — dry-run returns above without ever touching the DB.
+  const supabase = requireSupabaseAdmin(log);
 
   const nowIso = new Date().toISOString();
   const stamped = cacheRows.map((row) => ({ ...row, last_seen_at: nowIso, cache_fetched_at: nowIso, updated_at: nowIso }));

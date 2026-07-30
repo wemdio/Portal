@@ -33,6 +33,28 @@ export interface HeCompetitorEntry {
   site_excerpt?: string;
 }
 
+/**
+ * Живой прогресс стадии → he_jobs.progress ({done, total, label}); его
+ * показывает UI шага «Исследование». Best-effort: сбой обновления
+ * не должен валить стадию.
+ */
+async function reportProgress(
+  ctx: HeStageContext,
+  jobId: string,
+  done: number,
+  total: number,
+  label: string,
+): Promise<void> {
+  try {
+    await ctx.supabase
+      .from('he_jobs')
+      .update({ progress: { done, total, label } })
+      .eq('id', jobId);
+  } catch {
+    // прогресс — best-effort, сбой игнорируем
+  }
+}
+
 export async function runCompetitorsStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
   const project = await readProject(ctx.supabase, job.project_id);
@@ -66,8 +88,11 @@ export async function runCompetitorsStage(job: HeJob, ctx: HeStageContext): Prom
   );
   addUsage(usage, llm);
 
+  const selected = llm.data.competitors.slice(0, MAX_COMPETITORS);
   const competitors: HeCompetitorEntry[] = [];
-  for (const c of llm.data.competitors.slice(0, MAX_COMPETITORS)) {
+  for (let i = 0; i < selected.length; i += 1) {
+    const c = selected[i];
+    await reportProgress(ctx, job.id, i + 1, selected.length, 'изучаем конкурента');
     const entry: HeCompetitorEntry = { name: c.name, url: c.url, why: c.why, geo: c.geo };
     try {
       entry.site_excerpt = truncate(await fetchText(c.url), HOMEPAGE_EXCERPT);

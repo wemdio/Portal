@@ -20,11 +20,45 @@ import type {
 
 export const HE_API = '/api/tools/hypothesis-engine';
 
+/* ── Автосборка базы (POST /verticals/[id]/collect) ── */
+
+/** Источник базы: ручная загрузка файла или автосборка движком. */
+export type HeBaseSource = 'upload' | 'auto';
+
+/** Задача из плана автосборки (collect_info.plan.tasks): почему выбран этот источник. */
+export interface HeCollectPlanTask {
+  source?: string;
+  rationale?: string;
+}
+
+/** Живая задача автосборки (collect_info.tasks): статус и счётчик собранных строк. */
+export interface HeCollectTask {
+  source?: string;
+  status?: string;
+  rows?: number;
+}
+
+/**
+ * Прогресс автосборки (he_bases.collect_info, jsonb). Форма толерантная:
+ * все поля опциональны, на клиенте читать защитно.
+ */
+export interface HeCollectInfo {
+  plan?: { tasks?: HeCollectPlanTask[] } | null;
+  tasks?: HeCollectTask[] | null;
+}
+
 /** GET /projects/[id] отдаёт усечённые строки баз (без data/sample_rows). */
 export type HeBaseSummary = Pick<
   HeBase,
-  'id' | 'vertical_id' | 'filename' | 'row_count' | 'status' | 'analysis' | 'created_at'
->;
+  'id' | 'vertical_id' | 'filename' | 'row_count' | 'analysis' | 'created_at'
+> & {
+  /** Статус разбора + 'collecting' (идёт автосборка; появился вместе с collect-эндпоинтом). */
+  status: HeBase['status'] | 'collecting';
+  /** Откуда база. У записей, созданных до автосборки, поля нет — считать 'upload'. */
+  source?: HeBaseSource;
+  /** План/прогресс автосборки (null у загруженных вручную). */
+  collect_info?: HeCollectInfo | null;
+};
 
 /** Усечённая строка джобы (без result/tokens). */
 export type HeJobSummary = Pick<
@@ -34,6 +68,8 @@ export type HeJobSummary = Pick<
   finished_at: string | null;
   /** Вход стадии: фильтрация джоб по вертикали (payload.vertical_id). */
   payload?: { vertical_id?: string } | null;
+  /** Живой прогресс стадии (he_jobs.progress): счётчик «— 14/33 · проверяем гипотезу». */
+  progress?: { done?: number; total?: number; label?: string } | null;
 };
 
 /* ── Цепочка писем: A/B-варианты ── */
@@ -172,6 +208,13 @@ export interface HeHypothesisResponse {
 }
 
 export interface HeBaseCreateResponse {
+  base?: { id: string; status: string };
+  error?: string;
+}
+
+/** POST /verticals/[id]/collect → 201 { ok, base } (200, если сборка уже идёт). */
+export interface HeBaseCollectResponse {
+  ok?: boolean;
   base?: { id: string; status: string };
   error?: string;
 }

@@ -8,18 +8,25 @@
  */
 
 import { useCallback, useMemo, useState, type JSX } from 'react';
-import { Check, Copy, Download, Eye, FileText, Sparkles, User } from 'lucide-react';
+import { Check, Copy, Download, Eye, FileText, Rocket, Sparkles, User } from 'lucide-react';
 import type { HeTemplate } from '@/lib/hypothesisEngine/types';
 import {
   renderTemplatePreview,
   tokenizePreviewText,
   type HePreviewToken,
 } from '@/lib/hypothesisEngine/renderPreview';
-import { HE_API, heCall, type HeBaseSummary, type HeJobSummary } from '../api';
-import { Badge, OperatorText, StatusBox } from '../ui';
+import {
+  parseLaunchInfo,
+  type HeLaunchPresetOption,
+  type HeTemplateLaunchInfo,
+} from '@/lib/hypothesisEngine/launchHandoff';
+import { HE_API, heCall, hePost, type HeBaseSummary, type HeJobSummary } from '../api';
+import { Badge, OperatorText, StatusBox, formatDate } from '../ui';
 
 const PRIMARY_BTN =
   'inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700';
+const PRIMARY_SM_BTN =
+  'inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-medium text-white transition hover:bg-blue-700 disabled:opacity-50';
 const SECONDARY_BTN =
   'inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50';
 const TH_CLASS = 'px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-500';
@@ -147,7 +154,7 @@ function TemplateLeadPreview({ template, baseId }: { template: HeTemplate; baseI
 
   return (
     <details
-      className="rounded-xl border border-amber-200 bg-amber-50/40"
+      className="rounded-2xl border border-amber-200 bg-amber-50/40 shadow-sm"
       onToggle={(e) => handleToggle(e.currentTarget.open)}
     >
       <summary className="flex cursor-pointer select-none flex-wrap items-center gap-2 px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-800">
@@ -244,6 +251,175 @@ function TemplateLeadPreview({ template, baseId }: { template: HeTemplate; baseI
   );
 }
 
+/* ── «Отправить в запуск»: PAUSED-кампания в Instantly из готового шаблона ── */
+
+interface HeLaunchPresetsResponse {
+  presets?: HeLaunchPresetOption[];
+  error?: string;
+}
+
+interface HeLaunchResponse {
+  ok?: boolean;
+  launch?: HeTemplateLaunchInfo;
+  warnings?: string[];
+  error?: string;
+}
+
+/**
+ * Состояние запуска шаблона. Пока в launch_info шаблона есть запись — вместо
+ * формы показываем её (один запуск на шаблон; повторный force — только через API).
+ */
+function useTemplateLaunch(template: HeTemplate | null) {
+  const [recorded, setRecorded] = useState<HeTemplateLaunchInfo | null>(() =>
+    parseLaunchInfo((template as { launch_info?: unknown } | null)?.launch_info),
+  );
+  const [formOpen, setFormOpen] = useState(false);
+  const [presets, setPresets] = useState<HeLaunchPresetOption[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [presetId, setPresetId] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
+
+  const openForm = useCallback(() => {
+    if (!template) return;
+    setFormOpen(true);
+    setSubmitError(null);
+    if (presets !== null) return;
+    heCall<HeLaunchPresetsResponse>(`${HE_API}/templates/${template.id}/launch`)
+      .then(({ ok, data }) => {
+        if (!ok) {
+          setLoadError(data.error ?? 'Не удалось загрузить пресеты');
+          setPresets([]);
+          return;
+        }
+        const list = data.presets ?? [];
+        setPresets(list);
+        setPresetId((cur) => cur || list[0]?.id || '');
+      })
+      .catch(() => {
+        setLoadError('Не удалось загрузить пресеты');
+        setPresets([]);
+      });
+  }, [presets, template]);
+
+  const submit = useCallback(() => {
+    if (!template || !presetId || submitting) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    hePost<HeLaunchResponse>(`${HE_API}/templates/${template.id}/launch`, { preset_id: presetId })
+      .then(({ ok, data }) => {
+        if (!ok || !data.launch) {
+          setSubmitError(data.error ?? 'Не удалось отправить в запуск');
+          return;
+        }
+        setRecorded(data.launch);
+        setWarnings(data.warnings ?? []);
+        setFormOpen(false);
+      })
+      .catch(() => setSubmitError('Не удалось отправить в запуск'))
+      .finally(() => setSubmitting(false));
+  }, [template, presetId, submitting]);
+
+  return {
+    recorded,
+    formOpen,
+    setFormOpen,
+    presets,
+    loadError,
+    presetId,
+    setPresetId,
+    submitting,
+    submitError,
+    warnings,
+    openForm,
+    submit,
+  };
+}
+
+type TemplateLaunchState = ReturnType<typeof useTemplateLaunch>;
+
+/** Записанный запуск (emerald) либо инлайн-форма выбора пресета. */
+function LaunchSection({ launch }: { launch: TemplateLaunchState }) {
+  if (launch.recorded) {
+    const info = launch.recorded;
+    return (
+      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+        <p className="flex items-center gap-2 text-sm font-medium text-emerald-800">
+          <Check className="h-4 w-4 shrink-0" aria-hidden />
+          Кампания создана (на паузе): {info.campaign_name} · {info.leads_count.toLocaleString('ru-RU')}{' '}
+          лидов
+        </p>
+        <p className="mt-1 text-xs text-emerald-700">
+          {info.campaign_url ? (
+            <a href={info.campaign_url} target="_blank" rel="noreferrer" className="underline">
+              Открыть в Instantly
+            </a>
+          ) : null}
+          {info.created_at ? <span> · {formatDate(info.created_at)}</span> : null}
+          <span> · Активация — вручную в Instantly после проверки</span>
+        </p>
+        {launch.warnings.map((w) => (
+          <p key={w} className="mt-1 text-xs text-amber-700">
+            {w}
+          </p>
+        ))}
+      </div>
+    );
+  }
+
+  if (!launch.formOpen) return null;
+
+  return (
+    <div className="space-y-3 rounded-2xl border border-blue-200 bg-blue-50/50 px-4 py-3">
+      <p className="text-sm font-medium text-gray-800">
+        Запуск в Instantly: кампания будет создана <b>на паузе</b>, лиды загрузятся из базы.
+        Активация — вручную после проверки.
+      </p>
+      {launch.presets === null && !launch.loadError ? (
+        <p className="text-xs text-gray-400">Загружаем пресеты…</p>
+      ) : null}
+      {launch.loadError ? <p className="text-xs text-red-500">{launch.loadError}</p> : null}
+      {launch.presets && launch.presets.length === 0 && !launch.loadError ? (
+        <p className="text-xs text-gray-400">Нет доступных пресетов — сначала настройте пресет клиенту.</p>
+      ) : null}
+      {launch.presets && launch.presets.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={launch.presetId}
+            onChange={(e) => launch.setPresetId(e.target.value)}
+            className="h-9 rounded-lg border border-gray-200 bg-white px-2 text-xs text-gray-700"
+            aria-label="Пресет запуска"
+          >
+            {launch.presets.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={launch.submit}
+            disabled={launch.submitting || !launch.presetId}
+            className={PRIMARY_SM_BTN}
+          >
+            <Rocket className="h-3.5 w-3.5" aria-hidden />
+            {launch.submitting ? 'Создаём кампанию…' : 'Создать кампанию (на паузе)'}
+          </button>
+          <button type="button" onClick={() => launch.setFormOpen(false)} className={SECONDARY_BTN}>
+            Отмена
+          </button>
+        </div>
+      ) : null}
+      {launch.submitError ? (
+        <p className="text-xs text-red-600" role="alert">
+          {launch.submitError}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 export function Step5Template(props: {
   template: HeTemplate | null;
   base: HeBaseSummary | null;
@@ -253,6 +429,7 @@ export function Step5Template(props: {
   const { template, base, jobs, onBuildTemplate } = props;
   const [copied, setCopied] = useState(false);
   const [copiedLetterIdx, setCopiedLetterIdx] = useState<number | null>(null);
+  const launch = useTemplateLaunch(template);
 
   const templateJob = useMemo(() => latestStageJob(jobs, 'template'), [jobs]);
   const busy = templateJob?.status === 'pending' || templateJob?.status === 'running';
@@ -362,9 +539,15 @@ export function Step5Template(props: {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {!launch.recorded ? (
+            <button type="button" onClick={launch.openForm} className={PRIMARY_SM_BTN}>
+              <Rocket className="h-3.5 w-3.5" aria-hidden />
+              Отправить в запуск
+            </button>
+          ) : null}
           <button type="button" onClick={handleCopy} className={SECONDARY_BTN}>
             {copied ? (
-              <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden />
+              <Check className="h-3.5 w-3.5 text-emerald-500" aria-hidden />
             ) : (
               <Copy className="h-3.5 w-3.5" aria-hidden />
             )}
@@ -377,13 +560,16 @@ export function Step5Template(props: {
         </div>
       </header>
 
+      {/* Отправка в запуск: запись о запуске либо форма выбора пресета */}
+      <LaunchSection launch={launch} />
+
       {/* Превью по лидам — финальные письма с подставленными значениями базы */}
       <TemplateLeadPreview template={template} baseId={base?.id ?? template.base_id} />
 
       {/* Финальные письма */}
-      <ol className="space-y-3">
+      <ol className="max-w-3xl space-y-3">
         {template.letters.map((letter, idx) => (
-          <li key={idx} className="rounded-xl border border-gray-200 bg-white p-4">
+          <li key={idx} className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-[11px] font-bold text-blue-700">
                 {idx + 1}
@@ -401,10 +587,10 @@ export function Step5Template(props: {
                 onClick={() => handleCopyLetter(idx)}
                 title="Скопировать письмо"
                 aria-label="Скопировать письмо"
-                className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
+                className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
               >
                 {copiedLetterIdx === idx ? (
-                  <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden />
+                  <Check className="h-3.5 w-3.5 text-emerald-500" aria-hidden />
                 ) : (
                   <Copy className="h-3.5 w-3.5" aria-hidden />
                 )}
@@ -419,7 +605,7 @@ export function Step5Template(props: {
                 {letter.segment_variants.map((v, vi) => (
                   <details
                     key={`${v.when}-${vi}`}
-                    className="rounded-lg border border-violet-200 bg-violet-50/40"
+                    className="rounded-lg border border-violet-200 bg-violet-50"
                   >
                     <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold text-violet-700">
                       Вариант для сегмента: {v.when}
@@ -440,7 +626,7 @@ export function Step5Template(props: {
 
       {/* Фиксированный блок — длинный, свёрнут */}
       {template.fixed_block ? (
-        <details className="rounded-xl border border-gray-200 bg-white">
+        <details className="rounded-2xl border border-gray-200 bg-white shadow-sm">
           <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-800">
             Фиксированный блок (85%) — общая основа всех писем
           </summary>
@@ -456,7 +642,7 @@ export function Step5Template(props: {
 
       {/* Маппинг операторов на колонки базы — свёрнут */}
       {mapping.length > 0 ? (
-        <details className="rounded-xl border border-gray-200 bg-white">
+        <details className="rounded-2xl border border-gray-200 bg-white shadow-sm">
           <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-800">
             Маппинг операторов на колонки базы ({mapping.length})
           </summary>

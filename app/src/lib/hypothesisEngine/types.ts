@@ -18,6 +18,7 @@ export type HeStage =
   | 'chain'
   | 'vocab'
   | 'base_analyze'
+  | 'base_collect'
   | 'template'
   | 'dossier';
 
@@ -30,7 +31,7 @@ export type HeHypothesisStatus = 'proposed' | 'accepted' | 'rejected';
 /** 1 — очевидные ЦА, 2 — смежные сегменты, 3 — неочевидные рынки. */
 export type HeHypothesisTier = 1 | 2 | 3;
 
-export type HeBaseStatus = 'uploaded' | 'analyzing' | 'analyzed' | 'failed';
+export type HeBaseStatus = 'uploaded' | 'collecting' | 'analyzing' | 'analyzed' | 'failed';
 
 export type HeTemplateStatus = 'draft' | 'ready';
 

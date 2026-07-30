@@ -451,9 +451,22 @@ function slugFromUrl(url) {
   return match ? match[1] : '';
 }
 
+// Strips the enclosing quotes of a quoted CSV field ("Kaplan, Inc" protects the
+// comma) and un-doubles escaped inner quotes ("" -> ").
+function unquoteCsvField(value) {
+  const str = String(value ?? '');
+  if (str.length >= 2 && str.startsWith('"') && str.endsWith('"')) {
+    return str.slice(1, -1).replace(/""/g, '"');
+  }
+  return str;
+}
+
 // Parses the per-ATS `name,slug,url` company CSVs from kalil0321/ats-scrapers.
 // Tolerates the legacy two-column `name,url` form and company names with commas
-// (url and slug never contain commas, so we pop from the right).
+// (url and slug never contain commas, so we pop from the right; quoted names are
+// rejoined and unquoted). Slugs are matched case-insensitively but kept in their
+// original case — workday site paths are case-sensitive, and mergeCompanyTokens
+// already dedupes lower-case.
 function parseCompanyCsv(text) {
   const out = [];
   for (const line of String(text).split(/\r?\n/)) {
@@ -466,11 +479,11 @@ function parseCompanyCsv(text) {
     let slug;
     let name;
     const tail = parts[parts.length - 1]?.trim() ?? '';
-    if (parts.length >= 2 && /^[a-z0-9][a-z0-9._/-]*$/.test(tail)) {
+    if (parts.length >= 2 && /^[a-z0-9][a-z0-9._/-]*$/i.test(tail)) {
       slug = tail;
-      name = normalizeWhitespace(parts.slice(0, -1).join(','));
+      name = normalizeWhitespace(unquoteCsvField(parts.slice(0, -1).join(',')));
     } else {
-      name = normalizeWhitespace(parts.join(','));
+      name = normalizeWhitespace(unquoteCsvField(parts.join(',')));
       slug = slugFromUrl(url);
     }
     if (!slug) continue;

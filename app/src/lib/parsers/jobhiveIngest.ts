@@ -98,8 +98,13 @@ export interface JobhiveCacheRow {
 /** Build the DuckDB SELECT that streams + prunes + coarse-filters + coarse-dedups the
  *  remote feed. The coarse server-side dedup (one freshest posting per exact company +
  *  country) shrinks the export ~10x so the CLI can read it without blowing memory; Node
- *  then folds legal-suffix name variants and recovers blank countries from location. */
-export function buildJobhiveDuckdbSql(opts: { parquetUrl: string; cutoffIso: string }): string {
+ *  then folds legal-suffix name variants and recovers blank countries from location.
+ *  `limit` (positive int) caps the export for --dry-run rehearsals; anything else throws
+ *  so a bad knob never turns into an unbounded 4.3M-row scan. */
+export function buildJobhiveDuckdbSql(opts: { parquetUrl: string; cutoffIso: string; limit?: number | null }): string {
+  if (opts.limit != null && (!Number.isInteger(opts.limit) || opts.limit < 1)) {
+    throw new Error(`jobhive scan limit must be a positive integer, got ${opts.limit}`);
+  }
   const scanCols = JOBHIVE_SELECT_COLUMNS
     .map((col) => (col === 'description' ? 'substr(description, 1, 2000) AS description' : col))
     .join(', ');
@@ -114,7 +119,20 @@ export function buildJobhiveDuckdbSql(opts: { parquetUrl: string; cutoffIso: str
     `  PARTITION BY lower(trim(company)), coalesce(country_iso, '')`,
     `  ORDER BY posted_at DESC NULLS LAST`,
     `) = 1`,
+    ...(opts.limit != null ? [`LIMIT ${opts.limit}`] : []),
   ].join('\n');
+}
+
+/** Parse the JOBHIVE_LIMIT rehearsal cap. Throws on garbage: silently ignoring a typo
+ *  would turn a "quick rehearsal" into an unbounded 4.3M-row scan. */
+export function parseJobhiveLimit(raw: string | undefined | null): number | null {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+  const n = Number(s);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`JOBHIVE_LIMIT must be a positive integer, got ${JSON.stringify(s)}`);
+  }
+  return n;
 }
 
 function toIntOrNull(value: unknown): number | null {
@@ -202,4 +220,55 @@ export function dedupeJobhiveRowsByCompanyCountry(rows: JobhiveRow[]): JobhiveRo
     if (!existing || rowFreshnessRank(row) > rowFreshnessRank(existing)) best.set(key, row);
   }
   return [...best.values()];
+}
+
+export interface JobhivePipelineStats {
+  /** Rows the DuckDB scan exported (after the SQL coarse filter + coarse dedup). */
+  exported: number;
+  /** Rows that passed the EXACT sales-title filter. */
+  titleMatched: number;
+  /** Rows after the per-(company, country) dedup. */
+  deduped: number;
+  /** Rows successfully mapped to eng_hiring_cache rows. */
+  mapped: number;
+  /** Deduped rows the mapper rejected (NOT NULL columns unsatisfiable) — would be skipped. */
+  unmappable: number;
+  /** The mapped cache rows (what the real run would upsert). */
+  cacheRows: JobhiveCacheRow[];
+}
+
+/** The whole Node-side pipeline after the DuckDB scan: exact sales-title filter →
+ *  per-(company, country) dedup → cache-row mapping. Pure (no I/O) so the real ingest
+ *  and the --dry-run rehearsal share one code path and it stays unit-testable. */
+export function processJobhiveRows(rawRows: JobhiveRow[]): JobhivePipelineStats {
+  const titleMatched = rawRows.filter((row) => isHighIntentB2BSalesTitle(String(row.title ?? '')));
+  const dedupedRows = dedupeJobhiveRowsByCompanyCountry(titleMatched);
+  const cacheRows = dedupedRows
+    .map(mapJobhiveRowToCacheRow)
+    .filter((row): row is JobhiveCacheRow => row != null);
+  return {
+    exported: rawRows.length,
+    titleMatched: titleMatched.length,
+    deduped: dedupedRows.length,
+    mapped: cacheRows.length,
+    unmappable: dedupedRows.length - cacheRows.length,
+    cacheRows,
+  };
+}
+
+/** Human-readable dry-run report: the full funnel counts plus a few sample cache rows
+ *  so the operator can eyeball what WOULD be upserted before the first real run. */
+export function buildJobhiveDryRunReport(stats: JobhivePipelineStats, opts: { sampleSize?: number } = {}): string {
+  const sampleSize = Math.max(0, opts.sampleSize ?? 5);
+  const samples = stats.cacheRows.slice(0, sampleSize);
+  return [
+    'JOBHIVE DRY-RUN — no DB writes performed (scan + mapping rehearsal only)',
+    `rows exported from feed: ${stats.exported}`,
+    `passed exact sales-title filter: ${stats.titleMatched}`,
+    `after company/country dedup: ${stats.deduped}`,
+    `mapped to eng_hiring_cache rows: ${stats.mapped} (unmappable, would be skipped: ${stats.unmappable})`,
+    `sample cache rows (first ${samples.length}):`,
+    ...samples.map((row, i) =>
+      `  ${i + 1}. ${row.company_name} | ${row.vacancy_title} | ${row.country_code ?? '??'} | ${row.vacancy_url}`),
+  ].join('\n');
 }

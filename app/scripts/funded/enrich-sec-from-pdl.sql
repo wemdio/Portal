@@ -4,7 +4,8 @@
 -- never mis-attributes a website. Fuzzier matching (trigram / domain) can be
 -- layered later.
 --
--- Run on the main Postgres (144) after ingest-sec-formd.mjs:
+-- Run against the operational database (the same $DATABASE_URL the portal
+-- container uses) after ingest-sec-formd.mjs:
 --   psql "$DATABASE_URL" -f scripts/funded/enrich-sec-from-pdl.sql
 
 -- Functional index makes the name join fast over pdl_companies (~13M rows).

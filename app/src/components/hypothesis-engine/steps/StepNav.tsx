@@ -3,6 +3,8 @@
 /**
  * Горизонтальный степпер мастера «Движка вертикалей»: нумерованные кружки
  * с соединительными линиями, подпись и короткий подзаголовок у каждого шага.
+ * Плашка липкая (sticky top-0 + backdrop-blur): шаги остаются на экране
+ * при скролле длинных досок и писем.
  * Чисто презентационный компонент: состояния шагов считает ProjectDetail,
  * клик по шагу → onJump(step.id). «Locked»-шаги приглушены, но остаются
  * кликабельными — навигация никогда не блокируется.
@@ -45,7 +47,18 @@ export function StepNav({
   onJump: (step: number) => void;
 }) {
   return (
-    <nav aria-label="Шаги мастера">
+    // Липкая плашка поверх длинных экранов шагов: отрицательные margin
+    // компенсируют responsive-отступы контейнера ProjectDetail
+    // (px-4 / sm:px-6 / lg:px-8), так что при скролле полоса идёт во всю
+    // ширину оболочки — с backdrop-blur и нижней границей, как TopNav.
+    <nav
+      aria-label="Шаги мастера"
+      className="sticky top-14 z-20 -mx-4 border-b border-gray-200 bg-white/90 px-4 py-3 backdrop-blur-md sm:-mx-6 sm:px-6 sm:py-4 md:top-0 lg:-mx-8 lg:px-8"
+    >
+      {/* Колонки flex-1 равной ширины: на широкой оболочке шаги сами
+          разъезжаются по краям (тот же эффект, что justify-between), а
+          геометрия соединительных линий (calc(-50% …)) не ломается —
+          gap/justify-between здесь разорвали бы стыковку линий с кружками. */}
       <ol className="flex w-full items-start">
         {steps.map((step, idx) => (
           <li key={step.id} className="relative min-w-0 flex-1">

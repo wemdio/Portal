@@ -10,6 +10,10 @@
 - Connection strings and credentials remain local secrets in environment/MCP configuration and must never be committed. This map provides context; it does not grant access.
 - If an MCP server, environment file, script, or SSH profile still points a production database connection at `144.31.54.166`, treat it as stale configuration and report it instead of silently using it. Historical migration documents and explicit rollback sources are the exception.
 
+## Portal DB MCP guide
+
+- Before answering questions through the `portal-db` MCP (schema, Polza terminology, Sales AI tables, SQL templates), read `docs/portal-db-mcp-guide.md` — the full usage guide for that database. Keep it updated when the schema, Sales AI pipeline, or sync workers change.
+
 ## Release and production boundary (critical)
 
 - For code or documentation changes, the default authorized stopping point is: create a focused commit and push it to the current working branch for that task.
