@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
+import { formatTranscript } from '@/lib/ai-caller/transcript';
 import {
   Phone,
   Loader2,
@@ -243,10 +244,7 @@ export function TestCallTab({
         recordingUrl = `${window.location.origin}${recordingUrl}`;
       }
 
-      const transcript = call.messages
-        ?.filter((m) => m.role === 'assistant' || m.role === 'user' || m.role === 'bot')
-        .map((m) => `${m.role === 'user' ? 'Клиент' : 'AI'}: ${m.message || m.content || ''}`)
-        .join('\n') || call.transcript || '';
+      const transcript = formatTranscript(call.messages) || call.transcript || '';
 
       const tgRes = await authFetch('/api/ai-caller/telegram/send', {
         method: 'POST',

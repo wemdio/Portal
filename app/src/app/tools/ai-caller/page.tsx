@@ -51,7 +51,8 @@ export default function AiCallerPage() {
   const fetchCalls = useCallback(async () => {
     setLoadingCalls(true);
     try {
-      const res = await authFetch('/api/ai-caller/calls?limit=30');
+      // 200 — чтобы «Историю» и «Аналитику» было что листать (по 30 на страницу)
+      const res = await authFetch('/api/ai-caller/calls?limit=200');
       const data = await res.json();
       setCalls((data.calls ?? []) as VapiCall[]);
     } catch {

@@ -2,6 +2,8 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
+import { formatTranscript, type TranscriptMessage } from '@/lib/ai-caller/transcript';
+import { Pagination, usePagination } from '@/components/ai-caller/Pagination';
 import {
   Loader2,
   BarChart3,
@@ -240,18 +242,10 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
       const res = await authFetch(`/api/ai-caller/calls/${vapiCallId}`);
       const data = await res.json();
       const call = data.call as Record<string, unknown> | undefined;
-      const messages = call?.messages as Array<{ role: string; message: string }> | undefined;
+      const messages = call?.messages as TranscriptMessage[] | undefined;
       const transcript = call?.transcript as string | undefined;
 
-      let formatted = '';
-      if (messages && messages.length > 0) {
-        formatted = messages
-          .filter((m) => m.role === 'assistant' || m.role === 'user')
-          .map((m) => `${m.role === 'assistant' ? 'AI' : 'Клиент'}: ${m.message}`)
-          .join('\n');
-      } else if (transcript) {
-        formatted = transcript;
-      }
+      const formatted = formatTranscript(messages) || transcript || '';
 
       // Empty string = provider had no data; render will fall through to transcript_snippet
       setTranscriptCache((prev) => ({ ...prev, [vapiCallId]: formatted }));
@@ -335,35 +329,15 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
     return () => document.removeEventListener('click', handler);
   }, [tgDropdownId]);
 
-  // Download recording
+  // Download recording — через прокси портала: ссылка провайдера подписанная и
+  // короткоживущая, а браузер по прямой ссылке открыл бы аудио вкладкой.
   async function downloadRecording(callId: string) {
-    let url = recordingUrls[callId];
-    if (!url) {
-      try {
-        const res = await authFetch(`/api/ai-caller/calls/${callId}`);
-        const data = await res.json();
-        const call = data.call as Record<string, unknown> | undefined;
-        url = (call?.recordingUrl as string)
-          || ((call?.artifact as Record<string, unknown>)?.recordingUrl as string)
-          || '';
-        if (url) {
-          if (url.startsWith('/api/')) {
-            const token = await getAccessToken();
-            const sep = url.includes('?') ? '&' : '?';
-            url = `${url}${sep}token=${encodeURIComponent(token)}`;
-          }
-          setRecordingUrls((prev) => ({ ...prev, [callId]: url }));
-        }
-      } catch {
-        return;
-      }
-    }
-    if (!url) return;
+    const token = await getAccessToken();
+    if (!token) return;
 
     const a = document.createElement('a');
-    a.href = url;
+    a.href = `/api/ai-caller/calls/${callId}/recording?download=1&token=${encodeURIComponent(token)}`;
     a.download = `call-${callId}.wav`;
-    a.target = '_blank';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -477,6 +451,12 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
     ? [...analyses]
     : analyses.filter((a) => a.outcome === filter)
   ).sort((a, b) => compareAnalyses(a, b, sortBy, sortDir));
+
+  // Смена фильтра/кампании/сортировки возвращает на первую страницу
+  const { page, setPage, pageItems: pagedAnalyses, totalPages, total } = usePagination(
+    filtered,
+    `${filter}|${selectedCampaign}|${sortBy}|${sortDir}`,
+  );
 
   const stats = {
     total: analyses.length,
@@ -651,7 +631,7 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
         </div>
       ) : (
         <div className="space-y-3">
-          {filtered.map((a) => {
+          {pagedAnalyses.map((a) => {
             const config = OUTCOME_CONFIG[a.outcome] || OUTCOME_CONFIG.other;
             const Icon = config.icon;
             const isExpanded = expandedId === a.id;
@@ -950,6 +930,14 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
               </div>
             );
           })}
+
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            total={total}
+            onPageChange={setPage}
+            unit="звонков"
+          />
         </div>
       )}
     </div>

@@ -13,6 +13,7 @@ import {
   History,
 } from 'lucide-react';
 import type { VapiCall, VapiAssistant } from '@/types/ai-caller';
+import { Pagination, usePagination } from '@/components/ai-caller/Pagination';
 
 interface Props {
   calls: VapiCall[];
@@ -92,6 +93,8 @@ export function CallHistoryTab({
   const [detailCall, setDetailCall] = useState<VapiCall | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
 
+  const { page, setPage, pageItems: pagedCalls, totalPages, total } = usePagination(calls);
+
   async function loadCallDetail(callId: string) {
     if (expandedId === callId) {
       setExpandedId(null);
@@ -158,7 +161,7 @@ export function CallHistoryTab({
       {/* Header */}
       <div className="flex items-center justify-between">
         <p className="text-sm text-gray-500">
-          Последние {calls.length} звонков
+          Последние {total} звонков
         </p>
         <button
           onClick={onRefresh}
@@ -171,7 +174,7 @@ export function CallHistoryTab({
 
       {/* Calls List */}
       <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden divide-y divide-gray-100">
-        {calls.map((call) => {
+        {pagedCalls.map((call) => {
           const isExpanded = expandedId === call.id;
 
           return (
@@ -332,6 +335,14 @@ export function CallHistoryTab({
           );
         })}
       </div>
+
+      <Pagination
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onPageChange={setPage}
+        unit="звонков"
+      />
     </div>
   );
 }
