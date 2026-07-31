@@ -29,6 +29,7 @@ export const navItems: NavItem[] = [
   { id: 'board', name: 'Доска', nameEn: 'Board', href: '/board', navTabId: 'nav-tasks-board' },
   { id: 'team', name: 'Команда', nameEn: 'Team', href: '/team' },
   { id: 'finance', name: 'Финансы', nameEn: 'Finance', href: '/finance' },
+  { id: 'expenses', name: 'Деньги', nameEn: 'Money', href: '/expenses', adminOnly: true },
   { id: 'instantly', name: 'Instantly', nameEn: 'Instantly', href: '/instantly', requiresTool: 'instantly' },
   { id: 'tools', name: 'Инструменты', nameEn: 'Tools', href: '/tools' },
   { id: 'payments', name: 'Оплаты', nameEn: 'Payments', href: '/payments' },
