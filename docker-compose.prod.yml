@@ -1160,8 +1160,14 @@ services:
       - AMO_ACCESS_TOKEN=${AMO_ACCESS_TOKEN:-}
       - AMO_BASE_URL=${AMO_BASE_URL:-}
       - AMO_FIELD_YM_CLIENT_ID=${AMO_FIELD_YM_CLIENT_ID:-}
+      # Т-Банк: по одному токену на бизнес студии, второй необязателен.
+      # Номера счетов конфигом не задаются — источник спрашивает их у банка
+      # (GET /bank-accounts) для каждого токена. Бывший TBANK_ACCOUNT убран:
+      # в окружении он никогда не был задан, синк ходил по номеру, зашитому
+      # в исходник, и второму бизнесу этот номер не подходит — это счёт
+      # первого.
       - TBANK_TOKEN=${TBANK_TOKEN:-}
-      - TBANK_ACCOUNT=${TBANK_ACCOUNT:-40802810600001780269}
+      - TBANK_TOKEN_2=${TBANK_TOKEN_2:-}
       - TOCHKA_JWT=${TOCHKA_JWT:-}
       - BANK_OWN_INN=${BANK_OWN_INN:-165808519703}
     volumes:

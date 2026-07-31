@@ -225,14 +225,14 @@ TB_DEBIT = {
 
 
 def test_tbank_credit_marks_revenue():
-    row = map_operation(TB_CREDIT, ACC)
+    row = map_operation(TB_CREDIT, ACC, "RUB")
     assert row["direction"] == "credit"
     assert row["payer_name"] == "ООО Клиент"
     assert row["is_revenue"] is True
 
 
 def test_tbank_debit_fills_payee():
-    row = map_operation(TB_DEBIT, ACC)
+    row = map_operation(TB_DEBIT, ACC, "RUB")
     assert row["direction"] == "debit"
     assert row["payee_name"] == "ООО ЯНДЕКС"
     assert row["payee_inn"] == "7736207543"
@@ -247,13 +247,14 @@ def test_tbank_debit_payee_name_reads_recipient_field():
     правила разметки по имени получателя не срабатывали вовсе. Тест
     зафиксирован отдельно от test_tbank_debit_fills_payee — тот тоже ловит
     регресс, но не объясняет, из какого именно поля должно браться имя."""
-    row = map_operation(TB_DEBIT, ACC)
+    row = map_operation(TB_DEBIT, ACC, "RUB")
     assert row["payee_name"] == TB_DEBIT["recipient"]
 
 
 def test_tbank_foreign_operation_is_skipped():
     """Операция, где наш счёт не участвует ни одной стороной."""
-    assert map_operation({"recipientAccount": "1", "payerAccount": "2"}, ACC) is None
+    foreign = {"recipientAccount": "1", "payerAccount": "2"}
+    assert map_operation(foreign, ACC, "RUB") is None
 
 
 def test_tbank_unparsable_date_is_skipped():
@@ -261,7 +262,7 @@ def test_tbank_unparsable_date_is_skipped():
     она просто пропускается."""
     tx = dict(TB_DEBIT)
     tx["date"] = "16.07.2026"  # неожиданный формат
-    assert map_operation(tx, ACC) is None
+    assert map_operation(tx, ACC, "RUB") is None
 
 
 def test_tbank_missing_amount_is_skipped_not_zeroed():
@@ -269,7 +270,7 @@ def test_tbank_missing_amount_is_skipped_not_zeroed():
     настоящий ноль в выписке и отсутствующая сумма это разные вещи."""
     tx = dict(TB_DEBIT)
     del tx["amount"]
-    assert map_operation(tx, ACC) is None
+    assert map_operation(tx, ACC, "RUB") is None
 
 
 def test_tbank_skip_counts_tally_by_reason():
@@ -286,9 +287,46 @@ def test_tbank_skip_counts_tally_by_reason():
     del bad_amount["amount"]
     foreign = {"recipientAccount": "1", "payerAccount": "2"}
 
-    assert map_operation(bad_date, ACC, skip_counts) is None
-    assert map_operation(bad_amount, ACC, skip_counts) is None
-    assert map_operation(foreign, ACC, skip_counts) is None
-    assert map_operation(foreign, ACC, skip_counts) is None  # ещё одна чужая
+    assert map_operation(bad_date, ACC, "RUB", skip_counts) is None
+    assert map_operation(bad_amount, ACC, "RUB", skip_counts) is None
+    assert map_operation(foreign, ACC, "RUB", skip_counts) is None
+    assert map_operation(foreign, ACC, "RUB", skip_counts) is None  # ещё одна чужая
 
     assert skip_counts == {"bad_date": 1, "bad_amount": 1, "not_ours": 2}
+
+
+def test_tbank_currency_comes_from_the_account_not_from_a_rub_default():
+    """Главный тест новой сигнатуры: валюта операции — это валюта её счёта.
+
+    У операции Т-Банка своего поля валюты в ответе нет (проверено на живом
+    API), поэтому её задаёт счёт — раньше здесь стояла константа "RUB", и
+    операция валютного счёта молча легла бы в базу рублёвой, завысив
+    рублёвый итог витрины расходов.
+    """
+    assert map_operation(TB_DEBIT, ACC, "USD")["currency"] == "USD"
+    assert map_operation(TB_CREDIT, ACC, "EUR")["currency"] == "EUR"
+
+
+def test_tbank_currency_stays_rub_for_a_rub_account():
+    """Обратная сторона того же: у рублёвого счёта (а сегодня все счета
+    студии рублёвые) поведение не изменилось."""
+    assert map_operation(TB_CREDIT, ACC, "RUB")["currency"] == "RUB"
+    assert map_operation(TB_DEBIT, ACC, "RUB")["currency"] == "RUB"
+
+
+def test_tbank_transaction_id_falls_back_to_account_and_id():
+    """Номер счёта в запасном transaction_id обязателен: с несколькими
+    счетами операции разных счетов с одинаковым id схлопнулись бы в одну
+    строку по уникальному ключу (bank, transaction_id)."""
+    tx = dict(TB_DEBIT)
+    del tx["operationId"]
+
+    other_account = "40702810000000000009"
+    same_id_elsewhere = dict(tx)
+    same_id_elsewhere["payerAccount"] = other_account
+
+    assert map_operation(tx, ACC, "RUB")["transaction_id"] == f"{ACC}|12"
+    assert (
+        map_operation(same_id_elsewhere, other_account, "RUB")["transaction_id"]
+        == f"{other_account}|12"
+    )

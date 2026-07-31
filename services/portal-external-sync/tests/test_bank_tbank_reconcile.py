@@ -66,3 +66,61 @@ def test_beyond_tolerance_is_still_reported():
     warnings = reconcile_period_totals(rows, data)
     assert len(warnings) == 1
     assert "outcome mismatch" in warnings[0]
+
+
+# ── Сверка в границах одного счёта ────────────────────────────────────────
+#
+# income/outcome банк считает по одному конкретному счёту, а счетов у токена
+# может быть несколько. Если свалить операции разных счетов в общий котёл,
+# сверка сравнит их сумму с итогом одного счёта и начнёт врать в обе стороны:
+# лишние операции чужого счёта дадут «расхождение» там, где всё сошлось, а
+# недостача своего счёта замаскируется чужим приходом. Проверка обязана
+# оставаться в границах «токен + счёт + период».
+
+ACC_A = "40802810600001780269"
+ACC_B = "40702810000000000001"
+
+A_CREDIT = {"direction": "credit", "amount": 5000.0, "account_id": ACC_A}
+A_DEBIT = {"direction": "debit", "amount": 606.42, "account_id": ACC_A}
+B_CREDIT = {"direction": "credit", "amount": 999999.0, "account_id": ACC_B}
+B_DEBIT = {"direction": "debit", "amount": 777777.0, "account_id": ACC_B}
+
+
+def test_totals_of_another_account_do_not_leak_into_the_check():
+    """Главный тест: строки чужого счёта в списке не должны влиять на сверку
+    нашего — итоги банка относятся только к нашему."""
+    rows = [A_CREDIT, A_DEBIT, B_CREDIT, B_DEBIT]
+    data = {"income": 5000.0, "outcome": 606.42}  # итоги счёта A
+    assert reconcile_period_totals(rows, data, account=ACC_A) == []
+
+
+def test_own_shortfall_is_not_masked_by_another_accounts_rows():
+    """Обратная сторона: недостача своего счёта обязана быть видна, даже
+    когда рядом лежат операции другого счёта на любые суммы."""
+    rows = [A_DEBIT, B_CREDIT]  # приход счёта A "потерялся"
+    data = {"income": 5000.0, "outcome": 606.42}
+    warnings = reconcile_period_totals(rows, data, account=ACC_A)
+    assert len(warnings) == 1
+    assert "income mismatch" in warnings[0]
+    assert "mapped=0" in warnings[0]
+
+
+def test_mismatch_message_names_the_account():
+    """В сообщении о расхождении должен быть виден счёт — иначе с несколькими
+    счетами в логе не понять, чей период не сошёлся."""
+    rows = [A_DEBIT]
+    data = {"outcome": 606.42 + 1}
+    warnings = reconcile_period_totals(rows, data, account=ACC_A)
+    assert len(warnings) == 1
+    assert f"acc={ACC_A}" in warnings[0]
+
+
+def test_without_account_behaviour_is_unchanged():
+    """Без явного счёта фильтра нет и номер в сообщение не подставляется —
+    старые вызовы работают как работали."""
+    rows = [A_CREDIT, A_DEBIT]
+    data = {"income": 5000.0, "outcome": 606.42}
+    assert reconcile_period_totals(rows, data) == []
+    assert "acc=" not in "".join(
+        reconcile_period_totals(rows, {"outcome": 0.0})
+    )

@@ -43,6 +43,8 @@ npm run db:migrate
 | `services/portal-external-sync/pytest.ini` | Конфиг pytest |
 | `services/portal-external-sync/requirements-dev.txt` | pytest и respx |
 | `services/portal-external-sync/tests/test_bank_mapping.py` | Тесты чистого маппинга банковских операций |
+| `services/portal-external-sync/tests/test_bank_tbank_accounts.py` | Токены Т-Банка, разбор `/bank-accounts`, коды валют |
+| `services/portal-external-sync/tests/test_bank_tbank_run.py` | Прогон Т-Банка по токенам/счетам и изоляция сбоев (сеть и БД — фейки) |
 | `services/portal-external-sync/tests/test_fx_cbr.py` | Тесты парсера XML ЦБ |
 | `services/portal-external-sync/sources/fx_cbr.py` | Курсы ЦБ → `fx_rates` |
 | `services/portal-external-sync/sources/expense_rules.py` | Вызов `apply_expense_rules()` |
@@ -54,7 +56,7 @@ npm run db:migrate
 |---|---|
 | `services/portal-external-sync/sources/_bank_common.py` | Порядок колонок `bank_transactions` и `to_row()` |
 | `services/portal-external-sync/sources/bank_tochka.py` | Чистый `map_transaction`, дебет наравне с кредитом |
-| `services/portal-external-sync/sources/bank_tbank.py` | Дебет наравне с кредитом |
+| `services/portal-external-sync/sources/bank_tbank.py` | Дебет наравне с кредитом; несколько токенов, счета из `/bank-accounts`, валюта счёта |
 | `services/portal-external-sync/main.py` | Новые источники в `SOURCES` |
 
 ---
@@ -1027,168 +1029,93 @@ git commit -m "feat(sync): Точка — валюта из ответа, све
 
 ---
 
-### Task 7: Т-Банк — дебет
+### Task 7: Т-Банк — дебет, несколько токенов, счета из API
 
 **Files:**
 - Modify: `services/portal-external-sync/sources/bank_tbank.py`
+- Modify: `docker-compose.prod.yml` (переменные окружения источника)
 - Test: `services/portal-external-sync/tests/test_bank_mapping.py`
+- Test: `services/portal-external-sync/tests/test_bank_tbank_reconcile.py`
+- Test: `services/portal-external-sync/tests/test_bank_tbank_accounts.py`
+- Test: `services/portal-external-sync/tests/test_bank_tbank_run.py`
 
-Сейчас источник отбрасывает всё, где `recipientAccount != ACCOUNT` — то есть ровно исходящие.
+Задача пришла двумя волнами, и нынешнее устройство — итог обеих:
 
-- [ ] **Step 1: Дописать падающие тесты**
+1. Источник отбрасывал всё, где `recipientAccount != ACCOUNT`, то есть ровно исходящие. Направление стало определяться по тому, какой стороной стоит наш счёт.
+2. У студии появился второй бизнес в Т-Банке со своим токеном — и выяснилось, что счёт всё это время брался не из конфига, а из константы в исходнике.
 
-Добавить в конец `services/portal-external-sync/tests/test_bank_mapping.py`:
+**Что было не так со счётом**
 
 ```python
-from sources.bank_tbank import map_operation
-
-ACC = "40802810600001780269"
-
-TB_CREDIT = {
-    "operationId": "op-1",
-    "id": 11,
-    "date": "2026-07-15",
-    "amount": 5000,
-    "recipientAccount": ACC,
-    "payerName": "ООО Клиент",
-    "payerInn": "7701234567",
-    "paymentPurpose": "Оплата по счёту 42",
-}
-
-TB_DEBIT = {
-    "operationId": "op-2",
-    "id": 12,
-    "date": "2026-07-16",
-    "amount": 1500.5,
-    "recipientAccount": "40702810000000000001",
-    "payerAccount": ACC,
-    # Живая проверка API 2026-07-30: имя получателя приходит в "recipient",
-    # такого поля, как "recipientName", в ответе нет.
-    "recipient": "ООО ЯНДЕКС",
-    "recipientInn": "7736207543",
-    "paymentPurpose": "Оплата рекламных услуг",
-}
-
-
-def test_tbank_credit_marks_revenue():
-    row = map_operation(TB_CREDIT, ACC)
-    assert row["direction"] == "credit"
-    assert row["payer_name"] == "ООО Клиент"
-    assert row["is_revenue"] is True
-
-
-def test_tbank_debit_fills_payee():
-    row = map_operation(TB_DEBIT, ACC)
-    assert row["direction"] == "debit"
-    assert row["payee_name"] == "ООО ЯНДЕКС"
-    assert row["payee_inn"] == "7736207543"
-    assert row["is_revenue"] is None
-
-
-def test_tbank_foreign_operation_is_skipped():
-    """Операция, где наш счёт не участвует ни одной стороной."""
-    assert map_operation({"recipientAccount": "1", "payerAccount": "2"}, ACC) is None
+TOKEN   = os.environ.get("TBANK_TOKEN", "").strip()
+ACCOUNT = os.environ.get("TBANK_ACCOUNT", "40802810600001780269").strip()
 ```
 
-- [ ] **Step 2: Запустить и убедиться, что падает**
+`TBANK_ACCOUNT` в окружении задан не был (в compose стоял тот же дефолт), поэтому синк всё это время ходил по номеру, зашитому в исходник. Второму токену этот номер не подходит — это счёт первого бизнеса. Плюс гейт `if not ACCOUNT: raise NotImplementedError` существовал только затем, чтобы пустой номер не сделал `is_credit`/`is_debit` истинными на любой операции с пустым `recipientAccount`/`payerAccount`.
+
+**Факты живого API (проверено запросами 31.07.2026)**
+
+> `GET https://business.tbank.ru/openapi/api/v1/bank-accounts` с заголовком
+> `Authorization: Bearer <токен>` отдаёт 200 и голый массив:
+>
+> ```json
+> [{"accountNumber":"40802810600001780269","currency":"643",
+>   "balance":{"otb":456529.5,"authorized":0,
+>              "pendingPayments":0,"pendingRequisitions":0}}]
+> ```
+>
+> - путей `/accounts` и `/company/accounts` не существует (404);
+> - у первого токена счёт ровно один, и это тот самый номер, что был
+>   константой — значит для первого бизнеса переход на `/bank-accounts`
+>   поведение не меняет;
+> - выписка — по-прежнему `GET /openapi/api/v1/bank-statement?accountNumber=
+>   <номер>&from=<дата>&till=<дата>`, ответ содержит `accountNumber`,
+>   `saldoIn`, `income`, `outcome`, `saldoOut`, `operation`;
+> - у операции поля валюты нет вовсе — валюту задаёт счёт.
+
+**Устройство после правки**
+
+- **Токены списком.** `TOKEN_ENV_VARS = ("TBANK_TOKEN", "TBANK_TOKEN_2")` — константа модуля, `load_tokens()` собирает из окружения пары `(имя переменной, значение)`, отбрасывая пустые. Третий бизнес = дописать имя в кортеж, больше ничего. Ни одного токена — `NotImplementedError` (для `main.py` это `partial`, а не `error`).
+- **Счета — у банка, не в конфиге.** `parse_accounts(payload, token_label)` — чистая функция: массив из `/bank-accounts` → `list[BankAccount(number, currency)]`. Проверяется на образце ответа выше, без сети. Константа с номером и переменная `TBANK_ACCOUNT` удалены вместе с гейтом на её пустоту.
+- **Валюта из счёта.** `CURRENCY_BY_NUMERIC_CODE = {"643": "RUB", "840": "USD", "978": "EUR"}`, `currency_from_numeric_code()` → буквенный код или `None`. `None` — счёт **пропускается целиком с громким логом**, а не считается рублёвым: молчаливый дефолт в рубли завысил бы рублёвый итог витрины. `map_operation(o, account, currency, skip_counts=None)` — валюта обязательный параметр без значения по умолчанию, ровно чтобы дефолт не вернулся.
+- **Сверка по остаткам — на свой счёт.** `income`/`outcome` банк считает по одному счёту, поэтому `reconcile_period_totals(rows, data, tolerance=0.01, account=None)` при заданном `account` фильтрует `rows` по `account_id` и подставляет `acc=<номер>` в текст расхождения. Свалить операции разных счетов в общий котёл значит сравнить их сумму с итогом одного счёта — проверка перестала бы что-либо проверять.
+- **Три уровня изоляции.** Токен → счёт → период: упавший токен не уносит остальные токены, упавший счёт — остальные счета того же токена, упавший период — остальные периоды. Отдельно: если не удалось получить список счетов токена, это логируется и синк переходит к следующему токену. Сводка пропусков (`skip_counts`) остаётся общей за прогон.
+- **Токены в логи не попадают.** Токен опознаётся именем своей переменной окружения; тексты исключений и трейсбеки проходят через `redact_tokens()`, который затирает значения.
+- **`transaction_id` не тронут:** `operationId`, иначе `f"{account}|{id}"`. Номер счёта в запасном варианте обязателен — иначе операции разных счетов с одинаковым `id` схлопнулись бы по уникальному ключу `(bank, transaction_id)`.
+
+- [ ] **Step 1: Тесты**
+
+- `tests/test_bank_mapping.py` — существующие вызовы `map_operation` под новую сигнатуру + валюта счёта вместо рубля по умолчанию + запасной `transaction_id` с номером счёта.
+- `tests/test_bank_tbank_reconcile.py` — сверка в границах одного счёта: строки чужого счёта не влияют, своя недостача не маскируется чужим приходом, номер счёта виден в сообщении.
+- `tests/test_bank_tbank_accounts.py` (новый) — `load_tokens`, `redact_tokens`, `currency_from_numeric_code` (включая неизвестный код), `parse_accounts` на живом образце ответа.
+- `tests/test_bank_tbank_run.py` (новый) — прогон по обоим токенам и всем счетам, три уровня изоляции, отсутствие значения токена в логах. Сеть и БД — фейки, по образцу `tests/test_amo_events_sync.py`.
+
+- [ ] **Step 2: Реализация**
+
+`services/portal-external-sync/sources/bank_tbank.py`: `TOKEN_ENV_VARS` / `load_tokens` / `redact_tokens` / `CURRENCY_BY_NUMERIC_CODE` / `currency_from_numeric_code` / `BankAccount` / `parse_accounts`; `run()` разложен на `run` → `_sync_token` → `_sync_account` по уровням изоляции.
+
+`docker-compose.prod.yml`: убрать `TBANK_ACCOUNT`, добавить `TBANK_TOKEN_2=${TBANK_TOKEN_2:-}`.
+
+> После правки compose — обязательный `--force-recreate` для `portal-external-sync`
+> (см. CLAUDE.md). Значение второго токена кладётся в `.env` на проде руками,
+> в репозиторий не коммитится.
+
+- [ ] **Step 3: Запустить тесты**
 
 ```bash
-cd services/portal-external-sync && python -m pytest tests/test_bank_mapping.py -v
+cd services/portal-external-sync && python -m pytest
 ```
 
-Ожидается: FAIL — `ImportError: cannot import name 'map_operation'`.
-
-- [ ] **Step 3: Реализовать**
-
-В `services/portal-external-sync/sources/bank_tbank.py` заменить импорт:
-
-```python
-from ._bank_common import classify_revenue, parse_date, to_row
-```
-
-Добавить функцию модульного уровня перед классом:
-
-```python
-def map_operation(o: dict, account: str) -> dict | None:
-    """Операция Т-Банка → словарь полей bank_transactions. None — пропустить.
-
-    Направление определяем по тому, какой стороной стоит наш счёт. Операция,
-    где его нет вообще, к нам не относится.
-    """
-    is_credit = o.get("recipientAccount") == account
-    is_debit = o.get("payerAccount") == account
-    if not is_credit and not is_debit:
-        return None
-
-    purpose = o.get("paymentPurpose", "") or ""
-    payer = (o.get("payerName") or "") if is_credit else ""
-    payer_inn = (o.get("payerInn") or "") if is_credit else ""
-    payee = "" if is_credit else (o.get("recipient") or "")
-    payee_inn = "" if is_credit else (o.get("recipientInn") or "")
-
-    exclude_reason = classify_revenue(payer, payer_inn, purpose) if is_credit else ""
-    is_revenue = (not exclude_reason) if is_credit else None
-
-    tx_id = o.get("operationId") or f"{account}|{o.get('id')}"
-
-    return {
-        "bank": "tbank",
-        "account_id": account,
-        "transaction_id": str(tx_id),
-        "document_number": str(o.get("id")) if o.get("id") is not None else None,
-        "occurred_at": parse_date(o.get("date", "")),
-        "amount": float(o.get("amount", 0)),
-        "currency": "RUB",
-        "direction": "credit" if is_credit else "debit",
-        "payer_name": payer or None,
-        "payer_inn": payer_inn or None,
-        "payee_name": payee or None,
-        "payee_inn": payee_inn or None,
-        "purpose": purpose or None,
-        "is_revenue": is_revenue,
-        "exclude_reason": exclude_reason or None,
-        "raw": json.dumps(o, ensure_ascii=False),
-    }
-```
-
-Заменить тело цикла в `run` (сейчас `bank_tbank.py:55-80`) на:
-
-```python
-                rows: list[tuple] = []
-                for o in data.get("operation", []) or []:
-                    mapped = map_operation(o, ACCOUNT)
-                    if mapped is not None:
-                        rows.append(to_row(mapped))
-```
-
-В `_upsert` дополнить `DO UPDATE SET` теми же полями, что в Task 6 Step 3:
-
-```python
-               ON CONFLICT (bank, transaction_id) DO UPDATE SET
-                 direction      = EXCLUDED.direction,
-                 payee_name     = EXCLUDED.payee_name,
-                 payee_inn      = EXCLUDED.payee_inn,
-                 is_revenue     = EXCLUDED.is_revenue,
-                 exclude_reason = EXCLUDED.exclude_reason,
-                 raw            = EXCLUDED.raw,
-                 synced_at      = now()""",
-```
-
-Обновить docstring модуля: «Тянет входящие операции» → «Тянет операции по нашему счёту в обе стороны».
-
-- [ ] **Step 4: Запустить тесты**
+- [ ] **Step 4: Коммит**
 
 ```bash
-cd services/portal-external-sync && python -m pytest tests/test_bank_mapping.py -v
-```
-
-Ожидается: 7 passed.
-
-- [ ] **Step 5: Коммит**
-
-```bash
-git add services/portal-external-sync/sources/bank_tbank.py services/portal-external-sync/tests/test_bank_mapping.py
-git commit -m "feat(sync): Т-Банк отдаёт расход наравне с приходом"
+git add services/portal-external-sync/sources/bank_tbank.py \
+        services/portal-external-sync/tests/test_bank_mapping.py \
+        services/portal-external-sync/tests/test_bank_tbank_reconcile.py \
+        services/portal-external-sync/tests/test_bank_tbank_accounts.py \
+        services/portal-external-sync/tests/test_bank_tbank_run.py \
+        docker-compose.prod.yml
+git commit -m "feat(sync): Т-Банк — несколько токенов, счета из API, валюта счёта"
 ```
 
 ---
