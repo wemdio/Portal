@@ -6,8 +6,15 @@
 строку под датой публикации, а витрина берёт ближайший курс не позже даты
 операции — так выходные закрываются сами.
 
-Источники валютных дат — brocard_transactions, manual_expenses и
-bank_transactions. Раньше bank_tochka и bank_tbank сюда не входили вовсе:
+Источники валютных дат — brocard_transactions, manual_expenses,
+bank_transactions и crypto_income_transfers (см. _OPERATION_DATES_SQL).
+Крипта попала сюда вместе с источником crypto_usdt и требует оговорки: USDT
+считается по курсу ДОЛЛАРА, подмена валюты сделана прямо в объединении дат —
+подробности в комментарии там же. Место в SOURCES (main.py) обязывает:
+CryptoUsdtSync стоит СТРОГО выше FxCbrSync, иначе курс за дату сегодняшнего
+крипто-прихода будет запрошен только следующей ночью.
+
+Раньше bank_tochka и bank_tbank сюда не входили вовсе:
 оба банковских источника жёстко писали currency='RUB' (см.
 map_transaction/map_operation), и валютных трат в bank_transactions не
 бывало в принципе. С тех пор, как bank_tochka стал читать валюту из
@@ -45,9 +52,12 @@ MAX_DATES_PER_RUN = 120
 #: более ранний курс существует".
 _STALE_WINDOW_SQL = "interval '10 days'"
 
-_NEEDED_DATES_SQL = f"""
-    SELECT DISTINCT d
-    FROM (
+#: Все валютные операции, под которые может понадобиться курс: (дата, валюта).
+#: Один текст на оба запроса ниже — раньше этот UNION был скопирован в них
+#: дважды, и новый источник ничего не стоило дописать только в первый: даты
+#: тогда запрашивались бы, а сводка «ЦБ не публикует курс для…» смотрела бы на
+#: старый набор таблиц и молчала.
+_OPERATION_DATES_SQL = """
       SELECT (occurred_at AT TIME ZONE 'Europe/Moscow')::date AS d, currency
       FROM brocard_transactions
       UNION ALL
@@ -57,6 +67,27 @@ _NEEDED_DATES_SQL = f"""
       SELECT (occurred_at AT TIME ZONE 'Europe/Moscow')::date AS d, currency
       FROM bank_transactions
       WHERE currency <> 'RUB'
+      UNION ALL
+      -- Крипта. USDT считаем по курсу ДОЛЛАРА ЦБ и поэтому подменяем валюту
+      -- прямо здесь: это осознанное упрощение, а не совпадение имён —
+      -- стейблкоин привязан к доллару один к одному, и отдельный источник
+      -- котировок под него владелец заводить не стал. Без подмены источник
+      -- каждую ночь спрашивал бы у ЦБ несуществующий курс USDT, ничего не
+      -- находил и печатал бы «ЦБ не публикует курс для: USDT», а amount_rub
+      -- у крипты навсегда остался бы NULL.
+      -- Ровно та же подмена продублирована в витрине incomes_v
+      -- (supabase/migrations/20260731_0004_crypto_income.sql). Меняются оба
+      -- места только вместе: разойдутся — курс будет запрашиваться под одну
+      -- валюту, а искаться под другую.
+      SELECT (occurred_at AT TIME ZONE 'Europe/Moscow')::date AS d,
+             CASE WHEN currency = 'USDT' THEN 'USD' ELSE currency END AS currency
+      FROM crypto_income_transfers
+"""
+
+_NEEDED_DATES_SQL = f"""
+    SELECT DISTINCT d
+    FROM (
+{_OPERATION_DATES_SQL}
     ) x
     WHERE x.currency <> 'RUB'
       AND NOT EXISTS (
@@ -98,15 +129,7 @@ _NEEDED_DATES_SQL = f"""
 _STILL_MISSING_CURRENCIES_SQL = f"""
     SELECT DISTINCT x.currency
     FROM (
-      SELECT (occurred_at AT TIME ZONE 'Europe/Moscow')::date AS d, currency
-      FROM brocard_transactions
-      UNION ALL
-      SELECT occurred_on AS d, currency
-      FROM manual_expenses
-      UNION ALL
-      SELECT (occurred_at AT TIME ZONE 'Europe/Moscow')::date AS d, currency
-      FROM bank_transactions
-      WHERE currency <> 'RUB'
+{_OPERATION_DATES_SQL}
     ) x
     WHERE x.currency <> 'RUB'
       AND x.d = ANY($1::date[])

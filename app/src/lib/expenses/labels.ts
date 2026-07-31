@@ -34,7 +34,7 @@ export function categoryLabel(key: string): string {
 }
 
 export function sourceLabel(key: string): string {
-  return SOURCE_LABELS[key as ExpenseSource] ?? key;
+  return SOURCE_LABELS[key as ExpenseSource] ?? INCOME_ONLY_SOURCE_LABELS[key] ?? key;
 }
 
 /**
@@ -100,21 +100,37 @@ export function categoryColor(key: string): string {
 }
 
 export function sourceColor(key: string): string {
-  return SOURCE_COLORS[key as ExpenseSource] ?? MUTED_COLOR;
+  return SOURCE_COLORS[key as ExpenseSource] ?? INCOME_ONLY_SOURCE_COLORS[key] ?? MUTED_COLOR;
 }
 
 // ─── Доходы ────────────────────────────────────────────────────────────────
 
 /**
- * Источники дохода — подмножество расходных (только банки), поэтому подпись и
- * цвет берутся из тех же карт: «Точка» на доходной вкладке обязана выглядеть
- * ровно так же, как на расходной. Отдельный `Record<IncomeSource, true>` нужен
- * не ради значений, а ради исчерпываемости: новый банк в типе — ошибка
- * компиляции здесь, а не молча пропавший пункт фильтра.
+ * Источники дохода почти совпадают с расходными, и совпадающие берут подпись и
+ * цвет из тех же карт: «Точка» на доходной вкладке обязана выглядеть ровно так
+ * же, как на расходной.
+ *
+ * Криптокошелёк бывает только на доходной стороне, поэтому его подпись и цвет
+ * живут отдельно — расширять ими расходные карты значило бы предлагать крипту в
+ * фильтре расходов, где её не бывает.
+ *
+ * Отдельный `Record<IncomeSource, true>` нужен не ради значений, а ради
+ * исчерпываемости: новый источник в типе — ошибка компиляции здесь, а не молча
+ * пропавший пункт фильтра.
  */
 const INCOME_SOURCE_MAP: Record<IncomeSource, true> = {
   tochka: true,
   tbank: true,
+  crypto_usdt: true,
+};
+
+const INCOME_ONLY_SOURCE_LABELS: Record<string, string> = {
+  crypto_usdt: 'Крипта (USDT)',
+};
+
+// Слот 3: у дохода заняты первый и второй (Точка и Т-Банк).
+const INCOME_ONLY_SOURCE_COLORS: Record<string, string> = {
+  crypto_usdt: SERIES_3,
 };
 
 export const INCOME_SOURCE_VALUES = Object.keys(INCOME_SOURCE_MAP) as IncomeSource[];
