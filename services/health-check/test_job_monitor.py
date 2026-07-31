@@ -46,6 +46,15 @@ class JobMonitorTests(unittest.IsolatedAsyncioTestCase):
         query = conn.fetch.await_args.args[0]
         self.assertIn("j.parser_type <> 'hh_vacancies_autopipeline'", query)
 
+    def test_base_constructor_uses_database_heartbeat(self):
+        spec = next(
+            item for item in health._JOB_MONITOR_SPECS
+            if item.table == "base_constructor_jobs"
+        )
+
+        self.assertEqual(spec.updated_column, "started_at")
+        self.assertIsNone(spec.started_column)
+
     async def test_stuck_pending_job_alerts_once(self):
         spec = health.JobMonitorSpec(
             "yandex_maps_jobs",

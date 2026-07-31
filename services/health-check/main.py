@@ -1104,7 +1104,7 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
     JobMonitorSpec(
         "base_constructor_jobs", "Конструктор баз", ("pending", "processing"),
         ("current_step", "current_step_key", "current_step_progress", "total_steps"),
-        "portal-worker-baseconstructor",
+        "portal-worker-baseconstructor", updated_column="started_at", started_column=None,
     ),
     JobMonitorSpec(
         "yandex_maps_jobs", "Яндекс.Карты", ("pending", "running"),
