@@ -1659,6 +1659,28 @@ body:has(.client-portal) {
   }
 }
 
+/* Выпадающий список пункта меню в TopNav (см. components/TopNavDropdown).
+   Появление — короткий подъём с прозрачности, чтобы список читался как
+   часть шапки, а не как внезапно возникшая панель. */
+@keyframes portal-nav-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.portal-nav-menu {
+  animation: portal-nav-menu-in 120ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .portal-nav-menu {
+    animation: none;
+  }
+}
+
 @media (max-width: 639px) {
   .client-portal .neu-card,
   .client-portal .neu-sm,
@@ -2552,6 +2574,17 @@ html[data-portal-theme='dark'] .portal-shell a.bg-gray-900,
 html[data-portal-theme='dark'] .portal-shell a.bg-zinc-900,
 html[data-portal-theme='dark'] .portal-shell a.bg-slate-900 {
   background-color: var(--pd-surface-active) !important;
+  color: var(--pd-text) !important;
+}
+/* Триггер выпадающего меню в TopNav («Дашборды») — технически button, но в
+   ряду он стоит вровень с pill-ссылками. Без этого правила общее
+   button.bg-zinc-900 выше инверсировало бы его в белую плашку, и активная
+   группа выбивалась бы из ряда. Специфичность выше — правило перебивает. */
+html[data-portal-theme='dark'] .portal-shell button.portal-nav-trigger.bg-zinc-900 {
+  background-color: var(--pd-surface-active) !important;
+  color: var(--pd-text) !important;
+}
+html[data-portal-theme='dark'] .portal-shell button.portal-nav-trigger.bg-zinc-900 * {
   color: var(--pd-text) !important;
 }
 /* gray/zinc-900 как декоративный чип (не кнопка) — остаётся приглушённой
