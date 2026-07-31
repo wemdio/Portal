@@ -6,6 +6,7 @@ import ClassifyQueue from '@/components/expenses/ClassifyQueue';
 import Filters, { getDefaultFilters, type FiltersValue } from '@/components/expenses/Filters';
 import KpiRow from '@/components/expenses/KpiRow';
 import ManualExpenseForm from '@/components/expenses/ManualExpenseForm';
+import { getDefaultPeriod, type PeriodValue } from '@/components/expenses/PeriodBar';
 import TimeChart from '@/components/expenses/TimeChart';
 import VendorBreakdown from '@/components/expenses/VendorBreakdown';
 import type { VendorOption } from '@/components/expenses/VendorSelect';
@@ -13,6 +14,7 @@ import { expensesDownload, expensesFetch } from '@/lib/expenses/client';
 import type { ExpensesSummary, VendorBreakdownItem } from '@/lib/expenses/types';
 
 export default function ExpensesView() {
+  const [period, setPeriod] = useState<PeriodValue>(() => getDefaultPeriod());
   const [filters, setFilters] = useState<FiltersValue>(() => getDefaultFilters());
   const [summary, setSummary] = useState<ExpensesSummary | null>(null);
   const [vendors, setVendors] = useState<VendorBreakdownItem[]>([]);
@@ -28,21 +30,21 @@ export default function ExpensesView() {
   const [reloadKey, setReloadKey] = useState(0);
 
   const query = useMemo(() => {
-    const params = new URLSearchParams({ from: filters.from, to: filters.to, groupBy: filters.groupBy });
+    const params = new URLSearchParams({ from: period.from, to: period.to, groupBy: period.groupBy });
     if (filters.source) params.set('source', filters.source);
     if (filters.category) params.set('category', filters.category);
     return params.toString();
-  }, [filters]);
+  }, [period, filters]);
 
   // Очередь разметки живёт без фильтра по категории: у неразмеченной операции
   // категории нет по определению, и любой такой фильтр опустошил бы очередь.
   const queueQuery = useMemo(() => {
-    const params = new URLSearchParams({ from: filters.from, to: filters.to });
+    const params = new URLSearchParams({ from: period.from, to: period.to });
     if (filters.source) params.set('source', filters.source);
     return params.toString();
-  }, [filters]);
+  }, [period, filters]);
 
-  const range = useMemo(() => ({ from: filters.from, to: filters.to }), [filters.from, filters.to]);
+  const range = useMemo(() => ({ from: period.from, to: period.to }), [period.from, period.to]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -96,7 +98,7 @@ export default function ExpensesView() {
     setExporting(true);
     setError(null);
     try {
-      await expensesDownload(`/export?${query}`, `expenses-${filters.from}_${filters.to}.xlsx`);
+      await expensesDownload(`/export?${query}`, `expenses-${period.from}_${period.to}.xlsx`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось выгрузить файл');
     } finally {
@@ -124,7 +126,7 @@ export default function ExpensesView() {
         </button>
       </div>
 
-      <Filters value={filters} onChange={setFilters} />
+      <Filters period={period} onPeriodChange={setPeriod} value={filters} onChange={setFilters} />
 
       {error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>
@@ -150,7 +152,7 @@ export default function ExpensesView() {
             />
           ) : null}
 
-          <TimeChart series={summary.series} groupBy={filters.groupBy} />
+          <TimeChart series={summary.series} groupBy={period.groupBy} />
 
           <VendorBreakdown items={vendors} query={query} queueQuery={queueQuery} />
 
