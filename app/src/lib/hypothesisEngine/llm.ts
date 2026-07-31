@@ -147,6 +147,43 @@ function usageOf(response: RequestyResponse): { promptTokens: number; completion
 }
 
 /**
+ * Ремонт JSON, обрезанного по max_tokens: отрезаем хвост до конца последней
+ * целой структуры и докрываем скобки вариантами `}`, `]}`, `]}]`, `"}]`.
+ * Возвращает распарсенное значение или null (тогда идём в обычный retry).
+ * Семантическую валидность результата дальше проверяет zod-схема вызова.
+ */
+export function tryRepairTruncatedJson(text: string): unknown | null {
+  const t = text.trim();
+  if (!t.startsWith('{') && !t.startsWith('[')) return null;
+  // Сначала предпочтительный путь: отрезаем хвост до конца последней ЦЕЛОЙ
+  // структуры — незавершённые объекты отбрасываем, а не «закрываем» их.
+  const suffixes = ['', '}', ']}', ']}]', '"}]', '"}', '"]}'];
+  for (let end = t.length; end > 0; end--) {
+    const ch = t[end - 1];
+    if (ch !== '}' && ch !== ']') continue;
+    const head = t.slice(0, end);
+    for (const suffix of suffixes) {
+      try {
+        return JSON.parse(head + suffix);
+      } catch {
+        // пробуем следующий вариант закрытия
+      }
+    }
+  }
+  // Fallback: обрезка посередине строки/токена без единой закрывающей скобки —
+  // докрываем строку и/или структуру целиком.
+  const tailSuffixes = ['', '"', '}', ']', '"}', '"}]', '"}]}', ']}', ']}]'];
+  for (const suffix of tailSuffixes) {
+    try {
+      return JSON.parse(t + suffix);
+    } catch {
+      // следующий вариант
+    }
+  }
+  return null;
+}
+
+/**
  * Один LLM-вызов с response_format=json_object + Zod-валидация ответа.
  * При невалидном JSON — 1 retry с system-фидбэком об ошибке. Если и второй
  * раз невалидно — бросает LLMValidationError (воркер помечает job failed).
@@ -183,8 +220,14 @@ export async function callLLMWithSchema<T>(
     try {
       parsed = JSON.parse(cleaned);
     } catch (e) {
-      attempts.push({ text, error: `JSON.parse failed: ${e instanceof Error ? e.message : String(e)}` });
-      continue;
+      // Ремонт усечённого JSON: модель упёрлась в max_tokens посередине
+      // массива объектов. Обрезаем до последней целой структуры и закрываем
+      // скобки — спасаем то, что успело сгенерироваться, вместо жёсткого фейла.
+      parsed = tryRepairTruncatedJson(cleaned);
+      if (parsed === null) {
+        attempts.push({ text, error: `JSON.parse failed: ${e instanceof Error ? e.message : String(e)}` });
+        continue;
+      }
     }
 
     const validated = schema.safeParse(parsed);
