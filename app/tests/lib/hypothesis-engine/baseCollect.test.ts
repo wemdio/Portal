@@ -38,6 +38,8 @@ import {
   mapGoogleRow,
   mapHhRow,
   mapYandexRow,
+  normalizeCompanyForDedup,
+  normalizeWebsiteForDedup,
   runBaseCollectStage,
   type HeCollectInfo,
   type HeUnifiedRow,
@@ -213,6 +215,43 @@ describe('source row → unified row mapping', () => {
   });
 });
 
+describe('normalizeCompanyForDedup', () => {
+  it('treats legal forms, quote styles, case and word order of the form as equal', () => {
+    const forms = [
+      'ООО «ТЕРАБАЙТ»',
+      'ТЕРАБАЙТ',
+      'ООО "ТЕРАБАЙТ"',
+      'Терабайт ооо',
+      '  ооо   "Терабайт" ',
+    ];
+    for (const f of forms) expect(normalizeCompanyForDedup(f)).toBe('терабайт');
+  });
+
+  it('strips other legal forms and collapses punctuation/whitespace', () => {
+    expect(normalizeCompanyForDedup('ИП Иванов И.И.')).toBe('иванов и и');
+    expect(normalizeCompanyForDedup('АНО "Центр Развития"')).toBe('центр развития');
+    expect(normalizeCompanyForDedup('ПАО «Сбербанк»')).toBe('сбербанк');
+    expect(normalizeCompanyForDedup('ООО "Ромашка-Сервис"')).toBe('ромашка сервис');
+    expect(normalizeCompanyForDedup('')).toBe('');
+  });
+
+  it('does not mangle names containing legal-form-looking substrings', () => {
+    // «ао» внутри слова — не юрформа.
+    expect(normalizeCompanyForDedup('ООО "Аврора"')).toBe('аврора');
+  });
+});
+
+describe('normalizeWebsiteForDedup', () => {
+  it('reduces urls to a lowercase host without www or path', () => {
+    expect(normalizeWebsiteForDedup('https://www.x.ru/about')).toBe('x.ru');
+    expect(normalizeWebsiteForDedup('http://x.ru/')).toBe('x.ru');
+    expect(normalizeWebsiteForDedup('X.Ru')).toBe('x.ru');
+    expect(normalizeWebsiteForDedup('www.x.ru')).toBe('x.ru');
+    expect(normalizeWebsiteForDedup('as.ru')).toBe('as.ru');
+    expect(normalizeWebsiteForDedup('')).toBe('');
+  });
+});
+
 describe('dedupUnifiedRows', () => {
   it('dedups by lowercase company+website, first occurrence wins', () => {
     const a = row({ company: 'АС', website: 'as.ru', phone: '1' });
@@ -222,6 +261,16 @@ describe('dedupUnifiedRows', () => {
     expect(out).toHaveLength(2);
     expect(out[0].phone).toBe('1');
     expect(out[1].website).toBe('as2.ru');
+  });
+
+  it('dedups across legal forms / quote styles and keeps the full website in the row', () => {
+    const registry = row({ company: 'ООО "ТЕРАБАЙТ"', website: 'terabait.ru', phone: '1' });
+    const hh = row({ company: 'ТЕРАБАЙТ', website: 'https://www.terabait.ru/about', phone: '2' });
+    const out = dedupUnifiedRows([registry, hh]);
+    expect(out).toHaveLength(1);
+    expect(out[0].company).toBe('ООО "ТЕРАБАЙТ"');
+    // Полный website строки не трогаем — хост нужен только для ключа.
+    expect(out[0].website).toBe('terabait.ru');
   });
 });
 
@@ -671,7 +720,7 @@ describe('harvest', () => {
     expect(data.map((r) => r.company)).toEqual(['Реестр-1', 'HH-1', 'Реестр-2', 'HH-2', 'Реестр-3']);
   });
 
-  it('caps the merged base at 6000 rows, balanced across sources', async () => {
+  it('caps the merged base at 10000 rows, balanced across sources', async () => {
     const big = (prefix: string, n: number): HeUnifiedRow[] =>
       Array.from({ length: n }, (_, i) => row({ company: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
     const info: HeCollectInfo = {
@@ -681,17 +730,17 @@ describe('harvest', () => {
           source: 'companies_directory',
           status: 'done',
           child_job_id: null,
-          rows: 4000,
+          rows: 5000,
           task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
-          harvest: big('реестр', 4000),
+          harvest: big('реестр', 5000),
         },
         {
           source: 'hh_live',
           status: 'done',
           child_job_id: 'pj1',
-          rows: 4000,
+          rows: 5000,
           task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
-          harvest: big('hh', 4000),
+          harvest: big('hh', 5000),
         },
       ],
     };
@@ -705,15 +754,15 @@ describe('harvest', () => {
     });
 
     const res = await runBaseCollectStage(makeJob(), ctx());
-    expect((res.result as { rows: number }).rows).toBe(6000);
+    expect((res.result as { rows: number }).rows).toBe(10000);
 
     const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
-    expect(harvest?.row_count).toBe(6000);
+    expect(harvest?.row_count).toBe(10000);
     const data = harvest?.data as HeUnifiedRow[];
-    // Кап делит поровну: 3000 «ходов» каждого источника, а не 2000 реестра + 0 hh.
-    expect(data.filter((r) => r.company.startsWith('реестр-'))).toHaveLength(3000);
-    expect(data.filter((r) => r.company.startsWith('hh-'))).toHaveLength(3000);
-    expect((harvest?.collect_info as HeCollectInfo).stats?.rows_total).toBe(6000);
+    // Кап делит поровну: 5000 «ходов» каждого источника (2 × 5000 → 10000).
+    expect(data.filter((r) => r.company.startsWith('реестр-'))).toHaveLength(5000);
+    expect(data.filter((r) => r.company.startsWith('hh-'))).toHaveLength(5000);
+    expect((harvest?.collect_info as HeCollectInfo).stats?.rows_total).toBe(10000);
   });
 
   it('dispatches companies_directory synchronously via searchRows and harvests immediately', async () => {
@@ -760,7 +809,11 @@ describe('harvest', () => {
     const res = await runBaseCollectStage(makeJob(), ctx());
     expect((res.result as { rows: number }).rows).toBe(1);
 
-    expect(searchRowsMock).toHaveBeenCalledWith({ okvedCodes: ['62'], hasEmail: true, includeIp: false }, 2000);
+    expect(searchRowsMock).toHaveBeenCalledWith(
+      { okvedCodes: ['62'], hasEmail: true, includeIp: false },
+      1000,
+      0,
+    );
     // Без дочерних джоб парсеров.
     expect(mockDb.inserts.filter((i) => i.table !== 'he_jobs')).toHaveLength(0);
 
@@ -781,6 +834,151 @@ describe('harvest', () => {
         source_detail: 'реестр',
       }),
     );
+  });
+
+  it('paginates the directory in 1000-row pages until a short page', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: { okvedCodes: ['62'] } },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    const page = (prefix: string, n: number) =>
+      Array.from({ length: n }, (_, i) => ({ name: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
+    // 3 страницы: 1000 + 1000 + короткая 600 → стоп, 4-го запроса нет.
+    searchRowsMock
+      .mockResolvedValueOnce({ rows: page('a', 1000) })
+      .mockResolvedValueOnce({ rows: page('b', 1000) })
+      .mockResolvedValueOnce({ rows: page('c', 600) });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(2600);
+
+    const filters = { okvedCodes: ['62'], includeIp: false };
+    expect(searchRowsMock).toHaveBeenCalledTimes(3);
+    expect(searchRowsMock).toHaveBeenNthCalledWith(1, filters, 1000, 0);
+    expect(searchRowsMock).toHaveBeenNthCalledWith(2, filters, 1000, 1000);
+    expect(searchRowsMock).toHaveBeenNthCalledWith(3, filters, 1000, 2000);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(harvest?.row_count).toBe(2600);
+  });
+
+  it('stops directory pagination at the 5000 cap on full pages', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    // Каждая страница полная → ровно 5 запросов, кап 5000.
+    // Имена уникальны между страницами, иначе их съест дедуп.
+    let call = 0;
+    searchRowsMock.mockImplementation(async () => {
+      call += 1;
+      return { rows: Array.from({ length: 1000 }, (_, i) => ({ name: `p${call}-${i}` })) };
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(5000);
+    expect(searchRowsMock).toHaveBeenCalledTimes(5);
+  });
+
+  it('excludes companies already present in other bases of the project', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'done',
+          child_job_id: null,
+          rows: 3,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+          harvest: [
+            row({ company: 'ООО "ТЕРАБАЙТ"', website: 'tb.ru' }),
+            row({ company: 'ИП Сидоров', website: 'sidorov.ru' }),
+            row({ company: 'Новая Компания', website: 'new.ru' }),
+          ],
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [
+          makeBase(info),
+          // Другая авто-база того же проекта: совпадение по нормализованной
+          // компании («ТЕРАБАЙТ» без юрформы), несмотря на ДРУГОЙ website.
+          {
+            id: 'b2',
+            project_id: 'p1',
+            vertical_id: 'v1',
+            status: 'analyzed',
+            source: 'auto',
+            data: [{ company: 'ТЕРАБАЙТ', website: 'other-tb.ru' }, { company: 'ип сидоров' }],
+          },
+          // Ручная база тоже считается (source любой), но failed — игнорируется.
+          {
+            id: 'b3',
+            project_id: 'p1',
+            vertical_id: 'v1',
+            status: 'failed',
+            source: 'upload',
+            data: [{ company: 'Новая Компания' }],
+          },
+          // Чужой проект — не участвует.
+          {
+            id: 'b4',
+            project_id: 'p2',
+            vertical_id: 'v9',
+            status: 'analyzed',
+            source: 'auto',
+            data: [{ company: 'Новая Компания' }],
+          },
+        ],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(1);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    const data = harvest?.data as HeUnifiedRow[];
+    expect(data.map((r) => r.company)).toEqual(['Новая Компания']);
+    expect((harvest?.collect_info as HeCollectInfo).stats).toMatchObject({
+      rows_total: 1,
+      excluded_existing_bases: 2,
+    });
   });
 
   it('failed task does not fail the job when another task produced rows', async () => {

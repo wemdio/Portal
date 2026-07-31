@@ -13,19 +13,24 @@
  *     prompts/sourcePlan.ts + HeSourcePlanSchema). План и статусы задач
  *     пишутся в collect_info.
  *  2. DISPATCH — каждая pending-задача уходит в свой коллектор:
- *     companies_directory — синхронно через searchRows (строки сразу в задаче,
- *     дочерней джобы нет); hh_live / yandex_maps / google_maps — insert
- *     дочерней джобы (parser_jobs / yandex_maps_jobs / google_maps_jobs),
- *     её id — в child_job_id. collect_info персистится после каждой задачи.
+ *     companies_directory — синхронно через searchRows с пагинацией страницами
+ *     по 1000 (строки сразу в задаче, дочерней джобы нет; кап DIRECTORY_LIMIT
+ *     5000 — на больших ОКВЭД вроде 62 кап 2000 обрезал сегмент до малой доли
+ *     реестра); hh_live / yandex_maps / google_maps — insert дочерней джобы
+ *     (parser_jobs / yandex_maps_jobs / google_maps_jobs), её id — в
+ *     child_job_id. collect_info персистится после каждой задачи.
  *  3. WAIT — опрос дочерних джоб по статусу. Есть незавершённые →
  *     self-requeue и выход с {waiting: true}.
  *  4. HARVEST — строки всех done-задач мёржатся в унифицированные колонки
  *     round-robin'ом (по одной строке из каждой задачи по кругу — иначе реестр,
  *     диспатчущийся первым, съедал весь кап, а строки hh/карт молча отрезались),
- *     дедуп (company+website, регистронезависимо), кап 6000; he_bases →
- *     status='analyzing' и ставится стадия base_analyze. Ноль строк — база
- *     failed с разбором по задачам, джоба падает. Упавшие задачи фиксируются
- *     в collect_info, но не валят джобу, если хотя бы одна задача дала строки.
+ *     дедуп по нормализованному ключу (компания — без юрформ и кавычек, сайт —
+ *     хост без www/пути), исключение компаний из ДРУГИХ he_bases того же
+ *     проекта (иначе одна компания копилась в нескольких базах проекта через
+ *     повторные сборки), кап 10000; he_bases → status='analyzing' и ставится
+ *     стадия base_analyze. Ноль строк — база failed с разбором по задачам,
+ *     джоба падает. Упавшие задачи фиксируются в collect_info, но не валят
+ *     джобу, если хотя бы одна задача дала строки.
  */
 
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
@@ -49,12 +54,20 @@ import {
   type HeUsage,
 } from './shared';
 
-/** Кап строк одного синхронного запроса к реестру. */
-const DIRECTORY_LIMIT = 2000;
-/** Кап строк при чтении результата одной дочерней джобы. */
-const CHILD_ROWS_LIMIT = 2000;
-/** Общий кап строк собранной базы (после мёрджа и дедупа). */
-const TOTAL_ROWS_CAP = 6000;
+/** Кап строк реестра на задачу (постранично по DIRECTORY_PAGE_SIZE). */
+const DIRECTORY_LIMIT = 5000;
+/** Размер страницы при пагинации searchRows. */
+const DIRECTORY_PAGE_SIZE = 1000;
+/**
+ * Кап строк при чтении результата одной дочерней джобы. 5000, а не 2000:
+ * живой hh-парсер за пределами 2000 сам разбивает выдачу по датам, так что
+ * строки есть — их просто надо прочитать (для карт то же).
+ */
+const CHILD_ROWS_LIMIT = 5000;
+/** Общий кап строк собранной базы (после мёрджа, дедупа и исключения чужих баз). */
+const TOTAL_ROWS_CAP = 10000;
+/** Кап чтения data jsonb одной чужой базы при сборе ключей для исключения. */
+const EXCLUSION_READ_LIMIT = 10_000;
 /** Строк в he_bases.sample_rows — как у ручной загрузки. */
 const SAMPLE_ROWS = 30;
 /** Яндекс.Карты: max_results в воркере трактуется НА ОДИН поисковый URL, а не на задачу. */
@@ -151,14 +164,51 @@ export function mapGoogleRow(row: Record<string, unknown>): HeUnifiedRow {
 }
 
 /**
- * Дедуп по паре company+website (регистронезависимо, без учёта пробелов по
- * краям). Первое вхождение побеждает — задачи плана упорядочены по приоритету.
+ * Нормализация названия компании для дедупа: lowercase, срез юрформ
+ * (ООО/ИП/АО/ПАО/ЗАО/ОАО/АНО/НКО — отдельными словами, в любых кавычках),
+ * удаление кавычек («»„“""'') и прочей пунктуации, схлопывание пробелов.
+ * Иначе «ООО "ТЕРАБАЙТ"» из реестра и «ТЕРАБАЙТ» из hh жили в базе обе.
+ */
+export function normalizeCompanyForDedup(name: string): string {
+  let s = ` ${name.trim().toLowerCase()} `;
+  // Пунктуация → пробел: кавычки всех стилей, дефисы, точки — всё небуквенное.
+  s = s.replace(/[^0-9a-zа-яё\s]+/gi, ' ');
+  // Юрформы отдельными словами (длинные формы раньше коротких: «пао» до «ао»).
+  s = s.replace(/(^|\s)(ооо|ип|пао|зао|оао|ано|нко|ао)(?=\s|$)/g, ' ');
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Нормализация сайта для дедупа: только хост, lowercase, без www и пути
+ * (https://www.x.ru/about → x.ru). В строке сохраняется полный website —
+ * хост используется только в ключе.
+ */
+export function normalizeWebsiteForDedup(website: string): string {
+  const raw = website.trim().toLowerCase();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw.includes('://') ? raw : `https://${raw}`);
+    return url.hostname.replace(/^www\./, '');
+  } catch {
+    // Кривая строка (пробелы, мусор): грубый срез схемы/пути руками.
+    return raw.replace(/^[a-z]+:\/\//, '').split(/[\s/?#]/)[0].replace(/^www\./, '');
+  }
+}
+
+/** Ключ дедупа строки: нормализованная компания + хост сайта. */
+function dedupKey(row: HeUnifiedRow): string {
+  return `${normalizeCompanyForDedup(row.company)}|${normalizeWebsiteForDedup(row.website)}`;
+}
+
+/**
+ * Дедуп по нормализованной паре company+website. Первое вхождение побеждает —
+ * задачи плана упорядочены по приоритету.
  */
 export function dedupUnifiedRows(rows: HeUnifiedRow[]): HeUnifiedRow[] {
   const seen = new Set<string>();
   const out: HeUnifiedRow[] = [];
   for (const row of rows) {
-    const key = `${row.company.trim().toLowerCase()}|${row.website.trim().toLowerCase()}`;
+    const key = dedupKey(row);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(row);
@@ -252,6 +302,8 @@ export interface HeCollectInfo {
     tasks_done: number;
     tasks_failed: number;
     rows_total: number;
+    /** Строк отсеяно как уже существующие в других базах проекта. */
+    excluded_existing_bases: number;
     finished_at: string;
   };
 }
@@ -364,6 +416,28 @@ async function insertChildJob(
   return (data as { id: string }).id;
 }
 
+/**
+ * Реестр постранично до DIRECTORY_LIMIT: searchRows принимает (filters, limit,
+ * offset) — листаем страницами по DIRECTORY_PAGE_SIZE, пока страница не
+ * придёт короткой (конец выдачи) или не упремся в кап.
+ */
+async function fetchDirectoryRows(
+  filters: CompaniesSearchFilters,
+): Promise<{ rows: Record<string, unknown>[]; error?: string }> {
+  const rows: Record<string, unknown>[] = [];
+  while (rows.length < DIRECTORY_LIMIT) {
+    const page = await searchRows(
+      filters,
+      Math.min(DIRECTORY_PAGE_SIZE, DIRECTORY_LIMIT - rows.length),
+      rows.length,
+    );
+    if (page.error) return { rows: [], error: page.error };
+    rows.push(...page.rows);
+    if (page.rows.length < DIRECTORY_PAGE_SIZE) break;
+  }
+  return { rows };
+}
+
 async function dispatchTask(
   ctx: HeStageContext,
   state: HeCollectTaskState,
@@ -373,7 +447,7 @@ async function dispatchTask(
 
   // Реестр — синхронно, без дочерней джобы: строки сразу ложатся в задачу.
   if (task.source === 'companies_directory') {
-    const { rows, error } = await searchRows(mapDirectoryFilters(task.directory_filters), DIRECTORY_LIMIT);
+    const { rows, error } = await fetchDirectoryRows(mapDirectoryFilters(task.directory_filters));
     if (error) throw new Error(`companies_directory: ${error}`);
     state.harvest = rows.map(mapDirectoryRow);
     state.status = 'done';
@@ -534,6 +608,42 @@ async function requeueSelf(ctx: HeStageContext, job: HeJob): Promise<void> {
   if (error) throw new Error(`he_jobs requeue: ${error.message}`);
 }
 
+/* ─────────────────────────── Исключение чужих баз проекта ─────────────────────────── */
+
+/**
+ * Нормализованные ключи компаний из ДРУГИХ he_bases того же проекта (любой
+ * source, любой статус кроме failed; текущая база исключена). Без этого одна
+ * и та же компания копилась в нескольких базах проекта через повторные
+ * сборки. Матч только по компании — website в одном из источников может
+ * отсутствовать. data jsonb чужой базы читается с капом EXCLUSION_READ_LIMIT
+ * строк, компания — из колонки 'company'.
+ */
+async function loadOtherBaseCompanyKeys(
+  ctx: HeStageContext,
+  projectId: string,
+  baseId: string,
+): Promise<Set<string>> {
+  const { data, error } = await ctx.supabase
+    .from('he_bases')
+    .select('data')
+    .eq('project_id', projectId)
+    .neq('status', 'failed')
+    .neq('id', baseId);
+  if (error) throw new Error(`he_bases exclusion read: ${error.message}`);
+
+  const keys = new Set<string>();
+  for (const row of (data ?? []) as Array<{ data?: unknown }>) {
+    const rows = Array.isArray(row.data) ? row.data.slice(0, EXCLUSION_READ_LIMIT) : [];
+    for (const item of rows) {
+      const company = (item as Record<string, unknown> | null)?.company;
+      if (typeof company !== 'string') continue;
+      const key = normalizeCompanyForDedup(company);
+      if (key) keys.add(key);
+    }
+  }
+  return keys;
+}
+
 /* ─────────────────────────── Стадия ─────────────────────────── */
 
 export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
@@ -643,15 +753,26 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   const done = tasks.filter((t) => t.status === 'done');
   const failed = tasks.filter((t) => t.status === 'failed');
   // Round-robin по задачам (а не concat): ни один источник не съедает кап целиком.
-  const merged = dedupUnifiedRows(
+  const interleaved = dedupUnifiedRows(
     interleaveTaskHarvests(done.map((t) => (t.harvest ?? []).filter((r) => r.company))),
-  ).slice(0, TOTAL_ROWS_CAP);
+  );
+
+  // Исключаем компании, уже собранные в других базах этого проекта.
+  const existingKeys = await loadOtherBaseCompanyKeys(ctx, job.project_id, baseId);
+  const kept = interleaved.filter((r) => !existingKeys.has(normalizeCompanyForDedup(r.company)));
+  const excludedExisting = interleaved.length - kept.length;
+  if (excludedExisting > 0) {
+    stageLog(ctx, `[base_collect] исключено ${excludedExisting} строк — компании уже есть в других базах проекта`);
+  }
+  // Кап — после дедупа и исключения, как раньше после дедупа.
+  const merged = kept.slice(0, TOTAL_ROWS_CAP);
 
   const stats = {
     tasks_total: tasks.length,
     tasks_done: done.length,
     tasks_failed: failed.length,
     rows_total: merged.length,
+    excluded_existing_bases: excludedExisting,
     finished_at: new Date().toISOString(),
   };
 
