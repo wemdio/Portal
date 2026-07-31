@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { isTechnician } from '@/lib/roles';
+import { isAdmin } from '@/lib/roles';
 import type { UserRole } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
     .eq('id', user.id)
     .single();
 
-  if (!isTechnician((profile?.role ?? null) as UserRole | null)) {
+  if (!isAdmin((profile?.role ?? null) as UserRole | null)) {
     return jsonError('Forbidden', 403);
   }
 

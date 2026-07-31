@@ -80,7 +80,7 @@ export const navTree: NavEntry[] = [
     name: 'Счета',
     nameEn: 'Invoices',
     href: '/invoices',
-    technicianOrAdmin: true,
+    adminOnly: true,
   },
   {
     id: 'support',
