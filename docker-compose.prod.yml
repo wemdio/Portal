@@ -1196,6 +1196,14 @@ services:
       # карты аккаунта» — это утянуло бы в расходы студии чужие покупки.
       - BROCARD_API_KEY=${BROCARD_API_KEY:-}
       - BROCARD_CARD_TITLE=${BROCARD_CARD_TITLE:-}
+      # USDT TRC-20 (сеть Tron): входящие переводы на кошелёк студии, источник
+      # crypto_usdt. Адрес кошелька в репозиторий не кладём — он приезжает
+      # только из окружения; пусто → источник поднимает NotImplementedError,
+      # прогон логируется как 'partial', остальные источники не страдают.
+      # Ключ TronGrid необязателен: публичная ручка отвечает и без него, ключ
+      # лишь поднимает лимит запросов.
+      - TRON_USDT_WALLET_ADDRESS=${TRON_USDT_WALLET_ADDRESS:-}
+      - TRONGRID_API_KEY=${TRONGRID_API_KEY:-}
     volumes:
       - /var/log/portal-external-sync:/var/log/sync
     command: sh -c "mkdir -p /var/log/sync && exec python -u main.py 2>&1 | tee -a /var/log/sync/main.log"
