@@ -16,11 +16,18 @@ function jsonError(message: string, status: number) {
 // POST — запустить авто-сборку базы под вертикаль (стадия base_collect: план
 // источников → коллекторы → harvest в he_bases). Создаёт he_bases
 // (source='auto', status='collecting') + he_jobs (stage='base_collect').
+// Тело опционально: {limit?: 2000 | 10000 | 50000} — лимит строк сборки
+// (практический предохранитель от раздутого data jsonb; выбор — за
+// пользователем, дефолт 10000). Лимит едет в payload джобы (его читает
+// totalRowsCap в стадии) и в he_bases.collect_info (его показывает UI).
 // Дедуп: активная (pending/running) base_collect-задача этой вертикали или
 // собирающаяся auto-база уже есть → возвращаем её со статусом 200. Гонку
 // двух параллельных POST (оба прошли проверки до insert) закрывает partial
 // unique index he_bases_one_collecting_per_vertical: проигравший insert
 // получает 23505 и тоже отвечает 200 с чужой collecting-базой.
+/** Допустимые лимиты строк авто-сборки (см. UI Step4Base). */
+const ALLOWED_LIMITS: readonly number[] = [2000, 10000, 50000];
+const DEFAULT_LIMIT = 10000;
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.collect.post' },
@@ -32,6 +39,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       const { id } = await params;
       if (!id) return jsonError('Missing id', 400);
+
+      // Тело опционально (пустое/не-JSON — ок): лимит строк из выбора
+      // пользователя, любое значение вне ALLOWED_LIMITS — 400.
+      let body: unknown = null;
+      try {
+        body = await req.json();
+      } catch {
+        body = null;
+      }
+      let limit = DEFAULT_LIMIT;
+      if (body && typeof body === 'object' && 'limit' in body) {
+        const raw = (body as { limit?: unknown }).limit;
+        if (raw !== undefined) {
+          if (typeof raw !== 'number' || !ALLOWED_LIMITS.includes(raw)) {
+            return jsonError('limit должен быть одним из: 2000, 10000, 50000', 400);
+          }
+          limit = raw;
+        }
+      }
 
       const { data: vertical, error: vertErr } = await supabaseAdmin
         .from('he_verticals')
@@ -95,6 +121,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           row_count: 0,
           columns: [],
           data: [],
+          // Лимит — сразу в collect_info: прогресс-карта показывает его,
+          // пока стадия ещё не перезаписала collect_info планом (поле живёт
+          // дальше — стадия мержит collect_info, а не заменяет).
+          collect_info: { limit },
         })
         .select('id, status')
         .single();
@@ -127,7 +157,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           project_id: vertical.project_id,
           stage: 'base_collect',
           status: 'pending',
-          payload: { base_id: base.id },
+          payload: { base_id: base.id, limit },
         });
       if (jobErr) {
         await logError('tools.hypothesis-engine.collect.enqueue_failed', jobErr, {

@@ -4,11 +4,14 @@
  * Tests for the auto-collect enqueue surface:
  *
  *   POST /api/tools/hypothesis-engine/verticals/[id]/collect
- *     201 -> { ok, base } — inserts he_bases (source='auto', status='collecting')
- *            + he_jobs (stage 'base_collect', payload {base_id})
+ *     201 -> { ok, base } — inserts he_bases (source='auto', status='collecting',
+ *            collect_info {limit}) + he_jobs (stage 'base_collect',
+ *            payload {base_id, limit})
  *     200 -> { ok, base } — dedupe: an auto base is already collecting, a
  *            pending/running base_collect job targets a non-failed base of
  *            this vertical, or the insert loses the unique-index race (23505)
+ *     400 -> { error } when body.limit is not one of 2000 / 10000 / 50000
+ *            (limit is optional, default 10000)
  *     404 -> { error } when the vertical does not exist
  */
 
@@ -45,10 +48,14 @@ jest.mock('@/lib/loggerServer', () => ({
 
 import { POST } from '@/app/api/tools/hypothesis-engine/verticals/[id]/collect/route';
 
-function makePostReq(): NextRequest {
+function makePostReq(body?: unknown): NextRequest {
   return new Request('http://x/api/tools/hypothesis-engine/verticals/v1/collect', {
     method: 'POST',
-    headers: { authorization: 'Bearer test-token' },
+    headers: {
+      authorization: 'Bearer test-token',
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   }) as unknown as NextRequest;
 }
 
@@ -84,6 +91,8 @@ describe('POST verticals/[id]/collect', () => {
         row_count: 0,
         columns: [],
         data: [],
+        // Без тела — лимит по умолчанию, персистится в collect_info.
+        collect_info: { limit: 10000 },
       }),
     );
 
@@ -94,8 +103,63 @@ describe('POST verticals/[id]/collect', () => {
         project_id: 'p1',
         stage: 'base_collect',
         status: 'pending',
-        payload: { base_id: body.base.id },
+        payload: { base_id: body.base.id, limit: 10000 },
       }),
+    );
+  });
+
+  it('carries a chosen limit into the job payload and he_bases.collect_info (201)', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_verticals: [{ id: 'v1', project_id: 'p1', name: 'HR-агентства' }],
+        he_bases: [],
+        he_jobs: [],
+      },
+    });
+
+    const res = await POST(makePostReq({ limit: 50000 }), verticalParams);
+    expect(res.status).toBe(201);
+
+    const body = (await res.json()) as { ok: boolean; base: { id: string } };
+    expect(mockDb.getRows('he_bases')[0]).toEqual(
+      expect.objectContaining({ id: body.base.id, collect_info: { limit: 50000 } }),
+    );
+    expect(mockDb.getRows('he_jobs')[0]).toEqual(
+      expect.objectContaining({ payload: { base_id: body.base.id, limit: 50000 } }),
+    );
+  });
+
+  it.each([500, 3000, 100000, '50000', null, true])(
+    'returns 400 on a limit outside 2000/10000/50000 (%p)',
+    async (badLimit) => {
+      mockDb = createMockSupabase({
+        tables: {
+          he_verticals: [{ id: 'v1', project_id: 'p1', name: 'HR-агентства' }],
+          he_bases: [],
+          he_jobs: [],
+        },
+      });
+
+      const res = await POST(makePostReq({ limit: badLimit }), verticalParams);
+      expect(res.status).toBe(400);
+      expect(mockDb.getRows('he_bases')).toHaveLength(0);
+      expect(mockDb.getRows('he_jobs')).toHaveLength(0);
+    },
+  );
+
+  it.each([2000, 10000, 50000])('accepts the allowed limit %p', async (limit) => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_verticals: [{ id: 'v1', project_id: 'p1', name: 'HR-агентства' }],
+        he_bases: [],
+        he_jobs: [],
+      },
+    });
+
+    const res = await POST(makePostReq({ limit }), verticalParams);
+    expect(res.status).toBe(201);
+    expect(mockDb.getRows('he_jobs')[0]).toEqual(
+      expect.objectContaining({ payload: expect.objectContaining({ limit }) }),
     );
   });
 

@@ -31,6 +31,11 @@ const PRIMARY_BTN =
 /** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
 const COLLECT_POLL_MS = 4000;
 
+/** Лимит строк автосборки — выбор пользователя; route валидирует те же значения. */
+type CollectLimit = 2000 | 10000 | 50000;
+const COLLECT_LIMITS: readonly CollectLimit[] = [2000, 10000, 50000];
+const DEFAULT_COLLECT_LIMIT: CollectLimit = 10000;
+
 interface ParsedFile {
   filename: string;
   columns: string[];
@@ -69,6 +74,7 @@ export function Step4Base(props: {
   const [uploadError, setUploadError] = useState('');
   const [collectStarting, setCollectStarting] = useState(false);
   const [collectError, setCollectError] = useState('');
+  const [collectLimit, setCollectLimit] = useState<CollectLimit>(DEFAULT_COLLECT_LIMIT);
   const [templateStarting, setTemplateStarting] = useState(false);
   const [templateError, setTemplateError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -174,6 +180,7 @@ export function Step4Base(props: {
     try {
       const { ok, data } = await hePost<HeBaseCollectResponse>(
         `${HE_API}/verticals/${vertical.id}/collect`,
+        { limit: collectLimit },
       );
       if (!ok) {
         setCollectError(data.error || 'Не удалось запустить автосборку');
@@ -186,7 +193,7 @@ export function Step4Base(props: {
     } finally {
       setCollectStarting(false);
     }
-  }, [collectStarting, collectingBase, vertical.id, onUploaded]);
+  }, [collectStarting, collectingBase, collectLimit, vertical.id, onUploaded]);
 
   // Сборка создаёт base_collect-джобу, и родительский поллинг по активным
   // джобам её уже покрывает; локальный интервал — запасной вариант поверх
@@ -242,15 +249,38 @@ export function Step4Base(props: {
                 Автосборка завершилась ошибкой. Попробуйте ещё раз или загрузите файл вручную ниже.
               </p>
             ) : null}
-            <button
-              type="button"
-              onClick={() => void handleCollect()}
-              disabled={collectStarting}
-              className={PRIMARY_BTN}
-            >
-              {collectStarting ? <Spinner /> : <Sparkles className="h-4 w-4" aria-hidden />}
-              {collectFailed ? 'Попробовать снова' : 'Собрать базу автоматически'}
-            </button>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void handleCollect()}
+                disabled={collectStarting}
+                className={PRIMARY_BTN}
+              >
+                {collectStarting ? <Spinner /> : <Sparkles className="h-4 w-4" aria-hidden />}
+                {collectFailed ? 'Попробовать снова' : 'Собрать базу автоматически'}
+              </button>
+              <span className="inline-flex items-center gap-1 text-xs text-gray-500">
+                <span className="mr-0.5">Строк:</span>
+                {COLLECT_LIMITS.map((l) => (
+                  <button
+                    key={l}
+                    type="button"
+                    onClick={() => setCollectLimit(l)}
+                    aria-pressed={collectLimit === l}
+                    className={`rounded-md border px-2 py-1 text-xs font-medium transition ${
+                      collectLimit === l
+                        ? 'border-blue-600 bg-blue-600 text-white'
+                        : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300 hover:text-blue-600'
+                    }`}
+                  >
+                    {l.toLocaleString('ru-RU')}
+                  </button>
+                ))}
+              </span>
+            </div>
+            <p className="mt-1.5 text-[11px] text-gray-400">
+              Больше строк — дольше сбор и больше файл.
+            </p>
             {collectError ? (
               <p className="mt-2 text-sm text-red-600" role="alert">
                 {collectError}
@@ -647,20 +677,28 @@ function collectTaskFailed(status: string | undefined): boolean {
 function readCollectInfo(info: HeCollectInfo | null | undefined) {
   const plan = info?.plan?.tasks;
   const tasks = info?.tasks;
+  // limit появился позже plan/tasks — читаем так же защитно, как весь collect_info.
+  const rawLimit = (info as { limit?: unknown } | null | undefined)?.limit;
   return {
     plan: Array.isArray(plan) ? plan.filter((t) => t && typeof t === 'object') : [],
     tasks: Array.isArray(tasks) ? tasks.filter((t) => t && typeof t === 'object') : [],
+    limit: typeof rawLimit === 'number' && Number.isFinite(rawLimit) ? rawLimit : null,
   };
 }
 
 /** Карточка прогресса автосборки: план (почему эти источники) + живые статусы задач. */
 function CollectProgress({ base }: { base: HeBaseSummary }) {
-  const { plan, tasks } = readCollectInfo(base.collect_info);
+  const { plan, tasks, limit } = readCollectInfo(base.collect_info);
+  // У баз, созданных до появления limit в collect_info, показываем дефолт.
+  const shownLimit = limit ?? DEFAULT_COLLECT_LIMIT;
   return (
     <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
       <p className="flex items-center gap-2 text-sm font-medium text-blue-800">
         <Spinner className="h-4 w-4" />
         Собираем базу…
+      </p>
+      <p className="mt-1 text-xs text-blue-700/70">
+        собираем до {shownLimit.toLocaleString('ru-RU')} строк
       </p>
       {plan.length > 0 ? (
         <ul className="mt-2.5 space-y-1">

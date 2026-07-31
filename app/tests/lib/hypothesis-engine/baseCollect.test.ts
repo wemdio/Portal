@@ -8,7 +8,8 @@
  *   WAIT / requeue   — own he_jobs row → status 'pending' + run_after cooldown,
  *                      attempts untouched; stuck child (>3h) → task failed (timeout)
  *   HARVEST          — child rows merged into he_bases (+base_analyze enqueue),
- *                      zero rows → base failed + job throws
+ *                      total cap from job payload limit (default 10000, clamp
+ *                      [100, 50000]), zero rows → base failed + job throws
  *   guards           — base must be source='auto' AND status='collecting'
  */
 
@@ -765,6 +766,87 @@ describe('harvest', () => {
     expect((harvest?.collect_info as HeCollectInfo).stats?.rows_total).toBe(10000);
   });
 
+  it('caps the merged base at the payload limit (2 × 3000 with limit 4000 → 4000 interleaved)', async () => {
+    const big = (prefix: string, n: number): HeUnifiedRow[] =>
+      Array.from({ length: n }, (_, i) => row({ company: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'done',
+          child_job_id: null,
+          rows: 3000,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+          harvest: big('реестр', 3000),
+        },
+        {
+          source: 'hh_live',
+          status: 'done',
+          child_job_id: 'pj1',
+          rows: 3000,
+          task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
+          harvest: big('hh', 3000),
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+
+    const res = await runBaseCollectStage(
+      makeJob({ payload: { base_id: 'b1', limit: 4000 } }),
+      ctx(),
+    );
+    expect((res.result as { rows: number }).rows).toBe(4000);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(harvest?.row_count).toBe(4000);
+    const data = harvest?.data as HeUnifiedRow[];
+    // Кап из payload делится round-robin'ом: по 2000 «ходов» каждого источника.
+    expect(data.filter((r) => r.company.startsWith('реестр-'))).toHaveLength(2000);
+    expect(data.filter((r) => r.company.startsWith('hh-'))).toHaveLength(2000);
+    expect((harvest?.collect_info as HeCollectInfo).stats?.rows_total).toBe(4000);
+  });
+
+  it('clamps a payload limit outside [100, 50000]', async () => {
+    const big = (prefix: string, n: number): HeUnifiedRow[] =>
+      Array.from({ length: n }, (_, i) => row({ company: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'done',
+          child_job_id: null,
+          rows: 500,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+          harvest: big('реестр', 500),
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+
+    // limit 10 < MIN_ROWS_LIMIT → кламп до 100, хотя строк хватило бы на 500.
+    const res = await runBaseCollectStage(
+      makeJob({ payload: { base_id: 'b1', limit: 10 } }),
+      ctx(),
+    );
+    expect((res.result as { rows: number }).rows).toBe(100);
+  });
+
   it('dispatches companies_directory synchronously via searchRows and harvests immediately', async () => {
     const info: HeCollectInfo = {
       plan: { tasks: [] },
@@ -878,7 +960,7 @@ describe('harvest', () => {
     expect(harvest?.row_count).toBe(2600);
   });
 
-  it('stops directory pagination at the 5000 cap on full pages', async () => {
+  it('stops directory pagination at the default 10000 limit on full pages', async () => {
     const info: HeCollectInfo = {
       plan: { tasks: [] },
       tasks: [
@@ -899,7 +981,7 @@ describe('harvest', () => {
         he_jobs: [makeJob() as unknown as Record<string, unknown>],
       },
     });
-    // Каждая страница полная → ровно 5 запросов, кап 5000.
+    // Каждая страница полная → ровно 10 запросов, кап — дефолтный лимит 10000.
     // Имена уникальны между страницами, иначе их съест дедуп.
     let call = 0;
     searchRowsMock.mockImplementation(async () => {
@@ -908,8 +990,8 @@ describe('harvest', () => {
     });
 
     const res = await runBaseCollectStage(makeJob(), ctx());
-    expect((res.result as { rows: number }).rows).toBe(5000);
-    expect(searchRowsMock).toHaveBeenCalledTimes(5);
+    expect((res.result as { rows: number }).rows).toBe(10000);
+    expect(searchRowsMock).toHaveBeenCalledTimes(10);
   });
 
   it('excludes companies already present in other bases of the project', async () => {

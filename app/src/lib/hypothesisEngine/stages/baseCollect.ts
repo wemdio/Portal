@@ -14,9 +14,9 @@
  *     пишутся в collect_info.
  *  2. DISPATCH — каждая pending-задача уходит в свой коллектор:
  *     companies_directory — синхронно через searchRows с пагинацией страницами
- *     по 1000 (строки сразу в задаче, дочерней джобы нет; кап DIRECTORY_LIMIT
- *     5000 — на больших ОКВЭД вроде 62 кап 2000 обрезал сегмент до малой доли
- *     реестра); hh_live / yandex_maps / google_maps — insert дочерней джобы
+ *     по 1000 (строки сразу в задаче, дочерней джобы нет; кап — limit из
+ *     payload джобы, см. totalRowsCap); hh_live / yandex_maps / google_maps —
+ *     insert дочерней джобы
  *     (parser_jobs / yandex_maps_jobs / google_maps_jobs), её id — в
  *     child_job_id. collect_info персистится после каждой задачи.
  *  3. WAIT — опрос дочерних джоб по статусу. Есть незавершённые →
@@ -27,7 +27,8 @@
  *     дедуп по нормализованному ключу (компания — без юрформ и кавычек, сайт —
  *     хост без www/пути), исключение компаний из ДРУГИХ he_bases того же
  *     проекта (иначе одна компания копилась в нескольких базах проекта через
- *     повторные сборки), кап 10000; he_bases → status='analyzing' и ставится
+ *     повторные сборки), кап totalRowsCap(job) — limit из payload джобы
+ *     (дефолт 10000); he_bases → status='analyzing' и ставится
  *     стадия base_analyze. Ноль строк — база failed с разбором по задачам,
  *     джоба падает. Упавшие задачи фиксируются в collect_info, но не валят
  *     джобу, если хотя бы одна задача дала строки.
@@ -54,24 +55,44 @@ import {
   type HeUsage,
 } from './shared';
 
-/** Кап строк реестра на задачу (постранично по DIRECTORY_PAGE_SIZE). */
-const DIRECTORY_LIMIT = 5000;
-/** Размер страницы при пагинации searchRows. */
-const DIRECTORY_PAGE_SIZE = 1000;
 /**
- * Кап строк при чтении результата одной дочерней джобы. 5000, а не 2000:
- * живой hh-парсер за пределами 2000 сам разбивает выдачу по датам, так что
- * строки есть — их просто надо прочитать (для карт то же).
+ * Лимит строк авто-сборки выбирает пользователь (route кладёт его в payload
+ * джобы как `limit`, UI предлагает 2000 / 10000 / 50000). Кап — не бизнес-
+ * правило, а практический предохранитель: строки живут в he_bases.data jsonb,
+ * и «собирайте сколько есть» без капа раздувает строку БД и замедляет сборку.
+ * На больших ОКВЭД вроде 62 фиксированный кап 2000 обрезал сегмент до малой
+ * доли реестра — поэтому выбор отдан пользователю.
  */
-const CHILD_ROWS_LIMIT = 5000;
-/** Общий кап строк собранной базы (после мёрджа, дедупа и исключения чужих баз). */
-const TOTAL_ROWS_CAP = 10000;
+/** Лимит строк по умолчанию, когда в payload джобы limit не задан. */
+const DEFAULT_ROWS_LIMIT = 10000;
+/** Границы, в которые клампится limit из payload (мусор в payload ≠ 400 route). */
+const MIN_ROWS_LIMIT = 100;
+const MAX_ROWS_LIMIT = 50000;
+/** Размер страницы при пагинации searchRows (лимит 50000 просто листает дальше). */
+const DIRECTORY_PAGE_SIZE = 1000;
 /** Кап чтения data jsonb одной чужой базы при сборе ключей для исключения. */
 const EXCLUSION_READ_LIMIT = 10_000;
 /** Строк в he_bases.sample_rows — как у ручной загрузки. */
 const SAMPLE_ROWS = 30;
 /** Яндекс.Карты: max_results в воркере трактуется НА ОДИН поисковый URL, а не на задачу. */
 const YANDEX_RESULTS_PER_URL = 500;
+
+/** Достать необязательный number-параметр из payload джобы (не задан/не число — null). */
+function payloadNumber(job: HeJob, key: string): number | null {
+  const value = job.payload?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Единый лимит строк сборки: payloadNumber(job, 'limit') ?? 10000, кламп в
+ * [100, 50000]. Роль бывших DIRECTORY_LIMIT / CHILD_ROWS_LIMIT / TOTAL_ROWS_CAP
+ * теперь играет это одно значение: кап пагинации реестра, кап чтения каждой
+ * дочерней джобы и общий кап базы после мёрджа, дедупа и исключения чужих баз.
+ */
+export function totalRowsCap(job: HeJob): number {
+  const limit = payloadNumber(job, 'limit') ?? DEFAULT_ROWS_LIMIT;
+  return Math.min(MAX_ROWS_LIMIT, Math.max(MIN_ROWS_LIMIT, limit));
+}
 
 /* ─────────────────────── Унифицированная строка ─────────────────────── */
 
@@ -221,7 +242,7 @@ export function dedupUnifiedRows(rows: HeUnifiedRow[]): HeUnifiedRow[] {
  * кругу, затем строку №2 и т.д., исчерпанные списки пропускаем. Порядок строк
  * внутри каждой задачи сохраняется (строки реестра идут в порядке реестра —
  * в своих «ходах»). До этого был concat+slice по задачам, и первый источник
- * (реестр диспатчится первым) съедал весь TOTAL_ROWS_CAP, а строки hh/карт
+ * (реестр диспатчится первым) съедал весь кап, а строки hh/карт
  * молча отрезались. Дедуп после мёрджа сохраняет справедливость: первое
  * вхождение дубля — из самого раннего «хода», т.е. из самой приоритетной
  * задачи среди содержащих эту строку.
@@ -295,6 +316,8 @@ export interface HeCollectTaskState {
 }
 
 export interface HeCollectInfo {
+  /** Лимит строк, выбранный при запуске сборки (route пишет при создании базы). */
+  limit?: number;
   plan?: HeSourcePlan;
   tasks?: HeCollectTaskState[];
   stats?: {
@@ -417,18 +440,20 @@ async function insertChildJob(
 }
 
 /**
- * Реестр постранично до DIRECTORY_LIMIT: searchRows принимает (filters, limit,
- * offset) — листаем страницами по DIRECTORY_PAGE_SIZE, пока страница не
- * придёт короткой (конец выдачи) или не упремся в кап.
+ * Реестр постранично до limit: searchRows принимает (filters, limit, offset) —
+ * листаем страницами по DIRECTORY_PAGE_SIZE, пока страница не придёт короткой
+ * (конец выдачи) или не упремся в лимит. Лимит 50000 просто листает дольше —
+ * короткая страница останавливает цикл на любом лимите.
  */
 async function fetchDirectoryRows(
   filters: CompaniesSearchFilters,
+  limit: number,
 ): Promise<{ rows: Record<string, unknown>[]; error?: string }> {
   const rows: Record<string, unknown>[] = [];
-  while (rows.length < DIRECTORY_LIMIT) {
+  while (rows.length < limit) {
     const page = await searchRows(
       filters,
-      Math.min(DIRECTORY_PAGE_SIZE, DIRECTORY_LIMIT - rows.length),
+      Math.min(DIRECTORY_PAGE_SIZE, limit - rows.length),
       rows.length,
     );
     if (page.error) return { rows: [], error: page.error };
@@ -442,12 +467,16 @@ async function dispatchTask(
   ctx: HeStageContext,
   state: HeCollectTaskState,
   project: HeProject,
+  limit: number,
 ): Promise<void> {
   const { task } = state;
 
   // Реестр — синхронно, без дочерней джобы: строки сразу ложатся в задачу.
   if (task.source === 'companies_directory') {
-    const { rows, error } = await fetchDirectoryRows(mapDirectoryFilters(task.directory_filters));
+    const { rows, error } = await fetchDirectoryRows(
+      mapDirectoryFilters(task.directory_filters),
+      limit,
+    );
     if (error) throw new Error(`companies_directory: ${error}`);
     state.harvest = rows.map(mapDirectoryRow);
     state.status = 'done';
@@ -520,8 +549,12 @@ async function dispatchTask(
 
 /* ─────────────────────────── Фаза WAIT ─────────────────────────── */
 
-/** Прочитать строки завершённой дочерней джобы → унифицированные строки. */
-async function readChildRows(ctx: HeStageContext, state: HeCollectTaskState): Promise<HeUnifiedRow[]> {
+/** Прочитать строки завершённой дочерней джобы (кап — limit сборки) → унифицированные строки. */
+async function readChildRows(
+  ctx: HeStageContext,
+  state: HeCollectTaskState,
+  limit: number,
+): Promise<HeUnifiedRow[]> {
   const jobId = state.child_job_id;
   if (!jobId) return [];
 
@@ -530,7 +563,7 @@ async function readChildRows(ctx: HeStageContext, state: HeCollectTaskState): Pr
       .from('hh_vacancies')
       .select('name, company_name, company_site_url, area')
       .eq('job_id', jobId)
-      .limit(CHILD_ROWS_LIMIT);
+      .limit(limit);
     if (error) throw new Error(`hh_vacancies read: ${error.message}`);
     const queryText = state.task.hh_query?.text ?? '';
     return (data ?? []).map((r) => mapHhRow(r as Record<string, unknown>, queryText));
@@ -541,7 +574,7 @@ async function readChildRows(ctx: HeStageContext, state: HeCollectTaskState): Pr
       .from('yandex_maps_organizations')
       .select('name, website, email, phone, address, categories')
       .eq('job_id', jobId)
-      .limit(CHILD_ROWS_LIMIT);
+      .limit(limit);
     if (error) throw new Error(`yandex_maps_organizations read: ${error.message}`);
     return (data ?? []).map((r) => mapYandexRow(r as Record<string, unknown>));
   }
@@ -550,13 +583,13 @@ async function readChildRows(ctx: HeStageContext, state: HeCollectTaskState): Pr
     .from('google_maps_places')
     .select('name, website, emails, phone, address, category')
     .eq('job_id', jobId)
-    .limit(CHILD_ROWS_LIMIT);
+    .limit(limit);
   if (error) throw new Error(`google_maps_places read: ${error.message}`);
   return (data ?? []).map((r) => mapGoogleRow(r as Record<string, unknown>));
 }
 
 /** Опросить дочернюю джобу задачи: completed → harvest, failed/stopped → failed. */
-async function pollTask(ctx: HeStageContext, state: HeCollectTaskState): Promise<void> {
+async function pollTask(ctx: HeStageContext, state: HeCollectTaskState, limit: number): Promise<void> {
   const table = CHILD_JOB_TABLE[state.source as Exclude<HeCollectSource, 'companies_directory'>];
   if (!table || !state.child_job_id) return;
 
@@ -575,7 +608,7 @@ async function pollTask(ctx: HeStageContext, state: HeCollectTaskState): Promise
   const row = data as { status?: unknown; error_message?: unknown };
   const status = String(row.status ?? '');
   if (status === 'completed') {
-    state.harvest = await readChildRows(ctx, state);
+    state.harvest = await readChildRows(ctx, state, limit);
     state.status = 'done';
     state.rows = state.harvest.length;
   } else if (isChildFailed(state.source, status)) {
@@ -649,6 +682,9 @@ async function loadOtherBaseCompanyKeys(
 export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
   const baseId = payloadString(job, 'base_id');
+  // Лимит сборки из payload (route кладёт туда выбор пользователя): один на
+  // всё — пагинация реестра, чтение дочерних джоб, итоговый кап базы.
+  const limit = totalRowsCap(job);
 
   const { data: baseRow, error: bError } = await ctx.supabase
     .from('he_bases')
@@ -699,7 +735,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   for (const state of tasks) {
     if (state.status !== 'pending') continue;
     try {
-      await dispatchTask(ctx, state, project);
+      await dispatchTask(ctx, state, project, limit);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -730,7 +766,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       continue;
     }
     try {
-      await pollTask(ctx, state);
+      await pollTask(ctx, state, limit);
     } catch (e) {
       state.status = 'failed';
       state.error = e instanceof Error ? e.message : String(e);
@@ -765,7 +801,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     stageLog(ctx, `[base_collect] исключено ${excludedExisting} строк — компании уже есть в других базах проекта`);
   }
   // Кап — после дедупа и исключения, как раньше после дедупа.
-  const merged = kept.slice(0, TOTAL_ROWS_CAP);
+  const merged = kept.slice(0, totalRowsCap(job));
 
   const stats = {
     tasks_total: tasks.length,
