@@ -74,6 +74,7 @@ export function Step4Base(props: {
   const [uploadError, setUploadError] = useState('');
   const [collectStarting, setCollectStarting] = useState(false);
   const [collectError, setCollectError] = useState('');
+  const [collectNotice, setCollectNotice] = useState('');
   const [collectLimit, setCollectLimit] = useState<CollectLimit>(DEFAULT_COLLECT_LIMIT);
   const [templateStarting, setTemplateStarting] = useState(false);
   const [templateError, setTemplateError] = useState('');
@@ -176,6 +177,7 @@ export function Step4Base(props: {
   const handleCollect = useCallback(async () => {
     if (collectStarting || collectingBase) return;
     setCollectError('');
+    setCollectNotice('');
     setCollectStarting(true);
     try {
       const { ok, data } = await hePost<HeBaseCollectResponse>(
@@ -185,6 +187,17 @@ export function Step4Base(props: {
       if (!ok) {
         setCollectError(data.error || 'Не удалось запустить автосборку');
         return;
+      }
+      // Дедуп-ответ (200, existing): новая сборка не создана. Показываем,
+      // с каким лимитом уже идёт сборка, — иначе клик с другим лимитом
+      // выглядел бы как молча проигнорированный.
+      if (data.existing) {
+        const runningLimit = data.base?.collect_info?.limit;
+        setCollectNotice(
+          typeof runningLimit === 'number' && Number.isFinite(runningLimit)
+            ? `Уже собирается база с лимитом ${runningLimit.toLocaleString('ru-RU')}`
+            : 'Уже собирается база — повторный запуск не создаётся',
+        );
       }
       // 201 (сборка стартовала) и 200 (уже идёт) — в обоих случаях перечитываем деталь.
       onUploaded();
@@ -281,6 +294,9 @@ export function Step4Base(props: {
             <p className="mt-1.5 text-[11px] text-gray-400">
               Больше строк — дольше сбор и больше файл.
             </p>
+            {collectNotice ? (
+              <p className="mt-2 text-xs text-gray-500">{collectNotice}</p>
+            ) : null}
             {collectError ? (
               <p className="mt-2 text-sm text-red-600" role="alert">
                 {collectError}
@@ -678,7 +694,7 @@ function readCollectInfo(info: HeCollectInfo | null | undefined) {
   const plan = info?.plan?.tasks;
   const tasks = info?.tasks;
   // limit появился позже plan/tasks — читаем так же защитно, как весь collect_info.
-  const rawLimit = (info as { limit?: unknown } | null | undefined)?.limit;
+  const rawLimit = info?.limit;
   return {
     plan: Array.isArray(plan) ? plan.filter((t) => t && typeof t === 'object') : [],
     tasks: Array.isArray(tasks) ? tasks.filter((t) => t && typeof t === 'object') : [],

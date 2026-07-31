@@ -29,6 +29,32 @@ const CASE_LIST_COLUMNS = 'id, source, filename, industry, client_type, task, me
 // Максимум символов эталона стиля (brief.style_override) — после trim.
 const STYLE_OVERRIDE_MAX_LENGTH = 8000;
 
+// collect_info.tasks[].harvest — полный предмерж-харвест задачи (до 50k строк
+// на задачу): рабочее состояние воркера для cross-requeue, клиенту не нужен.
+// Деталка проекта поллится каждые 4с, поэтому вырезаем harvest из ответа —
+// иначе каждая база тащит десятки МБ на каждый опрос. Остальное в tasks[]
+// (source/status/rows/…) оставляем как есть: по нему рисуется прогресс-карта.
+function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
+  const info = base.collect_info as { tasks?: unknown } | null | undefined;
+  if (!info || !Array.isArray(info.tasks)) return base;
+  const hasHarvest = info.tasks.some(
+    (t) => t !== null && typeof t === 'object' && 'harvest' in (t as Record<string, unknown>),
+  );
+  if (!hasHarvest) return base;
+  return {
+    ...base,
+    collect_info: {
+      ...info,
+      tasks: info.tasks.map((t) => {
+        if (t === null || typeof t !== 'object' || !('harvest' in t)) return t;
+        const clone = { ...(t as Record<string, unknown>) };
+        delete clone.harvest;
+        return clone;
+      }),
+    },
+  };
+}
+
 // GET — деталка проекта: гипотезы, вертикали, цепочки, вокабуляр, базы,
 // шаблоны, досье вертикалей, банк кейсов и последние jobs. Чейн/вокаб/шаблоны
 // привязаны к вертикалям/базам, поэтому догружаются второй волной по id
@@ -133,7 +159,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         verticals,
         chains,
         vocabs,
-        bases: basesRes.data ?? [],
+        bases: (basesRes.data ?? []).map(stripTaskHarvest),
         templates,
         jobs: jobsRes.data ?? [],
         dossiers: dossiersRes.data ?? [],

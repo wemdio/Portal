@@ -4,8 +4,9 @@
  * Tests for GET /api/tools/hypothesis-engine/bases/[id]/export.
  *
  *   404 -> { error } when the base does not exist.
- *   409 -> { error } when the base is empty (row_count = 0) — нет смысла
- *          отдавать CSV из одних заголовков.
+ *   409 -> { error } when the base is empty (row_count = 0) or row_count > 0
+ *          but the parsed rows array is empty/missing — нет смысла отдавать
+ *          CSV из одних заголовков.
  *   200 -> text/csv с BOM: заголовки = columns, разделитель ';', экранирование,
  *          Content-Disposition с безопасным (транслит) именем файла.
  */
@@ -71,6 +72,18 @@ describe('GET bases/[id]/export', () => {
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toContain('пустая');
   });
+
+  it.each([null, [], 'broken'])(
+    'returns 409 when row_count > 0 but data is missing/not an array (%p)',
+    async (data) => {
+      // row_count — только счётчик: data потеряна/битая → экспортировать
+      // по факту нечего, тот же 409, что и у пустой базы.
+      seedBase({ filename: 'auto: HR', row_count: 5, columns: ['company'], data });
+      const res = await GET(makeReq(), params);
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toContain('пустая');
+    },
+  );
 
   it('streams a BOM-prefixed, semicolon CSV with escaped cells and a safe filename', async () => {
     seedBase({

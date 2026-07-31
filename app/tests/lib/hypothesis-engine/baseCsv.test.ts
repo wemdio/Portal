@@ -27,6 +27,18 @@ describe('csvField', () => {
     expect(csvField('ООО "Код"')).toBe('"ООО ""Код"""');
     expect(csvField('строка1\nстрока2')).toBe('"строка1\nстрока2"');
   });
+
+  it('prefixes formula-injection cells (=,+,-,@) with an apostrophe', () => {
+    // Значения приходят из парсеров — Excel иначе вычислит их как формулу.
+    expect(csvField('=1+1')).toBe("'=1+1");
+    expect(csvField('+79151234567')).toBe("'+79151234567");
+    expect(csvField('-5')).toBe("'-5");
+    expect(csvField('@channel')).toBe("'@channel");
+    // Префикс ставится до экранирования: поле с разделителем всё равно в кавычках.
+    expect(csvField('=a;b')).toBe(`"'=a;b"`);
+    // Опасный символ не в начале ячейки — не трогаем.
+    expect(csvField('a=b')).toBe('a=b');
+  });
 });
 
 describe('buildBaseCsv', () => {
@@ -70,6 +82,11 @@ describe('safeBaseFilename', () => {
   it('does not duplicate the .csv extension', () => {
     expect(safeBaseFilename('leads.csv', 'b1')).toBe('leads.csv');
     expect(safeBaseFilename('LEADS.CSV', 'b1')).toBe('leads.csv');
+  });
+
+  it('strips known spreadsheet extensions (.xlsx/.xls) before appending .csv', () => {
+    expect(safeBaseFilename('подъём.xlsx', 'b1')).toBe('podem.csv');
+    expect(safeBaseFilename('Book.XLS', 'b1')).toBe('book.csv');
   });
 
   it('keeps dots and dashes, collapses repeats', () => {

@@ -21,10 +21,13 @@ function jsonError(message: string, status: number) {
 // пользователем, дефолт 10000). Лимит едет в payload джобы (его читает
 // totalRowsCap в стадии) и в he_bases.collect_info (его показывает UI).
 // Дедуп: активная (pending/running) base_collect-задача этой вертикали или
-// собирающаяся auto-база уже есть → возвращаем её со статусом 200. Гонку
-// двух параллельных POST (оба прошли проверки до insert) закрывает partial
-// unique index he_bases_one_collecting_per_vertical: проигравший insert
-// получает 23505 и тоже отвечает 200 с чужой collecting-базой.
+// собирающаяся auto-база уже есть → возвращаем её со статусом 200 и флагом
+// existing: true (UI показывает «уже собирается», а не молча продолжает;
+// collect_info в выборке — ради collect_info.limit в этом уведомлении).
+// Гонку двух параллельных POST (оба прошли проверки до insert) закрывает
+// partial unique index he_bases_one_collecting_per_vertical: проигравший
+// insert получает 23505 и тоже отвечает 200 + existing с чужой
+// collecting-базой.
 /** Допустимые лимиты строк авто-сборки (см. UI Step4Base). */
 const ALLOWED_LIMITS: readonly number[] = [2000, 10000, 50000];
 const DEFAULT_LIMIT = 10000;
@@ -74,14 +77,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       // Дедуп 1: уже собирающаяся auto-база этой вертикали.
       const { data: collecting, error: collErr } = await supabaseAdmin
         .from('he_bases')
-        .select('id, status')
+        .select('id, status, collect_info')
         .eq('vertical_id', id)
         .eq('source', 'auto')
         .eq('status', 'collecting')
         .limit(1)
         .maybeSingle();
       if (collErr) return jsonError(collErr.message, 500);
-      if (collecting) return NextResponse.json({ ok: true, base: collecting });
+      if (collecting) return NextResponse.json({ ok: true, existing: true, base: collecting });
 
       // Дедуп 2: pending/running base_collect-задача на базу этой вертикали
       // (база могла уже выйти из collecting, пока джоба ещё активна).
@@ -98,7 +101,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       if (baseIds.length > 0) {
         const { data: existingBase, error: baseErr } = await supabaseAdmin
           .from('he_bases')
-          .select('id, status')
+          .select('id, status, collect_info')
           .eq('vertical_id', id)
           .in('id', baseIds)
           // Упавшая сборка не блокирует повторный запуск: failed-базу
@@ -107,7 +110,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           .limit(1)
           .maybeSingle();
         if (baseErr) return jsonError(baseErr.message, 500);
-        if (existingBase) return NextResponse.json({ ok: true, base: existingBase });
+        if (existingBase) return NextResponse.json({ ok: true, existing: true, base: existingBase });
       }
 
       const { data: base, error: baseInsertErr } = await supabaseAdmin
@@ -131,18 +134,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       if (baseInsertErr || !base) {
         // 23505 = unique_violation на he_bases_one_collecting_per_vertical:
         // параллельный POST успел вставить collecting-базу раньше. Это тот же
-        // дедуп, только пойманный индексом, — отвечаем 200 с чужой базой.
+        // дедуп, только пойманный индексом, — отвечаем 200 + existing с чужой базой.
         if (baseInsertErr?.code === '23505') {
           const { data: conflict, error: conflictErr } = await supabaseAdmin
             .from('he_bases')
-            .select('id, status')
+            .select('id, status, collect_info')
             .eq('vertical_id', id)
             .eq('source', 'auto')
             .eq('status', 'collecting')
             .limit(1)
             .maybeSingle();
           if (conflictErr) return jsonError(conflictErr.message, 500);
-          if (conflict) return NextResponse.json({ ok: true, base: conflict });
+          if (conflict) return NextResponse.json({ ok: true, existing: true, base: conflict });
         }
         await logError('tools.hypothesis-engine.collect.insert_failed', baseInsertErr, {
           userId,

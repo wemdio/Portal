@@ -44,8 +44,11 @@
  * заново скачивала те же первые N строк реестра и отбрасывала их как
  * известные — ~0 новых строк, и сегмент в 120k нельзя было собрать батчами.
  * Исчерпанный реестр помечается в collect_info («реестр исчерпан»); если все
- * задачи исчерпаны/пусты и новых строк нет — сборка падает с «сегмент
- * исчерпан: новых компаний нет» вместо общего нулевого фейла. У hh/карт
+ * задачи исчерпаны/пусты, ни одна не упала и новых строк нет — сборка падает
+ * с «сегмент исчерпан: новых компаний нет» вместо общего нулевого фейла.
+ * Стоп по потолку 200 страниц — НЕ исчерпание: задача получает note про
+ * предел сканирования, и «сегмент исчерпан» на такой задаче не срабатывает.
+ * У hh/карт
  * исключение остаётся только на мёрдже: продолжение для них требует
  * вариации поисковых запросов — future work.
  */
@@ -92,8 +95,6 @@ const DIRECTORY_PAGE_SIZE = 1000;
  * пропускается как уже собранная в других базах проекта.
  */
 const MAX_DIRECTORY_PAGES = 200;
-/** Кап чтения data jsonb одной чужой базы при сборе ключей для исключения. */
-const EXCLUSION_READ_LIMIT = 10_000;
 /** Строк в he_bases.sample_rows — как у ручной загрузки. */
 const SAMPLE_ROWS = 30;
 /** Яндекс.Карты: max_results в воркере трактуется НА ОДИН поисковый URL, а не на задачу. */
@@ -208,50 +209,87 @@ export function mapGoogleRow(row: Record<string, unknown>): HeUnifiedRow {
 
 /**
  * Нормализация названия компании для дедупа: lowercase, срез юрформ
- * (ООО/ИП/АО/ПАО/ЗАО/ОАО/АНО/НКО — отдельными словами, в любых кавычках),
- * удаление кавычек («»„“""'') и прочей пунктуации, схлопывание пробелов.
- * Иначе «ООО "ТЕРАБАЙТ"» из реестра и «ТЕРАБАЙТ» из hh жили в базе обе.
+ * (ООО/ИП/АО/ПАО/ЗАО/ОАО/АНО/НКО и латинские LLC/LTD/INC/OOO — отдельными
+ * словами, в любых кавычках; латинское IP НЕ срезаем — слишком коллизионно:
+ * «IP Solutions»), удаление кавычек («»„“""'') и прочей пунктуации,
+ * схлопывание пробелов. Иначе «ООО "ТЕРАБАЙТ"» из реестра и «ТЕРАБАЙТ»
+ * из hh жили в базе обе.
  */
 export function normalizeCompanyForDedup(name: string): string {
   let s = ` ${name.trim().toLowerCase()} `;
   // Пунктуация → пробел: кавычки всех стилей, дефисы, точки — всё небуквенное.
   s = s.replace(/[^0-9a-zа-яё\s]+/gi, ' ');
   // Юрформы отдельными словами (длинные формы раньше коротких: «пао» до «ао»).
-  s = s.replace(/(^|\s)(ооо|ип|пао|зао|оао|ано|нко|ао)(?=\s|$)/g, ' ');
+  s = s.replace(/(^|\s)(ооо|ип|пао|зао|оао|ано|нко|ао|llc|ltd|inc|ooo)(?=\s|$)/g, ' ');
   return s.replace(/\s+/g, ' ').trim();
 }
 
 /**
  * Нормализация сайта для дедупа: только хост, lowercase, без www и пути
- * (https://www.x.ru/about → x.ru). В строке сохраняется полный website —
- * хост используется только в ключе.
+ * (https://www.x.ru/about → x.ru), срез конечной точки (x.ru. → x.ru).
+ * Мусорные значения («не-сайт», localhost, произвольный текст) → пустой
+ * ключ: хост без «точки + TLD» — не сайт, а punycode-мусор в ключе склеивал
+ * бы разные строки одной компании не хуже пустого сайта. В строке
+ * сохраняется полный website — хост используется только в ключе.
  */
 export function normalizeWebsiteForDedup(website: string): string {
   const raw = website.trim().toLowerCase();
   if (!raw) return '';
+  let host: string;
   try {
     const url = new URL(raw.includes('://') ? raw : `https://${raw}`);
-    return url.hostname.replace(/^www\./, '');
+    host = url.hostname;
   } catch {
     // Кривая строка (пробелы, мусор): грубый срез схемы/пути руками.
-    return raw.replace(/^[a-z]+:\/\//, '').split(/[\s/?#]/)[0].replace(/^www\./, '');
+    host = raw.replace(/^[a-z]+:\/\//, '').split(/[\s/?#]/)[0];
   }
-}
-
-/** Ключ дедупа строки: нормализованная компания + хост сайта. */
-function dedupKey(row: HeUnifiedRow): string {
-  return `${normalizeCompanyForDedup(row.company)}|${normalizeWebsiteForDedup(row.website)}`;
+  host = host.replace(/^www\./, '').replace(/\.+$/, '');
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(host) ? host : '';
 }
 
 /**
- * Дедуп по нормализованной паре company+website. Первое вхождение побеждает —
- * задачи плана упорядочены по приоритету.
+ * Дедуп: точный ключ «компания|сайт» (первое вхождение побеждает — задачи
+ * плана упорядочены по приоритету) плюс схлопывание пары «та же компания,
+ * сайт пуст хотя бы у одной строки»: «ООО "ТЕРАБАЙТ"» с сайтом и «ТЕРАБАЙТ»
+ * без сайта — одна компания, выживает более богатая строка (с website/email,
+ * иначе первая). Асимметрия с кросс-базовым исключением осознанная: там
+ * матч ТОЛЬКО по компании (website может отсутствовать у целого источника),
+ * а здесь пары с РАЗНЫМИ непустыми сайтами живут обе — у дочек/филиалов
+ * бывают разные домены. Строки с пустым нормализованным ключом компании
+ * («ООО», «—», «») — мусор: все они схлопнулись бы в один ключ «|»,
+ * выбрасываются как и строки с пустым сырым company.
  */
 export function dedupUnifiedRows(rows: HeUnifiedRow[]): HeUnifiedRow[] {
   const seen = new Set<string>();
+  const firstIdxByCompany = new Map<string, number>();
   const out: HeUnifiedRow[] = [];
   for (const row of rows) {
-    const key = dedupKey(row);
+    const company = normalizeCompanyForDedup(row.company);
+    if (!company) continue;
+    const website = normalizeWebsiteForDedup(row.website);
+    const key = `${company}|${website}`;
+    const idx = firstIdxByCompany.get(company);
+    if (idx === undefined) {
+      firstIdxByCompany.set(company, out.length);
+      seen.add(key);
+      out.push(row);
+      continue;
+    }
+    const existingWebsite = normalizeWebsiteForDedup(out[idx].website);
+    if (website === '' || existingWebsite === '') {
+      // Та же компания, но сайт пуст хотя бы у одной строки (точный дубль
+      // «компания|» — тоже сюда): оставляем более богатую (с сайтом/email),
+      // при равенстве — первую.
+      const existingRich = existingWebsite !== '' || out[idx].email !== '';
+      const rowRich = website !== '' || row.email !== '';
+      if (rowRich && !existingRich) {
+        out[idx] = row;
+        seen.add(key);
+      }
+      continue;
+    }
+    // У обеих строк непустые сайты: точный дубль пропускаем, разные домены
+    // (дочки/филиалы) живут обе.
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(row);
@@ -339,6 +377,11 @@ export interface HeCollectTaskState {
   excluded_during_fetch?: number;
   /** Реестр: выдача под фильтры кончилась раньше limit — сегмент собран целиком. */
   exhausted?: boolean;
+  /**
+   * Реестр: стоп по потолку MAX_DIRECTORY_PAGES (200k просканированных строк)
+   * раньше limit — НЕ исчерпание: выдача ещё есть, повторная сборка продолжит.
+   */
+  hit_ceiling?: boolean;
   /** Пометка задачи для UI (например, «реестр исчерпан»). */
   note?: string;
 }
@@ -481,8 +524,11 @@ async function insertChildJob(
  * не влезающих в один кап, >50k). Без этого вторая сборка скачивала те же
  * первые N строк и отбрасывала их на мёрдже — ~0 новых. Стоп: limit новых
  * строк, короткая страница (конец выдачи) или потолок MAX_DIRECTORY_PAGES.
- * exhausted=true — выдача кончилась (или упёрлась в потолок) раньше limit:
- * сегмент под фильтры собран целиком, продолжать некуда.
+ * exhausted=true — выдача кончилась (короткая страница) раньше limit:
+ * сегмент под фильтры собран целиком, продолжать некуда. hitCeiling=true —
+ * стоп по потолку страниц раньше limit: выдача ещё есть, это НЕ исчерпание
+ * (иначе финальный разбор нулевой сборки врал «сегмент исчерпан» на простом
+ * срабатывании предохранителя).
  */
 async function fetchDirectoryRows(
   ctx: HeStageContext,
@@ -493,14 +539,18 @@ async function fetchDirectoryRows(
   rows: Record<string, unknown>[];
   excludedDuringFetch: number;
   exhausted: boolean;
+  hitCeiling: boolean;
   error?: string;
 }> {
   const rows: Record<string, unknown>[] = [];
   let excludedDuringFetch = 0;
   let offset = 0;
-  for (let page = 0; page < MAX_DIRECTORY_PAGES && rows.length < limit; page += 1) {
+  let page = 0;
+  for (; page < MAX_DIRECTORY_PAGES && rows.length < limit; page += 1) {
     const res = await searchRows(filters, DIRECTORY_PAGE_SIZE, offset);
-    if (res.error) return { rows: [], excludedDuringFetch, exhausted: false, error: res.error };
+    if (res.error) {
+      return { rows: [], excludedDuringFetch, exhausted: false, hitCeiling: false, error: res.error };
+    }
     offset += res.rows.length;
     for (const r of res.rows) {
       const key = normalizeCompanyForDedup(cell(r.name));
@@ -515,14 +565,18 @@ async function fetchDirectoryRows(
     }
     if (res.rows.length < DIRECTORY_PAGE_SIZE) break;
   }
-  const exhausted = rows.length < limit;
+  // Потолок: цикл вышел по числу страниц, а limit так и не набран — все
+  // страницы были полными, выдача ещё есть. Это предохранитель, не конец
+  // сегмента: exhausted остаётся false.
+  const hitCeiling = rows.length < limit && page >= MAX_DIRECTORY_PAGES;
+  const exhausted = rows.length < limit && !hitCeiling;
   if (excludedDuringFetch > 0) {
     stageLog(
       ctx,
       `[base_collect] реестр: ${excludedDuringFetch} строк пропущено на выборке — компании уже есть в других базах проекта`,
     );
   }
-  return { rows, excludedDuringFetch, exhausted };
+  return { rows, excludedDuringFetch, exhausted, hitCeiling };
 }
 
 async function dispatchTask(
@@ -538,7 +592,7 @@ async function dispatchTask(
   // Компании других баз проекта исключаются ещё на выборке (fetchDirectoryRows),
   // иначе повторная сборка сегмента заново скачивала уже собранные страницы.
   if (task.source === 'companies_directory') {
-    const { rows, excludedDuringFetch, exhausted, error } = await fetchDirectoryRows(
+    const { rows, excludedDuringFetch, exhausted, hitCeiling, error } = await fetchDirectoryRows(
       ctx,
       mapDirectoryFilters(task.directory_filters),
       limit,
@@ -556,6 +610,13 @@ async function dispatchTask(
       // разбору нулевой сборки («сегмент исчерпан» вместо «не дала строк»).
       state.exhausted = true;
       state.note = 'реестр исчерпан';
+    } else if (hitCeiling) {
+      // Стоп по потолку 200 страниц (200k просканированных строк) — выдача
+      // ещё есть, это предохранитель, а НЕ исчерпание сегмента: exhausted не
+      // ставим, чтобы финальный разбор нулевой сборки не показал «сегмент
+      // исчерпан» там, где поможет просто повторный запуск.
+      state.hit_ceiling = true;
+      state.note = 'достигнут предел сканирования 200k — запустите сборку ещё раз';
     }
     return;
   }
@@ -723,8 +784,11 @@ async function requeueSelf(ctx: HeStageContext, job: HeJob): Promise<void> {
  * source, любой статус кроме failed; текущая база исключена). Без этого одна
  * и та же компания копилась в нескольких базах проекта через повторные
  * сборки. Матч только по компании — website в одном из источников может
- * отсутствовать. data jsonb чужой базы читается с капом EXCLUSION_READ_LIMIT
- * строк, компания — из колонки 'company'.
+ * отсутствовать; компания — из колонки 'company'. data jsonb чужой базы и так читается целиком (одно поле
+ * строки), поэтому slice до MAX_ROWS_LIMIT — лишь JS-предохранитель; он
+ * обязан быть не меньше максимального размера базы: кап 10k при лимите
+ * сборки до 50k отрезал хвост чужой базы из исключений, и вторая сборка
+ * собирала компании 10001–50000 первой заново как «новые».
  */
 async function loadOtherBaseCompanyKeys(
   ctx: HeStageContext,
@@ -741,7 +805,7 @@ async function loadOtherBaseCompanyKeys(
 
   const keys = new Set<string>();
   for (const row of (data ?? []) as Array<{ data?: unknown }>) {
-    const rows = Array.isArray(row.data) ? row.data.slice(0, EXCLUSION_READ_LIMIT) : [];
+    const rows = Array.isArray(row.data) ? row.data.slice(0, MAX_ROWS_LIMIT) : [];
     for (const item of rows) {
       const company = (item as Record<string, unknown> | null)?.company;
       if (typeof company !== 'string') continue;
@@ -875,9 +939,14 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // ─── HARVEST ───
   const done = tasks.filter((t) => t.status === 'done');
   const failed = tasks.filter((t) => t.status === 'failed');
-  // Round-robin по задачам (а не concat): ни один источник не съедает кап целиком.
+  // Round-robin по задачам (а не concat): ни один источник не съедает кап
+  // целиком. Строки без компании и строки-мусор, чья компания схлопывается в
+  // пустой ключ («ООО», «—», «»), выбрасываем до мёрджа — все они делили бы
+  // один пустой ключ «|» (дедуп ниже их тоже отбрасывает, это первая линия).
   const interleaved = dedupUnifiedRows(
-    interleaveTaskHarvests(done.map((t) => (t.harvest ?? []).filter((r) => r.company))),
+    interleaveTaskHarvests(
+      done.map((t) => (t.harvest ?? []).filter((r) => normalizeCompanyForDedup(r.company) !== '')),
+    ),
   );
 
   // Исключаем компании, уже собранные в других базах этого проекта. Для
@@ -889,8 +958,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   if (excludedExisting > 0) {
     stageLog(ctx, `[base_collect] исключено ${excludedExisting} строк — компании уже есть в других базах проекта`);
   }
-  // Кап — после дедупа и исключения, как раньше после дедупа.
-  const merged = kept.slice(0, totalRowsCap(job));
+  // Кап — после дедупа и исключения, как раньше после дедупа (limit уже
+  // посчитан выше — тот же totalRowsCap(job)).
+  const merged = kept.slice(0, limit);
 
   const stats = {
     tasks_total: tasks.length,
@@ -903,17 +973,28 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   };
 
   if (merged.length === 0) {
-    // Сегмент исчерпан: все задачи исчерпаны/пусты, база пуста и реестр
-    // подтвердил продолжение — строки реально пропускались на выборке как
-    // уже собранные в других базах. Повторная сборка бессмысленна — честный
-    // фейл вместо общего «не дала строк». Пустая выдача при ПЕРВОЙ сборке
-    // (пропусков на выборке не было) — обычный нулевой сбор, не исчерпание.
+    // Сегмент исчерпан: все задачи исчерпаны/пусты (стоп по потолку
+    // сканирования — НЕ исчерпание, hit_ceiling сбрасывает признак), база
+    // пуста, нет упавших задач (упавшая задача важнее: показываем её разбор,
+    // а не «исчерпан») и реестр подтвердил продолжение — строки реально
+    // пропускались на выборке как уже собранные в других базах. Повторная
+    // сборка бессмысленна — честный фейл вместо общего «не дала строк».
+    // Пустая выдача при ПЕРВОЙ сборке (пропусков на выборке не было) —
+    // обычный нулевой сбор, не исчерпание.
     const segmentExhausted =
       (base.row_count ?? 0) === 0 &&
-      tasks.every((t) => t.exhausted || t.rows === 0) &&
+      failed.length === 0 &&
+      tasks.every((t) => t.exhausted || (t.rows === 0 && !t.hit_ceiling)) &&
       tasks.some((t) => (t.excluded_during_fetch ?? 0) > 0);
+    // Упавших задач нет — показываем пометки задач (например, потолок
+    // сканирования), а не бессмысленное «план пуст».
     const breakdown =
-      failed.map((f) => `${f.source} — ${f.error ?? '0 строк'}`).join('; ') || 'план пуст';
+      failed.map((f) => `${f.source} — ${f.error ?? '0 строк'}`).join('; ') ||
+      tasks
+        .map((t) => t.note)
+        .filter(Boolean)
+        .join('; ') ||
+      'план пуст';
     const note = segmentExhausted
       ? 'Сегмент исчерпан: новых компаний нет'
       : `Авто-сборка не дала строк: ${breakdown}`;

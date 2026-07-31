@@ -12,7 +12,11 @@
 
 /** Ячейка CSV: null/undefined → пусто; кавычки удваиваются; поле с разделителем/кавычкой/переводом строки — в кавычках. */
 export function csvField(value: unknown): string {
-  const s = value == null ? '' : String(value);
+  let s = value == null ? '' : String(value);
+  // Формульная инъекция: Excel/LibreOffice вычисляют ячейки, начинающиеся
+  // с =,+,-,@ (значения приходят из парсеров, т.е. из недоверенного источника).
+  // Нейтрализуем префиксом апострофа — до проверки на кавычки.
+  if (/^[=+\-@]/.test(s)) s = `'${s}`;
   return /[";\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -43,8 +47,10 @@ const CYRILLIC_LATIN: Record<string, string> = {
 
 /**
  * Безопасное имя файла выгрузки: транслит + только [a-z0-9-_.] (ASCII-имя не
- * ломает Content-Disposition и старые даунлоад-менеджеры). Пустой результат
- * (напр. filename из одних эмодзи) → fallback `base-<id>.csv`.
+ * ломает Content-Disposition и старые даунлоад-менеджеры). Известное
+ * табличное расширение исходного имени (.csv/.xlsx/.xls) срезаем, чтобы не
+ * плодить двойное «podem.xlsx.csv». Пустой результат (напр. filename из
+ * одних эмодзи) → fallback `base-<id>.csv`.
  */
 export function safeBaseFilename(filename: string | null | undefined, id: string): string {
   const stem = (filename ?? '')
@@ -52,7 +58,7 @@ export function safeBaseFilename(filename: string | null | undefined, id: string
     .split('')
     .map((ch) => CYRILLIC_LATIN[ch] ?? ch)
     .join('')
-    .replace(/\.csv$/, '')
+    .replace(/\.(csv|xlsx|xls)$/, '')
     .replace(/[^a-z0-9-_.]+/g, '-')
     .replace(/-{2,}/g, '-')
     .replace(/^[-.]+|[-.]+$/g, '');

@@ -16,7 +16,8 @@ function jsonError(message: string, status: number) {
 // GET — скачать базу целиком как CSV (разделитель ';', BOM — под Excel-RU).
 // Пустая база (row_count=0, напр. сборка упала или файл только загрузили) →
 // 409: отдавать CSV из одних заголовков было бы молчаливой потерей данных.
-// data ≤ 6000 строк (кап сборки/загрузки), поэтому собираем в буфер.
+// data ≤ 50 000 строк (кап автосборки; ручная загрузка — 10 000), поэтому
+// собираем в буфер.
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.bases.export.get' },
@@ -51,6 +52,11 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       const rows = Array.isArray(base.data)
         ? (base.data as Array<Record<string, unknown>>)
         : [];
+      // row_count>0, но data пуст/не массив (битая запись) — тот же 409:
+      // row_count здесь только счётчик, экспортировать по факту нечего.
+      if (rows.length === 0) {
+        return jsonError('База пустая — нечего выгружать', 409);
+      }
 
       const csv = buildBaseCsv(columns, rows);
       const filename = safeBaseFilename(

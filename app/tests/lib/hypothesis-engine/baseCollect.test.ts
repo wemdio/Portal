@@ -13,7 +13,9 @@
  *   continuation     — other-base companies are skipped DURING directory paging
  *                      (only new rows count toward limit, 200-page ceiling),
  *                      exhausted registry → task note «реестр исчерпан»,
- *                      all-exhausted + 0 new → «Сегмент исчерпан» failure;
+ *                      200-page ceiling → note «предел сканирования 200k»
+ *                      (NOT exhaustion), all-exhausted + 0 new + no failed
+ *                      tasks → «Сегмент исчерпан» failure;
  *                      merge-time exclusion stays as the hh/maps safety net
  *   guards           — base must be source='auto' AND status='collecting'
  */
@@ -245,6 +247,18 @@ describe('normalizeCompanyForDedup', () => {
     // «ао» внутри слова — не юрформа.
     expect(normalizeCompanyForDedup('ООО "Аврора"')).toBe('аврора');
   });
+
+  it('strips latin legal forms as whole tokens (llc/ltd/inc/ooo), keeps ip and lookalikes', () => {
+    // Латинские имена приходят от hh employers.
+    expect(normalizeCompanyForDedup('Terabayt LLC')).toBe('terabayt');
+    expect(normalizeCompanyForDedup('ACME Inc.')).toBe('acme');
+    expect(normalizeCompanyForDedup('Beta LTD')).toBe('beta');
+    expect(normalizeCompanyForDedup('Gamma OOO')).toBe('gamma');
+    // Латинское IP НЕ срезаем — слишком коллизионно («IP Solutions»).
+    expect(normalizeCompanyForDedup('IP Solutions')).toBe('ip solutions');
+    // Только целые токены: «Limited» — не «ltd».
+    expect(normalizeCompanyForDedup('Limited Inc')).toBe('limited');
+  });
 });
 
 describe('normalizeWebsiteForDedup', () => {
@@ -255,6 +269,16 @@ describe('normalizeWebsiteForDedup', () => {
     expect(normalizeWebsiteForDedup('www.x.ru')).toBe('x.ru');
     expect(normalizeWebsiteForDedup('as.ru')).toBe('as.ru');
     expect(normalizeWebsiteForDedup('')).toBe('');
+  });
+
+  it('strips the trailing dot and returns an empty key for junk hosts', () => {
+    expect(normalizeWebsiteForDedup('x.ru.')).toBe('x.ru');
+    expect(normalizeWebsiteForDedup('https://www.x.ru./about')).toBe('x.ru');
+    // «не-сайт» — не домен: без точки с TLD это мусор, а не ключ (раньше
+    // уходил в punycode и жил отдельным ключом от пустого сайта).
+    expect(normalizeWebsiteForDedup('не-сайт')).toBe('');
+    expect(normalizeWebsiteForDedup('localhost')).toBe('');
+    expect(normalizeWebsiteForDedup('просто текст')).toBe('');
   });
 });
 
@@ -277,6 +301,42 @@ describe('dedupUnifiedRows', () => {
     expect(out[0].company).toBe('ООО "ТЕРАБАЙТ"');
     // Полный website строки не трогаем — хост нужен только для ключа.
     expect(out[0].website).toBe('terabait.ru');
+  });
+
+  it('merges same-company rows when either website is empty — the richer row (website/email) wins', () => {
+    // Кросс-базовое исключение матчит только по компании, а within-batch дедуп
+    // оставлял «ООО "ТЕРАБАЙТ"» с сайтом и «ТЕРАБАЙТ» без сайта двумя строками.
+    const bare = row({ company: 'ТЕРАБАЙТ', phone: '2', vacancy_title: 'Рекрутер' });
+    const rich = row({ company: 'ООО "ТЕРАБАЙТ"', website: 'tb.ru', phone: '1' });
+    // Бедная строка первой — выживает богатая (с сайтом), на её месте.
+    const out = dedupUnifiedRows([bare, rich]);
+    expect(out).toHaveLength(1);
+    expect(out[0].website).toBe('tb.ru');
+    expect(out[0].phone).toBe('1');
+    // Богатая первая — она и остаётся.
+    expect(dedupUnifiedRows([rich, bare])).toEqual([rich]);
+    // Богатая по EMAIL (без сайта) — тоже замена.
+    const withEmail = row({ company: 'терабайт', email: 'a@tb.ru' });
+    const out2 = dedupUnifiedRows([bare, withEmail]);
+    expect(out2).toHaveLength(1);
+    expect(out2[0].email).toBe('a@tb.ru');
+    // Обе бедные — побеждает первая.
+    const bare2 = row({ company: 'Терабайт ООО', vacancy_title: 'Sourcer' });
+    expect(dedupUnifiedRows([bare, bare2])).toEqual([bare]);
+    // Разные НЕПУСТЫЕ сайты — обе строки живут (дочки/филиалы с разными доменами).
+    const otherSite = row({ company: 'ТЕРАБАЙТ', website: 'tb-two.ru' });
+    expect(dedupUnifiedRows([rich, otherSite])).toHaveLength(2);
+  });
+
+  it('drops garbage rows whose company normalizes to empty («ООО», «—», quotes-only)', () => {
+    // Все они схлопывались в один ключ «|» и жили одной мусорной строкой.
+    const out = dedupUnifiedRows([
+      row({ company: 'ООО', website: 'a.ru' }),
+      row({ company: '—', website: 'b.ru' }),
+      row({ company: '«»' }),
+      row({ company: 'Нормальная', website: 'n.ru' }),
+    ]);
+    expect(out).toEqual([row({ company: 'Нормальная', website: 'n.ru' })]);
   });
 });
 
@@ -635,6 +695,8 @@ describe('harvest', () => {
           { job_id: 'pj1', name: 'HR-менеджер', company_name: 'ас', company_site_url: 'AS.ru', area: 'СПб' },
           // без компании — отбрасывается
           { job_id: 'pj1', name: 'Sourcer', company_name: '', company_site_url: '', area: 'Москва' },
+          // компания-мусор (нормализуется в пустой ключ) — отбрасывается
+          { job_id: 'pj1', name: 'Ops', company_name: 'ООО', company_site_url: 'ooo.ru', area: '' },
           // чужая джоба — не попадает
           { job_id: 'pj2', name: 'X', company_name: 'Чужая', company_site_url: 'x.ru', area: 'Москва' },
         ],
@@ -1229,7 +1291,34 @@ describe('continuation: other-base exclusion during directory fetch', () => {
     });
   });
 
-  it('stops at the 200-page ceiling when pages stay full of known rows (200k scanned safety stop)', async () => {
+  it('excludes companies beyond the first 10k rows of another base (collect limit can be 50k)', async () => {
+    // 12k компаний в чужой базе; реестр отдаёт строки 10500–11499 — за старым
+    // капом чтения 10k. Они обязаны попасть в исключения на выборке, иначе
+    // вторая сборка собирает хвост первой базы заново как «новые» компании.
+    const known = Array.from({ length: 12_000 }, (_, i) => `c-${i}`);
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(directoryInfo()), otherBase(known.map((company) => ({ company })))],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    searchRowsMock
+      .mockResolvedValueOnce({ rows: known.slice(10_500, 11_500).map((name) => ({ name })) }) // все известны
+      .mockResolvedValueOnce({ rows: [{ name: 'Новая-1' }, { name: 'Новая-2' }] }); // короткая страница новых
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(2);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    const data = harvest?.data as HeUnifiedRow[];
+    expect(data.map((r) => r.company)).toEqual(['Новая-1', 'Новая-2']);
+    const info = harvest?.collect_info as HeCollectInfo;
+    expect(info.stats).toMatchObject({ excluded_during_fetch: 1000, excluded_existing_bases: 0 });
+  });
+
+  it('stops at the 200-page ceiling (200k scanned) and reports it as a ceiling, NOT segment exhaustion', async () => {
     const knownPage = Array.from({ length: 1000 }, (_, i) => ({ name: `old-${i}` }));
     mockDb = createMockSupabase({
       tables: {
@@ -1245,13 +1334,27 @@ describe('continuation: other-base exclusion during directory fetch', () => {
     // Полные страницы известных компаний бесконечно — останавливает только потолок.
     searchRowsMock.mockResolvedValue({ rows: knownPage });
 
-    await expect(runBaseCollectStage(makeJob(), ctx())).rejects.toThrow(/сегмент исчерпан/i);
+    // Потолок — не исчерпание: общий нулевой фейл, а не «Сегмент исчерпан».
+    await expect(runBaseCollectStage(makeJob(), ctx())).rejects.toThrow(/не дала строк/);
     expect(searchRowsMock).toHaveBeenCalledTimes(200);
     // Последняя страница уходит по offset 199k — потолок по просканированным строкам.
     expect(searchRowsMock).toHaveBeenLastCalledWith({ okvedCodes: ['62'], includeIp: false }, 1000, 199_000);
 
     const fail = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
-    expect((fail?.collect_info as HeCollectInfo).stats?.excluded_during_fetch).toBe(200_000);
+    expect(fail?.status).toBe('failed');
+    expect(String(fail?.error)).toContain('не дала строк');
+    expect(String(fail?.error)).not.toMatch(/сегмент исчерпан/i);
+    const info = fail?.collect_info as HeCollectInfo;
+    expect(info.stats?.excluded_during_fetch).toBe(200_000);
+    // Задача помечена note про предел сканирования и НЕ считается exhausted —
+    // повторная сборка продолжит сегмент с места останова.
+    expect(info.tasks?.[0]).toMatchObject({
+      status: 'done',
+      rows: 0,
+      hit_ceiling: true,
+      note: 'достигнут предел сканирования 200k — запустите сборку ещё раз',
+    });
+    expect(info.tasks?.[0].exhausted).toBeUndefined();
   });
 
   it('marks the directory task as exhausted («реестр исчерпан») when the registry ends before the limit', async () => {
@@ -1302,6 +1405,49 @@ describe('continuation: other-base exclusion during directory fetch', () => {
     expect(info.tasks?.[0]).toMatchObject({ exhausted: true, note: 'реестр исчерпан' });
     // base_analyze не ставится.
     expect(mockDb.inserts.find((i) => i.table === 'he_jobs')).toBeUndefined();
+  });
+
+  it('failed hh task + exhausted registry → failure breakdown, NOT «Сегмент исчерпан»', async () => {
+    // Реестр исчерпан (все строки выдачи уже в другой базе), но hh-задача
+    // упала — «исчерпан» маскировал бы настоящий фейл: показываем разбор.
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        ...directoryInfo().tasks!,
+        {
+          source: 'hh_live',
+          status: 'dispatched',
+          child_job_id: 'pj1',
+          rows: 0,
+          task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info), otherBase([{ company: 'Старая' }])],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        parser_jobs: [{ id: 'pj1', status: 'failed', error_message: 'captcha' }],
+      },
+    });
+    // Короткая страница, единственная строка уже в другой базе → реестр исчерпан, 0 новых.
+    searchRowsMock.mockResolvedValue({ rows: [{ name: 'Старая' }] });
+
+    await expect(runBaseCollectStage(makeJob(), ctx())).rejects.toThrow(/не дала строк/);
+
+    const fail = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(fail?.status).toBe('failed');
+    expect(String(fail?.error)).toContain('не дала строк');
+    expect(String(fail?.error)).toContain('hh_live — captcha');
+    expect(String(fail?.error)).not.toMatch(/сегмент исчерпан/i);
+    const saved = fail?.collect_info as HeCollectInfo;
+    // Реестр при этом честно помечен исчерпанным — но итог сборки не «исчерпан».
+    expect(saved.tasks?.find((t) => t.source === 'companies_directory')).toMatchObject({
+      exhausted: true,
+      note: 'реестр исчерпан',
+    });
   });
 
   it('still excludes hh/maps rows at merge time (fetch-time exclusion covers only the registry)', async () => {
