@@ -19,8 +19,10 @@
  *     её id — в child_job_id. collect_info персистится после каждой задачи.
  *  3. WAIT — опрос дочерних джоб по статусу. Есть незавершённые →
  *     self-requeue и выход с {waiting: true}.
- *  4. HARVEST — строки всех done-задач мёржатся в унифицированные колонки,
- *     дедуп (company+website, регистронезависимо), кап 2000; he_bases →
+ *  4. HARVEST — строки всех done-задач мёржатся в унифицированные колонки
+ *     round-robin'ом (по одной строке из каждой задачи по кругу — иначе реестр,
+ *     диспатчущийся первым, съедал весь кап, а строки hh/карт молча отрезались),
+ *     дедуп (company+website, регистронезависимо), кап 6000; he_bases →
  *     status='analyzing' и ставится стадия base_analyze. Ноль строк — база
  *     failed с разбором по задачам, джоба падает. Упавшие задачи фиксируются
  *     в collect_info, но не валят джобу, если хотя бы одна задача дала строки.
@@ -52,7 +54,7 @@ const DIRECTORY_LIMIT = 2000;
 /** Кап строк при чтении результата одной дочерней джобы. */
 const CHILD_ROWS_LIMIT = 2000;
 /** Общий кап строк собранной базы (после мёрджа и дедупа). */
-const TOTAL_ROWS_CAP = 2000;
+const TOTAL_ROWS_CAP = 6000;
 /** Строк в he_bases.sample_rows — как у ручной загрузки. */
 const SAMPLE_ROWS = 30;
 /** Яндекс.Карты: max_results в воркере трактуется НА ОДИН поисковый URL, а не на задачу. */
@@ -162,6 +164,30 @@ export function dedupUnifiedRows(rows: HeUnifiedRow[]): HeUnifiedRow[] {
     out.push(row);
   }
   return out;
+}
+
+/**
+ * Round-robin мёрдж харвестов задач: берём строку №1 из каждого списка по
+ * кругу, затем строку №2 и т.д., исчерпанные списки пропускаем. Порядок строк
+ * внутри каждой задачи сохраняется (строки реестра идут в порядке реестра —
+ * в своих «ходах»). До этого был concat+slice по задачам, и первый источник
+ * (реестр диспатчится первым) съедал весь TOTAL_ROWS_CAP, а строки hh/карт
+ * молча отрезались. Дедуп после мёрджа сохраняет справедливость: первое
+ * вхождение дубля — из самого раннего «хода», т.е. из самой приоритетной
+ * задачи среди содержащих эту строку.
+ */
+export function interleaveTaskHarvests(lists: HeUnifiedRow[][]): HeUnifiedRow[] {
+  const out: HeUnifiedRow[] = [];
+  for (let i = 0; ; i += 1) {
+    let took = false;
+    for (const list of lists) {
+      if (i < list.length) {
+        out.push(list[i]);
+        took = true;
+      }
+    }
+    if (!took) return out;
+  }
 }
 
 /* ─────────────────────── Билдеры запросов к коллекторам ─────────────────────── */
@@ -616,8 +642,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // ─── HARVEST ───
   const done = tasks.filter((t) => t.status === 'done');
   const failed = tasks.filter((t) => t.status === 'failed');
+  // Round-robin по задачам (а не concat): ни один источник не съедает кап целиком.
   const merged = dedupUnifiedRows(
-    done.flatMap((t) => (t.harvest ?? []).filter((r) => r.company)),
+    interleaveTaskHarvests(done.map((t) => (t.harvest ?? []).filter((r) => r.company))),
   ).slice(0, TOTAL_ROWS_CAP);
 
   const stats = {

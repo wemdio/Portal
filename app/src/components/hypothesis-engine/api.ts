@@ -47,10 +47,10 @@ export interface HeCollectInfo {
   tasks?: HeCollectTask[] | null;
 }
 
-/** GET /projects/[id] отдаёт усечённые строки баз (без data/sample_rows). */
+/** GET /projects/[id] отдаёт усечённые строки баз (без тяжёлого data). */
 export type HeBaseSummary = Pick<
   HeBase,
-  'id' | 'vertical_id' | 'filename' | 'row_count' | 'analysis' | 'created_at'
+  'id' | 'vertical_id' | 'filename' | 'row_count' | 'analysis' | 'created_at' | 'columns' | 'sample_rows'
 > & {
   /** Статус разбора + 'collecting' (идёт автосборка; появился вместе с collect-эндпоинтом). */
   status: HeBase['status'] | 'collecting';

@@ -32,6 +32,7 @@ import {
   buildYandexSearchUrls,
   dedupUnifiedRows,
   HE_AUTO_COLLECT_COLUMNS,
+  interleaveTaskHarvests,
   mapDirectoryFilters,
   mapDirectoryRow,
   mapGoogleRow,
@@ -221,6 +222,55 @@ describe('dedupUnifiedRows', () => {
     expect(out).toHaveLength(2);
     expect(out[0].phone).toBe('1');
     expect(out[1].website).toBe('as2.ru');
+  });
+});
+
+describe('interleaveTaskHarvests (fair merge)', () => {
+  const sourceRows = (source: string, n: number): HeUnifiedRow[] =>
+    Array.from({ length: n }, (_, i) =>
+      row({ company: `${source}-${i}`, website: `${source}${i}.ru`, source_detail: source }),
+    );
+
+  it('round-robins 3 sources 1500/1500/1500: first 900 rows contain 300 of each, total preserved', () => {
+    const registry = sourceRows('реестр', 1500);
+    const hh = sourceRows('hh', 1500);
+    const maps = sourceRows('карты', 1500);
+
+    const merged = interleaveTaskHarvests([registry, hh, maps]);
+    expect(merged).toHaveLength(4500);
+
+    // Первые 900 строк — ровно по 300 «ходов» каждого источника (а не 900 реестра,
+    // как давал concat+slice под капом 2000).
+    const first900 = merged.slice(0, 900);
+    for (const source of ['реестр', 'hh', 'карты']) {
+      expect(first900.filter((r) => r.source_detail === source)).toHaveLength(300);
+    }
+    // Порядок внутри источника сохранён: его строки идут по возрастанию индекса.
+    const registryTurns = merged.filter((r) => r.source_detail === 'реестр');
+    expect(registryTurns[0].company).toBe('реестр-0');
+    expect(registryTurns.at(-1)?.company).toBe('реестр-1499');
+  });
+
+  it('skips exhausted lists and keeps per-list order', () => {
+    const a = [row({ company: 'a1' }), row({ company: 'a2' }), row({ company: 'a3' })];
+    const b: HeUnifiedRow[] = [];
+    const c = [row({ company: 'c1' })];
+    expect(interleaveTaskHarvests([a, b, c]).map((r) => r.company)).toEqual([
+      'a1',
+      'c1',
+      'a2',
+      'a3',
+    ]);
+  });
+
+  it('dedup after interleave still works: first turn (higher-priority task) wins', () => {
+    const first = [row({ company: 'АС', website: 'as.ru', phone: '1' }), row({ company: 'Первая' })];
+    const second = [row({ company: 'Вторая' }), row({ company: 'ас', website: 'AS.ru', phone: '2' })];
+    const out = dedupUnifiedRows(interleaveTaskHarvests([first, second]));
+    // Дубль из второй задачи отброшен, хотя в concat-мёрдже порядок был бы тот же —
+    // важно, что строки разных задач в выдаче чередуются.
+    expect(out.map((r) => r.company)).toEqual(['АС', 'Вторая', 'Первая']);
+    expect(out[0].phone).toBe('1');
   });
 });
 
@@ -572,6 +622,98 @@ describe('harvest', () => {
         payload: { base_id: 'b1' },
       }),
     );
+  });
+
+  it('interleaves done task harvests round-robin (first source no longer eats the cap)', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'done',
+          child_job_id: null,
+          rows: 3,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+          harvest: [
+            row({ company: 'Реестр-1', website: 'r1.ru' }),
+            row({ company: 'Реестр-2', website: 'r2.ru' }),
+            row({ company: 'Реестр-3', website: 'r3.ru' }),
+          ],
+        },
+        {
+          source: 'hh_live',
+          status: 'done',
+          child_job_id: 'pj1',
+          rows: 2,
+          task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
+          harvest: [
+            row({ company: 'HH-1', website: 'h1.ru' }),
+            row({ company: 'HH-2', website: 'h2.ru' }),
+          ],
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(5);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    const data = harvest?.data as HeUnifiedRow[];
+    // Round-robin: реестр/hh по кругу, исчерпанный hh-список пропускается.
+    expect(data.map((r) => r.company)).toEqual(['Реестр-1', 'HH-1', 'Реестр-2', 'HH-2', 'Реестр-3']);
+  });
+
+  it('caps the merged base at 6000 rows, balanced across sources', async () => {
+    const big = (prefix: string, n: number): HeUnifiedRow[] =>
+      Array.from({ length: n }, (_, i) => row({ company: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'done',
+          child_job_id: null,
+          rows: 4000,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+          harvest: big('реестр', 4000),
+        },
+        {
+          source: 'hh_live',
+          status: 'done',
+          child_job_id: 'pj1',
+          rows: 4000,
+          task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
+          harvest: big('hh', 4000),
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(6000);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(harvest?.row_count).toBe(6000);
+    const data = harvest?.data as HeUnifiedRow[];
+    // Кап делит поровну: 3000 «ходов» каждого источника, а не 2000 реестра + 0 hh.
+    expect(data.filter((r) => r.company.startsWith('реестр-'))).toHaveLength(3000);
+    expect(data.filter((r) => r.company.startsWith('hh-'))).toHaveLength(3000);
+    expect((harvest?.collect_info as HeCollectInfo).stats?.rows_total).toBe(6000);
   });
 
   it('dispatches companies_directory synchronously via searchRows and harvests immediately', async () => {

@@ -8,8 +8,9 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
-import { ArrowRight, Check, FileSpreadsheet, Sparkles, Upload, X } from 'lucide-react';
+import { ArrowRight, Check, Download, Eye, EyeOff, FileSpreadsheet, Sparkles, Upload, X } from 'lucide-react';
 import type { HeBaseAnalysis, HeDistributionEntry, HeVertical } from '@/lib/hypothesisEngine/types';
+import { authFetch } from '@/lib/authFetch';
 import { readSpreadsheetFile } from '@/lib/spreadsheet/parseCSV';
 import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
 import {
@@ -370,45 +371,9 @@ export function Step4Base(props: {
           <p className="text-xs font-semibold uppercase tracking-widest text-gray-400">
             Базы под эту вертикаль ({verticalBases.length})
           </p>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-start gap-2">
             {verticalBases.map((base) => (
-              <div
-                key={base.id}
-                className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2"
-              >
-                <span className="min-w-0">
-                  <span className="flex items-center gap-1.5">
-                    <span className="max-w-[200px] truncate text-xs font-medium text-gray-800">
-                      {base.filename}
-                    </span>
-                    {base.source === 'auto' ? (
-                      <Badge tone="blue">авто</Badge>
-                    ) : (
-                      <Badge tone="gray">загрузка</Badge>
-                    )}
-                  </span>
-                  <span className="block text-[11px] text-gray-400">
-                    {base.row_count.toLocaleString('ru-RU')} строк · {formatDate(base.created_at)}
-                  </span>
-                </span>
-                {base.status === 'collecting' ? (
-                  <span className="inline-flex items-center gap-1 text-[11px] text-blue-600">
-                    <Spinner className="h-3.5 w-3.5" />
-                    Собираем…
-                  </span>
-                ) : base.status === 'analyzing' ? (
-                  <span className="inline-flex items-center gap-1 text-[11px] text-amber-600">
-                    <Spinner className="h-3.5 w-3.5" />
-                    Разбираем…
-                  </span>
-                ) : base.status === 'analyzed' ? (
-                  <Badge tone="emerald">Разобрана</Badge>
-                ) : base.status === 'failed' ? (
-                  <Badge tone="red">Ошибка</Badge>
-                ) : (
-                  <Badge tone="gray">Загружена</Badge>
-                )}
-              </div>
+              <BaseCard key={base.id} base={base} />
             ))}
           </div>
         </section>
@@ -466,6 +431,185 @@ export function Step4Base(props: {
           Сборка шаблона завершилась ошибкой{templateJob?.error ? `: ${templateJob.error}` : '.'}{' '}
           Нажмите «Собрать шаблон», чтобы попробовать снова.
         </StatusBox>
+      ) : null}
+    </div>
+  );
+}
+
+/* ─────────────────────────── Карточка базы: скачать CSV / превью ─────────────────────────── */
+
+/** Строк базы в превью на карточке (sample_rows в БД капнут 30 — хватает). */
+const PREVIEW_ROWS = 10;
+/** Усечение текста ячейки превью; полный текст — в title. */
+const PREVIEW_CELL_CHARS = 80;
+
+function previewCellText(value: unknown): string {
+  if (value == null) return '';
+  return typeof value === 'string' ? value : String(value);
+}
+
+/** Имя файла из Content-Disposition ответа экспорта; fallback — base-<id>.csv. */
+function exportDownloadName(res: Response, baseId: string): string {
+  const match = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '');
+  return match?.[1] ?? `base-${baseId}.csv`;
+}
+
+const CARD_ACTION_BTN =
+  'inline-flex items-center gap-1 rounded border border-gray-200 px-1.5 py-0.5 text-[11px] text-gray-500 transition hover:border-blue-300 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50';
+
+function BaseCard({ base }: { base: HeBaseSummary }) {
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState('');
+
+  const hasRows = base.row_count > 0;
+  const columns = Array.isArray(base.columns) ? base.columns : [];
+  const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : []).slice(
+    0,
+    PREVIEW_ROWS,
+  );
+
+  const handleDownload = useCallback(async () => {
+    if (downloading) return;
+    setDownloadError('');
+    setDownloading(true);
+    try {
+      // Не <a href>: экспорт за Bearer-авторизацией — тянем через authFetch
+      // и скачиваем blob через временный objectURL.
+      const res = await authFetch(`${HE_API}/bases/${base.id}/export`);
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || `Ошибка ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = exportDownloadName(res, base.id);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : 'Не удалось скачать CSV');
+    } finally {
+      setDownloading(false);
+    }
+  }, [base.id, downloading]);
+
+  return (
+    <div
+      className={`rounded-lg border border-gray-200 bg-white px-3 py-2 ${previewOpen ? 'w-full' : ''}`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="min-w-0">
+          <span className="flex items-center gap-1.5">
+            <span className="max-w-[200px] truncate text-xs font-medium text-gray-800">
+              {base.filename}
+            </span>
+            {base.source === 'auto' ? (
+              <Badge tone="blue">авто</Badge>
+            ) : (
+              <Badge tone="gray">загрузка</Badge>
+            )}
+          </span>
+          <span className="block text-[11px] text-gray-400">
+            {base.row_count.toLocaleString('ru-RU')} строк · {formatDate(base.created_at)}
+          </span>
+        </span>
+        {base.status === 'collecting' ? (
+          <span className="inline-flex items-center gap-1 text-[11px] text-blue-600">
+            <Spinner className="h-3.5 w-3.5" />
+            Собираем…
+          </span>
+        ) : base.status === 'analyzing' ? (
+          <span className="inline-flex items-center gap-1 text-[11px] text-amber-600">
+            <Spinner className="h-3.5 w-3.5" />
+            Разбираем…
+          </span>
+        ) : base.status === 'analyzed' ? (
+          <Badge tone="emerald">Разобрана</Badge>
+        ) : base.status === 'failed' ? (
+          <Badge tone="red">Ошибка</Badge>
+        ) : (
+          <Badge tone="gray">Загружена</Badge>
+        )}
+        {hasRows ? (
+          <span className="ml-auto inline-flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setPreviewOpen((v) => !v)}
+              className={CARD_ACTION_BTN}
+              aria-expanded={previewOpen}
+            >
+              {previewOpen ? (
+                <EyeOff className="h-3 w-3" aria-hidden />
+              ) : (
+                <Eye className="h-3 w-3" aria-hidden />
+              )}
+              Превью
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleDownload()}
+              disabled={downloading}
+              className={CARD_ACTION_BTN}
+            >
+              {downloading ? (
+                <Spinner className="h-3 w-3" />
+              ) : (
+                <Download className="h-3 w-3" aria-hidden />
+              )}
+              Скачать CSV
+            </button>
+          </span>
+        ) : null}
+      </div>
+      {downloadError ? (
+        <p className="mt-1 text-[11px] text-red-600" role="alert">
+          {downloadError}
+        </p>
+      ) : null}
+      {previewOpen && hasRows ? (
+        <div className="mt-2 overflow-x-auto rounded-lg border border-gray-200">
+          <table className="min-w-full divide-y divide-gray-200 text-xs">
+            <thead className="bg-gray-50">
+              <tr>
+                {columns.map((col) => (
+                  <th
+                    key={col}
+                    className="whitespace-nowrap px-3 py-1.5 text-left font-semibold uppercase tracking-wider text-gray-500"
+                  >
+                    {col}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100 bg-white">
+              {previewRows.map((row, ri) => (
+                <tr key={ri}>
+                  {columns.map((col) => {
+                    const text = previewCellText(row[col]);
+                    return (
+                      <td
+                        key={col}
+                        className="max-w-[220px] truncate px-3 py-1.5 text-gray-700"
+                        title={text}
+                      >
+                        {text.length > PREVIEW_CELL_CHARS
+                          ? `${text.slice(0, PREVIEW_CELL_CHARS)}…`
+                          : text}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {previewRows.length === 0 ? (
+            <p className="px-3 py-2 text-[11px] text-gray-400">Нет строк для превью</p>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );
