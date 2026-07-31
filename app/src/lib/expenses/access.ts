@@ -7,13 +7,14 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { UserRole } from '@/types';
 
 /**
- * Гард доступа к расходам.
+ * Гард раздела «Деньги» — и расходов, и доходов.
  *
- * Совпадает с правилом видимости вкладки (`isNavTabVisible` в lib/navigation):
- * админ проходит всегда, остальным нужен выданный тумблер nav-expenses.
- * Скрытый пункт меню защитой не является — данные закрыты здесь.
+ * Решает только роль: `admin` проходит, все остальные получают 403. Точечной
+ * выдачи больше нет — `user_tool_visibility` здесь не читается вовсе, и строка
+ * в этой таблице доступа не даёт. Пункт меню закрыт флагом `adminOnly` в
+ * `lib/navigation`, но скрытый пункт защитой не является: сюда можно прийти
+ * прямой ссылкой, и данные закрыты именно здесь.
  */
-export const EXPENSES_NAV_TAB_ID = 'nav-expenses';
 
 export type ExpensesGuardResult =
   | { ok: true; userId: string; role: UserRole | null }
@@ -29,24 +30,16 @@ export async function requireExpensesAccess(req: NextRequest): Promise<ExpensesG
 
   if (!supabaseAdmin) return { ok: false, status: 500, error: 'Server misconfigured' };
 
-  const [{ data: profile }, { data: visibility }] = await Promise.all([
-    supabaseAdmin.from('profiles').select('role').eq('id', user.id).single(),
-    supabaseAdmin
-      .from('user_tool_visibility')
-      .select('enabled')
-      .eq('user_id', user.id)
-      .eq('tool_id', EXPENSES_NAV_TAB_ID)
-      .maybeSingle(),
-  ]);
+  const { data: profile } = await supabaseAdmin
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single();
 
   const role = (profile?.role ?? null) as UserRole | null;
 
-  if (role !== 'admin' && visibility?.enabled !== true) {
-    return {
-      ok: false,
-      status: 403,
-      error: 'Доступ к расходам не выдан. Попроси админа включить вкладку в твоём профиле.',
-    };
+  if (role !== 'admin') {
+    return { ok: false, status: 403, error: 'Раздел «Деньги» доступен только админам' };
   }
 
   return { ok: true, userId: user.id, role };
