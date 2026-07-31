@@ -37,6 +37,15 @@ class JobMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(health._is_manual_stop_error("Job cancelled by user"))
         self.assertFalse(health._is_manual_stop_error("Playwright browser crashed"))
 
+    async def test_parser_archive_sink_is_filtered_from_monitor_queries(self):
+        spec = next(item for item in health._JOB_MONITOR_SPECS if item.table == "parser_jobs")
+        conn = FakeConnection()
+
+        await health._fetch_active_job_rows(conn, spec)
+
+        query = conn.fetch.await_args.args[0]
+        self.assertIn("j.parser_type <> 'hh_vacancies_autopipeline'", query)
+
     async def test_stuck_pending_job_alerts_once(self):
         spec = health.JobMonitorSpec(
             "yandex_maps_jobs",

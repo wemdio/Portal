@@ -1067,6 +1067,7 @@ class JobMonitorSpec:
     updated_column: str | None = None
     started_column: str | None = "started_at"
     queue_heartbeat_column: str | None = None
+    extra_predicate: str | None = None
     failed_statuses: tuple[str, ...] = (
         "failed", "error", "captcha", "blocked", "timeout", "login_required",
     )
@@ -1077,6 +1078,8 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
         "parser_jobs", "HH / ENG Hiring", ("pending", "running"),
         ("total_found", "total_parsed", "progress_stage", "progress_percent", "progress_detail"),
         "portal-worker-hh / portal-worker-eng-hiring",
+        # Permanent archive parent rows are not executable worker jobs.
+        extra_predicate="j.parser_type <> 'hh_vacancies_autopipeline'",
     ),
     JobMonitorSpec(
         "search_parser_jobs", "Поисковый парсер", ("pending", "running"),
@@ -1258,6 +1261,7 @@ async def _fetch_active_job_rows(conn, spec: JobMonitorSpec):
         if spec.owner_column
         else ""
     )
+    extra_filter = f" AND ({spec.extra_predicate})" if spec.extra_predicate else ""
     return await conn.fetch(
         f"SELECT j.id::text AS id, j.status, {_progress_sql(spec)} AS progress, "
         f"  {activity_secs} AS activity_secs, "
@@ -1266,7 +1270,8 @@ async def _fetch_active_job_rows(conn, spec: JobMonitorSpec):
         f"  {owner_select} "
         f"FROM public.{spec.table} j "
         f"{owner_join} "
-        "WHERE j.status = ANY($1::text[])",
+        "WHERE j.status = ANY($1::text[])"
+        f"{extra_filter}",
         list(spec.active_statuses),
     )
 
@@ -1361,9 +1366,11 @@ async def _baseline_existing_failures(conn) -> bool:
         return True
     for spec in _JOB_MONITOR_SPECS:
         try:
+            extra_filter = f" AND ({spec.extra_predicate})" if spec.extra_predicate else ""
             rows = await conn.fetch(
-                f"SELECT id::text AS id FROM public.{spec.table} "
-                "WHERE status = ANY($1::text[])",
+                f"SELECT j.id::text AS id FROM public.{spec.table} j "
+                "WHERE j.status = ANY($1::text[])"
+                f"{extra_filter}",
                 list(spec.failed_statuses),
             )
             if rows:
@@ -1408,6 +1415,7 @@ async def check_failed_jobs() -> list[str]:
                 if spec.owner_column
                 else ""
             )
+            extra_filter = f" AND ({spec.extra_predicate})" if spec.extra_predicate else ""
             try:
                 rows = await conn.fetch(
                     "SELECT j.id::text AS id, j.status, j.error_message, "
@@ -1415,7 +1423,8 @@ async def check_failed_jobs() -> list[str]:
                     f"FROM public.{spec.table} j "
                     f"{owner_join} "
                     "WHERE j.status = ANY($1::text[]) "
-                    "  AND nullif(btrim(j.error_message), '') IS NOT NULL",
+                    "  AND nullif(btrim(j.error_message), '') IS NOT NULL"
+                    f"{extra_filter}",
                     list(spec.failed_statuses),
                 )
             except Exception as e:
@@ -2005,11 +2014,18 @@ async def _fetch_active_jobs(
     for table, label, statuses in (job_tables or _JOB_TABLES):
         try:
             placeholders = ", ".join(f"${i+1}" for i in range(len(statuses)))
+            spec = next((item for item in _JOB_MONITOR_SPECS if item.table == table), None)
+            extra_filter = (
+                f" AND ({spec.extra_predicate})"
+                if spec and spec.extra_predicate
+                else ""
+            )
             rows = await conn.fetch(
-                f"SELECT status, count(*)::int AS n "
-                f"FROM public.{table} "
-                f"WHERE status IN ({placeholders}) "
-                f"GROUP BY status",
+                f"SELECT j.status, count(*)::int AS n "
+                f"FROM public.{table} j "
+                f"WHERE j.status IN ({placeholders})"
+                f"{extra_filter} "
+                f"GROUP BY j.status",
                 *statuses,
             )
             if rows:
