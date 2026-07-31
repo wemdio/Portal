@@ -526,6 +526,21 @@ export async function stepEnrich(
   let done = 0;
   let timedOut = 0;
   const checkpointEvery = 250;
+  const settledIndexes = new Set<number>();
+  const markSettled = async (index: number, didTimeOut: boolean) => {
+    // The watchdog can release the pool slot before the aborted fetch promise
+    // unwinds. Whichever path settles first owns progress for this row.
+    if (settledIndexes.has(index)) return;
+    settledIndexes.add(index);
+    done += 1;
+    if (didTimeOut) timedOut += 1;
+    if (done % 10 === 0 || done === toProcess.length) {
+      await onProgress(Math.round((done / toProcess.length) * 100));
+    }
+    if (onCheckpoint && (done % checkpointEvery === 0 || done === toProcess.length)) {
+      await onCheckpoint([newHeader, ...newBody]);
+    }
+  };
   await processInPool(toProcess, ENRICH_CONCURRENCY, async (item, _i, signal) => {
     if (isCancelled && await isCancelled()) return;
     try {
@@ -534,21 +549,16 @@ export async function stepEnrich(
       const text = await fetchAndExtract(item.url, { timeout: 15_000, signal });
       if (text) newBody[item.i][targetDescIdx] = text.slice(0, 2000);
     } catch {
-      if (signal?.aborted) {
-        timedOut += 1;
-        // No log per-site to avoid spamming — aggregate count printed below.
-      }
       // Other errors silently skipped: site is unreachable / blocked.
-    }
-    done++;
-    if (done % 10 === 0 || done === toProcess.length) {
-      await onProgress(Math.round((done / toProcess.length) * 100));
-    }
-    if (onCheckpoint && (done % checkpointEvery === 0 || done === toProcess.length)) {
-      await onCheckpoint([newHeader, ...newBody]);
+    } finally {
+      await markSettled(_i, false);
     }
   }, {
     taskTimeoutMs: ENRICH_PER_SITE_TIMEOUT_MS,
+    onTimeout: async (_item, index) => {
+      await markSettled(index, true);
+      return undefined;
+    },
   });
 
   if (timedOut > 0) {

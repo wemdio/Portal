@@ -224,7 +224,7 @@ export interface ProcessInPoolOptions<T, R> {
    * `undefined as R` — fine for callers that already mutate side-state inside
    * `fn` (most enrich/scrape callsites do).
    */
-  onTimeout?: (item: T, index: number) => R;
+  onTimeout?: (item: T, index: number) => R | Promise<R>;
 }
 
 export async function processInPool<T, R>(
@@ -246,8 +246,11 @@ export async function processInPool<T, R>(
     const timeoutPromise = new Promise<R>((resolve) => {
       timeoutHandle = setTimeout(() => {
         controller.abort();
-        const sentinel = onTimeout ? onTimeout(items[i], i) : (undefined as unknown as R);
-        resolve(sentinel);
+        // Allow callers to persist timeout progress before this slot advances.
+        // A failed timeout hook must never strand the pool worker.
+        Promise.resolve(
+          onTimeout ? onTimeout(items[i], i) : (undefined as unknown as R),
+        ).then(resolve, () => resolve(undefined as unknown as R));
       }, taskTimeoutMs);
     });
     try {
