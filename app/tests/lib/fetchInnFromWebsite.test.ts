@@ -66,6 +66,18 @@ describe('fetchInnFromWebsite', () => {
     ).resolves.not.toThrow();
   });
 
+  it('does not start fallback requests with an already-aborted signal', async () => {
+    global.fetch = jest.fn() as unknown as typeof fetch;
+    const controller = new AbortController();
+    controller.abort();
+    const { fetchAndExtract } = await import('@/lib/enrich/websiteParser');
+
+    await expect(
+      fetchAndExtract('https://example.com', { timeout: 1_000, signal: controller.signal }),
+    ).rejects.toThrow();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   /**
    * Source-level guard. The original prod outage was caused by:
    *   await import(/* webpackIgnore: true *\/ './innExtractor')

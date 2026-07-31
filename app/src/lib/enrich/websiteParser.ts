@@ -825,6 +825,13 @@ async function fetchHtml(
   const timer = setTimeout(() => controller.abort(), timeout);
 
   const externalSignal = options?.signal;
+  // AbortSignal does not replay an abort event to listeners attached after it
+  // fired. A watchdog can hand a fallback request an already-aborted signal,
+  // so stop here instead of starting another fetch that cannot be cancelled.
+  if (externalSignal?.aborted) {
+    clearTimeout(timer);
+    return null;
+  }
   const onExternalAbort = () => controller.abort();
   externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 

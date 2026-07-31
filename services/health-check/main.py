@@ -1068,6 +1068,7 @@ class JobMonitorSpec:
     started_column: str | None = "started_at"
     queue_heartbeat_column: str | None = None
     extra_predicate: str | None = None
+    progress_sql: str | None = None
     failed_statuses: tuple[str, ...] = (
         "failed", "error", "captcha", "blocked", "timeout", "login_required",
     )
@@ -1104,7 +1105,7 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
     JobMonitorSpec(
         "base_constructor_jobs", "Конструктор баз", ("pending", "processing"),
         ("current_step", "current_step_key", "current_step_progress", "total_steps"),
-        "portal-worker-baseconstructor",
+        "portal-worker-baseconstructor", updated_column="started_at", started_column=None,
     ),
     JobMonitorSpec(
         "yandex_maps_jobs", "Яндекс.Карты", ("pending", "running"),
@@ -1174,6 +1175,12 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
         "tg_transcribe_jobs", "Telegram-транскрибация", ("pending", "running"),
         ("payload",), "portal-worker-tg-transcribe", updated_column="updated_at",
         owner_column=None,
+        progress_sql=(
+            "concat_ws(' | ', "
+            "j.payload #>> '{videoInfo,filename}', "
+            "j.payload #>> '{monitor_progress,stage}', "
+            "(j.payload #>> '{monitor_progress,progress_percent}') || '%')"
+        ),
     ),
 )
 
@@ -1227,6 +1234,8 @@ async def _claim_job_alert(conn, alert_key: str) -> bool:
 
 
 def _progress_sql(spec: JobMonitorSpec) -> str:
+    if spec.progress_sql:
+        return spec.progress_sql
     values = ", ".join(
         f"coalesce(j.{column}::text, '')" for column in spec.progress_columns
     )
