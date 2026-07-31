@@ -1,5 +1,19 @@
 import { getSheetsClient } from '@/lib/googleSheets/auth';
 
+/**
+ * Оборачивает имя листа в одинарные кавычки для A1-нотации. Обязательно
+ * когда имя содержит пробелы, кириллицу или спец-символы (Google Sheets API
+ * возвращает "Unable to parse range" без кавычек). Одинарные кавычки внутри
+ * имени экранируются удвоением.
+ *
+ * Инцидент: боевая outreach «Лиды» и marketing «Лиды маркетинг» отваливались
+ * с `Unable to parse range: Лиды маркетинг!D:D` — в тестовых таблицах то же
+ * имя парсилось, в прод-таблицах нет. Кавычки решают проблему на обоих.
+ */
+export function quoteSheet(sheetName: string): string {
+  return `'${sheetName.replace(/'/g, "''")}'`;
+}
+
 /** Читает значения одной колонки листа (A1-нотация без диапазона). */
 export async function readColumn(
   spreadsheetId: string,
@@ -7,7 +21,7 @@ export async function readColumn(
   column: string, // 'A', 'B', ...
 ): Promise<string[]> {
   const sheets = getSheetsClient();
-  const range = `${sheetName}!${column}:${column}`;
+  const range = `${quoteSheet(sheetName)}!${column}:${column}`;
   const resp = await sheets.spreadsheets.values.get({ spreadsheetId, range });
   const rows = resp.data.values ?? [];
   return rows.map((r) => (r[0] ?? '').toString());
@@ -35,9 +49,10 @@ export async function appendRows(
   if (rows.length === 0) return;
   const sheets = getSheetsClient();
 
+  const quoted = quoteSheet(sheetName);
   // Читаем очень широкий диапазон, чтобы гарантированно поймать max используемую
   // строку даже если у ручных строк данные в столбцах после Z (AA, AB, ...).
-  const scanRange = `${sheetName}!A:AZ`;
+  const scanRange = `${quoted}!A:AZ`;
   const resp = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: scanRange,
@@ -52,7 +67,7 @@ export async function appendRows(
     );
   }
   const endCol = String.fromCharCode('A'.charCodeAt(0) + numCols - 1);
-  const targetRange = `${sheetName}!A${startRow}:${endCol}${endRow}`;
+  const targetRange = `${quoted}!A${startRow}:${endCol}${endRow}`;
 
   // Логируем в stdout — при разборе неверных вставок сразу видно куда именно
   // пошла запись и какой был detected lastRow.

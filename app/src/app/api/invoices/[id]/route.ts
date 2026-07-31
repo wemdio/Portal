@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
-import { isTechnician } from '@/lib/roles';
+import { isAdmin } from '@/lib/roles';
 import type { UserRole } from '@/types';
 import {
   getYookassaInvoice,
@@ -53,7 +53,7 @@ async function requireTechnicianAuth(req: NextRequest) {
     .eq('id', user.id)
     .single();
 
-  if (!isTechnician((profile?.role ?? null) as UserRole | null)) {
+  if (!isAdmin((profile?.role ?? null) as UserRole | null)) {
     return { error: jsonError('Forbidden', 403) };
   }
 

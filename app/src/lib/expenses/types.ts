@@ -36,10 +36,9 @@ export interface ExpenseRow {
   amount_rub: number | null;
 }
 
-export interface SeriesPoint {
+export interface SeriesPointBase {
   bucket: string;
   total: number;
-  byCategory: Record<string, number>;
   bySource: Record<string, number>;
   /**
    * Истина, когда календарные границы бакета (неделя/месяц) выходят за
@@ -50,6 +49,10 @@ export interface SeriesPoint {
    * столбец, а не рисует его как обычный.
    */
   partial: boolean;
+}
+
+export interface SeriesPoint extends SeriesPointBase {
+  byCategory: Record<string, number>;
 }
 
 export interface ExpensesSummary {
@@ -74,6 +77,75 @@ export interface VendorBreakdownItem {
   share: number;
   deltaPrev: number | null;
   /** Число операций этого вендора без курса ЦБ — total их не учитывает (amount_rub падает в 0), эти счётчики не дают этому потеряться. */
+  unconvertedCount: number;
+  unconvertedByCurrency: Record<string, number>;
+}
+
+// ─── Доходы ────────────────────────────────────────────────────────────────
+//
+// Доход устроен проще расхода: слоя разметки у него нет вовсе. Вместо вендоров
+// и категорий работает классификатор синка — `is_revenue` плюс причина в
+// `exclude_reason`. Поэтому здесь свои типы, а не расширение расходных: общий
+// у сторон только денежный минимум (сумма, валюта, рублёвый эквивалент).
+
+/** Источники дохода — только банки: карты и ручные записи бывают лишь на расходной стороне. */
+export type IncomeSource = 'tochka' | 'tbank';
+
+/** Строка витрины incomes_v. Контрагент — плательщик. */
+export interface IncomeRow {
+  source: IncomeSource;
+  source_ref: string;
+  occurred_on_msk: string;
+  amount: number;
+  currency: string;
+  counterparty: string | null;
+  counterparty_inn: string | null;
+  details: string | null;
+  /** Классификатор синка: true — клиентский платёж, false — не выручка (причина в exclude_reason). */
+  is_revenue: boolean | null;
+  exclude_reason: string | null;
+  amount_rub: number | null;
+}
+
+/** Точка ряда дохода: категорий у прихода нет, поэтому только разрез по банкам. */
+export type IncomeSeriesPoint = SeriesPointBase;
+
+/** Ключ бакета `nonRevenueByReason` для строк, у которых причина не записана. */
+export const UNKNOWN_EXCLUDE_REASON_KEY = 'unknown';
+
+export interface IncomesSummary {
+  total: number;
+  avgPerDay: number;
+  deltaPrev: number | null;
+  /** Не-выручка (is_revenue = false): в итог не входит, но показывается рядом — как перемещения в расходах. */
+  nonRevenueTotal: number;
+  nonRevenueCount: number;
+  /**
+   * Не-выручка в разрезе причин из `exclude_reason` — «возврат»,
+   * «банк-механика», «перевод себе». Причина здесь ценнее самой суммы: она
+   * объясняет, почему деньги пришли, но выручкой не считаются.
+   */
+  nonRevenueByReason: Record<string, number>;
+  unconvertedCount: number;
+  /** Сумма в исходной валюте (поле amount) по строкам без курса, сгруппированная по валюте. */
+  unconvertedByCurrency: Record<string, number>;
+  series: IncomeSeriesPoint[];
+}
+
+export interface PayerBreakdownItem {
+  /**
+   * Ключ группировки: `inn:<ИНН>`, если ИНН есть, иначе `name:<имя в нижнем
+   * регистре>`. Пустая строка — плательщик не указан вовсе. Префикс не
+   * декоративный: без него ИНН и имя из одних цифр склеились бы в одну строку.
+   */
+  payerKey: string;
+  payerInn: string | null;
+  payerName: string;
+  total: number;
+  ops: number;
+  share: number;
+  deltaPrev: number | null;
+  /** См. VendorBreakdownItem: строки без курса ЦБ не должны потеряться в total. */
   unconvertedCount: number;
   unconvertedByCurrency: Record<string, number>;
 }
