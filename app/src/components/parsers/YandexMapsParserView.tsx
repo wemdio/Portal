@@ -159,7 +159,9 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
         body: JSON.stringify(payload),
       });
       const jobId = data.job.id;
-      await refreshJobs();
+      // Show the created run immediately. The follow-up Supabase refresh is
+      // best-effort and must not make a successfully created job look lost.
+      setJobs((prev) => [data.job, ...prev.filter((job) => job.id !== jobId)]);
       setActiveJobId(jobId);
 
       try {
@@ -170,7 +172,8 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
       }
     } catch (e) {
       console.error(e);
-      setError(e instanceof Error ? e.message : 'Не удалось создать запуск');
+      const message = e instanceof Error ? e.message : 'Не удалось создать запуск';
+      setError(`Запуск не создан. ${message}`);
     } finally {
       setBusy(false);
     }
@@ -476,6 +479,21 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
         </div>
       )}
 
+      {error ? (
+        <div
+          className={clientMode
+            ? 'rounded-xl px-4 py-3 text-sm'
+            : 'rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700'}
+          style={clientMode
+            ? { background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-danger)', color: 'var(--cp-danger)' }
+            : undefined}
+          role="alert"
+          aria-live="assertive"
+        >
+          {error}
+        </div>
+      ) : null}
+
       {clientMode && activeJob ? (
         <div className="rounded-xl px-4 py-3 text-sm" style={{ background: 'var(--cp-surface-rest)', border: '1px solid var(--cp-divider)', color: 'var(--cp-paper-mute)' }}>
           <ClientTariffUsageInline
@@ -764,7 +782,6 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                       )}
                     </div>
                   </div>
-                  {error && <div className="mt-4 text-sm text-red-600 bg-red-50 p-2 rounded border border-red-100">{error}</div>}
                 </div>
               </div>
 

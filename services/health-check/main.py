@@ -17,10 +17,12 @@ Daily report (21:00 MSK):
 from __future__ import annotations
 
 import asyncio
+import html
 import io
 import json
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import deque
@@ -59,6 +61,12 @@ SERVER_IP = os.environ.get("HEALTH_SERVER_IP", "139.60.162.12")
 HEALTH_RETRY_ATTEMPTS = max(1, int(os.environ.get("HEALTH_RETRY_ATTEMPTS", "3")))
 HEALTH_RETRY_DELAY_SEC = max(0.0, float(os.environ.get("HEALTH_RETRY_DELAY_SEC", "1.0")))
 HEALTH_INTERVAL_SEC = int(os.environ.get("HEALTH_INTERVAL_SEC", "900"))
+JOB_MONITOR_INTERVAL_SEC = max(
+    60, int(os.environ.get("HEALTH_JOB_MONITOR_INTERVAL_SEC", "300"))
+)
+JOB_STUCK_MINUTES = max(
+    2, int(os.environ.get("HEALTH_JOB_STUCK_MIN", "15"))
+)
 # Proxies are checked on their own slower cadence (default 5 min) so a flaky
 # test target can't spam the chat, and so we don't hammer the proxy pool every
 # health cycle. The main cycle (site/DB) still runs every HEALTH_INTERVAL_SEC.
@@ -254,6 +262,7 @@ def _normalize_network_error(error: Exception, limit: int = 120) -> str:
 # ── Settings (mute alerts) ───────────────────────────────────────────────────
 
 SETTINGS_TABLE = "health_check_settings"
+JOB_ALERTS_TABLE = "health_check_job_alerts"
 
 # PgBouncer in transaction mode: prepared statements are not supported (per-connection).
 # Disable asyncpg statement cache to avoid "prepared statement already exists".
@@ -261,12 +270,22 @@ _CONNECT_KWARGS: dict = {"statement_cache_size": 0, "timeout": 15, "command_time
 
 
 async def _ensure_settings_table() -> None:
-    """Create settings table if not exists (single row: send_alerts)."""
+    """Create health-check state tables."""
     conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
     try:
         await conn.execute(
             f"CREATE TABLE IF NOT EXISTS {SETTINGS_TABLE} "
             "(id int PRIMARY KEY DEFAULT 1, send_alerts boolean NOT NULL DEFAULT true)"
+        )
+        await conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {JOB_ALERTS_TABLE} ("
+            "alert_key text PRIMARY KEY, "
+            "alerted_at timestamptz NOT NULL DEFAULT now())"
+        )
+        await conn.execute(
+            f"DELETE FROM {JOB_ALERTS_TABLE} "
+            "WHERE alerted_at < now() - interval '90 days' "
+            "AND alert_key <> 'job-monitor:v1:initialized'"
         )
     finally:
         await conn.close()
@@ -1024,48 +1043,230 @@ def _track(key: str, failed: bool) -> tuple[bool, bool]:
         return False, prev >= HEALTH_ALERT_MIN_CONSECUTIVE  # recovery
 
 
-# ── Stuck-job detection ──────────────────────────────────────────────────────
+# ── Parser-job monitoring ────────────────────────────────────────────────────
 #
-# Ловит фоновые задачи, которые «висят»: статус running/pending, а прогресс не
-# двигается N минут. Именно так выглядел инцидент 04.06 — «Поиск почт» у Оли
-# стоял на 0% ~20 мин (воркер захлебнулся, ретраи жгли попытки без финализации),
-# и узнали мы об этом только когда специалист написал в чат. Health-check ловит
-# это раньше человека и шлёт алерт.
+# One registry covers user-facing parsers and processing tools. Every five
+# minutes we look for:
+#   1) an active job whose DB heartbeat/progress has not moved for 15 minutes;
+#   2) a newly failed job with a real error.
 #
-# Для таблиц с числовым счётчиком (processed) сигнал = «значение не изменилось с
-# тех пор как мы впервые увидели задачу running, и прошло > stall_min». Для
-# конструктора баз счётчика на job-строке нет — там сигнал «running дольше
-# stall_min без завершения». Плюс универсальный «pending дольше pending_min» =
-# задачу никто не взял в работу (воркер лежит/перегружен).
-#
-# (table, человекочитаемая метка для кнопки, колонка-счётчик | None, stall_min)
-_STUCK_JOB_SPECS: list[tuple[str, str, str | None, int]] = [
-    ("website_enrichment_jobs", "Поиск почт / обогащение сайтов", "processed",
-     int(os.environ.get("HEALTH_STUCK_ENRICH_MIN", "8"))),
-    ("email_validation_jobs", "Валидация почт", "processed",
-     int(os.environ.get("HEALTH_STUCK_EMAILVAL_MIN", "8"))),
-    ("brief_scoring_jobs", "Оценка ЦА (скоринг)", "processed",
-     int(os.environ.get("HEALTH_STUCK_SCORING_MIN", "10"))),
-    ("base_constructor_jobs", "Конструктор баз", None,
-     int(os.environ.get("HEALTH_STUCK_BASECON_MIN", "60"))),
-]
-STUCK_PENDING_MINUTES = max(2, int(os.environ.get("HEALTH_STUCK_PENDING_MIN", "6")))
-STUCK_PREPARING_MINUTES = max(2, int(os.environ.get("HEALTH_STUCK_PREPARING_MIN", "15")))
+# Alerts are claimed in health_check_job_alerts, so a container restart or the
+# next polling cycle cannot repeat the same message. Explicit stopped/cancelled
+# statuses are not failures; legacy jobs that encode a manual stop as
+# status=failed are filtered by the error text.
 
-# job_key ("table:id") -> (progress fingerprint, loop-clock ts when first seen
-# with this fingerprint). Used to measure how long progress has been frozen.
-_STUCK_TRACKER: dict[str, tuple[str, float]] = {}
-# job_keys already alerted, so we don't repeat the same alert every cycle.
-_STUCK_ALERTED: set[str] = set()
+
+@dataclass(frozen=True)
+class JobMonitorSpec:
+    table: str
+    label: str
+    active_statuses: tuple[str, ...]
+    progress_columns: tuple[str, ...]
+    log_hint: str
+    owner_column: str | None = "user_id"
+    updated_column: str | None = None
+    started_column: str | None = "started_at"
+    failed_statuses: tuple[str, ...] = (
+        "failed", "error", "captcha", "blocked", "timeout", "login_required",
+    )
+
+
+_JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
+    JobMonitorSpec(
+        "parser_jobs", "HH / ENG Hiring", ("pending", "running"),
+        ("total_found", "total_parsed", "progress_stage", "progress_percent", "progress_detail"),
+        "portal-worker-hh / portal-worker-eng-hiring",
+    ),
+    JobMonitorSpec(
+        "search_parser_jobs", "Поисковый парсер", ("pending", "running"),
+        ("total_queries", "processed_queries", "total_results", "progress_stage", "progress_percent"),
+        "portal-worker-search",
+    ),
+    JobMonitorSpec(
+        "website_enrichment_jobs", "Поиск почт / обогащение", ("preparing", "pending", "running"),
+        ("total", "processed", "success_count", "error_count", "preparing_heartbeat_at"),
+        "portal-worker-enrich",
+    ),
+    JobMonitorSpec(
+        "email_validation_jobs", "Валидация почт", ("pending", "running"),
+        ("total", "processed", "success_count", "error_count"),
+        "portal-worker-emailvalidation",
+    ),
+    JobMonitorSpec(
+        "brief_scoring_jobs", "Оценка ЦА", ("pending", "running"),
+        ("total", "processed", "success_count", "error_count"),
+        "portal-worker-enrich",
+    ),
+    JobMonitorSpec(
+        "base_constructor_jobs", "Конструктор баз", ("pending", "processing"),
+        ("current_step", "current_step_key", "current_step_progress", "total_steps"),
+        "portal-worker-baseconstructor",
+    ),
+    JobMonitorSpec(
+        "yandex_maps_jobs", "Яндекс.Карты", ("pending", "running"),
+        ("progress_stage", "total_links", "processed_links", "total_organizations", "processed_organizations"),
+        "portal-worker-yandexmaps", updated_column="updated_at",
+    ),
+    JobMonitorSpec(
+        "yandex_direct_jobs", "Яндекс.Директ", ("pending", "running"),
+        ("total_requests", "processed_requests", "found_advertisers", "saved_total", "errors_count"),
+        "portal-worker-hh", updated_column="updated_at",
+    ),
+    JobMonitorSpec(
+        "google_maps_jobs", "Google Maps", ("queued", "running"),
+        ("message", "total_targets", "processed_targets", "total_results"),
+        "portal-worker-googleparsers",
+    ),
+    JobMonitorSpec(
+        "google_news_jobs", "Google News", ("queued", "running"),
+        ("message", "total_targets", "processed_targets", "total_results"),
+        "portal-worker-googleparsers",
+    ),
+    JobMonitorSpec(
+        "crypto_payment_jobs", "Криптоплатежи", ("pending", "running"),
+        ("checked_count", "total_count"), "portal-worker-enrich", updated_column="updated_at",
+        started_column=None,
+    ),
+    JobMonitorSpec(
+        "hh_archive_jobs", "Архив HH", ("pending", "running"),
+        ("found_total", "saved_total", "processed_chunks", "total_chunks", "errors_count"),
+        "portal-worker-hh", updated_column="updated_at",
+    ),
+    JobMonitorSpec(
+        "lead_import_jobs", "Импорт / парсинг лидов", ("pending", "running"),
+        ("total_rows", "processed_rows", "enrichment_progress"), "portal-worker-enrich",
+    ),
+    JobMonitorSpec(
+        "lpr_jobs", "LPR Discovery", ("pending", "running"),
+        ("total_found", "enriched_count", "usable_count", "apollo_credits", "pdl_credits"),
+        "portal",
+    ),
+    JobMonitorSpec(
+        "dfyb_jobs", "DFYB", ("planning", "parsing", "processing"),
+        ("current_step", "current_step_name", "current_step_progress", "total_steps"),
+        "portal",
+    ),
+    JobMonitorSpec(
+        "reputation_jobs", "Парсер репутации", ("pending", "running"),
+        ("progress_stage", "total_candidates", "processed_candidates", "auto_export_count"),
+        "portal",
+    ),
+    JobMonitorSpec(
+        "large_score_jobs", "Большой скоринг", ("pending", "uploading", "parsing", "scoring"),
+        ("total_domains", "parsed_domains", "scored_domains", "active_domains"),
+        "portal-worker-bob-scorer", owner_column="client_user_id",
+        updated_column="updated_at", started_column=None,
+    ),
+    JobMonitorSpec(
+        "tg_parser_jobs", "Telegram-парсер", ("pending", "running"),
+        ("stop_reason", "result_users"), "portal-worker-tg-parser",
+    ),
+    JobMonitorSpec(
+        "tg_scan_jobs", "Telegram-сканер", ("pending", "running"),
+        ("scanned", "videos_found", "completed", "errors"),
+        "portal-worker-tg-transcribe", updated_column="updated_at",
+    ),
+    JobMonitorSpec(
+        "tg_transcribe_jobs", "Telegram-транскрибация", ("pending", "running"),
+        ("payload",), "portal-worker-tg-transcribe", updated_column="updated_at",
+        owner_column=None,
+    ),
+)
+
+# table:id -> (progress fingerprint, loop-clock time when it last changed)
+_JOB_PROGRESS_TRACKER: dict[str, tuple[str, float]] = {}
+_JOB_FAILURE_BASELINE_KEY = "job-monitor:v1:initialized"
+
+
+def _is_manual_stop_error(error_message: str | None) -> bool:
+    msg = (error_message or "").strip().lower()
+    if not msg:
+        return False
+    markers = (
+        "остановлено пользователем",
+        "остановлена пользователем",
+        "остановлен пользователем",
+        "остановлено вручную",
+        "stopped by user",
+        "cancelled by user",
+        "canceled by user",
+        "job cancelled",
+        "job canceled",
+    )
+    return any(marker in msg for marker in markers) or msg == "остановлено"
+
+
+def _job_owner(row) -> str:
+    return str(row["owner_name"] or row["owner_email"] or "системная задача")
+
+
+def _job_context(spec: JobMonitorSpec, row) -> str:
+    owner = html.escape(_job_owner(row))
+    job_id = html.escape(str(row["id"])[:8])
+    log_commands = " / ".join(
+        f"<code>docker logs {html.escape(container.strip())} --tail 200</code>"
+        for container in spec.log_hint.split(" / ")
+    )
+    return (
+        f"{owner} · <code>#{job_id}</code>\n"
+        f"Проверьте логи: {log_commands}"
+    )
+
+
+async def _claim_job_alert(conn, alert_key: str) -> bool:
+    row = await conn.fetchrow(
+        f"INSERT INTO {JOB_ALERTS_TABLE} (alert_key) VALUES ($1) "
+        "ON CONFLICT (alert_key) DO NOTHING RETURNING alert_key",
+        alert_key,
+    )
+    return row is not None
+
+
+def _progress_sql(spec: JobMonitorSpec) -> str:
+    values = ", ".join(
+        f"coalesce(j.{column}::text, '')" for column in spec.progress_columns
+    )
+    return f"concat_ws('|', {values})"
+
+
+async def _fetch_active_job_rows(conn, spec: JobMonitorSpec):
+    start_anchor = (
+        f"coalesce(j.{spec.started_column}, j.created_at)"
+        if spec.started_column
+        else "j.created_at"
+    )
+    if spec.updated_column:
+        activity_secs = (
+            f"extract(epoch FROM (now() - coalesce(j.{spec.updated_column}, "
+            f"{start_anchor})))::int"
+        )
+    else:
+        activity_secs = "NULL::int"
+    owner_select = (
+        "p.full_name AS owner_name, p.email AS owner_email"
+        if spec.owner_column
+        else "NULL::text AS owner_name, NULL::text AS owner_email"
+    )
+    owner_join = (
+        f"LEFT JOIN public.profiles p ON p.id = j.{spec.owner_column}"
+        if spec.owner_column
+        else ""
+    )
+    return await conn.fetch(
+        f"SELECT j.id::text AS id, j.status, {_progress_sql(spec)} AS progress, "
+        f"  {activity_secs} AS activity_secs, "
+        f"  extract(epoch FROM (now() - {start_anchor}))::int AS active_secs, "
+        "  extract(epoch FROM (now() - j.created_at))::int AS age_secs, "
+        f"  {owner_select} "
+        f"FROM public.{spec.table} j "
+        f"{owner_join} "
+        "WHERE j.status = ANY($1::text[])",
+        list(spec.active_statuses),
+    )
 
 
 async def check_stuck_jobs() -> list[str]:
-    """Return alert lines for background jobs whose progress is frozen.
-
-    Mirrors the worker's own watchdog but lives outside the worker, so it still
-    fires when the worker itself is wedged/down. One alert per stuck job; cleared
-    automatically when the job leaves preparing/pending/running.
-    """
+    """Return one alert per parser job with no DB progress for 15 minutes."""
     if not DATABASE_URL:
         return []
     loop_now = asyncio.get_running_loop().time()
@@ -1078,9 +1279,6 @@ async def check_stuck_jobs() -> list[str]:
         print(f"[health] stuck-jobs connect error: {_normalize_network_error(e)}")
         return []
     try:
-        # Валидация почт: джобы, у которых оставшиеся строки ждут отложенных
-        # ретраев (pending + retry_after в будущем). Для них «замороженный»
-        # processed — штатное ожидание greylist/DNS-ретраев, а не зависание.
         deferred_emailval_jobs: set[str] = set()
         try:
             drows = await conn.fetch(
@@ -1092,93 +1290,167 @@ async def check_stuck_jobs() -> list[str]:
         except Exception as e:
             print(f"[health] email-validation deferred query skipped: {e}")
 
-        for table, label, prog_col, stall_min in _STUCK_JOB_SPECS:
-            prog_select = f"{prog_col}::text" if prog_col else "NULL::text"
-            age_anchor = (
-                "case when status = 'preparing' "
-                "then coalesce(preparing_heartbeat_at, created_at) else created_at end"
-                if table == "website_enrichment_jobs"
-                else "created_at"
-            )
+        for spec in _JOB_MONITOR_SPECS:
             try:
-                rows = await conn.fetch(
-                    f"SELECT id::text AS id, status, {prog_select} AS progress, "
-                    f"  extract(epoch FROM (now() - coalesce(started_at, created_at)))::int AS active_secs, "
-                    f"  extract(epoch FROM (now() - {age_anchor}))::int AS age_secs "
-                    f"FROM public.{table} WHERE status IN ('preparing','pending','running')"
-                )
+                rows = await _fetch_active_job_rows(conn, spec)
             except Exception as e:
-                print(f"[health] stuck-jobs query {table} skipped: {e}")
+                print(f"[health] stuck-jobs query {spec.table} skipped: {e}")
                 continue
 
-            for r in rows:
-                key = f"{table}:{r['id']}"
+            for row in rows:
+                key = f"{spec.table}:{row['id']}"
                 seen_keys.add(key)
+                status = str(row["status"])
+                stalled_secs: int | None = None
 
-                if r["status"] == "preparing":
-                    if r["age_secs"] > STUCK_PREPARING_MINUTES * 60 and key not in _STUCK_ALERTED:
-                        _STUCK_ALERTED.add(key)
-                        problems.append(
-                            f"🟠 <b>{label}</b>: очередь формируется {r['age_secs'] // 60} мин "
-                            f"— подготовка задачи, похоже, зависла"
-                        )
+                # Queue/preparation states have no meaningful progress yet:
+                # created_at is the heartbeat and 15 minutes is enough to alert.
+                if status in ("pending", "queued", "preparing", "planning", "uploading"):
+                    stalled_secs = int(row["age_secs"] or 0)
+                elif spec.updated_column:
+                    # Tables with updated_at expose an exact DB heartbeat.
+                    stalled_secs = int(row["activity_secs"] or 0)
+                else:
+                    # Other tables are observed externally. Any changed progress
+                    # field resets the timer; an unchanged fingerprint starts it.
+                    fingerprint = str(row["progress"] or "")
+                    previous = _JOB_PROGRESS_TRACKER.get(key)
+                    if previous is None or previous[0] != fingerprint:
+                        _JOB_PROGRESS_TRACKER[key] = (fingerprint, loop_now)
+                    else:
+                        stalled_secs = int(loop_now - previous[1])
+
+                if stalled_secs is None or stalled_secs < JOB_STUCK_MINUTES * 60:
+                    continue
+                if spec.table == "email_validation_jobs" and row["id"] in deferred_emailval_jobs:
+                    _JOB_PROGRESS_TRACKER[key] = (str(row["progress"] or ""), loop_now)
                     continue
 
-                if r["status"] == "pending":
-                    # Nobody claimed it — worker down or queue backed up.
-                    if r["age_secs"] > STUCK_PENDING_MINUTES * 60 and key not in _STUCK_ALERTED:
-                        _STUCK_ALERTED.add(key)
-                        problems.append(
-                            f"🟠 <b>{label}</b>: задача не взята в работу "
-                            f"{r['age_secs'] // 60} мин — воркер не разбирает очередь?"
-                        )
+                alert_key = f"stuck:{key}"
+                if not await _claim_job_alert(conn, alert_key):
                     continue
-
-                # status == 'running'
-                if prog_col is None:
-                    # No per-row counter on the job — fall back to wall-clock age.
-                    if r["active_secs"] > stall_min * 60 and key not in _STUCK_ALERTED:
-                        _STUCK_ALERTED.add(key)
-                        problems.append(
-                            f"🔴 <b>{label}</b>: выполняется {r['active_secs'] // 60} мин "
-                            f"без завершения (≥{stall_min} мин — похоже, зависла)"
-                        )
-                    continue
-
-                fp = r["progress"]
-                prev = _STUCK_TRACKER.get(key)
-                if prev is None or prev[0] != fp:
-                    # Progress moved (or first sighting) — reset the stall timer.
-                    _STUCK_TRACKER[key] = (fp, loop_now)
-                    _STUCK_ALERTED.discard(key)
-                elif (loop_now - prev[1]) > stall_min * 60 and key not in _STUCK_ALERTED:
-                    # Валидация почт: «замороженный» processed — НОРМА, когда
-                    # оставшаяся очередь ждёт отложенных ретраев (greylist
-                    # 5/15/30 мин, хвост до ~25 мин): строки pending с
-                    # retry_after в будущем. Это ожидание, не зависание —
-                    # сбрасываем таймер и не алертим. Когда отложенные
-                    # закончатся, подавление снимается само; просроченный
-                    # retry_after (воркер лёг и не клеймит) — алертит как раньше.
-                    if table == "email_validation_jobs" and r["id"] in deferred_emailval_jobs:
-                        _STUCK_TRACKER[key] = (fp, loop_now)
-                        continue
-                    _STUCK_ALERTED.add(key)
-                    problems.append(
-                        f"🔴 <b>{label}</b>: прогресс застрял на {fp} ≥{stall_min} мин — "
-                        f"воркер не двигает задачу (как 0% у «Поиск почт» 04.06)"
-                    )
+                progress = html.escape(str(row["progress"] or "нет данных")[:180])
+                problems.append(
+                    f"🟠 <b>Долго висит: {html.escape(spec.label)}</b>\n"
+                    f"Нет обновлений {stalled_secs // 60} мин · статус <code>{html.escape(status)}</code>\n"
+                    f"Прогресс: <code>{progress}</code>\n"
+                    f"{_job_context(spec, row)}"
+                )
     finally:
         await conn.close()
 
-    # Forget jobs that are no longer active so trackers/alerts don't leak.
-    for key in list(_STUCK_TRACKER.keys()):
+    for key in list(_JOB_PROGRESS_TRACKER):
         if key not in seen_keys:
-            _STUCK_TRACKER.pop(key, None)
-    for key in list(_STUCK_ALERTED):
-        if key not in seen_keys:
-            _STUCK_ALERTED.discard(key)
-
+            _JOB_PROGRESS_TRACKER.pop(key, None)
     return problems
+
+
+async def _baseline_existing_failures(conn) -> bool:
+    """Mark pre-deploy failures as seen. Returns True after baseline exists."""
+    exists = await conn.fetchval(
+        f"SELECT 1 FROM {JOB_ALERTS_TABLE} WHERE alert_key = $1",
+        _JOB_FAILURE_BASELINE_KEY,
+    )
+    if exists:
+        return True
+    for spec in _JOB_MONITOR_SPECS:
+        try:
+            rows = await conn.fetch(
+                f"SELECT id::text AS id FROM public.{spec.table} "
+                "WHERE status = ANY($1::text[])",
+                list(spec.failed_statuses),
+            )
+            if rows:
+                await conn.executemany(
+                    f"INSERT INTO {JOB_ALERTS_TABLE} (alert_key) VALUES ($1) "
+                    "ON CONFLICT (alert_key) DO NOTHING",
+                    [(f"failed:{spec.table}:{row['id']}",) for row in rows],
+                )
+        except Exception as e:
+            print(f"[health] failed-jobs baseline {spec.table} skipped: {e}")
+    await conn.execute(
+        f"INSERT INTO {JOB_ALERTS_TABLE} (alert_key) VALUES ($1) "
+        "ON CONFLICT (alert_key) DO NOTHING",
+        _JOB_FAILURE_BASELINE_KEY,
+    )
+    return False
+
+
+async def check_failed_jobs() -> list[str]:
+    """Return alerts for new parser failures that contain a real error."""
+    if not DATABASE_URL:
+        return []
+    problems: list[str] = []
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+    except Exception as e:
+        print(f"[health] failed-jobs connect error: {_normalize_network_error(e)}")
+        return []
+    try:
+        if not await _baseline_existing_failures(conn):
+            print("[health] failed-jobs baseline initialized")
+            return []
+
+        for spec in _JOB_MONITOR_SPECS:
+            owner_select = (
+                "p.full_name AS owner_name, p.email AS owner_email"
+                if spec.owner_column
+                else "NULL::text AS owner_name, NULL::text AS owner_email"
+            )
+            owner_join = (
+                f"LEFT JOIN public.profiles p ON p.id = j.{spec.owner_column}"
+                if spec.owner_column
+                else ""
+            )
+            try:
+                rows = await conn.fetch(
+                    "SELECT j.id::text AS id, j.status, j.error_message, "
+                    f"  {owner_select} "
+                    f"FROM public.{spec.table} j "
+                    f"{owner_join} "
+                    "WHERE j.status = ANY($1::text[]) "
+                    "  AND nullif(btrim(j.error_message), '') IS NOT NULL",
+                    list(spec.failed_statuses),
+                )
+            except Exception as e:
+                print(f"[health] failed-jobs query {spec.table} skipped: {e}")
+                continue
+
+            for row in rows:
+                error_message = str(row["error_message"] or "")
+                if _is_manual_stop_error(error_message):
+                    continue
+                alert_key = f"failed:{spec.table}:{row['id']}"
+                if not await _claim_job_alert(conn, alert_key):
+                    continue
+                error_text = html.escape(error_message[:500])
+                problems.append(
+                    f"🔴 <b>Ошибка парсера: {html.escape(spec.label)}</b>\n"
+                    f"Статус: <code>{html.escape(str(row['status']))}</code>\n"
+                    f"Ошибка: <code>{error_text}</code>\n"
+                    f"{_job_context(spec, row)}"
+                )
+    finally:
+        await conn.close()
+    return problems
+
+
+async def run_job_monitor() -> None:
+    """Run parser queue/failure checks independently from general health."""
+    try:
+        stuck, failed = await asyncio.gather(
+            check_stuck_jobs(),
+            check_failed_jobs(),
+        )
+        problems = [*stuck, *failed]
+        if not problems:
+            print(f"[health] job monitor OK at {_now_msk()}")
+            return
+        header = f"⚠️ <b>МОНИТОР ПАРСЕРОВ</b> — {_now_msk()}\n"
+        await send_telegram(header + "\n" + "\n\n".join(problems))
+        print(f"[health] JOB ALERT sent: {len(problems)} problem(s)")
+    except Exception as e:
+        print(f"[health] job monitor error: {_format_exception_message(e)}")
 
 
 # ── Health check (every 15 min) ─────────────────────────────────────────────
@@ -1316,12 +1588,6 @@ async def _run_health_check_inner():
         f"🔴 <b>Сервер {SERVER_IP}</b>: {srv_msg}",
         f"✅ <b>Сервер {SERVER_IP}</b>: восстановлен",
     )
-
-    # Stuck background jobs (progress frozen) — manages its own per-job dedup.
-    try:
-        problems.extend(await check_stuck_jobs())
-    except Exception as e:
-        print(f"[health] stuck-jobs check error: {e}")
 
     # Per-container memory/CPU watchdog. Added 23.07.2026 after main-rest OOM
     # (512M limit filled in ~1 min under portal+workers bulk POST/GET burst)
@@ -1712,21 +1978,15 @@ def _format_heartbeat_caption(
 
 
 _JOB_TABLES: list[tuple[str, str, list[str]]] = [
+    *[
+        (spec.table, spec.label, list(spec.active_statuses))
+        for spec in _JOB_MONITOR_SPECS
+    ],
     ("ai_caller_jobs",          "AI Звонилка",       ["pending", "running"]),
     ("ai_campaigns",            "AI Кампании",       ["running"]),
-    ("parser_jobs",             "HH Парсер",         ["pending", "running"]),
-    ("search_parser_jobs",      "Поисковый парсер",  ["pending", "running"]),
     ("tg_outreach_jobs",        "TG Аутрич",         ["pending", "running"]),
     ("tg_outreach_campaigns",   "TG Кампании",       ["running"]),
-    ("email_validation_jobs",   "Email валидация",   ["pending", "running"]),
-    ("website_enrichment_jobs", "Обогащение",        ["preparing", "pending", "running"]),
-    ("brief_scoring_jobs",      "Скоринг брифов",    ["pending", "running"]),
-    ("yandex_maps_jobs",        "Яндекс Карты",      ["pending", "running"]),
-    ("lead_import_jobs",        "Импорт лидов",      ["pending", "running"]),
     ("sales_copilot_jobs",      "Sales Copilot",     ["pending", "running"]),
-    ("tg_scan_jobs",            "TG Сканер",         ["pending", "running"]),
-    ("lpr_jobs",                "LPR Discovery",     ["pending", "running"]),
-    ("dfyb_jobs",               "DFYB",              ["planning", "parsing", "processing"]),
 ]
 
 
@@ -2088,6 +2348,13 @@ async def main():
         misfire_grace_time=HEALTH_INTERVAL_SEC,
     )
     scheduler.add_job(
+        run_job_monitor, "interval",
+        seconds=JOB_MONITOR_INTERVAL_SEC,
+        id="job_monitor",
+        max_instances=1,
+        misfire_grace_time=JOB_MONITOR_INTERVAL_SEC,
+    )
+    scheduler.add_job(
         send_heartbeat, "interval",
         seconds=HEARTBEAT_INTERVAL_SEC,
         id="heartbeat",
@@ -2117,6 +2384,7 @@ async def main():
 
     # Run first health check now
     await run_health_check()
+    await run_job_monitor()
     await send_heartbeat()
 
     scheduler.start()
@@ -2138,6 +2406,8 @@ async def main():
     print(
         f"[health] Started: site={PORTAL_URL}, server={SERVER_IP}, "
         f"proxies={proxy_count}, {instantly_info}, health every {HEALTH_INTERVAL_SEC}s, "
+        f"job monitor every {JOB_MONITOR_INTERVAL_SEC}s "
+        f"(stuck after {JOB_STUCK_MINUTES} min), "
         f"heartbeat every {HEARTBEAT_INTERVAL_SEC}s, {keepalive_info}. "
         "Commands in chat: /mute /вкл /alerts"
     )
