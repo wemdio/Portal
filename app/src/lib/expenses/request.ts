@@ -27,10 +27,11 @@ const SOURCE_MAP: Record<ExpenseSource, true> = {
   manual: true,
 };
 
-/** То же для дохода: банки и только банки. */
+/** То же для дохода: два банка и криптокошелёк. */
 const INCOME_SOURCE_MAP: Record<IncomeSource, true> = {
   tochka: true,
   tbank: true,
+  crypto_usdt: true,
 };
 
 export const EXPENSE_SOURCES = Object.keys(SOURCE_MAP) as ExpenseSource[];
