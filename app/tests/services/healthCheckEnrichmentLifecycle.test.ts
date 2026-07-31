@@ -18,4 +18,14 @@ describe('health-check website enrichment lifecycle', () => {
     expect(source).toContain('JOB_STUCK_MINUTES');
     expect(source).toContain('status in ("pending", "queued", "preparing", "planning", "uploading")');
   });
+
+  it('does not treat the permanent HH archive sink as a worker job', () => {
+    const source = fs.readFileSync(
+      path.resolve(process.cwd(), '../services/health-check/main.py'),
+      'utf8',
+    );
+
+    expect(source).toContain("extra_predicate=\"j.parser_type <> 'hh_vacancies_autopipeline'\"");
+    expect(source).toContain('f" AND ({spec.extra_predicate})"');
+  });
 });
