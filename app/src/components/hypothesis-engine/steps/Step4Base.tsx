@@ -7,7 +7,7 @@
  * базы и запуск сборки финального шаблона. Поглощает старый BasesTab.
  */
 
-import { useCallback, useMemo, useRef, useState, type JSX } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
 import { ArrowRight, Check, FileSpreadsheet, Sparkles, Upload, X } from 'lucide-react';
 import type { HeBaseAnalysis, HeDistributionEntry, HeVertical } from '@/lib/hypothesisEngine/types';
 import { readSpreadsheetFile } from '@/lib/spreadsheet/parseCSV';
@@ -15,8 +15,10 @@ import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
 import {
   HE_API,
   hePost,
+  type HeBaseCollectResponse,
   type HeBaseCreateResponse,
   type HeBaseSummary,
+  type HeCollectInfo,
   type HeJobResponse,
   type HeJobSummary,
 } from '../api';
@@ -24,6 +26,9 @@ import { Badge, Spinner, StatusBox, formatDate } from '../ui';
 
 const PRIMARY_BTN =
   'inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50';
+
+/** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
+const COLLECT_POLL_MS = 4000;
 
 interface ParsedFile {
   filename: string;
@@ -61,6 +66,8 @@ export function Step4Base(props: {
   const [parseError, setParseError] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
+  const [collectStarting, setCollectStarting] = useState(false);
+  const [collectError, setCollectError] = useState('');
   const [templateStarting, setTemplateStarting] = useState(false);
   const [templateError, setTemplateError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -77,6 +84,15 @@ export function Step4Base(props: {
     () => verticalBases.find((b) => b.status === 'analyzed' && b.analysis),
     [verticalBases],
   );
+
+  /** Последняя база в статусе автосборки (verticalBases отсортированы по created_at desc). */
+  const collectingBase = useMemo(
+    () => verticalBases.find((b) => b.status === 'collecting'),
+    [verticalBases],
+  );
+  /** Автосборка упала: последняя база вертикали — авто и в ошибке (retry уводит в re-POST). */
+  const collectFailed =
+    !collectingBase && latestBase?.source === 'auto' && latestBase.status === 'failed';
 
   const templateJob = useMemo(() => latestStageJob(jobs, 'template'), [jobs]);
   const templateBusy = templateStarting || jobActive(templateJob);
@@ -150,6 +166,39 @@ export function Step4Base(props: {
     }
   }, [parsed, uploading, projectId, vertical.id, clearFile, onUploaded]);
 
+  const handleCollect = useCallback(async () => {
+    if (collectStarting || collectingBase) return;
+    setCollectError('');
+    setCollectStarting(true);
+    try {
+      const { ok, data } = await hePost<HeBaseCollectResponse>(
+        `${HE_API}/verticals/${vertical.id}/collect`,
+      );
+      if (!ok) {
+        setCollectError(data.error || 'Не удалось запустить автосборку');
+        return;
+      }
+      // 201 (сборка стартовала) и 200 (уже идёт) — в обоих случаях перечитываем деталь.
+      onUploaded();
+    } catch (err) {
+      setCollectError(err instanceof Error ? err.message : 'Не удалось запустить автосборку');
+    } finally {
+      setCollectStarting(false);
+    }
+  }, [collectStarting, collectingBase, vertical.id, onUploaded]);
+
+  // Сборка создаёт base_collect-джобу, и родительский поллинг по активным
+  // джобам её уже покрывает; локальный интервал — запасной вариант поверх
+  // него: если джоба выпала из выборки детали (лимит 30 последних jobs) или
+  // родительский поллинг остановился, прогресс-карта сборки всё равно
+  // обновляется. Когда сборка кончается, base_analyze поднимает джобу и
+  // родительский поллинг подхватывает analyzing → analyzed.
+  useEffect(() => {
+    if (!collectingBase) return;
+    const timer = setInterval(() => onUploaded(), COLLECT_POLL_MS);
+    return () => clearInterval(timer);
+  }, [collectingBase, onUploaded]);
+
   const handleBuildTemplate = useCallback(async () => {
     if (!latestBase || templateBusy) return;
     setTemplateError('');
@@ -176,10 +225,44 @@ export function Step4Base(props: {
         подготовит финальный шаблон.
       </p>
 
+      {/* Автосборка базы под вертикаль */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+        <p className="text-sm font-semibold text-gray-800">Или соберите автоматически</p>
+        <p className="mt-1 text-xs text-gray-500">
+          Движок сам подберёт источники: реестр компаний, hh.ru, карты — и соберёт базу под это
+          направление.
+        </p>
+        {collectingBase ? (
+          <CollectProgress base={collectingBase} />
+        ) : (
+          <div className="mt-3">
+            {collectFailed ? (
+              <p className="mb-2 text-sm text-red-600" role="alert">
+                Автосборка завершилась ошибкой. Попробуйте ещё раз или загрузите файл вручную ниже.
+              </p>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => void handleCollect()}
+              disabled={collectStarting}
+              className={PRIMARY_BTN}
+            >
+              {collectStarting ? <Spinner /> : <Sparkles className="h-4 w-4" aria-hidden />}
+              {collectFailed ? 'Попробовать снова' : 'Собрать базу автоматически'}
+            </button>
+            {collectError ? (
+              <p className="mt-2 text-sm text-red-600" role="alert">
+                {collectError}
+              </p>
+            ) : null}
+          </div>
+        )}
+      </section>
+
       {/* Загрузка файла */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5">
+      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
         <label
-          className={`flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-gray-300 bg-gray-50/50 px-4 py-8 text-center transition hover:border-blue-300 hover:bg-blue-50/30 ${
+          className={`flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-gray-300 bg-gray-50/50 px-4 py-8 text-center transition hover:border-blue-300 hover:bg-blue-50/60 ${
             parsing ? 'pointer-events-none opacity-60' : ''
           }`}
         >
@@ -294,14 +377,26 @@ export function Step4Base(props: {
                 className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2"
               >
                 <span className="min-w-0">
-                  <span className="block max-w-[220px] truncate text-xs font-medium text-gray-800">
-                    {base.filename}
+                  <span className="flex items-center gap-1.5">
+                    <span className="max-w-[200px] truncate text-xs font-medium text-gray-800">
+                      {base.filename}
+                    </span>
+                    {base.source === 'auto' ? (
+                      <Badge tone="blue">авто</Badge>
+                    ) : (
+                      <Badge tone="gray">загрузка</Badge>
+                    )}
                   </span>
                   <span className="block text-[11px] text-gray-400">
                     {base.row_count.toLocaleString('ru-RU')} строк · {formatDate(base.created_at)}
                   </span>
                 </span>
-                {base.status === 'analyzing' ? (
+                {base.status === 'collecting' ? (
+                  <span className="inline-flex items-center gap-1 text-[11px] text-blue-600">
+                    <Spinner className="h-3.5 w-3.5" />
+                    Собираем…
+                  </span>
+                ) : base.status === 'analyzing' ? (
                   <span className="inline-flex items-center gap-1 text-[11px] text-amber-600">
                     <Spinner className="h-3.5 w-3.5" />
                     Разбираем…
@@ -319,7 +414,7 @@ export function Step4Base(props: {
         </section>
       ) : null}
 
-      {latestBase?.status === 'failed' ? (
+      {latestBase?.status === 'failed' && latestBase.source !== 'auto' ? (
         <StatusBox tone="error">
           Разбор базы «{latestBase.filename}» завершился ошибкой. Загрузите файл ещё раз.
         </StatusBox>
@@ -336,7 +431,7 @@ export function Step4Base(props: {
       ) : null}
 
       {/* Переход к шаблону */}
-      <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white p-5">
+      <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
         {templateDone ? (
           <button type="button" onClick={onGoToTemplate} className={PRIMARY_BTN}>
             Перейти к шаблону
@@ -376,6 +471,89 @@ export function Step4Base(props: {
   );
 }
 
+/* ─────────────────────────── Автосборка базы ─────────────────────────── */
+
+/** Русские имена источников автосборки; неизвестный ключ показываем как пришёл. */
+const COLLECT_SOURCE_LABELS: Record<string, string> = {
+  registry: 'реестр',
+  reestr: 'реестр',
+  rusprofile: 'реестр',
+  hh: 'hh.ru',
+  hh_ru: 'hh.ru',
+  yandex: 'яндекс.карты',
+  yandex_maps: 'яндекс.карты',
+  google_maps: 'google maps',
+  gmaps: 'google maps',
+};
+
+function collectSourceLabel(source: string | undefined): string {
+  const key = (source ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return COLLECT_SOURCE_LABELS[key] ?? (source?.trim() || 'источник');
+}
+
+function collectTaskDone(status: string | undefined): boolean {
+  return ['done', 'completed', 'success', 'ok'].includes((status ?? '').toLowerCase());
+}
+
+function collectTaskFailed(status: string | undefined): boolean {
+  return ['failed', 'error'].includes((status ?? '').toLowerCase());
+}
+
+/** Защитное чтение collect_info: форма толерантная, любой кусок может отсутствовать. */
+function readCollectInfo(info: HeCollectInfo | null | undefined) {
+  const plan = info?.plan?.tasks;
+  const tasks = info?.tasks;
+  return {
+    plan: Array.isArray(plan) ? plan.filter((t) => t && typeof t === 'object') : [],
+    tasks: Array.isArray(tasks) ? tasks.filter((t) => t && typeof t === 'object') : [],
+  };
+}
+
+/** Карточка прогресса автосборки: план (почему эти источники) + живые статусы задач. */
+function CollectProgress({ base }: { base: HeBaseSummary }) {
+  const { plan, tasks } = readCollectInfo(base.collect_info);
+  return (
+    <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
+      <p className="flex items-center gap-2 text-sm font-medium text-blue-800">
+        <Spinner className="h-4 w-4" />
+        Собираем базу…
+      </p>
+      {plan.length > 0 ? (
+        <ul className="mt-2.5 space-y-1">
+          {plan.map((task, i) => (
+            <li key={`plan-${i}`} className="text-xs text-gray-500">
+              <span className="font-medium text-gray-600">{collectSourceLabel(task.source)}</span>
+              {task.rationale ? ` — ${task.rationale}` : ''}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {tasks.length > 0 ? (
+        <ul className="mt-2.5 space-y-1.5">
+          {tasks.map((task, i) => (
+            <li key={`task-${i}`} className="flex items-center gap-2 text-xs text-gray-700">
+              {collectTaskDone(task.status) ? (
+                <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" aria-hidden />
+              ) : collectTaskFailed(task.status) ? (
+                <X className="h-3.5 w-3.5 shrink-0 text-red-500" aria-hidden />
+              ) : (
+                <Spinner className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+              )}
+              <span>{collectSourceLabel(task.source)}</span>
+              {collectTaskDone(task.status) && typeof task.rows === 'number' ? (
+                <span className="text-gray-400">· {task.rows.toLocaleString('ru-RU')} строк</span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {plan.length === 0 && tasks.length === 0 ? (
+        <p className="mt-2 text-xs text-gray-400">Подбираем источники под направление…</p>
+      ) : null}
+    </div>
+  );
+}
+
 /* ─────────────────────────── Профиль базы ─────────────────────────── */
 
 function BarList({
@@ -399,7 +577,7 @@ function BarList({
               </span>
               <span className="shrink-0 text-gray-400">{e.share_pct}%</span>
             </div>
-            <span className="mt-0.5 block h-1.5 overflow-hidden rounded-full bg-gray-200/70">
+            <span className="mt-0.5 block h-1.5 overflow-hidden rounded-full bg-gray-200">
               <span
                 className="block h-full rounded-full bg-blue-400"
                 style={{ width: `${Math.min(100, Math.max(3, e.share_pct))}%` }}

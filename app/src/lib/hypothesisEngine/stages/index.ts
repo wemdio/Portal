@@ -15,6 +15,7 @@ import { runClusteringStage } from './clustering';
 import { runChainStage } from './chain';
 import { runVocabStage } from './vocab';
 import { runBaseAnalyzeStage } from './baseAnalyze';
+import { runBaseCollectStage } from './baseCollect';
 import { runTemplateStage } from './template';
 import { runDossierStage } from './dossier';
 
@@ -40,6 +41,8 @@ export async function runHeStage(job: HeJob, ctx: HeStageContext): Promise<HeSta
       return runVocabStage(job, ctx);
     case 'base_analyze':
       return runBaseAnalyzeStage(job, ctx);
+    case 'base_collect':
+      return runBaseCollectStage(job, ctx);
     case 'template':
       return runTemplateStage(job, ctx);
     case 'dossier':
@@ -61,6 +64,7 @@ export type { AppliedVertical, ClusterHypothesisInput } from './clustering';
 export { runChainStage, parsedToChainLetters, CHAIN_WAIT_DAYS } from './chain';
 export { runVocabStage } from './vocab';
 export { runBaseAnalyzeStage } from './baseAnalyze';
+export { runBaseCollectStage } from './baseCollect';
 export {
   runTemplateStage,
   extractPersonalizationOperators,

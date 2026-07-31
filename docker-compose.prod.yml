@@ -591,6 +591,20 @@ services:
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=hypothesis-engine
     stop_grace_period: 5m
+    # autoheal + heartbeat healthcheck — защита от event-loop hang'ов
+    # (паттерн worker-yandexmaps, инцидент 27.07.2026: процесс жив, а event
+    # loop мёртв — без внешнего heartbeat такой стоп невидим). Heartbeat
+    # пишется независимым setInterval в worker/hypothesisEngine.ts;
+    # healthcheck флипает контейнер в unhealthy, если он старше 300с —
+    # autoheal sidecar тогда `docker restart`.
+    labels:
+      - autoheal=true
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/hypothesis-engine-worker-heartbeat && test $$(( $$(date +%s) - $$(cat /tmp/hypothesis-engine-worker-heartbeat | cut -c1-10) )) -lt 300 || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     deploy:
       resources:
         limits:

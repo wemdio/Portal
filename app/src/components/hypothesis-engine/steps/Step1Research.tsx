@@ -89,7 +89,7 @@ export function Step1Research({
 
   if (running) {
     return (
-      <section className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white p-6">
+      <section className="mx-auto max-w-xl rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
         <h2 className="mb-4 text-base font-semibold text-gray-900">Идёт исследование…</h2>
         <StageChecklist jobs={jobs} running />
         {failedStages.length > 0 ? (
@@ -104,7 +104,7 @@ export function Step1Research({
 
   if (failed) {
     return (
-      <section className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white p-6">
+      <section className="mx-auto max-w-xl rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
         <h2 className="mb-4 text-base font-semibold text-gray-900">Исследование остановилось</h2>
         <StageChecklist jobs={jobs} running={false} />
         <FailureNote
@@ -120,7 +120,7 @@ export function Step1Research({
 
   if (done) {
     return (
-      <section className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white p-6">
+      <section className="mx-auto max-w-xl rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
         <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
           <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-500" aria-hidden />
           <div>
@@ -191,7 +191,7 @@ function NotStarted({
   onCasesChanged?: () => void;
 }) {
   return (
-    <section className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white px-6 py-10 text-center">
+    <section className="mx-auto max-w-xl rounded-2xl border border-gray-200 bg-white px-6 py-10 text-center shadow-sm">
       <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
         <FlaskConical className="h-6 w-6" aria-hidden />
       </div>
@@ -267,12 +267,12 @@ function OfferBlock({
           type="button"
           onClick={() => void handleSave()}
           disabled={saving || !dirty}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
-        {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
+        {saved ? <span className="text-xs text-emerald-500">Сохранено ✓</span> : null}
       </div>
     </div>
   );
@@ -341,12 +341,12 @@ function StyleBlock({
           type="button"
           onClick={() => void handleSave()}
           disabled={saving || !dirty}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
           Сохранить
         </button>
-        {saved ? <span className="text-xs text-emerald-600">Сохранено ✓</span> : null}
+        {saved ? <span className="text-xs text-emerald-500">Сохранено ✓</span> : null}
       </div>
       {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
     </div>
@@ -442,7 +442,7 @@ function CasesBlock({
                   onClick={() => void handleDelete(c.id)}
                   disabled={deletingId === c.id}
                   title="Удалить кейс"
-                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-400 transition hover:border-red-200 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-400 transition hover:border-red-200 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {deletingId === c.id ? (
                     <Spinner className="h-3.5 w-3.5" />
@@ -474,13 +474,13 @@ function CasesBlock({
             onChange={(e) => setFilename(e.target.value)}
             placeholder="Имя файла (необязательно)"
             aria-label="Имя файла"
-            className="h-8 min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-3 text-xs text-gray-800 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+            className="h-9 min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-3 text-xs text-gray-800 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
           />
           <button
             type="button"
             onClick={() => void handleAdd()}
             disabled={saving || !text.trim()}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
             Добавить кейс
@@ -494,7 +494,20 @@ function CasesBlock({
 
 type StageState = 'done' | 'current' | 'upcoming' | 'failed';
 
-/** Вертикальный чек-лист стадий: сделано / идёт / впереди / не удалось. */
+/** Текст живого счётчика стадии: «14/33 · проверяем гипотезу» (из he_jobs.progress). */
+function progressText(job: HeJobSummary | undefined): string | null {
+  const p = job?.progress;
+  if (!p) return null;
+  const counter =
+    typeof p.done === 'number' && typeof p.total === 'number' && p.total > 0
+      ? `${p.done}/${p.total}`
+      : null;
+  const label = p.label?.trim() ? p.label.trim() : null;
+  if (!counter && !label) return null;
+  return [counter, label].filter(Boolean).join(' · ');
+}
+
+/** Вертикальный чек-лист стадий: сделано / идёт / впереди / не удалось. У активной — живой счётчик. */
 function StageChecklist({ jobs, running }: { jobs: HeJobSummary[]; running: boolean }) {
   const states: StageState[] = RESEARCH_STAGES.map(({ stage }) => {
     const job = latestJobOf(jobs, stage);
@@ -522,6 +535,7 @@ function StageChecklist({ jobs, running }: { jobs: HeJobSummary[]; running: bool
     <ol className="space-y-2.5">
       {RESEARCH_STAGES.map(({ stage, line }, i) => {
         const state = states[i];
+        const progress = state === 'current' ? progressText(latestJobOf(jobs, stage)) : null;
         return (
           <li
             key={stage}
@@ -546,7 +560,10 @@ function StageChecklist({ jobs, running }: { jobs: HeJobSummary[]; running: bool
                 <span className="h-1.5 w-1.5 rounded-full bg-gray-300" aria-hidden />
               )}
             </span>
-            {line}
+            <span>
+              {line}
+              {progress ? <span className="block text-xs font-normal text-blue-500">— {progress}</span> : null}
+            </span>
           </li>
         );
       })}
@@ -585,7 +602,7 @@ function FailureNote({
         type="button"
         onClick={onRetry}
         disabled={busy}
-        className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {busy ? <Spinner className="h-4 w-4" /> : null}
         Попробовать снова

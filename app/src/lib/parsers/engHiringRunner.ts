@@ -42,6 +42,23 @@ const MAX_RESULTS = Math.max(1000, Number(process.env.ENG_HIRING_MAX_RESULTS ?? 
 const DEFAULT_CACHE_MAX_AGE_HOURS = 12;
 const SCAN_DELAY_MS = Math.max(0, Number(process.env.ENG_HIRING_SCAN_DELAY_MS ?? '80'));
 const SCAN_CONCURRENCY = clampInteger(process.env.ENG_HIRING_SCAN_CONCURRENCY, 12, 1, 50);
+// Per-source scan pacing. Workday's CXS WAF IP-bans aggressive scanners (a burst
+// of 2604 boards at the global pace yielded 0 vacancies in prod), so it gets much
+// gentler built-in defaults. Every source can be tuned without a redeploy via
+// ENG_HIRING_<SOURCE>_SCAN_CONCURRENCY / ENG_HIRING_<SOURCE>_SCAN_DELAY_MS;
+// unlisted sources keep the global knobs above.
+const SCAN_PACE_DEFAULTS: Partial<Record<EngHiringSource, { concurrency: number; delayMs: number }>> = {
+  workday: { concurrency: 2, delayMs: 1500 },
+};
+
+function scanPaceFor(source: EngHiringSource): { concurrency: number; delayMs: number } {
+  const key = source.toUpperCase();
+  const base = SCAN_PACE_DEFAULTS[source] ?? { concurrency: SCAN_CONCURRENCY, delayMs: SCAN_DELAY_MS };
+  return {
+    concurrency: clampInteger(process.env[`ENG_HIRING_${key}_SCAN_CONCURRENCY`], base.concurrency, 1, 50),
+    delayMs: Math.max(0, Number(process.env[`ENG_HIRING_${key}_SCAN_DELAY_MS`] ?? base.delayMs) || 0),
+  };
+}
 const CACHE_PROGRESS_INTERVAL = clampInteger(process.env.ENG_HIRING_CACHE_PROGRESS_INTERVAL, 25, 1, 1000);
 const ENRICH_DELAY_MS = Math.max(0, Number(process.env.ENG_HIRING_ENRICH_DELAY_MS ?? '200'));
 const ENRICH_LIMIT = Math.max(0, Number(process.env.ENG_HIRING_ENRICH_LIMIT ?? '300'));
@@ -72,12 +89,16 @@ type CacheRow = EngHiringVacancy & {
 type RefreshSourceStats = {
   scannedCompanies: number;
   cachedVacancies: number;
+  failedBoards: number;
+  error: string | null;
 };
 
 type SourceDiagnostics = {
   refreshed: boolean;
   scanned_companies: number;
   cached_vacancies: number;
+  failed_boards: number;
+  error: string | null;
   matched_rows: number;
 };
 
@@ -259,7 +280,7 @@ function toCacheRow(v: EngHiringVacancy) {
   });
 }
 
-async function fetchSourceCacheRows(source: EngHiringSource, token: AtsCompanyToken): Promise<ReturnType<typeof toCacheRow>[]> {
+async function fetchSourceCacheRows(source: EngHiringSource, token: AtsCompanyToken): Promise<{ rows: ReturnType<typeof toCacheRow>[]; failed: boolean }> {
   try {
     const payloads = source === 'workday'
       ? await fetchWorkdayPayloads(postingsUrl(source, token.slug, token.url))
@@ -280,10 +301,11 @@ async function fetchSourceCacheRows(source: EngHiringSource, token: AtsCompanyTo
         if (vacancy) rows.push(toCacheRow(vacancy));
       }
     }
-    return rows;
+    return { rows, failed: false };
   } catch {
-    /* board moved, private, empty, or rate-limited: skip */
-    return [];
+    /* board moved, private, empty, or rate-limited: skip — but count it, so a
+       full-sweep failure (WAF/IP block) can't masquerade as an empty source */
+    return { rows: [], failed: true };
   }
 }
 
@@ -510,9 +532,11 @@ async function refreshSourceCache(
     }),
   );
   const tokens = mergeCompanyTokens(tokenLists).slice(0, limit);
+  const pace = scanPaceFor(source);
   const startIndex = Math.min(toNonNegativeInt(run.next_company_index), tokens.length);
   const batch: ReturnType<typeof toCacheRow>[] = [];
   let cachedVacancies = toNonNegativeInt(run.cached_vacancies);
+  let failedBoards = 0;
   let lastCheckpoint = startIndex;
 
   await updateCacheRunProgress(db, run.id, {
@@ -523,11 +547,12 @@ async function refreshSourceCache(
     error_message: null,
   });
 
-  for (let i = startIndex; i < tokens.length; i += SCAN_CONCURRENCY) {
+  for (let i = startIndex; i < tokens.length; i += pace.concurrency) {
     await ensureNotCancelled();
-    const chunk = tokens.slice(i, Math.min(i + SCAN_CONCURRENCY, tokens.length));
-    const chunkRows = await Promise.all(chunk.map((token) => fetchSourceCacheRows(source, token)));
-    for (const rows of chunkRows) {
+    const chunk = tokens.slice(i, Math.min(i + pace.concurrency, tokens.length));
+    const chunkResults = await Promise.all(chunk.map((token) => fetchSourceCacheRows(source, token)));
+    for (const { rows, failed } of chunkResults) {
+      if (failed) failedBoards += 1;
       batch.push(...rows);
       cachedVacancies += rows.length;
     }
@@ -550,11 +575,31 @@ async function refreshSourceCache(
       await ensureNotCancelled();
       await onProgress(done, tokens.length, source);
     }
-    if (SCAN_DELAY_MS > 0 && done < tokens.length) await sleep(SCAN_DELAY_MS);
+    if (pace.delayMs > 0 && done < tokens.length) await sleep(pace.delayMs);
   }
 
   if (batch.length) {
     await upsertCacheBatch(db, batch);
+  }
+
+  // Loud zero-yield: scanning boards but caching nothing means something systemic
+  // (WAF/IP block, TLS fingerprint ban, or an upstream schema change) — a legit
+  // quiet market never zeroes out hundreds of boards at once. Mark the run failed
+  // instead of silently 'completed', so the next job retries the source and the
+  // error surfaces in the cache run + job progress detail.
+  if (tokens.length > 0 && cachedVacancies === 0) {
+    const message = `${source} cache scan yielded 0 vacancies from ${tokens.length} boards `
+      + `(${failedBoards} board fetches failed) — likely WAF/IP block or upstream schema change`;
+    await updateCacheRunProgress(db, run.id, {
+      next_company_index: tokens.length,
+      scanned_companies: tokens.length,
+      cached_vacancies: cachedVacancies,
+      total_companies: tokens.length,
+      status: 'failed',
+      completed_at: new Date().toISOString(),
+      error_message: message,
+    });
+    return { scannedCompanies: tokens.length, cachedVacancies, failedBoards, error: message };
   }
 
   await updateCacheRunProgress(db, run.id, {
@@ -565,7 +610,7 @@ async function refreshSourceCache(
     error_message: null,
   });
 
-  return { scannedCompanies: tokens.length, cachedVacancies };
+  return { scannedCompanies: tokens.length, cachedVacancies, failedBoards, error: null };
 }
 
 function rowNeedsDetail(row: CacheRow): boolean {
@@ -652,6 +697,8 @@ async function ensureCache(
       refreshed: false,
       scanned_companies: 0,
       cached_vacancies: 0,
+      failed_boards: 0,
+      error: null,
       matched_rows: 0,
     },
   ])) as Record<EngHiringSource, SourceDiagnostics>;
@@ -687,15 +734,21 @@ async function ensureCache(
         refreshed: true,
         scanned_companies: stats.scannedCompanies,
         cached_vacancies: stats.cachedVacancies,
+        failed_boards: stats.failedBoards,
+        error: stats.error,
       };
-      await updateCacheRunProgress(db, runRow.id, {
-        status: 'completed',
-        next_company_index: stats.scannedCompanies,
-        scanned_companies: stats.scannedCompanies,
-        cached_vacancies: stats.cachedVacancies,
-        completed_at: new Date().toISOString(),
-        error_message: null,
-      });
+      // A zero-yield scan already marked its own run 'failed' with the diagnosis —
+      // don't overwrite that with a misleading 'completed'.
+      if (stats.error == null) {
+        await updateCacheRunProgress(db, runRow.id, {
+          status: 'completed',
+          next_company_index: stats.scannedCompanies,
+          scanned_companies: stats.scannedCompanies,
+          cached_vacancies: stats.cachedVacancies,
+          completed_at: new Date().toISOString(),
+          error_message: null,
+        });
+      }
     } catch (err) {
       if (err instanceof EngHiringCancelledError) {
         await updateCacheRunProgress(db, runRow.id, { error_message: null });
@@ -824,6 +877,8 @@ function attachMatchedDiagnostics(
       refreshed: false,
       scanned_companies: 0,
       cached_vacancies: 0,
+      failed_boards: 0,
+      error: null,
       matched_rows: 0,
     };
     out[row.source] = {

@@ -473,6 +473,34 @@ describe('atsCompanyParser — CSV parsing & export', () => {
     ]);
   });
 
+  it('accepts mixed-case slugs and keeps their original case (workday site paths are case-sensitive)', () => {
+    const rows = parseCompanyCsv(
+      [
+        'name,slug,url',
+        'Tysonfoods (TSN5),tysonfoods/TSN5,https://tysonfoods.wd5.myworkdayjobs.com/TSN5',
+      ].join('\n'),
+    );
+
+    expect(rows).toEqual([
+      { name: 'Tysonfoods (TSN5)', slug: 'tysonfoods/TSN5', url: 'https://tysonfoods.wd5.myworkdayjobs.com/TSN5' },
+    ]);
+  });
+
+  it('strips enclosing quotes and restores commas inside quoted names', () => {
+    const rows = parseCompanyCsv(
+      [
+        'name,slug,url',
+        '"Kaplan, Inc (Dekko Careers)",ghc/Dekko_Careers,https://job-boards.greenhouse.io/ghcdekkocareers',
+        '"Say ""Hi"", Inc",sayhi,https://job-boards.greenhouse.io/sayhi',
+      ].join('\n'),
+    );
+
+    expect(rows).toEqual([
+      { name: 'Kaplan, Inc (Dekko Careers)', slug: 'ghc/Dekko_Careers', url: 'https://job-boards.greenhouse.io/ghcdekkocareers' },
+      { name: 'Say "Hi", Inc', slug: 'sayhi', url: 'https://job-boards.greenhouse.io/sayhi' },
+    ]);
+  });
+
   it('merges company token lists from several sources, deduping by slug (first wins, order kept)', () => {
     const primary = [
       { name: 'Acme', slug: 'acme', url: 'https://job-boards.greenhouse.io/acme' },

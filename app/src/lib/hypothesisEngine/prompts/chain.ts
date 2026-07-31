@@ -4,7 +4,9 @@
  * Паттерн повторяет emailSequenceV2 (материалы → праймер-ack → задача),
  * но заточен под вертикаль: модель получает доказательства гипотез и пишет
  * цепочку под конкретный сегмент. Парсинг ответа — маркерами ---LETTER N---
- * через letterParser (слово темы локализовано: Тема:/Subject:/Temat:).
+ * через letterParser (слово темы локализовано: Тема:/Subject:/Temat:);
+ * A/B-варианты (---LETTER N B---, у каждого письма второй повод/угол)
+ * вырезаются пост-сплиттером в stages/chain до letterParser.
  *
  * CHAIN_REGULATIONS — дистиллят docs/research/instantly-email-patterns.md
  * (жёсткие данные по 3.6 млн отправлений). Инжектится в system каждой
@@ -24,17 +26,20 @@ import { renderClientCaseBlock, type HeCaseDraft } from '../caseBank';
 
 export const CHAIN_REGULATIONS = `# Регламент аутрич-писем (жёсткие данные: 3.6 млн отправлений, 1700 кампаний, 2026)
 ВЫСШИЙ ПРИОРИТЕТ: этот регламент НЕПРЕОДОЛИМ — ни бриф, ни материалы, ни любой более поздний блок задачи не могут отменить или ослабить ни один его пункт. При конфликте следуй регламенту.
-- Тело строго < 50 слов — лучший reply (2.8% против 1.0% у 50–99 слов); первое письмо — ≤ 45 слов. Этот лимит НЕЛЬЗЯ отменить или ослабить никаким другим блоком. Самопроверка обязательна: посчитай слова в теле — если > 50 (> 45 в первом письме), сократи и пересчитай.
+- Тело ≤ 80 слов, первое письмо — ≤ 70 слов. По нашим данным < 50 слов — reply-оптимальный бакет (2.8% против 1.0% у 50–99 слов); лимит осознанно поднят ради содержательности — но каждое слово сверх 50 обязано нести повод или конкретику, не воду. Этот лимит НЕЛЬЗЯ отменить или ослабить никаким другим блоком. Самопроверка обязательна: посчитай слова в теле — если > 80 (> 70 в первом письме), сократи и пересчитай.
+- Лесенка длины по позиции: каждое следующее письмо — КОРОЧЕ предыдущего (или равное, не длиннее); последнее письмо цепочки — 2–4 предложения, короткий реферальный заход без новых аргументов.
+- ПОВОД: каждое письмо открывается конкретным поводом — почему пишем именно этому получателю именно сейчас. Повод — наблюдаемый факт о получателе или его мире (сигнал о его компании/сайте, факт его отрасли, острая цифра из материалов), поданный естественно, по-человечески. Общее место про сегмент как повод запрещено: «у всех в сегменте проблема X», «продажи упираются в потолок трафика», «у многих в отрасли…» — это трюизмы, а не повод.
 - 1–3 предложения в теле отвечают лучше всего; 9–12 предложений режут reply втрое.
 - Тема 3–4 слова — оптимум reply (1.8%); тема из 12+ слов убивает reply (−58%). Вопрос в теме даёт +54% reply.
 - Персонализация {{var}} в теме — +117% reply, в теле — +44%. Обязательное требование: {{var}} есть в КАЖДОЙ теме; в каждом теле — ровно один {{var}}.
-- Цифры в теле — МИНУС 63% reply; цифры в теме — минус 34%. Избегай чисел, процентов, сумм, «топ-5».
+- Цифры в теле — МИНУС 63% reply; цифры в теме — минус 34%. Избегай чисел, процентов, сумм, «топ-5». Единственное исключение — одна опорная цифра из материалов, когда она и есть повод письма или доказательство кейса: без неё факт не работает.
 - Timeline-хуки («за 2 недели», «в N дней») — минус 29% reply. Не обещай сроков цифрами.
 - CTA «созвон/звонок на 15 минут?» — МИНУС 36.8% reply (0.70% против 1.11%, n=682 531, p<0.001): просить встречу или звонок в письме запрещено. В каждом письме — ровно один CTA: один мягкий вопрос без давления (уточнить интерес, предложить прислать детали/пример). В письме 1 CTA — гибридный: ОДИН вопрос (один вопросительный знак) с двумя ветками — интерес получателя + бесфрикционный реферал: «Это к вам, или подсказать, кто у вас отвечает за <тема>?». Чистая просьба направить к нужному человеку («к кому лучше обратиться?») допустима ТОЛЬКО в последнем шаге цепочки.
 - Цепочка 2–4 шага оптимальна; reply падает с каждым шагом (шаг 1 — 1.7%, шаг 5+ — 0.3%): самое сильное доказательство — в первое письмо.
 - Одно письмо — одна мысль; каждое следующее — новый угол, а не «напоминаю о себе».
 - Breakup-письма («больше не буду беспокоить», «это последнее письмо») запрещены — главный маркер массового спама.
 - Названия компаний и клиентов — ТОЛЬКО из предоставленных материалов. Выдуманное имя недопустимо: если подходящего кейса во входных данных нет, пиши безымянно («провайдер массового подбора», «ритейлер из топ-10»).
+- КЕЙС В КОНТЕКСТЕ: кейс клиента используй один раз и ТОЛЬКО ЕСЛИ он релевантен — его индустрия/домен правдоподобно близки миру получателя. Вводи кейс через релевантность («мы в вашей теме: делали для <клиент> <что и с каким результатом>»); голая наклейка «мы работали с X» без объяснения, причём он тут, запрещена. Кейс из далёкой индустрии — пиши безымянно («для вендора корпоративного ПО») или пропусти кейс целиком: кейс-слот может остаться пустым.
 - Одно и то же название клиента/кейса — максимум в одном письме цепочки; повтор в следующих письмах — маркер шаблона.
 - Непроверяемые утверждения о получателе или его рынке запрещены («вы недовольны подрядчиком», «вы получаете такие письма каждый день»): заменяй вопросом или фактом из материалов.
 - Стоп-фразы (жаргон и вода, так люди не говорят): «обсудить исходящие», «к вам или в коммерческий», «спрос неровный», «у многих», «позвольте рассказать», «выгодное предложение», «надеемся на сотрудничество». Пиши так, как живой человек пишет коллеге.`;
@@ -152,41 +157,57 @@ const TASK_PROMPTS: Record<HeChainLanguage, string> = {
 - Покрывай вертикаль ЦЕЛИКОМ: если в описании вертикали перечислены суб-сегменты, формулировки должны быть нейтральными и подходить каждому из них. Запрещено молча сужать цепочку до одного суб-сегмента или перескакивать на другую аудиторию в середине цепочки.
 - Гипотезы и доказательства — ПЕРВИЧНЫЙ источник болей, углов и конкретики: рыночные факты, чужие кейсы, регуляторные драйверы. Гипотезы с пометкой «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» подтверждены человеком — они в приоритете. Не вводи рыночные углы и боли, противоречащие списку гипотез; отклонённые специалистом гипотезы в материалах просто отсутствуют — не упоминай их существование. Опирайся на список, но НЕ цитируй URL в письмах и не грузи цифрами (см. регламент).
 - Бриф клиента — оффер и УТП. Одно письмо — одна мысль/одно УТП, распредели их по цепочке.
-- Если в материалах есть блок «КЕЙС КЛИЕНТА» — это ГЛАВНОЕ доказательство цепочки и её единственный кейс-слот: он замещает общее правило «один кейс из материалов» (кейсы из брифа — только когда этого блока нет). Используй его с реальными цифрами из блока, максимум в ОДНОМ письме, и никогда не приписывай его другой индустрии, чем указана в блоке.
+- Если в материалах есть блок «КЕЙС КЛИЕНТА» — это единственный кейс-слот цепочки (кейсы из брифа — только когда этого блока нет): используй его один раз и ТОЛЬКО ЕСЛИ релевантен миру получателя (индустрия/домен кейса правдоподобно близки вертикали). Вводи через релевантность: «мы в вашей теме: делали для <клиент> <что и с каким результатом>» — никогда голой наклейкой «мы работали с X». Кейс из далёкой индустрии → безымянно («для вендора корпоративного ПО») или пропусти кейс-слот целиком. Реальные цифры — только из блока, максимум в ОДНОМ письме, и никогда не приписывай его другой индустрии, чем указана в блоке.
 - Первое письмо — самое сильное: лучший угол + лучшее доказательство. Фоллоу-апы — новые углы, а не «пинг».
 
 Обязательная конструкция цепочки:
-- Письмо 1 (обязательные биты, человеческим диалогом, а не питчем): (1) почему пишу — триггер про получателя: наблюдаемый факт о его сегменте, а НЕ голая категоризация вроде «Вы продаёте в X» и НЕ непроверяемое утверждение о самом получателе; (2) что предлагаю — одна простая строка: услуга простыми словами + для кого; (3) как и почему могу помочь — доказательство/релевантность (результат для получателя через роли/сегменты, без маркетинговых цифр); (4) один мягкий вопрос — гибридный CTA по регламенту. Тест 5 секунд: незнакомец после письма 1 мгновенно отвечает — кто это, что предлагают, как это поможет мне; не проходит — перепиши. Описания процесса отправителя («собираем сигналы», «пишем под контекст») в письме 1 запрещены — процессу место в письмах 2+.
+- Письмо 1 (обязательные биты, человеческим диалогом, а не питчем): (1) ПОВОД — почему пишу именно этому получателю сейчас. Иерархия: (а) наблюдаемый факт о мире получателя из материалов — сигнал из описания вертикали, факт из бренд-облака, острая цифра из доказательств гипотез (цитируй её естественно, не как статистику); (б) если ничего конкретного нет — самый острый доказательный факт вертикали с его реальной цифрой как повод. Запрещено открывать письмо общим местом про сегмент («у всех в сегменте проблема X», «продажи упираются в потолок трафика»), голой категоризацией («Вы продаёте в X») или непроверяемым утверждением о самом получателе; (2) что предлагаю — одна простая строка: услуга простыми словами + для кого; (3) как и почему могу помочь — доказательство/релевантность (результат для получателя через роли/сегменты, без маркетинговых цифр); (4) один мягкий вопрос — гибридный CTA по регламенту. Тест 5 секунд: незнакомец после письма 1 мгновенно отвечает — кто это, что предлагают, как это поможет мне; не проходит — перепиши. Описания процесса отправителя («собираем сигналы», «пишем под контекст») в письме 1 запрещены — процессу место в письмах 2+.
+- Повод есть у КАЖДОГО письма, не только у первого: новый угол письма = новый факт-повод из материалов, а не «напоминаю о прошлом письме» и не «пинг».
+- A/B-ВАРИАНТЫ: каждое письмо пиши в ДВУХ вариантах с РАЗНЫМИ поводами. Вариант A (основной, блок ---LETTER N---) — повод от якоря со стороны получателя (его мир, его факты по иерархии выше). Вариант B (блок ---LETTER N B---) — повод от якоря сегмента/рынка (самый острый доказательный факт вертикали с его реальной цифрой). B — не перефразировка A, а другой угол; оба варианта проходят весь регламент (длина, {{var}}, ровно один CTA).
 - Конкретный кейс/доказательный факт (имя клиента и/или конкретный результат) — ТОЛЬКО из материалов и ровно в ОДНОМ письме цепочки: одно и то же название кейса/клиента не может появляться больше чем в одном письме. Если подходящего кейса в материалах нет — пиши безымянно; выдумывать названия запрещено.
 - Чистая просьба направить к нужному человеку («к кому лучше обратиться?») — только в последнем письме, один раз на всю цепочку; в письме 1 реферальная ветка допустима только внутри гибридного CTA (см. регламент).
 ${'{{OPERATORS_HINT}}'}
 ПРИМЕР — как нельзя и как надо (пример структуры, а не текст для копирования):
-ПЛОХО: «Polza пишет холодные письма за компанию, которая продаёт сложный продукт другому бизнесу, и доводит до разговора с ЛПР. Работаем как внешняя команда — с Диасофт, BPMSoft и Первой Формой. Прислать пример цепочки под {{company}}?»
-Почему плохо: услуга не названа простыми словами, клиент описан через вложенные придаточные, выгоды получателя нет — только механика отправителя.
-ХОРОШО: «Пишу, потому что у компаний со сложным B2B-продуктом продажи часто упираются в поиск ЛПР. Мы — Polza, делаем email-аутрич под ключ: находим нужные компании и приводим на разговор с ЛПР — так работали с Диасофт и BPMSoft. Начать можно с теста на узком сегменте. Это к вам, или подсказать, кто в {{company}} отвечает за новых клиентов?»
+ПЛОХО: «У вендоров ПО продажи упираются в потолок трафика. Мы — Polza, пишем холодные письма за компанию, которая продаёт сложный продукт другому бизнесу, и доводим до разговора с ЛПР. Так работали с BPMSoft. Прислать пример цепочки под {{company}}?»
+Почему плохо: повод — общее место про сегмент (трюизм про «потолок трафика» верен для всех и ни для кого конкретно); услуга не названа простыми словами, клиент описан через вложенные придаточные; кейс «Так работали с BPMSoft» — наклейка без контекста: непонятно, что делали и причём тут получатель.
+ХОРОШО: «Пишу из-за свежей цифры по вашей отрасли: за год доля сделок, застрявших на этапе пилота, выросла в 1,7 раза. Мы — Polza, делаем email-аутрич под ключ: находим компании, которым уже нужен ваш продукт, и приводим их на разговор с ЛПР. Мы в вашей теме: для Диасофт собирали встречи с финансовыми директорами предприятий. Это к вам, или подсказать, кто в {{company}} отвечает за новых клиентов?»
+Почему хорошо: повод — конкретный факт с опорной цифрой из материалов; услуга названа простыми словами; кейс введён через релевантность («мы в вашей теме») с понятным результатом, а не наклейкой.
 ЖЁСТКИЕ САМОПРОВЕРКИ ПЕРЕД ВЫДАЧЕЙ (не выполнено — перепиши):
-- Посчитай слова в каждом теле: > 50 — сократи и пересчитай; письмо 1 — ≤ 45 слов.
+- Посчитай слова в каждом теле: > 80 — сократи и пересчитай; письмо 1 — ≤ 70 слов. Каждое слово сверх 50 несёт повод или конкретику, не воду.
+- У КАЖДОГО письма есть конкретный повод — факт про получателя/его мир, а не общее место про сегмент; письмо 1 — по иерархии повода выше.
+- У каждого письма есть вариант B (---LETTER N B---) с ДРУГИМ поводом: A — от якоря получателя, B — от якоря сегмента/рынка; B — не перефразировка A.
+- Кейс (если есть) введён через релевантность и его индустрия близка получателю; иначе — безымянно или без кейса.
 - В КАЖДОЙ теме есть {{var}}; в каждом теле — ровно один {{var}}.
 - В каждом письме — ровно один CTA; в письме 1 — гибридный вопрос с одним вопросительным знаком.
 - Нет непроверяемых утверждений о получателе или его рынке: такие мысли оформляй вопросом или фактом из материалов.
 - Нет стоп-фраз из регламента («обсудить исходящие», «к вам или в коммерческий», «спрос неровный», «у многих») и рекламных клише («лидер», «лучший», «гарантируем», «выгодно», «бесплатно»).
-- В письме 1 нет маркетинговых цифр: результат получателя сформулирован через роли/сегменты.
+- В письме 1 нет маркетинговых цифр: результат получателя сформулирован через роли/сегменты (единственная допустимая цифра — опорный факт повода из материалов).
 - Перечитай каждое письмо вслух: согласование падежей и родов должно быть идеальным (пример ошибки: «на постоянной работой» → «на постоянной работе»).
 
 ЯЗЫК: вся цепочка строго на русском. Бренды и устоявшиеся термины индустрии — в оригинале.
 
 ФОРМАТ ВЫВОДА (ОБЯЗАТЕЛЕН — иначе ответ не пройдёт парсинг):
 ---LETTER 1---
-Тема: <тема письма 1>
+Тема: <тема письма 1, вариант A>
 
-<тело письма 1>
+<тело письма 1, вариант A>
+
+---LETTER 1 B---
+Тема: <тема письма 1, вариант B — другой повод>
+
+<тело письма 1, вариант B>
 
 ---LETTER 2---
-Тема: <тема письма 2>
+Тема: <тема письма 2, вариант A>
 
-<тело письма 2>
+<тело письма 2, вариант A>
 
-...и так далее до последнего письма. Никаких пояснений до/после блоков. Маркеры «---LETTER N---» и слово «Тема:» не меняй.`,
+---LETTER 2 B---
+Тема: <тема письма 2, вариант B>
+
+<тело письма 2, вариант B>
+
+...и так далее до последнего письма (у каждого — вариант B своим блоком сразу после варианта A). Никаких пояснений до/после блоков. Маркеры «---LETTER N---», «---LETTER N B---» и слово «Тема:» не меняй.`,
 
   en: `You are a senior email outreach specialist with 400+ launched cold B2B campaigns (average reply rate 8–18%).
 
@@ -196,7 +217,7 @@ How to use the materials:
 - The vertical and its synonyms are the audience: write as if you know their industry from the inside (their terms, their pains, their metrics).
 - The hypotheses list is the PRIMARY source of pains, angles and specifics: market facts, third-party cases, regulatory drivers. Items marked "✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ" are human-confirmed and take priority. Do not introduce market angles or pains that contradict the list; rejected hypotheses are simply absent from the materials — never mention their existence. Rely on the list, but do NOT cite URLs in the emails and do not overload them with numbers (see the regulations).
 - The client brief is the offer and USPs. One email — one idea/one USP; spread them across the sequence.
-- If the materials contain a "КЕЙС КЛИЕНТА" block — that is THE proof case of the sequence and its single case slot: it replaces the generic "one case from the materials" rule (brief cases remain a fallback only when this block is absent). Render it with its real numbers, in at most ONE email, and never attribute it to an industry other than the one stated in the block.
+- If the materials contain a "КЕЙС КЛИЕНТА" block — that is the single case slot of the sequence (brief cases remain a fallback only when this block is absent): use it once and ONLY IF relevant — the case's industry/domain is plausibly close to the recipient's world. Introduce it through relevance ("we're in your space: we did <what, with what result> for <client>"), never as a bare "we worked with X" sticker. A case from a far-away industry → write nameless ("for a corporate software vendor") or skip the case slot entirely. Real numbers only from the block, in at most ONE email, and never attribute it to an industry other than the one stated in the block.
 - The first email is the strongest: best angle + best proof. Follow-ups bring new angles, not "just bumping this".
 
 STEP 0 — THE OFFER (mandatory structure). Before writing, formulate the offer in four parts — in the vertical's own terms:
@@ -212,26 +233,38 @@ TONE — HUMAN DIALOGUE, NOT ADVERTISING. We are not blasting ads — we are hav
 - No marketing numbers in email 1 (digits in the body → −63% reply): phrase the recipient's outcome via roles/segments ("meetings with HR directors at large employers"), not a cadence like "3–5 meetings a month".
 
 Mandatory sequence construction:
-- Email 1 (mandatory beats, rendered as human dialogue, not a pitch): (1) why I'm writing — a trigger about the recipient: an observable fact about their segment, NOT bare categorization like "You sell into X" and NOT an unverifiable claim about the recipient themselves; (2) what I offer — one simple line: the service in plain words + for whom; (3) how and why I can help — proof/relevance (the recipient's outcome via roles/segments, no marketing numbers); (4) one soft hybrid question — ONE question (one question mark) with two branches, interest + frictionless referral: "Is this for you, or could you point me to who owns <topic>?" The 5-second test: after email 1 a stranger instantly answers — who is this, what do they offer, how does it help me; if it fails — rewrite. Self-centered process descriptions ("we collect signals", "we write to context") are banned from email 1 — process belongs to emails 2+.
-- A specific case/proof (client name and/or concrete result) — from the materials ONLY and in exactly ONE email of the sequence: the same named case/client may not appear in more than one email. If no suitable case exists in the materials — write without names; inventing names is forbidden.
+- Email 1 (mandatory beats, rendered as human dialogue, not a pitch): (1) THE REASON FOR WRITING — why this recipient, why now. Hierarchy: (a) an observable fact about the recipient's world from the materials — a signal from the vertical description, a brand-cloud fact, a sharp evidence number from the vertical's hypotheses (cite it naturally, in human words); (b) if nothing concrete exists — the vertical's single sharpest evidence fact with its real number as the reason. Opening with a generic segment claim ("everyone in the segment has problem X", "sales hit a traffic ceiling") is banned, as are bare categorization ("You sell into X") and unverifiable claims about the recipient themselves; (2) what I offer — one simple line: the service in plain words + for whom; (3) how and why I can help — proof/relevance (the recipient's outcome via roles/segments, no marketing numbers); (4) one soft hybrid question — ONE question (one question mark) with two branches, interest + frictionless referral: "Is this for you, or could you point me to who owns <topic>?" The 5-second test: after email 1 a stranger instantly answers — who is this, what do they offer, how does it help me; if it fails — rewrite. Self-centered process descriptions ("we collect signals", "we write to context") are banned from email 1 — process belongs to emails 2+.
+- EVERY email (not just the first) opens with its own concrete reason: a new angle = a new fact-reason from the materials, never "just following up" or "bumping this".
+- A/B VARIANTS: write EVERY email in TWO variants with DIFFERENT reasons/angles. Variant A (primary, the ---LETTER N--- block) — reason anchored on the recipient's side (their world, their facts, per the hierarchy above). Variant B (the ---LETTER N B--- block) — reason anchored on the segment/market side (the vertical's sharpest evidence fact with its real number). B is not a rephrase of A but a different angle; both variants pass the whole regulations (length, {{var}}, exactly one CTA).
+- A specific case/proof (client name and/or concrete result) — from the materials ONLY, used once and ONLY IF relevant to the recipient's world, introduced through relevance ("we're in your space: ..."), in exactly ONE email of the sequence: the same named case/client may not appear in more than one email. If no suitable case exists or the case is from a far-away industry — write without names or skip the case entirely; inventing names is forbidden.
 - A pure referral ask ("who should I talk to?") — only in the last email, once per sequence; in email 1 the referral branch is allowed only inside the hybrid CTA (see the regulations).
 
-FINAL SELF-CHECK: read every email aloud — grammar and agreement must be flawless; no advertising clichés; no marketing numbers in email 1.
+FINAL SELF-CHECK: read every email aloud — grammar and agreement must be flawless; no advertising clichés; no marketing numbers in email 1 (the only allowed digit is the one anchoring evidence fact of the reason); every email opens with a concrete reason (a fact about the recipient/their world, not a generic segment claim); every email has a B variant with a DIFFERENT reason (A — recipient-side anchor, B — segment/market anchor); body ≤ 80 words, email 1 ≤ 70.
 ${'{{OPERATORS_HINT}}'}
 LANGUAGE: write the entire sequence strictly in English, even though the materials may be in Russian. Convey the meaning, do not translate word for word.
 
 OUTPUT FORMAT (MANDATORY — otherwise the response will fail parsing):
 ---LETTER 1---
-Subject: <subject of email 1>
+Subject: <subject of email 1, variant A>
 
-<body of email 1>
+<body of email 1, variant A>
+
+---LETTER 1 B---
+Subject: <subject of email 1, variant B — different reason>
+
+<body of email 1, variant B>
 
 ---LETTER 2---
-Subject: <subject of email 2>
+Subject: <subject of email 2, variant A>
 
-<body of email 2>
+<body of email 2, variant A>
 
-...and so on through the last email. No explanations before/after the blocks. Keep the "---LETTER N---" markers and the word "Subject:" exactly as shown.`,
+---LETTER 2 B---
+Subject: <subject of email 2, variant B>
+
+<body of email 2, variant B>
+
+...and so on through the last email (each email's B variant in its own block right after variant A). No explanations before/after the blocks. Keep the "---LETTER N---", "---LETTER N B---" markers and the word "Subject:" exactly as shown.`,
 
   pl: `Jesteś starszym specjalistą ds. email outreach z ponad 400 uruchomionymi zimnymi kampaniami B2B (średni reply rate 8–18%).
 
@@ -241,7 +274,7 @@ Jak używać materiałów:
 - Pion i jego synonimy to grupa docelowa: pisz tak, jakbyś znał ich branżę od środka (ich terminy, ich bóle, ich metryki).
 - Lista hipotez to PIERWSZE źródło bólów, kątów i konkretów: fakty rynkowe, case studies, czynniki regulacyjne. Pozycje oznaczone «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ» zostały potwierdzone przez człowieka — mają priorytet. Nie wprowadzaj kątów rynkowych ani bólów sprzecznych z listą; odrzucone hipotezy są po prostu nieobecne w materiałach — nigdy nie wspominaj o ich istnieniu. Opieraj się na liście, ale NIE cytuj URL-i w mailach i nie przeciążaj liczbami (patrz regulamin).
 - Brief klienta to oferta i USP. Jeden mail — jedna myśl/jeden USP; rozłóż je na całą sekwencję.
-- Jeśli w materiałach jest blok «КЕЙС КЛИЕНТА» — to GŁÓWNY dowód sekwencji i jej jedyny slot na case: zastępuje ogólną zasadę «jeden case z materiałów» (case'y z briefu — tylko gdy tego bloku nie ma). Użyj go z prawdziwymi liczbami z bloku, maksymalnie w JEDNYM mailu, i nigdy nie przypisuj go do innej branży niż wskazana w bloku.
+- Jeśli w materiałach jest blok «КЕЙС КЛИЕНТА» — to jedyny slot na case w sekwencji (case'y z briefu — tylko gdy tego bloku nie ma): użyj go raz i TYLKO JEŚLI jest trafny — branża/domena case'u jest wiarygodnie bliska światu odbiorcy. Wprowadzaj go przez trafność («jesteśmy w Twoim temacie: robiliśmy dla <klient> <co i z jakim rezultatem>»), nigdy gołą naklejką «pracowaliśmy z X». Case z dalekiej branży → pisz bez nazwy („dla vendora oprogramowania korporacyjnego") albo pomiń slot całkowicie. Prawdziwe liczby — tylko z bloku, maksymalnie w JEDNYM mailu, i nigdy nie przypisuj go do innej branży niż wskazana w bloku.
 - Pierwszy mail jest najsilniejszy: najlepszy kąt + najlepszy dowód. Follow-upy wnoszą nowe kąty, nie "przypominam o sobie".
 
 KROK 0 — OFERTA (obowiązkowa struktura). Zanim zaczniesz pisać, sformułuj dla siebie ofertę w czterech częściach — w terminologii samego pionu:
@@ -257,26 +290,38 @@ TON — LUDZKI DIALOG, NIE REKLAMA. Nie rozsyłamy reklamy — prowadzimy ludzki
 - W mailu 1 — żadnych marketingowych liczb (cyfry w treści → −63% reply): rezultat dla odbiorcy formułuj przez role/segmenty („spotkania z dyrektorami HR u dużych pracodawców"), a nie kadencją „3–5 spotkań miesięcznie".
 
 Obowiązkowa konstrukcja sekwencji:
-- Mail 1 (obowiązkowe bity, prowadzone ludzkim dialogiem, nie pitczem): (1) dlaczego piszę — trigger o odbiorcy: obserwowalny fakt o jego segmencie, NIE goła kategoryzacja „Sprzedajecie do X" i NIE niesprawdzalne twierdzenie o samym odbiorcy; (2) co oferuję — jedna prosta linia: usługa prostymi słowami + dla kogo; (3) jak i dlaczego mogę pomóc — dowód/trafność (rezultat dla odbiorcy przez role/segmenty, bez marketingowych liczb); (4) jedno miękkie hybrydowe pytanie — JEDNO pytanie (jeden znak zapytania) z dwiema gałęziami: zainteresowanie + bezproblemowe polecenie: „Czy to do Ciebie, czy podpowiesz, kto u Was odpowiada za <temat>?" Test 5 sekund: obca osoba po mailu 1 natychmiast odpowiada — kto to, co oferuje, jak mi to pomoże; jeśli nie przechodzi — napisz od nowa. Autocentryczne opisy procesu nadawcy („zbieramy sygnały", „piszemy pod kontekst") są zakazane w mailu 1 — proces należy do maili 2+.
-- Konkretny case/fakt dowodowy (nazwa klienta i/lub konkretny wynik) — WYŁĄCZNIE z materiałów i w DOKŁADNIE JEDNYM mailu sekwencji: ta sama nazwa case'u/klienta nie może pojawić się w więcej niż jednym mailu. Jeśli w materiałach nie ma odpowiedniego case'u — pisz bez nazw; wymyślanie nazw jest zakazane.
+- Mail 1 (obowiązkowe bity, prowadzone ludzkim dialogiem, nie pitczem): (1) POWÓD — dlaczego piszę właśnie do tego odbiorcy i teraz. Hierarchia: (a) obserwowalny fakt o świecie odbiorcy z materiałów — sygnał z opisu pionu, fakt z brand cloud, ostra liczba z dowodów hipotez (cytuj ją naturalnie, po ludzku); (b) jeśli nie ma nic konkretnego — najostrzejszy fakt dowodowy pionu z jego prawdziwą liczbą jako powód. Zakazane otwieranie ogólnikiem o segmencie („wszyscy w segmencie mają problem X", „sprzedaż uderza w sufit ruchu"), gołą kategoryzacją („Sprzedajecie do X") i niesprawdzalnym twierdzeniem o samym odbiorcy; (2) co oferuję — jedna prosta linia: usługa prostymi słowami + dla kogo; (3) jak i dlaczego mogę pomóc — dowód/trafność (rezultat dla odbiorcy przez role/segmenty, bez marketingowych liczb); (4) jedno miękkie hybrydowe pytanie — JEDNO pytanie (jeden znak zapytania) z dwiema gałęziami: zainteresowanie + bezproblemowe polecenie: „Czy to do Ciebie, czy podpowiesz, kto u Was odpowiada za <temat>?" Test 5 sekund: obca osoba po mailu 1 natychmiast odpowiada — kto to, co oferuje, jak mi to pomoże; jeśli nie przechodzi — napisz od nowa. Autocentryczne opisy procesu nadawcy („zbieramy sygnały", „piszemy pod kontekst") są zakazane w mailu 1 — proces należy do maili 2+.
+- KAŻDY mail (nie tylko pierwszy) otwiera własny konkretny powód: nowy kąt = nowy fakt-powód z materiałów, nigdy „przypominam o sobie".
+- WARIANTY A/B: każdy mail pisz w DWÓCH wariantach z RÓŻNYMI powodami. Wariant A (główny, blok ---LETTER N---) — powód od kotwicy po stronie odbiorcy (jego świat, jego fakty wg hierarchii wyżej). Wariant B (blok ---LETTER N B---) — powód od kotwicy segmentu/rynku (najostrzejszy fakt dowodowy pionu z prawdziwą liczbą). B to nie parafraza A, lecz inny kąt; oba warianty przechodzą cały regulamin (długość, {{var}}, dokładnie jedno CTA).
+- Konkretny case/fakt dowodowy (nazwa klienta i/lub konkretny wynik) — WYŁĄCZNIE z materiałów, użyty raz i TYLKO JEŚLI trafny dla świata odbiorcy, wprowadzony przez trafność („jesteśmy w Twoim temacie: …"), w DOKŁADNIE JEDNYM mailu sekwencji: ta sama nazwa case'u/klienta nie może pojawić się w więcej niż jednym mailu. Jeśli w materiałach nie ma odpowiedniego case'u albo case jest z dalekiej branży — pisz bez nazw lub pomiń case całkowicie; wymyślanie nazw jest zakazane.
 - Czysta prośba o skierowanie do właściwej osoby („do kogo lepiej się zwrócić?") — tylko w ostatnim mailu, raz na całą sekwencję; w mailu 1 gałąź polecenia jest dozwolona tylko wewnątrz hybrydowego CTA (patrz regulamin).
 
-OSTATECZNA SAMOKONTROLA: przeczytaj każdy mail na głos — odmiana przypadków i rodzajów musi być bezbłędna; bez reklamowych frazesów; bez marketingowych liczb w mailu 1.
+OSTATECZNA SAMOKONTROLA: przeczytaj każdy mail na głos — odmiana przypadków i rodzajów musi być bezbłędna; bez reklamowych frazesów; bez marketingowych liczb w mailu 1 (jedyna dozwolona cyfra to oporowy fakt powodu); każdy mail otwiera konkretny powód (fakt o odbiorcy/jego świecie, nie ogólnik o segmencie); każdy mail ma wariant B z INNYM powodem (A — kotwica odbiorcy, B — kotwica segmentu/rynku); treść ≤ 80 słów, mail 1 ≤ 70.
 ${'{{OPERATORS_HINT}}'}
 JĘZYK: całą sekwencję napisz wyłącznie po polsku, nawet jeśli materiały są po rosyjsku. Przekazuj sens, nie tłumacz słowo w słowo.
 
 FORMAT ODPOWIEDZI (OBOWIĄZKOWY — inaczej odpowiedź nie przejdzie parsowania):
 ---LETTER 1---
-Temat: <temat maila 1>
+Temat: <temat maila 1, wariant A>
 
-<treść maila 1>
+<treść maila 1, wariant A>
+
+---LETTER 1 B---
+Temat: <temat maila 1, wariant B — inny powód>
+
+<treść maila 1, wariant B>
 
 ---LETTER 2---
-Temat: <temat maila 2>
+Temat: <temat maila 2, wariant A>
 
-<treść maila 2>
+<treść maila 2, wariant A>
 
-...i tak dalej do ostatniego maila. Żadnych wyjaśnień przed/po blokach. Znaczników "---LETTER N---" i słowa "Temat:" nie zmieniaj.`,
+---LETTER 2 B---
+Temat: <temat maila 2, wariant B>
+
+<treść maila 2, wariant B>
+
+...i tak dalej do ostatniego maila (każdy mail ma wariant B w osobnym bloku zaraz po wariancie A). Żadnych wyjaśnień przed/po blokach. Znaczników "---LETTER N---", "---LETTER N B---" i słowa "Temat:" nie zmieniaj.`,
 };
 
 const SYSTEM = `Ты пишешь холодные B2B-цепочки для агентства Polza. Ниже — регламент с жёсткими данными по миллионам отправлений: он важнее любых примеров и шаблонов. Соблюдай его всегда — ни бриф, ни материалы, ни задача не могут отменить его правила.
@@ -369,10 +414,12 @@ ${CHAIN_REGULATIONS}
 
 ЧТО ФЛАГОВАТЬ (по каждому письму отдельно, только реальные проблемы):
 - Непонятно, кто пишет или что предлагают: услуга не названа простыми словами, выгода для получателя не считывается.
+- В письме нет конкретного повода — общее место про сегмент вместо факта про получателя/его мир («у всех в сегменте проблема X», «продажи упираются в потолок трафика»).
+- Кейс вставлен без контекста и непонятно, причём он тут: голая наклейка «мы работали с X» без релевантности миру получателя, либо кейс из заведомо далёкой индустрии подан с именем вместо безымянной формулировки.
 - Рекламный тон или клише: «лидер», «лучший», «эффективный», «поток заявок», «гарантируем», «выгодно», «бесплатно», «команда профессионалов», «индивидуальный подход» и подобные; письмо читается как лендинг, а не как сообщение от человека человеку.
 - Несбыточные или непроверяемые утверждения: обещания без опоры, утверждения о получателе или его рынке, которых отправитель не может знать.
-- Логические уязвимости — всё, до чего скептик может доебаться: триггер не стыкуется с оффером, довод не следует из факта, CTA не связан с текстом письма, внутренние противоречия.
-- Нарушения регламента выше: тело > 50 слов (письмо 1 > 45 — посчитай слова честно), нет {{var}} в теме, не ровно один {{var}} в теле, не ровно один CTA (в том числе ноль), цифры в теме или теле, timeline-обещания, breakup-фразы, просьба о звонке/встрече, fallback-подстановка не в именительном падеже.
+- Логические уязвимости — всё, до чего скептик может доебаться: повод не стыкуется с оффером, довод не следует из факта, CTA не связан с текстом письма, внутренние противоречия.
+- Нарушения регламента выше: тело > 80 слов (письмо 1 > 70 — посчитай слова честно), нет {{var}} в теме, не ровно один {{var}} в теле, не ровно один CTA (в том числе ноль), цифры в теме или теле (кроме одной опорной цифры повода/кейса из материалов), timeline-обещания, breakup-фразы, просьба о звонке/встрече, fallback-подстановка не в именительном падеже.
 - В письме 1 CTA не гибридный (нет реферальной ветки).
 - Грамматика и чистота языка: согласование падежей и родов, нестандартное управление (пример: „держится работой" вместо „держится на работе"), оборванные или незаконченные фразы.
 - Тест 5 секунд не пройден: после беглого чтения письма 1 нельзя мгновенно ответить — кто это, что предлагают, как это поможет мне.
@@ -443,7 +490,7 @@ ${CHAIN_REGULATIONS}
 
 ЖЁСТКИЕ ПРАВИЛА РЕРАЙТА:
 - Переписывай ТОЛЬКО письма, чей letter_index есть в issues критики. Все остальные письма возвращай ДОСЛОВНО — символ в символ, включая тему: никаких «заодно поправил».
-- Каждый issue отмеченного письма закрывай по его полю fix; после переписи письмо обязано проходить ВЕСЬ регламент. Самопроверка обязательна: посчитай слова в теле (≤ 50, письмо 1 ≤ 45), {{var}} в теме и ровно один в теле, ровно один CTA (в письме 1 — гибридный вопрос с одним вопросительным знаком).
+- Каждый issue отмеченного письма закрывай по его полю fix; после переписи письмо обязано проходить ВЕСЬ регламент. Самопроверка обязательна: посчитай слова в теле (≤ 80, письмо 1 ≤ 70), письмо открывается конкретным поводом (не общим местом про сегмент), кейс — только через релевантность получателю, {{var}} в теме и ровно один в теле, ровно один CTA (в письме 1 — гибридный вопрос с одним вопросительным знаком).
 - Конструкция цепочки неизменна: то же количество писем, тот же порядок и те же роли писем в лесенке (письмо 1 — оффер и гибридный CTA, чистый реферальный вопрос — только в последнем). Ничего не добавляй, не удаляй и не меняй местами.
 - Новые факты запрещены: используй только то, что уже есть во входных письмах и материалах задачи. Новые имена клиентов, кейсы, цифры и обещания выдумывать нельзя — если критик требует конкретики, которой нет во входе, переписывай безымянно.
 - Конкретный кейс/название клиента — максимум в одном письме цепочки; при переписи не размазывай его на несколько писем.
@@ -460,7 +507,7 @@ const REWRITE_ACK: Record<HeChainLanguage, string> = {
 };
 
 const REWRITE_TASK: Record<HeChainLanguage, string> = {
-  ru: `Перепиши цепочку по критике выше: закрой каждый issue, не отмеченные письма верни дословно. Верни цепочку ЦЕЛИКОМ — все письма по порядку, и переписанные, и нетронутые. Сегментные варианты писем не трогаем — они восстанавливаются отдельно, их не выводи.
+  ru: `Перепиши цепочку по критике выше: закрой каждый issue, не отмеченные письма верни дословно. Верни цепочку ЦЕЛИКОМ — все письма по порядку, и переписанные, и нетронутые. Сегментные варианты и A/B-варианты (---LETTER N B---) писем не трогаем — они восстанавливаются отдельно, их не выводи.
 
 ФОРМАТ ВЫВОДА (ОБЯЗАТЕЛЕН — иначе ответ не пройдёт парсинг):
 ---LETTER 1---
@@ -474,7 +521,7 @@ const REWRITE_TASK: Record<HeChainLanguage, string> = {
 <тело письма 2>
 
 ...и так далее до последнего письма. Никаких пояснений до/после блоков. Маркеры «---LETTER N---» и слово «Тема:» не меняй. Пиши на русском.`,
-  en: `Rewrite the sequence per the critique above: close every issue, return unflagged emails verbatim. Return the WHOLE sequence — all emails in order, rewritten and untouched alike. Leave segment variants alone — they are restored separately; do not output them.
+  en: `Rewrite the sequence per the critique above: close every issue, return unflagged emails verbatim. Return the WHOLE sequence — all emails in order, rewritten and untouched alike. Leave segment variants and A/B variants (---LETTER N B---) alone — they are restored separately; do not output them.
 
 OUTPUT FORMAT (MANDATORY — otherwise the response will fail parsing):
 ---LETTER 1---
@@ -488,7 +535,7 @@ Subject: <subject of email 2>
 <body of email 2>
 
 ...and so on through the last email. No explanations before/after the blocks. Keep the "---LETTER N---" markers and the word "Subject:" exactly as shown. Write in English.`,
-  pl: `Przepisz sekwencję według krytyki powyżej: zamknij każdy issue, nieoflagowane maile zwróć dosłownie. Zwróć CAŁĄ sekwencję — wszystkie maile po kolei, i przepisane, i nietknięte. Wariantów segmentowych nie ruszamy — są odtwarzane osobno, nie wypisuj ich.
+  pl: `Przepisz sekwencję według krytyki powyżej: zamknij każdy issue, nieoflagowane maile zwróć dosłownie. Zwróć CAŁĄ sekwencję — wszystkie maile po kolei, i przepisane, i nietknięte. Wariantów segmentowych i wariantów A/B (---LETTER N B---) nie ruszamy — są odtwarzane osobno, nie wypisuj ich.
 
 FORMAT ODPOWIEDZI (OBOWIĄZKOWY — inaczej odpowiedź nie przejdzie parsowania):
 ---LETTER 1---

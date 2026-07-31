@@ -1,5 +1,8 @@
 /** @jest-environment node */
 
+jest.mock('node:child_process', () => ({ execFile: jest.fn() }));
+
+import { execFile } from 'node:child_process';
 import { fetchJsonWithFallback, fetchTextWithFallback } from '@/lib/parsers/atsHttp';
 
 describe('ATS HTTP helper', () => {
@@ -82,5 +85,45 @@ describe('ATS HTTP helper', () => {
       expect.any(Number),
       expect.objectContaining({ method: 'POST', body }),
     );
+  });
+});
+
+describe('default curl binary', () => {
+  const execFileMock = execFile as unknown as jest.Mock;
+  const originalBin = process.env.ATS_CURL_BIN;
+
+  beforeEach(() => {
+    execFileMock.mockReset();
+    // promisify(execFile) appends a (err, result) callback as the last argument
+    execFileMock.mockImplementation(
+      (_bin: string, _args: string[], _opts: unknown, cb: (err: null, out: { stdout: string }) => void) =>
+        cb(null, { stdout: 'curl-stdout' }),
+    );
+    delete process.env.ATS_CURL_BIN;
+  });
+
+  afterAll(() => {
+    if (originalBin == null) delete process.env.ATS_CURL_BIN;
+    else process.env.ATS_CURL_BIN = originalBin;
+  });
+
+  it('uses the system curl binary by default', async () => {
+    const fetchImpl = jest.fn().mockRejectedValue(new Error('fetch failed'));
+
+    await expect(fetchTextWithFallback('https://example.com/jobs', { fetchImpl })).resolves.toBe('curl-stdout');
+    expect(execFileMock).toHaveBeenCalledWith(
+      'curl',
+      expect.arrayContaining(['https://example.com/jobs']),
+      expect.any(Object),
+      expect.any(Function),
+    );
+  });
+
+  it('honours ATS_CURL_BIN so prod can point at curl-impersonate without a redeploy', async () => {
+    process.env.ATS_CURL_BIN = '/opt/curl-impersonate/bin/curl_chrome';
+    const fetchImpl = jest.fn().mockRejectedValue(new Error('fetch failed'));
+
+    await expect(fetchTextWithFallback('https://example.com/jobs', { fetchImpl })).resolves.toBe('curl-stdout');
+    expect(execFileMock.mock.calls[0][0]).toBe('/opt/curl-impersonate/bin/curl_chrome');
   });
 });

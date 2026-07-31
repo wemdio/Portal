@@ -43,7 +43,13 @@ psql "$DATABASE_URL" -f scripts/funded/enrich-sec-from-pdl.sql
 
 ## Cadence
 
-- **YC**: daily/weekly cron — `all.json` is regenerated daily; re-running upserts.
+- **YC**: weekly cron — `all.json` is regenerated daily upstream, so a weekly
+  re-run is enough; re-running upserts.
+
+  **Prod cron (suggested — NOT installed on prod yet, YC rows are only refreshed on manual runs):**
+  ```
+  40 5 * * 1 docker exec portal node /app/scripts/funded/ingest-yc.mjs >> /var/log/funded-yc-ingest.log 2>&1
+  ```
 - **SEC Form D, bulk**: quarterly (new DERA zip posted shortly after quarter-end).
   **Re-run with the FULL window** (e.g. `--quarters 2024q1,...,<new quarter>`) — the
   bulk upsert recomputes each issuer's totals from the quarters it sees, so a
@@ -63,6 +69,11 @@ psql "$DATABASE_URL" -f scripts/funded/enrich-sec-from-pdl.sql
   The script ships inside the portal image (`/app/scripts/funded/`); the container
   already has `DATABASE_URL`. SEC requires a descriptive User-Agent with a contact
   email on EVERY request — without it (or with one its WAF dislikes) you get 403.
+- **PDL enrichment** (`enrich-sec-from-pdl.sql`): re-run after every large SEC
+  ingest (a bulk quarterly run or a big daily-poller catch-up) — new SEC rows
+  arrive without website/industry. The script creates the `idx_pdl_lower_name`
+  index on `pdl_companies(lower(name))` itself (`create index if not exists`),
+  so the first run over the full PDL catalog is slow; later runs reuse the index.
 
 ## Attribution
 

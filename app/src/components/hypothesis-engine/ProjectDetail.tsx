@@ -10,8 +10,20 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Globe } from 'lucide-react';
-import type { HeHypothesisStatus, HeProjectStatus } from '@/lib/hypothesisEngine/types';
+import {
+  AlertCircle,
+  ArrowLeft,
+  BookOpen,
+  CheckCircle2,
+  Database,
+  FileText,
+  Globe,
+  LayoutTemplate,
+  Mail,
+  X,
+  type LucideIcon,
+} from 'lucide-react';
+import type { HeHypothesisStatus, HeProjectStatus, HeStage } from '@/lib/hypothesisEngine/types';
 import {
   HE_API,
   heCall,
@@ -35,6 +47,9 @@ const POLL_INTERVAL_MS = 4000;
 
 /** localStorage-ключ выбранной вертикали проекта. */
 const selectedVerticalKey = (projectId: string) => `he.sel.${projectId}`;
+
+/** localStorage-ключ метки последнего визита проекта (ISO-время). */
+const visitKey = (projectId: string) => `he.visit.${projectId}`;
 
 const STEP_DEFS = [
   { id: 1, label: 'Исследование', subtitle: 'анализируем рынок' },
@@ -73,6 +88,12 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const [templateNotice, setTemplateNotice] = useState(false);
   const templateNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Блок «С последнего визита»: база — метка предыдущего визита из localStorage
+  // (null = первый визит, блок не показываем); dismissed — скрыт до следующего визита.
+  const [visitBaseline, setVisitBaseline] = useState<string | null>(null);
+  const [visitDismissed, setVisitDismissed] = useState(false);
+  const visitTrackedRef = useRef(false);
+
   const jumpTo = useCallback((next: number) => {
     setStep(next);
     setMaxVisitedStep((prev) => Math.max(prev, next));
@@ -81,6 +102,18 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const load = useCallback(
     async (opts?: { silent?: boolean }) => {
       if (!opts?.silent) setLoading(true);
+      // Первая загрузка = начало визита: запоминаем метку прошлого визита как базу
+      // и сразу пишем «сейчас» — от неё отсчитается следующий визит.
+      if (!visitTrackedRef.current) {
+        visitTrackedRef.current = true;
+        try {
+          const prevVisit = window.localStorage.getItem(visitKey(projectId));
+          window.localStorage.setItem(visitKey(projectId), new Date().toISOString());
+          setVisitBaseline(prevVisit);
+        } catch {
+          // localStorage недоступен — блок «С последнего визита» просто не появится.
+        }
+      }
       try {
         const { ok, data } = await heCall<HeProjectDetailResponse>(`${HE_API}/projects/${projectId}`);
         if (!ok) {
@@ -177,6 +210,24 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
       .sort((a, b) => b.created_at.localeCompare(a.created_at));
     return list[0] ?? null;
   }, [detail, selectedBase]);
+
+  /* ── Блок «С последнего визита» ── */
+
+  // События после метки прошлого визита — из уже загруженной детальной выдачи.
+  const visitItems = useMemo(
+    () => (visitBaseline && detail ? collectVisitItems(detail, visitBaseline) : []),
+    [visitBaseline, detail],
+  );
+
+  // Скрыть блок: «сейчас» становится новой базой — события не всплывут повторно.
+  const dismissVisitBlock = useCallback(() => {
+    setVisitDismissed(true);
+    try {
+      window.localStorage.setItem(visitKey(projectId), new Date().toISOString());
+    } catch {
+      // localStorage недоступен — блок просто скрыт до следующего визита.
+    }
+  }, [projectId]);
 
   /* ── Состояния шагов ── */
 
@@ -487,9 +538,9 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 px-4 py-8 text-left">
+    <div className="mx-auto w-full max-w-7xl space-y-8 px-4 py-8 text-left sm:px-6 lg:px-8">
       {/* Шапка: назад, название проекта и ссылка на сайт — без технических деталей */}
-      <div className="flex min-w-0 items-start gap-3">
+      <div className="flex min-w-0 items-start gap-3 border-b border-gray-200 pb-6">
         <button
           type="button"
           onClick={onBack}
@@ -519,6 +570,36 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
         </div>
       </div>
 
+      {/* «С последнего визита»: что завершилось, пока пользователя не было */}
+      {visitItems.length > 0 && !visitDismissed ? (
+        <section className="rounded-2xl border border-blue-200 bg-blue-50/40 px-4 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-xs font-semibold uppercase tracking-widest text-blue-600">
+              С последнего визита
+            </h2>
+            <button
+              type="button"
+              onClick={dismissVisitBlock}
+              aria-label="Скрыть блок"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-blue-400 transition hover:bg-blue-100 hover:text-blue-600"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </div>
+          <ul className="mt-2 space-y-1.5">
+            {visitItems.map((item) => (
+              <li key={item.id} className="flex items-center gap-2 text-xs text-gray-600">
+                <item.icon className="h-3.5 w-3.5 shrink-0 text-blue-500" aria-hidden />
+                <span className="min-w-0 flex-1 truncate" title={item.text}>
+                  {item.text}
+                </span>
+                <span className="shrink-0 text-gray-400">{timeAgoRu(item.at)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
       {errorMsg && <StatusBox tone="error">{errorMsg}</StatusBox>}
       {actionError && <StatusBox tone="error">{actionError}</StatusBox>}
       {project?.status === 'failed' && project.error ? (
@@ -540,15 +621,13 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
 
       {detail ? (
         <>
-          {/* Навигация мастера */}
-          <div className="rounded-2xl border border-gray-200 bg-white px-3 py-4 sm:px-6">
-            <StepNav steps={wizardSteps} onJump={jumpTo} />
-          </div>
+          {/* Навигация мастера — sticky-плашка внутри StepNav */}
+          <StepNav steps={wizardSteps} onJump={jumpTo} />
 
           {renderStep()}
 
           {/* Техническая информация для отладки — по умолчанию скрыта */}
-          <details className="rounded-2xl border border-gray-200 bg-white px-4 py-3">
+          <details className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
             <summary className="cursor-pointer select-none text-xs font-semibold uppercase tracking-widest text-gray-400 transition hover:text-gray-600">
               Подробности
             </summary>
@@ -636,4 +715,121 @@ function JobsDebugTable({ jobs }: { jobs: HeJobSummary[] }) {
       </table>
     </div>
   );
+}
+
+/* ── Блок «С последнего визита» ── */
+
+/** Русские имена стадий джоб для ленты событий (исследовательские — как на шаге 1). */
+const VISIT_STAGE_NAMES: Record<HeStage, string> = {
+  site_profile: 'Изучение сайта',
+  competitors: 'Поиск конкурентов',
+  brand_cloud: 'Разбор клиентов конкурентов',
+  hypotheses: 'Генерация гипотез',
+  evidence: 'Проверка гипотез',
+  clustering: 'Сборка вертикалей',
+  chain: 'Генерация цепочки',
+  vocab: 'Сборка вокабуляра',
+  base_analyze: 'Анализ базы',
+  base_collect: 'Авто-сборка базы',
+  template: 'Сборка шаблона',
+  dossier: 'Сборка досье',
+};
+
+/** Относительное время по-русски: «только что», «5 мин назад», «2 ч назад», «3 дн назад». */
+function timeAgoRu(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return 'только что';
+  if (minutes < 60) return `${minutes} мин назад`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} ч назад`;
+  return `${Math.floor(hours / 24)} дн назад`;
+}
+
+/** Один пункт ленты «С последнего визита». */
+interface VisitActivityItem {
+  id: string;
+  icon: LucideIcon;
+  text: string;
+  /** ISO-время события — для сортировки (новые сверху) и относительной метки. */
+  at: string;
+}
+
+/**
+ * Собирает события, произошедшие после baseline (метка прошлого визита), из данных
+ * детальной выдачи — без дополнительных запросов. Артефакты (цепочка, вокабуляр,
+ * досье, база, шаблон) перекрывают свои джобы, чтобы событие не дублировалось;
+ * неперекрытые стадии показываются джобами («готово»/«ошибка»).
+ * Максимум 5 пунктов, новые сверху.
+ */
+function collectVisitItems(detail: HeProjectDetailResponse, baselineIso: string): VisitActivityItem[] {
+  const since = new Date(baselineIso).getTime();
+  if (Number.isNaN(since)) return [];
+  const after = (iso: string | null | undefined): iso is string =>
+    typeof iso === 'string' && new Date(iso).getTime() > since;
+
+  const items: VisitActivityItem[] = [];
+  const coveredStages = new Set<string>();
+
+  for (const c of detail.chains ?? []) {
+    if (after(c.created_at)) {
+      items.push({ id: `chain-${c.id}`, icon: Mail, text: 'Сгенерирована цепочка', at: c.created_at });
+      coveredStages.add('chain');
+    }
+  }
+  for (const v of detail.vocabs ?? []) {
+    if (after(v.created_at)) {
+      items.push({ id: `vocab-${v.id}`, icon: BookOpen, text: 'Собран вокабуляр', at: v.created_at });
+      coveredStages.add('vocab');
+    }
+  }
+  for (const d of detail.dossiers ?? []) {
+    // У досье в DTO нет created_at — ближайшая метка готовности: data.computed_at.
+    const readyAt = d.data?.computed_at;
+    if (d.status === 'ready' && after(readyAt)) {
+      items.push({ id: `dossier-${d.id}`, icon: FileText, text: 'Готово досье', at: readyAt });
+      coveredStages.add('dossier');
+    }
+  }
+  for (const b of detail.bases ?? []) {
+    if (after(b.created_at)) {
+      const text =
+        b.status === 'analyzed'
+          ? `База «${b.filename}» загружена и проанализирована`
+          : b.status === 'failed'
+            ? `База «${b.filename}» — ошибка анализа`
+            : `Загружена база «${b.filename}»`;
+      items.push({ id: `base-${b.id}`, icon: Database, text, at: b.created_at });
+      coveredStages.add('base_analyze');
+    }
+  }
+  for (const t of detail.templates ?? []) {
+    if (t.status === 'ready' && after(t.created_at)) {
+      items.push({ id: `template-${t.id}`, icon: LayoutTemplate, text: 'Готов шаблон', at: t.created_at });
+      coveredStages.add('template');
+    }
+  }
+
+  // Джобы: только последняя завершившаяся (done/failed) джоба каждой стадии после baseline.
+  const latestByStage = new Map<string, { job: HeJobSummary; finishedAt: string }>();
+  for (const j of detail.jobs ?? []) {
+    if (j.status !== 'done' && j.status !== 'failed') continue;
+    const finishedAt = j.finished_at;
+    if (!after(finishedAt)) continue;
+    const prev = latestByStage.get(j.stage);
+    if (!prev || new Date(finishedAt).getTime() > new Date(prev.finishedAt).getTime()) {
+      latestByStage.set(j.stage, { job: j, finishedAt });
+    }
+  }
+  for (const { job, finishedAt } of latestByStage.values()) {
+    if (coveredStages.has(job.stage)) continue;
+    items.push({
+      id: `job-${job.id}`,
+      icon: job.status === 'done' ? CheckCircle2 : AlertCircle,
+      text: `${VISIT_STAGE_NAMES[job.stage]} — ${job.status === 'done' ? 'готово' : 'ошибка'}`,
+      at: finishedAt,
+    });
+  }
+
+  return items.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime()).slice(0, 5);
 }
