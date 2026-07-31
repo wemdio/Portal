@@ -10,6 +10,11 @@
  *   HARVEST          — child rows merged into he_bases (+base_analyze enqueue),
  *                      total cap from job payload limit (default 10000, clamp
  *                      [100, 50000]), zero rows → base failed + job throws
+ *   continuation     — other-base companies are skipped DURING directory paging
+ *                      (only new rows count toward limit, 200-page ceiling),
+ *                      exhausted registry → task note «реестр исчерпан»,
+ *                      all-exhausted + 0 new → «Сегмент исчерпан» failure;
+ *                      merge-time exclusion stays as the hh/maps safety net
  *   guards           — base must be source='auto' AND status='collecting'
  */
 
@@ -1144,6 +1149,200 @@ describe('harvest', () => {
     expect(fail?.status).toBe('failed');
     expect(String(fail?.error)).toContain('не дала строк');
     expect(mockDb.inserts.find((i) => i.table === 'he_jobs')).toBeUndefined();
+  });
+});
+
+/* ─────────────────── Continuation: исключение на выборке реестра ─────────────────── */
+
+describe('continuation: other-base exclusion during directory fetch', () => {
+  const directoryInfo = (): HeCollectInfo => ({
+    plan: { tasks: [] },
+    tasks: [
+      {
+        source: 'companies_directory',
+        status: 'pending',
+        child_job_id: null,
+        rows: 0,
+        task: { source: 'companies_directory', rationale: 'r', directory_filters: { okvedCodes: ['62'] } },
+      },
+    ],
+  });
+
+  const otherBase = (data: Array<Record<string, unknown>>): Record<string, unknown> => ({
+    id: 'b2',
+    project_id: 'p1',
+    vertical_id: 'v1',
+    status: 'analyzed',
+    source: 'auto',
+    data,
+  });
+
+  it('skips rows known from other bases while paging and keeps paging until new rows (pages 1-2 known, page 3 new)', async () => {
+    const page = (prefix: string, n: number) =>
+      Array.from({ length: n }, (_, i) => ({ name: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [
+          makeBase(directoryInfo()),
+          // Первая сборка того же сегмента: страницы a-* и b-* реестра уже в ней.
+          otherBase([...page('a', 1000), ...page('b', 1000)].map((r) => ({ company: r.name, website: r.website }))),
+        ],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    searchRowsMock
+      .mockResolvedValueOnce({ rows: page('a', 1000) }) // все известны — в limit не считаются
+      .mockResolvedValueOnce({ rows: page('b', 1000) }) // все известны
+      .mockResolvedValueOnce({ rows: page('c', 600) }); // новые, короткая страница → стоп
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(600);
+
+    // offset двигается по ПРОСКАНИРОВАННЫМ строкам, а не по оставленным.
+    const filters = { okvedCodes: ['62'], includeIp: false };
+    expect(searchRowsMock).toHaveBeenCalledTimes(3);
+    expect(searchRowsMock).toHaveBeenNthCalledWith(1, filters, 1000, 0);
+    expect(searchRowsMock).toHaveBeenNthCalledWith(2, filters, 1000, 1000);
+    expect(searchRowsMock).toHaveBeenNthCalledWith(3, filters, 1000, 2000);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    const data = harvest?.data as HeUnifiedRow[];
+    expect(data).toHaveLength(600);
+    expect(data.every((r) => r.company.startsWith('c-'))).toBe(true);
+
+    // Исключение сработало на выборке — мёрджу отсекать нечего.
+    const info = harvest?.collect_info as HeCollectInfo;
+    expect(info.stats).toMatchObject({
+      rows_total: 600,
+      excluded_during_fetch: 2000,
+      excluded_existing_bases: 0,
+    });
+    // Выдача кончилась раньше limit — задача помечена исчерпанной.
+    expect(info.tasks?.[0]).toMatchObject({
+      status: 'done',
+      rows: 600,
+      exhausted: true,
+      note: 'реестр исчерпан',
+      excluded_during_fetch: 2000,
+    });
+  });
+
+  it('stops at the 200-page ceiling when pages stay full of known rows (200k scanned safety stop)', async () => {
+    const knownPage = Array.from({ length: 1000 }, (_, i) => ({ name: `old-${i}` }));
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [
+          makeBase(directoryInfo()),
+          otherBase(knownPage.map((r) => ({ company: r.name }))),
+        ],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    // Полные страницы известных компаний бесконечно — останавливает только потолок.
+    searchRowsMock.mockResolvedValue({ rows: knownPage });
+
+    await expect(runBaseCollectStage(makeJob(), ctx())).rejects.toThrow(/сегмент исчерпан/i);
+    expect(searchRowsMock).toHaveBeenCalledTimes(200);
+    // Последняя страница уходит по offset 199k — потолок по просканированным строкам.
+    expect(searchRowsMock).toHaveBeenLastCalledWith({ okvedCodes: ['62'], includeIp: false }, 1000, 199_000);
+
+    const fail = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect((fail?.collect_info as HeCollectInfo).stats?.excluded_during_fetch).toBe(200_000);
+  });
+
+  it('marks the directory task as exhausted («реестр исчерпан») when the registry ends before the limit', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(directoryInfo())],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    searchRowsMock.mockResolvedValue({ rows: [{ name: 'Одна', website: 'one.ru' }] });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(1);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(harvest?.status).toBe('analyzing');
+    const info = harvest?.collect_info as HeCollectInfo;
+    expect(info.tasks?.[0]).toMatchObject({ exhausted: true, note: 'реестр исчерпан' });
+    expect(info.stats?.excluded_during_fetch).toBe(0);
+  });
+
+  it('fails with «Сегмент исчерпан» when a continuation yields zero new rows (all scanned rows known)', async () => {
+    const known = [{ name: 'Старая-1' }, { name: 'Старая-2' }];
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [
+          makeBase(directoryInfo()),
+          otherBase(known.map((r) => ({ company: r.name }))),
+        ],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    // Короткая страница, все строки уже в другой базе → 0 новых, реестр исчерпан.
+    searchRowsMock.mockResolvedValue({ rows: known });
+
+    await expect(runBaseCollectStage(makeJob(), ctx())).rejects.toThrow(/сегмент исчерпан/i);
+
+    const fail = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(fail?.status).toBe('failed');
+    expect(String(fail?.error)).toContain('Сегмент исчерпан: новых компаний нет');
+    expect(String(fail?.error)).not.toContain('не дала строк');
+    const info = fail?.collect_info as HeCollectInfo;
+    expect(info.stats?.excluded_during_fetch).toBe(2);
+    expect(info.tasks?.[0]).toMatchObject({ exhausted: true, note: 'реестр исчерпан' });
+    // base_analyze не ставится.
+    expect(mockDb.inserts.find((i) => i.table === 'he_jobs')).toBeUndefined();
+  });
+
+  it('still excludes hh/maps rows at merge time (fetch-time exclusion covers only the registry)', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'hh_live',
+          status: 'done',
+          child_job_id: 'pj1',
+          rows: 2,
+          task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
+          harvest: [
+            row({ company: 'Уже Собранная', website: 'old.ru' }),
+            row({ company: 'Свежая', website: 'fresh.ru' }),
+          ],
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [
+          makeBase(info),
+          otherBase([{ company: 'Уже собранная' }]),
+        ],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(1);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect((harvest?.data as HeUnifiedRow[]).map((r) => r.company)).toEqual(['Свежая']);
+    // Страховка на мёрдже жива: строка hh отсеяна именно там, не на выборке.
+    expect((harvest?.collect_info as HeCollectInfo).stats).toMatchObject({
+      excluded_existing_bases: 1,
+      excluded_during_fetch: 0,
+    });
   });
 });
 

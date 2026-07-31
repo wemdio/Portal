@@ -15,8 +15,9 @@
  *  2. DISPATCH — каждая pending-задача уходит в свой коллектор:
  *     companies_directory — синхронно через searchRows с пагинацией страницами
  *     по 1000 (строки сразу в задаче, дочерней джобы нет; кап — limit из
- *     payload джобы, см. totalRowsCap); hh_live / yandex_maps / google_maps —
- *     insert дочерней джобы
+ *     payload джобы, см. totalRowsCap; компании других баз проекта
+ *     пропускаются ещё на выборке — см. блок про продолжение ниже);
+ *     hh_live / yandex_maps / google_maps — insert дочерней джобы
  *     (parser_jobs / yandex_maps_jobs / google_maps_jobs), её id — в
  *     child_job_id. collect_info персистится после каждой задачи.
  *  3. WAIT — опрос дочерних джоб по статусу. Есть незавершённые →
@@ -27,11 +28,26 @@
  *     дедуп по нормализованному ключу (компания — без юрформ и кавычек, сайт —
  *     хост без www/пути), исключение компаний из ДРУГИХ he_bases того же
  *     проекта (иначе одна компания копилась в нескольких базах проекта через
- *     повторные сборки), кап totalRowsCap(job) — limit из payload джобы
+ *     повторные сборки; для строк hh/карт это единственная точка исключения,
+ *     для реестра — страховка после исключения на выборке), кап
+ *     totalRowsCap(job) — limit из payload джобы
  *     (дефолт 10000); he_bases → status='analyzing' и ставится
  *     стадия base_analyze. Ноль строк — база failed с разбором по задачам,
  *     джоба падает. Упавшие задачи фиксируются в collect_info, но не валят
  *     джобу, если хотя бы одна задача дала строки.
+ *
+ * Продолжение сбора больших сегментов (>50k — больше одного капа limit):
+ * повторная сборка той же вертикали исключает компании других he_bases
+ * проекта ещё НА ВЫБОРКЕ реестра (fetchDirectoryRows листает дальше, пока не
+ * наберёт limit НОВЫХ строк или не кончится выдача; потолок 200 страниц —
+ * предохранитель), а не только на финальном мёрдже. Иначе вторая сборка
+ * заново скачивала те же первые N строк реестра и отбрасывала их как
+ * известные — ~0 новых строк, и сегмент в 120k нельзя было собрать батчами.
+ * Исчерпанный реестр помечается в collect_info («реестр исчерпан»); если все
+ * задачи исчерпаны/пусты и новых строк нет — сборка падает с «сегмент
+ * исчерпан: новых компаний нет» вместо общего нулевого фейла. У hh/карт
+ * исключение остаётся только на мёрдже: продолжение для них требует
+ * вариации поисковых запросов — future work.
  */
 
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
@@ -70,6 +86,12 @@ const MIN_ROWS_LIMIT = 100;
 const MAX_ROWS_LIMIT = 50000;
 /** Размер страницы при пагинации searchRows (лимит 50000 просто листает дальше). */
 const DIRECTORY_PAGE_SIZE = 1000;
+/**
+ * Потолок страниц реестра за одну задачу (200 × 1000 = 200k просканированных
+ * строк) — предохранитель от бесконечного листания, когда почти вся выдача
+ * пропускается как уже собранная в других базах проекта.
+ */
+const MAX_DIRECTORY_PAGES = 200;
 /** Кап чтения data jsonb одной чужой базы при сборе ключей для исключения. */
 const EXCLUSION_READ_LIMIT = 10_000;
 /** Строк в he_bases.sample_rows — как у ручной загрузки. */
@@ -313,6 +335,12 @@ export interface HeCollectTaskState {
   /** Когда задача ушла в дочерний парсер (ISO) — таймаут ожидания в WAIT. */
   dispatched_at?: string;
   error?: string;
+  /** Реестр: строк пропущено на выборке как уже собранные в других базах проекта. */
+  excluded_during_fetch?: number;
+  /** Реестр: выдача под фильтры кончилась раньше limit — сегмент собран целиком. */
+  exhausted?: boolean;
+  /** Пометка задачи для UI (например, «реестр исчерпан»). */
+  note?: string;
 }
 
 export interface HeCollectInfo {
@@ -327,6 +355,8 @@ export interface HeCollectInfo {
     rows_total: number;
     /** Строк отсеяно как уже существующие в других базах проекта. */
     excluded_existing_bases: number;
+    /** Реестр: строк пропущено ещё на выборке (уже собраны в других базах проекта). */
+    excluded_during_fetch: number;
     finished_at: string;
   };
 }
@@ -440,27 +470,59 @@ async function insertChildJob(
 }
 
 /**
- * Реестр постранично до limit: searchRows принимает (filters, limit, offset) —
- * листаем страницами по DIRECTORY_PAGE_SIZE, пока страница не придёт короткой
- * (конец выдачи) или не упремся в лимит. Лимит 50000 просто листает дольше —
- * короткая страница останавливает цикл на любом лимите.
+ * Реестр постранично (страница = DIRECTORY_PAGE_SIZE) до limit НОВЫХ строк.
+ * Каждая строка сверяется с excludedKeys — нормализованными компаниями
+ * других баз проекта (формат loadOtherBaseCompanyKeys: матч только по
+ * компании через normalizeCompanyForDedup, как и на финальном мёрдже —
+ * website в одном из источников может отсутствовать). Известные строки
+ * пропускаются и НЕ считаются в limit, но offset двигается по ВСЕМ
+ * просканированным — так повторная сборка того же сегмента перелистывает
+ * уже собранное в других базах и добирает новое (продолжение сегментов,
+ * не влезающих в один кап, >50k). Без этого вторая сборка скачивала те же
+ * первые N строк и отбрасывала их на мёрдже — ~0 новых. Стоп: limit новых
+ * строк, короткая страница (конец выдачи) или потолок MAX_DIRECTORY_PAGES.
+ * exhausted=true — выдача кончилась (или упёрлась в потолок) раньше limit:
+ * сегмент под фильтры собран целиком, продолжать некуда.
  */
 async function fetchDirectoryRows(
+  ctx: HeStageContext,
   filters: CompaniesSearchFilters,
   limit: number,
-): Promise<{ rows: Record<string, unknown>[]; error?: string }> {
+  excludedKeys: Set<string>,
+): Promise<{
+  rows: Record<string, unknown>[];
+  excludedDuringFetch: number;
+  exhausted: boolean;
+  error?: string;
+}> {
   const rows: Record<string, unknown>[] = [];
-  while (rows.length < limit) {
-    const page = await searchRows(
-      filters,
-      Math.min(DIRECTORY_PAGE_SIZE, limit - rows.length),
-      rows.length,
-    );
-    if (page.error) return { rows: [], error: page.error };
-    rows.push(...page.rows);
-    if (page.rows.length < DIRECTORY_PAGE_SIZE) break;
+  let excludedDuringFetch = 0;
+  let offset = 0;
+  for (let page = 0; page < MAX_DIRECTORY_PAGES && rows.length < limit; page += 1) {
+    const res = await searchRows(filters, DIRECTORY_PAGE_SIZE, offset);
+    if (res.error) return { rows: [], excludedDuringFetch, exhausted: false, error: res.error };
+    offset += res.rows.length;
+    for (const r of res.rows) {
+      const key = normalizeCompanyForDedup(cell(r.name));
+      if (key && excludedKeys.has(key)) {
+        excludedDuringFetch += 1;
+        continue;
+      }
+      // Новых строк на странице может быть больше остатка до limit — лишние
+      // не берём (они не попадают ни в базу, ни в исключения и будут
+      // подобраны следующей сборкой-продолжением).
+      if (rows.length < limit) rows.push(r);
+    }
+    if (res.rows.length < DIRECTORY_PAGE_SIZE) break;
   }
-  return { rows };
+  const exhausted = rows.length < limit;
+  if (excludedDuringFetch > 0) {
+    stageLog(
+      ctx,
+      `[base_collect] реестр: ${excludedDuringFetch} строк пропущено на выборке — компании уже есть в других базах проекта`,
+    );
+  }
+  return { rows, excludedDuringFetch, exhausted };
 }
 
 async function dispatchTask(
@@ -468,20 +530,33 @@ async function dispatchTask(
   state: HeCollectTaskState,
   project: HeProject,
   limit: number,
+  getExcludedKeys: () => Promise<Set<string>>,
 ): Promise<void> {
   const { task } = state;
 
   // Реестр — синхронно, без дочерней джобы: строки сразу ложатся в задачу.
+  // Компании других баз проекта исключаются ещё на выборке (fetchDirectoryRows),
+  // иначе повторная сборка сегмента заново скачивала уже собранные страницы.
   if (task.source === 'companies_directory') {
-    const { rows, error } = await fetchDirectoryRows(
+    const { rows, excludedDuringFetch, exhausted, error } = await fetchDirectoryRows(
+      ctx,
       mapDirectoryFilters(task.directory_filters),
       limit,
+      await getExcludedKeys(),
     );
     if (error) throw new Error(`companies_directory: ${error}`);
     state.harvest = rows.map(mapDirectoryRow);
     state.status = 'done';
     state.rows = state.harvest.length;
     state.child_job_id = null;
+    if (excludedDuringFetch > 0) state.excluded_during_fetch = excludedDuringFetch;
+    if (exhausted) {
+      // Выдача под фильтры кончилась раньше limit — сегмент собран целиком,
+      // повторные сборки ничего не добавят. Пометка для UI + сигнал финальному
+      // разбору нулевой сборки («сегмент исчерпан» вместо «не дала строк»).
+      state.exhausted = true;
+      state.note = 'реестр исчерпан';
+    }
     return;
   }
 
@@ -731,11 +806,23 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   }
   const tasks = info.tasks ?? [];
 
+  // Ключи компаний других баз проекта: нужны реестру ещё на DISPATCH
+  // (исключение на выборке — продолжение больших сегментов) и повторно на
+  // HARVEST (страховка для строк hh/карт). Лениво + мемоизация: на тиках
+  // чистого ожидания дочерних парсеров лишнего чтения he_bases нет.
+  let excludedKeysCache: Set<string> | null = null;
+  const getExcludedKeys = async (): Promise<Set<string>> => {
+    if (!excludedKeysCache) {
+      excludedKeysCache = await loadOtherBaseCompanyKeys(ctx, job.project_id, baseId);
+    }
+    return excludedKeysCache;
+  };
+
   // ─── DISPATCH ───
   for (const state of tasks) {
     if (state.status !== 'pending') continue;
     try {
-      await dispatchTask(ctx, state, project, limit);
+      await dispatchTask(ctx, state, project, limit, getExcludedKeys);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -793,8 +880,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     interleaveTaskHarvests(done.map((t) => (t.harvest ?? []).filter((r) => r.company))),
   );
 
-  // Исключаем компании, уже собранные в других базах этого проекта.
-  const existingKeys = await loadOtherBaseCompanyKeys(ctx, job.project_id, baseId);
+  // Исключаем компании, уже собранные в других базах этого проекта. Для
+  // реестра это страховка (основное исключение прошло на выборке), для
+  // hh/карт — единственная точка исключения.
+  const existingKeys = await getExcludedKeys();
   const kept = interleaved.filter((r) => !existingKeys.has(normalizeCompanyForDedup(r.company)));
   const excludedExisting = interleaved.length - kept.length;
   if (excludedExisting > 0) {
@@ -809,13 +898,25 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     tasks_failed: failed.length,
     rows_total: merged.length,
     excluded_existing_bases: excludedExisting,
+    excluded_during_fetch: tasks.reduce((sum, t) => sum + (t.excluded_during_fetch ?? 0), 0),
     finished_at: new Date().toISOString(),
   };
 
   if (merged.length === 0) {
+    // Сегмент исчерпан: все задачи исчерпаны/пусты, база пуста и реестр
+    // подтвердил продолжение — строки реально пропускались на выборке как
+    // уже собранные в других базах. Повторная сборка бессмысленна — честный
+    // фейл вместо общего «не дала строк». Пустая выдача при ПЕРВОЙ сборке
+    // (пропусков на выборке не было) — обычный нулевой сбор, не исчерпание.
+    const segmentExhausted =
+      (base.row_count ?? 0) === 0 &&
+      tasks.every((t) => t.exhausted || t.rows === 0) &&
+      tasks.some((t) => (t.excluded_during_fetch ?? 0) > 0);
     const breakdown =
       failed.map((f) => `${f.source} — ${f.error ?? '0 строк'}`).join('; ') || 'план пуст';
-    const note = `Авто-сборка не дала строк: ${breakdown}`;
+    const note = segmentExhausted
+      ? 'Сегмент исчерпан: новых компаний нет'
+      : `Авто-сборка не дала строк: ${breakdown}`;
     await ctx.supabase
       .from('he_bases')
       .update({
