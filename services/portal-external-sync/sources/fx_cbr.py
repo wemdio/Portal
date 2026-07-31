@@ -76,7 +76,7 @@ _OPERATION_DATES_SQL = """
       -- находил и печатал бы «ЦБ не публикует курс для: USDT», а amount_rub
       -- у крипты навсегда остался бы NULL.
       -- Ровно та же подмена продублирована в витрине incomes_v
-      -- (supabase/migrations/20260731_0002_crypto_income.sql). Меняются оба
+      -- (supabase/migrations/20260731_0004_crypto_income.sql). Меняются оба
       -- места только вместе: разойдутся — курс будет запрашиваться под одну
       -- валюту, а искаться под другую.
       SELECT (occurred_at AT TIME ZONE 'Europe/Moscow')::date AS d,

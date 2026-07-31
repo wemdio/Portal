@@ -11,7 +11,7 @@ class SyncSource:
     #: 'leads_report_outreach' | 'leads_report_summary' | 'brocard' | 'fx_cbr' |
     #: 'expense_rules' | 'meeting_links' | 'crypto_usdt'). См.
     #: supabase/migrations/20260730_0001_expenses_core.sql,
-    #: supabase/migrations/20260731_0002_crypto_income.sql и
+    #: supabase/migrations/20260731_0004_crypto_income.sql и
     #: supabase/migrations/20260731_0003_meeting_links_sync_source.sql.
     name: str = ""
 
