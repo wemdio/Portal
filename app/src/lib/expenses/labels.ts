@@ -1,12 +1,14 @@
 import {
   CATEGORY_LABELS,
   UNCLASSIFIED_CATEGORY_KEY,
+  UNKNOWN_EXCLUDE_REASON_KEY,
   type ExpenseCategory,
   type ExpenseSource,
+  type IncomeSource,
 } from '@/lib/expenses/types';
 
 /**
- * Подписи и цвета интерфейса расходов.
+ * Подписи и цвета интерфейса раздела «Деньги» — расходов и доходов.
  *
  * Живут отдельно от `types.ts`, потому что оттуда их читает и серверный код
  * (экспорт в xlsx, тексты ошибок роутов), а цвета графика ему не нужны. Здесь
@@ -63,4 +65,34 @@ export function categoryColor(key: string): string {
 
 export function sourceColor(key: string): string {
   return SOURCE_COLORS[key as ExpenseSource] ?? FALLBACK_COLOR;
+}
+
+// ─── Доходы ────────────────────────────────────────────────────────────────
+
+/**
+ * Источники дохода — подмножество расходных (только банки), поэтому подпись и
+ * цвет берутся из тех же карт: «Точка» на доходной вкладке обязана выглядеть
+ * ровно так же, как на расходной. Отдельный `Record<IncomeSource, true>` нужен
+ * не ради значений, а ради исчерпываемости: новый банк в типе — ошибка
+ * компиляции здесь, а не молча пропавший пункт фильтра.
+ */
+const INCOME_SOURCE_MAP: Record<IncomeSource, true> = {
+  tochka: true,
+  tbank: true,
+};
+
+export const INCOME_SOURCE_VALUES = Object.keys(INCOME_SOURCE_MAP) as IncomeSource[];
+
+/**
+ * Подпись причины, по которой приход не считается выручкой.
+ *
+ * Причина — свободный текст классификатора синка («перевод себе (ИНН
+ * владельца)», «банк-механика/возврат», «плательщик — банк»), он же и подпись:
+ * своя таблица переводов здесь только разъехалась бы с классификатором и
+ * показывала бы сырой ключ вместо причины. Заведён единственный служебный
+ * ключ — для строк, у которых причины не записано.
+ */
+export function excludeReasonLabel(key: string): string {
+  if (key === UNKNOWN_EXCLUDE_REASON_KEY) return 'Причина не записана';
+  return key;
 }

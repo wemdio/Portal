@@ -2752,6 +2752,66 @@ const PAIRS: Array<[string, string]> = [
   ['Сумма траты', 'Expense amount'],
   ['Дата траты', 'Expense date'],
   ['Валюта траты', 'Expense currency'],
+
+  // ── Incomes dashboard ──────────────────────────────────────
+  // Пары, которых ещё нет выше: «В среднем в день», «К прошлому периоду»,
+  // «Без курса ЦБ», «Все источники», «Сбросить фильтры», «Выгрузить в xlsx»,
+  // «Плательщик», «Операций», «Доля», «Сумма», «Показать ещё», «Загружаю…»,
+  // «Операций нет.», «курса ЦБ нет» — общие с расходной стороной и заведены
+  // в блоке выше.
+  ['Доходы', 'Incomes'],
+  ['Расходы или доходы', 'Expenses or incomes'],
+  ['ИНН', 'TIN'],
+  ['Доход по времени', 'Income over time'],
+  ['Разбивка по плательщикам', 'Breakdown by payer'],
+  ['Почему приход не стал доходом', 'Why money in did not become income'],
+  ['Доход за период', 'Income for period'],
+  ['Не выручка', 'Not revenue'],
+  ['Причина не записана', 'Reason not recorded'],
+  ['Показать операции', 'Show operations'],
+  ['Скрыть операции', 'Hide operations'],
+  [
+    'Клиентские платежи, без возвратов и переводов себе',
+    'Client payments, excluding refunds and self-transfers',
+  ],
+  ['в доход не входят', 'excluded from income'],
+  ['в итог не входят', 'excluded from the total'],
+  ['Весь доход пересчитан в рубли', 'All income converted to roubles'],
+  ['В прошлом периоде дохода не было', 'No income in the previous period'],
+  ['Поступлений за выбранный период нет.', 'No money in for the selected period.'],
+  ['Поступлений нет', 'No money in'],
+  ['в этом периоде не платил', 'no payments in this period'],
+  [
+    'Ни имени, ни ИНН — отобрать эти операции нечем.',
+    'Neither name nor TIN — there is no way to filter these operations.',
+  ],
+  ['Не удалось загрузить доходы', 'Failed to load incomes'],
+  ['Не удалось загрузить операции', 'Failed to load operations'],
+  ['Раздел «Деньги» недоступен', 'The Money section is unavailable'],
+  [
+    'Приход по счетам в банках, сгруппированный по плательщикам. Суммы — в рублях по курсу ЦБ на дату операции.',
+    'Money in on bank accounts, grouped by payer. Amounts are in roubles at the CBR rate on the operation date.',
+  ],
+  [
+    'Приход только по счетам в банках: карты и ручные записи бывают лишь на расходной стороне.',
+    'Money in comes from bank accounts only: cards and manual entries exist on the expense side alone.',
+  ],
+  [
+    'Приход, который выручкой не считается: возвраты, банковская механика, переводы себе. В итог не входит, но без него сумма не сойдётся с банковской выпиской.',
+    'Money in that does not count as revenue: refunds, banking mechanics, self-transfers. Excluded from the total, but without it the sum will not match the bank statement.',
+  ],
+  [
+    'Плательщик без ИНН опознаётся по имени, и разные написания одного имени в строку выше сведены, а в список ниже попадает только написание из последнего платежа.',
+    'A payer without a TIN is identified by name: different spellings of one name are merged into the row above, while the list below only covers the spelling from the latest payment.',
+  ],
+  [
+    'Неполный столбец: в выбранный период попала только часть этого отрезка. Он ниже соседних из-за границ периода, а не из-за падения дохода.',
+    'Incomplete bar: only part of this interval falls into the selected period. It is lower than its neighbours because of the period bounds, not because income dropped.',
+  ],
+  [
+    'в выбранный период попала только часть этого отрезка. Они ниже соседних из-за границ периода, а не из-за падения дохода.',
+    'only part of this interval falls into the selected period. They are lower than their neighbours because of the period bounds, not because income dropped.',
+  ],
 ];
 
 function escapeRegExp(value: string): string {
