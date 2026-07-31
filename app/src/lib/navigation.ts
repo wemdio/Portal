@@ -24,6 +24,7 @@ export const navItems: NavItem[] = [
   { id: 'projects', name: 'Проекты', nameEn: 'Projects', href: '/' },
   { id: 'projects-analytics', name: 'Аналитика проектов', nameEn: 'Project analytics', href: '/analytics/projects' },
   { id: 'mailbox-load', name: 'Нагрузка почт', nameEn: 'Mailbox load', href: '/analytics/mailbox-load', leadOnly: true },
+  { id: 'first-sales', name: 'Первичка', nameEn: 'First sales', href: '/analytics/first-sales', navTabId: 'nav-first-sales' },
   { id: 'tasks', name: 'Задачи', nameEn: 'Tasks', href: '/tasks' },
   { id: 'board', name: 'Доска', nameEn: 'Board', href: '/board', navTabId: 'nav-tasks-board' },
   { id: 'team', name: 'Команда', nameEn: 'Team', href: '/team' },
