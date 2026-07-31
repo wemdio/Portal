@@ -12,6 +12,7 @@
  *      пустыми — на структуре отчёта это не сказывается.
  */
 import { getSheetsClient } from '@/lib/googleSheets/auth';
+import { quoteSheet } from '@/lib/googleSheets/writer';
 import { columnIndexToLetter } from '@/lib/salesReport/sheetSchema';
 
 const DEFAULT_TEMPLATE_SHEET = 'ШАБЛОН';
@@ -64,7 +65,7 @@ async function readDateColumnPositions(
   const sheets = getSheetsClient();
   const resp = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${sheetTitle}!A1:BZ1`,
+    range: `${quoteSheet(sheetTitle)}!A1:BZ1`,
     valueRenderOption: 'UNFORMATTED_VALUE',
     dateTimeRenderOption: 'FORMATTED_STRING',
   });
@@ -107,7 +108,7 @@ async function writeMonthDates(
     const col = positions[d - 1];
     const dateStr = formatDdMmYyyy(new Date(Date.UTC(year, monthIndex, d)));
     data.push({
-      range: `${sheetTitle}!${columnIndexToLetter(col)}1`,
+      range: `${quoteSheet(sheetTitle)}!${columnIndexToLetter(col)}1`,
       values: [[dateStr]],
     });
   }
@@ -116,7 +117,7 @@ async function writeMonthDates(
   for (let i = daysInMonth; i < positions.length; i++) {
     const col = positions[i];
     data.push({
-      range: `${sheetTitle}!${columnIndexToLetter(col)}1`,
+      range: `${quoteSheet(sheetTitle)}!${columnIndexToLetter(col)}1`,
       values: [['']],
     });
   }

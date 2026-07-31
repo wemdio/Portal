@@ -7,6 +7,7 @@
  * месяца без переписывания при добавлении новой метрики или сдвиге строк.
  */
 import { getSheetsClient } from '@/lib/googleSheets/auth';
+import { quoteSheet } from '@/lib/googleSheets/writer';
 
 /** Метрики, которые скрипт умеет считать (см. lib/salesReport/metrics.ts). */
 export type SalesReportMetricKey =
@@ -185,7 +186,7 @@ export async function loadSheetSchema(
   const sheets = getSheetsClient();
   const resp = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${sheetName}!A1:BF40`,
+    range: `${quoteSheet(sheetName)}!A1:BF40`,
     valueRenderOption: 'UNFORMATTED_VALUE',
     dateTimeRenderOption: 'FORMATTED_STRING',
   });
