@@ -4,14 +4,30 @@ import { bucketKey, type GroupBy } from '@/lib/expenses/period';
 import {
   TRANSFER_CATEGORIES,
   UNCLASSIFIED_CATEGORY_KEY,
+  UNKNOWN_EXCLUDE_REASON_KEY,
   type ExpenseCategory,
   type ExpenseRow,
   type ExpensesSummary,
+  type IncomeRow,
+  type IncomeSeriesPoint,
+  type IncomesSummary,
+  type PayerBreakdownItem,
   type SeriesPoint,
   type VendorBreakdownItem,
 } from '@/lib/expenses/types';
 
 const UNCLASSIFIED_LABEL = 'Без вендора';
+
+/**
+ * Денежный минимум строки витрины — всё, что нужно арифметике сумм. Общий у
+ * расхода и дохода, поэтому помощники ниже принимают его, а не конкретный тип
+ * строки: две копии формулы «рубли или ноль» неизбежно разъехались бы.
+ */
+interface MoneyRow {
+  amount: number;
+  currency: string;
+  amount_rub: number | null;
+}
 
 function isTransfer(r: ExpenseRow): boolean {
   return r.category !== null && TRANSFER_CATEGORIES.includes(r.category);
@@ -21,7 +37,7 @@ function isTransfer(r: ExpenseRow): boolean {
  *  должен молчать, если поле однажды придёт `undefined` вместо `null`
  *  (например, расползётся имя колонки витрины). Это ровно тот случай, когда
  *  страховка нужнее всего. */
-function isUnconverted(r: ExpenseRow): boolean {
+function isUnconverted(r: MoneyRow): boolean {
   return r.amount_rub == null;
 }
 
@@ -30,11 +46,11 @@ function isUnclassified(r: ExpenseRow): boolean {
   return r.vendor_id == null;
 }
 
-function rub(r: ExpenseRow): number {
+function rub(r: MoneyRow): number {
   return r.amount_rub ?? 0;
 }
 
-function sum(rows: ExpenseRow[]): number {
+function sum(rows: MoneyRow[]): number {
   return rows.reduce((acc, r) => acc + rub(r), 0);
 }
 
@@ -205,6 +221,201 @@ export function breakdownByVendor(rows: ExpenseRow[], prevRows: ExpenseRow[]): V
       // тренда, а шум разметочной очереди. Поэтому для vendorId=null дельту
       // не считаем вовсе.
       deltaPrev: item.vendorId === null ? null : delta(item.total, prevByVendor.get(key)?.total ?? 0),
+    }))
+    .sort((a, b) => b.total - a.total);
+}
+
+// ─── Доходы ────────────────────────────────────────────────────────────────
+
+const NO_PAYER_LABEL = 'Плательщик не указан';
+
+/**
+ * Не-выручка: классификатор синка проставил `is_revenue = false` и записал
+ * причину в `exclude_reason` (возврат, банковская механика, перевод себе).
+ *
+ * Сравнение строгое, и это осознанно: `null` означает «строка не
+ * классифицирована», и такой приход считается выручкой. Иначе неклассифи-
+ * цированные деньги молча выпадали бы из итога — недосчитанный доход заметить
+ * нечем, а лишний виден сразу и разбирается по списку операций.
+ */
+function isNonRevenue(r: IncomeRow): boolean {
+  return r.is_revenue === false;
+}
+
+/** Имя плательщика в человеческом виде либо null, если банк его не прислал. */
+function payerDisplayName(r: IncomeRow): string | null {
+  const name = r.counterparty?.trim();
+  return name ? name : null;
+}
+
+/**
+ * Ключ группировки плательщика: ИНН, если он есть, иначе имя в нижнем
+ * регистре.
+ *
+ * Разрез выбран владельцем: справочника плательщиков (аналога вендоров) нет и
+ * не планируется, а ИНН — единственное, что склеивает одного и того же
+ * человека, приходящего то как «Ерхов Никита Владимирович», то как «ЕРХОВ
+ * НИКИТА». Префикс отделяет пространства значений: без него имя из одних цифр
+ * попало бы в одну строку с чьим-нибудь ИНН.
+ */
+function payerKey(r: IncomeRow): string {
+  const inn = r.counterparty_inn?.trim();
+  if (inn) return `inn:${inn}`;
+  const name = payerDisplayName(r);
+  return name ? `name:${name.toLowerCase()}` : '';
+}
+
+/**
+ * Итоги и ряд по времени для дохода.
+ *
+ * Роль перемещений здесь играет не-выручка (`is_revenue = false`): такие
+ * строки не входят ни в итог, ни в ряд, но считаются отдельным числом с
+ * разбивкой по причинам. Прятать их нельзя ровно по той же причине, что и
+ * перемещения в расходах: иначе сумма перестанет сходиться с банковской
+ * выпиской. Разбивка по причинам — не украшение: она объясняет, почему деньги
+ * пришли, но выручкой не считаются.
+ *
+ * Контракты на вызывающем те же, что у `summarize`: строки уже отфильтрованы
+ * по `range`, а если применён фильтр по `is_revenue`, то `nonRevenueTotal`
+ * окажется нулём — это следствие фильтра, а не ошибка агрегации.
+ */
+export function summarizeIncomes(
+  rows: IncomeRow[],
+  groupBy: GroupBy,
+  range: { from: string; to: string },
+  prevRows: IncomeRow[] | null,
+): IncomesSummary {
+  const revenue = rows.filter((r) => !isNonRevenue(r));
+  const nonRevenue = rows.filter(isNonRevenue);
+
+  const total = sum(revenue);
+  const days = differenceInCalendarDays(parseISO(range.to), parseISO(range.from)) + 1;
+
+  const buckets = new Map<string, IncomeSeriesPoint>();
+  for (const r of revenue) {
+    const key = bucketKey(r.occurred_on_msk, groupBy);
+    const point = buckets.get(key) ?? {
+      bucket: key,
+      total: 0,
+      bySource: {},
+      partial: isPartialBucket(key, groupBy, range),
+    };
+    const value = rub(r);
+    point.total += value;
+    point.bySource[r.source] = (point.bySource[r.source] ?? 0) + value;
+    buckets.set(key, point);
+  }
+
+  const nonRevenueByReason: Record<string, number> = {};
+  for (const r of nonRevenue) {
+    // Причина — свободный текст классификатора, он же и подпись в интерфейсе.
+    // Пустая причина складывается в отдельный бакет, а не теряется.
+    const reason = r.exclude_reason?.trim() || UNKNOWN_EXCLUDE_REASON_KEY;
+    nonRevenueByReason[reason] = (nonRevenueByReason[reason] ?? 0) + rub(r);
+  }
+
+  const unconverted = revenue.filter(isUnconverted);
+  const unconvertedByCurrency: Record<string, number> = {};
+  for (const r of unconverted) {
+    addToCurrencyMap(unconvertedByCurrency, r.currency, r.amount);
+  }
+
+  return {
+    total,
+    avgPerDay: days > 0 ? total / days : 0,
+    deltaPrev:
+      prevRows === null ? null : delta(total, sum(prevRows.filter((r) => !isNonRevenue(r)))),
+    nonRevenueTotal: sum(nonRevenue),
+    nonRevenueCount: nonRevenue.length,
+    nonRevenueByReason,
+    unconvertedCount: unconverted.length,
+    unconvertedByCurrency,
+    series: [...buckets.values()].sort((a, b) => a.bucket.localeCompare(b.bucket)),
+  };
+}
+
+interface PrevPayerTotal {
+  total: number;
+  payerInn: string | null;
+  payerName: string | null;
+}
+
+/** Разбивка дохода по плательщикам с долей и дельтой к прошлому периоду. */
+export function breakdownByPayer(rows: IncomeRow[], prevRows: IncomeRow[]): PayerBreakdownItem[] {
+  const revenue = rows.filter((r) => !isNonRevenue(r));
+  const total = sum(revenue);
+
+  const prevByPayer = new Map<string, PrevPayerTotal>();
+  for (const r of prevRows.filter((x) => !isNonRevenue(x))) {
+    const key = payerKey(r);
+    const existing = prevByPayer.get(key);
+    if (existing) {
+      existing.total += rub(r);
+      existing.payerName = existing.payerName ?? payerDisplayName(r);
+    } else {
+      prevByPayer.set(key, {
+        total: rub(r),
+        payerInn: r.counterparty_inn?.trim() || null,
+        payerName: payerDisplayName(r),
+      });
+    }
+  }
+
+  const acc = new Map<string, PayerBreakdownItem>();
+  for (const r of revenue) {
+    const key = payerKey(r);
+    const item = acc.get(key) ?? {
+      payerKey: key,
+      payerInn: r.counterparty_inn?.trim() || null,
+      payerName: '',
+      total: 0,
+      ops: 0,
+      share: 0,
+      deltaPrev: null,
+      unconvertedCount: 0,
+      unconvertedByCurrency: {},
+    };
+    // Одному ИНН соответствует несколько написаний имени. Берём первое
+    // непустое: строки приходят от свежих к старым, значит в отчёте окажется
+    // то, как плательщик подписан в последнем платеже.
+    if (!item.payerName) item.payerName = payerDisplayName(r) ?? '';
+    item.total += rub(r);
+    item.ops += 1;
+    if (isUnconverted(r)) {
+      item.unconvertedCount += 1;
+      addToCurrencyMap(item.unconvertedByCurrency, r.currency, r.amount);
+    }
+    acc.set(key, item);
+  }
+
+  // Плательщик, который платил в прошлом периоде и не платит в текущем, иначе
+  // структурно не может попасть в отчёт — а это и есть отвалившийся клиент,
+  // самое ценное, что разбивка по доходу вообще показывает.
+  for (const [key, prev] of prevByPayer) {
+    if (acc.has(key)) continue;
+    acc.set(key, {
+      payerKey: key,
+      payerInn: prev.payerInn,
+      payerName: prev.payerName ?? '',
+      total: 0,
+      ops: 0,
+      share: 0,
+      deltaPrev: null,
+      unconvertedCount: 0,
+      unconvertedByCurrency: {},
+    });
+  }
+
+  return [...acc.entries()]
+    .map(([key, item]) => ({
+      ...item,
+      payerName: item.payerName || NO_PAYER_LABEL,
+      share: total > 0 ? item.total / total : 0,
+      // Пустой ключ — не плательщик, а куча платежей без имени и ИНН.
+      // Дельта между двумя такими кучами измеряет не тренд, а качество
+      // банковской выписки, поэтому её не считаем — как и для неразмеченного
+      // в разбивке по вендорам.
+      deltaPrev: key === '' ? null : delta(item.total, prevByPayer.get(key)?.total ?? 0),
     }))
     .sort((a, b) => b.total - a.total);
 }
