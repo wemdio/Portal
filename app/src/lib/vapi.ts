@@ -87,8 +87,35 @@ export function listCalls(params?: {
   return vapiRequest<Record<string, unknown>[]>(`/call${query ? `?${query}` : ''}`);
 }
 
-export function getCall(id: string) {
-  return vapiRequest<Record<string, unknown>>(`/call/${id}`);
+/**
+ * Vapi's plain recordingUrl may point at a private R2 object and return
+ * InvalidArgument/Authorization. The presigned artifact URLs are the browser-
+ * usable variants and are refreshed whenever the call details are requested.
+ */
+export function pickRecordingUrl(
+  call: Record<string, unknown> | null | undefined,
+): string {
+  const artifact = (call?.artifact ?? {}) as Record<string, unknown>;
+  return (
+    (artifact.presignedMonoUrl as string) ||
+    (artifact.presignedStereoUrl as string) ||
+    (call?.recordingUrl as string) ||
+    (artifact.recordingUrl as string) ||
+    ''
+  );
+}
+
+export async function getCall(id: string) {
+  const call = await vapiRequest<Record<string, unknown>>(`/call/${id}`);
+  const recordingUrl = pickRecordingUrl(call);
+  if (!recordingUrl) return call;
+
+  const artifact = (call.artifact ?? {}) as Record<string, unknown>;
+  return {
+    ...call,
+    recordingUrl,
+    artifact: { ...artifact, recordingUrl },
+  };
 }
 
 export function createCall(data: {
