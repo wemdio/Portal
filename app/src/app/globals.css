@@ -1681,6 +1681,67 @@ body:has(.client-portal) {
   }
 }
 
+/* Раскрывающийся блок внутри карточки (легенда графика в разделе «Деньги»).
+   Своя пара keyframes, а не переиспользование меню TopNav: у меню это часть
+   его собственного поведения, и привязывать к нему карточку не за что. */
+@keyframes portal-disclosure-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.portal-disclosure {
+  animation: portal-disclosure-in 120ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .portal-disclosure {
+    animation: none;
+  }
+}
+
+/* ─── Палитра рядов графиков раздела «Деньги» ──────────────────────────────
+   Цвета лежат здесь, а не константами в JS, ровно по одной причине: тёмная
+   тема портала — это переопределение под `html[data-portal-theme='dark']
+   .portal-shell` (см. секцию PORTAL DARK THEME ниже), и до значений, зашитых
+   в JS, она не дотягивается. Пока палитра жила в `lib/expenses/labels.ts`,
+   тёмная тема рисовала график светлыми цветами.
+
+   Слоты назначаются по одному на ряд, в фиксированном порядке и без
+   циклического повторения. Набор проверен валидатором на различимость (в том
+   числе при дейтеранопии) в обеих темах — подбор «на глаз» эту проверку
+   обнуляет, поэтому значения не трогаем.
+
+   Три цвета светлой темы (`-3`, `-4`, `-5`) не добирают 3:1 контраста к фону.
+   Это допустимо ровно потому, что под каждым графиком стоит таблица с теми же
+   числами — разбивка по сервисам у расходов и по плательщикам у доходов.
+   Убрать её или спрятать за клик нельзя.
+
+   `muted` — не слот палитры, а отказ от неё: им красится неразмеченное, а это
+   не категория, а неизвестность, и в цветном ряду ей не место. */
+.portal-shell {
+  --chart-series-1: #2a78d6;
+  --chart-series-2: #eb6834;
+  --chart-series-3: #1baf7a;
+  --chart-series-4: #eda100;
+  --chart-series-5: #e87ba4;
+  --chart-series-6: #008300;
+  --chart-series-muted: #a1a1aa;
+}
+
+html[data-portal-theme='dark'] .portal-shell {
+  --chart-series-1: #3987e5;
+  --chart-series-2: #d95926;
+  --chart-series-3: #199e70;
+  --chart-series-4: #c98500;
+  --chart-series-5: #d55181;
+  --chart-series-6: #008300;
+  --chart-series-muted: #5f606a;
+}
+
 @media (max-width: 639px) {
   .client-portal .neu-card,
   .client-portal .neu-sm,
