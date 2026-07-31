@@ -27,13 +27,35 @@ company_name ещё будет пустым, и матчинг по назван
 """
 from __future__ import annotations
 
+import os
+
 import asyncpg
 
 from .base import SyncSource
+
+#: Потолок времени на один прогон матчера.
+#:
+#: Функция каждую ночь пересматривает ВСЕ записи чата встреч против всех сделок
+#: воронки, а не только новые. Сейчас это миллисекунды (1600 записей против
+#: полутора тысяч сделок), но объём растёт, а матчинг по названию использует
+#: поиск подстроки — индексом его не ускорить.
+#:
+#: Источник стоит выше банков, курсов и разметки расходов. Без потолка залипший
+#: матчер молча задержал бы всё, что идёт следом, и ночной цикл мог бы не успеть
+#: до отчёта продаж в 17:00 — при этом ни одна строка лога не покраснела бы.
+#: С потолком тот же случай падает с внятной ошибкой в external_sync_runs, а
+#: остальные источники отрабатывают штатно. Падать громко лучше, чем тормозить
+#: молча.
+STATEMENT_TIMEOUT = os.environ.get("MEETING_LINKS_STATEMENT_TIMEOUT", "120s")
 
 
 class MeetingLinksSync(SyncSource):
     name = "meeting_links"
 
     async def run(self, conn: asyncpg.Connection) -> int:
-        return int(await conn.fetchval("SELECT public.apply_meeting_deal_links()"))
+        # SET LOCAL живёт до конца транзакции и откатывается вместе с ней —
+        # поэтому потолок не протечёт на следующие источники, которые делят
+        # это же соединение. Обычный SET протёк бы.
+        async with conn.transaction():
+            await conn.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
+            return int(await conn.fetchval("SELECT public.apply_meeting_deal_links()"))
