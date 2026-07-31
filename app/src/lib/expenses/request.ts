@@ -2,10 +2,16 @@ import { isValid, parseISO } from 'date-fns';
 import type { NextRequest } from 'next/server';
 
 import { GROUP_BY_VALUES, parseRange, type GroupBy } from '@/lib/expenses/period';
-import { CATEGORY_LABELS, type ExpenseCategory, type ExpenseSource } from '@/lib/expenses/types';
+import {
+  CATEGORY_LABELS,
+  type ExpenseCategory,
+  type ExpenseSource,
+  type IncomeSource,
+} from '@/lib/expenses/types';
 
 /**
- * Разбор пользовательского ввода для роутов расходов.
+ * Разбор пользовательского ввода для роутов раздела «Деньги» — расходных и
+ * доходных.
  *
  * Всё, что здесь бросает, роут обязан ловить и отдавать как 400: невалидный
  * ввод — это ответ пользователю, а не пятисотка в Sentry. Поэтому проверки
@@ -21,8 +27,15 @@ const SOURCE_MAP: Record<ExpenseSource, true> = {
   manual: true,
 };
 
+/** То же для дохода: банки и только банки. */
+const INCOME_SOURCE_MAP: Record<IncomeSource, true> = {
+  tochka: true,
+  tbank: true,
+};
+
 export const EXPENSE_SOURCES = Object.keys(SOURCE_MAP) as ExpenseSource[];
 export const EXPENSE_CATEGORIES = Object.keys(CATEGORY_LABELS) as ExpenseCategory[];
+export const INCOME_SOURCES = Object.keys(INCOME_SOURCE_MAP) as IncomeSource[];
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -48,14 +61,20 @@ function optional(params: URLSearchParams, name: string): string | null {
   return value.length > 0 ? value : null;
 }
 
-/** Разбор общей query-строки читающих роутов. Бросает `Error` с человеческим текстом. */
-export function parseExpensesQuery(params: URLSearchParams): ExpensesQuery {
-  const range = parseRange(params.get('from') ?? '', params.get('to') ?? '');
-
+/** Группировка ряда по времени — общая у обеих сторон раздела. */
+function parseGroupBy(params: URLSearchParams): GroupBy {
   const groupBy = optional(params, 'groupBy') ?? 'day';
   if (!GROUP_BY_VALUES.includes(groupBy as GroupBy)) {
     throw new Error(`groupBy: ожидается ${GROUP_BY_VALUES.join(', ')}`);
   }
+  return groupBy as GroupBy;
+}
+
+/** Разбор общей query-строки читающих роутов. Бросает `Error` с человеческим текстом. */
+export function parseExpensesQuery(params: URLSearchParams): ExpensesQuery {
+  const range = parseRange(params.get('from') ?? '', params.get('to') ?? '');
+
+  const groupBy = parseGroupBy(params);
 
   const source = optional(params, 'source');
   if (source !== null && !EXPENSE_SOURCES.includes(source as ExpenseSource)) {
@@ -77,10 +96,66 @@ export function parseExpensesQuery(params: URLSearchParams): ExpensesQuery {
   return {
     from: range.from,
     to: range.to,
-    groupBy: groupBy as GroupBy,
+    groupBy,
     source: source as ExpenseSource | null,
     category: category as ExpenseCategory | null,
     vendorId,
+  };
+}
+
+export interface IncomesQuery {
+  from: string;
+  to: string;
+  groupBy: GroupBy;
+  source: IncomeSource | null;
+  /** Дрилл-даун по плательщику: ИНН и имя — разные ключи группировки, поэтому и параметра два. */
+  payerInn: string | null;
+  payerName: string | null;
+  /** true — только выручка, false — только не-выручка, null — весь приход. */
+  revenue: boolean | null;
+}
+
+const INN_RE = /^\d{10}(\d{2})?$/;
+/** Имя плательщика приходит из выписки; ограничение отсекает мусор, а не длинные названия. */
+const MAX_PAYER_NAME = 300;
+
+/** Разбор query-строки доходных роутов. Бросает `Error` с человеческим текстом. */
+export function parseIncomesQuery(params: URLSearchParams): IncomesQuery {
+  const range = parseRange(params.get('from') ?? '', params.get('to') ?? '');
+
+  const groupBy = parseGroupBy(params);
+
+  const source = optional(params, 'source');
+  if (source !== null && !INCOME_SOURCES.includes(source as IncomeSource)) {
+    throw new Error(`source: ожидается ${INCOME_SOURCES.join(', ')}`);
+  }
+
+  // ИНН юрлица 10 цифр, ИП и физлица — 12. Проверка не про безопасность
+  // (PostgREST параметризует значение), а про осмысленный 400 вместо пустого
+  // ответа на опечатку.
+  const payerInn = optional(params, 'payerInn');
+  if (payerInn !== null && !INN_RE.test(payerInn)) {
+    throw new Error('payerInn: ожидается 10 или 12 цифр');
+  }
+
+  const payerName = optional(params, 'payerName');
+  if (payerName !== null && payerName.length > MAX_PAYER_NAME) {
+    throw new Error(`payerName: не длиннее ${MAX_PAYER_NAME} символов`);
+  }
+
+  const revenueRaw = optional(params, 'revenue');
+  if (revenueRaw !== null && revenueRaw !== 'true' && revenueRaw !== 'false') {
+    throw new Error('revenue: ожидается true или false');
+  }
+
+  return {
+    from: range.from,
+    to: range.to,
+    groupBy,
+    source: source as IncomeSource | null,
+    payerInn,
+    payerName,
+    revenue: revenueRaw === null ? null : revenueRaw === 'true',
   };
 }
 
