@@ -47,6 +47,7 @@ from sources.bank_tbank import BankTBankSync
 from sources.brocard import BrocardSync
 from sources.fx_cbr import FxCbrSync
 from sources.expense_rules import ExpenseRulesSync
+from sources.meeting_links import MeetingLinksSync
 
 # ── Config ────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,10 @@ SOURCES = [
     AmoSync(),
     AmoEventsSync(),         # после AmoSync: нужны свежие amo_statuses
     AmoCompanyEnrichSync(),  # ходит на company_website и заполняет company_name; идёт СТРОГО после AmoSync
+    MeetingLinksSync(),      # СТРОГО сразу после AmoCompanyEnrichSync(): матчинг по названию
+                             # компании опирается на company_name, который заполняет именно она —
+                             # ниже по списку у сделок этой ночи название будет пустым (см.
+                             # sources/meeting_links.py)
     BankTochkaSync(),
     BankTBankSync(),
     BrocardSync(),

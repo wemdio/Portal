@@ -201,6 +201,10 @@ export default function MeetingLinksEditor({
   const [savingIds, setSavingIds] = useState<Set<string>>(new Set());
   const [selectedByRow, setSelectedByRow] = useState<Record<string, DealSearchRow | null>>({});
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
+  const [recalculating, setRecalculating] = useState(false);
+  // Инкремент этого счётчика — единственная причина перезапустить нижний
+  // useEffect вручную (при неизменных from/to), после успешного пересчёта.
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -230,7 +234,27 @@ export default function MeetingLinksEditor({
     return () => {
       active = false;
     };
-  }, [from, to]);
+  }, [from, to, reloadToken]);
+
+  const recalc = async () => {
+    setRecalculating(true);
+    try {
+      const res = await authFetch('/api/analytics/first-sales/meeting-links', { method: 'POST' });
+      const body = (await res.json().catch(() => null)) as { linked?: number; error?: string } | null;
+      if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+      setNotice(`Пересчитано: привязано ${body?.linked ?? 0}`);
+      // Перезагружаем очередь (записи, которые теперь привязались автоматом,
+      // должны из неё пропасть) и просим родителя пересчитать сводку выше —
+      // тот же onSaved, что после ручного сохранения строки.
+      setReloadToken((t) => t + 1);
+      onSaved();
+    } catch (e) {
+      logError('first-sales.meeting_links.recalc_failed', e);
+      setNotice(e instanceof Error ? e.message : 'Не удалось пересчитать привязки');
+    } finally {
+      setRecalculating(false);
+    }
+  };
 
   const removeRow = (id: string) => {
     setRows((cur) => (cur ? cur.filter((r) => r.id !== id) : cur));
@@ -305,13 +329,26 @@ export default function MeetingLinksEditor({
 
   return (
     <div className="rounded-xl border border-zinc-200 bg-white p-3">
-      <div className="mb-2">
-        <h2 className="text-sm font-semibold text-zinc-800">Записи без сделки</h2>
-        <p className="text-xs text-zinc-500">
-          Записи из чата встреч за выбранный период, которые автоматчик не смог однозначно привязать к сделке:
-          нет подписи, подпись не опознана, либо она зацепила сразу несколько сделок. Привяжите руками или
-          отметьте «не встреча» — для внутренних созвонов и мусора, чтобы они не всплывали здесь снова.
-        </p>
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold text-zinc-800">Записи без сделки</h2>
+          <p className="text-xs text-zinc-500">
+            Записи из чата встреч за выбранный период, которые автоматчик не смог однозначно привязать к сделке:
+            нет подписи, подпись не опознана, либо она зацепила сразу несколько сделок. Привяжите руками или
+            отметьте «не встреча» — для внутренних созвонов и мусора, чтобы они не всплывали здесь снова.
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={recalculating}
+          onClick={() => void recalc()}
+          // На время выполнения заблокирована: функция делает полное
+          // пересканирование записей чата встреч и сделок воронки, двойной
+          // клик — лишняя работа для БД, а не ускорение результата.
+          className="shrink-0 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-40"
+        >
+          {recalculating ? 'Пересчитываем…' : 'Пересчитать привязки'}
+        </button>
       </div>
 
       {error && (
