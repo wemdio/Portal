@@ -40,7 +40,7 @@ COPY app/ ./
 # so loggerServer, tracer, supabaseAdmin etc. work fine outside Next.js.
 # --external:playwright: keep playwright as a runtime require (native binaries).
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-RUN node_modules/.bin/esbuild worker/index.ts worker/hh.ts worker/engHiring.ts worker/search.ts worker/enrich.ts worker/enrichCoordinator.ts worker/yandexmaps.ts worker/googleparsers.ts worker/runner.ts worker/emailvalidation.ts worker/tgOutreach.ts worker/salesCopilot.ts worker/salesChatLogger.ts worker/salesChatArchive.ts worker/aiCaller.ts worker/tgParser.ts worker/tgTranscribe.ts worker/tgTranscribeAutoSyncCron.ts worker/instantlyLeads.ts worker/outreach.ts worker/liOutreach.ts worker/baseConstructor.ts worker/outreachosCron.ts worker/autoPipelineCron.ts worker/autoPipeline.ts worker/bobBackgroundScorer.ts worker/manualScoringWorker.ts worker/autoRenewCron.ts worker/salesAiAnalysis.ts worker/salesAiAnalysisCron.ts worker/byoSend.ts worker/byoReplies.ts worker/leadsReportCron.ts worker/leadsReportBot.ts worker/leadsReportSummaryCron.ts worker/salesReportCron.ts worker/hypothesisEngine.ts \
+RUN node_modules/.bin/esbuild worker/index.ts worker/hh.ts worker/engHiring.ts worker/search.ts worker/enrich.ts worker/enrichCoordinator.ts worker/yandexmaps.ts worker/googleparsers.ts worker/runner.ts worker/emailvalidation.ts worker/tgOutreach.ts worker/salesCopilot.ts worker/salesChatLogger.ts worker/salesChatArchive.ts worker/aiCaller.ts worker/tgParser.ts worker/tgTranscribe.ts worker/tgTranscribeAutoSyncCron.ts worker/instantlyLeads.ts worker/outreach.ts worker/liOutreach.ts worker/baseConstructor.ts worker/outreachosCron.ts worker/autoPipelineCron.ts worker/autoPipeline.ts worker/bobBackgroundScorer.ts worker/manualScoringWorker.ts worker/autoRenewCron.ts worker/salesAiAnalysis.ts worker/salesAiAnalysisCron.ts worker/byoSend.ts worker/byoReplies.ts worker/leadsReportCron.ts worker/leadsReportBot.ts worker/leadsReportSummaryCron.ts worker/salesReportCron.ts worker/hypothesisEngine.ts worker/jobhiveIngestCron.ts \
   --bundle \
   --platform=node \
   --target=node22 \
@@ -68,9 +68,16 @@ RUN chmod -R a+rX /ms-playwright
 # ffmpeg for audio/video extraction (transcription workers)
 # curl for the ATS parser's domain enrichment (Clearbit's WAF 403s node/undici
 # by TLS fingerprint, but lets curl through — see lib/parsers/atsRunner.ts)
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates unzip \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# DuckDB CLI for the jobhive bulk-feed ingest (worker/jobhiveIngestCron.ts streams
+# the remote parquet via httpfs). Single binary, same install as scripts/pdl/README.
+RUN curl -fsSL https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.zip -o /tmp/duckdb.zip \
+    && unzip -o /tmp/duckdb.zip -d /usr/local/bin \
+    && chmod +x /usr/local/bin/duckdb \
+    && rm /tmp/duckdb.zip
 
 # Install only Playwright system libraries (no browser download)
 RUN npx playwright install-deps chromium
