@@ -1,0 +1,304 @@
+import {
+  CONTRACT_RULE_SINCE,
+  computeFirstSalesSeries,
+  type FirstSalesLeadRow,
+} from '@/lib/firstSales/metrics';
+import { MEETINGS_RELIABLE_SINCE, type MeetingLinkRow } from '@/lib/firstSales/meetings';
+import type { SourceChannelRow } from '@/lib/firstSales/sourceChannels';
+
+const map: SourceChannelRow[] = [
+  { source: 'email outreach', channel: 'outreach', display_name: 'Email Outreach' },
+  { source: 'сайт', channel: 'inbound', display_name: 'Сайт' },
+];
+
+function lead(over: Partial<FirstSalesLeadRow> = {}): FirstSalesLeadRow {
+  return {
+    amo_id: 1,
+    name: 'Обычная сделка',
+    created_at: '2026-07-15T09:00:00.000Z',
+    first_qualified_at: null,
+    first_meeting_at: null,
+    first_contract_at: null,
+    won_at: null,
+    history_complete: true,
+    raw: {
+      custom_fields_values: [
+        { field_name: 'Источник', values: [{ value: 'Email Outreach' }] },
+      ],
+    },
+    ...over,
+  };
+}
+
+function meetingLink(over: Partial<MeetingLinkRow> = {}): MeetingLinkRow {
+  return {
+    amo_deal_id: 1,
+    meeting_at: '2026-07-10T09:00:00.000Z',
+    ...over,
+  };
+}
+
+const from = new Date('2026-07-01T00:00:00.000Z');
+// Конец июля по МСК, не по UTC: buildBuckets режет дни в МСК (см.
+// firstSales/buckets.ts), и 2026-07-31T23:59:59.999Z — это уже
+// 2026-08-01 02:59:59 МСК, то есть корзина 1 августа. 20:59:59.999Z —
+// последний момент 31 июля именно в МСК.
+const to = new Date('2026-07-31T20:59:59.999Z');
+
+describe('computeFirstSalesSeries', () => {
+  it('считает лидов по дате создания', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1 }), lead({ amo_id: 2, created_at: '2026-07-16T09:00:00.000Z' })],
+      [], map, from, to, 'day', null,
+    );
+    expect(res.totals.leads).toBe(2);
+    expect(res.series.find((b) => b.key === '2026-07-15')?.leads).toBe(1);
+    expect(res.series.find((b) => b.key === '2026-07-16')?.leads).toBe(1);
+  });
+
+  it('мёртвые сделки и лид-магниты остаются в лидах', () => {
+    // Отчёт продаж их выбрасывает; дашборд — нет, иначе прошлое едет.
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1, name: 'Бот: Иван' })],
+      [], map, from, to, 'day', null,
+    );
+    expect(res.totals.leads).toBe(1);
+    expect(res.totals.leadMagnets).toBe(1);
+  });
+
+  it('сделка с неполной историей не даёт договоров, но остаётся лидом; first_meeting_at (этап AMO) на встречи больше не влияет', () => {
+    const res = computeFirstSalesSeries(
+      [lead({
+        history_complete: false,
+        first_meeting_at: '2026-07-10T09:00:00.000Z',
+        first_contract_at: '2026-07-12T09:00:00.000Z',
+      })],
+      [], // без привязок — старый источник встреч (этап AMO) больше не используется
+      map, from, to, 'day', null,
+    );
+    expect(res.totals.leads).toBe(1);
+    expect(res.totals.meetings).toBe(0);
+    expect(res.totals.contracts).toBe(0);
+  });
+
+  it('фильтр по каналам применяется ко всем метрикам', () => {
+    const res = computeFirstSalesSeries(
+      [
+        lead({ amo_id: 1 }),                                            // outreach
+        lead({
+          amo_id: 2,
+          raw: { custom_fields_values: [{ field_name: 'Источник', values: [{ value: 'Сайт' }] }] },
+        }),                                                             // inbound
+      ],
+      [], map, from, to, 'day', ['outreach'],
+    );
+    expect(res.totals.leads).toBe(1);
+  });
+
+  it('средний цикл и медиана считаются по оплаченным в периоде', () => {
+    const res = computeFirstSalesSeries(
+      [
+        lead({ amo_id: 1, created_at: '2026-07-01T00:00:00.000Z', won_at: '2026-07-11T00:00:00.000Z' }), // 10 дней
+        lead({ amo_id: 2, created_at: '2026-07-01T00:00:00.000Z', won_at: '2026-07-21T00:00:00.000Z' }), // 20 дней
+        lead({ amo_id: 3, created_at: '2026-01-01T00:00:00.000Z', won_at: '2026-07-31T00:00:00.000Z' }), // 211 дней
+      ],
+      [], map, from, to, 'day', null,
+    );
+    expect(res.totals.wonCount).toBe(3);
+    expect(res.totals.cycleMedianDays).toBe(20);
+    expect(Math.round(res.totals.cycleAvgDays ?? 0)).toBe(80);
+  });
+
+  it('пустая выборка не даёт NaN', () => {
+    const res = computeFirstSalesSeries([], [], map, from, to, 'day', null);
+    expect(res.totals.leads).toBe(0);
+    expect(res.totals.cycleAvgDays).toBeNull();
+    expect(res.totals.cycleMedianDays).toBeNull();
+  });
+
+  it('пустые корзины присутствуют в ряду', () => {
+    const res = computeFirstSalesSeries([lead()], [], map, from, to, 'day', null);
+    expect(res.series).toHaveLength(31);
+    expect(res.series[0]).toEqual(
+      expect.objectContaining({ key: '2026-07-01', leads: 0, meetings: 0 }),
+    );
+  });
+
+  it('считает разбивку по источникам с пометкой неизвестных', () => {
+    const res = computeFirstSalesSeries(
+      [
+        lead({ amo_id: 1 }),
+        lead({
+          amo_id: 2,
+          raw: { custom_fields_values: [{ field_name: 'Источник', values: [{ value: 'Нейровыдача' }] }] },
+        }),
+      ],
+      [], map, from, to, 'day', null,
+    );
+    const unknown = res.bySource.find((s) => s.source === 'нейровыдача');
+    expect(unknown?.leads).toBe(1);
+    expect(unknown?.known).toBe(false);
+    expect(res.totals.unassignedLeads).toBe(1);
+  });
+});
+
+describe('договоры считаются только с даты, когда этап начал означать договор', () => {
+  // До 30.07.2026 этап «Согласование договора» ставили и когда договор реально
+  // правили, и когда его просто отправили по просьбе клиента. За июнь 2026 туда
+  // попали 169 сделок, из которых 162 умерли с нулевой суммой, — при том что
+  // реальных договоров у продаж около двадцати в месяц. Разделить задним числом
+  // нечем, поэтому старое не считаем вовсе.
+  const cutoff = CONTRACT_RULE_SINCE.getTime();
+  const before = new Date(cutoff - 5 * 24 * 60 * 60 * 1000).toISOString();
+  const after = new Date(cutoff + 60 * 60 * 1000).toISOString();
+
+  const wide = { from: new Date(cutoff - 60 * 24 * 60 * 60 * 1000), to: new Date(cutoff + 60 * 24 * 60 * 60 * 1000) };
+
+  it('договор до даты правила не засчитывается', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ created_at: before, first_contract_at: before })],
+      [], map, wide.from, wide.to, 'month', null,
+    );
+    expect(res.totals.contracts).toBe(0);
+  });
+
+  it('договор после даты правила засчитывается', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ created_at: before, first_contract_at: after })],
+      [], map, wide.from, wide.to, 'month', null,
+    );
+    expect(res.totals.contracts).toBe(1);
+  });
+
+  it('окно целиком до правила помечено как недостоверное', () => {
+    const res = computeFirstSalesSeries(
+      [], [], map,
+      new Date(cutoff - 60 * 24 * 60 * 60 * 1000),
+      new Date(cutoff - 1),
+      'month', null,
+    );
+    // UI обязан показать прочерк: ноль тут означал бы «договоров не было»,
+    // хотя на самом деле мы отказались считать грязные данные.
+    expect(res.totals.contractsReliable).toBe(false);
+  });
+
+  it('окно, захватывающее дату правила, помечено как достоверное', () => {
+    const res = computeFirstSalesSeries([], [], map, wide.from, wide.to, 'month', null);
+    expect(res.totals.contractsReliable).toBe(true);
+  });
+});
+
+describe('встречи считаются по привязкам записей разговоров, а не по этапу AMO', () => {
+  // Этап AMO «Встреча проведена + КП отправлено» давал 200+ встреч в месяц
+  // против 64 у руководителя продаж — этап засорён. Руководитель считает
+  // встречу так: есть запись разговора в чате встреч. Таблица
+  // meeting_deal_links привязывает такие записи к сделкам; здесь проверяется
+  // расчёт метрики поверх этих привязок.
+
+  it('две записи одной сделки в один день — одна встреча', () => {
+    // Одна встреча часто разрезана на несколько файлов: в боевых данных
+    // denvic.tech дважды за один день, файлы 1.mp4 и 2.mp4.
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1 })],
+      [
+        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T09:00:00.000Z' }),
+        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T15:00:00.000Z' }),
+      ],
+      map, from, to, 'day', null,
+    );
+    expect(res.totals.meetings).toBe(1);
+    expect(res.series.find((b) => b.key === '2026-07-10')?.meetings).toBe(1);
+  });
+
+  it('две записи одной сделки в разные дни — две встречи', () => {
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1 })],
+      [
+        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T09:00:00.000Z' }),
+        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-11T09:00:00.000Z' }),
+      ],
+      map, from, to, 'day', null,
+    );
+    expect(res.totals.meetings).toBe(2);
+    expect(res.series.find((b) => b.key === '2026-07-10')?.meetings).toBe(1);
+    expect(res.series.find((b) => b.key === '2026-07-11')?.meetings).toBe(1);
+  });
+
+  it('запись до MEETINGS_RELIABLE_SINCE не считается', () => {
+    const cutoff = MEETINGS_RELIABLE_SINCE.getTime();
+    const wide = {
+      from: new Date(cutoff - 60 * 24 * 60 * 60 * 1000),
+      to: new Date(cutoff + 60 * 24 * 60 * 60 * 1000),
+    };
+    const res = computeFirstSalesSeries(
+      [lead({ amo_id: 1 })],
+      [meetingLink({ amo_deal_id: 1, meeting_at: new Date(cutoff - 5 * 24 * 60 * 60 * 1000).toISOString() })],
+      map, wide.from, wide.to, 'month', null,
+    );
+    expect(res.totals.meetings).toBe(0);
+  });
+
+  it('окно целиком раньше MEETINGS_RELIABLE_SINCE помечено как недостоверное', () => {
+    const cutoff = MEETINGS_RELIABLE_SINCE.getTime();
+    const res = computeFirstSalesSeries(
+      [], [], map,
+      new Date(cutoff - 60 * 24 * 60 * 60 * 1000),
+      new Date(cutoff - 1),
+      'month', null,
+    );
+    // UI обязан показать прочерк: ноль тут означал бы «встреч не было», хотя
+    // на деле подписи к записям ещё не были регулярными и досчитать нечем.
+    expect(res.totals.meetingsReliable).toBe(false);
+  });
+
+  it('окно, захватывающее дату правила, помечено как достоверное', () => {
+    const cutoff = MEETINGS_RELIABLE_SINCE.getTime();
+    const wide = {
+      from: new Date(cutoff - 60 * 24 * 60 * 60 * 1000),
+      to: new Date(cutoff + 60 * 24 * 60 * 60 * 1000),
+    };
+    const res = computeFirstSalesSeries([], [], map, wide.from, wide.to, 'month', null);
+    expect(res.totals.meetingsReliable).toBe(true);
+  });
+
+  it('фильтр по каналам применяется к встречам через канал сделки', () => {
+    const res = computeFirstSalesSeries(
+      [
+        lead({ amo_id: 1 }), // outreach (Email Outreach)
+        lead({
+          amo_id: 2,
+          raw: { custom_fields_values: [{ field_name: 'Источник', values: [{ value: 'Сайт' }] }] },
+        }), // inbound
+      ],
+      [
+        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T09:00:00.000Z' }),
+        meetingLink({ amo_deal_id: 2, meeting_at: '2026-07-11T09:00:00.000Z' }),
+      ],
+      map, from, to, 'day', ['outreach'],
+    );
+    // Запись сама по себе не несёт канала — берём канал сделки. Без этого
+    // фильтр по каналу для встреч не работал бы вовсе.
+    expect(res.totals.meetings).toBe(1);
+    expect(res.series.find((b) => b.key === '2026-07-10')?.meetings).toBe(1);
+    expect(res.series.find((b) => b.key === '2026-07-11')?.meetings).toBe(0);
+  });
+
+  it('запись, привязанная к сделке вне выборки лидов, не роняет расчёт', () => {
+    // Сделка могла прийти раньше окна (встреча в июле у сделки, созданной в
+    // марте) и не попасть в `leads`, если вызывающий код не подтянул её через
+    // extraDealIds в fetchFirstSalesLeads. computeFirstSalesSeries обязан не
+    // упасть и всё равно посчитать встречу — просто без резолва канала.
+    expect(() => computeFirstSalesSeries(
+      [], // сделки #999 нет в выборке лидов вовсе
+      [meetingLink({ amo_deal_id: 999, meeting_at: '2026-07-10T09:00:00.000Z' })],
+      map, from, to, 'day', null,
+    )).not.toThrow();
+
+    const res = computeFirstSalesSeries(
+      [],
+      [meetingLink({ amo_deal_id: 999, meeting_at: '2026-07-10T09:00:00.000Z' })],
+      map, from, to, 'day', null,
+    );
+    expect(res.totals.meetings).toBe(1);
+  });
+});
