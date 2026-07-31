@@ -49,9 +49,10 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
   const llm = await callLLMWithSchema(
     buildHypothesesInstantMessages({ profile, websiteUrl: project.website_url, brandCloud, competitors }),
     HeHypothesesBatchSchema,
-    // 25–40 гипотез с description/rationale/search_queries на русском —
-    // кириллические BPE-токены дорогие, 8k обрезало бы JSON посередине.
-    { model: getHeModel('research'), maxTokens: 16384 },
+    // 25–40 гипотез с description/fit_rationale/rationale/search_queries на
+    // русском — кириллические BPE-токены дорогие, 8–16k обрезало бы JSON
+    // посередине (поймали на проде: Unterminated string).
+    { model: getHeModel('research'), maxTokens: 32768 },
   );
   addUsage(usage, llm);
 
