@@ -1066,6 +1066,7 @@ class JobMonitorSpec:
     owner_column: str | None = "user_id"
     updated_column: str | None = None
     started_column: str | None = "started_at"
+    queue_heartbeat_column: str | None = None
     failed_statuses: tuple[str, ...] = (
         "failed", "error", "captcha", "blocked", "timeout", "login_required",
     )
@@ -1085,7 +1086,7 @@ _JOB_MONITOR_SPECS: tuple[JobMonitorSpec, ...] = (
     JobMonitorSpec(
         "website_enrichment_jobs", "Поиск почт / обогащение", ("preparing", "pending", "running"),
         ("total", "processed", "success_count", "error_count", "preparing_heartbeat_at"),
-        "portal-worker-enrich",
+        "portal-worker-enrich", queue_heartbeat_column="preparing_heartbeat_at",
     ),
     JobMonitorSpec(
         "email_validation_jobs", "Валидация почт", ("pending", "running"),
@@ -1242,6 +1243,11 @@ async def _fetch_active_job_rows(conn, spec: JobMonitorSpec):
         )
     else:
         activity_secs = "NULL::int"
+    queue_anchor = (
+        f"coalesce(j.{spec.queue_heartbeat_column}, j.created_at)"
+        if spec.queue_heartbeat_column
+        else "j.created_at"
+    )
     owner_select = (
         "p.full_name AS owner_name, p.email AS owner_email"
         if spec.owner_column
@@ -1256,7 +1262,7 @@ async def _fetch_active_job_rows(conn, spec: JobMonitorSpec):
         f"SELECT j.id::text AS id, j.status, {_progress_sql(spec)} AS progress, "
         f"  {activity_secs} AS activity_secs, "
         f"  extract(epoch FROM (now() - {start_anchor}))::int AS active_secs, "
-        "  extract(epoch FROM (now() - j.created_at))::int AS age_secs, "
+        f"  extract(epoch FROM (now() - {queue_anchor}))::int AS age_secs, "
         f"  {owner_select} "
         f"FROM public.{spec.table} j "
         f"{owner_join} "
