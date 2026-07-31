@@ -2,7 +2,8 @@
 
 import { useRef, useState } from 'react';
 
-import { expensesFetch, formatCurrencyMap, formatDelta, formatMoney, formatRub } from '@/lib/expenses/client';
+import { UnconvertedNote } from '@/components/expenses/KpiTile';
+import { expensesFetch, formatDelta, formatMoney, formatRub } from '@/lib/expenses/client';
 import { categoryLabel, sourceLabel } from '@/lib/expenses/labels';
 import type { ExpenseRow, VendorBreakdownItem } from '@/lib/expenses/types';
 
@@ -15,19 +16,6 @@ interface DrillPage {
 
 function rowKey(item: VendorBreakdownItem): string {
   return item.vendorId ?? 'unclassified';
-}
-
-/** Операции без курса ЦБ: в рублёвую сумму они не вошли, и молчать об этом нельзя. */
-function UnconvertedNote({ item }: { item: VendorBreakdownItem }) {
-  if (item.unconvertedCount === 0) return null;
-  return (
-    <span
-      className="ml-1.5 whitespace-nowrap rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-800"
-      title="Для этих операций не нашёлся курс ЦБ — в рублёвую сумму слева они не входят."
-    >
-      +{item.unconvertedCount} без курса: {formatCurrencyMap(item.unconvertedByCurrency)}
-    </span>
-  );
 }
 
 export default function VendorBreakdown({
@@ -225,7 +213,7 @@ function RowGroup({
         <td className="py-2 text-zinc-600">{item.category ? categoryLabel(item.category) : '—'}</td>
         <td className="py-2 text-right tabular-nums text-zinc-900">
           {formatRub(item.total)} ₽
-          <UnconvertedNote item={item} />
+          <UnconvertedNote count={item.unconvertedCount} byCurrency={item.unconvertedByCurrency} />
         </td>
         <td className="py-2 text-right tabular-nums text-zinc-600">{Math.round(item.share * 100)}%</td>
         <td className="py-2 text-right tabular-nums text-zinc-600">{item.ops}</td>

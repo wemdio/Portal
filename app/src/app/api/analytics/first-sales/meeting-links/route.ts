@@ -259,3 +259,22 @@ export async function PUT(req: NextRequest) {
 
   return NextResponse.json({ ok: true });
 }
+
+/**
+ * Ручной пересчёт привязок — та же функция, что зовёт ночной синк
+ * (services/portal-external-sync/sources/meeting_links.py), только по
+ * запросу. Ждать до ночи ради проверки свежей привязки не нужно; функция
+ * тяжеловата (полное пересканирование всех записей чата встреч), поэтому
+ * кнопка на клиенте (MeetingLinksEditor.tsx) на время выполнения
+ * блокируется — двойной клик не нужен.
+ */
+export async function POST(req: NextRequest) {
+  const gate = await requireFirstSalesAccess(req);
+  if ('error' in gate) return gate.error;
+  const db = gate.supabaseAdmin;
+
+  const { data, error } = await db.rpc('apply_meeting_deal_links');
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  return NextResponse.json({ ok: true, linked: (data as number | null) ?? 0 });
+}

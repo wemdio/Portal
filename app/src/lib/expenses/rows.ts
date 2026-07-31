@@ -1,7 +1,7 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import type { ExpenseRow } from '@/lib/expenses/types';
+import type { ExpenseRow, IncomeRow } from '@/lib/expenses/types';
 
 /**
  * PostgREST по умолчанию отдаёт максимум 1000 строк и делает это МОЛЧА —
@@ -71,11 +71,78 @@ export async function fetchExpenseRows(filters: RowFilters): Promise<ExpenseRow[
     if (page.length < PAGE_SIZE) return rows;
   }
 
-  // Потолок выбран — дальше мы бы снова тихо обрезали период, ровно от чего и
-  // защищались. Молчать нельзя, поэтому оставляем след в логах.
+  warnCeiling('expenses_v', filters.from, filters.to);
+  return rows;
+}
+
+/**
+ * Потолок выбран — дальше мы бы снова тихо обрезали период, ровно от чего и
+ * защищались. Молчать нельзя, поэтому оставляем след в логах.
+ */
+function warnCeiling(view: string, from: string, to: string): void {
   console.warn(
-    `[expenses] выборка витрины упёрлась в потолок ${MAX_ROWS} строк ` +
-      `(${filters.from}..${filters.to}) — итог занижен, нужен более узкий период или агрегация в SQL`,
+    `[expenses] выборка ${view} упёрлась в потолок ${MAX_ROWS} строк ` +
+      `(${from}..${to}) — итог занижен, нужен более узкий период или агрегация в SQL`,
   );
+}
+
+/**
+ * Колонки витрины доходов. Тот же непроверяемый каст, что и у расходов, и та
+ * же страховка от рассинхрона — `tests/lib/incomeRowsSelect.test.ts`.
+ */
+const INCOME_SELECT_COLUMNS =
+  'source, source_ref, occurred_on_msk, amount, currency, counterparty, counterparty_inn, details, is_revenue, exclude_reason, amount_rub';
+
+export interface IncomeRowFilters {
+  from: string;
+  to: string;
+  source?: string | null;
+  /** Дрилл-даун по плательщику. ИНН и имя — разные ключи группировки, поэтому и фильтра два. */
+  payerInn?: string | null;
+  payerName?: string | null;
+  /** true — только выручка, false — только не-выручка, null/undefined — всё подряд. */
+  revenue?: boolean | null;
+}
+
+export async function fetchIncomeRows(filters: IncomeRowFilters): Promise<IncomeRow[]> {
+  if (!supabaseAdmin) throw new Error('Server misconfigured: supabaseAdmin недоступен');
+
+  const rows: IncomeRow[] = [];
+  for (let offset = 0; offset < MAX_ROWS; offset += PAGE_SIZE) {
+    let query = supabaseAdmin
+      .from('incomes_v')
+      .select(INCOME_SELECT_COLUMNS)
+      .gte('occurred_on_msk', filters.from)
+      .lte('occurred_on_msk', filters.to)
+      // Порядок обязан быть полным и стабильным, иначе постраничная выборка
+      // начнёт терять и дублировать операции. Полным его делает третий ключ:
+      // уникальность в bank_transactions — это (bank, transaction_id), то есть
+      // (source, source_ref) здесь, а не один source_ref.
+      .order('occurred_on_msk', { ascending: false })
+      .order('source_ref', { ascending: true })
+      .order('source', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+
+    if (filters.source) query = query.eq('source', filters.source);
+    if (filters.payerInn) query = query.eq('counterparty_inn', filters.payerInn);
+    if (filters.payerName) query = query.eq('counterparty', filters.payerName);
+    if (filters.revenue === true) {
+      // Не `.eq(true)`: неклассифицированная строка приходит с is_revenue =
+      // NULL, и агрегация считает её выручкой. Фильтр обязан думать так же,
+      // иначе итог по дашборду разойдётся с итогом по фильтру.
+      query = query.not('is_revenue', 'is', false);
+    } else if (filters.revenue === false) {
+      query = query.is('is_revenue', false);
+    }
+
+    const { data, error } = await query;
+    if (error) throw new Error(`incomes_v: ${error.message}`);
+
+    const page = (data ?? []) as unknown as IncomeRow[];
+    rows.push(...page);
+    if (page.length < PAGE_SIZE) return rows;
+  }
+
+  warnCeiling('incomes_v', filters.from, filters.to);
   return rows;
 }

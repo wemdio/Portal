@@ -7,6 +7,7 @@
  * пересчитаются на новые ФАКТ-числа.
  */
 import { getSheetsClient } from '@/lib/googleSheets/auth';
+import { quoteSheet } from '@/lib/googleSheets/writer';
 import { columnIndexToLetter } from '@/lib/salesReport/sheetSchema';
 
 export type CellUpdate = {
@@ -23,8 +24,9 @@ export async function writeFactCells(
   if (updates.length === 0) return;
   const sheets = getSheetsClient();
 
+  const quoted = quoteSheet(sheetName);
   const data = updates.map((u) => ({
-    range: `${sheetName}!${columnIndexToLetter(u.columnIndex)}${u.row}`,
+    range: `${quoted}!${columnIndexToLetter(u.columnIndex)}${u.row}`,
     values: [[u.value]],
   }));
 

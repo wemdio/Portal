@@ -1,5 +1,14 @@
 /** @jest-environment node */
 
+/**
+ * Раздел «Деньги» закрыт ролью и только ролью.
+ *
+ * Тумблер `nav-expenses` в `user_tool_visibility` в решении больше не
+ * участвует. Случаи с выданным и выключенным тумблером оставлены нарочно: они
+ * фиксируют, что строка в этой таблице ничего не даёт. Если точечную выдачу
+ * когда-нибудь вернут, эти два теста покраснеют.
+ */
+
 import { NextRequest } from 'next/server';
 
 const state: {
@@ -17,7 +26,7 @@ jest.mock('@/lib/supabaseRouteClient', () => ({
 
 jest.mock('@/lib/supabaseAdmin', () => ({
   supabaseAdmin: {
-    from: (table: string) => ({
+    from: () => ({
       select: () => ({
         eq: () => ({
           single: async () => ({ data: state.profile }),
@@ -47,25 +56,31 @@ it('401 без токена', async () => {
   expect(res).toMatchObject({ ok: false, status: 401 });
 });
 
-it('403 пользователю без выданного тумблера', async () => {
+it('403 не-админу без строки в user_tool_visibility', async () => {
   const res = await requireExpensesAccess(req());
   expect(res).toMatchObject({ ok: false, status: 403 });
 });
 
-it('403 пользователю с выключенным тумблером', async () => {
+it('403 не-админу с выданным тумблером: строка в user_tool_visibility доступа не даёт', async () => {
+  state.visibility = { enabled: true };
+  const res = await requireExpensesAccess(req());
+  expect(res).toMatchObject({ ok: false, status: 403 });
+});
+
+it('403 не-админу с выключенным тумблером', async () => {
   state.visibility = { enabled: false };
   const res = await requireExpensesAccess(req());
   expect(res).toMatchObject({ ok: false, status: 403 });
 });
 
-it('пропускает пользователя с выданным тумблером', async () => {
-  state.visibility = { enabled: true };
+it('403, если профиля нет: роль неизвестна — значит не админ', async () => {
+  state.profile = null;
   const res = await requireExpensesAccess(req());
-  expect(res).toMatchObject({ ok: true, userId: 'u-1', role: 'manager' });
+  expect(res).toMatchObject({ ok: false, status: 403 });
 });
 
-it('пропускает админа без строки в БД', async () => {
+it('пропускает админа', async () => {
   state.profile = { role: 'admin' };
   const res = await requireExpensesAccess(req());
-  expect(res).toMatchObject({ ok: true, role: 'admin' });
+  expect(res).toMatchObject({ ok: true, userId: 'u-1', role: 'admin' });
 });
