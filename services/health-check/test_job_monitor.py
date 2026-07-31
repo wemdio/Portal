@@ -55,6 +55,16 @@ class JobMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spec.updated_column, "started_at")
         self.assertIsNone(spec.started_column)
 
+    def test_tg_transcribe_uses_compact_worker_progress(self):
+        spec = next(
+            item for item in health._JOB_MONITOR_SPECS
+            if item.table == "tg_transcribe_jobs"
+        )
+
+        self.assertEqual(spec.updated_column, "updated_at")
+        self.assertIn("monitor_progress", spec.progress_sql or "")
+        self.assertNotEqual(health._progress_sql(spec), "")
+
     async def test_stuck_pending_job_alerts_once(self):
         spec = health.JobMonitorSpec(
             "yandex_maps_jobs",

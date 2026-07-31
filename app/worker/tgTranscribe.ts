@@ -5,12 +5,18 @@ import {
   saveErrorRecord,
   type TgMessage,
   type VideoInfo,
+  type VideoProgressEvent,
 } from '@/lib/tgTranscribe';
 import { runTgScanJob } from '@/lib/tgScanWorker';
+import { getLocalTranscriptionProgress } from '@/lib/transcription';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const MAX_CONCURRENCY = Number(process.env.TG_TRANSCRIBE_WORKER_MAX_CONCURRENCY ?? '2');
+const JOB_HEARTBEAT_INTERVAL_MS = Math.max(
+  15_000,
+  Number(process.env.TG_TRANSCRIBE_JOB_HEARTBEAT_MS ?? '30000'),
+);
 const WORKER_ID = `tg-transcribe-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 const running = new Set<Promise<void>>();
@@ -108,8 +114,100 @@ async function runTranscribeJob(job: TgTranscribeJobRow): Promise<void> {
     return;
   }
 
+  let latestProgress: VideoProgressEvent = {
+    phase: 'downloading',
+    downloadedBytes: 0,
+    totalBytes: resolvedVideoInfo.fileSize,
+  };
+  let transcriptionJobId: string | null = null;
+  let heartbeatStopped = false;
+  let heartbeatInFlight: Promise<void> | null = null;
+  let lastHeartbeatStartedAt = 0;
+
+  const writeHeartbeat = async (): Promise<void> => {
+    if (heartbeatStopped) return;
+
+    let localProgress: Awaited<ReturnType<typeof getLocalTranscriptionProgress>> = null;
+    if (transcriptionJobId) {
+      try {
+        localProgress = await getLocalTranscriptionProgress(transcriptionJobId);
+      } catch (error) {
+        // Progress is advisory. Even if the progress endpoint is unhealthy,
+        // keep bumping the DB heartbeat so a live upload/request is not
+        // reported as a dead job.
+        log('warn', `Local transcription progress failed for ${job.id}`, error);
+      }
+    }
+    const downloadPercent = latestProgress.totalBytes && latestProgress.downloadedBytes != null
+      ? Math.round((latestProgress.downloadedBytes / latestProgress.totalBytes) * 100)
+      : null;
+    const monitorProgress = localProgress
+      ? {
+          stage: localProgress.stage,
+          progress_percent: localProgress.progressPercent,
+          processed_seconds: localProgress.processedSeconds,
+          audio_duration_seconds: localProgress.audioDurationSeconds,
+          queue_position: localProgress.queuePosition ?? null,
+          queue_total: localProgress.queueTotal ?? null,
+          updated_at: new Date().toISOString(),
+        }
+      : {
+          stage: latestProgress.phase,
+          progress_percent: downloadPercent,
+          processed_seconds: null,
+          audio_duration_seconds: resolvedVideoInfo.duration ?? null,
+          queue_position: null,
+          queue_total: null,
+          updated_at: new Date().toISOString(),
+        };
+
+    const { error } = await db
+      .from('tg_transcribe_jobs')
+      .update({
+        updated_at: new Date().toISOString(),
+        payload: { ...(job.payload ?? {}), monitor_progress: monitorProgress },
+      })
+      .eq('id', job.id)
+      .eq('status', 'running');
+    if (error) log('warn', `TG transcribe heartbeat failed for ${job.id}`, error);
+  };
+
+  const scheduleHeartbeat = (force = false): void => {
+    if (heartbeatStopped || heartbeatInFlight) return;
+    const now = Date.now();
+    if (!force && now - lastHeartbeatStartedAt < JOB_HEARTBEAT_INTERVAL_MS) return;
+    lastHeartbeatStartedAt = now;
+    heartbeatInFlight = writeHeartbeat()
+      .catch((error) => {
+        log('warn', `TG transcribe heartbeat crashed for ${job.id}`, error);
+      })
+      .finally(() => {
+        heartbeatInFlight = null;
+      });
+  };
+
+  const onProgress = (event: VideoProgressEvent): void => {
+    const phaseChanged = event.phase !== latestProgress.phase;
+    latestProgress = event;
+    if (event.transcriptionJobId) transcriptionJobId = event.transcriptionJobId;
+    scheduleHeartbeat(phaseChanged || !!event.transcriptionJobId);
+  };
+
+  const heartbeatTimer = setInterval(
+    () => scheduleHeartbeat(true),
+    JOB_HEARTBEAT_INTERVAL_MS,
+  );
+  if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
+
   try {
-    const result = await processVideoMessage(msg, resolvedVideoInfo);
+    let result: Awaited<ReturnType<typeof processVideoMessage>>;
+    try {
+      result = await processVideoMessage(msg, resolvedVideoInfo, onProgress);
+    } finally {
+      clearInterval(heartbeatTimer);
+      heartbeatStopped = true;
+      if (heartbeatInFlight) await heartbeatInFlight;
+    }
 
     if (isTerminalOkStatus(result.status)) {
       await db
