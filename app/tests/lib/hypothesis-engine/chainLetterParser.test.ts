@@ -214,3 +214,32 @@ Body B.`;
     expect(cleaned).not.toContain('Тело B2');
   });
 });
+
+describe('extractLetterBVariants — деградация «все блоки как B» (прод-инцидент 01.08)', () => {
+  const onlyB = [
+    '---LETTER 1 B---',
+    'Тема: Первое, {{company}}?',
+    '',
+    'Тело первого варианта с поводом про получателя.',
+    '',
+    '---LETTER 2 B---',
+    'Тема: Второе?',
+    '',
+    'Тело второго варианта с углом рынка.',
+    '',
+    '---LETTER 3 B---',
+    'Тема: Третье, {{company}}?',
+    '',
+    'Тело третьего письма.',
+  ].join('\n');
+
+  it('B-маркеры без единого основного ---LETTER N--- трактуются как основные письма (не вырезаются в пустоту)', () => {
+    const { cleaned, variants } = extractLetterBVariants(onlyB);
+    expect(variants.size).toBe(0);
+    const { parsed, letters } = buildChainLetters(onlyB);
+    expect(parsed).toHaveLength(3);
+    expect(letters).toHaveLength(3);
+    expect(letters[0].body).toContain('Тело первого');
+    expect(cleaned).not.toContain('LETTER 1 B');
+  });
+});
