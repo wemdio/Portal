@@ -16,6 +16,7 @@ import {
   type HePreviewToken,
 } from '@/lib/hypothesisEngine/renderPreview';
 import {
+  HE_LAUNCH_MAX_LEADS,
   parseLaunchInfo,
   type HeLaunchPresetOption,
   type HeTemplateLaunchInfo,
@@ -516,6 +517,9 @@ export function Step5Template(props: {
 
   /* ── Готовый шаблон ── */
   const mapping = template.personalization_plan?.operator_mapping ?? [];
+  // Пречек лимита запуска: роут ответит 413 сверх HE_LAUNCH_MAX_LEADS —
+  // не даём дойти до клика по «Отправить в запуск» с заведомо большой базой.
+  const baseOverLaunchLimit = (base?.row_count ?? 0) > HE_LAUNCH_MAX_LEADS;
 
   return (
     <div className="space-y-5">
@@ -540,7 +544,12 @@ export function Step5Template(props: {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {!launch.recorded ? (
-            <button type="button" onClick={launch.openForm} className={PRIMARY_SM_BTN}>
+            <button
+              type="button"
+              onClick={launch.openForm}
+              disabled={baseOverLaunchLimit}
+              className={PRIMARY_SM_BTN}
+            >
               <Rocket className="h-3.5 w-3.5" aria-hidden />
               Отправить в запуск
             </button>
@@ -559,6 +568,14 @@ export function Step5Template(props: {
           </button>
         </div>
       </header>
+
+      {/* База больше лимита запуска — кнопка выключена, объясняем почему */}
+      {baseOverLaunchLimit ? (
+        <p className="text-xs text-gray-400">
+          База больше лимита запуска ({HE_LAUNCH_MAX_LEADS}). Скачайте CSV и запускайте порциями —
+          или соберите базу меньшего лимита.
+        </p>
+      ) : null}
 
       {/* Отправка в запуск: запись о запуске либо форма выбора пресета */}
       <LaunchSection launch={launch} />

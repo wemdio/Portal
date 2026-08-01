@@ -8,7 +8,15 @@
  *   WAIT / requeue   — own he_jobs row → status 'pending' + run_after cooldown,
  *                      attempts untouched; stuck child (>3h) → task failed (timeout)
  *   HARVEST          — child rows merged into he_bases (+base_analyze enqueue),
- *                      zero rows → base failed + job throws
+ *                      total cap from job payload limit (default 10000, clamp
+ *                      [100, 50000]), zero rows → base failed + job throws
+ *   continuation     — other-base companies are skipped DURING directory paging
+ *                      (only new rows count toward limit, 200-page ceiling),
+ *                      exhausted registry → task note «реестр исчерпан»,
+ *                      200-page ceiling → note «предел сканирования 200k»
+ *                      (NOT exhaustion), all-exhausted + 0 new + no failed
+ *                      tasks → «Сегмент исчерпан» failure;
+ *                      merge-time exclusion stays as the hh/maps safety net
  *   guards           — base must be source='auto' AND status='collecting'
  */
 
@@ -32,11 +40,14 @@ import {
   buildYandexSearchUrls,
   dedupUnifiedRows,
   HE_AUTO_COLLECT_COLUMNS,
+  interleaveTaskHarvests,
   mapDirectoryFilters,
   mapDirectoryRow,
   mapGoogleRow,
   mapHhRow,
   mapYandexRow,
+  normalizeCompanyForDedup,
+  normalizeWebsiteForDedup,
   runBaseCollectStage,
   type HeCollectInfo,
   type HeUnifiedRow,
@@ -212,6 +223,65 @@ describe('source row → unified row mapping', () => {
   });
 });
 
+describe('normalizeCompanyForDedup', () => {
+  it('treats legal forms, quote styles, case and word order of the form as equal', () => {
+    const forms = [
+      'ООО «ТЕРАБАЙТ»',
+      'ТЕРАБАЙТ',
+      'ООО "ТЕРАБАЙТ"',
+      'Терабайт ооо',
+      '  ооо   "Терабайт" ',
+    ];
+    for (const f of forms) expect(normalizeCompanyForDedup(f)).toBe('терабайт');
+  });
+
+  it('strips other legal forms and collapses punctuation/whitespace', () => {
+    expect(normalizeCompanyForDedup('ИП Иванов И.И.')).toBe('иванов и и');
+    expect(normalizeCompanyForDedup('АНО "Центр Развития"')).toBe('центр развития');
+    expect(normalizeCompanyForDedup('ПАО «Сбербанк»')).toBe('сбербанк');
+    expect(normalizeCompanyForDedup('ООО "Ромашка-Сервис"')).toBe('ромашка сервис');
+    expect(normalizeCompanyForDedup('')).toBe('');
+  });
+
+  it('does not mangle names containing legal-form-looking substrings', () => {
+    // «ао» внутри слова — не юрформа.
+    expect(normalizeCompanyForDedup('ООО "Аврора"')).toBe('аврора');
+  });
+
+  it('strips latin legal forms as whole tokens (llc/ltd/inc/ooo), keeps ip and lookalikes', () => {
+    // Латинские имена приходят от hh employers.
+    expect(normalizeCompanyForDedup('Terabayt LLC')).toBe('terabayt');
+    expect(normalizeCompanyForDedup('ACME Inc.')).toBe('acme');
+    expect(normalizeCompanyForDedup('Beta LTD')).toBe('beta');
+    expect(normalizeCompanyForDedup('Gamma OOO')).toBe('gamma');
+    // Латинское IP НЕ срезаем — слишком коллизионно («IP Solutions»).
+    expect(normalizeCompanyForDedup('IP Solutions')).toBe('ip solutions');
+    // Только целые токены: «Limited» — не «ltd».
+    expect(normalizeCompanyForDedup('Limited Inc')).toBe('limited');
+  });
+});
+
+describe('normalizeWebsiteForDedup', () => {
+  it('reduces urls to a lowercase host without www or path', () => {
+    expect(normalizeWebsiteForDedup('https://www.x.ru/about')).toBe('x.ru');
+    expect(normalizeWebsiteForDedup('http://x.ru/')).toBe('x.ru');
+    expect(normalizeWebsiteForDedup('X.Ru')).toBe('x.ru');
+    expect(normalizeWebsiteForDedup('www.x.ru')).toBe('x.ru');
+    expect(normalizeWebsiteForDedup('as.ru')).toBe('as.ru');
+    expect(normalizeWebsiteForDedup('')).toBe('');
+  });
+
+  it('strips the trailing dot and returns an empty key for junk hosts', () => {
+    expect(normalizeWebsiteForDedup('x.ru.')).toBe('x.ru');
+    expect(normalizeWebsiteForDedup('https://www.x.ru./about')).toBe('x.ru');
+    // «не-сайт» — не домен: без точки с TLD это мусор, а не ключ (раньше
+    // уходил в punycode и жил отдельным ключом от пустого сайта).
+    expect(normalizeWebsiteForDedup('не-сайт')).toBe('');
+    expect(normalizeWebsiteForDedup('localhost')).toBe('');
+    expect(normalizeWebsiteForDedup('просто текст')).toBe('');
+  });
+});
+
 describe('dedupUnifiedRows', () => {
   it('dedups by lowercase company+website, first occurrence wins', () => {
     const a = row({ company: 'АС', website: 'as.ru', phone: '1' });
@@ -221,6 +291,101 @@ describe('dedupUnifiedRows', () => {
     expect(out).toHaveLength(2);
     expect(out[0].phone).toBe('1');
     expect(out[1].website).toBe('as2.ru');
+  });
+
+  it('dedups across legal forms / quote styles and keeps the full website in the row', () => {
+    const registry = row({ company: 'ООО "ТЕРАБАЙТ"', website: 'terabait.ru', phone: '1' });
+    const hh = row({ company: 'ТЕРАБАЙТ', website: 'https://www.terabait.ru/about', phone: '2' });
+    const out = dedupUnifiedRows([registry, hh]);
+    expect(out).toHaveLength(1);
+    expect(out[0].company).toBe('ООО "ТЕРАБАЙТ"');
+    // Полный website строки не трогаем — хост нужен только для ключа.
+    expect(out[0].website).toBe('terabait.ru');
+  });
+
+  it('merges same-company rows when either website is empty — the richer row (website/email) wins', () => {
+    // Кросс-базовое исключение матчит только по компании, а within-batch дедуп
+    // оставлял «ООО "ТЕРАБАЙТ"» с сайтом и «ТЕРАБАЙТ» без сайта двумя строками.
+    const bare = row({ company: 'ТЕРАБАЙТ', phone: '2', vacancy_title: 'Рекрутер' });
+    const rich = row({ company: 'ООО "ТЕРАБАЙТ"', website: 'tb.ru', phone: '1' });
+    // Бедная строка первой — выживает богатая (с сайтом), на её месте.
+    const out = dedupUnifiedRows([bare, rich]);
+    expect(out).toHaveLength(1);
+    expect(out[0].website).toBe('tb.ru');
+    expect(out[0].phone).toBe('1');
+    // Богатая первая — она и остаётся.
+    expect(dedupUnifiedRows([rich, bare])).toEqual([rich]);
+    // Богатая по EMAIL (без сайта) — тоже замена.
+    const withEmail = row({ company: 'терабайт', email: 'a@tb.ru' });
+    const out2 = dedupUnifiedRows([bare, withEmail]);
+    expect(out2).toHaveLength(1);
+    expect(out2[0].email).toBe('a@tb.ru');
+    // Обе бедные — побеждает первая.
+    const bare2 = row({ company: 'Терабайт ООО', vacancy_title: 'Sourcer' });
+    expect(dedupUnifiedRows([bare, bare2])).toEqual([bare]);
+    // Разные НЕПУСТЫЕ сайты — обе строки живут (дочки/филиалы с разными доменами).
+    const otherSite = row({ company: 'ТЕРАБАЙТ', website: 'tb-two.ru' });
+    expect(dedupUnifiedRows([rich, otherSite])).toHaveLength(2);
+  });
+
+  it('drops garbage rows whose company normalizes to empty («ООО», «—», quotes-only)', () => {
+    // Все они схлопывались в один ключ «|» и жили одной мусорной строкой.
+    const out = dedupUnifiedRows([
+      row({ company: 'ООО', website: 'a.ru' }),
+      row({ company: '—', website: 'b.ru' }),
+      row({ company: '«»' }),
+      row({ company: 'Нормальная', website: 'n.ru' }),
+    ]);
+    expect(out).toEqual([row({ company: 'Нормальная', website: 'n.ru' })]);
+  });
+});
+
+describe('interleaveTaskHarvests (fair merge)', () => {
+  const sourceRows = (source: string, n: number): HeUnifiedRow[] =>
+    Array.from({ length: n }, (_, i) =>
+      row({ company: `${source}-${i}`, website: `${source}${i}.ru`, source_detail: source }),
+    );
+
+  it('round-robins 3 sources 1500/1500/1500: first 900 rows contain 300 of each, total preserved', () => {
+    const registry = sourceRows('реестр', 1500);
+    const hh = sourceRows('hh', 1500);
+    const maps = sourceRows('карты', 1500);
+
+    const merged = interleaveTaskHarvests([registry, hh, maps]);
+    expect(merged).toHaveLength(4500);
+
+    // Первые 900 строк — ровно по 300 «ходов» каждого источника (а не 900 реестра,
+    // как давал concat+slice под капом 2000).
+    const first900 = merged.slice(0, 900);
+    for (const source of ['реестр', 'hh', 'карты']) {
+      expect(first900.filter((r) => r.source_detail === source)).toHaveLength(300);
+    }
+    // Порядок внутри источника сохранён: его строки идут по возрастанию индекса.
+    const registryTurns = merged.filter((r) => r.source_detail === 'реестр');
+    expect(registryTurns[0].company).toBe('реестр-0');
+    expect(registryTurns.at(-1)?.company).toBe('реестр-1499');
+  });
+
+  it('skips exhausted lists and keeps per-list order', () => {
+    const a = [row({ company: 'a1' }), row({ company: 'a2' }), row({ company: 'a3' })];
+    const b: HeUnifiedRow[] = [];
+    const c = [row({ company: 'c1' })];
+    expect(interleaveTaskHarvests([a, b, c]).map((r) => r.company)).toEqual([
+      'a1',
+      'c1',
+      'a2',
+      'a3',
+    ]);
+  });
+
+  it('dedup after interleave still works: first turn (higher-priority task) wins', () => {
+    const first = [row({ company: 'АС', website: 'as.ru', phone: '1' }), row({ company: 'Первая' })];
+    const second = [row({ company: 'Вторая' }), row({ company: 'ас', website: 'AS.ru', phone: '2' })];
+    const out = dedupUnifiedRows(interleaveTaskHarvests([first, second]));
+    // Дубль из второй задачи отброшен, хотя в concat-мёрдже порядок был бы тот же —
+    // важно, что строки разных задач в выдаче чередуются.
+    expect(out.map((r) => r.company)).toEqual(['АС', 'Вторая', 'Первая']);
+    expect(out[0].phone).toBe('1');
   });
 });
 
@@ -530,6 +695,8 @@ describe('harvest', () => {
           { job_id: 'pj1', name: 'HR-менеджер', company_name: 'ас', company_site_url: 'AS.ru', area: 'СПб' },
           // без компании — отбрасывается
           { job_id: 'pj1', name: 'Sourcer', company_name: '', company_site_url: '', area: 'Москва' },
+          // компания-мусор (нормализуется в пустой ключ) — отбрасывается
+          { job_id: 'pj1', name: 'Ops', company_name: 'ООО', company_site_url: 'ooo.ru', area: '' },
           // чужая джоба — не попадает
           { job_id: 'pj2', name: 'X', company_name: 'Чужая', company_site_url: 'x.ru', area: 'Москва' },
         ],
@@ -572,6 +739,179 @@ describe('harvest', () => {
         payload: { base_id: 'b1' },
       }),
     );
+  });
+
+  it('interleaves done task harvests round-robin (first source no longer eats the cap)', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'done',
+          child_job_id: null,
+          rows: 3,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+          harvest: [
+            row({ company: 'Реестр-1', website: 'r1.ru' }),
+            row({ company: 'Реестр-2', website: 'r2.ru' }),
+            row({ company: 'Реестр-3', website: 'r3.ru' }),
+          ],
+        },
+        {
+          source: 'hh_live',
+          status: 'done',
+          child_job_id: 'pj1',
+          rows: 2,
+          task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
+          harvest: [
+            row({ company: 'HH-1', website: 'h1.ru' }),
+            row({ company: 'HH-2', website: 'h2.ru' }),
+          ],
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(5);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    const data = harvest?.data as HeUnifiedRow[];
+    // Round-robin: реестр/hh по кругу, исчерпанный hh-список пропускается.
+    expect(data.map((r) => r.company)).toEqual(['Реестр-1', 'HH-1', 'Реестр-2', 'HH-2', 'Реестр-3']);
+  });
+
+  it('caps the merged base at 10000 rows, balanced across sources', async () => {
+    const big = (prefix: string, n: number): HeUnifiedRow[] =>
+      Array.from({ length: n }, (_, i) => row({ company: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'done',
+          child_job_id: null,
+          rows: 5000,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+          harvest: big('реестр', 5000),
+        },
+        {
+          source: 'hh_live',
+          status: 'done',
+          child_job_id: 'pj1',
+          rows: 5000,
+          task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
+          harvest: big('hh', 5000),
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(10000);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(harvest?.row_count).toBe(10000);
+    const data = harvest?.data as HeUnifiedRow[];
+    // Кап делит поровну: 5000 «ходов» каждого источника (2 × 5000 → 10000).
+    expect(data.filter((r) => r.company.startsWith('реестр-'))).toHaveLength(5000);
+    expect(data.filter((r) => r.company.startsWith('hh-'))).toHaveLength(5000);
+    expect((harvest?.collect_info as HeCollectInfo).stats?.rows_total).toBe(10000);
+  });
+
+  it('caps the merged base at the payload limit (2 × 3000 with limit 4000 → 4000 interleaved)', async () => {
+    const big = (prefix: string, n: number): HeUnifiedRow[] =>
+      Array.from({ length: n }, (_, i) => row({ company: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'done',
+          child_job_id: null,
+          rows: 3000,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+          harvest: big('реестр', 3000),
+        },
+        {
+          source: 'hh_live',
+          status: 'done',
+          child_job_id: 'pj1',
+          rows: 3000,
+          task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
+          harvest: big('hh', 3000),
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+
+    const res = await runBaseCollectStage(
+      makeJob({ payload: { base_id: 'b1', limit: 4000 } }),
+      ctx(),
+    );
+    expect((res.result as { rows: number }).rows).toBe(4000);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(harvest?.row_count).toBe(4000);
+    const data = harvest?.data as HeUnifiedRow[];
+    // Кап из payload делится round-robin'ом: по 2000 «ходов» каждого источника.
+    expect(data.filter((r) => r.company.startsWith('реестр-'))).toHaveLength(2000);
+    expect(data.filter((r) => r.company.startsWith('hh-'))).toHaveLength(2000);
+    expect((harvest?.collect_info as HeCollectInfo).stats?.rows_total).toBe(4000);
+  });
+
+  it('clamps a payload limit outside [100, 50000]', async () => {
+    const big = (prefix: string, n: number): HeUnifiedRow[] =>
+      Array.from({ length: n }, (_, i) => row({ company: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'done',
+          child_job_id: null,
+          rows: 500,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+          harvest: big('реестр', 500),
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+
+    // limit 10 < MIN_ROWS_LIMIT → кламп до 100, хотя строк хватило бы на 500.
+    const res = await runBaseCollectStage(
+      makeJob({ payload: { base_id: 'b1', limit: 10 } }),
+      ctx(),
+    );
+    expect((res.result as { rows: number }).rows).toBe(100);
   });
 
   it('dispatches companies_directory synchronously via searchRows and harvests immediately', async () => {
@@ -618,7 +958,11 @@ describe('harvest', () => {
     const res = await runBaseCollectStage(makeJob(), ctx());
     expect((res.result as { rows: number }).rows).toBe(1);
 
-    expect(searchRowsMock).toHaveBeenCalledWith({ okvedCodes: ['62'], hasEmail: true, includeIp: false }, 2000);
+    expect(searchRowsMock).toHaveBeenCalledWith(
+      { okvedCodes: ['62'], hasEmail: true, includeIp: false },
+      1000,
+      0,
+    );
     // Без дочерних джоб парсеров.
     expect(mockDb.inserts.filter((i) => i.table !== 'he_jobs')).toHaveLength(0);
 
@@ -639,6 +983,151 @@ describe('harvest', () => {
         source_detail: 'реестр',
       }),
     );
+  });
+
+  it('paginates the directory in 1000-row pages until a short page', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: { okvedCodes: ['62'] } },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    const page = (prefix: string, n: number) =>
+      Array.from({ length: n }, (_, i) => ({ name: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
+    // 3 страницы: 1000 + 1000 + короткая 600 → стоп, 4-го запроса нет.
+    searchRowsMock
+      .mockResolvedValueOnce({ rows: page('a', 1000) })
+      .mockResolvedValueOnce({ rows: page('b', 1000) })
+      .mockResolvedValueOnce({ rows: page('c', 600) });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(2600);
+
+    const filters = { okvedCodes: ['62'], includeIp: false };
+    expect(searchRowsMock).toHaveBeenCalledTimes(3);
+    expect(searchRowsMock).toHaveBeenNthCalledWith(1, filters, 1000, 0);
+    expect(searchRowsMock).toHaveBeenNthCalledWith(2, filters, 1000, 1000);
+    expect(searchRowsMock).toHaveBeenNthCalledWith(3, filters, 1000, 2000);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(harvest?.row_count).toBe(2600);
+  });
+
+  it('stops directory pagination at the default 10000 limit on full pages', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'pending',
+          child_job_id: null,
+          rows: 0,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info)],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    // Каждая страница полная → ровно 10 запросов, кап — дефолтный лимит 10000.
+    // Имена уникальны между страницами, иначе их съест дедуп.
+    let call = 0;
+    searchRowsMock.mockImplementation(async () => {
+      call += 1;
+      return { rows: Array.from({ length: 1000 }, (_, i) => ({ name: `p${call}-${i}` })) };
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(10000);
+    expect(searchRowsMock).toHaveBeenCalledTimes(10);
+  });
+
+  it('excludes companies already present in other bases of the project', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'companies_directory',
+          status: 'done',
+          child_job_id: null,
+          rows: 3,
+          task: { source: 'companies_directory', rationale: 'r', directory_filters: {} },
+          harvest: [
+            row({ company: 'ООО "ТЕРАБАЙТ"', website: 'tb.ru' }),
+            row({ company: 'ИП Сидоров', website: 'sidorov.ru' }),
+            row({ company: 'Новая Компания', website: 'new.ru' }),
+          ],
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [
+          makeBase(info),
+          // Другая авто-база того же проекта: совпадение по нормализованной
+          // компании («ТЕРАБАЙТ» без юрформы), несмотря на ДРУГОЙ website.
+          {
+            id: 'b2',
+            project_id: 'p1',
+            vertical_id: 'v1',
+            status: 'analyzed',
+            source: 'auto',
+            data: [{ company: 'ТЕРАБАЙТ', website: 'other-tb.ru' }, { company: 'ип сидоров' }],
+          },
+          // Ручная база тоже считается (source любой), но failed — игнорируется.
+          {
+            id: 'b3',
+            project_id: 'p1',
+            vertical_id: 'v1',
+            status: 'failed',
+            source: 'upload',
+            data: [{ company: 'Новая Компания' }],
+          },
+          // Чужой проект — не участвует.
+          {
+            id: 'b4',
+            project_id: 'p2',
+            vertical_id: 'v9',
+            status: 'analyzed',
+            source: 'auto',
+            data: [{ company: 'Новая Компания' }],
+          },
+        ],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(1);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    const data = harvest?.data as HeUnifiedRow[];
+    expect(data.map((r) => r.company)).toEqual(['Новая Компания']);
+    expect((harvest?.collect_info as HeCollectInfo).stats).toMatchObject({
+      rows_total: 1,
+      excluded_existing_bases: 2,
+    });
   });
 
   it('failed task does not fail the job when another task produced rows', async () => {
@@ -722,6 +1211,284 @@ describe('harvest', () => {
     expect(fail?.status).toBe('failed');
     expect(String(fail?.error)).toContain('не дала строк');
     expect(mockDb.inserts.find((i) => i.table === 'he_jobs')).toBeUndefined();
+  });
+});
+
+/* ─────────────────── Continuation: исключение на выборке реестра ─────────────────── */
+
+describe('continuation: other-base exclusion during directory fetch', () => {
+  const directoryInfo = (): HeCollectInfo => ({
+    plan: { tasks: [] },
+    tasks: [
+      {
+        source: 'companies_directory',
+        status: 'pending',
+        child_job_id: null,
+        rows: 0,
+        task: { source: 'companies_directory', rationale: 'r', directory_filters: { okvedCodes: ['62'] } },
+      },
+    ],
+  });
+
+  const otherBase = (data: Array<Record<string, unknown>>): Record<string, unknown> => ({
+    id: 'b2',
+    project_id: 'p1',
+    vertical_id: 'v1',
+    status: 'analyzed',
+    source: 'auto',
+    data,
+  });
+
+  it('skips rows known from other bases while paging and keeps paging until new rows (pages 1-2 known, page 3 new)', async () => {
+    const page = (prefix: string, n: number) =>
+      Array.from({ length: n }, (_, i) => ({ name: `${prefix}-${i}`, website: `${prefix}${i}.ru` }));
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [
+          makeBase(directoryInfo()),
+          // Первая сборка того же сегмента: страницы a-* и b-* реестра уже в ней.
+          otherBase([...page('a', 1000), ...page('b', 1000)].map((r) => ({ company: r.name, website: r.website }))),
+        ],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    searchRowsMock
+      .mockResolvedValueOnce({ rows: page('a', 1000) }) // все известны — в limit не считаются
+      .mockResolvedValueOnce({ rows: page('b', 1000) }) // все известны
+      .mockResolvedValueOnce({ rows: page('c', 600) }); // новые, короткая страница → стоп
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(600);
+
+    // offset двигается по ПРОСКАНИРОВАННЫМ строкам, а не по оставленным.
+    const filters = { okvedCodes: ['62'], includeIp: false };
+    expect(searchRowsMock).toHaveBeenCalledTimes(3);
+    expect(searchRowsMock).toHaveBeenNthCalledWith(1, filters, 1000, 0);
+    expect(searchRowsMock).toHaveBeenNthCalledWith(2, filters, 1000, 1000);
+    expect(searchRowsMock).toHaveBeenNthCalledWith(3, filters, 1000, 2000);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    const data = harvest?.data as HeUnifiedRow[];
+    expect(data).toHaveLength(600);
+    expect(data.every((r) => r.company.startsWith('c-'))).toBe(true);
+
+    // Исключение сработало на выборке — мёрджу отсекать нечего.
+    const info = harvest?.collect_info as HeCollectInfo;
+    expect(info.stats).toMatchObject({
+      rows_total: 600,
+      excluded_during_fetch: 2000,
+      excluded_existing_bases: 0,
+    });
+    // Выдача кончилась раньше limit — задача помечена исчерпанной.
+    expect(info.tasks?.[0]).toMatchObject({
+      status: 'done',
+      rows: 600,
+      exhausted: true,
+      note: 'реестр исчерпан',
+      excluded_during_fetch: 2000,
+    });
+  });
+
+  it('excludes companies beyond the first 10k rows of another base (collect limit can be 50k)', async () => {
+    // 12k компаний в чужой базе; реестр отдаёт строки 10500–11499 — за старым
+    // капом чтения 10k. Они обязаны попасть в исключения на выборке, иначе
+    // вторая сборка собирает хвост первой базы заново как «новые» компании.
+    const known = Array.from({ length: 12_000 }, (_, i) => `c-${i}`);
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(directoryInfo()), otherBase(known.map((company) => ({ company })))],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    searchRowsMock
+      .mockResolvedValueOnce({ rows: known.slice(10_500, 11_500).map((name) => ({ name })) }) // все известны
+      .mockResolvedValueOnce({ rows: [{ name: 'Новая-1' }, { name: 'Новая-2' }] }); // короткая страница новых
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(2);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    const data = harvest?.data as HeUnifiedRow[];
+    expect(data.map((r) => r.company)).toEqual(['Новая-1', 'Новая-2']);
+    const info = harvest?.collect_info as HeCollectInfo;
+    expect(info.stats).toMatchObject({ excluded_during_fetch: 1000, excluded_existing_bases: 0 });
+  });
+
+  it('stops at the 200-page ceiling (200k scanned) and reports it as a ceiling, NOT segment exhaustion', async () => {
+    const knownPage = Array.from({ length: 1000 }, (_, i) => ({ name: `old-${i}` }));
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [
+          makeBase(directoryInfo()),
+          otherBase(knownPage.map((r) => ({ company: r.name }))),
+        ],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    // Полные страницы известных компаний бесконечно — останавливает только потолок.
+    searchRowsMock.mockResolvedValue({ rows: knownPage });
+
+    // Потолок — не исчерпание: общий нулевой фейл, а не «Сегмент исчерпан».
+    await expect(runBaseCollectStage(makeJob(), ctx())).rejects.toThrow(/не дала строк/);
+    expect(searchRowsMock).toHaveBeenCalledTimes(200);
+    // Последняя страница уходит по offset 199k — потолок по просканированным строкам.
+    expect(searchRowsMock).toHaveBeenLastCalledWith({ okvedCodes: ['62'], includeIp: false }, 1000, 199_000);
+
+    const fail = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(fail?.status).toBe('failed');
+    expect(String(fail?.error)).toContain('не дала строк');
+    expect(String(fail?.error)).not.toMatch(/сегмент исчерпан/i);
+    const info = fail?.collect_info as HeCollectInfo;
+    expect(info.stats?.excluded_during_fetch).toBe(200_000);
+    // Задача помечена note про предел сканирования и НЕ считается exhausted —
+    // повторная сборка продолжит сегмент с места останова.
+    expect(info.tasks?.[0]).toMatchObject({
+      status: 'done',
+      rows: 0,
+      hit_ceiling: true,
+      note: 'достигнут предел сканирования 200k — запустите сборку ещё раз',
+    });
+    expect(info.tasks?.[0].exhausted).toBeUndefined();
+  });
+
+  it('marks the directory task as exhausted («реестр исчерпан») when the registry ends before the limit', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(directoryInfo())],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    searchRowsMock.mockResolvedValue({ rows: [{ name: 'Одна', website: 'one.ru' }] });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(1);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(harvest?.status).toBe('analyzing');
+    const info = harvest?.collect_info as HeCollectInfo;
+    expect(info.tasks?.[0]).toMatchObject({ exhausted: true, note: 'реестр исчерпан' });
+    expect(info.stats?.excluded_during_fetch).toBe(0);
+  });
+
+  it('fails with «Сегмент исчерпан» when a continuation yields zero new rows (all scanned rows known)', async () => {
+    const known = [{ name: 'Старая-1' }, { name: 'Старая-2' }];
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [
+          makeBase(directoryInfo()),
+          otherBase(known.map((r) => ({ company: r.name }))),
+        ],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+    // Короткая страница, все строки уже в другой базе → 0 новых, реестр исчерпан.
+    searchRowsMock.mockResolvedValue({ rows: known });
+
+    await expect(runBaseCollectStage(makeJob(), ctx())).rejects.toThrow(/сегмент исчерпан/i);
+
+    const fail = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(fail?.status).toBe('failed');
+    expect(String(fail?.error)).toContain('Сегмент исчерпан: новых компаний нет');
+    expect(String(fail?.error)).not.toContain('не дала строк');
+    const info = fail?.collect_info as HeCollectInfo;
+    expect(info.stats?.excluded_during_fetch).toBe(2);
+    expect(info.tasks?.[0]).toMatchObject({ exhausted: true, note: 'реестр исчерпан' });
+    // base_analyze не ставится.
+    expect(mockDb.inserts.find((i) => i.table === 'he_jobs')).toBeUndefined();
+  });
+
+  it('failed hh task + exhausted registry → failure breakdown, NOT «Сегмент исчерпан»', async () => {
+    // Реестр исчерпан (все строки выдачи уже в другой базе), но hh-задача
+    // упала — «исчерпан» маскировал бы настоящий фейл: показываем разбор.
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        ...directoryInfo().tasks!,
+        {
+          source: 'hh_live',
+          status: 'dispatched',
+          child_job_id: 'pj1',
+          rows: 0,
+          task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [makeBase(info), otherBase([{ company: 'Старая' }])],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+        parser_jobs: [{ id: 'pj1', status: 'failed', error_message: 'captcha' }],
+      },
+    });
+    // Короткая страница, единственная строка уже в другой базе → реестр исчерпан, 0 новых.
+    searchRowsMock.mockResolvedValue({ rows: [{ name: 'Старая' }] });
+
+    await expect(runBaseCollectStage(makeJob(), ctx())).rejects.toThrow(/не дала строк/);
+
+    const fail = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect(fail?.status).toBe('failed');
+    expect(String(fail?.error)).toContain('не дала строк');
+    expect(String(fail?.error)).toContain('hh_live — captcha');
+    expect(String(fail?.error)).not.toMatch(/сегмент исчерпан/i);
+    const saved = fail?.collect_info as HeCollectInfo;
+    // Реестр при этом честно помечен исчерпанным — но итог сборки не «исчерпан».
+    expect(saved.tasks?.find((t) => t.source === 'companies_directory')).toMatchObject({
+      exhausted: true,
+      note: 'реестр исчерпан',
+    });
+  });
+
+  it('still excludes hh/maps rows at merge time (fetch-time exclusion covers only the registry)', async () => {
+    const info: HeCollectInfo = {
+      plan: { tasks: [] },
+      tasks: [
+        {
+          source: 'hh_live',
+          status: 'done',
+          child_job_id: 'pj1',
+          rows: 2,
+          task: { source: 'hh_live', rationale: 'r', hh_query: { text: 'рекрутер' } },
+          harvest: [
+            row({ company: 'Уже Собранная', website: 'old.ru' }),
+            row({ company: 'Свежая', website: 'fresh.ru' }),
+          ],
+        },
+      ],
+    };
+    mockDb = createMockSupabase({
+      tables: {
+        he_bases: [
+          makeBase(info),
+          otherBase([{ company: 'Уже собранная' }]),
+        ],
+        he_verticals: [VERTICAL],
+        he_projects: [PROJECT],
+        he_jobs: [makeJob() as unknown as Record<string, unknown>],
+      },
+    });
+
+    const res = await runBaseCollectStage(makeJob(), ctx());
+    expect((res.result as { rows: number }).rows).toBe(1);
+
+    const harvest = mockDb.updates.filter((u) => u.table === 'he_bases').at(-1)?.patch;
+    expect((harvest?.data as HeUnifiedRow[]).map((r) => r.company)).toEqual(['Свежая']);
+    // Страховка на мёрдже жива: строка hh отсеяна именно там, не на выборке.
+    expect((harvest?.collect_info as HeCollectInfo).stats).toMatchObject({
+      excluded_existing_bases: 1,
+      excluded_during_fetch: 0,
+    });
   });
 });
 

@@ -8,8 +8,9 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
-import { ArrowRight, Check, FileSpreadsheet, Sparkles, Upload, X } from 'lucide-react';
+import { ArrowRight, Check, Download, Eye, EyeOff, FileSpreadsheet, Sparkles, Upload, X } from 'lucide-react';
 import type { HeBaseAnalysis, HeDistributionEntry, HeVertical } from '@/lib/hypothesisEngine/types';
+import { authFetch } from '@/lib/authFetch';
 import { readSpreadsheetFile } from '@/lib/spreadsheet/parseCSV';
 import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
 import {
@@ -29,6 +30,11 @@ const PRIMARY_BTN =
 
 /** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
 const COLLECT_POLL_MS = 4000;
+
+/** Лимит строк автосборки — выбор пользователя; route валидирует те же значения. */
+type CollectLimit = 2000 | 10000 | 50000;
+const COLLECT_LIMITS: readonly CollectLimit[] = [2000, 10000, 50000];
+const DEFAULT_COLLECT_LIMIT: CollectLimit = 10000;
 
 interface ParsedFile {
   filename: string;
@@ -68,6 +74,8 @@ export function Step4Base(props: {
   const [uploadError, setUploadError] = useState('');
   const [collectStarting, setCollectStarting] = useState(false);
   const [collectError, setCollectError] = useState('');
+  const [collectNotice, setCollectNotice] = useState('');
+  const [collectLimit, setCollectLimit] = useState<CollectLimit>(DEFAULT_COLLECT_LIMIT);
   const [templateStarting, setTemplateStarting] = useState(false);
   const [templateError, setTemplateError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -169,14 +177,27 @@ export function Step4Base(props: {
   const handleCollect = useCallback(async () => {
     if (collectStarting || collectingBase) return;
     setCollectError('');
+    setCollectNotice('');
     setCollectStarting(true);
     try {
       const { ok, data } = await hePost<HeBaseCollectResponse>(
         `${HE_API}/verticals/${vertical.id}/collect`,
+        { limit: collectLimit },
       );
       if (!ok) {
         setCollectError(data.error || 'Не удалось запустить автосборку');
         return;
+      }
+      // Дедуп-ответ (200, existing): новая сборка не создана. Показываем,
+      // с каким лимитом уже идёт сборка, — иначе клик с другим лимитом
+      // выглядел бы как молча проигнорированный.
+      if (data.existing) {
+        const runningLimit = data.base?.collect_info?.limit;
+        setCollectNotice(
+          typeof runningLimit === 'number' && Number.isFinite(runningLimit)
+            ? `Уже собирается база с лимитом ${runningLimit.toLocaleString('ru-RU')}`
+            : 'Уже собирается база — повторный запуск не создаётся',
+        );
       }
       // 201 (сборка стартовала) и 200 (уже идёт) — в обоих случаях перечитываем деталь.
       onUploaded();
@@ -185,7 +206,7 @@ export function Step4Base(props: {
     } finally {
       setCollectStarting(false);
     }
-  }, [collectStarting, collectingBase, vertical.id, onUploaded]);
+  }, [collectStarting, collectingBase, collectLimit, vertical.id, onUploaded]);
 
   // Сборка создаёт base_collect-джобу, и родительский поллинг по активным
   // джобам её уже покрывает; локальный интервал — запасной вариант поверх
@@ -241,15 +262,41 @@ export function Step4Base(props: {
                 Автосборка завершилась ошибкой. Попробуйте ещё раз или загрузите файл вручную ниже.
               </p>
             ) : null}
-            <button
-              type="button"
-              onClick={() => void handleCollect()}
-              disabled={collectStarting}
-              className={PRIMARY_BTN}
-            >
-              {collectStarting ? <Spinner /> : <Sparkles className="h-4 w-4" aria-hidden />}
-              {collectFailed ? 'Попробовать снова' : 'Собрать базу автоматически'}
-            </button>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void handleCollect()}
+                disabled={collectStarting}
+                className={PRIMARY_BTN}
+              >
+                {collectStarting ? <Spinner /> : <Sparkles className="h-4 w-4" aria-hidden />}
+                {collectFailed ? 'Попробовать снова' : 'Собрать базу автоматически'}
+              </button>
+              <span className="inline-flex items-center gap-1 text-xs text-gray-500">
+                <span className="mr-0.5">Строк:</span>
+                {COLLECT_LIMITS.map((l) => (
+                  <button
+                    key={l}
+                    type="button"
+                    onClick={() => setCollectLimit(l)}
+                    aria-pressed={collectLimit === l}
+                    className={`rounded-md border px-2 py-1 text-xs font-medium transition ${
+                      collectLimit === l
+                        ? 'border-blue-600 bg-blue-600 text-white'
+                        : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300 hover:text-blue-600'
+                    }`}
+                  >
+                    {l.toLocaleString('ru-RU')}
+                  </button>
+                ))}
+              </span>
+            </div>
+            <p className="mt-1.5 text-[11px] text-gray-400">
+              Больше строк — дольше сбор и больше файл.
+            </p>
+            {collectNotice ? (
+              <p className="mt-2 text-xs text-gray-500">{collectNotice}</p>
+            ) : null}
             {collectError ? (
               <p className="mt-2 text-sm text-red-600" role="alert">
                 {collectError}
@@ -370,45 +417,9 @@ export function Step4Base(props: {
           <p className="text-xs font-semibold uppercase tracking-widest text-gray-400">
             Базы под эту вертикаль ({verticalBases.length})
           </p>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-start gap-2">
             {verticalBases.map((base) => (
-              <div
-                key={base.id}
-                className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2"
-              >
-                <span className="min-w-0">
-                  <span className="flex items-center gap-1.5">
-                    <span className="max-w-[200px] truncate text-xs font-medium text-gray-800">
-                      {base.filename}
-                    </span>
-                    {base.source === 'auto' ? (
-                      <Badge tone="blue">авто</Badge>
-                    ) : (
-                      <Badge tone="gray">загрузка</Badge>
-                    )}
-                  </span>
-                  <span className="block text-[11px] text-gray-400">
-                    {base.row_count.toLocaleString('ru-RU')} строк · {formatDate(base.created_at)}
-                  </span>
-                </span>
-                {base.status === 'collecting' ? (
-                  <span className="inline-flex items-center gap-1 text-[11px] text-blue-600">
-                    <Spinner className="h-3.5 w-3.5" />
-                    Собираем…
-                  </span>
-                ) : base.status === 'analyzing' ? (
-                  <span className="inline-flex items-center gap-1 text-[11px] text-amber-600">
-                    <Spinner className="h-3.5 w-3.5" />
-                    Разбираем…
-                  </span>
-                ) : base.status === 'analyzed' ? (
-                  <Badge tone="emerald">Разобрана</Badge>
-                ) : base.status === 'failed' ? (
-                  <Badge tone="red">Ошибка</Badge>
-                ) : (
-                  <Badge tone="gray">Загружена</Badge>
-                )}
-              </div>
+              <BaseCard key={base.id} base={base} />
             ))}
           </div>
         </section>
@@ -471,6 +482,185 @@ export function Step4Base(props: {
   );
 }
 
+/* ─────────────────────────── Карточка базы: скачать CSV / превью ─────────────────────────── */
+
+/** Строк базы в превью на карточке (sample_rows в БД капнут 30 — хватает). */
+const PREVIEW_ROWS = 10;
+/** Усечение текста ячейки превью; полный текст — в title. */
+const PREVIEW_CELL_CHARS = 80;
+
+function previewCellText(value: unknown): string {
+  if (value == null) return '';
+  return typeof value === 'string' ? value : String(value);
+}
+
+/** Имя файла из Content-Disposition ответа экспорта; fallback — base-<id>.csv. */
+function exportDownloadName(res: Response, baseId: string): string {
+  const match = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '');
+  return match?.[1] ?? `base-${baseId}.csv`;
+}
+
+const CARD_ACTION_BTN =
+  'inline-flex items-center gap-1 rounded border border-gray-200 px-1.5 py-0.5 text-[11px] text-gray-500 transition hover:border-blue-300 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50';
+
+function BaseCard({ base }: { base: HeBaseSummary }) {
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState('');
+
+  const hasRows = base.row_count > 0;
+  const columns = Array.isArray(base.columns) ? base.columns : [];
+  const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : []).slice(
+    0,
+    PREVIEW_ROWS,
+  );
+
+  const handleDownload = useCallback(async () => {
+    if (downloading) return;
+    setDownloadError('');
+    setDownloading(true);
+    try {
+      // Не <a href>: экспорт за Bearer-авторизацией — тянем через authFetch
+      // и скачиваем blob через временный objectURL.
+      const res = await authFetch(`${HE_API}/bases/${base.id}/export`);
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || `Ошибка ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = exportDownloadName(res, base.id);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : 'Не удалось скачать CSV');
+    } finally {
+      setDownloading(false);
+    }
+  }, [base.id, downloading]);
+
+  return (
+    <div
+      className={`rounded-lg border border-gray-200 bg-white px-3 py-2 ${previewOpen ? 'w-full' : ''}`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="min-w-0">
+          <span className="flex items-center gap-1.5">
+            <span className="max-w-[200px] truncate text-xs font-medium text-gray-800">
+              {base.filename}
+            </span>
+            {base.source === 'auto' ? (
+              <Badge tone="blue">авто</Badge>
+            ) : (
+              <Badge tone="gray">загрузка</Badge>
+            )}
+          </span>
+          <span className="block text-[11px] text-gray-400">
+            {base.row_count.toLocaleString('ru-RU')} строк · {formatDate(base.created_at)}
+          </span>
+        </span>
+        {base.status === 'collecting' ? (
+          <span className="inline-flex items-center gap-1 text-[11px] text-blue-600">
+            <Spinner className="h-3.5 w-3.5" />
+            Собираем…
+          </span>
+        ) : base.status === 'analyzing' ? (
+          <span className="inline-flex items-center gap-1 text-[11px] text-amber-600">
+            <Spinner className="h-3.5 w-3.5" />
+            Разбираем…
+          </span>
+        ) : base.status === 'analyzed' ? (
+          <Badge tone="emerald">Разобрана</Badge>
+        ) : base.status === 'failed' ? (
+          <Badge tone="red">Ошибка</Badge>
+        ) : (
+          <Badge tone="gray">Загружена</Badge>
+        )}
+        {hasRows ? (
+          <span className="ml-auto inline-flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setPreviewOpen((v) => !v)}
+              className={CARD_ACTION_BTN}
+              aria-expanded={previewOpen}
+            >
+              {previewOpen ? (
+                <EyeOff className="h-3 w-3" aria-hidden />
+              ) : (
+                <Eye className="h-3 w-3" aria-hidden />
+              )}
+              Превью
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleDownload()}
+              disabled={downloading}
+              className={CARD_ACTION_BTN}
+            >
+              {downloading ? (
+                <Spinner className="h-3 w-3" />
+              ) : (
+                <Download className="h-3 w-3" aria-hidden />
+              )}
+              Скачать CSV
+            </button>
+          </span>
+        ) : null}
+      </div>
+      {downloadError ? (
+        <p className="mt-1 text-[11px] text-red-600" role="alert">
+          {downloadError}
+        </p>
+      ) : null}
+      {previewOpen && hasRows ? (
+        <div className="mt-2 overflow-x-auto rounded-lg border border-gray-200">
+          <table className="min-w-full divide-y divide-gray-200 text-xs">
+            <thead className="bg-gray-50">
+              <tr>
+                {columns.map((col) => (
+                  <th
+                    key={col}
+                    className="whitespace-nowrap px-3 py-1.5 text-left font-semibold uppercase tracking-wider text-gray-500"
+                  >
+                    {col}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100 bg-white">
+              {previewRows.map((row, ri) => (
+                <tr key={ri}>
+                  {columns.map((col) => {
+                    const text = previewCellText(row[col]);
+                    return (
+                      <td
+                        key={col}
+                        className="max-w-[220px] truncate px-3 py-1.5 text-gray-700"
+                        title={text}
+                      >
+                        {text.length > PREVIEW_CELL_CHARS
+                          ? `${text.slice(0, PREVIEW_CELL_CHARS)}…`
+                          : text}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {previewRows.length === 0 ? (
+            <p className="px-3 py-2 text-[11px] text-gray-400">Нет строк для превью</p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /* ─────────────────────────── Автосборка базы ─────────────────────────── */
 
 /** Русские имена источников автосборки; неизвестный ключ показываем как пришёл. */
@@ -503,20 +693,28 @@ function collectTaskFailed(status: string | undefined): boolean {
 function readCollectInfo(info: HeCollectInfo | null | undefined) {
   const plan = info?.plan?.tasks;
   const tasks = info?.tasks;
+  // limit появился позже plan/tasks — читаем так же защитно, как весь collect_info.
+  const rawLimit = info?.limit;
   return {
     plan: Array.isArray(plan) ? plan.filter((t) => t && typeof t === 'object') : [],
     tasks: Array.isArray(tasks) ? tasks.filter((t) => t && typeof t === 'object') : [],
+    limit: typeof rawLimit === 'number' && Number.isFinite(rawLimit) ? rawLimit : null,
   };
 }
 
 /** Карточка прогресса автосборки: план (почему эти источники) + живые статусы задач. */
 function CollectProgress({ base }: { base: HeBaseSummary }) {
-  const { plan, tasks } = readCollectInfo(base.collect_info);
+  const { plan, tasks, limit } = readCollectInfo(base.collect_info);
+  // У баз, созданных до появления limit в collect_info, показываем дефолт.
+  const shownLimit = limit ?? DEFAULT_COLLECT_LIMIT;
   return (
     <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
       <p className="flex items-center gap-2 text-sm font-medium text-blue-800">
         <Spinner className="h-4 w-4" />
         Собираем базу…
+      </p>
+      <p className="mt-1 text-xs text-blue-700/70">
+        собираем до {shownLimit.toLocaleString('ru-RU')} строк
       </p>
       {plan.length > 0 ? (
         <ul className="mt-2.5 space-y-1">

@@ -12,11 +12,12 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-// Без data/sample_rows — это тяжёлые jsonb-поля, деталка проекта их не тянет.
-// source/collect_info лёгкие и нужны шагу «База»: прогресс-карта авто-сборки,
-// бейдж «авто» и состояние retry рисуются по ним.
+// Без data — тяжёлое jsonb-поле, деталка проекта его не тянет. sample_rows
+// (≤30 строк, серверный кап при записи) и columns лёгкие: шаг «База» рисует
+// по ним превью первых строк на карточке. source/collect_info — прогресс-карта
+// авто-сборки, бейдж «авто» и состояние retry.
 const BASE_LIST_COLUMNS =
-  'id, vertical_id, filename, row_count, status, analysis, source, collect_info, created_at';
+  'id, vertical_id, filename, row_count, status, analysis, source, collect_info, columns, sample_rows, created_at';
 // payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
 // иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
 const JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
@@ -27,6 +28,32 @@ const CASE_LIST_COLUMNS = 'id, source, filename, industry, client_type, task, me
 
 // Максимум символов эталона стиля (brief.style_override) — после trim.
 const STYLE_OVERRIDE_MAX_LENGTH = 8000;
+
+// collect_info.tasks[].harvest — полный предмерж-харвест задачи (до 50k строк
+// на задачу): рабочее состояние воркера для cross-requeue, клиенту не нужен.
+// Деталка проекта поллится каждые 4с, поэтому вырезаем harvest из ответа —
+// иначе каждая база тащит десятки МБ на каждый опрос. Остальное в tasks[]
+// (source/status/rows/…) оставляем как есть: по нему рисуется прогресс-карта.
+function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
+  const info = base.collect_info as { tasks?: unknown } | null | undefined;
+  if (!info || !Array.isArray(info.tasks)) return base;
+  const hasHarvest = info.tasks.some(
+    (t) => t !== null && typeof t === 'object' && 'harvest' in (t as Record<string, unknown>),
+  );
+  if (!hasHarvest) return base;
+  return {
+    ...base,
+    collect_info: {
+      ...info,
+      tasks: info.tasks.map((t) => {
+        if (t === null || typeof t !== 'object' || !('harvest' in t)) return t;
+        const clone = { ...(t as Record<string, unknown>) };
+        delete clone.harvest;
+        return clone;
+      }),
+    },
+  };
+}
 
 // GET — деталка проекта: гипотезы, вертикали, цепочки, вокабуляр, базы,
 // шаблоны, досье вертикалей, банк кейсов и последние jobs. Чейн/вокаб/шаблоны
@@ -132,7 +159,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         verticals,
         chains,
         vocabs,
-        bases: basesRes.data ?? [],
+        bases: (basesRes.data ?? []).map(stripTaskHarvest),
         templates,
         jobs: jobsRes.data ?? [],
         dossiers: dossiersRes.data ?? [],

@@ -272,7 +272,7 @@ export const HeDirectoryFiltersSchema = z
     hasEmail: z.boolean().optional(),
     includeIp: z.boolean().optional(),
   })
-  // Пустой {} — нефильтрованный срез реестра на DIRECTORY_LIMIT строк: запрещаем.
+  // Пустой {} — нефильтрованный срез реестра на весь лимит сбора: запрещаем.
   .refine((f) => Object.values(f).some((v) => v !== undefined), 'укажи хотя бы один фильтр');
 
 export const HeHhQuerySchema = z.object({
