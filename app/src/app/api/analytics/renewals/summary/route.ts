@@ -33,12 +33,18 @@ export async function GET(req: NextRequest) {
     const today = new Date();
     const result = computeRenewalsMetrics(rows, periods, from, to, groupBy, kpiFilter, today);
 
-    // Таблица строится из тех же `rows`, но НЕ срезана диапазоном дат — см.
-    // комментарий в tableRows.ts. Диапазон дат управляет плитками и графиком
-    // (метриками периода), таблица остаётся полным списком продлений,
-    // прошедшим только фильтр KPI, — так «без даты» и «запланировано» видно
-    // и построчно, а не только цифрой в плитке.
-    const tableRows = buildRenewalTableRows(rows, kpiFilter, bucketKey(today, 'day'));
+    // Таблица срезана тем же периодом, что и плитки: страница фильтруется
+    // целиком, а не по частям. Две выборки под одним фильтром разошлись бы, и
+    // объяснять расхождение пришлось бы в переписке.
+    //
+    // Границы приводим к ключу дня в МСК — тем же bucketKey, которым считаются
+    // корзины. Сравнивать даты оплаты (они уже строки YYYY-MM-DD) с ISO-меткой
+    // времени напрямую нельзя: `'2026-07-15' > '2026-07-15T00:00:00.000Z'`
+    // ложно, и последний день периода потерялся бы.
+    const tableRows = buildRenewalTableRows(rows, kpiFilter, bucketKey(today, 'day'), {
+      fromKey: bucketKey(from, 'day'),
+      toKey: bucketKey(to, 'day'),
+    });
 
     return NextResponse.json({ ...result, tableRows });
   } catch (e) {

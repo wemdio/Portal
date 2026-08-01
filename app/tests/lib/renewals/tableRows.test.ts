@@ -118,3 +118,71 @@ describe('buildRenewalTableRows — суммы', () => {
     expect(rows[0]?.budgetRaw).toBe('120к');
   });
 });
+
+describe('buildRenewalTableRows — срез по периоду', () => {
+  // Период фильтрует страницу целиком: таблица показывает те же продления, что
+  // и плитки. Две выборки под одним фильтром разошлись бы, и объяснять
+  // расхождение пришлось бы в переписке.
+  const window = { fromKey: '2026-07-01', toKey: '2026-07-31' };
+
+  it('без окна отдаёт всё — обратная совместимость вызова без периода', () => {
+    const rows = buildRenewalTableRows(
+      [renewal({ payment_date: '2025-01-01' }), renewal({ id: 'p2', payment_date: null })],
+      null,
+      TODAY_KEY,
+    );
+    expect(rows).toHaveLength(2);
+  });
+
+  it('оставляет только продления внутри периода', () => {
+    const rows = buildRenewalTableRows(
+      [
+        renewal({ id: 'in', payment_date: '2026-07-15' }),
+        renewal({ id: 'before', payment_date: '2026-06-30' }),
+        renewal({ id: 'after', payment_date: '2026-08-01' }),
+      ],
+      null,
+      TODAY_KEY,
+      window,
+    );
+    expect(rows.map((r) => r.id)).toEqual(['in']);
+  });
+
+  it('обе границы периода включительно', () => {
+    // Иначе первый и последний день месяца молча выпадали бы, а заметили бы
+    // это в лучшем случае по несходящейся сумме.
+    const rows = buildRenewalTableRows(
+      [
+        renewal({ id: 'first', payment_date: '2026-07-01' }),
+        renewal({ id: 'last', payment_date: '2026-07-31' }),
+      ],
+      null,
+      TODAY_KEY,
+      window,
+    );
+    expect(rows.map((r) => r.id).sort()).toEqual(['first', 'last']);
+  });
+
+  it('продление без даты оплаты в период не попадает ни при каком выборе', () => {
+    // Привязать его ко времени не к чему. Именно поэтому под таблицей стоит
+    // сноска с их числом — иначе строки исчезли бы с экрана бесследно.
+    const rows = buildRenewalTableRows(
+      [renewal({ payment_date: null })],
+      null,
+      TODAY_KEY,
+      window,
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it('запланированное продление внутри периода остаётся и помечено планом', () => {
+    const rows = buildRenewalTableRows(
+      [renewal({ payment_date: '2026-07-28' })],
+      null,
+      TODAY_KEY,
+      window,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.isPlanned).toBe(true);
+  });
+});

@@ -82,7 +82,7 @@ export default function RenewalsView() {
         <>
           <KpiRow totals={data.totals} />
 
-          <RenewalsTable rows={data.tableRows} />
+          <RenewalsTable rows={data.tableRows} withoutDate={data.totals.withoutDate} />
 
           {/* Заметка про отсутствующие фильтры — сразу под таблицей, чтобы не
               заставлять первым делом спрашивать «а где канал и сфера»:

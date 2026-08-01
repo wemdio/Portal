@@ -31,11 +31,21 @@ function fmtNumberCell(value: number | null, raw: string | null) {
 /**
  * Основной вид дашборда — таблица, а не график: продлений всего 32 за всю
  * историю, и список, где видно каждое, полезнее двух-трёх столбиков на
- * графике (см. план дашборда). Строки не срезаны диапазоном дат (см.
- * tableRows.ts) — только фильтром KPI, поэтому продления без даты оплаты или
- * с датой в будущем видны в таблице всегда, а не только числом в плитке.
+ * графике (см. план дашборда). Строки срезаны тем же периодом, что и плитки:
+ * страница фильтруется целиком.
+ *
+ * Цена этого — продления без даты оплаты в таблицу не попадают ни при каком
+ * периоде: привязать их ко времени не к чему. Поэтому под таблицей стоит
+ * сноска с их числом. Пять строк, исчезнувших с экрана бесследно, — худший
+ * исход, чем одна строка пояснения.
  */
-export default function RenewalsTable({ rows }: { rows: RenewalTableRow[] }) {
+export default function RenewalsTable({
+  rows,
+  withoutDate,
+}: {
+  rows: RenewalTableRow[];
+  withoutDate: number;
+}) {
   return (
     <div className="overflow-x-auto rounded-xl border border-zinc-200 bg-white">
       <table className="w-full min-w-[760px] text-xs">
@@ -97,6 +107,12 @@ export default function RenewalsTable({ rows }: { rows: RenewalTableRow[] }) {
           )}
         </tbody>
       </table>
+      {withoutDate > 0 && (
+        <p className="border-t border-zinc-100 px-3 py-2 text-[11px] text-amber-700">
+          Ещё {withoutDate} продлений без даты оплаты — их не видно в таблице ни при каком периоде,
+          привязать ко времени нечем. В обороте и количестве они тоже не учтены.
+        </p>
+      )}
     </div>
   );
 }
