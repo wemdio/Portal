@@ -43,7 +43,7 @@ function matchesFilter(lead: AmoLead, config: LeadsReportConfig): boolean {
  * Возвращает null, если ни одной валидной DD.MM.YYYY-даты нет — тогда
  * вызывающий код должен упасть на sinceDays-fallback.
  */
-function parseMaxDddMmYyyy(values: string[]): Date | null {
+function parseMaxDddMmYyyy(values: string[], nowMs: number = Date.now()): Date | null {
   let max: Date | null = null;
   for (const raw of values) {
     const s = raw.trim();
@@ -55,6 +55,11 @@ function parseMaxDddMmYyyy(values: string[]): Date | null {
     const year = Number(m[3]);
     const d = new Date(Date.UTC(year, mon - 1, day));
     if (!Number.isFinite(d.getTime())) continue;
+    // Игнорируем даты из будущего — менеджеры иногда ставят дату
+    // «передачи лида» на день-два вперёд как plan. Такой max сдвинул бы
+    // окно в будущее, а в БД сделок с created_at из будущего нет →
+    // fetchedFromDb=0. Клампим границу окна на «сейчас».
+    if (d.getTime() > nowMs) continue;
     if (!max || d.getTime() > max.getTime()) max = d;
   }
   return max;
