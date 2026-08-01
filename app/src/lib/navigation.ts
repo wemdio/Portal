@@ -62,6 +62,7 @@ export const navTree: NavEntry[] = [
     nameEn: 'Dashboards',
     children: [
       { id: 'first-sales', name: 'Первичка', nameEn: 'First sales', href: '/analytics/first-sales', navTabId: 'nav-first-sales' },
+      { id: 'renewals', name: 'Продления', nameEn: 'Renewals', href: '/analytics/renewals', navTabId: 'nav-renewals' },
       { id: 'expenses', name: 'Расходы и доходы', nameEn: 'Income & expenses', href: '/expenses', adminOnly: true },
     ],
   },
