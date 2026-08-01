@@ -21,7 +21,7 @@ import type { UserRole } from '@/types';
 function ctx(overrides: Partial<NavVisibilityContext> = {}): NavVisibilityContext {
   return {
     userRole: null,
-    navTabVisibility: { 'nav-tasks-board': false, 'nav-first-sales': false },
+    navTabVisibility: { 'nav-tasks-board': false, 'nav-first-sales': false, 'nav-renewals': false },
     visibleTools: [],
     ...overrides,
   };
@@ -33,6 +33,7 @@ function role(userRole: UserRole, overrides: Partial<NavVisibilityContext> = {})
 
 const dashboards = navTree.find((entry) => entry.id === 'dashboards') as NavGroup;
 const firstSales = navItems.find((item) => item.id === 'first-sales')!;
+const renewals = navItems.find((item) => item.id === 'renewals')!;
 const expenses = navItems.find((item) => item.id === 'expenses')!;
 
 function findGroup(entries: ReturnType<typeof visibleNavEntries>): NavGroup | undefined {
@@ -40,9 +41,9 @@ function findGroup(entries: ReturnType<typeof visibleNavEntries>): NavGroup | un
 }
 
 describe('nav tree shape', () => {
-  it('«Дашборды» — группа с «Первичкой» и «Расходами и доходами»', () => {
+  it('«Дашборды» — группа с «Первичкой», «Продлениями» и «Расходами и доходами»', () => {
     expect(isNavGroup(dashboards)).toBe(true);
-    expect(dashboards.children.map((child) => child.id)).toEqual(['first-sales', 'expenses']);
+    expect(dashboards.children.map((child) => child.id)).toEqual(['first-sales', 'renewals', 'expenses']);
   });
 
   it('у группы нет собственного адреса — активность выводится из детей', () => {
@@ -61,9 +62,15 @@ describe('nav tree shape', () => {
     expect(firstSales.adminOnly).toBeUndefined();
   });
 
+  it('«Продления» — точечная выдача по своему navTabId, как у «Первички»', () => {
+    expect(renewals.navTabId).toBe('nav-renewals');
+    expect(renewals.adminOnly).toBeUndefined();
+    expect(renewals.href).toBe('/analytics/renewals');
+  });
+
   it('navItems остаётся плоским списком конечных пунктов', () => {
     expect(navItems.some((item) => item.id === 'dashboards')).toBe(false);
-    expect(navItems.map((item) => item.id)).toEqual(expect.arrayContaining(['first-sales', 'expenses']));
+    expect(navItems.map((item) => item.id)).toEqual(expect.arrayContaining(['first-sales', 'renewals', 'expenses']));
     expect(navItems.every((item) => typeof item.href === 'string' && item.href.length > 0)).toBe(true);
   });
 });
@@ -86,6 +93,14 @@ describe('isNavTabVisible', () => {
     expect(isNavTabVisible(firstSales, role('admin'))).toBe(true);
   });
 
+  it('adminAlwaysOn — админ видит «Продления» без строки в user_tool_visibility, менеджеру нужна выдача', () => {
+    expect(isNavTabVisible(renewals, role('admin'))).toBe(true);
+    expect(isNavTabVisible(renewals, role('manager'))).toBe(false);
+    expect(
+      isNavTabVisible(renewals, role('manager', { navTabVisibility: { 'nav-renewals': true } })),
+    ).toBe(true);
+  });
+
   it('requiresTool не фильтрует, пока список инструментов не загружен', () => {
     const instantly = navItems.find((item) => item.id === 'instantly')!;
     expect(isNavTabVisible(instantly, role('manager', { visibleTools: null }))).toBe(true);
@@ -96,7 +111,9 @@ describe('isNavTabVisible', () => {
 
 describe('видимость группы «Дашборды»', () => {
   it('виден хотя бы один ребёнок — группа показывается', () => {
-    const managerWithFirstSales = role('manager', { navTabVisibility: { 'nav-first-sales': true } });
+    const managerWithFirstSales = role('manager', {
+      navTabVisibility: { 'nav-first-sales': true, 'nav-renewals': false },
+    });
     expect(isNavEntryVisible(dashboards, managerWithFirstSales)).toBe(true);
     expect(findGroup(visibleNavEntries(managerWithFirstSales))).toBeDefined();
   });
@@ -108,29 +125,48 @@ describe('видимость группы «Дашборды»', () => {
     expect(findGroup(visibleNavEntries(plainManager))).toBeUndefined();
   });
 
-  it('админ видит обоих детей', () => {
+  it('админ видит всех троих детей', () => {
     const admin = role('admin');
-    expect(visibleNavChildren(dashboards, admin).map((child) => child.id)).toEqual(['first-sales', 'expenses']);
-    expect(findGroup(visibleNavEntries(admin))?.children).toHaveLength(2);
+    expect(visibleNavChildren(dashboards, admin).map((child) => child.id)).toEqual([
+      'first-sales',
+      'renewals',
+      'expenses',
+    ]);
+    expect(findGroup(visibleNavEntries(admin))?.children).toHaveLength(3);
   });
 
   it('в списке только доступные пункты', () => {
-    const managerWithFirstSales = role('manager', { navTabVisibility: { 'nav-first-sales': true } });
+    // Явно гасим nav-renewals: у менеджера выдана только «Первичка», и без
+    // этой строки renewals попал бы в список — отсутствие ключа в
+    // navTabVisibility трактуется как «не выключено» (см. NavVisibilityContext
+    // в navigation.ts), а override здесь заменяет объект целиком, а не
+    // домерживает его с дефолтом ctx().
+    const managerWithFirstSales = role('manager', {
+      navTabVisibility: { 'nav-first-sales': true, 'nav-renewals': false },
+    });
     const group = findGroup(visibleNavEntries(managerWithFirstSales));
     expect(group?.children.map((child) => child.id)).toEqual(['first-sales']);
   });
 
+  it('«Продления» в одиночку тоже раскрывают группу', () => {
+    const managerWithRenewals = role('manager', {
+      navTabVisibility: { 'nav-first-sales': false, 'nav-renewals': true },
+    });
+    const group = findGroup(visibleNavEntries(managerWithRenewals));
+    expect(group?.children.map((child) => child.id)).toEqual(['renewals']);
+  });
+
   it('«Расходы и доходы» в одиночку тоже раскрывают группу', () => {
-    // Роли admin достаточно и для «Первички» (adminAlwaysOn), поэтому одиночный
-    // ребёнок проверяется на урезанной группе: только expenses.
+    // Роли admin достаточно и для «Первички»/«Продлений» (adminAlwaysOn),
+    // поэтому одиночный ребёнок проверяется на урезанной группе: только expenses.
     const onlyExpenses: NavGroup = { ...dashboards, children: [expenses] };
     expect(isNavEntryVisible(onlyExpenses, role('admin'))).toBe(true);
     expect(isNavEntryVisible(onlyExpenses, role('manager'))).toBe(false);
   });
 
   it('пруненая группа — копия, исходное дерево не мутируется', () => {
-    visibleNavEntries(role('manager', { navTabVisibility: { 'nav-first-sales': true } }));
-    expect(dashboards.children).toHaveLength(2);
+    visibleNavEntries(role('manager', { navTabVisibility: { 'nav-first-sales': true, 'nav-renewals': false } }));
+    expect(dashboards.children).toHaveLength(3);
   });
 });
 
