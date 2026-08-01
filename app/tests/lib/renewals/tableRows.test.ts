@@ -1,4 +1,4 @@
-import { buildRenewalTableRows } from '@/lib/renewals/tableRows';
+import { buildRenewalTableRows, buildUndatedRenewalTableRows } from '@/lib/renewals/tableRows';
 import type { RenewalProjectRow } from '@/lib/renewals/metrics';
 
 function renewal(over: Partial<RenewalProjectRow> = {}): RenewalProjectRow {
@@ -184,5 +184,64 @@ describe('buildRenewalTableRows — срез по периоду', () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]?.isPlanned).toBe(true);
+  });
+});
+
+describe('buildUndatedRenewalTableRows', () => {
+  it('берёт только строки без распознанной даты оплаты', () => {
+    const rows = buildUndatedRenewalTableRows(
+      [
+        renewal({ id: 'has-date', payment_date: '2026-07-15' }),
+        renewal({ id: 'empty', payment_date: null }),
+        renewal({ id: 'garbage', payment_date: '15.07.2026' }),
+      ],
+      null,
+      TODAY_KEY,
+    );
+    expect(rows.map((r) => r.id).sort()).toEqual(['empty', 'garbage']);
+  });
+
+  it('период на эту выборку не влияет — у функции вообще нет параметра окна', () => {
+    // buildRenewalTableRows с window выкидывает продления без даты из таблицы
+    // (окно не к чему привязать) — эта функция как раз восполняет то, что там
+    // выпало, и никаким периодом не режется.
+    const rows = buildUndatedRenewalTableRows([renewal({ payment_date: null })], null, TODAY_KEY);
+    expect(rows).toHaveLength(1);
+  });
+
+  it('фильтр KPI распространяется так же, как в основной выборке', () => {
+    const rows = buildUndatedRenewalTableRows(
+      [
+        renewal({ id: 'p1', payment_date: null, kpi_fact: '50' }),
+        renewal({ id: 'p2', payment_date: null, kpi_fact: '90' }),
+      ],
+      { min: 60, max: 100 },
+      TODAY_KEY,
+    );
+    expect(rows.map((r) => r.id)).toEqual(['p2']);
+  });
+
+  it('строки других типов проекта не попадают', () => {
+    const rows = buildUndatedRenewalTableRows(
+      [renewal({ payment_date: null, project_type: 'Продажа' })],
+      null,
+      TODAY_KEY,
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it('isPlanned всегда false — без даты план не определить', () => {
+    const rows = buildUndatedRenewalTableRows([renewal({ payment_date: null })], null, TODAY_KEY);
+    expect(rows[0]?.isPlanned).toBe(false);
+    expect(rows[0]?.paymentDate).toBeNull();
+  });
+
+  it('форма строки совпадает с buildRenewalTableRows (тот же budget/kpiFact разбор)', () => {
+    const rows = buildUndatedRenewalTableRows(
+      [renewal({ payment_date: null, budget: '120 000', kpi_fact: null })],
+      null,
+      TODAY_KEY,
+    );
+    expect(rows[0]).toMatchObject({ budget: 120000, budgetRaw: '120 000' });
   });
 });
