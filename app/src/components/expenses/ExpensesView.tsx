@@ -33,9 +33,14 @@ export default function ExpensesView({
   const [error, setError] = useState<string | null>(null);
   const [showQueue, setShowQueue] = useState(false);
   const [exporting, setExporting] = useState(false);
-  // Вендоры, заведённые в этой сессии. В разбивку они попадут только после
-  // того, как на них появятся траты, а выбрать их в очереди и в форме нужно
-  // сразу же.
+  // Справочник для выбора вендора — все активные, независимо от периода.
+  // Тянется здесь один раз и раздаётся вниз пропсами: и очередь разметки, и
+  // форма ручной траты выбирают из одного и того же списка, и незачем ходить
+  // за ним дважды.
+  const [directory, setDirectory] = useState<VendorOption[]>([]);
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
+  // Вендоры, заведённые в этой сессии. Справочник перечитывается только при
+  // открытии страницы, а выбрать нового нужно сразу же.
   const [createdVendors, setCreatedVendors] = useState<VendorOption[]>([]);
   // Перечитать сводку после разметки или правки ручной траты, не трогая фильтры.
   const [reloadKey, setReloadKey] = useState(0);
@@ -89,18 +94,51 @@ export default function ExpensesView({
     };
   }, [query, reloadKey]);
 
+  // Справочник от периода не зависит, поэтому и от `query` эффект не зависит:
+  // перечитывать его на каждую смену дат значило бы гонять один и тот же
+  // список по кругу.
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+
+    void (async () => {
+      try {
+        const res = await expensesFetch<{ items: VendorOption[] }>('/vendors/directory', {
+          signal: controller.signal,
+        });
+        if (!active) return;
+        setDirectory(res.items);
+        setDirectoryError(null);
+      } catch (e) {
+        if (!active) return;
+        if (e instanceof DOMException && e.name === 'AbortError') return;
+        // Отдельно от ошибки сводки: без справочника таблица расходов
+        // по-прежнему читается, не работает только выбор вендора.
+        setDirectoryError(e instanceof Error ? e.message : 'Не удалось загрузить справочник вендоров');
+      }
+    })();
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
   // Категория едет вместе с вендором: по ней выпадающий список группируется, и
   // без неё все два десятка вендоров сваливаются в кучу «без категории».
   const vendorOptions = useMemo(() => {
     const byId = new Map<string, VendorOption>();
-    for (const item of vendors) {
-      if (item.vendorId) {
-        byId.set(item.vendorId, { id: item.vendorId, name: item.vendorName, category: item.category });
-      }
-    }
+    for (const item of directory) byId.set(item.id, item);
     for (const item of createdVendors) byId.set(item.id, item);
+    // Ручка отдаёт список уже отсортированным, но заведённые в этой сессии
+    // вендоры приезжают в конец — сортируем повторно, уже по-русски.
     return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
-  }, [vendors, createdVendors]);
+  }, [directory, createdVendors]);
+
+  // Полоса ошибки в разметке одна: сводка ломается чаще, поэтому её текст и
+  // показывается первым — про справочник человек прочтёт, когда сводка
+  // починится.
+  const shownError = error ?? directoryError;
 
   const addVendor = (vendor: VendorOption) =>
     setCreatedVendors((prev) => (prev.some((item) => item.id === vendor.id) ? prev : [...prev, vendor]));
@@ -141,8 +179,10 @@ export default function ExpensesView({
 
       <Filters period={period} onPeriodChange={onPeriodChange} value={filters} onChange={setFilters} />
 
-      {error ? (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>
+      {shownError ? (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+          {shownError}
+        </div>
       ) : null}
 
       {loading && !summary ? <div className="py-10 text-center text-sm text-zinc-400">Загружаю…</div> : null}
