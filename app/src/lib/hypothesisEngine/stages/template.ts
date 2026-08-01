@@ -18,7 +18,7 @@
  */
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
-import { callLLMText, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
+import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
 import {
   HeBaseAnalysisSchema,
   HeTemplatePlanSchema,
@@ -518,7 +518,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     return { parsed, letters };
   };
 
-  let llm = await callLLMText(messages, { model, maxTokens: 6144 });
+  let llm = await callLLMTextWithFallback(messages, { model, maxTokens: 6144, log: (m) => stageLog(ctx, m) });
   addUsage(usage, llm);
   let { parsed, letters } = buildLetters(llm.text);
 
@@ -529,7 +529,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       { role: 'assistant', content: llm.text.slice(0, 2000) },
       { role: 'user', content: RETRY_HINT },
     ];
-    llm = await callLLMText(retryMessages, { model, maxTokens: 6144 });
+    llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 6144, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
     ({ parsed, letters } = buildLetters(llm.text));
   }

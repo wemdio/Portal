@@ -19,7 +19,7 @@ import { z } from 'zod';
 const API_URL = 'https://router.requesty.ai/v1/chat/completions';
 
 interface RequestyResponse {
-  choices?: Array<{ message?: { content?: string } }>;
+  choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
   usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 }
 
@@ -101,6 +101,8 @@ export interface LLMTextResult {
   completionTokens: number;
   costUsd: number;
   rawResponse: unknown;
+  /** finish_reason первого choice ('stop' | 'length' | 'content_filter' | ...). */
+  finishReason?: string;
 }
 
 export class LLMValidationError extends Error {
@@ -275,5 +277,33 @@ export async function callLLMText(
     completionTokens,
     costUsd: estimateCost(opts.model, promptTokens, completionTokens),
     rawResponse: response,
+    finishReason: response.choices?.[0]?.finish_reason,
+  };
+}
+
+/**
+ * callLLMText с запасной моделью на случай контентного отказа основной.
+ * Повторяет вызов на fallbackModel, если основная вернула пустой/короткий
+ * текст (< minChars) или finish_reason='content_filter' (типично для
+ * регулируемых ниш: крипто, финансы и т.п. — модель молча отказывает).
+ */
+export async function callLLMTextWithFallback(
+  messages: LLMMessage[],
+  opts: { model: string; maxTokens?: number; fallbackModel?: string; minChars?: number; log?: (msg: string) => void },
+): Promise<LLMTextResult> {
+  const minChars = opts.minChars ?? 20;
+  const fallbackModel = (opts.fallbackModel ?? process.env.HE_MODEL_CHAIN_FALLBACK ?? '').trim() || 'openai/gpt-5.2';
+  const first = await callLLMText(messages, opts);
+  const refused = first.finishReason === 'content_filter' || first.text.length < minChars;
+  if (!refused || fallbackModel === opts.model) return first;
+  opts.log?.(`[llm] ${opts.model}: отказ или пустой ответ (finish=${first.finishReason ?? 'n/a'}, len=${first.text.length}) — повтор на ${fallbackModel}`);
+  const second = await callLLMText(messages, { ...opts, model: fallbackModel });
+  // Суммируем стоимость обоих вызовов, текст — от успешного.
+  return {
+    ...second,
+    tokensUsed: first.tokensUsed + second.tokensUsed,
+    promptTokens: first.promptTokens + second.promptTokens,
+    completionTokens: first.completionTokens + second.completionTokens,
+    costUsd: first.costUsd + second.costUsd,
   };
 }
