@@ -54,7 +54,17 @@ export default function TimeSeriesChart({ series, groupBy }: { series: SeriesBuc
               contentStyle={{ fontSize: 12, borderRadius: 8, borderColor: '#e4e4e7' }}
               labelFormatter={(_, payload) => payload?.[0]?.payload?.key ?? ''}
             />
-            <Legend align="right" wrapperStyle={{ fontSize: 11, paddingRight: 8 }} />
+            {/* Легенда вертикальным блоком справа: горизонтальная снизу
+                отъедала высоту у графика, а с четырьмя рядами и длинной
+                подписью «Квал (из пришедших)» переносилась на вторую строку,
+                сдвигая ось. Справа она стоит на месте независимо от числа
+                рядов и длины подписей. */}
+            <Legend
+              layout="vertical"
+              align="right"
+              verticalAlign="middle"
+              wrapperStyle={{ fontSize: 11, paddingLeft: 12, lineHeight: '20px' }}
+            />
             <Bar dataKey="leads" name={LABELS.leads} fill="#d4d4d8" radius={[3, 3, 0, 0]} barSize={18} />
             <Line
               type="monotone"

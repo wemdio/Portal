@@ -67,7 +67,16 @@ export default function RenewalsChart({ series, groupBy }: { series: RenewalSeri
               labelFormatter={(_, payload) => payload?.[0]?.payload?.key ?? ''}
               formatter={(v: number, name: string) => [v.toLocaleString('ru-RU'), name]}
             />
-            <Legend align="right" wrapperStyle={{ fontSize: 11, paddingRight: 8 }} />
+            {/* Легенда вертикальным блоком справа: горизонтальная снизу
+                отъедала высоту у самого графика и на узком экране переносилась
+                на вторую строку, сдвигая ось. Справа она стоит на месте
+                независимо от числа рядов. */}
+            <Legend
+              layout="vertical"
+              align="right"
+              verticalAlign="middle"
+              wrapperStyle={{ fontSize: 11, paddingLeft: 12, lineHeight: '20px' }}
+            />
             <Bar yAxisId="count" dataKey="count" name="Продлений" fill="#d4d4d8" radius={[3, 3, 0, 0]} barSize={18} />
             {/* linear, а не monotone: сглаженный сплайн между помесячными
                 суммами рисует значения, которых не существует, и вдобавок

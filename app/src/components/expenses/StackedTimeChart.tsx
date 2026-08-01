@@ -389,28 +389,19 @@ export default function StackedTimeChart({
         </div>
       </div>
 
-      {legendOpen ? (
-        <div
-          id={legendId}
-          className="portal-disclosure mb-2 flex flex-wrap justify-end gap-x-4 gap-y-1.5 rounded-xl border border-zinc-200 bg-zinc-50/60 px-3 py-2"
-        >
-          {keys.map((key) => (
-            <span key={key} className="flex items-center gap-1.5">
-              <span
-                className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
-                style={{ background: colorOf(key) }}
-                aria-hidden="true"
-              />
-              <span className="text-[11px] text-zinc-600">{labelOf(key)}</span>
-            </span>
-          ))}
-        </div>
-      ) : null}
-
       {data.length === 0 ? (
         <div className="px-3 py-10 text-center text-sm text-zinc-400">{emptyText}</div>
       ) : (
-        <div style={{ height: 288 }}>
+        // Легенда — вертикальным блоком СПРАВА от графика, а не полосой над
+        // ним: горизонтальная полоса отъедала высоту у столбцов и при большом числе
+        // разрезов переносилась на вторую строку, каждый раз сдвигая график
+        // по вертикали. Сбоку она растёт вниз, не трогая ни высоту, ни
+        // положение столбцов.
+        //
+        // На узком экране (`flex-col`) блок возвращается под график: колонка
+        // легенды съела бы там половину ширины, а график важнее справочника.
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+          <div className="min-w-0 flex-1" style={{ height: 288 }}>
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data} margin={{ top: 12, right: 12, left: 0, bottom: 0 }} barCategoryGap="24%">
               <CartesianGrid vertical={false} stroke={GRID_LINE} />
@@ -459,6 +450,27 @@ export default function StackedTimeChart({
               ))}
             </BarChart>
           </ResponsiveContainer>
+          </div>
+
+          {legendOpen ? (
+            <div
+              id={legendId}
+              className="portal-disclosure flex shrink-0 flex-row flex-wrap gap-x-4 gap-y-1.5 self-start rounded-xl border border-zinc-200 bg-zinc-50/60 px-3 py-2 sm:max-w-[190px] sm:flex-col sm:flex-nowrap"
+            >
+              {keys.map((key) => (
+                <span key={key} className="flex items-center gap-1.5">
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
+                    style={{ background: colorOf(key) }}
+                    aria-hidden="true"
+                  />
+                  <span className="truncate text-[11px] text-zinc-600" title={labelOf(key)}>
+                    {labelOf(key)}
+                  </span>
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
       )}
 
