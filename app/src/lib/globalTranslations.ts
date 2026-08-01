@@ -2753,6 +2753,39 @@ const PAIRS: Array<[string, string]> = [
   ['Дата траты', 'Expense date'],
   ['Валюта траты', 'Expense currency'],
 
+  // ── Форма ручной траты: группы полей, поле вендора с поиском, плательщик ──
+  ['Что за трата', 'What was spent'],
+  ['К чему относится', 'What it belongs to'],
+  ['Пояснения', 'Notes'],
+  ['Добавить трату', 'Add expense'],
+  [
+    'Личная карта и всё, чего нет в банковских выгрузках.',
+    'A personal card and anything missing from bank statements.',
+  ],
+  [
+    'Вендор, выбранный здесь, размечает трату сразу — в очередь она не попадёт.',
+    'A vendor picked here classifies the expense right away, so it never reaches the queue.',
+  ],
+  ['Начни печатать название', 'Start typing a name'],
+  ['Создать вендора', 'Create vendor'],
+  ['Очистить вендора', 'Clear vendor'],
+  ['уйдёт в очередь разметки', 'goes to the classification queue'],
+  ['выбран', 'selected'],
+  [
+    'Ничего не нашлось. Допиши название — предложим создать вендора.',
+    'Nothing found. Type a bit more and we will offer to create a vendor.',
+  ],
+  ['Новый вендор', 'New vendor'],
+  ['выбери категорию', 'pick a category'],
+  ['Личная карта CEO', 'CEO personal card'],
+  ['Другой плательщик…', 'Another payer…'],
+  ['Как назвать плательщика', 'Name for the payer'],
+  ['например, карта партнёра', 'for example, a partner card'],
+  [
+    'Название попадёт в разбивку как есть — если пусто, запишем',
+    'The name goes into the breakdown as is; if left empty we record',
+  ],
+
   // ── Incomes dashboard ──────────────────────────────────────
   // Пары, которых ещё нет выше: «В среднем в день», «К прошлому периоду»,
   // «Без курса ЦБ», «Все источники», «Сбросить фильтры», «Выгрузить в xlsx»,
