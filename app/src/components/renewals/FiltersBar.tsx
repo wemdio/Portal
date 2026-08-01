@@ -64,6 +64,32 @@ const GROUP_BY_OPTIONS: Array<{ id: GroupBy; label: string }> = [
   { id: 'month', label: 'Месяц' },
 ];
 
+/**
+ * Пресеты периода. Считаются календарно — «месяц назад» это то же число
+ * предыдущего месяца, а не «минус 30 дней»: пользователь, выбирая «Месяц»,
+ * имеет в виду календарный месяц, и 30-дневное окно в феврале и марте дало бы
+ * разные ответы на один вопрос.
+ *
+ * Подписи намеренно отличаются от подписей группировки справа («День /
+ * Неделя / Месяц»): там тоже есть «Месяц», и два одинаковых слова в одной
+ * строке про разное — верный способ спутать период с шагом столбиков.
+ */
+const PERIOD_PRESETS: Array<{ id: string; label: string; months: number }> = [
+  { id: 'm1', label: 'За месяц', months: 1 },
+  { id: 'm3', label: 'За квартал', months: 3 },
+  { id: 'm6', label: 'За полгода', months: 6 },
+  { id: 'm12', label: 'За год', months: 12 },
+];
+
+/** Дата на N календарных месяцев раньше, в МСК. */
+function monthsBack(months: number): string {
+  const msk = mskNow();
+  const shifted = new Date(
+    Date.UTC(msk.getUTCFullYear(), msk.getUTCMonth() - months, msk.getUTCDate()),
+  );
+  return toDateInputValue(shifted);
+}
+
 export default function FiltersBar({
   value,
   onChange,
@@ -71,17 +97,45 @@ export default function FiltersBar({
   value: FiltersState;
   onChange: (value: FiltersState) => void;
 }) {
-  const resetToAllTime = () => {
-    onChange({ ...value, from: ALL_TIME_FROM, to: toDateInputValue(mskNow()) });
+  const today = toDateInputValue(mskNow());
+
+  const applyPreset = (from: string) => {
+    onChange({ ...value, from, to: today });
   };
+
+  // Подсвечиваем пресет, который совпал с текущим выбором, — иначе после
+  // перезагрузки или ручной правки дат непонятно, какой период сейчас открыт.
+  const activePresetId =
+    value.to !== today
+      ? null
+      : value.from === ALL_TIME_FROM
+        ? 'all'
+        : (PERIOD_PRESETS.find((p) => monthsBack(p.months) === value.from)?.id ?? null);
+
+  const presetClass = (isActive: boolean) =>
+    `rounded-full px-2.5 py-1 text-xs transition-colors ${
+      isActive
+        ? 'bg-zinc-900 text-white'
+        : 'border border-zinc-200 text-zinc-600 hover:bg-zinc-50'
+    }`;
 
   return (
     <div className="space-y-2 rounded-xl border border-zinc-200 bg-white px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
+        {PERIOD_PRESETS.map((preset) => (
+          <button
+            key={preset.id}
+            type="button"
+            onClick={() => applyPreset(monthsBack(preset.months))}
+            className={presetClass(activePresetId === preset.id)}
+          >
+            {preset.label}
+          </button>
+        ))}
         <button
           type="button"
-          onClick={resetToAllTime}
-          className="rounded-full border border-zinc-200 px-2.5 py-1 text-xs text-zinc-600 hover:bg-zinc-50"
+          onClick={() => applyPreset(ALL_TIME_FROM)}
+          className={presetClass(activePresetId === 'all')}
         >
           Всё время
         </button>
