@@ -3,12 +3,16 @@
 /**
  * Мелкие презентационные блоки «Движка вертикалей»: бейджи, статусные плашки,
  * подсветка {{operators}} в письмах, форматтеры дат/хостов.
- * Палитра — как у соседних инструментов (sales-hypotheses и др.).
+ * Без иконок: статус = цветная точка + текст (StatusDot из ./design),
+ * спиннер — CSS-кольцо. Палитра — светлые тона gray/blue/emerald/amber/
+ * violet/red, тёмную тему подхватывают overrides в globals.css.
  */
 
-import { AlertCircle, Loader2 } from 'lucide-react';
 import type { HeHypothesisTier, HeProjectStatus } from '@/lib/hypothesisEngine/types';
 import { OPERATOR_RE } from '@/lib/hypothesisEngine/renderPreview';
+import { HE, StatusDot } from './design';
+
+export { Spinner } from './design';
 
 export type BadgeTone = 'gray' | 'emerald' | 'amber' | 'red' | 'blue' | 'violet';
 
@@ -40,6 +44,7 @@ export function Badge({
   );
 }
 
+/** Статусная плашка: цветная точка + текст (info — синяя, error — красная). */
 export function StatusBox({
   tone,
   children,
@@ -47,25 +52,19 @@ export function StatusBox({
   tone: 'info' | 'error';
   children: React.ReactNode;
 }) {
-  const toneClass =
-    tone === 'error' ? 'border-red-200 bg-red-50 text-red-700' : 'border-gray-200 bg-white text-gray-600';
+  const isError = tone === 'error';
+  const toneClass = isError
+    ? 'border-red-200 bg-red-50 text-red-700'
+    : 'border-gray-200 bg-blue-50/40 text-gray-600';
   return (
     <div
       className={`flex items-start gap-2.5 rounded-xl border px-4 py-3 text-sm ${toneClass}`}
-      role={tone === 'error' ? 'alert' : undefined}
+      role={isError ? 'alert' : undefined}
     >
-      {tone === 'error' ? (
-        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-      ) : (
-        <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-gray-400" aria-hidden />
-      )}
+      <StatusDot tone={isError ? 'err' : 'info'} className="mt-[7px] shrink-0" />
       <span className="flex-1">{children}</span>
     </div>
   );
-}
-
-export function Spinner({ className = 'h-4 w-4' }: { className?: string }) {
-  return <Loader2 className={`animate-spin ${className}`} aria-hidden />;
 }
 
 /**
@@ -112,20 +111,26 @@ export function TierBadge({ tier }: { tier: HeHypothesisTier }) {
   );
 }
 
-export const PROJECT_STATUS_META: Record<HeProjectStatus, { label: string; tone: BadgeTone; pulse?: boolean }> = {
-  draft: { label: 'Черновик', tone: 'gray' },
-  researching: { label: 'Исследование…', tone: 'amber', pulse: true },
-  researched: { label: 'Готово', tone: 'emerald' },
-  failed: { label: 'Ошибка', tone: 'red' },
+type StatusDotTone = 'ok' | 'warn' | 'err' | 'info' | 'muted';
+
+export const PROJECT_STATUS_META: Record<
+  HeProjectStatus,
+  { label: string; tone: BadgeTone; dot: StatusDotTone; pulse?: boolean }
+> = {
+  draft: { label: 'Черновик', tone: 'gray', dot: 'muted' },
+  researching: { label: 'Исследование…', tone: 'amber', dot: 'warn', pulse: true },
+  researched: { label: 'Готово', tone: 'emerald', dot: 'ok' },
+  failed: { label: 'Ошибка', tone: 'red', dot: 'err' },
 };
 
+/** Статус проекта: пилюля с цветной точкой и подписью. */
 export function ProjectStatusBadge({ status }: { status: HeProjectStatus }) {
   const meta = PROJECT_STATUS_META[status] ?? PROJECT_STATUS_META.draft;
   return (
-    <Badge tone={meta.tone}>
-      {meta.pulse ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" aria-hidden /> : null}
+    <span className={`${HE.pill} ${BADGE_TONE_CLASS[meta.tone]}`}>
+      <StatusDot tone={meta.dot} className={meta.pulse ? 'animate-pulse' : undefined} />
       {meta.label}
-    </Badge>
+    </span>
   );
 }
 

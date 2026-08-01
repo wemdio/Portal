@@ -7,14 +7,15 @@
  * (accept/reject как в старой доске, оптимистично через onPatchHypothesis).
  * Главное действие карточки — «Выбрать это направление →» (onSelectVertical).
  * Чтобы разметка десятков гипотез не утомляла: над доской фильтр-чипы и
- * «Свернуть/развернуть все», на карточке — шеврон-коллапс до одной строки и
+ * «Свернуть/развернуть все», на карточке — тихий текст-коллапс до одной строки и
  * тихие массовые действия «принять все / отклонить все / сбросить».
+ * Визуал — токены design.ts: без иконок, статусы точками, один синий акцент.
  */
 
 import { useMemo, useState, type JSX } from 'react';
-import { Check, ChevronDown, ExternalLink, X } from 'lucide-react';
-import type { HeHypothesis, HeStage, HeVertical } from '@/lib/hypothesisEngine/types';
-import { Badge, PotentialBadge, Spinner, TierBadge } from '../ui';
+import type { HeHypothesis, HeHypothesisTier, HeStage, HeVertical } from '@/lib/hypothesisEngine/types';
+import { TIER_META } from '../ui';
+import { HE, Spinner, StatusDot } from '../design';
 import type { HeDossier, HeJobSummary, HeProjectDetailResponse } from '../api';
 
 /** Стадии досборки материалов под выбранную вертикаль (письма/вокабуляр/шаблон). */
@@ -68,6 +69,27 @@ function matchesFilter(h: HeHypothesis, filter: HypothesisFilter): boolean {
     case 'rejected':
       return h.status === 'rejected';
   }
+}
+
+/** Текстовая метка тира (T1/T2/T3) вместо бейджа; подсказка — в title. */
+function TierText({ tier }: { tier: HeHypothesisTier }) {
+  const meta = TIER_META[tier] ?? TIER_META[3];
+  return (
+    <span title={meta.hint} className={HE.tierText}>
+      {meta.label}
+    </span>
+  );
+}
+
+/** Пилюля процента потенциала: ≥50 изумрудная, ≥25 янтарная, <25 серая. */
+function PctPill({ pct }: { pct: number }) {
+  const tone =
+    pct >= 50
+      ? 'bg-emerald-100 text-emerald-700'
+      : pct >= 25
+        ? 'bg-amber-100 text-amber-700'
+        : 'bg-gray-100 text-gray-500';
+  return <span className={`${HE.pill} ${tone}`}>{pct}%</span>;
 }
 
 export interface Step2VerticalsProps {
@@ -147,7 +169,7 @@ export function Step2Verticals({
     return (
       <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50/50 p-10 text-center">
         <p className="text-sm font-medium text-gray-500">Вертикалей пока нет</p>
-        <p className="mt-1 text-xs text-gray-400">
+        <p className={`mt-1 text-xs ${HE.muted}`}>
           Дождитесь окончания исследования — направления появятся здесь.
         </p>
       </div>
@@ -156,7 +178,7 @@ export function Step2Verticals({
 
   return (
     <div className="grid items-start gap-4 xl:grid-cols-2">
-      <p className="text-sm text-gray-600 xl:col-span-2">
+      <p className={`xl:col-span-2 ${HE.lead}`}>
         Движок нашёл {sorted.length} {pluralDirections(sorted.length)}. Выберите одно — под него соберём письма,
         вокабуляр и шаблон.
       </p>
@@ -170,10 +192,8 @@ export function Step2Verticals({
               type="button"
               onClick={() => setFilter(chip.id)}
               aria-pressed={filter === chip.id}
-              className={`rounded-full border px-2.5 py-1 text-xs font-medium transition ${
-                filter === chip.id
-                  ? 'border-blue-200 bg-blue-50 text-blue-700'
-                  : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:text-gray-700'
+              className={`${HE.btnSmall} ${
+                filter === chip.id ? 'border-blue-600! text-blue-600!' : ''
               }`}
             >
               {chip.label}
@@ -184,15 +204,11 @@ export function Step2Verticals({
           <button
             type="button"
             onClick={() => setCollapsedIds(new Set(sorted.map((v) => v.id)))}
-            className="text-xs font-medium text-gray-500 transition hover:text-gray-700"
+            className={HE.btnQuiet}
           >
             Свернуть все
           </button>
-          <button
-            type="button"
-            onClick={() => setCollapsedIds(new Set())}
-            className="text-xs font-medium text-gray-500 transition hover:text-gray-700"
-          >
+          <button type="button" onClick={() => setCollapsedIds(new Set())} className={HE.btnQuiet}>
             Развернуть все
           </button>
         </div>
@@ -274,79 +290,75 @@ function VerticalCard({
 
   return (
     <article
-      className={`rounded-2xl border p-5 shadow-sm transition ${
-        selected ? 'border-emerald-300 bg-white ring-1 ring-emerald-500/40' : 'border-gray-200 bg-white'
-      }`}
+      className={`${HE.card} p-5 transition ${selected ? 'border-blue-500! ring-1 ring-blue-500/40' : ''}`}
     >
-      {/* Шапка: свёртка, rank, название, потенциал, массовые действия */}
+      {/* Шапка: rank, название, потенциал, выбор, массовые действия, свёртка */}
       <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={onToggleCollapsed}
-          aria-expanded={!collapsed}
-          title={collapsed ? 'Развернуть карточку' : 'Свернуть карточку'}
-          className="-ml-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
-        >
-          <ChevronDown
-            className={`h-4 w-4 transition-transform ${collapsed ? '-rotate-90' : ''}`}
-            aria-hidden
-          />
-        </button>
-        {vertical.rank != null ? (
-          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-100 text-[11px] font-bold text-gray-500">
-            {vertical.rank}
+        {vertical.rank != null ? <span className={HE.rankNum}>{vertical.rank}</span> : null}
+        <h3 className="text-[15px] font-semibold text-gray-900">{vertical.name}</h3>
+        <PctPill pct={vertical.potential_pct} />
+        {selected ? (
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600">
+            <StatusDot tone="ok" />
+            Выбрано
           </span>
         ) : null}
-        <h3 className="text-base font-semibold text-gray-900">{vertical.name}</h3>
-        <PotentialBadge pct={vertical.potential_pct} />
-        {selected ? <Badge tone="emerald">Выбрано</Badge> : null}
         {collapsed && total > 0 ? (
-          <span className="text-xs text-gray-400">
+          <span className={`text-xs ${HE.muted}`}>
             {total} {pluralHypotheses(total)} · {acceptedCount}/{total} принято
           </span>
         ) : null}
-        {!collapsed && total > 0 ? (
-          <div
-            className="ml-auto flex items-center gap-0.5"
-            role="group"
-            aria-label="Массовые действия с гипотезами"
+        <div className="ml-auto flex items-center gap-2">
+          {!collapsed && total > 0 ? (
+            <div className="flex items-center gap-1.5" role="group" aria-label="Массовые действия с гипотезами">
+              {busy ? <Spinner className="mr-0.5 h-3.5 w-3.5" /> : null}
+              <button
+                type="button"
+                onClick={() => void applyToAll('accepted')}
+                disabled={busy || acceptedCount === total}
+                title="Принять все гипотезы направления"
+                className={HE.btnSmall}
+              >
+                принять все
+              </button>
+              <button
+                type="button"
+                onClick={() => void applyToAll('rejected')}
+                disabled={busy || hypotheses.every((h) => h.status === 'rejected')}
+                title="Отклонить все гипотезы направления"
+                className={HE.btnSmall}
+              >
+                отклонить все
+              </button>
+              <button
+                type="button"
+                onClick={() => void applyToAll('proposed')}
+                disabled={busy || hypotheses.every((h) => h.status === 'proposed')}
+                title="Сбросить разметку всех гипотез направления"
+                className={HE.btnSmall}
+              >
+                сбросить
+              </button>
+            </div>
+          ) : null}
+          <button
+            type="button"
+            onClick={onToggleCollapsed}
+            aria-expanded={!collapsed}
+            title={collapsed ? 'Развернуть карточку' : 'Свернуть карточку'}
+            className={HE.btnQuiet}
           >
-            {busy ? <Spinner className="mr-1 h-3.5 w-3.5 text-gray-400" /> : null}
-            <button
-              type="button"
-              onClick={() => void applyToAll('accepted')}
-              disabled={busy || acceptedCount === total}
-              title="Принять все гипотезы направления"
-              className="rounded px-1.5 py-0.5 text-[11px] font-medium text-gray-400 transition hover:bg-emerald-50 hover:text-emerald-600 disabled:pointer-events-none disabled:opacity-40"
-            >
-              принять все
-            </button>
-            <button
-              type="button"
-              onClick={() => void applyToAll('rejected')}
-              disabled={busy || hypotheses.every((h) => h.status === 'rejected')}
-              title="Отклонить все гипотезы направления"
-              className="rounded px-1.5 py-0.5 text-[11px] font-medium text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:pointer-events-none disabled:opacity-40"
-            >
-              отклонить все
-            </button>
-            <button
-              type="button"
-              onClick={() => void applyToAll('proposed')}
-              disabled={busy || hypotheses.every((h) => h.status === 'proposed')}
-              title="Сбросить разметку всех гипотез направления"
-              className="rounded px-1.5 py-0.5 text-[11px] font-medium text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:pointer-events-none disabled:opacity-40"
-            >
-              сбросить
-            </button>
-          </div>
-        ) : null}
+            {collapsed ? 'Развернуть' : 'Свернуть'}
+          </button>
+        </div>
       </div>
 
       {!collapsed ? (
         <>
           {vertical.summary ? (
-            <p className={`mt-2 text-sm leading-relaxed text-gray-600 ${showDetails ? '' : 'line-clamp-2'}`}>
+            <p
+              className={`mt-2 text-[13px] leading-relaxed text-gray-600 ${showDetails ? '' : 'line-clamp-2'}`}
+            >
               {vertical.summary}
             </p>
           ) : null}
@@ -361,18 +373,14 @@ function VerticalCard({
                 type="button"
                 onClick={() => setShowDetails((v) => !v)}
                 aria-expanded={showDetails}
-                className="inline-flex items-center gap-1 text-xs font-medium text-gray-500 transition hover:text-gray-700"
+                className={HE.btnQuiet}
               >
-                <ChevronDown
-                  className={`h-3.5 w-3.5 transition-transform ${showDetails ? 'rotate-180' : ''}`}
-                  aria-hidden
-                />
                 {showDetails ? 'Скрыть' : 'Подробнее'}
               </button>
               {showDetails ? (
                 <div className="mt-2 flex flex-wrap gap-1">
                   {vertical.synonyms.map((syn) => (
-                    <span key={syn} className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">
+                    <span key={syn} className={HE.chip}>
                       {syn}
                     </span>
                   ))}
@@ -384,12 +392,9 @@ function VerticalCard({
           {/* Гипотезы вертикали (список фильтруется чипами над доской) */}
           {total > 0 ? (
             <details className="group mt-3">
-              <summary className="flex cursor-pointer list-none items-center gap-1.5 text-sm font-medium text-gray-600 hover:text-gray-800">
-                <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" aria-hidden />
+              <summary className={`cursor-pointer list-none ${HE.btnQuiet}`}>
                 Гипотезы ({filter === 'all' ? total : `${visibleHypotheses.length} из ${total}`})
-                <span className="text-xs font-normal text-gray-400">
-                  · принято {acceptedCount} / {total}
-                </span>
+                <span className={`text-xs ${HE.muted}`}> · принято {acceptedCount} / {total}</span>
               </summary>
               {visibleHypotheses.length > 0 ? (
                 <ul className="mt-3 space-y-2">
@@ -398,7 +403,7 @@ function VerticalCard({
                   ))}
                 </ul>
               ) : (
-                <p className="mt-2 text-xs text-gray-400">Под этот фильтр здесь ничего не попадает.</p>
+                <p className={`mt-2 text-xs ${HE.muted}`}>Под этот фильтр здесь ничего не попадает.</p>
               )}
             </details>
           ) : null}
@@ -411,13 +416,13 @@ function VerticalCard({
               disabled={selected}
               className={
                 selected
-                  ? 'inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-5 text-sm font-medium text-emerald-700'
-                  : 'inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700'
+                  ? 'inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-5 text-sm font-medium text-emerald-700'
+                  : `w-full ${HE.btnPrimary}`
               }
             >
               {selected ? (
                 <>
-                  <Check className="h-4 w-4" aria-hidden />
+                  <StatusDot tone="ok" />
                   Выбрано
                 </>
               ) : (
@@ -425,7 +430,7 @@ function VerticalCard({
               )}
             </button>
             {buildNote ? (
-              <p className="mt-2 flex items-center justify-center gap-1.5 text-xs text-gray-400">
+              <p className={`mt-2 flex items-center justify-center gap-1.5 text-xs ${HE.muted}`}>
                 <Spinner className="h-3 w-3" />
                 Собираем письма, вокабуляр и шаблон…
               </p>
@@ -468,7 +473,7 @@ function DossierStatRow({ dossier }: { dossier: HeDossier }) {
     );
   }
   if (parts.length === 0) return null;
-  return <p className="mt-2 text-xs font-medium text-gray-500">{parts.join(' · ')}</p>;
+  return <p className={`mt-2 text-xs tabular-nums ${HE.muted2}`}>{parts.join(' · ')}</p>;
 }
 
 function HypothesisItem({
@@ -495,70 +500,65 @@ function HypothesisItem({
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
-            <TierBadge tier={hypothesis.tier} />
+            <TierText tier={hypothesis.tier} />
             <p className="text-sm font-semibold text-gray-900">{hypothesis.title}</p>
-            <PotentialBadge pct={hypothesis.potential_pct} />
-            {accepted ? <Badge tone="emerald">Принята</Badge> : null}
-            {rejected ? <Badge tone="gray">Отклонена</Badge> : null}
+            <PctPill pct={hypothesis.potential_pct} />
           </div>
           {fitRationale ? (
-            <div className="mt-2 rounded-md border-l-2 border-blue-400 bg-blue-50/50 px-3 py-2">
-              <p className="text-[11px] font-semibold text-blue-600">Почему это рынок:</p>
-              <p className="mt-0.5 text-xs leading-relaxed text-gray-700">{fitRationale}</p>
-            </div>
+            <p className="mt-2 rounded-lg bg-blue-50/60 px-3 py-2 text-[12.5px] leading-relaxed text-gray-700">
+              <strong className="font-semibold text-gray-900">Почему это рынок:</strong> {fitRationale}
+            </p>
           ) : null}
           {hypothesis.description ? (
             <p className="mt-1 text-sm leading-relaxed text-gray-600">{hypothesis.description}</p>
           ) : null}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex shrink-0 items-center gap-3">
           <button
             type="button"
             onClick={() => onPatch(hypothesis.id, accepted ? 'proposed' : 'accepted')}
             title={accepted ? 'Снять принятие' : 'Принять гипотезу'}
             aria-pressed={accepted}
-            className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition ${
+            className={
               accepted
-                ? 'border-emerald-300 bg-emerald-100 text-emerald-700'
-                : 'border-gray-200 bg-white text-gray-400 hover:border-emerald-200 hover:text-emerald-500'
-            }`}
+                ? 'text-xs font-semibold text-emerald-600 underline decoration-emerald-300 underline-offset-4 transition hover:text-emerald-700'
+                : 'text-xs font-medium text-gray-500 transition hover:text-emerald-600'
+            }
           >
-            <Check className="h-4 w-4" aria-hidden />
+            {accepted ? 'Принято' : 'Принять'}
           </button>
           <button
             type="button"
             onClick={() => onPatch(hypothesis.id, rejected ? 'proposed' : 'rejected')}
             title={rejected ? 'Вернуть в предложенные' : 'Отклонить гипотезу'}
             aria-pressed={rejected}
-            className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition ${
+            className={
               rejected
-                ? 'border-red-300 bg-red-100 text-red-600'
-                : 'border-gray-200 bg-white text-gray-400 hover:border-red-200 hover:text-red-500'
-            }`}
+                ? 'text-xs font-semibold text-red-500 transition hover:text-red-600'
+                : 'text-xs font-medium text-gray-500 transition hover:text-red-600'
+            }
           >
-            <X className="h-4 w-4" aria-hidden />
+            {rejected ? 'Отклонено' : 'Отклонить'}
           </button>
         </div>
       </div>
 
       {hypothesis.evidence.length > 0 ? (
-        <details className="group/ev mt-2">
-          <summary className="flex cursor-pointer list-none items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700">
-            <ChevronDown className="h-3.5 w-3.5 transition-transform group-open/ev:rotate-180" aria-hidden />
+        <details className="mt-2">
+          <summary className={`cursor-pointer list-none ${HE.btnQuiet}`}>
             Доказательства ({hypothesis.evidence.length})
           </summary>
           <ul className="mt-2 space-y-2 border-l-2 border-gray-100 pl-3">
             {hypothesis.evidence.map((ev, ei) => (
               <li key={ei} className="text-xs leading-relaxed">
-                <p className="italic text-gray-600">«{ev.quote}»</p>
+                <p className="italic text-gray-500">«{ev.quote}»</p>
                 <p className="mt-0.5 text-gray-500">{ev.claim}</p>
                 <a
                   href={ev.source_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="mt-0.5 inline-flex items-center gap-1 break-all text-blue-600 hover:text-blue-700"
+                  className="mt-0.5 inline-block break-all text-blue-600 transition hover:text-blue-700 hover:underline"
                 >
-                  <ExternalLink className="h-3 w-3 shrink-0" aria-hidden />
                   {ev.source_url}
                 </a>
               </li>

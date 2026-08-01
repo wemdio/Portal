@@ -2,17 +2,17 @@
 
 /**
  * Горизонтальный степпер мастера «Движка вертикалей»: нумерованные кружки
- * с соединительными линиями, подпись и короткий подзаголовок у каждого шага.
+ * (StepNum, номер виден всегда — без галочек), подпись и короткий подзаголовок
+ * у каждого шага. Активный шаг — синее подчёркивание 2px под подписью.
  * Плашка липкая (sticky top-0 + backdrop-blur): шаги остаются на экране
  * при скролле длинных досок и писем.
  * Чисто презентационный компонент: состояния шагов считает ProjectDetail,
  * клик по шагу → onJump(step.id). «Locked»-шаги приглушены, но остаются
  * кликабельными — навигация никогда не блокируется.
- * Палитра — как у соседних инструментов: белая подложка, тёмный (gray-900)
- * активный шаг, emerald-акценты для пройденных.
+ * Палитра: белая подложка, один blue-акцент для пройденных/активного шага.
  */
 
-import { Check } from 'lucide-react';
+import { StepNum } from '../design';
 
 export type HeWizardStepState = 'done' | 'active' | 'available' | 'locked';
 
@@ -23,21 +23,19 @@ export interface HeWizardStep {
   state: HeWizardStepState;
 }
 
-const CIRCLE_CLASS: Record<HeWizardStepState, string> = {
-  done: 'border-emerald-500 bg-emerald-500 text-white',
-  active: 'border-gray-900 bg-gray-900 text-white shadow-sm',
-  available:
-    'border-gray-300 bg-white text-gray-500 group-hover:border-gray-400 group-hover:text-gray-700',
-  locked:
-    'border-gray-200 bg-gray-50 text-gray-300 group-hover:border-gray-300 group-hover:text-gray-400',
-};
-
 const LABEL_CLASS: Record<HeWizardStepState, string> = {
-  done: 'text-emerald-700',
+  done: 'text-gray-900',
   active: 'text-gray-900',
-  available: 'text-gray-600 group-hover:text-gray-800',
+  available: 'text-gray-600 group-hover:text-gray-900',
   locked: 'text-gray-400 group-hover:text-gray-500',
 };
+
+/** 4 состояния мастера → 3 состояния кружка: available и locked делят idle. */
+function stepNumState(state: HeWizardStepState): 'done' | 'active' | 'idle' {
+  if (state === 'done') return 'done';
+  if (state === 'active') return 'active';
+  return 'idle';
+}
 
 export function StepNav({
   steps,
@@ -62,26 +60,20 @@ export function StepNav({
       <ol className="flex w-full items-start">
         {steps.map((step, idx) => (
           <li key={step.id} className="relative min-w-0 flex-1">
-            {/* Соединительная линия к предыдущему шагу; зеленеет вслед за пройденными */}
+            {/* Соединительная линия к предыдущему шагу (центр кружка h-7: top-3.5) */}
             {idx > 0 ? (
               <span
                 aria-hidden
-                className={`absolute left-[calc(-50%+1.375rem)] right-[calc(50%+1.375rem)] top-5 h-0.5 ${
-                  steps[idx - 1].state === 'done' ? 'bg-emerald-300' : 'bg-gray-200'
-                }`}
+                className="absolute left-[calc(-50%+1rem)] right-[calc(50%+1rem)] top-3.5 h-0.5 bg-gray-200"
               />
             ) : null}
             <button
               type="button"
               onClick={() => onJump(step.id)}
               aria-current={step.state === 'active' ? 'step' : undefined}
-              className="group relative flex w-full min-w-0 flex-col items-center gap-1.5 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
+              className="group relative flex w-full min-w-0 flex-col items-center gap-1.5 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
             >
-              <span
-                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full border text-sm font-semibold transition-colors ${CIRCLE_CLASS[step.state]}`}
-              >
-                {step.state === 'done' ? <Check className="h-5 w-5" aria-hidden /> : step.id}
-              </span>
+              <StepNum n={step.id} state={stepNumState(step.state)} />
               <span
                 className={`min-w-0 max-w-full text-[11px] font-semibold leading-tight sm:text-xs md:text-sm ${LABEL_CLASS[step.state]}`}
               >
@@ -91,6 +83,12 @@ export function StepNav({
               <span className="hidden max-w-full text-[11px] leading-tight text-gray-400 md:block">
                 {step.subtitle}
               </span>
+              {/* Активный шаг: синее подчёркивание 2px (у остальных — прозрачная
+                  полоса той же высоты, чтобы геометрия шагов совпадала) */}
+              <span
+                aria-hidden
+                className={`h-0.5 w-10 rounded-full ${step.state === 'active' ? 'bg-blue-600' : 'bg-transparent'}`}
+              />
             </button>
           </li>
         ))}
