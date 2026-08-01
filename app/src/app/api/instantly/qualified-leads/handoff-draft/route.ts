@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { withAuth, jsonError } from '@/lib/instantly/apiRouteHelper';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { substituteHandoffLegend } from '@/lib/instantly/handoffLegend';
+import { buildHandoffDraft } from '@/lib/instantly/handoffLegend';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,12 +12,17 @@ interface DraftBody {
   framing?: string;
 }
 
+const API_KEY = () =>
+  process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
+  process.env.OPENROUTER_BRIEF_API_KEY ??
+  '';
+
 /**
- * Превью-драфт передачи лида для ручной пересылки: легенда проекта ДОСЛОВНО
- * (БЕЗ ИИ — спецы полностью контролируют текст; автогенератор убран после
- * жалоб «пишет широко и консультирует»). Ничего не отправляется: UI
- * подставляет текст в поле ответа, спец правит и шлёт сам. Легенда пуста
- * (и override не передан) — вернём пустой драфт, спец напишет руками.
+ * Превью-драфт передачи лида для ручной пересылки. Ничего не отправляется: UI
+ * подставляет текст в поле ответа, спец правит и шлёт сам.
+ * Режим по тумблеру проекта (handoff_ai_adapt): OFF (дефолт) — легенда проекта
+ * ДОСЛОВНО (+ подстановка имени); ON — ИИ адаптирует легенду под ответ лида.
+ * Легенды нет (и override не передан) — пустой драфт, спец пишет руками.
  */
 export const POST = withAuth(async (req) => {
   if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
@@ -27,7 +32,7 @@ export const POST = withAuth(async (req) => {
 
   const { data: qual, error } = await supabaseInstantly
     .from('instantly_lead_qualifications')
-    .select('lead_name, campaign_id')
+    .select('lead_name, campaign_id, reply_body, reply_preview, last_outbound_preview')
     .eq('id', qualification_id)
     .single();
 
@@ -35,6 +40,7 @@ export const POST = withAuth(async (req) => {
 
   // Легенда: per-request override ИЛИ легенда проекта кампании.
   let legend = (framing ?? '').trim();
+  let aiAdapt = false;
   if (!legend) {
     const campaignId = (qual.campaign_id as string | null) ?? '';
     if (!campaignId) return NextResponse.json({ draft: '' });
@@ -52,17 +58,29 @@ export const POST = withAuth(async (req) => {
     if (projectIds.length > 0 && supabaseAdmin) {
       const { data: project } = await supabaseAdmin
         .from('projects')
-        .select('handoff_legend')
+        .select('handoff_legend, handoff_ai_adapt')
         .in('id', projectIds)
         .limit(1)
         .maybeSingle();
       legend = ((project?.handoff_legend as string | null) ?? '').trim();
+      aiAdapt = Boolean(project?.handoff_ai_adapt);
     }
   }
 
   // Пустой драфт (нет легенды) — спец напишет текст руками, как до ИИ-превью.
-  const draft = legend
-    ? substituteHandoffLegend(legend, (qual.lead_name as string | null) ?? null)
-    : '';
+  if (!legend) return NextResponse.json({ draft: '' });
+
+  // Тумблер проекта: OFF — легенда дословно (+ подстановка имени); ON — ИИ
+  // адаптирует легенду под ответ лида (старое поведение).
+  const leadReplyText =
+    (qual.reply_body as string | null) || (qual.reply_preview as string | null) || '';
+  const draft = await buildHandoffDraft({
+    aiAdapt,
+    legend,
+    leadName: (qual.lead_name as string | null) ?? null,
+    leadReplyText,
+    lastOutboundText: (qual.last_outbound_preview as string | null) ?? null,
+    apiKey: API_KEY(),
+  });
   return NextResponse.json({ draft });
 });

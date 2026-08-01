@@ -17,7 +17,7 @@ import {
 import * as instantly from './client';
 import { isFreeProvider } from '@/lib/emailValidation/shared';
 import { getEmailRecipients } from '@/lib/clientCampaignReplies/participants';
-import { substituteHandoffLegend } from './handoffLegend';
+import { buildHandoffDraft } from './handoffLegend';
 import { signHandoffCallback } from './handoffCallback';
 import {
   resolveBoardProjectId,
@@ -1613,13 +1613,13 @@ async function maybePostLeadHandoff(opts: {
 
     const { data: projects } = await main
       .from('projects')
-      .select('handoff_email, handoff_legend, specialist_user_id')
+      .select('handoff_email, handoff_legend, handoff_ai_adapt, specialist_user_id')
       .in('id', projectIds);
     const project = (projects ?? []).find(
       (p) =>
         Boolean((p.handoff_email as string | null)?.trim()) &&
         Boolean((p.handoff_legend as string | null)?.trim()),
-    ) as { handoff_email: string; handoff_legend: string; specialist_user_id: string | null } | undefined;
+    ) as { handoff_email: string; handoff_legend: string; handoff_ai_adapt: boolean; specialist_user_id: string | null } | undefined;
     if (!project) return; // handoff not configured → off for this project
 
     if (!project.specialist_user_id) {
@@ -1649,13 +1649,18 @@ async function maybePostLeadHandoff(opts: {
       return;
     }
 
-    // 4. Текст передачи — ДОСЛОВНО легенда проекта, БЕЗ ИИ (жалобы спецов:
-    // генератор писал широко, «консультировал», добавлял лишнее). Что в легенде
-    // написано — то и уйдёт лиду; текст полностью под контролем проекта.
-    // ИИ-генератор остался только для ручного превью-драфта в UI (спец правит руками).
-    // Поддерживаемый плейсхолдер: «[Имя, если есть]»/«[Имя]» → имя лида.
-    const draft = substituteHandoffLegend((project.handoff_legend ?? '').trim(), opts.leadName);
-    if (!draft) return;
+    // 4. Текст передачи: по тумблеру проекта — OFF: легенда ДОСЛОВНО (дефолт,
+    // полный контроль текста у спецов); ON: ИИ адаптирует легенду под ответ лида
+    // (старое поведение — части спецов было удобно).
+    const draft = await buildHandoffDraft({
+      aiAdapt: Boolean(project.handoff_ai_adapt),
+      legend: project.handoff_legend,
+      leadName: opts.leadName,
+      leadReplyText: opts.leadReplyText,
+      lastOutboundText: opts.lastOutboundText,
+      apiKey: opts.apiKey,
+    });
+    if (!draft.trim()) return;
 
     // 5. Responsible specialist name (display only).
     let specialistName = 'ответственный';
