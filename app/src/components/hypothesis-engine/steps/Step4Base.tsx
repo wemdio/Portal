@@ -8,7 +8,6 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
-import { ArrowRight, Check, Download, Eye, EyeOff, FileSpreadsheet, Sparkles, Upload, X } from 'lucide-react';
 import type { HeBaseAnalysis, HeDistributionEntry, HeVertical } from '@/lib/hypothesisEngine/types';
 import { authFetch } from '@/lib/authFetch';
 import { readSpreadsheetFile } from '@/lib/spreadsheet/parseCSV';
@@ -23,10 +22,8 @@ import {
   type HeJobResponse,
   type HeJobSummary,
 } from '../api';
-import { Badge, Spinner, StatusBox, formatDate } from '../ui';
-
-const PRIMARY_BTN =
-  'inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50';
+import { HE, StatusDot, Spinner } from '../design';
+import { StatusBox, formatDate } from '../ui';
 
 /** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
 const COLLECT_POLL_MS = 4000;
@@ -240,16 +237,16 @@ export function Step4Base(props: {
 
   return (
     <div className="space-y-5">
-      <p className="text-sm text-gray-500">
+      <p className={HE.lead}>
         Загрузите CSV или XLSX с контактами под эту вертикаль (до{' '}
         {CLIENT_LAUNCH_ROW_LIMIT.toLocaleString('ru-RU')} строк). Движок разберёт состав базы и
         подготовит финальный шаблон.
       </p>
 
       {/* Автосборка базы под вертикаль */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-        <p className="text-sm font-semibold text-gray-800">Или соберите автоматически</p>
-        <p className="mt-1 text-xs text-gray-500">
+      <section className={`${HE.card} ${HE.cardPad}`}>
+        <p className={HE.secTitle}>Или соберите автоматически</p>
+        <p className={`mt-1 text-xs ${HE.muted}`}>
           Движок сам подберёт источники: реестр компаний, hh.ru, карты — и соберёт базу под это
           направление.
         </p>
@@ -267,9 +264,9 @@ export function Step4Base(props: {
                 type="button"
                 onClick={() => void handleCollect()}
                 disabled={collectStarting}
-                className={PRIMARY_BTN}
+                className={`${HE.btnPrimary} inline-flex items-center justify-center gap-2`}
               >
-                {collectStarting ? <Spinner /> : <Sparkles className="h-4 w-4" aria-hidden />}
+                {collectStarting ? <Spinner /> : null}
                 {collectFailed ? 'Попробовать снова' : 'Собрать базу автоматически'}
               </button>
               <span className="inline-flex items-center gap-1 text-xs text-gray-500">
@@ -280,10 +277,8 @@ export function Step4Base(props: {
                     type="button"
                     onClick={() => setCollectLimit(l)}
                     aria-pressed={collectLimit === l}
-                    className={`rounded-md border px-2 py-1 text-xs font-medium transition ${
-                      collectLimit === l
-                        ? 'border-blue-600 bg-blue-600 text-white'
-                        : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300 hover:text-blue-600'
+                    className={`${HE.btnSmall} ${
+                      collectLimit === l ? 'border-blue-600! text-blue-600!' : ''
                     }`}
                   >
                     {l.toLocaleString('ru-RU')}
@@ -307,21 +302,17 @@ export function Step4Base(props: {
       </section>
 
       {/* Загрузка файла */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+      <section className={`${HE.card} ${HE.cardPad}`}>
         <label
-          className={`flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-gray-300 bg-gray-50/50 px-4 py-8 text-center transition hover:border-blue-300 hover:bg-blue-50/60 ${
+          className={`${HE.card} flex cursor-pointer flex-col items-center justify-center gap-1.5 border-dashed px-4 py-8 text-center transition hover:border-blue-300 hover:bg-blue-50/60 ${
             parsing ? 'pointer-events-none opacity-60' : ''
           }`}
         >
-          {parsing ? (
-            <Spinner className="h-6 w-6 text-gray-400" />
-          ) : (
-            <Upload className="h-6 w-6 text-gray-400" aria-hidden />
-          )}
-          <span className="text-sm font-medium text-gray-600">
-            {parsing ? 'Читаем файл…' : parsed ? parsed.filename : 'Выберите файл с базой'}
+          {parsing ? <Spinner className="h-5 w-5" /> : null}
+          <span className="text-sm font-medium text-gray-700">
+            {parsing ? 'Читаем файл…' : parsed ? parsed.filename : 'Выберите файл CSV/XLSX'}
           </span>
-          <span className="text-xs text-gray-400">CSV, TSV или XLSX</span>
+          <span className={`text-xs ${HE.muted}`}>CSV, TSV или XLSX</span>
           <input
             ref={fileInputRef}
             type="file"
@@ -359,9 +350,8 @@ export function Step4Base(props: {
               <button
                 type="button"
                 onClick={clearFile}
-                className="inline-flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600"
+                className={HE.btnQuiet}
               >
-                <X className="h-3.5 w-3.5" aria-hidden />
                 Убрать файл
               </button>
             </div>
@@ -397,13 +387,9 @@ export function Step4Base(props: {
                 type="button"
                 onClick={() => void handleUpload()}
                 disabled={uploading || parsing}
-                className={PRIMARY_BTN}
+                className={`${HE.btnPrimary} inline-flex items-center justify-center gap-2`}
               >
-                {uploading ? (
-                  <Spinner />
-                ) : (
-                  <FileSpreadsheet className="h-4 w-4" aria-hidden />
-                )}
+                {uploading ? <Spinner /> : null}
                 Загрузить базу
               </button>
             </div>
@@ -442,22 +428,20 @@ export function Step4Base(props: {
       ) : null}
 
       {/* Переход к шаблону */}
-      <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+      <section className={`${HE.card} ${HE.cardPad} flex flex-wrap items-center gap-3`}>
         {templateDone ? (
-          <button type="button" onClick={onGoToTemplate} className={PRIMARY_BTN}>
-            Перейти к шаблону
-            <ArrowRight className="h-4 w-4" aria-hidden />
+          <button type="button" onClick={onGoToTemplate} className={HE.btnPrimary}>
+            Перейти к шаблону →
           </button>
         ) : (
           <button
             type="button"
             onClick={() => void handleBuildTemplate()}
             disabled={templateBusy || latestBase?.status !== 'analyzed'}
-            className={PRIMARY_BTN}
+            className={`${HE.btnPrimary} inline-flex items-center justify-center gap-2`}
           >
-            {templateBusy ? <Spinner /> : <Sparkles className="h-4 w-4" aria-hidden />}
-            {templateBusy ? 'Собираем шаблон…' : 'Собрать шаблон'}
-            {!templateBusy ? <ArrowRight className="h-4 w-4" aria-hidden /> : null}
+            {templateBusy ? <Spinner /> : null}
+            {templateBusy ? 'Собираем шаблон…' : 'Собрать шаблон →'}
           </button>
         )}
         {templateBusy ? (
@@ -499,9 +483,6 @@ function exportDownloadName(res: Response, baseId: string): string {
   const match = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '');
   return match?.[1] ?? `base-${baseId}.csv`;
 }
-
-const CARD_ACTION_BTN =
-  'inline-flex items-center gap-1 rounded border border-gray-200 px-1.5 py-0.5 text-[11px] text-gray-500 transition hover:border-blue-300 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50';
 
 function BaseCard({ base }: { base: HeBaseSummary }) {
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -545,7 +526,7 @@ function BaseCard({ base }: { base: HeBaseSummary }) {
 
   return (
     <div
-      className={`rounded-lg border border-gray-200 bg-white px-3 py-2 ${previewOpen ? 'w-full' : ''}`}
+      className={`${HE.card} px-3 py-2 ${previewOpen ? 'w-full' : ''}`}
     >
       <div className="flex items-center gap-2">
         <span className="min-w-0">
@@ -554,9 +535,9 @@ function BaseCard({ base }: { base: HeBaseSummary }) {
               {base.filename}
             </span>
             {base.source === 'auto' ? (
-              <Badge tone="blue">авто</Badge>
+              <span className={`${HE.pill} bg-blue-50 text-blue-700`}>авто</span>
             ) : (
-              <Badge tone="gray">загрузка</Badge>
+              <span className={`${HE.pill} bg-gray-100 text-gray-500`}>загрузка</span>
             )}
           </span>
           <span className="block text-[11px] text-gray-400">
@@ -569,43 +550,43 @@ function BaseCard({ base }: { base: HeBaseSummary }) {
             Собираем…
           </span>
         ) : base.status === 'analyzing' ? (
-          <span className="inline-flex items-center gap-1 text-[11px] text-amber-600">
-            <Spinner className="h-3.5 w-3.5" />
+          <span className="inline-flex items-center gap-1.5 text-[11px] text-amber-600">
+            <StatusDot tone="warn" />
             Разбираем…
           </span>
         ) : base.status === 'analyzed' ? (
-          <Badge tone="emerald">Разобрана</Badge>
+          <span className="inline-flex items-center gap-1.5 text-[11px] text-emerald-600">
+            <StatusDot tone="ok" />
+            Разобрана
+          </span>
         ) : base.status === 'failed' ? (
-          <Badge tone="red">Ошибка</Badge>
+          <span className="inline-flex items-center gap-1.5 text-[11px] text-red-600">
+            <StatusDot tone="err" />
+            Ошибка
+          </span>
         ) : (
-          <Badge tone="gray">Загружена</Badge>
+          <span className="inline-flex items-center gap-1.5 text-[11px] text-gray-500">
+            <StatusDot tone="muted" />
+            Загружена
+          </span>
         )}
         {hasRows ? (
-          <span className="ml-auto inline-flex shrink-0 items-center gap-1">
+          <span className="ml-auto inline-flex shrink-0 items-center gap-2">
             <button
               type="button"
               onClick={() => setPreviewOpen((v) => !v)}
-              className={CARD_ACTION_BTN}
+              className={HE.btnQuiet}
               aria-expanded={previewOpen}
             >
-              {previewOpen ? (
-                <EyeOff className="h-3 w-3" aria-hidden />
-              ) : (
-                <Eye className="h-3 w-3" aria-hidden />
-              )}
               Превью
             </button>
             <button
               type="button"
               onClick={() => void handleDownload()}
               disabled={downloading}
-              className={CARD_ACTION_BTN}
+              className={`${HE.btnGhost} inline-flex items-center justify-center gap-1.5`}
             >
-              {downloading ? (
-                <Spinner className="h-3 w-3" />
-              ) : (
-                <Download className="h-3 w-3" aria-hidden />
-              )}
+              {downloading ? <Spinner className="h-3 w-3" /> : null}
               Скачать CSV
             </button>
           </span>
@@ -642,9 +623,13 @@ function BaseCard({ base }: { base: HeBaseSummary }) {
                         className="max-w-[220px] truncate px-3 py-1.5 text-gray-700"
                         title={text}
                       >
-                        {text.length > PREVIEW_CELL_CHARS
-                          ? `${text.slice(0, PREVIEW_CELL_CHARS)}…`
-                          : text}
+                        {text === '' ? (
+                          <span className={HE.chip}>—</span>
+                        ) : text.length > PREVIEW_CELL_CHARS ? (
+                          `${text.slice(0, PREVIEW_CELL_CHARS)}…`
+                        ) : (
+                          text
+                        )}
                       </td>
                     );
                   })}
@@ -731,11 +716,11 @@ function CollectProgress({ base }: { base: HeBaseSummary }) {
           {tasks.map((task, i) => (
             <li key={`task-${i}`} className="flex items-center gap-2 text-xs text-gray-700">
               {collectTaskDone(task.status) ? (
-                <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" aria-hidden />
+                <StatusDot tone="ok" />
               ) : collectTaskFailed(task.status) ? (
-                <X className="h-3.5 w-3.5 shrink-0 text-red-500" aria-hidden />
+                <StatusDot tone="err" />
               ) : (
-                <Spinner className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+                <Spinner className="h-3.5 w-3.5 shrink-0" />
               )}
               <span>{collectSourceLabel(task.source)}</span>
               {collectTaskDone(task.status) && typeof task.rows === 'number' ? (
@@ -764,8 +749,8 @@ function BarList({
   const top = (entries ?? []).slice(0, 6);
   if (top.length === 0) return null;
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3">
-      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-400">{title}</p>
+    <div className={`${HE.card} p-3`}>
+      <p className={`mb-2 ${HE.secTitle}`}>{title}</p>
       <ul className="space-y-1.5">
         {top.map((e) => (
           <li key={e.value} className="text-xs">
@@ -826,7 +811,7 @@ function BaseAnalysisCards({ analysis }: { analysis: HeBaseAnalysis }) {
           <ul className="space-y-1">
             {qualityItems.map((note, i) => (
               <li key={i} className="flex items-start gap-1.5 text-xs text-gray-500">
-                <Check className="mt-0.5 h-3 w-3 shrink-0 text-gray-300" aria-hidden />
+                <span className={`${HE.dot} mt-1.5 shrink-0 bg-gray-300`} aria-hidden />
                 {note}
               </li>
             ))}
