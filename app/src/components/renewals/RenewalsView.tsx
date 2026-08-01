@@ -8,9 +8,10 @@ import type { RenewalTableRow } from '@/lib/renewals/tableRows';
 import FiltersBar, { getDefaultFilters, type FiltersState } from '@/components/renewals/FiltersBar';
 import KpiRow from '@/components/renewals/KpiRow';
 import RenewalsTable from '@/components/renewals/RenewalsTable';
+import RenewalsUndatedSection from '@/components/renewals/RenewalsUndatedSection';
 import RenewalsChart from '@/components/renewals/RenewalsChart';
 
-type SummaryResponse = RenewalsResult & { tableRows: RenewalTableRow[] };
+type SummaryResponse = RenewalsResult & { tableRows: RenewalTableRow[]; undatedRows: RenewalTableRow[] };
 
 export default function RenewalsView() {
   const [filters, setFilters] = useState<FiltersState>(() => getDefaultFilters());
@@ -87,7 +88,9 @@ export default function RenewalsView() {
               вопрос возникает после первого, а не до. */}
           <RenewalsChart series={data.series} groupBy={filters.groupBy} />
 
-          <RenewalsTable rows={data.tableRows} withoutDate={data.totals.withoutDate} />
+          <RenewalsTable rows={data.tableRows} />
+
+          <RenewalsUndatedSection rows={data.undatedRows} />
 
           {/* Заметка про отсутствующие фильтры — под таблицей, чтобы не
               заставлять первым делом спрашивать «а где канал и сфера»:

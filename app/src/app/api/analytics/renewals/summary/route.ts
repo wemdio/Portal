@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireRenewalsAccess } from '@/lib/renewals/access';
 import { parseRenewalsParams } from '@/lib/renewals/params';
 import { computeRenewalsMetrics, fetchRenewalPeriods, fetchRenewalProjects } from '@/lib/renewals/metrics';
-import { buildRenewalTableRows } from '@/lib/renewals/tableRows';
+import { buildRenewalTableRows, buildUndatedRenewalTableRows } from '@/lib/renewals/tableRows';
 import { bucketKey } from '@/lib/firstSales/buckets';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
@@ -46,7 +46,13 @@ export async function GET(req: NextRequest) {
       toKey: bucketKey(to, 'day'),
     });
 
-    return NextResponse.json({ ...result, tableRows });
+    // Продления без даты оплаты в `tableRows` не попадают ни при каком окне —
+    // привязать их ко времени нечем (см. buildRenewalTableRows). Период на них
+    // поэтому не распространяется и здесь: функция ниже вообще не принимает
+    // окно, только тот же фильтр KPI, что и основная таблица.
+    const undatedRows = buildUndatedRenewalTableRows(rows, kpiFilter, bucketKey(today, 'day'));
+
+    return NextResponse.json({ ...result, tableRows, undatedRows });
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : 'renewals_summary_failed' },
