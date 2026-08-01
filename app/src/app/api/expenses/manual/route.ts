@@ -15,7 +15,18 @@ import {
 export const dynamic = 'force-dynamic';
 
 const LIST_LIMIT = 500;
-const DEFAULT_PAYER = 'ceo_personal_card';
+
+/**
+ * Плательщик по умолчанию — сразу человеческое название, а не служебный ключ.
+ *
+ * `manual_expenses.payer` никогда не был справочником: это свободный текст без
+ * CHECK и без словаря, а витрина `expenses_v` кладёт его в `counterparty`
+ * рядом с настоящими контрагентами банка. Ключ `ceo_personal_card` поэтому
+ * протекал на экран — в разбивку по сервисам и в очередь разметки, — и
+ * расшифровать его в интерфейсе было нечем. Дублирует дефолт колонки из
+ * `20260801_0001_manual_expense_payer_label.sql`.
+ */
+const DEFAULT_PAYER = 'Личная карта CEO';
 
 const MANUAL_FIELDS = 'id, occurred_on, amount, currency, payer, comment, created_by, created_at';
 
