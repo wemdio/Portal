@@ -392,7 +392,7 @@ export default function StackedTimeChart({
       {legendOpen ? (
         <div
           id={legendId}
-          className="portal-disclosure mb-2 flex flex-wrap gap-x-4 gap-y-1.5 rounded-xl border border-zinc-200 bg-zinc-50/60 px-3 py-2"
+          className="portal-disclosure mb-2 flex flex-wrap justify-end gap-x-4 gap-y-1.5 rounded-xl border border-zinc-200 bg-zinc-50/60 px-3 py-2"
         >
           {keys.map((key) => (
             <span key={key} className="flex items-center gap-1.5">

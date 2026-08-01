@@ -41,9 +41,6 @@ const FIELD_CLASS =
 /** Подпись поля. */
 const LABEL_CLASS = 'flex min-w-0 flex-col gap-1 text-[11px] text-zinc-500';
 
-/** Заголовок смысловой группы полей. */
-const LEGEND_CLASS = 'text-[10px] font-semibold uppercase tracking-wide text-zinc-400';
-
 interface EditDraft {
   occurredOn: string;
   amount: string;
@@ -245,118 +242,115 @@ export default function ManualExpenseForm({
         Личная карта и всё, чего нет в банковских выгрузках.
       </p>
 
-      {/* Поля разложены по смыслу, а не в строку: одной полосой из семи контролов
-          форма не читается и на узком экране разъезжается на случайные переносы. */}
-      <form onSubmit={submit} className="mt-3 grid gap-x-4 gap-y-3 lg:grid-cols-12">
-        <fieldset className="min-w-0 lg:col-span-7">
-          <legend className={LEGEND_CLASS}>Что за трата</legend>
-          <div className="mt-1.5 grid grid-cols-2 gap-2 sm:grid-cols-[minmax(0,9.5rem)_minmax(0,1fr)_minmax(0,6.5rem)]">
-            <label className={LABEL_CLASS}>
-              Дата
-              <input
-                type="date"
-                value={occurredOn}
-                max={today}
-                onChange={(e) => setOccurredOn(e.target.value)}
-                required
-                className={FIELD_CLASS}
-              />
-            </label>
-            <label className={LABEL_CLASS}>
-              Сумма
-              <input
-                type="number"
-                step="0.01"
-                min="0.01"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                required
-                className={`${FIELD_CLASS} text-right tabular-nums`}
-              />
-            </label>
-            <label className={LABEL_CLASS}>
-              Валюта
-              <select
-                value={currency}
-                onChange={(e) => setCurrency(e.target.value)}
-                className={FIELD_CLASS}
-              >
-                {CURRENCIES.map((code) => (
-                  <option key={code} value={code}>
-                    {code}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          {currency !== 'RUB' ? (
-            <p className="mt-1.5 text-[11px] text-zinc-400">
-              Курс ЦБ подтягивается ночным синком: до него трата будет видна в KPI «без курса ЦБ» и не
-              войдёт в рублёвый итог.
-            </p>
-          ) : null}
-        </fieldset>
+      {/* Все поля — соседи в одной сетке, без групповых заголовков.
+          Заголовки давали перекос: у поля с подписью инпут начинается ниже
+          заголовка на высоту этой подписи, а у поля без подписи — сразу, и
+          соседние колонки переставали стоять на одной линии. Плюс группа,
+          занимавшая пол-строки, оставляла под собой пустую половину.
+          На шесть контролов группировка всё равно не окупалась: раздел уже
+          назван заголовком «Ручная трата». */}
+      <form onSubmit={submit} className="mt-3 grid gap-x-3 gap-y-3 sm:grid-cols-12">
+        <label className={`${LABEL_CLASS} min-w-0 sm:col-span-4 lg:col-span-2`}>
+          Дата
+          <input
+            type="date"
+            value={occurredOn}
+            max={today}
+            onChange={(e) => setOccurredOn(e.target.value)}
+            required
+            className={FIELD_CLASS}
+          />
+        </label>
 
-        <fieldset className="min-w-0 lg:col-span-5">
-          <legend className={LEGEND_CLASS}>К чему относится</legend>
-          <div className="mt-1.5 max-w-sm lg:max-w-none">
-            <VendorSelect
-              value={vendorId}
-              onChange={setVendorId}
-              options={vendors}
-              onCreated={onVendorCreated}
-              emptyLabel="Без вендора"
-              emptyHint="уйдёт в очередь разметки"
-            />
-          </div>
-        </fieldset>
+        <label className={`${LABEL_CLASS} min-w-0 sm:col-span-4 lg:col-span-2`}>
+          Сумма
+          <input
+            type="number"
+            step="0.01"
+            min="0.01"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            required
+            className={`${FIELD_CLASS} text-right tabular-nums`}
+          />
+        </label>
 
-        <fieldset className="min-w-0 lg:col-span-12">
-          <legend className={LEGEND_CLASS}>Пояснения</legend>
-          <div className="mt-1.5 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,13rem)_minmax(0,1fr)]">
+        <label className={`${LABEL_CLASS} min-w-0 sm:col-span-4 lg:col-span-1`}>
+          Валюта
+          <select
+            value={currency}
+            onChange={(e) => setCurrency(e.target.value)}
+            className={FIELD_CLASS}
+          >
+            {CURRENCIES.map((code) => (
+              <option key={code} value={code}>
+                {code}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {/* Обёртка, а не label: внутри VendorSelect свой input, и вложенный
+            label перехватывал бы у него клик. Подпись держит собственный
+            ariaLabel компонента. */}
+        <div className={`${LABEL_CLASS} min-w-0 sm:col-span-6 lg:col-span-4`}>
+          <span aria-hidden="true">Вендор</span>
+          <VendorSelect
+            value={vendorId}
+            onChange={setVendorId}
+            options={vendors}
+            onCreated={onVendorCreated}
+            emptyLabel="Без вендора"
+            emptyHint="уйдёт в очередь разметки"
+          />
+        </div>
+
+        <label className={`${LABEL_CLASS} min-w-0 sm:col-span-6 lg:col-span-3`}>
+          Плательщик
+          <select value={payer} onChange={(e) => setPayer(e.target.value)} className={FIELD_CLASS}>
+            {payerNames.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+            <option value={OTHER_PAYER}>Другой плательщик…</option>
+          </select>
+        </label>
+
+        <label className={`${LABEL_CLASS} min-w-0 sm:col-span-12 lg:col-span-12`}>
+          Комментарий
+          <input
+            type="text"
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            className={FIELD_CLASS}
+          />
+        </label>
+
+        {currency !== 'RUB' ? (
+          <p className="text-[11px] text-zinc-400 lg:col-span-12">
+            Курс ЦБ подтягивается ночным синком: до него трата будет видна в KPI «без курса ЦБ» и не
+            войдёт в рублёвый итог.
+          </p>
+        ) : null}
+
+        {payer === OTHER_PAYER ? (
+          <div className="max-w-md rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 lg:col-span-12">
             <label className={LABEL_CLASS}>
-              Плательщик
-              <select
-                value={payer}
-                onChange={(e) => setPayer(e.target.value)}
-                className={FIELD_CLASS}
-              >
-                {payerNames.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-                <option value={OTHER_PAYER}>Другой плательщик…</option>
-              </select>
-            </label>
-            <label className={LABEL_CLASS}>
-              Комментарий
+              Как назвать плательщика
               <input
                 type="text"
-                value={comment}
-                onChange={(e) => setComment(e.target.value)}
-                className={FIELD_CLASS}
+                value={customPayer}
+                onChange={(e) => setCustomPayer(e.target.value)}
+                placeholder="например, карта партнёра"
+                className={`${FIELD_CLASS} bg-white sm:max-w-xs`}
               />
             </label>
+            <p className="mt-1 text-[11px] text-zinc-400">
+              Название попадёт в разбивку как есть — если пусто, запишем «{DEFAULT_PAYER}».
+            </p>
           </div>
-          {payer === OTHER_PAYER ? (
-            <div className="mt-1.5 max-w-md rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2">
-              <label className={LABEL_CLASS}>
-                Как назвать плательщика
-                <input
-                  type="text"
-                  value={customPayer}
-                  onChange={(e) => setCustomPayer(e.target.value)}
-                  placeholder="например, карта партнёра"
-                  className={`${FIELD_CLASS} bg-white sm:max-w-xs`}
-                />
-              </label>
-              <p className="mt-1 text-[11px] text-zinc-400">
-                Название попадёт в разбивку как есть — если пусто, запишем «{DEFAULT_PAYER}».
-              </p>
-            </div>
-          ) : null}
-        </fieldset>
+        ) : null}
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 pt-3 lg:col-span-12">
           <p className="text-[11px] text-zinc-400">
