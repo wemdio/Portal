@@ -6,8 +6,25 @@ import IncomeOperations from '@/components/expenses/IncomeOperations';
 import { UnconvertedNote } from '@/components/expenses/KpiTile';
 import { formatDelta, formatRub } from '@/lib/expenses/client';
 import type { PayerBreakdownItem } from '@/lib/expenses/types';
+import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRows';
+import { SortableTh } from '@/components/ui/SortableTh';
 
 const TOP_N = 15;
+
+/**
+ * Колонки таблицы разбивки по плательщикам — см. тот же выбор в
+ * VendorBreakdown.tsx (соседний компонент по назначению). «Доля» не входит по
+ * той же причине: `item.share = item.total / total` с общим знаменателем,
+ * порядок по ней всегда совпадает с порядком по «Сумма» (см. `aggregate.ts`,
+ * `breakdownByPayer`).
+ */
+const payerSortColumns: SortColumns<PayerBreakdownItem> = {
+  payerName: { type: 'string', getValue: (r) => r.payerName },
+  payerInn: { type: 'string', getValue: (r) => r.payerInn },
+  total: { type: 'number', getValue: (r) => r.total },
+  ops: { type: 'number', getValue: (r) => r.ops },
+  deltaPrev: { type: 'number', getValue: (r) => r.deltaPrev },
+};
 
 /**
  * Разбивка дохода по плательщикам.
@@ -56,6 +73,10 @@ export default function PayerBreakdown({
   const withBars = items.filter((item) => item.total > 0).slice(0, TOP_N);
   const max = withBars[0]?.total ?? 0;
 
+  // Как и в VendorBreakdown: сортировка касается только таблицы, бары наверху
+  // всегда TOP_N по сумме.
+  const { sortedRows, sort, toggleSort } = useSortableRows(items, payerSortColumns);
+
   return (
     <div className="rounded-xl border border-zinc-200 bg-white p-3">
       <h3 className="mb-2 text-sm font-semibold text-zinc-900">Разбивка по плательщикам</h3>
@@ -89,16 +110,37 @@ export default function PayerBreakdown({
             <table className="w-full min-w-[680px] text-sm">
               <thead>
                 <tr className="text-left text-[10px] uppercase tracking-wider text-zinc-400">
-                  <th className="py-2 font-medium">Плательщик</th>
-                  <th className="py-2 font-medium">ИНН</th>
-                  <th className="py-2 text-right font-medium">Сумма</th>
+                  <SortableTh label="Плательщик" sortKey="payerName" sort={sort} onSort={toggleSort} className="py-2" />
+                  <SortableTh label="ИНН" sortKey="payerInn" sort={sort} onSort={toggleSort} className="py-2" />
+                  <SortableTh
+                    label="Сумма"
+                    sortKey="total"
+                    sort={sort}
+                    onSort={toggleSort}
+                    align="right"
+                    className="py-2"
+                  />
                   <th className="py-2 text-right font-medium">Доля</th>
-                  <th className="py-2 text-right font-medium">Операций</th>
-                  <th className="py-2 text-right font-medium">Δ</th>
+                  <SortableTh
+                    label="Операций"
+                    sortKey="ops"
+                    sort={sort}
+                    onSort={toggleSort}
+                    align="right"
+                    className="py-2"
+                  />
+                  <SortableTh
+                    label="Δ"
+                    sortKey="deltaPrev"
+                    sort={sort}
+                    onSort={toggleSort}
+                    align="right"
+                    className="py-2"
+                  />
                 </tr>
               </thead>
               <tbody>
-                {items.map((item) => {
+                {sortedRows.map((item) => {
                   const key = rowKey(item);
                   return (
                     <PayerRow
