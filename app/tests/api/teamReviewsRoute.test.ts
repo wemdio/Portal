@@ -10,6 +10,7 @@ const CLIENT_ID = '00000000-0000-4000-8000-000000000004';
 const DEMO_LEAD_ID = '00000000-0000-4000-8000-000000000005';
 const UNKNOWN_ROLE_ID = '00000000-0000-4000-8000-000000000006';
 const REVIEW_ID = '00000000-0000-4000-8000-000000000010';
+const SCHEDULED_REVIEW_ID = '00000000-0000-4000-8000-000000000012';
 
 let mockMainDb: MockSupabaseClient = createMockSupabase();
 let mockCurrentUser: { id: string } | null = { id: LEAD_ID };
@@ -71,6 +72,8 @@ function seedDatabase() {
           review_date: '2026-07-24',
           employee_user_id: EMPLOYEE_ID,
           reviewer_user_id: LEAD_ID,
+          status: 'completed',
+          reason: null,
           outcomes: 'Уверенно ведёт проекты',
           problems: 'Нужно лучше определять приоритеты',
           recommendations: 'Разбирать кейсы раз в неделю',
@@ -82,11 +85,26 @@ function seedDatabase() {
           review_date: '2026-07-20',
           employee_user_id: OTHER_EMPLOYEE_ID,
           reviewer_user_id: null,
+          status: 'completed',
+          reason: null,
           outcomes: 'Хороший результат',
           problems: null,
           recommendations: null,
           created_at: '2026-07-20T12:00:00.000Z',
           updated_at: '2026-07-20T12:00:00.000Z',
+        },
+        {
+          id: SCHEDULED_REVIEW_ID,
+          review_date: '2026-08-12',
+          employee_user_id: EMPLOYEE_ID,
+          reviewer_user_id: LEAD_ID,
+          status: 'scheduled',
+          reason: 'Проверить адаптацию на новых проектах',
+          outcomes: null,
+          problems: null,
+          recommendations: null,
+          created_at: '2026-07-31T12:00:00.000Z',
+          updated_at: '2026-07-31T12:00:00.000Z',
         },
       ],
     },
@@ -171,6 +189,8 @@ describe('GET /api/team/reviews', () => {
             role: 'lead',
             avatarUrl: 'lead.png',
           },
+          status: 'completed',
+          reason: null,
           outcomes: 'Уверенно ведёт проекты',
           problems: 'Нужно лучше определять приоритеты',
           recommendations: 'Разбирать кейсы раз в неделю',
@@ -180,6 +200,19 @@ describe('GET /api/team/reviews', () => {
         expect.objectContaining({
           employee: expect.objectContaining({ id: OTHER_EMPLOYEE_ID }),
           reviewer: null,
+          status: 'completed',
+          reason: null,
+        }),
+        expect.objectContaining({
+          id: SCHEDULED_REVIEW_ID,
+          reviewDate: '2026-08-12',
+          employee: expect.objectContaining({ id: EMPLOYEE_ID }),
+          reviewer: expect.objectContaining({ id: LEAD_ID }),
+          status: 'scheduled',
+          reason: 'Проверить адаптацию на новых проектах',
+          outcomes: null,
+          problems: null,
+          recommendations: null,
         }),
       ]),
     );
@@ -226,21 +259,13 @@ describe('GET /api/team/reviews', () => {
     expect(body.reviews).toHaveLength(1001);
     expect(ranges).toEqual([[0, 999], [1000, 1999]]);
   });
-  it('returns only the employee own reviews and own profile', async () => {
+  it('denies non-leadership employees instead of exposing their own reviews', async () => {
     mockCurrentUser = { id: EMPLOYEE_ID };
     const { GET } = await import('@/app/api/team/reviews/route');
 
     const response = await GET(request('/api/team/reviews'));
-    const body = await response.json();
 
-    expect(response.status).toBe(200);
-    expect(body.canManage).toBe(false);
-    expect(body.currentUserId).toBe(EMPLOYEE_ID);
-    expect(body.employees).toEqual([
-      expect.objectContaining({ id: EMPLOYEE_ID, name: 'Анна Ким' }),
-    ]);
-    expect(body.reviews).toHaveLength(1);
-    expect(body.reviews[0].id).toBe(REVIEW_ID);
+    expect(response.status).toBe(403);
   });
 
   it('rejects a demo account even if its stored role is leadership', async () => {
@@ -277,19 +302,17 @@ describe('GET /api/team/reviews', () => {
 });
 
 describe('POST /api/team/reviews', () => {
-  it('creates a review through service role, takes reviewer from the session and audits it', async () => {
+  it('schedules a review with date, employee and optional reason', async () => {
     const { POST } = await import('@/app/api/team/reviews/route');
 
     const response = await POST(
       request('/api/team/reviews', {
         method: 'POST',
         body: {
-          reviewDate: '2026-07-29',
+          reviewDate: '2026-08-12',
           employeeUserId: EMPLOYEE_ID,
+          reason: '  Проверить адаптацию  ',
           reviewerUserId: OTHER_EMPLOYEE_ID,
-          outcomes: '  Успешно адаптировалась  ',
-          problems: '  Приоритеты  ',
-          recommendations: '',
         },
       }),
     );
@@ -300,22 +323,26 @@ describe('POST /api/team/reviews', () => {
       table: 'employee_reviews',
       rows: [
         expect.objectContaining({
-          review_date: '2026-07-29',
+          review_date: '2026-08-12',
           employee_user_id: EMPLOYEE_ID,
           reviewer_user_id: LEAD_ID,
-          outcomes: 'Успешно адаптировалась',
-          problems: 'Приоритеты',
+          status: 'scheduled',
+          reason: 'Проверить адаптацию',
+          outcomes: null,
+          problems: null,
           recommendations: null,
         }),
       ],
     });
     expect(body.review).toEqual(
       expect.objectContaining({
-        reviewDate: '2026-07-29',
+        reviewDate: '2026-08-12',
         employee: expect.objectContaining({ id: EMPLOYEE_ID, name: 'Анна Ким' }),
         reviewer: expect.objectContaining({ id: LEAD_ID, name: 'Лид Команды' }),
-        outcomes: 'Успешно адаптировалась',
-        problems: 'Приоритеты',
+        status: 'scheduled',
+        reason: 'Проверить адаптацию',
+        outcomes: null,
+        problems: null,
         recommendations: null,
       }),
     );
@@ -325,9 +352,84 @@ describe('POST /api/team/reviews', () => {
       expect.objectContaining({
         reviewId: expect.any(String),
         employeeUserId: EMPLOYEE_ID,
-        reviewDate: '2026-07-29',
+        reviewDate: '2026-08-12',
       }),
       expect.objectContaining({ userId: LEAD_ID }),
+    );
+  });
+
+  it('keeps legacy completion fields and creates the review as completed', async () => {
+    const { POST } = await import('@/app/api/team/reviews/route');
+
+    const response = await POST(
+      request('/api/team/reviews', {
+        method: 'POST',
+        body: {
+          reviewDate: '2026-08-14',
+          employeeUserId: EMPLOYEE_ID,
+          outcomes: '  Успешно адаптировалась  ',
+          problems: '  Приоритеты  ',
+          recommendations: '  Еженедельные разборы  ',
+        },
+      }),
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(mockMainDb.getRows('employee_reviews')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          review_date: '2026-08-14',
+          employee_user_id: EMPLOYEE_ID,
+          reviewer_user_id: LEAD_ID,
+          status: 'completed',
+          outcomes: 'Успешно адаптировалась',
+          problems: 'Приоритеты',
+          recommendations: 'Еженедельные разборы',
+        }),
+      ]),
+    );
+    expect(body.review).toEqual(
+      expect.objectContaining({
+        status: 'completed',
+        outcomes: 'Успешно адаптировалась',
+        problems: 'Приоритеты',
+        recommendations: 'Еженедельные разборы',
+      }),
+    );
+  });
+
+  it('accepts a 500-character reason and normalizes a blank reason to null', async () => {
+    const { POST } = await import('@/app/api/team/reviews/route');
+
+    const maxReasonResponse = await POST(
+      request('/api/team/reviews', {
+        method: 'POST',
+        body: {
+          reviewDate: '2026-08-12',
+          employeeUserId: EMPLOYEE_ID,
+          reason: 'x'.repeat(500),
+        },
+      }),
+    );
+    expect(maxReasonResponse.status).toBe(201);
+
+    const blankReasonResponse = await POST(
+      request('/api/team/reviews', {
+        method: 'POST',
+        body: {
+          reviewDate: '2026-08-13',
+          employeeUserId: EMPLOYEE_ID,
+          reason: '   ',
+        },
+      }),
+    );
+    expect(blankReasonResponse.status).toBe(201);
+    expect(mockMainDb.getRows('employee_reviews')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ review_date: '2026-08-12', reason: 'x'.repeat(500) }),
+        expect.objectContaining({ review_date: '2026-08-13', reason: null }),
+      ]),
     );
   });
 
@@ -351,23 +453,14 @@ describe('POST /api/team/reviews', () => {
   });
 
   it.each([
-    [{ reviewDate: '29.07.2026', employeeUserId: EMPLOYEE_ID, outcomes: 'Итоги' }, 'reviewDate'],
-    [{ reviewDate: '2026-02-30', employeeUserId: EMPLOYEE_ID, outcomes: 'Итоги' }, 'reviewDate'],
-    [{ reviewDate: '2026-07-29', employeeUserId: EMPLOYEE_ID, outcomes: '   ' }, 'outcomes'],
+    [{ reviewDate: '29.07.2026', employeeUserId: EMPLOYEE_ID }, 'reviewDate'],
+    [{ reviewDate: '2026-02-30', employeeUserId: EMPLOYEE_ID }, 'reviewDate'],
+    [{ reviewDate: '2026-08-12', employeeUserId: 'not-a-uuid' }, 'employeeUserId'],
     [
-      { reviewDate: '2026-07-29', employeeUserId: EMPLOYEE_ID, outcomes: 'x'.repeat(5001) },
-      'outcomes',
+      { reviewDate: '2026-08-12', employeeUserId: EMPLOYEE_ID, reason: 'x'.repeat(501) },
+      'reason',
     ],
-    [
-      {
-        reviewDate: '2026-07-29',
-        employeeUserId: EMPLOYEE_ID,
-        outcomes: 'Итоги',
-        problems: 'x'.repeat(5001),
-      },
-      'problems',
-    ],
-  ])('rejects invalid payload %# without writing', async (payload, field) => {
+  ])('rejects invalid schedule payload %# without writing', async (payload, field) => {
     const { POST } = await import('@/app/api/team/reviews/route');
 
     const response = await POST(
@@ -419,7 +512,102 @@ describe('POST /api/team/reviews', () => {
 });
 
 describe('PATCH /api/team/reviews/[id]', () => {
-  it('updates allowed fields, preserves the reviewer and audits the change', async () => {
+  it('edits scheduled review metadata without filling post-meeting fields', async () => {
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+
+    const response = await PATCH(
+      request('/api/team/reviews/' + SCHEDULED_REVIEW_ID, {
+        method: 'PATCH',
+        body: {
+          reviewDate: '2026-08-15',
+          employeeUserId: OTHER_EMPLOYEE_ID,
+          reason: '  Обсудить новые зоны ответственности  ',
+        },
+      }),
+      { params: Promise.resolve({ id: SCHEDULED_REVIEW_ID }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mockMainDb.getRows('employee_reviews')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: SCHEDULED_REVIEW_ID,
+          review_date: '2026-08-15',
+          employee_user_id: OTHER_EMPLOYEE_ID,
+          reviewer_user_id: LEAD_ID,
+          status: 'scheduled',
+          reason: 'Обсудить новые зоны ответственности',
+          outcomes: null,
+          problems: null,
+          recommendations: null,
+        }),
+      ]),
+    );
+    expect(body.review).toEqual(
+      expect.objectContaining({
+        id: SCHEDULED_REVIEW_ID,
+        status: 'scheduled',
+        reason: 'Обсудить новые зоны ответственности',
+        outcomes: null,
+      }),
+    );
+  });
+
+  it('completes a scheduled review atomically and exposes it as completed', async () => {
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+
+    const response = await PATCH(
+      request('/api/team/reviews/' + SCHEDULED_REVIEW_ID, {
+        method: 'PATCH',
+        body: {
+          status: 'completed',
+          outcomes: '  Уверенно взяла новые проекты  ',
+          problems: '   ',
+          recommendations: '  Продолжить еженедельные разборы  ',
+        },
+      }),
+      { params: Promise.resolve({ id: SCHEDULED_REVIEW_ID }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mockMainDb.getRows('employee_reviews')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: SCHEDULED_REVIEW_ID,
+          reviewer_user_id: LEAD_ID,
+          status: 'completed',
+          outcomes: 'Уверенно взяла новые проекты',
+          problems: null,
+          recommendations: 'Продолжить еженедельные разборы',
+        }),
+      ]),
+    );
+    expect(body.review).toEqual(
+      expect.objectContaining({
+        id: SCHEDULED_REVIEW_ID,
+        status: 'completed',
+        outcomes: 'Уверенно взяла новые проекты',
+      }),
+    );
+    expect(mockLogAudit).toHaveBeenCalledWith(
+      'team.reviews.update.success',
+      'Employee review updated',
+      expect.objectContaining({
+        reviewId: SCHEDULED_REVIEW_ID,
+        changedFields: expect.arrayContaining([
+          'status',
+          'outcomes',
+          'problems',
+          'recommendations',
+        ]),
+      }),
+      expect.objectContaining({ userId: LEAD_ID }),
+    );
+  });
+
+  it('updates allowed fields, preserves completed status and reviewer, and audits the change', async () => {
     const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
 
     const response = await PATCH(
@@ -429,6 +617,7 @@ describe('PATCH /api/team/reviews/[id]', () => {
           reviewDate: '2026-07-29',
           employeeUserId: OTHER_EMPLOYEE_ID,
           reviewerUserId: OTHER_EMPLOYEE_ID,
+          reason: '  План развития  ',
           outcomes: 'Обновлённые итоги',
           problems: '',
           recommendations: 'Продолжить практику',
@@ -446,6 +635,8 @@ describe('PATCH /api/team/reviews/[id]', () => {
           review_date: '2026-07-29',
           employee_user_id: OTHER_EMPLOYEE_ID,
           reviewer_user_id: LEAD_ID,
+          status: 'completed',
+          reason: 'План развития',
           outcomes: 'Обновлённые итоги',
           problems: null,
           recommendations: 'Продолжить практику',
@@ -457,6 +648,8 @@ describe('PATCH /api/team/reviews/[id]', () => {
         id: REVIEW_ID,
         employee: expect.objectContaining({ id: OTHER_EMPLOYEE_ID }),
         reviewer: expect.objectContaining({ id: LEAD_ID }),
+        status: 'completed',
+        reason: 'План развития',
         outcomes: 'Обновлённые итоги',
       }),
     );
@@ -468,6 +661,7 @@ describe('PATCH /api/team/reviews/[id]', () => {
         changedFields: expect.arrayContaining([
           'review_date',
           'employee_user_id',
+          'reason',
           'outcomes',
           'problems',
           'recommendations',
@@ -475,6 +669,60 @@ describe('PATCH /api/team/reviews/[id]', () => {
       }),
       expect.objectContaining({ userId: LEAD_ID }),
     );
+  });
+
+  it.each([
+    [
+      'requires outcomes when completing a scheduled review',
+      SCHEDULED_REVIEW_ID,
+      { status: 'completed' },
+      'outcomes',
+    ],
+    [
+      'does not accept result fields while a review stays scheduled',
+      SCHEDULED_REVIEW_ID,
+      { outcomes: 'Преждевременные итоги' },
+      'status',
+    ],
+    [
+      'rejects an unknown lifecycle status',
+      SCHEDULED_REVIEW_ID,
+      { status: 'cancelled' },
+      'status',
+    ],
+    [
+      'does not move a completed review back to scheduled',
+      REVIEW_ID,
+      { status: 'scheduled' },
+      'transition',
+    ],
+    [
+      'rejects a reason longer than 500 characters',
+      SCHEDULED_REVIEW_ID,
+      { reason: 'x'.repeat(501) },
+      'reason',
+    ],
+    [
+      'does not allow clearing outcomes from a completed review',
+      REVIEW_ID,
+      { outcomes: '   ' },
+      'outcomes',
+    ],
+  ])('%s', async (_title, reviewId, payload, errorField) => {
+    const { PATCH } = await import('@/app/api/team/reviews/[id]/route');
+
+    const response = await PATCH(
+      request('/api/team/reviews/' + reviewId, {
+        method: 'PATCH',
+        body: payload,
+      }),
+      { params: Promise.resolve({ id: reviewId }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.toLowerCase()).toContain(errorField);
+    expect(mockMainDb.updates).toHaveLength(0);
   });
 
   it('allows only leadership to update reviews', async () => {

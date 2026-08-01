@@ -5,11 +5,13 @@ import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import {
   authenticateReviewRequest,
+  hasReviewResultFields,
   jsonError,
   loadInternalProfiles,
   logMeta,
   parseReviewInput,
   profileToApi,
+  REVIEW_PROJECTION,
   reviewToApi,
   validateInternalEmployee,
   type EmployeeReviewRow,
@@ -27,15 +29,9 @@ export async function GET(req: NextRequest) {
   let reviewsData: EmployeeReviewRow[];
   try {
     reviewsData = await collectPages(async (from, to) => {
-      let query = admin
+      const query = admin
         .from('employee_reviews')
-        .select(
-          'id, review_date, employee_user_id, reviewer_user_id, outcomes, problems, recommendations, created_at, updated_at',
-        );
-
-      if (!actor.canManage) {
-        query = query.eq('employee_user_id', actor.userId);
-      }
+        .select(REVIEW_PROJECTION);
 
       const page = await query
         .order('review_date', { ascending: false })
@@ -64,9 +60,7 @@ export async function GET(req: NextRequest) {
   const profilesById = new Map(
     profileResult.profiles.map((profile) => [profile.id, profile]),
   );
-  const visibleEmployees = actor.canManage
-    ? profileResult.profiles
-    : profileResult.profiles.filter((profile) => profile.id === actor.userId);
+  const visibleEmployees = profileResult.profiles;
 
   return NextResponse.json({
     reviews: reviewsData.map((review) =>
@@ -84,7 +78,6 @@ export async function POST(req: NextRequest) {
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
   const { actor } = auth;
-  if (!actor.canManage) return jsonError('Forbidden', 403);
 
   let body: unknown;
   try {
@@ -96,6 +89,11 @@ export async function POST(req: NextRequest) {
   const parsed = parseReviewInput(body, { partial: false });
   if ('error' in parsed) return jsonError(parsed.error, 400);
 
+  const completesReview = hasReviewResultFields(parsed.value);
+  if (completesReview && !parsed.value.outcomes) {
+    return jsonError('outcomes is required for completed review', 400);
+  }
+
   const employeeUserId = parsed.value.employee_user_id!;
   const employeeValidation = await validateInternalEmployee(employeeUserId);
   if ('error' in employeeValidation) return employeeValidation.error;
@@ -104,7 +102,9 @@ export async function POST(req: NextRequest) {
     review_date: parsed.value.review_date!,
     employee_user_id: employeeUserId,
     reviewer_user_id: actor.userId,
-    outcomes: parsed.value.outcomes!,
+    status: completesReview ? 'completed' as const : 'scheduled' as const,
+    reason: parsed.value.reason ?? null,
+    outcomes: parsed.value.outcomes ?? null,
     problems: parsed.value.problems ?? null,
     recommendations: parsed.value.recommendations ?? null,
   };
@@ -112,9 +112,7 @@ export async function POST(req: NextRequest) {
   const { data, error } = await supabaseAdmin
     .from('employee_reviews')
     .insert(row)
-    .select(
-      'id, review_date, employee_user_id, reviewer_user_id, outcomes, problems, recommendations, created_at, updated_at',
-    )
+    .select(REVIEW_PROJECTION)
     .single();
 
   if (error || !data) {

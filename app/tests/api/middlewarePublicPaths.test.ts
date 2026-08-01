@@ -12,18 +12,26 @@
 
 let mockUser: { id: string } | null = null;
 let mockRole: string | null = null;
+let mockIsDemo = false;
+let mockProfileError: { message: string } | null = null;
+let mockGetUserError: Error | null = null;
 
 jest.mock('@supabase/ssr', () => ({
   createServerClient: () => ({
     auth: {
-      getUser: async () => ({ data: { user: mockUser }, error: null }),
+      getUser: async () => {
+        if (mockGetUserError) throw mockGetUserError;
+        return { data: { user: mockUser }, error: null };
+      },
     },
     from: () => ({
       select: () => ({
         eq: () => ({
           single: async () => ({
-            data: mockUser ? { role: mockRole, locale: 'ru' } : null,
-            error: null,
+            data: mockUser && !mockProfileError
+              ? { role: mockRole, locale: 'ru', is_demo: mockIsDemo }
+              : null,
+            error: mockProfileError,
           }),
         }),
       }),
@@ -34,14 +42,22 @@ jest.mock('@supabase/ssr', () => ({
 import { NextRequest } from 'next/server';
 import { middleware } from '@/middleware';
 
-function req(path: string) {
-  return new NextRequest(`http://localhost:3000${path}`);
+function req(path: string, cookies: Record<string, string> = {}) {
+  const cookie = Object.entries(cookies)
+    .map(([name, value]) => `${name}=${value}`)
+    .join('; ');
+  return new NextRequest(`http://localhost:3000${path}`, {
+    headers: cookie ? { cookie } : undefined,
+  });
 }
 
 beforeEach(() => {
   jest.resetModules();
   mockUser = null;
   mockRole = null;
+  mockIsDemo = false;
+  mockProfileError = null;
+  mockGetUserError = null;
   process.env.NEXT_PUBLIC_SUPABASE_URL = 'http://supabase.test';
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'anon-key';
   delete process.env.MAINTENANCE_MODE;
@@ -81,5 +97,112 @@ describe('middleware: публичные пути lead-board', () => {
     mockRole = 'client';
     const res = await middleware(req('/projects/123'));
     expect(res.headers.get('location')).toContain('/client');
+  });
+});
+
+function redirectPath(response: Response): string | null {
+  const location = response.headers.get('location');
+  return location ? new URL(location).pathname : null;
+}
+
+describe('middleware: доступ к /team', () => {
+  it.each(['lead', 'director', 'admin'])(
+    'пропускает руководящую роль %s',
+    async (role) => {
+      mockUser = { id: `u-${role}` };
+      mockRole = role;
+
+      const res = await middleware(req('/team'));
+
+      expect(redirectPath(res)).toBeNull();
+    },
+  );
+
+  it.each(['technician', 'manager', 'sales', 'marketer'])(
+    'редиректит внутреннюю роль без руководящего доступа %s на главную',
+    async (role) => {
+      mockUser = { id: `u-${role}` };
+      mockRole = role;
+
+      const res = await middleware(req('/team'));
+
+      expect(redirectPath(res)).toBe('/');
+    },
+  );
+
+  it('does not trust a forged leadership role cookie', async () => {
+    mockUser = { id: 'u-technician' };
+    mockRole = 'technician';
+
+    const res = await middleware(req('/team', {
+      'x-portal-role': 'u-technician:lead',
+    }));
+
+    expect(redirectPath(res)).toBe('/');
+  });
+
+  it('uses the authoritative profile role instead of a stale role cookie', async () => {
+    mockUser = { id: 'u-lead' };
+    mockRole = 'lead';
+
+    const res = await middleware(req('/team', {
+      'x-portal-role': 'u-lead:technician',
+    }));
+
+    expect(redirectPath(res)).toBeNull();
+  });
+
+  it('denies a demo account even when its stored role is leadership', async () => {
+    mockUser = { id: 'u-demo-lead' };
+    mockRole = 'lead';
+    mockIsDemo = true;
+
+    const res = await middleware(req('/team', {
+      'x-portal-role': 'u-demo-lead:lead',
+    }));
+
+    expect(redirectPath(res)).toBe('/');
+  });
+
+  it('fails closed when the authoritative profile lookup fails', async () => {
+    mockUser = { id: 'u-lead' };
+    mockRole = 'lead';
+    mockProfileError = { message: 'profile lookup failed' };
+
+    const res = await middleware(req('/team', {
+      'x-portal-role': 'u-lead:lead',
+    }));
+
+    expect(redirectPath(res)).toBe('/');
+  });
+  it('fails closed when authentication verification throws', async () => {
+    mockGetUserError = new Error('auth unavailable');
+
+    const res = await middleware(req('/team'));
+
+    expect(redirectPath(res)).toBe('/');
+  });
+
+  it('fails closed when Supabase configuration is missing', async () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+
+    const res = await middleware(req('/team'));
+
+    expect(redirectPath(res)).toBe('/');
+  });
+
+  it('оставляет client внутри клиентского портала', async () => {
+    mockUser = { id: 'u-client' };
+    mockRole = 'client';
+
+    const res = await middleware(req('/team'));
+
+    expect(redirectPath(res)).toBe('/client');
+  });
+
+  it('редиректит анонима на login', async () => {
+    const res = await middleware(req('/team'));
+
+    expect(redirectPath(res)).toBe('/login');
   });
 });
