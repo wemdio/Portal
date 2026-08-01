@@ -54,7 +54,7 @@ export default function TimeSeriesChart({ series, groupBy }: { series: SeriesBuc
               contentStyle={{ fontSize: 12, borderRadius: 8, borderColor: '#e4e4e7' }}
               labelFormatter={(_, payload) => payload?.[0]?.payload?.key ?? ''}
             />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Legend align="right" wrapperStyle={{ fontSize: 11, paddingRight: 8 }} />
             <Bar dataKey="leads" name={LABELS.leads} fill="#d4d4d8" radius={[3, 3, 0, 0]} barSize={18} />
             <Line
               type="monotone"
