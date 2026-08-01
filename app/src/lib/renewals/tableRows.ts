@@ -88,6 +88,27 @@ function passesKpiFilter(kpiFact: string | null, filter: KpiFilter | null): bool
   return true;
 }
 
+/** Собирает `RenewalTableRow` из сырой строки БД и уже распарсенной даты
+ *  оплаты. Общий хвост для `buildRenewalTableRows` и
+ *  `buildUndatedRenewalTableRows` — обе строят одну и ту же форму строки,
+ *  расходятся только в том, какие строки на вход пропускают. */
+function toTableRow(row: RenewalProjectRow, paymentDate: string | null, todayKey: string): RenewalTableRow {
+  return {
+    id: row.id,
+    client: row.client,
+    name: row.name,
+    budget: parseAmount(row.budget),
+    budgetRaw: row.budget,
+    paymentDate,
+    isPlanned: paymentDate !== null && paymentDate > todayKey,
+    contractDate: parseIsoDateKey(row.contract_date),
+    kpiFact: parseAmount(row.kpi_fact),
+    kpiFactRaw: row.kpi_fact,
+    status: row.status,
+    manager: row.manager,
+  };
+}
+
 /**
  * Строит список строк для таблицы дашборда продлений.
  *
@@ -134,24 +155,16 @@ export function buildRenewalTableRows(
       if (paymentDate < window.fromKey || paymentDate > window.toKey) continue;
     }
 
-    result.push({
-      id: row.id,
-      client: row.client,
-      name: row.name,
-      budget: parseAmount(row.budget),
-      budgetRaw: row.budget,
-      paymentDate,
-      isPlanned: paymentDate !== null && paymentDate > todayKey,
-      contractDate: parseIsoDateKey(row.contract_date),
-      kpiFact: parseAmount(row.kpi_fact),
-      kpiFactRaw: row.kpi_fact,
-      status: row.status,
-      manager: row.manager,
-    });
+    result.push(toTableRow(row, paymentDate, todayKey));
   }
 
   // Свежие сверху; без даты — в конец. Не «раньше всех», а «неизвестно
   // когда» — конец списка честнее любой позиции среди датированных строк.
+  //
+  // Это ещё и порядок по умолчанию для сортировки таблицы на дашборде
+  // (см. RenewalsRowsTable.tsx): клик по заголовку сортирует по возрастанию/
+  // убыванию, третий клик сбрасывает к порядку, который вернула эта функция,
+  // — то есть к нему.
   result.sort((a, b) => {
     if (a.paymentDate === null && b.paymentDate === null) return 0;
     if (a.paymentDate === null) return 1;
@@ -159,6 +172,41 @@ export function buildRenewalTableRows(
     if (a.paymentDate === b.paymentDate) return 0;
     return a.paymentDate > b.paymentDate ? -1 : 1;
   });
+
+  return result;
+}
+
+/**
+ * Строки продлений без распознанной даты оплаты — те самые, что
+ * `buildRenewalTableRows` отсеивает, когда передано `window`: без даты
+ * привязать продление к периоду не к чему, поэтому период на них не
+ * распространяется вовсе (нет параметра окна в этой функции). Фильтр KPI
+ * распространяется — это не про время, а про то, какие продления вообще
+ * интересны пользователю, и должен работать одинаково в обеих выборках.
+ *
+ * Отдельная функция, а не флаг у `buildRenewalTableRows`: у флага разное
+ * поведение (в одном случае строки, у которых ЕСТЬ дата, в другом — только
+ * без даты) означало бы либо union-тип результата, либо два необязательных
+ * параметра «дайте мне только с датой / только без» — отдельная функция
+ * читается яснее вызывающим кодом (route.ts зовёт обе по имени) и не трогает
+ * существующую сигнатуру `buildRenewalTableRows`, которую уже вызывает роут.
+ */
+export function buildUndatedRenewalTableRows(
+  rows: RenewalProjectRow[],
+  kpiFilter: KpiFilter | null,
+  todayKey: string,
+): RenewalTableRow[] {
+  const result: RenewalTableRow[] = [];
+
+  for (const row of rows) {
+    if (!isRenewalType(row.project_type)) continue;
+    if (!passesKpiFilter(row.kpi_fact, kpiFilter)) continue;
+
+    const paymentDate = parseIsoDateKey(row.payment_date);
+    if (paymentDate !== null) continue; // это блок именно без даты
+
+    result.push(toTableRow(row, paymentDate, todayKey));
+  }
 
   return result;
 }

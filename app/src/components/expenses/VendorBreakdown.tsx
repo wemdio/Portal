@@ -6,8 +6,32 @@ import { UnconvertedNote } from '@/components/expenses/KpiTile';
 import { expensesFetch, formatDelta, formatMoney, formatRub } from '@/lib/expenses/client';
 import { categoryLabel, sourceLabel } from '@/lib/expenses/labels';
 import type { ExpenseRow, VendorBreakdownItem } from '@/lib/expenses/types';
+import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRows';
+import { SortableTh } from '@/components/ui/SortableTh';
 
 const TOP_N = 15;
+
+/**
+ * Колонки таблицы разбивки по вендорам для общего механизма сортировки.
+ *
+ * «Доля» сюда не входит: `item.share = item.total / total` с одним и тем же
+ * знаменателем для всех строк (см. `aggregate.ts`, `breakdownByVendor`) —
+ * монотонное преобразование `total`, порядок по доле всегда совпадает с
+ * порядком по сумме. Сортируемый заголовок для неё дублировал бы «Сумма» и
+ * подразумевал бы независимую сортировку, которой на самом деле нет — заголовок
+ * оставлен обычным `<th>`, как и в аналогичном случае в first-sales/SourceTable.
+ *
+ * «Категория» сортируется по русской подписи (`categoryLabel`), а не по
+ * внутреннему ключу (`payroll`/`marketing`/...) — иначе порядок в таблице не
+ * совпадал бы с алфавитным порядком того, что видит пользователь.
+ */
+const vendorSortColumns: SortColumns<VendorBreakdownItem> = {
+  vendorName: { type: 'string', getValue: (r) => r.vendorName },
+  category: { type: 'string', getValue: (r) => (r.category ? categoryLabel(r.category) : null) },
+  total: { type: 'number', getValue: (r) => r.total },
+  ops: { type: 'number', getValue: (r) => r.ops },
+  deltaPrev: { type: 'number', getValue: (r) => r.deltaPrev },
+};
 
 interface DrillPage {
   items: ExpenseRow[];
@@ -42,6 +66,11 @@ export default function VendorBreakdown({
 
   const withBars = items.filter((item) => item.total > 0).slice(0, TOP_N);
   const max = withBars[0]?.total ?? 0;
+
+  // Сортировка касается только таблицы ниже — плитки-бары наверху всегда
+  // показывают TOP_N по сумме, независимо от того, как отсортирована таблица
+  // (тот же выбор, что и разделение «график/таблица» в остальном дашборде).
+  const { sortedRows, sort, toggleSort } = useSortableRows(items, vendorSortColumns);
 
   async function fetchPage(item: VendorBreakdownItem, nextPage: number): Promise<DrillPage> {
     if (item.vendorId === null) {
@@ -130,16 +159,37 @@ export default function VendorBreakdown({
             <table className="w-full min-w-[680px] text-sm">
               <thead>
                 <tr className="text-left text-[10px] uppercase tracking-wider text-zinc-400">
-                  <th className="py-2 font-medium">Вендор</th>
-                  <th className="py-2 font-medium">Категория</th>
-                  <th className="py-2 text-right font-medium">Сумма</th>
+                  <SortableTh label="Вендор" sortKey="vendorName" sort={sort} onSort={toggleSort} className="py-2" />
+                  <SortableTh label="Категория" sortKey="category" sort={sort} onSort={toggleSort} className="py-2" />
+                  <SortableTh
+                    label="Сумма"
+                    sortKey="total"
+                    sort={sort}
+                    onSort={toggleSort}
+                    align="right"
+                    className="py-2"
+                  />
                   <th className="py-2 text-right font-medium">Доля</th>
-                  <th className="py-2 text-right font-medium">Операций</th>
-                  <th className="py-2 text-right font-medium">Δ</th>
+                  <SortableTh
+                    label="Операций"
+                    sortKey="ops"
+                    sort={sort}
+                    onSort={toggleSort}
+                    align="right"
+                    className="py-2"
+                  />
+                  <SortableTh
+                    label="Δ"
+                    sortKey="deltaPrev"
+                    sort={sort}
+                    onSort={toggleSort}
+                    align="right"
+                    className="py-2"
+                  />
                 </tr>
               </thead>
               <tbody>
-                {items.map((item) => {
+                {sortedRows.map((item) => {
                   const key = rowKey(item);
                   const open = openKey === key;
                   return (

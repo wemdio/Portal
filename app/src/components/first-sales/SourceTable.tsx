@@ -7,6 +7,8 @@ import { logError } from '@/lib/loggerClient';
 import { CHANNEL_LABELS } from '@/lib/firstSales/sourceChannels';
 import type { SourceBreakdown } from '@/lib/firstSales/metrics';
 import type { FiltersState } from '@/components/first-sales/FiltersBar';
+import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRows';
+import { SortableTh } from '@/components/ui/SortableTh';
 
 const fmt = (n: number) => n.toLocaleString('ru-RU');
 const pct = (part: number, total: number) => (total > 0 ? `${Math.round((part / total) * 100)}%` : '—');
@@ -24,6 +26,22 @@ type DrillLeadRow = {
 };
 
 type LeadsResponse = { rows: DrillLeadRow[]; truncated: boolean };
+
+/**
+ * Колонки drill-down таблицы сделок для общего механизма сортировки. Даты —
+ * полные ISO-таймстампы (не `YYYY-MM-DD`, как в продлениях), но тип `'date'`
+ * сравнивает их обычным строковым сравнением — для ISO 8601 с одинаковым
+ * форматом/офсетом лексикографический порядок совпадает с хронологическим,
+ * тем же способом уже отсортирован ответ ручки (`leads/route.ts`,
+ * `localeCompare` по `created_at`).
+ */
+const drillSortColumns: SortColumns<DrillLeadRow> = {
+  name: { type: 'string', getValue: (r) => r.name },
+  created_at: { type: 'date', getValue: (r) => r.created_at },
+  first_meeting_at: { type: 'date', getValue: (r) => r.first_meeting_at },
+  first_contract_at: { type: 'date', getValue: (r) => r.first_contract_at },
+  won_at: { type: 'date', getValue: (r) => r.won_at },
+};
 
 /**
  * Ключ, по которому раскрытая строка теряет актуальность. Только from/to/
@@ -88,6 +106,13 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
     // eslint-disable-next-line react-hooks/exhaustive-deps -- from/to/channels уже свёрнуты в drillKey выше уровнем; source меняется вместе со строкой.
   }, [source, filters.from, filters.to, filters.channels.join(',')]);
 
+  // `rows`/`sortedRows` объявлены до ранних return'ов ниже — хуки не могут
+  // вызываться условно, а DrillDownRows размонтируется/монтируется заново при
+  // смене source (см. комментарий у SourceTable), так что своё состояние
+  // сортировки здесь и не нужно сбрасывать вручную: React делает это сам.
+  const rows = data?.rows ?? [];
+  const { sortedRows, sort, toggleSort } = useSortableRows(rows, drillSortColumns);
+
   if (loading) {
     return (
       <tr>
@@ -108,8 +133,6 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
     );
   }
 
-  const rows = data?.rows ?? [];
-
   if (rows.length === 0) {
     return (
       <tr>
@@ -127,20 +150,49 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
           <table className="w-full min-w-[560px] text-[11px]">
             <thead>
               <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
-                <th className="px-2.5 py-1.5 font-medium">Сделка</th>
-                <th className="px-2.5 py-1.5 font-medium">Создана</th>
-                <th
-                  className="px-2.5 py-1.5 font-medium"
-                  title="Дата этапа AMO «Встреча проведена» — историческая метка CRM, не метрика «Встречи» на дашборде. Метрика считается по записям разговоров и может с этой датой не совпадать."
-                >
-                  Этап AMO
-                </th>
-                <th className="px-2.5 py-1.5 font-medium">Договор</th>
-                <th className="px-2.5 py-1.5 font-medium">Оплата</th>
+                <SortableTh
+                  label="Сделка"
+                  sortKey="name"
+                  sort={sort}
+                  onSort={toggleSort}
+                  className="px-2.5 py-1.5"
+                />
+                <SortableTh
+                  label="Создана"
+                  sortKey="created_at"
+                  sort={sort}
+                  onSort={toggleSort}
+                  className="px-2.5 py-1.5"
+                />
+                <SortableTh
+                  label={
+                    <span title="Дата этапа AMO «Встреча проведена» — историческая метка CRM, не метрика «Встречи» на дашборде. Метрика считается по записям разговоров и может с этой датой не совпадать.">
+                      Этап AMO
+                    </span>
+                  }
+                  sortKey="first_meeting_at"
+                  sort={sort}
+                  onSort={toggleSort}
+                  className="px-2.5 py-1.5"
+                />
+                <SortableTh
+                  label="Договор"
+                  sortKey="first_contract_at"
+                  sort={sort}
+                  onSort={toggleSort}
+                  className="px-2.5 py-1.5"
+                />
+                <SortableTh
+                  label="Оплата"
+                  sortKey="won_at"
+                  sort={sort}
+                  onSort={toggleSort}
+                  className="px-2.5 py-1.5"
+                />
               </tr>
             </thead>
             <tbody>
-              {rows.map((lead) => (
+              {sortedRows.map((lead) => (
                 <tr key={lead.amo_id} className="border-b border-zinc-50 last:border-0">
                   <td className="px-2.5 py-1.5">
                     <div className="flex items-center gap-1.5">
@@ -185,9 +237,32 @@ function DrillDownRows({ source, filters }: { source: string; filters: FiltersSt
   );
 }
 
+/**
+ * Колонки внешней таблицы разбивки по источникам.
+ *
+ * «Доля» сюда сознательно не входит — она вычисляется из `leads` тем же
+ * `totalLeads` для всех строк (`pct(row.leads, totalLeads)`), поэтому её
+ * сортировка ВСЕГДА даёт тот же порядок строк, что сортировка по «Лиды»: доля
+ * — монотонное преобразование лидов при фиксированном знаменателе, знак
+ * разницы двух долей совпадает со знаком разницы двух `leads`. Возможного
+ * случая, когда порядок разошёлся бы, нет. Кликабельный заголовок для колонки,
+ * которая всегда дублирует соседнюю, — не польза, а обман: подписывает
+ * пользователя ожидать независимую сортировку там, где её нет. Поэтому
+ * заголовок остаётся обычным `<th>`, как раньше.
+ */
+const sourceSortColumns: SortColumns<SourceBreakdown> = {
+  source: { type: 'string', getValue: (r) => r.source },
+  channel: { type: 'string', getValue: (r) => CHANNEL_LABELS[r.channel] },
+  leads: { type: 'number', getValue: (r) => r.leads },
+  qualified: { type: 'number', getValue: (r) => r.qualified },
+  meetings: { type: 'number', getValue: (r) => r.meetings },
+  contracts: { type: 'number', getValue: (r) => r.contracts },
+};
+
 export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]; filters: FiltersState }) {
   const totalLeads = rows.reduce((sum, r) => sum + r.leads, 0);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const { sortedRows, sort, toggleSort } = useSortableRows(rows, sourceSortColumns);
 
   const toggle = (source: string) => {
     setExpanded((cur) => (cur === source ? null : source));
@@ -198,17 +273,17 @@ export default function SourceTable({ rows, filters }: { rows: SourceBreakdown[]
       <table className="w-full min-w-[640px] text-xs">
         <thead>
           <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
-            <th className="px-3 py-2 font-medium">Источник</th>
-            <th className="px-3 py-2 font-medium">Канал</th>
-            <th className="px-3 py-2 font-medium text-right">Лиды</th>
-            <th className="px-3 py-2 font-medium text-right">Доля</th>
-            <th className="px-3 py-2 font-medium text-right">Квал</th>
-            <th className="px-3 py-2 font-medium text-right">Встречи</th>
-            <th className="px-3 py-2 font-medium text-right">Договоры</th>
+            <SortableTh label="Источник" sortKey="source" sort={sort} onSort={toggleSort} />
+            <SortableTh label="Канал" sortKey="channel" sort={sort} onSort={toggleSort} />
+            <SortableTh label="Лиды" sortKey="leads" sort={sort} onSort={toggleSort} align="right" />
+            <th className="px-3 py-2 text-right font-medium">Доля</th>
+            <SortableTh label="Квал" sortKey="qualified" sort={sort} onSort={toggleSort} align="right" />
+            <SortableTh label="Встречи" sortKey="meetings" sort={sort} onSort={toggleSort} align="right" />
+            <SortableTh label="Договоры" sortKey="contracts" sort={sort} onSort={toggleSort} align="right" />
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => {
+          {sortedRows.map((row) => {
             const isOpen = expanded === row.source;
             return (
               <Fragment key={row.source}>

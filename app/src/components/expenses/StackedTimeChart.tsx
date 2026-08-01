@@ -1,6 +1,6 @@
 'use client';
 
-import { useId, useMemo, useState, useSyncExternalStore, type ReactElement, type ReactNode } from 'react';
+import { useMemo, useSyncExternalStore, type ReactElement, type ReactNode } from 'react';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 import { formatRub } from '@/lib/expenses/client';
@@ -313,11 +313,6 @@ export default function StackedTimeChart({
   /** Управление разрезом, если оно у стороны есть. */
   toolbar?: ReactNode;
 }) {
-  // Легенда свёрнута по умолчанию — она справочник, а не постоянный элемент
-  // чтения. Потерей информации это не становится: ряд назван словом в тултипе,
-  // а числа целиком лежат в таблице под графиком.
-  const [legendOpen, setLegendOpen] = useState(false);
-  const legendId = useId();
   const reducedMotion = usePrefersReducedMotion();
 
   const { data, keys, edges, partialLabels } = useMemo(() => {
@@ -357,60 +352,22 @@ export default function StackedTimeChart({
     <div className="rounded-xl border border-zinc-200 bg-white p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-zinc-900">{title}</h3>
-        <div className="flex flex-wrap items-center gap-2">
-          {toolbar}
-          {keys.length > 0 ? (
-            <button
-              type="button"
-              onClick={() => setLegendOpen((prev) => !prev)}
-              aria-expanded={legendOpen}
-              aria-controls={legendId}
-              className="flex items-center gap-1 rounded-full border border-zinc-200 px-2.5 py-1 text-[11px] font-medium text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70"
-            >
-              Легенда
-              <svg
-                width="9"
-                height="9"
-                viewBox="0 0 12 12"
-                fill="none"
-                aria-hidden="true"
-                className={`transition-transform duration-150 ${legendOpen ? 'rotate-180' : ''}`}
-              >
-                <path
-                  d="M2.5 4.5 6 8l3.5-3.5"
-                  stroke="currentColor"
-                  strokeWidth="1.4"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
-          ) : null}
-        </div>
+        <div className="flex flex-wrap items-center gap-2">{toolbar}</div>
       </div>
-
-      {legendOpen ? (
-        <div
-          id={legendId}
-          className="portal-disclosure mb-2 flex flex-wrap justify-end gap-x-4 gap-y-1.5 rounded-xl border border-zinc-200 bg-zinc-50/60 px-3 py-2"
-        >
-          {keys.map((key) => (
-            <span key={key} className="flex items-center gap-1.5">
-              <span
-                className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
-                style={{ background: colorOf(key) }}
-                aria-hidden="true"
-              />
-              <span className="text-[11px] text-zinc-600">{labelOf(key)}</span>
-            </span>
-          ))}
-        </div>
-      ) : null}
 
       {data.length === 0 ? (
         <div className="px-3 py-10 text-center text-sm text-zinc-400">{emptyText}</div>
       ) : (
-        <div style={{ height: 288 }}>
+        // Легенда — вертикальным блоком СПРАВА от графика, а не полосой над
+        // ним: горизонтальная полоса отъедала высоту у столбцов и при большом числе
+        // разрезов переносилась на вторую строку, каждый раз сдвигая график
+        // по вертикали. Сбоку она растёт вниз, не трогая ни высоту, ни
+        // положение столбцов.
+        //
+        // На узком экране (`flex-col`) блок возвращается под график: колонка
+        // легенды съела бы там половину ширины, а график важнее справочника.
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+          <div className="min-w-0 flex-1" style={{ height: 288 }}>
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data} margin={{ top: 12, right: 12, left: 0, bottom: 0 }} barCategoryGap="24%">
               <CartesianGrid vertical={false} stroke={GRID_LINE} />
@@ -459,6 +416,28 @@ export default function StackedTimeChart({
               ))}
             </BarChart>
           </ResponsiveContainer>
+          </div>
+
+          {/* Легенда видна всегда — без кнопки и без сворачивания. Прятать
+              расшифровку цветов за кликом значит требовать этот клик каждый
+              раз: цвет сегмента сам по себе ничего не говорит, а тултип
+              появляется только при наведении на конкретный столбец. */}
+          {keys.length > 0 ? (
+            <div className="flex shrink-0 flex-row flex-wrap gap-x-4 gap-y-1.5 self-start rounded-xl border border-zinc-200 bg-zinc-50/60 px-3 py-2 sm:max-w-[190px] sm:flex-col sm:flex-nowrap">
+              {keys.map((key) => (
+                <span key={key} className="flex items-center gap-1.5">
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
+                    style={{ background: colorOf(key) }}
+                    aria-hidden="true"
+                  />
+                  <span className="truncate text-[11px] text-zinc-600" title={labelOf(key)}>
+                    {labelOf(key)}
+                  </span>
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
       )}
 
