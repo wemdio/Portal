@@ -45,12 +45,12 @@ async function tg<T = unknown>(token: string, method: string, body: Record<strin
   }
 }
 
-/** Posts the handoff message with a single "Передать клиенту" button. Returns the message_id. */
+/** Posts the handoff message; with callbackData — a "Передать клиенту" button, без неё — информационная карточка (авто-режим). Returns the message_id. */
 export async function postHandoffMessage(opts: {
   token: string;
   chatId: string;
   text: string;
-  callbackData: string;
+  callbackData?: string;
   threadId?: number | null;
 }): Promise<number | null> {
   const body: Record<string, unknown> = {
@@ -58,9 +58,13 @@ export async function postHandoffMessage(opts: {
     text: opts.text,
     parse_mode: 'HTML',
     disable_web_page_preview: true,
-    reply_markup: {
-      inline_keyboard: [[{ text: '➡️ Передать клиенту', callback_data: opts.callbackData }]],
-    },
+    ...(opts.callbackData
+      ? {
+          reply_markup: {
+            inline_keyboard: [[{ text: '➡️ Передать клиенту', callback_data: opts.callbackData }]],
+          },
+        }
+      : {}),
   };
   if (opts.threadId) body.message_thread_id = opts.threadId;
   const result = await tg<{ message_id?: number }>(opts.token, 'sendMessage', body);
