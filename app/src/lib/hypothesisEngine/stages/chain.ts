@@ -280,7 +280,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   });
 
   const model = getHeModel('chain');
-  let llm = await callLLMTextWithFallback(messages, { model, maxTokens: 6144, log: (m) => stageLog(ctx, m) });
+  let llm = await callLLMTextWithFallback(messages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
   addUsage(usage, llm);
   let { parsed, letters } = buildChainLetters(llm.text);
 
@@ -291,7 +291,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       { role: 'assistant', content: llm.text.slice(0, 2000) },
       { role: 'user', content: RETRY_HINT },
     ];
-    llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 6144, log: (m) => stageLog(ctx, m) });
+    llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
     ({ parsed, letters } = buildChainLetters(llm.text));
   }
@@ -326,7 +326,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
         winnerPatterns,
       }),
       HeChainCritiqueSchema,
-      { model, maxTokens: 2048 },
+      { model, maxTokens: 4096 },
     );
     addUsage(usage, critique);
     // letter_index вне 1..letters.length — галлюцинация критика: отбрасываем
@@ -346,7 +346,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
           styleExample,
           winnerPatterns,
         }),
-        { model, maxTokens: 6144 },
+        { model, maxTokens: 16384 },
       );
       addUsage(usage, rewrite);
       // Рерайт выводит только основной вариант (---LETTER N B--- блоков в

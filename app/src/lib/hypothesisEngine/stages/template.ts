@@ -518,7 +518,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     return { parsed, letters };
   };
 
-  let llm = await callLLMTextWithFallback(messages, { model, maxTokens: 6144, log: (m) => stageLog(ctx, m) });
+  let llm = await callLLMTextWithFallback(messages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
   addUsage(usage, llm);
   let { parsed, letters } = buildLetters(llm.text);
 
@@ -529,7 +529,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       { role: 'assistant', content: llm.text.slice(0, 2000) },
       { role: 'user', content: RETRY_HINT },
     ];
-    llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 6144, log: (m) => stageLog(ctx, m) });
+    llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
     ({ parsed, letters } = buildLetters(llm.text));
   }
@@ -546,7 +546,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         { role: 'assistant', content: llm.text.slice(0, 2000) },
         { role: 'user', content: shortenRetryHint(letters) },
       ],
-      { model, maxTokens: 6144 },
+      { model, maxTokens: 16384 },
     );
     addUsage(usage, retryLlm);
     const rebuilt = buildLetters(retryLlm.text);
@@ -579,7 +579,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         winnerPatterns,
       }),
       HeChainCritiqueSchema,
-      { model, maxTokens: 2048 },
+      { model, maxTokens: 4096 },
     );
     addUsage(usage, critique);
     // letter_index вне 1..letters.length — галлюцинация критика: отбрасываем
@@ -599,7 +599,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
           styleExample,
           winnerPatterns,
         }),
-        { model, maxTokens: 6144 },
+        { model, maxTokens: 16384 },
       );
       addUsage(usage, rewrite);
       const rebuilt = buildLetters(rewrite.text);
@@ -694,7 +694,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         { role: 'assistant', content: llm.text.slice(0, 2000) },
         { role: 'user', content: operatorIssuesHint(mappingIssues) },
       ],
-      { model, maxTokens: 6144 },
+      { model, maxTokens: 16384 },
     );
     addUsage(usage, retryLlm);
     const rebuilt = buildLetters(retryLlm.text);
